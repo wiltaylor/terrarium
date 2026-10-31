@@ -59,6 +59,9 @@ services:
       # A harness outside its tested range (harnesses.toml) at an agent start:
       # `warn` starts it with a warning event, `refuse` refuses the start.
       TERRARIUM_HARNESS_VERSION_POLICY: ${TERRARIUM_HARNESS_VERSION_POLICY:-warn}
+      # The harness auto-update check: daily, off, or a duration (6h). A
+      # pinned harness is never updated.
+      TERRARIUM_HARNESS_AUTO_UPDATE: ${TERRARIUM_HARNESS_AUTO_UPDATE:-daily}
       # The config repo auto-sync (PLAN §8.3): off, pull, or sync, every interval.
       TERRARIUM_CONFIG_SYNC: ${TERRARIUM_CONFIG_SYNC:-off}
       TERRARIUM_CONFIG_SYNC_INTERVAL: ${TERRARIUM_CONFIG_SYNC_INTERVAL:-15m}

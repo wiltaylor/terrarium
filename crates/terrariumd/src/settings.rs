@@ -212,6 +212,16 @@ pub struct Settings {
     )]
     pub harness_version_policy: crate::harness_versions::VersionPolicy,
 
+    /// The background check for harness updates: `daily`, `off`, or a
+    /// duration of 1h or more (`6h`). Each harness with the policy `auto`
+    /// moves to the latest release on npm (`crate::harness_auto_update`).
+    #[arg(
+        long,
+        env = crate::harness_auto_update::ENV_AUTO_UPDATE,
+        default_value = "daily"
+    )]
+    pub harness_auto_update: crate::harness_auto_update::Schedule,
+
     /// The tools dir: the npm prefix that holds the harnesses
     /// (`<dir>/bin` first on `PATH`). At start the daemon installs each pin
     /// of `<config dir>/harnesses.toml` that is missing there, and

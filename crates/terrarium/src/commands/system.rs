@@ -649,7 +649,9 @@ pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
 }
 
 /// `admin harness ls`: `GET /api/harnesses`; `admin harness update`:
-/// `POST /api/harnesses/{name}/update` or `POST /api/harnesses/update`.
+/// `POST /api/harnesses/{name}/update` or `POST /api/harnesses/update`;
+/// `pin`, `unpin`, and `check`: `POST /api/harnesses/{name}/pin`,
+/// `.../unpin`, and `POST /api/harnesses/check`.
 pub async fn harnesses(ctx: &Ctx, cmd: &HarnessCmd) -> anyhow::Result<()> {
     match cmd {
         HarnessCmd::Ls { refresh } => {
@@ -660,6 +662,30 @@ pub async fn harnesses(ctx: &Ctx, cmd: &HarnessCmd) -> anyhow::Result<()> {
             };
             let v = ctx.api.get("/api/harnesses", q).await?;
             ctx.emit(&v, print_harnesses)
+        }
+        HarnessCmd::Pin { name, version } => {
+            let body = match version {
+                Some(v) => serde_json::json!({ "version": v }),
+                None => serde_json::json!({}),
+            };
+            let path = format!("/api/harnesses/{}/pin", crate::transport::encode(name));
+            let v = ctx.api.post(&path, Some(body)).await?;
+            ctx.emit(&v, print_pin)
+        }
+        HarnessCmd::Unpin { name } => {
+            let path = format!("/api/harnesses/{}/unpin", crate::transport::encode(name));
+            let v = ctx.api.post(&path, None).await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "{}: auto-update on (stays at {} until the next check)",
+                    field(v, "harness"),
+                    field(v, "to")
+                ));
+            })
+        }
+        HarnessCmd::Check => {
+            let v = ctx.api.post("/api/harnesses/check", None).await?;
+            ctx.emit(&v, print_check)
         }
         HarnessCmd::Update {
             name,
@@ -826,6 +852,64 @@ fn without_printed_details(d: &Value) -> Option<Value> {
     (!rest.is_empty()).then_some(Value::Object(rest))
 }
 
+/// The answer of a pin: the switch, the agents on the old version, and
+/// the removed version dirs.
+fn print_pin(ctx: &Ctx, v: &Value) {
+    if let Some(out) = v["output"].as_str().filter(|s| !s.trim().is_empty()) {
+        ctx.line(out.trim_end());
+    }
+    let h = field(v, "harness");
+    let from = v["from"].as_str().unwrap_or("(not installed)");
+    let to = field(v, "to");
+    if v["from"].as_str() == v["to"].as_str() {
+        ctx.line(format!("{h}: pinned to {to}; no auto-update"));
+    } else {
+        ctx.line(format!(
+            "{h}: {from} -> {to}, pinned; no auto-update. New agent starts use {to}"
+        ));
+    }
+    if let Some(note) = v["note"].as_str() {
+        ctx.line(note);
+    }
+    if let Some(removed) = v["removed"].as_array().filter(|a| !a.is_empty()) {
+        let r: Vec<&str> = removed.iter().filter_map(Value::as_str).collect();
+        ctx.line(format!(
+            "{h}: removed the unused version(s) {}",
+            r.join(", ")
+        ));
+    }
+    ctx.line(format!("undo: terrarium admin harness unpin {h}"));
+}
+
+/// The answer of a check: one line for each harness.
+fn print_check(ctx: &Ctx, v: &Value) {
+    let rows = v["results"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        ctx.line("no harness to check");
+    }
+    for r in &rows {
+        let mailed = if r["mailed"] == true { " (mailed)" } else { "" };
+        ctx.line(format!(
+            "{}: {}: {}{mailed}",
+            field(r, "harness"),
+            field(r, "result"),
+            field(r, "detail")
+        ));
+    }
+}
+
+/// The update policy of a row: `auto`, or `pinned <version>`.
+fn policy_cell(h: &Value) -> String {
+    match h["auto_update"]["policy"].as_str() {
+        Some("pinned") => format!(
+            "pinned {}",
+            h["auto_update"]["pinned_version"].as_str().unwrap_or("?")
+        ),
+        Some(p) => p.to_owned(),
+        None => "-".to_owned(),
+    }
+}
+
 /// The harness table, then the policy, then a note for each harness out of
 /// its range.
 fn print_harnesses(ctx: &Ctx, v: &Value) {
@@ -836,6 +920,7 @@ fn print_harnesses(ctx: &Ctx, v: &Value) {
         "TESTED",
         "INSTALLED",
         "IN RANGE",
+        "UPDATES",
         "ON DISK",
     ]);
     for h in &items {
@@ -854,6 +939,7 @@ fn print_harnesses(ctx: &Ctx, v: &Value) {
             field(h, "tested"),
             field(h, "installed"),
             in_range,
+            policy_cell(h),
             if on_disk.is_empty() {
                 "-".to_owned()
             } else {
@@ -870,6 +956,15 @@ fn print_harnesses(ctx: &Ctx, v: &Value) {
         "policy: {} (TERRARIUM_HARNESS_VERSION_POLICY)",
         field(v, "policy")
     ));
+    if let Some(s) = v["auto_update"]["schedule"].as_str() {
+        let next = v["auto_update"]["next_check_at"]
+            .as_str()
+            .map(|t| format!(", next check {t}"))
+            .unwrap_or_default();
+        ctx.line(format!(
+            "auto-update: {s} (TERRARIUM_HARNESS_AUTO_UPDATE){next}"
+        ));
+    }
     for h in &items {
         if h["in_range"] == false {
             ctx.line(format!(

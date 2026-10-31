@@ -2674,6 +2674,26 @@ pub enum HarnessCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Pin a harness: switch it to a version for new agent starts, and
+    /// stop its auto-update. Without a version: the previous version (a
+    /// rollback). A version that is not on disk is installed first.
+    /// Running agents keep their version until their next start. Needs
+    /// sysadmin or the operator
+    Pin {
+        /// The harness (claude, codex, copilot, pi)
+        name: String,
+        /// A version like 0.164.0 (default: the previous version)
+        version: Option<String>,
+    },
+    /// Remove the pin of a harness: its auto-update starts again, and the
+    /// next check can update it. Needs sysadmin or the operator
+    Unpin {
+        /// The harness (claude, codex, copilot, pi)
+        name: String,
+    },
+    /// Run the auto-update check now: ask npm, and install a newer release
+    /// of each harness that is not pinned. Needs sysadmin or the operator
+    Check,
 }
 
 #[derive(Debug, Args)]

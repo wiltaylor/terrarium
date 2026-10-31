@@ -434,6 +434,31 @@ The model is pure and in `lib/lifecycle.ts`.
   idle agent `working` (`compacting`) for 1.5 s, then writes
   `agent.compacted`. Every harness can compact, as in the daemon.
 
+## Harness versions and the auto-update
+
+The "Harness versions" table of Settings, Subscriptions
+(`features/subscriptions/HarnessVersions.tsx`) reads
+`GET /api/harnesses?latest=true` (docs/api.md §4). The pure logic is in
+`features/subscriptions/harnesses.ts`, with tests.
+
+- **Updates column.** The policy chip (`policyChip`): `auto`, or
+  `pinned <version>`. Under it, the last check (`lastCheckLine`) and the
+  changelog link.
+- **Status column.** A row outside its tested range has a red warning
+  with the way back (`rangeWarning`).
+- **Buttons.** "Roll back and pin" (with an inline confirm) when the
+  previous version is older than the active one (`rollbackTarget`; `POST
+  .../pin` with no version). "Pin current" for an `auto` row (`POST
+  .../pin` with the active version). "Unpin" for a pinned row. "Check now"
+  in the header (`POST /api/harnesses/check`). The box under the table
+  shows one line for each result (`pinLine`, `checkLine`).
+- **Under the table.** The schedule and the next check (`scheduleNote`).
+- **Mock.** claude is pinned to 2.1.310. The auto-update moved pi to 1.5.1,
+  outside its tested range, so pi has "Roll back and pin" to 1.4.0. Check
+  now installs codex 0.165.0 (outside its range) and copilot 1.0.110, and
+  sends one Inbox mail for each, as the daemon does. The mock GC keeps the
+  previous and the pinned version and the newest two under the active one.
+
 ## Quota alerts and holds
 
 `stores/quota.ts` keeps the state of docs/api.md §16.6 from the event
@@ -674,7 +699,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/agents` | Agents grid of the project, status filter, new agent (a template chooser, then a form, for the project of the route) | `GET`, `POST /api/agents`, `GET /api/templates?project=`, `GET /api/templates/{key}/resolve`, events socket |
 | `/agents` | Gone: redirects to `/projects` (`app/nav.ts` `MOVED_ROUTES`). | none |
 | `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, conversation (the default tab), terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `pause/unpause/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions`, `GET .../sessions/{session}/transcript?after=&limit=`, `GET .../transcript/stream?after=` (SSE) |
-| `/settings/subscriptions` | Settings, Subscriptions tab: subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
+| `/settings/subscriptions` | Settings, Subscriptions tab: subscriptions, detect banner, add wizard; above them the "Harness versions" table (versions, updates, the auto-update policy, and the pins) | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty`; `GET /api/harnesses?latest=true`, `POST /api/harnesses/{name}/update\|pin\|unpin`, `POST /api/harnesses/update`, `POST /api/harnesses/check` |
 | `/inbox` | Inbox: questions, notices, mail to the operator, paused threads; kind tabs, open or done, project filter | `GET /api/inbox?status=&kind=&project=`, `GET /api/inbox/counts`, `POST /api/questions/{id}/answer\|ack\|retract`, `POST /api/inbox/mail/{id}/ack`, `POST /api/mail/{id}/release`, `POST /api/mail/threads/{id}/resume` |
 | `/questions` | Gone: redirects to `/inbox`. | none |
 | `/logs/mail` | Logs, Mail tab: every message, newest first, filters, live mode, the thread inline, reply, compose | `GET /api/mail?thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/reply` |

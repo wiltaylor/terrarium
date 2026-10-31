@@ -7,6 +7,7 @@ pub mod artifacts;
 pub mod audit;
 pub mod board;
 pub mod event_sources;
+pub mod harness_updates;
 pub mod hosts;
 pub mod inbox;
 pub mod leases;

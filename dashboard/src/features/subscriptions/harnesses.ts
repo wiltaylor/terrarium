@@ -7,7 +7,8 @@
 // until their next restart; the table names them.
 
 import { ApiError } from "../../api/http";
-import type { HarnessAgent, HarnessReport, HarnessUpdateResult, HarnessVersion } from "../../api/types";
+import { harnessUpdateKind } from "../../lib/harness-update";
+import type { HarnessAgent, HarnessCheckItem, HarnessPinResult, HarnessReport, HarnessUpdateResult, HarnessVersion } from "../../api/types";
 
 /** The status chip of one row. */
 export type HarnessStatus = "unsupported" | "update available (major)" | "update available" | "latest" | "in range" | "unknown";
@@ -101,4 +102,62 @@ export function policyNote(r: HarnessReport): string {
   return r.policy === "refuse"
     ? "An agent start on a harness outside its tested range is refused (TERRARIUM_HARNESS_VERSION_POLICY=refuse)."
     : "An agent start on a harness outside its tested range goes ahead with a warning event (TERRARIUM_HARNESS_VERSION_POLICY=warn).";
+}
+
+// ----- auto-update and pins (docs/api.md §4, "Auto-update and pins") -----
+
+/** The policy chip of one row: `auto`, or `pinned <version>`. */
+export function policyChip(h: HarnessVersion): { label: string; cls: string; title: string } {
+  const a = h.auto_update;
+  if (!a) return { label: "—", cls: "", title: "This daemon reports no update policy." };
+  if (a.policy === "pinned")
+    return { label: `pinned ${a.pinned_version ?? "?"}`, cls: "warn", title: `The auto-update does not change ${h.harness}. Unpin it to get updates again.` };
+  return { label: "auto", cls: "info", title: `The auto-update installs each newer release of ${h.harness} on npm, majors too.` };
+}
+
+/** The version that "Roll back and pin" goes to: the previous version, when it is older than the active one. */
+export function rollbackTarget(h: HarnessVersion): string | null {
+  const p = h.auto_update?.previous ?? null;
+  const active = h.active ?? h.installed;
+  return p && active && harnessUpdateKind(p, active) !== "none" ? p : null;
+}
+
+/** Can "Pin current" pin this row? Only an `auto` row with a known active version. */
+export const canPinCurrent = (h: HarnessVersion) => h.auto_update?.policy === "auto" && !!(h.active ?? h.installed);
+
+/** Can "Unpin" unpin this row? */
+export const canUnpin = (h: HarnessVersion) => h.auto_update?.policy === "pinned";
+
+/** The last check of a row, in one line: `2026-10-31 10:05 · updated: 1.4.0 -> 1.5.1`. Null before the first check. */
+export function lastCheckLine(h: HarnessVersion): string | null {
+  const a = h.auto_update;
+  if (!a?.checked_at) return null;
+  const when = a.checked_at.slice(0, 16).replace("T", " ");
+  return `${when} · ${a.result ?? "?"}${a.detail ? `: ${a.detail}` : ""}`;
+}
+
+/** The warning of a row outside its tested range, with the way back. Null in the range. */
+export function rangeWarning(h: HarnessVersion): string | null {
+  if (h.in_range !== false || !h.installed) return null;
+  const back = rollbackTarget(h);
+  return `${h.installed} is outside the tested range ${h.tested}: hooks and flags can be different.${back ? ` If agents break, roll back to ${back} and pin.` : ""}`;
+}
+
+/** The line about the background check: the schedule and the next check. */
+export function scheduleNote(r: HarnessReport): string {
+  const a = r.auto_update;
+  if (!a) return "";
+  if (a.schedule === "off") return "The auto-update is off (TERRARIUM_HARNESS_AUTO_UPDATE=off). Use Check now to check by hand.";
+  const next = a.next_check_at ? ` The next check is at ${a.next_check_at.slice(0, 16).replace("T", " ")} UTC.` : "";
+  return `The auto-update checks npm ${a.schedule === "daily" ? "daily" : `every ${a.schedule}`} and installs each newer release of a harness that is not pinned.${next}`;
+}
+
+/** One line for each harness of a check. */
+export const checkLine = (i: HarnessCheckItem) => `${i.harness}: ${i.result}${i.detail ? `: ${i.detail}` : ""}${i.mailed ? " (mailed)" : ""}`;
+
+/** One line for a pin or an unpin. */
+export function pinLine(r: HarnessPinResult): string {
+  if (r.policy === "auto") return `${r.harness}: unpinned; the auto-update can change it at the next check`;
+  if (r.from === r.to) return `${r.harness}: pinned to ${r.to}`;
+  return `${r.harness}: ${r.from ?? "(none)"} → ${r.to}, pinned. New agent starts use ${r.to}`;
 }

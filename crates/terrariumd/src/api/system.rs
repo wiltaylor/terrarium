@@ -91,7 +91,9 @@ pub struct HarnessQuery {
 /// the adapter's tested range, the installed version, and whether it is in
 /// the range; with a tools dir, the active version dir, the version dirs
 /// on disk, and the live agents with the version each runs; and the start
-/// policy (`TERRARIUM_HARNESS_VERSION_POLICY`). With `latest`, also the
+/// policy (`TERRARIUM_HARNESS_VERSION_POLICY`). Each row has its update
+/// policy and its last auto-update check (`auto_update`), and the report
+/// has the schedule of the check. With `latest`, also the
 /// latest release on npm and the update kind; npm that does not answer
 /// gives `latest: null` and `latest_error`, never an error status. Every
 /// caller may read it.
@@ -104,6 +106,7 @@ pub async fn harnesses(
         state.harness_latest.fill(&mut report, q.refresh).await;
     }
     let agents = agent_versions(&state).await?;
+    let policies = state.db.read(crate::store::harness_updates::all).await?;
     let cfg = state.harness_tools.config();
     for row in &mut report.harnesses {
         if let Some(cfg) = &cfg {
@@ -116,7 +119,21 @@ pub async fn harnesses(
             .filter(|(h, _)| *h == row.harness)
             .map(|(_, a)| a.clone())
             .collect();
+        let st = policies
+            .iter()
+            .find(|p| p.harness == row.harness.as_str())
+            .cloned()
+            .unwrap_or_else(|| {
+                crate::store::harness_updates::UpdateState::new(row.harness.as_str())
+            });
+        row.auto_update = Some(crate::harness_auto_update::row_info(
+            row.harness,
+            &st,
+            row.active.as_deref(),
+            &row.versions,
+        ));
     }
+    report.auto_update = Some(crate::harness_auto_update::schedule_info(&state));
     Ok(Json(report))
 }
 
@@ -240,8 +257,9 @@ fn tools(state: &Shared) -> ApiResult<std::sync::Arc<crate::harness_tools::Tools
     })
 }
 
-/// Remove the version dirs of `cfg` that are not active and that no live
-/// agent runs ([`crate::harness_tools::ToolsConfig::gc`]). When no live
+/// Remove the version dirs of `cfg` that are not active, that no live
+/// agent runs, and that are not the previous or the pinned version of
+/// their harness ([`crate::harness_tools::ToolsConfig::gc`]). When no live
 /// agent started on the flat layout of before the version dirs, remove
 /// that too. The caller holds the update lock. Answers the removed
 /// versions (`<name> <version>`).
@@ -250,6 +268,22 @@ pub async fn collect_garbage(
     cfg: std::sync::Arc<crate::harness_tools::ToolsConfig>,
 ) -> Vec<String> {
     let mut in_use = crate::harness_tools::InUse::new();
+    // The rollback target and the pin of each harness stay on disk.
+    match state.db.read(crate::store::harness_updates::all).await {
+        Ok(rows) => {
+            for r in rows {
+                let keep = in_use.entry(r.harness.clone()).or_default();
+                keep.extend(r.previous);
+                keep.extend(r.pinned_version);
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "the harness GC cannot read the update policies: {e}; it removes nothing"
+            );
+            return Vec::new();
+        }
+    }
     let mut flat = false;
     for r in state.supervisor.harness_runs() {
         match r.version {
@@ -271,6 +305,34 @@ pub async fn collect_garbage(
         tracing::warn!("the harness GC did not finish: {e}");
         Vec::new()
     })
+}
+
+/// The live agents on the harness of `pin` that run another version than
+/// `to`, and the note about them.
+async fn old_agents(
+    state: &Shared,
+    pin: &crate::harness_tools::Pin,
+    to: &str,
+) -> ApiResult<(Vec<crate::harness_versions::AgentOnVersion>, Option<String>)> {
+    let old: Vec<crate::harness_versions::AgentOnVersion> = agent_versions(state)
+        .await?
+        .into_iter()
+        .filter(|(h, a)| *h == pin.harness && a.version.as_deref() != Some(to))
+        .map(|(_, a)| a)
+        .collect();
+    let note = (!old.is_empty()).then(|| {
+        format!(
+            "{} live agent(s) run another version of {}: {}. Each keeps its version and moves \
+             to {to} at its next restart",
+            old.len(),
+            pin.name,
+            old.iter()
+                .map(|a| a.agent.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    Ok((old, note))
 }
 
 /// Run the update of one pin, then the audit row and the `harness` event.
@@ -300,26 +362,9 @@ async fn update_one(
             Some(f.message.clone()),
         ),
     };
-    let old: Vec<crate::harness_versions::AgentOnVersion> = match &to {
-        Some(to) if !pin.extension => agent_versions(state)
-            .await?
-            .into_iter()
-            .filter(|(h, a)| *h == pin.harness && a.version.as_deref() != Some(to.as_str()))
-            .map(|(_, a)| a)
-            .collect(),
-        _ => Vec::new(),
-    };
-    let note = match (&to, old.len()) {
-        (Some(to), n) if n > 0 => Some(format!(
-            "{n} live agent(s) run another version of {}: {}. Each keeps its version and moves \
-             to {to} at its next restart",
-            pin.name,
-            old.iter()
-                .map(|a| a.agent.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-        _ => None,
+    let (old, note) = match &to {
+        Some(to) if !pin.extension => old_agents(state, pin, to).await?,
+        _ => (Vec::new(), None),
     };
     let name = pin.name.clone();
     let package = pin.package.clone();
@@ -344,12 +389,20 @@ async fn update_one(
         )
     });
     let target = pin.name.clone();
+    let switch = (!pin.extension)
+        .then(|| to.clone().map(|to| (from.clone(), to)))
+        .flatten();
     state
         .db
         .write(actor.label(), move |t| {
             t.audit("harness.update", &target, None, detail)?;
             if let Some(e) = event {
                 t.emit(e)?;
+            }
+            // The rollback target; a pinned harness is now pinned to the
+            // new version.
+            if let Some((from, to)) = &switch {
+                crate::store::harness_updates::record_switch(t, &target, from.as_deref(), to)?;
             }
             Ok(())
         })
@@ -497,6 +550,258 @@ pub async fn harness_update_all(
         );
     }
     Ok(Json(HarnessUpdateAll { results }))
+}
+
+/// `POST /api/harnesses/check`: run the auto-update check now, as the
+/// background task does (`crate::harness_auto_update`): ask npm for each
+/// harness, and install a newer release of each harness with the policy
+/// `auto`. Needs sysadmin (or the operator). `409 conflict` while another
+/// check runs; `501 not_available` without a tools dir.
+pub async fn harness_check(
+    State(state): State<Shared>,
+    actor: Actor,
+) -> ApiResult<Json<crate::harness_auto_update::CheckReport>> {
+    policy::sysadmin(&actor, "checking the harnesses for updates")?;
+    tools(&state)?;
+    let _running = state
+        .harness_auto_update
+        .running
+        .try_lock()
+        .map_err(|_| ApiError::conflict("a harness check runs now; try again when it ends"))?;
+    Ok(Json(
+        crate::harness_auto_update::run_check(&state, chrono::Utc::now()).await,
+    ))
+}
+
+/// The body of `POST /api/harnesses/{name}/pin`. An empty body pins the
+/// previous version.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessPinBody {
+    /// A version like `0.164.0`. Absent: the previous version (a
+    /// rollback).
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// The answer of `POST /api/harnesses/{name}/pin` and `unpin`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessPinResult {
+    pub harness: String,
+    pub policy: crate::store::harness_updates::UpdatePolicy,
+    /// The version of the pin; `null` after an unpin.
+    pub pinned_version: Option<String>,
+    /// The active version before.
+    pub from: Option<String>,
+    /// The active version after.
+    pub to: Option<String>,
+    /// npm's output, when the pin installed the version.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
+    /// The live agents on another version than `to`. Each keeps its
+    /// version until its next start.
+    #[serde(default)]
+    pub agents_on_old_version: Vec<crate::harness_versions::AgentOnVersion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The version dirs that the GC after the switch removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
+}
+
+/// The harness pin `name` of `cfg` (not an extension), or `422 invalid`.
+fn harness_pin_of(
+    cfg: &crate::harness_tools::ToolsConfig,
+    name: &str,
+) -> ApiResult<crate::harness_tools::Pin> {
+    cfg.pins
+        .iter()
+        .find(|p| p.name == name && !p.extension)
+        .cloned()
+        .ok_or_else(|| {
+            let known: Vec<&str> = cfg
+                .pins
+                .iter()
+                .filter(|p| !p.extension)
+                .map(|p| p.name.as_str())
+                .collect();
+            ApiError::invalid(format!(
+                "unknown harness `{name}`: use one of {}",
+                known.join(", ")
+            ))
+        })
+}
+
+/// `POST /api/harnesses/{name}/pin`: switch the harness to a version and
+/// stop its auto-update. Without `version`, the version is the previous
+/// one (the version before the last switch, else the newest version dir
+/// under the active one): a rollback. A version that is not on disk is
+/// installed first. The switch is for new starts; running agents keep
+/// their version until their next start. Needs sysadmin (or the
+/// operator). `409 conflict` while an update runs; `422 invalid` for a
+/// bad name or version, no previous version, or an npm failure.
+pub async fn harness_pin(
+    State(state): State<Shared>,
+    actor: Actor,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<HarnessPinResult>> {
+    use crate::store::harness_updates::{self as hu, UpdatePolicy};
+    policy::sysadmin(&actor, "pinning a harness")?;
+    let body: HarnessPinBody = if body.iter().all(u8::is_ascii_whitespace) {
+        HarnessPinBody::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
+    };
+    let cfg = tools(&state)?;
+    let pin = harness_pin_of(&cfg, &name)?;
+    let _busy = state
+        .harness_tools
+        .busy
+        .try_lock()
+        .map_err(|_| ApiError::conflict("a harness update runs now; try again when it ends"))?;
+    let active = cfg.active(&pin).map(|a| a.version);
+    let key = name.clone();
+    let st = state.db.read(move |c| hu::get(c, &key)).await?;
+    let version = match body.version {
+        Some(v) => v,
+        None => crate::harness_auto_update::previous_version(
+            &st,
+            active.as_deref(),
+            &cfg.versions(&name),
+        )
+        .ok_or_else(|| {
+            ApiError::invalid(format!(
+                "{name} has no previous version on disk: give a version (`terrarium admin \
+                 harness pin {name} <version>`)"
+            ))
+        })?,
+    };
+    if semver::Version::parse(&version).is_err() {
+        return Err(ApiError::invalid(format!(
+            "`{version}` is not a version like 1.2.3"
+        )));
+    }
+    let u = match cfg.update(&name, &version, false).await {
+        Ok(u) => u,
+        Err(f) => {
+            let detail = serde_json::json!({
+                "version": version, "from": f.from, "ok": false, "error": f.message,
+            });
+            let target = name.clone();
+            state
+                .db
+                .write(actor.label(), move |t| {
+                    t.audit("harness.pin", &target, None, detail)
+                })
+                .await?;
+            return Err(
+                ApiError::invalid(f.message).with_details(serde_json::json!({
+                    "output": f.output, "package": pin.package, "version": version,
+                    "from": f.from,
+                })),
+            );
+        }
+    };
+    let (old, note) = old_agents(&state, &pin, &u.to).await?;
+    let old_names: Vec<String> = old.iter().map(|a| a.agent.clone()).collect();
+    let (target, from, to, package) = (
+        name.clone(),
+        u.from.clone(),
+        u.to.clone(),
+        pin.package.clone(),
+    );
+    let rollback = st.policy == UpdatePolicy::Auto && from.as_deref() != Some(to.as_str());
+    state
+        .db
+        .write(actor.label(), move |t| {
+            hu::record_switch(t, &target, from.as_deref(), &to)?;
+            hu::set_policy(t, &target, UpdatePolicy::Pinned, Some(&to))?;
+            t.audit(
+                "harness.pin",
+                &target,
+                None,
+                serde_json::json!({"version": to, "from": from, "ok": true,
+                                   "agents_on_old_version": old_names}),
+            )?;
+            t.emit(crate::events::EventDraft::new(
+                "harness",
+                format!(
+                    "{target} pinned to {to}{}",
+                    if rollback { " (rollback)" } else { "" }
+                ),
+                serde_json::json!({"change": "pinned", "harness": target, "package": package,
+                                   "from": from, "to": to,
+                                   "agents_on_old_version": old_names}),
+            ))?;
+            Ok(())
+        })
+        .await?;
+    let _ = state.supervisor.harness_versions(true).await;
+    let prefix = format!("{name} ");
+    let removed = collect_garbage(&state, cfg.clone())
+        .await
+        .into_iter()
+        .filter_map(|x| x.strip_prefix(&prefix).map(str::to_owned))
+        .collect();
+    Ok(Json(HarnessPinResult {
+        harness: name,
+        policy: UpdatePolicy::Pinned,
+        pinned_version: Some(u.to.clone()),
+        from: u.from,
+        to: Some(u.to),
+        output: if u.reused { String::new() } else { u.output },
+        agents_on_old_version: old,
+        note,
+        removed,
+    }))
+}
+
+/// `POST /api/harnesses/{name}/unpin`: set the policy of the harness back
+/// to `auto`. The active version stays; the next check may update it.
+/// Needs sysadmin (or the operator).
+pub async fn harness_unpin(
+    State(state): State<Shared>,
+    actor: Actor,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> ApiResult<Json<HarnessPinResult>> {
+    use crate::store::harness_updates::{self as hu, UpdatePolicy};
+    policy::sysadmin(&actor, "unpinning a harness")?;
+    let cfg = tools(&state)?;
+    let pin = harness_pin_of(&cfg, &name)?;
+    let active = cfg.active(&pin).map(|a| a.version);
+    let target = name.clone();
+    let was = state
+        .db
+        .write(actor.label(), move |t| {
+            let was = hu::get(t, &target)?.pinned_version;
+            hu::set_policy(t, &target, UpdatePolicy::Auto, None)?;
+            t.audit(
+                "harness.unpin",
+                &target,
+                None,
+                serde_json::json!({"was": was}),
+            )?;
+            t.emit(crate::events::EventDraft::new(
+                "harness",
+                format!("{target} unpinned: auto-update"),
+                serde_json::json!({"change": "unpinned", "harness": target, "was": was}),
+            ))?;
+            Ok(was)
+        })
+        .await?;
+    tracing::info!(harness = %name, was = ?was, "harness unpinned");
+    Ok(Json(HarnessPinResult {
+        harness: name,
+        policy: UpdatePolicy::Auto,
+        pinned_version: None,
+        from: active.clone(),
+        to: active,
+        output: String::new(),
+        agents_on_old_version: Vec::new(),
+        note: None,
+        removed: Vec::new(),
+    }))
 }
 
 /// `POST /api/reload`: read the definition files again and sync them.

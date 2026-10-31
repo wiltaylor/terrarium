@@ -7,18 +7,55 @@
 // image rebuild. Running agents keep their version until their next restart,
 // so nothing refuses the update. A copyable CLI line under the table is the
 // fallback.
+//
+// The "Updates" column shows the update policy of each harness (docs/api.md
+// §4, "Auto-update and pins"): `auto` (the background check installs each
+// newer release) or `pinned <version>`, and the last check. "Roll back and
+// pin" switches to the previous version and pins it; "Pin current" pins the
+// active version; "Unpin" starts the auto-update again; "Check now" runs the
+// check at once (POST /api/harnesses/check).
 
 import { createResource, createSignal, For, Show } from "solid-js";
-import { CopyButton, ErrorBanner } from "../../components/ui";
+import { ConfirmButton, CopyButton, ErrorBanner } from "../../components/ui";
 import { api } from "../../stores";
 import type { HarnessUpdateResult } from "../../api/types";
-import { harnessStatus, offPin, oldAgentLine, oldAgents, otherVersions, outOfRange, policyNote, publishedDay, resultLine, resultNotes, updateCommand, updateFailure, withUpdate, type UpdateFailure } from "./harnesses";
+import {
+  canPinCurrent,
+  canUnpin,
+  checkLine,
+  harnessStatus,
+  lastCheckLine,
+  offPin,
+  oldAgentLine,
+  oldAgents,
+  otherVersions,
+  outOfRange,
+  pinLine,
+  policyChip,
+  policyNote,
+  publishedDay,
+  rangeWarning,
+  resultLine,
+  resultNotes,
+  rollbackTarget,
+  scheduleNote,
+  updateCommand,
+  updateFailure,
+  withUpdate,
+  type UpdateFailure,
+} from "./harnesses";
 
-/** One update call, as the box under the table shows it. `name` is a harness, or "all". */
+/**
+ * One call, as the box under the table shows it. `name` is a harness, "all", or "the check". An update fills
+ * `results`; a pin, an unpin, or a check fills `lines`.
+ */
 interface UpdateRun {
   name: string;
+  /** "update", "pin", "unpin", or "check": the words of the status line. */
+  verb: string;
   done: boolean;
   results: HarnessUpdateResult[];
+  lines: string[];
   failure: UpdateFailure | null;
 }
 
@@ -28,12 +65,29 @@ export function HarnessVersions() {
   const busy = () => !!run() && !run()!.done;
 
   const update = async (name: string) => {
-    setRun({ name, done: false, results: [], failure: null });
+    setRun({ name, verb: "update", done: false, results: [], lines: [], failure: null });
     try {
       const results = name === "all" ? (await api.harnessUpdateAll()).results : [await api.harnessUpdate(name, { version: "latest" })];
-      setRun({ name, done: true, results, failure: null });
+      setRun({ name, verb: "update", done: true, results, lines: [], failure: null });
     } catch (e) {
-      setRun({ name, done: true, results: [], failure: updateFailure(e) });
+      setRun({ name, verb: "update", done: true, results: [], lines: [], failure: updateFailure(e) });
+    }
+    void refetch(true);
+  };
+
+  /** A pin (to `version`, else the previous version), an unpin, or a check; the box shows its lines. */
+  const act = async (verb: "pin" | "unpin" | "check", name: string, version?: string) => {
+    setRun({ name, verb, done: false, results: [], lines: [], failure: null });
+    try {
+      let lines: string[];
+      if (verb === "check") lines = (await api.harnessCheck()).results.map(checkLine);
+      else {
+        const r = verb === "pin" ? await api.harnessPin(name, version) : await api.harnessUnpin(name);
+        lines = [pinLine(r), ...(r.note ? [r.note] : []), ...(r.removed?.length ? [`${r.harness}: removed the unused version${r.removed.length > 1 ? "s" : ""} ${r.removed.join(", ")}`] : [])];
+      }
+      setRun({ name, verb, done: true, results: [], lines, failure: null });
+    } catch (e) {
+      setRun({ name, verb, done: true, results: [], lines: [], failure: updateFailure(e) });
     }
     void refetch(true);
   };
@@ -50,9 +104,14 @@ export function HarnessVersions() {
             {(n) => <span class="chip warn" style={{ "margin-left": "8px" }}>{n()} update{n() > 1 ? "s" : ""} available</span>}
           </Show>
         </h3>
-        <button class="small" onClick={() => void refetch(true)} disabled={report.loading}>
-          {report.loading ? "Checking…" : "Refresh"}
-        </button>
+        <div class="row" style={{ gap: "8px" }}>
+          <button class="small" disabled={busy()} title="Ask npm now, and install each newer release of a harness that is not pinned" onClick={() => void act("check", "the check")}>
+            Check now
+          </button>
+          <button class="small" onClick={() => void refetch(true)} disabled={report.loading}>
+            {report.loading ? "Checking…" : "Refresh"}
+          </button>
+        </div>
       </div>
       <ErrorBanner error={report.error} />
       <Show when={report.latest}>
@@ -67,6 +126,7 @@ export function HarnessVersions() {
                     <th>Tested range</th>
                     <th>Latest</th>
                     <th>Status</th>
+                    <th>Updates</th>
                     <th>Agents</th>
                     <th />
                   </tr>
@@ -75,6 +135,7 @@ export function HarnessVersions() {
                   <For each={r().harnesses}>
                     {(h) => {
                       const s = harnessStatus(h);
+                      const p = policyChip(h);
                       return (
                         <tr>
                           <td>
@@ -107,6 +168,28 @@ export function HarnessVersions() {
                             <span class={`chip ${s.cls}`} title={s.title} data-status={s.status}>
                               {s.status}
                             </span>
+                            <Show when={rangeWarning(h)}>
+                              {(w) => (
+                                <div class="small" role="note" style={{ color: "var(--danger)", "max-width": "28ch", "margin-top": "4px" }}>
+                                  {w()}
+                                </div>
+                              )}
+                            </Show>
+                          </td>
+                          <td class="small" aria-label={`Updates of ${h.harness}`}>
+                            <span class={`chip ${p.cls}`} title={p.title} data-policy={h.auto_update?.policy}>
+                              {p.label}
+                            </span>
+                            <Show when={lastCheckLine(h)}>{(l) => <div class="muted" title="The last auto-update check">{l()}</div>}</Show>
+                            <Show when={h.auto_update?.changelog}>
+                              {(u) => (
+                                <div>
+                                  <a href={u()} target="_blank" rel="noopener noreferrer">
+                                    changelog
+                                  </a>
+                                </div>
+                              )}
+                            </Show>
                           </td>
                           <td class="small" aria-label={`Agents on ${h.harness}`}>
                             <Show when={(h.agents ?? []).length} fallback={<span class="muted">—</span>}>
@@ -115,11 +198,34 @@ export function HarnessVersions() {
                             <For each={oldAgents(h)}>{(a) => <div class="chip warn mono" title="This agent keeps its version until its next restart">{oldAgentLine(a, h.active!)}</div>}</For>
                           </td>
                           <td>
-                            <Show when={h.update === "minor" || h.update === "major"}>
-                              <button class="small" disabled={busy()} title={`Update ${h.harness} to ${h.latest?.version ?? "the latest"} in the container`} onClick={() => void update(h.harness)}>
-                                Update
-                              </button>
-                            </Show>
+                            <div class="row" style={{ gap: "6px", "flex-direction": "column", "align-items": "stretch", "white-space": "nowrap" }}>
+                              <Show when={h.update === "minor" || h.update === "major"}>
+                                <button class="small" disabled={busy()} title={`Update ${h.harness} to ${h.latest?.version ?? "the latest"} in the container`} onClick={() => void update(h.harness)}>
+                                  Update
+                                </button>
+                              </Show>
+                              <Show when={rollbackTarget(h)}>
+                                {(v) => (
+                                  <ConfirmButton
+                                    class="small"
+                                    label="Roll back and pin"
+                                    confirmLabel={`Yes, use ${v()}`}
+                                    disabled={busy()}
+                                    onConfirm={() => act("pin", h.harness)}
+                                  />
+                                )}
+                              </Show>
+                              <Show when={canPinCurrent(h)}>
+                                <button class="small" disabled={busy()} title={`Keep ${h.harness} at ${h.active ?? h.installed}: the auto-update does not change it`} onClick={() => void act("pin", h.harness, h.active ?? h.installed ?? undefined)}>
+                                  Pin current
+                                </button>
+                              </Show>
+                              <Show when={canUnpin(h)}>
+                                <button class="small" disabled={busy()} title={`Start the auto-update of ${h.harness} again`} onClick={() => void act("unpin", h.harness)}>
+                                  Unpin
+                                </button>
+                              </Show>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -137,8 +243,9 @@ export function HarnessVersions() {
             </Show>
             <Show when={run()}>
               {(x) => (
-                <div class="card-box" aria-label="Update output" style={{ margin: "10px 0 0" }}>
-                  <div class="small">{x().done ? (x().failure ? `The update of ${x().name} failed.` : `The update of ${x().name} finished.`) : `Updating ${x().name}…`}</div>
+                <div class="card-box" aria-label="Update output" role="status" style={{ margin: "10px 0 0" }}>
+                  <div class="small">{runStatus(x())}</div>
+                  <For each={x().lines}>{(l) => <div class="small mono">{l}</div>}</For>
                   <For each={x().results}>
                     {(res) => (
                       <>
@@ -175,11 +282,18 @@ export function HarnessVersions() {
               </div>
             </Show>
             <p class="muted small" style={{ margin: "6px 0 0" }}>
-              {policyNote(r())} harnesses.toml gives the first install; see docs/getting-started.md, "Updating a harness".
+              {scheduleNote(r())} {policyNote(r())} harnesses.toml gives the first install; see docs/getting-started.md, "Updating a harness".
             </p>
           </>
         )}
       </Show>
     </section>
   );
+}
+
+/** The status line of the box: what runs, or how it ended. */
+function runStatus(x: UpdateRun): string {
+  const what = x.verb === "check" ? "The check" : `The ${x.verb} of ${x.name}`;
+  if (!x.done) return x.verb === "check" ? "Checking npm…" : x.verb === "update" ? `Updating ${x.name}…` : `${x.verb === "pin" ? "Pinning" : "Unpinning"} ${x.name}…`;
+  return x.failure ? `${what} failed.` : `${what} finished.`;
 }

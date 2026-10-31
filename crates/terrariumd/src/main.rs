@@ -163,6 +163,11 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // The harness auto-update (TERRARIUM_HARNESS_AUTO_UPDATE). Without a
+    // tools dir it has nothing to update.
+    let auto_update_task = daemon.state.harness_tools.config().map(|_| {
+        terrariumd::harness_auto_update::spawn(daemon.state.clone(), settings.harness_auto_update)
+    });
     let auto_sync = terrariumd::config_repo::AutoSync::from_env();
     let mut repo = terrariumd::config_repo::ConfigRepo::new(
         settings.config_repo.clone(),
@@ -221,6 +226,9 @@ async fn main() -> anyhow::Result<()> {
         t.abort();
     }
     if let Some(t) = sync_task {
+        t.abort();
+    }
+    if let Some(t) = auto_update_task {
         t.abort();
     }
     daemon.shutdown();

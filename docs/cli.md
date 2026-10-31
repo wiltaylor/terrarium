@@ -1277,9 +1277,12 @@ terrarium admin host rotate <name> [--enrol]   a new token, printed once, alone 
 terrarium admin host rm <name>                 revokes the token
 terrarium admin subscription ls                each subscription: provider, plan, account, login, default
 terrarium admin subscription default <name>    the default account of its harness (PLAN §16.3)
-terrarium admin harness ls [--refresh]         each harness: pin, tested range, installed, in range, on disk
+terrarium admin harness ls [--refresh]         each harness: pin, tested range, installed, in range, update policy, on disk
 terrarium admin harness update <name> [--version v|latest] [--force]   npm install -g into a new version dir, then the switch
 terrarium admin harness update --all [--force]   every harness and the extension to the latest
+terrarium admin harness pin <name> [version]   switch to a version (default: the previous one) and stop its auto-update
+terrarium admin harness unpin <name>           start the auto-update of the harness again
+terrarium admin harness check                  run the auto-update check now
 terrarium admin audit [--since time] [--actor a] [--action a]
 terrarium admin question ls|show|answer|update|retract ...   the operator answers; a sysadmin answers other agents (§4)
 terrarium admin password set [--stdin]         the operator password; every session ends
@@ -1358,8 +1361,11 @@ the agents of its own project; a global target needs sysadmin.
 |---|---|---|
 | `admin subscription ls` | `GET /api/subscriptions` | A table: `NAME`, `PROVIDER`, `PLAN`, `ACCOUNT` (the harness of the plan account, `API key`, or `-`), `LOGIN` (the `login_status`), `DEFAULT` (`*` on the default account of each harness), `AGENTS` (the number of agents on it). |
 | `admin subscription default <name>` | `POST /api/subscriptions/{name}/default` | `<name> is the default <harness> account`. A Claude Code, Codex, or Copilot agent with no subscription then runs on it; the old default stops being one. `422` for an API key, a subscription with no plan account, or an old pi account (pi uses API keys only). Needs sysadmin or the operator ([api.md §16.3](api.md)). |
-| `admin harness ls [--refresh]` | `GET /api/harnesses[?refresh=true]` | A table: `HARNESS`, `PINNED`, `TESTED`, `INSTALLED`, `IN RANGE` (`yes`, `NO`, or `unknown`), `ON DISK` (the version dirs in the tools dir). Then `policy: warn` or `policy: refuse`, one line for each harness out of its range (with the fix) or with an unknown version (with the reason), and one line for each live agent on another version than the active one (`<harness>: <agent> runs <v>; it moves to <active> at its next restart`). The pins come from `harnesses.toml` ([api.md §4](api.md)). |
+| `admin harness ls [--refresh]` | `GET /api/harnesses[?refresh=true]` | A table: `HARNESS`, `PINNED`, `TESTED`, `INSTALLED`, `IN RANGE` (`yes`, `NO`, or `unknown`), `UPDATES` (the update policy: `auto`, or `pinned <version>`), `ON DISK` (the version dirs in the tools dir). Then `policy: warn` or `policy: refuse`, the line `auto-update: <schedule> (TERRARIUM_HARNESS_AUTO_UPDATE), next check <time>`, one line for each harness out of its range (with the fix) or with an unknown version (with the reason), and one line for each live agent on another version than the active one (`<harness>: <agent> runs <v>; it moves to <active> at its next restart`). The pins come from `harnesses.toml` ([api.md §4](api.md)). |
 | `admin harness update <name> [--version v] [--force]`, `admin harness update --all [--force]` | `POST /api/harnesses/{name}/update` `{version?, force?}`, or `POST /api/harnesses/update` | npm's output, then `<name>: <from> -> <to>`, with `(outside the tested range ...)` when `to` is outside it. Then the `note` on the live agents that keep an older version until their next restart, and `<name>: removed the unused version(s) ...`. On a failure: npm's output, then the error. `--force` installs the version again when its version dir is on disk; running agents never stop an update. Needs sysadmin or the operator ([api.md §4](api.md)). |
+| `admin harness pin <name> [version]` | `POST /api/harnesses/{name}/pin` `{version?}` | Switches the harness to `version` for new agent starts, and stops its auto-update. Without `version`: the previous version (a rollback). A version that is not on disk is installed first. Prints `<name>: <from> -> <to>, pinned; no auto-update` (or `<name>: pinned to <v>` with no switch), the `note` on the live agents, and `undo: terrarium admin harness unpin <name>`. `422` when the harness has no previous version. Needs sysadmin or the operator ([api.md §4](api.md), "Auto-update and pins"). |
+| `admin harness unpin <name>` | `POST /api/harnesses/{name}/unpin` | Sets the policy back to `auto`. The active version stays until the next check. Needs sysadmin or the operator. |
+| `admin harness check` | `POST /api/harnesses/check` | Runs the auto-update check now: one line `<name>: <result>: <detail>` for each harness, with `(mailed)` when the check sent a mail. Needs sysadmin or the operator. |
 
 `admin host new`, `admin host rotate`, and `admin host rm` are for the
 operator only (PLAN §10: host agent tokens are operator-only). An agent gets

@@ -1119,7 +1119,8 @@ async fn an_update_while_an_agent_runs_keeps_its_version_until_a_restart() {
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 
-    // Nothing runs the old version now: the next GC removes it.
+    // Nothing runs the old version now, but it is the previous version
+    // (the rollback target), so the GC keeps it.
     let r = td
         .post(
             "/api/harnesses/claude/update",
@@ -1128,8 +1129,8 @@ async fn an_update_while_an_agent_runs_keeps_its_version_until_a_restart() {
         .await;
     assert_eq!(r["reused"], true);
     assert_eq!(r["agents_on_old_version"], json!([]));
-    assert_eq!(r["removed"], json!([pin]));
-    assert!(!old.exists());
+    assert!(r.get("removed").is_none(), "{r}");
+    assert!(old.exists());
 
     // A daemon restart: the runner lives on, and the new daemon reads its
     // version back.

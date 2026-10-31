@@ -3635,6 +3635,7 @@ impl Supervisor for RunnerSupervisor {
             HarnessReport {
                 policy: self.inner.cfg.version_policy,
                 harnesses,
+                auto_update: None,
             }
         })
     }

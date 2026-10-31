@@ -81,6 +81,10 @@ pub const COMPLETE: &str = ".complete";
 /// does not know which versions the live agents use (`terrariumd harness
 /// install`).
 pub const KEEP_VERSIONS: usize = 3;
+/// The version dirs under the active version that [`ToolsConfig::gc`]
+/// keeps with `in_use`, for a quick rollback (`POST
+/// /api/harnesses/{name}/pin`).
+pub const KEEP_PREVIOUS: usize = 2;
 /// The mark in the name of a version dir that npm still fills:
 /// `<version>.tmp-<id>`.
 const TMP_MARK: &str = ".tmp-";
@@ -867,9 +871,10 @@ impl ToolsConfig {
     }
 
     /// Remove the version dirs that are not needed. Each pin keeps its
-    /// active version. With `in_use` (the daemon knows its live agents),
-    /// it also keeps each version that a live agent runs and removes the
-    /// rest. Without it, it keeps the newest complete versions, up to
+    /// active version. With `in_use` (the daemon knows its live agents,
+    /// the previous version, and the pin of each harness), it also keeps
+    /// each version in `in_use` and the newest [`KEEP_PREVIOUS`] versions
+    /// under the active one, and removes the rest. Without it, it keeps the newest complete versions, up to
     /// [`KEEP_VERSIONS`] in all. A temp dir of a stopped install goes after
     /// [`STALE_TMP`]; a dir that a reinstall replaced goes at once.
     /// Answers the removed versions (`<name> <version>`).
@@ -913,9 +918,23 @@ impl ToolsConfig {
                 }
             }
             complete.sort_by(|a, b| version_order(b, a));
-            let mut keep: BTreeSet<String> = active.into_iter().collect();
+            let mut keep: BTreeSet<String> = active.iter().cloned().collect();
             match in_use {
-                Some(u) => keep.extend(u.get(&pin.name).into_iter().flatten().cloned()),
+                Some(u) => {
+                    keep.extend(u.get(&pin.name).into_iter().flatten().cloned());
+                    // `complete` is newest first.
+                    let below = |v: &String| match (&active, semver::Version::parse(v)) {
+                        (Some(a), Ok(v)) => semver::Version::parse(a).is_ok_and(|a| v < a),
+                        _ => false,
+                    };
+                    keep.extend(
+                        complete
+                            .iter()
+                            .filter(|v| below(v))
+                            .take(KEEP_PREVIOUS)
+                            .cloned(),
+                    );
+                }
                 None => {
                     for v in &complete {
                         if keep.len() >= KEEP_VERSIONS {
@@ -1599,9 +1618,10 @@ mod tests {
         assert!(c.versions("codex").is_empty());
     }
 
-    /// The GC keeps the active version and each version that a live agent
-    /// runs, and removes the rest. Without the in-use list it keeps the
-    /// newest, up to `KEEP_VERSIONS`. A stale temp dir goes too.
+    /// The GC keeps the active version, the newest `KEEP_PREVIOUS` under
+    /// it, and each version that a live agent runs, and removes the rest.
+    /// Without the in-use list it keeps the newest, up to `KEEP_VERSIONS`.
+    /// A stale temp dir goes too.
     #[tokio::test]
     async fn gc_keeps_the_active_and_the_used_versions() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1621,15 +1641,21 @@ mod tests {
         );
         assert_eq!(c.versions("codex"), ["0.171.0", "0.172.0", "0.173.0"]);
 
-        // With it: the active one and the used ones.
+        // With it: the active one, the newest `KEEP_PREVIOUS` under it,
+        // and the used ones.
+        c.update("codex", "0.174.0", false).await.unwrap();
         let mut used = InUse::new();
         used.entry("codex".into())
             .or_default()
             .insert("0.171.0".into());
-        let removed = c.gc(Some(&used));
-        assert_eq!(removed, vec!["codex 0.172.0".to_owned()]);
-        assert_eq!(c.versions("codex"), ["0.171.0", "0.173.0"]);
-        assert_eq!(c.read_manifest()["codex"].versions, ["0.171.0", "0.173.0"]);
+        assert!(c.gc(Some(&used)).is_empty());
+        let removed = c.gc(Some(&InUse::new()));
+        assert_eq!(removed, vec!["codex 0.171.0".to_owned()]);
+        assert_eq!(c.versions("codex"), ["0.172.0", "0.173.0", "0.174.0"]);
+        assert_eq!(
+            c.read_manifest()["codex"].versions,
+            ["0.172.0", "0.173.0", "0.174.0"]
+        );
         // The other pins keep their one active version.
         assert_eq!(c.versions("pi").len(), 1);
 
@@ -1642,9 +1668,11 @@ mod tests {
         c.gc(Some(&used));
         assert!(fresh.is_dir());
         assert!(!broken.exists());
-        // The active version is never removed.
+        // The active version is never removed; the versions over it go
+        // when nothing keeps them.
+        c.activate(c.pin("codex").unwrap(), "0.172.0").unwrap();
         c.gc(Some(&InUse::new()));
-        assert_eq!(c.versions("codex"), ["0.173.0"]);
+        assert_eq!(c.versions("codex"), ["0.172.0"]);
     }
 
     /// The flat layout of before the version dirs: npm's own prefix with

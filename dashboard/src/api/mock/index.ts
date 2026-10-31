@@ -64,6 +64,9 @@ import type {
   Repo,
   Role,
   HarnessUpdateResult,
+  HarnessAutoUpdate,
+  HarnessCheckItem,
+  HarnessPinResult,
   Subscription,
   SwapResult,
   Lease,
@@ -194,7 +197,17 @@ const MOCK_HARNESSES: MockHarness[] = [
   { name: "copilot-prompt", harness: null, package: "copilot-custom-system-prompt", pinned: "0.1.2", tested: null, npm: { version: "0.1.2", days: 30 } },
 ];
 
+/** The release notes of each harness, as the daemon knows them (`harness_auto_update::changelog_url`). */
+const HARNESS_CHANGELOG: Record<string, string> = {
+  claude: "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md",
+  codex: "https://github.com/openai/codex/releases",
+  copilot: "https://github.com/github/copilot-cli/releases",
+};
+
 const LIVE_STATUSES: string[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
+
+/** `x.y.z` with an optional pre-release: a version that a pin takes. */
+const VERSION_RE_STRICT = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 /** `latest`, or `x.y.z` with an optional pre-release; anything else is `422 invalid`. */
 function checkHarnessVersion(v: string | undefined): string {
@@ -296,6 +309,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const harnessOnDisk: Record<string, string[]> = Object.fromEntries(Object.entries(harnessInstalled).map(([k, v]) => [k, [v]]));
   const harnessAtStart: Record<string, string> = { ...harnessInstalled };
   const harnessRuns: Record<string, string> = {};
+  // The update policy and the last check of each harness (the daemon's `harness_updates`). Demo state: claude is
+  // pinned; the auto-update moved pi to 1.5.1, outside its tested range, so "Roll back and pin" goes to 1.4.0.
+  const harnessPolicy: Record<string, Omit<HarnessAutoUpdate, "changelog">> = {};
+  for (const h of ["claude", "codex", "copilot", "pi"]) harnessPolicy[h] = { policy: "auto", pinned_version: null, previous: null, latest: null, checked_at: null, result: null, detail: null };
+  Object.assign(harnessPolicy.claude!, { policy: "pinned", pinned_version: "2.1.310", latest: "2.1.310", checked_at: new Date(startedAt - 6 * 3600_000).toISOString(), result: "pinned", detail: "pinned to 2.1.310; no auto-update" });
+  Object.assign(harnessPolicy.pi!, { previous: "1.4.0", latest: "1.5.1", checked_at: new Date(startedAt - 6 * 3600_000).toISOString(), result: "updated", detail: "1.4.0 -> 1.5.1 (outside the tested range)" });
+  harnessOnDisk.pi = ["1.4.0", "1.5.1"];
 
   const reply = <T>(fn: () => T): Promise<T> =>
     new Promise<T>((resolve, reject) => {
@@ -624,14 +644,34 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         checked_at: at,
         ...(installed ? { active: installed, versions: [...(harnessOnDisk[h.name] ?? [])] } : {}),
         ...(agents.length ? { agents } : {}),
+        auto_update: harnessAutoUpdate(h.name, installed),
       };
       if (!latest) return base;
       if ("error" in h.npm) return { ...base, latest: null, update: null, latest_error: h.npm.error };
       return { ...base, latest: { version: h.npm.version, published_at: new Date(startedAt - h.npm.days * 86_400_000).toISOString() }, update: harnessUpdateKind(installed ?? h.pinned, h.npm.version) };
     });
-    return { policy: "warn", harnesses: rows };
+    return { policy: "warn", harnesses: rows, auto_update: { schedule: "daily", next_check_at: new Date(startedAt + 5 * 60_000).toISOString() } };
   };
-  const updateHarness = (h: MockHarness, version: string, forced: boolean): HarnessUpdateResult => {
+  /** The rollback target: the version before the last switch when it is on disk, else the newest dir under the active one. */
+  const harnessPrevious = (name: string, active: string | null): string | null => {
+    const p = harnessPolicy[name]?.previous ?? null;
+    const disk = harnessOnDisk[name] ?? [];
+    if (p && p !== active && disk.includes(p)) return p;
+    if (!active) return null;
+    return [...disk].reverse().find((v) => harnessUpdateKind(v, active) !== "none") ?? null;
+  };
+  const harnessAutoUpdate = (name: string, active: string | null): HarnessAutoUpdate => {
+    const p = harnessPolicy[name]!;
+    return { ...p, previous: harnessPrevious(name, active), changelog: HARNESS_CHANGELOG[name] ?? null };
+  };
+  /** After a switch: `from` is the previous version, and a pinned harness is pinned to `to`. */
+  const recordSwitch = (name: string, from: string | null, to: string) => {
+    const p = harnessPolicy[name];
+    if (!p) return;
+    if (from && from !== to) p.previous = from;
+    if (p.policy === "pinned") p.pinned_version = to;
+  };
+  const updateHarness = (h: MockHarness, version: string, forced: boolean, how: "manual" | "auto" | "pin" = "manual"): HarnessUpdateResult => {
     const target = version === "latest" ? ("error" in h.npm ? null : h.npm.version) : version;
     const from = harnessInstalled[h.name] ?? null;
     if (target === null) fail(422, "invalid", `npm install -g ${h.package}@latest failed`, { output: "npm error code ECONNREFUSED\nnpm error network request failed", package: h.package, version, from });
@@ -645,15 +685,21 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const disk = harnessOnDisk[h.name] ?? [];
     const reused = disk.includes(target) && !forced;
     harnessInstalled[h.name] = target;
-    // Running agents keep their version; the GC keeps the versions they run.
+    if (h.harness) recordSwitch(h.name, from, target);
+    // Running agents keep their version; the GC keeps the versions they run, the previous and the pinned version,
+    // and the newest two under the active one.
     const old = h.harness ? harnessAgents(h.harness).filter((a) => a.version !== target) : [];
-    const used = new Set([target, ...old.map((a) => a.version).filter((v): v is string => v !== null)]);
-    const all = disk.includes(target) ? disk : [...disk, target];
+    const all = (disk.includes(target) ? disk : [...disk, target]).sort((a, b) => (harnessUpdateKind(a, b) === "none" ? (a === b ? 0 : 1) : -1));
+    const below = all.filter((v) => harnessUpdateKind(v, target) !== "none").slice(-2);
+    const pol = harnessPolicy[h.name];
+    const used = new Set([target, ...below, ...(pol?.previous ? [pol.previous] : []), ...(pol?.pinned_version ? [pol.pinned_version] : []), ...old.map((a) => a.version).filter((v): v is string => v !== null)]);
     const removed = all.filter((v) => !used.has(v));
     harnessOnDisk[h.name] = all.filter((v) => used.has(v));
     const names = old.map((a) => a.agent);
-    audit("harness.update", h.name, undefined, { from, to: target, version, force: forced, reused, agents_on_old_version: names });
-    emit({ kind: "harness", actor: "operator", summary: `${h.name} ${from ?? "-"} -> ${target}`, data: { change: "updated", harness: h.name, package: h.package, from, to: target, forced, agents_on_old_version: names } });
+    if (how === "manual") {
+      audit("harness.update", h.name, undefined, { from, to: target, version, force: forced, reused, agents_on_old_version: names });
+      emit({ kind: "harness", actor: "operator", summary: `${h.name} ${from ?? "-"} -> ${target}`, data: { change: "updated", harness: h.name, package: h.package, from, to: target, forced, agents_on_old_version: names } });
+    }
     return {
       harness: h.name,
       package: h.package,
@@ -1843,6 +1889,67 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         if (!spec) fail(422, "invalid", `unknown harness \`${name}\`: use one of ${MOCK_HARNESSES.map((h) => h.name).join(", ")}`);
         const version = checkHarnessVersion(o.version);
         return updateHarness(spec, version, o.force === true);
+      }),
+    harnessPin: (name, version) =>
+      reply((): HarnessPinResult => {
+        const spec = MOCK_HARNESSES.find((h) => h.name === name && h.harness !== null);
+        if (!spec) fail(422, "invalid", `unknown harness \`${name}\`: use one of claude, codex, copilot, pi`);
+        const active = harnessInstalled[name] ?? null;
+        const v = version ?? harnessPrevious(name, active);
+        if (!v) fail(422, "invalid", `${name} has no previous version on disk: give a version (\`terrarium admin harness pin ${name} <version>\`)`);
+        if (!VERSION_RE_STRICT.test(v)) fail(422, "invalid", `\`${v}\` is not a version like 1.2.3`);
+        const r = updateHarness(spec, v, false, "pin");
+        const p = harnessPolicy[name]!;
+        p.policy = "pinned";
+        p.pinned_version = r.to;
+        const names = r.agents_on_old_version.map((a) => a.agent);
+        audit("harness.pin", name, undefined, { version: r.to, from: r.from, ok: true, agents_on_old_version: names });
+        emit({ kind: "harness", actor: "operator", summary: `${name} pinned to ${r.to}${r.from !== r.to ? " (rollback)" : ""}`, data: { change: "pinned", harness: name, package: spec.package, from: r.from, to: r.to, agents_on_old_version: names } });
+        return { harness: name, policy: "pinned", pinned_version: r.to, from: r.from, to: r.to, ...(r.reused ? {} : { output: r.output }), agents_on_old_version: r.agents_on_old_version, ...(r.note ? { note: r.note } : {}), ...(r.removed ? { removed: r.removed } : {}) };
+      }),
+    harnessUnpin: (name) =>
+      reply((): HarnessPinResult => {
+        const p = harnessPolicy[name];
+        if (!p) fail(422, "invalid", `unknown harness \`${name}\`: use one of claude, codex, copilot, pi`);
+        const was = p.pinned_version;
+        p.policy = "auto";
+        p.pinned_version = null;
+        audit("harness.unpin", name, undefined, { was });
+        emit({ kind: "harness", actor: "operator", summary: `${name} unpinned: auto-update`, data: { change: "unpinned", harness: name, was } });
+        const active = harnessInstalled[name] ?? null;
+        return { harness: name, policy: "auto", pinned_version: null, from: active, to: active, agents_on_old_version: [] };
+      }),
+    harnessCheck: () =>
+      reply(() => {
+        const at = iso();
+        const results = MOCK_HARNESSES.filter((h) => h.harness !== null).map((h): HarnessCheckItem => {
+          const p = harnessPolicy[h.name]!;
+          const from = harnessInstalled[h.name] ?? null;
+          const latest = "error" in h.npm ? null : h.npm.version;
+          let item: HarnessCheckItem;
+          if (p.policy === "pinned") item = { harness: h.name, result: "pinned", detail: `pinned to ${p.pinned_version}; no auto-update`, latest, mailed: false };
+          else if (latest === null) item = { harness: h.name, result: "skipped", detail: "error" in h.npm ? h.npm.error : "", latest, mailed: false };
+          else if (!from || harnessUpdateKind(from, latest) === "none") item = { harness: h.name, result: "current", detail: `${from} is the latest release`, latest, mailed: false };
+          else {
+            const r = updateHarness(h, latest, false, "auto");
+            const inRange = inTested(latest, h.tested!);
+            item = { harness: h.name, result: "updated", detail: `${from} -> ${latest}${inRange ? "" : " (outside the tested range)"}`, from, to: latest, latest, in_range: inRange, mailed: true };
+            audit("harness.auto_update", h.name, undefined, { package: h.package, from, to: latest, latest, ok: true, detail: item.detail, in_range: inRange }, "system");
+            emit({ kind: "harness", actor: "system", summary: `${h.name} ${from} -> ${latest} (auto-update)`, data: { change: "auto_updated", harness: h.name, package: h.package, from, to: latest, in_range: inRange } });
+            const warn = inRange ? `${latest} is in the tested range of the ${h.name} adapter (${h.tested}).\n` : `WARNING: ${latest} is outside the tested range of the ${h.name} adapter (${h.tested}). The hooks and the flags of the harness can be different. Look at the next agent turns on ${h.name}.\n`;
+            const log = HARNESS_CHANGELOG[h.name] ? `Changelog: ${HARNESS_CHANGELOG[h.name]}\n` : `Versions: https://www.npmjs.com/package/${h.package}?activeTab=versions\n`;
+            const old = r.agents_on_old_version.length;
+            sendMail(
+              "operator",
+              "system",
+              `Harness update: ${h.name} ${from} -> ${latest}${inRange ? "" : " (outside the tested range)"}`,
+              `The daemon updated ${h.name} (${h.package}) from ${from} to ${latest}.\n${old ? `${old} running agent(s) keep ${from}. Each agent moves to ${latest} at its next start or wake.` : `Each agent starts on ${latest} at its next start or wake.`}\n\n${warn}${log}\nTo roll back to ${from} and stop the auto-update of ${h.name}:\n  terrarium admin harness pin ${h.name} ${from}\n\nOpen: http://localhost:8080/settings/subscriptions\n`,
+            );
+          }
+          Object.assign(p, { checked_at: at, result: item.result, detail: item.detail, latest: latest ?? p.latest });
+          return item;
+        });
+        return { checked_at: at, results };
       }),
     harnessUpdateAll: (o = {}) =>
       reply(() => {

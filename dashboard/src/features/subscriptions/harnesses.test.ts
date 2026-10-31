@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { HarnessReport, HarnessVersion } from "../../api/types";
 import { createMockApi } from "../../api/mock";
 import { harnessUpdateKind } from "../../lib/harness-update";
-import { harnessStatus, offPin, oldAgentLine, oldAgents, otherVersions, outOfRange, policyNote, publishedDay, resultLine, resultNotes, updateCommand, updateFailure, withUpdate } from "./harnesses";
+import { canPinCurrent, canUnpin, checkLine, harnessStatus, lastCheckLine, offPin, oldAgentLine, oldAgents, otherVersions, outOfRange, pinLine, policyChip, policyNote, publishedDay, rangeWarning, resultLine, resultNotes, rollbackTarget, scheduleNote, updateCommand, updateFailure, withUpdate } from "./harnesses";
+import type { HarnessAutoUpdate } from "../../api/types";
 
 const row = (over: Partial<HarnessVersion>): HarnessVersion => ({
   harness: "claude",
@@ -102,9 +103,10 @@ describe("harness versions table", () => {
     expect(r.policy).toBe("warn");
     expect(r.harnesses.map((h) => h.harness)).toEqual(["claude", "codex", "copilot", "pi"]);
     for (const h of r.harnesses) {
-      for (const k of Object.keys(h)) expect(["active", "agents", "checked_at", "harness", "in_range", "installed", "package", "pinned", "tested", "versions"]).toContain(k);
+      for (const k of Object.keys(h)) expect(["active", "agents", "auto_update", "checked_at", "harness", "in_range", "installed", "package", "pinned", "tested", "versions"]).toContain(k);
       expect(h.active).toBe(h.installed);
-      expect(h.versions).toEqual([h.installed]);
+      expect(h.versions).toContain(h.installed);
+      expect(Object.keys(h.auto_update!).sort()).toEqual(["changelog", "checked_at", "detail", "latest", "pinned_version", "policy", "previous", "result"]);
     }
     expect(outOfRange(r).map((h) => h.harness)).toEqual(["pi"]);
   });
@@ -114,7 +116,7 @@ describe("harness versions table", () => {
     const r = await api.harnesses(false, true);
     for (const h of r.harnesses) {
       const keys = Object.keys(h)
-        .filter((k) => !["active", "versions", "agents"].includes(k))
+        .filter((k) => !["active", "versions", "agents", "auto_update"].includes(k))
         .sort();
       if (h.latest === null) expect(keys).toEqual(["checked_at", "harness", "in_range", "installed", "latest", "latest_error", "package", "pinned", "tested", "update"]);
       else expect(keys).toEqual(["checked_at", "harness", "in_range", "installed", "latest", "package", "pinned", "tested", "update"]);
@@ -159,5 +161,85 @@ describe("harness versions table", () => {
     const af = updateFailure(all);
     expect(af.output).toContain("pi: npm install -g @earendil-works/pi-coding-agent@latest failed");
     expect(af.output).toContain("copilot-prompt 0.1.2 → 0.1.2");
+  });
+
+  it("names the update policy, the rollback target, and the last check", () => {
+    const au = (over: Partial<HarnessAutoUpdate>): HarnessAutoUpdate => ({ policy: "auto", pinned_version: null, previous: null, latest: null, checked_at: null, result: null, detail: null, changelog: null, ...over });
+    expect(policyChip(row({})).label).toBe("—");
+    expect(policyChip(row({ auto_update: au({}) }))).toMatchObject({ label: "auto", cls: "info" });
+    const pinned = row({ auto_update: au({ policy: "pinned", pinned_version: "2.1.310" }) });
+    expect(policyChip(pinned)).toMatchObject({ label: "pinned 2.1.310", cls: "warn" });
+    expect(canUnpin(pinned)).toBe(true);
+    expect(canPinCurrent(pinned)).toBe(false);
+    expect(canPinCurrent(row({ active: "2.1.310", auto_update: au({}) }))).toBe(true);
+    // The rollback target is the previous version, never the active one.
+    expect(rollbackTarget(row({ active: "2.1.320", auto_update: au({ previous: "2.1.310" }) }))).toBe("2.1.310");
+    expect(rollbackTarget(row({ active: "2.1.310", auto_update: au({ previous: "2.1.310" }) }))).toBeNull();
+    // After a rollback the previous version is newer: no "Roll back" to it.
+    expect(rollbackTarget(row({ active: "2.1.310", auto_update: au({ previous: "2.1.320" }) }))).toBeNull();
+    expect(rollbackTarget(row({}))).toBeNull();
+    expect(lastCheckLine(row({ auto_update: au({}) }))).toBeNull();
+    expect(lastCheckLine(row({ auto_update: au({ checked_at: "2026-10-31T10:05:12.000Z", result: "updated", detail: "1.4.0 -> 1.5.1" }) }))).toBe("2026-10-31 10:05 · updated: 1.4.0 -> 1.5.1");
+  });
+
+  it("warns outside the tested range with the way back, and names the schedule", () => {
+    const out = row({ installed: "2.3.0", active: "2.3.0", in_range: false, auto_update: { policy: "auto", pinned_version: null, previous: "2.1.310", latest: "2.3.0", checked_at: null, result: null, detail: null, changelog: null } });
+    expect(rangeWarning(out)).toBe("2.3.0 is outside the tested range >=2.1.310, <2.2.0: hooks and flags can be different. If agents break, roll back to 2.1.310 and pin.");
+    expect(rangeWarning(row({}))).toBeNull();
+    expect(scheduleNote(report())).toBe("");
+    expect(scheduleNote({ ...report(), auto_update: { schedule: "off", next_check_at: null } })).toContain("TERRARIUM_HARNESS_AUTO_UPDATE=off");
+    expect(scheduleNote({ ...report(), auto_update: { schedule: "6h", next_check_at: "2026-10-31T10:05:00Z" } })).toBe(
+      "The auto-update checks npm every 6h and installs each newer release of a harness that is not pinned. The next check is at 2026-10-31 10:05 UTC.",
+    );
+    expect(checkLine({ harness: "codex", result: "updated", detail: "0.164.0 -> 0.165.0", latest: "0.165.0", mailed: true })).toBe("codex: updated: 0.164.0 -> 0.165.0 (mailed)");
+    expect(pinLine({ harness: "pi", policy: "pinned", pinned_version: "1.4.0", from: "1.5.1", to: "1.4.0", agents_on_old_version: [] })).toBe("pi: 1.5.1 → 1.4.0, pinned. New agent starts use 1.4.0");
+    expect(pinLine({ harness: "pi", policy: "pinned", pinned_version: "1.5.1", from: "1.5.1", to: "1.5.1", agents_on_old_version: [] })).toBe("pi: pinned to 1.5.1");
+    expect(pinLine({ harness: "pi", policy: "auto", pinned_version: null, from: "1.5.1", to: "1.5.1", agents_on_old_version: [] })).toContain("unpinned");
+  });
+
+  it("the mock checks, rolls back and pins, and unpins like the daemon", async () => {
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
+    const get = async (h: string) => (await api.harnesses(false, true)).harnesses.find((x) => x.harness === h)!;
+    const r = await api.harnesses();
+    expect(r.auto_update?.schedule).toBe("daily");
+    expect(policyChip((await get("claude"))).label).toBe("pinned 2.1.310");
+    const pi = await get("pi");
+    expect(rollbackTarget(pi)).toBe("1.4.0");
+    expect(rangeWarning(pi)).toContain("roll back to 1.4.0");
+
+    // The check: codex has a newer release (outside its range): an install and one mail; claude is pinned; pi's npm is down.
+    const c = await api.harnessCheck();
+    const by = Object.fromEntries(c.results.map((i) => [i.harness, i]));
+    expect(by.codex).toMatchObject({ result: "updated", from: "0.164.0", to: "0.165.0", in_range: false, mailed: true });
+    expect(by.claude).toMatchObject({ result: "pinned", mailed: false });
+    expect(by.copilot).toMatchObject({ result: "updated" });
+    expect(by.pi).toMatchObject({ result: "skipped" });
+    const mail = await api.mail.list({ to: "operator" });
+    const subjects = mail.items.map((m) => m.subject);
+    expect(subjects).toContain("Harness update: codex 0.164.0 -> 0.165.0 (outside the tested range)");
+    const codexMail = mail.items.find((m) => m.subject.startsWith("Harness update: codex"))!;
+    expect(codexMail.body).toContain("terrarium admin harness pin codex 0.164.0");
+    // Nothing new: no new mail.
+    const again = await api.harnessCheck();
+    expect(again.results.find((i) => i.harness === "codex")).toMatchObject({ result: "current", mailed: false });
+    expect((await api.mail.list({ to: "operator" })).items.length).toBe(mail.items.length);
+
+    // Roll back and pin: to the previous version, at once; the newer version stays on disk.
+    const pin = await api.harnessPin("codex");
+    expect(pin).toMatchObject({ policy: "pinned", pinned_version: "0.164.0", from: "0.165.0", to: "0.164.0" });
+    const codex = await get("codex");
+    expect(codex.active).toBe("0.164.0");
+    expect(codex.versions).toEqual(["0.164.0", "0.165.0"]);
+    expect(codex.auto_update).toMatchObject({ policy: "pinned", pinned_version: "0.164.0", previous: "0.165.0" });
+    expect((await api.harnessCheck()).results.find((i) => i.harness === "codex")).toMatchObject({ result: "pinned" });
+    await expect(api.harnessPin("copilot-prompt")).rejects.toMatchObject({ status: 422 });
+    await expect(api.harnessPin("pi", "latest")).rejects.toMatchObject({ status: 422 });
+
+    // Unpin: back to auto; the next check updates again.
+    const un = await api.harnessUnpin("codex");
+    expect(un).toMatchObject({ policy: "auto", pinned_version: null, to: "0.164.0" });
+    expect((await api.harnessCheck()).results.find((i) => i.harness === "codex")).toMatchObject({ result: "updated", to: "0.165.0" });
+    const ev = await api.events.history({ kind: "harness" });
+    expect(ev.items.map((e) => (e.data as { change: string }).change)).toEqual(expect.arrayContaining(["auto_updated", "pinned", "unpinned"]));
   });
 });

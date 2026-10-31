@@ -3630,16 +3630,18 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
              "tested": ">=2.1.310, <2.2.0", "installed": "2.1.311", "in_range": true,
              "checked_at": "2026-10-25T10:00:00Z", "active": "2.1.311",
              "versions": ["2.1.310", "2.1.311"],
+             "auto_update": {"policy": "pinned", "pinned_version": "2.1.311"},
              "agents": [{"agent": "terra/a", "id": "01A", "version": "2.1.310"},
                         {"agent": "terra/b", "id": "01B", "version": "2.1.311"},
                         {"agent": "terra/c", "id": "01C", "version": null}]},
             {"harness": "codex", "package": "@openai/codex", "pinned": "0.160.0",
              "tested": ">=0.160.0, <0.161.0", "installed": "0.164.0", "in_range": false,
-             "checked_at": "2026-10-25T10:00:00Z"},
+             "checked_at": "2026-10-25T10:00:00Z", "auto_update": {"policy": "auto"}},
             {"harness": "pi", "package": "@earendil-works/pi-coding-agent", "pinned": "0.85.1",
              "tested": ">=0.85.1, <0.86.0", "installed": null, "in_range": null,
              "error": "cannot run pi: No such file or directory", "checked_at": null}
-        ]
+        ],
+        "auto_update": {"schedule": "daily", "next_check_at": "2026-10-26T10:05:00Z"}
     });
     let out = ok(
         false,
@@ -3684,6 +3686,25 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
         out.contains("policy: warn (TERRARIUM_HARNESS_VERSION_POLICY)"),
         "{out}"
     );
+    assert!(lines[0].contains("UPDATES"), "{out}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("claude") && l.contains(" pinned 2.1.311 ")),
+        "{out}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("codex") && l.contains(" auto ")),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "auto-update: daily (TERRARIUM_HARNESS_AUTO_UPDATE), next check 2026-10-26T10:05:00Z"
+        ),
+        "{out}"
+    );
     assert!(
         out.contains("codex: 0.164.0 is outside >=0.160.0, <0.161.0; run `terrarium admin harness update codex` or `just harness::update codex`"),
         "{out}"
@@ -3708,6 +3729,92 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
     )
     .await;
     assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), answer);
+}
+
+#[tokio::test]
+async fn admin_harness_pin_unpin_and_check() {
+    let pinned = json!({"harness": "codex", "policy": "pinned", "pinned_version": "0.164.0",
+        "from": "0.165.0", "to": "0.164.0", "agents_on_old_version": [],
+        "note": "1 live agent(s) run another version of codex: terra/w. Each keeps its version and moves to 0.164.0 at its next restart"});
+    // No version: an empty body (the daemon takes the previous version).
+    let out = ok(
+        false,
+        &["admin", "harness", "pin", "codex"],
+        vec![(200, pinned.clone())],
+        vec![(Post, "/api/harnesses/codex/pin", vec![], Some(json!({})))],
+    )
+    .await;
+    assert!(
+        out.contains("codex: 0.165.0 -> 0.164.0, pinned; no auto-update"),
+        "{out}"
+    );
+    assert!(out.contains("terra/w"), "{out}");
+    assert!(
+        out.contains("undo: terrarium admin harness unpin codex"),
+        "{out}"
+    );
+    let same = json!({"harness": "codex", "policy": "pinned", "pinned_version": "0.164.0",
+        "from": "0.164.0", "to": "0.164.0", "agents_on_old_version": []});
+    let out = ok(
+        false,
+        &["admin", "harness", "pin", "codex", "0.164.0"],
+        vec![(200, same)],
+        vec![(
+            Post,
+            "/api/harnesses/codex/pin",
+            vec![],
+            Some(json!({"version": "0.164.0"})),
+        )],
+    )
+    .await;
+    assert!(out.contains("codex: pinned to 0.164.0"), "{out}");
+
+    let out = ok(
+        false,
+        &["admin", "harness", "unpin", "codex"],
+        vec![(
+            200,
+            json!({"harness": "codex", "policy": "auto", "pinned_version": null,
+                          "from": "0.164.0", "to": "0.164.0", "agents_on_old_version": []}),
+        )],
+        vec![(Post, "/api/harnesses/codex/unpin", vec![], None)],
+    )
+    .await;
+    assert!(
+        out.contains("codex: auto-update on (stays at 0.164.0"),
+        "{out}"
+    );
+
+    let out = ok(
+        false,
+        &["admin", "harness", "check"],
+        vec![(
+            200,
+            json!({"checked_at": "2026-10-31T00:00:00Z", "results": [
+            {"harness": "codex", "result": "updated", "detail": "0.164.0 -> 0.165.0",
+             "from": "0.164.0", "to": "0.165.0", "latest": "0.165.0", "mailed": true},
+            {"harness": "claude", "result": "current", "detail": "2.1.310 is the latest release",
+             "latest": "2.1.310", "mailed": false}]}),
+        )],
+        vec![(Post, "/api/harnesses/check", vec![], None)],
+    )
+    .await;
+    assert!(
+        out.contains("codex: updated: 0.164.0 -> 0.165.0 (mailed)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("claude: current: 2.1.310 is the latest release"),
+        "{out}"
+    );
+
+    for args in [
+        &["terrarium", "admin", "harness", "pin"][..],
+        &["terrarium", "admin", "harness", "unpin"][..],
+        &["terrarium", "admin", "harness", "check", "codex"][..],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err(), "{args:?}");
+    }
 }
 
 #[tokio::test]

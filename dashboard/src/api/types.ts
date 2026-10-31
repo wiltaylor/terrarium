@@ -71,6 +71,66 @@ export interface HarnessVersion {
   versions?: string[];
   /** The live agents on the harness and the version each runs. Absent when none runs. */
   agents?: HarnessAgent[];
+  /** The update policy and the last auto-update check (docs/api.md §4, "Auto-update and pins"). */
+  auto_update?: HarnessAutoUpdate;
+}
+
+/** `auto`: the background check installs each newer npm release. `pinned`: it installs nothing. */
+export type HarnessUpdatePolicy = "auto" | "pinned";
+
+/** The result of one harness in an auto-update check. */
+export type HarnessCheckResult = "current" | "updated" | "pinned" | "failed" | "skipped";
+
+/** The `auto_update` object of a row of `GET /api/harnesses`. */
+export interface HarnessAutoUpdate {
+  policy: HarnessUpdatePolicy;
+  /** The version of a `pinned` policy; null for `auto`. */
+  pinned_version: string | null;
+  /** The rollback target: the version before the last switch (on disk), else the newest version dir under the active one. */
+  previous: string | null;
+  /** The latest npm release at the last check. */
+  latest: string | null;
+  checked_at: string | null;
+  result: HarnessCheckResult | null;
+  /** One line about the last check. */
+  detail: string | null;
+  /** The release notes, when the daemon knows where they are. */
+  changelog: string | null;
+}
+
+/** `POST /api/harnesses/{name}/pin` and `.../unpin`. */
+export interface HarnessPinResult {
+  harness: string;
+  policy: HarnessUpdatePolicy;
+  pinned_version: string | null;
+  /** The active version before. */
+  from: string | null;
+  /** The active version after. */
+  to: string | null;
+  /** npm's output, when the pin installed the version. */
+  output?: string;
+  agents_on_old_version: HarnessAgent[];
+  note?: string;
+  removed?: string[];
+}
+
+/** One harness in `POST /api/harnesses/check`. */
+export interface HarnessCheckItem {
+  harness: string;
+  result: HarnessCheckResult;
+  detail: string;
+  from?: string;
+  to?: string;
+  latest: string | null;
+  in_range?: boolean;
+  /** True when the check sent a mail to the operator. */
+  mailed: boolean;
+}
+
+/** `POST /api/harnesses/check`. */
+export interface HarnessCheckReport {
+  checked_at: string;
+  results: HarnessCheckItem[];
 }
 
 /** A live agent and the harness version it runs (`GET /api/harnesses`, and the update answer). */
@@ -131,6 +191,8 @@ export type HarnessVersionPolicy = "warn" | "refuse";
 export interface HarnessReport {
   policy: HarnessVersionPolicy;
   harnesses: HarnessVersion[];
+  /** `TERRARIUM_HARNESS_AUTO_UPDATE` (`daily`, `off`, or a duration) and the next background check. */
+  auto_update?: { schedule: string; next_check_at: string | null };
 }
 
 /** docs/api.md §5. */

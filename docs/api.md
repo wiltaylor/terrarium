@@ -280,6 +280,7 @@ gives them to the routers and the mail code.
 |---|---|---|---|
 | `TERRARIUM_PUBLIC_URL` | `--public-url` | unset (mail: `http://localhost:8080`) | Mail links, `Version.url`, the cookie `Origin` check, CORS on `/a/...`. |
 | `TERRARIUM_MAIL_LOOP_LIMIT` | none | `6` | The mail loop guard (§6, PLAN §12): the agent-to-agent messages a thread can have since the last operator or project-inbox message before new agent mail on it types no pointer. The daemon reads it once. |
+| `TERRARIUM_HARNESS_AUTO_UPDATE` | `--harness-auto-update` | `daily` | The background check for harness updates (§4, "Auto-update and pins"): `daily`, `off`, or a duration of `1h` or more (`6h`). A value that does not parse stops the daemon at start. |
 | `TERRARIUM_IDLE_STOP` | none | `10m` | The idle stop of an agent that sets no `idle_stop` (§6.2, PLAN §18): a duration (`30m`, `1h30m`), or `off` (also `0`). The daemon reads it once. |
 | `TERRARIUM_COMPACT_ON_IDLE` | none | `off` | The `compact_on_idle` of an agent that sets none (§6.2, "Auto compact"): `on` or `off` (also `1`, `true`, `yes`, and `0`, `false`, `no`). The daemon reads it once. |
 | `TERRARIUM_COMPACT_MAX_AGE` | none | `off` | The `compact_max_age` of an agent that sets none (§6.2, "Auto compact"): a duration (`24h`, `12h30m`), or `off` (also `0`). The daemon reads it once. |
@@ -516,6 +517,28 @@ With a tools dir, each row also has these fields:
 An agent whose `version` differs from `active` keeps its version until
 its next start.
 
+Each row also has `auto_update`: the update policy of the harness and its
+last auto-update check (see "Auto-update and pins" below). The report has
+`auto_update` too: `{"schedule", "next_check_at"}`. `schedule` is
+`TERRARIUM_HARNESS_AUTO_UPDATE` (`daily`, `off`, or a duration such as
+`6h`); `next_check_at` is `null` when the check is off.
+
+```json
+"auto_update":{"policy":"pinned","pinned_version":"0.164.0","previous":"0.165.0",
+  "latest":"0.165.0","checked_at":"2026-10-31T10:05:12.000Z","result":"pinned",
+  "detail":"pinned to 0.164.0; no auto-update",
+  "changelog":"https://github.com/openai/codex/releases"}
+```
+
+| Field | Meaning |
+|---|---|
+| `policy` | `auto` (the default): the check installs each newer release on npm, majors too. `pinned`: the check installs nothing. |
+| `pinned_version` | The version of a `pinned` policy; `null` for `auto`. |
+| `previous` | The rollback target: the active version before the last switch, when its version dir is on disk; else the newest version dir under `active`. `null` when there is none. |
+| `latest` | The latest release on npm at the last check; `null` before the first check. |
+| `checked_at`, `result`, `detail` | The last check: when, the result (`current`, `updated`, `pinned`, `failed`, or `skipped`), and one line about it. `null` before the first check. |
+| `changelog` | The release notes of the harness, when the daemon knows where they are; else `null`. |
+
 `?latest=true` adds three fields to each row, from the npm registry
 (`https://registry.npmjs.org/<package>`: `dist-tags.latest` and its entry
 in `time`). The daemon caches each answer for 1 hour, and a failed lookup
@@ -600,7 +623,8 @@ Rules:
   complete on disk. Without it, a complete version dir is used as it is.
   The field is accepted for compatibility; no live agent needs it.
 - After a done update, the daemon removes each version dir of the tools
-  dir that is not active and that no live agent runs. It also removes the
+  dir that is not active, that no live agent runs, and that the retention
+  of "Auto-update and pins" (below) does not keep. It also removes the
   flat layout of before the version dirs (`tools/lib`) when no live agent
   started on it. The daemon start does the same.
 - One update runs at a time. A second one gets `409 conflict`.
@@ -629,6 +653,71 @@ Rules:
 
 `terrarium admin harness update <name> [--version <v>] [--force]` and
 `terrarium admin harness update --all [--force]` call these endpoints.
+
+A done update of a harness also records the version before it as the
+`previous` version of the harness (the rollback target). When the harness
+is pinned, the pin moves to the new version.
+
+### Auto-update and pins
+
+A daemon task checks npm for each harness on the schedule of
+`TERRARIUM_HARNESS_AUTO_UPDATE` (§1.3; default `daily`). The first check is
+5 minutes after the daemon start, or one interval after the last check
+when that is later. Each check has a random delay of up to a tenth of the
+interval (at most 30 minutes). A daemon with no tools dir has no check.
+
+For each harness (not the extension), the policy decides:
+
+- `auto`: when npm has a release that is newer than the active version (a
+  major too), the check installs it into its version dir and switches to
+  it, as an update does. Live agents keep their version; each moves to the
+  new version at its next start or wake. The operator gets one mail (§6,
+  from `system`) for each installed update: the harness, the old and the
+  new version, a warning when the new version is outside the adapter's
+  tested range, the changelog link (else the npm versions page), and the
+  rollback command.
+- `pinned`: no install. The check still asks npm, so `latest` shows the
+  newest release.
+
+A failed install keeps the active version. The operator gets one mail for
+each version that failed; the next checks try again with no new mail. A
+check skips a harness while a manual update runs. Each install, done or
+failed, writes the audit entry `harness.auto_update` (actor `system`;
+`detail`: `package`, `from`, `to`, `latest`, `ok`, `detail`, `in_range`),
+and a done one the event `harness` with `change: "auto_updated"`.
+
+The policy is in the state dir (the table `harness_updates`), so it stays
+through a restart and a deploy. `harnesses.toml` gives the versions of a
+fresh install only.
+
+| Endpoint | Body | Answer |
+|---|---|---|
+| `POST /api/harnesses/check` | none | `200` `{"checked_at", "results": [{harness, result, detail, from?, to?, latest, in_range?, mailed}]}`: one check now, as the task runs it. `409 conflict` while a check runs. |
+| `POST /api/harnesses/{name}/pin` | none, or `{"version"?}` | `200` `{harness, policy, pinned_version, from, to, output?, agents_on_old_version, note?, removed?}` |
+| `POST /api/harnesses/{name}/unpin` | none | `200` the same object, with `policy: "auto"` and `pinned_version: null` |
+
+A pin switches the harness to `version` for new agent starts and sets the
+policy `pinned`. Without `version`, it takes `previous` (a rollback); a
+harness with no previous version is `422 invalid`. A version that is not
+on disk is installed first (an npm failure is `422 invalid` with
+`details.output`). `version` must be semver (`latest` is `422 invalid`).
+Live agents keep their version until their next start. A pin while an
+update runs is `409 conflict`. An unpin sets the policy `auto`; the active
+version stays until the next check.
+
+Retention: after a switch, the GC keeps the active version, the newest two
+version dirs under it, the `previous` and the `pinned_version` of each
+harness, and each version that a live agent runs. It removes the rest.
+
+All three need sysadmin or the operator. Each pin writes the audit entry
+`harness.pin` (`detail`: `version`, `from`, `ok`, and `error` or
+`agents_on_old_version`), and each unpin `harness.unpin` (`detail.was`:
+the old pin). A done pin and an unpin also write the event `harness`
+(`change`: `pinned` or `unpinned`). A daemon with no tools dir answers
+`501 not_available`.
+
+`terrarium admin harness pin <name> [version]`, `terrarium admin harness
+unpin <name>`, and `terrarium admin harness check` call these endpoints.
 
 ### `POST /api/reload`
 
@@ -3175,7 +3264,7 @@ Kinds:
 | `lease` | `{change, target, lease_id, expires_at, exclusive, state}`. `change` is `granted`, `extended`, or `ended` (a revoke or the expiry). The `agent` is the lease holder. The supervisor types a pointer from it (§17.7). |
 | `target` | `{change, target, ...}`. `change` is `reconciled` (`from`, `state`, `snapshots_cleared`): a `status` found the target other than the store said. `snapshots_dropped` (`snapshots_dropped`): a snapshot list found that the host lost stored names. `snapshot_deleted` (`snapshot`, `scope`, `machines`, `agent`?): a snapshot delete (§17.3). |
 | `schedule` | `{change, schedule, name, project, run?, status?, trigger?}`. `change` is `created`, `updated`, `deleted`, `enabled`, `disabled`, `run_started`, or `run_finished`. `schedule` is the schedule ULID. A run event has `run`, `status`, and `trigger` (§19). |
-| `harness` | `{change, harness, package, from, to, forced}`. `change` is `updated`: an update in the tools dir (§4, `POST /api/harnesses/{name}/update`). |
+| `harness` | `{change, harness, package, from, to, forced}`. `change` is `updated`: an update in the tools dir (§4, `POST /api/harnesses/{name}/update`); `auto_updated`: an install of the auto-update check (with `in_range`); `pinned` or `unpinned`: a pin or an unpin (§4, "Auto-update and pins"; `unpinned` has `was` in place of `from` and `to`). |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
 | `event_source` | `{change, source, name, key, kind, enabled}` after a change of an event source (§20). |
 | `ci.run.*`, `ci.job.failed`, `git.push`, `pr.*`, `ext.*` | A webhook of an event source (§20.4), or `POST /api/events` (§20.5). The actor is `source:<project>/<name>`, or the caller of `POST /api/events`. |

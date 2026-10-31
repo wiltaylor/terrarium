@@ -101,6 +101,9 @@ pub struct AppState {
     /// The tools dir of the harnesses (`POST /api/harnesses/{name}/update`).
     /// Not configured: the update answers `501 not_available`.
     pub harness_tools: Arc<crate::harness_tools::HarnessTools>,
+    /// The harness auto-update: the schedule, the next check, and the
+    /// lock of a running check (`crate::harness_auto_update`).
+    pub harness_auto_update: Arc<crate::harness_auto_update::Runtime>,
     /// The origins, WebSocket auth, and sessions (`DaemonConfig::web`).
     pub web: crate::settings::WebConfig,
     /// The artifact listener address. Empty: no listener of its own, and
@@ -231,6 +234,9 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .route("/harnesses", get(system::harnesses))
         .route("/harnesses/update", post(system::harness_update_all))
         .route("/harnesses/{name}/update", post(system::harness_update))
+        .route("/harnesses/check", post(system::harness_check))
+        .route("/harnesses/{name}/pin", post(system::harness_pin))
+        .route("/harnesses/{name}/unpin", post(system::harness_unpin))
         .merge(hosts::routes())
         .merge(targets::routes())
         .route("/reload", post(system::reload))
@@ -865,6 +871,7 @@ mod tests {
             executor: Arc::default(),
             harness_latest: Arc::default(),
             harness_tools: Arc::default(),
+            harness_auto_update: Arc::default(),
             web,
             artifact_listen: String::new(),
             transcripts: Arc::default(),

@@ -75,21 +75,24 @@ async fn an_update_installs_a_version_dir_and_answers_from_and_to() {
             .ends_with(&format!("@openai/codex@{pin}"))
     );
 
-    // An empty body is `latest`. No agent runs the old version, so the GC
-    // removes it.
+    // An empty body is `latest`. No agent runs the old version, but it is
+    // the previous version (the rollback target), so the GC keeps it.
     let r = td.post_empty("/api/harnesses/codex/update").await;
     let b = r.ok();
     assert_eq!(b["to"], "9.0.0");
-    assert_eq!(b["removed"], json!([pin]));
+    assert!(b.get("removed").is_none(), "{b}");
     assert_eq!(cfg.read_manifest()["codex"].version, "9.0.0");
-    assert_eq!(cfg.versions("codex"), ["9.0.0"]);
+    assert_eq!(cfg.versions("codex"), [pin.as_str(), "9.0.0"]);
 
-    // The harness table shows the active version and the dirs on disk.
+    // The harness table shows the active version, the dirs on disk, and
+    // the previous version.
     let h = td.get("/api/harnesses").await;
     let rows = h.ok()["harnesses"].as_array().unwrap().clone();
     let codex = rows.iter().find(|r| r["harness"] == "codex").unwrap();
     assert_eq!(codex["active"], "9.0.0");
-    assert_eq!(codex["versions"], json!(["9.0.0"]));
+    assert_eq!(codex["versions"], json!([pin, "9.0.0"]));
+    assert_eq!(codex["auto_update"]["policy"], "auto");
+    assert_eq!(codex["auto_update"]["previous"], pin.as_str());
 
     // The audit row and the `harness` event.
     let audit = td.get("/api/audit?action=harness.update").await;

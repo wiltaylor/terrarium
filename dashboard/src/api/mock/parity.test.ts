@@ -820,7 +820,7 @@ describe("mock parity with docs/api.md", () => {
   it("answers GET /api/harnesses?latest=true and the harness update in the daemon's shapes", async () => {
     const api = mock();
     // The fields of `harness_versions::HarnessVersion` (docs/api.md GET /api/harnesses).
-    const ROW = ["harness", "package", "pinned", "tested", "installed", "in_range", "error", "checked_at", "latest", "update", "latest_error", "active", "versions", "agents"];
+    const ROW = ["harness", "package", "pinned", "tested", "installed", "in_range", "error", "checked_at", "latest", "update", "latest_error", "active", "versions", "agents", "auto_update"];
     const r = await api.harnesses(true, true);
     for (const h of r.harnesses) {
       for (const k of Object.keys(h)) expect(ROW).toContain(k);
@@ -845,6 +845,20 @@ describe("mock parity with docs/api.md", () => {
     const npm = await api.harnessUpdate("claude", { version: "99.1.0" }).catch((e: unknown) => e);
     expect(npm).toMatchObject({ status: 422, code: "invalid", details: { package: "@anthropic-ai/claude-code", version: "99.1.0", from: "2.1.320" } });
     expect(Object.keys((npm as { details: object }).details).sort()).toEqual(["from", "output", "package", "version"]);
+    // `harness_auto_update::HarnessAutoUpdate` and `ScheduleInfo` (docs/api.md "Auto-update and pins").
+    const AUTO = ["policy", "pinned_version", "previous", "latest", "checked_at", "result", "detail", "changelog"].sort();
+    for (const h of r.harnesses) expect(Object.keys(h.auto_update!).sort()).toEqual(AUTO);
+    expect(Object.keys(r.auto_update!).sort()).toEqual(["next_check_at", "schedule"]);
+    // `HarnessPinResult`: `output`, `note`, and `removed` are absent when empty.
+    const un = await api.harnessUnpin("claude");
+    expect(Object.keys(un).sort()).toEqual(["agents_on_old_version", "from", "harness", "pinned_version", "policy", "to"]);
+    // `CheckItem`: `from`, `to`, and `in_range` only on an install.
+    const check = await api.harnessCheck();
+    expect(Object.keys(check).sort()).toEqual(["checked_at", "results"]);
+    for (const i of check.results) {
+      const keys = ["harness", "result", "detail", "latest", "mailed", ...(i.result === "updated" ? ["from", "to", "in_range"] : [])].sort();
+      expect(Object.keys(i).sort()).toEqual(keys);
+    }
   });
 
   it("runs the target lifecycle with the daemon's states, and answers each verb with the executor report", async () => {

@@ -1337,6 +1337,29 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE agents ADD COLUMN last_compact_at TEXT;
     ALTER TABLE agents ADD COLUMN last_compact_ok INTEGER;
     "#,
+    // 43: the harness auto-update (PLAN §6, "Auto-update and pins"). One
+    // row for each harness that has a policy or a check. No row: the
+    // policy is `auto`. `pinned_version` is set only with `pinned`.
+    // `previous` is the active version before the last switch (the
+    // target of a rollback). `latest`, `checked_at`, `check_result`, and
+    // `check_detail` are from the last check. `failed_version` is the
+    // version whose failed install was mailed, so a failure mails once.
+    // Self-contained: when another branch takes number 43, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE harness_updates (
+        harness        TEXT PRIMARY KEY,
+        policy         TEXT NOT NULL DEFAULT 'auto' CHECK (policy IN ('auto', 'pinned')),
+        pinned_version TEXT,
+        previous       TEXT,
+        latest         TEXT,
+        checked_at     TEXT,
+        check_result   TEXT,
+        check_detail   TEXT,
+        failed_version TEXT,
+        updated_at     TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1907,6 +1930,7 @@ mod tests {
             "thread_resumes",
             "secrets",
             "secret_grants",
+            "harness_updates",
         ] {
             let n: i64 = conn
                 .query_row(

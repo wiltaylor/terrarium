@@ -103,6 +103,11 @@ pub struct HarnessVersion {
     /// Absent when none runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentOnVersion>,
+    /// The update policy and the last auto-update check
+    /// (`crate::harness_auto_update`). Absent from a supervisor's own
+    /// report; `GET /api/harnesses` adds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<crate::harness_auto_update::HarnessAutoUpdate>,
 }
 
 /// A live agent and the harness version it runs.
@@ -183,6 +188,16 @@ pub const LATEST_ERROR_TTL: Duration = Duration::from_secs(5 * 60);
 /// The npm registry.
 pub const NPM_REGISTRY: &str = "https://registry.npmjs.org";
 
+/// The npm registry of the lookups: `NPM_CONFIG_REGISTRY` (or
+/// `npm_config_registry`), as npm itself reads it for the installs, else
+/// [`NPM_REGISTRY`].
+pub fn registry_from_env() -> String {
+    ["NPM_CONFIG_REGISTRY", "npm_config_registry"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| NPM_REGISTRY.to_owned())
+}
+
 /// The registry URL of a package's document. The `/` of a scoped name is
 /// `%2f`.
 pub fn npm_url(registry: &str, package: &str) -> String {
@@ -234,7 +249,7 @@ impl Default for LatestCache {
             Arc::new(crate::probes::ReqwestHttp::with_timeout(
                 Duration::from_secs(90),
             )),
-            NPM_REGISTRY,
+            &registry_from_env(),
         )
     }
 }
@@ -346,6 +361,10 @@ impl LatestCache {
 pub struct HarnessReport {
     pub policy: VersionPolicy,
     pub harnesses: Vec<HarnessVersion>,
+    /// The schedule of the background check and the next check
+    /// (`TERRARIUM_HARNESS_AUTO_UPDATE`). `GET /api/harnesses` adds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<crate::harness_auto_update::ScheduleInfo>,
 }
 
 /// The rows for the pins alone, for a supervisor that cannot run the
@@ -370,8 +389,10 @@ pub fn pins_only(policy: VersionPolicy) -> HarnessReport {
                 active: None,
                 versions: Vec::new(),
                 agents: Vec::new(),
+                auto_update: None,
             })
             .collect(),
+        auto_update: None,
     }
 }
 
@@ -490,6 +511,7 @@ impl VersionCache {
             active: None,
             versions: Vec::new(),
             agents: Vec::new(),
+            auto_update: None,
         }
     }
 }

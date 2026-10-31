@@ -269,6 +269,36 @@ update`) and switches the links. It needs no image build and no restart
 (`docs/getting-started.md` §7). Each agent launch runs the harness from
 the version dir that is active at the launch, so running agents keep
 their version until their next start.
+
+**Auto-update and pins** (2026-10-31). A daemon task checks npm for each
+harness on a schedule (`TERRARIUM_HARNESS_AUTO_UPDATE`: `daily`, the
+default; `off`; or a duration of 1h or more), with a random delay of up
+to a tenth of the interval (30 minutes at most). The first check is 5
+minutes after the start, or one interval after the last check when that
+is later. Each harness has an update policy in the state dir (the table
+`harness_updates`, migration 43), so it stays through a restart and a
+deploy:
+
+- `auto` (the default): the check installs each newer release (a major
+  too) through the same install path as an update (a new version dir, then
+  a switch). Running agents keep their version, and each moves at its next
+  start or wake (§18). The operator gets one Inbox mail for each installed
+  update: the old and the new version, a warning when the new version is
+  outside the adapter's tested range, the changelog link, and the rollback
+  line. A failed install keeps the active version and mails once for each
+  failed version. A check skips a harness while a manual update runs.
+- `pinned` (a version): the check installs nothing.
+  `POST /api/harnesses/{name}/pin` sets it; without a version, it switches
+  to the previous version at once (a rollback). `unpin` sets `auto` again.
+
+`harnesses.toml` stays the source of a fresh install, CI, and the image;
+on a running daemon the policy wins. The GC keeps the active version, the
+newest two versions under it, the previous and the pinned version of each
+harness, and each version that a live agent runs. The Copilot prompt
+extension has no policy: a Copilot update reinstalls it. The code is
+`crates/terrariumd/src/harness_auto_update.rs`; the API is in
+`docs/api.md` §4, "Auto-update and pins".
+
 The sandbox binds the tools dir read-only (§11). The container mounts:
 
 | Mount | Purpose |
@@ -3342,7 +3372,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | 5 · lab repos | `lab_repo` (a git worktree of a project repo on the host, `lab_ref`, `lab_path`) and `lab_from_workspace` (one instance for each holder), with the lab allowlist in the host agent (`labcheck.rs`). `admin target edit` (`PATCH /api/targets/{name}`). The dashboard shows the lab source and the instances. Verified live on 2026-10-25. | — |
 | 5 · caps | `TERRARIUM_MAX_TARGETS_PER_PROJECT` (8, `409 conflict`) and the host agent's `max_running_targets` (4, `429 rate_limited`). The dashboard shows the cap errors and the running count of each host. | — |
 | 5 · scope | A target is global or belongs to one project (the `scope` field). A project target gets the prefix `<project>-`. A project_admin makes and leases the targets of its project; a global target needs sysadmin. The dashboard has scope chips and filters, and a targets panel on each project. | — |
-| Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, one npm prefix for each version) and the Copilot prompt extension, and writes `terrarium-manifest.json`. Updates into version dirs: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`. Running agents keep their version dir until their next start; the GC removes the unused version dirs. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
+| Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, one npm prefix for each version) and the Copilot prompt extension, and writes `terrarium-manifest.json`. Updates into version dirs: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`. The auto-update (§6, "Auto-update and pins"; `TERRARIUM_HARNESS_AUTO_UPDATE`, default `daily`; migration 43): a daemon task installs each newer npm release of a harness with the policy `auto` and mails the operator once for each update or failed version; `POST /api/harnesses/{name}/pin` (default: a rollback to the previous version), `unpin`, and `check`; `terrarium admin harness pin|unpin|check`; the policy chip and the "Roll back and pin", "Pin current", "Unpin", and "Check now" buttons of the dashboard; audited as `harness.auto_update`, `harness.pin`, and `harness.unpin`. Running agents keep their version dir until their next start; the GC removes the unused version dirs. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
 | Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, `[[templates]]` in project files and fleets, `template = "..."` on fleet agents and in export, `terrarium template` and `agent new --template`, the Templates tab of the dashboard Settings, the template chooser of New agent, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |
 | Waits | Waits and watches (§12d, `docs/api.md` §6.7): the status `waiting`, `agent`, `process`, `time`, and `card` waits with timeouts, the cycle check, and the limits; `terrarium run` (a detached exec session with a `process` wait); one wake mail for each end (a 2 s batch); watches with debounce and `--once`; `terrarium wait`, `run`, `watch`; the `waiting` chip and the Waits and Watches sections of the agent page; the prompt text. Tests with the fake supervisor and a real host agent (`tests/waits.rs`). | Not run live with real harnesses yet. The queued watch changes of a debounce do not live through a daemon restart. |
 | Lifecycle | Wake on demand, the idle stop, and the pause (§18, 2026-10-31): `crates/terrariumd/src/lifecycle.rs`; migration 41 (`agents.idle_stop`, `paused`, `status_reason`, `queued_turns`); `TERRARIUM_IDLE_STOP`; `POST /api/agents/{id}/pause` and `unpause`; `terrarium agent pause|unpause`, `--idle-stop`; Pause, Resume, the `paused` and `stopped (idle)` badges, and the queued count in the dashboard; the lead prompts wake workers with a card, not a start. Tests with the fake supervisor (`tests/lifecycle.rs`) and the real one (`tests/runtime.rs`). | Not run live with real harnesses yet. A turn queued before a stop that ends a launch before its first idle waits for the next launch in memory only. |

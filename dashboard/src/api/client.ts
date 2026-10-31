@@ -53,6 +53,8 @@ import type {
   EventQuery,
   ExecOpened,
   ExecRequest,
+  HarnessCheckReport,
+  HarnessPinResult,
   HarnessReport,
   HarnessUpdateOptions,
   HarnessUpdateResult,
@@ -169,6 +171,12 @@ export interface Api {
   harnessUpdate(name: string, opts?: HarnessUpdateOptions): Promise<HarnessUpdateResult>;
   /** `POST /api/harnesses/update`: every harness and the extension to the latest. */
   harnessUpdateAll(opts?: { force?: boolean }): Promise<{ results: HarnessUpdateResult[] }>;
+  /** `POST /api/harnesses/{name}/pin`: switch to `version` (default: the previous version) and stop its auto-update. */
+  harnessPin(name: string, version?: string): Promise<HarnessPinResult>;
+  /** `POST /api/harnesses/{name}/unpin`: back to the auto-update. */
+  harnessUnpin(name: string): Promise<HarnessPinResult>;
+  /** `POST /api/harnesses/check`: run the auto-update check now. */
+  harnessCheck(): Promise<HarnessCheckReport>;
 
   /** Dashboard sessions (docs/api.md §1.1). */
   session: {
@@ -728,6 +736,9 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
     },
     harnessUpdate: (name, opts = {}) => post(`/api/harnesses/${seg(name)}/update`, { version: opts.version ?? "latest", ...(opts.force ? { force: true } : {}) }),
     harnessUpdateAll: (opts = {}) => post("/api/harnesses/update", { version: "latest", ...(opts.force ? { force: true } : {}) }),
+    harnessPin: (name, version) => post(`/api/harnesses/${seg(name)}/pin`, version ? { version } : {}),
+    harnessUnpin: (name) => post(`/api/harnesses/${seg(name)}/unpin`),
+    harnessCheck: () => post("/api/harnesses/check"),
 
     session: {
       create: async (token) => {

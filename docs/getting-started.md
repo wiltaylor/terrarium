@@ -1607,9 +1607,15 @@ started on them runs. The daemon removes `tools/lib` at a later start or
 after an update, when no live agent uses it.
 
 **Removal of old versions.** After each update, and at each daemon start,
-the daemon removes each version dir that is not active and that no live
-agent runs. `terrariumd harness install` (the entrypoint) does not know
-the live agents: it keeps the newest 3 versions of each harness.
+the daemon removes each version dir that it does not need. It keeps the
+active version, the newest two versions under it, the previous and the
+pinned version (section 7.7), and each version that a live agent runs.
+`terrariumd harness install` (the entrypoint) does not know the live
+agents: it keeps the newest 3 versions of each harness.
+
+**Auto-update.** By default, the daemon checks npm once a day and
+installs each newer release by itself (section 7.7). Pin a harness to
+stop this for that harness.
 
 ### 7.1 Check
 
@@ -1749,15 +1755,35 @@ the installed version of each harness and its range.
 
 ### 7.6 Roll back
 
-Update to the old version:
+When a new version breaks something, roll back and pin. The pin switches
+the harness to the previous version for new agent starts, and stops its
+auto-update:
+
+```sh
+docker compose exec -u terrarium terrarium terrarium admin harness pin claude
+docker compose exec -u terrarium terrarium terrarium admin harness pin claude 2.1.310   # a given version
+```
+
+The update mail of the auto-update gives this line with the old version.
+In the dashboard, use "Roll back and pin" in the "Harness versions" table
+(Settings, Subscriptions). The daemon keeps the previous version on disk,
+so the switch needs no npm run. Agents on the newer version move back at
+their next start or wake. Restart an agent to move it now
+(`terrarium agent restart <agent>`).
+
+When the fix is out, remove the pin. The next check updates the harness
+again:
+
+```sh
+docker compose exec -u terrarium terrarium terrarium admin harness unpin claude
+```
+
+You can also update to the old version with no pin. Then the next check
+can install the newer version again:
 
 ```sh
 just harness::update claude 2.1.310
 ```
-
-When the old version dir is still on disk (an agent runs it), the switch
-needs no npm run. Agents on the newer version move back at their next
-restart.
 
 If you used `--pin`, `git checkout harnesses.toml docs/compat.md` undoes
 the file changes before a commit. To go back to the pins of
@@ -1768,6 +1794,43 @@ the file changes before a commit. To go back to the pins of
 `docker/Dockerfile` differs from `[node] image` in `harnesses.toml`, or
 when the Dockerfile installs a harness. To fix the default, run
 `uv run python scripts/harness-versions.py sync`.
+
+### 7.7 Auto-update and pins
+
+The daemon checks npm for each harness in the background
+(`TERRARIUM_HARNESS_AUTO_UPDATE` in `.env`: `daily`, the default; `off`;
+or a duration of 1h or more, such as `6h`). The first check is 5 minutes
+after the start, or one interval after the last check when that is later.
+
+Each harness has an update policy:
+
+- `auto` (the default): when npm has a newer release (a major too), the
+  check installs it as in 7.2 and switches to it. Running agents keep
+  their version, and each moves at its next start or wake. You get one
+  Inbox mail for each update. The mail gives the old and the new version,
+  a warning when the new version is outside the adapter's tested range,
+  the changelog link, and the rollback line.
+- `pinned`: the check installs nothing. `terrarium admin harness pin`
+  sets it (section 7.6), and `unpin` removes it.
+
+When an install fails, the harness stays at its version, and you get one
+mail for that version. The next checks try again with no new mail.
+
+The policy is in the state dir, so it stays through a restart and a
+deploy. `harnesses.toml` gives the versions of a fresh install (an empty
+`tools/`) only. To make an auto-update permanent for a fresh install, use
+`just harness::update <name> <version> --pin` (section 7.2).
+
+To see the policies and the last check:
+
+```sh
+docker compose exec -u terrarium terrarium terrarium admin harness ls
+docker compose exec -u terrarium terrarium terrarium admin harness check   # check now
+```
+
+The dashboard's "Harness versions" table shows the same: a policy chip
+(`auto` or `pinned <version>`), the last check, and the buttons "Roll back
+and pin", "Pin current", "Unpin", and "Check now".
 
 ## 8. Troubleshooting
 
