@@ -4330,7 +4330,8 @@ gets `401 unauthorized` before the upgrade.
 ```json
 {"name":"lab1","id":"01JB...","host_id":"01JB...","created_by":"operator",
  "status":"online","online":true,"sessions":1,
- "capabilities":{"docker":{"present":true,"version":"29.8.0"},"vmlab":{"present":false},"shell":"/bin/bash"},
+ "capabilities":{"docker":{"present":true,"version":"29.8.0"},"vmlab":{"present":false},"shell":"/bin/bash",
+   "limits":{"systemd":true,"controllers":["cpu","cpuset","io","memory","pids"],"docker":true}},
  "summary":{"os":"linux","arch":"x86_64","docker":true,"vmlab":false},
  "os":"linux","arch":"x86_64","version":"0.1.0","max_sessions":32,
  "connected_at":"2026-10-24T06:36:54.149Z","last_seen":"2026-10-24T06:36:54.149Z",
@@ -4445,6 +4446,7 @@ all projects. Targets are project targets by default: a global target
 | `has_display` | The target has a screen (§17.10): `vnc`, `rdp`, `desktop`, `vmlab` with a `machine` (or a lab instance kind), and a `docker` target with `display`. |
 | `runtime` | What runs now (§17.8): `attached` (the agent workspaces, `<project>/<agent>`, in the container or the lab instance), `lab` and `head` (the instance dir on the host and the commit of a `lab_repo` target), `instances` (one for each holder of a `lab_from_workspace` target, by the agent ULID: `{agent_name, lab, state, attached}`). `{}` when nothing runs. |
 | `credential_info` | Only with a `credential`: `{name, scope, kind, fingerprint?, warning?}`. `scope` and `kind` are those of the secret that the daemon uses (`null` when there is none). `fingerprint` is the `SHA256:` fingerprint of an `ssh_key`. `warning` tells why the credential does not work (below), also a global secret with no grant to the project (§5.2). Never a value. |
+| `limits_info` | Only with `limits` ("Resource limits", below): `{summary, per, problem?}`. `summary` is the short text, for example `2 CPU · 4G`. `per` is `holder` (a `host` target: each holder has its own budget) or `container` (a `docker` target: one budget). `problem` is the refusal that a session or an `up` gets now, because the online host agent cannot apply the limits. |
 
 **The project prefix.** `POST /api/targets` with a `project` names the
 target `<project>-<name>`, unless `name` starts with `<project>-` already.
@@ -4477,9 +4479,9 @@ The fields that each kind needs:
 
 | `kind` | Needs | Optional |
 |---|---|---|
-| `host` | `host` | |
+| `host` | `host` | `limits` |
 | `ssh` | `address` | `port`, `credential` (an `ssh_key` secret, §5.2) |
-| `docker` | `host`, and `image` or `container` | `ephemeral`, `keep`, `display` (`x11`, `wayland`, `auto`), `display_name` (§17.10) |
+| `docker` | `host`, and `image` or `container` | `ephemeral`, `keep`, `display` (`x11`, `wayland`, `auto`), `display_name` (§17.10), `limits` (with `image`) |
 | `vmlab` | `host`, and one of: `lab` (an absolute path); `lab_repo` with `machine`; `lab_from_workspace = true` with `machine` | `machine`, `lab_ref`, `lab_path`, `ephemeral`, `keep`, `snapshot_before_task` |
 | `vnc` | `host` (the host agent that connects), `address` (`host:port`, port default 5900) | `username`, `credential` (a `login` secret, §5.2) |
 | `rdp` | `host`, `address` (port default 3389) | `username`, `domain`, `credential` (a `login` secret) |
@@ -4517,7 +4519,8 @@ the state of one of its lab instances, is `running`), `PATCH` changes only
 `keep` and `snapshot_before_task`. A change to any other field is `409
 conflict`, with `details: {state, fields}`. Bring the target down first. A
 field with its current value is no change. `terrarium admin target edit`
-sends this `PATCH`.
+sends this `PATCH`. Exception: the `limits` of a `host` target change at
+any time ("Resource limits", below).
 
 An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values
 that go onto a command line (`host`, `address`, `image`, `container`,
@@ -4528,6 +4531,79 @@ File sync, at start and on `POST /api/reload`: a file target is made or
 updated and becomes `file`. An API target with the same name becomes
 `file`. When the file is gone, the target is deleted. The API refuses to
 change a file target (`409 file_managed`).
+
+**Resource limits.** `limits` keeps one agent from taking all of a
+machine. A `host` target and a `docker` target with `image` take it. Every
+field is optional:
+
+| Field | Value | `host` target (systemd) | `docker` target |
+|---|---|---|---|
+| `cpu` | Cores, from `0.01` to `1024`, with at most two decimals: `2`, `0.5` | `CPUQuota=200%` | `--cpus=2` |
+| `memory` | Bytes, or a size with `K`, `M`, `G`, `T` (powers of 1024; `B` and `iB` may follow): `"4G"`. At least `16M` | `MemoryMax`, and `MemoryHigh` at 90 % | `--memory` |
+| `swap` | A size: the swap on top of `memory`. Needs `memory`. Default: no swap | `MemorySwapMax` (`0` without `swap`) | `--memory-swap` = `memory` + `swap` |
+| `pids` | The most processes and threads, 1 to 4194304 | `TasksMax` | `--pids-limit` |
+| `io_weight` | 1 to 10000; the kernel default is 100 | `IOWeight` | `--blkio-weight`, 10 to 1000, with the inverse of the runc formula: `10 + (w - 1) × 990 / 9999` |
+
+```json
+{"name":"box","kind":"host","host":"lab1","limits":{"cpu":2,"memory":"4G","pids":512}}
+```
+
+Rules:
+
+- A bad value is `422 invalid`, and the message names the field, for
+  example ``bad `limits.memory` "4X": use a number with K, M, G, or T``. An
+  unknown field in `limits` is `400 bad_request`. `limits` on a `vmlab`
+  target (the lab file sizes each VM), an `ssh` target (the daemon cannot
+  apply it on the remote machine: use a host agent there), a display-only
+  target, or a docker target with only `container` is `422 invalid`.
+  `io_read` and `io_write` (bandwidth for one device) do not exist yet.
+- **A `host` target: a budget for each holder.** Each holder (each agent,
+  and the operator) has its own budget on the target. All its exec
+  sessions, shells, checkouts, and `terrarium run` jobs on the target share
+  it, so one agent cannot starve another. The host agent runs each such
+  command in a systemd scope of the user manager (`systemd-run --user
+  --scope`), in the slice of the holder: `terrarium-<target>-<project>-
+  <agent>.slice`, or `terrarium-<target>-_operator.slice`. Each part has the
+  escapes of `systemd-escape`, so systemd nests the slice under
+  `terrarium-<target>.slice` and `terrarium.slice`
+  ([host-protocol.md "Resource limits"](host-protocol.md#resource-limits)).
+  A `cp` on a host target runs in the host agent itself and has no limits.
+- `MemoryHigh` at 90 % of `memory` makes the kernel slow the holder down
+  before the OOM killer acts. Live on systemd 261: two sessions of one
+  holder that asked for 70 MiB each in a slice of 100 MiB never went past
+  96 MiB together. The second one waited until the first freed its memory
+  (about 3 s). When the first held its memory, the OOM killer ended one of
+  them after about 28 s of slow progress. Without `MemoryHigh` it acted at
+  once.
+- **A `docker` target: one budget for the container.** The container is
+  one for all holders (§17.8), so they share the limits. Docker sets them
+  when Terrarium runs the container (`up`). A change of `limits` while the
+  container runs is `409 conflict`, as for every field. While a container of
+  a permanent target is `stopped`, a change of `limits` is `409 conflict`
+  too, because `up` starts that container with its old limits: remove it
+  first (`POST /api/targets/{name}/down` with `{"destroy": true}`). An
+  ephemeral target gets a new container at each `up`.
+- **A `host` target is always `running`** while its host agent is online.
+  Its `limits` change at any time with `PATCH`. A new session sets the new
+  limits on the holder's slice, so the processes of the holder that run
+  already get them too.
+- `PATCH` merges `limits`: `{"limits": {"pids": 64}}` keeps `cpu` and
+  `memory`; `{"limits": {"cpu": null}}` removes `cpu`; `{"limits": null}`
+  removes every limit. A `limits` with no field left is no `limits`.
+- **The host agent must be able to apply them.** The host agent reports
+  `capabilities.limits` in `hello` (§17.1): `systemd` (`systemd-run --user`
+  works), `controllers` (the cgroup controllers of the user manager),
+  `reason`, and `docker`. An exec, shell, `terrarium run`, or checkout on a
+  `host` target with limits is `409 conflict` when the host agent cannot
+  apply them, with the message `this host agent cannot apply resource
+  limits: <reason>`. So is an `up` of a docker target with limits. The
+  reasons: the host agent is older than this feature (install the new
+  host agent, §17.9); `systemd-run --user` does not work (the message has
+  its error); or the user manager has no controller that a limit needs
+  (`cpu` for `cpu`, `memory` for `memory` and `swap`, `pids` for `pids`, `io`
+  for `io_weight`). The daemon never runs the command without its limits.
+  The host agent checks again before it starts the command. A target with no
+  limits works on every host agent.
 
 **The credential of a target** (PLAN §16b.6a). `credential` names a
 secret (§5.2). The daemon checks it when it saves the target. It does not
@@ -4844,6 +4920,9 @@ Rules:
   200 characters), `cwd`, `pty`, and the env names (not the values). Each
   `cp` writes `target.cp`.
 - A target whose host agent is offline is `409 conflict`.
+- On a `host` target with `limits`, the command runs in the budget of the
+  caller (§17.2, "Resource limits"). A host agent that cannot apply the
+  limits gives `409 conflict`.
 - A finished session is forgotten after 5 minutes without a read. A
   session that nobody reads for 30 minutes is killed.
 - When the host link drops, the sessions wait for the reconnect, and the

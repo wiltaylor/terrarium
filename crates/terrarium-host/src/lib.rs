@@ -22,6 +22,8 @@
 //!   lab instances).
 //! - [`config`]: the config file and the path policy.
 //! - [`capabilities`]: tool detection for `hello` and `check`.
+//! - [`limits`]: resource limits on a `host` target, with
+//!   `systemd-run --user` and a slice for each holder.
 //! - [`metrics`]: CPU, memory, network, disk IO, and disk space samples for
 //!   the `metrics` frame.
 //! - [`tls`]: the transport check, fingerprint pinning, the probe, and
@@ -33,6 +35,7 @@ pub mod config;
 pub mod display;
 pub mod docker;
 pub mod labcheck;
+pub mod limits;
 pub mod metrics;
 pub mod outbox;
 pub mod prepare;

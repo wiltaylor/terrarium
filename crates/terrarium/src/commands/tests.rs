@@ -3390,6 +3390,96 @@ async fn grant_with_a_lifecycle_error_exits_1() {
 }
 
 #[tokio::test]
+async fn target_limits_flags_build_the_limits_object() {
+    ok(
+        true,
+        &[
+            "admin", "target", "new", "box", "--kind", "host", "--host", "lab1", "--global",
+            "--cpu", "0.5", "--memory", "4G", "--pids", "256",
+        ],
+        vec![(201, json!({"name": "box"}))],
+        vec![(
+            Post,
+            "/api/targets",
+            vec![],
+            Some(json!({"name": "box", "kind": "host", "host": "lab1",
+                        "limits": {"cpu": 0.5, "memory": "4G", "pids": 256}})),
+        )],
+    )
+    .await;
+    let out = ok(
+        true,
+        &[
+            "admin",
+            "target",
+            "edit",
+            "box",
+            "--cpu",
+            "2",
+            "--io-weight",
+            "300",
+        ],
+        vec![(200, json!({"name": "box"}))],
+        vec![(
+            Patch,
+            "/api/targets/box",
+            vec![],
+            Some(json!({"limits": {"cpu": 2, "io_weight": 300}})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "changed target box: limits\n");
+    ok(
+        true,
+        &["admin", "target", "edit", "box", "--no-limits"],
+        vec![(200, json!({"name": "box"}))],
+        vec![(
+            Patch,
+            "/api/targets/box",
+            vec![],
+            Some(json!({"limits": null})),
+        )],
+    )
+    .await;
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "admin",
+            "target",
+            "edit",
+            "box",
+            "--no-limits",
+            "--cpu",
+            "1"
+        ])
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn target_show_prints_the_limits() {
+    let t = json!({"name": "box", "kind": "host", "host": "lab1", "source": "api",
+                   "state": "running",
+                   "limits_info": {"summary": "2 CPU · 4G", "per": "holder",
+                                   "problem": "this host agent cannot apply resource limits: x"}});
+    let out = ok(
+        false,
+        &["targets", "show", "box"],
+        vec![(200, t)],
+        vec![req(Get, "/api/targets/box")],
+    )
+    .await;
+    assert!(
+        out.contains("limits:      2 CPU · 4G (for each agent)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("warning:     this host agent cannot apply"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
 async fn target_edit_patches_only_the_flags_given() {
     let out = ok(
         true,

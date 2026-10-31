@@ -18,6 +18,7 @@ import { INSTALL_NOTES, installLine } from "../../lib/host-install";
 import { runningLabel, runningOnHost } from "../../lib/target-runtime";
 import { api } from "../../stores";
 import { hostDisplayLabel, hostDisplayOn } from "../targets/display";
+import { hostLimitsChip } from "../../lib/limits";
 
 /** The chips of a host's capabilities: `docker 29.8.0`, `vmlab 0.30.0-alpha`. */
 export function capabilityChips(h: Pick<Host, "capabilities">): { label: string; present: boolean }[] {
@@ -106,6 +107,13 @@ export default function HostsPage() {
                         </For>
                         <Show when={h.capabilities?.shell}>
                           <span class="chip mono">{h.capabilities!.shell}</span>
+                        </Show>
+                        <Show when={hostLimitsChip(h)}>
+                          {(c) => (
+                            <span class={`chip ${c().ok ? "ok" : ""}`} aria-label={`Resource limits of ${h.name}`} title={c().title}>
+                              {c().label}
+                            </span>
+                          )}
                         </Show>
                         <span
                           class={`chip ${hostDisplayOn(h) ? "warn" : ""}`}

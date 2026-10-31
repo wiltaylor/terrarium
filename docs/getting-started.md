@@ -703,6 +703,85 @@ every 2.5 s, and the host agent keeps the connection open between them
 containers for both kinds: x11vnc (`vnc.Dockerfile`) and xrdp
 (`rdp.Dockerfile`). See [api.md](api.md) §17.10 for the details.
 
+#### Limit the resources of a target
+
+A `host` target and a `docker` target can have resource limits, so one
+agent cannot take all of a machine:
+
+```sh
+terrarium admin target new box --kind host --host lab1 --cpu 2 --memory 4G --pids 512
+terrarium admin target edit terra-box --memory 8G      # the other limits stay
+terrarium admin target edit terra-box --no-limits      # remove all of them
+terrarium targets show terra-box                       # limits: 2 CPU · 8G (for each agent)
+```
+
+The flags are `--cpu` (cores: `2`, or `0.5` for half of one core),
+`--memory` (`4G`, `512M`), `--swap` (swap on top of the memory; default
+none), `--pids` (processes and threads), and `--io-weight` (1 to 10000;
+the default is 100). In a target file or a fleet file they are a table:
+
+```toml
+# targets/box.toml
+kind = "host"
+host = "lab1"
+
+[limits]
+cpu = 2
+memory = "4G"
+pids = 512
+```
+
+On a `host` target, each agent (and the operator) gets its own budget for
+all its sessions and `terrarium run` jobs on the target. On a `docker`
+target, the limits go on the container (`docker run --cpus --memory
+...`), so all the agents on it share one budget. The dashboard has the
+limits in the New target dialog, and shows a chip such as `2 CPU · 4G` on
+the target. A `vmlab` target takes its size from the lab file.
+
+A `host` target needs systemd on the host. The host agent runs each
+session with `systemd-run --user --scope` in a slice of the agent, and
+sets the limits on that slice. Check the host:
+
+1. The user of the host agent (the `User=` of the unit, `terrarium` by
+   default) needs a running systemd user manager, also when nobody is
+   logged in:
+
+   ```sh
+   sudo loginctl enable-linger terrarium
+   ```
+
+2. The user manager must have the cgroup controllers of the limits:
+   `cpu` for `--cpu`, `memory` for `--memory` and `--swap`, `pids` for
+   `--pids`, and `io` for `--io-weight`. As that user:
+
+   ```sh
+   cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers
+   ```
+
+   The line must name them, for example `cpuset cpu io memory pids`. When
+   one is missing, delegate it with a drop-in, then log the user out and in
+   (or restart `user@<uid>.service`):
+
+   ```sh
+   sudo mkdir -p /etc/systemd/system/user@.service.d
+   printf '[Service]\nDelegate=cpu cpuset io memory pids\n' |
+     sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+   sudo systemctl daemon-reload
+   ```
+
+3. Install the new host agent on the host (`just host::install`, or the
+   installer with `--upgrade`), and restart it. An older host agent cannot
+   apply limits. `terrarium-host check` prints `capabilities.limits`:
+   `systemd: true` and the `controllers`. The Hosts page shows the chip
+   `limits` (or `no limits`, with the reason as its tooltip).
+
+The daemon never runs a session on a target with limits that the host
+agent cannot apply. The exec gets `409 conflict`: `this host agent cannot
+apply resource limits: <reason>`. When an agent reaches its memory limit,
+the kernel first slows it down (at 90 % of the limit), then the OOM killer
+ends a process of that agent. See [api.md](api.md) §17.2, "Resource
+limits".
+
 ### 2.8 Mode 1 workflow
 
 In mode 1, the workspaces stay on the host and the targets carry the

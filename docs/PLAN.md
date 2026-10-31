@@ -3166,7 +3166,7 @@ Target kinds:
 
 | Kind | Where it runs | Lifecycle | Notes |
 |---|---|---|---|
-| `host` | directly on a host agent's machine | permanent | commands run as the host agent's user |
+| `host` | directly on a host agent's machine | permanent | commands run as the host agent's user; optional resource limits for each holder |
 | `ssh` | any machine with SSH | permanent | zero install; no lifecycle features |
 | `docker` | a host agent with Docker | ephemeral or permanent | image or existing container |
 | `vmlab` | a host agent with vmlab | ephemeral or permanent | lab file or template; `snapshot` gives reset-to-clean |
@@ -3209,6 +3209,25 @@ project. A project target is named `<project>-<name>`.
 With `snapshot_before_task` (vmlab only), the daemon takes the snapshot
 `terrarium-clean` after `up` and before any exec, and restores a kept target
 to it on agent stop (docs/api.md §17.3).
+
+**Resource limits.** A `host` or `docker` target can have `limits`: `cpu`
+(cores, for example `2` or `0.5`), `memory` (`"4G"`), `swap` (on top of
+`memory`; default none), `pids`, and `io_weight` (1 to 10000). They stop one
+agent from taking all of a machine. On a `host` target each holder (each
+agent, and the operator) gets its own budget for all its exec sessions and
+`terrarium run` jobs on the target: the host agent puts each session in a
+systemd scope, `systemd-run --user --scope`, in the holder's slice
+`terrarium-<target>-<project>-<agent>.slice`, and sets the limits on the
+slice (`CPUQuota`, `MemoryMax`, `MemoryHigh` at 90 %, `MemorySwapMax`,
+`TasksMax`, `IOWeight`). On a `docker` target the limits go on the container
+(`--cpus`, `--memory`, `--memory-swap`, `--pids-limit`, `--blkio-weight`),
+so all holders share one budget. `vmlab` (the lab file sizes the VMs),
+`ssh`, and the display kinds refuse `limits`. The host agent reports in
+`hello` whether `systemd-run --user` works and which cgroup controllers the
+user manager has. The daemon refuses a session (`409 conflict`) that the
+host agent cannot limit; it never runs one without its limits
+(docs/api.md §17.2, "Resource limits"; docs/host-protocol.md, "Resource
+limits").
 
 **Target leases.** `policy.targets` is static. A lead can also give a
 target to an agent at run time, and take it back: `terrarium admin target
@@ -3422,6 +3441,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | 5 · mode 1 | Workspaces under `TERRARIUM_WORK_DIR` (`<project>/<agent>`), bound in the sandbox at `$HOME/work` and `/work/<project>/<agent>`, and attached into targets at the same path (a docker bind, a vmlab `@dev` sync). `agent rm` moves the workspace to the trash. The templates split the work: git in the sandbox, builds and tests on the target. Verified live on 2026-10-25: two cards, each worker with its own vmlab instance, edits in the sandbox, tests on the target, merge, and teardown. | Two workers on one `lab_from_workspace` target at the same time (§21). |
 | 5 · lab repos | `lab_repo` (a git worktree of a project repo on the host, `lab_ref`, `lab_path`) and `lab_from_workspace` (one instance for each holder), with the lab allowlist in the host agent (`labcheck.rs`). `admin target edit` (`PATCH /api/targets/{name}`). The dashboard shows the lab source and the instances. Verified live on 2026-10-25. | — |
 | 5 · caps | `TERRARIUM_MAX_TARGETS_PER_PROJECT` (8, `409 conflict`) and the host agent's `max_running_targets` (4, `429 rate_limited`). The dashboard shows the cap errors and the running count of each host. | — |
+| 5 · limits | Target resource limits (§19, `docs/api.md` §17.2): `limits` (`cpu`, `memory`, `swap`, `pids`, `io_weight`) on `host` targets (a systemd slice for each holder, a scope for each session, `systemd-run --user`) and `docker` targets (the `docker run` flags); the `limits` capability in `hello` and the `409` refusal; `--cpu`, `--memory`, `--swap`, `--pids`, `--io-weight`, `--no-limits`; the dashboard form, the target chip, and the host chip. Tests: argv building, the probe parser, the docker flags, the API rules and the refusal, and a test on a real systemd user manager (two scopes of one slice stay under the memory cap). | No per-agent usage view yet. `io_read` and `io_write` bandwidth limits are not done (they need a device). |
 | 5 · scope | A target is global or belongs to one project (the `scope` field). A project target gets the prefix `<project>-`. A project_admin makes and leases the targets of its project; a global target needs sysadmin. The dashboard has scope chips and filters, and a targets panel on each project. | — |
 | Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, one npm prefix for each version) and the Copilot prompt extension, and writes `terrarium-manifest.json`. Updates into version dirs: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`. The auto-update (§6, "Auto-update and pins"; `TERRARIUM_HARNESS_AUTO_UPDATE`, default `daily`; migration 43): a daemon task installs each newer npm release of a harness with the policy `auto` and mails the operator once for each update or failed version; `POST /api/harnesses/{name}/pin` (default: a rollback to the previous version), `unpin`, and `check`; `terrarium admin harness pin|unpin|check`; the policy chip and the "Roll back and pin", "Pin current", "Unpin", and "Check now" buttons of the dashboard; audited as `harness.auto_update`, `harness.pin`, and `harness.unpin`. Running agents keep their version dir until their next start; the GC removes the unused version dirs. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
 | Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, each template a WCL file of the config repo (`templates/`: the load at start, on a change, and after a pull; the writes of the API; `GET .../wcl`; the move of the old rows, migration 44; eight packaged default templates), `[[templates]]` in fleets (and as a one-time import from project files), `template = "..."` on fleet agents and in export, `terrarium template` (`new --from-file <name>.wcl`, `show --wcl`) and `agent new --template`, the Templates tab of the dashboard Settings (with View WCL), the template chooser of New agent, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |

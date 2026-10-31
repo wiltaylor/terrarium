@@ -19,6 +19,7 @@ pub mod harnesses;
 pub mod hook;
 pub mod ids;
 pub mod launch;
+pub mod limits;
 pub mod model;
 pub mod moonshot;
 pub mod paths;

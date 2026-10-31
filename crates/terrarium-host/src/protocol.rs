@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use terrarium_core::display::{DisplayOp, DisplayProtocol};
+pub use terrarium_core::limits::{Limits, LimitsCapability};
 pub use terrarium_core::protocol::{
     CpDirection, DisplayCapability, ExitReason, HostCapabilities, TargetState, ToolCapability,
 };
@@ -254,6 +255,24 @@ pub struct ExecRequest {
     pub pty: Option<PtySize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Run the process in a systemd scope, in the slice of its holder on
+    /// the target, with these limits (docs/host-protocol.md, "Resource
+    /// limits"). The daemon sends it only to a host agent that has
+    /// `capabilities.limits.systemd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ExecLimits>,
+}
+
+/// The resource limits of an `exec` on a `host` target. All sessions of
+/// one holder on one target share one budget: the slice
+/// [`crate::limits::slice_name`] of `target` and `holder`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecLimits {
+    /// The target name.
+    pub target: String,
+    /// The holder of the budget: `<project>/<agent>`, or `operator`.
+    pub holder: String,
+    pub limits: Limits,
 }
 
 /// Write a file on the host. File data frames follow, then `cp_end`.
@@ -367,6 +386,11 @@ pub struct DockerRun {
     pub pty: Option<PtySize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Resource limits of the container: `--cpus`, `--memory`,
+    /// `--memory-swap`, `--pids-limit`, `--blkio-weight`. The daemon sends
+    /// it only to a host agent that has `capabilities.limits.docker`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Limits>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1178,6 +1202,50 @@ mod tests {
     }
 
     #[test]
+    fn limits_fields_round_trip_and_stay_optional() {
+        let text = r#"{"type":"exec","session":2,"cmd":"make","pty":null,
+            "limits":{"target":"box","holder":"terra/w-1",
+                      "limits":{"cpu_millis":2000,"memory_bytes":4294967296,"pids":512}}}"#;
+        let frame: DaemonFrame = decode_control(text).unwrap();
+        let DaemonFrame::Exec(req) = &frame else {
+            panic!("not exec: {frame:?}")
+        };
+        let l = req.limits.as_ref().expect("limits");
+        assert_eq!((l.target.as_str(), l.holder.as_str()), ("box", "terra/w-1"));
+        assert_eq!(l.limits.cpu_millis, Some(2000));
+        assert_eq!(l.limits.memory_bytes, Some(4 << 30));
+        assert_eq!(l.limits.io_weight, None);
+        let back: DaemonFrame = decode_control(&encode_control(&frame).unwrap()).unwrap();
+        assert_eq!(back, frame);
+        // No limits: the field is absent on the wire, as an older daemon sends it.
+        let plain: DaemonFrame =
+            decode_control(r#"{"type":"exec","session":1,"cmd":"true","pty":null}"#).unwrap();
+        assert!(!encode_control(&plain).unwrap().contains("limits"));
+
+        let run: DaemonFrame = decode_control(
+            r#"{"type":"docker.run","session":4,"image":"alpine:3","limits":{"cpu_millis":500}}"#,
+        )
+        .unwrap();
+        let DaemonFrame::DockerRun(r) = run else {
+            panic!()
+        };
+        assert_eq!(r.limits.and_then(|l| l.cpu_millis), Some(500));
+
+        // An older host agent sends no `limits` capability.
+        let caps: HostCapabilities =
+            serde_json::from_str(r#"{"docker":{"present":true}}"#).unwrap();
+        assert_eq!(caps.limits, None);
+        let caps: HostCapabilities = serde_json::from_str(
+            r#"{"limits":{"systemd":true,"controllers":["cpu","memory"],"docker":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            caps.limits.map(|l| l.controllers),
+            Some(vec!["cpu".to_owned(), "memory".to_owned()])
+        );
+    }
+
+    #[test]
     fn dotted_verb_names_round_trip() {
         let text = r#"{"type":"vmlab.snapshot_take","session":3,"lab":"/labs/win","name":"clean"}"#;
         let frame: DaemonFrame = decode_control(text).unwrap();
@@ -1224,6 +1292,12 @@ mod tests {
                     ..DisplayCapability::default()
                 },
                 metrics: true,
+                limits: Some(LimitsCapability {
+                    systemd: true,
+                    controllers: vec!["cpu".into(), "memory".into()],
+                    reason: None,
+                    docker: true,
+                }),
             },
             max_sessions: 32,
             max_running_targets: Some(4),

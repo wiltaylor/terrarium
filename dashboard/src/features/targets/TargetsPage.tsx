@@ -26,6 +26,7 @@ import { ScopeChip } from "./ScopeChip";
 import { ScreenPanel } from "./ScreenPanel";
 import { CredentialCell, takesCredential, TargetCredential } from "./TargetCredential";
 import { targetHasDisplay } from "./display";
+import { limitsChip, limitsTitle } from "../../lib/limits";
 
 const COLS = 7;
 
@@ -180,6 +181,16 @@ export default function TargetsPage() {
                                 <span class="chip" title="Snapshot before each task">
                                   snapshot per task
                                 </span>
+                              </Show>
+                              <Show when={limitsChip(t())}>
+                                {(l) => (
+                                  <>
+                                    {" "}
+                                    <span class={`chip${t().limits_info?.problem ? " bad" : ""}`} aria-label="Resource limits" title={limitsTitle(t())}>
+                                      {l()}
+                                    </span>
+                                  </>
+                                )}
                               </Show>
                               <Show when={sourceLabel(t())}>
                                 {(src) => (

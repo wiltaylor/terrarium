@@ -12,7 +12,8 @@
 import { createSignal } from "solid-js";
 import type { Api } from "../../api/client";
 import { ApiError } from "../../api/http";
-import type { DisplayProtocol, NewTarget, Target, TargetKind } from "../../api/types";
+import type { DisplayProtocol, NewTarget, Target, TargetKind, TargetLimits } from "../../api/types";
+import { resolveLimits } from "../../lib/limits";
 import { capError, fullTargetName, type CapError, type LabSource } from "../../lib/target-runtime";
 
 /** The scope choice: a project name, or `GLOBAL`. Empty: not chosen yet. */
@@ -49,7 +50,16 @@ export interface CreateTargetForm {
   ephemeral: boolean;
   keep: boolean;
   snapshot_before_task: boolean;
+  /** host and docker: the resource limits (docs/api.md §17.2, "Resource limits"). "" is not set. */
+  cpu: string;
+  memory: string;
+  swap: string;
+  pids: string;
+  io_weight: string;
 }
+
+/** The limit fields of the form, in the order of the dialog. */
+export const LIMIT_FIELDS = ["cpu", "memory", "swap", "pids", "io_weight"] as const;
 
 export type CreateOutcome =
   | { kind: "idle" }
@@ -64,9 +74,9 @@ export type CreateOutcome =
 
 /** The kinds, and the fields each one shows (docs/api.md §17.2). */
 export const KIND_FIELDS: Record<TargetKind, readonly (keyof CreateTargetForm)[]> = {
-  host: ["host"],
+  host: ["host", ...LIMIT_FIELDS],
   ssh: ["address", "port", "credential"],
-  docker: ["host", "image", "container", "ephemeral", "keep", "display", "display_name"],
+  docker: ["host", "image", "container", "ephemeral", "keep", "display", "display_name", ...LIMIT_FIELDS],
   vmlab: ["host", "labSource", "lab", "lab_repo", "lab_ref", "lab_path", "machine", "ephemeral", "keep", "snapshot_before_task"],
   vnc: ["host", "address", "username", "credential"],
   rdp: ["host", "address", "username", "domain", "credential"],
@@ -122,6 +132,11 @@ export const emptyCreateForm = (selectedProject: string | null | undefined, init
   ephemeral: false,
   keep: false,
   snapshot_before_task: false,
+  cpu: "",
+  memory: "",
+  swap: "",
+  pids: "",
+  io_weight: "",
   ...init,
 });
 
@@ -174,7 +189,26 @@ export function createBody(f: CreateTargetForm): { body: NewTarget } | { error: 
     if (f.keep) body.keep = true;
   }
   if (shows("snapshot_before_task") && f.snapshot_before_task) body.snapshot_before_task = true;
+  const limits = shows("cpu") ? limitsOfForm(f) : null;
+  if (limits && "error" in limits) return limits;
+  if (limits) {
+    if (f.kind === "docker" && !body.image) return { error: "Limits on a docker target need an image: Docker sets them when Terrarium runs the container." };
+    body.limits = limits.limits;
+  }
   return { body };
+}
+
+/** The `limits` of the form, or the reason a value is bad. Null when no limit is set. A number goes as a number. */
+export function limitsOfForm(f: Pick<CreateTargetForm, (typeof LIMIT_FIELDS)[number]>): { limits: TargetLimits } | { error: string } | null {
+  const limits: TargetLimits = {};
+  for (const k of LIMIT_FIELDS) {
+    const v = f[k].trim();
+    if (!v) continue;
+    limits[k] = k === "memory" || k === "swap" || !/^\d+(\.\d+)?$/.test(v) ? v : Number(v);
+  }
+  if (!Object.keys(limits).length) return null;
+  const r = resolveLimits(limits);
+  return "error" in r ? { error: r.error } : { limits };
 }
 
 /** The vmlab rules of each lab source (docs/api.md §17.2). Sets `lab_from_workspace` on the body. */

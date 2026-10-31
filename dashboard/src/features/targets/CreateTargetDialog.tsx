@@ -11,7 +11,7 @@ import { ErrorBanner, Modal } from "../../components/ui";
 import type { Target, TargetKind } from "../../api/types";
 import { api, projects } from "../../stores";
 import { capSentence } from "../../lib/target-runtime";
-import { createCreateTargetDialog, GLOBAL, LAB_SOURCES, showsField, type CreateOutcome, type CreateTargetForm } from "./create";
+import { createCreateTargetDialog, GLOBAL, LAB_SOURCES, showsField, type CreateOutcome, type CreateTargetForm, type LIMIT_FIELDS } from "./create";
 import { CredentialSelect } from "../secrets/CredentialSelect";
 
 const KINDS: readonly TargetKind[] = ["docker", "vmlab", "host", "ssh", "vnc", "rdp", "desktop"];
@@ -42,7 +42,7 @@ export function CreateTargetDialog(props: { project: string | null; onClose: () 
   };
   const remote = () => f().kind === "vnc" || f().kind === "rdp";
   const text = (
-    key: "host" | "address" | "port" | "credential" | "image" | "container" | "lab" | "machine" | "lab_ref" | "lab_path" | "username" | "domain" | "display_name",
+    key: "host" | "address" | "port" | "credential" | "image" | "container" | "lab" | "machine" | "lab_ref" | "lab_path" | "username" | "domain" | "display_name" | (typeof LIMIT_FIELDS)[number],
     label: string,
     placeholder = "",
   ) => (
@@ -180,6 +180,23 @@ export function CreateTargetDialog(props: { project: string | null; onClose: () 
           <p class="small muted" style={{ margin: 0 }}>
             A {f().kind} target has only a display. The password stays on the daemon; the host agent gets it only to connect.
           </p>
+        </Show>
+        <Show when={shows("cpu")}>
+          <fieldset class="stack" aria-label="Resource limits" style={{ gap: "6px" }}>
+            <legend class="small">Resource limits (optional)</legend>
+            <div class="form-grid">
+              {text("cpu", "CPU (cores)", "2 or 0.5")}
+              {text("memory", "Memory", "4G")}
+              {text("swap", "Swap on top of memory", "none")}
+              {text("pids", "Processes", "512")}
+              {text("io_weight", "IO weight (1-10000)", "100")}
+            </div>
+            <p class="small muted" style={{ margin: 0 }}>
+              {f().kind === "docker"
+                ? "Docker sets them on the container when Terrarium runs it. All agents on the target share this one budget."
+                : "Each agent on the target gets this budget for all its sessions. The host agent needs systemd-run --user with the cpu, memory, pids, and io controllers."}
+            </p>
+          </fieldset>
         </Show>
         <Show when={shows("ephemeral")}>
           <div class="row" style={{ "flex-wrap": "wrap", gap: "12px" }}>

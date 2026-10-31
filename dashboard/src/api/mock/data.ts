@@ -812,7 +812,7 @@ ${XSS_DOCUMENT}
   const targets: Target[] = [
     { id: "lab-win11", name: "lab-win11", kind: "vmlab", project: "terrarium", host: "lab1", lab: "/labs/win11", machine: "win11", scope: "project", state: "stopped", state_at: ago(60 * 2), ephemeral: true, keep: true, snapshot_before_task: true, snapshots: ["terrarium-clean"], source: "file", usable: true, runtime: {} },
     { id: "build-box", name: "build-box", kind: "ssh", address: "build@buildbox.lan", credential: "buildbox-key", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true, runtime: {} },
-    { id: "pg-test", name: "pg-test", kind: "docker", project: "webshop", host: "lab1", image: "postgres:17", scope: "project", state: "running", state_at: ago(60), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: { attached: ["webshop/shop-lead"] } },
+    { id: "pg-test", name: "pg-test", kind: "docker", project: "webshop", host: "lab1", image: "postgres:17", limits: { cpu: 2, memory: "4G" }, scope: "project", state: "running", state_at: ago(60), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: { attached: ["webshop/shop-lead"] } },
     { id: "dev-vm", name: "dev-vm", kind: "vmlab", host: "lab1", lab: "/labs/dev", scope: "global", state: "running", state_at: ago(30), ephemeral: false, keep: false, snapshot_before_task: false, snapshots: ["terrarium"], source: "file", usable: true, runtime: {} },
     { id: "ci-box", name: "ci-box", kind: "docker", host: "lab1", image: "alpine:3", scope: "global", state: "absent", state_at: ago(60 * 5), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: {} },
     { id: "desk-x11", name: "desk-x11", kind: "docker", host: "lab1", image: "terrarium/display-x11:dev", display: "x11", scope: "global", state: "stopped", state_at: ago(10), ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true, runtime: {} },
@@ -832,12 +832,16 @@ ${XSS_DOCUMENT}
         docker: { present: true, version: "29.8.0" }, vmlab: { present: true, version: "0.30.0-alpha" }, shell: "/bin/bash",
         display: { enabled: false, tesseract: true, tools: ["xdotool", "import"], drivers: ["vmlab", "docker"] },
         metrics: true,
+        limits: { systemd: true, controllers: ["cpu", "cpuset", "io", "memory", "pids"], docker: true },
       },
       summary: { os: "linux", arch: "x86_64", docker: true, vmlab: true, display: false },
     },
     {
       name: "build1", id: fakeUlid("host", 3), host_id: fakeUlid("host", 3), status: "online", online: true, sessions: 0, max_sessions: 32, max_running_targets: 2, connected_at: ago(60 * 26), os: "linux", arch: "x86_64", version: "0.1.0", last_seen: ago(0.1),
-      capabilities: { docker: { present: true, version: "29.8.0" }, vmlab: { present: false }, shell: "/bin/bash", metrics: true },
+      capabilities: {
+        docker: { present: true, version: "29.8.0" }, vmlab: { present: false }, shell: "/bin/bash", metrics: true,
+        limits: { systemd: false, reason: "`systemd-run` is not on PATH; the host agent's user needs a systemd user manager", docker: true },
+      },
       summary: { os: "linux", arch: "x86_64", docker: true, vmlab: false, display: false },
     },
     {

@@ -73,6 +73,14 @@ name = "buildbox"
 kind = "ssh"
 address = "build@buildbox.lan"
 
+[[projects.targets]]
+name = "box"
+kind = "host"
+host = "lab1"
+[projects.targets.limits]        # optional, host and docker: api.md §17.2, "Resource limits"
+cpu = 2
+memory = "4G"
+
 [[projects.schedules]]           # a ScheduleDef (api.md §19), no `project`
 name = "standup"
 catch_up = "once"                # optional: `skip` (the default) or `once`

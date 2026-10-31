@@ -7,8 +7,9 @@ use crate::config::DisplayConfig;
 use crate::protocol::HostCapabilities;
 
 /// Detect Docker (`docker version --format json`), vmlab
-/// (`vmlab --version`), the login shell, and the metrics sources
-/// (`/proc` on Linux). The desktop display is off.
+/// (`vmlab --version`), the login shell, the metrics sources (`/proc` on
+/// Linux), and resource limits (`systemd-run --user`). The desktop display
+/// is off.
 pub async fn detect(docker_bin: &str, vmlab_bin: &str) -> HostCapabilities {
     detect_with(docker_bin, vmlab_bin, &DisplayConfig::default()).await
 }
@@ -20,17 +21,20 @@ pub async fn detect_with(
     vmlab_bin: &str,
     display: &DisplayConfig,
 ) -> HostCapabilities {
-    let (docker, vmlab) = tokio::join!(
+    let (docker, vmlab, mut limits) = tokio::join!(
         crate::docker::detect(docker_bin),
-        crate::vmlab::detect(vmlab_bin)
+        crate::vmlab::detect(vmlab_bin),
+        crate::limits::detect()
     );
     let display = crate::display::detect(display, docker.present, vmlab.present);
+    limits.docker = docker.present;
     HostCapabilities {
         docker,
         vmlab,
         shell: detect_shell(),
         display,
         metrics: crate::metrics::Sampler::available(),
+        limits: Some(limits),
     }
 }
 
@@ -52,6 +56,8 @@ mod tests {
         assert!(!caps.docker.present);
         assert!(!caps.vmlab.present);
         assert!(caps.shell.is_some());
+        // Docker limits need Docker.
+        assert!(!caps.limits.expect("limits capability").docker);
     }
 
     /// Calls the real `docker` and `vmlab`. Run with `--ignored`.

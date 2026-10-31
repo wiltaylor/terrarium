@@ -353,6 +353,17 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
              can see this machine's screen and use its mouse and keyboard as this user"
         );
     }
+    match &caps.limits {
+        Some(l) if l.systemd => {
+            tracing::info!(controllers = %l.controllers.join(" "), "resource limits: systemd-run --user works");
+            terrarium_host::limits::kill_leftovers(&name).await;
+        }
+        Some(l) => tracing::info!(
+            reason = l.reason.as_deref().unwrap_or(""),
+            "resource limits: off on host targets; a session on a host target with limits is refused"
+        ),
+        None => {}
+    }
     if transport.mode == tls::TlsMode::PlainInsecure {
         tracing::warn!(
             %url,

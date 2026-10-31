@@ -320,6 +320,44 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
             "an ephemeral docker target needs `image`; it is run on agent start",
         ));
     }
+    validate_limits(def)?;
+    Ok(())
+}
+
+/// The rules of `limits` (docs/api.md §17.2, "Resource limits"): good
+/// values, and a kind that can apply them. A `host` target applies them
+/// with systemd on the host; a `docker` target with the flags of the
+/// `docker run` that Terrarium makes, so it needs `image`.
+fn validate_limits(def: &TargetDef) -> ApiResult<()> {
+    let Some(l) = &def.limits else {
+        return Ok(());
+    };
+    let k = kind_str(def.kind);
+    match def.kind {
+        TargetKind::Host => {}
+        TargetKind::Docker if def.image.is_some() => {}
+        TargetKind::Docker => {
+            return Err(ApiError::invalid(
+                "`limits` on a docker target needs `image`: Docker sets the limits when                  Terrarium runs the container, and a `container` alone is not run by Terrarium",
+            ));
+        }
+        TargetKind::Vmlab => {
+            return Err(ApiError::invalid(
+                "`limits` are not for a vmlab target: the lab file sets the size of each VM                  (cpus, memory)",
+            ));
+        }
+        TargetKind::Ssh => {
+            return Err(ApiError::invalid(
+                "`limits` are not for an ssh target: the daemon cannot apply them on the                  remote machine; use a host agent there and a `host` target",
+            ));
+        }
+        TargetKind::Vnc | TargetKind::Rdp | TargetKind::Desktop => {
+            return Err(ApiError::invalid(format!(
+                "`limits` are not for a `{k}` target: it has only a display"
+            )));
+        }
+    }
+    l.resolve().map_err(ApiError::invalid)?;
     Ok(())
 }
 
@@ -347,6 +385,14 @@ fn def_json(def: &TargetDef) -> ApiResult<String> {
     let mut v = serde_json::to_value(def)?;
     if let Some(o) = v.as_object_mut() {
         o.remove("name");
+        // `limits = {}` (for example after a patch removed the last
+        // limit) is no limits.
+        if o.get("limits")
+            .and_then(Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            o.remove("limits");
+        }
     }
     Ok(v.to_string())
 }
@@ -499,6 +545,11 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
             .map(|(k, _)| k.as_str())
             .filter(|k| !RUNNING_PATCHABLE.contains(k))
             .collect();
+        // A `host` target is always `running` while its host agent is
+        // online. Its limits apply to each new session, so they change.
+        if current.def.kind == TargetKind::Host {
+            changed.retain(|k| *k != "limits");
+        }
         changed.sort_unstable();
         if !changed.is_empty() {
             return Err(ApiError::conflict(format!(
@@ -513,12 +564,18 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
             .with_details(json!({"state": "running", "fields": changed})));
         }
     }
+    if p.contains_key("limits") {
+        refuse_docker_limits(&current, p.get("limits"), o.get("limits"))?;
+    }
     for (k, val) in p {
         if k == "name" && val.as_str() != Some(name) {
             return Err(ApiError::invalid("a target cannot be renamed"));
         }
         if val.is_null() {
             o.remove(k);
+        } else if let (Some(Value::Object(old)), Value::Object(change)) = (o.get_mut(k), val) {
+            // `limits` merges: `{"limits": {"cpu": 2}}` keeps the memory.
+            merge(old, change);
         } else {
             o.insert(k.clone(), val.clone());
         }
@@ -548,6 +605,52 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
         ],
     )?;
     get(t, name)
+}
+
+/// RFC 7396 merge of one object into another: `null` removes a key.
+fn merge(into: &mut serde_json::Map<String, Value>, change: &serde_json::Map<String, Value>) {
+    for (k, v) in change {
+        match (into.get_mut(k), v) {
+            (_, Value::Null) => {
+                into.remove(k);
+            }
+            (Some(Value::Object(a)), Value::Object(b)) => merge(a, b),
+            _ => {
+                into.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
+/// Docker sets the limits of a container when it makes it. A docker
+/// target whose container exists but is stopped keeps its old limits on
+/// `up` (a `docker start`), so a change of `limits` then is `409 conflict`.
+/// An ephemeral target gets a new container on each `up`.
+fn refuse_docker_limits(
+    current: &TargetRow,
+    patch: Option<&Value>,
+    now: Option<&Value>,
+) -> ApiResult<()> {
+    let d = &current.def;
+    if d.kind != TargetKind::Docker || d.ephemeral || current.state != "stopped" {
+        return Ok(());
+    }
+    let mut after = now.cloned().unwrap_or(Value::Null);
+    match (after.as_object_mut(), patch) {
+        (Some(a), Some(Value::Object(b))) => merge(a, b),
+        (_, p) => after = p.cloned().unwrap_or(Value::Null),
+    }
+    let empty = |v: &Value| v.is_null() || v.as_object().is_some_and(serde_json::Map::is_empty);
+    if after == now.cloned().unwrap_or(Value::Null) || (empty(&after) && now.is_none_or(empty)) {
+        return Ok(());
+    }
+    Err(ApiError::conflict(format!(
+        "target `{}` has a stopped container: Docker sets the limits when it makes the \
+         container, so `up` would start it with the old limits. Remove the container first \
+         (`POST /api/targets/{}/down` with `{{\"destroy\": true}}`), then change `limits`",
+        d.name, d.name
+    ))
+    .with_details(json!({"state": current.state, "fields": ["limits"]})))
 }
 
 /// The fields that a PATCH may change while the target runs.

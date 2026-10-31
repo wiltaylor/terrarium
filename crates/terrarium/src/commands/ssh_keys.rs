@@ -95,6 +95,17 @@ pub async fn show(ctx: &Ctx, name: &str) -> anyhow::Result<()> {
         }
         rows.push(("source", field(t, "source")));
         rows.push(("state", field(t, "state")));
+        let li = &t["limits_info"];
+        if let Some(sum) = li["summary"].as_str() {
+            let per = match li["per"].as_str() {
+                Some("container") => "one budget for the container",
+                _ => "for each agent",
+            };
+            rows.push(("limits", format!("{sum} ({per})")));
+            if let Some(p) = li["problem"].as_str() {
+                rows.push(("warning", p.to_owned()));
+            }
+        }
         let ci = &t["credential_info"];
         if ci.is_object() {
             let mut cred = field(ci, "name");

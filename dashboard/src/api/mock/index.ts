@@ -28,6 +28,7 @@ import { defaultModels, modelList, subscriptionDetail } from "./models";
 import { splitFrontMatter } from "../../lib/markdown";
 import { installCommand } from "../../lib/host-install";
 import { resolveEta } from "../../lib/eta";
+import { limitsInfo, limitsKindError, resolveLimits } from "../../lib/limits";
 import { mockChanges, mockCommit, mockCommits, mockFile, mockList, mockTrees } from "./repoTrees";
 import type {
   Agent,
@@ -355,6 +356,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     lease: null,
     runtime: t.runtime ?? {},
     ...(t.credential ? { credential_info: secrets.credentialInfo(t) } : {}),
+    ...(t.limits ? { limits_info: limitsInfo(t.kind, t.limits) } : {}),
   });
   // The checks of the daemon's `store/targets.rs` validate (docs/api.md §17.2): a bad value is `422 invalid`.
   const targetDef = (b: NewTarget): NewTarget => {
@@ -397,6 +399,14 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       fail(422, "invalid", `\`lab_repo\`, \`lab_ref\`, \`lab_path\`, and \`lab_from_workspace\` are for a vmlab target, not \`${b.kind}\``);
     }
     if (b.ephemeral && !(b.kind === "vmlab" || (b.kind === "docker" && b.image))) fail(422, "invalid", "an ephemeral target must be docker with `image`, or vmlab");
+    // docs/api.md §17.2, "Resource limits": `{}` is no limits.
+    if (b.limits && !Object.keys(b.limits).length) delete b.limits;
+    if (b.limits) {
+      const kindError = limitsKindError(b.kind, !!b.image);
+      if (kindError) fail(422, "invalid", kindError);
+      const r = resolveLimits(b.limits);
+      if ("error" in r) fail(422, "invalid", r.error);
+    }
     const def: NewTarget = { name: b.name, kind: b.kind };
     for (const [k, v] of Object.entries(b) as [keyof NewTarget, unknown][]) if (v !== undefined && v !== null && v !== "" && v !== false) (def as unknown as Record<string, unknown>)[k] = v;
     return def;
@@ -3510,11 +3520,19 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           for (const [k, v] of Object.entries(patch)) {
             if (k === "name" && v !== t.name) fail(422, "invalid", "a target cannot change its name");
             if (v === null) delete next[k];
-            else if (v !== undefined) next[k] = v;
+            else if (k === "limits" && t.limits && typeof v === "object") {
+              // A merge patch: the limits that the patch does not name stay; `null` removes one.
+              const merged: Record<string, unknown> = { ...t.limits };
+              for (const [lk, lv] of Object.entries(v as Record<string, unknown>)) if (lv === null) delete merged[lk];
+              else merged[lk] = lv;
+              if (Object.keys(merged).length) next[k] = merged;
+              else delete next[k];
+            } else if (v !== undefined) next[k] = v;
           }
           const changed = Object.keys(patch).filter((k) => JSON.stringify(next[k] ?? null) !== JSON.stringify((t as unknown as Record<string, unknown>)[k] ?? null));
           const running = t.state === "running" || Object.values(t.runtime?.instances ?? {}).some((i) => i.state === "running");
-          const locked = changed.filter((k) => k !== "keep" && k !== "snapshot_before_task");
+          // A host target is `running` while its host agent is online; its limits apply to each new session, so they change.
+          const locked = changed.filter((k) => k !== "keep" && k !== "snapshot_before_task" && !(k === "limits" && t.kind === "host"));
           if (running && locked.length) fail(409, "conflict", `target \`${t.name}\` runs: bring it down first to change ${locked.join(", ")}`, { state: "running", fields: locked });
           const def = targetDef({ ...(next as unknown as NewTarget), name: t.name });
           secrets.checkCredential(def, t);

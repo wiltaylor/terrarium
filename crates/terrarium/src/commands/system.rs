@@ -387,6 +387,27 @@ fn print_snapshots(c: &Ctx, target: &str, v: &Value) {
     }
 }
 
+/// The `limits` object of the limit flags, or `None` when none is given.
+/// The daemon checks the values (`422 invalid`).
+pub fn limits_body(a: &crate::cli::LimitArgs) -> Option<Value> {
+    let mut l = json!({});
+    if let Some(c) = a.cpu {
+        // `2` goes as an integer, `0.5` as a float.
+        #[allow(clippy::cast_possible_truncation)]
+        let v: Value = if c.fract() == 0.0 && c.abs() < 1e15 {
+            (c as i64).into()
+        } else {
+            c.into()
+        };
+        l["cpu"] = v;
+    }
+    set_opt(&mut l, "memory", a.memory.clone());
+    set_opt(&mut l, "swap", a.swap.clone());
+    set_opt(&mut l, "pids", a.pids);
+    set_opt(&mut l, "io_weight", a.io_weight);
+    (l != json!({})).then_some(l)
+}
+
 pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()> {
     match cmd {
         AdminTargetCmd::Ls => admin_targets(ctx).await,
@@ -414,6 +435,7 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 ephemeral,
                 keep,
                 global,
+                limits,
             } = &**a;
             let mut body = json!({"name": name, "kind": kind});
             set_opt(&mut body, "address", address.clone());
@@ -439,6 +461,9 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             }
             if *keep {
                 body["keep"] = true.into();
+            }
+            if let Some(l) = limits_body(limits) {
+                body["limits"] = l;
             }
             if !global {
                 body["project"] = ctx.project_or(None).await?.into();
@@ -469,10 +494,17 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 body["keep"] = a.keep.into();
             }
             set_opt(&mut body, "snapshot_before_task", a.snapshot_before_task);
+            if a.no_limits {
+                body["limits"] = Value::Null;
+            } else if let Some(l) = limits_body(&a.limits) {
+                // A merge patch: the limits that are not given stay.
+                body["limits"] = l;
+            }
             if body == json!({}) {
                 return Err(crate::api::CliError::usage(
                     "give a change: --lab-path, --lab-ref, --machine, --image, --host, \
-                     --ephemeral, --permanent, --keep, --no-keep, or --snapshot-before-task",
+                     --ephemeral, --permanent, --keep, --no-keep, --snapshot-before-task, \
+                     --cpu, --memory, --swap, --pids, --io-weight, or --no-limits",
                 ));
             }
             let path = format!("/api/targets/{}", crate::transport::encode(&a.name));

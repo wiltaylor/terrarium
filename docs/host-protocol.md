@@ -164,7 +164,9 @@ The host agent sends `hello` as its first frame:
     "shell": "/bin/bash",
     "display": {"enabled": false, "tesseract": true,
                 "tools": ["xdotool", "import"], "drivers": ["vmlab", "docker"]},
-    "metrics": true
+    "metrics": true,
+    "limits": {"systemd": true, "controllers": ["cpu", "cpuset", "io", "memory", "pids"],
+               "docker": true}
   },
   "max_sessions": 32,
   "max_running_targets": 4,
@@ -189,7 +191,10 @@ The host agent sends `hello` as its first frame:
   and always `vnc` and `rdp` (the clients are in the host agent). An older
   host agent sends no `display`: the daemon reads it as off. `metrics` is
   true when the host agent can send [`metrics`](#metrics) frames (Linux,
-  with `/proc`). An older host agent sends no `metrics`: false.
+  with `/proc`). An older host agent sends no `metrics`: false. `limits`
+  is `terrarium_core::limits::LimitsCapability`: what the host agent can do
+  for [resource limits](#resource-limits). An older host agent sends no
+  `limits`, and the daemon sends it no session that needs limits.
 - `max_running_targets` is the `max_running_targets` of the config. The
   daemon counts the docker and vmlab targets (and lab instances) on this
   host that it shows as `running`, and refuses an `up` past the limit. An
@@ -298,6 +303,7 @@ missing from `hello` as lost.
 | `env` | Added to the host agent's environment. |
 | `pty` | `{rows, cols}` runs the program in a PTY. `null` runs it with pipes. |
 | `timeout_secs` | Kill the process group after this many seconds. `0` or absent: no limit. |
+| `limits` | `{target, holder, limits}`: run the process in the budget of `holder` on `target`. See [Resource limits](#resource-limits). Absent: no limits. |
 
 The host agent starts each session in its own process group. A PTY session
 is a session leader. Signals and kills go to the whole group, so background
@@ -393,7 +399,7 @@ in the environment of the `docker` process.
 
 | Frame | Fields | Command |
 |---|---|---|
-| `docker.run` | `image`, `name`, `detach` (default true), `rm`, `init`, `env`, `volumes` [`{source, target, read_only}`], `workspaces` [`{path}`], `workdir`, `network`, `user`, `labels`, `command`, `pty`, `timeout_secs` | `docker run -d [--rm] [--init] [--name N] [-e K]... [-v S:T[:ro]]... [-v <work_dir>/<path>:/work/<path>]... [-w W] [--network N] [-u U] [--label K=V]... IMAGE [COMMAND...]`. With `detach: false`: `-i`, and `-t` with a `pty`. `workspaces`: see [Workspaces](#workspaces). |
+| `docker.run` | `image`, `name`, `detach` (default true), `rm`, `init`, `env`, `volumes` [`{source, target, read_only}`], `workspaces` [`{path}`], `workdir`, `network`, `user`, `labels`, `command`, `pty`, `timeout_secs`, `limits` | `docker run -d [--rm] [--init] [--cpus=C] [--memory=M --memory-swap=M+S] [--pids-limit=P] [--blkio-weight=W] [--name N] [-e K]... [-v S:T[:ro]]... [-v <work_dir>/<path>:/work/<path>]... [-w W] [--network N] [-u U] [--label K=V]... IMAGE [COMMAND...]`. With `detach: false`: `-i`, and `-t` with a `pty`. `workspaces`: see [Workspaces](#workspaces). `limits`: see [Resource limits](#resource-limits). |
 | `docker.exec` | `container`, `cmd`, `args`, `cwd`, `env`, `user`, `pty`, `timeout_secs` | `docker exec -i [-t] [-w CWD] [-e K]... [-u U] CONTAINER CMD ARGS...` |
 | `docker.start` | `container` | `docker start CONTAINER`. The container keeps its files. |
 | `docker.stop` | `container`, `grace_secs` | `docker stop [-t G] CONTAINER` |
@@ -785,6 +791,115 @@ replay, and no `ack`. The code is `crates/terrarium-host/src/metrics.rs`.
   finds the queue full, the host agent drops it. A slow `statvfs` holds
   back only the next sample.
 
+## Resource limits
+
+docs/api.md §17.2, "Resource limits". The code is
+`crates/terrarium-host/src/limits.rs` (systemd) and `limit_flags` in
+`crates/terrarium-host/src/docker.rs`. The shared types and checks are in
+`crates/terrarium-core/src/limits.rs`.
+
+`limits` on the wire are plain numbers (`terrarium_core::limits::Limits`):
+
+```json
+{"cpu_millis": 2000, "memory_bytes": 4294967296, "swap_bytes": 0, "pids": 512, "io_weight": 200}
+```
+
+Each field is optional. `cpu_millis` is CPU time in thousandths of one
+core (a multiple of 10). `swap_bytes` absent with `memory_bytes` is no
+swap.
+
+**Versioning.** The protocol version stays `1`. The new fields are
+optional, and a capability gates them, as for `metrics`. An older host
+agent ignores a field that it does not know, so it would run the command
+without limits. Thus the daemon sends `limits` only to a host agent whose
+`hello` has `capabilities.limits` and can apply them. Else the daemon
+refuses the session with `409 conflict`, `this host agent cannot apply
+resource limits: <reason>`, and sends nothing.
+
+**The capability.** At start, the host agent runs `systemd-run --user
+--scope --quiet --collect -p MemoryMax=64M true`. When that works, it reads
+the cgroup of the user manager (`systemctl --user show
+--property=ControlGroup --value`) and the `cgroup.controllers` of that
+cgroup. The result:
+
+| Field | Meaning |
+|---|---|
+| `systemd` | The probe worked and the `cgroup.controllers` file was read (cgroup v2). |
+| `controllers` | The controllers that the user manager can give to its units, sorted. A limit needs its controller: `cpu` for `cpu_millis`, `memory` for `memory_bytes` and `swap_bytes`, `pids` for `pids`, `io` for `io_weight`. |
+| `reason` | Why `systemd` is false: for example `` `systemd-run` is not on PATH ``, or the first error line of `systemd-run`. |
+| `docker` | Docker is present, so `docker.run` takes `limits`. |
+
+`systemctl --user` and `systemd-run --user` find the user manager through
+`XDG_RUNTIME_DIR`. A host agent in a system unit (`User=` in
+`terrarium-host.service`) has no `XDG_RUNTIME_DIR`; the host agent then
+sets `/run/user/<uid>` for these calls and for the limited commands, when
+that directory exists. The user of the host agent needs a running user
+manager: for a service user, `loginctl enable-linger <user>`. `terrarium-host
+check` prints the capability, and the start log has the line `resource
+limits: ...`.
+
+**`exec` with `limits`.** The frame has `limits: {target, holder,
+limits}`. `holder` is `<project>/<agent>`, or `operator`. The host agent:
+
+1. Checks the capability again (`systemd`, and the controllers). A
+   failure is `error` `unsupported` with the same sentence as the daemon.
+2. Sets the limits on the slice of the holder:
+   `systemctl --user set-property --runtime -- <slice> CPUQuota=<c>%
+   MemoryMax=<m> MemoryHigh=<90 % of m, down to 4 KiB> MemorySwapMax=<s or 0>
+   TasksMax=<p> IOWeight=<w>`. A limit that is not set gets its default
+   (`CPUQuota=`, `MemoryMax=infinity`, `IOWeight=`, ...), so a limit that
+   the operator removed does not stay. A failure is `error`
+   `spawn_failed`: the command never runs without its limits. The frame
+   loop waits for this call (about 20 ms), so the input frames of the
+   session come after it.
+3. Starts the command as `systemd-run --user --scope --quiet --collect
+   --slice=<slice> --unit=<scope> -- <cmd> <args>...`. `systemd-run` moves
+   itself into the new scope and then runs the command in its own process.
+   So the PID, the process group, the environment, the working directory,
+   and the PTY stay those of the session.
+
+The names:
+
+| Unit | Name |
+|---|---|
+| Slice | `terrarium-<target>-<project>-<agent>.slice`; the operator: `terrarium-<target>-_operator.slice`. Each part is escaped as `systemd-escape` does (a `-` becomes `\x2d`), so two targets or agents never share a slice. systemd nests it under `terrarium-<target>.slice` and `terrarium.slice`. A name over 255 bytes becomes `terrarium-x<32 hex of a SHA-256>.slice`. |
+| Scope | `terrarium-exec-<host>-<session>-<8 hex nonce>.scope`, with the host agent's name escaped. |
+
+All scopes of one holder on one target are in one slice, so they share one
+budget. Each holder has its own slice, so one agent cannot starve
+another. The limits stay on the slice until the user manager stops (a
+`--runtime` drop-in under `$XDG_RUNTIME_DIR/systemd/user.control/`).
+
+**The end of a session.** A kill (a timeout, a `release` of a live
+session, an output overflow, a detached timeout) sends `SIGKILL` to the
+process group, as for every session, and also runs `systemctl --user kill
+--signal=SIGKILL -- <scope>`. So a process that left the process group
+(for example with `setsid`) ends too. A session that exits by itself
+leaves its background processes in its scope, as before; they count in
+the budget of the holder.
+
+A scope is in the user manager, not in the cgroup of the host agent. So
+`KillMode=control-group` of `terrarium-host.service` does not end it when
+the host agent stops. At start, the host agent lists the scopes
+`terrarium-exec-<its name>-*` and kills them: their sessions ended with
+the run before.
+
+**Docker.** `docker.run` with `limits` adds `--cpus=<cores>`,
+`--memory=<bytes>` with `--memory-swap=<memory + swap>` (no `swap`: no
+swap), `--pids-limit=<n>`, and `--blkio-weight=<w>`. Docker takes a blkio
+weight from 10 to 1000; the host agent maps the IO weight with the inverse
+of the runc formula for cgroup v2 (`io = 1 + (b - 10) × 9999 / 990`). A
+docker without IO weight support only warns and drops it. The limits are
+on the container, so all holders of the target share them.
+
+**Measured on systemd 261** (Arch, the user manager has `cpuset cpu io
+memory pids`): a slice with `MemoryMax=100M` read back `MemoryMax=104857600`,
+`MemoryHigh=94371840`, `memory.swap.max 0`, and `cpu.max 50000 100000` for
+`CPUQuota=50%`. Two scopes in the slice asked for 70 MiB each. The second
+one waited about 3 s, until the first one ended, and the slice peak was
+96 MiB. When the first one held its memory, the OOM killer ended it after
+about 28 s of slow progress; with no `MemoryHigh` it acted at once (0.3 s).
+
 ## Workspaces
 
 PLAN §11, "mode 1". An agent's workspace is
@@ -924,6 +1039,8 @@ The host agent has these local limits:
 - `max_running_targets` (default 4). `hello` sends it, and the daemon
   refuses an `up` past it with `429 rate_limited` (docs/api.md §17.3).
 - `max_sessions` (default 32).
+- [Resource limits](#resource-limits) on `host` and `docker` targets,
+  when the daemon sends them.
 - Positional values for Docker and vmlab cannot start with `-`, so they
   cannot become flags.
 - Commands run as the user of the host agent (the `User=` of the systemd
@@ -1224,6 +1341,10 @@ Each item of the list is done:
   intervals.
 - [x] Apply the agent's policy before it sends any frame
   (`policy::use_target` in `executor`, before a session opens).
+- [x] Send `limits` only to a host agent whose `capabilities.limits` can
+  apply them, and refuse the session (`409 conflict`) otherwise
+  (`executor::exec_limits` for `exec`, `docker_limits` for `docker.run`;
+  [Resource limits](#resource-limits)).
 - [x] Register and revoke host agents with `POST` and `DELETE /api/hosts`.
   Only the operator can do this, because PLAN §10 keeps host agent tokens
   for the operator. `just host::token <name>` runs

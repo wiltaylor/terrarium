@@ -170,6 +170,11 @@ pub struct HostCapabilities {
     /// false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub metrics: bool,
+    /// What the host agent can do for target resource limits. An older
+    /// host agent sends none: the daemon refuses a session on a target
+    /// with limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::limits::LimitsCapability>,
 }
 
 /// What the host agent can do for target displays (docs/host-protocol.md,

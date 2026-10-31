@@ -113,6 +113,49 @@ pub struct TargetView {
     /// (PLAN §16b.6a). Absent when the target has no `credential`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential_info: Option<targets::CredentialView>,
+    /// The resource limits in short (docs/api.md §17.2, "Resource
+    /// limits"). Absent when the target has no `limits`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits_info: Option<LimitsInfo>,
+}
+
+/// The `limits_info` of a target view.
+#[derive(Debug, Clone, Serialize)]
+pub struct LimitsInfo {
+    /// For example `2 CPU · 4G · 512 pids`.
+    pub summary: String,
+    /// `holder`: each agent (and the operator) on a `host` target gets its
+    /// own budget. `container`: all holders of a `docker` target share the
+    /// container's budget.
+    pub per: &'static str,
+    /// Why the online host agent cannot apply the limits. A session (or
+    /// an `up`) on the target is then refused. Absent when it can, or
+    /// when the host agent is offline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+fn limits_info(state: &Shared, def: &TargetDef) -> Option<LimitsInfo> {
+    let limits = def.limits.as_ref()?.resolve().ok()?;
+    let caps = def
+        .host
+        .as_deref()
+        .and_then(|h| state.executor.hosts.capabilities(h));
+    let docker = def.kind == TargetKind::Docker;
+    let problem = caps.and_then(|c| {
+        let cap = c.limits.as_ref();
+        if docker {
+            limits.docker_support(cap).err()
+        } else {
+            limits.host_support(cap).err()
+        }
+    });
+    let per = if docker { "container" } else { "holder" };
+    Some(LimitsInfo {
+        summary: limits.summary(),
+        per,
+        problem: problem.map(|r| terrarium_core::limits::refusal(&r)),
+    })
 }
 
 /// Add the `credential_info` of each view, in one read.
@@ -187,6 +230,7 @@ pub fn view(state: &Shared, actor: &Actor, r: TargetRow, mine: &[LeaseRow]) -> T
         Actor::Agent(_) => None,
     };
     let has_display = crate::display::has_display(&r.def);
+    let limits_info = limits_info(state, &r.def);
     TargetView {
         has_display,
         id: r.def.name.clone(),
@@ -206,6 +250,7 @@ pub fn view(state: &Shared, actor: &Actor, r: TargetRow, mine: &[LeaseRow]) -> T
         lease: if access == Some("lease") { lease } else { None },
         runtime: r.runtime,
         credential_info: None,
+        limits_info,
     }
 }
 
@@ -588,6 +633,9 @@ async fn exec(
         timeout_secs: b.timeout_secs,
         shell: b.shell,
         agent: b.agent,
+
+        // `start_exec` sets it from the caller.
+        holder: None,
     };
     let s = executor::start_exec(&state, &actor, &name, cmd).await?;
     Ok(opened(&s))

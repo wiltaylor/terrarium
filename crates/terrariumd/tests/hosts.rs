@@ -14,6 +14,7 @@ use base64::Engine;
 use common::{TestDaemon, write};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use terrarium_core::limits::LimitsCapability;
 use terrarium_core::protocol::{HostCapabilities, ToolCapability};
 use terrarium_host::{Client, ClientOptions};
 use terrarium_runner::{RequestContext, RequestHandler};
@@ -62,6 +63,12 @@ impl Lab {
     }
 
     fn client(&self, name: &str, token: &str) -> Client {
+        self.client_with(name, token, None)
+    }
+
+    /// A host agent with this `limits` capability (`None`: an older host
+    /// agent).
+    fn client_with(&self, name: &str, token: &str, limits: Option<LimitsCapability>) -> Client {
         let mut o = ClientOptions::new(format!("ws://{}/hosts/connect", self.addr), token, name);
         o.capabilities = HostCapabilities {
             docker: ToolCapability {
@@ -73,6 +80,7 @@ impl Lab {
                 version: Some("0.30.0".into()),
             },
             shell: Some("/bin/sh".into()),
+            limits,
             ..Default::default()
         };
         o.backoff_min = Duration::from_millis(50);
@@ -91,8 +99,17 @@ impl Lab {
 
     /// Register `name`, run its host agent, and wait for it to be online.
     async fn host(&self, name: &str) -> tokio::task::JoinHandle<()> {
+        self.host_with(name, None).await
+    }
+
+    /// [`Lab::host`] with a `limits` capability.
+    async fn host_with(
+        &self,
+        name: &str,
+        limits: Option<LimitsCapability>,
+    ) -> tokio::task::JoinHandle<()> {
         let token = self.register(name).await;
-        let task = tokio::spawn(self.client(name, &token).run());
+        let task = tokio::spawn(self.client_with(name, &token, limits).run());
         self.wait_online(name, true).await;
         task
     }
@@ -3385,4 +3402,289 @@ async fn scheduled_exec_runs_through_the_executor() {
         .await;
     assert_eq!(run.ok()["status"], "ok", "{}", run.body);
     assert_eq!(run.body["actor"], format!("agent:{lead}"));
+}
+
+// ------------------------------------------------------------ resource limits
+
+fn full_limits_cap() -> LimitsCapability {
+    LimitsCapability {
+        systemd: false,
+        controllers: Vec::new(),
+        reason: Some("systemd-run is off in this test".into()),
+        docker: true,
+    }
+}
+
+#[tokio::test]
+async fn target_limits_validate_and_merge() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1",
+                      "limits": {"cpu": 2, "memory": "4G"}}))
+        .await;
+    let t = lab.td.get("/api/targets/box").await;
+    assert_eq!(t.ok()["limits"], json!({"cpu": 2, "memory": "4G"}));
+    assert_eq!(t.body["limits_info"]["summary"], "2 CPU · 4G");
+    assert_eq!(t.body["limits_info"]["per"], "holder");
+    let bad = [
+        (
+            json!({"kind": "host", "host": "lab1", "limits": {"memory": "4X"}}),
+            422,
+            "limits.memory",
+        ),
+        (
+            json!({"kind": "host", "host": "lab1", "limits": {"cpu": 0}}),
+            422,
+            "limits.cpu",
+        ),
+        (
+            json!({"kind": "host", "host": "lab1", "limits": {"io_weight": 0}}),
+            422,
+            "io_weight",
+        ),
+        (
+            json!({"kind": "host", "host": "lab1", "limits": {"swap": "1G"}}),
+            422,
+            "needs `limits.memory`",
+        ),
+        (
+            json!({"kind": "ssh", "address": "u@h", "limits": {"cpu": 1}}),
+            422,
+            "ssh target",
+        ),
+        (
+            json!({"kind": "vmlab", "host": "lab1", "lab": "/labs/x", "limits": {"cpu": 1}}),
+            422,
+            "vmlab",
+        ),
+        (
+            json!({"kind": "docker", "host": "lab1", "container": "c1", "limits": {"cpu": 1}}),
+            422,
+            "needs `image`",
+        ),
+        (
+            json!({"kind": "desktop", "host": "lab1", "limits": {"cpu": 1}}),
+            422,
+            "only a display",
+        ),
+        (
+            json!({"kind": "host", "host": "lab1", "limits": {"memroy": "1G"}}),
+            400,
+            "unknown field",
+        ),
+    ];
+    for (mut def, status, text) in bad {
+        def["name"] = "bad".into();
+        let r = lab.td.post("/api/targets", def.clone()).await;
+        assert_eq!(r.status, status, "{def}: {}", r.body);
+        let msg = r.body["error"]["message"].as_str().unwrap();
+        assert!(msg.contains(text), "{def}: {msg}");
+    }
+    // A host target is `running` while its host agent is online; its
+    // limits still change, and a patch merges into them.
+    lab.td.post_empty("/api/targets/box/status").await.ok();
+    assert_eq!(
+        lab.td.get("/api/targets/box").await.ok()["state"],
+        "running"
+    );
+    let r = lab
+        .td
+        .patch(
+            "/api/targets/box",
+            json!({"limits": {"pids": 64, "cpu": null}}),
+        )
+        .await;
+    assert_eq!(r.ok()["limits"], json!({"memory": "4G", "pids": 64}));
+    assert_eq!(r.body["limits_info"]["summary"], "4G · 64 pids");
+    let r = lab
+        .td
+        .patch("/api/targets/box", json!({"limits": {"memory": "1M"}}))
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    // Removing the last limit leaves no `limits`.
+    let r = lab
+        .td
+        .patch(
+            "/api/targets/box",
+            json!({"limits": {"memory": null, "pids": null}}),
+        )
+        .await;
+    assert!(r.ok().get("limits").is_none(), "{}", r.body);
+    assert!(r.body.get("limits_info").is_none());
+    let r = lab
+        .td
+        .patch("/api/targets/box", json!({"limits": {"cpu": 0.5}}))
+        .await;
+    assert_eq!(r.ok()["limits"], json!({"cpu": 0.5}));
+    let r = lab
+        .td
+        .patch("/api/targets/box", json!({"limits": null}))
+        .await;
+    assert!(r.ok().get("limits").is_none(), "{}", r.body);
+}
+
+#[tokio::test]
+async fn an_old_host_agent_gets_no_limited_session() {
+    let lab = Lab::start().await;
+    // No `limits` capability: a host agent from before the feature.
+    let _h = lab.host("lab1").await;
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1",
+                      "limits": {"memory": "1G"}}))
+        .await;
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1",
+                      "image": "alpine:3", "limits": {"cpu": 1}}))
+        .await;
+    let t = lab.td.get("/api/targets/box").await;
+    let problem = t.ok()["limits_info"]["problem"].as_str().unwrap();
+    assert!(
+        problem.starts_with("this host agent cannot apply resource limits: it is older"),
+        "{problem}"
+    );
+    let r = lab
+        .td
+        .post("/api/targets/box/exec", json!({"cmd": ["true"]}))
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("cannot apply resource limits"), "{msg}");
+    let r = lab.td.post_empty("/api/targets/dbox/up").await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(!lab.log().contains("docker run"), "{}", lab.log());
+    // A target with no limits still runs.
+    lab.target(json!({"name": "free", "kind": "host", "host": "lab1"}))
+        .await;
+    let sid = exec(&lab.td, "free", json!({"cmd": ["true"]})).await;
+    assert_eq!(drain(&lab.td, "free", &sid).await.end["code"], 0);
+}
+
+#[tokio::test]
+async fn docker_limits_go_on_the_container() {
+    let lab = Lab::start().await;
+    let _h = lab.host_with("lab1", Some(full_limits_cap())).await;
+    lab.target(
+        json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3",
+                      "limits": {"cpu": 1.5, "memory": "512M", "pids": 128, "io_weight": 100}}),
+    )
+    .await;
+    let t = lab.td.get("/api/targets/dbox").await;
+    assert_eq!(t.ok()["limits_info"]["per"], "container");
+    assert!(t.body["limits_info"].get("problem").is_none(), "{}", t.body);
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    let run = lab
+        .log()
+        .lines()
+        .find(|l| l.starts_with("docker run"))
+        .unwrap()
+        .to_owned();
+    assert!(
+        run.contains(
+            "--cpus=1.5 --memory=536870912 --memory-swap=536870912 --pids-limit=128 \
+             --blkio-weight=20"
+        ),
+        "{run}"
+    );
+    // A stopped container keeps the limits it was made with.
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    let r = lab
+        .td
+        .patch("/api/targets/dbox", json!({"limits": {"cpu": 2}}))
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("stopped container")
+    );
+    // The same limits are no change.
+    let r = lab
+        .td
+        .patch(
+            "/api/targets/dbox",
+            json!({"limits": {"cpu": 1.5}, "keep": true}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // A host target on this host agent: systemd is off, so it is refused
+    // with the host agent's reason.
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1",
+                      "limits": {"cpu": 1}}))
+        .await;
+    let r = lab
+        .td
+        .post("/api/targets/box/exec", json!({"cmd": ["true"]}))
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("systemd-run is off in this test")
+    );
+}
+
+/// The whole path on this machine: the daemon sends the limits and the
+/// holder, the host agent sets them on the holder's slice and runs the
+/// command in a scope there. Skips when `systemd-run --user` does not
+/// work.
+#[tokio::test]
+async fn a_host_exec_runs_in_the_slice_of_its_holder() {
+    let cap = terrarium_host::limits::detect().await;
+    if !cap.systemd || !cap.controllers.iter().any(|c| c == "memory") {
+        eprintln!("skip: {:?}", cap.reason);
+        return;
+    }
+    let lab = Lab::start().await;
+    let _h = lab.host_with("lab1", Some(cap)).await;
+    lab.td.project("terra").await;
+    let name = format!("terra-lim{}", std::process::id());
+    let worker = lab
+        .td
+        .agent("terra", "worker", json!({"policy": {"targets": [name]}}))
+        .await;
+    let w = worker["id"].as_str().unwrap().to_owned();
+    lab.target(
+        json!({"name": name, "kind": "host", "host": "lab1", "project": "terra",
+                      "limits": {"memory": "256M", "pids": 64}}),
+    )
+    .await;
+    let read = json!({"cmd": ["sh", "-c",
+        "cat /proc/self/cgroup; cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/../memory.max"]});
+    let r = lab
+        .td
+        .post_as(&w, &format!("/api/targets/{name}/exec"), read.clone())
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let sid = r.body["session_id"].as_str().unwrap().to_owned();
+    let d = drain_as(&lab.td, Some(&w), &name, &sid).await;
+    let out = String::from_utf8_lossy(&d.stdout).to_string();
+    let slice = terrarium_host::limits::slice_name(&name, "terra/worker");
+    let parent = format!("terrarium-{}.slice", terrarium_host::limits::escape(&name));
+    let stop = || {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "stop", "--", &parent])
+            .envs(terrarium_host::limits::user_bus_env())
+            .status();
+        let op = terrarium_host::limits::slice_name(&name, "operator");
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "revert", "--", &slice, &op])
+            .envs(terrarium_host::limits::user_bus_env())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    };
+    let ok = out.contains(&format!("/{slice}/terrarium-exec-lab1-"))
+        && out.lines().last() == Some(&(256u64 << 20).to_string());
+    if !ok {
+        stop();
+    }
+    assert!(ok, "{out}\n{}", String::from_utf8_lossy(&d.stderr));
+    // The operator has its own budget on the same target.
+    let sid = exec(&lab.td, &name, read).await;
+    let out = String::from_utf8_lossy(&drain(&lab.td, &name, &sid).await.stdout).to_string();
+    stop();
+    assert!(
+        out.contains(&terrarium_host::limits::slice_name(&name, "operator")),
+        "{out}"
+    );
 }

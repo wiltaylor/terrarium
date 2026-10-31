@@ -44,6 +44,26 @@ describe("createBody", () => {
     expect(showsField("vmlab", "display")).toBe(false);
   });
 
+  it("sends the resource limits of a host or docker target (docs/api.md §17.2)", async () => {
+    const host = emptyCreateForm("lab", { name: "h", kind: "host", host: "lab1", cpu: "0.5", memory: "4G", pids: "256" });
+    expect(createBody(host)).toEqual({ body: { name: "h", kind: "host", project: "lab", host: "lab1", limits: { cpu: 0.5, memory: "4G", pids: 256 } } });
+    expect(createBody(emptyCreateForm("lab", { name: "h", kind: "host", host: "lab1", memory: "4X" }))).toHaveProperty("error");
+    expect(createBody(emptyCreateForm("lab", { name: "d", kind: "docker", host: "lab1", container: "c", cpu: "1" }))).toHaveProperty("error");
+    // A kind without limits drops the values that stay in the form.
+    expect(createBody(emptyCreateForm("lab", { name: "s", kind: "ssh", address: "u@h", cpu: "x" }))).toEqual({ body: { name: "s", kind: "ssh", project: "lab", address: "u@h" } });
+    expect(showsField("vmlab", "cpu")).toBe(false);
+    const api = mock();
+    const t = await createCreateTargetDialog(api, "terrarium", { name: "lim", kind: "docker", host: "lab1", image: "alpine:3", cpu: "2", memory: "1G" }).submit();
+    expect(t).toMatchObject({ name: "terrarium-lim", limits: { cpu: 2, memory: "1G" }, limits_info: { summary: "2 CPU · 1G", per: "container" } });
+    // The mock merges a patch into the limits, as the daemon does.
+    const u = await api.targets.update("terrarium-lim", { limits: { pids: 64 } });
+    expect(u.limits).toEqual({ cpu: 2, memory: "1G", pids: 64 });
+    await expect(api.targets.update("terrarium-lim", { limits: { memory: "1M" } })).rejects.toMatchObject({ status: 422 });
+    const cleared = await api.targets.update("terrarium-lim", { limits: null });
+    expect(cleared.limits).toBeUndefined();
+    expect(cleared.limits_info).toBeUndefined();
+  });
+
   it("creates a vnc target through the mock", async () => {
     const api = mock();
     // The credential names a login secret (PLAN §16b.6a); the mock checks it as the daemon does.

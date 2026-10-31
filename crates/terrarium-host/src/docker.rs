@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::config::PathPolicy;
 use crate::protocol::{
     DockerExec, DockerInspect, DockerPs, DockerRm, DockerRun, DockerStart, DockerStop,
-    DockerVolumeCreate, DockerVolumeRm, TargetState, ToolCapability,
+    DockerVolumeCreate, DockerVolumeRm, Limits, TargetState, ToolCapability,
 };
 use crate::session::ExecPlan;
 use crate::verb::{BuildError, ResultParser, VerbPlan, env_key, ident, secs};
@@ -86,6 +86,9 @@ pub fn plan_run(
     }
     if req.init {
         a.push(s("--init"));
+    }
+    if let Some(l) = &req.limits {
+        a.extend(limit_flags(l));
     }
     if let Some(name) = &req.name {
         a.push(s("--name"));
@@ -166,6 +169,38 @@ pub fn plan_run(
     } else {
         VerbPlan::plain(exec)
     })
+}
+
+/// The `docker run` flags of resource limits. `--memory-swap` is the
+/// memory and the swap together, so with no `swap` the container gets no
+/// swap, as on a `host` target. Docker's `--blkio-weight` is 10 to 1000;
+/// the IO weight (1 to 10000) maps to it with the inverse of the formula
+/// that runc uses on cgroup v2.
+pub fn limit_flags(l: &Limits) -> Vec<String> {
+    let mut a = Vec::new();
+    if let Some(m) = l.cpu_millis {
+        a.push(format!("--cpus={}", terrarium_core::limits::show_cores(m)));
+    }
+    if let Some(m) = l.memory_bytes {
+        a.push(format!("--memory={m}"));
+        let swap = l.swap_bytes.unwrap_or(0);
+        a.push(format!("--memory-swap={}", m.saturating_add(swap)));
+    }
+    if let Some(p) = l.pids {
+        a.push(format!("--pids-limit={p}"));
+    }
+    if let Some(w) = l.io_weight {
+        a.push(format!("--blkio-weight={}", blkio_weight(w)));
+    }
+    a
+}
+
+/// runc maps a blkio weight `b` (10 to 1000) to the cgroup v2 IO weight
+/// `1 + (b - 10) * 9999 / 990`. This is the inverse, rounded.
+pub fn blkio_weight(io_weight: u16) -> u16 {
+    let w = u32::from(io_weight.clamp(1, 10_000));
+    let b = 10 + ((w - 1) * 990 + 9999 / 2) / 9999;
+    u16::try_from(b.clamp(10, 1000)).unwrap_or(1000)
 }
 
 pub fn plan_exec(req: &DockerExec, bin: &str) -> Result<VerbPlan, BuildError> {
@@ -410,6 +445,46 @@ mod tests {
         assert_eq!(plan.exec.env["TOKEN"], "secret");
         assert!(!plan.exec.args.iter().any(|a| a.contains("secret")));
         assert_eq!(plan.parser, Some(ResultParser::DockerRunId));
+    }
+
+    #[test]
+    fn run_maps_the_limits_to_flags() {
+        let mut r = run_req();
+        r.init = true;
+        r.limits = Some(Limits {
+            cpu_millis: Some(1500),
+            memory_bytes: Some(4 << 30),
+            swap_bytes: None,
+            pids: Some(256),
+            io_weight: Some(100),
+        });
+        let plan = plan_run(
+            &r,
+            "docker",
+            &PathPolicy::default(),
+            std::path::Path::new("/nonexistent"),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.exec.args.join(" "),
+            "run -d --init --cpus=1.5 --memory=4294967296 --memory-swap=4294967296 \
+             --pids-limit=256 --blkio-weight=20 alpine:3"
+        );
+        // Swap comes on top of the memory.
+        let swap = Limits {
+            memory_bytes: Some(1 << 30),
+            swap_bytes: Some(1 << 30),
+            ..Default::default()
+        };
+        assert_eq!(
+            limit_flags(&swap),
+            ["--memory=1073741824", "--memory-swap=2147483648"]
+        );
+        assert!(limit_flags(&Limits::default()).is_empty());
+        assert_eq!(blkio_weight(1), 10);
+        assert_eq!(blkio_weight(10_000), 1000);
+        // runc maps 500 to 1 + 490 * 9999 / 990 = 4950; that goes back to 500.
+        assert_eq!(blkio_weight(4950), 500);
     }
 
     #[test]

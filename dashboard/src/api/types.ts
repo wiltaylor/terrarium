@@ -1913,6 +1913,34 @@ export interface Target {
   runtime?: TargetRuntime;
   /** Only with a `credential` (docs/api.md §17.2): the secret that the daemon uses. Never a value. */
   credential_info?: CredentialInfo;
+  /** `host` and `docker`: the resource limits as the operator wrote them (docs/api.md §17.2, "Resource limits"). */
+  limits?: TargetLimits;
+  /** Only with `limits`: the short text, who shares the budget, and why the host agent cannot apply them. */
+  limits_info?: LimitsInfo;
+}
+
+/** docs/api.md §17.2, "Resource limits": the values as written. The daemon checks them (`422 invalid`). */
+export interface TargetLimits {
+  /** CPU time as cores: `2`, or `0.5` for half of one core. */
+  cpu?: number | string;
+  /** The memory cap: bytes, or a size such as `"4G"` (powers of 1024). */
+  memory?: number | string;
+  /** Swap on top of `memory`. Default: no swap. */
+  swap?: number | string;
+  /** The most processes and threads. */
+  pids?: number | string;
+  /** The IO weight, 1 to 10000. */
+  io_weight?: number | string;
+}
+
+/** docs/api.md §17.2: the `limits_info` of a target view. */
+export interface LimitsInfo {
+  /** For example `2 CPU · 4G · 512 pids`. */
+  summary: string;
+  /** `holder`: each agent on a host target gets its own budget. `container`: the agents of a docker target share it. */
+  per: "holder" | "container";
+  /** Why the online host agent cannot apply the limits; a session (or an `up`) is then refused. */
+  problem?: string;
 }
 
 /** docs/api.md §17.8: what runs on a target now. */
@@ -1971,6 +1999,7 @@ export interface NewTarget {
   ephemeral?: boolean;
   keep?: boolean;
   snapshot_before_task?: boolean;
+  limits?: TargetLimits;
 }
 
 // ----- Target displays (docs/api.md §17.10) -----
@@ -2208,6 +2237,20 @@ export interface HostCapabilities {
   display?: DisplayCapability;
   /** The host agent sends performance samples (docs/api.md §17.1). Absent from an older host agent. */
   metrics?: boolean;
+  /** What the host agent can do for target resource limits (docs/host-protocol.md, "Resource limits"). Absent from an older host agent: none. */
+  limits?: LimitsCapability;
+}
+
+/** `terrarium_core::limits::LimitsCapability`. */
+export interface LimitsCapability {
+  /** `systemd-run --user` works: a host target can have limits. */
+  systemd: boolean;
+  /** The cgroup controllers of the systemd user manager. */
+  controllers?: string[];
+  /** Why `systemd` is false. */
+  reason?: string;
+  /** `docker run` takes the limits. */
+  docker: boolean;
 }
 
 /** `terrarium_host::protocol::HostMetrics` with the daemon's `at` (docs/host-protocol.md, "`metrics`"). Rates are bytes per second. A part the host agent cannot read is absent. */

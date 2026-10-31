@@ -34,13 +34,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use terrarium_core::config::{TargetDef, TargetKind};
-use terrarium_core::protocol::CpDirection;
 use terrarium_core::protocol::LifecycleVerb;
+use terrarium_core::protocol::{CpDirection, HostCapabilities};
 use terrarium_host::protocol::{
     CpPull, CpPush, DaemonFrame, DockerExec, DockerInspect, DockerRm, DockerRun, DockerStart,
-    DockerStop, ExecRequest, LabSource, Probe, PtySize, StreamTag, VmlabCp, VmlabExec,
-    VmlabLifecycle, VmlabPrepare, VmlabRelease, VmlabShell, VmlabSnapshot, VmlabSnapshotDelete,
-    VmlabSnapshotList, VmlabStatus, WorkspaceMount, hex,
+    DockerStop, ExecLimits, ExecRequest, LabSource, Limits, Probe, PtySize, StreamTag, VmlabCp,
+    VmlabExec, VmlabLifecycle, VmlabPrepare, VmlabRelease, VmlabShell, VmlabSnapshot,
+    VmlabSnapshotDelete, VmlabSnapshotList, VmlabStatus, WorkspaceMount, hex,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
@@ -419,6 +419,43 @@ pub struct RemoteCmd {
     /// A `lab_from_workspace` target: the holder whose instance runs the
     /// command (an agent key). An agent caller uses its own.
     pub agent: Option<String>,
+    /// The owner of the resource budget on a `host` target with `limits`:
+    /// `<project>/<agent>` of the caller. `None` is the operator.
+    pub holder: Option<String>,
+}
+
+/// The [`RemoteCmd::holder`] of an actor.
+pub fn holder_of(actor: &Actor) -> Option<String> {
+    actor.agent().map(|a| format!("{}/{}", a.project, a.name))
+}
+
+/// The limits of a command on a `host` target with `limits`
+/// (docs/api.md §17.2, "Resource limits"). Each holder gets its own
+/// budget on the target. A host agent that cannot apply them is a `409
+/// conflict`: the command never runs without its limits.
+pub fn exec_limits(
+    def: &TargetDef,
+    caps: Option<&HostCapabilities>,
+    holder: Option<&str>,
+) -> ApiResult<Option<ExecLimits>> {
+    let (TargetKind::Host, Some(tl)) = (def.kind, &def.limits) else {
+        return Ok(None);
+    };
+    let limits = tl.resolve().map_err(ApiError::invalid)?;
+    if limits.is_empty() {
+        return Ok(None);
+    }
+    let Some(caps) = caps else {
+        return Err(crate::hosts::HostError::Offline(host_of(def)?.to_owned()).into());
+    };
+    limits
+        .host_support(caps.limits.as_ref())
+        .map_err(|r| ApiError::conflict(terrarium_core::limits::refusal(&r)))?;
+    Ok(Some(ExecLimits {
+        target: def.name.clone(),
+        holder: holder.unwrap_or("operator").to_owned(),
+        limits,
+    }))
 }
 
 fn valid_env_key(k: &str) -> bool {
@@ -598,6 +635,7 @@ pub fn host_frame(
     def: &TargetDef,
     shell: Option<&str>,
     cmd: &RemoteCmd,
+    limits: Option<ExecLimits>,
 ) -> ApiResult<impl FnOnce(u32) -> DaemonFrame + use<>> {
     no_exec(def)?;
     cmd.check()?;
@@ -675,6 +713,7 @@ pub fn host_frame(
             env: cmd.env,
             pty,
             timeout_secs: cmd.timeout_secs,
+            limits,
         }),
     })
 }
@@ -1323,8 +1362,10 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
         }
         _ => {
             let host = host_of(def)?;
-            let shell = ex.hosts.capabilities(host).and_then(|c| c.shell);
-            let make = host_frame(def, shell.as_deref(), cmd)?;
+            let caps = ex.hosts.capabilities(host);
+            let limits = exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?;
+            let shell = caps.and_then(|c| c.shell);
+            let make = host_frame(def, shell.as_deref(), cmd, limits)?;
             Ok(pump_host(ex.hosts.open(host, make)?))
         }
     }
@@ -1457,6 +1498,8 @@ pub async fn start_exec(
     let row = usable(state, actor, name).await?;
     check_cap(state, actor)?;
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
+    let mut cmd = cmd;
+    cmd.holder = holder_of(actor);
     let run = start_cmd(state, &def, &cmd)?;
     let kind = if cmd.shell { "shell" } else { "exec" };
     let (sess, ctl) = ExecSession::new(
@@ -1638,6 +1681,7 @@ async fn vmlab_cp(
             env: BTreeMap::new(),
             pty: None,
             timeout_secs: Some(60),
+            limits: None,
         };
         if let Ok(hs) = state.executor.hosts.open(&host, move |session| {
             DaemonFrame::Exec(ExecRequest { session, ..rm })
@@ -1787,6 +1831,7 @@ async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> A
     let name = container_name(def);
     let mut labels = BTreeMap::new();
     labels.insert("terrarium.target".to_owned(), def.name.clone());
+    let limits = docker_limits(state, def)?;
     verb_ok(state, def, "docker.run", move |session| {
         DaemonFrame::DockerRun(DockerRun {
             session,
@@ -1807,10 +1852,33 @@ async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> A
             command: vec!["sleep".into(), "infinity".into()],
             pty: None,
             timeout_secs: Some(VERB_TIMEOUT),
+            limits,
         })
     })
     .await?;
     Ok(())
+}
+
+/// The limits of a docker target's container (docs/api.md §17.2,
+/// "Resource limits"): one budget for the container, which all holders
+/// share. A host agent that cannot apply them is a `409 conflict`: the
+/// container never runs without them.
+fn docker_limits(state: &Shared, def: &TargetDef) -> ApiResult<Option<Limits>> {
+    let Some(tl) = &def.limits else {
+        return Ok(None);
+    };
+    let limits = tl.resolve().map_err(ApiError::invalid)?;
+    if limits.is_empty() {
+        return Ok(None);
+    }
+    let host = host_of(def)?;
+    let Some(caps) = state.executor.hosts.capabilities(host) else {
+        return Err(crate::hosts::HostError::Offline(host.to_owned()).into());
+    };
+    limits
+        .docker_support(caps.limits.as_ref())
+        .map_err(|r| ApiError::conflict(terrarium_core::limits::refusal(&r)))?;
+    Ok(Some(limits))
 }
 
 async fn docker_start(state: &Shared, def: &TargetDef) -> ApiResult<()> {
@@ -3864,14 +3932,14 @@ pub async fn checkout_on_target(
     depth: Option<u32>,
     secret: Option<&Secret>,
 ) -> ApiResult<Value> {
-    let _ = actor;
     no_exec(&row.def)?;
     if row.def.kind == TargetKind::Vmlab {
         return Err(ApiError::invalid(
             "a checkout on a vmlab target is not supported; vmlab exec takes no env for the credential",
         ));
     }
-    let cmd = checkout_cmd(url, dest, branch, depth, secret)?;
+    let mut cmd = checkout_cmd(url, dest, branch, depth, secret)?;
+    cmd.holder = holder_of(actor);
     let c = start_cmd(state, &row.def, &cmd)?.collect(256 * 1024).await;
     if !c.end().success() {
         let e = verb_failed("git checkout on the target", &c);
@@ -4144,7 +4212,7 @@ mod tests {
             cwd: Some("/w".into()),
             ..RemoteCmd::default()
         };
-        let f = host_frame(&d, None, &cmd).unwrap()(5);
+        let f = host_frame(&d, None, &cmd, None).unwrap()(5);
         let DaemonFrame::DockerExec(x) = f else {
             panic!()
         };
@@ -4157,18 +4225,22 @@ mod tests {
         )
         .unwrap();
         v.name = "w".into();
-        assert!(host_frame(&v, None, &cmd).is_err(), "vmlab takes no cwd");
+        assert!(
+            host_frame(&v, None, &cmd, None).is_err(),
+            "vmlab takes no cwd"
+        );
         let shell = RemoteCmd {
             shell: true,
             ..RemoteCmd::default()
         };
         assert!(matches!(
-            host_frame(&v, None, &shell).unwrap()(1),
+            host_frame(&v, None, &shell, None).unwrap()(1),
             DaemonFrame::VmlabShell(_)
         ));
         let mut h: TargetDef = toml::from_str("kind = \"host\"\nhost = \"h\"\n").unwrap();
         h.name = "h".into();
-        let DaemonFrame::Exec(e) = host_frame(&h, Some("/bin/bash"), &shell).unwrap()(2) else {
+        let DaemonFrame::Exec(e) = host_frame(&h, Some("/bin/bash"), &shell, None).unwrap()(2)
+        else {
             panic!()
         };
         assert_eq!(
@@ -4176,6 +4248,54 @@ mod tests {
             ("/bin/bash", &["-l".to_owned()][..])
         );
         assert_eq!(e.pty, Some(PtySize::default()));
+    }
+
+    #[test]
+    fn exec_limits_name_the_holder_and_need_the_capability() {
+        let mut h: TargetDef =
+            toml::from_str("kind = \"host\"\nhost = \"h\"\n[limits]\ncpu = 2\nmemory = \"1G\"\n")
+                .unwrap();
+        h.name = "box".into();
+        let mut caps = HostCapabilities {
+            limits: Some(terrarium_core::limits::LimitsCapability {
+                systemd: true,
+                controllers: vec!["cpu".into(), "memory".into()],
+                reason: None,
+                docker: false,
+            }),
+            ..HostCapabilities::default()
+        };
+        let l = exec_limits(&h, Some(&caps), Some("terra/w-1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!((l.target.as_str(), l.holder.as_str()), ("box", "terra/w-1"));
+        assert_eq!(l.limits.cpu_millis, Some(2000));
+        let op = exec_limits(&h, Some(&caps), None).unwrap().unwrap();
+        assert_eq!(op.holder, "operator");
+        let cmd = RemoteCmd {
+            argv: vec!["true".into()],
+            ..RemoteCmd::default()
+        };
+        let DaemonFrame::Exec(e) = host_frame(&h, None, &cmd, Some(l)).unwrap()(3) else {
+            panic!()
+        };
+        assert_eq!(e.limits.map(|l| l.holder), Some("terra/w-1".to_owned()));
+        // No capability (an older host agent), or a missing controller.
+        caps.limits = None;
+        let err = exec_limits(&h, Some(&caps), None).unwrap_err();
+        assert_eq!(err.code, Code::Conflict);
+        caps.limits = Some(terrarium_core::limits::LimitsCapability {
+            systemd: true,
+            controllers: vec!["memory".into()],
+            ..Default::default()
+        });
+        let err = exec_limits(&h, Some(&caps), None).unwrap_err();
+        assert!(err.message.contains("no cpu controller"), "{}", err.message);
+        // An offline host agent: no session, and no frame without limits.
+        assert!(exec_limits(&h, None, None).is_err());
+        // Other kinds and targets with no limits get none.
+        h.limits = None;
+        assert!(exec_limits(&h, None, None).unwrap().is_none());
     }
 
     #[tokio::test]

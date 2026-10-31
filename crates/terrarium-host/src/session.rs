@@ -40,6 +40,10 @@ pub struct ExecPlan {
     pub timeout: Option<Duration>,
     /// Keep stdout (up to [`CAPTURE_LIMIT`]) for a result parser.
     pub capture_stdout: bool,
+    /// The systemd scope that the process runs in (a target with resource
+    /// limits, [`crate::limits::wrap`]). A kill of the session kills the
+    /// scope too.
+    pub scope: Option<String>,
 }
 
 /// Input for a running session.
@@ -125,6 +129,15 @@ fn signal_group(pid: Option<u32>, sig: Signal) {
     }
 }
 
+/// Kill the process group, and the scope when the session has one: a
+/// process that left the group ends too.
+fn kill_all(pid: Option<u32>, scope: Option<&str>) {
+    signal_group(pid, Signal::SIGKILL);
+    if let Some(scope) = scope {
+        crate::limits::kill_scope(scope);
+    }
+}
+
 /// Sleep until the deadline, or forever without one.
 async fn deadline(timeout: Option<Duration>) {
     match timeout {
@@ -190,7 +203,9 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
     });
 
     let timeout = plan.timeout;
+    let scope = plan.scope.clone();
     let done = tokio::spawn(async move {
+        let scope = scope.as_deref();
         let mut stdin_tx = Some(stdin_tx);
         let mut forced: Option<ExitReason> = None;
         let timer = deadline(timeout);
@@ -210,23 +225,23 @@ fn spawn_pipes(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnErro
                     Some(SessionInput::Signal(sig)) => signal_group(pid, sig),
                     Some(SessionInput::Kill(reason)) => {
                         forced.get_or_insert(reason);
-                        signal_group(pid, Signal::SIGKILL);
+                        kill_all(pid, scope);
                     }
                     // Nobody holds the session any more.
                     None => {
-                        signal_group(pid, Signal::SIGKILL);
+                        kill_all(pid, scope);
                         let _ = child.start_kill();
                         break child.wait().await;
                     }
                 },
                 Some(reason) = kill_rx.recv() => {
                     forced.get_or_insert(reason);
-                    signal_group(pid, Signal::SIGKILL);
+                    kill_all(pid, scope);
                 }
                 () = &mut timer, if !timed_out => {
                     timed_out = true;
                     forced.get_or_insert(ExitReason::Timeout);
-                    signal_group(pid, Signal::SIGKILL);
+                    kill_all(pid, scope);
                 }
             }
         };
@@ -389,7 +404,9 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
     });
 
     let timeout = plan.timeout;
+    let scope = plan.scope.clone();
     let done = tokio::spawn(async move {
+        let scope = scope.as_deref();
         let mut forced: Option<ExitReason> = None;
         let timer = deadline(timeout);
         tokio::pin!(timer);
@@ -411,21 +428,21 @@ fn spawn_pty(plan: ExecPlan, outbox: Arc<Outbox>) -> Result<Running, SpawnError>
                     Some(SessionInput::Signal(sig)) => signal_group(pid, sig),
                     Some(SessionInput::Kill(reason)) => {
                         forced.get_or_insert(reason);
-                        signal_group(pid, Signal::SIGKILL);
+                        kill_all(pid, scope);
                     }
                     None => {
-                        signal_group(pid, Signal::SIGKILL);
+                        kill_all(pid, scope);
                         break (&mut exit_rx).await.ok();
                     }
                 },
                 Some(reason) = kill_rx.recv() => {
                     forced.get_or_insert(reason);
-                    signal_group(pid, Signal::SIGKILL);
+                    kill_all(pid, scope);
                 }
                 () = &mut timer, if !timed_out => {
                     timed_out = true;
                     forced.get_or_insert(ExitReason::Timeout);
-                    signal_group(pid, Signal::SIGKILL);
+                    kill_all(pid, scope);
                 }
             }
         };

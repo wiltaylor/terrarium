@@ -119,6 +119,7 @@ const TARGET_KEYS: &[&str] = &[
     "ephemeral",
     "keep",
     "snapshot_before_task",
+    "limits",
 ];
 const SUBSCRIPTION_KEYS: &[&str] = &["name", "provider", "plan", "harnesses", "probe", "alert_at"];
 const SCHEDULE_KEYS: &[&str] = &["name", "enabled", "catch_up", "spec", "action"];
@@ -1179,7 +1180,7 @@ impl Fleet {
             w.table(Some("[[subscriptions]]"), &table_of(s), SUBSCRIPTION_KEYS);
         }
         for t in &self.targets {
-            w.table(Some("[[targets]]"), &target_table(t), TARGET_KEYS);
+            write_target(&mut w, target_table(t), "targets");
         }
         for d in &self.templates {
             write_template(&mut w, d, "templates");
@@ -1237,7 +1238,7 @@ impl Fleet {
             for d in &p.targets {
                 let mut tt = target_table(d);
                 tt.remove("project");
-                w.table(Some("[[projects.targets]]"), &tt, TARGET_KEYS);
+                write_target(&mut w, tt, "projects.targets");
             }
             for s in &p.def.schedules {
                 let mut st = table_of(s);
@@ -1312,6 +1313,20 @@ impl Writer {
 
 fn table_of<T: Serialize>(v: &T) -> toml::Table {
     toml::Table::try_from(v).unwrap_or_default()
+}
+
+/// One target under `[[<header>]]`, with its `limits` as the sub-table
+/// `[<header>.limits]`.
+fn write_target(w: &mut Writer, mut t: toml::Table, header: &str) {
+    let limits = t.remove("limits");
+    w.table(Some(&format!("[[{header}]]")), &t, TARGET_KEYS);
+    if let Some(toml::Value::Table(lt)) = limits {
+        w.table(
+            Some(&format!("[{header}.limits]")),
+            &lt,
+            &["cpu", "memory", "swap", "pids", "io_weight"],
+        );
+    }
 }
 
 /// A target table without the flags that are off (their default).
@@ -1407,6 +1422,45 @@ mod tests {
             .ok()
             .unwrap_or_else(|e| panic!("{e:#?}\n{text}"));
         assert_eq!(f, again, "{text}");
+    }
+
+    #[test]
+    fn target_limits_parse_and_round_trip() {
+        let text = r#"
+[[targets]]
+name = "shared"
+kind = "host"
+host = "h1"
+[targets.limits]
+cpu = 0.5
+memory = "1G"
+
+[[projects]]
+name = "alpha"
+
+[[projects.targets]]
+name = "box"
+kind = "host"
+host = "h1"
+[projects.targets.limits]
+cpu = 2
+memory = "4G"
+pids = 512
+"#;
+        let f = parse(text, Some("lim"))
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}"));
+        let limits: Vec<String> = f
+            .all_targets()
+            .filter_map(|t| t.limits.as_ref()?.resolve().ok())
+            .map(|l| l.summary())
+            .collect();
+        assert_eq!(limits, ["0.5 CPU · 1G", "2 CPU · 4G · 512 pids"]);
+        let out = f.to_toml();
+        let again = parse(&out, Some("lim"))
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}\n{out}"));
+        assert_eq!(f, again, "{out}");
     }
 
     #[test]
@@ -1797,7 +1851,9 @@ targets = ["other"]
 name = "r1"
 template = "reviewer"
 "#;
-        let f = parse(text, None).ok().unwrap_or_else(|e| panic!("{e:#?}"));
+        let f = parse(text, Some("lim"))
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}"));
         let agent = |n: &str| f.agents().find(|a| a.def.name == n).unwrap().clone();
         // The project's template wins over the global one of that name.
         let w1 = agent("w1");

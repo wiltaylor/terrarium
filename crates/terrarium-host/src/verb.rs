@@ -124,6 +124,7 @@ pub fn plan_exec(req: &ExecRequest, policy: &PathPolicy) -> Result<VerbPlan, Bui
         pty: req.pty,
         timeout: secs(req.timeout_secs),
         capture_stdout: false,
+        scope: None,
     }))
 }
 
@@ -170,6 +171,7 @@ mod tests {
             env: Default::default(),
             pty: None,
             timeout_secs: Some(0),
+            limits: None,
         };
         let err = plan_exec(&req, &policy).unwrap_err();
         assert_eq!(err.code, ErrorCode::PathDenied);

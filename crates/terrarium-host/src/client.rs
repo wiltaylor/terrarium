@@ -696,7 +696,12 @@ impl Client {
             F::CpPull(req) => self.start_pull(req, tx),
             F::Exec(req) => {
                 let id = req.session;
-                self.start(id, crate::verb::plan_exec(&req, p), tx);
+                let plan = crate::verb::plan_exec(&req, p);
+                let plan = match (plan, &req.limits) {
+                    (Ok(plan), Some(l)) => self.limited(plan, l, id).await,
+                    (plan, _) => plan,
+                };
+                self.start(id, plan, tx);
             }
             F::DockerRun(r) => self.start(
                 r.session,
@@ -1059,6 +1064,38 @@ impl Client {
             });
             outbox.finish(frames);
         });
+    }
+
+    /// Put an `exec` plan in a scope in the holder's slice, after the
+    /// limits are on the slice (docs/host-protocol.md, "Resource limits").
+    /// A host agent that cannot apply them refuses the session: it never
+    /// runs it without its limits. The frame loop waits for the
+    /// `systemctl` call, so the session's input frames come after it.
+    async fn limited(
+        &self,
+        mut plan: VerbPlan,
+        l: &crate::protocol::ExecLimits,
+        session: SessionId,
+    ) -> Result<VerbPlan, BuildError> {
+        let refuse = |reason: String| BuildError {
+            code: ErrorCode::Unsupported,
+            message: terrarium_core::limits::refusal(&reason),
+        };
+        l.limits
+            .host_support(self.opts.capabilities.limits.as_ref())
+            .map_err(refuse)?;
+        let slice = crate::limits::slice_name(&l.target, &l.holder);
+        crate::limits::apply_slice(&slice, &l.limits)
+            .await
+            .map_err(|e| BuildError {
+                code: ErrorCode::SpawnFailed,
+                message: format!("cannot set the resource limits on {slice}: {e}"),
+            })?;
+        #[allow(clippy::cast_possible_truncation)]
+        let scope = crate::limits::scope_name(&self.opts.name, session, random_u64() as u32);
+        tracing::info!(session, %slice, %scope, limits = %l.limits.summary(), "limited session");
+        crate::limits::wrap(&mut plan.exec, &slice, &scope);
+        Ok(plan)
     }
 
     fn prepare_ctx(&self) -> crate::prepare::Ctx {

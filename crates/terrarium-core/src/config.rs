@@ -542,6 +542,11 @@ pub struct TargetDef {
     pub keep: bool,
     #[serde(default)]
     pub snapshot_before_task: bool,
+    /// `host` and `docker`: resource limits (docs/api.md §17.2, "Resource
+    /// limits"). On a `host` target each holder gets its own budget; on a
+    /// `docker` target the container has one budget for all holders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::limits::TargetLimits>,
 }
 
 /// A subscription definition, `subscriptions/<name>.toml`. See PLAN §16.

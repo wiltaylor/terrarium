@@ -207,6 +207,7 @@ fn exec(session: SessionId, cmd: &str, args: &[&str], pty: Option<PtySize>) -> D
         env: Default::default(),
         pty,
         timeout_secs: Some(30),
+        limits: None,
     })
 }
 

@@ -415,6 +415,9 @@ async fn run(
         timeout_secs: Some(limit.as_secs().max(1)),
         shell: false,
         agent: b.agent.clone(),
+
+        // `start_exec` sets it from the caller.
+        holder: None,
     };
     let sess = executor::start_exec(&state, &agent_actor, &b.target, cmd).await?;
     let label = name.map(str::to_owned).unwrap_or_else(|| {

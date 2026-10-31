@@ -2580,6 +2580,30 @@ pub struct AdminTargetNewArgs {
     /// `<project>-<name>`
     #[arg(long)]
     pub global: bool,
+    #[command(flatten)]
+    pub limits: LimitArgs,
+}
+
+/// Resource limits of a `host` or `docker` target. On a `host` target each
+/// agent gets its own budget; on a `docker` target the container has one
+/// budget for all its agents.
+#[derive(Debug, Args, Default)]
+pub struct LimitArgs {
+    /// CPU time as cores: `2`, or `0.5` for half of one core
+    #[arg(long, value_name = "CORES")]
+    pub cpu: Option<f64>,
+    /// The memory cap, for example `4G` or `512M` (powers of 1024)
+    #[arg(long, value_name = "SIZE")]
+    pub memory: Option<String>,
+    /// Swap on top of `--memory` (default: no swap)
+    #[arg(long, value_name = "SIZE")]
+    pub swap: Option<String>,
+    /// The most processes and threads
+    #[arg(long, value_name = "N")]
+    pub pids: Option<u64>,
+    /// The IO weight, 1 to 10000 (the default of the kernel is 100)
+    #[arg(long, value_name = "N")]
+    pub io_weight: Option<u64>,
 }
 
 /// `admin target edit`: only the flags given change.
@@ -2615,6 +2639,12 @@ pub struct AdminTargetEditArgs {
     /// `true` or `false`: take a snapshot before the first task
     #[arg(long, value_name = "BOOL")]
     pub snapshot_before_task: Option<bool>,
+    /// Set these limits; the other limits stay
+    #[command(flatten)]
+    pub limits: LimitArgs,
+    /// Remove all resource limits
+    #[arg(long, conflicts_with_all = ["cpu", "memory", "swap", "pids", "io_weight"])]
+    pub no_limits: bool,
 }
 
 #[derive(Debug, Subcommand)]

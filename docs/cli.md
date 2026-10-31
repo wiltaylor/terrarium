@@ -769,7 +769,7 @@ terrarium usage project                       the project, per agent
 terrarium usage subscriptions                 all plans
 terrarium status set <idle|working|blocked> [--note text]
 terrarium targets ls                          an agent: the targets its policy or a lease allows, with host online/offline
-terrarium targets show <target>               the definition, the state, and the key of the credential with its fingerprint
+terrarium targets show <target>               the definition, the state, the key of the credential with its fingerprint, and the limits
 terrarium targets test <target>               an ssh target: log in one time with its key, and report the result
 terrarium targets snapshot <target> [name] [--scope machine|lab] [--agent a]
 terrarium targets restore <target> [name] [--discard-guest-changes] [--scope machine|lab] [--agent a]
@@ -784,7 +784,10 @@ terrarium cp <target>:<src> <dst>             one file from the target
 For the operator, `targets ls` has the column `KEY`: the `credential` and
 the `SHA256:` fingerprint of its key. `(!)` marks a credential that does
 not work; `targets show` prints the `warning`
-([api.md §17.2](api.md#172-targets)).
+([api.md §17.2](api.md#172-targets)). For a target with resource limits,
+`targets show` prints `limits: 2 CPU · 4G (for each agent)` (or `(one
+budget for the container)`), and a `warning` line when the host agent
+cannot apply them.
 
 `targets test` sends `POST /api/targets/{t}/test`. It needs the rights of
 a lifecycle verb: the caller may use the target, or may define it. The
@@ -1269,8 +1272,10 @@ terrarium admin target new <name> --kind host|ssh|docker|vmlab [--host h] [--add
                           [--credential c] [--image i] [--container c] [--lab dir] [--machine m]
                           [--lab-repo r] [--lab-ref ref] [--lab-path dir] [--lab-from-workspace]
                           [--ephemeral] [--keep] [--global]
+                          [--cpu cores] [--memory size] [--swap size] [--pids n] [--io-weight n]
 terrarium admin target edit <name> [--lab-path dir] [--lab-ref ref] [--machine m] [--image i] [--host h]
                           [--ephemeral | --permanent] [--keep | --no-keep] [--snapshot-before-task true|false]
+                          [--cpu cores] [--memory size] [--swap size] [--pids n] [--io-weight n] [--no-limits]
 terrarium admin target ls                      agent mode: the project's and the global targets
 terrarium admin target rm <name>
 terrarium admin target verb <name> up|down|snapshot|restore|status [--snapshot name] [--agent a]
@@ -1334,10 +1339,21 @@ project or in each holder's workspace ([api.md
 `work/<project>/<agent>`, not to a repo. The checkout of a repo is one
 level down, so a `vmlab.wcl` at the root of the repo `hello-svc` is
 `--lab-path hello-svc`, never `.` ([api.md §17.2](api.md#172-targets)).
+`--cpu` (cores: `2`, `0.5`), `--memory` (`4G`, `512M`), `--swap` (on top
+of `--memory`; default none), `--pids`, and `--io-weight` (1 to 10000)
+set the resource limits of a `host` target or a `docker` target with
+`--image` (api.md §17.2, "Resource limits"). On a `host` target each agent
+gets its own budget for all its sessions on the target; on a `docker`
+target the container has one budget for all its agents. The daemon checks
+the values (`422`, exit 1). For example:
+`terrarium admin target new box --kind host --host lab1 --cpu 2 --memory 4G`.
 `admin target edit` changes a target with `PATCH /api/targets/{name}`, and
 sends only the flags that you give. While the target runs, only `--keep`,
 `--no-keep`, and `--snapshot-before-task` apply; a change to another field
-is `409 conflict` (exit 1). Bring the target down first. Without a flag, it
+is `409 conflict` (exit 1). Bring the target down first. The limits of a
+`host` target change at any time. The limit flags of `edit` merge: the
+limits that you do not give stay. `--no-limits` removes all of them (with
+a limit flag, it is a usage error). Without a flag, it
 is a usage error (exit 2). `admin target verb` prints
 `warning: attach needs a restart of the target ...` when a workspace could
 not join the running target; `--agent` names the holder's instance of a
@@ -1364,7 +1380,7 @@ the agents of its own project; a global target needs sysadmin.
 | Command | Request | Text output |
 |---|---|---|
 | `admin target grant <t> <a>` | `POST /api/targets/{t}/leases` `{"agent", "until"?, "exclusive"?, "reason"?}` | `granted <t> to <project/name> until <time or revoked>`, with ` (exclusive)`. A line `warning: the target did not come up: ...` when the grant could not bring an ephemeral target up; then exit 1, unless `--no-lifecycle-check`. |
-| `admin target edit <t> ...` | `PATCH /api/targets/{t}` with the fields of the flags given: `lab_path`, `lab_ref`, `machine`, `image`, `host`, `ephemeral`, `keep`, `snapshot_before_task` | `changed target <t>: <fields>` |
+| `admin target edit <t> ...` | `PATCH /api/targets/{t}` with the fields of the flags given: `lab_path`, `lab_ref`, `machine`, `image`, `host`, `ephemeral`, `keep`, `snapshot_before_task`, and `limits` (an object of the limit flags given, merged into the current limits; `null` for `--no-limits`) | `changed target <t>: <fields>` |
 | `admin target revoke <t> <a>` | `DELETE /api/targets/{t}/leases/{a}` | `revoked the lease of <project/name> on <t>` |
 | `admin target extend <t> <a> --until u` | `PATCH /api/targets/{t}/leases/{a}` `{"until"}` (`none` sends `null`) | `the lease of <project/name> on <t> lasts until <time or revoked>` |
 | `admin target leases <t> [--all]` | `GET /api/targets/{t}/leases[?all=true]` | A table: `TARGET`, `AGENT`, `STATE`, `EXCLUSIVE`, `EXPIRES`, `GRANTED BY`, `REASON`. `EXCLUSIVE` and `EXPIRES` are as in `targets ls`: `yes` or `no`, and the RFC 3339 end or `until revoked` (no end). With `--all`, an ended lease shows `revoked` or `expired` in `EXPIRES`. |
