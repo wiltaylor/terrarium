@@ -93,11 +93,12 @@ export function App() {
         </Route>
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/agents" component={AgentsPage} />
-        {/* The board screen: the tabs Cards, Versions, and Artifacts (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board. */}
+        {/* The board screen: the tabs Cards, Versions, Artifacts, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board. */}
         <Route path="/p/:project/board" component={BoardScreen}>
           <Route path="/" component={BoardPage} />
           <Route path="/versions/:id?" component={VersionsPage} />
           <Route path="/artifacts/:id?" component={ArtifactsPage} />
+          <Route path="/schedules" component={SchedulesPage} />
         </Route>
         {/* The repos of the project, and the browser of one repo (its trees: main and each agent checkout). */}
         <Route path="/p/:project/repos" component={ReposPage} />
@@ -118,7 +119,6 @@ export function App() {
           <Route path="/wiki/*path" component={WikiPage} />
           <Route path="/memory" component={MemoryPage} />
         </Route>
-        <Route path="/p/:project/schedules" component={SchedulesPage} />
         <Show when={isMock}>
           <Route path="/dev/xss" component={XssPage} />
         </Show>

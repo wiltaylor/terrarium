@@ -1,6 +1,7 @@
 // Schedules (docs/api.md §19). Two views: a project view
-// (`/p/:project/schedules`, `GET /api/schedules?project=`: the project's
-// schedules and the global ones, with a scope filter), and the view of all
+// (`/p/:project/board/schedules`, the Schedules tab of the board screen;
+// `GET /api/schedules?project=`: the project's schedules and the global
+// ones, with a scope filter), and the view of all
 // schedules (`/schedules`, grouped by scope). Two tabs, kept in the URL
 // (`?tab=triggers`): Schedules (the time specs, `?kind=time`) and Triggers
 // (the spec `on`, `?kind=trigger`, §19.4), with the event sources (§20)
@@ -156,7 +157,8 @@ export default function SchedulesPage() {
 
   return (
     <>
-      <PageHead title={project() ? `Schedules · ${project()}` : "Schedules · all"}>
+      {/* In a project it is a tab of the board screen, under the screen title. */}
+      <PageHead title={project() ? "Schedules" : "Schedules · all"} level={project() ? 2 : 1}>
         <button class="primary" onClick={() => setDialog({})}>
           {triggers() ? "New trigger" : "New schedule"}
         </button>

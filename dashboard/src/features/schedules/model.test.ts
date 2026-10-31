@@ -142,9 +142,9 @@ describe("Home attention: failed runs in the last 24 h", () => {
     expect(failedRecently(list, now).map((s) => s.id)).toEqual(["a"]);
   });
   it("links to the row", () => {
-    expect(scheduleHref({ id: "S1", project: "terrarium" })).toBe("/p/terrarium/schedules?open=S1");
+    expect(scheduleHref({ id: "S1", project: "terrarium" })).toBe("/p/terrarium/board/schedules?open=S1");
     expect(scheduleHref({ id: "S1", project: null })).toBe("/schedules?open=S1");
-    expect(scheduleHref({ id: "T1", project: "terrarium", spec: { kind: "on", kinds: ["ci.run.failed"] } })).toBe("/p/terrarium/schedules?open=T1&tab=triggers");
+    expect(scheduleHref({ id: "T1", project: "terrarium", spec: { kind: "on", kinds: ["ci.run.failed"] } })).toBe("/p/terrarium/board/schedules?open=T1&tab=triggers");
   });
 });
 

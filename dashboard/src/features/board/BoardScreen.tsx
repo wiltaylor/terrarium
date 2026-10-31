@@ -1,5 +1,5 @@
-// The Board screen of a project: the cards, the versions, and the artifacts
-// as tabs (app/nav.ts BOARD_TABS). Each tab is a route under
+// The Board screen of a project: the cards, the versions, the artifacts, and
+// the schedules as tabs (app/nav.ts BOARD_TABS). Each tab is a route under
 // /p/:project/board. The Cards tab is the index route, so the board keeps
 // its URL and a `?card=` link opens the card drawer.
 

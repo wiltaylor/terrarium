@@ -8,7 +8,6 @@ export const PROJECT_ITEMS = [
   { path: "logs", label: "Logs" },
   // The wiki and the memory of the project (KNOWLEDGE_TABS).
   { path: "knowledge", label: "Knowledge" },
-  { path: "schedules", label: "Schedules" },
   // Every agent of the project, in any status. Last, so the agent rows of the open node do not push the pages down.
   { path: "agents", label: "Agents" },
 ] as const;
@@ -22,6 +21,8 @@ export const BOARD_TABS = [
   { path: "", label: "Cards" },
   { path: "versions", label: "Versions" },
   { path: "artifacts", label: "Artifacts" },
+  // The schedules and triggers of the project; the page keeps its own `?tab=triggers` sub-tab.
+  { path: "schedules", label: "Schedules" },
 ] as const;
 
 /** The tabs of the knowledge screen, in order. Each is a route under /p/:project/knowledge. */
@@ -126,6 +127,9 @@ export const PROJECT_LOGS_TABS = [
  *   (BOARD_TABS). The daemon puts `/p/<project>/versions/<id>` in
  *   `Version.url` and in the review mail, so the old paths stay as
  *   redirects.
+ * - The project Schedules page is a tab of the board screen (BOARD_TABS).
+ *   A schedule link of an old mail or a bookmark has the old path with a
+ *   query (`?open=...&tab=triggers`), so the old path stays as a redirect.
  * - The project Wiki and Memory pages are tabs of the knowledge screen
  *   (KNOWLEDGE_TABS). The wiki redirect keeps the page path (`*path`).
  *   `/p/:project/knowledge` opens the Wiki tab.
@@ -156,6 +160,7 @@ export const MOVED_ROUTES = [
   { path: "/p/:project/versions/:id", to: "/p/:project/board/versions/:id" },
   { path: "/p/:project/artifacts", to: "/p/:project/board/artifacts" },
   { path: "/p/:project/artifacts/:id", to: "/p/:project/board/artifacts/:id" },
+  { path: "/p/:project/schedules", to: "/p/:project/board/schedules" },
   { path: "/p/:project/wiki/*path", to: "/p/:project/knowledge/wiki/*path" },
   { path: "/p/:project/memory", to: "/p/:project/knowledge/memory" },
   { path: "/p/:project/knowledge", to: "/p/:project/knowledge/wiki" },

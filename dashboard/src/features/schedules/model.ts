@@ -199,5 +199,5 @@ export function failedRecently(list: Schedule[], now = Date.now(), hours = 24): 
 /** The page of a schedule, with its row open, on the tab of its kind. */
 export const scheduleHref = (s: Pick<Schedule, "id" | "project"> & Partial<Pick<Schedule, "spec">>): string => {
   const tab = s.spec?.kind === "on" ? "&tab=triggers" : "";
-  return `${s.project ? `/p/${encodeURIComponent(s.project)}/schedules` : "/schedules"}?open=${encodeURIComponent(s.id)}${tab}`;
+  return `${s.project ? `/p/${encodeURIComponent(s.project)}/board/schedules` : "/schedules"}?open=${encodeURIComponent(s.id)}${tab}`;
 };

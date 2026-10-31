@@ -242,11 +242,13 @@ project, under `/p/<project>/logs`. The project settings screen is the
 same: it has a tab for each of General, Secrets, and Templates of
 the project, under `/p/<project>/settings`. The screens use
 `components/TabScreen.tsx`. The Logs item is active on each of its tabs.
-The project items are Board, Repos, Logs, Knowledge, Schedules, and Agents.
+The project items are Board, Repos, Logs, Knowledge, and Agents.
 The **Board** item (`features/board/BoardScreen.tsx`) has a tab for each of
-Cards, Versions, and Artifacts (`BOARD_TABS`). The Cards tab is the board
-at `/p/<project>/board`, so a `?card=` link keeps its path. The other tabs
-are under `/p/<project>/board/versions` and `/p/<project>/board/artifacts`.
+Cards, Versions, Artifacts, and Schedules (`BOARD_TABS`). The Cards tab is
+the board at `/p/<project>/board`, so a `?card=` link keeps its path. The
+other tabs are under `/p/<project>/board/versions`,
+`/p/<project>/board/artifacts`, and `/p/<project>/board/schedules`. The
+Schedules tab keeps its Schedules and Triggers sub-tabs (`?tab=triggers`).
 The **Knowledge** item (`features/knowledge/KnowledgePage.tsx`) has a tab
 for each of Wiki and Memory (`KNOWLEDGE_TABS`), under
 `/p/<project>/knowledge`. The Board and Knowledge items are active on each
@@ -721,10 +723,11 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/knowledge/wiki/*path` | Knowledge, Wiki tab: page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
 | `/p/:project/knowledge/memory` | Knowledge, Memory tab: memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
 | `/p/:project/versions/:id?`, `/p/:project/artifacts/:id?`, `/p/:project/wiki/*path`, `/p/:project/memory`, `/p/:project/knowledge` | Gone: redirect to the Board and Knowledge tabs (`app/nav.ts` `MOVED_ROUTES`). The wiki redirect keeps the page path, and each redirect keeps the query. The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. `/p/:project/knowledge` opens the Wiki tab. | none |
+| `/p/:project/schedules` | Gone: redirects to `/p/:project/board/schedules` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query (`?open=`, `?tab=triggers`). | none |
 | `/p/:project/spend` | Gone: redirects to `/` (`app/nav.ts` `MOVED_ROUTES`). The daemon's budget alert mail still links it. | none |
-| `/p/:project/schedules` | Schedules of the project and the global ones, scope filter, run history, run now, enable, create, edit, delete | `GET /api/schedules?project=`, `POST /api/schedules`, `PATCH`, `DELETE /api/schedules/{id}`, `POST .../run\|enable\|disable`, `GET .../runs?limit=&cursor=` (docs/api.md §19) |
+| `/p/:project/board/schedules` | Board, Schedules tab: schedules of the project and the global ones, scope filter, run history, run now, enable, create, edit, delete | `GET /api/schedules?project=`, `POST /api/schedules`, `PATCH`, `DELETE /api/schedules/{id}`, `POST .../run\|enable\|disable`, `GET .../runs?limit=&cursor=` (docs/api.md §19) |
 | `/schedules` | All schedules, grouped by scope | `GET /api/schedules` and the calls above |
-| `/p/:project/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §20) |
+| `/p/:project/board/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §20) |
 | `/settings/targets` | Settings, Targets tab: targets, lifecycle, snapshots (list, take, restore, delete), exec console, leases (grant, extend, revoke, history), the resource limits chip (`limits_info.summary`, for example `2 CPU · 4G`; red with the host agent's `problem`), and the limit fields of the New target dialog for `host` and `docker` targets | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `GET .../snapshots`, `DELETE .../snapshots/{snap}`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/settings/hosts` | Settings, Hosts tab: host agents: status, capabilities (also the `limits` or `no limits` chip of `capabilities.limits`, with the controllers or the reason as the tooltip), add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/logs/events` | Logs, Events tab: event log with history; all projects or the selected one, kind and agent filters | `GET /api/events?since=&kind=&project=&agent=`, events socket |
