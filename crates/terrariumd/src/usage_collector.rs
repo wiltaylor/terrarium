@@ -28,6 +28,12 @@
 //! JSONL, Copilot tails its `events.jsonl`, and pi tails its session file.
 //! A new source implements [`UsageSourceFactory`] and goes into
 //! [`default_sources`].
+//!
+//! Copilot CLI writes the end of a compaction only to its session file.
+//! The collector gives that end to the supervisor
+//! ([`UsageSource::take_signals`]), one end for each `compact_started`
+//! event. While a compaction waits for its end, the collector reads the
+//! file every [`COMPACTION_POLL`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -206,6 +212,14 @@ pub trait UsageSource: Send {
     fn take_signals(&mut self) -> Vec<(Event, Option<DateTime<Utc>>)> {
         Vec::new()
     }
+    /// A compaction of the agent started (the `compact_started` event),
+    /// with its trigger. A source can then give an end that it infers from
+    /// the session file ([`CopilotSource`]). The default does nothing.
+    fn compaction_started(&mut self, trigger: Option<String>) {
+        let _ = trigger;
+    }
+    /// The compaction of [`UsageSource::compaction_started`] ended.
+    fn compaction_ended(&mut self) {}
 }
 
 /// Makes a [`UsageSource`] for the sessions of one harness.
@@ -388,6 +402,14 @@ impl UsageSource for Guarded {
     fn take_signals(&mut self) -> Vec<(Event, Option<DateTime<Utc>>)> {
         self.inner.take_signals()
     }
+
+    fn compaction_started(&mut self, trigger: Option<String>) {
+        self.inner.compaction_started(trigger);
+    }
+
+    fn compaction_ended(&mut self) {
+        self.inner.compaction_ended();
+    }
 }
 
 /// Claude Code: tail the session JSONL with the adapter's
@@ -474,15 +496,54 @@ impl UsageSource for CodexSource {
 /// sample, keyed by its `usage_id`. A `session.compaction_complete` line
 /// is a signal ([`UsageSource::take_signals`]). The start of a compaction
 /// is not: the `PreCompact` hook reports it.
+///
+/// Copilot writes `events.jsonl` only at the first prompt. While a
+/// compaction runs and the session dir has no `events.jsonl`, the session
+/// has no prompt, so the source gives the end "Nothing to compact."
+/// ([`terrarium_adapter_copilot::usage::empty_session_compaction_end`]).
 pub struct CopilotSource {
     tail: terrarium_adapter_copilot::usage::TranscriptTail,
     signals: Vec<(Event, Option<DateTime<Utc>>)>,
+    /// A compaction runs ([`UsageSource::compaction_started`]), with its
+    /// trigger.
+    compacting: Option<Option<String>>,
+}
+
+impl CopilotSource {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            tail: terrarium_adapter_copilot::usage::TranscriptTail::new(path),
+            signals: Vec::new(),
+            compacting: None,
+        }
+    }
+
+    /// Give the inferred end when a compaction runs, the session dir
+    /// exists, and the session file does not. A missing session dir can
+    /// be a wrong path, so it gives nothing.
+    fn check_empty_session(&mut self) {
+        let path = self.tail.path();
+        let empty = !path.exists() && path.parent().is_some_and(Path::is_dir);
+        if !empty {
+            return;
+        }
+        if let Some(trigger) = self.compacting.take() {
+            debug!(path = %path.display(), "no Copilot session file: nothing to compact");
+            self.signals.push((
+                terrarium_adapter_copilot::usage::empty_session_compaction_end(trigger),
+                Some(Utc::now()),
+            ));
+        }
+    }
 }
 
 impl UsageSource for CopilotSource {
     fn poll(&mut self) -> Result<Vec<SourceSample>, String> {
         use terrarium_adapter_copilot::usage::UsageRecord as R;
         let records = self.tail.poll().map_err(|e| e.to_string())?;
+        if self.compacting.is_some() {
+            self.check_empty_session();
+        }
         let signals = &mut self.signals;
         Ok(records
             .into_iter()
@@ -509,6 +570,14 @@ impl UsageSource for CopilotSource {
 
     fn take_signals(&mut self) -> Vec<(Event, Option<DateTime<Utc>>)> {
         std::mem::take(&mut self.signals)
+    }
+
+    fn compaction_started(&mut self, trigger: Option<String>) {
+        self.compacting = Some(trigger);
+    }
+
+    fn compaction_ended(&mut self) {
+        self.compacting = None;
     }
 }
 
@@ -570,12 +639,7 @@ pub fn default_sources() -> Vec<Arc<dyn UsageSourceFactory>> {
         }),
         Arc::new(TailFactory {
             harness: HarnessId::Copilot,
-            make: |p| {
-                Box::new(CopilotSource {
-                    tail: terrarium_adapter_copilot::usage::TranscriptTail::new(p),
-                    signals: Vec::new(),
-                })
-            },
+            make: |p| Box::new(CopilotSource::new(p)),
         }),
         Arc::new(TailFactory {
             harness: HarnessId::Pi,
@@ -609,7 +673,37 @@ pub struct Collector {
     /// The current card of each agent, as [`ustore::current_card`] gave
     /// it. `card` events invalidate it.
     cards: HashMap<String, Option<String>>,
+    /// The last compaction of each agent, from the `compact_started`
+    /// event. It stays when the source opens again (a new
+    /// `session_started`), and goes at the exit.
+    compactions: HashMap<String, Compaction>,
 }
+
+/// A compaction that the hub reported (`compact_started`).
+struct Compaction {
+    /// The ends in the session file from this time on belong to it. Some
+    /// time before the event: the harness writes its start line before
+    /// the hook that reports it.
+    since: DateTime<Utc>,
+    trigger: Option<String>,
+    /// The end came: the collector gave it, or the hub reported it
+    /// (`compact_finished`, `agent.compacted`). A later end line of the
+    /// same compaction is dropped, so the supervisor gets one end only.
+    done: bool,
+}
+
+/// How much earlier than its `compact_started` event a compaction can
+/// start in the session file.
+const COMPACTION_SLACK: chrono::Duration = chrono::Duration::seconds(5);
+
+/// How often the collector reads the session file of an agent whose
+/// compaction waits for its end. The usual poll is every
+/// [`UsageConfig::poll_interval`].
+pub const COMPACTION_POLL: Duration = Duration::from_secs(2);
+
+/// A compaction that has no end after this time is not polled faster any
+/// more. The supervisor ends it after 5 minutes.
+const COMPACTION_POLL_LIMIT: chrono::Duration = chrono::Duration::minutes(10);
 
 fn time_str(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -622,6 +716,7 @@ impl Collector {
             sources,
             agents: HashMap::new(),
             cards: HashMap::new(),
+            compactions: HashMap::new(),
         }
     }
 
@@ -690,14 +785,55 @@ impl Collector {
                 }
             }
             "turn_end" => self.poll(&agent, false).await,
-            "session_ended" | "exit" => self.close(&agent).await,
+            "compact_started" => self.compaction_started(&agent, e).await,
+            "compact_finished" | "agent.compacted" => self.compaction_ended(&agent),
+            "session_ended" | "exit" => {
+                self.compactions.remove(&agent);
+                self.close(&agent).await;
+            }
             "status" => {
                 let s = e.data.get("status").and_then(Value::as_str);
                 if matches!(s, Some("stopped" | "error")) {
+                    self.compactions.remove(&agent);
                     self.close(&agent).await;
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A compaction of `agent` started: tell its source, and read the
+    /// session file now.
+    async fn compaction_started(&mut self, agent: &str, e: &StoredEvent) {
+        let at = DateTime::parse_from_rfc3339(&e.at)
+            .map(|t| t.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        let trigger = e
+            .data
+            .get("trigger")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        self.compactions.insert(
+            agent.to_owned(),
+            Compaction {
+                since: at - COMPACTION_SLACK,
+                trigger: trigger.clone(),
+                done: false,
+            },
+        );
+        if let Some(t) = self.agents.get_mut(agent) {
+            t.source.compaction_started(trigger);
+            self.poll(agent, false).await;
+        }
+    }
+
+    /// The compaction of `agent` ended.
+    fn compaction_ended(&mut self, agent: &str) {
+        if let Some(c) = self.compactions.get_mut(agent) {
+            c.done = true;
+        }
+        if let Some(t) = self.agents.get_mut(agent) {
+            t.source.compaction_ended();
         }
     }
 
@@ -775,7 +911,7 @@ impl Collector {
         let Some(source) = factory.open(&info, &home) else {
             return;
         };
-        let source: Box<dyn UsageSource> = match guard {
+        let mut source: Box<dyn UsageSource> = match guard {
             Some((path, roots)) => Box::new(Guarded {
                 path,
                 harness: info.harness,
@@ -785,6 +921,9 @@ impl Collector {
             }),
             None => source,
         };
+        if let Some(c) = self.compactions.get(agent).filter(|c| !c.done) {
+            source.compaction_started(c.trigger.clone());
+        }
         let key = agent.to_owned();
         let turn_seq = self
             .state
@@ -842,6 +981,21 @@ impl Collector {
         }
     }
 
+    /// Read the session files of the agents whose compaction waits for its
+    /// end ([`COMPACTION_POLL`]).
+    pub async fn poll_compacting(&mut self) {
+        let old = Utc::now() - COMPACTION_POLL_LIMIT;
+        let keys: Vec<String> = self
+            .compactions
+            .iter()
+            .filter(|(k, c)| !c.done && c.since > old && self.agents.contains_key(*k))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in keys {
+            self.poll(&k, false).await;
+        }
+    }
+
     /// Read one agent's new usage and store it. `flush` emits the pending
     /// `usage.sample` event now.
     async fn poll(&mut self, agent: &str, flush: bool) {
@@ -857,10 +1011,26 @@ impl Collector {
             }
         };
         let signals = t.source.take_signals();
+        let mut ended = false;
         if let Ok(id) = agent.parse::<terrarium_core::AgentId>() {
             for (event, at) in signals {
+                let current = self
+                    .compactions
+                    .get_mut(agent)
+                    .filter(|c| at.is_none_or(|a| a >= c.since));
+                if let (Event::CompactFinished { .. }, Some(c)) = (&event, current) {
+                    if c.done {
+                        debug!(agent, "usage: the compaction has its end already");
+                        continue;
+                    }
+                    c.done = true;
+                    ended = true;
+                }
                 self.state.supervisor.session_signal(id, event, at);
             }
+        }
+        if ended {
+            t.source.compaction_ended();
         }
         let card = if samples.is_empty() {
             None
@@ -999,6 +1169,8 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
         info!("usage collector started");
         let mut tick = tokio::time::interval(interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut fast = tokio::time::interval(COMPACTION_POLL.min(interval));
+        fast.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 ev = rx.recv() => match ev {
@@ -1011,6 +1183,7 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                     Err(RecvError::Closed) => return,
                 },
                 _ = tick.tick() => c.poll_all().await,
+                _ = fast.tick() => c.poll_compacting().await,
             }
         }
     })

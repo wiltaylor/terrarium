@@ -134,6 +134,27 @@ pub fn compaction_event(kind: &str, data: &Value) -> Option<terrarium_core::Even
     }
 }
 
+/// The reason of a compaction that had nothing to compact, as Copilot CLI
+/// writes it (`session.compaction_complete` `error`).
+pub const NOTHING_TO_COMPACT: &str = "Nothing to compact.";
+
+/// The end of a compaction in a session that has no `events.jsonl` yet.
+///
+/// Copilot CLI keeps the events of a new session in memory and writes
+/// `events.jsonl` only at the first prompt (live 2026-10-31, 1.0.105: the
+/// birth time of the file is the first prompt, 5 minutes after the
+/// `preCompact` hook). A session with no prompt has nothing to compact,
+/// and Copilot ends the compaction with "Nothing to compact.". The line
+/// that says so comes into the file only with the first prompt, so the
+/// daemon gives this end in its place (docs/compat.md, "Compaction").
+pub fn empty_session_compaction_end(trigger: Option<String>) -> terrarium_core::Event {
+    terrarium_core::Event::CompactFinished {
+        ok: false,
+        trigger,
+        message: Some(NOTHING_TO_COMPACT.into()),
+    }
+}
+
 fn u(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
@@ -519,6 +540,13 @@ mod tests {
                     "2026-10-31T05:09:25.161+00:00".to_owned()
                 ),
             ]
+        );
+        // The end that the daemon gives when the file is not written yet
+        // is the end of the captured line.
+        assert_eq!(
+            got[1].0,
+            empty_session_compaction_end(manual()),
+            "the inferred end"
         );
     }
 

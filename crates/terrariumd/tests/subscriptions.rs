@@ -1016,6 +1016,126 @@ async fn collector_forwards_copilot_compaction_ends() {
     assert_eq!(td.sup.session_signals(agent), [failed, done]);
 }
 
+/// `line` (a JSON line) with `timestamp` set to `at`.
+fn stamped(line: &str, at: chrono::DateTime<chrono::Utc>) -> String {
+    let mut v: Value = serde_json::from_str(line).unwrap();
+    v["timestamp"] = json!(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    v.to_string()
+}
+
+/// A `/compact` before the first prompt, as live on 2026-10-31 (Copilot
+/// 1.0.105): the `preCompact` hook reports the session (no `source`) and
+/// the start, but Copilot writes `events.jsonl` only at the first prompt.
+/// The collector gives the end "Nothing to compact." at once. When the
+/// file comes, its end line of that compaction is not given again, and a
+/// new `session_started` counts no usage twice.
+#[tokio::test]
+async fn collector_ends_a_copilot_compaction_before_the_first_prompt() {
+    use terrarium_core::Event;
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.project("p").await;
+    let a = td.agent("p", "cop", json!({"harness": "copilot"})).await;
+    let id = a["id"].as_str().unwrap().to_owned();
+    let agent: AgentId = id.parse().unwrap();
+    let sid = "00000000-0000-4000-8000-000000000106";
+    let file = terrarium_runner::harness_dir(&td.state, agent)
+        .join(format!("copilot/session-state/{sid}/events.jsonl"));
+    // Copilot makes the session dir at the start, and no file.
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let reported = format!("/home/agent/.copilot/session-state/{sid}/events.jsonl");
+    let compact_started = chrono::Utc::now();
+    emit(
+        td,
+        &a,
+        "session_started",
+        json!({"harness_session": sid, "transcript_path": reported}),
+    )
+    .await;
+    emit(td, &a, "compact_started", json!({"trigger": "manual"})).await;
+    let failed = Event::CompactFinished {
+        ok: false,
+        trigger: Some("manual".into()),
+        message: Some("Nothing to compact.".into()),
+    };
+    wait_for("the inferred end", || async {
+        td.sup.session_signals(agent) == [failed.clone()]
+    })
+    .await;
+
+    // The first prompt: Copilot writes the file with the compaction lines
+    // and a model call, and `sessionStart` reports the session again.
+    let read = |name: &str| {
+        std::fs::read_to_string(format!(
+            "{}/../adapters/copilot/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let compaction = read("compaction-1.0.105.jsonl");
+    let events = read("events.jsonl");
+    let usage = events
+        .lines()
+        .find(|l| l.contains("\"session.usage_record\""))
+        .unwrap();
+    let mut lines: Vec<String> = compaction
+        .lines()
+        .take(2)
+        .map(|l| stamped(l, compact_started))
+        .collect();
+    lines.push(stamped(usage, chrono::Utc::now()));
+    std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+    emit(
+        td,
+        &a,
+        "session_started",
+        json!({"harness_session": sid, "transcript_path": reported, "source": "new"}),
+    )
+    .await;
+    emit(td, &a, "turn_end", json!({})).await;
+    let messages = || async {
+        let r = td.get(&format!("/api/usage?agent={id}&bucket=day")).await;
+        r.body
+            .as_array()
+            .and_then(|a| a.first())
+            .map(|b| b["messages"].clone())
+    };
+    wait_for("the sample", || async {
+        messages().await == Some(json!(1))
+    })
+    .await;
+    // A resume reads the file from the top again.
+    emit(
+        td,
+        &a,
+        "session_started",
+        json!({"harness_session": sid, "transcript_path": reported, "source": "resume"}),
+    )
+    .await;
+    emit(td, &a, "turn_end", json!({})).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(messages().await, Some(json!(1)));
+    assert_eq!(td.sup.session_signals(agent), std::slice::from_ref(&failed));
+
+    // A compaction after the turn: the end line comes after the start,
+    // and the faster poll reads it.
+    emit(td, &a, "compact_started", json!({"trigger": "manual"})).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let done = compaction.lines().nth(3).unwrap();
+    lines.push(stamped(done, chrono::Utc::now()));
+    std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+    let ok = Event::CompactFinished {
+        ok: true,
+        trigger: Some("manual".into()),
+        message: None,
+    };
+    wait_for("the second end", || async {
+        td.sup.session_signals(agent).len() == 2
+    })
+    .await;
+    assert_eq!(td.sup.session_signals(agent), [failed, ok]);
+}
+
 #[tokio::test]
 async fn budgets_hold_a_project() {
     let env = boot(
