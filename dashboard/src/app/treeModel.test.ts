@@ -306,18 +306,19 @@ describe("the Agents node of a project", () => {
       rootKey: "root",
       rootOpen: true,
       projects: ["alpha", "beta"],
-      items: ["agents", "board"],
+      items: ["board", "schedules", "agents"],
       isOpen: (n) => open.has(n),
       agentsOf: (p) => (p === "alpha" ? ["a1", "a2"] : ["b1"]),
     });
-    // beta is closed, so its open Agents node shows nothing.
+    // The Agents node is last, so its agents come before the next project. beta is closed, so its open Agents node shows nothing.
     expect(keys).toEqual([
       "root",
       projectKey("alpha"),
+      itemKey("alpha", "board"),
+      itemKey("alpha", "schedules"),
       itemKey("alpha", "agents"),
       projectAgentKey("a1"),
       projectAgentKey("a2"),
-      itemKey("alpha", "board"),
       projectKey("beta"),
     ]);
     expect(projectTreeKeys({ rootKey: "root", rootOpen: false, projects: ["alpha"], items: ["agents"], isOpen: () => true, agentsOf: () => ["a1"] })).toEqual(["root"]);

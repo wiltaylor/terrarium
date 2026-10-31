@@ -213,7 +213,7 @@ section at the bottom. The project tree
 (`app/ProjectTree.tsx`) has a Projects root. A click on its name opens the
 project cards (`/projects`) and opens the root; the chevron only opens or
 closes it. Under the root, each project opens to show its pages. The Agents
-page of a project is a node too. A click on its name opens the agent list of
+page of a project is a node too, and it is the last row of the project. A click on its name opens the agent list of
 the project (`/p/:project/agents`) and opens the node; the chevron only opens
 or closes it. The node is closed by default. The agent list of the project
 opens it. Open, it shows the agents of that project, sorted by name
@@ -242,7 +242,7 @@ project, under `/p/<project>/logs`. The project settings screen is the
 same: it has a tab for each of General, Secrets, and Templates of
 the project, under `/p/<project>/settings`. The screens use
 `components/TabScreen.tsx`. The Logs item is active on each of its tabs.
-The project items are Agents, Board, Repos, Logs, Knowledge, and Schedules.
+The project items are Board, Repos, Logs, Knowledge, Schedules, and Agents.
 The **Board** item (`features/board/BoardScreen.tsx`) has a tab for each of
 Cards, Versions, and Artifacts (`BOARD_TABS`). The Cards tab is the board
 at `/p/<project>/board`, so a `?card=` link keeps its path. The other tabs

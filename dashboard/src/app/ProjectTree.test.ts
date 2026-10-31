@@ -73,4 +73,11 @@ describe("ProjectTree", () => {
     expect(rows).toContain("Board");
     for (const gone of ["Templates", "Secrets", "Settings & repos"]) expect(rows).not.toContain(gone);
   });
+
+  it("shows the pages of an open project in order, with the Agents node last", () => {
+    const el = mount("/p/alpha/board");
+    const group = el.querySelector<HTMLElement>('[data-project="alpha"] > [role="group"]')!;
+    const keys = Array.from(group.querySelectorAll<HTMLElement>('[role="treeitem"][data-key^="i:"]')).map((r) => r.dataset.key);
+    expect(keys).toEqual(["board", "repos", "logs", "knowledge", "schedules", "agents"].map((p) => `i:alpha/${p}`));
+  });
 });

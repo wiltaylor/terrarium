@@ -36,8 +36,8 @@ describe("navigation", () => {
     expect(block).not.toMatch(/AuditPage/);
   });
 
-  it("has Agents first under the project, with a route to the Agents page", () => {
-    expect(PROJECT_ITEMS[0]).toEqual({ path: "agents", label: "Agents" });
+  it("has Agents last under the project, with a route to the Agents page", () => {
+    expect(PROJECT_ITEMS.at(-1)).toEqual({ path: "agents", label: "Agents" });
     expect(app).toMatch(/path="\/p\/:project\/agents" component=\{AgentsPage\}/);
   });
 
@@ -59,7 +59,7 @@ describe("navigation", () => {
   it("has no Templates, Secrets, or Settings item under the project: they are tabs of the project settings screen, each with a route", () => {
     const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
     for (const gone of ["templates", "secrets", "settings"]) expect(paths).not.toContain(gone);
-    expect(paths).toEqual(["agents", "board", "repos", "logs", "knowledge", "schedules"]);
+    expect(paths).toEqual(["board", "repos", "logs", "knowledge", "schedules", "agents"]);
     expect(PROJECT_SETTINGS_TABS).toEqual([
       { path: "general", label: "General" },
       { path: "secrets", label: "Secrets" },

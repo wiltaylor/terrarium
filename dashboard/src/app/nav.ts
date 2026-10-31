@@ -1,8 +1,6 @@
 // The sidebar items and the routes that moved. Pure, so tests can read them.
 
 export const PROJECT_ITEMS = [
-  // Every agent of the project, in any status.
-  { path: "agents", label: "Agents" },
   { path: "board", label: "Board" },
   // The repos of the project (PLAN §9a): add one, then browse its trees (main and each agent checkout).
   { path: "repos", label: "Repos" },
@@ -11,6 +9,8 @@ export const PROJECT_ITEMS = [
   // The wiki and the memory of the project (KNOWLEDGE_TABS).
   { path: "knowledge", label: "Knowledge" },
   { path: "schedules", label: "Schedules" },
+  // Every agent of the project, in any status. Last, so the agent rows of the open node do not push the pages down.
+  { path: "agents", label: "Agents" },
 ] as const;
 
 /**
