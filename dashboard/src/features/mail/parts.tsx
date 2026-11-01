@@ -2,6 +2,7 @@
 // are the sender's words: they go into the page as text nodes only.
 
 import { createSignal, For, Show } from "solid-js";
+import { SessionLink } from "../../components/SessionLink";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Message } from "../../api/types";
 import { ago } from "../../lib/format";
@@ -42,8 +43,11 @@ export function MessageView(props: { message: Message }) {
   return (
     <div class="message">
       <div class="spread small">
-        <span>
-          <strong title={props.message.from}>{props.message.from_name}</strong> → <span title={props.message.to}>{props.message.to_name}</span>
+        <span class="log-who">
+          <span>
+            <strong title={props.message.from}>{props.message.from_name}</strong> → <span title={props.message.to}>{props.message.to_name}</span>
+          </span>
+          <SessionLink row={props.message} />
         </span>
         <span class="muted" title={props.message.created_at}>
           {ago(props.message.created_at)}

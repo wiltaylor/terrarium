@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::ApiResult;
+use crate::store::session_refs::{self, LinkKey, SessionField};
 use crate::store::{Page, Paged};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -21,6 +22,10 @@ pub struct AuditEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     pub detail: Value,
+    /// `session_id` and `session_label`: the session of an agent actor at
+    /// `at`, when the reader may read it.
+    #[serde(flatten)]
+    pub link: SessionField,
 }
 
 fn row(r: &Row<'_>) -> rusqlite::Result<AuditEntry> {
@@ -34,6 +39,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<AuditEntry> {
         target: r.get("target")?,
         project: r.get("project")?,
         detail: serde_json::from_str(&detail).unwrap_or(Value::String(detail)),
+        link: SessionField::default(),
     })
 }
 
@@ -99,6 +105,27 @@ pub fn list(conn: &Connection, f: &AuditFilter, page: &Page) -> ApiResult<Paged<
         )?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Paged::from_rows(rows, limit, |e| e.seq.to_string()))
+}
+
+/// Find the session of each row of a page whose actor is an agent: the
+/// agent's session at the row's time (`store::session_refs::links`).
+pub fn attach_links(conn: &Connection, rows: &mut [AuditEntry]) -> ApiResult<()> {
+    let keys: Vec<LinkKey<'_>> = rows
+        .iter()
+        .map(|e| LinkKey {
+            session: None,
+            agent: e
+                .actor
+                .strip_prefix("agent:")
+                .and_then(session_refs::agent_of),
+            at: &e.at,
+        })
+        .collect();
+    let links = session_refs::links(conn, &keys)?;
+    for (e, l) in rows.iter_mut().zip(links) {
+        e.link = SessionField::of(l);
+    }
+    Ok(())
 }
 
 /// One row by its ID.

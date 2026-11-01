@@ -566,6 +566,14 @@ pub fn create_from(
         def.subscription.as_deref(),
         &def.subscription_pool,
     )?;
+    // A new agent never takes a disabled subscription (PLAN §16).
+    if let Some(n) = def.subscription.as_deref()
+        && let Some(why) = crate::store::subscriptions::find(t, n)?
+            .as_ref()
+            .and_then(crate::store::subscriptions::disabled_refusal)
+    {
+        return Err(ApiError::invalid(why));
+    }
     let exists: i64 = t.query_row(
         "SELECT count(*) FROM agents WHERE project = ?1 AND name = ?2",
         params![def.project, def.name],
@@ -849,9 +857,8 @@ pub fn check_plan_logins(
     current: Option<&str>,
     pool: &[String],
 ) -> ApiResult<()> {
-    if harness != HarnessId::Pi {
-        return Ok(());
-    }
+    // pi takes no plan login; a self-hosted server takes only the
+    // harnesses of its API style (`plan_refusal` says both).
     for name in current.into_iter().chain(pool.iter().map(String::as_str)) {
         if let Some(why) = crate::store::subscriptions::find(conn, name)?
             .and_then(|s| crate::store::subscriptions::plan_refusal(harness, &s))

@@ -9,7 +9,7 @@ import { HARNESSES, type Harness, type LoginSession } from "../../api/types";
 import { Terminal } from "../../components/Terminal";
 import { isLocalOnly } from "../../components/UsageTile";
 import { CopyButton, ErrorBanner, Modal, useNow } from "../../components/ui";
-import { humanize } from "../../lib/format";
+import { humanize, orderWindows, subscriptionTitle, windowLabel } from "../../lib/format";
 import { api, subscriptions } from "../../stores";
 import {
   apiKeyBody,
@@ -18,6 +18,7 @@ import {
   initialWizard,
   isDeviceFlow,
   isLoginPath,
+  isSelfHosted,
   KEY_HELP,
   KEY_PLANS,
   KEY_PROVIDERS,
@@ -27,6 +28,13 @@ import {
   takesPlan,
   teardownLeft,
   wizardReduce,
+  emptySelfHostedForm,
+  parseModels,
+  selfHostedBody,
+  STYLE_HARNESSES,
+  STYLES,
+  styleHarnesses,
+  type SelfHostedForm,
   type WizardAction,
   type WizardLogin,
   type WizardPath,
@@ -38,7 +46,8 @@ export const PATHS: { path: WizardPath; title: string; detail: string }[] = [
   { path: "claude", title: "Claude Code", detail: "Anthropic plan. Runs claude auth login; paste the code back." },
   { path: "codex", title: "Codex", detail: "ChatGPT plan. Device code with codex login --device-auth." },
   { path: "copilot", title: "Copilot", detail: "GitHub plan. Device code with copilot login --device-code." },
-  { path: "api_key", title: "API key", detail: "Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, Z.ai (GLM), an OpenAI-compatible endpoint, or a GitHub PAT. pi uses API keys only." },
+  { path: "api_key", title: "API key", detail: "Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, Z.ai (GLM), Moonshot, or a GitHub PAT. pi uses API keys only." },
+  { path: "selfhosted", title: "Self-hosted model", detail: "Your own model server (vLLM, Ollama, llama.cpp, SGLang): OpenAI or Anthropic API style, the models, and the limits." },
   { path: "define", title: "Define only", detail: "Write the definition now; log in or add a key later." },
 ];
 
@@ -143,6 +152,9 @@ export function AddSubscriptionWizard(props: { path?: WizardPath; setup?: Wizard
             <Switch>
               <Match when={s().path === "api_key"}>
                 <ApiKeyForm setup={s().setup} onBack={() => send({ type: "back" })} onSaved={(name) => send({ type: "saved", subscription: name })} />
+              </Match>
+              <Match when={s().path === "selfhosted"}>
+                <SelfHostedSetup onBack={() => send({ type: "back" })} onSaved={(name) => send({ type: "saved", subscription: name })} />
               </Match>
               <Match when={s().path === "define"}>
                 <DefineForm onBack={() => send({ type: "back" })} onSaved={(name) => send({ type: "saved", subscription: name })} />
@@ -400,10 +412,10 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
           {KEY_HELP[provider()]}
         </p>
       </Show>
-      <Show when={provider() === "openai-compatible"}>
+      <Show when={isSelfHosted(provider()) && !fixedName}>
         <label>
-          Base URL
-          <input type="url" value={baseUrl()} onInput={(e) => setBaseUrl(e.currentTarget.value)} placeholder="https://llm.example.com/v1" required />
+          Base URL (a new subscription: an OpenAI-style server)
+          <input type="url" value={baseUrl()} onInput={(e) => setBaseUrl(e.currentTarget.value)} placeholder="http://gpu.lan:8000/v1" />
         </label>
       </Show>
       <label>
@@ -520,6 +532,10 @@ function DoneStep(props: { name: string; onClose: () => void }) {
       <Show when={sub()}>
         {(s) => (
           <dl class="kv">
+            <dt>Name</dt>
+            <dd>
+              {subscriptionTitle(s())} <span class="muted small mono">{s().name}</span>
+            </dd>
             <dt>Provider</dt>
             <dd>{s().provider}</dd>
             <dt>Plan</dt>
@@ -537,7 +553,7 @@ function DoneStep(props: { name: string; onClose: () => void }) {
             <dd>
               <Show when={!isLocalOnly(s())} fallback={<span class="muted">Local estimate only: the tile shows local accounting.</span>}>
                 <Show when={s().windows.length} fallback={<span class="muted">no samples</span>}>
-                  {s().windows.map((w) => `${w.window} ${Math.round(w.used_pct)}%`).join(", ")}
+                  {orderWindows(s().windows).map((w) => `${windowLabel(w.window)} ${Math.round(w.used_pct)}%`).join(", ")}
                 </Show>
               </Show>
             </dd>
@@ -550,5 +566,159 @@ function DoneStep(props: { name: string; onClose: () => void }) {
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * The Self-hosted model path: the API style, the server, an optional key,
+ * the models (fetched from the server or typed), and the limits. It makes
+ * the subscription (`POST /api/subscriptions`), then stores the key when
+ * the form has one (`POST .../api-key`).
+ */
+function SelfHostedSetup(props: { onBack: () => void; onSaved: (name: string) => void }) {
+  const [f, setF] = createSignal<SelfHostedForm>(emptySelfHostedForm());
+  const [error, setError] = createSignal<unknown>(null);
+  const [fetchNote, setFetchNote] = createSignal<string | null>(null);
+  const [fetched, setFetched] = createSignal<string[]>([]);
+  const [busy, setBusy] = createSignal(false);
+  const set = (p: Partial<SelfHostedForm>) => setF((x) => ({ ...x, ...p }));
+  const style = () => STYLES.find((x) => x.id === f().api)!;
+  const models = () => parseModels(f().models);
+
+  const fetchModels = async () => {
+    setBusy(true);
+    setFetchNote(null);
+    try {
+      const r = await api.subscriptions.fetchModels({ api: f().api, base_url: f().baseUrl.trim(), ...(f().key.trim() ? { key: f().key.trim() } : {}) });
+      const ids = r.models.map((m) => m.id);
+      setFetched(ids);
+      set({ models: ids.join(", "), ...(f().defaultModel || !ids[0] ? {} : { defaultModel: ids[0] }) });
+      setFetchNote(`${ids.length} models from ${r.base_url}${r.cached ? " (cached)" : ""}.`);
+    } catch (e) {
+      setFetched([]);
+      setFetchNote(`Fetch failed: ${e instanceof Error ? e.message : String(e)}. Type the model ids instead.`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submit = async (e: Event) => {
+    e.preventDefault();
+    const b = selfHostedBody(f());
+    if ("error" in b) {
+      setError(new Error(b.error));
+      return;
+    }
+    setBusy(true);
+    try {
+      const s = await api.subscriptions.create(b.def);
+      if (b.key) await api.subscriptions.setApiKey(s.name, { provider: "selfhosted", key: b.key });
+      set({ key: "" });
+      props.onSaved(s.name);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form class="stack" onSubmit={submit} aria-label="Self-hosted model">
+      <div class="spread">
+        <h3 style={{ margin: 0 }}>Self-hosted model</h3>
+        <button type="button" class="small" onClick={() => props.onBack()}>
+          Back
+        </button>
+      </div>
+      <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <fieldset class="row" style={{ "flex-wrap": "wrap", border: "none", padding: 0 }}>
+        <legend class="small">API style</legend>
+        <For each={STYLES}>
+          {(st) => (
+            <label class="row small">
+              <input type="radio" name="selfhosted-api" checked={f().api === st.id} onChange={() => set({ api: st.id, harnesses: [...STYLE_HARNESSES[st.id]] })} />
+              {st.label}
+            </label>
+          )}
+        </For>
+      </fieldset>
+      <div class="grid" style={{ "grid-template-columns": "repeat(auto-fill, minmax(min(100%, 220px), 1fr))" }}>
+        <label>
+          Subscription name
+          <input value={f().name} onInput={(e) => set({ name: e.currentTarget.value })} required placeholder="gpu-lan" autocomplete="off" />
+        </label>
+        <label>
+          Base URL
+          <input type="url" value={f().baseUrl} onInput={(e) => set({ baseUrl: e.currentTarget.value })} required placeholder={style().placeholder} />
+        </label>
+        <label>
+          API key (optional)
+          <input type="password" value={f().key} onInput={(e) => set({ key: e.currentTarget.value })} autocomplete="off" placeholder="many local servers need none" />
+        </label>
+      </div>
+      <p class="muted small" style={{ margin: 0 }}>
+        {style().hint}
+      </p>
+      <div class="row" style={{ "flex-wrap": "wrap", "align-items": "flex-end" }}>
+        <label style={{ flex: 1, "min-width": "min(100%, 260px)" }}>
+          Models (comma or line separated)
+          <textarea rows={2} value={f().models} onInput={(e) => set({ models: e.currentTarget.value })} placeholder="qwen3-coder-30b, glm-5.3-air" />
+        </label>
+        <button type="button" disabled={busy() || !f().baseUrl.trim()} onClick={() => void fetchModels()} title="The daemon sends one GET to the models list of the server, with the key if you typed one">
+          Fetch models
+        </button>
+      </div>
+      <Show when={fetchNote()}>
+        <p class="muted small" style={{ margin: 0 }} role="status">
+          {fetchNote()}
+        </p>
+      </Show>
+      <div class="grid" style={{ "grid-template-columns": "repeat(auto-fill, minmax(min(100%, 180px), 1fr))" }}>
+        <label>
+          Default model
+          <Show when={models().length} fallback={<input value={f().defaultModel} onInput={(e) => set({ defaultModel: e.currentTarget.value })} placeholder="the first model" />}>
+            <select value={f().defaultModel} onChange={(e) => set({ defaultModel: e.currentTarget.value })}>
+              <option value="">the first model</option>
+              <For each={[...new Set([...models(), ...fetched()])]}>{(m) => <option value={m}>{m}</option>}</For>
+            </select>
+          </Show>
+        </label>
+        <label>
+          Context window (tokens)
+          <input inputmode="numeric" value={f().contextWindow} onInput={(e) => set({ contextWindow: e.currentTarget.value })} placeholder="131072 or 128k" />
+        </label>
+        <label>
+          Max output tokens
+          <input inputmode="numeric" value={f().maxOutputTokens} onInput={(e) => set({ maxOutputTokens: e.currentTarget.value })} placeholder="16384" />
+        </label>
+        <label>
+          Concurrent streams
+          <input inputmode="numeric" value={f().maxConcurrent} onInput={(e) => set({ maxConcurrent: e.currentTarget.value })} placeholder="no limit" />
+        </label>
+        <label>
+          Status page (optional)
+          <input type="url" value={f().statusUrl} onInput={(e) => set({ statusUrl: e.currentTarget.value })} placeholder="http://gpu.lan:3001/status" />
+        </label>
+      </div>
+      <fieldset class="row" style={{ "flex-wrap": "wrap", border: "none", padding: 0 }}>
+        <legend class="small">Harnesses that can use it ({f().api} style)</legend>
+        <For each={STYLE_HARNESSES[f().api]}>
+          {(h) => (
+            <label class="row small">
+              <input type="checkbox" checked={f().harnesses.includes(h)} onChange={(e) => set({ harnesses: styleHarnesses(f().api, e.currentTarget.checked ? [...f().harnesses, h] : f().harnesses.filter((y) => y !== h)) })} />
+              {h}
+            </label>
+          )}
+        </For>
+      </fieldset>
+      <p class="muted small" style={{ margin: 0 }}>
+        Concurrent streams is how many agents on this subscription may run a turn at the same time; the work of the others waits. Copilot cannot use a self-hosted server. The key, if any, stays on the daemon.
+      </p>
+      <div>
+        <button class="primary" type="submit" disabled={busy() || !f().name.trim() || !f().baseUrl.trim()}>
+          Add server
+        </button>
+      </div>
+    </form>
   );
 }

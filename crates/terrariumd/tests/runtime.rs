@@ -3146,3 +3146,79 @@ async fn compaction_turn_hooks_are_no_turn_and_a_silent_end_times_out() {
     let a = td.get(&format!("/api/agents/{id}")).await;
     assert_eq!(a["status_reason"], "compaction failed", "{a}");
 }
+
+/// The stream limit of a self-hosted subscription (`stream_limit`): one
+/// stream, two agents. The turn of the second agent waits (status reason
+/// `stream_limit`) until the turn of the first ends, then goes out. A
+/// stop frees the stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selfhosted_stream_limit_queues_the_second_turn() {
+    let td = Td::start().await;
+    // A turn of the fake TUI takes 1.5 s.
+    td.adapter.set_env("FAKE_TUI_DELAY_MS", "1500");
+    td.post(
+        "/api/subscriptions",
+        Some(
+            json!({"name": "gpu", "provider": "selfhosted", "selfhosted": {
+            "api": "anthropic", "base_url": "http://127.0.0.1:9", "models": ["m"],
+            "max_concurrent": 1}}),
+        ),
+    )
+    .await;
+    let bob = td
+        .agent("demo", "bob", json!({"subscription": "gpu"}))
+        .await;
+    let carol = td
+        .agent("demo", "carol", json!({"subscription": "gpu"}))
+        .await;
+    for id in [&bob, &carol] {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+    }
+    for id in [&bob, &carol] {
+        td.wait_status(id, "idle").await;
+    }
+    td.post(
+        &format!("/api/agents/{bob}/send"),
+        Some(json!({"text": "first"})),
+    )
+    .await;
+    td.wait_events(&bob, "turn_start", |e| !e.is_empty()).await;
+    td.post(
+        &format!("/api/agents/{carol}/send"),
+        Some(json!({"text": "second"})),
+    )
+    .await;
+    // Carol waits for the stream.
+    let waiting = td
+        .wait_events(&carol, "status", |e| {
+            e.iter().any(|x| {
+                x["data"]["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.starts_with("stream_limit"))
+            })
+        })
+        .await;
+    assert!(!waiting.is_empty());
+    let sub = td.get("/api/subscriptions/gpu").await;
+    assert_eq!(sub["streams"], json!({"max": 1, "in_use": 1, "waiting": 1}));
+    assert!(td.events(&carol, "turn_start").await.is_empty());
+    // Bob's turn ends: Carol's turn goes out.
+    let starts = td
+        .wait_events(&carol, "turn_start", |e| !e.is_empty())
+        .await;
+    assert_eq!(starts[0]["data"]["prompt"], "[User] second");
+    let bob_end = td.events(&bob, "turn_end").await;
+    assert!(!bob_end.is_empty(), "bob's turn ended first");
+    // A stop frees the stream: a new turn of Bob goes out.
+    td.post(&format!("/api/agents/{carol}/stop"), None).await;
+    td.wait_status(&carol, "stopped").await;
+    td.post(
+        &format!("/api/agents/{bob}/send"),
+        Some(json!({"text": "third"})),
+    )
+    .await;
+    td.wait_events(&bob, "turn_start", |e| e.len() >= 2).await;
+    td.wait_status(&bob, "idle").await;
+    let sub = td.get("/api/subscriptions/gpu").await;
+    assert_eq!(sub["streams"]["waiting"], 0);
+}

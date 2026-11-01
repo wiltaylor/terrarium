@@ -16,6 +16,7 @@ pub mod memory;
 pub mod pointers;
 pub mod projects;
 pub mod questions;
+pub mod records;
 pub mod repos;
 pub mod schedules;
 pub mod session_refs;

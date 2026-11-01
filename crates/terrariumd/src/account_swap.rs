@@ -56,6 +56,9 @@ pub fn check(
     if let Some(why) = subs::plan_refusal(a.harness, to) {
         return Err(ApiError::invalid(why));
     }
+    if let Some(why) = subs::disabled_refusal(to) {
+        return Err(ApiError::invalid(why));
+    }
     if !to.harnesses.contains(&a.harness) {
         return Err(ApiError::invalid(format!(
             "the {} harness cannot spend subscription `{}`",
@@ -192,7 +195,8 @@ pub fn pick(
         );
         let login =
             crate::accounts::has_credential(state_dir, name, a.harness) || s.env_var.is_some();
-        if usable && login && s.harnesses.contains(&a.harness) && !limited(name) {
+        // A disabled subscription takes no agent (PLAN §16).
+        if usable && login && s.enabled && s.harnesses.contains(&a.harness) && !limited(name) {
             return Some(name.clone());
         }
     }
@@ -299,9 +303,17 @@ mod tests {
         let v = view("a", &["a", "b", "c"]);
         assert_eq!(pick(state, &v, &members, |n| n != "a"), None);
         // An expired member is skipped.
-        let mut m2 = members;
+        let mut m2 = members.clone();
         m2[1].login_status = "expired".into();
         assert_eq!(pick(state, &v, &m2, |n| n == "c"), None);
+        // A disabled member is skipped (PLAN §16), and a swap into it is
+        // refused.
+        let mut m3 = members;
+        m3[1].enabled = false;
+        let v = view("a", &["a", "b", "c"]);
+        assert_eq!(pick(state, &v, &m3, |_| false).as_deref(), Some("c"));
+        let e = check(state, &v, Some(&m3[0]), &m3[1]).unwrap_err();
+        assert!(e.message.contains("disabled"), "{}", e.message);
     }
 
     #[test]

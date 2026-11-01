@@ -1495,7 +1495,7 @@ each as best-effort (PLAN §21).
 
 | Probe | Request | Status |
 |---|---|---|
-| `anthropic-oauth-usage` | `GET https://api.anthropic.com/api/oauth/usage`, `Authorization: Bearer <claudeAiOauth.accessToken>`, `anthropic-beta: oauth-2025-04-20` | verified (200) |
+| `anthropic-oauth-usage` | `GET https://api.anthropic.com/api/oauth/usage`, `Authorization: Bearer <claudeAiOauth.accessToken>`, `anthropic-beta: oauth-2025-04-20` | verified (200); the Ultra shape verified 2026-11-01 |
 | `openai-codex-usage` | `GET https://chatgpt.com/backend-api/wham/usage`, `Authorization: Bearer <tokens.access_token>`, `ChatGPT-Account-Id: <tokens.account_id>` (both from `$CODEX_HOME/auth.json`) | verified (200) |
 | `github-copilot-quota` | `GET https://api.github.com/copilot_internal/user`, `Authorization: token <GitHub OAuth token or PAT>` | verified (200) with a `gh` OAuth token |
 | User-Agent | All three answered with `User-Agent: terrarium/0.1.0`. No harness UA is needed. | verified |
@@ -1507,7 +1507,8 @@ each as best-effort (PLAN §21).
 refreshToken, expiresAt, refreshTokenExpiresAt, scopes, subscriptionType,
 subscriptionTypeSource, rateLimitTier}`.
 
-Answer (sanitised; many other keys are `null`):
+Answer of a Max 20x plan, 2026-10-24 (sanitised; many other keys are
+`null`; `tests/fixtures/probes/anthropic_oauth_usage.json`):
 
 ```json
 {"five_hour": {"utilization": 16.0, "resets_at": "2026-10-24T10:59:59.514909+00:00",
@@ -1521,13 +1522,69 @@ Answer (sanitised; many other keys are `null`):
  "spend": {...}, "seven_day_breakdown": {"rows": [{"key": "claude_code", "percent": 100}, ...]}}
 ```
 
+Answer of an Ultra plan (the Max 20x plan before 2026-10-30), verified
+2026-11-01 on two accounts (sanitised;
+`tests/fixtures/probes/anthropic_usage_ultra.json`). The probe status
+stays 200; only the shape changed:
+
+```json
+{"five_hour": null,
+ "seven_day": {"utilization": 5.0, "resets_at": "2026-11-07T02:00:00.937522+00:00", ...},
+ "seven_day_oauth_apps": null, "seven_day_opus": null, "seven_day_sonnet": null,
+ "seven_day_cowork": null, "seven_day_omelette": null, "tangelo": null,
+ "iguana_necktie": {"utilization": 0.0, "resets_at": "...", "limit_dollars": 250, "used_dollars": 0.0, ...},
+ "...": "about 20 more code-named keys, all null",
+ "extra_usage": {"is_enabled": false, "monthly_limit": null, "utilization": null, "decimal_places": null,
+                 "daily": null, "weekly": null, ...},
+ "limits": [{"kind": "weekly_all", "group": "weekly", "percent": 5, "severity": "normal",
+             "resets_at": "...", "scope": null, "is_active": true},
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 0,
+             "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}, ...}],
+ "spend": {...}, "seven_day_breakdown": {...},
+ "weekly_scoped_shares": [{"limit_index": 1, "used_percent_of_weekly": 0, "allowance_percent_of_weekly": 50}]}
+```
+
 - `utilization` is a percent (0 to 100). The probe reads `five_hour` (`5h`),
   `seven_day` (`7d`), and, when not `null`, `seven_day_opus`,
-  `seven_day_sonnet`, `seven_day_oauth_apps`.
-- The answer has code-named objects with dollar limits (for example a
-  promotional credit). The probe ignores them.
-- `limits[]` repeats the windows as integer percents, and adds per-model
-  weekly limits. The probe does not read it yet.
+  `seven_day_sonnet`, `seven_day_oauth_apps`, `seven_day_cowork`.
+- Then `limits[]`, for each limit that no object above gave: `session`
+  is `5h`, `weekly_all` is `7d`, and `weekly_scoped` is `7d_<model>` from
+  `scope.model.display_name` (the Fable weekly limit is `7d_fable`). A
+  `limits` entry of another kind is not a window. `percent` is an integer.
+- An Ultra plan has no `five_hour` (`null`) and no `session` limit: Ultra
+  has no 5-hour limit for a verified account. Its windows are `7d` and
+  `7d_fable`. The probe removes the stored `5h` window of the
+  subscription at the next good probe (docs/api.md §16.2, "Windows that
+  go").
+- `extra_usage` is a window (`extra`) only when `is_enabled` is `true` and
+  `utilization` is a number.
+- The code-named objects (`iguana_necktie` with a $250 limit on one
+  account, and many `null` keys) have no documented meaning. The probe
+  ignores them.
+- The login of 2026-11-01 still says `subscriptionType: "max"` and
+  `rateLimitTier: "default_claude_max_20x"` in `.credentials.json`, and
+  `claude auth status` (2.1.316) prints `"subscriptionType": "max"`
+  (`crates/adapters/claude/tests/fixtures/auth/`). No new tier word is
+  known yet. The daemon shows such a plan as `Ultra`; a tier word that
+  has `ultra` is `Ultra` too.
+
+### Display names
+
+The `display_name` of a subscription (docs/api.md §16.1) is the vendor's
+own name, from `terrarium_core::providers::display_name`. Sources, read
+2026-11-01:
+
+| Provider | Name | Source |
+|---|---|---|
+| `anthropic` | `Claude Free`, `Claude Pro`, `Claude Max`, `Claude Ultra`; `Claude API` for an API key | https://claude.com/pricing; https://support.claude.com/en/articles/17728952-what-is-the-ultra-plan ("The Max 20x plan is now called the Ultra plan"). A stored `Max 20x` or the tier `default_claude_max_20x` shows as Ultra; `Max 5x` or `default_claude_max_5x` as Max (the $100 plan, "5x Pro usage"). |
+| `openai` | `ChatGPT Free`, `Go`, `Plus`, `Pro`, `Business`, `Edu`, `Enterprise`; `OpenAI API` for an API key | https://learn.chatgpt.com/docs/pricing ("ChatGPT Free, Go, Plus, Pro, Business, Edu, or Enterprise plan"). The plan claim `team` shows as Business. |
+| `github` | `GitHub Copilot`, with `Free`, `Pro`, `Pro+`, `Max`, `Business`, or `Enterprise` when the stored plan names it | https://github.com/features/copilot/plans. The quota answer does not name the plan (`copilot_plan: "individual"`). |
+| `zai` | `GLM Coding Plan`, with `Lite`, `Pro`, or `Max` from the `level` of the quota answer; `Z.ai` for an `api` key | https://docs.z.ai/devpack/overview. |
+| `moonshot` | `Kimi Code` (`coding`, `coding-cn`); `Kimi API Platform` (`api`, `api-cn`) | https://www.kimi.com/code; https://platform.kimi.ai/ (page title). No plan tier is detected. |
+| `openrouter` | `OpenRouter` | https://openrouter.ai/pricing. |
+| `selfhosted` | `Self-hosted <host of base_url>` | Not a vendor. |
+
+The operator can set another name (`PUT /api/subscriptions/{name}/label`).
 
 ### OpenAI Codex
 
@@ -1976,6 +2033,39 @@ takes these ids, so the daemon does not change them.
 The token is not in an error note: the daemon replaces each token and the
 account id with `<redacted>`. An expired Claude token (`expiresAt`) fails
 before the request, as for the probe. The daemon never refreshes a token.
+
+### Self-hosted model servers
+
+Read on 2026-11-01 from the installed harness versions in `tools/` (no
+model turn; no local server was up). The code is
+`crates/terrarium-core/src/selfhosted.rs`; the API is docs/api.md §16.5.
+**Verified offline** means: read in the installed package or binary.
+Nothing here ran a turn against a self-hosted server.
+
+| Harness | API style | Evidence | Status |
+|---|---|---|---|
+| pi 1.4.0 | OpenAI | `models.json` takes a custom provider with `baseUrl`, `api` `openai-completions`, `apiKey` (`"$NAME"` reads an env var), and models with `contextWindow` (default 128000) and `maxTokens` (default 16384) (`docs/models-configuration.md`; `docs/models.md`, "Configure a compatible endpoint", has an Ollama example on `http://localhost:11434/v1`). A provider needs a resolvable key to list its models, so the daemon sets the placeholder `terrarium-no-key` when no key is stored. | verified offline |
+| pi 1.4.0 | Anthropic | The same file takes `api` `anthropic-messages`. pi passes `baseUrl` to the Anthropic SDK as `baseURL` (`pi-ai/dist/api/anthropic-messages.js`); the built-in `anthropic` provider has `https://api.anthropic.com` (no `/v1`), so the base URL is the root without `/v1`. The key goes in `x-api-key` (`authHeader` is false by default). | verified offline |
+| Claude Code 2.1.316 | Anthropic | `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`, as for Z.ai (§ "Z.ai (GLM)"). The binary reads `ANTHROPIC_DEFAULT_OPUS_MODEL`, `..._SONNET_MODEL`, `..._HAIKU_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (strings of `claude.exe`: "resolveAutoCompactWindow output clamped to the model window, honoring /autocompact, CLAUDE_CODE_AUTO_COMPACT_WINDOW", and "To enforce it, set CLAUDE_CODE_AUTO_COMPACT_WINDOW="). The compact window can only make the window smaller, so it is the context window setting. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` applies only with `DISABLE_COMPACT`, so Terrarium does not set it. | verified offline |
+| Claude Code | OpenAI | No: Claude Code speaks the Anthropic Messages API only. | refused (422) |
+| Codex 0.166.0 | OpenAI | A custom `model_providers.<id>` with `name`, `base_url`, `env_key`, and `wire_api`, picked with `model_provider` (strings of the `codex` binary). `wire_api = "chat"` "is no longer supported"; the fix that Codex prints is `wire_api = "responses"`. So the server must serve the Responses API (`/v1/responses`). `model_context_window` is a config key; `model_max_output_tokens` is not in the binary, so no output limit goes to Codex. The values go in `-c` flags (no file changes); `env_key` names `TERRARIUM_SELFHOSTED_API_KEY`. | verified offline |
+| Codex | Anthropic | No: Codex has no Anthropic wire API. | refused (422) |
+| Copilot CLI 1.0.105 | either | Copilot CLI has no setting for a custom model endpoint that Terrarium knows. | refused (422) |
+
+Servers: vLLM serves `/v1/chat/completions`, `/v1/responses`, and
+`/v1/models`, and newer versions an Anthropic `/v1/messages`. Ollama
+serves `/v1/chat/completions` and `/v1/models`; llama.cpp's
+`llama-server` serves `/v1/chat/completions` and `/v1/models`. Whether a
+given version also serves `/v1/responses` (for Codex) or `/v1/messages`
+(for Claude Code) is a fact of that server version: check it before you
+give the subscription to those harnesses. These server facts are from
+the servers' docs, not verified here.
+
+The operator's LAN providers from the pi spike (§ "pi 0.85.1", "Auth and
+token reuse": `glm53-exl3`, `vllm`, `qwen38-helios`) are the obvious
+first live check: one OpenAI-style subscription per server, a pi agent
+with one short turn, and `terrarium admin subscription fetch-models
+--subscription <name>`.
 
 ## vmlab workspace attach
 

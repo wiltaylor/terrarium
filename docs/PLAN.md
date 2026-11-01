@@ -535,13 +535,36 @@ Verified in Phase 0 (Claude Code 2.1.310, `docs/compat.md`):
 
 A persona is a prompt file that replaces the harness's default system
 prompt. The Terrarium protocol template comes after it, as after a
-`system_prompt`. The agent field `persona` selects the file:
+`system_prompt`. The persona files are the **system prompt library**: the
+dir `system-prompts/` of the config repo (§8.3), one `<name>.md` for each
+entry. The packaged defaults put `leader.md` and `worker.md` there. The
+agent field `persona` selects an entry:
 
 | `persona` | The base system prompt |
 |---|---|
-| Unset (default) | By role: `<prompts>/leader.md` for an agent with `project_admin` or `sysadmin`, else `<prompts>/worker.md`. A missing file is no persona. |
-| `leader`, `worker`, or another file name | `<prompts>/<name>.md`. A missing file stops the start with an error. |
+| Unset (default) | By role: `leader` for an agent with `project_admin` or `sysadmin`, else `worker`. A missing file is no persona. |
+| `leader`, `worker`, or another entry name | The entry `<name>`. A missing file stops the start with an error. |
 | `none` | No persona: the harness keeps its default prompt, and the protocol template is appended (the behaviour before personas). |
+
+The lookup of `<name>`: `system-prompts/<name>.md`, then
+`<prompts>/<name>.md`. The second step keeps an older config repo
+working. At its first start with the new defaults, the daemon moves the
+`prompts/leader.md` and `prompts/worker.md` of an earlier start to
+`system-prompts/`, with their record: an edit stays an edit, and the new
+default waits as a `.new` file. The library lists the files of
+`system-prompts/`, never the protocol templates of `prompts/`.
+
+An optional first line `<!-- description: <text> -->` gives the entry a
+short description for the selector. The daemon removes it with the other
+HTML comments. The API (docs/api.md §28), the CLI (`terrarium
+system-prompt`), and the dashboard (Settings → System prompts, and the
+System prompt selector of an agent or a template) read and write the
+library. A write goes to the work tree after the secret scan and stays
+uncommitted, as a template file does. Each read goes to the disk, so an
+edit by hand shows at once, and an agent gets it at its next start. The
+dashboard shows the two fields as one selector: by role, the harness
+default, a library entry, or Custom (the `system_prompt` text). "Save as
+new system prompt" adds a custom text to the library and selects it.
 
 The order of precedence: the agent's (or template's) `system_prompt`, then
 the persona, then the harness default. The daemon removes HTML comments
@@ -626,8 +649,9 @@ restart of each agent.
 ### 8.3 Packaged defaults and the config repo
 
 **Packaged defaults.** The repo dir `defaults/` holds the default
-prompts (`prompts/leader.md`, `worker.md`, `default.md`,
-`project-lead.md`, `system-lead.md`, `README.md`), the default settings of
+personas (`system-prompts/leader.md`, `worker.md`, §8.1), the default
+prompts (`prompts/default.md`, `project-lead.md`, `system-lead.md`,
+`README.md`, `harness/<harness>.md`), the default settings of
 each harness (`harness/<harness>/...`), the default agent templates
 (`templates/<name>.wcl`, §5b), the config repo `README.md`, and
 `manifest.json` with the SHA-256 of each file (`just defaults::manifest`
@@ -654,7 +678,7 @@ diff; Accept takes the new default, Keep keeps the edit.
 `state/backup/config-terrarium-<time>/` and writes every default over it.
 
 **Git.** The config repo is a git repo (the daemon runs `git init` on
-first use). It holds `prompts/`, `harness/`, `skills/` (§8.6),
+first use). It holds `prompts/`, `system-prompts/` (§8.1), `harness/`, `skills/` (§8.6),
 `templates/` (the agent templates, one WCL file each, §5b), `export/`,
 `README.md`, and `.gitignore`. `export/` is the declarative export of the store, written
 before each commit: one fleet file for each project
@@ -2039,6 +2063,63 @@ The protocol in the system prompt tells an agent to:
 Export: mirror a project's wiki and the artifacts it embeds to a `docs/` tree
 in a repo (§22). Page paths map to file paths.
 
+### 15.4 The DB
+
+Each project has a small database, the DB, for structured data: lists of
+items, inventories, results, measurements, and decisions. The wiki holds
+free text and the memory graph holds facts; the DB holds rows that an agent
+adds to, filters, sorts, and counts again. An agent can make its own types.
+The operator sees and edits the same data on the DB tab of the Knowledge
+screen (`/p/:project/knowledge/db`). The contract is `docs/api.md` §27.
+
+Data: `db_types(id, project, name, description, schema, revision,
+created_by, created_at, updated_at)` and `db_records(id, project, type,
+data, revision, created_by, updated_by, created_at, updated_at)`. `schema`
+is `{"fields": [...]}` and `data` is a JSON object of the field values.
+Queries read the values with the SQLite JSON functions. Migration 45.
+
+A field has a name, a kind (`string`, `text`, `number`, `integer`, `bool`,
+`date`, `datetime`, `enum`, `list`, `ref`, `json`), and the options
+`required`, `default`, `description`, `values` (enum), `of` (list items),
+`ref` (the target type), and `unique`. A `ref` points at a record of a type
+of the same project. The first `string` field of a type is its label: a
+ref shows it, and a write can give a label instead of a record ID.
+
+Rules the daemon enforces:
+
+- Every record write is checked against the schema of its type. A problem
+  names the field (`422`). A ref must point at a record of the target type;
+  a unique field has no duplicate.
+- A schema change keeps the records valid. A renamed field moves its data;
+  a removed field needs `confirm` and its data goes; a new field with a
+  default fills the records. A change that a record does not fit (a new
+  kind, a field that is required now) is refused with up to 20 of the
+  records. Each change makes a new revision of the type.
+- Records and types have revisions. A write that names an old revision is
+  refused (`409`), as a stale wiki base is.
+- A record that another record refers to is not deleted. A type that
+  another type refers to is not deleted. A type with records is deleted
+  only by a project admin, with `?confirm=records`.
+- Every member of the project reads and writes. Agents of other projects
+  cannot (sysadmin can). Events `db.type` and `db.record`; audit rows for
+  type changes and for deletes.
+
+One query language serves the API, the CLI (`terrarium db query`), the
+dashboard, and the wiki: `type:bug status=open severity>=high
+title~"login" sort:-severity limit:20 fields:title,severity`, with
+`count:true` and `group:field`. The daemon parses it and compiles it to
+SQL with bound parameters only; a field name must be a field of the type.
+An error gives its position in the query.
+
+A wiki page shows a query result with a fenced block of the language `db`
+(`view:table`, `list`, `count`, or `group`). The dashboard renders it
+after the sanitizer, with the rights of the reader, in the project of the
+page.
+
+The packaged skill `terrarium-db` (`defaults/skills/terrarium-db/`) tells
+an agent when to use the DB, the CLI, the query language, and the wiki
+block. An agent gets it when its `skills` list names it (§8.6).
+
 ---
 
 ## 16. Subscriptions and usage
@@ -2058,6 +2139,20 @@ probe = "anthropic-oauth-usage"        # how to read remaining quota
 alert_at = 80                          # percent of any window
 ```
 
+A self-hosted model server (§16.4):
+
+```toml
+# subscriptions/gpu-lan.toml
+name = "gpu-lan"
+provider = "selfhosted"
+[selfhosted]
+api = "anthropic"                      # or "openai"
+base_url = "http://192.168.1.20:8000"  # Anthropic root without /v1; OpenAI root with /v1
+models = ["qwen3-coder"]
+context_window = 131072
+max_concurrent = 2                     # agents that may run a turn at the same time
+```
+
 ### 16.1 Registering subscriptions from the dashboard
 
 The **Subscriptions** page lists every plan with a status chip: `logged in`,
@@ -2075,7 +2170,8 @@ login.
 | Claude Code (Anthropic plan) | Opens an embedded terminal running `claude auth login` as the daemon user, outside any sandbox. Extracts the login URL and shows it as a link with a copy button. Gives a paste field for the code and types it into the PTY. Offers `claude setup-token` as the long-lived alternative. |
 | Codex (ChatGPT plan) | Runs `codex login --device-auth` in the embedded terminal. Shows the device code and URL large, with copy buttons. Polls `codex login status` until it succeeds. |
 | Copilot (GitHub plan) | Runs `copilot login --device-code`. Same device-code pattern. A second tab takes a fine-grained PAT with the Copilot Requests permission and feeds it through `--with-token` on stdin. |
-| API key (pi, and the key providers) | A form: provider (Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, or an OpenAI-compatible endpoint with a base URL and model list). The key is stored under `/state/credentials` with mode 0600, never shown again, and set as the provider's env var only in the harness of agents on this subscription. The key does not go through the launch spec: `terrarium exec-env` gets it from the daemon inside the sandbox at each start (§16b.4). Optionally written to pi's `auth.json` for `pi auth` compatibility. |
+| Self-hosted model | A form for a model server that the operator runs (vLLM, Ollama, llama.cpp, SGLang, LM Studio): the API style (OpenAI or Anthropic), the base URL, an optional key, the models (typed, or "Fetch models" from the server), the default model, and the limits: context window, max output tokens, and max concurrent streams. Provider `selfhosted` (§16.4). |
+| API key (pi, and the key providers) | A form: provider (Anthropic, OpenAI, Google, OpenRouter, xAI, Groq). The key is stored under `/state/credentials` with mode 0600, never shown again, and set as the provider's env var only in the harness of agents on this subscription. The key does not go through the launch spec: `terrarium exec-env` gets it from the daemon inside the sandbox at each start (§16b.4). Optionally written to pi's `auth.json` for `pi auth` compatibility. |
 
 **pi uses API keys only.** Use Claude Code for a Claude plan and Codex for
 a ChatGPT plan. The wizard has no pi login: `POST /api/subscriptions/login`
@@ -2114,6 +2210,18 @@ agents, and is torn down on completion or after ten minutes. The daemon never
 reads a pasted code or key back to the browser. Device-code and paste-code
 flows are used everywhere, because a browser loopback callback cannot reach
 into the container.
+
+Each row also has **Disable** and **Enable**, **Stop all now** (with an
+in-page confirm), **Disable and stop all**, and a **Status page** link to
+the provider's public status page (when the provider has an official one;
+a self-hosted server has an optional `status_url`). A disabled
+subscription starts no agent, wakes none, and takes no new agent; agents
+that run go on and finish their work, and after they stop they do not
+wake until the operator enables it again. **Stop all now** stops every
+running agent on the subscription at once (graceful, then hard after the
+stop time limit); it does not disable the subscription by itself
+(api.md §16.2). The operator and sysadmin may do both (Wil's decision,
+2026-11-01).
 
 ### 16.2 Measuring usage
 
@@ -2406,6 +2514,45 @@ token file. A probe reads the account's file. Neither refreshes.
   other account. Codex and Copilot agents see only their current account.
 
 ---
+
+### 16.4 Self-hosted model servers
+
+Provider `selfhosted` (`crates/terrarium-core/src/selfhosted.rs`, api.md
+§16.5). The operator adds a model server that it runs, with:
+
+- `api`: `openai` or `anthropic`. The style decides the harnesses
+  (verified from the installed versions, `docs/compat.md`, "Self-hosted
+  model servers"): OpenAI style is for pi (custom provider,
+  `openai-completions`) and Codex (custom model provider, Responses API
+  only); Anthropic style is for Claude Code (`ANTHROPIC_BASE_URL` and
+  `ANTHROPIC_AUTH_TOKEN`, as for Z.ai) and pi (`anthropic-messages`).
+  Copilot CLI cannot use one. Another harness is `422` and names the
+  harnesses of the style.
+- `base_url` (http or https; a LAN host is fine), an optional key (in the
+  key store, never in a grant, redacted, only through `terrarium
+  exec-env`), `models`, and `default_model`.
+- Limits: `context_window` and `max_output_tokens` go to each harness
+  that has a setting (pi `contextWindow` and `maxTokens`; Claude Code
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS`;
+  Codex `model_context_window`). `max_concurrent` is the number of agents
+  on the subscription that may run a turn at the same time. The daemon
+  enforces it (`crates/terrariumd/src/stream_limit.rs`): before the
+  supervisor types work into an idle agent, the agent takes a stream; with
+  none free, the work waits (status reason `stream_limit`), and the end of
+  a turn, a stop, or a crash gives the stream to the first agent that
+  waits (FIFO). A compaction counts as a stream.
+- No probe: a local server has no quota (`no_quota`), so the quota UI shows
+  the usage counts only.
+- "Fetch models" reads `{base_url}/models` (OpenAI style) or
+  `{base_url}/v1/models` (Anthropic style) on request: the operator and
+  sysadmin only, no redirects, 5 s, 1 MiB, cached 5 minutes. It is the one
+  daemon request to a URL that a person types (api.md §16.5, the SSRF
+  limits).
+
+`openai-compatible`, the old provider word, is an alias on input.
+Migration 46 renames the stored rows to `selfhosted` with `api = "openai"`,
+and the next start moves their base URL and models from the key file into
+the row.
 
 ## 16b. Secrets
 

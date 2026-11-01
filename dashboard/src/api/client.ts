@@ -33,9 +33,17 @@ import type {
   SkillSummary,
   SkillUpdate,
   SkillUsage,
+  NewSystemPrompt,
+  SystemPromptDetail,
+  SystemPromptSummary,
+  SystemPromptUpdate,
   AgentPatch,
   SwapResult,
   ApiKeyInput,
+  FetchModelsInput,
+  FetchModelsResult,
+  StopAllResult,
+  SubscriptionPatch,
   Artifact,
   ArtifactJsonUpload,
   ArtifactLinkKind,
@@ -159,6 +167,11 @@ import type {
   WikiDiff,
   WikiPage,
   WikiPageSummary,
+  DbQueryResult,
+  DbRecord,
+  DbType,
+  DbTypePatch,
+  NewDbType,
 } from "./types";
 
 export interface Api {
@@ -384,6 +397,22 @@ export interface Api {
     review(id: string, decision: "approve" | "comment", comment?: string): Promise<WikiPage>;
   };
 
+  /** The project DB (docs/api.md §27). Errors: `400 bad_request` for a bad query (`details: {position, message}`), `422 invalid` with `details.fields` or `details.problems`, `409 conflict` for a stale revision. */
+  db: {
+    types(project: string): Promise<DbType[]>;
+    type(project: string, name: string): Promise<DbType>;
+    createType(project: string, t: NewDbType): Promise<DbType>;
+    updateType(project: string, name: string, patch: DbTypePatch): Promise<DbType>;
+    /** `confirm`: `true` for a type with no records, `records` to delete its records too. */
+    removeType(project: string, name: string, confirm: "true" | "records"): Promise<void>;
+    createRecord(project: string, type: string, data: Record<string, unknown>): Promise<DbRecord>;
+    record(project: string, id: string): Promise<DbRecord>;
+    /** A merge: `null` removes a field. With `revision`, a stale record is `409 conflict` with `details.record`. */
+    updateRecord(project: string, id: string, data: Record<string, unknown>, revision?: number): Promise<DbRecord>;
+    removeRecord(project: string, id: string): Promise<void>;
+    query(project: string, q: string, o?: { type?: string; cursor?: string }): Promise<DbQueryResult>;
+  };
+
   /** docs/api.md §12. `id` is `ART-n`, `project/ART-n`, or the `uid`. */
   artifacts: {
     list(project: string): Promise<Artifact[]>;
@@ -435,6 +464,16 @@ export interface Api {
     makeDefault(name: string): Promise<Subscription>;
     /** Write-only. The answer never has the key. */
     setApiKey(name: string, input: ApiKeyInput): Promise<Subscription>;
+    /** `PATCH`: `alert_at`, and the harnesses and the server of a self-hosted one. `409 file_managed` for a file subscription. */
+    update(name: string, patch: SubscriptionPatch): Promise<Subscription>;
+    /** Agents on it may start and wake again; agents with work wake now. */
+    enable(name: string): Promise<Subscription>;
+    /** No agent on it starts or wakes; agents that run go on. */
+    disable(name: string): Promise<Subscription>;
+    /** Stop every running agent on it now. `disable` disables it first. */
+    stopAll(name: string, opts?: { disable?: boolean }): Promise<StopAllResult>;
+    /** The model list of a self-hosted server (one GET from the daemon). Operator and sysadmin only. `503 unavailable` when the server does not answer. */
+    fetchModels(input: FetchModelsInput): Promise<FetchModelsResult>;
     detect(): Promise<DetectedLogin[]>;
     startLogin(req: StartLogin): Promise<LoginSession>;
     loginState(id: string): Promise<LoginSession>;
@@ -632,6 +671,21 @@ export interface Api {
     remove(name: string): Promise<void>;
     /** `GET /api/skills/{name}/usage`: the agents and templates that name it. */
     usage(name: string): Promise<SkillUsage>;
+  };
+
+  /**
+   * The system prompt library in the config repo (docs/api.md §28). A write
+   * stays uncommitted: the Harness config page commits it. The operator, a
+   * sysadmin, and a project_admin read and add. A delete of an entry in use
+   * is `409 conflict` with `details.users`, unless `force`. A secret in the
+   * text is `422 invalid`. No config repo: `501 not_available`.
+   */
+  systemPrompts: {
+    list(): Promise<SystemPromptSummary[]>;
+    get(name: string): Promise<SystemPromptDetail>;
+    create(body: NewSystemPrompt): Promise<SystemPromptDetail>;
+    update(name: string, body: SystemPromptUpdate): Promise<SystemPromptDetail>;
+    remove(name: string, opts?: { force?: boolean }): Promise<void>;
   };
 
   /**
@@ -925,6 +979,19 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       review: (id, decision, comment) => post(`/api/wiki/${seg(id)}/review`, { decision, comment }),
     },
 
+    db: {
+      types: (project) => all(`${p(project)}/db/types`),
+      type: (project, name) => get(`${p(project)}/db/types/${seg(name)}`),
+      createType: (project, body) => post(`${p(project)}/db/types`, body),
+      updateType: (project, name, body) => patch(`${p(project)}/db/types/${seg(name)}`, body),
+      removeType: (project, name, confirm) => del(`${p(project)}/db/types/${seg(name)}`, { confirm }),
+      createRecord: (project, type, data) => post(`${p(project)}/db/records`, { type, data }),
+      record: (project, id) => get(`${p(project)}/db/records/${seg(id)}`),
+      updateRecord: (project, id, data, revision) => patch(`${p(project)}/db/records/${seg(id)}`, revision === undefined ? { data } : { data, revision }),
+      removeRecord: (project, id) => del(`${p(project)}/db/records/${seg(id)}`),
+      query: (project, q, o = {}) => get(`${p(project)}/db/query`, { q, type: o.type, cursor: o.cursor }),
+    },
+
     artifacts: {
       list: (project) => all(`${p(project)}/artifacts`),
       usage: (project) => get(`${p(project)}/artifacts/usage`),
@@ -966,6 +1033,11 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       logout: (name) => post(`${sub(name)}/logout`),
       makeDefault: (name) => post(`${sub(name)}/default`),
       setApiKey: (name, input) => post(`${sub(name)}/api-key`, input),
+      update: (name, body) => patch(sub(name), body),
+      enable: (name) => post(`${sub(name)}/enable`),
+      disable: (name) => post(`${sub(name)}/disable`),
+      stopAll: (name, opts = {}) => post(`${sub(name)}/stop-all`, { disable: !!opts.disable }),
+      fetchModels: (input) => post("/api/subscriptions/fetch-models", input),
       detect: () => get("/api/subscriptions/detect"),
       startLogin: (req) => post("/api/subscriptions/login", req),
       loginState: (id) => get(login(id)),
@@ -1082,6 +1154,14 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       update: (name, body) => put(`/api/skills/${seg(name)}`, body),
       remove: (name) => del(`/api/skills/${seg(name)}`),
       usage: (name) => get(`/api/skills/${seg(name)}/usage`),
+    },
+
+    systemPrompts: {
+      list: () => get("/api/system-prompts"),
+      get: (name) => get(`/api/system-prompts/${seg(name)}`),
+      create: (body) => post("/api/system-prompts", body),
+      update: (name, body) => put(`/api/system-prompts/${seg(name)}`, body),
+      remove: (name, opts = {}) => del(`/api/system-prompts/${seg(name)}`, opts.force ? { force: "true" } : undefined),
     },
 
     secrets: {

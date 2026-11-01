@@ -383,13 +383,34 @@ or `--system-prompt-file <path>`, or the **System prompt** field in the
 dashboard. Terrarium's protocol prompt still comes after it. The change
 applies at the next start or restart (`defaults/prompts/README.md`).
 
-An agent also has a persona (PLAN §8.1): `config/terrarium/prompts/leader.md`
-for a lead (`project_admin` or `sysadmin`), `worker.md` for a member. A
-persona with text replaces the harness's default prompt, as a base system
-prompt does. The packaged personas hold only a comment, so the harness
-keeps its default prompt until you write text in them. `--persona <name>`
-picks another file, and `--persona none` keeps the harness's default
-prompt. A base system prompt wins over the persona.
+**Pick or save a system prompt.** The system prompt library holds
+premade system prompts: `config/terrarium/system-prompts/<name>.md`
+(PLAN §8.1). `leader` and `worker` come with Terrarium: an agent with
+`project_admin` or `sysadmin` gets `leader` by role, a member gets
+`worker`. In the dashboard, the **System prompt** field of an agent or a
+template is one selector:
+
+- **By role**: `leader` or `worker`, by the roles of the agent.
+- **Harness default**: no system prompt (`persona = none`).
+- A library entry, with **Preview** to read its text.
+- **Custom…**: your own text in a text box. **Save as new system prompt**
+  asks for a name and an optional description, adds the text to the
+  library, and selects the new entry.
+
+Settings → **System prompts** lists the library: view, edit, delete, and
+**New system prompt**. A delete of an entry that agents use shows them,
+and asks again. With the CLI:
+
+```sh
+t system-prompt ls
+t system-prompt new reviewer --file reviewer.md --description "Reviews cards"
+t -p demo agent set w1 --persona reviewer
+t -p demo agent set w2 --save-system-prompt careful   # save w2's own text, and select it
+```
+
+A new or changed entry is a file in the config repo: commit it on the
+**Harness config** page, or with `t admin config commit`. An agent gets
+it at its next start.
 
 To use the CLI from the host over TCP, build it and set `TERRARIUM_URL`.
 `just` reads `TERRARIUM_TOKEN` from `.env`:
@@ -1036,7 +1057,7 @@ The config repo `config/terrarium/` holds what you tune for the agents:
 
 | Path | Content |
 |---|---|
-| `prompts/leader.md`, `prompts/worker.md` | The personas (PLAN §8.1). |
+| `system-prompts/<name>.md` | The system prompt library, with the personas `leader.md` and `worker.md` (PLAN §8.1). An older repo has the personas in `prompts/`; the first start with the new defaults moves them. |
 | `prompts/default.md`, `project-lead.md`, `system-lead.md` | The protocol templates. |
 | `harness/claude/settings.json`, `harness/codex/config.toml`, `harness/copilot/settings.json`, `harness/pi/settings.json` | The settings of each harness for every agent (PLAN §8.2). Terrarium puts the keys that it needs (hooks, yolo, sandbox paths, telemetry off) on top. |
 | `templates/<name>.wcl`, `templates/<project>/<name>.wcl` | The agent templates, one WCL file each ([api.md §21.5](api.md#215-template-files)). The API, the CLI, and the dashboard write them; you can edit them by hand. |
@@ -1050,8 +1071,8 @@ to see the diff. Then accept the new default or keep your file:
 
 ```sh
 t admin config defaults
-t admin config defaults accept prompts/worker.md
-t admin config defaults keep prompts/leader.md
+t admin config defaults accept system-prompts/worker.md
+t admin config defaults keep system-prompts/leader.md
 ```
 
 A change to a prompt or a settings file applies at the next start or
@@ -1133,7 +1154,8 @@ A skill is a folder with a `SKILL.md` file: YAML front matter with a
 `name` and a `description`, then instructions in Markdown. It can also
 hold `scripts/`, `references/`, and `assets/`. An agent sees the name and
 the description of each of its skills. When a skill fits the task, the
-agent loads the instructions. Terrarium ships no skill (PLAN §8.6).
+agent loads the instructions. Terrarium ships one skill, `terrarium-db`
+(§2.13b, PLAN §8.6).
 
 1. Add a skill to the library. It goes to `config/terrarium/skills/<name>/`:
 
@@ -1176,6 +1198,119 @@ agent loads the instructions. Terrarium ships no skill (PLAN §8.6).
 `terrarium skill usage fern-check` lists the agents and templates that
 use a skill. When you delete a skill, the agents that name it start
 without it and show a warning.
+
+### 2.13b The project DB: structured data for agents and you
+
+Each project has a DB: record types with a schema, and records (PLAN
+§15.4). Agents use it for data that repeats: bugs, inventories, benchmark
+results, decisions. You see it on the DB tab of the Knowledge screen
+(`/p/<project>/knowledge/db`).
+
+1. Give the packaged skill `terrarium-db` to the agents that should use
+   the DB. It tells them when to use it, the CLI, and the query language.
+   The daemon writes it to `config/terrarium/skills/terrarium-db/` at
+   each start. The `--skill` flag replaces the list, so name the other
+   skills of the agent too:
+
+   ```bash
+   terrarium admin agent set worker --skill terrarium-db
+   terrarium template edit worker --skill terrarium-db
+   ```
+
+2. Make a type and some records with the CLI (or with the "New type" and
+   "New record" buttons of the DB tab):
+
+   ```bash
+   terrarium -p demo db type new bug --field 'title:string!' \
+     --field 'severity:enum(low,medium,high,critical)!' \
+     --field 'status:enum(open,fixed)!=open' --field 'reported:date!'
+   terrarium -p demo db rec new bug --set 'title=Login fails' --set severity=high \
+     --set reported=2026-10-01
+   terrarium -p demo db query 'type:bug status=open sort:-severity'
+   ```
+
+3. Show the data in a wiki page with a `db` block. The page runs the
+   query when someone opens it:
+
+   ````markdown
+   ```db
+   type:bug status=open group:severity view:group
+   ```
+   ````
+
+To try it with example data, run `scripts/seed-db-demo.sh [project]`
+(default project `demo`) next to `compose.yaml`. It makes the types
+`service`, `bug`, `decision`, `benchmark`, and `contact` with a few
+hundred records, and the wiki page `db-examples` with each view of a
+`db` block. It skips a type that exists. Set `T=terrarium` to use a local
+daemon instead of the Docker stack.
+
+### 2.13c A self-hosted model server: vLLM, Ollama, or llama.cpp
+
+You can give agents a model server that you run yourself. Terrarium calls
+it a self-hosted subscription (provider `selfhosted`, PLAN §16.4). The
+server speaks one of two API styles, and the style decides the harnesses:
+
+| API style | Base URL | Harnesses |
+|---|---|---|
+| `openai` | the OpenAI root, with `/v1` | pi, and Codex if the server serves `/v1/responses` |
+| `anthropic` | the Anthropic root, without `/v1` | Claude Code and pi |
+
+Copilot CLI cannot use a self-hosted server.
+
+1. Start the server on a host that the Terrarium container can reach (not
+   `localhost` of your laptop when Terrarium runs in Docker on another
+   machine). Examples:
+
+   ```bash
+   vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct --port 8000     # http://gpu:8000/v1
+   ollama serve                                                  # http://gpu:11434/v1
+   llama-server -m model.gguf --port 8080 --host 0.0.0.0         # http://gpu:8080/v1
+   ```
+
+2. Add it in the dashboard: **Subscriptions > Add subscription >
+   Self-hosted model**. Select the API style, type the base URL, and (only
+   when the server needs one) the key. Click **Fetch models** to read the
+   model list from the server, or type the model ids. Set the context
+   window of the model, and the number of agents that may run a turn at
+   the same time (max concurrent streams; a small GPU server serves one or
+   two streams well). Or use the CLI:
+
+   ```bash
+   terrarium admin subscription fetch-models --base-url http://gpu:8000/v1
+   terrarium admin subscription new gpu-vllm --provider selfhosted --api openai \
+     --base-url http://gpu:8000/v1 --model Qwen/Qwen3-Coder-30B-A3B-Instruct \
+     --context-window 131072 --max-concurrent 2
+   # a key, only when the server needs one:
+   echo "$KEY" | terrarium admin subscription set gpu-vllm --key-stdin
+   ```
+
+3. Give an agent of a supported harness the subscription:
+
+   ```bash
+   terrarium -p demo agent new local-dev --harness pi --subscription gpu-vllm
+   ```
+
+   The agent gets the subscription's default model (else the first model)
+   when it sets no `model`. When more agents want a turn than the limit
+   lets run, the others wait and show "waiting for a free stream"; their
+   turns go out in order when a turn ends.
+
+The row of the subscription shows the API style, the limit, the context
+window, and how many streams are in use. A self-hosted server has no
+quota, so the usage view shows the token counts only.
+
+**Fetch models** is the only request that the daemon sends to a URL that
+you type. Only the operator and sysadmin can use it, and it follows no
+redirect (api.md §16.5).
+
+**Disable and stop.** Each subscription row (every provider, not only a
+self-hosted one) has **Disable**, **Stop all now**, and **Disable and stop
+all**. Disable a subscription before you take a server down: agents that
+run finish their work, and no agent starts or wakes on it until you
+enable it again. **Stop all now** stops its running agents at once. The
+CLI is `terrarium admin subscription disable|enable <name>` and
+`terrarium admin subscription stop-all <name> [--disable]`.
 
 ### 2.14 Install on a server
 

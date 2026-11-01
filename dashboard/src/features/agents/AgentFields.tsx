@@ -1,50 +1,15 @@
 // The agent fields that an agent and a template share: harness,
-// subscription, model, prompt, system prompt, persona, skills, restart, idle stop, auto compact, roles, and policy. No name and no
+// subscription, model, prompt, system prompt (persona and text in one selector), skills, restart, idle stop, auto compact, roles, and policy. No name and no
 // project: the agent form and the template form add those.
 
-import { createResource, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createResource, createSignal, For, Show } from "solid-js";
 import { GRANTABLE_ROLES, HARNESSES, RESTART_POLICIES, type Harness, type RestartPolicy, type Role } from "../../api/types";
 import { api, subscriptions } from "../../stores";
-import { compactMaxAgeProblem, idleStopProblem, PERSONAS, personaProblem, type AgentFormValues, type CompactSwitch } from "./form";
+import { compactMaxAgeProblem, idleStopProblem, type AgentFormValues, type CompactSwitch } from "./form";
+import { SystemPromptSelect } from "./SystemPromptSelect";
 import { prunePool, reconcileSubscription } from "./subscription";
 import { defaultModelHint, ModelField, PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
 import { SkillsPicker } from "../skills/SkillsPicker";
-
-export const SYSTEM_PROMPT_HELP = "Replaces the harness's default system prompt. Terrarium's protocol instructions are always added after it.";
-
-/** The system prompt textarea. The text is user content: it stays a textarea value. */
-export function SystemPromptField(props: { value: string; onChange: (s: string) => void; label?: string }) {
-  return (
-    <label>
-      {props.label ?? "System prompt"}
-      <textarea class="mono" rows={5} value={props.value} onInput={(e) => props.onChange(e.currentTarget.value)} placeholder="Empty: the harness's default system prompt" />
-      <span class="muted small">{SYSTEM_PROMPT_HELP}</span>
-    </label>
-  );
-}
-
-export const PERSONA_HELP = "Empty: by role (leader for project_admin or sysadmin, else worker). The persona replaces the harness's default system prompt. A system prompt wins over it. none keeps the harness default.";
-
-/** The persona: a text input with the known names. Empty is "by role". */
-export function PersonaField(props: { value: string; onChange: (s: string) => void }) {
-  const list = createUniqueId();
-  return (
-    <label>
-      Persona
-      <input value={props.value} list={list} onInput={(e) => props.onChange(e.currentTarget.value)} placeholder="by role" pattern="[A-Za-z0-9_\-]{0,64}" />
-      <datalist id={list}>
-        <For each={PERSONAS}>{(p) => <option value={p} />}</For>
-      </datalist>
-      <Show when={personaProblem(props.value)} fallback={<span class="muted small">{PERSONA_HELP}</span>}>
-        {(p) => (
-          <span class="small" style={{ color: "var(--danger)" }}>
-            {p()}
-          </span>
-        )}
-      </Show>
-    </label>
-  );
-}
 
 // The global idle stop (`GET /api/health` `idle_stop`). One request for each page load.
 let idleStopDefault: Promise<string | undefined> | undefined;
@@ -227,8 +192,7 @@ export function AgentFields(props: {
         <span class="muted small">A swap moves the agent to another account of the pool. Same provider only.</span>
       </fieldset>
 
-      <SystemPromptField value={v().system_prompt} onChange={(s) => set("system_prompt", s)} />
-      <PersonaField value={v().persona} onChange={(s) => set("persona", s)} />
+      <SystemPromptSelect value={{ persona: v().persona, system_prompt: v().system_prompt }} roles={v().roles} onChange={(f) => props.onChange({ ...v(), ...f })} />
       <SkillsPicker value={v().skills} onChange={(s) => set("skills", s)} />
 
       <Show when={props.roles} fallback={<Show when={props.rolesNote}>{(n) => <p class="muted small">{n()}</p>}</Show>}>

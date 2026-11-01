@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import type { LoginStatus, Subscription } from "../api/types";
-import { ago, compact, humanize, sparkPath, timeUntil, usageLevel, money, windowValue } from "../lib/format";
+import { ago, compact, humanize, orderWindows, sparkPath, subscriptionTitle, timeUntil, usageLevel, money, windowLabel, windowValue } from "../lib/format";
 import { ProviderLogo } from "./ui";
 
 export function Sparkline(props: { values: number[]; label?: string; height?: number }) {
@@ -18,7 +18,7 @@ export function Sparkline(props: { values: number[]; label?: string; height?: nu
 export const LOGIN_CHIP: Record<LoginStatus, string> = { logged_in: "ok", expiring: "warn", expired: "bad", missing: "bad", unknown: "", api_key: "ok" };
 
 /** No probe, or the probe has not run: local accounting is the only number. */
-export const isLocalOnly = (s: Pick<Subscription, "local_estimate_only" | "probe_status">): boolean => s.local_estimate_only || s.probe_status === "none";
+export const isLocalOnly = (s: Pick<Subscription, "local_estimate_only" | "probe_status"> & { no_quota?: boolean }): boolean => !!s.no_quota || s.local_estimate_only || s.probe_status === "none";
 
 export function UsageTile(props: { sub: Subscription; now: number; spark: number[]; tokens24h?: number; onClick?: () => void }) {
   const local = () => isLocalOnly(props.sub);
@@ -35,8 +35,8 @@ export function UsageTile(props: { sub: Subscription; now: number; spark: number
         <div class="provider">
           <ProviderLogo provider={props.sub.provider} />
           <div style={{ "min-width": 0 }}>
-            <div style={{ "font-weight": 600 }}>{props.sub.plan ?? props.sub.name}</div>
-            <div class="muted small">{props.sub.name}</div>
+            <div style={{ "font-weight": 600 }}>{subscriptionTitle(props.sub)}</div>
+            <div class="muted small mono" title="The subscription name">{props.sub.name}</div>
           </div>
         </div>
         <div class="row" style={{ gap: "4px", "flex-wrap": "wrap", "justify-content": "flex-end" }}>
@@ -48,6 +48,16 @@ export function UsageTile(props: { sub: Subscription; now: number; spark: number
               probe failed
             </span>
           </Show>
+          <Show when={props.sub.enabled === false}>
+            <span class="chip warn" title="No agent on it starts or wakes. Agents that run go on.">disabled</span>
+          </Show>
+          <Show when={props.sub.streams}>
+            {(st) => (
+              <span class={`chip ${st().waiting > 0 ? "warn" : "info"}`} title="Agents that run a turn now, of the stream limit">
+                {st().in_use}/{st().max} streams
+              </span>
+            )}
+          </Show>
           <Show when={props.sub.held_agents > 0}>
             <span class="chip bad" title="Agents whose turns wait after a usage-limit error">
               {props.sub.held_agents} held
@@ -56,21 +66,23 @@ export function UsageTile(props: { sub: Subscription; now: number; spark: number
         </div>
       </div>
       <Show when={local()}>
-        <div class="muted small">{props.sub.local_estimate_only ? "Local estimate only. This plan has no usage probe." : "Local estimate only. The probe has not run yet."}</div>
+        <div class="muted small">
+          {props.sub.no_quota ? "Usage counts only. A self-hosted server has no quota." : props.sub.local_estimate_only ? "Local estimate only. This plan has no usage probe." : "Local estimate only. The probe has not run yet."}
+        </div>
       </Show>
       <Show when={props.sub.windows.length} fallback={<Show when={!local()}><div class="muted small">No samples yet.</div></Show>}>
-        <For each={props.sub.windows}>
+        <For each={orderWindows(props.sub.windows)}>
           {(w) => {
             const level = () => usageLevel(w.used_pct, props.sub.alert_at);
             return (
               <div class="meter">
                 <div class="meter-label">
                   <span>
-                    <strong style={{ color: "var(--text)" }}>{w.window}</strong> {windowValue(w)}
+                    <strong style={{ color: "var(--text)" }} title={w.window}>{windowLabel(w.window)}</strong> {windowValue(w)}
                   </span>
                   <span>{w.balance ? `${money(w.balance.used, w.balance.currency)} used of ${money(w.balance.total, w.balance.currency)}` : w.resets_at ? `resets in ${timeUntil(w.resets_at, props.now)}` : "no reset time"}</span>
                 </div>
-                <div class={`meter-bar ${level()}`} role="progressbar" aria-valuenow={w.used_pct} aria-valuemin={0} aria-valuemax={100} aria-label={`${w.window} window`}>
+                <div class={`meter-bar ${level()}`} role="progressbar" aria-valuenow={w.used_pct} aria-valuemin={0} aria-valuemax={100} aria-label={`${windowLabel(w.window)} window`}>
                   <span style={{ width: `${Math.min(100, w.used_pct)}%` }} />
                 </div>
               </div>

@@ -1,3 +1,4 @@
+<!-- description: The worker persona: do one card at a time and report on the card. -->
 <!--
 Terrarium persona: worker. Agents with no `persona` that have the role
 member get this file (PLAN §8.1). It replaces the harness's default system

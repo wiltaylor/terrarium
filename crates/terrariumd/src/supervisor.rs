@@ -227,6 +227,12 @@ pub trait Supervisor: Send + Sync + 'static {
     /// Type `text` into the harness as one turn.
     fn send_turn(&self, agent: AgentId, text: String)
     -> BoxFuture<'_, Result<(), SupervisorError>>;
+    /// `agent` got a stream of its self-hosted subscription
+    /// (`crate::stream_limit`): type the work that waited for it. The
+    /// default does nothing.
+    fn stream_granted(&self, agent: AgentId) {
+        let _ = agent;
+    }
     /// Type `text` as-is into the harness, then Enter, at once (D3, a
     /// leader's raw send): no escape of a leading `/` or `!`, no bracketed
     /// paste, and no wait for `idle`. A slash command or a bang command

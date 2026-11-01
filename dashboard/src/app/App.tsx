@@ -21,6 +21,7 @@ const VersionsPage = lazy(() => import("../features/versions/VersionsPage"));
 const TargetsPage = lazy(() => import("../features/targets/TargetsPage"));
 const SchedulesPage = lazy(() => import("../features/schedules/SchedulesPage"));
 const TemplatesPage = lazy(() => import("../features/templates/TemplatesPage"));
+const SystemPromptsPage = lazy(() => import("../features/systemprompts/SystemPromptsPage"));
 const HostsPage = lazy(() => import("../features/hosts/HostsPage"));
 const AuditPage = lazy(() => import("../features/audit/AuditPage"));
 const EventsPage = lazy(() => import("../features/events/EventsPage"));
@@ -29,6 +30,8 @@ const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"
 const ReposPage = lazy(() => import("../features/repos/ReposPage"));
 const RepoPage = lazy(() => import("../features/repos/RepoPage"));
 const KnowledgePage = lazy(() => import("../features/knowledge/KnowledgePage"));
+const DbTypesPage = lazy(() => import("../features/db/DbTypesPage"));
+const DbRecordsPage = lazy(() => import("../features/db/DbRecordsPage"));
 const LogsPage = lazy(() => import("../features/logs/LogsPage"));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
 const AccountPage = lazy(() => import("../features/settings/AccountPage"));
@@ -86,6 +89,7 @@ export function App() {
           <Route path="/subscriptions" component={SubscriptionsPage} />
           <Route path="/secrets" component={SecretsPage} />
           <Route path="/templates" component={TemplatesPage} />
+          <Route path="/system-prompts" component={SystemPromptsPage} />
           <Route path="/skills/:name?" component={SkillsPage} />
           <Route path="/targets" component={TargetsPage} />
           <Route path="/harness" component={ConfigPage} />
@@ -114,10 +118,12 @@ export function App() {
           <Route path="/secrets" component={SecretsPage} />
           <Route path="/templates" component={TemplatesPage} />
         </Route>
-        {/* The knowledge screen: the tabs Wiki and Memory (nav.ts KNOWLEDGE_TABS). /p/:project/knowledge redirects to the Wiki tab. */}
+        {/* The knowledge screen: the tabs Wiki, Memory, and DB (nav.ts KNOWLEDGE_TABS). /p/:project/knowledge redirects to the Wiki tab. */}
         <Route path="/p/:project/knowledge" component={KnowledgePage}>
           <Route path="/wiki/*path" component={WikiPage} />
           <Route path="/memory" component={MemoryPage} />
+          <Route path="/db" component={DbTypesPage} />
+          <Route path="/db/:type" component={DbRecordsPage} />
         </Route>
         <Show when={isMock}>
           <Route path="/dev/xss" component={XssPage} />

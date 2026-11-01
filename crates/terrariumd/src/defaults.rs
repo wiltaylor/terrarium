@@ -9,7 +9,7 @@
 //!
 //! | The file in the config repo | What the start does |
 //! |---|---|
-//! | missing | writes the default (a template under `templates/` that an earlier start wrote: nothing, the operator deleted it) |
+//! | missing | writes the default (a template under `templates/` or a skill under `skills/` that an earlier start wrote: nothing, the operator deleted it) |
 //! | the same as the new default | nothing |
 //! | the same as the default that the last start wrote (not edited) | writes the new default |
 //! | edited | keeps the file, and writes the new default next to it as `<file>.new` |
@@ -243,10 +243,12 @@ pub enum SeedAction {
     Removed,
 }
 
-/// A default under `templates/`: an agent template (PLAN §5b). A delete
-/// of one by the operator stays, where a missing prompt comes back.
+/// A default under `templates/` (an agent template, PLAN §5b) or under
+/// `skills/` (a packaged skill, PLAN §8.6). A delete of one by the
+/// operator stays, where a missing prompt comes back.
 fn is_template(rel: &str) -> bool {
     rel.starts_with(&format!("{}/", terrarium_core::template_file::DIR))
+        || rel.starts_with(&format!("{}/", terrarium_core::skills::LIBRARY_DIR))
 }
 
 /// One row of a seed report.
@@ -256,10 +258,59 @@ pub struct Seeded {
     pub action: SeedAction,
 }
 
+/// The defaults that moved to another path: the old path, then the new
+/// one. The personas went from `prompts/` to the system prompt library
+/// (`crate::system_prompts`).
+pub const MOVED: &[(&str, &str)] = &[
+    ("prompts/leader.md", "system-prompts/leader.md"),
+    ("prompts/worker.md", "system-prompts/worker.md"),
+];
+
+/// Move the files of [`MOVED`] that an earlier start wrote, with their
+/// `.new` file and their record entry, when the package has the new path
+/// and not the old one. An edit stays an edit: the seed after the move
+/// compares the file with the new default as before. A file at the new
+/// path already wins, and the old file stays.
+fn move_defaults(defaults: &Defaults, target: &Path, record: &mut Record) -> Result<(), String> {
+    for (old, new) in MOVED {
+        let files = &defaults.manifest.files;
+        if files.contains_key(*old) || !files.contains_key(*new) {
+            continue;
+        }
+        let (from, to) = (target.join(old), target.join(new));
+        if !from.is_file() || to.exists() {
+            continue;
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        std::fs::rename(&from, &to).map_err(|e| format!("{}: {e}", from.display()))?;
+        let (from_new, to_new) = (new_path(target, old), new_path(target, new));
+        if from_new.is_file() {
+            std::fs::rename(&from_new, &to_new)
+                .map_err(|e| format!("{}: {e}", from_new.display()))?;
+        }
+        if let Some(entry) = record.files.remove(*old) {
+            record.files.insert((*new).to_owned(), entry);
+        }
+    }
+    Ok(())
+}
+
+/// True when the file `rel` of the config repo `target`, with the content
+/// `bytes`, is the packaged default that a start wrote, with no edit.
+pub fn is_unedited_default(target: &Path, rel: &str, bytes: &[u8]) -> bool {
+    read_record(target)
+        .files
+        .get(rel)
+        .is_some_and(|e| e.default == sha256_hex(bytes))
+}
+
 /// Copy the defaults into `target` by the rules of the module table.
 pub fn seed(defaults: &Defaults, target: &Path) -> Result<Vec<Seeded>, String> {
     std::fs::create_dir_all(target).map_err(|e| format!("{}: {e}", target.display()))?;
     let mut record = read_record(target);
+    move_defaults(defaults, target, &mut record)?;
     let mut out = Vec::new();
     for f in defaults.files()? {
         let path = target.join(&f.rel);
@@ -271,7 +322,7 @@ pub fn seed(defaults: &Defaults, target: &Path) -> Result<Vec<Seeded>, String> {
         };
         let entry = record.files.entry(f.rel.clone()).or_default();
         let action = match have {
-            // A default template that the operator deleted stays deleted.
+            // A default template or skill that the operator deleted stays deleted.
             None if is_template(&f.rel) && !entry.default.is_empty() => SeedAction::Removed,
             None => {
                 write_atomic(&path, &f.bytes)?;
@@ -537,6 +588,76 @@ mod tests {
         assert!(accept(&target, "../x").is_err());
     }
 
+    /// A packaged skill or template that the operator deleted stays
+    /// deleted; a deleted prompt comes back.
+    #[test]
+    fn a_deleted_skill_or_template_stays_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("cfg");
+        let d = pack(
+            &tmp.path().join("d"),
+            &[
+                ("skills/terrarium-db/SKILL.md", "S\n"),
+                ("templates/w.wcl", "T\n"),
+                ("prompts/leader.md", "L\n"),
+            ],
+        );
+        seed(&d, &target).unwrap();
+        std::fs::remove_dir_all(target.join("skills/terrarium-db")).unwrap();
+        std::fs::remove_file(target.join("templates/w.wcl")).unwrap();
+        std::fs::remove_file(target.join("prompts/leader.md")).unwrap();
+        let r = seed(&d, &target).unwrap();
+        let action = |p: &str| r.iter().find(|s| s.path == p).unwrap().action;
+        assert_eq!(action("skills/terrarium-db/SKILL.md"), SeedAction::Removed);
+        assert_eq!(action("templates/w.wcl"), SeedAction::Removed);
+        assert_eq!(action("prompts/leader.md"), SeedAction::Seeded);
+        assert!(!target.join("skills/terrarium-db").exists());
+    }
+
+    /// A persona that an earlier start wrote to `prompts/` moves to the
+    /// system prompt library with its record: an unedited one takes the
+    /// new default, an edited one keeps the edit and gets a `.new` file.
+    #[test]
+    fn the_personas_move_to_the_library() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("cfg");
+        let old = pack(
+            &tmp.path().join("old"),
+            &[("prompts/leader.md", "L1\n"), ("prompts/worker.md", "W1\n")],
+        );
+        seed(&old, &target).unwrap();
+        std::fs::write(target.join("prompts/worker.md"), "W1 edited\n").unwrap();
+        let new = pack(
+            &tmp.path().join("new"),
+            &[
+                ("system-prompts/leader.md", "L2\n"),
+                ("system-prompts/worker.md", "W2\n"),
+            ],
+        );
+        let r = seed(&new, &target).unwrap();
+        let action = |p: &str| r.iter().find(|s| s.path == p).unwrap().action;
+        assert_eq!(action("system-prompts/leader.md"), SeedAction::Upgraded);
+        assert_eq!(action("system-prompts/worker.md"), SeedAction::Pending);
+        assert!(!target.join("prompts/leader.md").exists());
+        assert!(!target.join("prompts/worker.md").exists());
+        assert_eq!(read(&target.join("system-prompts/leader.md")), "L2\n");
+        assert_eq!(
+            read(&target.join("system-prompts/worker.md")),
+            "W1 edited\n"
+        );
+        assert_eq!(read(&target.join("system-prompts/worker.md.new")), "W2\n");
+        assert!(is_unedited_default(
+            &target,
+            "system-prompts/leader.md",
+            b"L2\n"
+        ));
+        assert!(!is_unedited_default(
+            &target,
+            "system-prompts/worker.md",
+            b"W1 edited\n"
+        ));
+    }
+
     /// A file that another instance changed to the new default (a sync)
     /// counts as current.
     #[test]
@@ -608,8 +729,8 @@ mod tests {
         let d = Defaults::load(&dir).unwrap();
         for rel in [
             "README.md",
-            "prompts/leader.md",
-            "prompts/worker.md",
+            "system-prompts/leader.md",
+            "system-prompts/worker.md",
             "prompts/default.md",
             "prompts/project-lead.md",
             "prompts/system-lead.md",

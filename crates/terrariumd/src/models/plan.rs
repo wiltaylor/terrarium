@@ -695,6 +695,8 @@ mod tests {
             probe_error: None,
             last_probe_at: None,
             last_success_at: None,
+            selfhosted: None,
+            enabled: true,
             created_at: String::new(),
             updated_at: String::new(),
         };

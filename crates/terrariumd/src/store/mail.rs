@@ -206,6 +206,11 @@ pub struct Message {
     /// message that migration 30 found on a thread with a later reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_by: Option<String>,
+    /// `session_id` and `session_label`: the session of an agent sender at
+    /// `created_at`, when the reader may read it. Only the lists that
+    /// call [`attach_links`] fill it.
+    #[serde(flatten)]
+    pub link: crate::store::session_refs::SessionField,
 }
 
 struct RawMessage {
@@ -296,7 +301,31 @@ fn render(conn: &Connection, raw: RawMessage, cache: &mut RenderCache) -> Messag
         held_reason: raw.held_reason,
         released_at: raw.released_at,
         released_by: raw.released_by,
+        link: Default::default(),
     }
+}
+
+/// Find the session of each message of a page that an agent sent: the
+/// sender's session at `created_at` (`store::session_refs::links`). The
+/// daemon does not record which turn of the recipient read a message, so
+/// a message links to the sender's session only.
+pub fn attach_links(conn: &Connection, rows: &mut [Message]) -> ApiResult<()> {
+    use crate::store::session_refs::{self, LinkKey, SessionField};
+    let keys: Vec<LinkKey<'_>> = rows
+        .iter()
+        .map(|m| LinkKey {
+            session: None,
+            agent: (m.from_kind == "agent")
+                .then(|| session_refs::agent_of(&m.from))
+                .flatten(),
+            at: &m.created_at,
+        })
+        .collect();
+    let links = session_refs::links(conn, &keys)?;
+    for (m, l) in rows.iter_mut().zip(links) {
+        m.link = SessionField::of(l);
+    }
+    Ok(())
 }
 
 pub fn get(conn: &Connection, id: &str) -> ApiResult<Message> {

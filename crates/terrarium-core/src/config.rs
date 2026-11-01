@@ -566,6 +566,10 @@ pub struct SubscriptionDef {
     /// Alert when any window passes this percentage.
     #[serde(default = "default_alert_at")]
     pub alert_at: u8,
+    /// The server of a `selfhosted` subscription (`[selfhosted]`,
+    /// [`crate::selfhosted`]). `None` for every other provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selfhosted: Option<crate::selfhosted::SelfHosted>,
 }
 
 fn default_alert_at() -> u8 {

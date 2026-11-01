@@ -119,13 +119,18 @@ const TABLE: &[Row] = &[
         plan: false,
         api_key: Some(("moonshotai", terrarium_core::moonshot::KEY_ENV)),
     },
-    // An OpenAI-compatible endpoint needs a provider entry in the shared
-    // `models.json` (a base URL and a model list). pi does not read a base
-    // URL from the env. Not supported yet: no provider flag.
+    // A self-hosted server (`terrarium_core::selfhosted`, and its alias
+    // `openai-compatible`): the custom provider `terrarium-selfhosted` in
+    // the per-agent `models.json` ([`crate::config::agent_models`]).
+    // [`provider_for`] and [`required_env`] pick it; this row only marks
+    // an API key (or no key).
     Row {
-        names: &["openai-compatible"],
+        names: &["selfhosted", "openai-compatible"],
         plan: false,
-        api_key: None,
+        api_key: Some((
+            terrarium_core::selfhosted::PI_PROVIDER,
+            terrarium_core::selfhosted::KEY_ENV,
+        )),
     },
 ];
 
@@ -217,6 +222,21 @@ pub fn start_refusal(sub: &SubscriptionDef, model: Option<&str>) -> Option<Strin
         return Some(r.to_owned());
     }
     let has_model = model.is_some_and(|m| !m.trim().is_empty());
+    if terrarium_core::selfhosted::is_selfhosted(&sub.provider) {
+        let Some(sh) = &sub.selfhosted else {
+            return Some(
+                "the self-hosted subscription has no server (`selfhosted.base_url`)".into(),
+            );
+        };
+        if sh.model_for(model).is_none() {
+            return Some(
+                "the self-hosted subscription names no model: set the agent's `model`, or the \
+                 subscription's `default_model` or `models`"
+                    .into(),
+            );
+        }
+        return None;
+    }
     let provider = provider_for(sub)?;
     if !has_model && crate::flags::default_model(&provider).is_none() {
         return Some(format!(
@@ -238,6 +258,7 @@ mod tests {
             harnesses: vec![],
             probe: None,
             alert_at: 80,
+            selfhosted: None,
         }
     }
 
@@ -307,11 +328,8 @@ mod tests {
             assert!(!is_plan(&sub(p, plan)), "{p} {plan:?}");
         }
         assert_eq!(refusal(&sub("anthropic", Some("API key"))), None);
-        // Not a plan, but pi has no provider flag for it yet.
-        assert_eq!(
-            refusal(&sub("openai-compatible", Some("API key"))),
-            Some("pi has no provider for this subscription")
-        );
+        // The old word is a self-hosted server: the custom provider.
+        assert_eq!(refusal(&sub("openai-compatible", Some("API key"))), None);
     }
 
     #[test]
@@ -362,10 +380,22 @@ mod tests {
             Some("glm53-exl3")
         );
         assert_eq!(required_env(&sub("glm53-exl3", None)), None);
-        assert_eq!(
-            provider_for(&sub("openai-compatible", Some("API key"))),
-            None
-        );
+        for p in ["openai-compatible", "selfhosted"] {
+            assert_eq!(
+                provider_for(&sub(p, None)).as_deref(),
+                Some("terrarium-selfhosted")
+            );
+            assert_eq!(
+                required_env(&sub(p, None)),
+                Some("TERRARIUM_SELFHOSTED_API_KEY")
+            );
+            // No server: the start says so.
+            assert!(
+                start_refusal(&sub(p, None), Some("m"))
+                    .unwrap()
+                    .contains("no server")
+            );
+        }
         assert_eq!(provider_for(&sub("  ", None)), None);
         assert!(!is_api_key(&sub("openai", Some("ChatGPT Pro"))));
         assert!(is_api_key(&sub("openai", Some(" api KEY "))));

@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 use crate::db::now;
 use crate::error::ApiResult;
 use crate::store::audit::AuditEntry;
+use crate::store::session_refs::{self, LinkKey, SessionField};
 
 /// One row of the event log, as the API shows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -34,8 +35,14 @@ pub struct StoredEvent {
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card: Option<String>,
+    /// The session recorded with the event: the agent's current session
+    /// when the event was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// `session_id` and `session_label`: the link to the session, when
+    /// the reader may read it (`api::session_links::Linker`).
+    #[serde(flatten)]
+    pub link: SessionField,
     /// A short line for lists.
     #[serde(default)]
     pub summary: String,
@@ -92,7 +99,7 @@ impl EventDraft {
 /// no agent, so they show in `GET /api/agents/{id}/events`. Mail and card
 /// events name their subject (the recipient, the assignee) on their own:
 /// the push listener reads that as the agent to point at.
-const ACTOR_ATTRIBUTED: &[&str] = &["wiki.", "artifact.", "memory.", "version."];
+const ACTOR_ATTRIBUTED: &[&str] = &["wiki.", "artifact.", "memory.", "version.", "db."];
 
 /// Name the acting agent on a draft of an [`ACTOR_ATTRIBUTED`] kind.
 fn attribute_actor(conn: &Connection, actor: &str, d: &mut EventDraft) -> ApiResult<()> {
@@ -119,6 +126,29 @@ pub fn insert(conn: &Connection, actor: &str, mut d: EventDraft) -> ApiResult<St
     attribute_actor(conn, actor, &mut d)?;
     let id = ulid::Ulid::new().to_string();
     let at = now();
+    // An event of an agent records the agent's current session.
+    if d.session.is_none()
+        && let Some(agent) = &d.agent_id
+    {
+        d.session = conn
+            .query_row(
+                "SELECT id FROM sessions WHERE agent_id = ?1 AND current = 1",
+                [agent],
+                |r| r.get(0),
+            )
+            .optional()?;
+    }
+    let link = match &d.session {
+        Some(s) => session_refs::link(
+            conn,
+            LinkKey {
+                session: Some(s),
+                agent: d.agent_id.as_deref(),
+                at: &at,
+            },
+        )?,
+        None => None,
+    };
     if let Value::Object(map) = &mut d.data {
         if let Some(agent) = &d.agent_id {
             map.entry("agent_id")
@@ -159,6 +189,7 @@ pub fn insert(conn: &Connection, actor: &str, mut d: EventDraft) -> ApiResult<St
         project: d.project,
         card: d.card,
         session: d.session,
+        link: SessionField::of(link),
         summary: d.summary,
         data: d.data,
     })
@@ -203,6 +234,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<StoredEvent> {
         project: r.get("project")?,
         card: r.get("card")?,
         session: r.get("session_id")?,
+        link: SessionField::default(),
         summary: r.get("summary")?,
         data: serde_json::from_str(&payload).unwrap_or(Value::String(payload)),
     })
@@ -270,6 +302,25 @@ fn select(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(values), from_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Find the session of each event of a page (`store::session_refs::links`):
+/// the recorded session, else the session of the event's agent at the
+/// event's time (an event from before the daemon recorded sessions).
+pub fn attach_links(conn: &Connection, events: &mut [StoredEvent]) -> ApiResult<()> {
+    let keys: Vec<LinkKey<'_>> = events
+        .iter()
+        .map(|e| LinkKey {
+            session: e.session.as_deref(),
+            agent: e.agent_id.as_deref(),
+            at: &e.at,
+        })
+        .collect();
+    let links = session_refs::links(conn, &keys)?;
+    for (e, l) in events.iter_mut().zip(links) {
+        e.link = SessionField::of(l);
+    }
+    Ok(())
 }
 
 /// Turn a `?since=` value into a `seq`: a number is a `seq`; a time

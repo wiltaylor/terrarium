@@ -1,4 +1,4 @@
-// The Knowledge screen of a project: the wiki and the memory as tabs
+// The Knowledge screen of a project: the wiki, the memory, and the DB as tabs
 // (app/nav.ts KNOWLEDGE_TABS). Each tab is a route under
 // /p/:project/knowledge. /p/:project/knowledge redirects to the Wiki tab.
 

@@ -20,7 +20,7 @@ Sections: [1 Transports](#1-transports-and-callers) ·
 [17 Targets, hosts, and exec](#17-targets-host-agents-and-exec-sessions) ·
 [18 Fleet](#18-fleet) · [19 Schedules](#19-schedules) ·
 [20 Event sources](#20-event-sources-and-ingest) ·
-[21 Agent templates](#21-agent-templates).
+[21 Agent templates](#21-agent-templates) · [27 DB](#27-db).
 
 ## 1. Transports and callers
 
@@ -457,6 +457,8 @@ everything. Every privileged action writes an audit row (§9).
 | Grant or revoke `sysadmin` | no | no | no (operator only) |
 | Read the audit log | no | own project's rows | all |
 | Read memories, pages, artifacts, versions; write memories, links, tags, pages, uploads, versions | own project | own project | any |
+| Read and write the DB (§27): types, records, queries | own project | own project | any |
+| Delete a DB type with its records (§27) | no | own project | any |
 | Edit or delete any memory; move, delete, or undelete a page; delete any artifact; release a version | no | own project | any |
 | Approve or reject a version | no | no | no (operator only) |
 | Prune artifacts | no | no | yes |
@@ -764,6 +766,10 @@ row. A project admin reads the rows of its project. Another agent gets
 
 New and changed rows also come live, as `audit` frames on the firehose
 stream with `audit=1` (§9.1). The same read rule applies.
+
+A row of an agent actor can have `session_id` and `session_label`: the
+actor's session at `at`, when the reader may read that session (§9,
+"Session links").
 
 ```json
 [{"id":"01M5PA0S0RK019JM7AD46MKF6B","seq":1,"at":"2026-10-24T06:36:53.144Z","actor":"system",
@@ -1688,12 +1694,12 @@ An agent is the core `Agent` with bookkeeping fields:
 | `subscription`, `model`, `prompt` | Absent when not set. |
 | `subscription_pool` | The account pool (PLAN §16.3): subscription names of one provider that the harness can spend, which a swap may pick (§6.2). The current `subscription` is always a member. Absent when empty. |
 | `system_prompt` | The agent's base system prompt (below). Absent when not set. |
-| `persona` | The persona (below): `leader`, `worker`, `none`, or a prompt file name. Absent: by role. |
+| `persona` | The persona (below): `leader`, `worker`, `none`, or an entry of the system prompt library (§28). Absent: by role. |
 | `skills` | The skills of the agent from the skill library (§26): skill names, or `*` for every skill. Absent: none. |
 | `skills_restart` | `true` when the live agent runs with other skills than its `skills` now picks from the library (the list or a skill changed after its start). A restart applies them. Absent when false. |
 | `roles` | Roles above `member`: `project_admin`, `sysadmin`. |
 | `status` | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. `waiting`: the turn ended, and the agent has one or more open waits (§6.7). `idle`: the turn ended, and the agent has no open wait. |
-| `status_reason` | The reason of the last status change: `idle` after an idle stop, `paused` after the stop of a pause, `stopped`, an exit, or an error text. Absent when not known. |
+| `status_reason` | The reason of the last status change: `idle` after an idle stop, `paused` after the stop of a pause, `subscription_disabled` (the subscription is disabled, §16.2), `stream_limit: waiting for a free stream on `<sub>`` (the work waits for a stream of a self-hosted subscription, §16.2), `stopped`, an exit, or an error text. Absent when not known. |
 | `paused` | `true` while the agent is paused (§6.2): nothing wakes it, and its work waits. Always present. |
 | `queued` | The work that waits for the agent: queued turns, `queued` mail, and card and nudge lines (§6.2). Absent when 0. |
 | `idle_stop` | The idle stop of the agent (§6.2): `off`, or a duration such as `30m`. Absent: the daemon's `TERRARIUM_IDLE_STOP`. |
@@ -1754,11 +1760,12 @@ text.
   `prompt` template replace the harness's default system prompt. The
   Terrarium template always stays.
 
-`persona` (optional): the persona prompt (PLAN §8.1), a file of the
-config repo's `prompts/`. `leader`, `worker`, `none`, or another file name
-(letters, digits, `-`, `_`; else `422 invalid`). Not set: by role,
-`leader.md` for an agent with `project_admin` or `sysadmin`, else
-`worker.md`. The persona replaces the harness's default system prompt,
+`persona` (optional): the persona prompt (PLAN §8.1), an entry of the
+system prompt library (§28, `system-prompts/<name>.md` in the config
+repo, else `prompts/<name>.md` of an older repo). `leader`, `worker`,
+`none`, or another entry name (letters, digits, `-`, `_`; else
+`422 invalid`). Not set: by role, `leader` for an agent with
+`project_admin` or `sysadmin`, else `worker`. The persona replaces the harness's default system prompt,
 and the protocol template comes after it, as for a `system_prompt`. A set
 `system_prompt` wins over the persona. `none` keeps the harness's default
 prompt. A named persona with no file stops the start (`422`); the persona
@@ -2923,6 +2930,10 @@ message (limit 6)`. The daemon sets both at the send and does not change
 them. Messages from before migration 16 have `held: false`.
 `thread_paused` is about the thread now; `held` is about the message.
 
+A message from an agent in `GET /api/mail` and `GET /api/mail/{id}` can
+have `session_id` and `session_label`: the sender's session at
+`created_at`, when the reader may read that session (§9, "Session links").
+
 The daemon redacts the subject and the body before it stores a message
 (§5.2, "Redaction"). A known secret value shows as `[secret:<label>]`.
 
@@ -3226,9 +3237,46 @@ The event log is append-only. `seq` orders it.
 | `seq` | The position in the log. Use it as `?since=`. |
 | `actor` | `operator`, `system`, or `agent:<ulid>`. An event of an event source has `source:<project>/<name>` (§20). |
 | `agent` | The agent **name**. `agent_id` and `data.agent_id` carry the ULID. Absent for project events. |
-| `project`, `card`, `session` | Absent when they do not apply. |
+| `project`, `card`, `session` | Absent when they do not apply. `session` is the session that the event recorded: the agent's current session when the daemon wrote the event. |
+| `session_id`, `session_label` | The link to the agent's session (see "Session links" below). Absent when there is no link. |
 | `summary` | A short line for lists. |
 | `data` | The kind's payload. |
+
+**Session links.** An event, a message (§7), and an audit row (§4,
+`GET /api/audit`) can link to the agent session that was active when the
+row was written. The row then has two more fields:
+
+| Field | Meaning |
+|---|---|
+| `session_id` | The session ID. `GET /api/sessions/{id}` (§6.6) reads the session; the dashboard page is `/sessions/<id>`. |
+| `session_label` | `<agent> · <start time>`, for example `worker · 2026-10-24 06:36 UTC`. The agent name is without the project. The time is the start of the session, to the minute, in UTC. |
+
+The daemon finds the session as follows:
+
+- An event: the session that the event recorded (`session`). An event
+  without one (an event from before the daemon recorded it) uses the
+  session of the event's `agent_id` at the event's `at`.
+- A message: the session of the sender at `created_at`, when the sender is
+  an agent. The daemon does not record which turn of the recipient read a
+  message, so a message does not link to a session of the recipient.
+- An audit row: the session of the actor at `at`, when the actor is
+  `agent:<ulid>`.
+
+"The session at a time" is the agent's session with `started_at` at or
+before that time, and `ended_at` absent or at or after that time. When two
+sessions match (a resumed session keeps its first start), the later start
+wins. When no session matches, there is no link.
+
+The two fields are present only when the reader may read the session: the
+operator, a member of the session's project, or a sysadmin (the rule of
+`GET /api/sessions/{id}`). A reader that sees the row but not the session
+gets the row without the fields. A session of a deleted agent links only
+while its archived session file is there (`TERRARIUM_SESSION_ARCHIVE_DAYS`;
+see §6.6, "Retention"). The fields are on the JSON pages, the WebSocket and SSE
+frames of `GET /api/events` and `GET /api/agents/{id}/events`, the `audit`
+frames, `GET /api/mail`, `GET /api/mail/{id}`, and `GET /api/audit`. The
+daemon finds the sessions of a page in one step, with the
+`sessions(agent_id, started_at)` index.
 
 Kinds:
 
@@ -3262,6 +3310,7 @@ Kinds:
 | `harness` | `{change, harness, package, from, to, forced}`. `change` is `updated`: an update in the tools dir (§4, `POST /api/harnesses/{name}/update`); `auto_updated`: an install of the auto-update check; `pinned` or `unpinned`: a pin or an unpin (§4, "Auto-update and pins"; `unpinned` has `was` in place of `from` and `to`). |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
 | `event_source` | `{change, source, name, key, kind, enabled}` after a change of an event source (§20). |
+| `system_prompt` | `{change, name, path}` after a write through the API of the system prompt library (§28). `change` is `created`, `updated`, or `deleted`. An edit of a file by hand gives no event. |
 | `ci.run.*`, `ci.job.failed`, `git.push`, `pr.*`, `ext.*` | A webhook of an event source (§20.4), or `POST /api/events` (§20.5). The actor is `source:<project>/<name>`, or the caller of `POST /api/events`. |
 
 A `memory.*`, `wiki.*`, `artifact.*`, or `version.*` event that an agent
@@ -3827,11 +3876,18 @@ A subscription:
 | Field | Meaning |
 |---|---|
 | `source` | `file` (`subscriptions/<name>.toml`), `api` (the API, the login wizard, an API key), or `fleet:<name>` (a fleet file, §18.1). A file subscription whose file is gone becomes `api` on reload; its samples stay. |
-| `login_status` | `logged_in`, `expiring`, `expired`, `missing`, `unknown` (not checked yet), or `api_key` (a stored Z.ai or Moonshot key: no harness status command can check it, §16.5). See "Expired logins" in §16.2. |
+| `login_status` | `logged_in`, `expiring`, `expired`, `missing`, `unknown` (not checked yet), or `api_key` (a stored Z.ai or Moonshot key, or a self-hosted server: no harness status command can check it, §16.5). See "Expired logins" in §16.2. |
 | `harnesses` | The harnesses that may spend it. pi uses API keys only: a plan login (a provider that sells a plan, Claude, ChatGPT, Copilot, or any OAuth login, with no `plan` "API key") never lists `pi`. The daemon drops `pi` from such a definition when it stores it, and from an older row when it reads it. A `moonshot` subscription lists `pi` only (§16.5). |
 | `probe_status` | `ok`, `failed` (`probe_error` says why), or `none` (no probe, or not run yet). `last_success_at` stays when a probe fails. |
-| `windows` | The newest sample of each window. Window names: `5h`, `7d`, `7d_opus`, `7d_sonnet` (Anthropic); `<n>h` or `<n>d` from the window length (OpenAI); `monthly` (Copilot premium requests). |
+| `display_name` | The name for people: `label` when the operator set one, else the vendor's own product and plan name, for example `Claude Ultra`, `Claude Max`, `ChatGPT Pro`, `GitHub Copilot`, `GLM Coding Plan Max`, `Kimi Code`, `Kimi API Platform`, `OpenRouter`, or `Self-hosted <host>`. `docs/compat.md`, "Display names", has the table and its sources. A stored plan of an older name shows by the name of today (`Max 20x` is `Claude Ultra`). `name` stays the id. Always present. |
+| `label` | The display name that the operator set (`PUT /api/subscriptions/{name}/label`). Absent when not set. Daemon state: a file subscription can have one too. |
+| `windows` | The newest sample of each window that the last good probe reported. Window names: `5h`, `7d`, `7d_<model>` (a weekly limit of one model, for example `7d_fable`), `7d_opus`, `7d_sonnet`, `extra` (extra usage, when it is on) (Anthropic); `<n>h` or `<n>d` from the window length (OpenAI); `monthly` (Copilot premium requests). An Anthropic Ultra plan has no `5h` window. A good probe removes each stored window that its answer does not have, with its samples (§16.2); a failed probe removes nothing. |
 | `local_estimate_only` | `true` when there is no probe: local accounting is the only number. |
+| `no_quota` | `true` for a self-hosted server (§16.5): it has no quota at all, so the quota UI shows the usage counts only. Always present. |
+| `enabled` | `false` when the operator disabled the subscription (§16.2, "Disabled subscriptions"). Daemon state: a file subscription can be disabled too. Always present. |
+| `selfhosted` | The server of a `selfhosted` subscription (§16.5): `{api, base_url, models?, default_model?, context_window?, max_output_tokens?, max_concurrent?, status_url?}`. Absent for every other provider. No secret. |
+| `streams` | The streams of a self-hosted subscription with `max_concurrent`: `{max, in_use, waiting}` (§16.2, "Stream limit"). `in_use` counts the agents that run a turn now; `waiting` the agents whose work waits for a free stream. Absent with no limit. |
+| `status_url` | The public status page of the provider: `anthropic` `https://status.anthropic.com`, `openai` `https://status.openai.com`, `github` `https://www.githubstatus.com`, `openrouter` `https://status.openrouter.ai`, `moonshot` `https://status.moonshot.cn`; for `selfhosted` its own `status_url`. Z.ai has no official status page, so it has none. Absent when none is known. The table is `terrarium_core::providers::status_url`. The dashboard only links to it; nothing fetches it. |
 | `env_var` | Set when an API key is stored: the env var that carries it into the agents. The key is never in the API. |
 | `held_agents` | Agents whose turns wait after a usage-limit error on this subscription (cause `limit:<subscription>`, §16.6). |
 | `account` | The plan account of the subscription (PLAN §16.3), when it has one: `harness` (whose login it holds), `has_login` (the credential file is there), `login` (the Copilot login name, or the email of a Claude login), `source` (`migration`: the shared login moved here at a daemon start; `login`: the login wizard), `created_at`, `updated_at`. Never a secret. |
@@ -3839,7 +3895,8 @@ A subscription:
 | `default` | `true` when the plan account is the default account of its harness (PLAN §16.3): a Claude Code, Codex, or Copilot agent with no subscription runs on it. Each harness has one default or none. Always present. |
 | `default_models` | The model that each harness gets on this subscription when the agent sets no `model`, by harness name, for example `{"pi":"glm-5.3-flash","claude":"glm-5.3"}` for a Z.ai key, or `{"pi":"kimi-for-coding"}` for a Moonshot `coding` key. Only the harnesses where the daemon picks the model: pi (the provider's default from the pi adapter's table; no entry when pi refuses the subscription) and Claude Code on Z.ai. `{}` when every harness keeps its own default. Always present. |
 
-Names follow the project name rules; `login` and `detect` are reserved.
+Names follow the project name rules; `login`, `detect`, and
+`fetch-models` are reserved.
 
 Probes: `anthropic-oauth-usage`, `openai-codex-usage` (alias
 `codex-rate-limits`), `github-copilot-quota` (alias
@@ -3908,6 +3965,40 @@ keep their card.
   §16.1). Any agent gets `403 forbidden`.
 - `GET /api/usage`: an agent sees its own project only, unless it is a
   `sysadmin`.
+- `PATCH`, enable, disable, stop-all, and `fetch-models`: `sysadmin` or the
+  operator. Any other agent gets `403 forbidden`.
+- Disabled subscriptions. `POST .../disable` sets `enabled: false`. Then:
+  - No agent on it starts, wakes, or restarts. `POST /api/agents/{id}/start`
+    and `.../restart` answer `409 conflict` with the reason. A wake (mail,
+    a turn, a card) does nothing: the work waits in the store, as for a
+    paused agent, and a stopped agent shows the status reason
+    `subscription_disabled`.
+  - No new agent takes it: `POST /api/agents` with it is `422 invalid`.
+  - A swap (§6.2) into it is `422 invalid`, and the auto-swap skips it.
+  - An agent that runs goes on: its current and queued turns go out while
+    it runs. When it stops (an idle stop, a stop, a crash), it does not
+    start again. A crash ends `stopped` with the reason
+    `subscription_disabled`, with no restart.
+  - `POST .../enable` sets `enabled: true` and wakes each agent on it that
+    has queued work (the stream limit applies to their turns).
+  - `POST .../stop-all` stops every running agent on it now. It does not
+    disable the subscription unless the body says `{"disable": true}`.
+- Stream limit. A self-hosted subscription with `max_concurrent` lets at
+  most that many of its agents run a turn at the same time
+  (`crates/terrariumd/src/stream_limit.rs`). Before the supervisor types
+  work into an idle agent (a turn, the recap turn, a mail or card pointer,
+  a compaction), the agent takes a free stream. With none free, the work
+  waits in the supervisor, and the agent shows `idle` with the status
+  reason `stream_limit: waiting for a free stream on `<name>``; the idle
+  stop does not stop it. The end of a turn (the agent rests), a stop, a
+  crash, and an idle stop free the stream, and the first agent that waits
+  gets it (first in, first out across agents). An agent with more work
+  goes to the end of the queue. A compaction takes a free stream only
+  (it does not queue; the idle pass tries again). A turn that the runner
+  reports `working` counts also past the limit (a turn typed in the
+  terminal, or a turn that ran across a daemon restart), so the count
+  after a restart comes from the turns that run. A turn that never ends
+  keeps its stream until the agent stops; there is no stall timer.
 - Plan accounts (PLAN §16.3). Each plan login is its own subscription with
   its own account under `<state>/credentials/accounts/<name>/`. The status
   checks, the probes, and the model lists read the account; before the
@@ -3927,21 +4018,34 @@ keep their card.
   mails the operator once from `system` (subject `Login expired: <name>`)
   and emits `subscription.expired`. A later successful probe or status
   check sets `logged_in` again.
+- Windows that go. A successful probe stores the windows of its answer,
+  and removes each stored window of the subscription that the answer does
+  not have: its samples and its quota notice rows (§16.6). The rule is the
+  same for every probe. So a window that the provider stopped reporting
+  (the `5h` window of an Anthropic plan that became Ultra on 2026-10-30)
+  leaves the lists and the tiles, and no quota line notifies for it. A
+  failed probe removes nothing: the windows of the last success stay.
 
 ### 16.3 Endpoints
 
 | Method and path | Body or query | Answer |
 |---|---|---|
 | `GET /api/subscriptions` | | Array of subscriptions. |
-| `POST /api/subscriptions` | `{name, provider, plan?, harnesses?, probe?, alert_at?}` | `201` with the subscription (`source = api`). `409 conflict` when the name exists; `422 invalid` for an unknown probe, or for provider `zai` with a plan that is not `coding` or `api`. A plan login loses `pi` from `harnesses` (§16.1). |
+| `POST /api/subscriptions` | `{name, provider, plan?, harnesses?, probe?, alert_at?, selfhosted?}` | `201` with the subscription (`source = api`). `409 conflict` when the name exists; `422 invalid` for an unknown probe, or for provider `zai` with a plan that is not `coding` or `api`. A plan login loses `pi` from `harnesses` (§16.1). `selfhosted` is for provider `selfhosted` only (§16.5). |
+| `PATCH /api/subscriptions/{name}` | `{alert_at?, harnesses?, selfhosted?}` | The subscription. `selfhosted` is a part of the server object: a field that is not in the body stays, and `null` clears `default_model`, `context_window`, `max_output_tokens`, `max_concurrent`, or `status_url`. `harnesses` changes here only for a self-hosted subscription; a new `api` style drops the harnesses that it does not serve. The checks of a create apply. `409 file_managed` for a file subscription. Audit `subscription.update`. |
+| `POST /api/subscriptions/{name}/enable` | | The subscription, `enabled: true`. Wakes the agents on it that have queued work. Audit `subscription.enabled`, event `subscription.enabled`. |
+| `POST /api/subscriptions/{name}/disable` | | The subscription, `enabled: false` (§16.2). Audit and event `subscription.disabled`. A second call changes nothing and writes nothing. |
+| `POST /api/subscriptions/{name}/stop-all` | `{disable?}` (the body is optional) | `{subscription, stopped: [{id, name, project, error?}]}`. Stops each running agent on the subscription with the graceful stop of `POST /api/agents/{id}/stop` (then the hard stop after its time limit). With `disable: true` the subscription is disabled first. Only the agents whose current subscription is this one. Audit and event `subscription.stop_all` (`{agents, disabled}`). |
+| `POST /api/subscriptions/fetch-models` | `{api?, base_url?, key?, subscription?, refresh?}` | The model list of a self-hosted server (§16.5): `{api, base_url, models: [{id, name?, context?}], cached, fetched_at}`. `503 unavailable` with the reason when the server does not answer with a list. |
 | `GET /api/subscriptions/{name}` | | One subscription. |
 | `DELETE /api/subscriptions/{name}` | | `204`. `409 file_managed` for a file subscription. The plan account goes with it; `409 conflict` while an agent's current subscription is this one (swap it first, §6.2). |
 | `GET /api/subscriptions/{name}/quota` | `?since=` (a time, §2.1; default 24 h ago), `?window=`, `?limit=` (default 1000) | Array of samples, oldest first: `{subscription, window, used_pct, resets_at, raw, at}`. `raw` is the provider's window object. |
 | `GET /api/subscriptions/{name}/models` | `?refresh=true` | The models the subscription can use (below). Cached for 6 h per subscription; `refresh` reads the list again. |
 | `POST /api/subscriptions/{name}/probe` | | `{subscription, probe_status, error?, windows}`. Here `subscription` is the **name** only, not the object. A failed probe is still `200`. |
-| `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the subscription's plan account (PLAN §16.3; before its migration, the shared home) and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
+| `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the subscription's plan account (PLAN §16.3; before its migration, the shared home) and sets `login_status` and `plan`: the plan when the subscription has none, and, for an `api` subscription of Anthropic, OpenAI, or GitHub, the plan that the check read when it differs (a renamed plan: `Max 20x` becomes `Ultra`). A daemon start does the same for each plan account. A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
 | `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. A plan account: removes the account directory and nothing else; no harness command runs, so no other account and no shared file changes. `409 conflict` while an agent's current subscription is this one. A subscription with no account (a shared login before its migration): runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command (it uses API keys only): `422 invalid`. An old pi plan account (from before pi took API keys only) logs out as any plan account: its directory goes. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
 | `POST /api/subscriptions/{name}/default` | | The subscription (§16.1), with `default: true`. Its plan account becomes the default account of its harness; the old default stops being one, in the same transaction. The audit row is `subscription.default` (`{harness, from, to, reason}`), and a `subscription` event (§16.7) follows. `422 invalid` for an API-key subscription, a subscription with no plan account, and a pi account or a provider that is not the plan provider of the harness. `404 not_found` for an unknown name. |
+| `PUT /api/subscriptions/{name}/label` | `{label}` | The subscription (§16.1). `label` is a string (at most 80 characters, no control characters) or `null`; `null` or only spaces removes it, and `display_name` comes from the vendor table again. Text for people only: the name, the ids, and the keys stay. Works on a file subscription too. Needs the operator or sysadmin. The audit row is `subscription.label` (`{label}`). |
 | `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?}` | The subscription, without the key. `plan` is for `zai` and `moonshot` only. See §16.5. |
 | `GET /api/subscriptions/detect` | | Logins found in the Claude Code, Codex, and Copilot homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, logged_in, plan?, detail?, suggested}]`. pi uses API keys only: no pi login is found. `suggested` is a subscription definition. |
 | `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
@@ -3963,15 +4067,17 @@ keep their card.
  "notes":["GET https://api.z.ai/api/coding/paas/v4/models: status 500"]}
 ```
 
-The daemon tries four sources, in order, and answers with the first list
-that has a model:
+A `selfhosted` subscription answers its stored `models` (and its
+`default_model`) with `source` `subscription`, and sends no request to
+the server; `POST /api/subscriptions/fetch-models` reads the server on
+request. For every other subscription the daemon tries four sources, in
+order, and answers with the first list that has a model:
 
 1. `provider`: `GET <base>/models` (the OpenAI list shape) with the stored
    API key as a bearer token, for an API-key subscription of `zai` (the
    plan's base URL: `coding` `https://api.z.ai/api/coding/paas/v4`, `api`
    `https://api.z.ai/api/paas/v4`), `moonshot` (the plan's base URL, see
-   §16.5), `openai-compatible` (the stored
-   `base_url`), `openai`, or `openrouter`. The key stays in the daemon.
+   §16.5), `openai`, or `openrouter`. The key stays in the daemon.
 2. `plan`: the model list of the harness login, with the credential of the
    shared harness home. The usage probes read the same credentials.
    - `anthropic` with `claude` in `harnesses`, or with a stored Anthropic
@@ -4106,7 +4212,7 @@ directories are `0700`), and sets `env_var`:
 |---|---|
 | `anthropic` | `ANTHROPIC_API_KEY` |
 | `openai` | `OPENAI_API_KEY` |
-| `openai-compatible` (needs `base_url`) | `OPENAI_API_KEY`, and `OPENAI_BASE_URL` |
+| `selfhosted` (alias `openai-compatible`) | `TERRARIUM_SELFHOSTED_API_KEY`, and `ANTHROPIC_AUTH_TOKEN` for an Anthropic-style server (below) |
 | `google`, `gemini` | `GEMINI_API_KEY` |
 | `openrouter` | `OPENROUTER_API_KEY` |
 | `xai` | `XAI_API_KEY` |
@@ -4190,6 +4296,75 @@ and the numbers, and the first window also has `booster_wallet` when the
 answer has one. A `401`, `403`, or `404` fails the probe with a hint, for
 example that the key is an Open Platform key and not a Kimi Code key
 (`sk-kimi-`). `docs/compat.md`, "Kimi Code usage", has the answer.
+
+**Self-hosted model servers.** `provider` `selfhosted`. The operator
+runs a model server (vLLM, Ollama, llama.cpp, SGLang, LM Studio, a
+proxy) and adds it with `POST /api/subscriptions` and a `selfhosted`
+object (or `[selfhosted]` in `subscriptions/<name>.toml`):
+
+| Field | Meaning |
+|---|---|
+| `api` | `openai` (the default) or `anthropic`: the API style of the server. |
+| `base_url` | Needed. `http` or `https`; a LAN host or `localhost` is fine. No user or password in it, no `?` or `#`. The OpenAI style takes the root with `/v1` (`http://gpu:8000/v1`); the Anthropic style takes the root without it (`http://gpu:8000`), as `ANTHROPIC_BASE_URL` does. A trailing `/` goes. |
+| `models` | The model ids that the server serves (typed, or picked from "Fetch models"). |
+| `default_model` | The model of an agent that sets none. Else the first of `models`. |
+| `context_window` | The context window, in tokens (at least 1024). |
+| `max_output_tokens` | The most output tokens of one answer (at most `context_window`). |
+| `max_concurrent` | How many agents on the subscription may run a turn at the same time, 1 to 1024 (§16.2, "Stream limit"). None: no limit. |
+| `status_url` | An `http(s)` status page of the server, for the dashboard link. |
+
+The harnesses that a style serves (verified from the installed harness
+versions, `docs/compat.md`, "Self-hosted model servers"):
+
+| `api` | Harnesses | How the harness gets the server |
+|---|---|---|
+| `openai` | pi, Codex | pi: the custom provider `terrarium-selfhosted` (`api` `openai-completions`) in the agent's `models.json`, `--provider terrarium-selfhosted --model <m>`. Codex: `-c model_provider="terrarium_selfhosted"` and `-c model_providers.terrarium_selfhosted={name, base_url, env_key="TERRARIUM_SELFHOSTED_API_KEY", wire_api="responses"}`, `-m <m>`. Codex 0.166 takes the Responses API only (`wire_api = "chat"` is no longer supported), so the server must serve `/v1/responses`. |
+| `anthropic` | Claude Code, pi | Claude Code: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `API_TIMEOUT_MS=3000000`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `..._SONNET_MODEL`, `..._HAIKU_MODEL`, and `CLAUDE_CODE_SUBAGENT_MODEL` set to the model, `--model <m>`. pi: `terrarium-selfhosted` with `api` `anthropic-messages`. |
+
+Copilot CLI cannot use a self-hosted server. No `harnesses` gives all
+the harnesses of the style; a harness of the other style, or `copilot`,
+is `422 invalid` and names the harnesses that the style serves. An agent
+of such a harness on the subscription is `422 invalid` too (create, the
+harness or subscription PATCH, a swap). The limits reach the harness
+where it has a setting: pi `contextWindow` and `maxTokens` of each model;
+Claude Code `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (it compacts before the
+window is full) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS`; Codex
+`-c model_context_window=<n>` (Codex 0.166 has no output-token setting).
+
+The key is optional: many local servers need none. `POST
+/api/subscriptions/{name}/api-key` with `provider` `selfhosted` stores
+one; it sets `env_var` `TERRARIUM_SELFHOSTED_API_KEY` and `login_status`
+`api_key`. With no key, each harness gets the placeholder
+`terrarium-no-key` in the key vars, so no harness sends another
+credential (the shared Claude login) to the server. The base URL, the
+models, and the limits are no secret: they are in the launch spec. The
+key goes only through `terrarium exec-env`, as every stored key does. A
+self-hosted key on a subscription of another provider (and the reverse)
+is `422 invalid`. A self-hosted subscription has no probe (`no_quota`,
+`local_estimate_only`), no plan, and no logout; verify sets `api_key`.
+
+`openai-compatible` is the old provider word. It stays an alias on
+input: a create, a file, or an API key with it makes a `selfhosted`
+subscription with `api` `openai`. Migration 46 renames the stored rows,
+and the next start moves their base URL and models from the key file
+into `selfhosted` (audit `subscription.migrate`); their `env_var`
+becomes `TERRARIUM_SELFHOSTED_API_KEY`.
+
+"Fetch models" (`POST /api/subscriptions/fetch-models`) is the one place
+where the daemon sends a request to a URL that a caller gives. It is a
+server-side request to any host the daemon can reach (an SSRF risk), so:
+only the operator and sysadmin can call it; `http` and `https` only, with
+the base URL rules above; one `GET` of `{base_url}/models` (OpenAI style)
+or `{base_url}/v1/models` (Anthropic style, with `anthropic-version`); no
+redirect is followed (a `3xx` is an error); 5 s for the whole request;
+at most 1 MiB of body; the answer is a list of model ids only. With
+`subscription`, the stored server and the stored key are used, and a
+`base_url` that is not the stored one is `422 invalid`: the stored key
+never goes to another host. A `key` in the body is sent and never
+stored. The key goes in `Authorization: Bearer` (and `x-api-key` for the
+Anthropic style), and never in an error text. A list is cached for 5
+minutes per style and base URL (`refresh: true` reads it again). Audit
+`subscription.fetch_models` (`{models, cached}`).
 
 At each launch, `RunnerSupervisor` puts the stored key into the env of
 every agent whose `subscription` has `env_var`
@@ -4282,12 +4457,14 @@ status that the runner reports. An agent may report for itself only.
 |---|---|
 | `usage.sample` | `{subscription, harness, model, input_tokens, output_tokens, cache_read, cache_write, messages}`: the new usage of one agent since its last `usage.sample`, at most one each 10 s per agent. `model` is the model of the newest response, as the session file names it (the usage store has the same name); the agent definition's model only when the file names none. |
 | `usage.rejected_path` | `{harness, harness_session, path, reason}`: the usage collector refused the session file that a `session_started` hook named. The file must be a regular file (not a symlink) under the agent's own session dir (`harness/claude/projects/`, `harness/codex/sessions/`, `harness/copilot/session-state/`, `harness/pi/sessions/`; with sandbox mode `none` also the session area of the shared home), and another agent must not read it. A Claude Code, Codex, or Copilot file must also carry the session ID in its name (`docs/security-review.md` F12). The collector does not read a refused file. |
-| `quota.sample` | `{subscription, windows}` after each successful probe. |
+| `quota.sample` | `{subscription, windows, removed_windows?}` after each successful probe. `removed_windows` names the stored windows that the answer no longer has: they and their quota notice rows are gone (§16.1). |
 | `quota.alert` | `{subscription, window, used_pct, resets_at, level, alert_at, threshold, message}`: `level` is `alert` under 100 and `exhausted` at 100; `threshold` is the line; `message` is the ID of the mail to the operator. For a budget `{project, subscription, window, used, limit, used_pct, level}`. The dashboard shows no banner for it. |
 | `quota.blocked` | `{cause, until, reason, enforced}`. The `agent` is the held agent. |
 | `quota.resumed` | `{cause, holds_left}`. |
 | `subscription.offer` | `{login, suggested}`: a login found at daemon start that no subscription covers. |
 | `subscription.expired` | `{subscription, from, reason}`: the login changed into `expired`. |
+| `subscription.enabled`, `subscription.disabled` | `{subscription, enabled}`: the operator or sysadmin enabled or disabled the subscription (§16.2). |
+| `subscription.stop_all` | `{subscription, agents, disabled}`: a stop-all; `agents` is the `stopped` list of the answer. |
 | `subscription` | `{change, harness, from, to, reason?}`. `change` is `default`: the default account of `harness` is now `to` (`reason` is `set` for the API, `backfill` for the oldest account at a start, `first_account` for the first login of the harness, `replaced` when the oldest account left takes over from a deleted or logged-out default). Or `default_cleared`: the default `from` was deleted or logged out; a `default` event with `replaced` follows when an account is left. The audit row of `default` is `subscription.default`. |
 | `credentials.migrated` | `{harness, moved, backups, skipped, pi_link}`: the start-up migration moved a shared login into an account (PLAN §16.3). The audit row is `credentials.migrate`. |
 | `agent.swapped` | `{from, to, applied, auto, reason}`: an agent moved to another account (§6.2). The audit row is `agent.swap`. |
@@ -6636,3 +6813,322 @@ A write body:
   at the next start; until then the agent shows `skills_restart: true`.
 - **Audit.** `skill.create`, `skill.update`, and `skill.delete`; an
   agent `PATCH` audits `skills`.
+
+## 27. DB
+
+The DB of a project (PLAN §15.4): record types with a schema, and records
+of a type. Agents keep structured data here (lists of items, inventories,
+results, decisions); the operator reads and edits it on the DB tab of
+the Knowledge screen. A wiki page shows query results with a `db` block
+(§27.5). The code is in `crates/terrariumd/src/store/records/`.
+
+### 27.1 Shapes
+
+A type:
+
+```json
+{"id":"01JB4…","project":"proj","name":"bug","description":"Defects found in the services",
+ "fields":[
+   {"name":"title","kind":"string","required":true},
+   {"name":"severity","kind":"enum","required":true,"values":["low","medium","high","critical"]},
+   {"name":"status","kind":"enum","required":true,"values":["open","fixed"],"default":"open"},
+   {"name":"service","kind":"ref","required":false,"ref":"service"},
+   {"name":"tags","kind":"list","required":false,"of":"string"}],
+ "revision":3,"records":60,"created_by":"01M5PA0T…","created_by_name":"proj/w1",
+ "created_at":"…","updated_at":"…"}
+```
+
+- A type name is `[a-z][a-z0-9_-]{0,62}`, unique in the project.
+- `records` is the number of records of the type.
+- `revision` goes up by one at each change of the type.
+
+A field:
+
+| Field | Meaning |
+|---|---|
+| `name` | `[a-z][a-z0-9_]{0,62}`. Not one of `id`, `type`, `created`, `updated`, `created_by`, `updated_by`, `revision`, `sort`, `limit`, `fields`, `count`, `group`, `view`. |
+| `kind` | `string` (one line, at most 1000 characters), `text` (at most 64 KiB, Markdown in the dashboard), `number`, `integer`, `bool`, `date` (`YYYY-MM-DD`), `datetime` (RFC 3339; stored in UTC with milliseconds), `enum`, `list`, `ref`, `json` (any JSON, at most 64 KiB). |
+| `required` | A record must have a value. An empty or blank `string` or `text` counts as no value. |
+| `default` | The value of a record that gives none at its create. It must fit the kind. A `ref` or `unique` field has none. |
+| `description` | At most 1000 characters. |
+| `values` | `enum` only: 1 to 200 values. Their order is the sort order of the field. |
+| `of` | `list` only: `string`, `integer`, or `number`. A list has at most 1000 items. |
+| `ref` | `ref` only: the name of a type of the project (the type itself is good). |
+| `unique` | No two records of the type have the same value. For `string`, `number`, `integer`, `date`, `datetime`, `enum`, and `ref`. |
+
+A type has 1 to 100 fields. A problem in the field list is `422 invalid`
+with `details.problems`, a list of text.
+
+A record:
+
+```json
+{"id":"01JB5…","project":"proj","type":"bug",
+ "data":{"title":"Login fails on Safari","severity":"high","status":"open",
+         "service":"01JB4…","tags":["ui","auth"]},
+ "revision":2,"created_by":"01M5PA0T…","created_by_name":"proj/w1",
+ "updated_by":"operator","updated_by_name":"operator","created_at":"…","updated_at":"…"}
+```
+
+- `data` holds a value for each field that has one. A field with no value
+  is absent.
+- A record has at most 64 KiB of `data` (as JSON).
+- The **label** of a record is the value of the first `string` field of
+  its type. A `ref` value in a write is a record ID or a label; the daemon
+  stores the ID. A label that no record of the target type has, or that
+  two records have, is a problem of the field.
+
+### 27.2 Endpoints
+
+| Endpoint | Body | Answer |
+|---|---|---|
+| `GET /api/projects/{p}/db/types` | | `200` types by name; cursor: the name |
+| `POST /api/projects/{p}/db/types` | `{"name", "description"?, "fields"}` | `201` type; `409 conflict` when the name exists |
+| `GET /api/projects/{p}/db/types/{type}` | | `200` type |
+| `PATCH /api/projects/{p}/db/types/{type}` | `{"revision", "description"?, "fields"?, "rename"?, "confirm"?}` | `200` type |
+| `DELETE /api/projects/{p}/db/types/{type}?confirm=true\|records` | | `204` |
+| `POST /api/projects/{p}/db/records` | `{"type", "data"}` | `201` record |
+| `GET /api/projects/{p}/db/records/{id}` | | `200` record |
+| `PATCH /api/projects/{p}/db/records/{id}` | `{"data", "revision"?}` | `200` record |
+| `DELETE /api/projects/{p}/db/records/{id}` | | `204` |
+| `GET /api/projects/{p}/db/query?q=&type=&cursor=` | | `200` query answer (§27.3) |
+
+**Record writes.** Each write is checked against the schema of the type.
+An unknown field, a missing required field, and a value of the wrong
+kind are `422 invalid` with `details.fields`: an object with a message for
+each field, for example `{"title":"is required","severity":"must be one
+of: low, medium, high"}`. The key `*` is a problem of the whole record
+(its size). A create fills a missing field that has a `default`. `PATCH`
+merges `data` into the record: a `null` value removes the field (a
+required field gives `is required`). With `revision`, a record at another
+revision is `409 conflict` with `details: {"current", "revision",
+"record"}` (`record` is the record now). A `PATCH` that changes nothing
+makes no new revision.
+
+**Record deletes.** A record that a `ref` of another record points at is
+`409 conflict` with `details: {"referrers": [{"id", "type", "field"}],
+"total"}` (at most 20 referrers). Change or delete those records first.
+
+**Schema changes** (`PATCH` of a type). `revision` is the revision that
+the change starts from; another one is `409 conflict` with `details:
+{"current", "revision"}`. `fields` is the whole new field list.
+`rename` is a list of `{"from", "to"}`: it applies first, and the data of
+each record moves to the new name. Then the daemon compares the old and
+the new list:
+
+- a new optional field: no change to the records;
+- a new field with a `default`: each record gets the default. A new
+  required field with no default, in a type with records, is
+  `422 invalid`;
+- a field that is required now and has a `default`: each record with no
+  value gets the default;
+- a removed field: its data goes from each record. Without
+  `"confirm": true` the answer is `409 confirm_required` with
+  `details.removed`;
+- then every record must fit the new schema (a new kind, `required`,
+  enum values, `unique`, a ref target). If one does not, nothing changes:
+  `422 invalid` with `details: {"records": [{"id", "field", "message"}],
+  "failing"}` (at most 20 records).
+
+A change of the data of a record gives it a new revision.
+
+**Type deletes.** A type with no records needs `?confirm=true`. A type
+with records needs `?confirm=records`, and project_admin, sysadmin, or
+the operator; its records go with it. Else the answer is
+`409 confirm_required` (`details.records` when it has records). A type
+that a `ref` field of another type points at is `409 conflict` with
+`details.referrers` (`["bug.service"]`).
+
+### 27.3 Queries
+
+`q` is a list of terms separated by spaces:
+
+| Term | Meaning |
+|---|---|
+| `type:<name>` | The type. Needed, unless the request gives `?type=`. |
+| `field=v`, `field!=v` | Equal, not equal. A record with no value is "not equal". |
+| `field>v`, `field>=v`, `field<v`, `field<=v` | Numbers, dates, times, text, and enums in the order of `values`. |
+| `field~text` | Contains, without case (`string`, `text`). For a `list`: has the item. |
+| `field:null`, `field:!null` | The record has no value, has a value. |
+| `sort:field`, `sort:-field` | Sort up, down. More than one term, or `sort:a,-b`. A record with no value goes last. |
+| `limit:N` | 1 to 500 records on a page. Default 50. |
+| `fields:a,b,c` | The columns of the answer. Default: every field. |
+| `count:true` | Only the count. |
+| `group:field` | The number of records for each value of the field (each item of a list). |
+| `view:table\|list\|count\|group` | The view of a wiki block (§27.5). The answer gives it back. |
+
+- `field` can also be a property of the record: `id`, `created`,
+  `updated`, `created_by`, `updated_by`, `revision`.
+- A value with spaces goes in double quotes: `title="Login fails"`. In
+  quotes, `\"` is a quote and `\\` is a backslash. A quoted `"null"` is
+  text.
+- A `date` takes `YYYY-MM-DD`; a `datetime` takes RFC 3339 or a date
+  (its midnight in UTC). Both also take `today`, `now`, and a time back
+  from now: `-7d`, `-12h`, `-30m`, `-2w`.
+- A `bool` takes `true` and `false`, with `=` and `!=` only.
+- A `ref` takes `=` and `!=` with a record ID or a label.
+- A `list` takes `=` or `~` (has the item; text without case) and `!=`
+  (has not).
+- A `json` field takes only `:null` and `:!null`. A `text`, `list`, or
+  `json` field cannot be a sort; a `text` or `json` field cannot be a
+  group.
+- Without `sort:`, the newest record comes first.
+
+The daemon compiles the query to SQL with bound parameters only. A field
+name must be a field of the type.
+
+A bad query is `400 bad_request` with `details: {"position",
+"message"}`. `position` is the offset (in characters, from 0) of the
+term or value with the problem:
+
+```json
+{"error":{"code":"bad_request","message":"bad query: position 9: type `bug` has no field `sevrity`; …",
+ "details":{"position":9,"message":"type `bug` has no field `sevrity`; …"}}}
+```
+
+The answer:
+
+```json
+{"type":"bug","query":"type:bug status=open sort:-severity limit:2 fields:title,severity,service",
+ "view":"table",
+ "fields":[{"name":"title","kind":"string","required":true},
+           {"name":"severity","kind":"enum","required":true,"values":["low","medium","high","critical"]},
+           {"name":"service","kind":"ref","required":false,"ref":"service"}],
+ "records":[{"id":"01JB5…","type":"bug","data":{"title":"…","severity":"critical","service":"01JB4…"}, …}],
+ "count":17,"next_cursor":"2","labels":{"01JB4…":"auth-service"}}
+```
+
+| Field | Meaning |
+|---|---|
+| `fields` | The columns. A record property (`fields:title,created`) has `"meta": true`; read it from the record (`created_at`, …), not from `data`. |
+| `records` | The page. `data` holds only the columns. Empty for `count:true` and `group:`. |
+| `count` | The number of records that match, on all pages. |
+| `next_cursor` | Present when there is a next page. Send it as `?cursor=`. It is an offset. |
+| `group`, `groups` | With `group:`: the field, and `[{"value", "count"}]`. An enum is in the order of `values`, a bool `true` first, other values the largest count first. `limit:` applies to the groups. |
+| `labels` | The label of each record ID in a `ref` column or a `ref` group. |
+
+### 27.4 Rules
+
+- Every member of the project (its agents too) reads and writes types and
+  records. A sysadmin and the operator read and write every project. An
+  agent of another project gets `403 forbidden`. A record ID of another
+  project is `404 not_found`.
+- The free text of a write is redacted (§5.2): every string value of
+  `data`, the description of the type, and the descriptions of the
+  fields.
+- **Events.** `db.type` and `db.record`, with `data: {"change", "project",
+  "type", "id", "revision"}`. `change` is `created`, `updated`, or
+  `deleted`. A schema change that changes records gives one `db.type`
+  event with `records_changed`, not an event for each record. A type
+  delete gives one event with `records`. The events have the `project`:
+  an agent sees those of its own project.
+- **Audit.** `db.type.create`, `db.type.update` (the added, removed,
+  renamed, and changed fields, and `records_changed`), `db.type.delete`
+  (with `records`), and `db.record.delete`. A record create or change has
+  no audit row, as a wiki save has none.
+
+### 27.5 The wiki `db` block
+
+A fenced block with the language `db` in a wiki page shows a query
+result:
+
+````markdown
+```db
+type:bug status=open severity>=high sort:-severity limit:10 fields:title,severity,service
+```
+````
+
+The dashboard renders the Markdown, then puts a placeholder for each
+block (the query is a data attribute, as text). After the sanitizer, a
+component sends the query to `GET /api/projects/{p}/db/query` with the
+project of the page and the rights of the reader. `view:` chooses the
+form: `table` (the default: the columns of `fields:`), `list` (the first
+column as a list), `count` (the number), or `group` (with `group:`, the
+count of each value). Each value shows as text; a `ref` links to the
+record on the DB tab. An error shows as a short line in the page.
+
+## 28. System prompts
+
+The system prompt library (PLAN §8.1): `system-prompts/<name>.md` in the
+config repo. An agent (§6) or a template (§21) selects an entry with
+`persona = "<name>"`. The entries `leader` and `worker` are the personas
+by role of every project. A daemon with no config repo answers
+`501 not_available`. A write goes to the work tree of the config repo
+after the secret scan, and stays uncommitted: `POST /api/config/commit`
+(§25) commits it.
+
+The lookup of a name at the start of an agent: `system-prompts/<name>.md`,
+then `<prompts dir>/<name>.md` (an older config repo). The list has the
+files of `system-prompts/`, and `leader` and `worker` from `prompts/` when
+`system-prompts/` does not have them. It never has the protocol templates
+of `prompts/` (`default.md`, `project-lead.md`, `system-lead.md`).
+
+Each read goes to the disk: an edit of a file by hand shows at the next
+read, and each agent gets it at its next start. There is no reload step.
+
+### 28.1 Shapes
+
+An entry in a list:
+
+```json
+{"name":"reviewer","description":"Review the cards in review","size":412,
+ "source":"config","path":"system-prompts/reviewer.md","builtin":false,
+ "updated":"2026-11-01T09:12:00Z"}
+```
+
+| Field | Meaning |
+|---|---|
+| `description` | The text of a first line `<!-- description: <text> -->`. Empty when the file has none. Show it as plain text. |
+| `size` | The bytes of the file. |
+| `source` | `default`: an unedited packaged default. `config`: any other file. |
+| `path` | The file in the config repo: `system-prompts/<name>.md`, or `prompts/<name>.md` in an older repo. |
+| `builtin` | `true` for `leader` and `worker`. They cannot be deleted. |
+| `updated` | The time of the last change of the file. |
+
+One entry (`GET /api/system-prompts/{name}`): the fields above, `text`
+(the prompt text without the description line), and `users`, the agents
+and templates that select it:
+
+```json
+{"users":[{"kind":"agent","id":"01K…","name":"p/w1","project":"p"},
+          {"kind":"agent","id":"01K…","name":"p/w2","project":"p","by_role":true},
+          {"kind":"template","id":"01K…","name":"rev"}]}
+```
+
+`by_role` is `true` for an agent with no `persona` that gets `leader` or
+`worker` by its roles. A global template has no `project`.
+
+### 28.2 Endpoints
+
+| Endpoint | Body | Answer | Needs |
+|---|---|---|---|
+| `GET /api/system-prompts` | | `200` entries by name | project_admin, sysadmin, or the operator |
+| `GET /api/system-prompts/{name}` | | `200` entry; `404` when missing | project_admin, sysadmin, or the operator |
+| `POST /api/system-prompts` | `{"name","text","description"?,"replace"?}` | `201` entry; `200` with `replace: true` over an entry that exists; `409` when it exists without `replace`; `422` (below) | project_admin, sysadmin, or the operator; `replace` as `PUT` |
+| `PUT /api/system-prompts/{name}` | `{"text"?,"description"?}`: only the fields given change; `"description": ""` removes it | `200` entry; `404` when missing | see "Rights" |
+| `DELETE /api/system-prompts/{name}?force=` | | `204`; `404` when missing; `409` when in use or `builtin` | see "Rights" |
+
+### 28.3 Rules
+
+- **Names.** 1 to 63 of `a-z`, `0-9`, `-`, and `_`, starting with a
+  letter or a digit (the rules of a template name). `none` is not a
+  name: it means the harness's default prompt.
+- **Checks.** The text is not empty, and the file is at most 32 KiB (the
+  limit of `system_prompt`). The description has no `-->`. The secret
+  scan of §25 finds nothing. A write that fails is `422 invalid`; a
+  finding of the scan is in `details.findings` and names the file, the
+  line, and the rule, never the value. Nothing is written.
+- **Rights.** The operator, a sysadmin, and a project_admin read the
+  library and add to it. A change or a delete needs sysadmin or the
+  operator when the entry is `leader` or `worker`, or when an agent or a
+  template outside the caller's project selects it (a global template
+  counts as outside). Else a project_admin may.
+- **Delete in use.** A delete of an entry that agents or templates select
+  is `409 conflict` with `details.users` (the shape of `users` above).
+  With `?force=true` the file goes; the next start of such an agent
+  stops with an error that names the missing file. `leader` and `worker`
+  cannot be deleted (`409`): edit them instead.
+- **Events and audit.** The audit rows `system_prompt.create`,
+  `system_prompt.update`, and `system_prompt.delete` hold the name, the
+  path, and the size, never the text. The event `system_prompt` (§9) has
+  `{"change","name","path"}`, with `change` = `created`, `updated`, or
+  `deleted`.

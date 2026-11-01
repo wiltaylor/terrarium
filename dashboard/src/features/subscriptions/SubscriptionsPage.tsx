@@ -7,23 +7,24 @@ import { createSignal, For, onMount, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead, ProviderLogo, useNow } from "../../components/ui";
 import { isLocalOnly, LOGIN_CHIP } from "../../components/UsageTile";
 import type { DetectedLogin, Subscription } from "../../api/types";
-import { ago, balanceText, humanize, timeUntil, windowValue } from "../../lib/format";
+import { ago, balanceText, humanize, orderWindows, subscriptionTitle, timeUntil, windowLabel, windowValue } from "../../lib/format";
 import { api, subscriptions } from "../../stores";
 import { AddSubscriptionWizard } from "./AddSubscriptionWizard";
 import { HarnessVersions } from "./HarnessVersions";
-import { reloginFor, wizardFromQuery, type WizardPath, type WizardSetup } from "./wizard";
+import { isSelfHosted, reloginFor, selfHostedSummary, stopAllText, streamsText, wizardFromQuery, type WizardPath, type WizardSetup } from "./wizard";
 import { A, useSearchParams } from "@solidjs/router";
 import { accountText, defaultInfo } from "./account";
 
 /** The probe chip: `ok` with the last success, `failed` with why, or local only. */
 export function probeChip(s: Subscription, now = Date.now()): { cls: string; text: string; title?: string } {
+  if (s.no_quota) return { cls: "", text: "no quota", title: "A self-hosted server has no quota: the usage counts only." };
   if (s.probe_status === "ok") return { cls: "ok", text: `probe ok${s.last_success_at ? ` · ${ago(s.last_success_at, now)}` : ""}` };
   if (s.probe_status === "failed") return { cls: "warn", text: "probe failed", title: s.probe_error };
   return { cls: "", text: s.probe ? "probe not run" : "local estimate only" };
 }
 
-/** A harness with a logout command (pi has none). */
-const canLogout = (s: Subscription) => !s.has_api_key && s.harnesses.some((h) => h !== "pi");
+/** A harness with a logout command (pi has none). A self-hosted server has no login. */
+const canLogout = (s: Subscription) => !s.has_api_key && !isSelfHosted(s.provider) && s.harnesses.some((h) => h !== "pi");
 
 const suggestName = (d: DetectedLogin) => d.suggested.name || `${d.pi_provider ?? d.provider}-${d.harness}`;
 
@@ -112,7 +113,10 @@ export default function SubscriptionsPage() {
                   <ProviderLogo provider={s.provider} />
                   <div style={{ "min-width": 0 }}>
                     <div class="row" style={{ "flex-wrap": "wrap" }}>
-                      <strong>{s.name}</strong>
+                      <strong>{subscriptionTitle(s)}</strong>
+                      <span class="muted small mono" title="The subscription name">
+                        {s.name}
+                      </span>
                       <Show when={def().isDefault}>
                         <span class="chip ok" title={`Agents of ${s.account?.harness} with no subscription run on this account`}>
                           default
@@ -142,9 +146,34 @@ export default function SubscriptionsPage() {
                       <Show when={s.held_agents > 0}>
                         <span class="chip bad">{s.held_agents} agents held</span>
                       </Show>
+                      <Show when={s.enabled === false}>
+                        <span class="chip warn" title="No agent on it starts or wakes, and no new agent takes it. Agents that run go on until they stop.">
+                          disabled
+                        </span>
+                      </Show>
+                      <Show when={selfHostedSummary(s)}>
+                        {(t) => (
+                          <span class="chip info" title={s.selfhosted?.base_url}>
+                            {t()}
+                          </span>
+                        )}
+                      </Show>
+                      <Show when={streamsText(s)}>
+                        {(t) => <span class={`chip ${(s.streams?.waiting ?? 0) > 0 ? "warn" : ""}`} title="Agents that run a turn now, of the stream limit. The work of the others waits.">{t()}</span>}
+                      </Show>
                     </div>
+                    <Show when={s.selfhosted}>
+                      {(sh) => (
+                        <div class="muted small">
+                          <span class="mono">{sh().base_url}</span>
+                          {sh().models?.length ? ` · models: ${sh().models!.join(", ")}` : ""}
+                          {sh().default_model ? ` · default ${sh().default_model}` : ""}
+                          {sh().max_output_tokens ? ` · max output ${sh().max_output_tokens}` : ""}
+                        </div>
+                      )}
+                    </Show>
                     <div class="muted small">
-                      {s.plan ?? "plan not known"} · {s.provider} · harnesses: {s.harnesses.join(", ") || "none"} · probe: {s.probe ?? "none"} · alert at {s.alert_at}%
+                      {s.plan ?? (s.selfhosted ? "no plan" : "plan not known")} · {s.provider} · harnesses: {s.harnesses.join(", ") || "none"} · probe: {s.probe ?? "none"} · alert at {s.alert_at}%
                     </div>
                     <div class="muted small">
                       Verified {s.verified_at ? ago(s.verified_at, now()) : "never"} · last probe {s.last_probe_at ? ago(s.last_probe_at, now()) : "never"} · last success{" "}
@@ -176,12 +205,70 @@ export default function SubscriptionsPage() {
                     </Show>
                     <Show when={s.windows.length}>
                       <div class="muted small">
-                        {s.windows.map((w) => `${w.window} ${w.balance ? balanceText(w.balance) : `${Math.round(w.used_pct)}%`}${w.balance ? "" : w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`).join(" · ")}
+                        {orderWindows(s.windows).map((w) => `${windowLabel(w.window)} ${w.balance ? balanceText(w.balance) : `${Math.round(w.used_pct)}%`}${w.balance ? "" : w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`).join(" · ")}
                       </div>
                     </Show>
                   </div>
                 </div>
                 <div class="row" style={{ "flex-wrap": "wrap", "justify-content": "flex-end" }}>
+                  <Show when={s.status_url}>
+                    {(u) => (
+                      <a class="btn small" href={u()} target="_blank" rel="noopener noreferrer" title={`Open ${u()} in a new tab`}>
+                        Status page
+                      </a>
+                    )}
+                  </Show>
+                  <Show
+                    when={s.enabled === false}
+                    fallback={
+                      <button
+                        class="small"
+                        disabled={busy() === s.name}
+                        title="No agent on it starts or wakes. Agents that run go on until they stop."
+                        onClick={() =>
+                          act(s.name, async () => {
+                            await api.subscriptions.disable(s.name);
+                            return `${s.name} is disabled. Agents that run go on; none starts or wakes.`;
+                          })
+                        }
+                      >
+                        Disable
+                      </button>
+                    }
+                  >
+                    <button
+                      class="small"
+                      disabled={busy() === s.name}
+                      onClick={() =>
+                        act(s.name, async () => {
+                          await api.subscriptions.enable(s.name);
+                          return `${s.name} is enabled. Agents with work wake now.`;
+                        })
+                      }
+                    >
+                      Enable
+                    </button>
+                  </Show>
+                  <ConfirmButton
+                    class="small danger"
+                    label="Stop all now"
+                    confirmLabel="Yes, stop all"
+                    disabled={busy() === s.name}
+                    onConfirm={() =>
+                      act(s.name, async () => stopAllText(s.name, await api.subscriptions.stopAll(s.name), false))
+                    }
+                  />
+                  <Show when={s.enabled !== false}>
+                    <ConfirmButton
+                      class="small danger"
+                      label="Disable and stop all"
+                      confirmLabel="Yes, disable and stop all"
+                      disabled={busy() === s.name}
+                      onConfirm={() =>
+                        act(s.name, async () => stopAllText(s.name, await api.subscriptions.stopAll(s.name, { disable: true }), true))
+                      }
+                    />
+                  </Show>
                   <button
                     class="small"
                     disabled={busy() === s.name}
@@ -201,7 +288,7 @@ export default function SubscriptionsPage() {
                       onClick={() =>
                         act(s.name, async () => {
                           const r = await api.subscriptions.probe(s.name);
-                          return r.probe_status === "ok" ? `${s.name}: probe ok, ${r.windows.map((w) => `${w.window} ${windowValue(w)}`).join(", ") || "no windows"}.` : `${s.name}: probe ${r.probe_status}${r.error ? `: ${r.error}` : ""}.`;
+                          return r.probe_status === "ok" ? `${s.name}: probe ok, ${orderWindows(r.windows).map((w) => `${windowLabel(w.window)} ${windowValue(w)}`).join(", ") || "no windows"}.` : `${s.name}: probe ${r.probe_status}${r.error ? `: ${r.error}` : ""}.`;
                         })
                       }
                     >
@@ -224,7 +311,7 @@ export default function SubscriptionsPage() {
                     </button>
                   </Show>
                   <button class="small" onClick={() => setWizard(reloginFor(s))}>
-                    {s.has_api_key ? "Replace key" : "Re-login"}
+                    {s.has_api_key ? "Replace key" : isSelfHosted(s.provider) ? "Add key" : "Re-login"}
                   </button>
                   <Show when={canLogout(s)}>
                     <ConfirmButton class="small danger" label="Logout" disabled={busy() === s.name || s.login_status === "missing"} onConfirm={() => act(s.name, async () => void (await api.subscriptions.logout(s.name)))} />

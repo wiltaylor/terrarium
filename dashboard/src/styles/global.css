@@ -202,7 +202,8 @@ button.ghost {
   border-color: transparent;
   background: transparent;
 }
-button.small {
+button.small,
+.btn.small {
   padding: 2px 8px;
   font-size: 0.85rem;
 }
@@ -1658,6 +1659,27 @@ a.chip.card-link:hover {
   flex-wrap: wrap;
   gap: 4px;
 }
+/* The session link of a log row (components/SessionLink.tsx). */
+.session-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+  color: var(--link);
+  text-decoration: none;
+}
+.session-link:hover {
+  text-decoration: underline;
+}
+.session-link svg {
+  flex: none;
+}
+.log-who {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 6px;
+}
 .log-thread {
   padding: 4px 12px 12px 16px;
 }
@@ -1838,17 +1860,25 @@ a.chip.card-link:hover {
 }
 .event-row {
   display: grid;
-  grid-template-columns: 70px 92px minmax(0, 1fr);
+  grid-template-columns: 70px 92px minmax(0, 1fr) auto;
   gap: 10px;
   padding: 5px 0;
   border-bottom: 1px solid var(--border);
 }
 @media (max-width: 520px) {
   .event-row {
-    grid-template-columns: 60px minmax(0, 1fr);
+    grid-template-columns: 60px minmax(0, 1fr) auto;
   }
   .event-row .kind {
     display: none;
+  }
+  /* The icon alone; the label stays in the tooltip and the aria-label. */
+  .event-row .session-link span {
+    display: none;
+  }
+  .event-row .session-link {
+    padding: 4px;
+    margin: -4px;
   }
 }
 
@@ -2826,4 +2856,16 @@ tr.row-open > td {
   .repo-browser.tree-closed .repo-tree-pane {
     display: none;
   }
+}
+
+/* The read-only text of a system prompt (the selector preview and the System prompts tab). */
+.prompt-preview {
+  margin: 0;
+  white-space: pre-wrap;
+  max-height: 20em;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
 }

@@ -1374,6 +1374,61 @@ const MIGRATIONS: &[&str] = &[
     UPDATE agent_templates SET source = 'config' WHERE source = 'fleet:terrarium-global';
     DELETE FROM fleet_objects WHERE kind = 'template' AND fleet = 'terrarium-global';
     "#,
+    // 45: the DB of a project (PLAN §15.4, `crate::store::records`).
+    // `db_types.schema` is `{"fields": [...]}`; `db_records.data` is a JSON
+    // object of the field values. The queries read the values with
+    // `json_extract`, inside one type, so the indexes are by type.
+    // Self-contained: when another branch takes number 45, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE db_types (
+        id          TEXT PRIMARY KEY,           -- ULID
+        project     TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        schema      TEXT NOT NULL CHECK (json_valid(schema)),
+        revision    INTEGER NOT NULL DEFAULT 1,
+        created_by  TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        UNIQUE (project, name)
+    );
+    CREATE TABLE db_records (
+        id         TEXT PRIMARY KEY,            -- ULID
+        project    TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        type       TEXT NOT NULL REFERENCES db_types(id) ON DELETE CASCADE,
+        data       TEXT NOT NULL CHECK (json_valid(data)),
+        revision   INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX db_records_type ON db_records(type, id);
+    CREATE INDEX db_records_project ON db_records(project, type);
+    CREATE INDEX db_records_type_created ON db_records(type, created_at);
+    CREATE INDEX db_records_type_updated ON db_records(type, updated_at);
+    "#,
+    // 46: self-hosted model servers and the enabled switch of a
+    // subscription (PLAN §16). `selfhosted` is the JSON of
+    // `terrarium_core::selfhosted::SelfHosted`. `openai-compatible` rows
+    // become `selfhosted`; the start fills their `selfhosted` from the key
+    // file (`store::subscriptions::migrate_openai_compatible`).
+    // Self-contained: when another branch takes number 46, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE subscriptions ADD COLUMN selfhosted TEXT CHECK (selfhosted IS NULL OR json_valid(selfhosted));
+    ALTER TABLE subscriptions ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+    UPDATE subscriptions SET provider = 'selfhosted' WHERE provider = 'openai-compatible';
+    "#,
+    // 47: the display name that the operator gives a subscription
+    // (`PUT /api/subscriptions/{name}/label`). NULL: the name from the
+    // vendor table (`terrarium_core::providers::display_name`). Daemon
+    // state, not part of the definition. Self-contained: when another
+    // branch takes number 47, move this entry to the end of the list.
+    r#"
+    ALTER TABLE subscriptions ADD COLUMN label TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1682,6 +1737,16 @@ impl<'c> Tx<'c> {
         self.redact_json_counted(v).0
     }
 
+    /// [`Self::redact`] of each string value of a JSON value, under every
+    /// key: the values of a DB record are free text, whatever the field
+    /// name ([`redact_json_values`]).
+    pub fn redact_values(&self, v: serde_json::Value) -> serde_json::Value {
+        if self.redactor.is_empty() {
+            return v;
+        }
+        redact_json_values(&self.redactor, self.view(), v)
+    }
+
     /// [`Self::redact_json`] with the number of matches.
     fn redact_json_counted(&self, v: serde_json::Value) -> (serde_json::Value, usize) {
         if self.redactor.is_empty() {
@@ -1743,7 +1808,8 @@ impl<'c> Tx<'c> {
             "UPDATE audit SET detail = ?2, at = ?3 WHERE id = ?1",
             rusqlite::params![id, detail.to_string(), now()],
         )?;
-        if let Some(row) = crate::store::audit::get(&self.tx, id)? {
+        if let Some(mut row) = crate::store::audit::get(&self.tx, id)? {
+            crate::store::audit::attach_links(&self.tx, std::slice::from_mut(&mut row))?;
             self.audits.borrow_mut().push(row);
         }
         Ok(())
@@ -1775,7 +1841,7 @@ impl<'c> Tx<'c> {
             ],
         )?;
         // `seq` is the rowid (INTEGER PRIMARY KEY).
-        self.audits.borrow_mut().push(AuditEntry {
+        let mut row = AuditEntry {
             id: id.to_owned(),
             seq: self.tx.last_insert_rowid(),
             at,
@@ -1784,7 +1850,11 @@ impl<'c> Tx<'c> {
             target: target.to_owned(),
             project: project.map(str::to_owned),
             detail,
-        });
+            link: Default::default(),
+        };
+        // The live `audit` frame carries the session too.
+        crate::store::audit::attach_links(&self.tx, std::slice::from_mut(&mut row))?;
+        self.audits.borrow_mut().push(row);
         Ok(())
     }
 }

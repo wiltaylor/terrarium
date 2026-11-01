@@ -93,6 +93,26 @@ describe("sanitizer: what the renderer emits survives", () => {
     expect(out).toContain('href="https://example.com/x" target="_blank" rel="noopener noreferrer"');
   });
 
+  it("keeps the db placeholder; a hostile query stays text in the attribute", () => {
+    const q = '"><img src=x onerror=alert(1)>';
+    const html = renderWiki("```db\ntype:bug title=" + q + "\n```\n", ctx);
+    expectInert(html);
+    const box = document.createElement("div");
+    setSafeHtml(box, html);
+    const slot = box.querySelector<HTMLElement>("div.db-embed")!;
+    expect(slot.dataset.dbQuery).toBe(`type:bug title=${q}`);
+    expect(box.querySelector("img")).toBeNull();
+    // A closing tag in the value: DOMPurify drops the attribute (its mXSS rule); nothing gets in.
+    const closing = renderWiki("```db\ntype:bug title=</div><script>alert(2)</script>\n```\n", ctx);
+    expectInert(closing);
+    setSafeHtml(box, closing);
+    expect(box.querySelector("script")).toBeNull();
+    expect(box.querySelector<HTMLElement>("div.db-embed")!.dataset.dbQuery ?? "").not.toContain("<script");
+    // Only on a div, and only up to 2000 characters.
+    expect(sanitizeHtml('<span data-db-query="x">a</span>')).toBe("<span>a</span>");
+    expect(sanitizeHtml(`<div class="db-embed" data-db-query="${"x".repeat(2001)}"></div>`)).toBe('<div class="db-embed"></div>');
+  });
+
   it("allows base64 PNG, JPEG, and GIF images only", () => {
     expect(sanitizeHtml('<img src="data:image/png;base64,iVBORw0KGgo=">')).toContain("data:image/png");
     expect(sanitizeHtml('<img src="data:image/gif;base64,R0lGOD==">')).toContain("data:image/gif");

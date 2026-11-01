@@ -243,6 +243,24 @@ impl Adapter for ClaudeAdapter {
                 a.model = Some(terrarium_core::zai::model_for(agent.model.as_deref()));
                 self.launch(&a, resume)
             }
+            // A self-hosted Anthropic-style server
+            // (`terrarium_core::selfhosted`): `--model` and the env of the
+            // endpoint and the limits. The daemon refuses an OpenAI-style
+            // server for Claude Code before the launch.
+            Some(s) if terrarium_core::selfhosted::is_selfhosted(&s.provider) => {
+                let Some(sh) = s
+                    .selfhosted
+                    .as_ref()
+                    .filter(|sh| sh.api == terrarium_core::selfhosted::Api::Anthropic)
+                else {
+                    return self.launch(agent, resume);
+                };
+                let mut a = agent.clone();
+                a.model = sh.model_for(agent.model.as_deref());
+                let mut spec = self.launch(&a, resume);
+                spec.env.extend(sh.claude_env(a.model.as_deref()));
+                spec
+            }
             _ => self.launch(agent, resume),
         }
     }
@@ -326,6 +344,49 @@ mod tests {
     }
 
     #[test]
+    fn selfhosted_anthropic_server_sets_the_model_and_the_endpoint_env() {
+        let a = ClaudeAdapter::default();
+        let agent = test_agent(None);
+        let mut s = SubscriptionDef {
+            name: "gpu".into(),
+            provider: "selfhosted".into(),
+            plan: None,
+            harnesses: vec![HarnessId::Claude],
+            probe: None,
+            alert_at: 80,
+            selfhosted: None,
+        };
+        s.selfhosted = Some(terrarium_core::selfhosted::SelfHosted {
+            api: terrarium_core::selfhosted::Api::Anthropic,
+            base_url: "http://gpu:8000".into(),
+            default_model: Some("qwen3-coder".into()),
+            context_window: Some(65_536),
+            ..Default::default()
+        });
+        let spec = a.launch_for(&agent, None, Some(&s));
+        let i = spec
+            .args
+            .iter()
+            .position(|x| x == "--model")
+            .expect("--model");
+        assert_eq!(spec.args[i + 1], "qwen3-coder");
+        assert_eq!(spec.env["ANTHROPIC_BASE_URL"], "http://gpu:8000");
+        assert_eq!(
+            spec.env["ANTHROPIC_AUTH_TOKEN"],
+            terrarium_core::selfhosted::NO_KEY
+        );
+        assert_eq!(spec.env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "65536");
+        assert_eq!(spec.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "qwen3-coder");
+        assert!(!spec.env.contains_key("ANTHROPIC_API_KEY"));
+        // An OpenAI-style server is not for Claude Code: no endpoint env.
+        if let Some(sh) = s.selfhosted.as_mut() {
+            sh.api = terrarium_core::selfhosted::Api::Openai;
+        }
+        let spec = a.launch_for(&agent, None, Some(&s));
+        assert!(!spec.env.contains_key("ANTHROPIC_BASE_URL"));
+    }
+
+    #[test]
     fn zai_subscription_passes_a_glm_model_and_keeps_the_quiet_flags() {
         let tmp = tempfile::tempdir().expect("tmp");
         let a = ClaudeAdapter::new(ClaudeOptions {
@@ -339,6 +400,7 @@ mod tests {
             harnesses: vec![HarnessId::Claude, HarnessId::Pi],
             probe: None,
             alert_at: 80,
+            selfhosted: None,
         };
         let model = |spec: &LaunchSpec| {
             let i = spec.args.iter().position(|x| x == "--model")?;

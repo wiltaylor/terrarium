@@ -32,12 +32,24 @@ pub fn model_args(
     subscription: Option<&SubscriptionDef>,
 ) -> Vec<String> {
     let provider = subscription.and_then(provider::provider_for);
+    let mut out = Vec::new();
+    // A self-hosted server: the model of the agent, else the default of
+    // the subscription (`SelfHosted::model_for`).
+    if let (Some(p), Some(sh)) = (
+        provider.as_deref(),
+        subscription.and_then(|s| s.selfhosted.as_ref()),
+    ) {
+        if let Some(m) = sh.model_for(agent.model.as_deref()) {
+            out.extend([f.provider.to_owned(), p.to_owned()]);
+            out.extend([f.model.to_owned(), m]);
+        }
+        return out;
+    }
     let model = agent
         .model
         .as_deref()
         .map(str::trim)
         .filter(|m| !m.is_empty());
-    let mut out = Vec::new();
     match (provider.as_deref(), model) {
         (Some(p), Some(m)) => {
             let m = m
@@ -200,6 +212,7 @@ mod tests {
             harnesses: vec![terrarium_core::HarnessId::Pi],
             probe: None,
             alert_at: 80,
+            selfhosted: None,
         }
     }
 

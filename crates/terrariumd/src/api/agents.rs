@@ -209,6 +209,8 @@ async fn create(
 #[derive(Debug, Serialize)]
 struct SubscriptionDetail {
     name: String,
+    /// The name for people (`store::subscriptions::display_name`).
+    display_name: String,
     provider: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     plan: Option<String>,
@@ -248,10 +250,15 @@ async fn show(
             let harness = view.agent.harness;
             state
                 .db
-                .read(move |c| crate::store::subscriptions::get(c, &name))
+                .read(move |c| {
+                    let s = crate::store::subscriptions::get(c, &name)?;
+                    let d = crate::store::subscriptions::display_name(c, &s)?;
+                    Ok((s, d))
+                })
                 .await
                 .ok()
-                .map(|s| SubscriptionDetail {
+                .map(|(s, display_name)| SubscriptionDetail {
+                    display_name,
                     default_model: crate::models::default_models(&s).remove(harness.as_str()),
                     name: s.name,
                     provider: s.provider,
@@ -461,6 +468,7 @@ pub(super) async fn start(
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "starting an agent")?;
     refuse_paused(&a, "start")?;
+    refuse_disabled(&state, &a).await?;
     if state
         .supervisor
         .status(agent_id(&a))
@@ -498,6 +506,25 @@ pub(super) async fn start(
     let id = a.agent.id.to_string();
     let v = state.db.read(move |c| agents::get(c, &id)).await?;
     Ok((StatusCode::ACCEPTED, Json(v)))
+}
+
+/// `409 conflict` for an agent whose subscription is disabled (PLAN §16):
+/// a start or a restart needs the enable first. A running agent goes on.
+async fn refuse_disabled(state: &Shared, a: &AgentView) -> ApiResult<()> {
+    let Some(name) = a.agent.subscription.clone() else {
+        return Ok(());
+    };
+    let sub = state
+        .db
+        .read(move |c| crate::store::subscriptions::find(c, &name))
+        .await?;
+    match sub
+        .as_ref()
+        .and_then(crate::store::subscriptions::disabled_refusal)
+    {
+        Some(why) => Err(ApiError::new(Code::Conflict, why)),
+        None => Ok(()),
+    }
 }
 
 /// `409 conflict` for a paused agent: a start or a restart needs an
@@ -749,6 +776,7 @@ pub(super) async fn restart(
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "restarting an agent")?;
     refuse_paused(&a, "restart")?;
+    refuse_disabled(&state, &a).await?;
     let live = state
         .supervisor
         .status(agent_id(&a))

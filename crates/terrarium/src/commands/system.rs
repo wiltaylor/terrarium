@@ -781,7 +781,277 @@ pub async fn subscriptions(ctx: &Ctx, cmd: &SubscriptionCmd) -> anyhow::Result<(
                 ));
             })
         }
+        SubscriptionCmd::Show { name } => {
+            let v = ctx.api.get(&sub_path(name, ""), vec![]).await?;
+            ctx.emit(&v, print_subscription)
+        }
+        SubscriptionCmd::New(a) => {
+            let mut body = json!({ "name": a.name, "provider": a.provider });
+            set_opt(&mut body, "plan", a.plan.as_deref());
+            set_opt(&mut body, "probe", a.probe.as_deref());
+            if let Some(n) = a.alert_at {
+                body["alert_at"] = json!(n);
+            }
+            if !a.harnesses.is_empty() {
+                body["harnesses"] = json!(a.harnesses);
+            }
+            let server = selfhosted_body(&a.server);
+            if server.as_object().is_some_and(|m| !m.is_empty()) {
+                body["selfhosted"] = server;
+            }
+            let key = if a.key_stdin {
+                Some(read_key(ctx)?)
+            } else {
+                None
+            };
+            let mut v = ctx.api.post("/api/subscriptions", Some(body)).await?;
+            if let Some(k) = key {
+                v = store_key(ctx, &a.name, &v, k).await?;
+            }
+            ctx.emit(&v, print_subscription)
+        }
+        SubscriptionCmd::Set(a) => {
+            let mut body = json!({});
+            if let Some(n) = a.alert_at {
+                body["alert_at"] = json!(n);
+            }
+            if !a.harnesses.is_empty() {
+                body["harnesses"] = json!(a.harnesses);
+            }
+            let mut server = selfhosted_body(&a.server);
+            for (clear, key) in [
+                (a.clear_default_model, "default_model"),
+                (a.clear_context_window, "context_window"),
+                (a.clear_max_output_tokens, "max_output_tokens"),
+                (a.clear_max_concurrent, "max_concurrent"),
+                (a.clear_status_url, "status_url"),
+            ] {
+                if clear {
+                    server[key] = Value::Null;
+                }
+            }
+            if server.as_object().is_some_and(|m| !m.is_empty()) {
+                body["selfhosted"] = server;
+            }
+            let key = if a.key_stdin {
+                Some(read_key(ctx)?)
+            } else {
+                None
+            };
+            let mut v = if body.as_object().is_some_and(|m| !m.is_empty()) {
+                ctx.api.patch(&sub_path(&a.name, ""), body).await?
+            } else {
+                ctx.api.get(&sub_path(&a.name, ""), vec![]).await?
+            };
+            if let Some(k) = key {
+                v = store_key(ctx, &a.name, &v, k).await?;
+            }
+            ctx.emit(&v, print_subscription)
+        }
+        SubscriptionCmd::Enable { name } => {
+            let v = ctx.api.post(&sub_path(name, "/enable"), None).await?;
+            ctx.emit(&v, |c, v| c.line(format!("{}: enabled", field(v, "name"))))
+        }
+        SubscriptionCmd::Disable { name } => {
+            let v = ctx.api.post(&sub_path(name, "/disable"), None).await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "{}: disabled (agents that run go on; none starts or wakes)",
+                    field(v, "name")
+                ));
+            })
+        }
+        SubscriptionCmd::StopAll { name, disable } => {
+            let v = ctx
+                .api
+                .post(
+                    &sub_path(name, "/stop-all"),
+                    Some(json!({ "disable": disable })),
+                )
+                .await?;
+            ctx.emit(&v, |c, v| {
+                let list = v["stopped"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    c.line("no agent of the subscription was running");
+                }
+                for a in &list {
+                    match a["error"].as_str() {
+                        Some(e) => c.line(format!(
+                            "{}/{}: not stopped: {e}",
+                            field(a, "project"),
+                            field(a, "name")
+                        )),
+                        None => c.line(format!(
+                            "{}/{}: stopping",
+                            field(a, "project"),
+                            field(a, "name")
+                        )),
+                    }
+                }
+                if v["subscription"]["enabled"].as_bool() == Some(false) {
+                    c.line(format!("{}: disabled", field(&v["subscription"], "name")));
+                }
+            })
+        }
+        SubscriptionCmd::FetchModels {
+            subscription,
+            base_url,
+            api,
+            key_stdin,
+            refresh,
+        } => {
+            let mut body = json!({ "refresh": refresh });
+            set_opt(&mut body, "subscription", subscription.as_deref());
+            set_opt(&mut body, "base_url", base_url.as_deref());
+            set_opt(&mut body, "api", api.as_deref());
+            if *key_stdin {
+                body["key"] = json!(read_key(ctx)?);
+            }
+            let v = ctx
+                .api
+                .post("/api/subscriptions/fetch-models", Some(body))
+                .await?;
+            ctx.emit(&v, |c, v| {
+                for m in v["models"].as_array().cloned().unwrap_or_default() {
+                    c.line(field(&m, "id"));
+                }
+            })
+        }
+        SubscriptionCmd::Label { name, label, clear } => {
+            let label = if *clear { None } else { label.clone() };
+            let v = ctx
+                .api
+                .put(&sub_path(name, "/label"), json!({ "label": label }))
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "{}: {}",
+                    field(v, "name"),
+                    field(v, "display_name")
+                ));
+            })
+        }
     }
+}
+
+/// `/api/subscriptions/<name><rest>`.
+fn sub_path(name: &str, rest: &str) -> String {
+    format!(
+        "/api/subscriptions/{}{rest}",
+        crate::transport::encode(name)
+    )
+}
+
+/// The first line of stdin, as an API key.
+fn read_key(ctx: &Ctx) -> anyhow::Result<String> {
+    let text = ctx.text("-")?;
+    let key = text.lines().next().unwrap_or_default().trim().to_owned();
+    if key.is_empty() {
+        return Err(crate::api::CliError::usage("no key on stdin"));
+    }
+    Ok(key)
+}
+
+/// Store `key` on subscription `name` (`v` is its view: the provider).
+async fn store_key(ctx: &Ctx, name: &str, v: &Value, key: String) -> anyhow::Result<Value> {
+    let body = json!({ "provider": v["provider"], "key": key });
+    ctx.api.post(&sub_path(name, "/api-key"), Some(body)).await
+}
+
+/// The `selfhosted` object of the server flags; only the flags given.
+fn selfhosted_body(a: &crate::cli::SelfHostedArgs) -> Value {
+    let mut s = json!({});
+    set_opt(&mut s, "api", a.api.as_deref());
+    set_opt(&mut s, "base_url", a.base_url.as_deref());
+    set_opt(&mut s, "default_model", a.default_model.as_deref());
+    set_opt(&mut s, "status_url", a.status_url.as_deref());
+    if !a.models.is_empty() {
+        s["models"] = json!(a.models);
+    }
+    if let Some(n) = a.context_window {
+        s["context_window"] = json!(n);
+    }
+    if let Some(n) = a.max_output_tokens {
+        s["max_output_tokens"] = json!(n);
+    }
+    if let Some(n) = a.max_concurrent {
+        s["max_concurrent"] = json!(n);
+    }
+    s
+}
+
+/// A token count as `128k` or `1M`.
+fn tokens(n: u64) -> String {
+    if n >= 1_000_000 && n.is_multiple_of(1_000_000) {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1024 && n.is_multiple_of(1024) {
+        format!("{}k", n / 1024)
+    } else if n >= 1000 && n.is_multiple_of(1000) {
+        format!("{}k", n / 1000)
+    } else {
+        n.to_string()
+    }
+}
+
+/// One subscription, as lines.
+fn print_subscription(ctx: &Ctx, v: &Value) {
+    ctx.line(format!("{} ({})", field(v, "name"), field(v, "provider")));
+    if let Some(d) = v["display_name"].as_str() {
+        ctx.line(format!("  display name: {d}"));
+    }
+    let enabled = v["enabled"].as_bool() != Some(false);
+    ctx.line(format!("  enabled: {}", if enabled { "yes" } else { "no" }));
+    if let Some(p) = v["plan"].as_str() {
+        ctx.line(format!("  plan: {p}"));
+    }
+    let harnesses: Vec<&str> = v["harnesses"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    ctx.line(format!("  harnesses: {}", harnesses.join(", ")));
+    ctx.line(format!("  login: {}", field(v, "login_status")));
+    let sh = &v["selfhosted"];
+    if sh.is_object() {
+        ctx.line(format!("  api: {}", field(sh, "api")));
+        ctx.line(format!("  base url: {}", field(sh, "base_url")));
+        let models: Vec<&str> = sh["models"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if !models.is_empty() {
+            ctx.line(format!("  models: {}", models.join(", ")));
+        }
+        if let Some(m) = sh["default_model"].as_str() {
+            ctx.line(format!("  default model: {m}"));
+        }
+        if let Some(n) = sh["context_window"].as_u64() {
+            ctx.line(format!("  context window: {} tokens", tokens(n)));
+        }
+        if let Some(n) = sh["max_output_tokens"].as_u64() {
+            ctx.line(format!("  max output: {} tokens", tokens(n)));
+        }
+        ctx.line(format!(
+            "  api key: {}",
+            if v["has_api_key"].as_bool() == Some(true) {
+                "stored"
+            } else {
+                "none"
+            }
+        ));
+    }
+    if let Some(st) = v["streams"].as_object() {
+        ctx.line(format!(
+            "  streams: {}/{} in use, {} waiting",
+            st.get("in_use").and_then(Value::as_u64).unwrap_or(0),
+            st.get("max").and_then(Value::as_u64).unwrap_or(0),
+            st.get("waiting").and_then(Value::as_u64).unwrap_or(0)
+        ));
+    }
+    if let Some(u) = v["status_url"].as_str() {
+        ctx.line(format!("  status page: {u}"));
+    }
+    let agents = v["agents"].as_array().map_or(0, Vec::len);
+    ctx.line(format!("  agents: {agents}"));
 }
 
 /// The subscriptions as a table. `DEFAULT` is `*` on the default account
@@ -793,7 +1063,15 @@ fn print_subscriptions(ctx: &Ctx, v: &Value) {
         return;
     }
     let mut t = crate::output::Table::new(&[
-        "NAME", "PROVIDER", "PLAN", "ACCOUNT", "LOGIN", "DEFAULT", "AGENTS",
+        "NAME",
+        "DISPLAY NAME",
+        "PROVIDER",
+        "PLAN",
+        "ACCOUNT",
+        "LOGIN",
+        "ENABLED",
+        "DEFAULT",
+        "AGENTS",
     ]);
     for s in &items {
         let account = match (s["account"]["harness"].as_str(), s["has_api_key"].as_bool()) {
@@ -804,10 +1082,16 @@ fn print_subscriptions(ctx: &Ctx, v: &Value) {
         let agents = s["agents"].as_array().map_or(0, Vec::len);
         t.row(vec![
             field(s, "name"),
+            field(s, "display_name"),
             field(s, "provider"),
             field(s, "plan"),
             account,
             field(s, "login_status"),
+            if s["enabled"].as_bool() == Some(false) {
+                "no".to_owned()
+            } else {
+                "yes".to_owned()
+            },
             if s["default"].as_bool() == Some(true) {
                 "*".to_owned()
             } else {

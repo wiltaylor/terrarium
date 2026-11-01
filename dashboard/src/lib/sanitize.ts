@@ -21,7 +21,7 @@ export const ALLOWED_TAGS = [
 
 /** The attributes `renderWiki` emits. Hooks below narrow their values further. */
 export const ALLOWED_ATTR = [
-  "align", "alt", "checked", "class", "data-artifact", "data-artifact-link", "disabled",
+  "align", "alt", "checked", "class", "data-artifact", "data-artifact-link", "data-db-query", "disabled",
   "href", "loading", "rel", "src", "start", "target", "title", "type",
 ] as const;
 
@@ -39,6 +39,10 @@ export const PURIFY_CONFIG: Config = {
   // Only http(s), mailto, and URLs with no scheme. The hook below checks again
   // on a normalised value and adds the image `data:` rule.
   ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
+  // The query of a `db` block starts with `type:`, which reads as a URL
+  // scheme. It is never a URL: the page reads it as text (the hook below
+  // keeps it on a div only, at most 2000 characters).
+  ADD_URI_SAFE_ATTR: ["data-db-query"],
   SAFE_FOR_TEMPLATES: false,
   SANITIZE_DOM: true,
   SANITIZE_NAMED_PROPS: true,
@@ -48,7 +52,9 @@ export const PURIFY_CONFIG: Config = {
 
 const SAFE_IMAGE_DATA = /^data:image\/(?:png|jpeg|gif);base64,[a-z0-9+/=\s]*$/i;
 const SCHEME = /^([a-z][a-z0-9+.-]*):/i;
-const CLASS_TOKEN = /^(?:wikilink|wikilink-(?:page|card|memory|version)|missing|artifact-embed|language-[\w+#.-]{1,40})$/;
+const CLASS_TOKEN = /^(?:wikilink|wikilink-(?:page|card|memory|version)|missing|artifact-embed|db-embed|language-[\w+#.-]{1,40})$/;
+/** The query of a `db` block (lib/markdown DB_QUERY_MAX). Any text: the page reads it with `dataset`, never as HTML. */
+const DB_QUERY_MAX = 2000;
 const ARTIFACT_ID = /^ART-\d+$/;
 
 /**
@@ -92,6 +98,7 @@ function addHooks(p: Purifier) {
     if (name === "href") keep = tag === "a" && isSafeHref(value);
     else if (name === "src") keep = tag === "img" && isSafeImageSrc(value);
     else if (name === "data-artifact" || name === "data-artifact-link") keep = ARTIFACT_ID.test(value);
+    else if (name === "data-db-query") keep = tag === "div" && value.length <= DB_QUERY_MAX;
     else if (name === "class") {
       const tokens = value.split(/\s+/).filter((t) => CLASS_TOKEN.test(t));
       data.attrValue = tokens.join(" ");

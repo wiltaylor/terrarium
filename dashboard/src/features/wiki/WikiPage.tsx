@@ -175,7 +175,7 @@ export default function WikiPage() {
               <Switch>
                 <Match when={tab() === "page"}>
                   <div class="card-box">
-                    <Markdown html={html()} artifacts={artifactMap()} />
+                    <Markdown html={html()} artifacts={artifactMap()} project={params.project} />
                   </div>
                   <Show when={backlinks()?.length}>
                     <div class="small">

@@ -13,6 +13,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use super::longpoll::{self, WaitQuery};
+use super::session_links::Linker;
 use super::{ApiJson, ApiQuery, Shared, paged};
 use crate::actor::Actor;
 use crate::db::Tx;
@@ -56,7 +57,7 @@ async fn list(
     ApiQuery(q): ApiQuery<ListQuery>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> ApiResult<Response> {
-    let rows = longpoll::hold(&state, wait, &["mail"], || {
+    let mut rows = longpoll::hold(&state, wait, &["mail"], || {
         let (actor, page, q) = (actor.clone(), page.clone(), q.clone());
         state.db.read(move |c| {
             let context = actor.project();
@@ -99,10 +100,16 @@ async fn list(
                     None => f.involving = Some(a.id.clone()),
                 }
             }
-            mail::list(c, &f, &page)
+            let mut rows = mail::list(c, &f, &page)?;
+            mail::attach_links(c, &mut rows.items)?;
+            Ok(rows)
         })
     })
     .await?;
+    let mut linker = Linker::new(&state, &actor);
+    for m in &mut rows.items {
+        linker.show(&mut m.link);
+    }
     Ok(paged(rows))
 }
 
@@ -215,10 +222,18 @@ async fn show(
     actor: Actor,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Message>> {
-    let m = state.db.read(move |c| mail::get(c, &id)).await?;
+    let mut m = state
+        .db
+        .read(move |c| {
+            let mut m = mail::get(c, &id)?;
+            mail::attach_links(c, std::slice::from_mut(&mut m))?;
+            Ok(m)
+        })
+        .await?;
     if !may_read_message(&actor, &m) {
         return Err(ApiError::not_found(format!("no message `{}`", m.id)));
     }
+    Linker::new(&state, &actor).show(&mut m.link);
     Ok(Json(m))
 }
 

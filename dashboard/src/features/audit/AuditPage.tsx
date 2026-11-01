@@ -6,6 +6,7 @@
 import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { createLive, createScrollKeeper, LiveControl, NewAbove } from "../../components/Live";
 import { createPagedList } from "../../components/paged";
+import { SessionLink } from "../../components/SessionLink";
 import { Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";
 import type { AuditEntry, AuditQuery } from "../../api/types";
 import { ago } from "../../lib/format";
@@ -100,7 +101,12 @@ export default function AuditPage() {
               {(e) => (
                 <tr>
                   <td title={e.at}>{ago(e.at)}</td>
-                  <td>{actorName(e.actor)}</td>
+                  <td>
+                    <span class="log-who">
+                      <span>{actorName(e.actor)}</span>
+                      <SessionLink row={e} />
+                    </span>
+                  </td>
                   <td class="mono small">{e.action}</td>
                   <td class="mono small">{agents.byId(e.target) ? `${agents.byId(e.target)!.project}/${agents.byId(e.target)!.name}` : e.target}</td>
                   <td>{e.project ?? ""}</td>

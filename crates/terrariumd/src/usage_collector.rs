@@ -154,6 +154,9 @@ pub struct UsageRuntime {
     pub models: crate::models::ModelCache,
     /// The subscriptions that hit a usage limit ([`crate::usage_limit`]).
     pub limits: crate::usage_limit::LimitBook,
+    /// The stream limits of the self-hosted subscriptions
+    /// ([`crate::stream_limit`]).
+    pub streams: crate::stream_limit::StreamGate,
 }
 
 impl UsageRuntime {
@@ -163,6 +166,7 @@ impl UsageRuntime {
             logins: Logins::default(),
             models: crate::models::ModelCache::default(),
             limits: crate::usage_limit::LimitBook::default(),
+            streams: crate::stream_limit::StreamGate::default(),
         }
     }
 }

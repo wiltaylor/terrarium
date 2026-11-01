@@ -456,6 +456,7 @@ impl Pi {
             harnesses: vec![HarnessId::Pi],
             probe: None,
             alert_at: 80,
+            selfhosted: None,
         };
         Self {
             home,

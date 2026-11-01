@@ -151,6 +151,37 @@ describe("createHttpApi", () => {
     expect(calls[7]!.opts?.body).toEqual({ comment: "tests fail" });
   });
 
+  it("maps the DB calls (docs/api.md §27)", async () => {
+    const { api, calls } = recorder();
+    await api.db.type("my p", "bug");
+    await api.db.createType("p", { name: "bug", fields: [] });
+    await api.db.updateType("p", "bug", { revision: 2, confirm: true });
+    await api.db.removeType("p", "bug", "records");
+    await api.db.createRecord("p", "bug", { title: "x" });
+    await api.db.record("p", "01R");
+    await api.db.updateRecord("p", "01R", { title: null }, 3);
+    await api.db.updateRecord("p", "01R", { title: "y" });
+    await api.db.removeRecord("p", "01R");
+    await api.db.query("p", 'type:bug title~"a b"', { cursor: "50" });
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "GET /api/projects/my%20p/db/types/bug",
+      "POST /api/projects/p/db/types",
+      "PATCH /api/projects/p/db/types/bug",
+      "DELETE /api/projects/p/db/types/bug",
+      "POST /api/projects/p/db/records",
+      "GET /api/projects/p/db/records/01R",
+      "PATCH /api/projects/p/db/records/01R",
+      "PATCH /api/projects/p/db/records/01R",
+      "DELETE /api/projects/p/db/records/01R",
+      "GET /api/projects/p/db/query",
+    ]);
+    expect(calls[3]!.opts?.query).toEqual({ confirm: "records" });
+    expect(calls[4]!.opts?.body).toEqual({ type: "bug", data: { title: "x" } });
+    expect(calls[6]!.opts?.body).toEqual({ data: { title: null }, revision: 3 });
+    expect(calls[7]!.opts?.body).toEqual({ data: { title: "y" } });
+    expect(calls[9]!.opts?.query).toEqual({ q: 'type:bug title~"a b"', type: undefined, cursor: "50" });
+  });
+
   it("opens every socket with the bearer subprotocol, arraybuffer frames, and no token in the URL", () => {
     const { api, sockets, raw } = recorder();
     const s = api.agents.pty("01JB");

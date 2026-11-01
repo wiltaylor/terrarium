@@ -40,6 +40,7 @@ use crate::probes::{HttpGet, HttpRequest};
 use crate::store::subscriptions::Subscription;
 
 pub mod plan;
+pub mod selfhosted;
 
 /// How long a model list stays fresh.
 pub const CACHE_TTL: Duration = Duration::from_secs(6 * 3600);
@@ -80,6 +81,10 @@ pub enum ModelSource {
     Plan,
     Pi,
     Fallback,
+    /// The `models` of a self-hosted subscription
+    /// (`terrarium_core::selfhosted`). The daemon reads no server for this
+    /// list; `POST /api/subscriptions/fetch-models` does, on request.
+    Subscription,
 }
 
 /// The answer of `GET /api/subscriptions/{name}/models`.
@@ -99,6 +104,8 @@ pub struct ModelList {
 #[derive(Default)]
 pub struct ModelCache {
     lists: Mutex<HashMap<String, (String, Instant, ModelList)>>,
+    /// The lists that "Fetch models" read from self-hosted servers.
+    pub fetched: selfhosted::FetchCache,
 }
 
 impl ModelCache {
@@ -122,6 +129,16 @@ impl ModelCache {
 /// `default_models` of `GET /api/subscriptions`.
 pub fn default_models(sub: &Subscription) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
+    // A self-hosted server: its default model (else its first) for each
+    // harness that it serves.
+    if sub.is_selfhosted() {
+        if let Some(m) = sub.selfhosted.as_ref().and_then(|s| s.model_for(None)) {
+            for h in &sub.harnesses {
+                out.insert(h.as_str().to_owned(), m.clone());
+            }
+        }
+        return out;
+    }
     if sub.harnesses.contains(&HarnessId::Pi) {
         let def = crate::runner_supervisor::sub_def(sub);
         // No default where pi refuses the subscription (a Claude plan).
@@ -177,6 +194,30 @@ pub async fn list(
 /// is the table.
 pub async fn fetch(src: &Sources<'_>, sub: &Subscription) -> ModelList {
     let mut notes = Vec::new();
+    // A self-hosted server: the stored list only. No request goes to the
+    // server here (`selfhosted::fetch` does, for the operator).
+    if sub.is_selfhosted() {
+        let models = sub
+            .selfhosted
+            .as_ref()
+            .map(|s| {
+                let mut ids = s.models.clone();
+                if let Some(d) = &s.default_model
+                    && !ids.contains(d)
+                {
+                    ids.insert(0, d.clone());
+                }
+                ids.into_iter()
+                    .map(|id| ModelInfo {
+                        id,
+                        name: None,
+                        context: s.context_window,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        return done(models, ModelSource::Subscription, notes);
+    }
     let key = login::read_key(src.state_dir, &sub.name);
     if let Some(key) = &key
         && let Some(base) = openai_base(sub, key)
@@ -238,7 +279,6 @@ fn done(models: Vec<ModelInfo>, source: ModelSource, notes: Vec<String>) -> Mode
 ///   (`terrarium_core::moonshot::Plan::openai_base_url`). The Open Platform
 ///   documents `GET /v1/models`; Kimi Code does not, so a failure there
 ///   falls through to pi's catalog and the table. Not verified live.
-/// - `openai-compatible`: the stored base URL.
 /// - `openai`: `https://api.openai.com/v1` (a key, not a ChatGPT plan).
 /// - `openrouter`: `https://openrouter.ai/api/v1`.
 pub fn openai_base(sub: &Subscription, key: &ApiKey) -> Option<String> {
@@ -256,7 +296,6 @@ pub fn openai_base(sub: &Subscription, key: &ApiKey) -> Option<String> {
             .to_owned()
     } else {
         match provider.as_str() {
-            "openai-compatible" => key.base_url.clone()?,
             "openai" => "https://api.openai.com/v1".to_owned(),
             "openrouter" => "https://openrouter.ai/api/v1".to_owned(),
             _ => return None,
@@ -478,6 +517,8 @@ zai-api   glm-5.3            1M       131.1K   yes       no    \n";
             probe_error: None,
             last_probe_at: None,
             last_success_at: None,
+            selfhosted: None,
+            enabled: true,
             created_at: String::new(),
             updated_at: String::new(),
         };
@@ -508,12 +549,10 @@ zai-api   glm-5.3            1M       131.1K   yes       no    \n";
                 "{plan:?}"
             );
         }
+        // A self-hosted server is never read here (only by "Fetch
+        // models", for the operator).
         assert_eq!(
-            openai_base(&sub("openai-compatible", None), &key(Some("http://l/v1/"))).as_deref(),
-            Some("http://l/v1")
-        );
-        assert_eq!(
-            openai_base(&sub("openai-compatible", None), &key(None)),
+            openai_base(&sub("selfhosted", None), &key(Some("http://l/v1/"))),
             None
         );
         assert_eq!(openai_base(&sub("xai", None), &key(None)), None);
@@ -556,6 +595,8 @@ zai-api   glm-5.3            1M       131.1K   yes       no    \n";
                 probe_error: None,
                 last_probe_at: None,
                 last_success_at: None,
+                selfhosted: None,
+                enabled: true,
                 created_at: String::new(),
                 updated_at: String::new(),
             }

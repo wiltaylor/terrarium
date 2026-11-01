@@ -8,6 +8,10 @@
 //!
 //! Rights: a member of the session's project reads, the operator reads
 //! all. The same as the card and the agent's own transcript.
+//!
+//! The log rows (events, mail, audit rows) link to their session too:
+//! [`Linker`] shows `session_id` and `session_label` on a row only when
+//! the reader may read the session and the session can still open.
 
 use axum::extract::{Path, State};
 use axum::routing::get;
@@ -22,7 +26,7 @@ use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult};
 use crate::policy;
 use crate::store::board;
-use crate::store::session_refs::{self, SessionRef, SessionRow};
+use crate::store::session_refs::{self, SessionField, SessionLink, SessionRef, SessionRow};
 use crate::transcripts::{LocateError, Located, locate_row};
 
 pub fn routes() -> Router<Shared> {
@@ -30,6 +34,49 @@ pub fn routes() -> Router<Shared> {
         .route("/sessions/{id}", get(show))
         .route("/sessions/{id}/transcript", get(transcript))
         .route("/cards/{id}/sessions", get(card_sessions))
+}
+
+/// The rights check of the session links of log rows, with a cache for
+/// one page (or one stream).
+pub struct Linker<'a> {
+    actor: &'a Actor,
+    state_dir: &'a std::path::Path,
+    seen: std::collections::HashMap<String, bool>,
+}
+
+impl<'a> Linker<'a> {
+    pub fn new(state: &'a Shared, actor: &'a Actor) -> Self {
+        Self::with_dir(&state.state_dir, actor)
+    }
+
+    pub fn with_dir(state_dir: &'a std::path::Path, actor: &'a Actor) -> Self {
+        Self {
+            actor,
+            state_dir,
+            seen: std::collections::HashMap::new(),
+        }
+    }
+
+    /// True when the reader may open the session: it reads the session's
+    /// project, and a session of a deleted agent still has its archived
+    /// file (the archive keeps it for `TERRARIUM_SESSION_ARCHIVE_DAYS`).
+    pub fn may(&mut self, l: &SessionLink) -> bool {
+        if let Some(ok) = self.seen.get(&l.id) {
+            return *ok;
+        }
+        let ok = policy::read_project(self.actor, &l.project).is_ok()
+            && (!l.removed
+                || l.archive.as_deref().is_some_and(|rel| {
+                    crate::session_archive::archived_file(self.state_dir, rel).is_some()
+                }));
+        self.seen.insert(l.id.clone(), ok);
+        ok
+    }
+
+    /// Show or clear the link of one row.
+    pub fn show(&mut self, f: &mut SessionField) {
+        f.show(|l| self.may(l));
+    }
 }
 
 /// `GET /api/sessions/{id}`.

@@ -444,6 +444,8 @@ export type AgentPatch = Partial<Pick<AgentDef, "harness" | "policy" | "restart"
 /** `subscription_detail` of `GET /api/agents/{id}`: the agent's subscription, when it exists. */
 export interface AgentSubscriptionDetail {
   name: string;
+  /** The name for people (`Subscription.display_name`). Absent from older daemons. */
+  display_name?: string;
   provider: string;
   plan?: string;
   login_status: LoginStatus;
@@ -900,6 +902,9 @@ export const EVENT_KINDS = [
   "wiki.restored",
   "wiki.moved",
   "wiki.reviewed",
+  // The project DB (docs/api.md §27): `data: {change, project, type, id, revision}`.
+  "db.type",
+  "db.record",
   "artifact.created",
   "artifact.linked",
   "artifact.deleted",
@@ -919,6 +924,10 @@ export const EVENT_KINDS = [
   "subscription.offer",
   // docs/api.md §16.7: `{change, harness, from, to}`, the default plan account of a harness.
   "subscription",
+  // A subscription was enabled or disabled (`{subscription, enabled}`), or every agent on it was stopped (`{subscription, agents, disabled}`).
+  "subscription.enabled",
+  "subscription.disabled",
+  "subscription.stop_all",
   "self_report",
   // The lifecycle: a pause, an unpause, and a wake (`{cause}`) of a stopped agent.
   "agent.paused",
@@ -944,11 +953,25 @@ export const EVENT_KINDS = [
   "event_source",
   // docs/api.md §21: `{change, template, name, key, revision}`.
   "template",
+  // docs/api.md §28: `{change, name, path}`.
+  "system_prompt",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
+/**
+ * The session link of a log row: an event, a message, or an audit row
+ * (docs/api.md §4, §7, §9). The daemon sends it only when the reader may
+ * read the session and the session can still open.
+ */
+export interface LogSessionLink {
+  /** The agent session that was active when the row was written. The session page is `/sessions/<id>`. */
+  session_id?: string;
+  /** `<agent> · <start time>`, for example `dev · 2026-10-26 09:12 UTC`. */
+  session_label?: string;
+}
+
 /** One row of the event log (docs/api.md §9). */
-export interface AgentEvent {
+export interface AgentEvent extends LogSessionLink {
   /** The position in the log. Use it as `?since=`. */
   seq: number;
   id: string;
@@ -987,7 +1010,7 @@ export type MessageState = "queued" | "delivered" | "read" | "replied";
 /** `system` is the daemon (quota alerts, blocked-card notices, loop-guard notices). It only sends: `to_kind` is never `system`. */
 export type AddressKind = "operator" | "system" | "project" | "agent";
 
-export interface Message {
+export interface Message extends LogSessionLink {
   id: string;
   thread_id: string;
   /** Stored address: `operator`, `system`, `project:<name>`, or the agent ULID. */
@@ -1413,6 +1436,96 @@ export interface WikiDiff {
   diff: string;
 }
 
+// ----- The project DB (PLAN §15.4, docs/api.md §27) -----
+
+export type DbKind = "string" | "text" | "number" | "integer" | "bool" | "date" | "datetime" | "enum" | "list" | "ref" | "json";
+export type DbItemKind = "string" | "integer" | "number";
+
+/** One field of a record type. */
+export interface DbField {
+  name: string;
+  kind: DbKind;
+  required: boolean;
+  /** The value of a new record that gives none. */
+  default?: unknown;
+  description?: string;
+  /** `enum`: the values, in sort order. */
+  values?: string[];
+  /** `list`: the kind of the items. */
+  of?: DbItemKind;
+  /** `ref`: the name of the target type. */
+  ref?: string;
+  /** Absent when false. */
+  unique?: boolean;
+}
+
+export interface DbType {
+  id: string;
+  project: string;
+  name: string;
+  description: string;
+  fields: DbField[];
+  revision: number;
+  /** The number of records of the type. */
+  records: number;
+  created_by: string;
+  created_by_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NewDbType {
+  name: string;
+  description?: string;
+  fields: DbField[];
+}
+
+/** `PATCH .../db/types/{name}`: `fields` is the whole new list, after the renames. */
+export interface DbTypePatch {
+  revision: number;
+  description?: string;
+  fields?: DbField[];
+  rename?: { from: string; to: string }[];
+  /** Needed when a field goes away. */
+  confirm?: boolean;
+}
+
+export interface DbRecord {
+  id: string;
+  project: string;
+  type: string;
+  data: Record<string, unknown>;
+  revision: number;
+  created_by: string;
+  created_by_name: string;
+  updated_by: string;
+  updated_by_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A column of a query answer: a field, or a record property (`meta`: id, created, updated, created_by, updated_by, revision). */
+export type DbColumn = DbField & { meta?: boolean };
+
+export type DbView = "table" | "list" | "count" | "group";
+
+/** `GET /api/projects/{p}/db/query`. */
+export interface DbQueryResult {
+  type: string;
+  query: string;
+  view: DbView;
+  fields: DbColumn[];
+  /** `data` has only the columns. Empty for `count:true` and `group:`. */
+  records: DbRecord[];
+  /** The number of records that match (all pages). */
+  count: number;
+  next_cursor?: string;
+  group?: string;
+  groups?: { value: unknown; count: number }[];
+  /** A label for each record ID in a ref column: the first string field of the record. */
+  labels: Record<string, string>;
+}
+
 // ----- Artifacts (§15.2, docs/api.md §12) -----
 
 export type ArtifactLinkKind = "page" | "version" | "card";
@@ -1561,7 +1674,11 @@ export type ProbeStatus = "ok" | "failed" | "none";
 
 /** The newest sample of one window (docs/api.md §16.1). */
 export interface QuotaWindow {
-  /** `5h`, `7d`, `7d_opus`, `<n>h`, `<n>d`, `monthly`, ... */
+  /**
+   * `5h`, `7d`, `7d_<model>` (a weekly limit of one model), `extra`,
+   * `<n>h`, `<n>d`, `monthly`, ... Only the windows that the last good
+   * probe reported: an Anthropic Ultra plan has no `5h`.
+   */
   window: string;
   used_pct: number;
   resets_at?: string;
@@ -1593,6 +1710,14 @@ export interface SubscriptionAgentRef {
 /** docs/api.md §16.1. */
 export interface Subscription {
   name: string;
+  /**
+   * The name for people: the operator's `label`, else the vendor's product
+   * and plan name (`Claude Ultra`, `ChatGPT Pro`, `GitHub Copilot`). `name`
+   * stays the id. Absent from older daemons: use `subscriptionTitle`.
+   */
+  display_name?: string;
+  /** The display name that the operator set (`PUT /api/subscriptions/{name}/label`). */
+  label?: string;
   provider: string;
   plan?: string;
   harnesses: Harness[];
@@ -1632,10 +1757,76 @@ export interface Subscription {
    * Absent from older daemons.
    */
   default?: boolean;
+  /** The server of a `selfhosted` subscription. Absent for every other provider. */
+  selfhosted?: SelfHosted;
+  /** False: no agent on it starts or wakes, and no new agent takes it. Agents that run go on. Absent from older daemons (enabled). */
+  enabled?: boolean;
+  /** The provider has no quota at all (a self-hosted server): show the usage counts only. */
+  no_quota?: boolean;
+  /** The streams of a self-hosted subscription with `max_concurrent`. */
+  streams?: StreamUsage;
+  /** The public status page of the provider, or the `status_url` of a self-hosted server. */
+  status_url?: string;
 }
 
-/** Where `GET /api/subscriptions/{name}/models` found the list: the provider's `/models`, the harness login's list, pi's catalogue, or the default table. */
-export type ModelSource = "provider" | "plan" | "pi" | "fallback";
+/** The API style of a self-hosted server. */
+export type SelfHostedApi = "openai" | "anthropic";
+
+/** The server of a `selfhosted` subscription (docs/api.md §16). No secret: the key is in the key store. */
+export interface SelfHosted {
+  api: SelfHostedApi;
+  /** `http` or `https`. The OpenAI root with `/v1`, or the Anthropic root without it. */
+  base_url: string;
+  models?: string[];
+  default_model?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  /** How many agents may run a turn at the same time. Absent: no limit. */
+  max_concurrent?: number;
+  status_url?: string;
+}
+
+/** The streams of a limited self-hosted subscription. */
+export interface StreamUsage {
+  max: number;
+  in_use: number;
+  waiting: number;
+}
+
+/** `PATCH /api/subscriptions/{name}`. In `selfhosted`, `null` clears an optional field. */
+export interface SubscriptionPatch {
+  alert_at?: number;
+  harnesses?: Harness[];
+  selfhosted?: Partial<{ [K in keyof SelfHosted]: SelfHosted[K] | null }>;
+}
+
+/** `POST /api/subscriptions/{name}/stop-all`. */
+export interface StopAllResult {
+  subscription: Subscription;
+  stopped: { id: string; name: string; project: string; error?: string }[];
+}
+
+/** `POST /api/subscriptions/fetch-models`. */
+export interface FetchModelsInput {
+  api?: SelfHostedApi;
+  base_url?: string;
+  /** Sent to the server once; never stored. */
+  key?: string;
+  /** Use the server and the stored key of this subscription. */
+  subscription?: string;
+  refresh?: boolean;
+}
+
+export interface FetchModelsResult {
+  api: SelfHostedApi;
+  base_url: string;
+  models: ModelInfo[];
+  cached: boolean;
+  fetched_at: string;
+}
+
+/** Where `GET /api/subscriptions/{name}/models` found the list: the provider's `/models`, the harness login's list, pi's catalogue, the default table, or the stored list of a self-hosted subscription. */
+export type ModelSource = "provider" | "plan" | "pi" | "fallback" | "subscription";
 
 export interface ModelInfo {
   id: string;
@@ -1661,6 +1852,8 @@ export interface SubscriptionDef {
   harnesses?: Harness[];
   probe?: string;
   alert_at?: number;
+  /** For provider `selfhosted`. */
+  selfhosted?: SelfHosted;
 }
 
 export type NewSubscription = SubscriptionDef & { name: string };
@@ -1823,7 +2016,7 @@ export interface QuotaHold {
 /** `GET /api/usage/me?agent=`. */
 export interface UsageMe {
   agent: { id: string; name: string; project: string };
-  subscription?: Pick<Subscription, "name" | "provider" | "plan" | "probe_status" | "last_success_at" | "local_estimate_only" | "windows">;
+  subscription?: Pick<Subscription, "name" | "display_name" | "provider" | "plan" | "probe_status" | "last_success_at" | "local_estimate_only" | "windows">;
   today: { since: string; mine: UsageTotals; subscription?: UsageTotals; share_pct?: number };
   holds: QuotaHold[];
 }
@@ -2331,7 +2524,7 @@ export type NewHostToken = Host & {
 // ----- Audit -----
 
 /** docs/api.md §4 `GET /api/audit`. */
-export interface AuditEntry {
+export interface AuditEntry extends LogSessionLink {
   id: string;
   seq?: number;
   at: string;
@@ -2945,6 +3138,61 @@ export interface SkillUser {
 export interface SkillUsage {
   agents: SkillUser[];
   templates: SkillUser[];
+}
+
+// ----- System prompts (PLAN §8.1, docs/api.md §28) -----
+// The library in the config repo: `system-prompts/<name>.md`. An agent or a
+// template selects an entry with `persona = name`. The text is user
+// content: show it as text, never as HTML.
+
+/** One entry of `GET /api/system-prompts`. */
+export interface SystemPromptSummary {
+  name: string;
+  /** From the first line `<!-- description: ... -->`. Empty when none. Plain text. */
+  description: string;
+  /** The bytes of the file. */
+  size: number;
+  /** `default`: an unedited packaged default. `config`: any other file. */
+  source: "default" | "config";
+  /** The file in the config repo: `system-prompts/<name>.md`, or `prompts/<name>.md` in an older repo. */
+  path: string;
+  /** `leader` or `worker`: the persona by role. It cannot be deleted. */
+  builtin: boolean;
+  /** The last change of the file (RFC 3339). */
+  updated?: string;
+}
+
+/** An agent or a template that selects a system prompt. */
+export interface SystemPromptUser {
+  kind: "agent" | "template";
+  id: string;
+  /** `project/agent` for an agent; the name (`project/name` for a project template) for a template. */
+  name: string;
+  /** Absent for a global template. */
+  project?: string;
+  /** True: the agent has no persona and gets `leader` or `worker` by its roles. */
+  by_role?: boolean;
+}
+
+/** `GET /api/system-prompts/{name}`. */
+export interface SystemPromptDetail extends SystemPromptSummary {
+  /** The prompt text, without the description line. */
+  text: string;
+  users: SystemPromptUser[];
+}
+
+/** `POST /api/system-prompts`. `replace` writes over an entry that exists. */
+export interface NewSystemPrompt {
+  name: string;
+  text: string;
+  description?: string;
+  replace?: boolean;
+}
+
+/** `PUT /api/system-prompts/{name}`: only the fields given change. `description: ""` removes it. */
+export interface SystemPromptUpdate {
+  text?: string;
+  description?: string;
 }
 
 // ----- Secrets (PLAN §16b, docs/api.md §5.2) -----

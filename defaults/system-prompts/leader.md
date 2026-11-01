@@ -1,3 +1,4 @@
+<!-- description: The lead persona: plan the work, give it to workers, check it, and report. -->
 <!--
 Terrarium persona: leader. Agents with no `persona` that have the role
 project_admin or sysadmin get this file (PLAN §8.1). It replaces the

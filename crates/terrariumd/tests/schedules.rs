@@ -1087,7 +1087,8 @@ async fn probe_actions_run_the_quota_probe() {
     assert_eq!(run.schedule, sid);
     assert_eq!(run.status, "ok", "{run:?}");
     assert_eq!(run.output["probe_status"], "ok");
-    assert_eq!(run.output["windows"].as_array().unwrap().len(), 2);
+    // 5h, 7d, and the weekly limit of one model (`weekly_scoped`).
+    assert_eq!(run.output["windows"].as_array().unwrap().len(), 3);
     assert!(run.summary.contains("5h"), "{}", run.summary);
     let s = td.get("/api/subscriptions/anthropic-max").await;
     assert_eq!(s.ok()["probe_status"], "ok");

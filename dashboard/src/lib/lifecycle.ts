@@ -24,8 +24,14 @@ export interface LifecycleBadge {
 /** True when the daemon stopped the agent after its idle timeout. */
 export const idleStopped = (a: Pick<Agent, "status" | "status_reason">): boolean => a.status === "stopped" && a.status_reason === "idle";
 
+/** True while the work of the agent waits for a free stream of its self-hosted subscription (`stream_limit: ...`). */
+export const streamWaiting = (a: Pick<Agent, "status" | "status_reason">): boolean => a.status !== "stopped" && (a.status_reason ?? "").startsWith("stream_limit");
+
 export function lifecycleBadge(a: Lifecycle): LifecycleBadge {
   if (a.paused) return { label: "paused", cls: "st-paused", title: "Paused: nothing wakes the agent. Turns and mail stay queued until you resume it." };
+  if (a.status === "stopped" && a.status_reason === "subscription_disabled")
+    return { label: "stopped (subscription disabled)", cls: "st-stopped", title: "Stopped. Its subscription is disabled: nothing wakes it until the subscription is enabled. Turns and mail stay queued." };
+  if (streamWaiting(a)) return { label: "waiting for a free stream", cls: `st-${a.status}`, title: `Its work waits for a free stream of its self-hosted subscription (${a.status_reason}).` };
   if (idleStopped(a)) return { label: "stopped (idle)", cls: "st-stopped", title: "Stopped after the idle timeout. A turn, mail, or a card wakes it." };
   if (a.status === "stopped") return { label: "stopped", cls: "st-stopped", title: "Status: stopped. A turn, mail, or a card wakes it." };
   if (a.status === "waiting" && a.waiting_on) return { label: a.status, cls: `st-${a.status}`, title: `Status: waiting on ${a.waiting_on}` };

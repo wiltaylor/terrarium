@@ -21,11 +21,13 @@ use crate::probes::{self, ProbeOutcome};
 use crate::store::projects::SOURCE_API;
 use crate::store::subscriptions::{self as subs, QuotaSample, Subscription};
 use crate::store::usage as ustore;
+use terrarium_core::selfhosted::{self, Api, SelfHosted};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/subscriptions", get(list).post(create))
         .route("/subscriptions/detect", get(detect))
+        .route("/subscriptions/fetch-models", post(fetch_models))
         .route("/subscriptions/login", post(login_start))
         .route(
             "/subscriptions/login/{id}",
@@ -33,7 +35,13 @@ pub fn routes() -> Router<Shared> {
         )
         .route("/subscriptions/login/{id}/input", post(login_input))
         .route("/subscriptions/login/{id}/pty", get(login_pty))
-        .route("/subscriptions/{name}", get(show).delete(remove))
+        .route(
+            "/subscriptions/{name}",
+            get(show).delete(remove).patch(update),
+        )
+        .route("/subscriptions/{name}/enable", post(enable))
+        .route("/subscriptions/{name}/disable", post(disable))
+        .route("/subscriptions/{name}/stop-all", post(stop_all))
         .route("/subscriptions/{name}/quota", get(quota))
         .route("/subscriptions/{name}/models", get(models))
         .route("/subscriptions/{name}/probe", post(probe))
@@ -41,6 +49,7 @@ pub fn routes() -> Router<Shared> {
         .route("/subscriptions/{name}/logout", post(logout))
         .route("/subscriptions/{name}/default", post(make_default))
         .route("/subscriptions/{name}/api-key", post(api_key))
+        .route("/subscriptions/{name}/label", axum::routing::put(set_label))
 }
 
 /// The newest sample of one window, for lists.
@@ -100,10 +109,32 @@ impl From<QuotaSample> for WindowView {
 pub struct SubscriptionView {
     #[serde(flatten)]
     pub sub: Subscription,
+    /// The name for people: `label` when the operator set one, else the
+    /// vendor's product and plan name
+    /// (`terrarium_core::providers::display_name`), for example
+    /// `Claude Ultra`. `name` stays the id.
+    pub display_name: String,
+    /// The display name that the operator set
+    /// (`PUT /api/subscriptions/{name}/label`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// The newest sample per window.
     pub windows: Vec<WindowView>,
     /// No probe: the only numbers are local accounting.
     pub local_estimate_only: bool,
+    /// The provider has no quota at all (a self-hosted server): the quota
+    /// UI shows the usage counts only.
+    pub no_quota: bool,
+    /// The streams of a self-hosted subscription with `max_concurrent`
+    /// (`crate::stream_limit`): the limit, the agents that run a turn now,
+    /// and the agents whose work waits. Absent with no limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub streams: Option<crate::stream_limit::StreamUsage>,
+    /// The public status page of the provider
+    /// (`terrarium_core::providers::status_url`), or the `status_url` of a
+    /// self-hosted server. Absent when none is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_url: Option<String>,
     /// An API key is stored for it (never shown).
     pub has_api_key: bool,
     /// Agents whose turns wait after a usage-limit error on this
@@ -158,11 +189,14 @@ fn view(
     c: &rusqlite::Connection,
     sub: Subscription,
     state_dir: &std::path::Path,
+    streams: &crate::stream_limit::StreamGate,
 ) -> ApiResult<SubscriptionView> {
     let windows = subs::latest_windows(c, &sub.name)?
         .into_iter()
         .map(WindowView::from)
         .collect();
+    let label = subs::label(c, &sub.name)?;
+    let display_name = subs::display_name(c, &sub)?;
     let cause = crate::usage_limit::cause(&sub.name);
     let held_agents = ustore::holds(c)?
         .iter()
@@ -187,11 +221,19 @@ fn view(
         .map(|(id, name, project)| AgentOn { id, name, project })
         .collect();
     Ok(SubscriptionView {
+        display_name,
+        label,
         default: subs::is_default(c, &sub.name)?,
         account,
         agents,
         default_models: crate::models::default_models(&sub),
         local_estimate_only: sub.probe.is_none(),
+        no_quota: sub.is_selfhosted(),
+        streams: streams.usage(&sub.name),
+        status_url: terrarium_core::providers::status_url_of(
+            &sub.provider,
+            sub.selfhosted.as_ref(),
+        ),
         has_api_key: sub.env_var.is_some() && login::stored_key(state_dir, &sub.name).is_some(),
         windows,
         held_agents,
@@ -201,11 +243,12 @@ fn view(
 
 async fn load(state: &Shared, name: String) -> ApiResult<SubscriptionView> {
     let dir = state.state_dir.clone();
+    let st = state.clone();
     state
         .db
         .read(move |c| {
             let s = subs::get(c, &name)?;
-            view(c, s, &dir)
+            view(c, s, &dir, &st.usage.streams)
         })
         .await
 }
@@ -213,12 +256,13 @@ async fn load(state: &Shared, name: String) -> ApiResult<SubscriptionView> {
 async fn list(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Vec<SubscriptionView>>> {
     policy::read_subscriptions(&actor)?;
     let dir = state.state_dir.clone();
+    let st = state.clone();
     let v = state
         .db
         .read(move |c| {
             subs::list(c)?
                 .into_iter()
-                .map(|s| view(c, s, &dir))
+                .map(|s| view(c, s, &dir, &st.usage.streams))
                 .collect::<ApiResult<Vec<_>>>()
         })
         .await?;
@@ -323,6 +367,10 @@ struct NewSubscription {
     probe: Option<String>,
     #[serde(default)]
     alert_at: Option<u8>,
+    /// The server of a `selfhosted` subscription
+    /// (`terrarium_core::selfhosted::SelfHosted`).
+    #[serde(default)]
+    selfhosted: Option<SelfHosted>,
 }
 
 async fn create(
@@ -353,6 +401,20 @@ async fn create(
         harnesses: b.harnesses,
         probe: b.probe,
         alert_at: b.alert_at.unwrap_or(80),
+        selfhosted: b.selfhosted,
+    };
+    // `openai-compatible` is the old word of `selfhosted` (OpenAI style).
+    let def = if selfhosted::is_alias(&def.provider) {
+        SubscriptionDef {
+            provider: selfhosted::PROVIDER.into(),
+            selfhosted: def.selfhosted.map(|mut s| {
+                s.api = Api::Openai;
+                s
+            }),
+            ..def
+        }
+    } else {
+        def
     };
     let name = def.name.clone();
     state
@@ -365,16 +427,443 @@ async fn create(
                     def.name
                 )));
             }
-            subs::upsert_def(t, &def, SOURCE_API)?;
+            let s = subs::upsert_def(t, &def, SOURCE_API)?;
             t.audit(
                 "subscription.create",
                 &def.name,
                 None,
-                json!({"provider": def.provider, "probe": def.probe}),
+                json!({"provider": s.provider, "probe": def.probe, "selfhosted": s.selfhosted}),
             )
         })
         .await?;
+    crate::stream_limit::refresh(&state).await;
     Ok((StatusCode::CREATED, Json(load(&state, name).await?)))
+}
+
+/// `null` clears a field of a `PATCH`; a missing field keeps it.
+fn nullable<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// The `selfhosted` fields of `PATCH /api/subscriptions/{name}`. A missing
+/// field keeps its value; `null` clears an optional one.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelfHostedPatch {
+    #[serde(default)]
+    api: Option<Api>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    models: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    default_model: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    context_window: Option<Option<u64>>,
+    #[serde(default, deserialize_with = "nullable")]
+    max_output_tokens: Option<Option<u64>>,
+    #[serde(default, deserialize_with = "nullable")]
+    max_concurrent: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "nullable")]
+    status_url: Option<Option<String>>,
+}
+
+impl SelfHostedPatch {
+    fn apply(self, mut s: SelfHosted) -> SelfHosted {
+        if let Some(v) = self.api {
+            s.api = v;
+        }
+        if let Some(v) = self.base_url {
+            s.base_url = v;
+        }
+        if let Some(v) = self.models {
+            s.models = v;
+        }
+        if let Some(v) = self.default_model {
+            s.default_model = v;
+        }
+        if let Some(v) = self.context_window {
+            s.context_window = v;
+        }
+        if let Some(v) = self.max_output_tokens {
+            s.max_output_tokens = v;
+        }
+        if let Some(v) = self.max_concurrent {
+            s.max_concurrent = v;
+        }
+        if let Some(v) = self.status_url {
+            s.status_url = v;
+        }
+        s
+    }
+}
+
+/// `PATCH /api/subscriptions/{name}`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubscriptionPatch {
+    #[serde(default)]
+    alert_at: Option<u8>,
+    #[serde(default)]
+    harnesses: Option<Vec<HarnessId>>,
+    #[serde(default)]
+    selfhosted: Option<SelfHostedPatch>,
+}
+
+/// `PATCH /api/subscriptions/{name}`: change an API subscription
+/// (`alert_at`; the `harnesses` and the server of a self-hosted one). A
+/// file subscription changes in its file (`409 file_managed`).
+async fn update(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(b): ApiJson<SubscriptionPatch>,
+) -> ApiResult<Json<SubscriptionView>> {
+    policy::manage_subscriptions(&actor, "changing a subscription")?;
+    if b.alert_at.is_some_and(|a| a == 0 || a > 100) {
+        return Err(ApiError::invalid("alert_at is a percent, 1 to 100"));
+    }
+    let n = name.clone();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            let s = subs::get(t, &n)?;
+            if s.source == crate::store::projects::SOURCE_FILE {
+                return Err(ApiError::new(
+                    crate::error::Code::FileManaged,
+                    format!(
+                        "subscription `{n}` is declared in subscriptions/{n}.toml; change the                          file, then POST /api/reload"
+                    ),
+                ));
+            }
+            if let Some(a) = b.alert_at {
+                subs::set_alert_at(t, &n, a)?;
+            }
+            if b.selfhosted.is_some() || (b.harnesses.is_some() && s.is_selfhosted()) {
+                let current = s.selfhosted.clone().unwrap_or_default();
+                let next = b.selfhosted.unwrap_or_default().apply(current);
+                subs::set_selfhosted(t, &n, next, b.harnesses.clone())?;
+            } else if b.harnesses.is_some() {
+                return Err(ApiError::invalid(
+                    "`harnesses` changes here only for a self-hosted subscription; change the                      definition of another one",
+                ));
+            }
+            let after = subs::get(t, &n)?;
+            t.audit(
+                "subscription.update",
+                &n,
+                None,
+                json!({"alert_at": after.alert_at, "harnesses": after.harnesses, "selfhosted": after.selfhosted}),
+            )
+        })
+        .await?;
+    crate::stream_limit::refresh(&state).await;
+    Ok(Json(load(&state, name).await?))
+}
+
+/// Enable or disable a subscription (PLAN §16): the audit row, the
+/// `subscription.enabled` or `subscription.disabled` event, and on the
+/// enable a wake of the agents on it that have work.
+async fn set_enabled(
+    state: &Shared,
+    actor: &Actor,
+    name: String,
+    enabled: bool,
+) -> ApiResult<SubscriptionView> {
+    let n = name.clone();
+    let changed = state
+        .db
+        .write(actor.label(), move |t| {
+            let changed = subs::set_enabled(t, &n, enabled)?;
+            if changed {
+                let kind = if enabled {
+                    "subscription.enabled"
+                } else {
+                    "subscription.disabled"
+                };
+                t.audit(kind, &n, None, json!({}))?;
+                let word = if enabled { "enabled" } else { "disabled" };
+                t.emit(crate::events::EventDraft::new(
+                    kind,
+                    format!("{n}: {word}"),
+                    json!({"subscription": n, "enabled": enabled}),
+                ))?;
+            }
+            Ok(changed)
+        })
+        .await?;
+    if changed && enabled {
+        // The agents with work that waited for the enable wake now. The
+        // stream limit applies to their turns.
+        let key = name.clone();
+        let ids = state.db.read(move |c| ustore::agents_on(c, &key)).await?;
+        for (id, _, _) in ids {
+            if let Ok(id) = id.parse() {
+                crate::lifecycle::wake_with_work(state, Some(id), "subscription_enabled").await;
+            }
+        }
+    }
+    load(state, name).await
+}
+
+/// `POST /api/subscriptions/{name}/enable`.
+async fn enable(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<SubscriptionView>> {
+    policy::manage_subscriptions(&actor, "enabling a subscription")?;
+    Ok(Json(set_enabled(&state, &actor, name, true).await?))
+}
+
+/// `POST /api/subscriptions/{name}/disable`: no agent on it starts or
+/// wakes, and no new agent takes it. Agents that run go on.
+async fn disable(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<SubscriptionView>> {
+    policy::manage_subscriptions(&actor, "disabling a subscription")?;
+    Ok(Json(set_enabled(&state, &actor, name, false).await?))
+}
+
+/// The body of `POST /api/subscriptions/{name}/stop-all`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopAll {
+    /// Disable the subscription first, so no agent wakes again.
+    #[serde(default)]
+    disable: bool,
+}
+
+/// One agent of a stop-all.
+#[derive(Debug, Clone, Serialize)]
+struct StoppedAgent {
+    id: String,
+    name: String,
+    project: String,
+    /// The error of a stop that failed. Absent when it stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// `POST /api/subscriptions/{name}/stop-all`: stop every running agent on
+/// the subscription now, with the graceful stop of the agent stop (then
+/// the hard stop after its time limit). With `disable: true` the
+/// subscription is disabled first. The answer lists the agents.
+async fn stop_all(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<Value>> {
+    policy::manage_subscriptions(&actor, "stopping the agents of a subscription")?;
+    // The body is optional: no body is `{}`.
+    let b: StopAll = if body.iter().all(u8::is_ascii_whitespace) {
+        StopAll::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::bad_request(format!("bad body: {e}")))?
+    };
+    let key = name.clone();
+    let on = state
+        .db
+        .read(move |c| {
+            subs::get(c, &key)?;
+            ustore::agents_on(c, &key)
+        })
+        .await?;
+    if b.disable {
+        set_enabled(&state, &actor, name.clone(), false).await?;
+    }
+    let mut stopped = Vec::new();
+    for (id, agent, project) in on {
+        let Ok(aid) = id.parse::<terrarium_core::AgentId>() else {
+            continue;
+        };
+        let live = state
+            .supervisor
+            .status(aid)
+            .await
+            .is_some_and(|s| s.is_live() || s == terrarium_core::AgentStatus::Restarting);
+        if !live {
+            continue;
+        }
+        let error = state
+            .supervisor
+            .stop(aid)
+            .await
+            .err()
+            .map(|e| e.to_string());
+        stopped.push(StoppedAgent {
+            id,
+            name: agent,
+            project,
+            error,
+        });
+    }
+    let n = name.clone();
+    let agents = serde_json::to_value(&stopped)?;
+    let disabled = b.disable;
+    state
+        .db
+        .write(actor.label(), move |t| {
+            let count = agents.as_array().map_or(0, Vec::len);
+            t.audit(
+                "subscription.stop_all",
+                &n,
+                None,
+                json!({"agents": agents, "disabled": disabled}),
+            )?;
+            t.emit(crate::events::EventDraft::new(
+                "subscription.stop_all",
+                format!("{n}: stop all ({count} agents)"),
+                json!({"subscription": n, "agents": agents, "disabled": disabled}),
+            ))
+        })
+        .await?;
+    Ok(Json(json!({
+        "subscription": load(&state, name).await?,
+        "stopped": stopped,
+    })))
+}
+
+/// The body of `POST /api/subscriptions/fetch-models`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchModels {
+    #[serde(default)]
+    api: Option<Api>,
+    #[serde(default)]
+    base_url: Option<String>,
+    /// A key to send (the wizard, before the key is stored). Never stored
+    /// and never logged.
+    #[serde(default)]
+    key: Option<String>,
+    /// Use the server and the stored key of this subscription. A
+    /// `base_url` must then be its own: the stored key never goes to
+    /// another host.
+    #[serde(default)]
+    subscription: Option<String>,
+    /// Read the server again instead of the cache.
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// `POST /api/subscriptions/fetch-models`: the model list of a self-hosted
+/// server (`crate::models::selfhosted`), for the wizard before the
+/// subscription exists, or for an edit. The operator and sysadmin only:
+/// it is a request from the daemon to a URL that the caller gives.
+async fn fetch_models(
+    State(state): State<Shared>,
+    actor: Actor,
+    ApiJson(b): ApiJson<FetchModels>,
+) -> ApiResult<Json<Value>> {
+    policy::manage_subscriptions(&actor, "fetching the models of a self-hosted server")?;
+    let stored = match &b.subscription {
+        Some(n) => {
+            let k = n.clone();
+            let s = state.db.read(move |c| subs::get(c, &k)).await?;
+            let Some(sh) = s.selfhosted.clone().filter(|_| s.is_selfhosted()) else {
+                return Err(ApiError::invalid(format!(
+                    "subscription `{n}` is not a self-hosted server"
+                )));
+            };
+            Some((sh, login::stored_key(&state.state_dir, n)))
+        }
+        None => None,
+    };
+    let (sh, key) = match stored {
+        Some((mut sh, stored_key)) => {
+            if let Some(u) = &b.base_url {
+                let u =
+                    selfhosted::check_http_url("base_url", u, false).map_err(ApiError::invalid)?;
+                if u != sh.base_url {
+                    return Err(ApiError::invalid(
+                        "a fetch with the stored key goes to the stored base_url only; leave                          `base_url` out, or leave `subscription` out and give the key",
+                    ));
+                }
+            }
+            if let Some(api) = b.api {
+                sh.api = api;
+            }
+            (sh, b.key.clone().or(stored_key))
+        }
+        None => {
+            let Some(base_url) = b.base_url.clone() else {
+                return Err(ApiError::invalid("give `base_url` (or `subscription`)"));
+            };
+            let sh = SelfHosted {
+                api: b.api.unwrap_or_default(),
+                base_url,
+                ..SelfHosted::default()
+            }
+            .checked()
+            .map_err(ApiError::invalid)?;
+            (sh, b.key.clone())
+        }
+    };
+    let cache = &state.usage.models.fetched;
+    let (models, cached) = match (!b.refresh).then(|| cache.get(&sh)).flatten() {
+        Some(m) => (m, true),
+        None => {
+            let m = crate::models::selfhosted::fetch(&sh, key.as_deref())
+                .await
+                .map_err(|e| ApiError::new(crate::error::Code::Unavailable, e))?;
+            cache.put(&sh, &m);
+            (m, false)
+        }
+    };
+    let (url, n) = (sh.models_url(), models.len());
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit(
+                "subscription.fetch_models",
+                &url,
+                None,
+                json!({"models": n, "cached": cached}),
+            )
+        })
+        .await?;
+    Ok(Json(json!({
+        "api": sh.api,
+        "base_url": sh.base_url,
+        "models": models,
+        "cached": cached,
+        "fetched_at": crate::db::now(),
+    })))
+}
+
+/// `PUT /api/subscriptions/{name}/label`: `{"label": "..."}` sets the
+/// display name; `{"label": null}` (or only spaces) goes back to the name
+/// from the vendor table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LabelBody {
+    label: Option<String>,
+}
+
+async fn set_label(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(b): ApiJson<LabelBody>,
+) -> ApiResult<Json<SubscriptionView>> {
+    policy::manage_subscriptions(&actor, "naming a subscription")?;
+    let n = name.clone();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            let label = subs::set_label(t, &n, b.label.as_deref())?;
+            t.audit("subscription.label", &n, None, json!({"label": label}))
+        })
+        .await?;
+    Ok(Json(load(&state, name).await?))
 }
 
 async fn remove(
@@ -409,6 +898,7 @@ async fn remove(
             .map_err(|e| ApiError::internal(format!("cannot remove the account: {e}")))?;
         settle_defaults(&state, None).await;
     }
+    crate::stream_limit::refresh(&state).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -494,6 +984,19 @@ async fn verify(
             json!({"subscription": load(&state, name).await?, "status": {"logged_in": true, "detail": "a stored API key"}}),
         ));
     }
+    // A self-hosted server has no login, and a key is optional.
+    if sub.is_selfhosted() {
+        let n = name.clone();
+        state
+            .db
+            .write(actor.label(), move |t| {
+                subs::set_login_status(t, &n, subs::API_KEY)
+            })
+            .await?;
+        return Ok(Json(
+            json!({"subscription": load(&state, name).await?, "status": {"logged_in": true, "detail": "a self-hosted server: no login, no stored key"}}),
+        ));
+    }
     // A Z.ai or Moonshot subscription is a key only. Its first harness
     // would report the shared login of that harness, which is not this
     // subscription.
@@ -536,11 +1039,13 @@ async fn verify(
         .db
         .write(actor.label(), move |t| {
             subs::record_login_check(t, &n, logged_in)?;
-            if let Some(p) = plan
+            if let Some(p) = &plan
                 && subs::get(t, &n)?.plan.is_none()
             {
-                subs::set_plan(t, &n, &p)?;
+                subs::set_plan(t, &n, p)?;
             }
+            // A renamed or changed plan (Max 20x is Ultra now).
+            subs::refresh_plan(t, &n, plan.as_deref())?;
             t.audit(
                 "subscription.verify",
                 &n,
@@ -750,6 +1255,25 @@ async fn api_key(
             )));
         }
     }
+    // A self-hosted key goes on a self-hosted subscription only, and a new
+    // one needs the server's base URL.
+    let is_sh = selfhosted::is_selfhosted(&key.provider);
+    match &exists {
+        Some(s) if s.is_selfhosted() != is_sh => {
+            return Err(ApiError::invalid(format!(
+                "cannot store a {} key on subscription `{name}`: it is a {} subscription",
+                key.provider, s.provider
+            )));
+        }
+        None if is_sh && key.base_url.as_deref().is_none_or(str::is_empty) => {
+            return Err(ApiError::invalid(format!(
+                "provider `{}` needs base_url for a new subscription (or create it first with \
+                 POST /api/subscriptions and `selfhosted`)",
+                key.provider
+            )));
+        }
+        _ => {}
+    }
     let source = exists.as_ref().map(|s| s.source.clone());
     let dir = state.state_dir.clone();
     let k = key.clone();
@@ -785,11 +1309,30 @@ async fn api_key(
                         harnesses,
                         probe: None,
                         alert_at: 80,
+                        selfhosted: None,
                     };
                     subs::upsert_def(t, &def, SOURCE_API)?;
                 } else if source.as_deref() == Some(SOURCE_API) {
                     subs::set_plan(t, &n, plan)?;
                 }
+            } else if source.is_none() && is_sh {
+                // The old wizard path (`openai-compatible` with a base URL):
+                // a self-hosted OpenAI-style server.
+                let def = SubscriptionDef {
+                    name: n.clone(),
+                    provider: selfhosted::PROVIDER.into(),
+                    plan: None,
+                    harnesses: Vec::new(),
+                    probe: None,
+                    alert_at: 80,
+                    selfhosted: Some(SelfHosted {
+                        api: Api::Openai,
+                        base_url: base_url.clone().unwrap_or_default(),
+                        models: models.clone(),
+                        ..SelfHosted::default()
+                    }),
+                };
+                subs::upsert_def(t, &def, SOURCE_API)?;
             } else if source.is_none() {
                 let harness = if provider == "github" { HarnessId::Copilot } else { HarnessId::Pi };
                 let def = SubscriptionDef {
@@ -803,13 +1346,18 @@ async fn api_key(
                         None
                     },
                     alert_at: 80,
+                    selfhosted: None,
                 };
                 subs::upsert_def(t, &def, SOURCE_API)?;
             }
             // A file subscription keeps its definition; the env var is
             // daemon state.
             subs::set_env_var(t, &n, Some(var))?;
-            let status = if key_plan.is_some() { subs::API_KEY } else { subs::LOGGED_IN };
+            let status = if key_plan.is_some() || is_sh {
+                subs::API_KEY
+            } else {
+                subs::LOGGED_IN
+            };
             subs::set_login_status(t, &n, status)?;
             t.audit(
                 "subscription.api_key",
@@ -829,6 +1377,8 @@ fn key_only_provider(provider: &str) -> Option<&'static str> {
         Some("Z.ai")
     } else if terrarium_core::moonshot::is_moonshot(provider) {
         Some("Moonshot")
+    } else if selfhosted::is_selfhosted(provider) {
+        Some("self-hosted")
     } else {
         None
     }

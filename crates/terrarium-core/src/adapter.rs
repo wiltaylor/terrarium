@@ -163,6 +163,19 @@ pub trait Adapter: Send + Sync {
     fn materialize_config(&self, _agent: &Agent, _home: &Path) -> Result<Vec<FileOverlay>> {
         Ok(Vec::new())
     }
+
+    /// [`Adapter::materialize_config`] for an agent whose subscription the
+    /// caller has resolved. A harness whose per-agent files name the
+    /// provider (pi's `models.json` for a self-hosted server) writes it
+    /// there. The default ignores the subscription.
+    fn materialize_for(
+        &self,
+        agent: &Agent,
+        home: &Path,
+        _subscription: Option<&SubscriptionDef>,
+    ) -> Result<Vec<FileOverlay>> {
+        self.materialize_config(agent, home)
+    }
 }
 
 /// The writes of a graceful exit, from [`Adapter::exit_keys`] and

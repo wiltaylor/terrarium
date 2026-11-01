@@ -254,8 +254,8 @@ agents or repos, the tree or a project node shows a filter. The root and the
 project nodes use `app/TreeRoot.tsx`, one open set in `localStorage`,
 and the keyboard map in `app/treeNav.ts`. Settings
 (`features/settings/SettingsPage.tsx`) is one page with a tab for each of
-Account, Subscriptions, Secrets, Templates, Skills, Targets, Harness config,
-and Hosts. Each tab is a route under `/settings`. The Skills tab also has the
+Account, Subscriptions, Secrets, Templates, System prompts, Skills, Targets,
+Harness config, and Hosts. Each tab is a route under `/settings`. The Skills tab also has the
 editor of one skill at `/settings/skills/<name>`. Logs
 (`features/logs/LogsPage.tsx`) is the same: the top Logs item has a tab for
 each of Mail, Events, and Audit, under `/logs`. The **Logs** item of a project has the Mail and Events tabs of that
@@ -271,9 +271,21 @@ other tabs are under `/p/<project>/board/versions`,
 `/p/<project>/board/artifacts`, and `/p/<project>/board/schedules`. The
 Schedules tab keeps its Schedules and Triggers sub-tabs (`?tab=triggers`).
 The **Knowledge** item (`features/knowledge/KnowledgePage.tsx`) has a tab
-for each of Wiki and Memory (`KNOWLEDGE_TABS`), under
+for each of Wiki, Memory, and DB (`KNOWLEDGE_TABS`), under
 `/p/<project>/knowledge`. The Board and Knowledge items are active on each
 of their tabs.
+The **DB** tab (`features/db`, docs/api.md §27) shows the record types of
+the project (`DbTypesPage`). A type opens its records
+(`/p/<project>/knowledge/db/<type>`, `DbRecordsPage`): a query box that
+starts with `type:<name>` (Enter runs it; an error marks its position), a
+table with the first six fields and a column chooser, headers that write
+`sort:` terms, and **Load more**. A row, or `?id=<record>`, opens the record
+dialog (`RecordModal`): one input for each field kind, the errors of the
+daemon under each input, and an offer to load the current record after a
+`409`. **Schema** opens the schema editor (`SchemaEditor`). `?q=` fills the
+query box. `db.type` and `db.record` events reload the page. The pure logic
+is in `features/db/model.ts`. On a phone, the dialogs fill the screen and
+the table scrolls in its box. The styles are in `styles/db.css`.
 The **Repos** item of a project (after Board) opens `/p/<project>/repos`
 (`features/repos/ReposPage.tsx`): the repos, and **Add repo**. A repo opens
 its browser (`features/repos/RepoPage.tsx`, see "The repo browser").
@@ -300,6 +312,27 @@ the path and the text of the file (`GET /api/templates/{key}/wcl`), in a
 `<pre>` text node, monospace. There is no WCL editor: edit the file by
 hand, or use the form. The mock writes the same text (`renderWcl` in
 `api/mock/templates.ts`).
+
+**System prompts.** An agent and a template have one **System prompt**
+selector (`features/agents/SystemPromptSelect.tsx`) over the two fields
+`persona` and `system_prompt` (docs/api.md §6.1, §28): **By role** (no
+persona), **Harness default** (`none`), each entry of the system prompt
+library (`persona` = the name), and **Custom…** (the `system_prompt` text
+in a textarea; it wins over the persona). A library entry clears the custom
+text. Custom starts from the text of the entry that was selected.
+**Preview** shows the text of the selected entry (or of the entry by role)
+in a `<pre>` text node, monospace. **Save as new system prompt** under the
+custom text asks for a name and an optional description, sends
+`POST /api/system-prompts`, then selects the new entry and clears the
+text. A persona that the library does not list shows a warning, in the
+form and on the agent page. The model is the pure
+`features/agents/systemPrompt.ts`. The agent page shows one **System
+prompt** row with an **Edit** button that opens the same selector. The
+System prompts tab (`features/systemprompts/SystemPromptsPage.tsx`) lists
+the library, with view (the text and the users), edit, delete, and **New
+system prompt**. A delete of an entry in use gets `409` with
+`details.users`: the tab lists the users and offers **Delete anyway**
+(`?force=true`). `leader` and `worker` have no Delete.
 
 **Live mode of the log tabs.** Mail, Events, and Audit have the same
 **Live** control first in their toolbar (`components/Live.tsx`
@@ -464,6 +497,41 @@ The model is pure and in `lib/lifecycle.ts`.
   `compact_max_age` `24h` and a compaction 5 hours ago. Compact now makes an
   idle agent `working` (`compacting`) for 1.5 s, then writes
   `agent.compacted`. Every harness can compact, as in the daemon.
+
+## Self-hosted models, enable and disable, stop all
+
+Settings, Subscriptions (`features/subscriptions/`). The pure logic is in
+`wizard.ts` (with `selfhosted.test.ts`); the mock is in
+`api/mock/selfhosted.ts`.
+
+- **Self-hosted model** (a path of the Add subscription wizard): pick the
+  API style (OpenAI or Anthropic), then the base URL (the OpenAI root
+  with `/v1`; the Anthropic root without it), an optional key, the models,
+  the default model, the context window, the max output tokens, the
+  concurrent streams, and an optional status page. **Fetch models** asks
+  the daemon to read the model list of the server once
+  (`POST /api/subscriptions/fetch-models`); when it fails, the page shows
+  the error and you type the model ids. The harness boxes show only the
+  harnesses of the style (OpenAI: pi and Codex; Anthropic: Claude Code and
+  pi; never Copilot). The wizard makes the subscription
+  (`POST /api/subscriptions` with `selfhosted`), then stores the key only
+  when you typed one.
+- **The row.** A self-hosted subscription shows
+  `self-hosted · <style> · N streams · 128k ctx`, its base URL and models,
+  and `1/2 streams in use` (with `N waiting` when work waits for a stream).
+  A disabled subscription shows a `disabled` chip. **Status page** opens
+  the provider's public status page (or the `status_url` of a self-hosted
+  server) in a new tab; the dashboard only links to it.
+- **Disable / Enable.** A disabled subscription starts and wakes no agent,
+  and the agent form does not offer it. Agents that run go on until they
+  stop. **Stop all now** and **Disable and stop all** ask in the page
+  before they act (`POST .../stop-all`).
+- **Agents.** The agent page shows a `disabled` chip next to a disabled
+  subscription. The badge says `stopped (subscription disabled)`, or
+  `waiting for a free stream` when the work of the agent waits for a
+  stream of its self-hosted subscription.
+- **Usage.** A self-hosted subscription has no quota (`no_quota`): its
+  tile shows the usage counts only.
 
 ## Harness versions and the auto-update
 
@@ -677,6 +745,27 @@ Event sockets (`/api/events`): the server sends one JSON `AgentEvent` in each
 text frame. `agent` is the agent name. `data.agent_id` carries the ID.
 A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 
+## Session links in the logs
+
+A row of each Logs tab can link to the agent session that was active when
+the row was written (docs/api.md §9, "Session links"). The daemon sends
+`session_id` and `session_label` only when the reader may read the session.
+`components/SessionLink.tsx` shows a small "session" link with a terminal
+icon to `/sessions/<id>`. The tooltip is the full label, for example
+`dev · 2026-10-26 09:12 UTC`. The link is at these places:
+
+- Events tab: at the end of the event row (`components/EventList.tsx`, so
+  the agent Events tab has it too).
+- Mail tab: in the From cell of the row, and in the head of each message of
+  the open thread (`features/mail/parts.tsx` `MessageView`). It is the
+  sender's session.
+- Audit tab: in the Actor cell, for an agent actor.
+
+Live rows have the link too: the daemon puts the fields on the stream
+frames. A click on the link opens the session and does not open or close
+the row. `components/sessionLink.ts` has the model. The mock gives the
+fields as the daemon does (`api/mock/index.ts` `withSession`).
+
 ## The mail log
 
 The mail log is a record, not a to-do list. It keeps no unread state for the
@@ -721,7 +810,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 
 | Route | View | API calls |
 |---|---|---|
-| `/` | Home: usage strip, host cards (see "Home: hosts"); the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; hosts: `GET /api/hosts`, `GET /api/hosts/{name}/metrics?minutes=15` |
+| `/` | Home: usage strip (each tile has the `display_name` of the subscription, its name in small text, and the windows of the last good probe, shortest first, with clear labels: "5-hour", "Weekly", "Weekly, Fable"; an Anthropic Ultra plan has no 5-hour window, so its weekly window leads; `lib/format.ts` `orderWindows`, `windowLabel`), host cards (see "Home: hosts"); the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; hosts: `GET /api/hosts`, `GET /api/hosts/{name}/metrics?minutes=15` |
 | `/projects` | Projects: list, create. The Projects root of the sidebar tree links it | `GET`, `POST /api/projects` |
 | `/p/:project/settings/general` | Project settings, General tab: project edit and delete, Targets panel, a link to the Repos page | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET .../targets` |
 | `/p/:project/repos` | Repos of the project: list, **Add repo** (project_admin), a checkout row for each repo | `GET`, `POST /api/projects/{name}/repos`, `GET .../targets`, `POST /api/repos/{id}/checkout` |
@@ -732,7 +821,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/agents` | Agents grid of the project, status filter, new agent (a template chooser, then a form, for the project of the route) | `GET`, `POST /api/agents`, `GET /api/templates?project=`, `GET /api/templates/{key}/resolve`, events socket |
 | `/agents` | Gone: redirects to `/projects` (`app/nav.ts` `MOVED_ROUTES`). | none |
 | `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, conversation (the default tab), terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `pause/unpause/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions`, `GET .../sessions/{session}/transcript?after=&limit=`, `GET .../transcript/stream?after=` (SSE) |
-| `/settings/subscriptions` | Settings, Subscriptions tab: subscriptions, detect banner, add wizard; above them the "Harness versions" table (versions, updates, the auto-update policy, and the pins) | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty`; `GET /api/harnesses?latest=true`, `POST /api/harnesses/{name}/update\|pin\|unpin`, `POST /api/harnesses/update`, `POST /api/harnesses/check` |
+| `/settings/subscriptions` | Settings, Subscriptions tab: subscriptions, detect banner, add wizard; above them the "Harness versions" table (versions, updates, the auto-update policy, and the pins) | `GET`, `POST`, `PATCH`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key\|enable\|disable\|stop-all`, `POST /api/subscriptions/fetch-models`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty`; `GET /api/harnesses?latest=true`, `POST /api/harnesses/{name}/update\|pin\|unpin`, `POST /api/harnesses/update`, `POST /api/harnesses/check` |
 | `/inbox` | Inbox: questions, notices, mail to the operator, paused threads; kind tabs, open or done, project filter | `GET /api/inbox?status=&kind=&project=`, `GET /api/inbox/counts`, `POST /api/questions/{id}/answer\|ack\|retract`, `POST /api/inbox/mail/{id}/ack`, `POST /api/mail/{id}/release`, `POST /api/mail/threads/{id}/resume` |
 | `/questions` | Gone: redirects to `/inbox`. | none |
 | `/logs/mail` | Logs, Mail tab: every message, newest first, filters, live mode, the thread inline, reply, compose | `GET /api/mail?thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/reply` |
@@ -744,6 +833,8 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/board/artifacts/:id?` | Board, Artifacts tab: artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/knowledge/wiki/*path` | Knowledge, Wiki tab: page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
 | `/p/:project/knowledge/memory` | Knowledge, Memory tab: memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
+| `/p/:project/knowledge/db` | Knowledge, DB tab: the record types, New type | `GET`, `POST .../db/types` |
+| `/p/:project/knowledge/db/:type` | The records of a type: query box, table, record dialog, schema editor | `GET .../db/query`, `.../db/records`, `PATCH`, `DELETE .../db/types/{type}` |
 | `/p/:project/versions/:id?`, `/p/:project/artifacts/:id?`, `/p/:project/wiki/*path`, `/p/:project/memory`, `/p/:project/knowledge` | Gone: redirect to the Board and Knowledge tabs (`app/nav.ts` `MOVED_ROUTES`). The wiki redirect keeps the page path, and each redirect keeps the query. The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. `/p/:project/knowledge` opens the Wiki tab. | none |
 | `/p/:project/schedules` | Gone: redirects to `/p/:project/board/schedules` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query (`?open=`, `?tab=triggers`). | none |
 | `/p/:project/spend` | Gone: redirects to `/` (`app/nav.ts` `MOVED_ROUTES`). The daemon's budget alert mail still links it. | none |
@@ -758,6 +849,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/settings/harness` | Settings, Harness config tab: the config repo, its changes and diffs, commit, sync, pull, push, secret grants to approve | `GET /api/config/...` (docs/api.md §25) |
 | `/settings/secrets` | Settings, Secrets tab: every secret that the caller manages, with a scope filter | `GET /api/secrets`, `POST /api/secrets`, `PUT`, `DELETE /api/secrets/{scope}/{name}`, `POST .../generate\|reveal`, `GET .../grants` |
 | `/settings/templates` | Settings, Templates tab: the global templates and those of each project, with a scope filter | `GET`, `POST /api/templates`, `PATCH`, `DELETE /api/templates/{key}`, `template` events |
+| `/settings/system-prompts` | Settings, System prompts tab: the system prompt library in the config repo; view, edit, delete, new | `GET`, `POST /api/system-prompts`, `GET`, `PUT`, `DELETE /api/system-prompts/{name}` |
 | `/settings/skills/:name?` | Settings, Skills tab: the skill library in the config repo; with a name, the editor of that skill | `GET`, `POST /api/skills`, `GET`, `PUT`, `DELETE /api/skills/{name}`, `GET .../usage` |
 | `/secrets`, `/templates`, `/skills/:name?`, `/targets` | Gone: redirect to `/settings/secrets`, `/settings/templates`, `/settings/skills/:name?`, and `/settings/targets` (`app/nav.ts` `MOVED_ROUTES`). The skill redirect keeps the skill name, and each redirect keeps the query. | none |
 | `/settings`, `/subscriptions`, `/hosts`, `/config` | Gone: redirect to `/settings/account`, `/settings/subscriptions`, `/settings/hosts`, and `/settings/harness` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. A quota mail of the daemon still links `/subscriptions`. | none |
@@ -902,6 +994,13 @@ See `docs/security-review.md` F3, F4, and F5.
   Class names must be ones the renderer makes.
 - Memory bodies, card bodies and comments, and mail bodies render as text
   nodes. The browser does not parse them as HTML.
+- A wiki `db` block becomes `<div class="db-embed" data-db-query>`. The
+  query is text in an attribute: the sanitizer keeps the attribute on a
+  `div` only, at most 2000 characters. `Markdown` reads it with `dataset`
+  and mounts `components/DbEmbed.tsx`, which runs the query in the project
+  of the page and shows each value as a text node (a ref is a link to the
+  record in the DB tab). `components/DbEmbed.test.ts` and
+  `lib/sanitize.test.ts` check hostile queries and values.
 - `lib/xss-payloads.ts` lists hostile payloads. `lib/sanitize.test.ts`
   checks that each one comes out inert from the renderer plus DOMPurify, and
   from DOMPurify alone. In mock mode, `/dev/xss` and the wiki page

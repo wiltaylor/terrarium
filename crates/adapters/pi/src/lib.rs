@@ -164,6 +164,27 @@ impl PiAdapter {
         Ok(config::materialize(&self.options, agent, home, prompt)?)
     }
 
+    /// [`PiAdapter::materialize`] for an agent on `subscription`: a
+    /// self-hosted server goes into its `models.json`.
+    pub fn materialize_with(
+        &self,
+        agent: &Agent,
+        home: &Path,
+        prompt: Option<&str>,
+        subscription: Option<&SubscriptionDef>,
+    ) -> Result<Vec<FileOverlay>> {
+        let sh = subscription
+            .filter(|s| terrarium_core::selfhosted::is_selfhosted(&s.provider))
+            .and_then(|s| s.selfhosted.as_ref());
+        Ok(config::materialize_for(
+            &self.options,
+            agent,
+            home,
+            prompt,
+            sh,
+        )?)
+    }
+
     /// `pi auth check` for `provider` against the shared home. `extra_env`
     /// carries an API key (see [`required_env`]). This blocks.
     pub fn auth_check(
@@ -214,7 +235,17 @@ impl Adapter for PiAdapter {
             Some(id) => id.0.clone(),
             None => launch::new_session_uuid(),
         };
-        self.launch_with(agent, &id, subscription)
+        let mut spec = self.launch_with(agent, &id, subscription);
+        // A self-hosted server with no stored key: the provider's
+        // `$TERRARIUM_SELFHOSTED_API_KEY` still resolves (a stored key
+        // replaces it through `terrarium exec-env`).
+        if subscription.is_some_and(|s| terrarium_core::selfhosted::is_selfhosted(&s.provider)) {
+            spec.env.insert(
+                terrarium_core::selfhosted::KEY_ENV.to_owned(),
+                terrarium_core::selfhosted::NO_KEY.to_owned(),
+            );
+        }
+        spec
     }
 
     fn hook_event(&self, hook: &HookPayload) -> Vec<Event> {
@@ -249,6 +280,15 @@ impl Adapter for PiAdapter {
     /// write a new one.
     fn materialize_config(&self, agent: &Agent, home: &Path) -> Result<Vec<FileOverlay>> {
         self.materialize(agent, home, None)
+    }
+
+    fn materialize_for(
+        &self,
+        agent: &Agent,
+        home: &Path,
+        subscription: Option<&SubscriptionDef>,
+    ) -> Result<Vec<FileOverlay>> {
+        self.materialize_with(agent, home, None, subscription)
     }
 }
 
@@ -319,6 +359,7 @@ mod tests {
             harnesses: vec![HarnessId::Pi],
             probe: None,
             alert_at: 80,
+            selfhosted: None,
         };
         let with = a.launch_for(&agent, Some(&id), Some(&sub));
         assert_eq!(value_after(&with, "--provider"), Some("openai"));
@@ -438,5 +479,72 @@ mod tests {
         ] {
             assert!(help.contains(flag), "{flag} is not in pi --help");
         }
+    }
+
+    #[test]
+    fn selfhosted_server_is_a_custom_provider_in_models_json() {
+        use terrarium_core::selfhosted::{Api, SelfHosted};
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().join("auth-pi");
+        std::fs::create_dir_all(&home).expect("home");
+        let agent = test_agent_in(tmp.path(), None);
+        let a = PiAdapter::default();
+        let sub = SubscriptionDef {
+            name: "gpu".into(),
+            provider: "selfhosted".into(),
+            plan: None,
+            harnesses: vec![HarnessId::Pi],
+            probe: None,
+            alert_at: 80,
+            selfhosted: Some(SelfHosted {
+                api: Api::Anthropic,
+                base_url: "http://gpu:8000".into(),
+                default_model: Some("glm-local".into()),
+                context_window: Some(32_768),
+                max_output_tokens: Some(4096),
+                ..SelfHosted::default()
+            }),
+        };
+        a.materialize_for(&agent, &home, Some(&sub))
+            .expect("materialize");
+        let models: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(config::pi_dir(&agent).join(config::MODELS_FILE)).expect("read"),
+        )
+        .expect("json");
+        let p = &models["providers"]["terrarium-selfhosted"];
+        assert_eq!(p["api"], "anthropic-messages");
+        assert_eq!(p["baseUrl"], "http://gpu:8000");
+        assert_eq!(p["apiKey"], "$TERRARIUM_SELFHOSTED_API_KEY");
+        assert_eq!(p["models"][0]["id"], "glm-local");
+        assert_eq!(p["models"][0]["contextWindow"], 32_768);
+        assert_eq!(p["models"][0]["maxTokens"], 4096);
+        let spec = a.launch_for(&agent, None, Some(&sub));
+        assert_eq!(
+            value_after(&spec, "--provider"),
+            Some("terrarium-selfhosted")
+        );
+        assert_eq!(value_after(&spec, "--model"), Some("glm-local"));
+        assert_eq!(
+            spec.env["TERRARIUM_SELFHOSTED_API_KEY"],
+            terrarium_core::selfhosted::NO_KEY
+        );
+        // Another subscription: no self-hosted provider in the file.
+        a.materialize_for(&agent, &home, None).expect("materialize");
+        let models: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(config::pi_dir(&agent).join(config::MODELS_FILE)).expect("read"),
+        )
+        .expect("json");
+        assert!(models["providers"].get("terrarium-selfhosted").is_none());
+        // No model anywhere: the start is refused.
+        let mut none = sub.clone();
+        if let Some(sh) = none.selfhosted.as_mut() {
+            sh.default_model = None;
+        }
+        assert!(
+            provider::start_refusal(&none, None)
+                .expect("refused")
+                .contains("names no model")
+        );
+        assert_eq!(provider::start_refusal(&none, Some("m")), None);
     }
 }

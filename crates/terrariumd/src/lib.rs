@@ -43,7 +43,9 @@ pub mod settings;
 pub mod skills;
 pub mod ssh_agent;
 pub mod store;
+pub mod stream_limit;
 pub mod supervisor;
+pub mod system_prompts;
 pub mod target_test;
 pub mod template_files;
 pub mod time_param;
@@ -555,6 +557,22 @@ pub async fn apply_definitions(
         .write(actor, move |t| store::sync::sync(t, &d, &work_dir))
         .await?;
     report.errors.splice(0..0, errors);
+    // `openai-compatible` rows that migration 46 renamed get their server
+    // from the key file, before a file sync needs it. Idempotent.
+    let dir = state.state_dir.clone();
+    match state
+        .db
+        .write("system", move |t| {
+            store::subscriptions::migrate_openai_compatible(t, &dir)
+        })
+        .await
+    {
+        Ok(names) if !names.is_empty() => {
+            info!(subscriptions = ?names, "openai-compatible subscriptions are now selfhosted");
+        }
+        Ok(_) => {}
+        Err(e) => warn!("cannot migrate the openai-compatible subscriptions: {e}"),
+    }
     let subscriptions = defs.subscriptions.clone();
     let changes = state
         .db
@@ -563,6 +581,8 @@ pub async fn apply_definitions(
         })
         .await?;
     report.errors.extend(changes.errors);
+    // The stream limits of the self-hosted subscriptions.
+    stream_limit::refresh(state).await;
     let target_defs = defs.targets.clone();
     let (_, target_errors) = state
         .db

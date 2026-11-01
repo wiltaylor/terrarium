@@ -210,6 +210,40 @@ impl Adapter for CodexAdapter {
         self.launch_with(agent, resume, prompt.as_deref())
     }
 
+    /// [`Adapter::launch`], and for a self-hosted OpenAI-style server
+    /// (`terrarium_core::selfhosted`) its model provider through `-c`
+    /// (`SelfHosted::codex_overrides`), `-m` with its model, and the key
+    /// var with the no-key placeholder (a stored key replaces it through
+    /// `terrarium exec-env`). The daemon refuses an Anthropic-style server
+    /// for Codex before the launch.
+    fn launch_for(
+        &self,
+        agent: &Agent,
+        resume: Option<&HarnessSessionId>,
+        subscription: Option<&terrarium_core::config::SubscriptionDef>,
+    ) -> LaunchSpec {
+        use terrarium_core::selfhosted::{self, Api};
+        let sh = subscription
+            .filter(|s| selfhosted::is_selfhosted(&s.provider))
+            .and_then(|s| s.selfhosted.as_ref())
+            .filter(|sh| sh.api == Api::Openai);
+        let Some(sh) = sh else {
+            return self.launch(agent, resume);
+        };
+        let mut a = agent.clone();
+        a.model = sh.model_for(agent.model.as_deref());
+        let mut spec = self.launch(&a, resume);
+        for o in sh.codex_overrides() {
+            spec.args.push(self.options.flags.config.to_owned());
+            spec.args.push(o);
+        }
+        spec.env.insert(
+            selfhosted::KEY_ENV.to_owned(),
+            selfhosted::NO_KEY.to_owned(),
+        );
+        spec
+    }
+
     fn hook_event(&self, hook: &HookPayload) -> Vec<Event> {
         hooks::hook_events(hook)
     }
@@ -292,6 +326,63 @@ mod tests {
         assert!(Version::parse(CODEX_PINNED.verified).is_ok());
         assert_eq!(a.id(), HarnessId::Codex);
         assert!(a.prompt_frozen_on_resume());
+    }
+
+    #[test]
+    fn selfhosted_openai_server_adds_its_model_provider() {
+        use terrarium_core::selfhosted::{Api, SelfHosted};
+        let a = CodexAdapter::default();
+        let agent = test_agent(None);
+        let mut s = terrarium_core::config::SubscriptionDef {
+            name: "gpu".into(),
+            provider: "selfhosted".into(),
+            plan: None,
+            harnesses: vec![HarnessId::Codex],
+            probe: None,
+            alert_at: 80,
+            selfhosted: Some(SelfHosted {
+                api: Api::Openai,
+                base_url: "http://gpu:8000/v1".into(),
+                models: vec!["gpt-oss-120b".into()],
+                context_window: Some(131_072),
+                ..SelfHosted::default()
+            }),
+        };
+        let spec = a.launch_for(&agent, None, Some(&s));
+        let i = spec.args.iter().position(|x| x == "-m").expect("-m");
+        assert_eq!(spec.args[i + 1], "gpt-oss-120b");
+        let c: Vec<&str> = spec
+            .args
+            .windows(2)
+            .filter(|w| w[0] == "-c")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert!(
+            c.contains(&"model_provider=\"terrarium_selfhosted\""),
+            "{c:?}"
+        );
+        assert!(c.contains(&"model_context_window=131072"), "{c:?}");
+        assert!(
+            c.iter()
+                .any(|o| o.contains("base_url=\"http://gpu:8000/v1\"")
+                    && o.contains("wire_api=\"responses\"")),
+            "{c:?}"
+        );
+        assert_eq!(
+            spec.env["TERRARIUM_SELFHOSTED_API_KEY"],
+            terrarium_core::selfhosted::NO_KEY
+        );
+        // An Anthropic-style server is not for Codex: a plain launch.
+        if let Some(sh) = s.selfhosted.as_mut() {
+            sh.api = Api::Anthropic;
+        }
+        let plain = a.launch_for(&agent, None, Some(&s));
+        assert!(
+            !plain
+                .args
+                .iter()
+                .any(|x| x.contains("terrarium_selfhosted"))
+        );
     }
 
     #[test]

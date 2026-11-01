@@ -1129,6 +1129,13 @@ fn check_subscription(
     {
         return Err(SupervisorError::NotReady(why));
     }
+    // A disabled subscription starts no agent (PLAN §16): a running agent
+    // goes on, but no start, wake, or relaunch.
+    if let Some(SubscriptionCheck::Found(s)) = sub
+        && let Some(why) = crate::store::subscriptions::disabled_refusal(s)
+    {
+        return Err(SupervisorError::NotReady(why));
+    }
     match sub {
         Some(SubscriptionCheck::Found(s)) if s.harnesses.contains(&agent.harness) => {
             Ok(Some((**s).clone()))
@@ -1455,11 +1462,12 @@ impl RunnerSupervisor {
         let template = prompt::load_template(&cfg.prompts_dir, agent.prompt.as_deref())
             .map_err(SupervisorError::NotReady)?;
         // The base prompt: the agent's `system_prompt`, else its persona
-        // (PLAN §8.1). The adapters replace the harness's default prompt
+        // (PLAN §8.1), from the system prompt library of the config repo,
+        // else from the prompts dir. The adapters replace the harness's default prompt
         // when `system_prompt` is set, so the launch copy carries the
         // persona there.
-        let base =
-            prompt::base_prompt(&cfg.prompts_dir, &agent).map_err(SupervisorError::NotReady)?;
+        let dirs = prompt::prompt_dirs(cfg.config_repo.as_deref(), &cfg.prompts_dir);
+        let base = prompt::base_prompt_in(&dirs, &agent).map_err(SupervisorError::NotReady)?;
         agent.system_prompt = base.clone();
         // The user settings of the harness (PLAN §8.2). A broken file
         // stops the start, with the file and the line.
@@ -1568,7 +1576,7 @@ impl RunnerSupervisor {
                     ));
                 }
                 let overlays = adapter
-                    .materialize_config(&a, &home)
+                    .materialize_for(&a, &home, sub.as_ref().map(|s| s.def()).as_ref())
                     .map_err(|e| format!("cannot write the {} config: {e}", a.harness))?;
                 // The names of the stored API key vars of the subscription
                 // (PLAN §16b.4). The values reach the harness through
@@ -2103,6 +2111,16 @@ impl RunnerSupervisor {
             slot.reached_idle = hello.status != AgentStatus::Starting;
             slot.seen = hello.status;
             slot.pointer_busy = false;
+            // A turn that runs across a daemon restart holds a stream
+            // (`crate::stream_limit`).
+            if hello.status == AgentStatus::Working
+                && let Some(state) = self.state()
+            {
+                state
+                    .usage
+                    .streams
+                    .note_busy(slot.agent.subscription.as_deref(), id);
+            }
             if let Some(p) = lock(&self.inner.parked).remove(&id) {
                 slot.pointer.merge(p);
             }
@@ -2190,6 +2208,13 @@ impl RunnerSupervisor {
                     .filter(|s| s.epoch == epoch)
                 {
                     slot.seen = *to;
+                }
+                match to {
+                    AgentStatus::Working => self.stream_busy(id),
+                    // A rest that is not `idle` ends the turn too; `idle`
+                    // releases in `on_idle`.
+                    AgentStatus::Waiting => self.stream_release(id),
+                    _ => {}
                 }
             }
             _ => {}
@@ -2319,7 +2344,86 @@ impl RunnerSupervisor {
             };
             slot.reached_idle = true;
         }
+        // The turn ended: its stream goes to the first agent that waits,
+        // before this agent's own next work (`crate::stream_limit`).
+        self.stream_release(id);
         self.deliver_pending(id);
+    }
+
+    // ---- the stream limit (`crate::stream_limit`) ----
+
+    /// The subscription of the agent of `id`.
+    fn stream_sub(&self, id: AgentId) -> Option<String> {
+        lock(&self.inner.slots)
+            .get(&id)
+            .and_then(|s| s.agent.subscription.clone())
+    }
+
+    /// May `id` on `sub` type work now? The first refusal shows the agent
+    /// `idle` with the reason `stream_limit: ...`. Takes no slots lock, so
+    /// a caller may hold it.
+    fn stream_take(&self, id: AgentId, sub: Option<&str>) -> bool {
+        let Some(state) = self.state() else {
+            return true;
+        };
+        match state.usage.streams.take(sub, id) {
+            crate::stream_limit::Take::Go => true,
+            crate::stream_limit::Take::Wait { new } => {
+                if new && let Some(sub) = sub {
+                    info!(agent = %id, subscription = %sub, "no free stream; the work of the agent waits");
+                    self.emit_status(
+                        id,
+                        AgentStatus::Idle,
+                        crate::stream_limit::waiting_reason(sub),
+                    );
+                }
+                false
+            }
+        }
+    }
+
+    /// `id` ended its turn: free its stream, and type the work of the
+    /// agents that got one.
+    fn stream_release(&self, id: AgentId) {
+        let Some(state) = self.state() else {
+            return;
+        };
+        for next in state.usage.streams.release(id) {
+            self.deliver_pending(next);
+        }
+    }
+
+    /// `id` stopped: it leaves its stream and the queue.
+    fn stream_forget(&self, id: AgentId) {
+        let Some(state) = self.state() else {
+            return;
+        };
+        for next in state.usage.streams.forget(id) {
+            self.deliver_pending(next);
+        }
+    }
+
+    /// The runner reports `id` working: count its stream.
+    fn stream_busy(&self, id: AgentId) {
+        if let Some(state) = self.state() {
+            let sub = self.stream_sub(id);
+            state.usage.streams.note_busy(sub.as_deref(), id);
+        }
+    }
+
+    /// True when the subscription of `agent` is disabled (a relaunch
+    /// does not happen then).
+    async fn subscription_disabled(&self, agent: &Agent) -> bool {
+        let (Some(state), Some(name)) = (self.state(), agent.subscription.clone()) else {
+            return false;
+        };
+        state
+            .db
+            .read(move |c| crate::store::subscriptions::find(c, &name))
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|s| !s.enabled)
     }
 
     /// Type the recap turn and the early turns, else the pending pointer.
@@ -2339,6 +2443,20 @@ impl RunnerSupervisor {
             let Some(runner) = slot.runner.clone() else {
                 return;
             };
+            // The stream limit: no work, no stream; work waits for one.
+            let work = slot.recap.is_some()
+                || !slot.turns.is_empty()
+                || !slot.pointer.is_empty()
+                || slot.pointer_busy;
+            let sub = slot.agent.subscription.clone();
+            if !work {
+                drop(slots);
+                self.stream_release(id);
+                return;
+            }
+            if slot.reached_idle && !self.stream_take(id, sub.as_deref()) {
+                return;
+            }
             (slot.recap.take(), std::mem::take(&mut slot.turns), runner)
         };
         if recap.is_none() && turns.is_empty() {
@@ -2454,6 +2572,14 @@ impl RunnerSupervisor {
         let clean = status.success();
         let how = exit_how(&status);
         let mut ended_agent = None;
+        // The harness is gone: its stream is free (`crate::stream_limit`).
+        self.stream_forget(id);
+        // A disabled subscription: the agent stays down (no relaunch).
+        let slot_agent = lock(&self.inner.slots).get(&id).map(|s| s.agent.clone());
+        let disabled = match &slot_agent {
+            Some(a) => self.subscription_disabled(a).await,
+            None => false,
+        };
         let next = {
             let mut slots = lock(&self.inner.slots);
             let Some(slot) = slots.get_mut(&id).filter(|s| s.epoch == epoch) else {
@@ -2466,6 +2592,11 @@ impl RunnerSupervisor {
             let resume_failed = slot.resume.is_some() && !slot.reached_idle && !clean;
             let next = if slot.stop_requested {
                 Next::Done(AgentStatus::Stopped, "stopped".into())
+            } else if disabled {
+                Next::Done(
+                    AgentStatus::Stopped,
+                    crate::store::subscriptions::REASON_DISABLED.into(),
+                )
             } else if slot.restart_requested {
                 slot.restart_requested = false;
                 Next::Relaunch {
@@ -2829,6 +2960,12 @@ impl RunnerSupervisor {
                 || slot.compacting.is_some()
                 || slot.seen != AgentStatus::Idle
             {
+                return;
+            }
+            // The stream limit (`crate::stream_limit`): the pointer waits
+            // for a free stream.
+            let sub = slot.agent.subscription.clone();
+            if !self.stream_take(id, sub.as_deref()) {
                 return;
             }
             slot.pointer_busy = true;
@@ -3804,10 +3941,24 @@ impl Supervisor for RunnerSupervisor {
                     slot.turns.push(text);
                     return Ok(());
                 }
+                // The stream limit (`crate::stream_limit`): with no free
+                // stream the turn waits in the slot, and goes out when the
+                // agent gets one.
+                if let Some(slot) = slots.get_mut(&agent) {
+                    let sub = slot.agent.subscription.clone();
+                    if !self.stream_take(agent, sub.as_deref()) {
+                        slot.turns.push(text);
+                        return Ok(());
+                    }
+                }
             }
             type_detached(agent, &runner, text);
             Ok(())
         })
+    }
+
+    fn stream_granted(&self, agent: AgentId) {
+        self.deliver_pending(agent);
     }
 
     fn send_raw(&self, agent: AgentId, text: String) -> BoxFuture<'_, Result<(), SupervisorError>> {
@@ -4055,6 +4206,18 @@ impl Supervisor for RunnerSupervisor {
                         "the agent is not idle ({status}); it compacts only at rest"
                     )));
                 }
+                // A compaction counts as a stream (`crate::stream_limit`).
+                // It does not queue: the idle pass tries again later.
+                if let Some(state) = self.state()
+                    && !state
+                        .usage
+                        .streams
+                        .take_if_free(slot.agent.subscription.as_deref(), agent)
+                {
+                    return Err(SupervisorError::NotReady(
+                        "no free stream on the subscription; the agent compacts later".into(),
+                    ));
+                }
                 let token = COMPACT_TOKEN.fetch_add(1, Ordering::Relaxed);
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 slot.compacting = Some(Compacting {
@@ -4132,8 +4295,14 @@ impl Supervisor for RunnerSupervisor {
                 if runner.status() == AgentStatus::Idle {
                     self.emit_status(agent, AgentStatus::Idle, "quota hold ended");
                 }
-                for text in held.waiting {
-                    type_detached(agent, &runner, text);
+                let sub = self.stream_sub(agent);
+                if held.waiting.is_empty() || self.stream_take(agent, sub.as_deref()) {
+                    for text in held.waiting {
+                        type_detached(agent, &runner, text);
+                    }
+                } else if let Some(slot) = lock(&self.inner.slots).get_mut(&agent) {
+                    // No free stream: the turns wait for one.
+                    slot.turns.extend(held.waiting);
                 }
                 self.deliver_pending(agent);
                 return Ok(());

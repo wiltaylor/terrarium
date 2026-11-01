@@ -11,6 +11,7 @@
 import { A, useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { createLive, createScrollKeeper, LiveControl, NewAbove } from "../../components/Live";
+import { SessionLink } from "../../components/SessionLink";
 import { Empty, ErrorBanner, LoadMore, PageHead, useNow } from "../../components/ui";
 import type { Card, Message } from "../../api/types";
 import { ago } from "../../lib/format";
@@ -211,8 +212,11 @@ function LogRow(props: {
         <td class="muted small nowrap" title={m().created_at}>
           {ago(m().created_at, props.now)}
         </td>
-        <td class="small" title={m().from}>
-          {m().from_name}
+        <td class="small">
+          <span class="log-who">
+            <span title={m().from}>{m().from_name}</span>
+            <SessionLink row={m()} />
+          </span>
         </td>
         <td class="small" title={m().to}>
           {m().to_name}

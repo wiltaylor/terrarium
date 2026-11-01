@@ -96,10 +96,18 @@ export interface RenderOptions extends ResolveContext {
   artifactUrl?: (id: string) => string | undefined;
 }
 
+/** The longest query of a `db` block. The sanitizer drops a longer attribute. */
+export const DB_QUERY_MAX = 2000;
+
+/** The query of a `db` block: its lines joined with spaces. */
+export const dbQueryText = (text: string): string => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).join(" ").slice(0, DB_QUERY_MAX);
+
 /**
  * Render a wiki body to HTML. Wikilinks become `<a class="wikilink">`.
  * Artifact fences become placeholders `<div data-artifact="ART-n">` that the
- * page component replaces with a sandboxed viewer.
+ * page component replaces with a sandboxed viewer. A `db` fence becomes
+ * `<div class="db-embed" data-db-query="...">`; the page component runs the
+ * query and shows the answer as text.
  */
 export function renderWiki(src: string, opts: RenderOptions): string {
   const { body } = splitFrontMatter(src);
@@ -132,6 +140,8 @@ export function renderWiki(src: string, opts: RenderOptions): string {
         const lang = (token.lang ?? "").trim();
         const art = /^artifact\s+(ART-\d+)/.exec(lang) ?? (lang === "artifact" ? /(ART-\d+)/.exec(token.text) : null);
         if (art) return `<div class="artifact-embed" data-artifact="${esc(art[1]!)}"></div>\n`;
+        // A DB query block (docs/api.md §27): the component reads the query as text from the attribute.
+        if (lang === "db") return `<div class="db-embed" data-db-query="${esc(dbQueryText(token.text))}"></div>\n`;
         const cls = lang ? ` class="language-${esc(lang.split(/\s/)[0]!)}"` : "";
         return `<pre><code${cls}>${esc(token.text)}</code></pre>\n`;
       },

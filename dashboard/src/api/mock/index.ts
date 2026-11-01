@@ -17,6 +17,7 @@
 // the cookie is good.
 
 import type { Api } from "../client";
+import { mockDisplayName } from "./displayName";
 import { ApiError, AuthError, isMutating, type Page } from "../http";
 import { createWsEventStream, type EventStream, type RawSocket, type SocketEvent } from "../sockets";
 import { mockHistory, withMetrics } from "./hostMetrics";
@@ -25,6 +26,7 @@ import { httpVerbs } from "./verbs";
 import { checkKeyPlan, isZai, zaiKeyDefaults, zaiPlan, ZAI_KEY_ENV } from "./zai";
 import { isMoonshot, moonshotHarnessError, moonshotKeyDefaults, moonshotPlan, moonshotProbe, MOONSHOT_KEY_ENV } from "./moonshot";
 import { defaultModels, modelList, subscriptionDetail } from "./models";
+import * as selfhosted from "./selfhosted";
 import { splitFrontMatter } from "../../lib/markdown";
 import { installCommand } from "../../lib/host-install";
 import { resolveEta } from "../../lib/eta";
@@ -49,6 +51,7 @@ import type {
   Memory,
   WikiPageSummary,
   AuditEntry,
+  LogSessionLink,
   Card,
   CardComment,
   ColumnEdit,
@@ -99,6 +102,8 @@ import { createQuestionMock } from "./questions";
 import { createInboxMock, isPauseNotice } from "./inbox";
 import { createConfigMock } from "./config";
 import { createSkillMock, skillsError } from "./skills";
+import { createSystemPromptMock } from "./systemPrompts";
+import { createDbMock } from "./db";
 import { applyTemplate, compactMaxAgeError, compactOnIdleError, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createSecretMock } from "./secrets";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
@@ -572,6 +577,25 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     if (!who) return undefined;
     return { id: s.id, agent_id: s.agent, agent: who.name, project: who.project, harness: who.harness, started_at: s.started_at, ...(s.ended_at ? { ended_at: s.ended_at } : {}), removed: !a };
   };
+  /**
+   * The session link of a log row (store/session_refs.rs `links`): the
+   * recorded session, else the agent's session whose window holds `at`
+   * (the latest start wins). The mock caller is the operator, and the mock
+   * keeps every archive: each found session links.
+   */
+  const withSession = <T extends LogSessionLink>(row: T, agentId: string | undefined, at: string, recorded?: string): T => {
+    const s = recorded
+      ? w.sessions.find((x) => x.id === recorded)
+      : agentId
+        ? w.sessions.filter((x) => x.agent === agentId && x.started_at <= at && (!x.ended_at || x.ended_at >= at)).sort((x, y) => y.started_at.localeCompare(x.started_at))[0]
+        : undefined;
+    const r = s && sessionRef(s.id);
+    if (!r) return row;
+    return { ...row, session_id: r.id, session_label: `${r.agent} · ${r.started_at.slice(0, 16).replace("T", " ")} UTC` };
+  };
+  const eventLink = (e: AgentEvent): AgentEvent => withSession(e, e.agent_id, e.at, e.session);
+  const mailLink = (m: Message): Message => withSession(m, m.from_kind === "agent" ? m.from : undefined, m.created_at);
+  const auditLink = (a: AuditEntry): AuditEntry => withSession(a, a.actor.startsWith("agent:") ? a.actor.slice(6) : undefined, a.at);
   /** A fake `text/event-stream` body: the blocks after `after`, then live frames until the client aborts. */
   const transcriptBody = (sessionId: string, after: number | undefined, signal: AbortSignal): AsyncIterable<string> => {
     const queue: string[] = [];
@@ -716,7 +740,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   };
   // ----- waits and watches -----
   // The skill library lives in the config repo: no repo, no skills.
+  // The project DB (docs/api.md §27): ./db. The seed fills project `terrarium`.
+  // Its own counter: the seed does not move the IDs of the other mock objects.
+  let dbCounter = 0;
+  const dbMock = createDbMock({ iso, ulid: (tag) => fakeUlid(tag, ++dbCounter), reply, fail, emit, audit, project: (name) => project(name), now: now() });
+  if (w.projects.some((x) => x.name === "terrarium")) dbMock.seed();
   const skillMock = createSkillMock({ w, reply, fail, audit, caller: opts.scheduleCaller, available: opts.configRepo });
+  const systemPromptMock = createSystemPromptMock({ w, iso, reply, fail, audit, emit, caller: opts.scheduleCaller, available: opts.configRepo });
   const waitMock = createWaitMock({ w, iso, now, ulid, reply, fail, emit, agent, setStatus, sendMail: (to, from, subject, body) => sendMail(to, from, subject, body) });
   // ----- questions to the operator -----
   const questionMock = createQuestionMock({
@@ -829,9 +859,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     // `order=desc`: newest first; `since` stays the lower bound and the cursor is the upper bound.
     if (q.order === "desc") {
       const before = q.cursor ? Number(q.cursor) : Infinity;
-      return paginate(rows(since).filter((e) => e.seq < before).reverse(), { limit: q.limit }, (e) => String(e.seq));
+      return paginate(rows(since).filter((e) => e.seq < before).reverse().map(eventLink), { limit: q.limit }, (e) => String(e.seq));
     }
-    return paginate(rows(q.cursor ? Number(q.cursor) : since), { limit: q.limit }, (e) => String(e.seq));
+    return paginate(rows(q.cursor ? Number(q.cursor) : since).map(eventLink), { limit: q.limit }, (e) => String(e.seq));
   };
 
   /** A fake WebSocket to `/api/events`: the backlog after `?since=`, then live frames. */
@@ -859,18 +889,18 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         this.fire("open", {});
         let last = since;
         for (const e of w.events.filter((x) => x.seq > since)) {
-          this.fire("message", { data: JSON.stringify(e) });
+          this.fire("message", { data: JSON.stringify(eventLink(e)) });
           last = e.seq;
         }
         const fn = (e: AgentEvent) => {
           if (e.seq > last) {
             last = e.seq;
-            this.fire("message", { data: JSON.stringify(e) });
+            this.fire("message", { data: JSON.stringify(eventLink(e)) });
           }
         };
         hub.add(fn);
         // `audit` frames: live only, no `seq`, no backlog.
-        const onAudit = (a: AuditEntry) => this.fire("message", { data: JSON.stringify({ kind: "audit", audit: a }) });
+        const onAudit = (a: AuditEntry) => this.fire("message", { data: JSON.stringify({ kind: "audit", audit: auditLink(a) }) });
         if (withAudit) auditHub.add(onAudit);
         this.off = () => (hub.delete(fn), auditHub.delete(onAudit));
       });
@@ -1082,7 +1112,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     return n;
   };
   /** The row as the daemon renders it: `thread_paused` only when true. */
-  const render = (m: Message): Message => (agentRun(m.thread_id) > LOOP_LIMIT ? { ...m, thread_paused: true } : m);
+  const render = (m: Message): Message => mailLink(agentRun(m.thread_id) > LOOP_LIMIT ? { ...m, thread_paused: true } : m);
   const sendMail = (to: string, from: string, subject: string, body: string, thread?: string, inReplyTo?: string): Message => {
     if (to === "system") fail(422, "invalid", "`system` only sends mail");
     const t = address(to);
@@ -1219,7 +1249,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const KEY_ENV: Record<string, string> = {
     anthropic: "ANTHROPIC_API_KEY",
     openai: "OPENAI_API_KEY",
-    "openai-compatible": "OPENAI_API_KEY",
+    "openai-compatible": selfhosted.SELFHOSTED_KEY_ENV,
+    selfhosted: selfhosted.SELFHOSTED_KEY_ENV,
     google: "GEMINI_API_KEY",
     gemini: "GEMINI_API_KEY",
     openrouter: "OPENROUTER_API_KEY",
@@ -1232,13 +1263,28 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   /** The subscription as the API shows it (docs/api.md §16.1). */
   const subView = (s: Subscription): Subscription => ({
     ...s,
+    display_name: s.label ?? mockDisplayName(s),
     local_estimate_only: !s.probe,
     has_api_key: !!s.env_var && !!w.apiKeys[s.name],
     held_agents: w.holds.filter((h) => h.cause === `limit:${s.name}`).length,
     default_models: defaultModels(s),
     agents: w.agents.filter((a) => a.subscription === s.name).map((a) => ({ id: a.id, name: a.name, project: a.project })),
     default: !!s.default,
+    enabled: s.enabled !== false,
+    no_quota: selfhosted.isSelfHosted(s.provider),
+    ...(s.selfhosted?.max_concurrent ? { streams: { max: s.selfhosted.max_concurrent, in_use: Math.min(s.streams?.in_use ?? 0, s.selfhosted.max_concurrent), waiting: s.streams?.waiting ?? 0 } } : { streams: undefined }),
+    status_url: selfhosted.statusUrlOf(s.provider, s.selfhosted),
   });
+  /** Enable or disable `s`: the audit row and the event, on a change. An enable wakes the agents with queued work. */
+  const setSubEnabled = (s: Subscription, enabled: boolean): Subscription => {
+    if ((s.enabled !== false) === enabled) return s;
+    s.enabled = enabled;
+    s.updated_at = iso();
+    const kind = enabled ? "subscription.enabled" : "subscription.disabled";
+    audit(kind, s.name, undefined, {});
+    emit({ kind, actor: "operator", summary: `${s.name}: ${enabled ? "enabled" : "disabled"}`, data: { subscription: s.name, enabled } });
+    return s;
+  };
   /** PLAN §16.3: the harnesses with a default plan account. */
   const DEFAULT_HARNESSES = ["claude", "codex", "copilot"];
   /** The default of `s` goes away (its delete or logout). The daemon picks no new one. */
@@ -1263,11 +1309,18 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const piPlan = (s: Subscription) => PLAN_PROVIDERS.includes(s.provider.trim().toLowerCase()) && (s.plan ?? "").trim().toLowerCase() !== "api key";
   /** A pi agent, its pool, or a pi template names no plan login. */
   const checkPiPlans = (harness: Agent["harness"], names: (string | undefined)[]) => {
-    if (harness !== "pi") return;
     for (const n of names) {
       const s = n ? w.subscriptions.find((x) => x.name === n) : undefined;
-      if (s && piPlan(s)) fail(422, "invalid", `subscription \`${s.name}\`: ${PI_PLAN_REFUSAL}`);
+      // A self-hosted server serves the harnesses of its API style only.
+      const why = s ? selfhosted.harnessRefusal(s, harness) : null;
+      if (why) fail(422, "invalid", why);
+      if (harness === "pi" && s && piPlan(s)) fail(422, "invalid", `subscription \`${s.name}\`: ${PI_PLAN_REFUSAL}`);
     }
+  };
+  /** Why no agent may start on the subscription of `a`: it is disabled. */
+  const disabledRefusal = (name: string | undefined): string | null => {
+    const s = name ? w.subscriptions.find((x) => x.name === name) : undefined;
+    return s && s.enabled === false ? `subscription \`${s.name}\` is disabled; enable it first (terrarium admin subscription enable ${s.name})` : null;
   };
   const checkPool = (harness: Agent["harness"], current: string | undefined, pool: string[]): string[] => {
     const names = [...new Set(pool.map((n) => n.trim()).filter(Boolean))];
@@ -2059,6 +2112,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (def.policy?.mail_to.some((m) => !m.trim())) fail(422, "invalid", "policy.mail_to has an empty entry");
           for (const x of def.policy?.cross_project ?? []) if (!/^[^/]+\/[^/]+$/.test(x)) fail(422, "invalid", `policy.cross_project entry \`${x}\` is not project/agent`);
           const pool = checkPool(def.harness, def.subscription, def.subscription_pool ?? []);
+          const dis = disabledRefusal(def.subscription);
+          if (dis) fail(422, "invalid", dis);
           const id = ulid("agt");
           const a: Agent = {
             id,
@@ -2190,6 +2245,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           const a = agent(id);
           if (a.paused) fail(409, "conflict", `agent \`${a.project}/${a.name}\` is paused; unpause it first`);
+          const dis = disabledRefusal(a.subscription);
+          if (dis) fail(409, "conflict", dis);
           if (LIVE.includes(a.status)) fail(409, "already_running", `agent \`${a.project}/${a.name}\` is running already`);
           const snap = clone(a);
           audit("agent.start", a.id, a.project);
@@ -2218,6 +2275,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       restart: (id) =>
         reply(() => {
           const a = agent(id);
+          const dis = disabledRefusal(a.subscription);
+          if (dis) fail(409, "conflict", dis);
           const snap = clone(a);
           audit("agent.restart", a.id, a.project);
           later(() => {
@@ -2977,6 +3036,25 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (isZai(def.provider)) { const p = zaiPlan(def.plan); if ("error" in p) fail(422, "invalid", p.error); }
           // Moonshot is for pi only; an Open Platform plan gets the balance probe.
           let probe = def.probe;
+          if (selfhosted.isSelfHosted(def.provider)) {
+            if (def.probe) fail(422, "invalid", `subscription \`${def.name}\`: a self-hosted server has no quota probe`);
+            if (!def.selfhosted) fail(422, "invalid", `subscription \`${def.name}\`: a self-hosted subscription needs \`selfhosted.base_url\``);
+            const alias = def.provider.trim().toLowerCase() === selfhosted.OPENAI_COMPATIBLE;
+            const c = selfhosted.checkSelfHosted({ ...def.selfhosted!, ...(alias ? { api: "openai" as const } : {}) });
+            if ("error" in c) fail(422, "invalid", `subscription \`${def.name}\`: ${c.error}`);
+            const sh = (c as { sh: NonNullable<Subscription["selfhosted"]> }).sh;
+            const h = selfhosted.selfHostedHarnesses(def.name, sh.api, def.harnesses);
+            if ("error" in h) fail(422, "invalid", h.error);
+            const s: Subscription = {
+              name: def.name, provider: selfhosted.SELFHOSTED, harnesses: (h as { harnesses: Agent["harness"][] }).harnesses, alert_at: def.alert_at ?? 80, source: "api",
+              login_status: "unknown", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: true, has_api_key: false, held_agents: 0, agents: [],
+              selfhosted: sh, enabled: true,
+            };
+            w.subscriptions.push(s);
+            audit("subscription.create", s.name, undefined, { provider: s.provider, selfhosted: sh });
+            return subView(s);
+          }
+          if (def.selfhosted) fail(422, "invalid", `subscription \`${def.name}\`: \`selfhosted\` is only for the provider selfhosted, not \`${def.provider}\``);
           if (isMoonshot(def.provider)) {
             const p = moonshotPlan(def.plan);
             if ("error" in p) fail(422, "invalid", p.error);
@@ -3013,6 +3091,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       models: (name) =>
         reply(() => {
           const s = sub(name);
+          if (selfhosted.isSelfHosted(s.provider)) {
+            const sh = s.selfhosted;
+            const ids = [...new Set([...(sh?.default_model ? [sh.default_model] : []), ...(sh?.models ?? [])])];
+            return { models: ids.map((id) => ({ id, ...(sh?.context_window ? { context: sh.context_window } : {}) })), source: "subscription" as const, fetched_at: iso() };
+          }
           return modelList(s, !!w.apiKeys[s.name], iso());
         }),
       probe: (name) =>
@@ -3031,6 +3114,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       verify: (name) =>
         reply(() => {
           const s = sub(name);
+          if (selfhosted.isSelfHosted(s.provider)) {
+            s.login_status = "api_key";
+            return { subscription: subView(s), status: { logged_in: true, detail: "a self-hosted server: no login, no stored key" } };
+          }
           if (s.env_var && w.apiKeys[name]) {
             s.login_status = isZai(s.provider) || isMoonshot(s.provider) ? "api_key" : "logged_in";
             return { subscription: subView(s), status: { logged_in: true, detail: "a stored API key" } };
@@ -3077,8 +3164,18 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (planError) fail(422, "invalid", planError);
           const ms = isMoonshot(input.provider) ? moonshotKeyDefaults(input) : null;
           const zai = isZai(input.provider) ? zaiKeyDefaults(input) : ms;
-          if (input.provider === "openai-compatible" && !input.base_url?.trim()) fail(422, "invalid", "openai-compatible needs base_url");
           let s = w.subscriptions.find((x) => x.name === name);
+          // A self-hosted key goes on a self-hosted subscription only; a new one needs the base URL.
+          const sh = selfhosted.isSelfHosted(input.provider);
+          if (s && selfhosted.isSelfHosted(s.provider) !== sh) fail(422, "invalid", `cannot store a ${input.provider} key on subscription \`${name}\`: it is a ${s.provider} subscription`);
+          if (!s && sh) {
+            if (!input.base_url?.trim()) fail(422, "invalid", `provider \`${input.provider}\` needs base_url for a new subscription (or create it first with POST /api/subscriptions and \`selfhosted\`)`);
+            checkSubName(name);
+            const c = selfhosted.checkSelfHosted({ api: "openai", base_url: input.base_url!, models: input.models });
+            if ("error" in c) fail(422, "invalid", `subscription \`${name}\`: ${c.error}`);
+            s = { name, provider: selfhosted.SELFHOSTED, harnesses: ["pi", "codex"], alert_at: 80, source: "api", login_status: "api_key", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: true, has_api_key: true, held_agents: 0, agents: [], selfhosted: (c as { sh: NonNullable<Subscription["selfhosted"]> }).sh, enabled: true };
+            w.subscriptions.push(s);
+          }
           // A Moonshot key never goes to a harness other than pi.
           if (ms && s) {
             const why = isMoonshot(s.provider) ? moonshotHarnessError(name, s.harnesses) : `it is a ${s.provider} subscription`;
@@ -3093,10 +3190,71 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (zai && s.source === "api") s.plan = zai.plan;
           if (ms && s.source === "api") { if (ms.probe) s.probe = ms.probe; else delete s.probe; }
           s.env_var = env;
-          s.login_status = zai?.login_status ?? "logged_in";
+          s.login_status = sh ? "api_key" : zai?.login_status ?? "logged_in";
           s.updated_at = iso();
           audit("subscription.api_key", name, undefined, { provider: input.provider, env_var: env, base_url: input.base_url ?? null, models: input.models ?? [] });
           return subView(s);
+        }),
+      update: (name, patch) =>
+        reply(() => {
+          const s = sub(name);
+          if (s.source === "file") fail(409, "file_managed", `subscription \`${name}\` is declared in subscriptions/${name}.toml; change the file, then POST /api/reload`);
+          if (patch.alert_at !== undefined && (patch.alert_at < 1 || patch.alert_at > 100)) fail(422, "invalid", "alert_at is a percent, 1 to 100");
+          const isSh = selfhosted.isSelfHosted(s.provider);
+          if ((patch.selfhosted || patch.harnesses) && !isSh) {
+            if (patch.selfhosted) fail(422, "invalid", `subscription \`${name}\` is ${s.provider}, not selfhosted`);
+            fail(422, "invalid", "`harnesses` changes here only for a self-hosted subscription; change the definition of another one");
+          }
+          let next = s.selfhosted;
+          let harnesses = s.harnesses;
+          if (isSh && (patch.selfhosted || patch.harnesses)) {
+            const merged: Record<string, unknown> = { ...(s.selfhosted ?? { api: "openai", base_url: "" }) };
+            for (const [k, v] of Object.entries(patch.selfhosted ?? {})) {
+              if (v === null) delete merged[k];
+              else if (v !== undefined) merged[k] = v;
+            }
+            const c = selfhosted.checkSelfHosted(merged as unknown as NonNullable<Subscription["selfhosted"]>);
+            if ("error" in c) fail(422, "invalid", `subscription \`${name}\`: ${c.error}`);
+            next = (c as { sh: NonNullable<Subscription["selfhosted"]> }).sh;
+            const want = patch.harnesses ?? s.harnesses.filter((h) => selfhosted.STYLE_HARNESSES[next!.api].includes(h));
+            const h = selfhosted.selfHostedHarnesses(name, next.api, want);
+            if ("error" in h) fail(422, "invalid", h.error);
+            harnesses = (h as { harnesses: Agent["harness"][] }).harnesses;
+          }
+          if (patch.alert_at !== undefined) s.alert_at = patch.alert_at;
+          s.selfhosted = next;
+          s.harnesses = harnesses;
+          s.updated_at = iso();
+          audit("subscription.update", name, undefined, { alert_at: s.alert_at, harnesses: s.harnesses, selfhosted: s.selfhosted ?? null });
+          return subView(s);
+        }),
+      enable: (name) => reply(() => subView(setSubEnabled(sub(name), true))),
+      disable: (name) => reply(() => subView(setSubEnabled(sub(name), false))),
+      stopAll: (name, opts = {}) =>
+        reply(() => {
+          const s = sub(name);
+          if (opts.disable) setSubEnabled(s, false);
+          const stopped = w.agents
+            .filter((a) => a.subscription === name && LIVE.includes(a.status))
+            .map((a) => {
+              later(() => {
+                endSession(a, "stopped");
+                setStatus(a, "stopped", "stopped");
+              }, 0);
+              return { id: a.id, name: a.name, project: a.project };
+            });
+          if (s.streams) s.streams = { ...s.streams, in_use: 0, waiting: 0 };
+          audit("subscription.stop_all", name, undefined, { agents: stopped, disabled: !!opts.disable });
+          emit({ kind: "subscription.stop_all", actor: "operator", summary: `${name}: stop all (${stopped.length} agents)`, data: { subscription: name, agents: stopped, disabled: !!opts.disable } });
+          return { subscription: subView(s), stopped };
+        }),
+      fetchModels: (input) =>
+        reply(() => {
+          const stored = input.subscription ? sub(input.subscription) : undefined;
+          if (stored && !selfhosted.isSelfHosted(stored.provider)) fail(422, "invalid", `subscription \`${stored.name}\` is not a self-hosted server`);
+          const r = selfhosted.fetchModels(input, stored?.selfhosted, iso());
+          if ("error" in r) fail(r.status, r.code, r.error);
+          return (r as { result: import("../types").FetchModelsResult }).result;
         }),
       detect: () => reply(detected),
       startLogin: (req) =>
@@ -3231,7 +3389,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       reply(() => {
         const rows = w.audit.filter((a) => (!q.actor || a.actor === q.actor) && (!q.action || a.action === q.action) && (!q.project || a.project === q.project) && (!q.since || a.at >= q.since));
         // `order=desc`: newest first, the cursor goes on to older rows.
-        return paginate(q.order === "desc" ? [...rows].reverse() : rows, q, (a) => String(a.seq ?? a.id));
+        return paginate((q.order === "desc" ? [...rows].reverse() : rows).map(auditLink), q, (a) => String(a.seq ?? a.id));
       }),
 
     // The daemon's `api/targets.rs` is new; the mock runs the same lifecycle.
@@ -3548,6 +3706,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     // Terrarium-managed skills, in the config repo (./skills).
     skills: skillMock.api,
+
+    // The system prompt library, in the config repo (./systemPrompts).
+    systemPrompts: systemPromptMock.api,
+
+    // The project DB (./db).
+    db: dbMock.api,
 
     hosts: {
       list: () => reply(() => w.hosts.map((h) => withMetrics(h))),

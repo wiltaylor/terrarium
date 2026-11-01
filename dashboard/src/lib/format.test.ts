@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { forceLayout } from "./force";
-import { ago, balanceText, bytes, windowValue, duration, sparkPath, timeUntil, usageLevel } from "./format";
+import { ago, balanceText, bytes, windowValue, duration, orderWindows, primaryWindow, sparkPath, subscriptionTitle, timeUntil, usageLevel, windowLabel, windowSeconds } from "./format";
 
 describe("format", () => {
   it("formats durations", () => {
@@ -60,5 +60,37 @@ describe("windowValue", () => {
   it("shows money left for a balance, else the percentage", () => {
     expect(windowValue({ used_pct: 82.3, balance: { remaining: 10.647, currency: "USD" } })).toBe("$10.65 left");
     expect(windowValue({ used_pct: 42.4 })).toBe("42%");
+  });
+
+  it("labels the windows clearly", () => {
+    expect(windowLabel("5h")).toBe("5-hour");
+    expect(windowLabel("7d")).toBe("Weekly");
+    expect(windowLabel("7d_fable")).toBe("Weekly, Fable");
+    expect(windowLabel("7d_claude_opus")).toBe("Weekly, Claude opus");
+    expect(windowLabel("7d_oauth_apps")).toBe("Weekly, OAuth apps");
+    expect(windowLabel("30d")).toBe("30-day");
+    expect(windowLabel("24h")).toBe("24-hour");
+    expect(windowLabel("extra")).toBe("Extra usage");
+    expect(windowLabel("monthly")).toBe("Monthly");
+    expect(windowLabel("premium_interactions")).toBe("premium interactions");
+    expect(windowSeconds("7d_fable")).toBe(604_800);
+    expect(windowSeconds("credits")).toBeUndefined();
+  });
+
+  it("puts the most relevant window first, with no 5-hour window on an Ultra plan", () => {
+    const names = (ws: { window: string }[]) => orderWindows(ws).map((w) => w.window);
+    // The API order is by name.
+    expect(names([{ window: "5h" }, { window: "7d" }, { window: "7d_fable" }])).toEqual(["5h", "7d", "7d_fable"]);
+    expect(names([{ window: "7d_fable" }, { window: "extra" }, { window: "7d" }, { window: "30d" }, { window: "5h" }])).toEqual(["5h", "7d", "7d_fable", "30d", "extra"]);
+    // Ultra: no 5-hour window; the weekly one leads.
+    expect(primaryWindow([{ window: "7d_fable" }, { window: "7d" }])?.window).toBe("7d");
+    expect(primaryWindow([{ window: "credits" }, { window: "monthly" }])?.window).toBe("monthly");
+    expect(primaryWindow([])).toBeUndefined();
+  });
+
+  it("titles a subscription by its display name", () => {
+    expect(subscriptionTitle({ name: "anthropic-max-20x", display_name: "Claude Ultra", plan: "Max 20x" })).toBe("Claude Ultra");
+    expect(subscriptionTitle({ name: "anthropic-max-20x", plan: "Max 20x" })).toBe("Max 20x");
+    expect(subscriptionTitle({ name: "x" })).toBe("x");
   });
 });

@@ -482,6 +482,7 @@ Start here. The lead keeps this page current.
 
 - [[reports/phase-1]]: phase 1 report (needs review)
 - [[designs/runner-v2]]: runner redesign
+- [[db-examples]]: live queries of the project DB
 - Current work: [[TER-12]], blocked on [[TER-15]]
 - Background: [[MEM-1]]
 - Release under review: [[v0.1.0]]
@@ -532,6 +533,47 @@ through the sanitizer alone, too.
 
 ${XSS_DOCUMENT}
 `,
+    "db-examples": `# DB examples
+
+Each block below is a query of the project DB. The page shows the
+answer live.
+
+## Open critical bugs
+
+\`\`\`db
+type:bug status=open severity>=high sort:-severity,reported limit:10 fields:title,severity,component,service,reported
+\`\`\`
+
+## Bugs per component
+
+\`\`\`db
+type:bug group:component view:group
+\`\`\`
+
+## Open bugs
+
+\`\`\`db
+type:bug status=open view:count
+\`\`\`
+
+## Latest benchmarks
+
+\`\`\`db
+type:benchmark sort:-run_at limit:6 fields:service,metric,value,run_at
+\`\`\`
+
+## Accepted decisions
+
+\`\`\`db
+type:decision status=accepted sort:-date view:list fields:title,date
+\`\`\`
+
+## A bad query
+
+\`\`\`db
+type:bug sevrity=high
+\`\`\`
+`,
     "webshop:index": `# Webshop wiki
 
 - [[WEB-4]] checkout is in progress.
@@ -562,6 +604,7 @@ ${XSS_DOCUMENT}
     page(fakeUlid("pg", 3), "terrarium", "designs/runner-v2", "Runner v2", "draft", 2, 60 * 5),
     page(fakeUlid("pg", 4), "webshop", "index", "Webshop wiki", "reviewed", 1, 60 * 24),
     page(fakeUlid("pg", 5), "terrarium", "security/xss-payloads", "XSS payloads (mock)", "draft", 1, 60 * 3),
+    page(fakeUlid("pg", 6), "terrarium", "db-examples", "DB examples", undefined, 1, 50),
   ];
 
   const revisions: MockWorld["revisions"] = {};
@@ -695,7 +738,14 @@ ${XSS_DOCUMENT}
     },
     {
       ...subBase, name: "gemini", provider: "google", plan: "Gemini Code Assist", harnesses: ["pi"], alert_at: 80,
-      login_status: "missing", probe_status: "none", windows: [], local_estimate_only: true,
+      login_status: "missing", probe_status: "none", windows: [], local_estimate_only: true, enabled: false,
+    },
+    // A self-hosted Anthropic-style server on the LAN with two streams; one turn runs now.
+    {
+      ...subBase, name: "gpu-lan", provider: "selfhosted", harnesses: ["claude", "pi"], alert_at: 80,
+      login_status: "api_key", probe_status: "none", windows: [], local_estimate_only: true, enabled: true,
+      selfhosted: { api: "anthropic", base_url: "http://gpu.lan:8000", models: ["qwen3-coder-30b", "glm-5.3-air"], default_model: "qwen3-coder-30b", context_window: 131_072, max_output_tokens: 16_384, max_concurrent: 2, status_url: "http://gpu.lan:3001/status" },
+      streams: { max: 2, in_use: 1, waiting: 0 },
     },
   ];
   const apiKeys: MockWorld["apiKeys"] = { "openrouter-key": { provider: "openrouter", key: "sk-or-mock-never-shown" }, "zai-key": { provider: "zai", key: "zk-mock-never-shown" }, "kimi-key": { provider: "moonshot", key: "sk-kimi-mock-never-shown" } };
@@ -869,7 +919,7 @@ ${XSS_DOCUMENT}
   const audit: AuditEntry[] = [
     auditRow(1, 60 * 24 * 9, "system", "project.create", "terrarium", "terrarium", { card_prefix: "TER", source: "file" }),
     auditRow(2, 60 * 24 * 4, "operator", "project.create", "webshop", "webshop", { card_prefix: "WEB", source: "api" }),
-    auditRow(3, 60 * 5, `agent:${byName("lead").id}`, "agent.roles", byName("reviewer").id, "terrarium", { added: [], removed: ["project_admin"] }),
+    auditRow(3, 60 * 2, `agent:${byName("lead").id}`, "agent.roles", byName("reviewer").id, "terrarium", { added: [], removed: ["project_admin"] }),
     auditRow(4, 60 * 3, "operator", "agent.stop", byName("sysadmin").id, "terrarium", {}),
     auditRow(5, 26, "system", "agent.restart", byName("css-worker").id, "webshop", { reason: "3 restarts in 10 minutes" }),
   ];

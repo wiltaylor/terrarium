@@ -380,9 +380,32 @@ fn add_kimi_coding_cn_models(providers: &mut Value) {
 /// Terrarium providers set ([`TERRARIUM_PROVIDERS`]), and with the missing
 /// Kimi Code models added to pi's built-in `kimi-coding`.
 pub fn agent_models(shared: Option<Value>) -> Value {
+    agent_models_for(shared, None, None)
+}
+
+/// [`agent_models`], and for an agent on a self-hosted server
+/// (`terrarium_core::selfhosted`) the custom provider
+/// `terrarium-selfhosted` ([`terrarium_core::selfhosted::SelfHosted::pi_provider`])
+/// with the agent's `model` in its model list. A provider of that id in
+/// the shared file is replaced; an agent on another subscription gets no
+/// such provider.
+pub fn agent_models_for(
+    shared: Option<Value>,
+    selfhosted: Option<&terrarium_core::selfhosted::SelfHosted>,
+    model: Option<&str>,
+) -> Value {
     let mut models = shared.unwrap_or_else(|| json!({}));
     if !models.get("providers").is_some_and(Value::is_object) {
         models["providers"] = json!({});
+    }
+    let id = terrarium_core::selfhosted::PI_PROVIDER;
+    if let Some(map) = models["providers"].as_object_mut() {
+        map.remove(id);
+    }
+    if let Some(sh) = selfhosted {
+        let extra: Vec<String> = sh.model_for(model).into_iter().collect();
+        let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+        models["providers"][id] = sh.pi_provider(&extra);
     }
     models["providers"][terrarium_core::zai::PI_API_PROVIDER] = zai_api_provider();
     models["providers"][terrarium_core::moonshot::PI_CODING_PROVIDER] = kimi_coding_intl_provider();
@@ -404,6 +427,19 @@ pub fn materialize(
     agent: &Agent,
     home: &Path,
     prompt: Option<&str>,
+) -> Result<Vec<FileOverlay>> {
+    materialize_for(opts, agent, home, prompt, None)
+}
+
+/// [`materialize`] for an agent on `selfhosted` (its subscription's
+/// server, `terrarium_core::selfhosted`): its `models.json` gets the
+/// provider `terrarium-selfhosted` ([`agent_models_for`]).
+pub fn materialize_for(
+    opts: &PiOptions,
+    agent: &Agent,
+    home: &Path,
+    prompt: Option<&str>,
+    selfhosted: Option<&terrarium_core::selfhosted::SelfHosted>,
 ) -> Result<Vec<FileOverlay>> {
     let dir = pi_dir(agent);
     let sessions = sessions_dir(agent);
@@ -449,7 +485,11 @@ pub fn materialize(
     // start. pi needs `providers` in the file, also in the mount point.
     let own_models = dir.join(MODELS_FILE);
     let shared_models = home.join(MODELS_FILE);
-    let models = agent_models(read_json(&shared_models)?);
+    let models = agent_models_for(
+        read_json(&shared_models)?,
+        selfhosted,
+        agent.model.as_deref(),
+    );
     if read_json(&own_models)?.as_ref() != Some(&models) {
         let bytes =
             serde_json::to_vec_pretty(&models).map_err(|e| PiError::json("models.json", e))?;

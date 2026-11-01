@@ -328,14 +328,18 @@ async fn run_cmd(
     })
 }
 
-/// `Max 20x` from `default_claude_max_20x`, else the subscription type.
+/// The plan by Anthropic's name of today
+/// (`terrarium_core::providers::claude_plan_name`): `Ultra` from
+/// `default_claude_max_20x` (the Max 20x plan is the Ultra plan since
+/// 2026-10-30), `Max` from `default_claude_max_5x`, else the subscription
+/// type.
 pub fn claude_plan(subscription_type: Option<&str>, tier: Option<&str>) -> Option<String> {
-    if let Some(t) = tier {
-        for (k, v) in [("max_20x", "Max 20x"), ("max_5x", "Max 5x"), ("pro", "Pro")] {
-            if t.contains(k) {
-                return Some(v.into());
-            }
-        }
+    use terrarium_core::providers::claude_plan_name;
+    if let Some(p) = tier.and_then(claude_plan_name) {
+        return Some(p.into());
+    }
+    if let Some(p) = subscription_type.and_then(claude_plan_name) {
+        return Some(p.into());
     }
     subscription_type.map(|s| {
         let mut c = s.chars();
@@ -669,6 +673,7 @@ pub fn suggested_def(st: &LoginStatus, name: Option<&str>) -> SubscriptionDef {
             _ => crate::probes::for_provider(&st.provider).map(str::to_owned),
         },
         alert_at: 80,
+        selfhosted: None,
     }
 }
 
@@ -727,10 +732,13 @@ pub async fn detect_on_start(state: &Shared) -> ApiResult<()> {
             )
             .await;
             let (n, status) = (sub.name.clone(), st.logged_in);
+            let plan = st.plan.clone().filter(|_| st.logged_in);
             state
                 .db
                 .write("system", move |t| {
-                    subs::record_login_check(t, &n, status).map(|_| ())
+                    subs::record_login_check(t, &n, status)?;
+                    // A renamed plan shows with no new login.
+                    subs::refresh_plan(t, &n, plan.as_deref()).map(|_| ())
                 })
                 .await?;
             continue;
@@ -1513,7 +1521,10 @@ pub fn env_var_for(provider: &str) -> Option<(&'static str, Option<&'static str>
     Some(match provider {
         "anthropic" => ("ANTHROPIC_API_KEY", None),
         "openai" => ("OPENAI_API_KEY", None),
-        "openai-compatible" => ("OPENAI_API_KEY", Some("OPENAI_BASE_URL")),
+        // A self-hosted server (`terrarium_core::selfhosted`); the old word
+        // `openai-compatible` is its alias. The base URL is in the
+        // subscription row, not in the env.
+        "selfhosted" | "openai-compatible" => (terrarium_core::selfhosted::KEY_ENV, None),
         "google" | "gemini" => ("GEMINI_API_KEY", None),
         "openrouter" => ("OPENROUTER_API_KEY", None),
         "xai" => ("XAI_API_KEY", None),
@@ -1575,8 +1586,12 @@ pub fn stored_key(state_dir: &Path, name: &str) -> Option<String> {
 }
 
 /// The env that an agent on `sub` gets for its stored API key: the
-/// provider's key var, and the base URL var for an OpenAI-compatible
-/// endpoint. Empty when the subscription has no stored key.
+/// provider's key var. Empty when the subscription has no stored key.
+///
+/// A self-hosted server (`terrarium_core::selfhosted`) gets
+/// `TERRARIUM_SELFHOSTED_API_KEY`, and also `ANTHROPIC_AUTH_TOKEN` for an
+/// Anthropic-style server. The base URL and the limits are no secret: the
+/// adapters put them in the launch.
 ///
 /// A Z.ai key (`terrarium_core::zai`) also gives the Claude Code env
 /// ([`terrarium_core::zai::claude_env`]): `ANTHROPIC_BASE_URL`,
@@ -1602,6 +1617,18 @@ pub fn credential_env_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, 
         return Vec::new();
     };
     let mut out = vec![(var.to_owned(), k.key.clone())];
+    if sub.is_selfhosted() {
+        // Claude Code reads the key of an Anthropic-style server from
+        // `ANTHROPIC_AUTH_TOKEN` (over the placeholder of the launch).
+        let anthropic = sub
+            .selfhosted
+            .as_ref()
+            .is_some_and(|s| s.api == terrarium_core::selfhosted::Api::Anthropic);
+        if anthropic {
+            out.push(("ANTHROPIC_AUTH_TOKEN".to_owned(), k.key.clone()));
+        }
+        return out;
+    }
     if terrarium_core::zai::is_zai(&sub.provider) || terrarium_core::zai::is_zai(&k.provider) {
         out.extend(terrarium_core::zai::claude_env(&k.key));
         return out;
@@ -1707,11 +1734,23 @@ mod tests {
 
     #[test]
     fn plans_and_names() {
+        // The Max 20x plan is the Ultra plan since 2026-10-30: the login
+        // of 2026-11-01 still has the old tier.
         assert_eq!(
             claude_plan(Some("max"), Some("default_claude_max_20x")).as_deref(),
-            Some("Max 20x")
+            Some("Ultra")
         );
+        assert_eq!(
+            claude_plan(Some("max"), Some("default_claude_ultra")).as_deref(),
+            Some("Ultra")
+        );
+        assert_eq!(
+            claude_plan(Some("max"), Some("default_claude_max_5x")).as_deref(),
+            Some("Max")
+        );
+        assert_eq!(claude_plan(Some("max"), None).as_deref(), Some("Max"));
         assert_eq!(claude_plan(Some("pro"), None).as_deref(), Some("Pro"));
+        assert_eq!(claude_plan(Some("odd"), None).as_deref(), Some("Odd"));
         assert_eq!(claude_plan(None, None), None);
         let st = LoginStatus {
             kind: LoginKind::Claude,
@@ -1761,15 +1800,37 @@ mod tests {
         }))
         .unwrap();
         assert!(credential_env_for(tmp.path(), &sub).is_empty());
-        sub.env_var = Some("OPENAI_API_KEY".into());
+        // The old word is an alias of `selfhosted`: only the key var, no
+        // base URL var (the base URL is in the row).
+        assert_eq!(
+            env_var_for("openai-compatible"),
+            Some(("TERRARIUM_SELFHOSTED_API_KEY", None))
+        );
+        sub.provider = "selfhosted".into();
+        sub.env_var = Some("TERRARIUM_SELFHOSTED_API_KEY".into());
+        sub.selfhosted = Some(terrarium_core::selfhosted::SelfHosted {
+            base_url: "https://llm.example/v1".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            credential_env_for(tmp.path(), &sub),
+            [(
+                "TERRARIUM_SELFHOSTED_API_KEY".to_owned(),
+                "sk-test".to_owned()
+            )]
+        );
+        // An Anthropic-style server: Claude Code reads ANTHROPIC_AUTH_TOKEN.
+        if let Some(s) = sub.selfhosted.as_mut() {
+            s.api = terrarium_core::selfhosted::Api::Anthropic;
+        }
         assert_eq!(
             credential_env_for(tmp.path(), &sub),
             [
-                ("OPENAI_API_KEY".to_owned(), "sk-test".to_owned()),
                 (
-                    "OPENAI_BASE_URL".to_owned(),
-                    "https://llm.example/v1".to_owned()
-                )
+                    "TERRARIUM_SELFHOSTED_API_KEY".to_owned(),
+                    "sk-test".to_owned()
+                ),
+                ("ANTHROPIC_AUTH_TOKEN".to_owned(), "sk-test".to_owned())
             ]
         );
         assert_eq!(env_var_for("anthropic"), Some(("ANTHROPIC_API_KEY", None)));

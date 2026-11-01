@@ -36,6 +36,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::debug;
 
 use super::agents::{load, supervisor_error};
+use super::session_links::Linker;
 use super::{ApiQuery, Shared, is_websocket, paged};
 use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult};
@@ -119,6 +120,7 @@ fn is_desc(v: Option<&str>) -> ApiResult<bool> {
 
 async fn respond(
     state: Shared,
+    actor: Actor,
     filter: EventFilter,
     audit: Option<AuditFilter>,
     page: Page,
@@ -162,16 +164,22 @@ async fn respond(
         Mode::Json => {
             let limit = page.limit();
             let f = filter.clone();
-            let rows = state
+            let mut rows = state
                 .db
                 .read(move |c| {
-                    if desc {
-                        events::list_desc(c, &f, since, before, limit + 1)
+                    let mut rows = if desc {
+                        events::list_desc(c, &f, since, before, limit + 1)?
                     } else {
-                        events::list(c, &f, since, limit + 1)
-                    }
+                        events::list(c, &f, since, limit + 1)?
+                    };
+                    events::attach_links(c, &mut rows)?;
+                    Ok(rows)
                 })
                 .await?;
+            let mut linker = Linker::new(&state, &actor);
+            for e in &mut rows {
+                linker.show(&mut e.link);
+            }
             paged(Paged::from_rows(rows, limit, |e: &StoredEvent| {
                 e.seq.to_string()
             }))
@@ -180,11 +188,11 @@ async fn respond(
             // Subscribe before the upgrade, so no row between now and the
             // live loop is lost.
             let audit = audit.map(|f| (f, state.db.hub().subscribe_audit()));
-            ws.on_upgrade(move |socket| ws_events(socket, state, filter, audit, since))
+            ws.on_upgrade(move |socket| ws_events(socket, state, actor, filter, audit, since))
         }
         Mode::Sse => {
             let audit = audit.map(|f| (f, state.db.hub().subscribe_audit()));
-            sse_events(state, filter, audit, since).into_response()
+            sse_events(state, actor, filter, audit, since).into_response()
         }
     })
 }
@@ -223,7 +231,7 @@ pub async fn firehose(
     } else {
         None
     };
-    respond(state, filter, audit, page, q, req).await
+    respond(state, actor, filter, audit, page, q, req).await
 }
 
 /// The `audit` frames of a firehose stream with `?audit=1`: the rows that
@@ -243,9 +251,20 @@ fn audit_frames(actor: &Actor, project: Option<&str>) -> Option<AuditFilter> {
     })
 }
 
-/// The JSON of an `audit` frame: `{"kind":"audit","audit":<row>}`.
-fn audit_frame(e: &AuditEntry) -> serde_json::Value {
+/// The JSON of an `audit` frame: `{"kind":"audit","audit":<row>}`, with
+/// the session link that the reader may see.
+fn audit_frame(linker: &mut Linker<'_>, e: &AuditEntry) -> serde_json::Value {
+    let mut e = e.clone();
+    linker.show(&mut e.link);
     json!({ "kind": "audit", "audit": e })
+}
+
+/// An event as the reader sees it: the session link only when the reader
+/// may read the session.
+fn shown(linker: &mut Linker<'_>, e: &StoredEvent) -> StoredEvent {
+    let mut e = e.clone();
+    linker.show(&mut e.link);
+    e
 }
 
 /// The next audit row for a stream, or never when the stream has no
@@ -286,20 +305,25 @@ pub async fn agent_events(
         kind: q.kind.clone(),
         ..EventFilter::default()
     };
-    respond(state, filter, None, page, q, req).await
+    respond(state, actor, filter, None, page, q, req).await
 }
 
 async fn backlog(state: &Shared, filter: &EventFilter, after: i64) -> ApiResult<Vec<StoredEvent>> {
     let f = filter.clone();
     state
         .db
-        .read(move |c| events::list(c, &f, after, BATCH))
+        .read(move |c| {
+            let mut rows = events::list(c, &f, after, BATCH)?;
+            events::attach_links(c, &mut rows)?;
+            Ok(rows)
+        })
         .await
 }
 
 async fn ws_events(
     socket: WebSocket,
     state: Shared,
+    actor: Actor,
     filter: EventFilter,
     mut audit: AuditFeed,
     since: i64,
@@ -307,8 +331,10 @@ async fn ws_events(
     let (mut tx, mut rx) = socket.split();
     let mut live = state.db.hub().subscribe();
     let mut last = since;
-    let send = |e: &StoredEvent| {
-        serde_json::to_string(e)
+    let state_dir = state.state_dir.clone();
+    let mut linker = Linker::with_dir(&state_dir, &actor);
+    let send = |linker: &mut Linker<'_>, e: &StoredEvent| {
+        serde_json::to_string(&shown(linker, e))
             .map(|s| WsMessage::Text(s.into()))
             .ok()
     };
@@ -318,7 +344,7 @@ async fn ws_events(
             return;
         };
         for e in &batch {
-            if let Some(m) = send(e)
+            if let Some(m) = send(&mut linker, e)
                 && tx.send(m).await.is_err()
             {
                 return;
@@ -336,7 +362,7 @@ async fn ws_events(
                 Some(Ok(_)) => {}
             },
             row = next_audit(&mut audit) => {
-                let m = WsMessage::Text(audit_frame(&row).to_string().into());
+                let m = WsMessage::Text(audit_frame(&mut linker, &row).to_string().into());
                 if tx.send(m).await.is_err() {
                     return;
                 }
@@ -344,7 +370,7 @@ async fn ws_events(
             ev = live.recv() => match ev {
                 Ok(e) => {
                     if e.seq > last && filter.matches(&e) {
-                        if let Some(m) = send(&e)
+                        if let Some(m) = send(&mut linker, &e)
                             && tx.send(m).await.is_err()
                         {
                             return;
@@ -358,7 +384,7 @@ async fn ws_events(
                         return;
                     };
                     for e in &batch {
-                        if let Some(m) = send(e)
+                        if let Some(m) = send(&mut linker, e)
                             && tx.send(m).await.is_err()
                         {
                             return;
@@ -374,6 +400,7 @@ async fn ws_events(
 
 struct SseState {
     state: Shared,
+    actor: Actor,
     filter: EventFilter,
     last: i64,
     queue: VecDeque<StoredEvent>,
@@ -384,6 +411,7 @@ struct SseState {
 
 fn sse_events(
     state: Shared,
+    actor: Actor,
     filter: EventFilter,
     audit: AuditFeed,
     since: i64,
@@ -391,6 +419,7 @@ fn sse_events(
     let live = state.db.hub().subscribe();
     let init = SseState {
         state,
+        actor,
         filter,
         last: since,
         queue: VecDeque::new(),
@@ -402,6 +431,7 @@ fn sse_events(
         loop {
             if let Some(e) = s.queue.pop_front() {
                 s.last = e.seq;
+                let e = shown(&mut Linker::new(&s.state, &s.actor), &e);
                 let ev = SseEvent::default()
                     .id(e.seq.to_string())
                     .event(e.kind.clone())
@@ -420,7 +450,7 @@ fn sse_events(
                     // No `id`: `Last-Event-ID` stays the `seq` of the event log.
                     let ev = SseEvent::default()
                         .event("audit")
-                        .json_data(audit_frame(&row))
+                        .json_data(audit_frame(&mut Linker::new(&s.state, &s.actor), &row))
                         .unwrap_or_else(|_| SseEvent::default().comment("bad audit row"));
                     return Some((Ok(ev), s));
                 }

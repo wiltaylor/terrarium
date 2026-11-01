@@ -15,7 +15,9 @@
 //!
 //! The scheduler ([`spawn_scheduler`]) runs the probe of each subscription
 //! on an interval (default 5 minutes), stores the samples, and calls the
-//! quota policy.
+//! quota policy. A successful probe removes each stored window that its
+//! answer does not have (`subs::retire_windows`): the window and its
+//! quota notice rows go, for every probe. A failed probe removes nothing.
 
 pub mod anthropic;
 pub mod github;
@@ -395,17 +397,26 @@ pub async fn run_subscription(state: &Shared, name: &str) -> ApiResult<ProbeOutc
                             &q.raw,
                         )?;
                     }
+                    // A window that the answer no longer has goes
+                    // (`subs::retire_windows`).
+                    let keep: Vec<&str> = w.iter().map(|q| q.window.as_str()).collect();
+                    let removed = subs::retire_windows(t, &n, &keep)?;
                     subs::set_probe_result(t, &n, Ok(()))?;
                     subs::clear_expired(t, &n)?;
-                    let summary = w
+                    let mut summary = w
                         .iter()
                         .map(|q| format!("{} {:.0}%", q.window, q.used_pct))
                         .collect::<Vec<_>>()
                         .join(", ");
+                    let mut data = json!({"subscription": n, "windows": w});
+                    if !removed.is_empty() {
+                        summary.push_str(&format!("; removed {}", removed.join(", ")));
+                        data["removed_windows"] = json!(removed);
+                    }
                     t.emit(EventDraft::new(
                         "quota.sample",
                         format!("{n}: {summary}"),
-                        json!({"subscription": n, "windows": w}),
+                        data,
                     ))?;
                     Ok(())
                 })

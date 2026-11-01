@@ -31,6 +31,9 @@ pub const DELIVERED_DIR: &str = "skills";
 pub const SKILL_FILE: &str = "SKILL.md";
 /// The name in a `skills` list that means "every skill of the library".
 pub const ALL: &str = "*";
+/// The suffix of a new packaged default next to the operator's file
+/// (PLAN §8.3). The skill reader skips such a file.
+pub const NEW_DEFAULT_SUFFIX: &str = ".new";
 /// The longest skill name.
 pub const NAME_MAX: usize = 64;
 /// The longest description.
@@ -325,6 +328,11 @@ pub fn read_dir(dir: &Path) -> Result<Files, Vec<String>> {
                 }
             };
             let ft = meta.file_type();
+            // A new packaged default that waits for the operator
+            // (`SKILL.md.new`, PLAN §8.3) is not a file of the skill.
+            if ft.is_file() && rel.ends_with(NEW_DEFAULT_SUFFIX) {
+                continue;
+            }
             if ft.is_symlink() {
                 problems.push(format!("`{rel}` is a symbolic link; a skill holds none"));
             } else if ft.is_dir() {
@@ -713,6 +721,8 @@ mod tests {
         std::fs::create_dir_all(s.join("scripts")).expect("mkdir");
         std::fs::write(s.join(SKILL_FILE), md("fern", "d")).expect("write");
         std::fs::write(s.join("scripts/a.sh"), b"x").expect("write");
+        // A new packaged default that waits for the operator is not a file of the skill.
+        std::fs::write(s.join("SKILL.md.new"), md("fern", "newer")).expect("write");
         let f = read_dir(&s).expect("read");
         assert_eq!(f.keys().collect::<Vec<_>>(), [SKILL_FILE, "scripts/a.sh"]);
         std::os::unix::fs::symlink("/etc/passwd", s.join("passwd.txt")).expect("link");

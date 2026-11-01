@@ -835,9 +835,17 @@ pub async fn audit(
         }
     }
     filter.since = crate::time_param::opt_time_param("since", filter.since.as_deref())?;
-    let rows = state
+    let mut rows = state
         .db
-        .read(move |c| audit::list(c, &filter, &page))
+        .read(move |c| {
+            let mut rows = audit::list(c, &filter, &page)?;
+            audit::attach_links(c, &mut rows.items)?;
+            Ok(rows)
+        })
         .await?;
+    let mut linker = super::session_links::Linker::new(&state, &actor);
+    for e in &mut rows.items {
+        linker.show(&mut e.link);
+    }
     Ok(paged(rows))
 }

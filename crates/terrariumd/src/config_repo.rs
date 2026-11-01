@@ -6,7 +6,10 @@
 //! in the container). The daemon makes it a git repo on first use
 //! ([`ConfigRepo::ensure`]). What goes in:
 //!
-//! - `prompts/`: the personas and the protocol templates (`*.md`).
+//! - `prompts/`: the protocol templates and the harness sections (`*.md`).
+//! - `system-prompts/`: the system prompt library (PLAN §8.1,
+//!   `crate::system_prompts`), one `<name>.md` for each entry, with the
+//!   personas `leader` and `worker`.
 //! - `harness/<harness>/`: the user settings of each harness.
 //! - `templates/`: the agent templates, one WCL file each
 //!   (`crate::template_files`).
@@ -88,9 +91,12 @@ pub const GITIGNORE: &str = "\
 !/export/
 !/skills/
 !/templates/
+!/system-prompts/
 /prompts/**
 !/prompts/**/
 !/prompts/**/*.md
+/system-prompts/**
+!/system-prompts/*.md
 /harness/**
 !/harness/**/
 !/harness/**/*.json

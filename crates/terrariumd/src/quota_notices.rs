@@ -157,11 +157,13 @@ fn tokens(n: u64) -> String {
     }
 }
 
-/// The length of a window by its name: `5h`, `7d`, `30m`. `None` for a
-/// window with no length in its name (`credits`, `balance`).
+/// The length of a window by its name: `5h`, `7d`, `30m`, and `7d_fable`
+/// (a weekly limit of one model). `None` for a window with no length in
+/// its name (`credits`, `balance`, `extra`).
 fn window_length(window: &str) -> Option<Duration> {
     let (n, unit) = window.split_at(window.find(|c: char| !c.is_ascii_digit())?);
     let n: i64 = n.parse().ok()?;
+    let unit = unit.split_once('_').map_or(unit, |(u, _)| u);
     match unit {
         "m" => Some(Duration::minutes(n)),
         "h" => Some(Duration::hours(n)),
@@ -339,6 +341,7 @@ mod tests {
                     harnesses: Vec::new(),
                     probe: None,
                     alert_at,
+                    selfhosted: None,
                 },
                 "api",
             )
@@ -543,5 +546,7 @@ mod tests {
         assert_eq!(window_length("5h"), Some(Duration::hours(5)));
         assert_eq!(window_length("7d"), Some(Duration::days(7)));
         assert_eq!(window_length("credits"), None);
+        assert_eq!(window_length("7d_fable"), Some(Duration::days(7)));
+        assert_eq!(window_length("extra"), None);
     }
 }

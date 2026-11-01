@@ -320,6 +320,7 @@ terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--m
                     [--persona p] [--restart r] [--idle-stop 30m|off|default] [--policy JSON]
                     [--new-session-on-prompt-change true|false] [--skill s... | --no-skills]
                     [--compact-on-idle on|off|default] [--compact-max-age 24h|off|default]
+terrarium agent set <agent> --save-system-prompt <name>  save the custom text in the library, and select it
 terrarium agent swap <agent> <subscription>  move to another plan account of the pool
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
@@ -425,13 +426,16 @@ applies at the next start or restart. `agent show` prints the whole text
 after the other fields, under `system_prompt:`. `agent ls` does not show
 it.
 
-`--persona` sets the persona (PLAN §8.1): `leader`, `worker`, `none`, or
-the name of a file in the config repo's `prompts/` (without `.md`). The
-persona replaces the harness's default system prompt, and the protocol
-prompt comes after it. `--system-prompt` wins over it. Without a persona,
-the agent gets one by role: `leader` for `project_admin` or `sysadmin`,
-else `worker`. `none` keeps the harness's default prompt. `--persona ''`
-sets it back to by role.
+`--persona` selects a system prompt of the library (PLAN §8.1, "System
+prompts" below): `leader`, `worker`, `none`, or the name of an entry
+(`terrarium system-prompt ls`). The entry replaces the harness's default
+system prompt, and the protocol prompt comes after it. `--system-prompt`
+(a custom text) wins over it. Without a persona, the agent gets one by
+role: `leader` for `project_admin` or `sysadmin`, else `worker`. `none`
+keeps the harness's default prompt. `--persona ''` sets it back to by
+role. `agent set <agent> --save-system-prompt <name>` saves the agent's
+own custom text in the library as `<name>`, then selects it: `persona`
+becomes `<name>`, and the custom text is cleared.
 
 `agent attach` puts the terminal in raw mode, sends each key to the PTY,
 and sends a resize when the window changes size. Press Ctrl-] to detach.
@@ -620,6 +624,34 @@ terrarium skill usage <name>                       the agents and templates that
   The agent gets them at its next start. `agent show` has
   `skills_restart: true` until then.
 
+### System prompts
+
+`system-prompt` has the alias `system-prompts`. The library is
+`system-prompts/<name>.md` in the config repo (PLAN §8.1,
+[api.md §28](api.md#28-system-prompts)). An agent or a template selects
+an entry with `--persona <name>`. The operator, a sysadmin, and a
+project_admin read the library and add to it.
+
+```
+terrarium system-prompt ls                                   the entries: name, source, size, description
+terrarium system-prompt show <name>                          the text, and the agents and templates that use it
+terrarium system-prompt new <name> --file f.md [--description d] [--replace]   `-` reads stdin
+terrarium system-prompt edit <name> [--file f.md] [--description d]            `--description ''` removes it
+terrarium system-prompt rm <name> [--force]                  refused when in use, unless --force
+```
+
+- A write goes to the work tree of the config repo, after the secret
+  scan. Commit it with `terrarium admin config commit` (or Settings,
+  Harness config in the dashboard).
+- `leader` and `worker` are the system prompts by role. A change of them
+  needs sysadmin or the operator, and they cannot be deleted. A change
+  or a delete of an entry that agents or templates of another project use
+  needs sysadmin or the operator too.
+- `rm` of an entry in use exits with the `409` and lists the users. With
+  `--force` the file goes, and the next start of each user stops with an
+  error.
+- An agent gets a changed entry at its next start.
+
 ### Mail and the project inbox
 
 ```
@@ -727,6 +759,56 @@ terrarium wiki backlinks <page>
 A page is a path in the project, for example `reports/perf`. The daemon
 needs a summary (`-m`) on each save. When the base of `wiki edit` is stale,
 the CLI prints the diff since the base, then the error.
+
+### DB
+
+The DB of the project (PLAN §15.4, [api.md §27](api.md#27-db)): record
+types with a schema, records, and queries. Every member of the project
+reads and writes it.
+
+```
+terrarium db type ls                                   the types, with record counts
+terrarium db type show <type>                          the fields of a type
+terrarium db type new <type> [-d text] [--field spec]... [--unique f]... [--from-file f | -]
+terrarium db type edit <type> [-d text] [--field spec]... [--unique f]... [--rename old:new]...
+                              [--remove f]... [--from-file f | -] [--confirm]
+terrarium db type rm <type> [--records]                --records: with its records (project_admin)
+terrarium db rec new <type> [--set f=v]... [--json-data <json | ->]
+terrarium db rec get <id>
+terrarium db rec set <id> [--set f=v]... [--unset f]... [--json-data <json | ->] [--revision n]
+terrarium db rec rm <id>
+terrarium db rec ls <type> [query terms]... [--format table|json|csv] [--cursor c]
+terrarium db query <query> [--format table|json|csv] [--cursor c]
+```
+
+A field spec is `name:kind[!][=default]`. `!` makes the field required.
+The kinds are `string`, `text`, `number`, `integer`, `bool`, `date`,
+`datetime`, `enum(a,b,c)`, `list(string|integer|number)`, `ref(<type>)`,
+and `json`. Put the spec in single quotes in a shell:
+
+```
+terrarium db type new bug --field 'title:string!' --field 'severity:enum(low,medium,high)!=low' \
+  --field 'tags:list(string)' --field 'service:ref(service)'
+```
+
+`--from-file` takes a JSON list of fields, or an object with
+`description` and `fields` (the shape of api.md §27.1). `type edit`
+reads the type first: `--field` adds a field or replaces the field of
+that name, `--rename` moves the data of a field, and `--remove` drops a
+field and its data (it needs `--confirm`). The CLI sends the revision
+that it read, so a change by someone else since then is refused.
+
+`--set field=value` takes the value in the kind of the field: a number,
+`true` or `false`, a list as `a,b,c` (or a JSON list), JSON for `json`, a
+record ID or the record's label for a `ref`, and `-` for stdin. The CLI
+reads the type to know the kinds. `--unset` removes an optional value.
+
+`db query` and `db rec ls` print a table: an `ID` column and one column
+for each field of the answer. A ref shows the label of the record. When
+there is a next page, the last line gives its `--cursor`. `--format csv`
+prints RFC 4180 CSV with the full values. `--format json` and `--json`
+print the API answer. The query language is in api.md §27.3; for
+example `type:bug status=open severity>=high sort:-severity limit:20`.
 
 ### Artifacts and versions
 
@@ -1293,8 +1375,20 @@ terrarium admin host show <name>               the link, the capabilities, and t
 terrarium admin host new <name> [--enrol]      prints the token once, alone on stdout
 terrarium admin host rotate <name> [--enrol]   a new token, printed once, alone on stdout
 terrarium admin host rm <name>                 revokes the token
-terrarium admin subscription ls                each subscription: provider, plan, account, login, default
+terrarium admin subscription ls                each subscription: provider, plan, account, login, enabled, default
+terrarium admin subscription show <name>       one subscription: the server, the streams, the status page
 terrarium admin subscription default <name>    the default account of its harness (PLAN §16.3)
+terrarium admin subscription new <name> --provider selfhosted --api openai|anthropic --base-url <url>
+        [--key-stdin] [--model m]... [--default-model m] [--context-window N]
+        [--max-output-tokens N] [--max-concurrent N] [--status-url url] [--harness h]...
+terrarium admin subscription set <name> [--api a] [--base-url u] [--model m]... [--default-model m]
+        [--context-window N] [--max-output-tokens N] [--max-concurrent N] [--status-url u]
+        [--clear-default-model] [--clear-context-window] [--clear-max-output-tokens]
+        [--clear-max-concurrent] [--clear-status-url] [--harness h]... [--alert-at N] [--key-stdin]
+terrarium admin subscription enable <name>     agents on it may start and wake again
+terrarium admin subscription disable <name>    no agent on it starts or wakes; running agents go on
+terrarium admin subscription stop-all <name> [--disable]   stop every running agent on it now
+terrarium admin subscription fetch-models (--subscription s | --base-url u [--api a] [--key-stdin]) [--refresh]
 terrarium admin harness ls [--refresh]         each harness: pin, installed, update policy, on disk
 terrarium admin harness update <name> [--version v|latest] [--force]   npm install -g into a new version dir, then the switch
 terrarium admin harness update --all [--force]   every harness and the extension to the latest
@@ -1388,7 +1482,13 @@ the agents of its own project; a global target needs sysadmin.
 
 | Command | Request | Text output |
 |---|---|---|
-| `admin subscription ls` | `GET /api/subscriptions` | A table: `NAME`, `PROVIDER`, `PLAN`, `ACCOUNT` (the harness of the plan account, `API key`, or `-`), `LOGIN` (the `login_status`), `DEFAULT` (`*` on the default account of each harness), `AGENTS` (the number of agents on it). |
+| `admin subscription ls` | `GET /api/subscriptions` | A table: `NAME`, `PROVIDER`, `PLAN`, `ACCOUNT` (the harness of the plan account, `API key`, or `-`), `LOGIN` (the `login_status`), `ENABLED` (`yes` or `no`), `DEFAULT` (`*` on the default account of each harness), `AGENTS` (the number of agents on it). |
+| `admin subscription show <name>` | `GET /api/subscriptions/{name}` | Lines: the name and the provider, `enabled`, the plan, the harnesses, the login; for a self-hosted server its `api`, base URL, models, default model, context window, max output, and whether a key is stored; `streams: <in use>/<max> in use, <n> waiting`; `status page: <url>` when the provider has one; the number of agents. |
+| `admin subscription new <name> --provider p ...` | `POST /api/subscriptions` `{name, provider, plan?, harnesses?, probe?, alert_at?, selfhosted?}`; with `--key-stdin` then `POST /api/subscriptions/{name}/api-key` `{provider, key}` | The subscription, as `show` prints it. The server flags (`--api`, `--base-url`, `--model` (repeat), `--default-model`, `--context-window`, `--max-output-tokens`, `--max-concurrent`, `--status-url`) make the `selfhosted` object. `--key-stdin` reads the key from the first line of stdin (the key is optional for a self-hosted server; storing it needs the operator). Needs sysadmin or the operator ([api.md §16.5](api.md)). |
+| `admin subscription set <name> ...` | `PATCH /api/subscriptions/{name}` `{alert_at?, harnesses?, selfhosted?}`, then the API key with `--key-stdin` | The subscription. Only the flags given change; `--clear-<field>` sends `null` and clears the field. `--harness` (repeat) replaces the harness list of a self-hosted subscription. `409 file_managed` for a file subscription. |
+| `admin subscription enable <name>`, `disable <name>` | `POST /api/subscriptions/{name}/enable` or `/disable` | `<name>: enabled`, or `<name>: disabled (agents that run go on; none starts or wakes)`. A disabled subscription starts no agent, wakes none, and takes no new agent ([api.md §16.2](api.md)). Needs sysadmin or the operator. |
+| `admin subscription stop-all <name> [--disable]` | `POST /api/subscriptions/{name}/stop-all` `{disable}` | One line per agent: `<project>/<agent>: stopping` (or `not stopped: <error>`), and `<name>: disabled` with `--disable`. `no agent of the subscription was running` when none ran. Needs sysadmin or the operator. |
+| `admin subscription fetch-models ...` | `POST /api/subscriptions/fetch-models` `{subscription?, base_url?, api?, key?, refresh}` | One model id per line. The daemon sends one `GET` to the server (no redirects, 5 s, 1 MiB). `--subscription` uses its stored server and key. Needs sysadmin or the operator. |
 | `admin subscription default <name>` | `POST /api/subscriptions/{name}/default` | `<name> is the default <harness> account`. A Claude Code, Codex, or Copilot agent with no subscription then runs on it; the old default stops being one. `422` for an API key, a subscription with no plan account, or an old pi account (pi uses API keys only). Needs sysadmin or the operator ([api.md §16.3](api.md)). |
 | `admin harness ls [--refresh]` | `GET /api/harnesses[?refresh=true]` | A table: `HARNESS`, `PINNED`, `INSTALLED` (`-` when not known), `UPDATES` (the update policy: `auto`, or `pinned <version>`), `ON DISK` (the version dirs in the tools dir). Then the line `auto-update: <schedule> (TERRARIUM_HARNESS_AUTO_UPDATE), next check <time>`, one line for each harness with an unknown version (with the reason), and one line for each live agent on another version than the active one (`<harness>: <agent> runs <v>; it moves to <active> at its next restart`). The pins come from `harnesses.toml` ([api.md §4](api.md)). |
 | `admin harness update <name> [--version v] [--force]`, `admin harness update --all [--force]` | `POST /api/harnesses/{name}/update` `{version?, force?}`, or `POST /api/harnesses/update` | npm's output, then `<name>: <from> -> <to>`. Then the `note` on the live agents that keep an older version until their next restart, and `<name>: removed the unused version(s) ...`. On a failure: npm's output, then the error. `--force` installs the version again when its version dir is on disk; running agents never stop an update. Needs sysadmin or the operator ([api.md §4](api.md)). |

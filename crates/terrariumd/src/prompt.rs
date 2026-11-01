@@ -9,8 +9,10 @@
 //!
 //! The base system prompt comes before the template ([`base_prompt`]): the
 //! agent's own `system_prompt`, else its persona (PLAN §8.1,
-//! [`load_persona`]): `leader.md` or `worker.md` by role, or the file that
-//! `persona` names. The harness section (`<prompts dir>/harness/<harness>.md`,
+//! [`load_persona_in`]): `leader` or `worker` by role, or the entry that
+//! `persona` names, from the system prompt library
+//! (`<config repo>/system-prompts/<name>.md`, `crate::system_prompts`),
+//! else from the prompts dir for an older config repo. The harness section (`<prompts dir>/harness/<harness>.md`,
 //! [`load_harness_section`]) comes after it: the tool details of the
 //! harness that a replaced system prompt loses. The prompts dir is the
 //! config repo's `prompts/` (`TERRARIUM_CONFIG_REPO`), unless
@@ -256,19 +258,48 @@ pub fn persona_name(agent: &Agent) -> Option<(String, bool)> {
 }
 
 /// The persona text of `agent`, without HTML comments, or `None` (the
-/// harness keeps its default prompt). A persona that the agent names and
-/// that has no file is an error. The persona by role with no file is no
-/// persona: a prompts dir with no `leader.md` keeps the old behaviour.
-/// An empty persona (the packaged placeholder) is no persona too.
+/// harness keeps its default prompt), with the prompts dir only: see
+/// [`load_persona_in`].
 pub fn load_persona(prompts_dir: &Path, agent: &Agent) -> Result<Option<String>, String> {
+    load_persona_in(&prompt_dirs(None, prompts_dir), agent)
+}
+
+/// The lookup dirs of a persona: the system prompt library of the config
+/// repo `repo` (when there is one), then the prompts dir.
+pub fn prompt_dirs(repo: Option<&Path>, prompts_dir: &Path) -> crate::system_prompts::Dirs {
+    crate::system_prompts::Dirs {
+        library: repo.map(crate::system_prompts::library_dir),
+        prompts: prompts_dir.to_path_buf(),
+    }
+}
+
+/// The persona text of `agent`, without HTML comments, or `None` (the
+/// harness keeps its default prompt). The file is the library entry of
+/// the name, `system-prompts/<name>.md`, else `<prompts dir>/<name>.md`
+/// (`crate::system_prompts::resolve`). A persona that the agent names and
+/// that has no file is an error. The persona by role with no file is no
+/// persona: a config repo with no `leader.md` keeps the old behaviour.
+/// An empty persona (the packaged placeholder) is no persona too.
+pub fn load_persona_in(
+    dirs: &crate::system_prompts::Dirs,
+    agent: &Agent,
+) -> Result<Option<String>, String> {
     let Some((name, named)) = persona_name(agent) else {
         return Ok(None);
     };
     terrarium_core::config::check_persona(&name)?;
-    let path = prompts_dir.join(format!("{name}.md"));
+    let Some(path) = crate::system_prompts::resolve(dirs, &name) else {
+        if !named {
+            return Ok(None);
+        }
+        return Err(format!(
+            "the persona `{name}` has no file: add {}/{name}.md to the system prompt library, \
+             or pick another system prompt",
+            crate::system_prompts::DIR
+        ));
+    };
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
-        Err(e) if !named && e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             return Err(format!(
                 "cannot read the persona `{name}` ({}): {e}",
@@ -319,9 +350,19 @@ fn persona_is_none(agent: &Agent) -> bool {
 /// harness's default prompt with it, and the protocol template comes after
 /// it ([`compose`]). `None`: the harness keeps its default prompt.
 pub fn base_prompt(prompts_dir: &Path, agent: &Agent) -> Result<Option<String>, String> {
+    base_prompt_in(&prompt_dirs(None, prompts_dir), agent)
+}
+
+/// [`base_prompt`] with the system prompt library: the persona comes from
+/// [`load_persona_in`]. The harness section stays in the prompts dir.
+pub fn base_prompt_in(
+    dirs: &crate::system_prompts::Dirs,
+    agent: &Agent,
+) -> Result<Option<String>, String> {
+    let prompts_dir = dirs.prompts.as_path();
     let (base, with_harness) = match agent.system_prompt.as_deref() {
         Some(t) if !t.trim().is_empty() => (t.trim_end().to_owned(), !persona_is_none(agent)),
-        _ => match load_persona(prompts_dir, agent)? {
+        _ => match load_persona_in(dirs, agent)? {
             Some(p) => (p, true),
             None => return Ok(None),
         },
@@ -858,6 +899,64 @@ mod tests {
         );
     }
 
+    /// The system prompt library (`system-prompts/<name>.md`) comes
+    /// first, then the prompts dir of an older config repo. The selected
+    /// entry is the base of the prompt that the agent starts with.
+    #[test]
+    fn the_library_entry_is_the_persona() {
+        let repo = tempfile::tempdir().unwrap();
+        let prompts = repo.path().join("prompts");
+        let lib = repo.path().join(crate::system_prompts::DIR);
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        personas(&prompts);
+        std::fs::write(lib.join("worker.md"), "New work.").unwrap();
+        std::fs::write(lib.join("terse"), "not an .md file, so not an entry").unwrap();
+        std::fs::write(
+            lib.join("terse.md"),
+            "<!-- description: Short answers -->\n\nYou are {{agent.name}}. Be terse.\n",
+        )
+        .unwrap();
+        let dirs = prompt_dirs(Some(repo.path()), &prompts);
+        let worker = agent(vec![], None, None);
+        // By role: the library wins over `prompts/worker.md`; the leader
+        // is still in `prompts/` only.
+        assert_eq!(
+            load_persona_in(&dirs, &worker).unwrap().as_deref(),
+            Some("New work.")
+        );
+        assert_eq!(
+            load_persona_in(&dirs, &agent(vec![Role::ProjectAdmin], None, None))
+                .unwrap()
+                .as_deref(),
+            Some("Lead {{project.name}}.")
+        );
+        // An old named persona in `prompts/` still works.
+        assert_eq!(
+            load_persona_in(&dirs, &agent(vec![], Some("reviewer"), None))
+                .unwrap()
+                .as_deref(),
+            Some("Review.")
+        );
+        let e = load_persona_in(&dirs, &agent(vec![], Some("gone"), None)).unwrap_err();
+        assert!(e.contains("system-prompts/gone.md"), "{e}");
+        // The golden prompt of an agent that selected `terse`: the entry
+        // without its description line, then the protocol template.
+        let a = agent(vec![], Some("terse"), None);
+        let base = base_prompt_in(&dirs, &a).unwrap().expect("a base prompt");
+        assert_eq!(base, "You are {{agent.name}}. Be terse.");
+        assert_eq!(
+            compose(Some(&base), "PROTOCOL for {{project.name}}", &ctx()),
+            "You are worker. Be terse.\n\nPROTOCOL for demo"
+        );
+        // A custom text still wins over the selected entry.
+        let custom = agent(vec![], Some("terse"), Some("Custom."));
+        assert_eq!(
+            base_prompt_in(&dirs, &custom).unwrap().as_deref(),
+            Some("Custom.")
+        );
+    }
+
     /// `system_prompt` wins over the persona; the protocol template comes
     /// after the base prompt in both cases.
     #[test]
@@ -881,9 +980,16 @@ mod tests {
     /// its harness, then the protocol template.
     #[test]
     fn packaged_personas_are_used_by_role() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let dir = root.join("prompts");
+        let dirs = prompt_dirs(Some(&root), &dir);
         let read = |name: &str| {
-            strip_comments(&std::fs::read_to_string(dir.join(name)).unwrap())
+            let path = if name.starts_with("harness/") {
+                dir.join(name)
+            } else {
+                root.join(crate::system_prompts::DIR).join(name)
+            };
+            strip_comments(&std::fs::read_to_string(path).unwrap())
                 .trim()
                 .to_owned()
         };
@@ -929,7 +1035,7 @@ mod tests {
             ] {
                 let mut a = agent(roles.clone(), None, None);
                 a.harness = harness;
-                let base = base_prompt(&dir, &a).unwrap().expect("a persona");
+                let base = base_prompt_in(&dirs, &a).unwrap().expect("a persona");
                 let section = read(&format!("harness/{harness}.md"));
                 assert!(!section.is_empty(), "{harness}");
                 assert_eq!(base, format!("{persona}\n\n{section}"), "{harness}");

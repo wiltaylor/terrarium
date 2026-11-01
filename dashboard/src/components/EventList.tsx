@@ -1,6 +1,7 @@
 import { For, Show } from "solid-js";
 import type { AgentEvent } from "../api/types";
 import { humanize } from "../lib/format";
+import { SessionLink } from "./SessionLink";
 
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
@@ -22,6 +23,9 @@ export function EventList(props: { events: AgentEvent[]; showAgent?: boolean; li
                   <span class="muted">{e.project ? ` @${e.project}` : ""}</span>:{" "}
                 </Show>
                 {e.summary}
+              </span>
+              <span class="event-session">
+                <SessionLink row={e} />
               </span>
             </div>
           )}

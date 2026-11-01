@@ -155,7 +155,7 @@ describe("navigation", () => {
 
   it("has one Settings item, and the settings screen has its tabs in order, each with a route", () => {
     expect(SETTINGS_ITEMS).toEqual([{ href: "/settings", label: "Settings" }]);
-    expect(SETTINGS_TABS.map((t) => t.label)).toEqual(["Account", "Subscriptions", "Secrets", "Templates", "Skills", "Targets", "Harness config", "Hosts"]);
+    expect(SETTINGS_TABS.map((t) => t.label)).toEqual(["Account", "Subscriptions", "Secrets", "Templates", "System prompts", "Skills", "Targets", "Harness config", "Hosts"]);
     const hrefs = TOP_ITEMS.map((i) => i.href) as string[];
     for (const gone of ["/subscriptions", "/hosts", "/config", "/settings"]) expect(hrefs).not.toContain(gone);
     expect(app).toMatch(/<Route path="\/settings" component=\{SettingsPage\}>/);
@@ -271,20 +271,23 @@ describe("navigation", () => {
     for (const now of ["/p/terrarium/board/versions", "/p/terrarium/board/versions/01ABC", "/p/terrarium/board/artifacts/ART-2", "/p/terrarium/board/schedules"]) expect(movedTo(now)).toBeUndefined();
   });
 
-  it("has Knowledge with the tabs Wiki and Memory, each with a route; /p/:project/knowledge opens the Wiki tab", () => {
+  it("has Knowledge with the tabs Wiki, Memory, and DB, each with a route; /p/:project/knowledge opens the Wiki tab", () => {
     expect(PROJECT_ITEMS.find((i) => i.path === "knowledge")?.label).toBe("Knowledge");
     expect(KNOWLEDGE_TABS).toEqual([
       { path: "wiki", label: "Wiki" },
       { path: "memory", label: "Memory" },
+      { path: "db", label: "DB" },
     ]);
     expect(app).toMatch(/<Route path="\/p\/:project\/knowledge" component=\{KnowledgePage\}>/);
     const start = app.indexOf('<Route path="/p/:project/knowledge"');
     const block = app.slice(start, app.indexOf("</Route>", start));
     expect(block).toMatch(/path="\/wiki\/\*path" component=\{WikiPage\}/);
     expect(block).toMatch(/path="\/memory" component=\{MemoryPage\}/);
+    expect(block).toMatch(/path="\/db" component=\{DbTypesPage\}/);
+    expect(block).toMatch(/path="\/db\/:type" component=\{DbRecordsPage\}/);
     expect(movedTo("/p/terrarium/knowledge")).toBe("/p/terrarium/knowledge/wiki");
     expect(movedTo("/p/terrarium/knowledge/")).toBe("/p/terrarium/knowledge/wiki");
-    for (const now of ["/p/terrarium/knowledge/wiki", "/p/terrarium/knowledge/wiki/designs/runner-v2", "/p/terrarium/knowledge/memory"]) expect(movedTo(now)).toBeUndefined();
+    for (const now of ["/p/terrarium/knowledge/wiki", "/p/terrarium/knowledge/wiki/designs/runner-v2", "/p/terrarium/knowledge/memory", "/p/terrarium/knowledge/db", "/p/terrarium/knowledge/db/bug"]) expect(movedTo(now)).toBeUndefined();
   });
 
   it("redirects the old Versions and Artifacts paths to the board tabs, with the ID", () => {

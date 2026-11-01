@@ -351,6 +351,11 @@ async fn new(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<()> {
 
 async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
     let mut body = json!({});
+    if let Some(name) = &a.save_system_prompt {
+        super::system_prompts::save_from_agent(ctx, &a.agent, name).await?;
+        body["persona"] = name.clone().into();
+        body["system_prompt"] = Value::Null;
+    }
     set_opt(&mut body, "harness", a.harness.clone());
     set_opt(&mut body, "subscription", a.subscription.clone());
     if let Some(p) = &a.pool {

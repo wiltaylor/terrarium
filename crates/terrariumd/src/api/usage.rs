@@ -114,6 +114,8 @@ struct AgentRef {
 #[derive(Debug, Serialize)]
 struct SubRef {
     name: String,
+    /// The name for people (`store::subscriptions::display_name`).
+    display_name: String,
     provider: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     plan: Option<String>,
@@ -198,6 +200,7 @@ async fn me(
                 )?;
                 sub_totals = Some(all);
                 subscription = Some(SubRef {
+                    display_name: subs::display_name(c, &s)?,
                     windows: subs::latest_windows(c, n)?
                         .into_iter()
                         .map(WindowView::from)

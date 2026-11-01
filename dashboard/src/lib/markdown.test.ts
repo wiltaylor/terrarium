@@ -44,6 +44,17 @@ describe("renderWiki", () => {
     expect(html).not.toContain("vbscript:");
   });
 
+  it("turns a db fence into a placeholder with the query as an escaped attribute", () => {
+    const html = renderWiki('```db\ntype:bug status=open\n  sort:-severity  \n```\n', { project: "p" });
+    expect(html).toContain('<div class="db-embed" data-db-query="type:bug status=open sort:-severity"></div>');
+    const hostile = renderWiki('```db\ntype:bug title=""><img src=x onerror=alert(1)></div><script>x</script>"\n```\n', { project: "p" });
+    expect(hostile).not.toContain("<img");
+    expect(hostile).not.toContain("<script");
+    expect(hostile).toContain("&quot;&gt;&lt;img src=x onerror=alert(1)&gt;&lt;/div&gt;&lt;script&gt;");
+    // Another language stays a code block.
+    expect(renderWiki("```dbx\nx\n```\n", { project: "p" })).toContain('<pre><code class="language-dbx">');
+  });
+
   it("resolves artifact images, links, and fenced embeds", () => {
     const html = renderWiki("![d](artifact:ART-9)\n\n[r](artifact:ART-10)\n\n```artifact ART-11\n```\n", {
       ...ctx,

@@ -7003,3 +7003,373 @@ async fn agent_compact_and_the_auto_compact_flags() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     assert!(Cli::try_parse_from(["terrarium", "agent", "compact"]).is_err());
 }
+
+/// The type of the `db` tests: what `rec new` and `rec set` read first.
+fn bug_type() -> Value {
+    json!({"name": "bug", "revision": 4, "records": 2, "fields": [
+        {"name": "title", "kind": "string", "required": true},
+        {"name": "points", "kind": "integer"},
+        {"name": "open", "kind": "bool"},
+        {"name": "tags", "kind": "list", "of": "string"},
+        {"name": "service", "kind": "ref", "ref": "service"},
+        {"name": "notes", "kind": "text"}
+    ]})
+}
+
+#[tokio::test]
+async fn db_types() {
+    ok(
+        true,
+        &[
+            "db", "type", "new", "bug", "-d", "Defects",
+            "--field", "title:string!",
+            "--field", "severity:enum(low,high)!=low",
+            "--field", "tags:list(string)",
+            "--unique", "title",
+        ],
+        vec![(201, json!({"name": "bug", "fields": [{}, {}, {}]}))],
+        vec![(
+            Post,
+            "/api/projects/terra/db/types",
+            vec![],
+            Some(json!({"name": "bug", "description": "Defects", "fields": [
+                {"name": "title", "kind": "string", "required": true, "unique": true},
+                {"name": "severity", "kind": "enum", "required": true, "values": ["low", "high"], "default": "low"},
+                {"name": "tags", "kind": "list", "required": false, "of": "string"}
+            ]})),
+        )],
+    )
+    .await;
+    // `edit` reads the type, then sends the whole list with its revision.
+    ok(
+        true,
+        &[
+            "db",
+            "type",
+            "edit",
+            "bug",
+            "--rename",
+            "notes:details",
+            "--remove",
+            "open",
+            "--field",
+            "points:number!=0",
+            "--field",
+            "owner:string",
+            "--confirm",
+        ],
+        vec![
+            (200, bug_type()),
+            (200, json!({"name": "bug", "revision": 5})),
+        ],
+        vec![
+            req(Get, "/api/projects/terra/db/types/bug"),
+            (
+                Patch,
+                "/api/projects/terra/db/types/bug",
+                vec![],
+                Some(json!({"revision": 4, "confirm": true,
+                "rename": [{"from": "notes", "to": "details"}],
+                "fields": [
+                    {"name": "title", "kind": "string", "required": true},
+                    {"name": "points", "kind": "number", "required": true, "default": 0},
+                    {"name": "tags", "kind": "list", "of": "string"},
+                    {"name": "service", "kind": "ref", "ref": "service"},
+                    {"name": "details", "kind": "text"},
+                    {"name": "owner", "kind": "string", "required": false}
+                ]})),
+            ),
+        ],
+    )
+    .await;
+    ok(
+        true,
+        &["db", "type", "rm", "bug", "--records"],
+        vec![(204, Value::Null)],
+        vec![(
+            Delete,
+            "/api/projects/terra/db/types/bug",
+            vec![("confirm", "records")],
+            None,
+        )],
+    )
+    .await;
+    let out = ok(
+        true,
+        &["db", "type", "show", "bug"],
+        vec![(200, bug_type())],
+        vec![req(Get, "/api/projects/terra/db/types/bug")],
+    )
+    .await;
+    assert!(out.starts_with("bug  rev 4  2 records\n"), "{out}");
+    assert!(out.contains("title    string        required"), "{out}");
+    assert!(out.contains("service  ref(service)"), "{out}");
+    // A bad spec is a usage error before any request.
+    let r = exec(
+        true,
+        &["db", "type", "new", "x", "--field", "a:strng"],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(r.result.as_ref().unwrap_err()), exit::USAGE);
+    assert!(r.reqs.is_empty());
+}
+
+#[tokio::test]
+async fn db_records() {
+    let out = ok_in(
+        true,
+        &[
+            "db",
+            "rec",
+            "new",
+            "bug",
+            "--set",
+            "title=Login fails, again",
+            "--set",
+            "points=3",
+            "--set",
+            "open=true",
+            "--set",
+            "tags=ui,auth",
+            "--set",
+            "service=auth",
+            "--set",
+            "notes=-",
+        ],
+        vec![
+            (200, bug_type()),
+            (201, json!({"id": "01R", "type": "bug"})),
+        ],
+        Some("# Steps\n1. x"),
+        vec![
+            req(Get, "/api/projects/terra/db/types/bug"),
+            (
+                Post,
+                "/api/projects/terra/db/records",
+                vec![],
+                Some(json!({"type": "bug", "data": {
+                    "title": "Login fails, again", "points": 3, "open": true,
+                    "tags": ["ui", "auth"], "service": "auth", "notes": "# Steps\n1. x"
+                }})),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(out, "created bug 01R\n");
+    // A quoted value with `=` and `"` in it, from stdin JSON plus a set.
+    ok_in(
+        true,
+        &["db", "rec", "set", "01R", "--json-data", "-", "--set", "title=a = \"b\"", "--unset", "notes", "--revision", "2"],
+        vec![
+            (200, json!({"id": "01R", "type": "bug", "revision": 2})),
+            (200, bug_type()),
+            (200, json!({"id": "01R", "type": "bug", "revision": 3})),
+        ],
+        Some(r#"{"points": 5}"#),
+        vec![
+            req(Get, "/api/projects/terra/db/records/01R"),
+            req(Get, "/api/projects/terra/db/types/bug"),
+            (
+                Patch,
+                "/api/projects/terra/db/records/01R",
+                vec![],
+                Some(json!({"revision": 2, "data": {"points": 5, "title": "a = \"b\"", "notes": null}})),
+            ),
+        ],
+    )
+    .await;
+    let out = ok(
+        true,
+        &["db", "rec", "get", "01R"],
+        vec![(
+            200,
+            json!({"id": "01R", "type": "bug", "revision": 3, "updated_by_name": "terra/worker",
+            "updated_at": "2026-10-01T10:00:00.000Z", "data": {"title": "X", "notes": "a\nb"}}),
+        )],
+        vec![req(Get, "/api/projects/terra/db/records/01R")],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "bug 01R  rev 3  by terra/worker, 2026-10-01 10:00\nnotes:\n  a\n  b\ntitle  X\n"
+    );
+    ok(
+        true,
+        &["db", "rec", "rm", "01R"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/projects/terra/db/records/01R")],
+    )
+    .await;
+    let r = exec(true, &["db", "rec", "set", "01R"], vec![], None).await;
+    assert_eq!(exit_code_of(r.result.as_ref().unwrap_err()), exit::USAGE);
+}
+
+fn answer() -> Value {
+    json!({"type": "bug", "view": "table", "count": 3, "next_cursor": "2",
+        "fields": [
+            {"name": "title", "kind": "string"},
+            {"name": "service", "kind": "ref", "ref": "service"},
+            {"name": "created", "kind": "datetime", "meta": true}
+        ],
+        "records": [
+            {"id": "01A", "created_at": "2026-10-01T10:00:00.000Z", "data": {"title": "Login, fails", "service": "01S"}},
+            {"id": "01B", "created_at": "2026-10-02T11:00:00.000Z", "data": {"title": "Say \"hi\""}}
+        ],
+        "labels": {"01S": "auth"}})
+}
+
+#[tokio::test]
+async fn db_queries() {
+    let out = ok(
+        true,
+        &[
+            "db",
+            "query",
+            "type:bug",
+            "title~\"login page\"",
+            "sort:-created",
+        ],
+        vec![(200, answer())],
+        vec![(
+            Get,
+            "/api/projects/terra/db/query",
+            vec![("q", "type:bug title~\"login page\" sort:-created")],
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "ID   TITLE         SERVICE  CREATED\n\
+         01A  Login, fails  auth     2026-10-01 10:00\n\
+         01B  Say \"hi\"      -        2026-10-02 11:00\n\
+         2 of 3; the next page: --cursor 2\n"
+    );
+    let out = ok(
+        true,
+        &[
+            "db",
+            "rec",
+            "ls",
+            "bug",
+            "status=open",
+            "--format",
+            "csv",
+            "--cursor",
+            "2",
+        ],
+        vec![(200, answer())],
+        vec![(
+            Get,
+            "/api/projects/terra/db/query",
+            vec![("q", "type:bug status=open"), ("cursor", "2")],
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "id,title,service,created\n01A,\"Login, fails\",01S,2026-10-01 10:00\n01B,\"Say \"\"hi\"\"\",,2026-10-02 11:00\n"
+    );
+    let out = ok(
+        true,
+        &["db", "query", "type:bug group:service"],
+        vec![(
+            200,
+            json!({"type": "bug", "view": "group", "group": "service", "count": 3,
+            "groups": [{"value": "01S", "count": 2}, {"value": null, "count": 1}],
+            "labels": {"01S": "auth"}}),
+        )],
+        vec![(
+            Get,
+            "/api/projects/terra/db/query",
+            vec![("q", "type:bug group:service")],
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(out, "SERVICE  COUNT\nauth     2\n-        1\n");
+    let out = ok(
+        true,
+        &["db", "query", "type:bug count:true"],
+        vec![(
+            200,
+            json!({"type": "bug", "view": "count", "count": 17, "records": []}),
+        )],
+        vec![(
+            Get,
+            "/api/projects/terra/db/query",
+            vec![("q", "type:bug count:true")],
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(out, "17\n");
+    // `--json` prints the answer as it is.
+    let out = ok(
+        true,
+        &["--json", "db", "query", "type:bug"],
+        vec![(200, json!({"count": 0}))],
+        vec![(
+            Get,
+            "/api/projects/terra/db/query",
+            vec![("q", "type:bug")],
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap(),
+        json!({"count": 0})
+    );
+}
+
+/// `admin subscription label`: a display name for people, or `--clear`
+/// for the name from the vendor table.
+#[tokio::test]
+async fn admin_subscription_label_puts_the_label() {
+    let answer = json!({"name": "anthropic-max-20x", "provider": "anthropic",
+                        "display_name": "Team Ultra", "label": "Team Ultra"});
+    let out = ok(
+        false,
+        &[
+            "admin",
+            "subscription",
+            "label",
+            "anthropic-max-20x",
+            "Team Ultra",
+        ],
+        vec![(200, answer)],
+        vec![(
+            Put,
+            "/api/subscriptions/anthropic-max-20x/label",
+            vec![],
+            Some(json!({"label": "Team Ultra"})),
+        )],
+    )
+    .await;
+    assert_eq!(out.trim(), "anthropic-max-20x: Team Ultra");
+    let answer = json!({"name": "anthropic-max-20x", "provider": "anthropic",
+                        "display_name": "Claude Ultra"});
+    let out = ok(
+        false,
+        &[
+            "admin",
+            "subscription",
+            "label",
+            "anthropic-max-20x",
+            "--clear",
+        ],
+        vec![(200, answer)],
+        vec![(
+            Put,
+            "/api/subscriptions/anthropic-max-20x/label",
+            vec![],
+            Some(json!({"label": null})),
+        )],
+    )
+    .await;
+    assert_eq!(out.trim(), "anthropic-max-20x: Claude Ultra");
+}

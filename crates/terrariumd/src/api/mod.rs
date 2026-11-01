@@ -17,6 +17,7 @@ mod mail;
 mod memory;
 mod projects;
 mod questions;
+mod records;
 mod repo_trees;
 mod repos;
 mod schedules;
@@ -30,6 +31,7 @@ mod skills;
 mod streams;
 mod subscriptions;
 pub mod system;
+mod system_prompts;
 mod targets;
 mod templates;
 mod transcripts;
@@ -258,6 +260,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(board::routes())
         .merge(memory::routes())
         .merge(wiki::routes())
+        .merge(records::routes())
         .merge(artifacts::routes())
         .merge(versions::routes())
         .merge(subscriptions::routes())
@@ -271,6 +274,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(inbox::routes())
         .merge(config::routes())
         .merge(skills::routes())
+        .merge(system_prompts::routes())
         .route(
             "/session",
             get(session::current)

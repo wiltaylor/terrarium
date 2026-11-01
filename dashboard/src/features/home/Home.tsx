@@ -3,7 +3,7 @@ import { createResource, createSignal, For, onCleanup, onMount, Show } from "sol
 import { isLocalOnly, Sparkline, UsageTile } from "../../components/UsageTile";
 import { Empty, ErrorBanner, Modal, PageHead, Tabs, useNow } from "../../components/ui";
 import type { Subscription, UsageGroup, UsagePoint } from "../../api/types";
-import { ago, compact } from "../../lib/format";
+import { ago, compact, subscriptionTitle } from "../../lib/format";
 import { api, events, projects, subscriptions } from "../../stores";
 import { usageLabel } from "./labels";
 import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
@@ -113,7 +113,7 @@ function UsageDetail(props: { sub: Subscription; onClose: () => void }) {
     return tokenSeries(series() ?? [], bucketStarts(now - (r().hours - (r().bucket === "hour" ? 1 : 24)) * HOUR, now, r().bucket));
   };
   return (
-    <Modal title={`${props.sub.plan ?? props.sub.name} (${props.sub.name})`} onClose={() => props.onClose()}>
+    <Modal title={`${subscriptionTitle(props.sub)} (${props.sub.name})`} onClose={() => props.onClose()}>
       <div class="spread">
         <Tabs tabs={RANGES.map((x) => ({ id: x.id, label: x.label }))} active={range()} onChange={setRange} />
         <A class="btn small" href="/settings/subscriptions">

@@ -10,7 +10,19 @@ import type { Agent, Harness, LoginStatus, ModelList, Subscription, SwapResult }
  * a plan account is never one for pi.
  */
 export function compatibleSubscriptions(list: Subscription[], harness: Harness): Subscription[] {
-  return list.filter((s) => s.harnesses.includes(harness) && (harness !== "pi" || !s.account));
+  return list.filter((s) => s.harnesses.includes(harness) && (harness !== "pi" || !s.account) && selfHostedServes(s, harness) && s.enabled !== false);
+}
+
+/**
+ * A self-hosted server serves the harnesses of its API style only: OpenAI
+ * style pi and Codex, Anthropic style Claude Code and pi. Copilot never.
+ * True for every other subscription.
+ */
+export function selfHostedServes(s: Pick<Subscription, "provider" | "selfhosted">, harness: Harness): boolean {
+  const p = s.provider.trim().toLowerCase();
+  if (p !== "selfhosted" && p !== "openai-compatible") return true;
+  const api = s.selfhosted?.api ?? "openai";
+  return (api === "anthropic" ? ["claude", "pi"] : ["pi", "codex"]).includes(harness);
 }
 
 /** The login status in short words. */
@@ -30,9 +42,15 @@ export function loginText(status: LoginStatus, hasKey = false): string {
   }
 }
 
-/** `name — provider plan (API key|logged in|expired)`. A plan that only says "API key" is not said twice. */
-export function subscriptionLabel(s: Pick<Subscription, "name" | "provider" | "plan" | "login_status"> & { has_api_key?: boolean }): string {
+/**
+ * `Claude Ultra — anthropic-max-20x (logged in)`: the display name first,
+ * then the subscription name. From an older daemon (no `display_name`):
+ * `name — provider plan (API key|logged in|expired)`. A plan that only
+ * says "API key" is not said twice.
+ */
+export function subscriptionLabel(s: Pick<Subscription, "name" | "provider" | "plan" | "login_status" | "display_name"> & { has_api_key?: boolean }): string {
   const status = loginText(s.login_status, s.has_api_key);
+  if (s.display_name) return `${s.display_name} — ${s.name} (${status})`;
   const plan = s.plan && s.plan.toLowerCase() !== status.toLowerCase() ? ` ${s.plan}` : "";
   return `${s.name} — ${s.provider}${plan} (${status})`;
 }
@@ -81,7 +99,12 @@ export function subscriptionOptions(list: Subscription[], harness: Harness, curr
   const name = current.trim();
   if (name && !fit.some((s) => s.name === name)) {
     const known = list.find((s) => s.name === name);
-    const why = harness === "pi" ? "not for pi, which uses API keys only" : `not for ${harness}`;
+    const why =
+      known?.enabled === false && known.harnesses.includes(harness)
+        ? "disabled: no agent on it starts"
+        : harness === "pi"
+          ? "not for pi, which uses API keys only"
+          : `not for ${harness}`;
     out.push({ value: name, label: known ? `${subscriptionLabel(known)} — ${why}` : `${name} — not found` });
   }
   return out;
@@ -92,6 +115,7 @@ export function modelSourceText(list: ModelList): string {
   if (list.source === "provider") return "from the provider's model list";
   if (list.source === "plan") return "from the harness login's model list";
   if (list.source === "pi") return "from pi's model catalogue";
+  if (list.source === "subscription") return "from the model list of the self-hosted subscription";
   return "from Terrarium's default table (the provider, the login, and pi listed none)";
 }
 

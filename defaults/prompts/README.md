@@ -8,10 +8,13 @@ default, and a file that you edited keeps your text, with the new default
 next to it as `<file>.new`. The daemon option `--prompts-dir` (env
 `TERRARIUM_PROMPTS_DIR`) changes the path.
 
-| Persona | Role | Purpose |
+The personas `leader.md` and `worker.md` are in `../system-prompts/`, the
+system prompt library (PLAN §8.1). A file here with the name of a persona
+still works for an older config repo: the daemon looks in
+`system-prompts/` first, then here.
+
+| File | Role | Purpose |
 |---|---|---|
-| `leader.md` | `project_admin`, `sysadmin` | The persona of a lead. It replaces the harness's default system prompt. |
-| `worker.md` | `member` | The persona of a worker. It replaces the harness's default system prompt. |
 | `harness/<harness>.md` | all | The tool details of one harness. It comes after the persona or the `system_prompt`. |
 
 | Template | Role | Purpose |
@@ -62,12 +65,14 @@ including the mode 1 run. Keep them when you edit a template.
 ## Personas
 
 A persona replaces the harness's default system prompt, and the protocol
-template comes after it. The agent field `persona` selects the file:
+template comes after it. The agent field `persona` selects an entry of
+the system prompt library, `system-prompts/<name>.md` (else
+`prompts/<name>.md` of an older config repo):
 
-- Not set: `leader.md` for an agent with `project_admin` or `sysadmin`,
-  else `worker.md`. With no file, the agent has no persona.
-- `leader`, `worker`, or another name: `<name>.md`. With no file, the
-  start stops with an error.
+- Not set: `leader` for an agent with `project_admin` or `sysadmin`,
+  else `worker`. With no file, the agent has no persona.
+- `leader`, `worker`, or another name: the entry `<name>`. With no file,
+  the start stops with an error.
 - `none`: no persona. The harness keeps its default prompt.
 
 A `system_prompt` on the agent or its template wins over the persona. The

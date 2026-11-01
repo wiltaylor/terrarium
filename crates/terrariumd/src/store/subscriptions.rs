@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use terrarium_core::HarnessId;
 use terrarium_core::config::SubscriptionDef;
+use terrarium_core::selfhosted::{self, SelfHosted};
 
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
@@ -17,7 +18,7 @@ use crate::store::json_col;
 use crate::store::projects::{SOURCE_API, SOURCE_FILE};
 
 /// Names that collide with the fixed routes under `/api/subscriptions/`.
-pub const RESERVED_NAMES: [&str; 2] = ["login", "detect"];
+pub const RESERVED_NAMES: [&str; 3] = ["login", "detect", "fetch-models"];
 
 /// Login state words of the Subscriptions page.
 pub const LOGGED_IN: &str = "logged_in";
@@ -63,6 +64,15 @@ pub struct Subscription {
     pub last_probe_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_success_at: Option<String>,
+    /// The server of a `selfhosted` subscription
+    /// (`terrarium_core::selfhosted`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selfhosted: Option<SelfHosted>,
+    /// False: no agent on the subscription starts or wakes, and no new
+    /// agent takes it. Agents that run go on. Daemon state, not part of
+    /// the definition.
+    #[serde(default = "yes")]
+    pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -77,7 +87,19 @@ impl Subscription {
             harnesses: self.harnesses.clone(),
             probe: self.probe.clone(),
             alert_at: self.alert_at,
+            selfhosted: self.selfhosted.clone(),
         }
+    }
+
+    /// True for a `selfhosted` subscription.
+    pub fn is_selfhosted(&self) -> bool {
+        selfhosted::is_selfhosted(&self.provider)
+    }
+
+    /// The most agents of a `selfhosted` subscription that may run a turn
+    /// at the same time, when it sets a limit.
+    pub fn max_concurrent(&self) -> Option<u32> {
+        self.selfhosted.as_ref().and_then(|s| s.max_concurrent)
     }
 
     /// True when the subscription is a plan login (Claude Pro/Max,
@@ -100,8 +122,25 @@ pub fn spendable_harnesses(def: &SubscriptionDef) -> Vec<HarnessId> {
     out
 }
 
-/// Why `harness` must not spend `sub`: pi and a plan login (PLAN §16.3).
+fn yes() -> bool {
+    true
+}
+
+/// Why `harness` must not spend `sub`: pi and a plan login (PLAN §16.3),
+/// and a harness that a self-hosted server does not serve
+/// (`terrarium_core::selfhosted`, for example Copilot, or Claude Code on
+/// an OpenAI-style server).
 pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
+    if sub.is_selfhosted() {
+        let api = sub.selfhosted.as_ref().map(|s| s.api).unwrap_or_default();
+        return (!api.harnesses().contains(&harness)).then(|| {
+            format!(
+                "subscription `{}`: {}",
+                sub.name,
+                selfhosted::refusal_text(api, harness)
+            )
+        });
+    }
     (harness == HarnessId::Pi && sub.is_plan()).then(|| {
         format!(
             "subscription `{}`: {}",
@@ -110,6 +149,20 @@ pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
         )
     })
 }
+
+/// Why no new work may start on `sub`: it is disabled.
+pub fn disabled_refusal(sub: &Subscription) -> Option<String> {
+    (!sub.enabled).then(|| {
+        format!(
+            "subscription `{}` is disabled; enable it first (terrarium admin subscription \
+             enable {})",
+            sub.name, sub.name
+        )
+    })
+}
+
+/// The status reason of an agent whose subscription is disabled.
+pub const REASON_DISABLED: &str = "subscription_disabled";
 
 /// The probe of a subscription that names none: `zai-usage` for a Z.ai
 /// GLM Coding Plan (the `api` plan has no quota endpoint),
@@ -142,7 +195,10 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Subscription> {
     let provider: String = r.get("provider")?;
     let plan: Option<String> = r.get("plan")?;
     let probe: Option<String> = r.get("probe")?;
+    let sh: Option<String> = r.get("selfhosted")?;
     let mut s = Subscription {
+        selfhosted: sh.and_then(|t| serde_json::from_str(&t).ok()),
+        enabled: r.get("enabled")?,
         name: r.get("name")?,
         probe: probe.or_else(|| default_probe(&provider, plan.as_deref())),
         provider,
@@ -203,6 +259,7 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
     if def.provider.trim().is_empty() {
         return Err(ApiError::invalid("the subscription needs a provider"));
     }
+    let def = &normalize_selfhosted(t, def)?;
     if terrarium_core::zai::is_zai(&def.provider) {
         terrarium_core::zai::parse_plan(def.plan.as_deref()).map_err(ApiError::invalid)?;
     }
@@ -218,14 +275,20 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
     }
     let at = now();
     let harnesses = serde_json::to_string(&spendable_harnesses(def))?;
+    let sh = def
+        .selfhosted
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     t.execute(
         "INSERT INTO subscriptions (name, provider, plan, harnesses, probe, alert_at, source,
-                                    created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                                    created_at, updated_at, selfhosted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)
          ON CONFLICT (name) DO UPDATE SET
              provider = excluded.provider, plan = excluded.plan,
              harnesses = excluded.harnesses, probe = excluded.probe,
              alert_at = excluded.alert_at,
+             selfhosted = coalesce(excluded.selfhosted, subscriptions.selfhosted),
              source = CASE WHEN excluded.source = 'api' AND subscriptions.source GLOB 'fleet:*'
                            THEN subscriptions.source ELSE excluded.source END,
              updated_at = excluded.updated_at",
@@ -237,10 +300,196 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
             def.probe,
             i64::from(def.alert_at),
             source,
-            at
+            at,
+            sh
         ],
     )?;
     get(t, &def.name)
+}
+
+/// A `selfhosted` (or `openai-compatible`) definition in its stored form:
+/// the provider `selfhosted`, a checked server, and harnesses that the
+/// API style serves (none given: all of them). A definition with no
+/// server keeps the stored one (a file from before `[selfhosted]`, whose
+/// base URL the migration moved from the key file); with neither, `422`.
+/// Every other definition with a `selfhosted` table is `422`.
+fn normalize_selfhosted(t: &Tx<'_>, def: &SubscriptionDef) -> ApiResult<SubscriptionDef> {
+    if !selfhosted::is_selfhosted(&def.provider) {
+        if def.selfhosted.is_some() {
+            return Err(ApiError::invalid(format!(
+                "subscription `{}`: `selfhosted` is only for the provider selfhosted, not `{}`",
+                def.name, def.provider
+            )));
+        }
+        return Ok(def.clone());
+    }
+    let mut d = def.clone();
+    d.provider = selfhosted::PROVIDER.to_owned();
+    if d.plan.is_some() && !terrarium_adapter_pi::provider::is_api_key(&d) {
+        return Err(ApiError::invalid(format!(
+            "subscription `{}`: a self-hosted subscription has no plan",
+            d.name
+        )));
+    }
+    d.plan = None;
+    let stored = find(t, &d.name)?.and_then(|s| s.selfhosted);
+    let sh = match d.selfhosted.take().or(stored) {
+        Some(s) => s
+            .checked()
+            .map_err(|e| ApiError::invalid(format!("subscription `{}`: {e}", d.name)))?,
+        None => {
+            return Err(ApiError::invalid(format!(
+                "subscription `{}`: a self-hosted subscription needs `selfhosted.base_url`",
+                d.name
+            )));
+        }
+    };
+    if d.harnesses.is_empty() {
+        d.harnesses = sh.api.harnesses().to_vec();
+    }
+    if let Some(why) = selfhosted::harnesses_refusal(sh.api, &d.harnesses) {
+        return Err(ApiError::invalid(format!(
+            "subscription `{}`: {why}",
+            d.name
+        )));
+    }
+    if d.probe.is_some() {
+        return Err(ApiError::invalid(format!(
+            "subscription `{}`: a self-hosted server has no quota probe",
+            d.name
+        )));
+    }
+    d.selfhosted = Some(sh);
+    Ok(d)
+}
+
+/// Replace the server of a `selfhosted` subscription (`PATCH`), and the
+/// harnesses when `harnesses` is given. Checked as a create is.
+pub fn set_selfhosted(
+    t: &mut Tx<'_>,
+    name: &str,
+    sh: SelfHosted,
+    harnesses: Option<Vec<HarnessId>>,
+) -> ApiResult<Subscription> {
+    let s = get(t, name)?;
+    if !s.is_selfhosted() {
+        return Err(ApiError::invalid(format!(
+            "subscription `{name}` is {}, not selfhosted",
+            s.provider
+        )));
+    }
+    let mut def = s.def();
+    def.selfhosted = Some(sh);
+    def.harnesses = harnesses.unwrap_or_else(|| {
+        // A new API style can drop harnesses: keep the ones it serves.
+        let api = def.selfhosted.as_ref().map(|x| x.api).unwrap_or_default();
+        s.harnesses
+            .iter()
+            .copied()
+            .filter(|h| api.harnesses().contains(h))
+            .collect()
+    });
+    let def = normalize_selfhosted(t, &def)?;
+    let sh = def
+        .selfhosted
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    t.execute(
+        "UPDATE subscriptions SET selfhosted = ?2, harnesses = ?3, updated_at = ?4
+         WHERE name = ?1",
+        params![name, sh, serde_json::to_string(&def.harnesses)?, now()],
+    )?;
+    get(t, name)
+}
+
+/// Set the alert threshold of a subscription.
+pub fn set_alert_at(t: &mut Tx<'_>, name: &str, alert_at: u8) -> ApiResult<()> {
+    t.execute(
+        "UPDATE subscriptions SET alert_at = ?2, updated_at = ?3 WHERE name = ?1",
+        params![name, i64::from(alert_at), now()],
+    )?;
+    Ok(())
+}
+
+/// Enable or disable a subscription. Returns true when it changed.
+pub fn set_enabled(t: &mut Tx<'_>, name: &str, enabled: bool) -> ApiResult<bool> {
+    let s = get(t, name)?;
+    if s.enabled == enabled {
+        return Ok(false);
+    }
+    t.execute(
+        "UPDATE subscriptions SET enabled = ?2, updated_at = ?3 WHERE name = ?1",
+        params![name, enabled, now()],
+    )?;
+    Ok(true)
+}
+
+/// Give each `selfhosted` row with no server one: a row that migration 46
+/// renamed from `openai-compatible` keeps its base URL and models in the
+/// key file (`login_session::ApiKey`). Once, at the start; idempotent.
+/// Returns the names it changed.
+pub fn migrate_openai_compatible(
+    t: &mut Tx<'_>,
+    state_dir: &std::path::Path,
+) -> ApiResult<Vec<String>> {
+    let rows: Vec<String> = {
+        let mut stmt =
+            t.prepare("SELECT name FROM subscriptions WHERE provider = ?1 AND selfhosted IS NULL")?;
+        let rows = stmt.query_map([selfhosted::PROVIDER], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let mut out = Vec::new();
+    for name in rows {
+        let Some(key) = crate::login_session::read_key(state_dir, &name) else {
+            continue;
+        };
+        let Some(base_url) = key.base_url.clone() else {
+            continue;
+        };
+        let sh = SelfHosted {
+            api: selfhosted::Api::Openai,
+            base_url,
+            models: key.models.clone(),
+            ..SelfHosted::default()
+        };
+        let Ok(sh) = sh.checked() else {
+            tracing::warn!(subscription = %name, "the stored base URL of the openai-compatible subscription does not parse; set it again");
+            continue;
+        };
+        let current = get(t, &name)?;
+        let harnesses: Vec<HarnessId> = current
+            .harnesses
+            .iter()
+            .copied()
+            .filter(|h| sh.api.harnesses().contains(h))
+            .collect();
+        let harnesses = if harnesses.is_empty() {
+            sh.api.harnesses().to_vec()
+        } else {
+            harnesses
+        };
+        t.execute(
+            "UPDATE subscriptions SET selfhosted = ?2, harnesses = ?3, plan = NULL,
+                    env_var = CASE WHEN env_var IS NULL THEN NULL ELSE ?4 END, updated_at = ?5
+             WHERE name = ?1",
+            params![
+                name,
+                serde_json::to_string(&sh)?,
+                serde_json::to_string(&harnesses)?,
+                selfhosted::KEY_ENV,
+                now()
+            ],
+        )?;
+        t.audit(
+            "subscription.migrate",
+            &name,
+            None,
+            serde_json::json!({"from": "openai-compatible", "to": "selfhosted", "api": "openai"}),
+        )?;
+        out.push(name);
+    }
+    Ok(out)
 }
 
 /// What a file sync changed.
@@ -378,6 +627,89 @@ pub fn set_plan(t: &mut Tx<'_>, name: &str, plan: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// The longest display name that the operator can give.
+pub const LABEL_MAX: usize = 80;
+
+/// The display name that the operator gave a subscription, if any
+/// (migration 47).
+pub fn label(conn: &Connection, name: &str) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT label FROM subscriptions WHERE name = ?1",
+            [name],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// Set or clear (`None`, or only spaces) the display name of a
+/// subscription. It is text for people only: the name, the ids, and the
+/// keys stay. Returns the stored value.
+pub fn set_label(t: &mut Tx<'_>, name: &str, label: Option<&str>) -> ApiResult<Option<String>> {
+    get(t, name)?;
+    let label = label.map(str::trim).filter(|l| !l.is_empty());
+    if let Some(l) = label {
+        if l.chars().count() > LABEL_MAX {
+            return Err(ApiError::invalid(format!(
+                "the label is longer than {LABEL_MAX} characters"
+            )));
+        }
+        if l.chars().any(char::is_control) {
+            return Err(ApiError::invalid("the label has a control character"));
+        }
+    }
+    t.execute(
+        "UPDATE subscriptions SET label = ?2, updated_at = ?3 WHERE name = ?1",
+        params![name, label, now()],
+    )?;
+    Ok(label.map(str::to_owned))
+}
+
+/// The name of a subscription for people: the operator's label, else the
+/// vendor's product and plan name
+/// (`terrarium_core::providers::display_name`), with the plan tier that
+/// the last probe answer names (the `level` of Z.ai).
+pub fn display_name(conn: &Connection, sub: &Subscription) -> ApiResult<String> {
+    if let Some(l) = label(conn, &sub.name)? {
+        return Ok(l);
+    }
+    let tier = latest_windows(conn, &sub.name)?.iter().find_map(|q| {
+        q.raw
+            .get("level")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    Ok(terrarium_core::providers::display_name(
+        &sub.provider,
+        sub.plan.as_deref(),
+        tier.as_deref(),
+        sub.selfhosted.as_ref(),
+        &sub.name,
+    ))
+}
+
+/// Take the plan that a login check read (`login_session::claude_plan`,
+/// `codex_plan`) when it differs from the stored one: a plan that the
+/// vendor renamed (Anthropic's Max 20x is Ultra since 2026-10-30) or
+/// changed shows at the next check, with no new login. Only for a plan
+/// login (Anthropic, OpenAI, GitHub) and not for a file subscription
+/// (the file owns its plan). Returns true when it changed.
+pub fn refresh_plan(t: &mut Tx<'_>, name: &str, plan: Option<&str>) -> ApiResult<bool> {
+    let Some(plan) = plan.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Ok(false);
+    };
+    let s = get(t, name)?;
+    let login_plan = ["anthropic", "openai", "github"]
+        .iter()
+        .any(|p| s.provider.trim().eq_ignore_ascii_case(p));
+    if !login_plan || s.source == SOURCE_FILE || s.plan.as_deref() == Some(plan) {
+        return Ok(false);
+    }
+    set_plan(t, name, plan)?;
+    Ok(true)
+}
+
 pub fn set_env_var(t: &mut Tx<'_>, name: &str, env_var: Option<&str>) -> ApiResult<()> {
     t.execute(
         "UPDATE subscriptions SET env_var = ?2, updated_at = ?3 WHERE name = ?1",
@@ -464,6 +796,37 @@ pub fn latest_windows(conn: &Connection, subscription: &str) -> ApiResult<Vec<Qu
     )?;
     let rows = stmt.query_map([subscription], sample_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Remove each window of a subscription that is not in `keep`: its
+/// samples and its quota notice rows. A successful probe calls it with
+/// the windows of its answer, so a window that the provider stopped
+/// reporting (the 5-hour window of an Anthropic Ultra plan) leaves the
+/// lists, and no quota line can notify for it. Returns the removed window
+/// names, by name.
+pub fn retire_windows(t: &mut Tx<'_>, subscription: &str, keep: &[&str]) -> ApiResult<Vec<String>> {
+    let mut stmt = t.prepare(
+        "SELECT DISTINCT window FROM quota_samples WHERE subscription = ?1 ORDER BY window",
+    )?;
+    let had = stmt
+        .query_map([subscription], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let gone: Vec<String> = had
+        .into_iter()
+        .filter(|w| !keep.contains(&w.as_str()))
+        .collect();
+    for w in &gone {
+        t.execute(
+            "DELETE FROM quota_samples WHERE subscription = ?1 AND window = ?2",
+            params![subscription, w],
+        )?;
+        t.execute(
+            "DELETE FROM quota_notices WHERE subscription = ?1 AND window = ?2",
+            params![subscription, w],
+        )?;
+    }
+    Ok(gone)
 }
 
 /// Samples of a subscription after `since` (an RFC 3339 time), oldest
@@ -932,6 +1295,95 @@ mod tests {
         assert_eq!(all.len(), 2);
     }
 
+    /// A login check renames the plan of an API subscription (Max 20x is
+    /// Ultra now); a file subscription and a key plan keep theirs.
+    #[tokio::test]
+    async fn a_login_check_refreshes_the_plan_label() {
+        let db = db();
+        let changed = db
+            .write("system", |t| {
+                upsert_def(t, &def("api"), SOURCE_API)?;
+                upsert_def(t, &def("file"), SOURCE_FILE)?;
+                let mut z = def("z");
+                z.provider = "zai".into();
+                z.plan = Some("coding".into());
+                z.harnesses = vec![HarnessId::Claude];
+                upsert_def(t, &z, SOURCE_API)?;
+                Ok(vec![
+                    refresh_plan(t, "api", Some("Ultra"))?,
+                    refresh_plan(t, "api", Some("Ultra"))?,
+                    refresh_plan(t, "api", None)?,
+                    refresh_plan(t, "file", Some("Ultra"))?,
+                    refresh_plan(t, "z", Some("Max"))?,
+                ])
+            })
+            .await
+            .unwrap();
+        assert_eq!(changed, vec![true, false, false, false, false]);
+        let plan = |n: &'static str| db.read(move |c| Ok(get(c, n)?.plan));
+        assert_eq!(plan("api").await.unwrap().as_deref(), Some("Ultra"));
+        assert_eq!(plan("file").await.unwrap().as_deref(), Some("Max 20x"));
+        assert_eq!(plan("z").await.unwrap().as_deref(), Some("coding"));
+    }
+
+    /// Any probe: a window that the last answer does not have goes, with
+    /// its samples and its quota notice rows. Other subscriptions keep
+    /// theirs.
+    #[tokio::test]
+    async fn a_window_that_the_probe_stops_reporting_goes() {
+        let db = db();
+        db.write("system", |t| {
+            for name in ["s1", "s2"] {
+                upsert_def(t, &def(name), SOURCE_API)?;
+                for w in ["5h", "7d", "7d_opus"] {
+                    insert_sample(t, name, w, 95.0, None, &Value::Null)?;
+                    t.execute(
+                        "INSERT INTO quota_notices (subscription, window, threshold, used_pct, at)
+                         VALUES (?1, ?2, 90, 95, '2026-11-01T00:00:00Z')",
+                        params![name, w],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let gone = db
+            .write("system", |t| retire_windows(t, "s1", &["7d", "7d_fable"]))
+            .await
+            .unwrap();
+        assert_eq!(gone, vec!["5h".to_owned(), "7d_opus".to_owned()]);
+        let w = db.read(|c| latest_windows(c, "s1")).await.unwrap();
+        assert_eq!(
+            w.iter().map(|w| w.window.as_str()).collect::<Vec<_>>(),
+            vec!["7d"]
+        );
+        assert!(
+            db.read(|c| samples(c, "s1", Some("5h"), "", 10))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let notices = |sub: &'static str| {
+            db.read(move |c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM quota_notices WHERE subscription = ?1",
+                    [sub],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+        };
+        assert_eq!(notices("s1").await.unwrap(), 1);
+        assert_eq!(notices("s2").await.unwrap(), 3);
+        assert_eq!(db.read(|c| latest_windows(c, "s2")).await.unwrap().len(), 3);
+        // Nothing more to remove.
+        let gone = db
+            .write("system", |t| retire_windows(t, "s1", &["7d"]))
+            .await
+            .unwrap();
+        assert!(gone.is_empty());
+    }
+
     #[tokio::test]
     async fn logout_after_login_expires_once_and_mails_once() {
         let db = db();
@@ -996,6 +1448,7 @@ mod tests {
             harnesses: vec![HarnessId::Claude, HarnessId::Pi],
             probe: None,
             alert_at: 80,
+            selfhosted: None,
         };
         for plan in [None, Some("coding"), Some("api")] {
             let d = zai(plan);
@@ -1030,6 +1483,7 @@ mod tests {
             harnesses,
             probe: None,
             alert_at: 80,
+            selfhosted: None,
         };
         for plan in [
             None,
@@ -1100,6 +1554,7 @@ mod tests {
             harnesses: vec![HarnessId::Claude],
             probe: probe.map(str::to_owned),
             alert_at: 80,
+            selfhosted: None,
         };
         db.write("t", move |t| {
             upsert_def(t, &zai("zc", Some("coding"), None), "api")?;

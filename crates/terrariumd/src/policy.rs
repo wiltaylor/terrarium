@@ -694,6 +694,34 @@ pub fn unlink_memory(actor: &Actor, project: &str, author: &str) -> ApiResult<()
     ))
 }
 
+/// Read the DB of a project (PLAN §15.4): its types, records, and
+/// queries. The same rule as the other project data: the members of the
+/// project (its agents too), a sysadmin, and the operator.
+pub fn read_db(actor: &Actor, project: &str) -> ApiResult<()> {
+    read_project(actor, project)
+}
+
+/// Write the DB of a project: create and change types and records, and
+/// delete a type with no records or a record. Every member writes, so an
+/// agent can make its own types.
+pub fn write_db(actor: &Actor, project: &str) -> ApiResult<()> {
+    read_project(actor, project).map_err(|_| {
+        ApiError::forbidden(format!(
+            "project `{project}` is not your project; writing its DB needs sysadmin"
+        ))
+    })
+}
+
+/// Delete a DB type with its `records` records: project_admin of the
+/// project, sysadmin, or the operator.
+pub fn purge_db_type(actor: &Actor, project: &str, records: i64) -> ApiResult<()> {
+    admin_project(
+        actor,
+        project,
+        &format!("deleting a DB type with its {records} records"),
+    )
+}
+
 /// Move, delete, or undelete a wiki page.
 pub fn admin_wiki(actor: &Actor, project: &str, what: &str) -> ApiResult<()> {
     admin_project(actor, project, what)

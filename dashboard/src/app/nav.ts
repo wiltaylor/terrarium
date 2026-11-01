@@ -32,6 +32,8 @@ export const KNOWLEDGE_TABS = [
   // The wiki pages; the rest of the path is the page path.
   { path: "wiki", label: "Wiki" },
   { path: "memory", label: "Memory" },
+  // The project DB: record types and records; `db/:type` is the records of one type.
+  { path: "db", label: "DB" },
 ] as const;
 
 /**
@@ -77,6 +79,8 @@ export const SETTINGS_TABS = [
   { path: "secrets", label: "Secrets" },
   // The global templates and the templates of each project.
   { path: "templates", label: "Templates" },
+  // The system prompt library in the config repo (docs/api.md §28).
+  { path: "system-prompts", label: "System prompts" },
   // The skill library in the config repo. The rest of the path is the skill name.
   { path: "skills", label: "Skills" },
   { path: "targets", label: "Targets" },

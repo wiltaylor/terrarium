@@ -98,6 +98,13 @@ pub enum Command {
         #[command(subcommand)]
         command: SkillCmd,
     },
+    /// System prompts: the library in the config repo (PLAN §8.1). An
+    /// agent or a template selects one with `--persona <name>`
+    #[command(visible_alias = "system-prompts")]
+    SystemPrompt {
+        #[command(subcommand)]
+        command: SystemPromptCmd,
+    },
     /// Mail
     Mail {
         #[command(subcommand)]
@@ -124,6 +131,11 @@ pub enum Command {
     Wiki {
         #[command(subcommand)]
         command: WikiCmd,
+    },
+    /// The project DB: record types with a schema, records, and queries
+    Db {
+        #[command(subcommand)]
+        command: DbCmd,
     },
     /// Artifacts: files and static bundles for the user
     Artifact {
@@ -661,6 +673,11 @@ pub struct AgentSetArgs {
     /// Remove every skill of the agent
     #[arg(long)]
     pub no_skills: bool,
+    /// Save the agent's own system prompt text in the system prompt
+    /// library as this name, and select it (`--persona <name>`, the text
+    /// cleared)
+    #[arg(long, conflicts_with_all = ["system_prompt", "system_prompt_file", "no_system_prompt", "persona"])]
+    pub save_system_prompt: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1123,6 +1140,156 @@ pub enum WikiCmd {
     Restore { page: String, rev: u64 },
     /// Pages that link to this page
     Backlinks { page: String },
+}
+
+/// `terrarium db ...` (docs/api.md §28).
+#[derive(Debug, Subcommand)]
+pub enum DbCmd {
+    /// Record types and their schemas
+    Type {
+        #[command(subcommand)]
+        command: DbTypeCmd,
+    },
+    /// Records
+    #[command(visible_alias = "record")]
+    Rec {
+        #[command(subcommand)]
+        command: DbRecCmd,
+    },
+    /// Run a query, for example `type:bug status=open sort:-severity`
+    Query {
+        /// The query; more words are joined with spaces
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        /// The output format (`--json` is the same as `--format json`)
+        #[arg(long, value_enum, default_value_t = DbFormat::Table)]
+        format: DbFormat,
+        /// The page: the cursor that the last page printed
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+}
+
+/// The output of `db query` and `db rec ls`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum DbFormat {
+    Table,
+    Json,
+    Csv,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DbTypeCmd {
+    /// List the types, with their record counts
+    Ls,
+    /// Show a type and its fields
+    Show { name: String },
+    /// Make a type
+    ///
+    /// A field is `name:kind`, with `!` for required and `=value` for a
+    /// default: `title:string!`, `severity:enum(low,medium,high)!=low`,
+    /// `tags:list(string)`, `service:ref(service)`. Kinds: string, text,
+    /// number, integer, bool, date, datetime, enum(...), list(string|
+    /// integer|number), ref(type), json.
+    New {
+        name: String,
+        #[arg(long, short = 'd')]
+        description: Option<String>,
+        /// A field: `name:kind[!][=default]`; repeat for more
+        #[arg(long = "field", short = 'f', allow_hyphen_values = true)]
+        fields: Vec<String>,
+        /// Make a field unique; repeat for more
+        #[arg(long = "unique")]
+        unique: Vec<String>,
+        /// The fields as JSON: a list of fields, or `{"description", "fields"}`; `-` reads stdin
+        #[arg(long, conflicts_with = "fields")]
+        from_file: Option<String>,
+    },
+    /// Change a type: add or change fields, rename, remove
+    ///
+    /// `--field` adds a field, or replaces the field of that name. A
+    /// removed field loses its data in every record: give `--confirm`.
+    Edit {
+        name: String,
+        #[arg(long, short = 'd')]
+        description: Option<String>,
+        /// A field to add or replace: `name:kind[!][=default]`
+        #[arg(long = "field", short = 'f', allow_hyphen_values = true)]
+        fields: Vec<String>,
+        /// Make a field unique
+        #[arg(long = "unique")]
+        unique: Vec<String>,
+        /// Rename a field and move its data: `old:new`
+        #[arg(long = "rename")]
+        renames: Vec<String>,
+        /// Remove a field and its data
+        #[arg(long = "remove")]
+        removes: Vec<String>,
+        /// The whole new field list as JSON (`-` reads stdin)
+        #[arg(long, conflicts_with = "fields")]
+        from_file: Option<String>,
+        /// Confirm that removed fields lose their data
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Delete a type
+    Rm {
+        name: String,
+        /// Delete its records too (project_admin, sysadmin, or the operator)
+        #[arg(long)]
+        records: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DbRecCmd {
+    /// Make a record
+    ///
+    /// `--set field=value` takes the value in the field's kind: a list is
+    /// `a,b,c` (or a JSON list), a ref is a record ID or the name of the
+    /// record (its first string field), `-` reads stdin.
+    New {
+        #[arg(value_name = "TYPE")]
+        type_name: String,
+        /// `field=value`; repeat for more
+        #[arg(long = "set", short = 's', allow_hyphen_values = true)]
+        sets: Vec<String>,
+        /// The values as a JSON object (`-` reads stdin)
+        #[arg(long, allow_hyphen_values = true)]
+        json_data: Option<String>,
+    },
+    /// Show a record
+    Get { id: String },
+    /// Change a record
+    Set {
+        id: String,
+        /// `field=value`; repeat for more
+        #[arg(long = "set", short = 's', allow_hyphen_values = true)]
+        sets: Vec<String>,
+        /// Remove the value of a field
+        #[arg(long = "unset")]
+        unsets: Vec<String>,
+        /// The values as a JSON object (`-` reads stdin)
+        #[arg(long, allow_hyphen_values = true)]
+        json_data: Option<String>,
+        /// Refuse the change when the record is not at this revision
+        #[arg(long)]
+        revision: Option<i64>,
+    },
+    /// Delete a record
+    Rm { id: String },
+    /// List the records of a type, with an optional query
+    Ls {
+        #[arg(value_name = "TYPE")]
+        type_name: String,
+        /// More query terms, for example `status=open sort:-severity`
+        #[arg(num_args = 0..)]
+        query: Vec<String>,
+        #[arg(long, value_enum, default_value_t = DbFormat::Table)]
+        format: DbFormat,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2163,6 +2330,49 @@ pub struct TemplateSpecArgs {
     pub no_skills: bool,
 }
 
+/// `terrarium system-prompt ...` (docs/api.md §28).
+#[derive(Debug, Subcommand)]
+pub enum SystemPromptCmd {
+    /// List the system prompts of the library
+    Ls,
+    /// Show a system prompt: its text and the agents and templates that
+    /// use it
+    Show { name: String },
+    /// Add a system prompt to the library
+    New {
+        /// The name: 1-63 of a-z, 0-9, `-`, `_`
+        name: String,
+        /// The text (`-` reads stdin)
+        #[arg(long)]
+        file: PathBuf,
+        /// A short description for the selector
+        #[arg(long)]
+        description: Option<String>,
+        /// Write over a system prompt that exists
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Change a system prompt: the agents that use it get the new text at
+    /// their next start
+    Edit {
+        name: String,
+        /// The new text (`-` reads stdin)
+        #[arg(long, required_unless_present = "description")]
+        file: Option<PathBuf>,
+        /// A new description; `''` removes it
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Delete a system prompt. Refused when agents or templates use it,
+    /// unless `--force`
+    Rm {
+        name: String,
+        /// Delete it also when it is in use (their next start fails)
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 /// `terrarium skill ...` (docs/api.md §26).
 #[derive(Debug, Subcommand)]
 pub enum SkillCmd {
@@ -2683,6 +2893,165 @@ pub enum SubscriptionCmd {
         /// The subscription
         name: String,
     },
+    /// Show one subscription: provider, plan, the server of a self-hosted
+    /// one, the streams in use, and the status page
+    Show {
+        /// The subscription
+        name: String,
+    },
+    /// Define a subscription. A self-hosted model server: `--provider
+    /// selfhosted --api openai|anthropic --base-url URL`. Needs sysadmin
+    /// or the operator; the key (`--key-stdin`) needs the operator
+    New(SubscriptionNewArgs),
+    /// Change a subscription: the alert threshold, and the server, the
+    /// models, and the limits of a self-hosted one
+    Set(SubscriptionSetArgs),
+    /// Enable a subscription: agents on it may start and wake again
+    Enable {
+        /// The subscription
+        name: String,
+    },
+    /// Disable a subscription: no agent on it starts or wakes, and no new
+    /// agent takes it. Agents that run go on until they stop
+    Disable {
+        /// The subscription
+        name: String,
+    },
+    /// Stop every running agent on a subscription now (graceful, then
+    /// hard after the time limit)
+    StopAll {
+        /// The subscription
+        name: String,
+        /// Disable the subscription first, so no agent wakes again
+        #[arg(long)]
+        disable: bool,
+    },
+    /// Read the model list of a self-hosted server (the daemon sends one
+    /// GET to it)
+    FetchModels {
+        /// A self-hosted subscription (its server and stored key)
+        #[arg(long, conflicts_with = "base_url")]
+        subscription: Option<String>,
+        /// The base URL of a server that is not a subscription yet
+        #[arg(long)]
+        base_url: Option<String>,
+        /// The API style of the server
+        #[arg(long, value_parser = ["openai", "anthropic"])]
+        api: Option<String>,
+        /// Read the key to send from the first line of stdin
+        #[arg(long)]
+        key_stdin: bool,
+        /// Read the server again in place of the cached list
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Give a subscription a display name (for people only; the name,
+    /// the ids, and the keys stay). With no label and `--clear`, the name
+    /// from the vendor table comes back, for example `Claude Ultra`
+    Label {
+        /// The subscription
+        name: String,
+        /// The display name
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        label: Option<String>,
+        /// Remove the display name that the operator set
+        #[arg(long)]
+        clear: bool,
+    },
+}
+
+/// `terrarium admin subscription new`.
+#[derive(Debug, Args)]
+pub struct SubscriptionNewArgs {
+    /// The subscription name
+    pub name: String,
+    /// The provider (`selfhosted`; `openai-compatible` is its old word)
+    #[arg(long)]
+    pub provider: String,
+    /// The plan
+    #[arg(long)]
+    pub plan: Option<String>,
+    /// A harness that may spend it (repeat). A self-hosted server: all the
+    /// harnesses of its API style when none is given
+    #[arg(long = "harness", value_name = "HARNESS")]
+    pub harnesses: Vec<String>,
+    /// The quota probe
+    #[arg(long)]
+    pub probe: Option<String>,
+    /// Alert when a quota window passes this percent
+    #[arg(long)]
+    pub alert_at: Option<u8>,
+    #[command(flatten)]
+    pub server: SelfHostedArgs,
+    /// Read the API key from the first line of stdin and store it (the
+    /// operator only)
+    #[arg(long)]
+    pub key_stdin: bool,
+}
+
+/// `terrarium admin subscription set`.
+#[derive(Debug, Args)]
+pub struct SubscriptionSetArgs {
+    /// The subscription name
+    pub name: String,
+    /// A harness that may spend it (repeat; replaces the list). A
+    /// self-hosted subscription only
+    #[arg(long = "harness", value_name = "HARNESS")]
+    pub harnesses: Vec<String>,
+    /// Alert when a quota window passes this percent
+    #[arg(long)]
+    pub alert_at: Option<u8>,
+    #[command(flatten)]
+    pub server: SelfHostedArgs,
+    /// Clear the default model
+    #[arg(long, conflicts_with = "default_model")]
+    pub clear_default_model: bool,
+    /// Clear the context window
+    #[arg(long, conflicts_with = "context_window")]
+    pub clear_context_window: bool,
+    /// Clear the maximum output tokens
+    #[arg(long, conflicts_with = "max_output_tokens")]
+    pub clear_max_output_tokens: bool,
+    /// Clear the stream limit (no limit)
+    #[arg(long, conflicts_with = "max_concurrent")]
+    pub clear_max_concurrent: bool,
+    /// Clear the status page
+    #[arg(long, conflicts_with = "status_url")]
+    pub clear_status_url: bool,
+    /// Read a new API key from the first line of stdin and store it (the
+    /// operator only)
+    #[arg(long)]
+    pub key_stdin: bool,
+}
+
+/// The server of a self-hosted subscription.
+#[derive(Debug, Args, Default)]
+pub struct SelfHostedArgs {
+    /// The API style of the server
+    #[arg(long, value_parser = ["openai", "anthropic"])]
+    pub api: Option<String>,
+    /// The base URL: the OpenAI root with `/v1`, or the Anthropic root
+    /// without it
+    #[arg(long)]
+    pub base_url: Option<String>,
+    /// A model id that the server serves (repeat; replaces the list)
+    #[arg(long = "model", value_name = "MODEL")]
+    pub models: Vec<String>,
+    /// The model of an agent that sets none
+    #[arg(long)]
+    pub default_model: Option<String>,
+    /// The context window, in tokens
+    #[arg(long)]
+    pub context_window: Option<u64>,
+    /// The most output tokens of one answer
+    #[arg(long)]
+    pub max_output_tokens: Option<u64>,
+    /// How many agents may run a turn at the same time
+    #[arg(long)]
+    pub max_concurrent: Option<u32>,
+    /// The status page of the server
+    #[arg(long)]
+    pub status_url: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -3217,5 +3586,118 @@ mod tests {
             }
         ));
         assert!(Cli::try_parse_from(["terrarium", "admin", "subscription", "default"]).is_err());
+    }
+
+    #[test]
+    fn admin_subscription_selfhosted_commands_parse() {
+        let cli = parse(&[
+            "admin",
+            "subscription",
+            "new",
+            "gpu",
+            "--provider",
+            "selfhosted",
+            "--api",
+            "anthropic",
+            "--base-url",
+            "http://gpu:8000",
+            "--key-stdin",
+            "--model",
+            "m1",
+            "--model",
+            "m2",
+            "--context-window",
+            "131072",
+            "--max-concurrent",
+            "2",
+        ]);
+        let Command::Admin {
+            command:
+                AdminCmd::Subscription {
+                    command: SubscriptionCmd::New(a),
+                },
+        } = cli.command
+        else {
+            panic!("not admin subscription new");
+        };
+        assert_eq!(a.name, "gpu");
+        assert_eq!(a.server.api.as_deref(), Some("anthropic"));
+        assert_eq!(a.server.models, ["m1", "m2"]);
+        assert_eq!(a.server.context_window, Some(131_072));
+        assert_eq!(a.server.max_concurrent, Some(2));
+        assert!(a.key_stdin);
+        assert!(
+            Cli::try_parse_from([
+                "terrarium",
+                "admin",
+                "subscription",
+                "new",
+                "gpu",
+                "--provider",
+                "selfhosted",
+                "--api",
+                "chat"
+            ])
+            .is_err()
+        );
+        let cli = parse(&[
+            "admin",
+            "subscription",
+            "set",
+            "gpu",
+            "--max-concurrent",
+            "4",
+            "--clear-context-window",
+        ]);
+        let Command::Admin {
+            command:
+                AdminCmd::Subscription {
+                    command: SubscriptionCmd::Set(a),
+                },
+        } = cli.command
+        else {
+            panic!("not admin subscription set");
+        };
+        assert_eq!(a.server.max_concurrent, Some(4));
+        assert!(a.clear_context_window);
+        assert!(
+            Cli::try_parse_from([
+                "terrarium",
+                "admin",
+                "subscription",
+                "set",
+                "gpu",
+                "--context-window",
+                "1",
+                "--clear-context-window"
+            ])
+            .is_err()
+        );
+        for (args, want) in [
+            (vec!["admin", "subscription", "disable", "gpu"], "disable"),
+            (vec!["admin", "subscription", "enable", "gpu"], "enable"),
+            (
+                vec!["admin", "subscription", "stop-all", "gpu", "--disable"],
+                "stop-all",
+            ),
+        ] {
+            let cli = parse(&args);
+            let Command::Admin {
+                command: AdminCmd::Subscription { command },
+            } = cli.command
+            else {
+                panic!("not admin subscription");
+            };
+            let got = match command {
+                SubscriptionCmd::Disable { name } if name == "gpu" => "disable",
+                SubscriptionCmd::Enable { name } if name == "gpu" => "enable",
+                SubscriptionCmd::StopAll {
+                    name,
+                    disable: true,
+                } if name == "gpu" => "stop-all",
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(got, want);
+        }
     }
 }

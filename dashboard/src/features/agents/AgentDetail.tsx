@@ -8,7 +8,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Terminal } from "../../components/Terminal";
 import { ConfirmButton, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
 import { GRANTABLE_ROLES, type Agent, type AgentStatus, type Role } from "../../api/types";
-import { ago, compact, timeUntil, windowValue } from "../../lib/format";
+import { ago, compact, orderWindows, subscriptionTitle, timeUntil, windowLabel, windowValue } from "../../lib/format";
 import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
 import { describeCause } from "../../stores/quota";
 import { eventAgentId } from "../../stores/agents";
@@ -22,8 +22,10 @@ import { AGENT_TABS, agentViewQuery, parseAgentView, type AgentTab } from "./ses
 import { RoleBadges } from "./AgentsPage";
 import { appliedText, changeSubscription, loginText, noSubscriptionAccount, noSubscriptionAccountText, normalizePool, samePool, swapTargets } from "./subscription";
 import { PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
-import { SystemPromptField, useCompactDefaults, useGlobalIdleStop } from "./AgentFields";
-import { autoCompactText, effectivePersona, idleStopText, systemPromptProblem } from "./form";
+import { useCompactDefaults, useGlobalIdleStop } from "./AgentFields";
+import { SystemPromptSelect, usePromptLibrary } from "./SystemPromptSelect";
+import { choiceLabel, choiceOf, missingPersonaWarning, type PromptFields } from "./systemPrompt";
+import { autoCompactText, idleStopText, systemPromptProblem } from "./form";
 import { WaitsPanel, WatchesPanel } from "./Waits";
 import { QuestionsPanel } from "../inbox/QuestionsPanel";
 import { SkillsPicker } from "../skills/SkillsPicker";
@@ -189,16 +191,6 @@ export default function AgentDetail() {
               <dd>
                 <SystemPromptCell agent={a()} running={running()} onError={setError} />
               </dd>
-              <dt>Persona</dt>
-              <dd>
-                {effectivePersona(a()).persona}
-                <Show when={effectivePersona(a()).byRole}>
-                  <span class="muted"> (by role)</span>
-                </Show>
-                <Show when={a().system_prompt}>
-                  <span class="muted small"> · the system prompt wins</span>
-                </Show>
-              </dd>
               <dt>Skills</dt>
               <dd>
                 <SkillsCell agent={a()} running={running()} onError={setError} />
@@ -342,7 +334,7 @@ export function SubscriptionCell(props: { agent: Agent; running: boolean; onErro
       // An older daemon has no subscription_detail: use the list.
       await subscriptions.ensureLoaded();
       const s = subscriptions.byName(name);
-      return s ? { name: s.name, provider: s.provider, plan: s.plan, login_status: s.login_status, harnesses: s.harnesses, default_model: s.default_models?.[props.agent.harness] } : undefined;
+      return s ? { name: s.name, display_name: s.display_name, provider: s.provider, plan: s.plan, login_status: s.login_status, harnesses: s.harnesses, default_model: s.default_models?.[props.agent.harness] } : undefined;
     },
   );
   const [editing, setEditing] = createSignal(false);
@@ -411,17 +403,23 @@ export function SubscriptionCell(props: { agent: Agent; running: boolean; onErro
           >
             {(name) => (
               <>
-                <A href="/settings/subscriptions">{name()}</A>
+                <A href="/settings/subscriptions">{detail()?.display_name ?? name()}</A>
                 <Show when={detail()} fallback={<Show when={!detail.loading}><span class="chip warn">not found</span></Show>}>
                   {(d) => (
                     <>
                       <span class="muted small">
-                        {d().provider}
-                        {d().plan ? ` · ${d().plan}` : ""}
+                        <Show when={d().display_name} fallback={<>{d().provider}{d().plan ? ` · ${d().plan}` : ""}</>}>
+                          <span class="mono" title="The subscription name">{name()}</span>
+                        </Show>
                       </span>
                       <span class={`chip ${d().login_status === "expired" || d().login_status === "missing" ? "warn" : "ok"}`}>{loginText(d().login_status)}</span>
                       <Show when={!d().harnesses.includes(props.agent.harness)}>
                         <span class="chip warn">not for {props.agent.harness}</span>
+                      </Show>
+                      <Show when={subscriptions.byName(name())?.enabled === false}>
+                        <span class="chip warn" title="The subscription is disabled: the agent does not start or wake. If it runs now, it goes on until it stops.">
+                          disabled
+                        </span>
                       </Show>
                       <Show when={!props.agent.model && d().default_model}>
                         <span class="muted small">model {d().default_model} (default)</span>
@@ -569,24 +567,38 @@ export function PoolCell(props: { agent: Agent; onError: (e: unknown) => void })
 }
 
 /**
- * The agent's system prompt, and a control to change it with
- * `PATCH /api/agents/{id}` (empty sends `null`: the harness default). The
- * change applies at the next start, as for the subscription.
+ * The agent's system prompt: by role, the harness default, an entry of the
+ * system prompt library (`persona`), or its own text (`system_prompt`). Edit
+ * opens the selector (SystemPromptSelect.tsx) and saves the two fields with
+ * `PATCH /api/agents/{id}`. The change applies at the next start, as for the
+ * subscription.
  */
 function SystemPromptCell(props: { agent: Agent; running: boolean; onError: (e: unknown) => void }) {
   const [editing, setEditing] = createSignal(false);
-  const [draft, setDraft] = createSignal("");
+  const [draft, setDraft] = createSignal<PromptFields>({ persona: "", system_prompt: "" });
   const [busy, setBusy] = createSignal(false);
   const [saved, setSaved] = createSignal(false);
+  const library = usePromptLibrary();
   const fileManaged = () => props.agent.source === "file";
-  const current = () => props.agent.system_prompt ?? "";
-  const next = () => (draft().trim() ? draft() : null);
-  const problem = () => systemPromptProblem(draft());
+  const current = (): PromptFields => ({ persona: props.agent.persona ?? "", system_prompt: props.agent.system_prompt ?? "" });
+  const choice = () => choiceOf(current());
+  const roles = () => props.agent.roles.filter((r) => r !== "member");
+  const missing = () => missingPersonaWarning(current().system_prompt.trim() ? "" : current().persona, library()?.map((e) => e.name));
+  const problem = () => systemPromptProblem(draft().system_prompt);
+  /** The fields that changed: `null` clears one. */
+  const patch = () => {
+    const out: { persona?: string | null; system_prompt?: string | null } = {};
+    const d = draft();
+    const c = current();
+    if (d.persona.trim() !== c.persona.trim()) out.persona = d.persona.trim() || null;
+    if ((d.system_prompt.trim() ? d.system_prompt : "") !== (c.system_prompt.trim() ? c.system_prompt : "")) out.system_prompt = d.system_prompt.trim() ? d.system_prompt : null;
+    return out;
+  };
 
   const save = async () => {
     setBusy(true);
     try {
-      const a = await api.agents.update(props.agent.id, { system_prompt: next() });
+      const a = await api.agents.update(props.agent.id, patch());
       agents.upsert(a);
       setEditing(false);
       setSaved(true);
@@ -611,10 +623,9 @@ function SystemPromptCell(props: { agent: Agent; running: boolean; onError: (e: 
         when={!editing()}
         fallback={
           <>
-            <SystemPromptField value={draft()} onChange={setDraft} label="New system prompt" />
-            <Show when={problem()}>{(p) => <span class="small" style={{ color: "var(--danger)" }}>{p()}</span>}</Show>
+            <SystemPromptSelect value={draft()} roles={roles()} onChange={setDraft} />
             <span class="row">
-              <button class="small primary" disabled={busy() || !!problem() || (next() ?? "") === current()} onClick={save}>
+              <button class="small primary" disabled={busy() || !!problem() || Object.keys(patch()).length === 0} onClick={save}>
                 Save
               </button>
               <button class="small" onClick={() => setEditing(false)}>
@@ -625,9 +636,10 @@ function SystemPromptCell(props: { agent: Agent; running: boolean; onError: (e: 
         }
       >
         <span class="row" style={{ "flex-wrap": "wrap", "align-items": "flex-start" }}>
-          <Show when={current()} fallback={<span class="muted">harness default</span>}>
+          <span>{choiceLabel(choice(), roles())}</span>
+          <Show when={choice().kind === "custom"}>
             <pre class="mono small" style={{ margin: 0, "white-space": "pre-wrap", "max-height": "12em", overflow: "auto", flex: "1 1 20em" }}>
-              {current()}
+              {current().system_prompt}
             </pre>
           </Show>
           <button
@@ -643,6 +655,13 @@ function SystemPromptCell(props: { agent: Agent; running: boolean; onError: (e: 
             Edit
           </button>
         </span>
+        <Show when={missing()}>
+          {(m) => (
+            <span class="notice small" role="alert">
+              {m()}
+            </span>
+          )}
+        </Show>
       </Show>
       <Show when={editing() || saved()}>
         <span class="muted small">
@@ -899,14 +918,18 @@ function QuotaPanel(props: { agent: Agent }) {
           <dl class="kv">
             <dt>Plan</dt>
             <dd>
-              {m().subscription?.plan ?? m().subscription?.name ?? props.agent.subscription}
+              {m().subscription ? subscriptionTitle(m().subscription!) : props.agent.subscription}
+              <Show when={m().subscription?.display_name}>
+                {" "}
+                <span class="muted small mono">{m().subscription?.name}</span>
+              </Show>
               <Show when={m().subscription?.local_estimate_only}> · local estimate only</Show>
             </dd>
             <dt>Windows</dt>
             <dd class="small">
               <Show when={m().subscription?.windows.length} fallback={<span class="muted">no samples</span>}>
-                {m()
-                  .subscription!.windows.map((w) => `${w.window} ${windowValue(w)}${w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`)
+                {orderWindows(m().subscription!.windows)
+                  .map((w) => `${windowLabel(w.window)} ${windowValue(w)}${w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`)
                   .join(" · ")}
               </Show>
             </dd>

@@ -80,6 +80,8 @@ describe("subscription choice", () => {
     expect(subscriptionLabel(pro)).toBe("openai-pro — openai pro (expired)");
     // A plan that says "API key" is not said twice.
     expect(subscriptionLabel(sub({ name: "or", provider: "openrouter", plan: "API key", has_api_key: true }))).toBe("or — openrouter (API key)");
+    // The display name leads; the subscription name follows.
+    expect(subscriptionLabel({ ...max, display_name: "Claude Ultra" })).toBe("Claude Ultra — anthropic-max (logged in)");
   });
 
   it("offers none and the compatible subscriptions, and keeps an incompatible current one visible", () => {

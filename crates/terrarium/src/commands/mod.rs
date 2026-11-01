@@ -6,6 +6,7 @@ pub mod artifacts;
 pub mod auth;
 pub mod board;
 pub mod config;
+pub mod db;
 pub mod events;
 pub mod fleet;
 pub mod inspect;
@@ -20,6 +21,7 @@ pub mod secrets;
 pub mod skills;
 pub mod ssh_keys;
 pub mod system;
+pub mod system_prompts;
 pub mod templates;
 pub mod waits;
 
@@ -49,12 +51,14 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Agent { command } => agents::agent(ctx, command).await,
         Command::Template { command } => templates::template(ctx, command).await,
         Command::Skill { command } => skills::skill(ctx, command).await,
+        Command::SystemPrompt { command } => system_prompts::system_prompt(ctx, command).await,
         Command::Mail { command } => mail::mail(ctx, command).await,
         Command::Inbox { command } => mail::inbox(ctx, command).await,
         Command::Board => board::board(ctx).await,
         Command::Card { command } => board::card(ctx, command).await,
         Command::Mem { command } => knowledge::mem(ctx, command).await,
         Command::Wiki { command } => knowledge::wiki(ctx, command).await,
+        Command::Db { command } => db::db(ctx, command).await,
         Command::Artifact { command } => artifacts::artifact(ctx, command).await,
         Command::Version { command } => artifacts::version(ctx, command).await,
         Command::Usage { command } => system::usage(ctx, command.as_ref()).await,

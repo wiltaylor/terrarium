@@ -1,0 +1,302 @@
+/* The DB tab of the knowledge screen (features/db) and the wiki `db` blocks
+   (components/DbEmbed). The variables of global.css give both themes. */
+
+/* ---------- The query box ---------- */
+
+.db-query {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.db-query input {
+  flex: 1;
+  min-width: 0;
+}
+.db-query-error {
+  border: 1px solid var(--danger);
+  background: var(--danger-soft);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  display: grid;
+  gap: 4px;
+  color: var(--danger);
+}
+.db-query-error pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+  background: none;
+  padding: 0;
+}
+.db-caret {
+  background: var(--danger);
+  color: var(--surface);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.db-help {
+  margin: 0 0 10px;
+}
+.db-bar {
+  margin-bottom: 6px;
+}
+.db-chooser {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-bottom: 8px;
+}
+
+/* ---------- Tables ---------- */
+
+.db-table-box {
+  padding: 0;
+}
+.db-table th.num,
+.db-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.db-table tr.clickable {
+  cursor: pointer;
+}
+.db-table tr.clickable:hover,
+.db-table tr.clickable:focus-visible {
+  background: var(--surface-2);
+}
+.db-table td {
+  max-width: 28rem;
+  overflow-wrap: break-word;
+}
+/* A text column keeps a readable width; the box scrolls on a phone. */
+.db-table td.db-cell-string,
+.db-table td.db-cell-text {
+  min-width: 10rem;
+}
+.db-cell-number,
+.db-cell-integer {
+  font-variant-numeric: tabular-nums;
+}
+.db-cell-datetime,
+.db-cell-date {
+  white-space: nowrap;
+}
+.db-desc-cell {
+  color: var(--muted);
+}
+button.db-sort {
+  font: inherit;
+  color: inherit;
+  font-weight: 600;
+  padding: 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.db-sort-mark {
+  color: var(--accent);
+}
+.db-count {
+  font-size: 2rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- The record dialog and the schema editor ---------- */
+
+.modal.db-modal {
+  width: min(calc(100vw - 32px), 820px);
+}
+.db-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 12px;
+}
+.db-field-text,
+.db-field-json,
+.db-field-list,
+.db-field-ref {
+  grid-column: 1 / -1;
+}
+.db-field textarea {
+  width: 100%;
+  resize: vertical;
+}
+.db-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 4px;
+}
+.db-label-name {
+  color: var(--text);
+  font-weight: 600;
+}
+.db-required {
+  color: var(--danger);
+  font-weight: 700;
+}
+.db-desc {
+  flex-basis: 100%;
+}
+label.db-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+.db-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  background: var(--surface);
+}
+.db-chips input {
+  flex: 1;
+  min-width: 8rem;
+  border: 0;
+  background: transparent;
+}
+.chip.db-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.chip.db-chip button {
+  padding: 0 4px;
+  min-height: 0;
+  line-height: 1;
+}
+.db-ref {
+  display: grid;
+  gap: 4px;
+}
+.db-ref-hits {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  max-height: 12rem;
+  overflow-y: auto;
+}
+.db-ref-hits button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+.db-ref-hits button[aria-selected="true"] {
+  background: var(--accent-soft);
+}
+.db-preview summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.db-actions {
+  flex-wrap: wrap;
+}
+.db-schema-rows {
+  display: grid;
+  gap: 10px;
+}
+.db-schema-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px 10px;
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+.db-schema-row legend {
+  padding: 0 4px;
+  font-family: var(--mono);
+}
+.db-problems {
+  margin: 0;
+  padding-left: 18px;
+}
+.db-failures {
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+.db-failures ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.db-confirm {
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  background: var(--danger-soft);
+}
+
+/* ---------- The wiki `db` block ---------- */
+
+.db-embed-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin: 0 0 1em;
+  background: var(--surface);
+}
+.db-embed-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+  color: var(--muted);
+}
+.db-embed-query {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.db-embed-box .db-table {
+  margin: 0;
+}
+.db-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+/* ---------- Phones ---------- */
+
+@media (max-width: 760px) {
+  /* The dialogs fill the screen, as the card drawer does. */
+  .modal.db-modal {
+    inset: 0;
+    transform: none;
+    width: 100vw;
+    max-height: none;
+    height: 100%;
+    border: 0;
+    border-radius: 0;
+    align-content: start;
+    padding: calc(12px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    overscroll-behavior: contain;
+  }
+  .modal.db-modal button,
+  .modal.db-modal select,
+  .modal.db-modal input:not([type="checkbox"]) {
+    min-height: 40px;
+  }
+  .db-query {
+    flex-wrap: wrap;
+  }
+  .db-query input {
+    flex-basis: 100%;
+  }
+  .db-table td {
+    max-width: 16rem;
+  }
+}

@@ -268,7 +268,8 @@ async fn file_subscriptions_list_and_probe() {
         .post_empty("/api/subscriptions/anthropic-max/probe")
         .await;
     assert_eq!(out.ok()["probe_status"], "ok");
-    assert_eq!(out.body["windows"].as_array().unwrap().len(), 2);
+    // five_hour, seven_day, and the weekly Fable limit of `limits`.
+    assert_eq!(out.body["windows"].as_array().unwrap().len(), 3);
 
     let s = td.get("/api/subscriptions/anthropic-max").await;
     let s = s.ok();
@@ -279,9 +280,10 @@ async fn file_subscriptions_list_and_probe() {
     assert_eq!(w[0]["used_pct"], 16.0);
     assert_eq!(w[0]["resets_at"], "2026-10-24T10:59:59Z");
     assert_eq!(w[1]["window"], "7d");
+    assert_eq!(w[2]["window"], "7d_fable");
 
     let q = td.get("/api/subscriptions/anthropic-max/quota").await;
-    assert_eq!(q.ok().as_array().unwrap().len(), 2);
+    assert_eq!(q.ok().as_array().unwrap().len(), 3);
     assert_eq!(q.body[0]["raw"]["utilization"], 16.0);
     let q = td
         .get("/api/subscriptions/anthropic-max/quota?window=7d")
@@ -303,7 +305,7 @@ async fn file_subscriptions_list_and_probe() {
     assert_eq!(s.body["probe_status"], "failed");
     assert_eq!(s.body["last_success_at"], ok_at.as_str());
     // The windows of the last success stay on the tile.
-    assert_eq!(s.body["windows"].as_array().unwrap().len(), 2);
+    assert_eq!(s.body["windows"].as_array().unwrap().len(), 3);
 
     // No credential: a clear failure, no request. The start-up migration
     // may have moved the shared login into the account (PLAN §16.3).
@@ -536,6 +538,79 @@ async fn quota_probe_windows_alert_but_hold_nothing() {
             .any(|e| e["data"]["prompt"] == "[User] now")
     })
     .await;
+}
+
+/// An Anthropic plan that became Ultra (2026-10-30) has no 5-hour window:
+/// the next good probe removes the stored `5h` window, and no quota line
+/// notifies for it after that. A failed probe removes nothing.
+#[tokio::test]
+async fn a_window_the_probe_stops_reporting_goes_and_alerts_no_more() {
+    let env = boot(
+        |c| write(c, "subscriptions/anthropic-max.toml", MAX_SUB),
+        |_, _| {},
+    )
+    .await;
+    let td = &env.td;
+    claude_creds(&env.homes[&HarnessId::Claude]);
+    let soon = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+    let old = json!({"five_hour": {"utilization": 85.0, "resets_at": soon},
+                     "seven_day": {"utilization": 30.0, "resets_at": "2099-01-01T00:00:00Z"}})
+    .to_string();
+    env.http.set(ANTHROPIC, 200, &old);
+    td.post_empty("/api/subscriptions/anthropic-max/probe")
+        .await
+        .ok();
+    assert_eq!(events_of(td, "quota.alert").await.len(), 1);
+    let windows = |v: &Value| -> Vec<String> {
+        v["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["window"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let s = td.get("/api/subscriptions/anthropic-max").await;
+    assert_eq!(windows(s.ok()), vec!["5h", "7d"]);
+
+    // A failure keeps the windows.
+    env.http.set(ANTHROPIC, 500, "{}");
+    td.post_empty("/api/subscriptions/anthropic-max/probe")
+        .await
+        .ok();
+    let s = td.get("/api/subscriptions/anthropic-max").await;
+    assert_eq!(windows(s.ok()), vec!["5h", "7d"]);
+
+    // The Ultra answer: no five_hour.
+    env.http.set(
+        ANTHROPIC,
+        200,
+        &fixture("probes/anthropic_usage_ultra.json"),
+    );
+    let out = td
+        .post_empty("/api/subscriptions/anthropic-max/probe")
+        .await;
+    assert_eq!(out.ok()["probe_status"], "ok");
+    let s = td.get("/api/subscriptions/anthropic-max").await;
+    assert_eq!(windows(s.ok()), vec!["7d", "7d_fable"]);
+    let q = td
+        .get("/api/subscriptions/anthropic-max/quota?window=5h")
+        .await;
+    assert!(q.ok().as_array().unwrap().is_empty());
+    let sample = events_of(td, "quota.sample").await;
+    let last = sample
+        .iter()
+        .find(|e| e["data"]["removed_windows"].is_array())
+        .expect("a sample event names the removed window");
+    assert_eq!(last["data"]["removed_windows"], json!(["5h"]));
+
+    // More probes: no alert for the removed window.
+    for _ in 0..2 {
+        td.post_empty("/api/subscriptions/anthropic-max/probe")
+            .await
+            .ok();
+    }
+    let alerts = events_of(td, "quota.alert").await;
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
 }
 
 /// A usage-limit error of the provider blocks the agent: a hold with the
@@ -1267,9 +1342,16 @@ async fn api_keys_are_write_only() {
         .await;
     let body = r.ok().to_string();
     assert!(!body.contains(secret), "{body}");
-    assert_eq!(r.body["env_var"], "OPENAI_API_KEY");
+    // `openai-compatible` is the old word: the subscription is a
+    // self-hosted OpenAI-style server.
+    assert_eq!(r.body["provider"], "selfhosted");
+    assert_eq!(r.body["selfhosted"]["api"], "openai");
+    assert_eq!(r.body["selfhosted"]["base_url"], "https://llm.example/v1");
+    assert_eq!(r.body["selfhosted"]["models"], json!(["m1"]));
+    assert_eq!(r.body["env_var"], "TERRARIUM_SELFHOSTED_API_KEY");
     assert_eq!(r.body["has_api_key"], true);
-    assert_eq!(r.body["login_status"], "logged_in");
+    assert_eq!(r.body["login_status"], "api_key");
+    assert_eq!(r.body["no_quota"], true);
     assert_eq!(r.body["source"], "api");
     for path in [
         "/api/subscriptions",
@@ -1293,8 +1375,10 @@ async fn api_keys_are_write_only() {
         .await
         .unwrap();
     let env_vars = terrariumd::login_session::credential_env_for(&td.state, &sub);
-    assert_eq!(env_vars[0], ("OPENAI_API_KEY".into(), secret.into()));
-    assert_eq!(env_vars[1].0, "OPENAI_BASE_URL");
+    assert_eq!(
+        env_vars,
+        [("TERRARIUM_SELFHOSTED_API_KEY".into(), secret.into())]
+    );
     // Verify trusts the stored key.
     let v = td.post_empty("/api/subscriptions/local/verify").await;
     assert_eq!(v.ok()["status"]["logged_in"], true);
@@ -1374,7 +1458,7 @@ async fn zai_key_is_a_claude_and_pi_subscription_with_no_probe() {
         .await;
     assert_eq!(
         shown.ok()["subscription_detail"],
-        json!({"name": "glm2", "provider": "zai", "plan": "coding", "login_status": "api_key",
+        json!({"name": "glm2", "display_name": "GLM Coding Plan", "provider": "zai", "plan": "coding", "login_status": "api_key",
                "harnesses": ["claude", "pi"], "default_model": "glm-5.3-flash"})
     );
     let none = td.agent("p", "plain", json!({"harness": "pi"})).await;
@@ -1496,7 +1580,7 @@ async fn moonshot_key_is_a_pi_only_subscription() {
         .await;
     assert_eq!(
         shown.ok()["subscription_detail"],
-        json!({"name": "kimi", "provider": "moonshot", "plan": "coding", "login_status": "api_key",
+        json!({"name": "kimi", "display_name": "Kimi Code", "provider": "moonshot", "plan": "coding", "login_status": "api_key",
                "harnesses": ["pi"], "default_model": "kimi-for-coding"})
     );
     let sub = td
@@ -1645,8 +1729,9 @@ async fn detect_lists_logins_without_a_definition() {
     let d = d.ok().as_array().unwrap().clone();
     assert_eq!(d.len(), 1, "{d:?}");
     assert_eq!(d[0]["kind"], "claude");
-    assert_eq!(d[0]["plan"], "Max 20x");
-    assert_eq!(d[0]["suggested"]["name"], "anthropic-max-20x");
+    // The Max 20x plan is the Ultra plan since 2026-10-30.
+    assert_eq!(d[0]["plan"], "Ultra");
+    assert_eq!(d[0]["suggested"]["name"], "anthropic-ultra");
     assert_eq!(d[0]["suggested"]["probe"], "anthropic-oauth-usage");
     // With a definition that covers the login, nothing is offered.
     td.post(
@@ -1661,7 +1746,7 @@ async fn detect_lists_logins_without_a_definition() {
         .post_empty("/api/subscriptions/anthropic-max/verify")
         .await;
     assert_eq!(v.ok()["subscription"]["login_status"], "logged_in");
-    assert_eq!(v.body["subscription"]["plan"], "Max 20x");
+    assert_eq!(v.body["subscription"]["plan"], "Ultra");
 }
 
 /// The real outputs of a container login: `codex login status` prints its
@@ -1863,12 +1948,12 @@ esac"#,
     .ok();
     let done = wait_login(td, &id, "done").await;
     assert_eq!(done["done"], true);
-    assert_eq!(done["subscription"], "anthropic-max-20x");
+    assert_eq!(done["subscription"], "anthropic-ultra");
     assert!(!done.to_string().contains("good-code"));
-    let s = td.get("/api/subscriptions/anthropic-max-20x").await;
+    let s = td.get("/api/subscriptions/anthropic-ultra").await;
     let s = s.ok();
     assert_eq!(s["login_status"], "logged_in");
-    assert_eq!(s["plan"], "Max 20x");
+    assert_eq!(s["plan"], "Ultra");
     assert_eq!(s["harnesses"], json!(["claude"]));
     // The first probe ran.
     assert_eq!(s["probe_status"], "ok");
@@ -1892,7 +1977,7 @@ esac"#,
     let state = td.daemon.as_ref().unwrap().state.state_dir.clone();
     assert!(terrariumd::accounts::has_credential(
         &state,
-        "anthropic-max-20x",
+        "anthropic-ultra",
         HarnessId::Claude
     ));
     assert!(
@@ -1903,7 +1988,7 @@ esac"#,
     assert_eq!(s["account"]["harness"], "claude", "{s}");
     assert_eq!(s["account"]["has_login"], true, "{s}");
     // The first Claude account is the default (PLAN §16.3).
-    let first = td.get("/api/subscriptions/anthropic-max-20x").await;
+    let first = td.get("/api/subscriptions/anthropic-ultra").await;
     assert_eq!(first.ok()["default"], true, "{}", first.body);
 
     // A second login of the provider makes a second account.
@@ -1919,35 +2004,35 @@ esac"#,
     .await
     .ok();
     let done = wait_login(td, &id, "done").await;
-    assert_eq!(done["subscription"], "anthropic-max-20x-2");
+    assert_eq!(done["subscription"], "anthropic-ultra-2");
     assert!(terrariumd::accounts::has_credential(
         &state,
-        "anthropic-max-20x-2",
+        "anthropic-ultra-2",
         HarnessId::Claude
     ));
     // The second account keeps the default where it is.
-    let second = td.get("/api/subscriptions/anthropic-max-20x-2").await;
+    let second = td.get("/api/subscriptions/anthropic-ultra-2").await;
     assert_eq!(second.ok()["default"], false, "{}", second.body);
     assert_eq!(
-        td.get("/api/subscriptions/anthropic-max-20x").await.body["default"],
+        td.get("/api/subscriptions/anthropic-ultra").await.body["default"],
         true
     );
 
     // Logout removes the account, and nothing else.
     let out = td
-        .post_empty("/api/subscriptions/anthropic-max-20x/logout")
+        .post_empty("/api/subscriptions/anthropic-ultra/logout")
         .await;
     assert_eq!(out.ok()["login_status"], "missing");
     // The logout of the default makes the account left the default.
     assert_eq!(out.body["default"], false);
     assert_eq!(
-        td.get("/api/subscriptions/anthropic-max-20x-2").await.body["default"],
+        td.get("/api/subscriptions/anthropic-ultra-2").await.body["default"],
         true
     );
-    assert!(!terrariumd::accounts::exists(&state, "anthropic-max-20x"));
+    assert!(!terrariumd::accounts::exists(&state, "anthropic-ultra"));
     assert!(terrariumd::accounts::has_credential(
         &state,
-        "anthropic-max-20x-2",
+        "anthropic-ultra-2",
         HarnessId::Claude
     ));
 }
@@ -2538,4 +2623,360 @@ async fn the_default_account_follows_the_operator() {
         ev.iter().any(|e| e["data"]["change"] == "default_cleared"),
         "{ev:?}"
     );
+}
+
+/// A self-hosted server (PLAN §16, `terrarium_core::selfhosted`): the API
+/// styles, the harness rules, the URL rules, the PATCH, and no probe.
+#[tokio::test]
+async fn selfhosted_servers_are_checked() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    let r = td
+        .post(
+            "/api/subscriptions",
+            json!({"name": "gpu", "provider": "selfhosted", "selfhosted": {
+                "api": "anthropic", "base_url": "http://192.168.1.20:8000/",
+                "models": ["qwen3-coder"], "context_window": 131072,
+                "max_concurrent": 2, "status_url": "http://gpu.lan/status"}}),
+        )
+        .await;
+    let v = r.ok();
+    assert_eq!(v["provider"], "selfhosted");
+    assert_eq!(v["harnesses"], json!(["claude", "pi"]));
+    assert_eq!(v["selfhosted"]["base_url"], "http://192.168.1.20:8000");
+    assert_eq!(v["enabled"], true);
+    assert_eq!(v["no_quota"], true);
+    assert_eq!(v["local_estimate_only"], true);
+    assert_eq!(v["streams"], json!({"max": 2, "in_use": 0, "waiting": 0}));
+    assert_eq!(v["status_url"], "http://gpu.lan/status");
+    assert_eq!(
+        v["default_models"],
+        json!({"claude": "qwen3-coder", "pi": "qwen3-coder"})
+    );
+    // The alias and the OpenAI style: pi and Codex.
+    let r = td
+        .post(
+            "/api/subscriptions",
+            json!({"name": "vllm", "provider": "openai-compatible",
+                   "selfhosted": {"base_url": "http://vllm:8000/v1"}}),
+        )
+        .await;
+    assert_eq!(r.ok()["provider"], "selfhosted");
+    assert_eq!(r.body["harnesses"], json!(["pi", "codex"]));
+    // The rules: no base URL, a bad URL, a harness of the other style,
+    // Copilot, a probe, limits out of range.
+    for (body, why) in [
+        (json!({"name": "a1", "provider": "selfhosted"}), "base_url"),
+        (
+            json!({"name": "a2", "provider": "selfhosted", "selfhosted": {"base_url": "file:///etc"}}),
+            "http://",
+        ),
+        (
+            json!({"name": "a3", "provider": "selfhosted", "selfhosted": {"base_url": "http://u:p@gpu/v1"}}),
+            "password",
+        ),
+        (
+            json!({"name": "a4", "provider": "selfhosted", "harnesses": ["claude"],
+                   "selfhosted": {"api": "openai", "base_url": "http://gpu/v1"}}),
+            "pi and codex",
+        ),
+        (
+            json!({"name": "a5", "provider": "selfhosted", "harnesses": ["copilot"],
+                   "selfhosted": {"api": "anthropic", "base_url": "http://gpu"}}),
+            "not copilot",
+        ),
+        (
+            json!({"name": "a6", "provider": "selfhosted", "probe": "anthropic-oauth-usage",
+                   "selfhosted": {"base_url": "http://gpu/v1"}}),
+            "no quota probe",
+        ),
+        (
+            json!({"name": "a7", "provider": "selfhosted",
+                   "selfhosted": {"base_url": "http://gpu/v1", "max_concurrent": 0}}),
+            "1 to 1024",
+        ),
+        (
+            json!({"name": "a8", "provider": "anthropic",
+                   "selfhosted": {"base_url": "http://gpu/v1"}}),
+            "only for the provider selfhosted",
+        ),
+    ] {
+        let r = td.post("/api/subscriptions", body).await;
+        r.err(422, "invalid");
+        let m = r.body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(m.contains(why), "{why}: {m}");
+    }
+    // An agent of a harness that the server does not serve: 422 that
+    // names the supported ones.
+    td.project("p").await;
+    let r = td
+        .post(
+            "/api/agents",
+            json!({"name": "w", "project": "p", "harness": "codex", "subscription": "gpu"}),
+        )
+        .await;
+    r.err(422, "invalid");
+    assert!(r.body.to_string().contains("claude and pi"), "{}", r.body);
+    td.agent(
+        "p",
+        "cc",
+        json!({"harness": "claude", "subscription": "gpu"}),
+    )
+    .await;
+    // PATCH: a new limit and a cleared context window; the style change
+    // drops the harnesses that it does not serve.
+    let r = td
+        .patch(
+            "/api/subscriptions/gpu",
+            json!({"selfhosted": {"max_concurrent": 4, "context_window": null}}),
+        )
+        .await;
+    assert_eq!(r.ok()["selfhosted"]["max_concurrent"], 4);
+    assert!(r.body["selfhosted"].get("context_window").is_none());
+    assert_eq!(r.body["streams"]["max"], 4);
+    let r = td
+        .patch(
+            "/api/subscriptions/vllm",
+            json!({"selfhosted": {"api": "anthropic", "base_url": "http://vllm:8000"}}),
+        )
+        .await;
+    assert_eq!(r.ok()["harnesses"], json!(["pi"]));
+    td.patch(
+        "/api/subscriptions/gpu",
+        json!({"selfhosted": {"base_url": "gopher://x"}}),
+    )
+    .await
+    .err(422, "invalid");
+    // Models: the stored list, never a request to the server.
+    let m = td.get("/api/subscriptions/gpu/models").await;
+    assert_eq!(m.ok()["source"], "subscription");
+    assert_eq!(m.body["models"][0]["id"], "qwen3-coder");
+    assert!(env.http.calls.lock().unwrap().is_empty());
+    let audit = td.get("/api/audit?action=subscription.update").await;
+    assert_eq!(audit.ok().as_array().unwrap().len(), 2);
+}
+
+/// `fetch-models`: the operator and sysadmin only; the URL rules; the
+/// stored key goes to the stored base URL only.
+#[tokio::test]
+async fn fetch_models_rights_and_url_rules() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.project("p").await;
+    let a = td.agent("p", "worker", json!({})).await;
+    let id = a["id"].as_str().unwrap();
+    td.post_as(
+        id,
+        "/api/subscriptions/fetch-models",
+        json!({"base_url": "http://127.0.0.1:9/v1"}),
+    )
+    .await
+    .err(403, "forbidden");
+    td.post(
+        "/api/subscriptions/fetch-models",
+        json!({"base_url": "file:///etc/passwd"}),
+    )
+    .await
+    .err(422, "invalid");
+    // Nothing listens on port 9: the fetch fails with 503, no hang.
+    td.post(
+        "/api/subscriptions/fetch-models",
+        json!({"base_url": "http://127.0.0.1:9/v1"}),
+    )
+    .await
+    .err(503, "unavailable");
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "gpu", "provider": "selfhosted",
+               "selfhosted": {"base_url": "http://127.0.0.1:9/v1"}}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/subscriptions/gpu/api-key",
+        json!({"provider": "selfhosted", "key": "sk-stored"}),
+    )
+    .await
+    .ok();
+    let r = td
+        .post(
+            "/api/subscriptions/fetch-models",
+            json!({"subscription": "gpu", "base_url": "http://evil.example/v1"}),
+        )
+        .await;
+    r.err(422, "invalid");
+    assert!(r.body.to_string().contains("stored base_url only"));
+    // A self-hosted key on another provider's subscription is refused.
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "or", "provider": "openrouter"}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/subscriptions/or/api-key",
+        json!({"provider": "selfhosted", "key": "k"}),
+    )
+    .await
+    .err(422, "invalid");
+}
+
+/// Enable and disable (PLAN §16): a disabled subscription takes no new
+/// agent and starts none; the rights; the audit rows and events; stop-all
+/// stops the agents of that subscription only.
+#[tokio::test]
+async fn disable_enable_and_stop_all() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.project("p").await;
+    for name in ["s1", "s2"] {
+        td.post(
+            &format!("/api/subscriptions/{name}/api-key"),
+            json!({"provider": "anthropic", "key": "sk-ant-x"}),
+        )
+        .await
+        .ok();
+    }
+    let on1 = td
+        .agent("p", "on1", json!({"harness": "pi", "subscription": "s1"}))
+        .await;
+    let on2 = td
+        .agent("p", "on2", json!({"harness": "pi", "subscription": "s2"}))
+        .await;
+    let (id1, id2) = (
+        on1["id"].as_str().unwrap().to_owned(),
+        on2["id"].as_str().unwrap().to_owned(),
+    );
+    td.post_empty(&format!("/api/agents/{id1}/start"))
+        .await
+        .ok();
+    td.post_empty(&format!("/api/agents/{id2}/start"))
+        .await
+        .ok();
+    td.wait_status(&id1, "idle").await;
+    td.wait_status(&id2, "idle").await;
+    // An agent may not disable a subscription.
+    td.post_as(&id1, "/api/subscriptions/s1/disable", json!({}))
+        .await
+        .err(403, "forbidden");
+    let r = td.post_empty("/api/subscriptions/s1/disable").await;
+    assert_eq!(r.ok()["enabled"], false);
+    // A running agent goes on.
+    assert_eq!(
+        td.get(&format!("/api/agents/{id1}")).await.ok()["status"],
+        "idle"
+    );
+    // No new agent on it.
+    td.post(
+        "/api/agents",
+        json!({"name": "new", "project": "p", "harness": "pi", "subscription": "s1"}),
+    )
+    .await
+    .err(422, "invalid");
+    // No restart.
+    td.post_empty(&format!("/api/agents/{id1}/restart"))
+        .await
+        .err(409, "conflict");
+    // Stop all: only the agents of s1.
+    let r = td.post_empty("/api/subscriptions/s1/stop-all").await;
+    let stopped = r.ok()["stopped"].as_array().unwrap().clone();
+    assert_eq!(stopped.len(), 1);
+    assert_eq!(stopped[0]["id"], id1.as_str());
+    td.wait_status(&id1, "stopped").await;
+    assert_eq!(
+        td.get(&format!("/api/agents/{id2}")).await.ok()["status"],
+        "idle"
+    );
+    // A stopped agent on a disabled subscription does not start, and a
+    // turn waits for it.
+    td.post_empty(&format!("/api/agents/{id1}/start"))
+        .await
+        .err(409, "conflict");
+    let r = td
+        .post(&format!("/api/agents/{id1}/send"), json!({"text": "hello"}))
+        .await;
+    assert_eq!(r.ok()["queued"], true);
+    let v = td.get(&format!("/api/agents/{id1}")).await;
+    assert_eq!(v.ok()["status"], "stopped");
+    assert_eq!(v.body["status_reason"], "subscription_disabled");
+    // Enable: the agent with the queued turn wakes.
+    let r = td.post_empty("/api/subscriptions/s1/enable").await;
+    assert_eq!(r.ok()["enabled"], true);
+    td.wait_status(&id1, "idle").await;
+    // stop-all with disable: both in one call.
+    let r = td
+        .post("/api/subscriptions/s2/stop-all", json!({"disable": true}))
+        .await;
+    assert_eq!(r.ok()["subscription"]["enabled"], false);
+    assert_eq!(r.body["stopped"].as_array().unwrap().len(), 1);
+    for k in [
+        "subscription.disabled",
+        "subscription.enabled",
+        "subscription.stop_all",
+    ] {
+        let a = td.get(&format!("/api/audit?action={k}")).await;
+        assert!(!a.ok().as_array().unwrap().is_empty(), "{k}");
+    }
+    assert!(!events_of(td, "subscription.stop_all").await.is_empty());
+}
+
+/// The migration of an `openai-compatible` row (migration 46 and the
+/// start): the base URL and the models move from the key file.
+#[tokio::test]
+async fn openai_compatible_rows_become_selfhosted() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    let state = &td.daemon.as_ref().unwrap().state;
+    // A row as an older daemon wrote it, and its key file.
+    let key = terrariumd::login_session::ApiKey {
+        provider: "openai-compatible".into(),
+        key: "sk-old".into(),
+        plan: None,
+        base_url: Some("http://old.lan:8000/v1".into()),
+        models: vec!["m1".into()],
+    };
+    terrariumd::login_session::store_key(&td.state, "old", &key).unwrap();
+    state
+        .db
+        .write("system", |t| {
+            t.execute(
+                "INSERT INTO subscriptions (name, provider, plan, harnesses, alert_at, source,
+                                            env_var, created_at, updated_at)
+                 VALUES ('old', 'selfhosted', 'API key', '[\"pi\"]', 80, 'api',
+                         'OPENAI_API_KEY', '', '')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let dir = td.state.clone();
+    let changed = state
+        .db
+        .write("system", move |t| {
+            terrariumd::store::subscriptions::migrate_openai_compatible(t, &dir)
+        })
+        .await
+        .unwrap();
+    assert_eq!(changed, ["old"]);
+    let v = td.get("/api/subscriptions/old").await;
+    assert_eq!(v.ok()["selfhosted"]["api"], "openai");
+    assert_eq!(v.body["selfhosted"]["base_url"], "http://old.lan:8000/v1");
+    assert_eq!(v.body["selfhosted"]["models"], json!(["m1"]));
+    assert_eq!(v.body["env_var"], "TERRARIUM_SELFHOSTED_API_KEY");
+    assert_eq!(v.body["harnesses"], json!(["pi"]));
+    assert!(v.body.get("plan").is_none());
+    // Idempotent.
+    let dir = td.state.clone();
+    let again = state
+        .db
+        .write("system", move |t| {
+            terrariumd::store::subscriptions::migrate_openai_compatible(t, &dir)
+        })
+        .await
+        .unwrap();
+    assert!(again.is_empty());
 }

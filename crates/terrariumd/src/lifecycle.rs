@@ -297,6 +297,9 @@ pub enum Woke {
     Error,
     /// A quota or budget hold lasts: the work waits for its end.
     Held,
+    /// The subscription of the agent is disabled: the work waits for the
+    /// enable (`POST /api/subscriptions/{name}/enable`).
+    Disabled,
     /// No such agent.
     Gone,
     /// The start failed. The agent is in `error` with this reason.
@@ -326,10 +329,14 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
         .read(move |c| {
             let v = agents::get(c, &key)?;
             let holds = crate::store::usage::holds_of(c, &key)?.len();
-            Ok((v, holds))
+            let disabled = match v.agent.subscription.as_deref() {
+                Some(n) => crate::store::subscriptions::find(c, n)?.is_some_and(|s| !s.enabled),
+                None => false,
+            };
+            Ok((v, holds, disabled))
         })
         .await;
-    let (view, holds) = match read {
+    let (view, holds, disabled) = match read {
         Ok(r) => r,
         Err(e) if e.code == Code::NotFound => return Woke::Gone,
         Err(e) => {
@@ -349,6 +356,31 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
     }
     if holds > 0 {
         return Woke::Held;
+    }
+    // A disabled subscription: a stopped agent stays stopped, and its
+    // work waits (PLAN §16). The status reason says why.
+    if disabled {
+        if view.agent.status == AgentStatus::Stopped
+            && view.status_reason.as_deref() != Some(crate::store::subscriptions::REASON_DISABLED)
+        {
+            let key = id.to_string();
+            if let Err(e) = state
+                .db
+                .write("system", move |t| {
+                    agents::set_status(
+                        t,
+                        &key,
+                        AgentStatus::Stopped,
+                        Some(crate::store::subscriptions::REASON_DISABLED),
+                    )
+                    .map(|_| ())
+                })
+                .await
+            {
+                warn!(agent = %id, "cannot record the reason of a refused wake: {e}");
+            }
+        }
+        return Woke::Disabled;
     }
     let (key, why, queued) = (id.to_string(), cause.to_owned(), view.queued);
     let begun = state
@@ -490,7 +522,12 @@ async fn idle_stop(state: &Shared, id: AgentId) {
 /// session, an open `process` wait, queued work, or a wake on the way.
 async fn keeps_running(state: &Shared, id: AgentId) -> bool {
     let key = id.to_string();
-    if state.lifecycle.waking(id) || state.executor.live_of(&key) > 0 {
+    // Work that waits for a stream of its subscription counts as queued
+    // work (`crate::stream_limit`).
+    if state.lifecycle.waking(id)
+        || state.executor.live_of(&key) > 0
+        || state.usage.streams.is_waiting(id)
+    {
         return true;
     }
     let busy = state

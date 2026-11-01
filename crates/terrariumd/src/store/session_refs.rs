@@ -4,7 +4,9 @@
 //! after `agent rm` (migration 37): the row then names the harness, and
 //! `archive` holds the copy of its session file (`crate::session_archive`).
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use std::collections::HashMap;
+
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Tx, now};
@@ -139,4 +141,384 @@ pub fn set_archive(t: &mut Tx<'_>, session: &str, rel: &str) -> ApiResult<()> {
         params![session, rel],
     )?;
     Ok(())
+}
+
+/// The session of a log row (an event, a message, an audit row), before
+/// the rights check. The API shows it as `session_id` and `session_label`
+/// only when the reader may read the session ([`SessionField::show`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionLink {
+    pub id: String,
+    /// `<agent> · <start time>`, for example `dev · 2026-10-26 09:12 UTC`.
+    pub label: String,
+    /// The project of the session's agent: the read right of the link.
+    pub project: String,
+    /// The agent is deleted. Then the link needs the archived file.
+    pub removed: bool,
+    /// The archived session file, relative to the state dir.
+    pub archive: Option<String>,
+}
+
+/// The session fields of a log row. `session_id` and `session_label` are
+/// empty until [`SessionField::show`] passes the rights check, so a row
+/// that skips the check shows no link.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionField {
+    /// The session that was active when the row was written: a link to
+    /// `/api/sessions/{id}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// `<agent> · <start time>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_label: Option<String>,
+    /// The found session, before the rights check.
+    #[serde(skip)]
+    pub link: Option<SessionLink>,
+}
+
+impl SessionField {
+    pub fn of(link: Option<SessionLink>) -> Self {
+        Self {
+            link,
+            ..Self::default()
+        }
+    }
+
+    /// Show the link when `may` lets the reader read the session; else
+    /// clear the shown fields.
+    pub fn show(&mut self, may: impl FnOnce(&SessionLink) -> bool) {
+        match &self.link {
+            Some(l) if may(l) => {
+                self.session_id = Some(l.id.clone());
+                self.session_label = Some(l.label.clone());
+            }
+            _ => {
+                self.session_id = None;
+                self.session_label = None;
+            }
+        }
+    }
+}
+
+/// What to find the session of a log row by: the exact session when the
+/// row recorded one, else the agent and the time of the row.
+#[derive(Debug, Clone, Copy)]
+pub struct LinkKey<'a> {
+    pub session: Option<&'a str>,
+    pub agent: Option<&'a str>,
+    pub at: &'a str,
+}
+
+/// The agent ULID of an actor or a mail address: `agent:<ulid>` or a bare
+/// ULID. `None` for the operator, `system`, and a project.
+pub fn agent_of(who: &str) -> Option<&str> {
+    let id = who.strip_prefix("agent:").unwrap_or(who);
+    (id.len() == 26 && id.parse::<ulid::Ulid>().is_ok()).then_some(id)
+}
+
+/// The label of a session link: the agent and the start, to the minute.
+fn link_label(agent: &str, started_at: &str) -> String {
+    let start = chrono::DateTime::parse_from_rfc3339(started_at)
+        .map(|t| {
+            t.with_timezone(&chrono::Utc)
+                .format("%Y-%m-%d %H:%M UTC")
+                .to_string()
+        })
+        .unwrap_or_else(|_| started_at.to_owned());
+    format!("{agent} · {start}")
+}
+
+/// The sessions of a page of log rows, in the order of `keys`: two
+/// queries for the whole page. A key with a session takes that session.
+/// A key with an agent only takes the agent's session whose time window
+/// holds `at`: `started_at <= at`, and `ended_at` is empty or `>= at`.
+/// When windows overlap (a resumed session keeps its first start), the
+/// latest start wins. The `sessions(agent_id, started_at)` index serves
+/// the lookup.
+pub fn links(conn: &Connection, keys: &[LinkKey<'_>]) -> ApiResult<Vec<Option<SessionLink>>> {
+    use rusqlite::types::Value as Sql;
+    let mut ids: Vec<Option<String>> = keys.iter().map(|k| k.session.map(str::to_owned)).collect();
+    // The window lookup, one row per key that needs it.
+    let want: Vec<usize> = (0..keys.len())
+        .filter(|&i| keys[i].session.is_none() && keys[i].agent.is_some())
+        .collect();
+    for chunk in want.chunks(300) {
+        let mut values = Vec::with_capacity(chunk.len() * 3);
+        let rows: Vec<&str> = chunk.iter().map(|_| "(?, ?, ?)").collect();
+        for &i in chunk {
+            values.push(Sql::Integer(i as i64));
+            values.push(Sql::Text(keys[i].agent.unwrap_or_default().to_owned()));
+            values.push(Sql::Text(keys[i].at.to_owned()));
+        }
+        let sql = format!(
+            "WITH w(i, agent, at) AS (VALUES {})
+             SELECT w.i, (SELECT s.id FROM sessions s
+                          WHERE s.agent_id = w.agent AND s.started_at <= w.at
+                            AND (s.ended_at IS NULL OR s.ended_at >= w.at)
+                          ORDER BY s.started_at DESC LIMIT 1)
+             FROM w",
+            rows.join(", ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let found = stmt.query_map(params_from_iter(values), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        for f in found {
+            let (i, id) = f?;
+            if let Some(slot) = ids.get_mut(i as usize) {
+                *slot = id;
+            }
+        }
+    }
+    // The sessions themselves, once each.
+    let mut distinct: Vec<&str> = ids.iter().flatten().map(String::as_str).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let mut by_id: HashMap<String, SessionLink> = HashMap::new();
+    for chunk in distinct.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(", ");
+        let mut stmt = conn.prepare(&format!("{SELECT} WHERE s.id IN ({marks})"))?;
+        let found = stmt.query_map(params_from_iter(chunk.iter()), row)?;
+        for f in found {
+            let r = f?;
+            by_id.insert(
+                r.session.id.clone(),
+                SessionLink {
+                    label: link_label(&r.session.agent, &r.session.started_at),
+                    id: r.session.id,
+                    project: r.session.project,
+                    removed: r.session.removed,
+                    archive: r.archive,
+                },
+            );
+        }
+    }
+    Ok(ids
+        .into_iter()
+        .map(|id| id.and_then(|id| by_id.get(&id).cloned()))
+        .collect())
+}
+
+/// The session link of one row: [`links`] for a single key.
+pub fn link(conn: &Connection, key: LinkKey<'_>) -> ApiResult<Option<SessionLink>> {
+    Ok(links(conn, &[key])?.pop().flatten())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn db() -> Connection {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        c
+    }
+
+    fn agent(c: &Connection, project: &str, name: &str) -> String {
+        let id = ulid::Ulid::new().to_string();
+        c.execute(
+            "INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'claude', '/w', 't', 't')",
+            params![id, name, project],
+        )
+        .unwrap();
+        id
+    }
+
+    fn session(c: &Connection, agent: &str, start: &str, end: Option<&str>) -> String {
+        let id = ulid::Ulid::new().to_string();
+        c.execute(
+            "INSERT INTO sessions (id, agent_id, current, started_at, ended_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, agent, end.is_none(), start, end],
+        )
+        .unwrap();
+        id
+    }
+
+    fn at<'a>(agent: &'a str, at: &'a str) -> LinkKey<'a> {
+        LinkKey {
+            session: None,
+            agent: Some(agent),
+            at,
+        }
+    }
+
+    const T1: &str = "2026-10-26T09:00:00.000Z";
+    const T2: &str = "2026-10-26T10:00:00.000Z";
+    const T3: &str = "2026-10-26T11:00:00.000Z";
+
+    #[test]
+    fn a_recorded_session_wins_over_the_time() {
+        let c = db();
+        let a = agent(&c, "p", "dev");
+        let old = session(&c, &a, T1, Some(T2));
+        let new = session(&c, &a, T2, None);
+        let l = link(
+            &c,
+            LinkKey {
+                session: Some(&old),
+                agent: Some(&a),
+                at: T3,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(l.id, old);
+        assert_eq!(l.project, "p");
+        assert_eq!(l.label, "dev · 2026-10-26 09:00 UTC");
+        assert!(!l.removed);
+        // The same key with no session: the open one at T3.
+        assert_eq!(link(&c, at(&a, T3)).unwrap().unwrap().id, new);
+    }
+
+    #[test]
+    fn the_window_holds_its_bounds_and_nothing_outside() {
+        let c = db();
+        let a = agent(&c, "p", "dev");
+        let s = session(&c, &a, T1, Some(T2));
+        let keys = [
+            at(&a, T1),
+            at(&a, "2026-10-26T09:30:00.000Z"),
+            at(&a, T2),
+            at(&a, "2026-10-26T08:59:59.999Z"),
+            at(&a, "2026-10-26T10:00:00.001Z"),
+        ];
+        let got: Vec<Option<String>> = links(&c, &keys)
+            .unwrap()
+            .into_iter()
+            .map(|l| l.map(|l| l.id))
+            .collect();
+        assert_eq!(got, [Some(s.clone()), Some(s.clone()), Some(s), None, None]);
+    }
+
+    #[test]
+    fn no_agent_no_session_and_an_unknown_session_give_no_link() {
+        let c = db();
+        let a = agent(&c, "p", "dev");
+        let other = agent(&c, "p", "ops");
+        session(&c, &other, T1, None);
+        let keys = [
+            LinkKey {
+                session: None,
+                agent: None,
+                at: T2,
+            },
+            at(&a, T2),
+            LinkKey {
+                session: Some("01NOSUCHSESSION00000000000"),
+                agent: Some(&a),
+                at: T2,
+            },
+        ];
+        assert_eq!(links(&c, &keys).unwrap(), [None, None, None]);
+        assert!(links(&c, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn overlapping_windows_take_the_latest_start() {
+        let c = db();
+        let a = agent(&c, "p", "dev");
+        // A resumed session keeps its first start and is open again.
+        let resumed = session(&c, &a, T1, None);
+        let between = session(&c, &a, "2026-10-26T09:30:00.000Z", Some(T2));
+        assert_eq!(
+            link(&c, at(&a, "2026-10-26T09:45:00.000Z"))
+                .unwrap()
+                .unwrap()
+                .id,
+            between
+        );
+        assert_eq!(link(&c, at(&a, T3)).unwrap().unwrap().id, resumed);
+    }
+
+    #[test]
+    fn a_deleted_agent_links_through_its_tombstone() {
+        let c = db();
+        let a = agent(&c, "p", "dev");
+        let s = session(&c, &a, T1, Some(T2));
+        c.execute(
+            "UPDATE sessions SET harness = 'claude', archive = 'archive/agents/x' WHERE id = ?1",
+            [&s],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO agents_removed (id, project, name, removed_at) VALUES (?1, 'p', 'dev', ?2)",
+            params![a, T3],
+        )
+        .unwrap();
+        c.execute("DELETE FROM agents WHERE id = ?1", [&a]).unwrap();
+        let l = link(&c, at(&a, T1)).unwrap().unwrap();
+        assert_eq!(l.id, s);
+        assert!(l.removed);
+        assert_eq!(l.project, "p");
+        assert_eq!(l.archive.as_deref(), Some("archive/agents/x"));
+    }
+
+    #[test]
+    fn a_page_larger_than_one_chunk_resolves_every_row() {
+        let c = db();
+        let a = agent(&c, "p", "dev");
+        let s = session(&c, &a, T1, None);
+        // More keys than one chunk of the window query.
+        let times: Vec<String> = (0..700)
+            .map(|i| format!("2026-10-26T10:{:02}:{:02}.000Z", i / 60 % 60, i % 60))
+            .collect();
+        let keys: Vec<LinkKey<'_>> = times.iter().map(|t| at(&a, t)).collect();
+        let got = links(&c, &keys).unwrap();
+        assert_eq!(got.len(), 700);
+        assert!(got.iter().all(|l| l.as_ref().is_some_and(|l| l.id == s)));
+    }
+
+    /// The window lookup reads the `sessions(agent_id, started_at)` index,
+    /// not the whole table.
+    #[test]
+    fn the_window_lookup_uses_the_index() {
+        let c = db();
+        let plan: Vec<String> = c
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT s.id FROM sessions s
+                 WHERE s.agent_id = 'a' AND s.started_at <= 't'
+                   AND (s.ended_at IS NULL OR s.ended_at >= 't')
+                 ORDER BY s.started_at DESC LIMIT 1",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|p| p.contains("sessions_agent")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn show_needs_the_check() {
+        let mut f = SessionField::of(Some(SessionLink {
+            id: "S".into(),
+            label: "dev · x".into(),
+            project: "p".into(),
+            removed: false,
+            archive: None,
+        }));
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json, serde_json::json!({}), "no link before the check");
+        f.show(|_| true);
+        assert_eq!(f.session_id.as_deref(), Some("S"));
+        assert_eq!(f.session_label.as_deref(), Some("dev · x"));
+        f.show(|_| false);
+        assert!(f.session_id.is_none() && f.session_label.is_none());
+    }
+
+    #[test]
+    fn agent_of_reads_actors_and_addresses() {
+        let id = ulid::Ulid::new().to_string();
+        assert_eq!(agent_of(&format!("agent:{id}")), Some(id.as_str()));
+        assert_eq!(agent_of(&id), Some(id.as_str()));
+        assert_eq!(agent_of("operator"), None);
+        assert_eq!(agent_of("project:p"), None);
+        assert_eq!(agent_of("system"), None);
+    }
 }

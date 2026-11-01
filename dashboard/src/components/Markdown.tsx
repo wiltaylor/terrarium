@@ -1,5 +1,6 @@
 // Renders wiki HTML from lib/markdown, routes internal links through the
-// router, and mounts artifact embeds into their placeholders. The HTML goes
+// router, and mounts artifact embeds and DB query blocks into their
+// placeholders. The HTML goes
 // through DOMPurify (lib/sanitize) on its way into the DOM.
 
 import { useNavigate } from "@solidjs/router";
@@ -7,8 +8,10 @@ import { createEffect, onCleanup } from "solid-js";
 import { render } from "solid-js/web";
 import { setSafeHtml } from "../lib/sanitize";
 import { ArtifactViewer, type ArtifactLike } from "./ArtifactViewer";
+import { DbEmbed } from "./DbEmbed";
 
-export function Markdown(props: { html: string; artifacts?: Record<string, ArtifactLike> }) {
+/** `project`: the project of the page. A `db` block queries the DB of this project only. */
+export function Markdown(props: { html: string; artifacts?: Record<string, ArtifactLike>; project?: string }) {
   let el!: HTMLDivElement;
   const navigate = useNavigate();
   let disposers: (() => void)[] = [];
@@ -22,6 +25,13 @@ export function Markdown(props: { html: string; artifacts?: Record<string, Artif
       const a = props.artifacts?.[id];
       if (a) disposers.push(render(() => <ArtifactViewer artifact={a} />, slot));
       else slot.textContent = `[missing artifact ${id}]`;
+    });
+    // The query is the text of the attribute (`dataset`), never HTML.
+    el.querySelectorAll<HTMLElement>(".db-embed").forEach((slot) => {
+      const query = slot.dataset.dbQuery ?? "";
+      const project = props.project;
+      if (project) disposers.push(render(() => <DbEmbed project={project} query={query} />, slot));
+      else slot.textContent = "[a DB query shows on the wiki page only]";
     });
   });
   onCleanup(() => disposers.forEach((d) => d()));
