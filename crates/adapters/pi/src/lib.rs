@@ -252,6 +252,16 @@ impl Adapter for PiAdapter {
         hooks::hook_events(hook)
     }
 
+    /// pi 1.4.0 draws the editor before its startup is complete
+    /// (`docs/compat.md`, "pi 1.4.0", "Startup signal").
+    fn waits_for_startup_hook(&self) -> bool {
+        true
+    }
+
+    fn is_startup_hook(&self, hook: &HookPayload) -> bool {
+        hooks::is_startup_hook(hook)
+    }
+
     fn screen_hint(&self, screen: &Screen) -> ScreenHint {
         screen::screen_hint(screen)
     }

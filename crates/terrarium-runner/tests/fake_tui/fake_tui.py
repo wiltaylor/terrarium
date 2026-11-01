@@ -38,6 +38,11 @@ Env:
                        this long after the start, with no hooks
   FAKE_TUI_SUBMIT_GATE a path: after a line is read, wait until this file
                        exists before UserPromptSubmit goes out
+  FAKE_TUI_STARTUP_GATE  a path: as pi 1.4.0, show the prompt at once, but
+                       finish the startup only when this file exists. Then
+                       send the SessionStart hook (with --session). Input
+                       before that is dropped with "Startup is still in
+                       progress"
   FAKE_TUI_IGNORE_HUP  when "1", ignore SIGHUP (only SIGKILL stops it)
   FAKE_TUI_ANSWER_HOLD when "1", /question waits for one more line after
                        the answer before Stop, so the turn stays open
@@ -79,6 +84,7 @@ STALL = float(os.environ.get("FAKE_TUI_STALL_MS", "1500")) / 1000
 NO_SUBMIT = os.environ.get("FAKE_TUI_NO_SUBMIT") == "1"
 NO_SUBMIT_HOOK = os.environ.get("FAKE_TUI_NO_SUBMIT_HOOK") == "1"
 SUBMIT_GATE = os.environ.get("FAKE_TUI_SUBMIT_GATE")
+STARTUP_GATE = os.environ.get("FAKE_TUI_STARTUP_GATE")
 SLASH_NEEDS_PAUSE = os.environ.get("FAKE_TUI_SLASH_NEEDS_PAUSE") == "1"
 INPUT_LOG = os.environ.get("FAKE_TUI_INPUT_LOG")
 COMPACT = os.environ.get("FAKE_TUI_COMPACT", "")
@@ -153,6 +159,22 @@ def watch_parent():
     threading.Thread(target=watch, daemon=True).start()
 
 
+def wait_for_startup_gate():
+    """A prompt that looks ready while the startup runs. A submit in that
+    time does nothing, as in pi 1.4.0."""
+    import select
+
+    fd = sys.stdin.fileno()
+    out("> ")
+    while not os.path.exists(STARTUP_GATE):
+        readable, _, _ = select.select([fd], [], [], 0.01)
+        if readable:
+            if not os.read(fd, 4096):
+                return
+            out("\nStartup is still in progress\n> ")
+    out("\n")
+
+
 def main():
     # Python sets no handler for these; make the default explicit, so a
     # signal ends the TUI at once.
@@ -179,6 +201,8 @@ def main():
     if resume and os.environ.get("FAKE_TUI_RESUME_FAIL") == "1":
         out(f"No conversation found with session ID: {resume}\n")
         return 1
+    if STARTUP_GATE:
+        wait_for_startup_gate()
     if session:
         source = "resume" if resume else "startup"
         out(f"session {session} ({source})\n")

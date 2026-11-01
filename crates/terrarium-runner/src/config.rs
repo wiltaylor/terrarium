@@ -12,6 +12,9 @@ pub const DEFAULT_KILL_GRACE: Duration = Duration::from_secs(3);
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(5);
 /// The default of [`RunnerConfig::output_capacity`].
 pub const DEFAULT_OUTPUT_CAPACITY: usize = 1024;
+/// The default of [`RunnerConfig::startup_hook_timeout`]. pi can fetch `fd`
+/// and `rg` in its startup, so this is long.
+pub const DEFAULT_STARTUP_HOOK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The settings of one runner.
 #[derive(Clone)]
@@ -61,6 +64,12 @@ pub struct RunnerConfig {
     /// this many chunks behind lags. The default is 1024. Tests set a small
     /// value to force a lag.
     pub output_capacity: usize,
+    /// For an adapter that waits for a startup hook
+    /// ([`terrarium_core::Adapter::waits_for_startup_hook`]): when no
+    /// startup hook came this long after the spawn, the screen alone
+    /// decides, with a warning. A broken event extension then costs this
+    /// wait, not the agent.
+    pub startup_hook_timeout: Duration,
 }
 
 impl RunnerConfig {
@@ -87,6 +96,7 @@ impl RunnerConfig {
             kill_grace: DEFAULT_KILL_GRACE,
             stop_grace: DEFAULT_STOP_GRACE,
             output_capacity: DEFAULT_OUTPUT_CAPACITY,
+            startup_hook_timeout: DEFAULT_STARTUP_HOOK_TIMEOUT,
         }
     }
 

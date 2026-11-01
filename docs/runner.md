@@ -179,7 +179,7 @@ Error codes:
 | From | Cause | To |
 |---|---|---|
 | (spawn) | The runner starts the child. | `starting` |
-| `starting` | The prompt is ready for the first time. | `idle` |
+| `starting` | The prompt is ready for the first time, and the startup hook came when the adapter waits for one. | `idle` |
 | any live status | A `TurnStart` event (the prompt-submit hook). | `working` |
 | any live status | A system prompt: a prompt-submit hook for which `Adapter::is_system_prompt` is true. | `working` (reason `system prompt`) |
 | `idle` | A typed turn is in flight and the adapter's `screen_hint` says `Busy`. | `working` |
@@ -254,6 +254,14 @@ The runner decides "the prompt is ready" in this order:
    `❯`, or `›`. `DefaultReadyDetector::new(quiet, pattern)` sets a different
    quiet time and a regex for the line.
 
+The first `starting` → `idle` needs one more thing when
+`Adapter::waits_for_startup_hook` is true: a hook for which
+`Adapter::is_startup_hook` is true. pi 1.4.0 needs it: it draws an empty
+editor before its startup is complete, and a submit in that time does not
+go to the model (`docs/compat.md`, "pi 1.4.0"). When no startup hook comes
+in `RunnerConfig::startup_hook_timeout` (default 120 s), the runner emits a
+`warning` event, and the screen alone decides.
+
 ## Attaching
 
 - `Runner::attach()` gives a `ScreenSnapshot` and an output receiver. The
@@ -290,6 +298,7 @@ methods:
 | `clear_input_keys` | The keystrokes that empty the input line before a retry. The runner sends them only when no prompt-submit hook and no busy screen came. |
 | `is_system_prompt` | True for a prompt-submit hook of a prompt that the harness made itself. Such a hook does not confirm a delivery and is not a `TurnStart` (see "Typing a turn"). The default is false. Copilot implements it. |
 | `exit_keys` | The keystrokes that make an idle harness exit, for `Runner::stop`. |
+| `waits_for_startup_hook`, `is_startup_hook` | Keep the agent `starting` until the startup hook comes (see "Typing a turn"). The default is false. pi implements them with `session_start`. |
 | `exit_key_pause` | The pause before the final CR of `exit_keys`. With a pause, `Runner::stop` and the daemon's stop type the keys without the CR, wait, then type the CR (`terrarium_core::adapter::exit_key_writes`). The default is zero (one write). Codex sets 300 ms. |
 
 The adapter's `launch` gives the `LaunchSpec`. The supervisor calls `launch`

@@ -90,6 +90,23 @@ pub trait Adapter: Send + Sync {
         false
     }
 
+    /// True when the harness sends a hook at the end of its startup, and
+    /// its prompt does not take a turn before that hook. The runner then
+    /// keeps the agent `starting` until a hook matches
+    /// [`Adapter::is_startup_hook`], also when the screen reads as ready.
+    /// pi draws an empty editor before its startup is complete, and a
+    /// submit in that time only shows "Startup is still in progress". The
+    /// default is false: the screen alone decides.
+    fn waits_for_startup_hook(&self) -> bool {
+        false
+    }
+
+    /// True when `hook` tells that the startup of the harness is complete
+    /// (see [`Adapter::waits_for_startup_hook`]). The default is false.
+    fn is_startup_hook(&self, _hook: &HookPayload) -> bool {
+        false
+    }
+
     /// Heuristics from the screen, for `blocked` detection and for "is the
     /// prompt ready" before typing.
     fn screen_hint(&self, _screen: &Screen) -> ScreenHint {

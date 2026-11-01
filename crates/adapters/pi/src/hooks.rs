@@ -91,6 +91,15 @@ pub fn tool_summary(tool: &str, input: &Value) -> Option<String> {
         .filter(|l| !l.is_empty())
 }
 
+/// True for `session_start`: the end of pi's startup. pi 1.4.0 emits it in
+/// `bindExtensions`, after the full submit handler of the editor is set
+/// (`interactive-mode.js`, `init`). Before that, a submit keeps the text in
+/// the editor and shows "Startup is still in progress". The extension sends
+/// it for each start, also for a resume and with no session id.
+pub fn is_startup_hook(hook: &HookPayload) -> bool {
+    hook_context(hook).event == "session_start"
+}
+
 /// Map one hook payload to events.
 pub fn hook_events(hook: &HookPayload) -> Vec<Event> {
     let ctx = hook_context(hook);
@@ -458,5 +467,17 @@ mod tests {
         let long = "x".repeat(200);
         let s = tool_summary("bash", &json!({"command": long})).expect("summary");
         assert_eq!(s.chars().count(), SUMMARY_MAX + 1);
+    }
+
+    #[test]
+    fn session_start_ends_the_startup() {
+        assert!(is_startup_hook(&hook("session_start", json!({}))));
+        assert!(is_startup_hook(&hook(
+            "x",
+            json!({"hook_event_name": "session_start", "reason": "resume"})
+        )));
+        for name in ["project_trust", "model_select", "input", "agent_settled"] {
+            assert!(!is_startup_hook(&hook(name, json!({}))), "{name}");
+        }
     }
 }

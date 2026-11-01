@@ -184,6 +184,13 @@ struct State {
     exited: bool,
     queue: VecDeque<PendingTurn>,
     in_flight: Option<InFlight>,
+    /// The startup of the harness is complete: the adapter does not wait
+    /// for a startup hook, the hook came, or its wait timed out
+    /// ([`RunnerConfig::startup_hook_timeout`]). Until then the agent
+    /// stays `starting`, also on a ready screen.
+    startup_done: bool,
+    /// The spawn time, for the startup hook timeout.
+    spawned: Instant,
 }
 
 pub(crate) struct Inner {
@@ -276,6 +283,7 @@ impl Runner {
         let (output_tx, _) = broadcast::channel(config.output_capacity.max(1));
         let (events_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let parser = vt100::Parser::new(config.rows, config.cols, 0);
+        let startup_done = !adapter.waits_for_startup_hook();
         let inner = Arc::new(Inner {
             adapter,
             detector,
@@ -301,6 +309,8 @@ impl Runner {
                 exited: false,
                 queue: VecDeque::new(),
                 in_flight: None,
+                startup_done,
+                spawned: now,
             }),
             status_tx: watch::Sender::new(AgentStatus::Starting),
             exit_tx: watch::Sender::new(None),
@@ -790,11 +800,16 @@ impl Inner {
         // `<system_notification>` after a background shell) is not a typed
         // turn: it must not confirm a delivery, and it is not a user turn.
         let system = self.adapter.is_system_prompt(&payload);
+        let startup = self.adapter.is_startup_hook(&payload);
         let mut state = lock(&self.state);
         if state.exited {
             return;
         }
         state.last_activity = Instant::now();
+        if startup && !state.startup_done {
+            tracing::debug!("startup hook `{}`: the startup is complete", payload.hook);
+            state.startup_done = true;
+        }
         for event in events {
             let event = match event {
                 Event::TurnStart { prompt } if system => {
@@ -941,8 +956,24 @@ impl Inner {
                 return false;
             }
             let now = Instant::now();
+            if !state.startup_done
+                && now.duration_since(state.spawned) >= self.config.startup_hook_timeout
+            {
+                state.startup_done = true;
+                let secs = self.config.startup_hook_timeout.as_secs();
+                tracing::warn!("no startup hook after {secs} s; the screen alone decides");
+                self.emit(Event::Warning {
+                    message: format!(
+                        "the harness sent no startup hook in {secs} s; \
+                         the prompt-ready screen counts alone"
+                    ),
+                });
+            }
             match state.status {
-                AgentStatus::Starting if ready => {
+                // A harness that sends a startup hook can draw a ready
+                // prompt before its startup is complete (pi 1.4.0). A turn
+                // typed then does not submit.
+                AgentStatus::Starting if ready && state.startup_done => {
                     self.transition(&mut state, AgentStatus::Idle, "prompt ready");
                 }
                 AgentStatus::Working if hint == ScreenHint::Question => {

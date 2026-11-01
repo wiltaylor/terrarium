@@ -31,6 +31,8 @@ use tokio::time::timeout;
 struct FakeAdapter {
     busy_screen: bool,
     exit_pause: Duration,
+    /// Wait for the `SessionStart` hook before the prompt counts as ready.
+    startup_hook: bool,
 }
 
 impl Adapter for FakeAdapter {
@@ -65,6 +67,12 @@ impl Adapter for FakeAdapter {
         } else {
             ScreenHint::Unknown
         }
+    }
+    fn waits_for_startup_hook(&self) -> bool {
+        self.startup_hook
+    }
+    fn is_startup_hook(&self, hook: &HookPayload) -> bool {
+        hook.hook == "SessionStart"
     }
     fn is_system_prompt(&self, hook: &HookPayload) -> bool {
         hook.hook == "UserPromptSubmit"
@@ -120,6 +128,12 @@ struct Opts {
     kill_grace: Option<Duration>,
     stop_grace: Option<Duration>,
     exit_pause: Duration,
+    /// The adapter waits for the `SessionStart` hook before the prompt
+    /// counts as ready.
+    startup_hook: bool,
+    /// Launch with `--session <id>`: the fake TUI sends `SessionStart`.
+    session: Option<&'static str>,
+    startup_hook_timeout: Option<Duration>,
 }
 
 impl Default for Opts {
@@ -133,6 +147,9 @@ impl Default for Opts {
             kill_grace: None,
             stop_grace: None,
             exit_pause: Duration::ZERO,
+            startup_hook: false,
+            session: None,
+            startup_hook_timeout: None,
         }
     }
 }
@@ -168,17 +185,24 @@ async fn start_with(opts: Opts, handler: Arc<dyn RequestHandler>) -> Harness {
     if let Some(g) = opts.stop_grace {
         config.stop_grace = g;
     }
+    if let Some(t) = opts.startup_hook_timeout {
+        config.startup_hook_timeout = t;
+    }
     config.ready_detector = Some(Arc::new(DefaultReadyDetector {
         quiet: Duration::from_millis(100),
         pattern: None,
     }));
     let mut spec = LaunchSpec::new("python3", dir.path()).arg(fake_tui().display().to_string());
+    if let Some(id) = opts.session {
+        spec = spec.arg("--session").arg(id);
+    }
     for (k, v) in opts.env {
         spec = spec.env(k, v);
     }
     let adapter = Arc::new(FakeAdapter {
         busy_screen: opts.busy_screen,
         exit_pause: opts.exit_pause,
+        startup_hook: opts.startup_hook,
     });
     let runner = Runner::spawn(config, adapter, spec, handler)
         .await
@@ -446,6 +470,79 @@ async fn busy_screen_confirms_a_turn_without_the_submit_hook() {
     assert!(all.iter().any(|r| matches!(&r.event,
         Event::StatusChanged { to: AgentStatus::Working, reason: Some(r), .. }
             if r.contains("screen busy"))));
+}
+
+/// pi 1.4.0 draws a ready prompt before its startup is complete, and a
+/// submit then does nothing. With an adapter that waits for the startup
+/// hook, the agent stays `starting` and the queued turn waits until the
+/// hook comes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_waits_for_the_startup_hook() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gate = dir.path().join("startup");
+    let mut h = start(Opts {
+        env: vec![("FAKE_TUI_STARTUP_GATE", gate.display().to_string())],
+        startup_hook: true,
+        session: Some("s1"),
+        ..Opts::default()
+    })
+    .await;
+    let delivery = h.runner.type_turn("hello");
+    // The snapshot text has no trailing spaces: the prompt reads as `>`.
+    until("the prompt on the screen", || {
+        h.runner.screen().text().lines().any(|l| l == ">")
+    })
+    .await;
+    // The prompt is on the screen and the PTY is quiet for longer than the
+    // detector needs; the generic detector would call it ready now.
+    tokio::time::sleep(ms(500)).await;
+    assert_eq!(h.runner.status(), AgentStatus::Starting);
+    let text = h.runner.screen().text();
+    assert!(!text.contains("hello"), "typed before the startup: {text}");
+    assert!(!text.contains("Startup is still in progress"), "{text}");
+
+    std::fs::write(&gate, b"").expect("end the startup");
+    until_status(&mut h.events, AgentStatus::Idle).await;
+    assert!(h.runner.screen().text().contains("session s1 (startup)"));
+    timeout(wait(), delivery.wait())
+        .await
+        .expect("delivery in time")
+        .expect("delivered");
+    until_screen(&h, "done: hello").await;
+    assert!(
+        !h.runner
+            .screen()
+            .text()
+            .contains("Startup is still in progress")
+    );
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+}
+
+/// No startup hook (a broken event extension): after the timeout the
+/// screen alone decides, with a warning, so the agent does not stay
+/// `starting`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_startup_hook_falls_back_to_the_screen() {
+    let mut h = start(Opts {
+        startup_hook: true,
+        startup_hook_timeout: Some(ms(400)),
+        ..Opts::default()
+    })
+    .await;
+    let seen = until_status(&mut h.events, AgentStatus::Idle).await;
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, Event::Warning { message } if message.contains("startup hook"))),
+        "{seen:?}"
+    );
+    let d = h.runner.type_turn("hello");
+    timeout(wait(), d.wait())
+        .await
+        .expect("delivery in time")
+        .expect("delivered");
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
 }
 
 /// Copilot sends a `UserPromptSubmit` with a `<system_notification>`
@@ -835,6 +932,7 @@ async fn spawn_err(config: RunnerConfig, spec: LaunchSpec) -> terrarium_runner::
     let adapter = Arc::new(FakeAdapter {
         busy_screen: false,
         exit_pause: Duration::ZERO,
+        startup_hook: false,
     });
     match Runner::spawn(config, adapter, spec, Arc::new(NoHandler)).await {
         Ok(runner) => {

@@ -43,6 +43,16 @@
 //! The box is found, it is empty, pi is not busy, no dialog shows, at most
 //! [`MAX_FOOTER_LINES`] non-empty lines follow the box, and no exit line
 //! ("To resume this session") shows.
+//!
+//! # Startup
+//!
+//! pi 1.4.0 draws the empty editor and the footer before its startup is
+//! complete, so the screen reads as ready too early. A submit then keeps
+//! the text in the editor and adds "Startup is still in progress" to the
+//! chat. The screen cannot tell that time apart: the runner waits for the
+//! `session_start` hook ([`crate::hooks::is_startup_hook`]). The status
+//! line stays in the chat after the startup, so it is not a not-ready
+//! marker; the text in the editor already makes the screen not ready.
 
 use terrarium_core::ScreenHint;
 use terrarium_core::adapter::Screen;
@@ -305,6 +315,27 @@ mod tests {
             let lines: Vec<&str> = text.lines().collect();
             assert_eq!(screen_state(&lines).hint(), want, "{file}");
         }
+    }
+
+    /// Rebuilt from the live screen of 2026-11-01 (pi 1.4.0, a self-hosted
+    /// DeepSeek server; the rules are full width here). A turn typed before
+    /// `session_start` stays in the editor. After the startup the status
+    /// line stays above an empty editor, and the screen is ready.
+    #[test]
+    fn startup_in_progress_screens() {
+        let text = fixture("screen-startup-in-progress.txt");
+        let lines: Vec<&str> = text.lines().collect();
+        let st = screen_state(&lines);
+        assert_eq!(
+            st.input_text.as_deref(),
+            Some("[User] Reply with the single word: ok")
+        );
+        assert_eq!(st.hint(), NotReady);
+
+        let text = fixture("screen-startup-done.txt");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(text.contains("Startup is still in progress"));
+        assert_eq!(screen_state(&lines).hint(), PromptReady);
     }
 
     #[test]

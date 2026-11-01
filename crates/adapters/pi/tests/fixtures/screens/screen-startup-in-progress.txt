@@ -1,0 +1,13 @@
+Warning: No project session found with id '01kxe8b2m4c6d8f0g2h4j6k8m0'; creating a new session with that id.
+ ▀▀█  v1.4.0
+
+[Extensions]
+  terrarium.ts
+
+ Startup is still in progress
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+[User] Reply with the single word: ok
+────────────────────────────────────────────────────────────────────────────────────────────────────
+~/work
+0.0%/300k (auto)                                                       DeepSeek-V4.1-Flash-1017
