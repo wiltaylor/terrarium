@@ -98,7 +98,7 @@ export function App() {
         </Route>
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/agents" component={AgentsPage} />
-        {/* The board screen: the tabs Cards, Artifacts, Tests, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it manages the versions too (?rows=version&version=<id>). */}
+        {/* The board screen: the tabs Cards, Artifacts, Tests, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it manages the versions too (?version=<id>). */}
         <Route path="/p/:project/board" component={BoardScreen}>
           <Route path="/" component={BoardPage} />
           <Route path="/artifacts/:id?" component={ArtifactsPage} />

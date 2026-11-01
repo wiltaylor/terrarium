@@ -1,6 +1,6 @@
 // The Version modal of the board (docs/api.md §13): one version with its notes, cards, artifacts, review
 // actions, archive, and review history; or a new version (create mode). The board opens it from a version
-// row header, a version chip on a card, the toolbar version menu, and `?rows=version&version=<id>`. It
+// row header, a version chip on a card, the toolbar version menu, and `?version=<id>`. It
 // replaces the old Versions tab of the board screen.
 
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";

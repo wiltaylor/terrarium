@@ -299,18 +299,19 @@ describe("navigation", () => {
     for (const now of ["/p/terrarium/knowledge/wiki", "/p/terrarium/knowledge/wiki/designs/runner-v2", "/p/terrarium/knowledge/memory", "/p/terrarium/knowledge/db", "/p/terrarium/knowledge/db/bug"]) expect(movedTo(now)).toBeUndefined();
   });
 
-  it("redirects the old Versions paths in one hop to the version rows of the Cards tab, and the Artifacts paths to the board tab", () => {
-    expect(movedTo("/p/terrarium/versions")).toBe("/p/terrarium/board?rows=version");
-    expect(movedTo("/p/terrarium/versions/")).toBe("/p/terrarium/board?rows=version");
+  it("redirects the old Versions paths in one hop to the version lanes of the Cards tab, and the Artifacts paths to the board tab", () => {
+    expect(movedTo("/p/terrarium/versions")).toBe("/p/terrarium/board");
+    expect(movedTo("/p/terrarium/versions/")).toBe("/p/terrarium/board");
     // The daemon links `/p/<project>/versions/<id>` (Version.url, the review mail): the version modal opens.
-    expect(movedTo("/p/terrarium/versions/01M5PA1A0K16V6G88P3SE78WAB")).toBe("/p/terrarium/board?rows=version&version=01M5PA1A0K16V6G88P3SE78WAB");
-    expect(movedTo("/p/my%20app/versions/v0.1.0/")).toBe("/p/my%20app/board?rows=version&version=v0.1.0");
+    expect(movedTo("/p/terrarium/versions/01M5PA1A0K16V6G88P3SE78WAB")).toBe("/p/terrarium/board?version=01M5PA1A0K16V6G88P3SE78WAB");
+    expect(movedTo("/p/my%20app/versions/v0.1.0/")).toBe("/p/my%20app/board?version=v0.1.0");
     // The paths of the old Versions tab.
-    expect(movedTo("/p/terrarium/board/versions")).toBe("/p/terrarium/board?rows=version");
-    expect(movedTo("/p/terrarium/board/versions/01ABC")).toBe("/p/terrarium/board?rows=version&version=01ABC");
+    expect(movedTo("/p/terrarium/board/versions")).toBe("/p/terrarium/board");
+    expect(movedTo("/p/terrarium/board/versions/01ABC")).toBe("/p/terrarium/board?version=01ABC");
     // The query of the old URL joins the query of the target.
-    expect(withQuery("/p/t/board?rows=version&version=X", "?card=TER-1")).toBe("/p/t/board?rows=version&version=X&card=TER-1");
-    expect(withQuery("/p/t/board?rows=version", "?rows=none")).toBe("/p/t/board?rows=version");
+    expect(withQuery("/p/t/board?version=X", "?card=TER-1")).toBe("/p/t/board?version=X&card=TER-1");
+    // A key of the target wins; an old `rows` key goes along, and the board ignores it.
+    expect(withQuery("/p/t/board?version=X", "?version=Y&rows=none")).toBe("/p/t/board?version=X&rows=none");
     expect(withQuery("/logs/mail", "?thread=T")).toBe("/logs/mail?thread=T");
     expect(withQuery("/logs/mail", "")).toBe("/logs/mail");
     expect(movedTo("/p/terrarium/artifacts")).toBe("/p/terrarium/board/artifacts");

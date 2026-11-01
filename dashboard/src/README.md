@@ -829,8 +829,8 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/logs/mail` | Project logs, Mail tab: the mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
-| `/p/:project/board` | Board, Cards tab: drag and drop, New card dialog (the "+" of the backlog column), Edit columns dialog, ETA countdowns, question badges, version chips, the Version filter (`?version=`), version rows (`?rows=version`) and the Version modal (`?rows=version&version=<id>`), "+ Version", the Versions menu, card drawer with its questions and versions (see "The board") | `GET .../board`, `PATCH .../board`, `GET .../versions?archived=all`, `POST .../versions`, `PATCH /api/versions/{id}`, `POST /api/versions/{id}/submit\|approve\|reject\|release\|archive\|unarchive`, `compare`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
-| `/p/:project/versions/:id?`, `/p/:project/board/versions/:id?` | Gone: redirect in one hop to `/p/:project/board?rows=version`, with `&version=<id>` when the path has an ID (`app/nav.ts` `MOVED_ROUTES`). The Version modal opens. The redirect adds the old query (`withQuery`). The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. | none |
+| `/p/:project/board` | Board, Cards tab: drag and drop, New card dialog (the "+" of the backlog column), Edit columns dialog, ETA countdowns, question badges, version chips, the version lanes and the Version modal (`?version=<id>`), "+ Version", the Versions menu, card drawer with its questions and versions (see "The board") | `GET .../board`, `PATCH .../board`, `GET .../versions?archived=all`, `POST .../versions`, `PATCH /api/versions/{id}`, `POST /api/versions/{id}/submit\|approve\|reject\|release\|archive\|unarchive`, `compare`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
+| `/p/:project/versions/:id?`, `/p/:project/board/versions/:id?` | Gone: redirect in one hop to `/p/:project/board`, with `?version=<id>` when the path has an ID (`app/nav.ts` `MOVED_ROUTES`). The Version modal opens. The redirect adds the old query (`withQuery`). The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. | none |
 | `/p/:project/board/tests`, `/p/:project/board/tests/:id` | Board, Tests tab: the test runs (filters, counts bar, links) and one run (counts, compare with the previous run, suites and cases, Failed only, search, output, Download original, link and unlink, delete); see "Test runs" | `GET .../test-runs?card=&version=&name=&status=&cursor=`, `GET /api/test-runs/{id}?status=&q=&cursor=`, `GET .../compare?with=previous`, `GET .../raw`, `PATCH .../links`, `DELETE /api/test-runs/{id}` |
 | `/p/:project/board/artifacts/:id?` | Board, Artifacts tab: artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/knowledge/wiki/*path` | Knowledge, Wiki tab: page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
@@ -946,20 +946,20 @@ versions that are not archived. A card is in a version when
 `Version.cards` has it; a card can be in several versions
 (`features/board/versions.ts`). Each card shows a chip for each of its
 versions, with the name in the status colour. A click on a chip opens the
-Version modal. The **Version** filter of the toolbar filters: "Any
-version", each version with its status, and "No version", in the URL
-query `?version=<id>` or `?version=none`.
+Version modal. The toolbar has no Version filter: the lanes show the
+versions.
 
-**Version rows.** **Rows: none | version** in the toolbar
-(`features/board/lanes.ts`, `LanesBoard.tsx`). The choice is in the URL
-(`?rows=version`) and in localStorage for each project
-(`terrarium.board.lanes.<project>`, with the collapsed rows). With version
-rows, the board has one row ("lane") for each version that is not
+**Version lanes.** The Cards tab always shows the cards in version rows
+("lanes") (`features/board/lanes.ts`, `LanesBoard.tsx`). An old `?rows=`
+in the URL has no effect. localStorage keeps the collapsed rows of each
+project (`terrarium.board.lanes.<project>`); the page ignores an old
+`rows` value in it. The board has one row for each version that is not
 archived: draft, in review, approved, released, rejected, then the newest
 first. An empty released or rejected row does not show. The last row is
 "No version": the cards in no version, and the cards that are only in
-archived versions. Each row has all the columns, under one row of column
-heads. A row head has a chevron (collapse), the version name (opens the
+archived versions. A project with no version row shows only "No
+version", with no row head: it looks like a plain board. Each row has
+all the columns, under one row of column heads. A row head has a chevron (collapse), the version name (opens the
 Version modal), the status, and the card count. A card in several
 versions shows in each of their rows, with "also in <name>". The WIP
 limits and the counts of the column heads are for the whole column; each
@@ -969,15 +969,14 @@ old row and adds it to the version of the new row (`PATCH
 /api/versions/{id}` with `remove_cards`, then `add_cards`), then moves it
 to the column of the drop. A card in more versions asks first. A version
 in review, approved, or released takes no card change, so the board
-refuses that drag with a message. With version rows, `?version=<id>`
-does not filter: it opens the Version modal, and the row of the version
-opens and scrolls into view; the Version filter does not show. On a
+refuses that drag with a message. `?version=<id>` opens the Version
+modal, and the row of the version opens and scrolls into view. On a
 phone, each column holds the rows as sections that collapse, and the
 **Versions** field of the card drawer adds the card to a version or
 removes it.
 
 **The Version modal** (`features/board/VersionModal.tsx`) opens from a row
-head, a version chip, the Versions menu, and `?rows=version&version=<id>`
+head, a version chip, the Versions menu, and `?version=<id>`
 (a version ID or name). It shows the status, the notes, the repo and ref,
 the review actions (Approve and Reject with a comment, Submit for review,
 Release), **Archive** or **Unarchive**, the cards (with **Add cards**, a

@@ -1,7 +1,7 @@
-// The version rows ("lanes") of the Cards tab: pure helpers. No Solid imports.
+// The version lanes of the Cards tab: pure helpers. No Solid imports.
 //
-// With `?rows=version`, the board has one horizontal lane for each version of the project that is not
-// archived, and a last lane "No version". Each lane shows every column. A card in several versions shows in
+// The board has one horizontal lane for each version of the project that is not archived, and a last
+// lane "No version". Each lane shows every column. A card in several versions shows in
 // each of their lanes. A card that is only in archived versions goes to "No version". The WIP limits and the
 // column counts stay per column, over all lanes.
 
@@ -9,8 +9,6 @@ import type { Card, Version, VersionPatch, VersionStatus } from "../../api/types
 
 /** The lane of the cards that are in no version (that is not archived). A version ID is a ULID, never this word. */
 export const NO_VERSION_LANE = "none";
-
-export type RowsMode = "none" | "version";
 
 /** The order of the lanes by status; then the newest version first. */
 export const LANE_STATUS_ORDER: Record<VersionStatus, number> = { draft: 0, in_review: 1, approved: 2, released: 3, rejected: 4 };
@@ -109,15 +107,8 @@ export function columnIndex(cell: readonly Card[], column: readonly Card[], cell
   return last ? column.findIndex((c) => c.id === last.id) + 1 : column.length;
 }
 
-/** The rows mode from the URL, else the stored one, else none. */
-export function parseRows(query: string | undefined, stored: string | null | undefined): RowsMode {
-  const v = query ?? stored ?? "";
-  return v === "version" ? "version" : "none";
-}
-
-/** The per-project state that the page keeps in localStorage. */
+/** The per-project state that the page keeps in localStorage. An old `rows` key in it has no effect. */
 export interface LaneState {
-  rows: RowsMode;
   /** The keys of the collapsed lanes. */
   collapsed: string[];
 }
@@ -127,14 +118,13 @@ export const laneStateKey = (project: string) => `terrarium.board.lanes.${projec
 export function readLaneState(raw: string | null): LaneState {
   try {
     const v = JSON.parse(raw ?? "") as Partial<LaneState>;
-    return { rows: v.rows === "version" ? "version" : "none", collapsed: Array.isArray(v.collapsed) ? v.collapsed.filter((x): x is string => typeof x === "string") : [] };
+    return { collapsed: Array.isArray(v.collapsed) ? v.collapsed.filter((x): x is string => typeof x === "string") : [] };
   } catch {
-    return { rows: "none", collapsed: [] };
+    return { collapsed: [] };
   }
 }
 
 export const toggleCollapsed = (s: LaneState, key: string): LaneState => ({
-  ...s,
   collapsed: s.collapsed.includes(key) ? s.collapsed.filter((k) => k !== key) : [...s.collapsed, key],
 });
 
@@ -145,6 +135,9 @@ export function menuVersions(versions: readonly Version[], showArchived: boolean
     archived: showArchived ? versions.filter((v) => v.archived).sort((a, b) => b.created_at.localeCompare(a.created_at)) : [],
   };
 }
+
+/** True when the board has no version lane: only "No version", which then shows as a plain board (no lane head). */
+export const onlyNoVersion = (lanes: readonly Lane[]) => lanes.every((l) => l.key === NO_VERSION_LANE);
 
 /** Find a version by ID or by name (a wikilink has the name). */
 export const findVersion = (versions: readonly Version[], key: string | undefined) => (key ? (versions.find((v) => v.id === key) ?? versions.find((v) => v.name === key)) : undefined);

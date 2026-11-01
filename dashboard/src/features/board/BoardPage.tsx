@@ -14,23 +14,21 @@ import { CardQuestions } from "./CardQuestions";
 import { CardTestsChip, LinkedRuns } from "../tests/parts";
 import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkable } from "./questions";
 import { emptyNewCardForm, type NewCardErrors, type NewCardForm, newCardBody, newCardColumn, nextNewCardForm } from "./newCard";
-import { columnTitle, isBlockedColumn, overLimit } from "./columns";
+import { columnTitle, isBlockedColumn } from "./columns";
 import { ColumnsEditor } from "./ColumnsEditor";
 import { LanesBoard } from "./LanesBoard";
-import { buildLanes, columnIndex, findVersion, laneCells, type LaneMove, laneMove, laneMovePatches, laneStateKey, menuVersions, parseRows, readLaneState, type RowsMode, takesCards, toggleCollapsed } from "./lanes";
+import { buildLanes, columnIndex, findVersion, laneCells, type LaneMove, laneMove, laneMovePatches, laneStateKey, menuVersions, readLaneState, takesCards, toggleCollapsed } from "./lanes";
 import { NewVersionModal, VersionModal } from "./VersionModal";
 import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_QUERY } from "./phone";
-import { matchesVersion, parseVersionFilter, VERSION_CHIP, versionOptions, versionQuery, versionsByCard } from "./versions";
+import { VERSION_CHIP, versionsByCard } from "./versions";
 import { agents, api, events } from "../../stores";
-
-type Drop = { column: string; index: number };
 
 export function BoardPage() {
   const params = useParams<{ project: string }>();
-  const [search, setSearch] = useSearchParams<{ card?: string; version?: string; col?: string; rows?: string }>();
+  const [search, setSearch] = useSearchParams<{ card?: string; version?: string; col?: string }>();
   const board = createBoardStore(api);
+  // The card that is in a drag (LanesBoard): no live reload of the board until the drop.
   const [dragging, setDragging] = createSignal<string | null>(null);
-  const [drop, setDrop] = createSignal<Drop | null>(null);
   const [pendingBlock, setPendingBlock] = createSignal<{ id: string; column: string; index: number } | null>(null);
   const [editColumns, setEditColumns] = createSignal(false);
   let editColumnsButton: HTMLButtonElement | undefined;
@@ -70,7 +68,7 @@ export function BoardPage() {
   createEffect(on(() => params.project, () => void loadQuestions()));
   const badges = () => cardQuestionBadges(questions());
 
-  // The versions of the project: the Version filter and the version chips of the cards.
+  // The versions of the project: the lanes and the version chips of the cards.
   // Every version, archived ones too (the toolbar menu lists them); the board shows only those that are not archived.
   const [allVersions, setVersions] = createSignal<Version[] | undefined>(undefined);
   const versions = () => allVersions()?.filter((v) => !v.archived);
@@ -81,7 +79,7 @@ export function BoardPage() {
       const rows = await api.versions.list(params.project, { archived: "all" });
       if (mine === vGen) setVersions(rows);
     } catch {
-      // A daemon or a caller without versions gets no chips and no filter.
+      // A daemon or a caller without versions gets no chips and only the "No version" lane.
       if (mine === vGen) setVersions([]);
     }
   };
@@ -96,7 +94,8 @@ export function BoardPage() {
   );
   const byCard = createMemo(() => versionsByCard(versions() ?? []));
 
-  // Version rows (lanes.ts): `?rows=version`, else the choice kept in localStorage for the project.
+  // The Cards tab always shows the version lanes (lanes.ts). An old `?rows=` in the URL has no effect.
+  // localStorage keeps the collapsed lanes of each project.
   const storage = (): Storage | undefined => (typeof localStorage === "undefined" ? undefined : localStorage);
   const [laneState, setLaneState] = createSignal(readLaneState(null));
   createEffect(on(() => params.project, (p) => setLaneState(readLaneState(storage()?.getItem(laneStateKey(p)) ?? null))));
@@ -108,23 +107,14 @@ export function BoardPage() {
       // A full or blocked storage: the choice lasts for this page only.
     }
   };
-  const rows = (): RowsMode => parseRows(search.rows, laneState().rows);
-  const setRows = (mode: RowsMode) => {
-    saveLaneState({ ...laneState(), rows: mode });
-    setSearch({ rows: mode === "version" ? "version" : "none", version: undefined }, { replace: true });
-  };
   const [showArchived, setShowArchived] = createSignal(false);
   const [newVersion, setNewVersion] = createSignal(false);
-  // The open Version modal: `?version=` with version rows; else a version chip opens it without a change of the filter.
-  const [chipVersion, setChipVersion] = createSignal<string | null>(null);
-  const openVersionKey = () => (rows() === "version" ? search.version : (chipVersion() ?? undefined));
-  const openVersion = () => findVersion(allVersions() ?? [], openVersionKey());
-  const showVersion = (id: string) => (rows() === "version" ? setSearch({ version: id }) : setChipVersion(id));
-  const closeVersion = () => (rows() === "version" ? setSearch({ version: undefined }) : setChipVersion(null));
-  // With version rows, `?version=` does not filter: it opens the version, and its lane opens and scrolls into view.
-  const versionFilter = () => (rows() === "version" ? "" : parseVersionFilter(search.version, versions()));
+  // The open Version modal: `?version=<id or name>`. Its lane opens and scrolls into view.
+  const openVersion = () => findVersion(allVersions() ?? [], search.version);
+  const showVersion = (id: string) => setSearch({ version: id });
+  const closeVersion = () => setSearch({ version: undefined });
   createEffect(
-    on([() => (rows() === "version" ? openVersion()?.id : undefined), () => !!board.state.board], ([id, loaded]) => {
+    on([() => openVersion()?.id, () => !!board.state.board], ([id, loaded]) => {
       if (!id || !loaded) return;
       if (laneState().collapsed.includes(id)) saveLaneState(toggleCollapsed(laneState(), id));
       requestAnimationFrame(() => document.querySelector(`[data-lane="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" }));
@@ -199,16 +189,7 @@ export function BoardPage() {
   const labels = () => [...new Set(board.state.board?.cards.flatMap((c) => c.labels) ?? [])].sort();
   const assignees = () => [...new Set(board.state.board?.cards.map((c) => c.assignee_name ?? c.assignee).filter((a): a is string => !!a) ?? [])].sort();
   const visible = (c: Card) =>
-    (!label() || c.labels.includes(label())) && (!assignee() || (c.assignee_name ?? c.assignee) === assignee()) && matchesVersion(c.id, versionFilter(), byCard());
-
-  const dropIndex = (columnEl: HTMLElement, y: number) => {
-    const cards = [...columnEl.querySelectorAll<HTMLElement>("[data-card]")].filter((el) => el.dataset.card !== dragging());
-    const i = cards.findIndex((el) => {
-      const r = el.getBoundingClientRect();
-      return y < r.top + r.height / 2;
-    });
-    return i < 0 ? cards.length : i;
-  };
+    (!label() || c.labels.includes(label())) && (!assignee() || (c.assignee_name ?? c.assignee) === assignee());
 
   const boardColumns = (): Column[] => board.state.board?.columns ?? [];
   const titleOf = (name: string) => columnTitle(boardColumns().find((c) => c.name === name) ?? { name });
@@ -300,12 +281,12 @@ export function BoardPage() {
     showVersion(id);
   };
 
-  const filterCount = () => activeFilterCount({ label: label(), version: versionFilter(), assignee: assignee() });
+  const filterCount = () => activeFilterCount({ label: label(), assignee: assignee() });
 
   return (
     <div class="board-page">
       <PageHead title="Cards" level={2}>
-        {/* A phone folds the three filters into this button; a wider screen shows them in the row and hides the button. */}
+        {/* A phone folds the two filters into this button; a wider screen shows them in the row and hides the button. */}
         <button
           type="button"
           class="board-filters-toggle"
@@ -326,26 +307,11 @@ export function BoardPage() {
             <option value="">Any label</option>
             <For each={labels()}>{(l) => <option value={l}>{l}</option>}</For>
           </select>
-          {/* With version rows, the lanes show the versions: no Version filter. */}
-          <Show when={rows() === "none" && versions()}>
-            {(vs) => (
-              <select value={versionFilter()} onChange={(e) => setSearch({ version: versionQuery(e.currentTarget.value) })} aria-label="Filter by version">
-                <For each={versionOptions(vs())}>{(o) => <option value={o.value}>{o.label}</option>}</For>
-              </select>
-            )}
-          </Show>
           <select value={assignee()} onChange={(e) => setAssignee(e.currentTarget.value)} aria-label="Filter by assignee">
             <option value="">Any assignee</option>
             <For each={assignees()}>{(a) => <option value={a}>{a}</option>}</For>
           </select>
         </div>
-        <label class="board-rows">
-          <span class="small muted">Rows</span>
-          <select value={rows()} onChange={(e) => setRows(e.currentTarget.value as RowsMode)} aria-label="Rows">
-            <option value="none">none</option>
-            <option value="version">version</option>
-          </select>
-        </label>
         <button type="button" aria-haspopup="dialog" onClick={() => setNewVersion(true)}>
           + Version
         </button>
@@ -423,125 +389,44 @@ export function BoardPage() {
                 )}
               </For>
             </div>
-            <Show
-              when={rows() === "version"}
-              fallback={
-            <div class="board" ref={boardEl} onScroll={onBoardScroll}>
-              <For each={b().columns}>
-                {(col) => {
-                  const cards = () => cardsIn(b(), col.name);
-                  // Over its limit (a limit set under the count): the count shows red until cards leave.
-                  const over = () => overLimit(col, cards().length);
-                  const othersIndex = (id: string) => cards().filter((c) => c.id !== dragging()).findIndex((c) => c.id === id);
-                  return (
-                    <section
-                      id={`board-col-${col.name}`}
-                      data-column={col.name}
-                      class={`column${drop()?.column === col.name ? " drop" : ""}${over() ? " over-limit" : ""}`}
-                      aria-label={columnTitle(col)}
-                      onDragOver={(e) => {
-                        if (!dragging()) return;
-                        e.preventDefault();
-                        e.dataTransfer!.dropEffect = "move";
-                        const index = dropIndex(e.currentTarget, e.clientY);
-                        const d = drop();
-                        if (!d || d.column !== col.name || d.index !== index) setDrop({ column: col.name, index });
-                      }}
-                      onDragLeave={(e) => {
-                        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDrop(null);
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        const id = e.dataTransfer?.getData("text/plain") || dragging();
-                        const d = drop();
-                        setDrop(null);
-                        setDragging(null);
-                        if (id && d) void commitMove(id, d.column, d.index);
-                      }}
-                    >
-                      <div class="column-head">
-                        <span title={col.role ? `${columnTitle(col)} (${col.name}): the ${col.role} column` : col.name}>{columnTitle(col)}</span>
-                        <span class="row column-head-end">
-                          <span class="count muted small" title={over() ? `Over the WIP limit of ${col.wip_limit}: no more cards enter until some leave` : undefined}>
-                            {cards().length}
-                            {col.wip_limit !== undefined ? ` / ${col.wip_limit}` : ""}
-                          </span>
-                          {/* New cards go to the backlog (newCard.ts newCardColumn), so only that column has the "+" button. */}
-                          <Show when={col.name === newCardColumn(columnNames())}>{addCardButton(col)}</Show>
-                        </span>
-                      </div>
-                      <For each={cards()}>
-                        {(card) => (
-                          <>
-                            <Show when={drop()?.column === col.name && dragging() !== card.id && othersIndex(card.id) === drop()?.index}>
-                              <div class="drop-marker" />
-                            </Show>
-                            <KCard
-                              card={card}
-                              now={now()}
-                              questions={badges().get(card.id)}
-                              versions={byCard().get(card.id) ?? []}
-                              onVersion={showVersion}
-                              hidden={!visible(card)}
-                              dragging={dragging() === card.id}
-                              draggable={!phone()}
-                              onOpen={() => setSearch({ card: card.id })}
-                              onDragStart={(e) => {
-                                e.dataTransfer!.setData("text/plain", card.id);
-                                e.dataTransfer!.effectAllowed = "move";
-                                setDragging(card.id);
-                              }}
-                              onDragEnd={() => {
-                                setDragging(null);
-                                setDrop(null);
-                              }}
-                            />
-                        </>
-                      )}
-                    </For>
-                    <Show when={drop()?.column === col.name && drop()!.index >= cards().filter((c) => c.id !== dragging()).length}>
-                      <div class="drop-marker" />
-                    </Show>
-                  </section>
-                );
-              }}
-            </For>
-          </div>
-              }
-            >
-              <LanesBoard
-                board={b()}
-                lanes={lanes()}
-                versions={versions() ?? []}
-                phone={phone()}
-                collapsed={laneState().collapsed}
-                onToggle={(key) => saveLaneState(toggleCollapsed(laneState(), key))}
-                visible={visible}
-                addColumn={newCardColumn(columnNames())}
-                addButton={addCardButton}
-                onOpenVersion={showVersion}
-                onDrop={onLaneDrop}
-                boardRef={(el) => (boardEl = el)}
-                onScroll={onBoardScroll}
-                card={(card, lane, drag, also) => (
-                  <KCard
-                    card={card}
-                    now={now()}
-                    questions={badges().get(card.id)}
-                    versions={byCard().get(card.id) ?? []}
-                    onVersion={showVersion}
-                    hidden={!visible(card)}
-                    dragging={drag.dragging}
-                    draggable={drag.draggable}
-                    note={also.length ? `also in ${also.map((v) => v.name).join(", ")}` : undefined}
-                    lane={lane.key}
-                    onOpen={() => setSearch({ card: card.id })}
-                    onDragStart={drag.onDragStart}
-                    onDragEnd={drag.onDragEnd}
-                  />
-                )}
-              />
-            </Show>
+            <LanesBoard
+              board={b()}
+              lanes={lanes()}
+              versions={versions() ?? []}
+              phone={phone()}
+              collapsed={laneState().collapsed}
+              onToggle={(key) => saveLaneState(toggleCollapsed(laneState(), key))}
+              visible={visible}
+              addColumn={newCardColumn(columnNames())}
+              addButton={addCardButton}
+              onOpenVersion={showVersion}
+              onDrop={onLaneDrop}
+              boardRef={(el) => (boardEl = el)}
+              onScroll={onBoardScroll}
+              card={(card, lane, drag, also) => (
+                <KCard
+                  card={card}
+                  now={now()}
+                  questions={badges().get(card.id)}
+                  versions={byCard().get(card.id) ?? []}
+                  onVersion={showVersion}
+                  hidden={!visible(card)}
+                  dragging={drag.dragging}
+                  draggable={drag.draggable}
+                  note={also.length ? `also in ${also.map((v) => v.name).join(", ")}` : undefined}
+                  lane={lane.key}
+                  onOpen={() => setSearch({ card: card.id })}
+                  onDragStart={(e) => {
+                    drag.onDragStart(e);
+                    setDragging(card.id);
+                  }}
+                  onDragEnd={() => {
+                    drag.onDragEnd();
+                    setDragging(null);
+                  }}
+                />
+              )}
+            />
           </>
         )}
       </Show>
@@ -717,9 +602,9 @@ function KCard(props: {
   versions: Version[];
   /** A click on a version chip: open that version. */
   onVersion: (id: string) => void;
-  /** A line under the title, for example "also in v0.2.0" in a version row. */
+  /** A line under the title, for example "also in v0.2.0" in a version lane. */
   note?: string;
-  /** The version row of the card, with version rows. */
+  /** The version lane of the card. */
   lane?: string;
   hidden: boolean;
   dragging: boolean;
@@ -777,7 +662,7 @@ function KCard(props: {
                 type="button"
                 class={`chip version-chip ${VERSION_CHIP[v.status]}`}
                 title={`In version ${v.name} (${humanize(v.status)}). Open the version.`}
-                // A click opens the version; it does not open the card. The toolbar Version filter filters.
+                // A click opens the version; it does not open the card.
                 onClick={(e) => {
                   e.stopPropagation();
                   props.onVersion(v.id);
@@ -1093,7 +978,7 @@ function CardDrawer(props: {
         </label>
       </div>
 
-      {/* The versions of the card. On a phone this moves a card between version rows (no drag and drop there). */}
+      {/* The versions of the card. On a phone this moves a card between version lanes (no drag and drop there). */}
       <fieldset class="drawer-versions">
         <legend class="small">Versions</legend>
         <For each={props.versions} fallback={<span class="muted small">No versions.</span>}>

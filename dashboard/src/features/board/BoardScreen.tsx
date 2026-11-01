@@ -2,7 +2,7 @@
 // as tabs (app/nav.ts BOARD_TABS). Each tab is a route under /p/:project/board.
 // The Cards tab is the index route, so the board keeps its URL and a `?card=`
 // link opens the card drawer. The Cards tab manages the versions too: version
-// rows (`?rows=version`) and the Version modal (`?version=<id>`).
+// lanes and the Version modal (`?version=<id>`).
 
 import { useParams, type RouteSectionProps } from "@solidjs/router";
 import { TabScreen } from "../../components/TabScreen";

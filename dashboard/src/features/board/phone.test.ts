@@ -39,8 +39,8 @@ describe("phone board column", () => {
 
 describe("filter count", () => {
   it("counts each filter that is not any", () => {
-    expect(activeFilterCount({ label: "", version: "", assignee: "" })).toBe(0);
-    expect(activeFilterCount({ label: "api", version: "", assignee: "" })).toBe(1);
-    expect(activeFilterCount({ label: "api", version: "none", assignee: "lead" })).toBe(3);
+    expect(activeFilterCount({ label: "", assignee: "" })).toBe(0);
+    expect(activeFilterCount({ label: "api", assignee: "" })).toBe(1);
+    expect(activeFilterCount({ label: "api", assignee: "lead" })).toBe(2);
   });
 });

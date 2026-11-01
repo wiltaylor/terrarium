@@ -56,7 +56,7 @@ export function targetHref(t: WikiTarget): string {
     case "memory":
       return `${p}/knowledge/memory?id=${encodeURIComponent(t.id)}`;
     case "version":
-      return `${p}/board?rows=version&version=${encodeURIComponent(t.name)}`;
+      return `${p}/board?version=${encodeURIComponent(t.name)}`;
   }
 }
 

@@ -11,7 +11,7 @@ import {
   laneVersions,
   menuVersions,
   NO_VERSION_LANE,
-  parseRows,
+  onlyNoVersion,
   readLaneState,
   toggleCollapsed,
 } from "./lanes";
@@ -112,16 +112,23 @@ describe("version lanes", () => {
     expect(columnIndex([], col, 0)).toBe(4);
   });
 
-  it("keeps the rows mode and the collapsed lanes", () => {
-    expect(parseRows("version", null)).toBe("version");
-    expect(parseRows(undefined, "version")).toBe("version");
-    expect(parseRows("none", "version")).toBe("none");
-    expect(parseRows(undefined, null)).toBe("none");
-    expect(readLaneState("{bad")).toEqual({ rows: "none", collapsed: [] });
-    const s = readLaneState(JSON.stringify({ rows: "version", collapsed: ["A", 3] }));
-    expect(s).toEqual({ rows: "version", collapsed: ["A"] });
+  it("keeps the collapsed lanes and ignores an old rows mode", () => {
+    expect(readLaneState("{bad")).toEqual({ collapsed: [] });
+    expect(readLaneState(null)).toEqual({ collapsed: [] });
+    const s = readLaneState(JSON.stringify({ rows: "none", collapsed: ["A", 3] }));
+    expect(s).toEqual({ collapsed: ["A"] });
     expect(toggleCollapsed(s, "A").collapsed).toEqual([]);
     expect(toggleCollapsed(s, "B").collapsed).toEqual(["A", "B"]);
+  });
+
+  it("shows a board with no version lane as a plain board", () => {
+    const none = buildLanes([], cards);
+    expect(none.map((l) => l.key)).toEqual([NO_VERSION_LANE]);
+    expect(none[0]!.cards).toHaveLength(cards.length);
+    expect(onlyNoVersion(none)).toBe(true);
+    // Only archived versions, or only an empty released one: still no version lane.
+    expect(onlyNoVersion(buildLanes([versions[6]!, v("OLD", "released", [], "2026-09-01")], cards))).toBe(true);
+    expect(onlyNoVersion(buildLanes(versions, cards))).toBe(false);
   });
 
   it("lists the versions of the toolbar menu and finds a version by ID or name", () => {

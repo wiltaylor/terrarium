@@ -1648,7 +1648,7 @@ export interface Version {
   archived?: boolean;
   archived_at?: string;
   archived_by?: string;
-  /** The dashboard page of the version: a path, `/p/<project>/versions/<id>`, or an absolute URL when the daemon has `TERRARIUM_PUBLIC_URL`. The dashboard redirects it to the board (`?rows=version&version=<id>`). */
+  /** The dashboard page of the version: a path, `/p/<project>/versions/<id>`, or an absolute URL when the daemon has `TERRARIUM_PUBLIC_URL`. The dashboard redirects it to the board (`?version=<id>`). */
   url?: string;
   cards: { id: string; title: string; column: string }[];
   artifacts: { id: string; uid: string; name: string; kind: Artifact["kind"]; content_type: string; size: number }[];

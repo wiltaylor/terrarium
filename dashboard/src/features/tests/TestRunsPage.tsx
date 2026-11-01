@@ -163,7 +163,7 @@ function RunRow(props: { run: TestRunSummary }) {
         </For>
         <For each={r().versions}>
           {(v) => (
-            <A class="chip info" href={`/p/${p()}/board?rows=version&version=${encodeURIComponent(v.id)}`} title={`Open version ${v.name}`}>
+            <A class="chip info" href={`/p/${p()}/board?version=${encodeURIComponent(v.id)}`} title={`Open version ${v.name}`}>
               {v.name}
             </A>
           )}

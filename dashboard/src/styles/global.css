@@ -2948,12 +2948,7 @@ tr.row-open > td {
   }
 }
 
-/* The Rows choice, the Versions menu, and the version rows of the Cards tab (features/board/lanes.ts). */
-.board-rows {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
+/* The Versions menu and the version lanes of the Cards tab (features/board/lanes.ts). */
 details.menu {
   position: relative;
 }
@@ -3074,6 +3069,19 @@ button.menu-item:hover {
 }
 .lane-none .lane-name {
   font-style: italic;
+}
+/* Only the "No version" lane (no version in the project): a plain board, with no lane head or rule. */
+.lane.lane-plain,
+.lanes-column .lane-phone.lane-plain {
+  border-top: 0;
+}
+.lane-plain .lane-cell {
+  min-height: 120px;
+  padding-top: 8px;
+}
+/* The column head has the same count. */
+.lane-plain .lane-cell-count {
+  display: none;
 }
 /* A phone: the lanes are sections inside the column. */
 .lanes-column .lane-phone {

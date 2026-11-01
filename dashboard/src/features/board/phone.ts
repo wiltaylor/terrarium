@@ -23,8 +23,8 @@ export function columnQuery(column: string, columns: readonly string[]): string 
 }
 
 /** The number of filters that apply. An empty value is "any". */
-export function activeFilterCount(filters: { label: string; version: string; assignee: string }): number {
-  return [filters.label, filters.version, filters.assignee].filter((v) => v !== "").length;
+export function activeFilterCount(filters: { label: string; assignee: string }): number {
+  return [filters.label, filters.assignee].filter((v) => v !== "").length;
 }
 
 /**

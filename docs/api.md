@@ -3817,7 +3817,7 @@ Release points that the user reviews (PLAN §15.3). The code is in
   review mail, §13.2), else the path alone, which the dashboard opens on
   its own origin. The dashboard redirects this path in one hop to the
   version rows of the project board, which open the Version modal
-  (`/p/<project>/board?rows=version&version=<id>`).
+  (`/p/<project>/board?version=<id>`).
 - `archived` (always present), `archived_at`, and `archived_by` (absent when
   not archived): an archived version keeps its status and its reviews. It
   has no row on the board and is not in the default list.

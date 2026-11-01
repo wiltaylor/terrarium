@@ -1,13 +1,13 @@
-// The Cards tab with version rows (`?rows=version`, lanes.ts): one lane for each version that is not
-// archived, and a last lane "No version". On a wide screen the lanes are rows of one grid, under one row of
+// The Cards tab (lanes.ts): one lane for each version that is not archived, and a last lane "No version". On a wide screen the lanes are rows of one grid, under one row of
 // column heads. On a phone (one column at a time) each column holds the lanes as sections that collapse; a
-// phone has no drag and drop, so the Versions field of the card drawer moves a card between lanes.
+// phone has no drag and drop, so the Versions field of the card drawer moves a card between lanes. A board
+// with no version lane shows the "No version" lane with no lane head, as a plain board.
 
 import { createSignal, For, type JSX, Show } from "solid-js";
 import type { Board, Card, Column, Version } from "../../api/types";
 import { cardsIn } from "../../stores/board";
 import { columnTitle, overLimit } from "./columns";
-import { alsoIn, type Lane, laneCells, NO_VERSION_LANE } from "./lanes";
+import { alsoIn, type Lane, laneCells, NO_VERSION_LANE, onlyNoVersion } from "./lanes";
 import { VERSION_CHIP } from "./versions";
 import { humanize } from "../../lib/format";
 
@@ -49,7 +49,9 @@ export function LanesBoard(props: {
     });
     return i < 0 ? cards.length : i;
   };
-  const isCollapsed = (key: string) => props.collapsed.includes(key);
+  // Only "No version": no lane head, and the lane cannot collapse.
+  const plain = () => onlyNoVersion(props.lanes);
+  const isCollapsed = (key: string) => !plain() && props.collapsed.includes(key);
   const laneName = (l: Lane) => l.version?.name ?? "No version";
   const visibleCount = (l: Lane) => l.cards.filter(props.visible).length;
 
@@ -177,8 +179,10 @@ export function LanesBoard(props: {
                 <ColumnHead col={col} />
                 <For each={props.lanes}>
                   {(lane) => (
-                    <section class="lane lane-phone" data-lane={lane.key}>
-                      <LaneHead lane={lane} />
+                    <section class="lane lane-phone" classList={{ "lane-plain": plain() }} data-lane={lane.key}>
+                      <Show when={!plain()}>
+                        <LaneHead lane={lane} />
+                      </Show>
                       <Show when={!isCollapsed(lane.key)}>
                         <Cell lane={lane} col={col} />
                       </Show>
@@ -197,8 +201,10 @@ export function LanesBoard(props: {
         </div>
         <For each={props.lanes}>
           {(lane) => (
-            <section class="lane" classList={{ "lane-none": lane.key === NO_VERSION_LANE, collapsed: isCollapsed(lane.key) }} data-lane={lane.key} aria-label={laneName(lane)}>
-              <LaneHead lane={lane} />
+            <section class="lane" classList={{ "lane-none": lane.key === NO_VERSION_LANE, "lane-plain": plain(), collapsed: isCollapsed(lane.key) }} data-lane={lane.key} aria-label={laneName(lane)}>
+              <Show when={!plain()}>
+                <LaneHead lane={lane} />
+              </Show>
               <Show when={!isCollapsed(lane.key)}>
                 <For each={props.board.columns}>{(col) => <Cell lane={lane} col={col} />}</For>
               </Show>

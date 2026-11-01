@@ -195,7 +195,7 @@ export default function TestRunPage() {
                   <For each={r().versions}>
                     {(v) => (
                       <span class="chip info">
-                        <A href={`/p/${p()}/board?rows=version&version=${encodeURIComponent(v.id)}`}>{v.name}</A>
+                        <A href={`/p/${p()}/board?version=${encodeURIComponent(v.id)}`}>{v.name}</A>
                         <button type="button" class="ghost small" aria-label={`Unlink ${v.name}`} title={`Unlink ${v.name}`} onClick={() => void links({ remove_versions: [v.id] })}>
                           ×
                         </button>

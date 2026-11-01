@@ -23,7 +23,7 @@ describe("resolveWikilink", () => {
     expect(targetHref({ kind: "card", project: "terrarium", id: "TER-1" })).toBe("/p/terrarium/board?card=TER-1");
     expect(targetHref({ kind: "page", project: "a b", path: "x/y z" })).toBe("/p/a%20b/knowledge/wiki/x/y%20z");
     expect(targetHref({ kind: "memory", project: "terrarium", id: "MEM-17" })).toBe("/p/terrarium/knowledge/memory?id=MEM-17");
-    expect(targetHref({ kind: "version", project: "terrarium", name: "v0.1.0" })).toBe("/p/terrarium/board?rows=version&version=v0.1.0");
+    expect(targetHref({ kind: "version", project: "terrarium", name: "v0.1.0" })).toBe("/p/terrarium/board?version=v0.1.0");
   });
 });
 
