@@ -279,8 +279,8 @@ async fn create(
         WaitKind::Card => {
             let card = need(&b.card, "card", "card")?.to_owned();
             let column = need(&b.column, "column", "card")?.to_owned();
-            let (c, columns) = {
-                let key = card.clone();
+            let (c, columns, resolved) = {
+                let (key, want) = (card.clone(), column.clone());
                 state
                     .db
                     .read(move |c| {
@@ -288,18 +288,22 @@ async fn create(
                         let board = crate::store::board::get_board(c, &card.project)?;
                         let cols: Vec<String> =
                             board.columns.iter().map(|k| k.name.clone()).collect();
-                        Ok((card, cols))
+                        // A role alias (`working`, `blocked`) names the
+                        // column with that role.
+                        let resolved =
+                            crate::store::board::resolve_column(c, &card.project, &want).ok();
+                        Ok((card, cols, resolved))
                     })
                     .await?
             };
             policy::read_project(&actor, &c.project)?;
-            if !columns.contains(&column) {
+            let Some(column) = resolved else {
                 return Err(ApiError::invalid(format!(
                     "the board of `{}` has no column `{column}`; it has {}",
                     c.project,
                     columns.join(", ")
                 )));
-            }
+            };
             NewWait {
                 agent: waiter_id.clone(),
                 kind: WaitKind::Card,

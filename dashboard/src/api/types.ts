@@ -915,6 +915,8 @@ export const EVENT_KINDS = [
   "version.approved",
   "version.rejected",
   "version.released",
+  "version.archived",
+  "version.unarchived",
   // docs/api.md §16.7.
   "usage.sample",
   "quota.sample",
@@ -1159,18 +1161,31 @@ export interface InboxEventData {
 
 // ----- Board (§13, docs/api.md §8) -----
 
+/** The role of a column (docs/api.md §8.1): `working` is where `card claim` moves a card; a move to `blocked` needs a comment. */
+export type ColumnRole = "working" | "blocked";
+export const COLUMN_ROLES: ColumnRole[] = ["working", "blocked"];
+
 export interface Column {
   name: string;
+  /** The display label: the stored title, or the name with spaces for underscores. An older daemon sends none. */
+  title?: string;
   position: number;
   wip_limit?: number;
+  /** `working`, `blocked`, or none. */
+  role?: ColumnRole;
   /** Cards in the column, archived ones excluded. */
   count?: number;
 }
 
-/** A column in `PATCH /api/projects/{name}/board`. */
+/**
+ * A column in `PATCH /api/projects/{name}/board`: the list is the whole board, in order.
+ * `title` and `role` absent keep the current value; `null` clears it. `wip_limit` absent: no limit.
+ */
 export interface ColumnEdit {
   name: string;
+  title?: string | null;
   wip_limit?: number;
+  role?: ColumnRole | null;
   rename_from?: string;
 }
 
@@ -1625,7 +1640,11 @@ export interface Version {
   decided_at?: string;
   decided_by?: string;
   released_at?: string;
-  /** The dashboard page of the version: a path, `/p/<project>/versions/<id>`, or an absolute URL when the daemon has `TERRARIUM_PUBLIC_URL`. */
+  /** An archived version keeps its status and reviews; it has no row on the board and is not in the default list. An older daemon sends none. */
+  archived?: boolean;
+  archived_at?: string;
+  archived_by?: string;
+  /** The dashboard page of the version: a path, `/p/<project>/versions/<id>`, or an absolute URL when the daemon has `TERRARIUM_PUBLIC_URL`. The dashboard redirects it to the board (`?rows=version&version=<id>`). */
   url?: string;
   cards: { id: string; title: string; column: string }[];
   artifacts: { id: string; uid: string; name: string; kind: Artifact["kind"]; content_type: string; size: number }[];

@@ -24,6 +24,8 @@ pub fn routes() -> Router<Shared> {
         .route("/versions/{id}/approve", post(approve))
         .route("/versions/{id}/reject", post(reject))
         .route("/versions/{id}/release", post(release))
+        .route("/versions/{id}/archive", post(archive))
+        .route("/versions/{id}/unarchive", post(unarchive))
         .route("/versions/{id}/compare", get(compare))
 }
 
@@ -36,13 +38,15 @@ fn absolute<V: std::borrow::BorrowMut<Version>>(state: &Shared, mut v: V) -> V {
 }
 
 /// The event kinds that wake a `?wait=` list.
-const VERSION_KINDS: [&str; 6] = [
+const VERSION_KINDS: [&str; 8] = [
     "version.created",
     "version.updated",
     "version.submitted",
     "version.approved",
     "version.rejected",
     "version.released",
+    "version.archived",
+    "version.unarchived",
 ];
 
 async fn list(
@@ -192,6 +196,37 @@ async fn release(
         })
         .await?;
     Ok(Json(absolute(&state, v)))
+}
+
+async fn set_archived(
+    state: Shared,
+    actor: Actor,
+    id: String,
+    archived: bool,
+) -> ApiResult<Json<Version>> {
+    let v = state
+        .db
+        .write(actor.label(), move |t| {
+            versions::set_archived(t, &actor, &id, archived)
+        })
+        .await?;
+    Ok(Json(absolute(&state, v)))
+}
+
+async fn archive(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Version>> {
+    set_archived(state, actor, id, true).await
+}
+
+async fn unarchive(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Version>> {
+    set_archived(state, actor, id, false).await
 }
 
 #[derive(Debug, Default, Deserialize)]

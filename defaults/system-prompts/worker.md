@@ -86,8 +86,8 @@ daemon then marks you `blocked` and sends the question to your lead.
    4. End your turn. The reply mail wakes you. Do not run `terrarium mail
       wait`. Do not use `terrarium wait agent <lead>`: it waits for the
       status of the lead, not for its answer.
-3. When the answer arrives, move the card back to `in_progress` and
-   continue.
+3. When the answer arrives, move the card back with `terrarium card move
+   <id> working` and continue.
 
 ## Work safely
 

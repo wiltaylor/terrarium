@@ -54,7 +54,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::SystemPrompt { command } => system_prompts::system_prompt(ctx, command).await,
         Command::Mail { command } => mail::mail(ctx, command).await,
         Command::Inbox { command } => mail::inbox(ctx, command).await,
-        Command::Board => board::board(ctx).await,
+        Command::Board { command } => board::board(ctx, command.as_ref()).await,
         Command::Card { command } => board::card(ctx, command).await,
         Command::Mem { command } => knowledge::mem(ctx, command).await,
         Command::Wiki { command } => knowledge::wiki(ctx, command).await,

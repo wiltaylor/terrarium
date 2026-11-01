@@ -39,6 +39,59 @@ describe("mock API", () => {
     expect((err as ApiError).details).toEqual({ column: "in_progress", wip_limit: 3 });
   });
 
+  it("edits the columns with the rules of docs/api.md §8.1", async () => {
+    const api = mock();
+    const b = await api.board.get("terrarium");
+    expect(b.columns.find((c) => c.name === "in_progress")).toMatchObject({ role: "working", title: "in progress" });
+    const bad = async (columns: Parameters<typeof api.board.update>[1]) => {
+      const err = await api.board.update("terrarium", columns).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      return err as ApiError;
+    };
+    const keep = b.columns.map((c) => ({ name: c.name }));
+    expect((await bad(keep.slice(1))).status).toBe(422);
+    expect((await bad([{ name: "backlog", wip_limit: 2 }, ...keep.slice(1)])).message).toMatch(/no WIP/);
+    expect((await bad(keep.map((c) => (c.name === "in_progress" ? { ...c, role: null } : c)))).message).toMatch(/exactly one/);
+    expect((await bad(keep.map((c) => (c.name === "review" ? { ...c, role: "blocked" as const } : c)))).message).toMatch(/at most one/);
+    // A column with cards cannot go: the error lists them.
+    const busy = await bad(keep.filter((c) => c.name !== "review"));
+    expect(busy.status).toBe(409);
+    expect((busy.details as { cards: string[] }).cards.length).toBeGreaterThan(0);
+    // Rename in_progress to doing; claim-like moves follow the role; a limit under the count is allowed.
+    const next = await api.board.update(
+      "terrarium",
+      keep.map((c) => (c.name === "in_progress" ? { name: "doing", rename_from: "in_progress", title: "Doing", wip_limit: 1 } : c.name === "blocked" ? { name: "stuck", rename_from: "blocked" } : c)),
+    );
+    const doing = next.columns.find((c) => c.name === "doing")!;
+    expect(doing).toMatchObject({ role: "working", title: "Doing", wip_limit: 1 });
+    expect(doing.count).toBeGreaterThanOrEqual(1);
+    expect(next.columns.find((c) => c.name === "stuck")?.role).toBe("blocked");
+    expect(next.cards.some((c) => c.column === "in_progress")).toBe(false);
+    // The alias `blocked` names the role column, and it needs a comment.
+    await expect(api.cards.update("TER-13", { column: "blocked" })).rejects.toBeInstanceOf(ApiError);
+    expect((await api.cards.update("TER-13", { column: "blocked", comment: "a login" })).column).toBe("stuck");
+    // A new card in a full column is refused.
+    const full = await api.cards.create("terrarium", { title: "x", column: "working" }).catch((e: unknown) => e);
+    expect((full as ApiError).code).toBe("wip_limit");
+  });
+
+  it("archives a version: no lane, not in the default list, history kept", async () => {
+    const api = mock();
+    const names = async (q?: Parameters<typeof api.versions.list>[1]) => (await api.versions.list("terrarium", q)).map((v) => v.name).sort();
+    expect(await names()).not.toContain("spike-pty");
+    expect(await names({ archived: "true" })).toEqual(["spike-pty"]);
+    expect(await names({ archived: "all" })).toContain("spike-pty");
+    const a = await api.versions.archive("terrarium/v0.1.0");
+    expect(a).toMatchObject({ archived: true, status: "in_review" });
+    expect(a.reviews.length).toBeGreaterThan(0);
+    expect(await names()).not.toContain("v0.1.0");
+    const u = await api.versions.unarchive(a.id);
+    expect(u.archived).toBe(false);
+    expect(u.archived_at).toBeUndefined();
+    expect(await names()).toContain("v0.1.0");
+    await expect(api.versions.list("terrarium", { archived: "maybe" as "all" })).rejects.toBeInstanceOf(ApiError);
+  });
+
   it("emits events to subscribers when a card moves", async () => {
     const api = mock();
     const seen: string[] = [];

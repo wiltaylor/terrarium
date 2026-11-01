@@ -4,14 +4,19 @@
 //! - An agent may create cards, claim unassigned cards, move and edit its own
 //!   cards, and comment on any card of its project. It may not move or
 //!   reassign another agent's card. Project admins and the operator may.
-//! - A card with unmet dependencies cannot enter `in_progress`.
+//! - The columns are configurable ([`set_columns`]). `backlog` is always the
+//!   first column and `done` always the last. Each other column can have a
+//!   WIP limit and a role: exactly one column has the role `working`, and
+//!   at most one has the role `blocked`. The rules below follow the roles,
+//!   not the column names.
+//! - A card with unmet dependencies cannot enter the `working` column.
 //! - A column at its WIP limit refuses one more card.
-//! - Moving a card to `blocked` needs a comment, and mails the operator and
-//!   the card's creator.
+//! - Moving a card to the `blocked` column needs a comment, and mails the
+//!   operator and the card's creator.
 //! - `done` is terminal for members. On `done`, every linked mail thread gets
 //!   a notice, and dependent cards that are now free raise `unblocked`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -24,31 +29,65 @@ use crate::events::EventDraft;
 use crate::policy;
 use crate::store::mail::{self, Address, Outgoing};
 use crate::store::session_refs::{self, SessionRef};
-use crate::store::{Page, Paged, agents, json_col, valid_name};
+use crate::store::{Page, Paged, agents, json_col};
 
-/// The columns of a new board, in order.
-pub const DEFAULT_COLUMNS: [&str; 6] = [
-    "backlog",
-    "ready",
-    "in_progress",
-    "review",
-    "blocked",
-    "done",
+/// The columns of a new board, in order, with their roles.
+pub const DEFAULT_COLUMNS: [(&str, Option<&str>); 6] = [
+    ("backlog", None),
+    ("ready", None),
+    ("in_progress", Some(WORKING)),
+    ("review", None),
+    ("blocked", Some(BLOCKED)),
+    ("done", None),
 ];
-/// Columns that the rules depend on. They cannot be renamed or removed.
-pub const REQUIRED_COLUMNS: [&str; 4] = ["backlog", "in_progress", "blocked", "done"];
 
+/// The first column. New cards go here. It cannot be removed, renamed, or
+/// moved, and takes no WIP limit and no role.
 pub const BACKLOG: &str = "backlog";
-pub const IN_PROGRESS: &str = "in_progress";
-pub const BLOCKED: &str = "blocked";
+/// The last column, as `backlog` is the first.
 pub const DONE: &str = "done";
+/// The role of the column that `card claim` moves a card to. Also the
+/// alias of that column in a move or a filter.
+pub const WORKING: &str = "working";
+/// The role of the column where a move needs a comment and mails a notice.
+/// Also the alias of that column in a move or a filter.
+pub const BLOCKED: &str = "blocked";
+/// The roles a column can have.
+pub const ROLES: [&str; 2] = [WORKING, BLOCKED];
+/// The most characters of a column title.
+pub const TITLE_MAX: usize = 40;
+
+/// Is `name` one of the two fixed columns?
+pub fn is_fixed(name: &str) -> bool {
+    name == BACKLOG || name == DONE
+}
+
+/// The title of a column with no stored title: the name with spaces for
+/// the underscores (`in_progress` -> `in progress`).
+pub fn default_title(name: &str) -> String {
+    name.replace('_', " ")
+}
+
+/// A new column name: a lower-case letter, then at most 31 lower-case
+/// letters, digits, or underscores.
+pub fn valid_column_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
+        && name.len() <= 32
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Column {
     pub name: String,
+    /// The display label: the stored title, or [`default_title`].
+    pub title: String,
     pub position: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wip_limit: Option<i64>,
+    /// `working`, `blocked`, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// Cards in the column, archived cards not counted.
     pub count: i64,
 }
@@ -135,7 +174,15 @@ pub struct Board {
 struct ColumnRow {
     id: i64,
     name: String,
+    title: Option<String>,
     wip_limit: Option<i64>,
+    role: Option<String>,
+}
+
+impl ColumnRow {
+    fn is(&self, role: &str) -> bool {
+        self.role.as_deref() == Some(role)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +191,8 @@ struct CardRow {
     project: String,
     column_id: i64,
     column: String,
+    /// The role of the card's column.
+    column_role: Option<String>,
     position: i64,
     title: String,
     body: String,
@@ -167,6 +216,7 @@ fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
         project: r.get("project")?,
         column_id: r.get("column_id")?,
         column: r.get("column_name")?,
+        column_role: r.get("column_role")?,
         position: r.get("position")?,
         title: r.get("title")?,
         body: r.get("body")?,
@@ -185,7 +235,7 @@ fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
     })
 }
 
-const CARD_SELECT: &str = "SELECT c.*, k.name AS column_name FROM cards c
+const CARD_SELECT: &str = "SELECT c.*, k.name AS column_name, k.role AS column_role FROM cards c
                            JOIN board_columns k ON k.id = c.column_id";
 
 /// A readable name for a stored address.
@@ -202,10 +252,10 @@ pub fn create_board(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
         "INSERT INTO boards (project, created_at) VALUES (?1, ?2)",
         params![project, now()],
     )?;
-    for (i, name) in DEFAULT_COLUMNS.iter().enumerate() {
+    for (i, (name, role)) in DEFAULT_COLUMNS.iter().enumerate() {
         t.execute(
-            "INSERT INTO board_columns (project, name, position) VALUES (?1, ?2, ?3)",
-            params![project, name, i as i64],
+            "INSERT INTO board_columns (project, name, position, role) VALUES (?1, ?2, ?3, ?4)",
+            params![project, name, i as i64, role],
         )?;
     }
     Ok(())
@@ -213,27 +263,71 @@ pub fn create_board(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
 
 fn column_rows(conn: &Connection, project: &str) -> ApiResult<Vec<ColumnRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, wip_limit FROM board_columns WHERE project = ?1 ORDER BY position",
+        "SELECT id, name, title, wip_limit, role FROM board_columns WHERE project = ?1
+         ORDER BY position",
     )?;
     let rows = stmt
         .query_map([project], |r| {
             Ok(ColumnRow {
                 id: r.get(0)?,
                 name: r.get(1)?,
-                wip_limit: r.get(2)?,
+                title: r.get(2)?,
+                wip_limit: r.get(3)?,
+                role: r.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
+fn names_of(cols: &[ColumnRow]) -> String {
+    cols.iter()
+        .map(|c| match &c.role {
+            Some(r) => format!("{} ({r})", c.name),
+            None => c.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Find a column by its name, or by a role alias: `working` or `blocked`
+/// names the column with that role. A column name wins over an alias.
 fn column(conn: &Connection, project: &str, name: &str) -> ApiResult<ColumnRow> {
-    let cols = column_rows(conn, project)?;
-    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
-    let names = names.join(", ");
-    cols.into_iter()
-        .find(|c| c.name == name)
-        .ok_or_else(|| ApiError::invalid(format!("no column `{name}`; columns: {names}")))
+    let mut cols = column_rows(conn, project)?;
+    let names = names_of(&cols);
+    if let Some(i) = cols.iter().position(|c| c.name == name) {
+        return Ok(cols.swap_remove(i));
+    }
+    if ROLES.contains(&name) {
+        return cols.into_iter().find(|c| c.is(name)).ok_or_else(|| {
+            ApiError::invalid(format!(
+                "the board of `{project}` has no `{name}` column (no column has the role \
+                 `{name}`); columns: {names}"
+            ))
+        });
+    }
+    Err(ApiError::invalid(format!(
+        "no column `{name}`; columns: {names}"
+    )))
+}
+
+/// The name of the column that `name` means on the board of `project`: a
+/// column name, or a role alias (`working`, `blocked`). 422 when there is
+/// no such column.
+pub fn resolve_column(conn: &Connection, project: &str, name: &str) -> ApiResult<String> {
+    Ok(column(conn, project, name)?.name)
+}
+
+/// The role of the column `name` of `project`, if it has one.
+pub fn role_of(conn: &Connection, project: &str, name: &str) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT role FROM board_columns WHERE project = ?1 AND name = ?2",
+            params![project, name],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten())
 }
 
 fn active_count(conn: &Connection, column_id: i64) -> ApiResult<i64> {
@@ -405,9 +499,11 @@ pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
     for (i, c) in column_rows(conn, project)?.into_iter().enumerate() {
         columns.push(Column {
             count: active_count(conn, c.id)?,
+            title: c.title.unwrap_or_else(|| default_title(&c.name)),
             name: c.name,
             position: i as i64,
             wip_limit: c.wip_limit,
+            role: c.role,
         });
     }
     let mut stmt = conn.prepare(&format!(
@@ -451,6 +547,13 @@ pub fn list_cards(
 ) -> ApiResult<Paged<Card>> {
     let limit = page.limit();
     let after: i64 = page.cursor().and_then(|c| c.parse().ok()).unwrap_or(0);
+    // A role alias (`working`, `blocked`) names the column with that role.
+    // An unknown name matches no card, as before.
+    let column_name = f.column.as_deref().map(|c| {
+        column(conn, project, c)
+            .map(|k| k.name)
+            .unwrap_or_else(|_| c.to_owned())
+    });
     let mut stmt = conn.prepare(&format!(
         "{CARD_SELECT} WHERE c.project = ?1 AND c.number > ?2
            AND (?3 IS NULL OR k.name = ?3)
@@ -465,7 +568,7 @@ pub fn list_cards(
             params![
                 project,
                 after,
-                f.column,
+                column_name,
                 assignee,
                 f.unassigned as i64,
                 f.label,
@@ -507,6 +610,7 @@ fn card_event(t: &mut Tx<'_>, card: &CardRow, change: &str, mut extra: Value) ->
         map.insert("change".into(), json!(change));
         map.insert("title".into(), json!(card.title));
         map.insert("column".into(), json!(card.column));
+        map.insert("column_role".into(), json!(card.column_role));
         map.insert("actor_name".into(), json!(actor_name));
         // The session of an agent actor, for the card's session list.
         if let Some(sid) = session_refs::current_of(t, &t.actor)? {
@@ -585,8 +689,8 @@ fn notify_blocked(t: &mut Tx<'_>, actor: &Actor, card: &CardRow, comment: &str) 
     let by = name_of(t, &me)?;
     let subject = format!("{} blocked: {}", card.id, card.title);
     let body = format!(
-        "Card {} \"{}\" moved to blocked by {by}.\n\nComment:\n{comment}\n\nRun `terrarium card show {}`.",
-        card.id, card.title, card.id
+        "Card {} \"{}\" moved to {} (the blocked column) by {by}.\n\nComment:\n{comment}\n\nRun `terrarium card show {}`.",
+        card.id, card.title, card.column, card.id
     );
     let mut thread: Option<String> = None;
     for recipient in to.iter().filter(|a| a.key() != me) {
@@ -753,7 +857,7 @@ fn check_move(
     if to.id == card.column_id {
         return Ok(());
     }
-    if to.name == IN_PROGRESS {
+    if to.is(WORKING) {
         let open = unmet(t, &card.id)?;
         if !open.is_empty() {
             return Err(ApiError::new(
@@ -776,12 +880,12 @@ fn check_move(
         )
         .with_details(json!({"column": to.name, "wip_limit": limit})));
     }
-    if to.name == BLOCKED && comment.is_none_or(|c| c.trim().is_empty()) {
+    if to.is(BLOCKED) && comment.is_none_or(|c| c.trim().is_empty()) {
         return Err(ApiError::new(
             Code::CommentRequired,
             format!(
-                "moving {} to blocked needs a comment that says what is needed",
-                card.id
+                "moving {} to `{}` (the blocked column) needs a comment that says what is needed",
+                card.id, to.name
             ),
         ));
     }
@@ -834,7 +938,8 @@ fn apply_move(
         t,
         &moved,
         "moved",
-        json!({"from": card.column, "to": to.name, "comment": comment, "assignee": moved.assignee}),
+        json!({"from": card.column, "to": to.name, "from_role": card.column_role,
+               "to_role": to.role, "comment": comment, "assignee": moved.assignee}),
     )?;
     if card.column == DONE {
         t.audit(
@@ -844,7 +949,7 @@ fn apply_move(
             json!({"to": to.name}),
         )?;
     }
-    if to.name == BLOCKED {
+    if to.is(BLOCKED) {
         notify_blocked(t, actor, &moved, comment.unwrap_or_default())?;
     }
     if to.name == DONE {
@@ -960,7 +1065,7 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
     get_card(t, &card.id)
 }
 
-/// Assign a card to the caller and move it to `in_progress`.
+/// Assign a card to the caller and move it to the `working` column.
 pub fn claim_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<Card> {
     let card = find_row(t, id)?;
     policy::read_project(actor, &card.project)?;
@@ -985,7 +1090,7 @@ pub fn claim_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<Card> {
         card_event(t, &row, "claimed", json!({"assignee": me}))?;
     }
     let row = find_row(t, &card.id)?;
-    let to = column(t, &card.project, IN_PROGRESS)?;
+    let to = column(t, &card.project, WORKING)?;
     check_move(t, actor, &row, &to, None)?;
     apply_move(t, actor, &row, &to, None, None)?;
     get_card(t, &card.id)
@@ -1016,7 +1121,7 @@ pub struct NewCard {
     /// A message ID: the card takes its subject, body, and thread.
     #[serde(default)]
     pub from_mail: Option<String>,
-    /// Needed when `column` is `blocked`.
+    /// Needed when `column` is the `blocked` column.
     #[serde(default)]
     pub comment: Option<String>,
     /// The ETA: an RFC 3339 time or a duration from now (`2h30m`).
@@ -1153,8 +1258,14 @@ pub fn create_card(
         "created",
         json!({"from_mail": new.from_mail, "thread_id": thread}),
     )?;
-    if let Some(col) = new.column.as_deref().filter(|c| *c != BACKLOG) {
-        let to = column(t, project, col)?;
+    // A role alias (`working`, `blocked`) names the column with that role.
+    let to = new
+        .column
+        .as_deref()
+        .map(|c| column(t, project, c))
+        .transpose()?
+        .filter(|k| k.name != BACKLOG);
+    if let Some(to) = to {
         if to.name == DONE && !policy::is_admin_of(actor, project) {
             return Err(ApiError::forbidden(
                 "only a project admin or the operator makes a card in done",
@@ -1440,9 +1551,19 @@ pub fn add_link(t: &mut Tx<'_>, actor: &Actor, id: &str, link: &NewLink) -> ApiR
 #[serde(deny_unknown_fields)]
 pub struct ColumnSpec {
     pub name: String,
+    /// The display label. Absent: the column keeps its title (a new column:
+    /// the default). Null, empty, or equal to [`default_title`]: the
+    /// default.
+    #[serde(default, deserialize_with = "double_option")]
+    pub title: Option<Option<String>>,
+    /// Absent or null: no limit.
     #[serde(default)]
     pub wip_limit: Option<i64>,
-    /// Rename this existing column to `name`.
+    /// `working`, `blocked`, or null for none. Absent: the column keeps its
+    /// role (a new column: none).
+    #[serde(default, deserialize_with = "double_option")]
+    pub role: Option<Option<String>>,
+    /// Rename this existing column to `name`. Its cards stay in it.
     #[serde(default)]
     pub rename_from: Option<String>,
     /// Ignored: the order of the list is the order of the board.
@@ -1453,92 +1574,242 @@ pub struct ColumnSpec {
     pub count: Option<i64>,
 }
 
-/// Set the columns: the list is the whole board, in order. A column that is
-/// not in the list is removed; it must have no cards.
+/// A checked [`ColumnSpec`].
+struct Wanted {
+    name: String,
+    title: Option<String>,
+    wip_limit: Option<i64>,
+    role: Option<String>,
+    /// The existing column it keeps (its ID), or `None` for a new column.
+    keeps: Option<i64>,
+    rename_from: Option<String>,
+}
+
+fn check_column_title(name: &str, title: Option<&str>) -> ApiResult<Option<String>> {
+    let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    if t.chars().count() > TITLE_MAX {
+        return Err(ApiError::invalid(format!(
+            "column `{name}`: the title has more than {TITLE_MAX} characters"
+        )));
+    }
+    if t.chars().any(char::is_control) {
+        return Err(ApiError::invalid(format!(
+            "column `{name}`: the title has a control character"
+        )));
+    }
+    Ok((t != default_title(name)).then(|| t.to_owned()))
+}
+
+/// Check the whole list against the rules of [`set_columns`].
+fn check_columns(current: &[ColumnRow], specs: &[ColumnSpec]) -> ApiResult<Vec<Wanted>> {
+    let by_name: HashMap<&str, &ColumnRow> = current.iter().map(|c| (c.name.as_str(), c)).collect();
+    if specs.first().map(|s| s.name.as_str()) != Some(BACKLOG)
+        || specs.first().is_some_and(|s| s.rename_from.is_some())
+    {
+        return Err(ApiError::invalid(
+            "`backlog` must be the first column; it cannot be removed, renamed, or moved",
+        ));
+    }
+    if specs.last().map(|s| s.name.as_str()) != Some(DONE)
+        || specs.last().is_some_and(|s| s.rename_from.is_some())
+    {
+        return Err(ApiError::invalid(
+            "`done` must be the last column; it cannot be removed, renamed, or moved",
+        ));
+    }
+    let mut names = HashSet::new();
+    let mut sources = HashSet::new();
+    let mut out = Vec::new();
+    for s in specs {
+        let name = s.name.as_str();
+        if !names.insert(name) {
+            return Err(ApiError::invalid(format!(
+                "column `{name}` is twice in the list"
+            )));
+        }
+        let source = s.rename_from.as_deref().unwrap_or(name);
+        if !sources.insert(source) {
+            return Err(ApiError::invalid(format!(
+                "column `{source}` is twice in the list"
+            )));
+        }
+        let old: Option<&ColumnRow> = match &s.rename_from {
+            Some(from) => {
+                let Some(c) = by_name.get(from.as_str()) else {
+                    return Err(ApiError::invalid(format!("no column `{from}` to rename")));
+                };
+                if is_fixed(from) {
+                    return Err(ApiError::invalid(format!(
+                        "column `{from}` cannot be renamed"
+                    )));
+                }
+                if from != name && by_name.contains_key(name) {
+                    return Err(ApiError::invalid(format!(
+                        "column `{name}` exists; rename it first, or choose another name"
+                    )));
+                }
+                Some(*c)
+            }
+            None => by_name.get(name).copied(),
+        };
+        let keeps = old.map(|c| c.id);
+        // A new name follows the strict rule; a name that the board has
+        // already stays valid.
+        let is_new_name =
+            s.rename_from.as_deref().is_some_and(|f| f != name) || !by_name.contains_key(name);
+        if is_new_name && !valid_column_name(name) {
+            return Err(ApiError::invalid(format!(
+                "bad column name `{name}`: a lower-case letter, then at most 31 lower-case \
+                 letters, digits, or underscores"
+            )));
+        }
+        if is_new_name && is_fixed(name) {
+            return Err(ApiError::invalid(format!(
+                "`{name}` is a fixed column; another column cannot take its name"
+            )));
+        }
+        if let Some(w) = s.wip_limit {
+            if is_fixed(name) {
+                return Err(ApiError::invalid(format!(
+                    "column `{name}` takes no WIP limit"
+                )));
+            }
+            if w < 1 {
+                return Err(ApiError::invalid(format!(
+                    "column `{name}`: wip_limit must be 1 or more, or null"
+                )));
+            }
+        }
+        let role = match &s.role {
+            Some(r) => r.as_deref(),
+            None => old.and_then(|c| c.role.as_deref()),
+        };
+        let role = role.map(str::trim).filter(|r| !r.is_empty());
+        if let Some(r) = role {
+            if !ROLES.contains(&r) {
+                return Err(ApiError::invalid(format!(
+                    "column `{name}`: bad role `{r}`; use working, blocked, or null"
+                )));
+            }
+            if is_fixed(name) {
+                return Err(ApiError::invalid(format!("column `{name}` takes no role")));
+            }
+        }
+        // The aliases `working` and `blocked` must name one column only.
+        if ROLES.contains(&name) && role != Some(name) {
+            return Err(ApiError::invalid(format!(
+                "the name `{name}` is kept for the column with the role `{name}`; \
+                 give this column the role `{name}`, or another name"
+            )));
+        }
+        out.push(Wanted {
+            title: match &s.title {
+                Some(t) => check_column_title(name, t.as_deref())?,
+                // A kept title that is now the default of a new name goes.
+                None => check_column_title(name, old.and_then(|c| c.title.as_deref()))?,
+            },
+            name: name.to_owned(),
+            wip_limit: s.wip_limit,
+            role: role.map(str::to_owned),
+            keeps,
+            rename_from: s.rename_from.clone(),
+        });
+    }
+    for r in ROLES {
+        let n = out.iter().filter(|w| w.role.as_deref() == Some(r)).count();
+        if r == WORKING && n != 1 {
+            return Err(ApiError::invalid(format!(
+                "exactly one column must have the role `working` (`terrarium card claim` moves \
+                 a card there); this list has {n}"
+            )));
+        }
+        if r == BLOCKED && n > 1 {
+            return Err(ApiError::invalid(format!(
+                "at most one column can have the role `blocked`; this list has {n}"
+            )));
+        }
+    }
+    Ok(out)
+}
+
+/// Set the columns: the list is the whole board, in order (PLAN §13).
+///
+/// - `backlog` is first and `done` is last. They stay, keep their names,
+///   and take no WIP limit and no role.
+/// - Exactly one column has the role `working`; at most one has `blocked`.
+/// - A column that is not in the list is removed; it must have no active
+///   cards (409, with the cards).
+/// - `rename_from` renames a column; its cards stay in it.
+/// - A WIP limit lower than the count of the column is allowed: the column
+///   refuses more cards until it is under the limit.
 pub fn set_columns(
     t: &mut Tx<'_>,
     actor: &Actor,
     project: &str,
     specs: &[ColumnSpec],
 ) -> ApiResult<Board> {
-    policy::admin_project(actor, project, "editing columns and WIP limits")?;
+    policy::admin_project(actor, project, "editing the board columns")?;
     let current = column_rows(t, project)?;
-    let exists = |n: &str| current.iter().any(|c| c.name == n);
-    let mut seen = HashSet::new();
-    for s in specs {
-        if !valid_name(&s.name) {
-            return Err(ApiError::invalid(format!("bad column name `{}`", s.name)));
-        }
-        if !seen.insert(s.name.clone()) {
-            return Err(ApiError::invalid(format!(
-                "column `{}` is twice in the list",
-                s.name
-            )));
-        }
-        if s.wip_limit.is_some_and(|w| w < 1) {
-            return Err(ApiError::invalid(format!(
-                "column `{}`: wip_limit must be 1 or more, or null",
-                s.name
-            )));
-        }
-        if let Some(from) = &s.rename_from {
-            if !exists(from) {
-                return Err(ApiError::invalid(format!("no column `{from}` to rename")));
-            }
-            if REQUIRED_COLUMNS.contains(&from.as_str()) {
-                return Err(ApiError::invalid(format!(
-                    "column `{from}` cannot be renamed"
-                )));
-            }
-            if exists(&s.name) {
-                return Err(ApiError::invalid(format!("column `{}` exists", s.name)));
-            }
-        }
-    }
-    for req in REQUIRED_COLUMNS {
-        if !seen.contains(req) {
-            return Err(ApiError::invalid(format!(
-                "the board needs the column `{req}`"
-            )));
-        }
-    }
-    let kept: HashSet<&str> = specs
-        .iter()
-        .map(|s| s.rename_from.as_deref().unwrap_or(&s.name))
-        .collect();
+    let wanted = check_columns(&current, specs)?;
+    let kept: HashSet<i64> = wanted.iter().filter_map(|w| w.keeps).collect();
     let backlog = column(t, project, BACKLOG)?;
-    for c in current.iter().filter(|c| !kept.contains(c.name.as_str())) {
-        let n = active_count(t, c.id)?;
-        if n > 0 {
+    for c in current.iter().filter(|c| !kept.contains(&c.id)) {
+        let mut stmt = t.prepare(
+            "SELECT id FROM cards WHERE column_id = ?1 AND archived = 0 ORDER BY number",
+        )?;
+        let cards = stmt
+            .query_map([c.id], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        if !cards.is_empty() {
             return Err(ApiError::conflict(format!(
-                "column `{}` has {n} card(s); move them first",
-                c.name
-            )));
+                "column `{}` has {} card(s): {}; move them first",
+                c.name,
+                cards.len(),
+                cards.join(", ")
+            ))
+            .with_details(json!({"column": c.name, "cards": cards})));
         }
+        // Archived cards of a removed column go to the backlog.
         t.execute(
             "UPDATE cards SET column_id = ?2 WHERE column_id = ?1",
             params![c.id, backlog.id],
         )?;
         t.execute("DELETE FROM board_columns WHERE id = ?1", [c.id])?;
     }
-    for (i, s) in specs.iter().enumerate() {
-        let source = s.rename_from.as_deref().unwrap_or(&s.name);
-        let updated = t.execute(
-            "UPDATE board_columns SET name = ?3, position = ?4, wip_limit = ?5
-             WHERE project = ?1 AND name = ?2",
-            params![project, source, s.name, i as i64, s.wip_limit],
-        )?;
-        if updated == 0 {
-            t.execute(
-                "INSERT INTO board_columns (project, name, position, wip_limit)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![project, s.name, i as i64, s.wip_limit],
-            )?;
+    // Free the names and the roles first, so that the UNIQUE indexes do
+    // not see a half-done change (two columns that swap a role).
+    t.execute(
+        "UPDATE board_columns SET name = '#' || id, role = NULL WHERE project = ?1",
+        [project],
+    )?;
+    for (i, w) in wanted.iter().enumerate() {
+        match w.keeps {
+            Some(id) => {
+                t.execute(
+                    "UPDATE board_columns SET name = ?2, title = ?3, position = ?4,
+                        wip_limit = ?5, role = ?6
+                     WHERE id = ?1",
+                    params![id, w.name, w.title, i as i64, w.wip_limit, w.role],
+                )?;
+            }
+            None => {
+                t.execute(
+                    "INSERT INTO board_columns (project, name, title, position, wip_limit, role)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![project, w.name, w.title, i as i64, w.wip_limit, w.role],
+                )?;
+            }
         }
     }
-    let after: Vec<Value> = specs
+    let after: Vec<Value> = wanted
         .iter()
-        .map(|s| json!({"name": s.name, "wip_limit": s.wip_limit}))
+        .map(|w| {
+            json!({"name": w.name, "title": w.title, "wip_limit": w.wip_limit, "role": w.role,
+                   "rename_from": w.rename_from})
+        })
         .collect();
     t.audit(
         "board.columns",

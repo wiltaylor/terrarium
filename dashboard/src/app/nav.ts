@@ -21,7 +21,6 @@ export const PROJECT_ITEMS = [
  */
 export const BOARD_TABS = [
   { path: "", label: "Cards" },
-  { path: "versions", label: "Versions" },
   { path: "artifacts", label: "Artifacts" },
   // The schedules and triggers of the project; the page keeps its own `?tab=triggers` sub-tab.
   { path: "schedules", label: "Schedules" },
@@ -129,10 +128,13 @@ export const PROJECT_LOGS_TABS = [
  *   `/p/:project/settings` opens the first tab. The Repos panel left the
  *   General tab for the Repos item of the project (/p/:project/repos); the
  *   General tab keeps its path.
- * - The project Versions and Artifacts pages are tabs of the board screen
- *   (BOARD_TABS). The daemon puts `/p/<project>/versions/<id>` in
- *   `Version.url` and in the review mail, so the old paths stay as
- *   redirects.
+ * - The project Artifacts page is a tab of the board screen (BOARD_TABS).
+ * - The Versions tab of the board is gone: the Cards tab manages versions
+ *   (version rows, the Version modal, the toolbar version menu). The daemon
+ *   puts `/p/<project>/versions/<id>` in `Version.url` and in the review
+ *   mail, so the old paths, and the paths of the old tab, redirect in one
+ *   hop to `/p/<project>/board?rows=version&version=<id>`, which opens the
+ *   version.
  * - The project Schedules page is a tab of the board screen (BOARD_TABS).
  *   A schedule link of an old mail or a bookmark has the old path with a
  *   query (`?open=...&tab=triggers`), so the old path stays as a redirect.
@@ -162,8 +164,10 @@ export const MOVED_ROUTES = [
   { path: "/p/:project/secrets", to: "/p/:project/settings/secrets" },
   { path: "/p/:project/templates", to: "/p/:project/settings/templates" },
   { path: "/p/:project/settings", to: "/p/:project/settings/general" },
-  { path: "/p/:project/versions", to: "/p/:project/board/versions" },
-  { path: "/p/:project/versions/:id", to: "/p/:project/board/versions/:id" },
+  { path: "/p/:project/versions", to: "/p/:project/board?rows=version" },
+  { path: "/p/:project/versions/:id", to: "/p/:project/board?rows=version&version=:id" },
+  { path: "/p/:project/board/versions", to: "/p/:project/board?rows=version" },
+  { path: "/p/:project/board/versions/:id", to: "/p/:project/board?rows=version&version=:id" },
   { path: "/p/:project/artifacts", to: "/p/:project/board/artifacts" },
   { path: "/p/:project/artifacts/:id", to: "/p/:project/board/artifacts/:id" },
   { path: "/p/:project/schedules", to: "/p/:project/board/schedules" },
@@ -176,6 +180,20 @@ export const MOVED_ROUTES = [
   { path: "/skills/:name", to: "/settings/skills/:name" },
   { path: "/targets", to: "/settings/targets" },
 ] as const;
+
+/**
+ * The redirect target with the query of the old URL. A `to` with its own query keeps its keys; the old query
+ * adds the keys that it does not have.
+ */
+export function withQuery(to: string, search: string): string {
+  const old = search.replace(/^\?/, "");
+  if (!old) return to;
+  const at = to.indexOf("?");
+  if (at < 0) return `${to}?${old}`;
+  const merged = new URLSearchParams(to.slice(at + 1));
+  for (const [k, v] of new URLSearchParams(old)) if (!merged.has(k)) merged.set(k, v);
+  return `${to.slice(0, at)}?${merged.toString()}`;
+}
 
 /**
  * The new place of a moved path, or undefined. A `/*name` splat at the end

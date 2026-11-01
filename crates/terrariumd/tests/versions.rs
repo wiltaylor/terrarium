@@ -501,3 +501,89 @@ async fn agent_changes_show_in_the_agent_event_stream() {
         "{events:#?}"
     );
 }
+
+#[tokio::test]
+async fn archive_hides_a_version_and_keeps_its_history() {
+    let td = setup().await;
+    td.agent("proj", "w2", json!({})).await;
+    let c1 = card(&td, "Parser").await;
+    let v = td
+        .post_as(
+            "proj/w1",
+            "/api/projects/proj/versions",
+            json!({"name": "v1", "cards": [c1]}),
+        )
+        .await;
+    let id = v.ok()["id"].as_str().unwrap().to_owned();
+    assert_eq!(v.ok()["archived"], false);
+    td.post_as(
+        "proj/w1",
+        "/api/projects/proj/versions",
+        json!({"name": "v2"}),
+    )
+    .await
+    .ok();
+    td.post_empty_as("proj/w1", &format!("/api/versions/{id}/submit"))
+        .await
+        .ok();
+    // Another member may not; the creator, a project admin, and the
+    // operator may.
+    td.post_empty_as("proj/w2", &format!("/api/versions/{id}/archive"))
+        .await
+        .err(403, "forbidden");
+    td.post_empty_as("other/x", &format!("/api/versions/{id}/archive"))
+        .await
+        .err(403, "forbidden");
+    let a = td
+        .post_empty_as("proj/w1", &format!("/api/versions/{id}/archive"))
+        .await;
+    let a = a.ok();
+    assert_eq!(a["archived"], true);
+    assert_eq!(a["status"], "in_review");
+    assert!(a["archived_at"].is_string());
+    assert_eq!(a["reviews"].as_array().unwrap().len(), 1);
+    // Again: no change, no second event.
+    td.post_empty_as("proj/lead", &format!("/api/versions/{id}/archive"))
+        .await
+        .ok();
+    let names = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let l = td.get("/api/projects/proj/versions").await;
+    assert_eq!(names(l.ok()), ["v2"]);
+    let l = td.get("/api/projects/proj/versions?archived=true").await;
+    assert_eq!(names(l.ok()), ["v1"]);
+    let l = td.get("/api/projects/proj/versions?archived=all").await;
+    assert_eq!(names(l.ok()), ["v2", "v1"]);
+    td.get("/api/projects/proj/versions?archived=maybe")
+        .await
+        .err(400, "bad_request");
+    // An archived version is still there by ID.
+    assert_eq!(
+        td.get(&format!("/api/versions/{id}")).await.ok()["archived"],
+        true
+    );
+    let ev = td
+        .get("/api/events?kind=version.archived&project=proj")
+        .await;
+    let ev = ev.ok().as_array().unwrap().clone();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0]["data"]["archived"], true);
+    let audit = td.get("/api/audit?action=version.archive").await;
+    assert_eq!(audit.ok().as_array().unwrap().len(), 1);
+    let u = td
+        .post_empty(&format!("/api/versions/{id}/unarchive"))
+        .await;
+    assert_eq!(u.ok()["archived"], false);
+    assert!(u.ok().get("archived_at").is_none());
+    let l = td.get("/api/projects/proj/versions").await;
+    assert_eq!(names(l.ok()), ["v2", "v1"]);
+    let ev = td
+        .get("/api/events?kind=version.unarchived&project=proj")
+        .await;
+    assert_eq!(ev.ok().as_array().unwrap().len(), 1);
+}

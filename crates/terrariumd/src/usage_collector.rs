@@ -13,7 +13,7 @@
 //! counts nothing twice.
 //!
 //! Each sample also carries the card the agent works on when the collector
-//! stores it: the agent's card in `in_progress` that is assigned to it
+//! stores it: the agent's card in the `working` column, assigned to it
 //! ([`ustore::current_card`]), else none. The collector caches the answer
 //! per agent and drops an agent's entry on each `card` event that names
 //! the agent (as the event's agent, `assignee`, or `previous`), so a

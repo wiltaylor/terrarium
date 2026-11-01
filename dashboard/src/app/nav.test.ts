@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import app from "./App.tsx?raw";
 import layout from "./Layout.tsx?raw";
-import { BOARD_TABS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
+import { BOARD_TABS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
 
 describe("navigation", () => {
   it("has no Spend item; the project has Logs, not Inbox or Mail, with a route", () => {
@@ -174,7 +174,7 @@ describe("navigation", () => {
     expect(movedTo("/settings/hosts")).toBeUndefined();
     expect(movedTo("/settings/account")).toBeUndefined();
     // The redirect keeps the query (the add-API-key link opens the wizard).
-    expect(app).toMatch(/\$\{location\.search\}/);
+    expect(app).toMatch(/withQuery\(movedTo\(location\.pathname\) \?\? r\.to, location\.search\)/);
   });
 
   it("redirects the old Spend route to Home, where the usage split lives", () => {
@@ -215,6 +215,8 @@ describe("navigation", () => {
       "/p/:project/settings",
       "/p/:project/versions",
       "/p/:project/versions/:id",
+      "/p/:project/board/versions",
+      "/p/:project/board/versions/:id",
       "/p/:project/artifacts",
       "/p/:project/artifacts/:id",
       "/p/:project/schedules",
@@ -251,10 +253,9 @@ describe("navigation", () => {
     }
   });
 
-  it("has Board with the tabs Cards, Versions, Artifacts, Schedules, each with a route; Cards is the index route at /p/:project/board", () => {
+  it("has Board with the tabs Cards, Artifacts, Schedules, each with a route; Cards is the index route at /p/:project/board", () => {
     expect(BOARD_TABS).toEqual([
       { path: "", label: "Cards" },
-      { path: "versions", label: "Versions" },
       { path: "artifacts", label: "Artifacts" },
       { path: "schedules", label: "Schedules" },
     ]);
@@ -262,13 +263,14 @@ describe("navigation", () => {
     const start = app.indexOf('<Route path="/p/:project/board"');
     const block = app.slice(start, app.indexOf("</Route>", start));
     expect(block).toMatch(/path="\/" component=\{BoardPage\}/);
-    expect(block).toMatch(/path="\/versions\/:id\?" component=\{VersionsPage\}/);
+    // The Cards tab manages the versions: no Versions tab.
+    expect(app).not.toMatch(/VersionsPage/);
     expect(block).toMatch(/path="\/artifacts\/:id\?" component=\{ArtifactsPage\}/);
     expect(block).toMatch(/path="\/schedules" component=\{SchedulesPage\}/);
     for (const gone of ["versions", "artifacts", "wiki", "memory"]) expect(app).not.toMatch(new RegExp(`path="/p/:project/${gone}[^"]*" component=`));
     // The Cards tab and its `?card=` links keep the path.
     expect(movedTo("/p/terrarium/board")).toBeUndefined();
-    for (const now of ["/p/terrarium/board/versions", "/p/terrarium/board/versions/01ABC", "/p/terrarium/board/artifacts/ART-2", "/p/terrarium/board/schedules"]) expect(movedTo(now)).toBeUndefined();
+    for (const now of ["/p/terrarium/board/artifacts/ART-2", "/p/terrarium/board/schedules"]) expect(movedTo(now)).toBeUndefined();
   });
 
   it("has Knowledge with the tabs Wiki, Memory, and DB, each with a route; /p/:project/knowledge opens the Wiki tab", () => {
@@ -290,12 +292,20 @@ describe("navigation", () => {
     for (const now of ["/p/terrarium/knowledge/wiki", "/p/terrarium/knowledge/wiki/designs/runner-v2", "/p/terrarium/knowledge/memory", "/p/terrarium/knowledge/db", "/p/terrarium/knowledge/db/bug"]) expect(movedTo(now)).toBeUndefined();
   });
 
-  it("redirects the old Versions and Artifacts paths to the board tabs, with the ID", () => {
-    expect(movedTo("/p/terrarium/versions")).toBe("/p/terrarium/board/versions");
-    expect(movedTo("/p/terrarium/versions/")).toBe("/p/terrarium/board/versions");
-    // The daemon links `/p/<project>/versions/<id>` (Version.url, the review mail).
-    expect(movedTo("/p/terrarium/versions/01M5PA1A0K16V6G88P3SE78WAB")).toBe("/p/terrarium/board/versions/01M5PA1A0K16V6G88P3SE78WAB");
-    expect(movedTo("/p/my%20app/versions/v0.1.0/")).toBe("/p/my%20app/board/versions/v0.1.0");
+  it("redirects the old Versions paths in one hop to the version rows of the Cards tab, and the Artifacts paths to the board tab", () => {
+    expect(movedTo("/p/terrarium/versions")).toBe("/p/terrarium/board?rows=version");
+    expect(movedTo("/p/terrarium/versions/")).toBe("/p/terrarium/board?rows=version");
+    // The daemon links `/p/<project>/versions/<id>` (Version.url, the review mail): the version modal opens.
+    expect(movedTo("/p/terrarium/versions/01M5PA1A0K16V6G88P3SE78WAB")).toBe("/p/terrarium/board?rows=version&version=01M5PA1A0K16V6G88P3SE78WAB");
+    expect(movedTo("/p/my%20app/versions/v0.1.0/")).toBe("/p/my%20app/board?rows=version&version=v0.1.0");
+    // The paths of the old Versions tab.
+    expect(movedTo("/p/terrarium/board/versions")).toBe("/p/terrarium/board?rows=version");
+    expect(movedTo("/p/terrarium/board/versions/01ABC")).toBe("/p/terrarium/board?rows=version&version=01ABC");
+    // The query of the old URL joins the query of the target.
+    expect(withQuery("/p/t/board?rows=version&version=X", "?card=TER-1")).toBe("/p/t/board?rows=version&version=X&card=TER-1");
+    expect(withQuery("/p/t/board?rows=version", "?rows=none")).toBe("/p/t/board?rows=version");
+    expect(withQuery("/logs/mail", "?thread=T")).toBe("/logs/mail?thread=T");
+    expect(withQuery("/logs/mail", "")).toBe("/logs/mail");
     expect(movedTo("/p/terrarium/artifacts")).toBe("/p/terrarium/board/artifacts");
     expect(movedTo("/p/terrarium/artifacts/ART-2")).toBe("/p/terrarium/board/artifacts/ART-2");
     expect(movedTo("/p/terrarium/versions/a/b")).toBeUndefined();
@@ -322,7 +332,7 @@ describe("navigation", () => {
     expect(movedTo("/p/terrarium/memory")).toBe("/p/terrarium/knowledge/memory");
     expect(movedTo("/p/terrarium/memory/x")).toBeUndefined();
     // The router gives the query and the hash to the redirect (App.tsx).
-    expect(app).toMatch(/\$\{location\.search\}\$\{location\.hash\}/);
+    expect(app).toMatch(/location\.search\)\}\$\{location\.hash\}/);
   });
 
   it("has no Spend page left in the code", () => {

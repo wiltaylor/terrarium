@@ -86,6 +86,13 @@ pub struct Version {
     pub released_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_by: Option<String>,
+    /// An archived version keeps its status and history. It has no row on
+    /// the board and is not in the default list.
+    pub archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_by: Option<String>,
     /// The dashboard page of the version.
     pub url: String,
     pub cards: Vec<VersionCard>,
@@ -112,6 +119,8 @@ pub struct VersionRow {
     pub decided_by: Option<String>,
     pub released_at: Option<String>,
     pub released_by: Option<String>,
+    pub archived_at: Option<String>,
+    pub archived_by: Option<String>,
 }
 
 fn version_row(r: &Row<'_>) -> rusqlite::Result<VersionRow> {
@@ -133,6 +142,8 @@ fn version_row(r: &Row<'_>) -> rusqlite::Result<VersionRow> {
         decided_by: r.get("decided_by")?,
         released_at: r.get("released_at")?,
         released_by: r.get("released_by")?,
+        archived_at: r.get("archived_at")?,
+        archived_by: r.get("archived_by")?,
     })
 }
 
@@ -256,6 +267,9 @@ fn render(conn: &Connection, row: VersionRow) -> ApiResult<Version> {
         decided_by: row.decided_by,
         released_at: row.released_at,
         released_by: row.released_by,
+        archived: row.archived_at.is_some(),
+        archived_at: row.archived_at,
+        archived_by: row.archived_by,
         cards,
         artifacts: arts,
         reviews,
@@ -271,6 +285,9 @@ pub fn get(conn: &Connection, actor: &Actor, key: &str) -> ApiResult<Version> {
 pub struct VersionFilter {
     pub status: Option<String>,
     pub name: Option<String>,
+    /// `false` (the default): versions that are not archived. `true`: the
+    /// archived ones. `all`: both.
+    pub archived: Option<String>,
 }
 
 /// Versions of a project, newest first. Cursor: the version ID.
@@ -289,16 +306,34 @@ pub fn list(
             STATUSES.join(", ")
         )));
     }
+    let archived = match f.archived.as_deref().unwrap_or("false") {
+        "false" => "no",
+        "true" => "yes",
+        "all" => "all",
+        a => {
+            return Err(ApiError::bad_request(format!(
+                "bad archived `{a}`: use true, false, or all"
+            )));
+        }
+    };
     let limit = page.limit();
     let before = page.cursor().unwrap_or("~").to_owned();
     let mut stmt = conn.prepare(
         "SELECT * FROM versions WHERE project = ?1 AND id < ?2
            AND (?3 IS NULL OR status = ?3) AND (?4 IS NULL OR name = ?4)
+           AND (?6 = 'all' OR (?6 = 'yes') = (archived_at IS NOT NULL))
          ORDER BY id DESC LIMIT ?5",
     )?;
     let rows = stmt
         .query_map(
-            params![project, before, f.status, f.name, (limit + 1) as i64],
+            params![
+                project,
+                before,
+                f.status,
+                f.name,
+                (limit + 1) as i64,
+                archived
+            ],
             version_row,
         )?
         .collect::<Result<Vec<_>, _>>()?;
@@ -806,6 +841,47 @@ pub fn decide(
     }
     let new = by_id(t, &row.id)?.ok_or_else(|| ApiError::internal("version vanished"))?;
     emit(t, &new, word, json!({"comment": comment, "cards": cards}))?;
+    render(t, new)
+}
+
+/// Archive a version, or take it out of the archive. The status and the
+/// review history stay; a released version can be archived too. The
+/// rights are those of an edit: the creator, a project admin, or the
+/// operator. A version that is already in that state comes back as it is.
+pub fn set_archived(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    key: &str,
+    archived: bool,
+) -> ApiResult<Version> {
+    let row = find_for(t, actor, key)?;
+    policy::edit_version(actor, &row.project, &row.created_by, &row.name)?;
+    if row.archived_at.is_some() == archived {
+        return render(t, row);
+    }
+    let at = now();
+    let (when, by) = if archived {
+        (Some(at.as_str()), Some(actor.address()))
+    } else {
+        (None, None)
+    };
+    t.execute(
+        "UPDATE versions SET archived_at = ?2, archived_by = ?3, updated_at = ?4 WHERE id = ?1",
+        params![row.id, when, by, at],
+    )?;
+    let change = if archived { "archived" } else { "unarchived" };
+    t.audit(
+        if archived {
+            "version.archive"
+        } else {
+            "version.unarchive"
+        },
+        &format!("{}/{}", row.project, row.name),
+        Some(&row.project),
+        json!({"version_id": row.id}),
+    )?;
+    let new = by_id(t, &row.id)?.ok_or_else(|| ApiError::internal("version vanished"))?;
+    emit(t, &new, change, json!({"archived": archived}))?;
     render(t, new)
 }
 

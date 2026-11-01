@@ -24,7 +24,7 @@ pub struct AgentView {
     /// `file` (declared in `agents/<name>.toml`), `api`, or
     /// `fleet:<name>` (owned by a fleet).
     pub source: String,
-    /// The card the agent has in `in_progress`, if any.
+    /// The card the agent has in the `working` column of its board, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_card: Option<String>,
     /// The template that the create copied (docs/api.md §21), if any.
@@ -182,7 +182,7 @@ fn complete(conn: &Connection, mut v: AgentView) -> ApiResult<AgentView> {
     v.current_card = conn
         .query_row(
             "SELECT c.id FROM cards c JOIN board_columns k ON k.id = c.column_id
-             WHERE c.assignee = ?1 AND k.name = 'in_progress' AND c.archived = 0
+             WHERE c.assignee = ?1 AND k.role = 'working' AND c.archived = 0
              ORDER BY c.updated_at DESC LIMIT 1",
             [&id],
             |r| r.get(0),

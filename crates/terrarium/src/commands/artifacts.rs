@@ -352,24 +352,45 @@ pub async fn version(ctx: &Ctx, cmd: &VersionCmd) -> anyhow::Result<()> {
                 ));
             })
         }
-        VersionCmd::Ls => {
+        VersionCmd::Ls { archived, all } => {
+            let which = if *all {
+                Some("all")
+            } else if *archived {
+                Some("true")
+            } else {
+                None
+            };
+            let q = query([("archived", which.map(str::to_owned))]);
             let v = Value::Array(
                 ctx.api
-                    .list(&format!("{}/versions", project_path(&p)), vec![], None)
+                    .list(&format!("{}/versions", project_path(&p)), q, None)
                     .await?,
             );
             ctx.emit(&v, |c, v| {
-                print_table(
-                    c,
-                    as_items(v),
-                    &[
-                        ("NAME", "name"),
-                        ("STATUS", "status"),
-                        ("REF", "git_ref"),
-                        ("CREATED", "created_at"),
-                    ],
-                    "no versions",
-                );
+                let mut cols = vec![
+                    ("NAME", "name"),
+                    ("STATUS", "status"),
+                    ("REF", "git_ref"),
+                    ("CREATED", "created_at"),
+                ];
+                if which.is_some() {
+                    cols.push(("ARCHIVED", "archived"));
+                }
+                print_table(c, as_items(v), &cols, "no versions");
+            })
+        }
+        VersionCmd::Archive { name } | VersionCmd::Unarchive { name } => {
+            let action = if matches!(cmd, VersionCmd::Archive { .. }) {
+                "archive"
+            } else {
+                "unarchive"
+            };
+            let v = ctx
+                .api
+                .post(&format!("{}/{action}", version_path(&p, name)), None)
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!("{action}d {name} [{}]", field(v, "status")));
             })
         }
         VersionCmd::Show { name } => {

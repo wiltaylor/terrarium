@@ -465,9 +465,15 @@ unusual, ask the operator first.
 
 ## Board
 
+Each board has its own columns: run `terrarium board columns` to see them.
+In a card command, `working` and `blocked` name the columns with those
+roles. If the board has no `ready` or `review` column, use the column for
+that step.
+
 1. When you start or are idle, run `terrarium card ls --mine`. Then run
    `terrarium card ls --unassigned --column ready`.
-2. Claim one card at a time with `terrarium card claim <id>`. Put code on a
+2. Claim one card at a time with `terrarium card claim <id>`: it moves the
+   card to the working column. Put code on a
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit and push the branch. Comment at checkpoints with
    `terrarium card comment <id> -m "..."`.
@@ -571,6 +577,8 @@ mod tests {
             "terrarium card ls --mine",
             "terrarium card claim",
             "terrarium card move <id> blocked\n   -m",
+            "terrarium board columns",
+            "`working` and `blocked` name the columns",
             "terrarium mem search",
             "terrarium mem new",
             "mem supersede <old> <new>",
@@ -598,7 +606,9 @@ mod tests {
         // §12d) after the snapshot line of the CLI list (docs/api.md §17.3).
         // 1030: mail comes as a tagged turn with its body (PLAN §8.5).
         // 1080: card ETAs on claim (PLAN §13).
-        assert!(words < 1080, "{words} words");
+        // 1130 (2026-11-01): configurable board columns and their roles
+        // (PLAN §13).
+        assert!(words < 1130, "{words} words");
     }
 
     /// The prompt holds only stable facts, so a change of peer status, or of

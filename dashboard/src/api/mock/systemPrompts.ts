@@ -63,7 +63,7 @@ const REVIEWER = `# How you review
 
 You are \`{{agent.name}}\`, a reviewer. Read each change on a card in
 \`review\`. Run the tests on a target. Write what you found on the card, and
-move it to \`done\` or back to \`in_progress\`.
+move it to \`done\` or back to the working column (\`terrarium card move <id> working\`).
 `;
 
 function seed(at: string): Map<string, Stored> {

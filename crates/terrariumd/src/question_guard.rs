@@ -245,7 +245,9 @@ pub fn turn_facts(conn: &Connection, id: &str, end_seq: i64) -> ApiResult<TurnFa
                                 AND json_extract(payload, '$.status') = 'blocked')
                             OR (kind = 'card'
                                 AND json_extract(payload, '$.change') = 'moved'
-                                AND json_extract(payload, '$.to') = 'blocked')))",
+                                AND (json_extract(payload, '$.to_role') = 'blocked'
+                                     OR (json_type(payload, '$.to_role') IS NULL
+                                         AND json_extract(payload, '$.to') = 'blocked')))))",
         params![actor, start, end_seq],
         |r| r.get(0),
     )?;

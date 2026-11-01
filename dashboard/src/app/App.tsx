@@ -3,7 +3,7 @@ import { For, lazy, Match, Show, Switch } from "solid-js";
 import { isMock } from "../api";
 import { auth } from "../stores";
 import { Layout } from "./Layout";
-import { MOVED_ROUTES, movedTo } from "./nav";
+import { MOVED_ROUTES, movedTo, withQuery } from "./nav";
 import { LoginScreen } from "./LoginScreen";
 import { Home } from "../features/home/Home";
 import { AgentsPage } from "../features/agents/AgentsPage";
@@ -17,7 +17,6 @@ const InboxPage = lazy(() => import("../features/inbox/InboxPage"));
 const MemoryPage = lazy(() => import("../features/memory/MemoryPage"));
 const WikiPage = lazy(() => import("../features/wiki/WikiPage"));
 const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
-const VersionsPage = lazy(() => import("../features/versions/VersionsPage"));
 const TargetsPage = lazy(() => import("../features/targets/TargetsPage"));
 const SchedulesPage = lazy(() => import("../features/schedules/SchedulesPage"));
 const TemplatesPage = lazy(() => import("../features/templates/TemplatesPage"));
@@ -97,10 +96,9 @@ export function App() {
         </Route>
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/agents" component={AgentsPage} />
-        {/* The board screen: the tabs Cards, Versions, Artifacts, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board. */}
+        {/* The board screen: the tabs Cards, Artifacts, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it manages the versions too (?rows=version&version=<id>). */}
         <Route path="/p/:project/board" component={BoardScreen}>
           <Route path="/" component={BoardPage} />
-          <Route path="/versions/:id?" component={VersionsPage} />
           <Route path="/artifacts/:id?" component={ArtifactsPage} />
           <Route path="/schedules" component={SchedulesPage} />
         </Route>
@@ -129,7 +127,7 @@ export function App() {
           <Route path="/dev/xss" component={XssPage} />
         </Show>
         {/* A redirect keeps the query and the hash: an old `/subscriptions?add=api_key` link still opens the wizard. */}
-        <For each={MOVED_ROUTES}>{(r) => <Route path={r.path} component={() => <Navigate href={({ location }) => `${movedTo(location.pathname) ?? r.to}${location.search}${location.hash}`} />} />}</For>
+        <For each={MOVED_ROUTES}>{(r) => <Route path={r.path} component={() => <Navigate href={({ location }) => `${withQuery(movedTo(location.pathname) ?? r.to, location.search)}${location.hash}`} />} />}</For>
         <Route path="*" component={NotFound} />
       </Router>
       </Match>

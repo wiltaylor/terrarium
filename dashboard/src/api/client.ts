@@ -432,12 +432,16 @@ export interface Api {
 
   /** docs/api.md §13. `id` is the ULID or `project/name`. */
   versions: {
-    list(project: string, q?: { status?: VersionStatus; name?: string }): Promise<Version[]>;
+    /** `archived`: absent or `false` for the versions that are not archived, `true` for the archived ones, `all` for both. */
+    list(project: string, q?: { status?: VersionStatus; name?: string; archived?: "true" | "false" | "all" }): Promise<Version[]>;
     create(project: string, v: NewVersion): Promise<Version>;
     get(id: string): Promise<Version>;
     update(id: string, patch: VersionPatch): Promise<Version>;
     transition(id: string, action: "submit" | "approve" | "reject" | "release", comment?: string): Promise<Version>;
     compare(id: string, to: string): Promise<VersionCompare>;
+    /** Archive or unarchive (docs/api.md §13): the creator, a project admin, or the operator. The status and reviews stay. */
+    archive(id: string): Promise<Version>;
+    unarchive(id: string): Promise<Version>;
   };
 
   /** docs/api.md §16. */
@@ -1019,6 +1023,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       update: (id, body) => patch(`/api/versions/${seg(id)}`, body),
       transition: (id, action, comment) => post(`/api/versions/${seg(id)}/${action}`, comment ? { comment } : undefined),
       compare: (id, to) => get(`/api/versions/${seg(id)}/compare`, { to }),
+      archive: (id) => post(`/api/versions/${seg(id)}/archive`),
+      unarchive: (id) => post(`/api/versions/${seg(id)}/unarchive`),
     },
 
     subscriptions: {

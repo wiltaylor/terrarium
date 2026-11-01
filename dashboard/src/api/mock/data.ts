@@ -131,9 +131,9 @@ const hostile = `<img src=x onerror="window.__xss=1"> <script>window.__xss=1</sc
 const COLUMNS: Column[] = [
   { name: "backlog", position: 0 },
   { name: "ready", position: 1 },
-  { name: "in_progress", position: 2, wip_limit: 3 },
+  { name: "in_progress", position: 2, wip_limit: 3, role: "working" },
   { name: "review", position: 3 },
-  { name: "blocked", position: 4 },
+  { name: "blocked", position: 4, role: "blocked" },
   { name: "done", position: 5 },
 ];
 
@@ -688,6 +688,22 @@ type:bug sevrity=high
       reviews: [{ id: fakeUlid("rev", 3), author: lead.addr, author_name: lead.label, decision: "submitted", comment: "Please look.", created_at: ago(50) }],
       created_by: lead.addr, created_by_name: lead.label, created_at: ago(60 * 2), submitted_at: ago(50), submitted_by: lead.addr, git_ref: "main@4f2a9c1",
       url: `/p/terrarium/versions/${fakeUlid("ver", 1)}`,
+    },
+    {
+      // A draft: the board's version rows have a lane that takes cards.
+      id: fakeUlid("ver", 3), project: "terrarium", name: "v0.1.1", status: "draft", notes: "Phase 2: Codex and the board rows.",
+      cards: ["TER-13", "TER-17"].map(cardRef), artifacts: [], reviews: [],
+      created_by: lead.addr, created_by_name: lead.label, created_at: ago(30), git_ref: "main",
+      url: `/p/terrarium/versions/${fakeUlid("ver", 3)}`,
+    },
+    {
+      // Archived: no lane on the board, and not in the default list.
+      id: fakeUlid("ver", 4), project: "terrarium", name: "spike-pty", status: "rejected", notes: "A PTY spike that we did not keep.",
+      cards: ["TER-10"].map(cardRef), artifacts: [],
+      reviews: [{ id: fakeUlid("rev", 4), author: "operator", author_name: "operator", decision: "rejected", comment: "Not the way.", created_at: ago(60 * 24 * 4) }],
+      created_by: lead.addr, created_by_name: lead.label, created_at: ago(60 * 24 * 5), decided_at: ago(60 * 24 * 4), decided_by: "operator",
+      archived: true, archived_at: ago(60 * 24 * 3), archived_by: "operator",
+      url: `/p/terrarium/versions/${fakeUlid("ver", 4)}`,
     },
     {
       id: fakeUlid("ver", 2), project: "webshop", name: "demo-2026-10-31", status: "draft", notes: "Demo build for Halloween.",

@@ -680,6 +680,11 @@ stay as they are. `--no-mark` leaves my messages unread. With an ID,
 
 ```
 terrarium board                               the board, grouped by column
+terrarium board columns [--from-file f.json | -]
+terrarium board column add <name> [--title t] [--wip N] [--role working|blocked] [--after c | --before c]
+terrarium board column set <name> [--title t] [--wip N | --no-wip] [--role r | --no-role] [--rename new]
+terrarium board column rm <name>
+terrarium board column move <name> (--after c | --before c)
 terrarium card ls [-c column] [--mine | --assignee a] [--unassigned] [--label l] [--archived]
 terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
@@ -700,8 +705,27 @@ terrarium card wait [--mine] [--timeout 300]
 `card comment` takes the text as the last argument, with `-b`/`--body`, or
 with `-m`, as `card move` does. Give only one of them.
 
-A move to `blocked` needs `-m`. A card with unmet dependencies cannot
-enter `in_progress`; the error lists the blocking cards.
+A move to the `blocked` column needs `-m`. A card with unmet dependencies
+cannot enter the `working` column; the error lists the blocking cards. In
+`card move`, `card new -c`, and `card ls -c`, the words `working` and
+`blocked` name the columns with those roles, and a column name works as
+before. With no `blocked` column, `card move <id> blocked` fails and names
+the columns.
+
+`board columns` lists the columns: name, title, role, WIP limit, and card
+count. `board` marks the role and a title that is not the default. `board
+column add | set | rm | move` change one column: the CLI reads the board,
+changes the list, and sends the whole list (`PATCH
+/api/projects/{name}/board`, docs/api.md §8.3). They need project_admin,
+sysadmin, or the operator. `add` puts the column before `done` unless
+`--after` or `--before` says where. `--role` gives the role to this column,
+and the column that had it loses it. `set --rename` keeps the cards in the
+column (`rename_from`). `set --title ""` gives the default title. `rm`
+fails while the column has cards; the error lists them. `backlog` and
+`done` stay first and last, and take no WIP limit and no role. A WIP limit
+under the card count is allowed: the column takes no more cards until it
+is under the limit. `board columns --from-file` sends a whole list: a JSON
+list of columns, or `{"columns": [...]}`; `-` reads stdin.
 
 `card eta` sets when the work is expected to be done: a duration from now
 with one or more parts (`45m`, `2h30m`, `1d`), or an RFC 3339 time. The
@@ -818,14 +842,19 @@ terrarium artifact ls
 terrarium artifact url <id>                   a signed preview URL
 terrarium artifact rm <id>
 terrarium version new <name> [--notes text | -] [--repo r --ref sha] [--card id]...
-terrarium version ls
+terrarium version ls [--archived | --all]
 terrarium version show <name>
+terrarium version archive|unarchive <name>    the creator, admins, operator
 terrarium version attach <name> <artifact id>
 terrarium version submit <name>
 terrarium version wait <name> [--timeout 3600]
 terrarium version release <name>              admins
 terrarium version approve|reject <name> [-m comment]      operator
 ```
+
+`version ls` hides the archived versions; `--archived` shows only them, and
+`--all` shows both, with an ARCHIVED column. `version archive` keeps the
+status and the reviews; the version leaves the board rows.
 
 `artifact push` sends the file as base64 in JSON. A directory becomes a tar
 archive with `kind: "bundle"`; the CLI runs the system `tar`. The limit is

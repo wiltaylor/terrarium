@@ -738,3 +738,416 @@ async fn eta_stays_on_done_and_done_at_is_set() {
         .await
         .err(409, "conflict");
 }
+
+// ---- configurable columns (PLAN §13) ----
+
+async fn set_cols(td: &TestDaemon, cols: Value) -> common::Resp {
+    td.patch("/api/projects/proj/board", json!({ "columns": cols }))
+        .await
+}
+
+fn names(b: &Value) -> Vec<String> {
+    b["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn col<'a>(b: &'a Value, name: &str) -> &'a Value {
+    b["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn new_boards_have_roles_and_titles() {
+    let td = setup().await;
+    let b = td.get("/api/projects/proj/board").await;
+    let b = b.ok();
+    assert_eq!(col(b, "in_progress")["role"], "working");
+    assert_eq!(col(b, "in_progress")["title"], "in progress");
+    assert_eq!(col(b, "blocked")["role"], "blocked");
+    assert!(col(b, "ready").get("role").is_none());
+    assert!(col(b, "backlog").get("role").is_none());
+}
+
+#[tokio::test]
+async fn backlog_and_done_are_fixed() {
+    let td = setup().await;
+    let mid = json!([{"name": "in_progress", "role": "working"}]);
+    let with = |first: Value, last: Value| {
+        let mut v = vec![first];
+        v.extend(mid.as_array().unwrap().iter().cloned());
+        v.push(last);
+        Value::Array(v)
+    };
+    for (cols, why) in [
+        (
+            json!([{"name": "in_progress", "role": "working"}, {"name": "done"}]),
+            "no backlog",
+        ),
+        (
+            json!([{"name": "backlog"}, {"name": "in_progress", "role": "working"}]),
+            "no done",
+        ),
+        (
+            json!([{"name": "in_progress", "role": "working"}, {"name": "backlog"}, {"name": "done"}]),
+            "backlog not first",
+        ),
+        (
+            json!([{"name": "backlog"}, {"name": "done"}, {"name": "in_progress", "role": "working"}]),
+            "done not last",
+        ),
+        (
+            with(
+                json!({"name": "todo", "rename_from": "backlog"}),
+                json!({"name": "done"}),
+            ),
+            "rename backlog",
+        ),
+        (
+            with(
+                json!({"name": "backlog"}),
+                json!({"name": "finished", "rename_from": "done"}),
+            ),
+            "rename done",
+        ),
+        (
+            with(
+                json!({"name": "backlog", "wip_limit": 3}),
+                json!({"name": "done"}),
+            ),
+            "wip on backlog",
+        ),
+        (
+            with(
+                json!({"name": "backlog"}),
+                json!({"name": "done", "wip_limit": 3}),
+            ),
+            "wip on done",
+        ),
+        (
+            with(
+                json!({"name": "backlog", "role": "blocked"}),
+                json!({"name": "done"}),
+            ),
+            "role on backlog",
+        ),
+        (
+            json!([{"name": "backlog"}, {"name": "in_progress", "role": "working"}, {"name": "backlog"}, {"name": "done"}]),
+            "backlog twice",
+        ),
+    ] {
+        let r = set_cols(&td, cols).await;
+        assert_eq!(r.status.as_u16(), 422, "{why}: {:?}", r.body);
+    }
+    // A title is allowed on a fixed column.
+    let r = set_cols(
+        &td,
+        with(
+            json!({"name": "backlog", "title": "Ideas"}),
+            json!({"name": "done"}),
+        ),
+    )
+    .await;
+    let b = r.ok();
+    assert_eq!(col(b, "backlog")["title"], "Ideas");
+    assert_eq!(names(b), ["backlog", "in_progress", "done"]);
+}
+
+#[tokio::test]
+async fn exactly_one_working_and_at_most_one_blocked() {
+    let td = setup().await;
+    for (cols, why) in [
+        (
+            json!([{"name": "backlog"}, {"name": "in_progress", "role": null}, {"name": "blocked"}, {"name": "done"}]),
+            "no working",
+        ),
+        (
+            json!([{"name": "backlog"}, {"name": "ready", "role": "working"}, {"name": "in_progress"}, {"name": "blocked"}, {"name": "done"}]),
+            "two working",
+        ),
+        (
+            json!([{"name": "backlog"}, {"name": "in_progress"}, {"name": "review", "role": "blocked"}, {"name": "blocked"}, {"name": "done"}]),
+            "two blocked",
+        ),
+        (
+            json!([{"name": "backlog"}, {"name": "in_progress", "role": "doing"}, {"name": "done"}]),
+            "bad role",
+        ),
+        // `working` and `blocked` are aliases: only the role column has the name.
+        (
+            json!([{"name": "backlog"}, {"name": "in_progress"}, {"name": "working"}, {"name": "done"}]),
+            "reserved name",
+        ),
+        (
+            json!([{"name": "backlog"}, {"name": "in_progress"}, {"name": "Bad-Name"}, {"name": "done"}]),
+            "bad name",
+        ),
+        (
+            json!([{"name": "backlog"}, {"name": "in_progress", "title": "x".repeat(41)}, {"name": "done"}]),
+            "long title",
+        ),
+    ] {
+        let r = set_cols(&td, cols).await;
+        assert_eq!(r.status.as_u16(), 422, "{why}: {:?}", r.body);
+    }
+    // No blocked column is allowed; the role moves with a swap.
+    let b = set_cols(
+        &td,
+        json!([{"name": "backlog"}, {"name": "ready", "role": "working"},
+               {"name": "in_progress", "role": null}, {"name": "done"}]),
+    )
+    .await;
+    let b = b.ok();
+    assert_eq!(col(b, "ready")["role"], "working");
+    assert!(col(b, "in_progress").get("role").is_none());
+}
+
+#[tokio::test]
+async fn rename_reorder_remove_and_claim_follows_the_role() {
+    let td = setup().await;
+    let a = card(&td, "proj/w1", json!({"title": "A", "column": "ready"})).await;
+    // Rename in_progress to doing (with a title), move review first, and
+    // remove nothing that has cards.
+    let b = set_cols(
+        &td,
+        json!([
+            {"name": "backlog"},
+            {"name": "review"},
+            {"name": "ready"},
+            {"name": "doing", "rename_from": "in_progress", "title": "Doing now"},
+            {"name": "blocked"},
+            {"name": "done"}
+        ]),
+    )
+    .await;
+    let b = b.ok();
+    assert_eq!(
+        names(b),
+        ["backlog", "review", "ready", "doing", "blocked", "done"]
+    );
+    assert_eq!(col(b, "doing")["role"], "working");
+    assert_eq!(col(b, "doing")["title"], "Doing now");
+    let claimed = td
+        .post_empty_as("proj/w1", &format!("/api/cards/{a}/claim"))
+        .await;
+    assert_eq!(claimed.ok()["column"], "doing");
+    // The agent's current card follows the role.
+    let w1 = td.get("/api/agents/proj%2Fw1").await;
+    assert_eq!(w1.ok()["current_card"], a);
+    // `working` is an alias of the role column in a filter and a move.
+    let mine = td
+        .get_as("proj/w1", "/api/projects/proj/cards?column=working")
+        .await;
+    assert_eq!(mine.ok().as_array().unwrap().len(), 1);
+    // A column with cards cannot go; the error lists them.
+    let r = set_cols(
+        &td,
+        json!([{"name": "backlog"}, {"name": "ready", "role": "working"}, {"name": "done"}]),
+    )
+    .await;
+    r.err(409, "conflict");
+    assert_eq!(r.body["error"]["details"]["cards"], json!([a]));
+    assert!(r.body["error"]["message"].as_str().unwrap().contains(&a));
+    // Renamed again with the default title: the stored title goes.
+    let b = set_cols(
+        &td,
+        json!([{"name": "backlog"}, {"name": "ready"},
+               {"name": "work_now", "rename_from": "doing", "title": null},
+               {"name": "blocked"}, {"name": "done"}]),
+    )
+    .await;
+    let b = b.ok();
+    assert_eq!(col(b, "work_now")["title"], "work now");
+    assert_eq!(col(b, "work_now")["count"], 1);
+    let c = td.get(&format!("/api/cards/{a}")).await;
+    assert_eq!(c.ok()["column"], "work_now");
+}
+
+#[tokio::test]
+async fn the_blocked_rules_follow_the_role() {
+    let td = setup().await;
+    set_cols(
+        &td,
+        json!([{"name": "backlog"}, {"name": "in_progress"},
+               {"name": "stuck", "rename_from": "blocked", "role": "blocked"}, {"name": "done"}]),
+    )
+    .await
+    .ok();
+    let id = card(&td, "proj/w1", json!({"title": "Hard"})).await;
+    td.post_empty_as("proj/w1", &format!("/api/cards/{id}/claim"))
+        .await
+        .ok();
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{id}/move"),
+        json!({"column": "stuck"}),
+    )
+    .await
+    .err(422, "comment_required");
+    // The alias `blocked` names the role column.
+    let c = td
+        .post_as(
+            "proj/w1",
+            &format!("/api/cards/{id}/move"),
+            json!({"column": "blocked", "comment": "need a key"}),
+        )
+        .await;
+    assert_eq!(c.ok()["column"], "stuck");
+    let ops = td.get("/api/mail?to=operator").await;
+    let ops = ops.ok().as_array().unwrap().clone();
+    assert_eq!(ops.len(), 1);
+    assert!(ops[0]["body"].as_str().unwrap().contains("moved to stuck"));
+    let ev = td.get(&format!("/api/cards/{id}/events")).await;
+    let moved = ev
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["data"]["change"] == "moved" && e["data"]["to"] == "stuck")
+        .cloned()
+        .unwrap();
+    assert_eq!(moved["data"]["to_role"], "blocked");
+    assert_eq!(moved["data"]["from_role"], "working");
+    let listed = td.get("/api/projects/proj/cards?column=blocked").await;
+    assert_eq!(listed.ok().as_array().unwrap().len(), 1);
+
+    // With no blocked column, a move to `blocked` is refused by name.
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{id}/move"),
+        json!({"column": "in_progress"}),
+    )
+    .await
+    .ok();
+    set_cols(
+        &td,
+        json!([{"name": "backlog"}, {"name": "in_progress"},
+               {"name": "on_hold", "rename_from": "stuck", "role": null}, {"name": "done"}]),
+    )
+    .await
+    .ok();
+    let r = td
+        .post_as(
+            "proj/w1",
+            &format!("/api/cards/{id}/move"),
+            json!({"column": "blocked", "comment": "x"}),
+        )
+        .await;
+    r.err(422, "invalid");
+    let m = r.body["error"]["message"].as_str().unwrap();
+    assert!(
+        m.contains("no `blocked` column") && m.contains("on_hold"),
+        "{m}"
+    );
+    // `on_hold` is a plain column now: no comment needed.
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{id}/move"),
+        json!({"column": "on_hold"}),
+    )
+    .await
+    .ok();
+}
+
+#[tokio::test]
+async fn wip_limits_on_create_and_below_the_count() {
+    let td = setup().await;
+    let a = card(&td, "proj/w1", json!({"title": "A", "column": "ready"})).await;
+    let b = card(&td, "proj/w1", json!({"title": "B", "column": "ready"})).await;
+    // A limit under the count is allowed: the column is over its limit.
+    let r = set_cols(
+        &td,
+        json!([{"name": "backlog"}, {"name": "ready", "wip_limit": 1}, {"name": "in_progress"},
+               {"name": "review"}, {"name": "blocked"}, {"name": "done"}]),
+    )
+    .await;
+    let bd = r.ok();
+    assert_eq!(col(bd, "ready")["count"], 2);
+    assert_eq!(col(bd, "ready")["wip_limit"], 1);
+    // A new card in the full column is refused, and leaves nothing behind.
+    let r = td
+        .post_as(
+            "proj/w1",
+            "/api/projects/proj/cards",
+            json!({"title": "C", "column": "ready"}),
+        )
+        .await;
+    r.err(409, "wip_limit");
+    let all = td.get("/api/projects/proj/cards").await;
+    assert_eq!(all.ok().as_array().unwrap().len(), 2);
+    let c = card(&td, "proj/w1", json!({"title": "C"})).await;
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{c}/move"),
+        json!({"column": "ready"}),
+    )
+    .await
+    .err(409, "wip_limit");
+    // Two cards leave: one more fits.
+    for id in [&a, &b] {
+        td.post_as(
+            "proj/w1",
+            &format!("/api/cards/{id}/move"),
+            json!({"column": "review"}),
+        )
+        .await
+        .ok();
+    }
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{c}/move"),
+        json!({"column": "ready"}),
+    )
+    .await
+    .ok();
+}
+
+#[tokio::test]
+async fn columns_rights_audit_and_event() {
+    let td = setup().await;
+    let cols = json!({"columns": [
+        {"name": "backlog"}, {"name": "in_progress", "wip_limit": 2},
+        {"name": "qa", "title": "QA"}, {"name": "blocked"}, {"name": "done"}
+    ]});
+    let r = td
+        .patch_as("proj/w1", "/api/projects/proj/board", cols.clone())
+        .await;
+    r.err(403, "forbidden");
+    let m = r.body["error"]["message"].as_str().unwrap();
+    assert!(
+        m.contains("editing the board columns needs project_admin"),
+        "{m}"
+    );
+    // An agent of another project may not.
+    td.patch_as("other/x", "/api/projects/proj/board", cols.clone())
+        .await
+        .err(403, "forbidden");
+    let b = td
+        .patch_as("proj/lead", "/api/projects/proj/board", cols)
+        .await;
+    assert_eq!(col(b.ok(), "qa")["title"], "QA");
+    let ev = td.get("/api/events?kind=board&project=proj").await;
+    let ev = ev.ok().as_array().unwrap().last().unwrap().clone();
+    let qa = ev["data"]["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "qa")
+        .unwrap()
+        .clone();
+    assert_eq!(qa["title"], "QA");
+    assert_eq!(
+        ev["data"]["columns"][1],
+        json!({"name": "in_progress", "title": null, "wip_limit": 2, "role": "working",
+               "rename_from": null})
+    );
+    let audit = td.get("/api/audit?action=board.columns").await;
+    assert_eq!(audit.ok().as_array().unwrap().len(), 1);
+}

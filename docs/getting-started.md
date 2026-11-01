@@ -344,6 +344,27 @@ of a repo to open its browser: select `main` or the checkout of an agent,
 then use the **Files**, **Changes**, and **Commits** tabs. From the shell,
 use `t -p demo project repo-add <url>`.
 
+Each project has a board. A new board has the columns `backlog`, `ready`,
+`in_progress`, `review`, `blocked`, and `done`. To change them, open
+**Board** and click **Edit columns**, or use the CLI:
+
+```sh
+t -p demo board columns
+t -p demo board column add qa --title QA --wip 2 --after review
+t -p demo board column set in_progress --rename doing --title "Doing now"
+t -p demo board column rm ready
+```
+
+`backlog` stays first and `done` stays last. One column has the role
+`working` (`card claim` moves cards there), and at most one has the role
+`blocked` (a move there needs a comment). A column with cards cannot go.
+A lead agent (project_admin) can change the columns too.
+
+To see the cards by version, set **Rows** to **version** on the board.
+Each version that is not archived gets a row. Drag a card into another row
+to move it to that version. Click a version name to open the version:
+review it, add or remove cards, or archive it.
+
 To make more agents with the same settings, use an agent template. Make
 the template one time, then give only the name of each agent:
 

@@ -115,8 +115,12 @@ pub enum Command {
         #[command(subcommand)]
         command: InboxCmd,
     },
-    /// The project board, grouped by column
-    Board,
+    /// The project board, grouped by column; `board columns` and `board
+    /// column` change the columns
+    Board {
+        #[command(subcommand)]
+        command: Option<BoardCmd>,
+    },
     /// Cards on the board
     Card {
         #[command(subcommand)]
@@ -839,9 +843,91 @@ pub enum InboxCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum BoardCmd {
+    /// List the columns: name, title, role, WIP limit, and card count.
+    /// `--from-file` sets the whole list (project_admin or the operator)
+    Columns {
+        /// The whole column list as JSON: a list, or `{"columns": [...]}`;
+        /// `-` reads stdin
+        #[arg(long, value_name = "FILE")]
+        from_file: Option<String>,
+    },
+    /// Add, change, remove, or move one column (project_admin or the
+    /// operator). `backlog` and `done` are fixed
+    Column {
+        #[command(subcommand)]
+        command: ColumnCmd,
+    },
+}
+
+/// A column role: `working` is where `card claim` moves a card; a move to
+/// `blocked` needs a comment.
+pub const COLUMN_ROLES: [&str; 2] = ["working", "blocked"];
+
+#[derive(Debug, Subcommand)]
+pub enum ColumnCmd {
+    /// Add a column, before `done` unless `--after` or `--before` says
+    Add {
+        /// a-z, then a-z, 0-9, or `_` (at most 32)
+        name: String,
+        /// The display label (default: the name)
+        #[arg(long)]
+        title: Option<String>,
+        /// The most cards the column holds
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        wip: Option<u32>,
+        /// `working` or `blocked`; the column that had the role loses it
+        #[arg(long, value_parser = COLUMN_ROLES)]
+        role: Option<String>,
+        #[arg(long, value_name = "COLUMN", conflicts_with = "before")]
+        after: Option<String>,
+        #[arg(long, value_name = "COLUMN")]
+        before: Option<String>,
+    },
+    /// Change a column: title, WIP limit, role, or name
+    Set {
+        name: String,
+        /// The display label; `""` gives the default
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, value_name = "N", conflicts_with = "no_wip", value_parser = clap::value_parser!(u32).range(1..))]
+        wip: Option<u32>,
+        /// Remove the WIP limit
+        #[arg(long)]
+        no_wip: bool,
+        /// `working` or `blocked`; the column that had the role loses it
+        #[arg(long, value_parser = COLUMN_ROLES, conflicts_with = "no_role")]
+        role: Option<String>,
+        /// Remove the role
+        #[arg(long)]
+        no_role: bool,
+        /// A new name; the cards stay in the column
+        #[arg(long, value_name = "NEW")]
+        rename: Option<String>,
+    },
+    /// Remove a column; it must have no cards
+    Rm { name: String },
+    /// Move a column
+    Move {
+        name: String,
+        #[arg(
+            long,
+            value_name = "COLUMN",
+            required_unless_present = "before",
+            conflicts_with = "before"
+        )]
+        after: Option<String>,
+        #[arg(long, value_name = "COLUMN")]
+        before: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum CardCmd {
     /// List cards
     Ls {
+        /// A column name, or `working` or `blocked` for the column with
+        /// that role
         #[arg(long, short = 'c')]
         column: Option<String>,
         /// Cards assigned to me
@@ -862,7 +948,7 @@ pub enum CardCmd {
     New(Box<CardNewArgs>),
     /// Change a card
     Edit(Box<CardEditArgs>),
-    /// Assign to self and move to in_progress
+    /// Assign to self and move to the working column
     Claim {
         id: String,
         /// Set the ETA too: a duration such as 45m, 2h30m, or 1d
@@ -872,10 +958,12 @@ pub enum CardCmd {
     /// Move a card to a column
     Move {
         id: String,
+        /// A column name, or `working` or `blocked` for the column with
+        /// that role (`terrarium board columns` lists them)
         column: String,
         #[arg(long)]
         position: Option<u64>,
-        /// The move comment; `blocked` needs one
+        /// The move comment; the blocked column needs one
         #[arg(long, short = 'm')]
         comment: Option<String>,
         /// Set the ETA too: a duration such as 45m, 2h30m, or 1d
@@ -965,7 +1053,7 @@ pub struct CardNewArgs {
     /// Make the card from a message: subject, body, and thread
     #[arg(long)]
     pub from_mail: Option<String>,
-    /// A comment, needed for `--column blocked`
+    /// A comment, needed for `--column blocked` (the blocked column)
     #[arg(long, short = 'm')]
     pub comment: Option<String>,
     /// The ETA: a duration such as 45m, 2h30m, or 1d, or an RFC 3339 time
@@ -1344,10 +1432,23 @@ pub enum VersionCmd {
         #[arg(long = "card")]
         cards: Vec<String>,
     },
-    /// List versions
-    Ls,
+    /// List versions; archived versions only with `--archived` or `--all`
+    Ls {
+        /// Only the archived versions
+        #[arg(long, conflicts_with = "all")]
+        archived: bool,
+        /// The archived versions and the others
+        #[arg(long)]
+        all: bool,
+    },
     /// Show a version
     Show { name: String },
+    /// Archive a version: it leaves the board rows and the default list;
+    /// its status and reviews stay (its creator, a project admin, or the
+    /// operator)
+    Archive { name: String },
+    /// Take a version out of the archive
+    Unarchive { name: String },
     /// Attach an artifact
     Attach { name: String, artifact: String },
     /// draft -> in_review; mails the operator

@@ -2869,3 +2869,264 @@ tr.row-open > td {
   border-radius: 4px;
   background: var(--surface-2);
 }
+
+/* The Edit columns dialog of the board: one row for each column. */
+.columns-editor-modal {
+  width: min(calc(100vw - 32px), 980px);
+}
+.columns-editor-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.columns-editor-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1.2fr) minmax(0, 1.4fr) minmax(0, 0.7fr) minmax(0, 0.9fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.columns-editor-row label {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.columns-editor-row input,
+.columns-editor-row select {
+  width: 100%;
+  min-width: 0;
+}
+.columns-editor-row.fixed {
+  background: var(--surface);
+}
+.columns-editor-row.dragging {
+  opacity: 0.5;
+}
+.columns-editor-move,
+.columns-editor-end {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  align-self: center;
+}
+.columns-editor-end {
+  flex-direction: column;
+  align-items: end;
+}
+.drag-handle {
+  cursor: grab;
+  padding: 0 4px;
+  color: var(--muted);
+  user-select: none;
+}
+.drag-handle.disabled {
+  cursor: default;
+  opacity: 0.3;
+}
+.warn-text {
+  color: var(--warn);
+}
+@media (max-width: 760px) {
+  .columns-editor-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .columns-editor-move {
+    grid-column: 1 / -1;
+  }
+  .columns-editor-end {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    justify-content: space-between;
+  }
+  .drag-handle {
+    display: none;
+  }
+}
+
+/* The Rows choice, the Versions menu, and the version rows of the Cards tab (features/board/lanes.ts). */
+.board-rows {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+details.menu {
+  position: relative;
+}
+details.menu > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+details.menu > summary::-webkit-details-marker {
+  display: none;
+}
+details.menu > .menu-panel {
+  position: absolute;
+  right: 0;
+  z-index: 30;
+  margin-top: 4px;
+  min-width: 260px;
+  max-height: 60vh;
+  overflow-y: auto;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.15);
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 6px;
+  border-radius: 4px;
+}
+button.menu-item:hover {
+  background: var(--surface-2);
+}
+.menu-item.archived {
+  opacity: 0.85;
+}
+.menu-toggle {
+  gap: 6px;
+  padding: 6px;
+  border-top: 1px solid var(--border);
+}
+.lanes {
+  display: grid;
+  grid-template-columns: repeat(var(--lane-cols), minmax(250px, 1fr));
+  gap: 0 12px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  align-items: start;
+}
+.lanes-heads {
+  display: contents;
+}
+.lanes-col-head {
+  padding: 6px 8px;
+  background: var(--surface-2);
+  border-radius: var(--radius) var(--radius) 0 0;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.lanes-col-head.over-limit .count {
+  color: var(--danger);
+}
+.lane {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  gap: 0 12px;
+  border-top: 1px solid var(--border);
+}
+.lane-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px;
+  position: sticky;
+  left: 0;
+  width: max-content;
+  max-width: 100%;
+}
+.lane-name {
+  font-weight: 600;
+}
+.lane-cell {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  align-content: start;
+  min-height: 56px;
+  padding: 18px 8px 8px;
+  background: var(--surface-2);
+  border: 2px solid transparent;
+  margin-bottom: 8px;
+  border-radius: var(--radius);
+}
+.lane-cell.drop {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.lane-cell-count {
+  position: absolute;
+  top: 1px;
+  right: 8px;
+  line-height: 1.4;
+}
+.lane-none .lane-name {
+  font-style: italic;
+}
+/* A phone: the lanes are sections inside the column. */
+.lanes-column .lane-phone {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid var(--border);
+}
+.lanes-column .lane-phone .lane-head {
+  position: static;
+  width: auto;
+}
+.lanes-column .lane-phone .lane-cell {
+  background: var(--surface);
+  margin-bottom: 4px;
+}
+.kcard-note {
+  font-style: italic;
+}
+.card-picker {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  min-width: 0;
+}
+.card-picker ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 14em;
+  overflow-y: auto;
+  display: grid;
+  gap: 2px;
+}
+.drawer-versions {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+}
+.drawer-versions label {
+  gap: 6px;
+}
+.version-card {
+  flex-wrap: wrap;
+}
+@media (max-width: 760px) {
+  details.menu > .menu-panel {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    min-width: 0;
+  }
+}

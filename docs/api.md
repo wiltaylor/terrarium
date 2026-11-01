@@ -417,7 +417,7 @@ refused it. Do not parse the message; use `code`.
 | 409 | `file_managed` | The object is declared in a definition file. Edit the file, then `POST /api/reload`. |
 | 409 | `confirm_required` | The delete needs `?confirm=true`. |
 | 409 | `wip_limit` | The target column is full. `details: {"column", "wip_limit"}`. |
-| 409 | `dependencies_unmet` | The card cannot enter `in_progress`. `details: {"blocked_by": [card ids]}`. |
+| 409 | `dependencies_unmet` | The card cannot enter the `working` column (§8.2). `details: {"blocked_by": [card ids]}`. |
 | 409 | `not_running` | The agent is not running. |
 | 409 | `already_running` | The agent is running already. |
 | 409 | `stale_base` | A wiki edit names a base revision that is not current. `details: {"base", "current", "diff"}`. |
@@ -428,7 +428,7 @@ refused it. Do not parse the message; use `code`.
 | 501 | `not_available` | The route exists, but this phase does not do the request. |
 | 503 | `unavailable` | The daemon cannot do the request on this machine: the repo browser has no `bwrap` to read an agent tree (§5.3). |
 | 422 | `invalid` | Well-formed values that break a rule: a bad name, an empty title, a missing column. |
-| 422 | `comment_required` | A move to `blocked` without a comment; a version rejection or a wiki review comment without a comment. |
+| 422 | `comment_required` | A move to the `blocked` column (§8.2) without a comment; a version rejection or a wiki review comment without a comment. |
 | 500 | `internal` | A daemon bug or an I/O error. |
 
 ## 3. Roles and rules
@@ -1711,7 +1711,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `waiting_on` | What the agent waits on, in one short line: the summaries of the oldest 3 open waits and a count of the others. Absent when the agent has no open wait. |
 | `session` | The harness session ID of the current session, when known. |
 | `harness_version` | The harness version that the live agent runs: the version dir in the tools dir that its launch resolved (§4, `POST /api/harnesses/{name}/update`). It stays until the next start, also after an update. Absent when the agent does not run, or when the version is not known. |
-| `current_card` | The card the agent has in `in_progress`, if any. |
+| `current_card` | The card the agent has in the `working` column of its board (§8.1), if any. |
 | `source` | `file`, `api`, or `fleet:<name>` (§18.1). |
 | `template` | The agent template that the create copied: `{"id", "name", "project", "revision"}` (§21). Absent when the create named none. For display only. |
 
@@ -2100,7 +2100,7 @@ change gets no nudge. A lead that does not run keeps the line in
 |---|---|
 | A card with no assignee moves into `ready`, also a new card made in `ready` | `New card DEM-3 in ready: <title>. Run `terrarium card ls --unassigned --column ready`.` |
 | A card moves to `review` | `DEM-3 moved to review by <who>. Run `terrarium card show DEM-3`.` |
-| A card moves to `blocked` | `DEM-3 moved to blocked by <who>: <comment>. Run `terrarium card show DEM-3`.` |
+| A card moves to the `blocked` column (§8.1; an event from before migration 48: the column `blocked`) | `DEM-3 moved to <column> by <who>: <comment>. Run `terrarium card show DEM-3`.` |
 
 The title and the comment are cut to their first line and 100 characters.
 In each project, the daemon sends not more than one batch of nudges in 10
@@ -3101,14 +3101,41 @@ A board:
 
 ```json
 {"project":"terrarium","card_prefix":"TER",
- "columns":[{"name":"backlog","position":0,"count":1},{"name":"ready","position":1,"count":0},
-            {"name":"in_progress","position":2,"wip_limit":2,"count":0},{"name":"review","position":3,"count":0},
-            {"name":"blocked","position":4,"count":1},{"name":"done","position":5,"count":0}],
+ "columns":[{"name":"backlog","title":"backlog","position":0,"count":1},
+            {"name":"ready","title":"ready","position":1,"count":0},
+            {"name":"in_progress","title":"in progress","position":2,"wip_limit":2,"role":"working","count":0},
+            {"name":"review","title":"Code review","position":3,"count":0},
+            {"name":"blocked","title":"blocked","position":4,"role":"blocked","count":1},
+            {"name":"done","title":"done","position":5,"count":0}],
  "cards":[ ...cards that are not archived, by column, then position... ]}
 ```
 
-A new board has the columns `backlog`, `ready`, `in_progress`, `review`,
-`blocked`, `done`. `count` excludes archived cards.
+A new board has the columns `backlog`, `ready`, `in_progress` (role
+`working`), `review`, `blocked` (role `blocked`), `done`. `count` excludes
+archived cards. The columns are configurable (§8.3, "Columns"):
+
+- `name` is the ID of the column: a lower-case letter, then at most 31
+  lower-case letters, digits, or `_`. A name that a board had before this
+  rule stays valid.
+- `title` is the display label: the stored title (at most 40 characters),
+  else the name with spaces for the underscores.
+- `role` is `working` or `blocked`, or absent. Exactly one column has the
+  role `working`: `card claim` moves a card there, and a card with unmet
+  dependencies cannot enter it. At most one column has the role `blocked`:
+  a move there needs a comment and mails a notice. The rules of §8.2 follow
+  the roles, not the names.
+- `backlog` is always the first column and `done` always the last. Neither
+  can be removed, renamed, or moved, and neither takes a WIP limit or a
+  role. Both can have a title.
+- In a move, a new card, a card filter (`?column=`), a card wait, and a
+  schedule card action, `working` and `blocked` are also aliases: they name
+  the column with that role. A column name wins over an alias, and the
+  names `working` and `blocked` are kept for the column with that role, so
+  the two cannot differ. With no `blocked` column, a move to `blocked` is
+  `422 invalid`, and the message names the columns.
+- Migration 48 gives each existing board the roles (`in_progress` working,
+  `blocked` blocked), puts `backlog` first and `done` last, and clears a
+  WIP limit on `backlog` and `done`.
 
 ### 8.2 Rules (PLAN §13)
 
@@ -3117,15 +3144,20 @@ A new board has the columns `backlog`, `ready`, `in_progress`, `review`,
   member made it. A member claims unassigned cards and comments on any card
   of its project. It may not move or reassign another agent's card
   (`403 forbidden`). Project admins and the operator may.
-- **Dependencies.** A card with unmet dependencies cannot enter
-  `in_progress`: `409 dependencies_unmet`, `details.blocked_by`. A dependency
+- **Dependencies.** A card with unmet dependencies cannot enter the
+  `working` column: `409 dependencies_unmet`, `details.blocked_by`. A dependency
   cycle is `422 invalid`.
-- **WIP limits.** A move into a full column is `409 wip_limit`. A move inside
-  one column does not count.
-- **Blocked.** A move to `blocked` needs a non-blank `comment`
+- **WIP limits.** A move into a full column is `409 wip_limit`. A new card
+  in a full column is refused the same way, and the daemon keeps no part of
+  it. A move inside one column does not count. A limit lower than the count
+  of the column is allowed: the column is over its limit (the dashboard
+  shows the count red) and refuses more cards until it is under the limit.
+- **Blocked.** A move to the `blocked` column needs a non-blank `comment`
   (`422 comment_required`). The comment goes on the card. The daemon mails
   the operator and the card's creator (when that is not the mover) from
-  `system`, on one new thread. Subject: `<card> blocked: <title>`.
+  `system`, on one new thread. Subject: `<card> blocked: <title>`. The
+  `moved` event has `from_role` and `to_role` (`null` for a column with no
+  role), and each `card` event has `column_role`.
 - **Done.** `done` is terminal for members: a member cannot move a done card
   out, edit it, or reassign it (`403`). Only a project admin or the operator
   reopens a card; the reopen is audited. A member cannot make a card in
@@ -3156,7 +3188,7 @@ A new board has the columns `backlog`, `ready`, `in_progress`, `review`,
 | `DELETE /api/cards/{id}` | | `204`; the card is archived |
 | `POST /api/cards/{id}/move` | `{"column", "position"?, "comment"?}` | `200` card |
 | `POST /api/cards/{id}/assign` | `{"assignee": "<address>" \| "me" \| null}` | `200` card |
-| `POST /api/cards/{id}/claim` | none | `200` card, assigned to the caller, in `in_progress` |
+| `POST /api/cards/{id}/claim` | none | `200` card, assigned to the caller, in the `working` column |
 | `GET /api/cards/{id}/comments` | | `200` comments |
 | `POST /api/cards/{id}/comments` | `{"body"}` | `201` card |
 | `POST /api/cards/{id}/links` | `{"kind", "ref"}` | `201` card |
@@ -3164,17 +3196,35 @@ A new board has the columns `backlog`, `ready`, `in_progress`, `review`,
 | `GET /api/cards/{id}/sessions` | | `200` the session links (§6.6) of the card's comments and card events, distinct, oldest first |
 
 **Columns.** The `PATCH` list is the whole board, in order. Each column is
-`{"name", "wip_limit"?, "rename_from"?}`. A missing `wip_limit` means no
-limit. `rename_from` renames a column and keeps its cards. A column not in
-the list goes away; it must have no active cards (`409 conflict`). The
-columns `backlog`, `in_progress`, `blocked`, and `done` must stay and keep
-their names (`422 invalid`). The daemon ignores `position` and `count` in
-the list, so a client may send back the columns it read.
+`{"name", "title"?, "wip_limit"?, "role"?, "rename_from"?}`.
+
+- `wip_limit` absent or `null`: no limit. It must be 1 or more.
+- `title` and `role` absent: the column keeps its title and role (a new
+  column: none). `null` clears them. A title equal to the default (the name
+  with spaces) is stored as none, so a later rename takes the new default.
+- `rename_from` renames a column and keeps its cards and their order. The
+  new name must not be the name of another column.
+- A column not in the list goes away. It must have no active cards: `409
+  conflict` with `details: {"column", "cards"}`, and the message lists the
+  cards. Archived cards of a removed column go to `backlog`.
+- `422 invalid`: `backlog` not first or `done` not last, a fixed column
+  renamed or given a WIP limit or a role, a name twice in the list, a bad
+  name or title, not exactly one `working` column, more than one `blocked`
+  column, or a column named `working` or `blocked` without that role.
+- The daemon ignores `position` and `count` in the list, so a client may
+  send back the columns it read.
+- The rights: project_admin of the project (this includes a project lead
+  agent), sysadmin, or the operator. Another agent gets `403 forbidden`
+  ("editing the board columns needs project_admin of `<project>`, ...").
+- The change writes the audit row `board.columns` and a `board` event, both
+  with `{"columns": [{"name", "title", "wip_limit", "role", "rename_from"}]}`.
 
 ```
 PATCH /api/projects/terrarium/board
-{"columns":[{"name":"backlog"},{"name":"ready"},{"name":"in_progress","wip_limit":2},
-            {"name":"qa","rename_from":"review"},{"name":"blocked"},{"name":"done"}]}
+{"columns":[{"name":"backlog"},{"name":"ready","wip_limit":3},
+            {"name":"doing","rename_from":"in_progress","title":"Doing now"},
+            {"name":"qa","rename_from":"review","title":"QA"},
+            {"name":"stuck","rename_from":"blocked","role":"blocked"},{"name":"done"}]}
 ```
 
 **New card.** All fields are optional except `title`, which `from_mail` can
@@ -3187,7 +3237,8 @@ supply:
 ```
 
 - `column` defaults to `backlog`. Another column follows the move rules, so
-  `blocked` needs `comment`.
+  the `blocked` column needs `comment`, and a full column is `409
+  wip_limit`. `working` and `blocked` are aliases (§8.1).
 - `from_mail` is a message ID the caller may read. The card takes the
   subject as `title` and `From <sender>:\n\n<body>` as `body`, unless the
   request sets them, and links the message's thread.
@@ -3759,8 +3810,12 @@ Release points that the user reviews (PLAN §15.3). The code is in
 - `url` is the dashboard page of the version, `/p/<project>/versions/<id>`:
   absolute on `TERRARIUM_PUBLIC_URL` when it is set (the same link as the
   review mail, §13.2), else the path alone, which the dashboard opens on
-  its own origin. The dashboard redirects this path to the Versions tab of
-  the project board (`/p/<project>/board/versions/<id>`).
+  its own origin. The dashboard redirects this path in one hop to the
+  version rows of the project board, which open the Version modal
+  (`/p/<project>/board?rows=version&version=<id>`).
+- `archived` (always present), `archived_at`, and `archived_by` (absent when
+  not archived): an archived version keeps its status and its reviews. It
+  has no row on the board and is not in the default list.
 
 ### 13.2 Rules
 
@@ -3782,12 +3837,18 @@ Release points that the user reviews (PLAN §15.3). The code is in
   `approved` version. It writes `version.release` in the audit log.
 - A released version is immutable: every change is `409 conflict`. Its
   artifacts cannot be deleted, and retention keeps them.
+- `archive` and `unarchive` need the creator, a project admin, or the
+  operator (the rights of an edit), in any status, a released version too.
+  They write the audit row `version.archive` or `version.unarchive` and the
+  event `version.archived` or `version.unarchived` (`data.archived`). A
+  version that is already in that state comes back unchanged, with no
+  event. Migration 49 adds the flag.
 
 ### 13.3 Endpoints
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `GET /api/projects/{name}/versions?status=&name=&wait=` | | `200` versions newest first, cursor: ID |
+| `GET /api/projects/{name}/versions?status=&name=&archived=&wait=` | | `200` versions newest first, cursor: ID. `archived`: `false` (the default) for the versions that are not archived, `true` for the archived ones, `all` for both; another value is `400 bad_request` |
 | `POST /api/projects/{name}/versions` | `{"name", "notes"?, "repo"?, "git_ref"?, "cards"?, "artifacts"?}` | `201` version |
 | `GET /api/versions/{id}` | | `200` version |
 | `PATCH /api/versions/{id}` | version patch | `200` version |
@@ -3795,6 +3856,8 @@ Release points that the user reviews (PLAN §15.3). The code is in
 | `POST /api/versions/{id}/approve` | none, or `{"comment"?}` | `200` version; operator |
 | `POST /api/versions/{id}/reject` | `{"comment"}` | `200` version; operator |
 | `POST /api/versions/{id}/release` | none, or `{"comment"?}` | `200` version; admins |
+| `POST /api/versions/{id}/archive` | none | `200` version; the creator, a project admin, or the operator |
+| `POST /api/versions/{id}/unarchive` | none | `200` version; the same rights |
 | `GET /api/versions/{id}/compare?to=` | | `200` compare |
 
 - `wait` (seconds, at most 300) holds an empty list until a `version.*`
@@ -3943,7 +4006,7 @@ With `group=card`, `key` is the card ID and the point also has the card's
 ```
 
 Card attribution. The collector gives each sample the card that the
-sample's agent has in `in_progress`, assigned to itself, at the time the
+sample's agent has in the `working` column, assigned to itself, at the time the
 collector stores the sample. When the agent has more than one such card,
 the card with the newest `updated_at` wins. When it has none, the sample
 has no card. The collector caches the card of each agent. Each `card`

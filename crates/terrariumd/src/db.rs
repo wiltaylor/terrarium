@@ -1429,6 +1429,37 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE subscriptions ADD COLUMN label TEXT;
     "#,
+    // 48: configurable board columns (PLAN §13). `title` is the display
+    // label (NULL: the name). `role` is `working` (the column of `card
+    // claim`) or `blocked` (a move needs a comment); one column of a board
+    // for each role. An existing board keeps its columns: `in_progress`
+    // takes `working` and `blocked` takes `blocked`. `backlog` goes first
+    // and `done` last, and neither keeps a WIP limit. Self-contained: when
+    // another branch takes number 48, move this entry to the end of the
+    // list.
+    r#"
+    ALTER TABLE board_columns ADD COLUMN title TEXT;
+    ALTER TABLE board_columns ADD COLUMN role TEXT
+        CHECK (role IS NULL OR role IN ('working', 'blocked'));
+    UPDATE board_columns SET role = 'working' WHERE name = 'in_progress';
+    UPDATE board_columns SET role = 'blocked' WHERE name = 'blocked';
+    UPDATE board_columns SET wip_limit = NULL WHERE name IN ('backlog', 'done');
+    UPDATE board_columns SET position = -1 WHERE name = 'backlog';
+    UPDATE board_columns SET position = (SELECT max(b.position) + 1 FROM board_columns b
+                                         WHERE b.project = board_columns.project)
+        WHERE name = 'done';
+    CREATE UNIQUE INDEX board_columns_role ON board_columns(project, role)
+        WHERE role IS NOT NULL;
+    "#,
+    // 49: the archive flag of a version (PLAN §15.3). Not a status, so the
+    // review history stays. NULL: not archived. An archived version has no
+    // row on the board and is not in the default list. Self-contained: when
+    // another branch takes number 49, move this entry to the end of the
+    // list.
+    r#"
+    ALTER TABLE versions ADD COLUMN archived_at TEXT;
+    ALTER TABLE versions ADD COLUMN archived_by TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -3047,5 +3078,63 @@ mod tests {
                 .unwrap();
             assert_eq!(got, want, "{actor}");
         }
+    }
+
+    #[test]
+    fn migration_48_gives_existing_boards_roles_and_fixed_ends() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("board_columns_role"))
+            .unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        // A board whose operator put `done` before `review` and gave the
+        // backlog a WIP limit.
+        conn.execute_batch(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 't', 't');
+             INSERT INTO boards (project, created_at) VALUES ('p', 't');
+             INSERT INTO board_columns (project, name, position, wip_limit) VALUES
+               ('p', 'backlog', 0, 5), ('p', 'in_progress', 1, 2), ('p', 'blocked', 2, NULL),
+               ('p', 'done', 3, 9), ('p', 'review', 4, NULL);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, wip_limit, role FROM board_columns WHERE project = 'p'
+                 ORDER BY position",
+            )
+            .unwrap();
+        let rows: Vec<(String, Option<i64>, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let want = [
+            ("backlog", None, None),
+            ("in_progress", Some(2), Some("working")),
+            ("blocked", None, Some("blocked")),
+            ("review", None, None),
+            ("done", None, None),
+        ];
+        let got: Vec<(&str, Option<i64>, Option<&str>)> = rows
+            .iter()
+            .map(|(n, w, r)| (n.as_str(), *w, r.as_deref()))
+            .collect();
+        assert_eq!(got, want);
+        // One column for each role.
+        let dup = conn.execute(
+            "UPDATE board_columns SET role = 'working' WHERE name = 'review'",
+            [],
+        );
+        assert!(dup.is_err());
+        let bad = conn.execute(
+            "UPDATE board_columns SET role = 'stuck' WHERE name = 'review'",
+            [],
+        );
+        assert!(bad.is_err());
     }
 }

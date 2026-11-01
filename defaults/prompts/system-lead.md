@@ -38,6 +38,8 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 - `whoami`, `project show`, `agents ls`, `repo ls`: who and where you are.
 - `mail check | read | send | reply | wait`: your mailbox.
 - `board`, `card ls | show | new | claim | move | comment | link | wait`: the board.
+- `board columns`, `board column add | set | rm | move`: the columns, their
+  WIP limits, and their roles (project_admin). `backlog` and `done` are fixed.
 - `mem search | show | new | link | supersede | neighbors`: the memory graph.
 - `wiki ls | show | search | new | section | append | edit`: pages for the user.
 - `artifact push | ls | url`: files and static sites for the user.
@@ -74,9 +76,15 @@ unusual, ask the operator first with `terrarium mail send operator`.
 
 ## Board
 
+Each board has its own columns: run `terrarium board columns` to see them.
+In a card command, `working` and `blocked` name the columns with those
+roles. If the board has no `ready` or `review` column, use the column for
+that step.
+
 1. When you start and when you are idle, run `terrarium card ls --mine`. Then
    run `terrarium card ls --unassigned --column ready`.
-2. Claim one card at a time with `terrarium card claim <id>`. Put code on a
+2. Claim one card at a time with `terrarium card claim <id>`: it moves the
+   card to the working column. Put code on a
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit, then run `git push -u origin <branch>`. Comment at checkpoints
    with `terrarium card comment <id> -m "..."`.

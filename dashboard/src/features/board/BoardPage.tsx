@@ -5,7 +5,7 @@ import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
-import type { Card, NewCard, Question, Version } from "../../api/types";
+import type { Card, Column, NewCard, Question, Version } from "../../api/types";
 import { ago, compact, humanize } from "../../lib/format";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { cardsIn, createBoardStore } from "../../stores/board";
@@ -13,6 +13,11 @@ import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./s
 import { CardQuestions } from "./CardQuestions";
 import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkable } from "./questions";
 import { emptyNewCardForm, type NewCardErrors, type NewCardForm, newCardBody, newCardColumn, nextNewCardForm } from "./newCard";
+import { columnTitle, isBlockedColumn, overLimit } from "./columns";
+import { ColumnsEditor } from "./ColumnsEditor";
+import { LanesBoard } from "./LanesBoard";
+import { buildLanes, columnIndex, findVersion, laneCells, type LaneMove, laneMove, laneMovePatches, laneStateKey, menuVersions, parseRows, readLaneState, type RowsMode, takesCards, toggleCollapsed } from "./lanes";
+import { NewVersionModal, VersionModal } from "./VersionModal";
 import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_QUERY } from "./phone";
 import { matchesVersion, parseVersionFilter, VERSION_CHIP, versionOptions, versionQuery, versionsByCard } from "./versions";
 import { agents, api, events } from "../../stores";
@@ -21,11 +26,13 @@ type Drop = { column: string; index: number };
 
 export function BoardPage() {
   const params = useParams<{ project: string }>();
-  const [search, setSearch] = useSearchParams<{ card?: string; version?: string; col?: string }>();
+  const [search, setSearch] = useSearchParams<{ card?: string; version?: string; col?: string; rows?: string }>();
   const board = createBoardStore(api);
   const [dragging, setDragging] = createSignal<string | null>(null);
   const [drop, setDrop] = createSignal<Drop | null>(null);
-  const [pendingBlock, setPendingBlock] = createSignal<{ id: string; index: number } | null>(null);
+  const [pendingBlock, setPendingBlock] = createSignal<{ id: string; column: string; index: number } | null>(null);
+  const [editColumns, setEditColumns] = createSignal(false);
+  let editColumnsButton: HTMLButtonElement | undefined;
   const [label, setLabel] = createSignal("");
   const [assignee, setAssignee] = createSignal("");
   // The column of the open New card dialog, or null.
@@ -63,12 +70,14 @@ export function BoardPage() {
   const badges = () => cardQuestionBadges(questions());
 
   // The versions of the project: the Version filter and the version chips of the cards.
-  const [versions, setVersions] = createSignal<Version[] | undefined>(undefined);
+  // Every version, archived ones too (the toolbar menu lists them); the board shows only those that are not archived.
+  const [allVersions, setVersions] = createSignal<Version[] | undefined>(undefined);
+  const versions = () => allVersions()?.filter((v) => !v.archived);
   let vGen = 0;
   const loadVersions = async () => {
     const mine = ++vGen;
     try {
-      const rows = await api.versions.list(params.project);
+      const rows = await api.versions.list(params.project, { archived: "all" });
       if (mine === vGen) setVersions(rows);
     } catch {
       // A daemon or a caller without versions gets no chips and no filter.
@@ -85,7 +94,71 @@ export function BoardPage() {
     ),
   );
   const byCard = createMemo(() => versionsByCard(versions() ?? []));
-  const versionFilter = () => parseVersionFilter(search.version, versions());
+
+  // Version rows (lanes.ts): `?rows=version`, else the choice kept in localStorage for the project.
+  const storage = (): Storage | undefined => (typeof localStorage === "undefined" ? undefined : localStorage);
+  const [laneState, setLaneState] = createSignal(readLaneState(null));
+  createEffect(on(() => params.project, (p) => setLaneState(readLaneState(storage()?.getItem(laneStateKey(p)) ?? null))));
+  const saveLaneState = (next: ReturnType<typeof readLaneState>) => {
+    setLaneState(next);
+    try {
+      storage()?.setItem(laneStateKey(params.project), JSON.stringify(next));
+    } catch {
+      // A full or blocked storage: the choice lasts for this page only.
+    }
+  };
+  const rows = (): RowsMode => parseRows(search.rows, laneState().rows);
+  const setRows = (mode: RowsMode) => {
+    saveLaneState({ ...laneState(), rows: mode });
+    setSearch({ rows: mode === "version" ? "version" : "none", version: undefined }, { replace: true });
+  };
+  const [showArchived, setShowArchived] = createSignal(false);
+  const [newVersion, setNewVersion] = createSignal(false);
+  // The open Version modal: `?version=` with version rows; else a version chip opens it without a change of the filter.
+  const [chipVersion, setChipVersion] = createSignal<string | null>(null);
+  const openVersionKey = () => (rows() === "version" ? search.version : (chipVersion() ?? undefined));
+  const openVersion = () => findVersion(allVersions() ?? [], openVersionKey());
+  const showVersion = (id: string) => (rows() === "version" ? setSearch({ version: id }) : setChipVersion(id));
+  const closeVersion = () => (rows() === "version" ? setSearch({ version: undefined }) : setChipVersion(null));
+  // With version rows, `?version=` does not filter: it opens the version, and its lane opens and scrolls into view.
+  const versionFilter = () => (rows() === "version" ? "" : parseVersionFilter(search.version, versions()));
+  createEffect(
+    on([() => (rows() === "version" ? openVersion()?.id : undefined), () => !!board.state.board], ([id, loaded]) => {
+      if (!id || !loaded) return;
+      if (laneState().collapsed.includes(id)) saveLaneState(toggleCollapsed(laneState(), id));
+      requestAnimationFrame(() => document.querySelector(`[data-lane="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" }));
+    }),
+  );
+  const lanes = createMemo(() => buildLanes(versions() ?? [], board.state.board?.cards ?? []));
+  const [laneError, setLaneError] = createSignal<unknown>(null);
+  const [pendingLane, setPendingLane] = createSignal<{ id: string; move: LaneMove; column: string; index: number } | null>(null);
+
+  /** Change the versions of a card for a drag between lanes, then move it to the column of the drop. */
+  const applyLaneMove = async (id: string, m: LaneMove, column: string, index: number) => {
+    try {
+      for (const c of laneMovePatches(id, m)) await api.versions.update(c.version, c.patch);
+      setLaneError(null);
+    } catch (e) {
+      setLaneError(e);
+      await loadVersions();
+      return;
+    }
+    await loadVersions();
+    const card = board.state.board?.cards.find((c) => c.id === id);
+    if (card && card.column !== column) await commitMove(id, column, index);
+  };
+  const onLaneDrop = (id: string, fromLane: string, toLane: string, column: string, cellIndex: number) => {
+    const b = board.state.board;
+    if (!b) return;
+    const lane = lanes().find((l) => l.key === toLane);
+    const cell = lane ? laneCells(lane, column).filter((c) => c.id !== id) : [];
+    const index = columnIndex(cell, cardsIn(b, column).filter((c) => c.id !== id), cellIndex);
+    if (fromLane === toLane) return void commitMove(id, column, index);
+    const m = laneMove(id, fromLane, toLane, versions() ?? []);
+    if (m.refused) return setLaneError(new Error(m.refused));
+    if (m.others.length) return setPendingLane({ id, move: m, column, index });
+    void applyLaneMove(id, m, column, index);
+  };
 
   // One shared clock for the ETA countdowns: 1 s while a countdown is under an hour, else 30 s; no timer without one.
   const [now, setNow] = createSignal(Date.now());
@@ -136,9 +209,12 @@ export function BoardPage() {
     return i < 0 ? cards.length : i;
   };
 
+  const boardColumns = (): Column[] => board.state.board?.columns ?? [];
+  const titleOf = (name: string) => columnTitle(boardColumns().find((c) => c.name === name) ?? { name });
   const commitMove = async (id: string, column: string, index: number, comment?: string) => {
-    if (column === "blocked" && !comment) {
-      setPendingBlock({ id, index });
+    // The column with the role `blocked` (columns.ts roleColumn) needs a comment.
+    if (isBlockedColumn(boardColumns(), column) && !comment) {
+      setPendingBlock({ id, column, index });
       return;
     }
     await board.move(id, column, index, comment);
@@ -201,6 +277,28 @@ export function BoardPage() {
     cancelAnimationFrame(scrollFrame);
   });
 
+  const addCardButton = (col: Column) => (
+    <button
+      type="button"
+      class="ghost column-add"
+      ref={addButton}
+      aria-label={`Add a card to ${columnTitle(col)}`}
+      title={`Add a card to ${columnTitle(col)}`}
+      aria-haspopup="dialog"
+      onClick={() => setNewCardIn(col.name)}
+    >
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+        <path d="M8 3v10M3 8h10" />
+      </svg>
+    </button>
+  );
+  const versionMenu = menuVersions;
+  let versionsMenuEl: HTMLDetailsElement | undefined;
+  const openFromMenu = (id: string) => {
+    if (versionsMenuEl) versionsMenuEl.open = false;
+    showVersion(id);
+  };
+
   const filterCount = () => activeFilterCount({ label: label(), version: versionFilter(), assignee: assignee() });
 
   return (
@@ -227,7 +325,8 @@ export function BoardPage() {
             <option value="">Any label</option>
             <For each={labels()}>{(l) => <option value={l}>{l}</option>}</For>
           </select>
-          <Show when={versions()}>
+          {/* With version rows, the lanes show the versions: no Version filter. */}
+          <Show when={rows() === "none" && versions()}>
             {(vs) => (
               <select value={versionFilter()} onChange={(e) => setSearch({ version: versionQuery(e.currentTarget.value) })} aria-label="Filter by version">
                 <For each={versionOptions(vs())}>{(o) => <option value={o.value}>{o.label}</option>}</For>
@@ -239,8 +338,64 @@ export function BoardPage() {
             <For each={assignees()}>{(a) => <option value={a}>{a}</option>}</For>
           </select>
         </div>
+        <label class="board-rows">
+          <span class="small muted">Rows</span>
+          <select value={rows()} onChange={(e) => setRows(e.currentTarget.value as RowsMode)} aria-label="Rows">
+            <option value="none">none</option>
+            <option value="version">version</option>
+          </select>
+        </label>
+        <button type="button" aria-haspopup="dialog" onClick={() => setNewVersion(true)}>
+          + Version
+        </button>
+        <details class="menu versions-menu" ref={versionsMenuEl}>
+          <summary class="button">Versions</summary>
+          <div class="menu-panel" role="menu" aria-label="Versions">
+            <For each={versionMenu(allVersions() ?? [], showArchived()).active} fallback={<p class="muted small">No versions.</p>}>
+              {(v) => (
+                <button type="button" role="menuitem" class="menu-item" onClick={() => openFromMenu(v.id)}>
+                  <span>{v.name}</span> <span class={`chip ${VERSION_CHIP[v.status]}`}>{humanize(v.status)}</span>
+                </button>
+              )}
+            </For>
+            <label class="row small menu-toggle">
+              <input type="checkbox" checked={showArchived()} onChange={(e) => setShowArchived(e.currentTarget.checked)} />
+              Show archived versions
+            </label>
+            <Show when={showArchived()}>
+              <For each={versionMenu(allVersions() ?? [], true).archived} fallback={<p class="muted small">No archived versions.</p>}>
+                {(v) => (
+                  <div class="row menu-item archived">
+                    <button type="button" role="menuitem" class="link" onClick={() => openFromMenu(v.id)}>
+                      {v.name}
+                    </button>
+                    <span class={`chip ${VERSION_CHIP[v.status]}`}>{humanize(v.status)}</span>
+                    <button
+                      type="button"
+                      class="small"
+                      onClick={async () => {
+                        try {
+                          await api.versions.unarchive(v.id);
+                          await loadVersions();
+                        } catch (e) {
+                          setLaneError(e);
+                        }
+                      }}
+                    >
+                      Unarchive
+                    </button>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </div>
+        </details>
+        <button type="button" ref={editColumnsButton} aria-haspopup="dialog" disabled={!board.state.board} onClick={() => setEditColumns(true)}>
+          Edit columns
+        </button>
       </PageHead>
       <ErrorBanner error={board.state.error} onDismiss={board.clearError} />
+      <ErrorBanner error={laneError()} onDismiss={() => setLaneError(null)} />
 
       <Show when={board.state.board} fallback={<p class="muted">{board.state.loading ? "Loading…" : ""}</p>}>
         {(b) => (
@@ -260,25 +415,29 @@ export function BoardPage() {
                       setColumn(col.name);
                     }}
                   >
-                    {humanize(col.name)}
+                    {columnTitle(col)}
                     {/* The cards that the filters show, so a phone finds the matches. */}
                     <span class="nav-count">{cardsIn(b(), col.name).filter(visible).length}</span>
                   </button>
                 )}
               </For>
             </div>
+            <Show
+              when={rows() === "version"}
+              fallback={
             <div class="board" ref={boardEl} onScroll={onBoardScroll}>
               <For each={b().columns}>
                 {(col) => {
                   const cards = () => cardsIn(b(), col.name);
-                  const over = () => col.wip_limit !== undefined && cards().length > col.wip_limit;
+                  // Over its limit (a limit set under the count): the count shows red until cards leave.
+                  const over = () => overLimit(col, cards().length);
                   const othersIndex = (id: string) => cards().filter((c) => c.id !== dragging()).findIndex((c) => c.id === id);
                   return (
                     <section
                       id={`board-col-${col.name}`}
                       data-column={col.name}
                       class={`column${drop()?.column === col.name ? " drop" : ""}${over() ? " over-limit" : ""}`}
-                      aria-label={col.name}
+                      aria-label={columnTitle(col)}
                       onDragOver={(e) => {
                         if (!dragging()) return;
                         e.preventDefault();
@@ -300,28 +459,14 @@ export function BoardPage() {
                       }}
                     >
                       <div class="column-head">
-                        <span>{humanize(col.name)}</span>
+                        <span title={col.role ? `${columnTitle(col)} (${col.name}): the ${col.role} column` : col.name}>{columnTitle(col)}</span>
                         <span class="row column-head-end">
-                          <span class="count muted small">
+                          <span class="count muted small" title={over() ? `Over the WIP limit of ${col.wip_limit}: no more cards enter until some leave` : undefined}>
                             {cards().length}
                             {col.wip_limit !== undefined ? ` / ${col.wip_limit}` : ""}
                           </span>
                           {/* New cards go to the backlog (newCard.ts newCardColumn), so only that column has the "+" button. */}
-                          <Show when={col.name === newCardColumn(columnNames())}>
-                            <button
-                              type="button"
-                              class="ghost column-add"
-                              ref={addButton}
-                              aria-label={`Add a card to ${humanize(col.name)}`}
-                              title={`Add a card to ${humanize(col.name)}`}
-                              aria-haspopup="dialog"
-                              onClick={() => setNewCardIn(col.name)}
-                            >
-                              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-                                <path d="M8 3v10M3 8h10" />
-                              </svg>
-                            </button>
-                          </Show>
+                          <Show when={col.name === newCardColumn(columnNames())}>{addCardButton(col)}</Show>
                         </span>
                       </div>
                       <For each={cards()}>
@@ -335,7 +480,7 @@ export function BoardPage() {
                               now={now()}
                               questions={badges().get(card.id)}
                               versions={byCard().get(card.id) ?? []}
-                              onVersion={(id) => setSearch({ version: id })}
+                              onVersion={showVersion}
                               hidden={!visible(card)}
                               dragging={dragging() === card.id}
                               draggable={!phone()}
@@ -361,7 +506,95 @@ export function BoardPage() {
               }}
             </For>
           </div>
+              }
+            >
+              <LanesBoard
+                board={b()}
+                lanes={lanes()}
+                versions={versions() ?? []}
+                phone={phone()}
+                collapsed={laneState().collapsed}
+                onToggle={(key) => saveLaneState(toggleCollapsed(laneState(), key))}
+                visible={visible}
+                addColumn={newCardColumn(columnNames())}
+                addButton={addCardButton}
+                onOpenVersion={showVersion}
+                onDrop={onLaneDrop}
+                boardRef={(el) => (boardEl = el)}
+                onScroll={onBoardScroll}
+                card={(card, lane, drag, also) => (
+                  <KCard
+                    card={card}
+                    now={now()}
+                    questions={badges().get(card.id)}
+                    versions={byCard().get(card.id) ?? []}
+                    onVersion={showVersion}
+                    hidden={!visible(card)}
+                    dragging={drag.dragging}
+                    draggable={drag.draggable}
+                    note={also.length ? `also in ${also.map((v) => v.name).join(", ")}` : undefined}
+                    lane={lane.key}
+                    onOpen={() => setSearch({ card: card.id })}
+                    onDragStart={drag.onDragStart}
+                    onDragEnd={drag.onDragEnd}
+                  />
+                )}
+              />
+            </Show>
           </>
+        )}
+      </Show>
+
+      <Show when={pendingLane()}>
+        {(p) => (
+          <Modal title={`Move ${p().id}`} onClose={() => setPendingLane(null)}>
+            <p style={{ margin: 0 }}>
+              {p().id} is also in {p().move.others.map((v) => v.name).join(", ")}. {p().move.remove ? `It leaves ${p().move.remove!.name}` : "It stays where it is"}
+              {p().move.add ? ` and goes into ${p().move.add!.name}` : ""}. The other versions keep it.
+            </p>
+            <div class="row">
+              <button
+                class="primary"
+                onClick={() => {
+                  const { id, move, column, index } = p();
+                  setPendingLane(null);
+                  void applyLaneMove(id, move, column, index);
+                }}
+              >
+                Move
+              </button>
+              <button onClick={() => setPendingLane(null)}>Cancel</button>
+            </div>
+          </Modal>
+        )}
+      </Show>
+
+      <Show when={newVersion()}>
+        <NewVersionModal
+          project={params.project}
+          cards={board.state.board?.cards ?? []}
+          onClose={() => setNewVersion(false)}
+          onCreated={async (v) => {
+            setNewVersion(false);
+            await loadVersions();
+            showVersion(v.id);
+          }}
+        />
+      </Show>
+
+      <Show when={openVersion()}>
+        {(v) => (
+          <VersionModal
+            version={v()}
+            all={allVersions() ?? []}
+            cards={board.state.board?.cards ?? []}
+            onChanged={() => void loadVersions()}
+            onOpenCard={(id) => {
+              closeVersion();
+              setSearch({ card: id });
+            }}
+            onClose={closeVersion}
+          />
         )}
       </Show>
 
@@ -370,7 +603,7 @@ export function BoardPage() {
           <NewCardModal
             prefix={board.prefix()}
             column={column()}
-            columns={columnNames()}
+            columns={boardColumns()}
             agents={agents.inProject(params.project)}
             onCreate={async (body) => {
               const card = await api.cards.create(params.project, body);
@@ -390,14 +623,30 @@ export function BoardPage() {
         {(p) => (
           <BlockModal
             cardId={p().id}
+            column={titleOf(p().column)}
             onCancel={() => setPendingBlock(null)}
             onSubmit={async (comment) => {
-              const { id, index } = p();
+              const { id, column, index } = p();
               setPendingBlock(null);
-              await commitMove(id, "blocked", index, comment);
+              await commitMove(id, column, index, comment);
             }}
           />
         )}
+      </Show>
+
+      <Show when={editColumns()}>
+        <ColumnsEditor
+          columns={boardColumns()}
+          onSave={async (edits) => {
+            const b = await api.board.update(params.project, edits);
+            await board.reload();
+            return b;
+          }}
+          onClose={() => {
+            setEditColumns(false);
+            editColumnsButton?.focus();
+          }}
+        />
       </Show>
 
       <Show when={selected()}>
@@ -405,7 +654,18 @@ export function BoardPage() {
           <CardDrawer
             card={c()}
             now={now()}
-            columns={board.state.board?.columns.map((x) => x.name) ?? []}
+            columns={boardColumns()}
+            versions={versions() ?? []}
+            onVersion={async (versionId, on) => {
+              try {
+                await api.versions.update(versionId, on ? { add_cards: [c().id] } : { remove_cards: [c().id] });
+                setLaneError(null);
+              } catch (e) {
+                setLaneError(e);
+              }
+              await loadVersions();
+            }}
+            onOpenVersion={showVersion}
             linkable={linkable(questions(), params.project)}
             onQuestionsChanged={() => void loadQuestions()}
             onClose={() => setSearch({ card: undefined })}
@@ -454,8 +714,12 @@ function KCard(props: {
   questions?: CardQuestionBadge;
   /** The versions that have the card. */
   versions: Version[];
-  /** A click on a version chip: filter the board by that version. */
+  /** A click on a version chip: open that version. */
   onVersion: (id: string) => void;
+  /** A line under the title, for example "also in v0.2.0" in a version row. */
+  note?: string;
+  /** The version row of the card, with version rows. */
+  lane?: string;
   hidden: boolean;
   dragging: boolean;
   /** False on a phone: a touch scrolls the board, and the drawer moves the card. */
@@ -470,6 +734,7 @@ function KCard(props: {
       class={`kcard${props.dragging ? " dragging" : ""}`}
       style={{ display: props.hidden ? "none" : undefined }}
       data-card={props.card.id}
+      data-card-lane={props.lane}
       draggable={props.draggable}
       tabIndex={0}
       onDragStart={(e) => props.onDragStart(e)}
@@ -495,6 +760,9 @@ function KCard(props: {
         </span>
       </div>
       <div class="title">{props.card.title}</div>
+      <Show when={props.note}>
+        <div class="small muted kcard-note">{props.note}</div>
+      </Show>
       <EtaChip card={props.card} now={props.now} />
       <div class="row small">
         <For each={props.card.labels}>{(l) => <span class="chip">{l}</span>}</For>
@@ -506,8 +774,8 @@ function KCard(props: {
               <button
                 type="button"
                 class={`chip version-chip ${VERSION_CHIP[v.status]}`}
-                title={`In version ${v.name} (${humanize(v.status)}). Show the cards of this version.`}
-                // A click filters the board; it does not open the card.
+                title={`In version ${v.name} (${humanize(v.status)}). Open the version.`}
+                // A click opens the version; it does not open the card. The toolbar Version filter filters.
                 onClick={(e) => {
                   e.stopPropagation();
                   props.onVersion(v.id);
@@ -544,7 +812,7 @@ function KCard(props: {
 function NewCardModal(props: {
   prefix: string | null;
   column: string;
-  columns: string[];
+  columns: Column[];
   agents: { id: string; name: string }[];
   onCreate: (body: NewCard) => Promise<Card>;
   onClose: () => void;
@@ -631,7 +899,7 @@ function NewCardModal(props: {
           <label class="drawer-field">
             Column
             <select value={form.column} onChange={field("column")}>
-              <For each={props.columns}>{(c) => <option value={c}>{humanize(c)}</option>}</For>
+              <For each={props.columns}>{(c) => <option value={c.name}>{columnTitle(c)}</option>}</For>
             </select>
           </label>
           <label class="drawer-field">
@@ -678,17 +946,17 @@ function NewCardModal(props: {
   );
 }
 
-function BlockModal(props: { cardId: string; onCancel: () => void; onSubmit: (comment: string) => void }) {
+function BlockModal(props: { cardId: string; column: string; onCancel: () => void; onSubmit: (comment: string) => void }) {
   const [text, setText] = createSignal("");
   return (
     <Modal title={`Block ${props.cardId}`} onClose={() => props.onCancel()}>
       <p class="muted" style={{ margin: 0 }}>
-        Moving a card to blocked needs a comment. The daemon mails it to the operator and the card's creator.
+        Moving a card to {props.column} (the blocked column) needs a comment. The daemon mails it to the operator and the card's creator.
       </p>
       <textarea value={text()} onInput={(e) => setText(e.currentTarget.value)} placeholder="What is needed to unblock it?" aria-label="Comment" />
       <div class="row">
         <button class="primary" disabled={!text().trim()} onClick={() => props.onSubmit(text().trim())}>
-          Move to blocked
+          Move to {props.column}
         </button>
         <button onClick={() => props.onCancel()}>Cancel</button>
       </div>
@@ -699,7 +967,11 @@ function BlockModal(props: { cardId: string; onCancel: () => void; onSubmit: (co
 function CardDrawer(props: {
   card: Card;
   now: number;
-  columns: string[];
+  columns: Column[];
+  /** The versions that are not archived: the Versions field adds the card to one or removes it. */
+  versions: Version[];
+  onVersion: (versionId: string, on: boolean) => Promise<void>;
+  onOpenVersion: (versionId: string) => void;
   linkable: Question[];
   onQuestionsChanged: () => void;
   onClose: () => void;
@@ -759,7 +1031,7 @@ function CardDrawer(props: {
     <Drawer
       title={
         <span>
-          <span class="mono muted">{props.card.id}</span> <span class="chip">{humanize(props.card.column)}</span>
+          <span class="mono muted">{props.card.id}</span> <span class="chip">{columnTitle(props.columns.find((c) => c.name === props.card.column) ?? { name: props.card.column })}</span>
         </span>
       }
       onClose={() => props.onClose()}
@@ -806,7 +1078,7 @@ function CardDrawer(props: {
         <label class="drawer-field">
           Column
           <select value={props.card.column} onChange={(e) => void props.onMove(e.currentTarget.value)}>
-            <For each={props.columns}>{(c) => <option value={c}>{humanize(c)}</option>}</For>
+            <For each={props.columns}>{(c) => <option value={c.name}>{columnTitle(c)}</option>}</For>
           </select>
         </label>
         <label class="drawer-field">
@@ -818,6 +1090,25 @@ function CardDrawer(props: {
           </select>
         </label>
       </div>
+
+      {/* The versions of the card. On a phone this moves a card between version rows (no drag and drop there). */}
+      <fieldset class="drawer-versions">
+        <legend class="small">Versions</legend>
+        <For each={props.versions} fallback={<span class="muted small">No versions.</span>}>
+          {(v) => {
+            const inIt = () => v.cards.some((x) => x.id === props.card.id);
+            return (
+              <label class="row small" title={takesCards(v) ? undefined : `Version ${v.name} is ${humanize(v.status)}: its cards change only in draft or after a rejection.`}>
+                <input type="checkbox" checked={inIt()} disabled={!takesCards(v)} onChange={(e) => void props.onVersion(v.id, e.currentTarget.checked)} />
+                <button type="button" class="link" onClick={() => props.onOpenVersion(v.id)}>
+                  {v.name}
+                </button>
+                <span class={`chip ${VERSION_CHIP[v.status]}`}>{humanize(v.status)}</span>
+              </label>
+            );
+          }}
+        </For>
+      </fieldset>
 
       <dl class="kv">
         <dt>Labels</dt>

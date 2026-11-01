@@ -623,6 +623,10 @@ struct LeadItem {
     by: String,
     /// The comment of a move to `blocked`, on one line.
     comment: String,
+    /// The column the card moved to (the blocked column can have another
+    /// name). Empty in a nudge queued before columns had roles.
+    #[serde(default)]
+    column: String,
 }
 
 impl LeadItem {
@@ -638,8 +642,14 @@ impl LeadItem {
                 self.by
             ),
             LeadChange::Blocked => format!(
-                "{c} moved to blocked by {}: {}. Run `terrarium card show {c}`.",
-                self.by, self.comment
+                "{c} moved to {} by {}: {}. Run `terrarium card show {c}`.",
+                if self.column.is_empty() {
+                    "blocked"
+                } else {
+                    &self.column
+                },
+                self.by,
+                self.comment
             ),
         }
     }
@@ -647,7 +657,8 @@ impl LeadItem {
 
 /// The lead nudge of a card event, when the event is one: a card with no
 /// assignee moved into `ready` (also a card made in `ready`), or a card
-/// moved to `review` or `blocked`.
+/// moved to `review` or to the column with the role `blocked` (an event
+/// from before the roles: the column `blocked`).
 /// The most card events [`acted_since_assign`] reads for one card.
 const CARD_EVENTS_READ: usize = 5_000;
 
@@ -686,10 +697,15 @@ fn lead_item(ev: &crate::events::StoredEvent) -> Option<LeadItem> {
     if ev.kind != "card" || s("change").as_deref() != Some("moved") {
         return None;
     }
-    let change = match s("to").as_deref()? {
+    let to = s("to")?;
+    let to_blocked = match ev.data.get("to_role") {
+        Some(role) => role.as_str() == Some(crate::store::board::BLOCKED),
+        None => to == crate::store::board::BLOCKED,
+    };
+    let change = match to.as_str() {
+        _ if to_blocked => LeadChange::Blocked,
         "ready" if s("assignee").is_none() => LeadChange::Ready,
         "review" => LeadChange::Review,
-        "blocked" => LeadChange::Blocked,
         _ => return None,
     };
     Some(LeadItem {
@@ -700,6 +716,7 @@ fn lead_item(ev: &crate::events::StoredEvent) -> Option<LeadItem> {
             .or_else(|| ev.actor.clone())
             .unwrap_or_default(),
         comment: one_line(&s("comment").unwrap_or_default()),
+        column: to,
     })
 }
 
@@ -3050,7 +3067,9 @@ impl RunnerSupervisor {
                 for k in keys {
                     match crate::store::board::get_card(c, &k) {
                         Ok(card) => {
-                            out.insert(k, Some((card.column, card.assignee, card.archived)));
+                            let role =
+                                crate::store::board::role_of(c, &card.project, &card.column)?;
+                            out.insert(k, Some((card.column, card.assignee, card.archived, role)));
                         }
                         Err(e) if e.code == crate::error::Code::NotFound => {
                             out.insert(k, None);
@@ -3077,7 +3096,7 @@ impl RunnerSupervisor {
         let now = |k: &str| cards.get(k).cloned().flatten().filter(|c| !c.2);
         pointer.cards.retain(|c| match now(&c.card) {
             None => false,
-            Some((column, assignee, _)) => {
+            Some((column, assignee, ..)) => {
                 column != "done"
                     && (c.change != CardChange::Assigned
                         || (assignee.as_deref() == Some(&me) && !acted.contains(&c.card)))
@@ -3085,10 +3104,10 @@ impl RunnerSupervisor {
         });
         pointer.leads.retain(|l| match now(&l.card) {
             None => false,
-            Some((column, assignee, _)) => match l.change {
+            Some((column, assignee, _, role)) => match l.change {
                 LeadChange::Ready => column == "ready" && assignee.is_none(),
                 LeadChange::Review => column == "review",
-                LeadChange::Blocked => column == "blocked",
+                LeadChange::Blocked => role.as_deref() == Some(crate::store::board::BLOCKED),
             },
         });
         pointer
@@ -5345,6 +5364,17 @@ mod tests {
             blocked.line(),
             "DEM-3 moved to blocked by demo/bob: needs a key…. Run `terrarium card show DEM-3`."
         );
+        // The role, not the name: a blocked column with another name.
+        let stuck = moved(
+            "stuck",
+            serde_json::json!({"to_role": "blocked", "comment": "needs a key"}),
+        )
+        .unwrap();
+        assert_eq!(
+            stuck.line(),
+            "DEM-3 moved to stuck by demo/bob: needs a key. Run `terrarium card show DEM-3`."
+        );
+        assert!(moved("doing", serde_json::json!({"to_role": "working"})).is_none());
         let mut p = Pointer::default();
         p.add_lead(review.clone());
         p.add_lead(blocked);

@@ -30,6 +30,8 @@ import * as selfhosted from "./selfhosted";
 import { splitFrontMatter } from "../../lib/markdown";
 import { installCommand } from "../../lib/host-install";
 import { resolveEta } from "../../lib/eta";
+import { defaultTitle } from "../../features/board/columns";
+import { checkColumnEdits } from "./boardColumns";
 import { limitsInfo, limitsKindError, resolveLimits } from "../../lib/limits";
 import { mockChanges, mockCommit, mockCommits, mockFile, mockList, mockTrees } from "./repoTrees";
 import type {
@@ -54,7 +56,9 @@ import type {
   LogSessionLink,
   Card,
   CardComment,
+  Column,
   ColumnEdit,
+  ColumnRole,
   EventQuery,
   HarnessAgent,
   HarnessReport,
@@ -243,7 +247,6 @@ export function lineDiff(a: string, b: string): string {
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const PREFIX_RE = /^[A-Z][A-Z0-9]{0,9}$/;
-const REQUIRED_COLUMNS = ["backlog", "in_progress", "blocked", "done"];
 const LIVE: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 /** The global idle stop of the mock daemon (`TERRARIUM_IDLE_STOP`). The mock does not stop idle agents by time. */
 const MOCK_IDLE_STOP = "10m";
@@ -497,6 +500,24 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   };
   const cardById = (id: string) => find(w.cards, (c) => c.id.toUpperCase() === id.toUpperCase(), `card ${id}`);
   const version = (id: string) => find(w.versions, (v) => v.id === id || `${v.project}/${v.name}` === id || v.name === id, `version \`${id}\``);
+  /** Archive or unarchive a version (store/versions.rs set_archived): no change, no event. */
+  const setArchived = (v: Version, archived: boolean): Version => {
+    if (!!v.archived === archived) return v;
+    if (archived) {
+      v.archived = true;
+      v.archived_at = iso();
+      v.archived_by = "operator";
+    } else {
+      v.archived = false;
+      delete v.archived_at;
+      delete v.archived_by;
+    }
+    v.updated_at = iso();
+    const change = archived ? "archived" : "unarchived";
+    audit(archived ? "version.archive" : "version.unarchive", `${v.project}/${v.name}`, v.project, { version_id: v.id });
+    emit({ kind: `version.${change}` as AgentEvent["kind"], actor: "operator", project: v.project, summary: `version ${v.name} ${change}`, data: { version_id: v.id, name: v.name, status: v.status, archived } });
+    return v;
+  };
   const sub = (name: string) => find(w.subscriptions, (s) => s.name === name, `subscription ${name}`);
 
   // ----- addresses (docs/api.md §2.3) -----
@@ -990,6 +1011,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       .sort((a, b) => a.started_at.localeCompare(b.started_at) || a.id.localeCompare(b.id));
   };
   const activeIn = (proj: string, column: string) => w.cards.filter((c) => c.project === proj && c.column === column && !c.archived);
+  /** The column of a `?column=` filter: a role alias names the role column; an unknown name matches no card. */
+  const listColumn = (proj: string, name: string) => {
+    const cols = w.columns[proj] ?? [];
+    return cols.find((x) => x.name === name)?.name ?? ((name === "working" || name === "blocked") && cols.find((x) => x.role === name)?.name) ?? name;
+  };
   const boardOf = (name: string) => {
     const p = project(name);
     const cols = w.columns[name] ?? [];
@@ -997,7 +1023,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     return {
       project: name,
       card_prefix: p.card_prefix,
-      columns: cols.map((c, i) => ({ ...c, position: i, count: activeIn(name, c.name).length })),
+      columns: cols.map((c, i) => ({ ...c, title: c.title || defaultTitle(c.name), position: i, count: activeIn(name, c.name).length })),
       cards: w.cards
         .filter((c) => c.project === name && !c.archived)
         .sort((a, b) => (order.get(a.column) ?? 99) - (order.get(b.column) ?? 99) || a.position - b.position)
@@ -1010,7 +1036,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       .forEach((c, i) => (c.position = i));
   const cardEvent = (c: Card, change: string, summary: string, data: Record<string, unknown> = {}) => {
     const as = c.assignee ? w.agents.find((a) => a.id === c.assignee) : undefined;
-    emit({ kind: "card", actor: "operator", ...(as ? { agent: as.name, agent_id: as.id } : {}), project: c.project, card: c.id, summary, data: { card_id: c.id, change, title: c.title, column: c.column, ...data } });
+    const column_role = roleOf(c.project, c.column) ?? null;
+    emit({ kind: "card", actor: "operator", ...(as ? { agent: as.name, agent_id: as.id } : {}), project: c.project, card: c.id, summary, data: { card_id: c.id, change, title: c.title, column: c.column, column_role, ...data } });
+  };
+  /** The role of a column of the board of `proj`. */
+  const roleOf = (proj: string, column: string): ColumnRole | undefined => (w.columns[proj] ?? []).find((x) => x.name === column)?.role;
+  /** A column by name, or by a role alias (`working`, `blocked`): store/board.rs `column`. A name wins over an alias. */
+  const columnOf = (proj: string, name: string): Column => {
+    const cols = w.columns[proj] ?? [];
+    const list = cols.map((x) => (x.role ? `${x.name} (${x.role})` : x.name)).join(", ");
+    const byName = cols.find((x) => x.name === name);
+    if (byName) return byName;
+    if (name === "working" || name === "blocked")
+      return cols.find((x) => x.role === name) ?? fail(422, "invalid", `the board of \`${proj}\` has no \`${name}\` column (no column has the role \`${name}\`); columns: ${list}`);
+    return fail(422, "invalid", `no column \`${name}\`; columns: ${list}`);
   };
   const comment = (c: Card, body: string) => {
     const cm: CardComment = { id: ulid("cmt"), author: "operator", author_name: "operator", body, created_at: iso(), session: null };
@@ -1018,19 +1057,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     return cm;
   };
   /** Move with the rules of docs/api.md §8.2. */
-  const move = (c: Card, column: string, position: number | undefined, note?: string) => {
+  const move = (c: Card, to: string, position: number | undefined, note?: string) => {
     if (c.archived) fail(409, "conflict", `${c.id} is archived`);
-    const cols = w.columns[c.project] ?? [];
-    const col = cols.find((x) => x.name === column) ?? fail(422, "invalid", `no column \`${column}\` on the board of \`${c.project}\``);
+    const col = columnOf(c.project, to);
+    const column = col.name;
     const from = c.column;
+    const fromRole = roleOf(c.project, from) ?? null;
     if (column !== from) {
       if (col.wip_limit !== undefined && activeIn(c.project, column).length >= col.wip_limit)
         fail(409, "wip_limit", `column \`${column}\` is at its WIP limit (${col.wip_limit})`, { column, wip_limit: col.wip_limit });
-      if (column === "in_progress") {
+      if (col.role === "working") {
         const unmet = blockedBy(c);
         if (unmet.length) fail(409, "dependencies_unmet", `${c.id} depends on ${unmet.join(", ")} that are not done`, { blocked_by: unmet });
       }
-      if (column === "blocked" && !note?.trim()) fail(422, "comment_required", "a move to `blocked` needs a comment");
+      if (col.role === "blocked" && !note?.trim()) fail(422, "comment_required", `moving ${c.id} to \`${column}\` (the blocked column) needs a comment that says what is needed`);
     }
     if (note?.trim()) comment(c, note.trim());
     c.column = column;
@@ -1048,10 +1088,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     if (from !== column) reindex(c.project, from);
     c.updated_at = iso();
     if (from !== column) {
-      cardEvent(c, "moved", `operator moved ${c.id} to ${column}`, { from, to: column, comment: note ?? null });
-      if (column === "blocked") {
+      cardEvent(c, "moved", `operator moved ${c.id} to ${column}`, { from, to: column, from_role: fromRole, to_role: col.role ?? null, comment: note ?? null });
+      if (col.role === "blocked") {
         // The daemon's notice (store/board.rs notify_blocked): from `system` to the operator.
-        sendMail("operator", "system", `${c.id} blocked: ${c.title}`, `Card ${c.id} "${c.title}" moved to blocked by operator.\n\nComment:\n${note ?? ""}\n\nRun \`terrarium card show ${c.id}\`.`);
+        sendMail("operator", "system", `${c.id} blocked: ${c.title}`, `Card ${c.id} "${c.title}" moved to ${column} (the blocked column) by operator.\n\nComment:\n${note ?? ""}\n\nRun \`terrarium card show ${c.id}\`.`);
       }
       if (column === "done") {
         for (const d of w.cards.filter((x) => x.depends_on.includes(c.id) && blockedBy(x).length === 0)) cardEvent(d, "unblocked", `${d.id} unblocked by ${c.id}`, { by: c.id });
@@ -1457,10 +1497,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       }));
 
   // ----- local accounting (docs/api.md §16.4 `GET /api/usage`) -----
-  /** The attribution rule of docs/api.md §16.1: the agent's card in `in_progress`, newest `updated_at` first. */
+  /** The attribution rule of docs/api.md §16.1: the agent's card in the working column, newest `updated_at` first. */
   const currentCard = (agentId: string): string | undefined =>
     w.cards
-      .filter((c) => c.assignee === agentId && c.column === "in_progress" && !c.archived)
+      .filter((c) => c.assignee === agentId && roleOf(c.project, c.column) === "working" && !c.archived)
       .sort((x, y) => y.updated_at.localeCompare(x.updated_at) || x.id.localeCompare(y.id))[0]?.id;
   const cardTitle = (id: string) => w.cards.find((c) => c.id === id)?.title;
   const sumRows = (rows: UsageRow[]): UsageTotals => {
@@ -2010,9 +2050,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           w.columns[p.name] = [
             { name: "backlog", position: 0 },
             { name: "ready", position: 1 },
-            { name: "in_progress", position: 2 },
+            { name: "in_progress", position: 2, role: "working" },
             { name: "review", position: 3 },
-            { name: "blocked", position: 4 },
+            { name: "blocked", position: 4, role: "blocked" },
             { name: "done", position: 5 },
           ];
           audit("project.create", proj.name, proj.name, { card_prefix: proj.card_prefix, source: "api" });
@@ -2483,19 +2523,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       update: (proj, columns: ColumnEdit[]) =>
         reply(() => {
           project(proj);
+          const next = checkColumnEdits(w.columns[proj] ?? [], columns);
           const old = w.columns[proj] ?? [];
-          const names = columns.map((c) => c.name);
-          for (const r of REQUIRED_COLUMNS) if (!names.includes(r)) fail(422, "invalid", `the column \`${r}\` must stay and keep its name`);
-          if (new Set(names).size !== names.length) fail(422, "invalid", "two columns have the same name");
-          const renamed = new Map(columns.filter((c) => c.rename_from).map((c) => [c.rename_from!, c.name]));
+          const kept = new Set(columns.map((c) => c.rename_from ?? c.name));
           for (const o of old) {
-            if (names.includes(o.name) || renamed.has(o.name)) continue;
-            if (activeIn(proj, o.name).length) fail(409, "conflict", `column \`${o.name}\` has cards`);
+            if (kept.has(o.name)) continue;
+            const cards = activeIn(proj, o.name).map((c) => c.id);
+            if (cards.length) fail(409, "conflict", `column \`${o.name}\` has ${cards.length} card(s): ${cards.join(", ")}; move them first`, { column: o.name, cards });
           }
-          for (const [from, to] of renamed) for (const c of w.cards.filter((x) => x.project === proj && x.column === from)) c.column = to;
-          w.columns[proj] = columns.map((c, i) => ({ name: c.name, position: i, ...(c.wip_limit !== undefined ? { wip_limit: c.wip_limit } : {}) }));
-          audit("board.columns", proj, proj, { columns: names });
-          emit({ kind: "board", actor: "operator", project: proj, summary: `operator changed the columns of ${proj}`, data: { columns: names } });
+          for (const c of columns.filter((x) => x.rename_from && x.rename_from !== x.name))
+            for (const k of w.cards.filter((x) => x.project === proj && x.column === c.rename_from)) k.column = c.name;
+          w.columns[proj] = next;
+          const after = next.map((c, i) => ({ name: c.name, title: c.title ?? null, wip_limit: c.wip_limit ?? null, role: c.role ?? null, rename_from: columns[i]!.rename_from ?? null }));
+          audit("board.columns", proj, proj, { columns: after });
+          emit({ kind: "board", actor: "operator", project: proj, summary: `${proj}: columns changed`, data: { columns: after } });
           return boardOf(proj);
         }),
     },
@@ -2505,7 +2546,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           project(proj);
           const rows = w.cards
-            .filter((c) => c.project === proj && (q.archived ? true : !c.archived) && (!q.column || c.column === q.column) && (!q.label || c.labels.includes(q.label)) && (!q.unassigned || !c.assignee) && (!q.assignee || c.assignee === q.assignee || c.assignee_name === q.assignee))
+            .filter((c) => c.project === proj && (q.archived ? true : !c.archived) && (!q.column || c.column === listColumn(proj, q.column)) && (!q.label || c.labels.includes(q.label)) && (!q.unassigned || !c.assignee) && (!q.assignee || c.assignee === q.assignee || c.assignee_name === q.assignee))
             .sort((a, b) => Number(a.id.split("-")[1]) - Number(b.id.split("-")[1]))
             .map(view);
           return paginate(rows, q, (c) => c.id.split("-")[1]!);
@@ -2516,9 +2557,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const msg = c.from_mail ? find(w.mail, (m) => m.id === c.from_mail, `message ${c.from_mail}`) : undefined;
           const title = c.title?.trim() || msg?.subject || fail(422, "invalid", "a card needs a title");
           const n = Math.max(0, ...w.cards.filter((x) => x.project === proj).map((x) => Number(x.id.split("-")[1]) || 0)) + 1;
-          const column = c.column ?? "backlog";
-          if (!(w.columns[proj] ?? []).some((x) => x.name === column)) fail(422, "invalid", `no column \`${column}\``);
-          if (column === "blocked" && !c.comment?.trim()) fail(422, "comment_required", "a move to `blocked` needs a comment");
+          const col = columnOf(proj, c.column ?? "backlog");
+          const column = col.name;
+          if (col.role === "blocked" && !c.comment?.trim()) fail(422, "comment_required", `moving a card to \`${column}\` (the blocked column) needs a comment that says what is needed`);
+          // A new card in a full column is refused too (store/board.rs create_card moves it there).
+          if (column !== "backlog" && col.wip_limit !== undefined && activeIn(proj, column).length >= col.wip_limit)
+            fail(409, "wip_limit", `column \`${column}\` is at its WIP limit (${col.wip_limit})`, { column, wip_limit: col.wip_limit });
           const eta = c.eta_at ? resolveEta(c.eta_at) : undefined;
           if (eta && "error" in eta) fail(422, "invalid", eta.error);
           const card: Card = {
@@ -2932,7 +2976,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       list: (proj, q = {}) =>
         reply(() => {
           project(proj);
-          return w.versions.filter((v) => v.project === proj && (!q.status || v.status === q.status) && (!q.name || v.name === q.name)).sort((a, b) => b.created_at.localeCompare(a.created_at));
+          const archived = q.archived ?? "false";
+          if (!["true", "false", "all"].includes(archived)) fail(400, "bad_request", `bad archived \`${archived}\`: use true, false, or all`);
+          return w.versions
+            .filter((v) => v.project === proj && (!q.status || v.status === q.status) && (!q.name || v.name === q.name) && (archived === "all" || (archived === "true") === !!v.archived))
+            .sort((a, b) => b.created_at.localeCompare(a.created_at));
         }),
       create: (proj, v) =>
         reply(() => {
@@ -2941,7 +2989,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (w.versions.some((x) => x.project === proj && x.name === v.name)) fail(409, "conflict", `version \`${v.name}\` exists`);
           const id = ulid("ver");
           const ver: Version = {
-            id, project: proj, name: v.name, notes: v.notes ?? "", status: "draft", ...(v.git_ref ? { git_ref: v.git_ref } : {}), ...(v.repo ? { repo: v.repo } : {}),
+            id, project: proj, name: v.name, notes: v.notes ?? "", status: "draft", archived: false, ...(v.git_ref ? { git_ref: v.git_ref } : {}), ...(v.repo ? { repo: v.repo } : {}),
             cards: (v.cards ?? []).map(cardRef), artifacts: (v.artifacts ?? []).map(artRef), reviews: [],
             created_by: "operator", created_by_name: "operator", created_at: iso(), updated_at: iso(), url: `/p/${proj}/versions/${id}`,
           };
@@ -3003,6 +3051,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           emit({ kind: `version.${decision[action]}` as AgentEvent["kind"], actor: "operator", project: v.project, summary: `operator ${decision[action]} ${v.name}`, data: { version_id: v.id, name: v.name, status: v.status, comment: comment ?? null } });
           return v;
         }),
+      archive: (id) => reply(() => setArchived(version(id), true)),
+      unarchive: (id) => reply(() => setArchived(version(id), false)),
       compare: (id, to) =>
         reply(() => {
           const a = version(id);

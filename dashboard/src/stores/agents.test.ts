@@ -81,6 +81,11 @@ describe("applyAgentEvent", () => {
     expect(moved[0]!.current_card).toBe("P-1");
     const done = applyAgentEvent(moved, ev({ kind: "card", agent_id: "A1", card: "P-1", data: { card_id: "P-1", change: "moved", column: "review" } }));
     expect(done[0]!.current_card).toBeUndefined();
+    // A renamed working column: the role counts, not the name.
+    const doing = applyAgentEvent([agent()], ev({ kind: "card", agent_id: "A1", card: "P-2", data: { card_id: "P-2", change: "moved", column: "doing", column_role: "working" } }));
+    expect(doing[0]!.current_card).toBe("P-2");
+    const plain = applyAgentEvent([agent()], ev({ kind: "card", agent_id: "A1", card: "P-3", data: { card_id: "P-3", change: "moved", column: "in_progress", column_role: null } }));
+    expect(plain[0]!.current_card).toBeUndefined();
   });
 
   it("ignores unknown agents, other projects, and bad statuses", () => {

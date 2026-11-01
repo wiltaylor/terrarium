@@ -136,7 +136,7 @@ Observations that shape the design:
 | **Project** | A named group. Owns agents, project-scoped targets, and repositories. Sets the default scope for peer discovery and mail. |
 | **Repository** | A git remote attached to a project: URL, default branch, credential reference, and a checkout path name. |
 | **Board** | The kanban board of a project. One per project. Has ordered columns. |
-| **Column** | A named lane on a board, with an optional WIP limit. Defaults: `backlog`, `ready`, `in_progress`, `review`, `blocked`, `done`. |
+| **Column** | A named lane on a board, with an optional title, WIP limit, and role (`working` or `blocked`). Defaults: `backlog`, `ready`, `in_progress` (working), `review`, `blocked` (blocked), `done`. `backlog` and `done` are fixed (§13). |
 | **Card** | One unit of work. Title, body, column, position, assignee (agent or operator), labels, repo and branch, dependencies, comments, linked mail threads. |
 | **Memory** | One node of project knowledge. Title, body, tags, author, sources (card, thread, repo path or commit), superseded-by. |
 | **Link** | A directed, labelled edge between two memories, with an author and an optional note. Relations: `relates_to`, `supports`, `contradicts`, `supersedes`, `derived_from`, `part_of`, `example_of`. |
@@ -986,7 +986,7 @@ terrarium board                              the project board, grouped by colum
 terrarium card ls [--column c] [--mine] [--unassigned]
 terrarium card show <id>                     body, comments, links, dependencies
 terrarium card new <title> [--body - ] [--column c] [--label l] [--depends-on id]
-terrarium card claim <id>                    assign to self and move to in_progress
+terrarium card claim <id>                    assign to self and move to the working column
 terrarium card move <id> <column>
 terrarium card assign <id> <agent>
 terrarium card comment <id> <text | ->
@@ -1807,7 +1807,8 @@ show and remove the banner with no reload. The Inbox counts give
 
 One board per project. The operator and every agent in the project share it.
 
-Data: `boards(project)`, `columns(board, name, position, wip_limit)`,
+Data: `boards(project)`, `columns(board, name, title, position, wip_limit,
+role)`,
 `cards(id, board, column, position, title, body, assignee, labels, repo,
 branch, created_by, created_at, updated_at)`, `card_deps(card, depends_on)`,
 `card_comments(card, author, body, created_at)`, `card_links(card, kind, ref)`.
@@ -1821,11 +1822,27 @@ Rules the daemon enforces:
 - An agent may create cards, claim unassigned cards, move and comment on its
   own cards, and comment on any card. It may not move or reassign another
   agent's card. The operator may do anything.
-- A card with unmet dependencies cannot enter `in_progress`. The CLI explains
-  which cards block it.
-- A column with a WIP limit refuses a move past the limit with a clear error.
-- Moving a card to `blocked` requires a comment. The daemon mails the operator
-  (and the card's creator, if different) with the card ID and the comment.
+- The columns are configurable: the operator and each project admin (a
+  lead agent too) add, remove, rename, reorder, and title them, with
+  `terrarium board column ...`, the dashboard's Edit columns dialog, or
+  `PATCH /api/projects/{name}/board`. Other agents cannot. `backlog` is
+  always the first column and `done` always the last; they stay, keep
+  their names, and take no WIP limit and no role. A column with cards
+  cannot go. Migration 48 moved the old boards to this model.
+- The rules follow roles, not names. Exactly one column has the role
+  `working`: `card claim` moves a card there. At most one has the role
+  `blocked`. In a card command, `working` and `blocked` name those columns,
+  and a board with no `blocked` column refuses a move to `blocked` with a
+  message that names the columns.
+- A card with unmet dependencies cannot enter the `working` column. The CLI
+  explains which cards block it.
+- A column with a WIP limit refuses a move or a new card past the limit with
+  a clear error. A limit under the current count is allowed: the column
+  refuses more cards until it is under the limit, and the dashboard shows
+  the count red.
+- Moving a card to the `blocked` column requires a comment. The daemon mails
+  the operator (and the card's creator, if different) with the card ID and
+  the comment.
 - `done` is terminal for agents. Only a project admin or the operator reopens
   a card. On `done`, the daemon notifies every mail thread linked to the card
   (§12).
@@ -1837,7 +1854,8 @@ The board protocol in the system prompt tells an agent to:
 2. Claim one card at a time. Work it. Comment on progress at natural
    checkpoints, with the branch name once there is one.
 3. Move it to `review` with a comment that says what to look at, or to
-   `blocked` with a comment that says what is needed.
+   `blocked` with a comment that says what is needed. A board with other
+   columns: `terrarium board columns` shows them.
 4. Split work it cannot finish into new cards in `backlog`, linked with
    `--depends-on`, rather than leaving notes in chat.
 
@@ -1852,7 +1870,7 @@ line. `terrarium card wait` is the pull
 equivalent for an agent that prefers to block.
 
 Lead nudges use the same path. A card with no assignee in `ready`, or a
-move to `review` or `blocked`, types a pointer into each `project_admin` of
+move to `review` or to the `blocked` column (by role), types a pointer into each `project_admin` of
 the project, except the agent that made the change. Each project gets at
 most one batch of nudges in 10 s; the changes in that time go out as one
 pointer. A lead that does not run keeps the nudge for its next start
@@ -1868,7 +1886,7 @@ answers, acknowledges, or retracts there. The closed ones are under
 has no card ("Link a question"), and unlinks each one ("Unlink"). The
 `question` events keep the badges and the drawer live.
 
-Status link: the dashboard shows each agent's current `in_progress` card next
+Status link: the dashboard shows each agent's current card (in the `working` column) next
 to its status badge, so "working" always answers "on what".
 
 Session links: the operator can read the work behind a card. An agent
@@ -2027,7 +2045,8 @@ A version is a named point in a project's life that the user can review:
 cards that landed, a repo ref, and the artifacts to look at.
 
 Data: `versions(id, project, name, status, notes, repo, git_ref, created_by,
-created_at, submitted_at, decided_at, decided_by)`, `version_cards(version,
+created_at, submitted_at, decided_at, decided_by, archived_at,
+archived_by)`, `version_cards(version,
 card)`, `version_reviews(version, author, decision, comment, created_at)`.
 Statuses: `draft`, `in_review`, `approved`, `rejected`, `released`.
 
@@ -2046,9 +2065,19 @@ Flow:
 4. An admin runs `terrarium version release` once the approved build is
    shipped. Released versions are immutable; artifacts on them are retained.
 
-Dashboard: a Versions timeline per project; a version page with status,
-notes, cards, artifacts, reviews, and compare-to-previous; approve and reject
-buttons with a comment box.
+Archive: the creator, a project admin, or the operator archives a version
+(`terrarium version archive`). It is a flag, not a status, so the review
+history stays. An archived version has no row on the board and is not in
+the default list (`version ls --archived` shows it). `unarchive` brings it
+back.
+
+Dashboard: the Cards tab of the board manages the versions. **Rows:
+version** splits the board into one row for each version that is not
+archived, and a row "No version". A drag into another row moves the card
+from one version to the other (in draft and rejected only). The Version
+modal shows the status, notes, cards (add and remove), artifacts, reviews,
+and compare-to-previous, with approve and reject buttons and a comment box,
+submit, release, and archive. **+ Version** creates one, with its cards.
 
 The protocol in the system prompt tells an agent to:
 

@@ -38,6 +38,8 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 - `whoami`, `project show`, `agents ls`, `repo ls`: who and where you are.
 - `mail check | read | send | reply | wait`: your mailbox.
 - `board`, `card ls | show | new | claim | move | comment | link | wait`: the board.
+- `board columns`, `board column add | set | rm | move`: the columns, their
+  WIP limits, and their roles (project_admin). `backlog` and `done` are fixed.
 - `mem search | show | new | link | supersede | neighbors`: the memory graph.
 - `wiki ls | show | search | new | section | append | edit`: pages for the user.
 - `artifact push | ls | url`: files and static sites for the user.
@@ -74,9 +76,15 @@ unusual, ask the operator first with `terrarium mail send operator`.
 
 ## Board
 
+Each board has its own columns: run `terrarium board columns` to see them.
+In a card command, `working` and `blocked` name the columns with those
+roles. If the board has no `ready` or `review` column, use the column for
+that step.
+
 1. When you start and when you are idle, run `terrarium card ls --mine`. Then
    run `terrarium card ls --unassigned --column ready`.
-2. Claim one card at a time with `terrarium card claim <id>`. Put code on a
+2. Claim one card at a time with `terrarium card claim <id>`: it moves the
+   card to the working column. Put code on a
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit, then run `git push -u origin <branch>`. Comment at checkpoints
    with `terrarium card comment <id> -m "..."`.
@@ -195,7 +203,8 @@ You do not take cards yourself while the duties below have work.
    feed. Check `terrarium usage project` before you add one, and plan around
    the resets.
 4. **Watch for stuck work.** Look for workers that are `idle` or `stopped`
-   on an `in_progress` card, and for cards in `blocked`. A worker in `waiting`
+   on a card in the working column, and for cards in the blocked column
+   (`terrarium card ls --column blocked`). A worker in `waiting`
    waits on a run or a peer: it is not stuck. Do not poll the workers:
    watch them (step 6 of "New card"), or run `terrarium wait agent
    <worker>` and end your turn. Run `terrarium card show
@@ -288,7 +297,7 @@ commands in your sandbox, never on a target.
    the worker's last comment. A worker that gave no test result did not
    finish.
 4. If the work is not complete, move the card back with `terrarium card
-   move <card> in_progress -m "what to fix"`. Stop here.
+   move <card> working -m "what to fix"`. Stop here.
 5. Ask the operator with a question, not a mail: `terrarium question ask
    "Merge <branch> into main?" -o "Merge" -o "Hold" --context "<card>:
    <summary>. Branch <branch>. Tests: <the command and the result>.
@@ -300,7 +309,7 @@ commands in your sandbox, never on a target.
 7. If the answer is "Hold" (or a text), do not merge. Run `terrarium card
    comment <card> "Held: <the operator's reason>"`. When the answer asks
    for a change, move the card back with `terrarium card move <card>
-   in_progress -m "<the change>"`. Reply on the thread of the answer with
+   working -m "<the change>"`. Reply on the thread of the answer with
    what you do and why. Stop here.
 8. On the answer "Merge", run `git checkout main && git pull --ff-only
    origin main`. Then run `git merge --no-ff --no-edit origin/<branch> &&
@@ -316,7 +325,7 @@ commands in your sandbox, never on a target.
     Do not use `mail send -s "Re: ..."`: it starts a new thread. Add a
     line to the log.
 
-**"<card> moved to blocked by <worker>: <comment>".** Run `terrarium card
+**"<card> moved to <the blocked column> by <worker>: <comment>".** Run `terrarium card
 show <card>`. Answer the worker with `terrarium mail send <worker> -`, or
 ask the operator. Add a line to the log.
 

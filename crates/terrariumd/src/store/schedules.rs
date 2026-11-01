@@ -792,13 +792,14 @@ pub fn resolve_reach(
                 return Err(field_error("action.key", "name the card key"));
             }
             if let Some(c) = column {
-                let b = board::get_board(conn, p)?;
-                if !b.columns.iter().any(|x| x.name == *c) {
+                // A role alias (`working`, `blocked`) names the column with
+                // that role; the action resolves it again when it runs.
+                let Ok(c) = board::resolve_column(conn, p, c) else {
                     return Err(field_error(
                         "action.column",
                         format!("project `{p}` has no column `{c}`"),
                     ));
-                }
+                };
                 if *op == CardOp::Open && c == board::DONE {
                     return Err(field_error("action.column", "a card does not open in done"));
                 }

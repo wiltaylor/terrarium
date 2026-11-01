@@ -1825,6 +1825,48 @@ async fn artifacts_and_versions() {
     .await;
     ok(
         true,
+        &["version", "ls", "--archived"],
+        vec![],
+        vec![(
+            Get,
+            "/api/projects/terra/versions",
+            vec![("archived", "true")],
+            None,
+        )],
+    )
+    .await;
+    let out = ok(
+        true,
+        &["version", "ls", "--all"],
+        vec![(
+            200,
+            json!([{"name": "v1", "status": "draft", "archived": true}]),
+        )],
+        vec![(
+            Get,
+            "/api/projects/terra/versions",
+            vec![("archived", "all")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("ARCHIVED"), "{out}");
+    assert!(Cli::try_parse_from(["terrarium", "version", "ls", "--all", "--archived"]).is_err());
+    for (action, path) in [
+        ("archive", "/api/versions/terra%2Fv1/archive"),
+        ("unarchive", "/api/versions/terra%2Fv1/unarchive"),
+    ] {
+        let out = ok(
+            true,
+            &["version", action, "v1"],
+            vec![(200, json!({"name": "v1", "status": "approved"}))],
+            vec![req(Post, path)],
+        )
+        .await;
+        assert!(out.contains(&format!("{action}d v1 [approved]")), "{out}");
+    }
+    ok(
+        true,
         &["version", "show", "v1"],
         vec![(200, json!({}))],
         vec![req(Get, "/api/versions/terra%2Fv1")],
@@ -7372,4 +7414,213 @@ async fn admin_subscription_label_puts_the_label() {
     )
     .await;
     assert_eq!(out.trim(), "anthropic-max-20x: Claude Ultra");
+}
+
+/// The board as `GET .../board` gives it, for the `board column` tests.
+fn columns_board() -> Value {
+    json!({"project": "terra", "card_prefix": "TER", "cards": [], "columns": [
+        {"name": "backlog", "title": "backlog", "position": 0, "count": 1},
+        {"name": "in_progress", "title": "in progress", "position": 1, "role": "working",
+         "wip_limit": 2, "count": 0},
+        {"name": "review", "title": "Code review", "position": 2, "count": 0},
+        {"name": "blocked", "title": "blocked", "position": 3, "role": "blocked", "count": 0},
+        {"name": "done", "title": "done", "position": 4, "count": 3}
+    ]})
+}
+
+/// `board column ...`: one GET, then one PATCH with the whole list.
+async fn column_edit(args: &[&str], want: Value) {
+    let mut full = vec!["-p", "terra", "board"];
+    full.extend_from_slice(args);
+    let reply = json!({"columns": []});
+    let r = exec(
+        false,
+        &full,
+        vec![(200, columns_board()), (200, reply)],
+        None,
+    )
+    .await;
+    if let Err(e) = &r.result {
+        panic!("{args:?} failed: {e:#}");
+    }
+    assert_eq!(r.reqs.len(), 2, "{args:?}");
+    assert_eq!(r.reqs[0].method, Get);
+    assert_eq!(r.reqs[1].method, Patch);
+    assert_eq!(r.reqs[1].path, "/api/projects/terra/board");
+    assert_eq!(r.reqs[1].body, Some(json!({ "columns": want })), "{args:?}");
+}
+
+#[tokio::test]
+async fn board_columns_list_and_edit() {
+    let out = ok(
+        false,
+        &["-p", "terra", "board", "columns"],
+        vec![(200, columns_board())],
+        vec![req(Get, "/api/projects/terra/board")],
+    )
+    .await;
+    assert!(
+        out.contains("NAME") && out.contains("ROLE") && out.contains("WIP"),
+        "{out}"
+    );
+    assert!(out.contains("Code review"), "{out}");
+    let out = ok(
+        false,
+        &["-p", "terra", "board"],
+        vec![(200, columns_board())],
+        vec![req(Get, "/api/projects/terra/board")],
+    )
+    .await;
+    assert!(out.contains("== in_progress (0, wip 2, working)"), "{out}");
+    assert!(out.contains("== review \"Code review\" (0)"), "{out}");
+
+    let base = || {
+        json!([
+            {"name": "backlog", "role": null},
+            {"name": "in_progress", "role": "working", "wip_limit": 2},
+            {"name": "review", "role": null, "title": "Code review"},
+            {"name": "blocked", "role": "blocked"},
+            {"name": "done", "role": null}
+        ])
+    };
+    // add: before `done` by default; with a role, the old column loses it.
+    let mut want = base();
+    want.as_array_mut().unwrap().insert(
+        4,
+        json!({"name": "qa", "role": "working", "title": "QA", "wip_limit": 3}),
+    );
+    want[1]["role"] = Value::Null;
+    column_edit(
+        &[
+            "column", "add", "qa", "--title", "QA", "--wip", "3", "--role", "working",
+        ],
+        want,
+    )
+    .await;
+    let mut want = base();
+    want.as_array_mut()
+        .unwrap()
+        .insert(1, json!({"name": "ready", "role": null}));
+    column_edit(&["column", "add", "ready", "--after", "backlog"], want).await;
+    let mut want = base();
+    want.as_array_mut()
+        .unwrap()
+        .insert(2, json!({"name": "ready", "role": null}));
+    column_edit(&["column", "add", "ready", "--before", "review"], want).await;
+    // set: rename keeps the cards (rename_from); --no-wip; --title "".
+    let mut want = base();
+    want[1] = json!({"name": "doing", "rename_from": "in_progress", "role": "working"});
+    column_edit(
+        &[
+            "column",
+            "set",
+            "in_progress",
+            "--rename",
+            "doing",
+            "--no-wip",
+        ],
+        want,
+    )
+    .await;
+    let mut want = base();
+    want[2]["title"] = Value::Null;
+    want[2]["wip_limit"] = json!(5);
+    want[3]["role"] = Value::Null;
+    want[2]["role"] = json!("blocked");
+    column_edit(
+        &[
+            "column", "set", "review", "--title", "", "--wip", "5", "--role", "blocked",
+        ],
+        want,
+    )
+    .await;
+    let mut want = base();
+    want[3]["role"] = Value::Null;
+    column_edit(&["column", "set", "blocked", "--no-role"], want).await;
+    // rm and move.
+    let mut want = base();
+    want.as_array_mut().unwrap().remove(2);
+    column_edit(&["column", "rm", "review"], want).await;
+    let b = base();
+    let want = json!([b[0], b[2], b[1], b[3], b[4]]);
+    column_edit(
+        &["column", "move", "review", "--after", "backlog"],
+        want.clone(),
+    )
+    .await;
+    column_edit(
+        &["column", "move", "review", "--before", "in_progress"],
+        want,
+    )
+    .await;
+
+    // Usage errors: nothing is sent after the GET.
+    for args in [
+        vec!["column", "add", "review"],
+        vec!["column", "set", "nope", "--wip", "2"],
+        vec!["column", "set", "review"],
+        vec!["column", "rm", "nope"],
+        vec!["column", "move", "review", "--after", "nope"],
+    ] {
+        let mut full = vec!["-p", "terra", "board"];
+        full.extend_from_slice(&args);
+        let r = exec(false, &full, vec![(200, columns_board())], None).await;
+        assert!(r.result.is_err(), "{args:?}");
+        assert_eq!(r.reqs.len(), 1, "{args:?}");
+    }
+    for bad in [
+        vec!["terrarium", "board", "column", "add", "x", "--wip", "0"],
+        vec![
+            "terrarium",
+            "board",
+            "column",
+            "add",
+            "x",
+            "--role",
+            "stuck",
+        ],
+        vec![
+            "terrarium",
+            "board",
+            "column",
+            "set",
+            "x",
+            "--wip",
+            "2",
+            "--no-wip",
+        ],
+        vec!["terrarium", "board", "column", "move", "x"],
+    ] {
+        assert!(Cli::try_parse_from(&bad).is_err(), "{bad:?}");
+    }
+}
+
+#[tokio::test]
+async fn board_columns_from_file() {
+    let list = r#"{"columns": [{"name": "backlog"}, {"name": "doing", "role": "working"}, {"name": "done"}]}"#;
+    ok_in(
+        false,
+        &["-p", "terra", "board", "columns", "--from-file", "-"],
+        vec![(200, columns_board())],
+        Some(list),
+        vec![(
+            Patch,
+            "/api/projects/terra/board",
+            vec![],
+            Some(
+                json!({"columns": [{"name": "backlog"}, {"name": "doing", "role": "working"},
+                                    {"name": "done"}]}),
+            ),
+        )],
+    )
+    .await;
+    let r = exec(
+        false,
+        &["-p", "terra", "board", "columns", "--from-file", "-"],
+        vec![],
+        Some("{\"x\": 1}"),
+    )
+    .await;
+    assert!(r.result.is_err());
+    assert!(r.reqs.is_empty());
 }

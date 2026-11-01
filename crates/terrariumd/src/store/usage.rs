@@ -5,7 +5,7 @@
 //! a response that the session file repeats, or that a tail reads again
 //! after a restart, counts once.
 //!
-//! `card_id` is the card that the agent had in `in_progress`, assigned to
+//! `card_id` is the card that the agent had in the `working` column, assigned to
 //! itself, when the collector stored the sample ([`current_card`]). It is
 //! null when the agent had no such card.
 
@@ -312,14 +312,15 @@ pub fn by_model(conn: &Connection, f: &UsageFilter) -> ApiResult<Vec<(String, To
 }
 
 /// The card an agent works on: a card that is not archived, in the
-/// `in_progress` column of its board, and assigned to the agent. When the
+/// `working` column of its board (the column with that role), and
+/// assigned to the agent. When the
 /// agent has more than one, the most recently updated wins (the newest
 /// claim or move); ties go to the lower card ID.
 pub fn current_card(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
     Ok(conn
         .query_row(
             "SELECT c.id FROM cards c JOIN board_columns bc ON bc.id = c.column_id
-             WHERE c.assignee = ?1 AND bc.name = 'in_progress' AND c.archived = 0
+             WHERE c.assignee = ?1 AND bc.role = 'working' AND c.archived = 0
              ORDER BY c.updated_at DESC, c.id LIMIT 1",
             [agent],
             |r| r.get(0),

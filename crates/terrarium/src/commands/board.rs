@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::{delimited, event_line, print_table, set_list, set_opt};
 use crate::api::{CliError, query};
-use crate::cli::{CardCmd, CardEditArgs, CardNewArgs};
+use crate::cli::{BoardCmd, CardCmd, CardEditArgs, CardNewArgs, ColumnCmd};
 use crate::commands::projects::project_path;
 use crate::commands::system::as_items;
 use crate::ctx::{Ctx, Waiter};
@@ -26,12 +26,205 @@ fn card_path(id: &str) -> String {
     format!("/api/cards/{}", encode(id))
 }
 
-pub async fn board(ctx: &Ctx) -> anyhow::Result<()> {
+pub async fn board(ctx: &Ctx, cmd: Option<&BoardCmd>) -> anyhow::Result<()> {
     let p = ctx.project_or(None).await?;
-    let b = ctx
-        .api
-        .get(&format!("{}/board", project_path(&p)), vec![])
-        .await?;
+    let path = format!("{}/board", project_path(&p));
+    let cols = match cmd {
+        None => return show_board(ctx, &path).await,
+        Some(BoardCmd::Columns { from_file: None }) => {
+            let b = ctx.api.get(&path, vec![]).await?;
+            return ctx.emit(&b["columns"], print_columns);
+        }
+        Some(BoardCmd::Columns { from_file: Some(f) }) => columns_from(ctx, f)?,
+        Some(BoardCmd::Column { command }) => {
+            let b = ctx.api.get(&path, vec![]).await?;
+            edit_columns(as_items(&b["columns"]), command)?
+        }
+    };
+    let b = ctx.api.patch(&path, json!({ "columns": cols })).await?;
+    ctx.emit(&b["columns"], print_columns)
+}
+
+const COLUMN_COLS: &[(&str, &str)] = &[
+    ("NAME", "name"),
+    ("TITLE", "title"),
+    ("ROLE", "role"),
+    ("WIP", "wip_limit"),
+    ("CARDS", "count"),
+];
+
+fn print_columns(ctx: &Ctx, cols: &Value) {
+    print_table(ctx, as_items(cols), COLUMN_COLS, "no columns");
+}
+
+/// The default title of a column, as the daemon makes it.
+fn default_title(name: &str) -> String {
+    name.replace('_', " ")
+}
+
+/// The column list of `--from-file`: a JSON list, or `{"columns": [...]}`.
+fn columns_from(ctx: &Ctx, arg: &str) -> anyhow::Result<Vec<Value>> {
+    let text = if arg == "-" {
+        ctx.text("-")?
+    } else {
+        std::fs::read_to_string(arg)
+            .map_err(|e| CliError::usage(format!("cannot read {arg}: {e}")))?
+    };
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| CliError::usage(format!("{arg} is not JSON: {e}")))?;
+    let list = match v {
+        Value::Array(a) => a,
+        Value::Object(mut o) => match o.remove("columns") {
+            Some(Value::Array(a)) => a,
+            _ => return Err(CliError::usage(format!("{arg} has no `columns` list"))),
+        },
+        _ => return Err(CliError::usage(format!("{arg}: give a list of columns"))),
+    };
+    Ok(list)
+}
+
+/// The `PATCH .../board` list of the columns that the daemon returned:
+/// the name, the role (null for none), the WIP limit, and the title when
+/// it is not the default. A title left out keeps the stored one, so a
+/// rename takes the default title of the new name.
+fn column_specs(cols: &[Value]) -> Vec<Value> {
+    cols.iter()
+        .map(|c| {
+            let name = c["name"].as_str().unwrap_or_default();
+            let mut s =
+                json!({"name": name, "role": c.get("role").cloned().unwrap_or(Value::Null)});
+            if let Some(w) = c.get("wip_limit").filter(|w| !w.is_null()) {
+                s["wip_limit"] = w.clone();
+            }
+            if let Some(t) = c["title"].as_str().filter(|t| *t != default_title(name)) {
+                s["title"] = t.into();
+            }
+            s
+        })
+        .collect()
+}
+
+fn index_of(specs: &[Value], name: &str) -> anyhow::Result<usize> {
+    specs.iter().position(|s| s["name"] == name).ok_or_else(|| {
+        let names: Vec<&str> = specs.iter().filter_map(|s| s["name"].as_str()).collect();
+        CliError::usage(format!("no column `{name}`; columns: {}", names.join(", ")))
+    })
+}
+
+/// The place of a column put `--after` or `--before` another, or before
+/// `done` when neither is given.
+fn place(specs: &[Value], after: Option<&str>, before: Option<&str>) -> anyhow::Result<usize> {
+    match (after, before) {
+        (Some(a), _) => Ok(index_of(specs, a)? + 1),
+        (_, Some(b)) => index_of(specs, b),
+        _ => Ok(specs
+            .iter()
+            .position(|s| s["name"] == "done")
+            .unwrap_or(specs.len())),
+    }
+}
+
+/// Give `role` to the column at `at`: each other column with it loses it,
+/// because one column has each role.
+fn give_role(specs: &mut [Value], at: usize, role: &str) {
+    for s in specs.iter_mut() {
+        if s["role"] == role {
+            s["role"] = Value::Null;
+        }
+    }
+    specs[at]["role"] = role.into();
+}
+
+/// The whole column list after one `board column` change. The daemon
+/// checks the rules (the fixed columns, the roles, cards in a removed
+/// column).
+pub fn edit_columns(cols: &[Value], cmd: &ColumnCmd) -> anyhow::Result<Vec<Value>> {
+    let mut specs = column_specs(cols);
+    match cmd {
+        ColumnCmd::Add {
+            name,
+            title,
+            wip,
+            role,
+            after,
+            before,
+        } => {
+            if specs.iter().any(|s| s["name"] == name.as_str()) {
+                return Err(CliError::usage(format!("column `{name}` exists")));
+            }
+            let at = place(&specs, after.as_deref(), before.as_deref())?;
+            let mut s = json!({"name": name, "role": null});
+            set_opt(&mut s, "title", title.clone());
+            set_opt(&mut s, "wip_limit", *wip);
+            specs.insert(at, s);
+            if let Some(r) = role {
+                give_role(&mut specs, at, r);
+            }
+        }
+        ColumnCmd::Set {
+            name,
+            title,
+            wip,
+            no_wip,
+            role,
+            no_role,
+            rename,
+        } => {
+            if title.is_none()
+                && wip.is_none()
+                && !no_wip
+                && role.is_none()
+                && !no_role
+                && rename.is_none()
+            {
+                return Err(CliError::usage(
+                    "give --title, --wip, --no-wip, --role, --no-role, or --rename",
+                ));
+            }
+            let at = index_of(&specs, name)?;
+            if let Some(t) = title {
+                specs[at]["title"] = if t.trim().is_empty() {
+                    Value::Null
+                } else {
+                    t.as_str().into()
+                };
+            }
+            if let Some(w) = wip {
+                specs[at]["wip_limit"] = (*w).into();
+            }
+            if *no_wip && let Some(o) = specs[at].as_object_mut() {
+                o.remove("wip_limit");
+            }
+            if let Some(r) = role {
+                give_role(&mut specs, at, r);
+            }
+            if *no_role {
+                specs[at]["role"] = Value::Null;
+            }
+            if let Some(new) = rename.as_deref().filter(|n| *n != name.as_str()) {
+                specs[at]["rename_from"] = name.as_str().into();
+                specs[at]["name"] = new.into();
+            }
+        }
+        ColumnCmd::Rm { name } => {
+            let at = index_of(&specs, name)?;
+            specs.remove(at);
+        }
+        ColumnCmd::Move {
+            name,
+            after,
+            before,
+        } => {
+            let s = specs.remove(index_of(&specs, name)?);
+            let at = place(&specs, after.as_deref(), before.as_deref())?;
+            specs.insert(at, s);
+        }
+    }
+    Ok(specs)
+}
+
+async fn show_board(ctx: &Ctx, path: &str) -> anyhow::Result<()> {
+    let b = ctx.api.get(path, vec![]).await?;
     ctx.emit(&b, |c, b| {
         c.line(format!(
             "board {} (cards {}-N)",
@@ -41,11 +234,23 @@ pub async fn board(ctx: &Ctx) -> anyhow::Result<()> {
         let cards = as_items(&b["cards"]);
         for col in as_items(&b["columns"]) {
             let name = col["name"].as_str().unwrap_or_default();
+            let title = col["title"]
+                .as_str()
+                .filter(|t| *t != default_title(name))
+                .map(|t| format!(" \"{t}\""))
+                .unwrap_or_default();
             let wip = col["wip_limit"]
                 .as_u64()
                 .map(|w| format!(", wip {w}"))
                 .unwrap_or_default();
-            c.line(format!("\n== {name} ({}{wip})", field(col, "count")));
+            let role = col["role"]
+                .as_str()
+                .map(|r| format!(", {r}"))
+                .unwrap_or_default();
+            c.line(format!(
+                "\n== {name}{title} ({}{wip}{role})",
+                field(col, "count")
+            ));
             for card in cards.iter().filter(|k| k["column"] == name) {
                 let who = match field(card, "assignee_name").as_str() {
                     "-" => String::new(),

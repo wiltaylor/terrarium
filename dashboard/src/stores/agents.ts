@@ -71,7 +71,9 @@ export function applyAgentEvent(agents: Agent[], e: AgentEvent): Agent[] {
     // The `agent` of a card event is the assignee (docs/api.md §9).
     const card = typeof e.data?.card_id === "string" ? e.data.card_id : e.card;
     const column = e.data?.column;
-    if (card && column === "in_progress") a.current_card = card;
+    // The working column has the role `working` (`column_role`); an event of an older daemon has no role: `in_progress`.
+    const working = "column_role" in (e.data ?? {}) ? e.data?.column_role === "working" : column === "in_progress";
+    if (card && working) a.current_card = card;
     else if (card && a.current_card === card && typeof column === "string") delete a.current_card;
   }
   const next = agents.slice();
