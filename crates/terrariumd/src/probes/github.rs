@@ -15,6 +15,15 @@
 //! `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` in the daemon env.
 //! The plain-text fallback keeps the token in `authTokens.<key>.token`
 //! (verified 2026-10-25 with a container login, docs/compat.md).
+//!
+//! The answer does not name the plan. [`copilot_tier`] reads it from
+//! `access_type_sku` and `copilot_plan`, with the map of VS Code
+//! (`src/vs/workbench/services/chat/common/chatEntitlementService.ts`,
+//! `doResolveEntitlement`, read 2026-11-01). The probe puts the tier in the
+//! `raw` of each window as `level`, as the Z.ai probe does, and the display
+//! name shows it (`GitHub Copilot Pro`). Verified 2026-11-01: a Pro
+//! account answers `copilot_plan: "individual"`, `access_type_sku:
+//! "yearly_subscriber_quota"` (docs/compat.md, "GitHub Copilot").
 
 use std::path::Path;
 
@@ -76,6 +85,33 @@ pub fn config_token(home: &Path) -> Result<Option<String>, ProbeError> {
     let v: Value = serde_json::from_str(&strip_line_comments(&text))
         .map_err(|e| ProbeError::NoCredential(format!("{} is not JSON: {e}", path.display())))?;
     Ok(token_in_config(&v))
+}
+
+/// The plan key of a quota answer (`free`, `student`, `pro`, `pro+`,
+/// `max`, `business`, `enterprise`) for
+/// `terrarium_core::providers::copilot_plan_name`. The order is the order
+/// of VS Code: the SKU of a free plan first, then `copilot_plan`. `None`
+/// for a value that VS Code does not know, and for an account that can
+/// still sign up for Copilot Free (it has no plan).
+pub fn copilot_tier(v: &Value) -> Option<&'static str> {
+    let sku = v.get("access_type_sku").and_then(Value::as_str);
+    match sku {
+        Some("free_limited_copilot") => return Some("free"),
+        Some("free_educational_quota") => return Some("student"),
+        _ => {}
+    }
+    if v.get("can_signup_for_limited").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    Some(match v.get("copilot_plan").and_then(Value::as_str)? {
+        "individual_edu" => "student",
+        "individual" => "pro",
+        "individual_pro" => "pro+",
+        "individual_max" => "max",
+        "business" => "business",
+        "enterprise" => "enterprise",
+        _ => return None,
+    })
 }
 
 fn percent_used(s: &Value) -> Option<f64> {
@@ -147,6 +183,7 @@ impl QuotaProbe for CopilotQuota {
             .and_then(Value::as_str)
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|t| t.with_timezone(&Utc));
+        let level = copilot_tier(&v);
         let mut out = Vec::new();
         for (key, window) in [
             ("premium_interactions", "monthly"),
@@ -158,11 +195,15 @@ impl QuotaProbe for CopilotQuota {
                 continue;
             }
             let Some(pct) = percent_used(s) else { continue };
+            let mut raw = s.clone();
+            if let (Some(l), Some(o)) = (level, raw.as_object_mut()) {
+                o.insert("level".into(), l.into());
+            }
             out.push(QuotaWindow {
                 window: window.into(),
                 used_pct: (pct * 10.0).round() / 10.0,
                 resets_at,
-                raw: s.clone(),
+                raw,
             });
         }
         if out.is_empty() {
@@ -194,7 +235,70 @@ mod tests {
             "2026-11-01T00:00:00+00:00"
         );
         assert_eq!(w[0].raw["entitlement"], 300);
+        // `copilot_plan: "individual"` is Copilot Pro.
+        assert_eq!(w[0].raw["level"], "pro");
         assert!(CopilotQuota.parse(r#"{"login": "x"}"#).is_err());
+    }
+
+    /// The answer of a Pro account, read 2026-11-01 (sanitised: no login,
+    /// ids, organizations, or enterprises).
+    const PRO: &str = include_str!("../../tests/fixtures/probes/github_copilot_user_pro.json");
+
+    #[test]
+    fn a_pro_answer_has_the_pro_level() {
+        let w = CopilotQuota.parse(PRO).unwrap();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].window, "monthly");
+        assert_eq!(w[0].used_pct, 0.0);
+        assert_eq!(w[0].raw["level"], "pro");
+        assert_eq!(
+            terrarium_core::providers::display_name("github", None, Some("pro"), None, "g"),
+            "GitHub Copilot Pro"
+        );
+    }
+
+    #[test]
+    fn the_tier_follows_vs_code() {
+        let t = |sku: &str, plan: &str| {
+            copilot_tier(&serde_json::json!({"access_type_sku": sku, "copilot_plan": plan}))
+        };
+        assert_eq!(t("yearly_subscriber_quota", "individual"), Some("pro"));
+        assert_eq!(t("free_limited_copilot", "individual"), Some("free"));
+        assert_eq!(t("free_educational_quota", "individual"), Some("student"));
+        assert_eq!(t("x", "individual_edu"), Some("student"));
+        assert_eq!(t("x", "individual_pro"), Some("pro+"));
+        assert_eq!(t("x", "individual_max"), Some("max"));
+        assert_eq!(t("x", "business"), Some("business"));
+        assert_eq!(t("x", "enterprise"), Some("enterprise"));
+        // No guess for a value that VS Code does not know.
+        assert_eq!(t("x", "individual_ultra"), None);
+        assert_eq!(copilot_tier(&serde_json::json!({})), None);
+        // An account that can still sign up for Copilot Free has no plan.
+        assert_eq!(
+            copilot_tier(
+                &serde_json::json!({"copilot_plan": "individual", "can_signup_for_limited": true})
+            ),
+            None
+        );
+        // Each name is one that the display name table knows.
+        for p in [
+            "free",
+            "student",
+            "pro",
+            "pro+",
+            "max",
+            "business",
+            "enterprise",
+        ] {
+            assert!(
+                terrarium_core::providers::copilot_plan_name(p).is_some(),
+                "{p}"
+            );
+        }
+        // An unknown plan leaves no level, and the windows stay.
+        let body = FIXTURE.replace("\"individual\"", "\"individual_new\"");
+        let w = CopilotQuota.parse(&body).unwrap();
+        assert!(w[0].raw.get("level").is_none());
     }
 
     #[test]

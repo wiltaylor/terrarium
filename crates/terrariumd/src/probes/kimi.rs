@@ -27,6 +27,17 @@
 //! - `booster_wallet` (older `boosterWallet`): the pay-as-you-go top-up. It
 //!   is not a window. It stays in the `raw` of the first window, under
 //!   `booster_wallet`.
+//!
+//! The tier: after the usage answer, the probe sends `GET
+//! https://api.kimi.com/coding/v1/me` with the same key. The official
+//! Kimi Code CLI reads it for the profile
+//! (https://github.com/MoonshotAI/kimi-code,
+//! `packages/oauth/src/managed-userinfo.ts`). Its `user_level_name` (for
+//! example `Plus`) goes in the `raw` of each window as `level`, as the
+//! Z.ai probe does, and the display name shows it (`Kimi Code Plus`).
+//! Verified live 2026-11-01 with the Kimi Code key (docs/compat.md, "Kimi
+//! Code usage"). The tier is best effort: a failed `/me` does not fail the
+//! probe.
 
 use std::path::Path;
 
@@ -41,6 +52,8 @@ use crate::supervisor::BoxFuture;
 
 pub const NAME: &str = "kimi-code-usage";
 pub const URL: &str = "https://api.kimi.com/coding/v1/usages";
+/// The profile, with the membership tier (`user_level_name`).
+pub const ME_URL: &str = "https://api.kimi.com/coding/v1/me";
 
 /// The prefix of a Kimi Code key (from third-party clients; Moonshot does
 /// not document it).
@@ -191,6 +204,27 @@ fn refusal(status: u16, body: &str, kimi_key: bool) -> ProbeError {
     }
 }
 
+/// The `user_level_name` of a `/me` answer (`Plus`), or `None`.
+pub fn level_of(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    v.get("user_level_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+/// A request with the Kimi Code key.
+fn bearer(url: &str, creds: &Credentials) -> HttpRequest {
+    HttpRequest {
+        url: url.into(),
+        headers: vec![
+            ("Authorization".into(), format!("Bearer {}", creds.token())),
+            ("Accept".into(), "application/json".into()),
+        ],
+    }
+}
+
 impl KimiCodeUsage {
     /// Parse an answer read at `now` (for `reset_in`).
     pub fn parse_at(&self, body: &str, now: DateTime<Utc>) -> Result<Vec<QuotaWindow>, ProbeError> {
@@ -279,20 +313,15 @@ impl QuotaProbe for KimiCodeUsage {
     }
 
     fn request(&self, creds: &Credentials) -> HttpRequest {
-        HttpRequest {
-            url: URL.into(),
-            headers: vec![
-                ("Authorization".into(), format!("Bearer {}", creds.token())),
-                ("Accept".into(), "application/json".into()),
-            ],
-        }
+        bearer(URL, creds)
     }
 
     fn parse(&self, body: &str) -> Result<Vec<QuotaWindow>, ProbeError> {
         self.parse_at(body, Utc::now())
     }
 
-    /// The default run, with a hint on a 401, 403, or 404.
+    /// The default run, with a hint on a 401, 403, or 404, and then the
+    /// tier from `/me` (best effort).
     fn run<'a>(
         &'a self,
         http: &'a dyn HttpGet,
@@ -308,7 +337,18 @@ impl QuotaProbe for KimiCodeUsage {
                 let kimi_key = creds.token().trim().starts_with(KEY_PREFIX);
                 return Err(refusal(resp.status, &resp.body, kimi_key));
             }
-            self.parse(&resp.body)
+            let mut out = self.parse(&resp.body)?;
+            if let Ok(me) = http.get(bearer(ME_URL, creds)).await
+                && (200..300).contains(&me.status)
+                && let Some(level) = level_of(&me.body)
+            {
+                for w in &mut out {
+                    if let Some(o) = w.raw.as_object_mut() {
+                        o.insert("level".into(), Value::String(level.clone()));
+                    }
+                }
+            }
+            Ok(out)
         })
     }
 }
@@ -434,27 +474,76 @@ mod tests {
 
     #[tokio::test]
     async fn kimi_sends_the_bearer_key() {
+        // No `/me` answer: the windows come with no level.
         let http = FakeHttp::with(URL, 200, FIXTURE);
         let w = KimiCodeUsage
             .run(&http, &Credentials::new("sk-kimi-k"))
             .await
             .unwrap();
         assert_eq!(w.len(), 3);
+        assert!(w.iter().all(|q| q.raw.get("level").is_none()));
         let seen = http.seen.lock().unwrap();
-        assert_eq!(seen.len(), 1);
-        assert!(
-            seen[0]
-                .headers
-                .iter()
-                .any(|(k, v)| k == "Authorization" && v == "Bearer sk-kimi-k")
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].url, ME_URL);
+        for req in seen.iter() {
+            assert!(
+                req.headers
+                    .iter()
+                    .any(|(k, v)| k == "Authorization" && v == "Bearer sk-kimi-k")
+            );
+            // No user agent is spoofed.
+            assert!(
+                !req.headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+            );
+        }
+    }
+
+    /// The `/me` answer of a Plus membership, read 2026-11-01 (sanitised:
+    /// no ids, nickname, avatar, email, or times).
+    const ME: &str = include_str!("../../tests/fixtures/probes/kimi_code_me.json");
+
+    #[tokio::test]
+    async fn kimi_reads_the_tier_from_me() {
+        let http = FakeHttp::with(URL, 200, FIXTURE);
+        http.answers.lock().unwrap().insert(
+            ME_URL.into(),
+            crate::probes::HttpResponse {
+                status: 200,
+                body: ME.into(),
+            },
         );
-        // No user agent is spoofed.
-        assert!(
-            !seen[0]
-                .headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+        let w = KimiCodeUsage
+            .run(&http, &Credentials::new("sk-kimi-k"))
+            .await
+            .unwrap();
+        assert!(w.iter().all(|q| q.raw["level"] == "Plus"));
+        assert_eq!(
+            terrarium_core::providers::display_name(
+                "moonshot",
+                Some("coding"),
+                Some("Plus"),
+                None,
+                "k"
+            ),
+            "Kimi Code Plus"
         );
+        // A refused `/me` does not fail the probe.
+        http.answers.lock().unwrap().insert(
+            ME_URL.into(),
+            crate::probes::HttpResponse {
+                status: 404,
+                body: "{}".into(),
+            },
+        );
+        let w = KimiCodeUsage
+            .run(&http, &Credentials::new("sk-kimi-k"))
+            .await
+            .unwrap();
+        assert!(w.iter().all(|q| q.raw.get("level").is_none()));
+        assert_eq!(level_of(r#"{"user_level_name": ""}"#), None);
+        assert_eq!(level_of("<html>"), None);
     }
 
     #[tokio::test]

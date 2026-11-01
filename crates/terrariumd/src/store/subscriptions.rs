@@ -669,7 +669,8 @@ pub fn set_label(t: &mut Tx<'_>, name: &str, label: Option<&str>) -> ApiResult<O
 /// The name of a subscription for people: the operator's label, else the
 /// vendor's product and plan name
 /// (`terrarium_core::providers::display_name`), with the plan tier that
-/// the last probe answer names (the `level` of Z.ai).
+/// the last probe answer names (the `level` of the Z.ai, GitHub Copilot,
+/// and Kimi Code probes).
 pub fn display_name(conn: &Connection, sub: &Subscription) -> ApiResult<String> {
     if let Some(l) = label(conn, &sub.name)? {
         return Ok(l);

@@ -1578,9 +1578,9 @@ own name, from `terrarium_core::providers::display_name`. Sources, read
 |---|---|---|
 | `anthropic` | `Claude Free`, `Claude Pro`, `Claude Max`, `Claude Ultra`; `Claude API` for an API key | https://claude.com/pricing; https://support.claude.com/en/articles/17728952-what-is-the-ultra-plan ("The Max 20x plan is now called the Ultra plan"). A stored `Max 20x` or the tier `default_claude_max_20x` shows as Ultra; `Max 5x` or `default_claude_max_5x` as Max (the $100 plan, "5x Pro usage"). |
 | `openai` | `ChatGPT Free`, `Go`, `Plus`, `Pro`, `Business`, `Edu`, `Enterprise`; `OpenAI API` for an API key | https://learn.chatgpt.com/docs/pricing ("ChatGPT Free, Go, Plus, Pro, Business, Edu, or Enterprise plan"). The plan claim `team` shows as Business. |
-| `github` | `GitHub Copilot`, with `Free`, `Pro`, `Pro+`, `Max`, `Business`, or `Enterprise` when the stored plan names it | https://github.com/features/copilot/plans. The quota answer does not name the plan (`copilot_plan: "individual"`). |
+| `github` | `GitHub Copilot`, with `Free`, `Student`, `Pro`, `Pro+`, `Max`, `Business`, or `Enterprise` from the `level` of the quota answer (else from the stored plan) | https://github.com/features/copilot/plans (Free, Pro, Pro+, Max; Business and Enterprise in the FAQ); https://docs.github.com/en/copilot/concepts/billing/individual-plans ("Copilot Student"). The answer has no plan name: the probe maps `access_type_sku` and `copilot_plan` to a tier as VS Code does (see "GitHub Copilot"). A value that the map does not know shows only `GitHub Copilot`. |
 | `zai` | `GLM Coding Plan`, with `Lite`, `Pro`, or `Max` from the `level` of the quota answer; `Z.ai` for an `api` key | https://docs.z.ai/devpack/overview. |
-| `moonshot` | `Kimi Code` (`coding`, `coding-cn`); `Kimi API Platform` (`api`, `api-cn`) | https://www.kimi.com/code; https://platform.kimi.ai/ (page title). No plan tier is detected. |
+| `moonshot` | `Kimi Code`, with `Go`, `Plus`, `Pro`, `Andante`, `Moderato`, or `Allegretto` from the `level` of the usage answer (`coding`, `coding-cn`); `Kimi API Platform` (`api`, `api-cn`) | https://www.kimi.com/code; https://www.kimi.com/code/docs/en/kimi-code/membership.html (Go, Plus, Pro; legacy Andante, Moderato, Allegretto); https://platform.kimi.ai/ (page title). The level is `user_level_name` of `GET /coding/v1/me` (see "Kimi Code usage"). A name that the membership page does not give (for example `Vivace`, in the CLI source) shows only `Kimi Code`. |
 | `openrouter` | `OpenRouter` | https://openrouter.ai/pricing. |
 | `selfhosted` | `Self-hosted <host of base_url>` | Not a vendor. |
 
@@ -1632,6 +1632,40 @@ Answer (sanitised):
 - The probe reports `premium_interactions` as `monthly` (`used_pct = 100 -
   percent_remaining`), and `chat` and `completions` only when they are not
   unlimited. The reset is `quota_reset_date_utc`.
+- **The plan.** Read again on 2026-11-01 with the token of the
+  `github-copilot` subscription (one read-only `GET` from inside the daemon
+  container; the token was not printed). The answer is
+  `crates/terrariumd/tests/fixtures/probes/github_copilot_user_pro.json`,
+  with no login, ids, organizations, enterprises, or tracking id. The
+  fields about the plan are `copilot_plan: "individual"`,
+  `access_type_sku: "yearly_subscriber_quota"`,
+  `can_signup_for_limited: false`, `can_upgrade_plan: false`, and the
+  `endpoints` host `api.individual.githubcopilot.com`. No field names the
+  plan. The `premium_interactions` entitlement (300) is no tier signal:
+  GitHub now sells the plans in GitHub AI Credits
+  (https://docs.github.com/en/copilot/concepts/billing/individual-plans).
+- The probe maps the fields as VS Code does
+  (https://github.com/microsoft/vscode,
+  `src/vs/workbench/services/chat/common/chatEntitlementService.ts`,
+  `doResolveEntitlement`, commit `acb9c66`, read 2026-11-01). The first
+  rule that matches wins:
+
+  | Field | Value | Tier (`level`) | Name |
+  |---|---|---|---|
+  | `access_type_sku` | `free_limited_copilot` | `free` | Copilot Free |
+  | `access_type_sku` | `free_educational_quota` | `student` | Copilot Student |
+  | `can_signup_for_limited` | `true` | none | (no plan) |
+  | `copilot_plan` | `individual_edu` | `student` | Copilot Student |
+  | `copilot_plan` | `individual` | `pro` | Copilot Pro |
+  | `copilot_plan` | `individual_pro` | `pro+` | Copilot Pro+ |
+  | `copilot_plan` | `individual_max` | `max` | Copilot Max |
+  | `copilot_plan` | `business` | `business` | Copilot Business |
+  | `copilot_plan` | `enterprise` | `enterprise` | Copilot Enterprise |
+
+  The tier goes in the `raw` of each window as `level`. The display name
+  is `GitHub Copilot <name>`; this account shows as `GitHub Copilot Pro`.
+  Only the `individual` row is verified live. The other rows are from the
+  VS Code source. Another value gives no `level`.
 - **The token.** Copilot keeps its login in the system credential store.
   On this host `~/.copilot/config.json` holds no token (it is JSON with
   `//` comment lines at the top: strip them before parsing). In a
@@ -1740,6 +1774,8 @@ the answer is `crates/terrariumd/tests/fixtures/probes/kimi_code_usages.json`
 | Shape (live) | `{limits: [{window: {duration: 300, timeUnit: "TIME_UNIT_MINUTE"}, detail: {limit: "100", remaining: "100", resetTime: "<ISO time>"}}], usages: {limit_5h, limit_month_total, limit_month_code}}`. Each `usages` entry is `{used_ratio, reset_time}`, with `used_ratio` from 0 to 1. The numbers of `detail` are strings. No `usage`, no `booster_wallet`, and no weekly window came back. | verified |
 | Shape (other clients) | Also `usage` (the weekly window of the legacy plans: `limit`, `used`, `remaining`, a reset), `usages.limit_7d`, and `booster_wallet` (older `boosterWallet`): `status` `STATUS_ENABLED` or `STATUS_DISABLED`, `monthlyUsed` and `monthlyChargeLimit` with `priceInCents` (a string) and `currency`. The reset is `resetTime`, `reset_at`, `reset_time` (an ISO time or an epoch), or `reset_in` (seconds). With no `used`, used is `limit - remaining`. | https://github.com/MoonshotAI/kimi-cli , https://github.com/Golden0Voyager/kimi-code-usage (`providers/kimi.py`, 2026-10-19) |
 | Monthly credits | Only on the kimi.com membership web page, not in the API. Terrarium does not read web pages. | https://github.com/Golden0Voyager/kimi-code-usage |
+| Tier | `GET https://api.kimi.com/coding/v1/me` with the same key answered `200` on 2026-11-01 (one read-only `GET` from inside the daemon container; the key was not printed). The fields about the plan: `status: "USER_STATUS_NORMAL"`, `region: "REGION_OVERSEA"`, `user_level: 20`, `user_level_name: "Plus"`, `goods_version: 2`. The answer also has ids, a nickname, an avatar, an email, and times; the fixture `crates/terrariumd/tests/fixtures/probes/kimi_code_me.json` drops them. | verified; https://github.com/MoonshotAI/kimi-code (`packages/oauth/src/managed-userinfo.ts`, commit `a2afdbc`) |
+| Tier names | Go (no coding quota), Plus, Pro; the legacy Andante, Moderato, Allegretto. The CLI source shows `user_level_name: "Vivace"` in an example; the membership page does not name it. | https://www.kimi.com/code/docs/en/kimi-code/membership.html , https://www.kimi.com/code/docs/en/ (read 2026-11-01) |
 
 The probe `kimi-code-usage` makes one window for each `limits` item with a
 known `window` (`5h`, `7d`, `monthly`, and so on), with `used_pct` = used /
@@ -1751,6 +1787,15 @@ A window name that is already there is not added again, so the live answer
 gives `5h` (from `limits`), `monthly`, and `monthly-code`. `raw` has
 `source` and the numbers. A booster wallet is not a window: it stays in the
 `raw` of the first window, under `booster_wallet`.
+
+After a usage answer, the probe sends `GET /coding/v1/me` with the same
+key. When `user_level_name` is there, it goes in the `raw` of each window
+as `level`, and the display name is `Kimi Code <level>` for a name that the
+membership page gives (`Kimi Code Plus`). The numeric `user_level` is not
+used: Moonshot does not document the numbers. The `/usages` limits (for
+example the 5-hour `limit: "100"`) are not used either: the membership page
+gives no number for a tier. A failed `/me` does not fail the probe; the
+name is then `Kimi Code`.
 
 A refused request fails the probe with a hint. A `401` says that a Kimi
 Code key (`sk-kimi-`) is necessary when the key has another prefix (an
@@ -1910,7 +1955,7 @@ in the region where it was made:
 
 | Fact | Value | Source |
 |---|---|---|
-| Kimi Code (membership) | Plans Plus, Pro, Pro+ (and the legacy Moderato, Allegretto, Andante). The Go plan has no coding quota. Keys come from the Kimi Code Console; up to 5 keys. | https://www.kimi.com/code/docs/en/ , https://www.kimi.com/code/docs/en/kimi-code/membership.html |
+| Kimi Code (membership) | Plans Plus, Pro, Pro+ (and the legacy Moderato, Allegretto, Andante). The Go plan has no coding quota. The membership page read on 2026-11-01 names Go, Plus, Pro, Andante, Moderato, and Allegretto, and no Pro+. Keys come from the Kimi Code Console; up to 5 keys. | https://www.kimi.com/code/docs/en/ , https://www.kimi.com/code/docs/en/kimi-code/membership.html |
 | Kimi Code, OpenAI-compatible | Overseas `https://api.kimi.ai/coding/v1`; China `https://api.kimi.com/coding/v1` (Chat Completions and Responses) | https://www.kimi.com/code/docs/en/ |
 | Kimi Code, Anthropic-compatible | Overseas `https://api.kimi.ai/coding/`; China `https://api.kimi.com/coding/`. Not used (pi only). | https://www.kimi.com/code/docs/en/ , https://www.kimi.com/code/docs/en/third-party-tools/claude-code |
 | Kimi Code models | `k3.1-pro`, `k3.1-pro-highspeed`, `k3`, `k3-256k`, `kimi-for-coding`, `kimi-for-coding-highspeed`. The tier decides which ids work and the context (256K or 1M). | https://www.kimi.com/code/docs/en/kimi-code/models.html |

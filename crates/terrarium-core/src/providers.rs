@@ -51,13 +51,19 @@ pub fn status_url_of(
 //   Plus, Pro, Business, Edu, or Enterprise plan"). The `team` plan claim
 //   of older logins is the plan that OpenAI calls Business now.
 // - GitHub: https://github.com/features/copilot/plans ("GitHub Copilot",
-//   plans Free, Pro, Pro+, Max, Business, Enterprise). The probe answer
-//   does not say the plan, so the tier shows only when the stored plan
-//   names it.
+//   plans Free, Pro, Pro+, Max, Business, Enterprise) and
+//   https://docs.github.com/en/copilot/concepts/billing/individual-plans
+//   ("Copilot Student"). The tier is the `level` of the quota probe
+//   answer: the probe reads `access_type_sku` and `copilot_plan` with the
+//   map of VS Code (`chatEntitlementService.ts`, `doResolveEntitlement`).
 // - Z.ai: https://docs.z.ai/devpack/overview ("GLM Coding Plan", tiers
 //   Lite, Pro, Max). The tier is the `level` of the quota probe answer.
 // - Moonshot: https://www.kimi.com/code ("Kimi Code") and
-//   https://platform.kimi.ai/ ("Kimi API Platform").
+//   https://platform.kimi.ai/ ("Kimi API Platform"). The Kimi Code tiers
+//   are in https://www.kimi.com/code/docs/en/kimi-code/membership.html
+//   (Go, Plus, Pro; the legacy Andante, Moderato, Allegretto). The tier is
+//   the `level` of the usage probe answer: `user_level_name` of
+//   `GET /coding/v1/me`.
 // - OpenRouter: https://openrouter.ai/pricing ("OpenRouter").
 
 /// The name that Anthropic uses today for a Claude plan, from a
@@ -98,10 +104,12 @@ pub fn chatgpt_plan_name(raw: &str) -> Option<&'static str> {
     })
 }
 
-/// The GitHub Copilot plan name from a stored plan (`pro+`).
+/// The GitHub Copilot plan name from the `level` of the quota probe
+/// answer or a stored plan (`pro+`).
 pub fn copilot_plan_name(raw: &str) -> Option<&'static str> {
     Some(match raw.trim().to_ascii_lowercase().as_str() {
         "free" => "Free",
+        "student" => "Student",
         "pro" => "Pro",
         "pro+" | "pro_plus" | "proplus" | "pro-plus" => "Pro+",
         "max" => "Max",
@@ -117,6 +125,20 @@ pub fn glm_coding_tier(raw: &str) -> Option<&'static str> {
         "lite" => "Lite",
         "pro" => "Pro",
         "max" => "Max",
+        _ => return None,
+    })
+}
+
+/// The Kimi Code tier from the `level` of the usage probe answer (the
+/// `user_level_name` of `/coding/v1/me`).
+pub fn kimi_code_tier(raw: &str) -> Option<&'static str> {
+    Some(match raw.trim().to_ascii_lowercase().as_str() {
+        "go" => "Go",
+        "plus" => "Plus",
+        "pro" => "Pro",
+        "andante" => "Andante",
+        "moderato" => "Moderato",
+        "allegretto" => "Allegretto",
         _ => return None,
     })
 }
@@ -137,9 +159,11 @@ fn host_of(url: &str) -> Option<&str> {
 }
 
 /// The display name of a subscription: the vendor's product and plan
-/// name (`Claude Ultra`, `ChatGPT Pro`, `GitHub Copilot`, `GLM Coding
-/// Plan Max`, `Kimi Code`, `OpenRouter`). `tier` is a plan hint from the
-/// last probe answer (the `level` of Z.ai). A provider that the table
+/// name (`Claude Ultra`, `ChatGPT Pro`, `GitHub Copilot Pro`, `GLM Coding
+/// Plan Max`, `Kimi Code Plus`, `OpenRouter`). `tier` is a plan hint
+/// from the last probe answer (the `level` of the Z.ai, GitHub Copilot,
+/// and Kimi Code probes). For GitHub Copilot, the tier comes before the
+/// stored plan. A provider that the table
 /// does not know shows as `<provider> <plan>`; a self-hosted server as
 /// `Self-hosted <host>`. `name` is the subscription name, the last
 /// fallback.
@@ -168,12 +192,16 @@ pub fn display_name(
             with("ChatGPT", plan.and_then(chatgpt_plan_name))
         }
         "github" | "github-copilot" | "copilot" => {
-            with("GitHub Copilot", plan.and_then(copilot_plan_name))
+            let t = tier.and_then(copilot_plan_name);
+            with(
+                "GitHub Copilot",
+                t.or_else(|| plan.and_then(copilot_plan_name)),
+            )
         }
         "zai" | "z.ai" if is_api_key(plan) => "Z.ai".into(),
         "zai" | "z.ai" => with("GLM Coding Plan", tier.and_then(glm_coding_tier)),
         "moonshot" if is_api_key(plan) => "Kimi API Platform".into(),
-        "moonshot" => "Kimi Code".into(),
+        "moonshot" => with("Kimi Code", tier.and_then(kimi_code_tier)),
         "openrouter" => "OpenRouter".into(),
         _ => match plan {
             Some(pl) => format!("{} {pl}", provider.trim()),
@@ -269,6 +297,23 @@ mod name_tests {
         assert_eq!(name("github", None), "GitHub Copilot");
         assert_eq!(name("github", Some("API key")), "GitHub Copilot");
         assert_eq!(name("github", Some("pro+")), "GitHub Copilot Pro+");
+        // The probe's tier comes before the stored plan.
+        assert_eq!(
+            display_name("github", None, Some("pro"), None, "g"),
+            "GitHub Copilot Pro"
+        );
+        assert_eq!(
+            display_name("github", Some("pro"), Some("pro+"), None, "g"),
+            "GitHub Copilot Pro+"
+        );
+        assert_eq!(
+            display_name("github", None, Some("student"), None, "g"),
+            "GitHub Copilot Student"
+        );
+        assert_eq!(
+            display_name("github", Some("pro"), Some("odd"), None, "g"),
+            "GitHub Copilot Pro"
+        );
         assert_eq!(name("zai", Some("coding")), "GLM Coding Plan");
         assert_eq!(
             display_name("zai", Some("coding"), Some("max"), None, "z"),
@@ -281,6 +326,23 @@ mod name_tests {
         assert_eq!(name("zai", Some("api")), "Z.ai");
         assert_eq!(name("moonshot", Some("coding")), "Kimi Code");
         assert_eq!(name("moonshot", Some("coding-cn")), "Kimi Code");
+        assert_eq!(
+            display_name("moonshot", Some("coding"), Some("Plus"), None, "k"),
+            "Kimi Code Plus"
+        );
+        assert_eq!(
+            display_name("moonshot", Some("coding"), Some("Allegretto"), None, "k"),
+            "Kimi Code Allegretto"
+        );
+        // A level that the membership page does not name stays out.
+        assert_eq!(
+            display_name("moonshot", Some("coding"), Some("Vivace"), None, "k"),
+            "Kimi Code"
+        );
+        assert_eq!(
+            display_name("moonshot", Some("api"), Some("Plus"), None, "k"),
+            "Kimi API Platform"
+        );
         assert_eq!(name("moonshot", Some("api")), "Kimi API Platform");
         assert_eq!(name("moonshot", Some("api-cn")), "Kimi API Platform");
         assert_eq!(name("openrouter", Some("API key")), "OpenRouter");

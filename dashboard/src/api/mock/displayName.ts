@@ -11,13 +11,14 @@ const claude = (raw: string): string | undefined => {
   return ({ pro: "Pro", free: "Free", team: "Team", enterprise: "Enterprise" } as Record<string, string>)[k];
 };
 const chatgpt: Record<string, string> = { free: "Free", go: "Go", plus: "Plus", pro: "Pro", team: "Business", business: "Business", edu: "Edu", enterprise: "Enterprise" };
-const copilot: Record<string, string> = { free: "Free", pro: "Pro", "pro+": "Pro+", max: "Max", business: "Business", enterprise: "Enterprise" };
+const copilot: Record<string, string> = { free: "Free", student: "Student", pro: "Pro", "pro+": "Pro+", max: "Max", business: "Business", enterprise: "Enterprise" };
 const glm: Record<string, string> = { lite: "Lite", pro: "Pro", max: "Max" };
+const kimi: Record<string, string> = { go: "Go", plus: "Plus", pro: "Pro", andante: "Andante", moderato: "Moderato", allegretto: "Allegretto" };
 
 const isKey = (plan?: string) => ["api key", "api", "api-cn"].includes((plan ?? "").trim().toLowerCase());
 const join = (product: string, tier?: string) => (tier ? `${product} ${tier}` : product);
 
-/** `Claude Ultra`, `ChatGPT Pro`, `GitHub Copilot`, `GLM Coding Plan Max`, `Kimi Code`, `OpenRouter`, `Self-hosted <host>`. */
+/** `Claude Ultra`, `ChatGPT Pro`, `GitHub Copilot Pro`, `GLM Coding Plan Max`, `Kimi Code Plus`, `OpenRouter`, `Self-hosted <host>`. */
 export function mockDisplayName(s: Pick<Subscription, "name" | "provider" | "plan" | "windows"> & { selfhosted?: { base_url?: string } }): string {
   const p = s.provider.trim().toLowerCase();
   const plan = s.plan?.trim() || undefined;
@@ -25,20 +26,19 @@ export function mockDisplayName(s: Pick<Subscription, "name" | "provider" | "pla
     const host = s.selfhosted?.base_url?.replace(/^[a-z]+:\/\//i, "").split(/[/?#]/)[0];
     return `Self-hosted ${host || s.name}`;
   }
+  // The `level` of the last probe answer (Z.ai, GitHub Copilot, Kimi Code).
+  const level = s.windows?.map((w) => (w as { raw?: { level?: string } }).raw?.level).find(Boolean)?.toLowerCase();
   switch (p) {
     case "anthropic":
       return isKey(plan) ? "Claude API" : join("Claude", plan && claude(plan));
     case "openai":
       return isKey(plan) ? "OpenAI API" : join("ChatGPT", plan && chatgpt[plan.toLowerCase()]);
     case "github":
-      return join("GitHub Copilot", plan && copilot[plan.toLowerCase()]);
-    case "zai": {
-      if (isKey(plan)) return "Z.ai";
-      const level = s.windows?.map((w) => (w as { raw?: { level?: string } }).raw?.level).find(Boolean);
-      return join("GLM Coding Plan", level && glm[level.toLowerCase()]);
-    }
+      return join("GitHub Copilot", (level && copilot[level]) || (plan && copilot[plan.toLowerCase()]));
+    case "zai":
+      return isKey(plan) ? "Z.ai" : join("GLM Coding Plan", level && glm[level]);
     case "moonshot":
-      return isKey(plan) ? "Kimi API Platform" : "Kimi Code";
+      return isKey(plan) ? "Kimi API Platform" : join("Kimi Code", level && kimi[level]);
     case "openrouter":
       return "OpenRouter";
     default:
