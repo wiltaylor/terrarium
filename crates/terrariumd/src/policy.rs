@@ -754,6 +754,25 @@ pub fn delete_artifact(actor: &Actor, project: &str, author: &str) -> ApiResult<
     ))
 }
 
+/// Upload a test run: every member of the project (its agents too).
+pub fn write_test_runs(actor: &Actor, project: &str) -> ApiResult<()> {
+    read_project(actor, project).map_err(|_| {
+        ApiError::forbidden(format!(
+            "project `{project}` is not your project; uploading its test runs needs sysadmin"
+        ))
+    })
+}
+
+/// Delete a test run: its creator, or an admin.
+pub fn delete_test_run(actor: &Actor, project: &str, creator: &str) -> ApiResult<()> {
+    if actor.address() == creator || is_admin_of(actor, project) {
+        return Ok(());
+    }
+    Err(ApiError::forbidden(
+        "only the creator of a test run, a project admin, or the operator deletes it",
+    ))
+}
+
 /// Prune artifacts by the retention rule.
 pub fn prune_artifacts(actor: &Actor) -> ApiResult<()> {
     sysadmin(actor, "pruning artifacts")

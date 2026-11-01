@@ -92,6 +92,9 @@ pub enum CliError {
     /// `terrarium exec` passes on the exit code of the remote command.
     #[error("the remote command exited with {0}")]
     RemoteExit(u8),
+    /// `test push --fail-on-failures`: the run has failed tests (exit 1).
+    #[error("{0} tests failed or errored")]
+    TestsFailed(i64),
 }
 
 impl CliError {
@@ -111,6 +114,7 @@ pub fn exit_code_of(err: &anyhow::Error) -> u8 {
     }
     match err.downcast_ref::<CliError>() {
         Some(CliError::RemoteExit(code)) => return *code,
+        Some(CliError::TestsFailed(_)) => return exit::SERVER,
         Some(_) => return exit::USAGE,
         None => {}
     }

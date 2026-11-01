@@ -437,6 +437,7 @@ output. Run `terrarium <command> --help` for the flags.
 - `wiki ls | show | search | new | section | append | edit`: pages for the user.
 - `artifact push | ls | url`: files and static sites for the user.
 - `version new | attach | submit | wait`: ask the user to review a result.
+- `test push | ls | show | compare`: prove test results (the `terrarium-tests` skill).
 - `usage`: your subscription use.
 - `secret list | get`: granted secrets.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.
@@ -608,7 +609,8 @@ mod tests {
         // 1080: card ETAs on claim (PLAN §13).
         // 1130 (2026-11-01): configurable board columns and their roles
         // (PLAN §13).
-        assert!(words < 1130, "{words} words");
+        // 1150 (2026-11-02): `terrarium test` in the CLI list (PLAN §15.5).
+        assert!(words < 1150, "{words} words");
     }
 
     /// The prompt holds only stable facts, so a change of peer status, or of

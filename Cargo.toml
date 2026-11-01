@@ -83,6 +83,9 @@ tar = { version = "0.4.46", default-features = false }
 # Target displays (PLAN §19b): crop and scale screenshots in the host agent.
 png = "0.17"
 similar = "2.7"
+# Test runs (docs/api.md, test runs): the JUnit and TRX parsers. A DOM
+# parser with no DTD support: a DOCTYPE is an error, so no entity expands.
+roxmltree = "=0.21.1"
 # The repo browser (PLAN §9a): the blob IDs of work tree files, made in
 # Rust, so that no git filter runs.
 sha1 = "0.11"

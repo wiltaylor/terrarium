@@ -643,6 +643,26 @@ pub fn attach_artifact(
     render(t, row)
 }
 
+/// Check a link from a test run of `project` to a version (PLAN §15.5):
+/// the edit rights of the version. Returns the version ID.
+pub fn check_test_link(
+    conn: &Connection,
+    actor: &Actor,
+    key: &str,
+    project: &str,
+) -> ApiResult<String> {
+    let row = find(conn, key, Some(project))?;
+    policy::read_project(actor, &row.project)?;
+    if row.project != project {
+        return Err(ApiError::invalid(
+            "a test run links to a version of its project",
+        ));
+    }
+    editable(&row)?;
+    policy::edit_version(actor, &row.project, &row.created_by, &row.name)?;
+    Ok(row.id)
+}
+
 fn review_row(
     t: &Tx<'_>,
     row: &VersionRow,

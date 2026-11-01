@@ -65,6 +65,8 @@ lead or the operator. A quoted `[\User]` is not a tag.
 - Do not say that work is done without evidence. Run the tests on a
   target. Quote the command, the exit code, and the pass count on the
   card. Say what you checked and what you assumed.
+  Prove test results with `terrarium test push --card <id>`; see the
+  `terrarium-tests` skill.
 
 ## When you are blocked or unsure
 

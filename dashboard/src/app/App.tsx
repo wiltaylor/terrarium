@@ -17,6 +17,8 @@ const InboxPage = lazy(() => import("../features/inbox/InboxPage"));
 const MemoryPage = lazy(() => import("../features/memory/MemoryPage"));
 const WikiPage = lazy(() => import("../features/wiki/WikiPage"));
 const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
+const TestRunsPage = lazy(() => import("../features/tests/TestRunsPage"));
+const TestRunPage = lazy(() => import("../features/tests/TestRunPage"));
 const TargetsPage = lazy(() => import("../features/targets/TargetsPage"));
 const SchedulesPage = lazy(() => import("../features/schedules/SchedulesPage"));
 const TemplatesPage = lazy(() => import("../features/templates/TemplatesPage"));
@@ -96,10 +98,12 @@ export function App() {
         </Route>
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/agents" component={AgentsPage} />
-        {/* The board screen: the tabs Cards, Artifacts, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it manages the versions too (?rows=version&version=<id>). */}
+        {/* The board screen: the tabs Cards, Artifacts, Tests, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it manages the versions too (?rows=version&version=<id>). */}
         <Route path="/p/:project/board" component={BoardScreen}>
           <Route path="/" component={BoardPage} />
           <Route path="/artifacts/:id?" component={ArtifactsPage} />
+          <Route path="/tests" component={TestRunsPage} />
+          <Route path="/tests/:id" component={TestRunPage} />
           <Route path="/schedules" component={SchedulesPage} />
         </Route>
         {/* The repos of the project, and the browser of one repo (its trees: main and each agent checkout). */}

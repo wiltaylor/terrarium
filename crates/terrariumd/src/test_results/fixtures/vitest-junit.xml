@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="7" failures="2" errors="0" time="0.078758997">
+    <testsuite name="src/cart.test.js" timestamp="2026-11-01T21:43:30.851Z" hostname="build-01" tests="5" failures="1" errors="0" skipped="2" time="0.049738341">
+        <testcase classname="src/cart.test.js" name="cart &gt; adds an item" time="0.008003567">
+        </testcase>
+        <testcase classname="src/cart.test.js" name="cart &gt; totals the prices" time="0.032721724">
+            <system-out>
+total is 30
+
+            </system-out>
+            <failure message="expected 25 to be 30 // Object.is equality" type="AssertionError">
+AssertionError: expected 25 to be 30 // Object.is equality
+
+- Expected
++ Received
+
+- 30
++ 25
+
+ ❯ src/cart.test.js:3:79
+            </failure>
+        </testcase>
+        <testcase classname="src/cart.test.js" name="cart &gt; discounts &gt; applies a 10% code" time="0.001065994">
+        </testcase>
+        <testcase classname="src/cart.test.js" name="cart &gt; discounts &gt; stacks two codes" time="0">
+            <skipped/>
+        </testcase>
+        <testcase classname="src/cart.test.js" name="cart &gt; discounts &gt; expires old codes" time="0">
+            <skipped/>
+        </testcase>
+    </testsuite>
+    <testsuite name="src/format.test.js" timestamp="2026-11-01T21:43:30.877Z" hostname="build-01" tests="2" failures="1" errors="0" skipped="0" time="0.029020656">
+        <testcase classname="src/format.test.js" name="formatPrice &gt; formats cents" time="0.007875875">
+        </testcase>
+        <testcase classname="src/format.test.js" name="formatPrice &gt; throws on NaN" time="0.013878841">
+            <failure message="price is not a number" type="TypeError">
+TypeError: price is not a number
+ ❯ src/format.test.js:3:37
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>

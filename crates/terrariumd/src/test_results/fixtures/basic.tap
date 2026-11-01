@@ -1,0 +1,18 @@
+TAP version 14
+1..5
+ok 1 - parses an empty config
+ok 2 - parses ports
+not ok 3 - rejects a bad port
+  ---
+  message: 'port 70000 is out of range'
+  severity: fail
+  at:
+    file: t/config.t
+    line: 42
+  data:
+    got: 70000
+    expect: 'error'
+  ...
+ok 4 - reads the env # SKIP no HOME on this runner
+not ok 5 - merges two files # TODO merge is not written yet
+# 2 of 5 tests failed (1 TODO)

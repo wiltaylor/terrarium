@@ -265,11 +265,11 @@ the project, under `/p/<project>/settings`. The screens use
 `components/TabScreen.tsx`. The Logs item is active on each of its tabs.
 The project items are Board, Repos, Logs, Knowledge, and Agents.
 The **Board** item (`features/board/BoardScreen.tsx`) has a tab for each of
-Cards, Artifacts, and Schedules (`BOARD_TABS`). The Cards tab is the board
+Cards, Artifacts, Tests, and Schedules (`BOARD_TABS`). The Cards tab is the board
 at `/p/<project>/board`, so a `?card=` link keeps its path. The Cards tab
 manages the versions too (version rows, the Version modal); there is no
-Versions tab. The other tabs are under `/p/<project>/board/artifacts` and
-`/p/<project>/board/schedules`. The
+Versions tab. The other tabs are under `/p/<project>/board/artifacts`,
+`/p/<project>/board/tests`, and `/p/<project>/board/schedules`. The
 Schedules tab keeps its Schedules and Triggers sub-tabs (`?tab=triggers`).
 The **Knowledge** item (`features/knowledge/KnowledgePage.tsx`) has a tab
 for each of Wiki, Memory, and DB (`KNOWLEDGE_TABS`), under
@@ -831,6 +831,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
 | `/p/:project/board` | Board, Cards tab: drag and drop, New card dialog (the "+" of the backlog column), Edit columns dialog, ETA countdowns, question badges, version chips, the Version filter (`?version=`), version rows (`?rows=version`) and the Version modal (`?rows=version&version=<id>`), "+ Version", the Versions menu, card drawer with its questions and versions (see "The board") | `GET .../board`, `PATCH .../board`, `GET .../versions?archived=all`, `POST .../versions`, `PATCH /api/versions/{id}`, `POST /api/versions/{id}/submit\|approve\|reject\|release\|archive\|unarchive`, `compare`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
 | `/p/:project/versions/:id?`, `/p/:project/board/versions/:id?` | Gone: redirect in one hop to `/p/:project/board?rows=version`, with `&version=<id>` when the path has an ID (`app/nav.ts` `MOVED_ROUTES`). The Version modal opens. The redirect adds the old query (`withQuery`). The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. | none |
+| `/p/:project/board/tests`, `/p/:project/board/tests/:id` | Board, Tests tab: the test runs (filters, counts bar, links) and one run (counts, compare with the previous run, suites and cases, Failed only, search, output, Download original, link and unlink, delete); see "Test runs" | `GET .../test-runs?card=&version=&name=&status=&cursor=`, `GET /api/test-runs/{id}?status=&q=&cursor=`, `GET .../compare?with=previous`, `GET .../raw`, `PATCH .../links`, `DELETE /api/test-runs/{id}` |
 | `/p/:project/board/artifacts/:id?` | Board, Artifacts tab: artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/knowledge/wiki/*path` | Knowledge, Wiki tab: page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
 | `/p/:project/knowledge/memory` | Knowledge, Memory tab: memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
@@ -1020,6 +1021,54 @@ sends `PATCH /api/questions/{id}` with `card: null`. A `question` event
 whose `card_id` or `previous_card_id` is the card reads the section
 again. The pure helpers are in `features/board/questions.ts`
 (`cardQuestionBadges`, `linkable`, `isCardQuestionEvent`).
+
+**Test chips.** A card with a linked test run (docs/api.md, test runs)
+shows a chip with the latest run (`Card.tests`): "✓ 120 passed",
+"✗ 3 failed" (failed plus errored), or "– no tests", as a colour and as
+text. A click opens the run, not the card. A `test_run` event of the
+project reloads the board. The card drawer has a **Tests** section, and
+the Version modal has one too (`features/tests/parts.tsx` `LinkedRuns`,
+`GET .../test-runs?card=<id>` or `?version=<id>`). It lists the linked runs,
+newest first, and a combined status of the newest run of each name: failed
+when one failed, else passed, else empty. A failed run on a card in review
+changes nothing on the board: no card moves.
+
+## Test runs
+
+The **Tests** tab of the board (`features/tests`) shows the test runs that
+agents push with `terrarium test push` (docs/api.md, test runs). The daemon
+parses JUnit XML, TRX, CTRF, libtest JSON, Vitest and Jest JSON, and TAP.
+
+- **The list** (`TestRunsPage.tsx`, `/p/<project>/board/tests`): newest
+  first, with the status (icon and word), the name, the format and tool,
+  who pushed it and when, the branch and the commit, the duration, the
+  counts as a stacked bar and as text, and the linked cards and versions.
+  The filters (name, status, card, version) are in the URL
+  (`?name=&status=&card=&version=`). **Load more** reads the next page. A
+  `test_run` event of the project reloads the list.
+- **The run** (`TestRunPage.tsx`, `/p/<project>/board/tests/<id>`): the
+  big counts (passed, failed, errored, skipped) with an icon each, the
+  duration, the format, the tool, the file, the commit, the branch, and the
+  linked cards and versions (unlink with ×, link a card by ID). **Compare
+  with the previous run** reads `GET /api/test-runs/{id}/compare?with=previous`
+  and shows Newly failing and Fixed open at the top, then Still failing,
+  New tests, and Removed tests. The suites are groups that open and close,
+  with their counts. A case shows its status as an icon and a word, its
+  name, and its duration; a click shows the message, the trace, stdout,
+  and stderr in `<pre>` text nodes. The text has no ANSI codes
+  (`model.ts` `stripAnsi`) and never renders as HTML. **Failed only** is
+  on at first when the run has a failed or an errored case. The search box
+  and Failed only go to the daemon (`?q=&status=failed`), which pages the
+  cases (**Load more**). **Download original** reads
+  `GET /api/test-runs/{id}/raw` with the session and saves it from an
+  object URL. **Delete** asks once.
+- The pure logic is in `features/tests/model.ts`: the bar segments, the
+  counts text, the chip text, the run status, the combined status, the
+  case filter, the suite groups, the compare sections, `diffCases` (the
+  mock's compare), and the durations. The mock (`api/mock/testRuns.ts`)
+  seeds project `terrarium` with a run in each format; two `unit` runs
+  show the compare, and some messages have ANSI colour codes. On a phone
+  the rows stack and the filters take the full width.
 
 ## Security notes
 

@@ -23,6 +23,7 @@ pub mod ssh_keys;
 pub mod system;
 pub mod system_prompts;
 pub mod templates;
+pub mod test_runs;
 pub mod waits;
 
 #[cfg(test)]
@@ -60,6 +61,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Wiki { command } => knowledge::wiki(ctx, command).await,
         Command::Db { command } => db::db(ctx, command).await,
         Command::Artifact { command } => artifacts::artifact(ctx, command).await,
+        Command::Test { command } => test_runs::test(ctx, command).await,
         Command::Version { command } => artifacts::version(ctx, command).await,
         Command::Usage { command } => system::usage(ctx, command.as_ref()).await,
         Command::Status { command } => agents::status(ctx, command).await,

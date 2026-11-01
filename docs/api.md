@@ -20,7 +20,8 @@ Sections: [1 Transports](#1-transports-and-callers) ·
 [17 Targets, hosts, and exec](#17-targets-host-agents-and-exec-sessions) ·
 [18 Fleet](#18-fleet) · [19 Schedules](#19-schedules) ·
 [20 Event sources](#20-event-sources-and-ingest) ·
-[21 Agent templates](#21-agent-templates) · [27 DB](#27-db).
+[21 Agent templates](#21-agent-templates) · [27 DB](#27-db) ·
+[28 System prompts](#28-system-prompts) · [29 Test runs](#29-test-runs).
 
 ## 1. Transports and callers
 
@@ -3080,6 +3081,9 @@ A card:
   clears it. It is absent for a card that is not done, and for a card done
   before migration 40.
 - `blocked_by` lists the dependencies that are neither `done` nor archived.
+- `tests` is the latest test run that is linked to the card (§29):
+  `{"id","name","status","counts":{"passed","failed","errored","skipped","total"},"created_at"}`.
+  It is absent when no run is linked to the card.
 - `comments[].session` is the session link (§6.6) of the agent that wrote
   the comment: the agent's current session at that time. It is `null` for
   the operator and for a comment from before migration 37. Each path that
@@ -3362,6 +3366,7 @@ Kinds:
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
 | `event_source` | `{change, source, name, key, kind, enabled}` after a change of an event source (§20). |
 | `system_prompt` | `{change, name, path}` after a write through the API of the system prompt library (§28). `change` is `created`, `updated`, or `deleted`. An edit of a file by hand gives no event. |
+| `test_run` | `{change, project, id, name, counts, cards, versions}` after a change of a test run (§29). `change` is `created`, `linked`, `unlinked`, or `deleted`. `cards` are card IDs and `versions` are version names. |
 | `ci.run.*`, `ci.job.failed`, `git.push`, `pr.*`, `ext.*` | A webhook of an event source (§20.4), or `POST /api/events` (§20.5). The actor is `source:<project>/<name>`, or the caller of `POST /api/events`. |
 
 A `memory.*`, `wiki.*`, `artifact.*`, or `version.*` event that an agent
@@ -7195,3 +7200,216 @@ and templates that select it:
   path, and the size, never the text. The event `system_prompt` (§9) has
   `{"change","name","path"}`, with `change` = `created`, `updated`, or
   `deleted`.
+
+## 29. Test runs
+
+The results of a test run (PLAN §15.5). An agent or the operator uploads
+a standard test result file. The daemon reads the file and keeps the run
+and each test case. A run links to cards and to versions. The operator
+reads the runs on the Tests tab of the Board screen, on the card drawer,
+and in the Version modal. The code is in
+`crates/terrariumd/src/test_results/` (the parsers) and
+`crates/terrariumd/src/store/test_runs.rs`.
+
+### 29.1 Formats
+
+| `format` | The file | Made by |
+|---|---|---|
+| `junit` | JUnit XML: `<testsuites>` or `<testsuite>`, with `<testcase>` and `<failure>`, `<error>`, `<skipped>`, `<system-out>`, `<system-err>`. Nested suites and `<properties>` are read. `time` is in seconds. | cargo-nextest (`--profile` with `[profile.<name>.junit]`), Vitest (`--reporter=junit`), jest-junit, pytest (`--junitxml`), go-junit-report, Maven Surefire, `dotnet test --logger junit` |
+| `trx` | .NET VSTest XML: `<TestRun>` with `<UnitTestResult>` (`outcome` `Passed`, `Failed`, `NotExecuted`, and the others), `duration` as `hh:mm:ss.fffffff`, `<Output>` (`<StdOut>`, `<StdErr>`, `<ErrorInfo>` with `<Message>` and `<StackTrace>`), and `<TestDefinitions>` for the class and the method names. | `dotnet test --logger trx` |
+| `ctrf` | CTRF JSON (<https://ctrf.io>): `results.tool`, `results.summary`, `results.tests[]` with `name`, `status`, `duration`, `message`, `trace`, `suite`. | the CTRF reporters (Playwright, Jest, Cypress, and others) |
+| `libtest-json` | Lines of JSON from libtest: `{"type":"test","event":"started"\|"ok"\|"failed"\|"ignored",...}` and `{"type":"suite",...}`, with `stdout` and `exec_time`. | `cargo test -- -Z unstable-options --format json --report-time`, `cargo nextest run --message-format libtest-json` |
+| `vitest-json` | The JSON reporter of Vitest: `testResults[].assertionResults[]` with `status`, `title`, `ancestorTitles`, `duration`, `failureMessages`. | `vitest --reporter=json` |
+| `jest-json` | The `--json` output of Jest. The same shape as `vitest-json`. | `jest --json` |
+| `tap` | TAP 13 and 14: `ok` and `not ok` lines, `# SKIP` and `# TODO`, and the YAML diagnostics (`---` to `...`). | `node --test --test-reporter=tap`, prove, and other TAP producers |
+
+**Auto-detect.** `format=auto` (the default) finds the format from the
+content:
+
+- XML with the root element `testsuites` or `testsuite` is `junit`. The
+  root element `TestRun` is `trx`.
+- A JSON object with `results.tests` is `ctrf`. A JSON object with
+  `testResults[].assertionResults` is `vitest-json` or `jest-json`. Vitest
+  and Jest share the shape; the tool comes from the content.
+- Lines of JSON objects with `"type":"test"` or `"type":"suite"` are
+  `libtest-json`.
+- Text that starts with `TAP version`, a plan line `1..N`, or `ok` and
+  `not ok` lines is `tap`.
+
+Content that fits no format is `422 invalid`, and the message names the
+formats. Give `format` to skip the detection. A file that does not parse
+as the given format is `422 invalid` with the reason (for example the
+line and the column of an XML error).
+
+**Statuses.** A test case has the status `passed`, `failed`, `errored`,
+or `skipped`. JUnit `<error>` and a TRX `Error`, `Timeout`, or `Aborted`
+give `errored`. Skipped, ignored, pending, todo, and not executed tests
+give `skipped`. The status of a run is `failed` when `failed + errored >
+0`, `passed` when it has tests and none failed or errored, and `empty`
+when it has no tests.
+
+**Limits and safety.**
+
+- A file is at most 20 MiB (`413 too_large`) and 100 000 test cases
+  (`422 invalid`).
+- Each `message`, `trace`, `stdout`, and `stderr` is cut to 64 KiB, with
+  the line `[truncated: N bytes more]` at the end. The run gets a note in
+  `notes`.
+- The XML reader rejects a `<!DOCTYPE>` (`422 invalid`). It reads no DTD,
+  resolves no external entity, and expands no entity other than the five
+  predefined ones and character references.
+- The daemon keeps the original file (compressed) for
+  `GET /api/test-runs/{id}/raw`. Known secret values are replaced with
+  `[secret:<name>]` in the cases and in the original file.
+
+### 29.2 Shapes
+
+A run (the list items, and the answer of an upload and a link change):
+
+```json
+{"id":"01JB7…","project":"demo","name":"unit","format":"junit","tool":"cargo-nextest",
+ "status":"failed","counts":{"passed":120,"failed":2,"errored":1,"skipped":3,"total":126},
+ "duration_ms":5321,"started_at":"2026-11-02T01:02:03Z","commit":"abc123","branch":"main",
+ "file_name":"junit.xml","raw_size":12345,"notes":[],
+ "cards":["DEMO-12"],"versions":[{"id":"01JB6…","name":"v1.2.0"}],
+ "created_by":"01M5PA0T…","created_by_name":"demo/worker",
+ "created_at":"2026-11-02T01:03:00.000Z","url":"/p/demo/board/tests/01JB7…"}
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | The name of the upload. Else a name in the file (the `name` of a JUnit root suite, the TRX test assembly, the CTRF `appName`), else the tool, else the file name without its extension. The compare finds the previous run by this name. |
+| `tool` | The tool that wrote the file, when the file says it. Else `null`. |
+| `duration_ms`, `started_at` | From the file. `null` when the file does not give them. |
+| `commit`, `branch` | From the upload. `null` when not given. |
+| `file_name`, `raw_size` | The name and the size in bytes of the original file. |
+| `notes` | Notes of the parse, for example `3 texts were cut to 64 KiB`. Usually empty. |
+| `cards`, `versions` | The links. |
+| `url` | The dashboard page of the run. |
+
+A suite:
+
+```json
+{"name":"terrarium::store","duration_ms":120,"counts":{"passed":10,"failed":1,"errored":0,"skipped":0,"total":11}}
+```
+
+A test case:
+
+```json
+{"seq":17,"suite":"terrarium::store","name":"creates_a_run","classname":"store::tests",
+ "file":"src/store.rs","line":42,"status":"failed","duration_ms":12,
+ "message":"assertion failed: left == right","trace":"thread 'creates_a_run' panicked at …",
+ "stdout":"…","stderr":null}
+```
+
+- `seq` is the position of the case in the file, from 0.
+- `classname`, `file`, `line`, `duration_ms`, `message`, `trace`,
+  `stdout`, and `stderr` are `null` when the file does not give them.
+- The text fields are plain text as the tool wrote it. They can hold
+  ANSI colour codes. Show them as text, never as HTML.
+
+One run (`GET /api/test-runs/{id}`): the run fields, and:
+
+| Field | Meaning |
+|---|---|
+| `suites` | Every suite of the run, in file order, with the full counts. |
+| `cases` | One page of the cases that match the filter, in file order. |
+| `cases_total` | The number of cases that match the filter (all pages). |
+| `next_cursor` | The `cursor` of the next page (a `seq`), or `null`. |
+
+A compare:
+
+```json
+{"run":{…run…},"base":{…run…},
+ "counts":{"newly_failing":1,"fixed":2,"still_failing":1,"new_tests":4,"removed_tests":0},
+ "newly_failing":[{"suite":"terrarium::store","classname":"store::tests","name":"creates_a_run",
+                   "status":"failed","base_status":"passed","message":"assertion failed"}],
+ "fixed":[…],"still_failing":[…],"new_tests":[…],"removed_tests":[…]}
+```
+
+- The key of a case is its suite, its classname, and its name.
+- A case fails when its status is `failed` or `errored`.
+- `newly_failing`: it fails in the run, and it did not fail in the base.
+  `fixed`: it failed in the base, and it passed in the run (a skip is not a fix).
+  `still_failing`: it fails in both. `new_tests`: only in the run.
+  `removed_tests`: only in the base.
+- `status` is the status in the run, and `base_status` the status in the
+  base. Each is `null` when the case is not there. `message` is from the
+  run, else from the base.
+- `counts` has the full numbers. Each list has at most 1000 items.
+- `base` is `null` when there is no previous run. Then each list is
+  empty.
+
+### 29.3 Endpoints
+
+| Endpoint | Body | Answer |
+|---|---|---|
+| `POST /api/projects/{p}/test-runs` | the upload (below) | `201` run |
+| `GET /api/projects/{p}/test-runs?card=&version=&name=&status=&limit=&cursor=` | | `200` runs, newest first; `X-Next-Cursor` (§2.4) |
+| `GET /api/test-runs/{id}?status=&q=&limit=&cursor=` | | `200` one run with its suites and a page of cases |
+| `GET /api/test-runs/{id}/raw` | | `200` the original file |
+| `GET /api/test-runs/{id}/compare?with=<id>\|previous` | | `200` compare |
+| `PATCH /api/test-runs/{id}/links` | `{"add_cards"?, "remove_cards"?, "add_versions"?, "remove_versions"?}` | `200` run |
+| `DELETE /api/test-runs/{id}` | | `204` |
+
+**Upload.** Send the file in one of three ways:
+
+- JSON (the CLI sends this): `{"content": "<the file text>"}` or
+  `{"data_base64": "…"}`, with the optional fields `file_name`, `name`,
+  `format`, `cards` (a list of card IDs), `versions` (a list of version
+  names or IDs), `commit`, and `branch`. A JSON body is this envelope
+  only when it has the key `content` or `data_base64`.
+- `multipart/form-data`: the part `file`, and the text parts `name`,
+  `format`, `card` (repeat it), `version` (repeat it), `commit`, and
+  `branch`. The file name of the part is the `file_name`.
+- Any other body is the file itself. Give the fields in the query:
+  `?name=&format=auto&card=DEMO-1&card=DEMO-2&version=v1&commit=&branch=&file_name=`.
+
+`format` is `auto` (the default) or a format of §29.1. An unknown format
+is `422 invalid`. A link that the caller may not make (§29.4) fails the
+upload: nothing is stored.
+
+**Lists.** `card` (a card ID), `version` (a version name or ID), `name`
+(the exact run name), and `status` (`passed`, `failed`, or `empty`)
+filter the runs. `limit` is 100 by default, at most 1000.
+
+**One run.** `status` filters the cases: `passed`, `failed`, `errored`,
+or `skipped`; `failed` gives the failed and the errored cases. `q`
+finds text in the suite, the classname, or the name (no case). `limit`
+is 500 by default, at most 5000. `cursor` is the `next_cursor` of the
+last page.
+
+**Raw.** The answer has the original file with
+`Content-Disposition: attachment` and its file name,
+`X-Content-Type-Options: nosniff`, and the content type
+`application/xml`, `application/json`, `application/x-ndjson`
+(`libtest-json`), or `text/plain` by the format.
+
+**Compare.** `with=previous` (the default) is the newest older run with
+the same name in the project. `with=<id>` is any run of the same
+project; an unknown ID is `404`.
+
+**Links.** Each list in the body holds card IDs or version names (or
+IDs). A link that exists already, and an unlink of a link that does not
+exist, change nothing.
+
+### 29.4 Rules
+
+- **Rights.** The members of the project (its agents) and the operator
+  upload, list, read, and compare runs. An agent of another project needs
+  sysadmin.
+- **Links.** A link to a card follows the edit rights of the card
+  (§8.2): its assignee or its creator, a project admin, or the operator;
+  not an archived card; a `done` card only for a project admin or the
+  operator. A link to a version follows the edit rights of the version
+  (§13.2): its creator, a project admin, or the operator, while the
+  version is `draft` or `rejected`. The same rights apply to an unlink.
+  A card or a version of another project is `422 invalid`.
+- **Deletes.** The creator of the run, a project_admin of the project, a
+  sysadmin, or the operator deletes a run. A delete by another actor
+  writes the audit row `test_run.delete` with the name and the counts.
+- **No automatic actions.** A failing run moves no card and changes no
+  version. The agents and the operator decide.
+- **Events.** The event `test_run` (§9) has `{"change","project","id",
+  "name","counts","cards","versions"}`, with `change` = `created`,
+  `linked`, `unlinked`, or `deleted`.

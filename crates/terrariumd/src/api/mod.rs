@@ -34,6 +34,7 @@ pub mod system;
 mod system_prompts;
 mod targets;
 mod templates;
+mod test_runs;
 mod transcripts;
 mod usage;
 mod versions;
@@ -263,6 +264,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(records::routes())
         .merge(artifacts::routes())
         .merge(versions::routes())
+        .merge(test_runs::routes())
         .merge(subscriptions::routes())
         .merge(usage::routes())
         .merge(fleet::routes())

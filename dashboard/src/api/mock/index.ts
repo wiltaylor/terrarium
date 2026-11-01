@@ -108,6 +108,7 @@ import { createConfigMock } from "./config";
 import { createSkillMock, skillsError } from "./skills";
 import { createSystemPromptMock } from "./systemPrompts";
 import { createDbMock } from "./db";
+import { createTestRunMock } from "./testRuns";
 import { applyTemplate, compactMaxAgeError, compactOnIdleError, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createSecretMock } from "./secrets";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
@@ -766,6 +767,19 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   let dbCounter = 0;
   const dbMock = createDbMock({ iso, ulid: (tag) => fakeUlid(tag, ++dbCounter), reply, fail, emit, audit, project: (name) => project(name), now: now() });
   if (w.projects.some((x) => x.name === "terrarium")) dbMock.seed();
+  // Test runs (docs/api.md, test runs): ./testRuns. The seed gives project `terrarium` a run in each format.
+  const testRunMock = createTestRunMock({
+    reply,
+    fail,
+    emit,
+    audit,
+    project: (name) => project(name),
+    cards: () => w.cards,
+    versions: () => w.versions,
+    agentId: (name) => w.agents.find((a) => a.project === "terrarium" && a.name === name)?.id ?? "operator",
+    now: now(),
+  });
+  if (w.projects.some((x) => x.name === "terrarium") && w.cards.some((c) => c.id === "TER-12")) testRunMock.seed();
   const skillMock = createSkillMock({ w, reply, fail, audit, caller: opts.scheduleCaller, available: opts.configRepo });
   const systemPromptMock = createSystemPromptMock({ w, iso, reply, fail, audit, emit, caller: opts.scheduleCaller, available: opts.configRepo });
   const waitMock = createWaitMock({ w, iso, now, ulid, reply, fail, emit, agent, setStatus, sendMail: (to, from, subject, body) => sendMail(to, from, subject, body) });
@@ -997,6 +1011,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   // The session of a comment renders at read time, like the daemon: `removed` follows the agent.
   const view = (c: Card): Card => ({
     ...c,
+    ...(testRunMock.cardTests(c.id) ? { tests: testRunMock.cardTests(c.id) } : {}),
     blocked_by: blockedBy(c),
     comments: c.comments.map((cm) => ({ ...cm, session: cm.session ? (sessionRef(cm.session.id) ?? null) : null })),
   });
@@ -3762,6 +3777,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     // The project DB (./db).
     db: dbMock.api,
+    testRuns: testRunMock.api,
 
     hosts: {
       list: () => reply(() => w.hosts.map((h) => withMetrics(h))),

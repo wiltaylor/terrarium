@@ -151,6 +151,11 @@ pub enum Command {
         #[command(subcommand)]
         command: VersionCmd,
     },
+    /// Test runs: upload test result files as proof, list, show, compare
+    Test {
+        #[command(subcommand)]
+        command: TestCmd,
+    },
     /// Subscription usage
     Usage {
         #[command(subcommand)]
@@ -1414,6 +1419,96 @@ pub enum ArtifactCmd {
     /// The stable preview URL
     Url { id: String },
     /// Delete an artifact (own and unattached only)
+    Rm { id: String },
+}
+
+/// The formats of `test push --format`.
+pub const TEST_FORMATS: [&str; 8] = [
+    "auto",
+    "junit",
+    "trx",
+    "ctrf",
+    "libtest-json",
+    "vitest-json",
+    "jest-json",
+    "tap",
+];
+
+#[derive(Debug, Subcommand)]
+pub enum TestCmd {
+    /// Upload a test result file (JUnit XML, TRX, CTRF, libtest JSON,
+    /// Vitest or Jest JSON, TAP); prints the counts and the dashboard link
+    ///
+    /// The exit code is 0 also when tests failed: the upload does not
+    /// judge. Use --fail-on-failures to exit 1 when a test failed.
+    Push {
+        file: PathBuf,
+        /// The file format; `auto` finds it from the content
+        #[arg(long, default_value = "auto", value_parser = TEST_FORMATS)]
+        format: String,
+        /// The run name (the same name each time, so `compare` finds the
+        /// previous run). Default: from the file
+        #[arg(long)]
+        name: Option<String>,
+        /// Link the run to this card (repeat for more)
+        #[arg(long = "card")]
+        cards: Vec<String>,
+        /// Link the run to this version (repeat for more)
+        #[arg(long = "version")]
+        versions: Vec<String>,
+        /// The commit that was tested
+        #[arg(long)]
+        commit: Option<String>,
+        /// The branch that was tested
+        #[arg(long)]
+        branch: Option<String>,
+        /// Exit 1 when a test failed or errored
+        #[arg(long)]
+        fail_on_failures: bool,
+    },
+    /// List test runs, newest first
+    Ls {
+        #[arg(long)]
+        card: Option<String>,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        /// Only runs with a failed or errored test
+        #[arg(long)]
+        failed: bool,
+    },
+    /// Show a run: the counts, and each failed case with its message
+    Show {
+        id: String,
+        /// Only the failed and errored cases
+        #[arg(long)]
+        failed: bool,
+    },
+    /// Compare a run with the previous run of the same name, or with a run
+    Compare {
+        id: String,
+        /// A run ID, or `previous`
+        #[arg(long, default_value = "previous")]
+        with: String,
+    },
+    /// Link a run to cards and versions
+    Link {
+        id: String,
+        #[arg(long = "card")]
+        cards: Vec<String>,
+        #[arg(long = "version")]
+        versions: Vec<String>,
+    },
+    /// Unlink a run from cards and versions
+    Unlink {
+        id: String,
+        #[arg(long = "card")]
+        cards: Vec<String>,
+        #[arg(long = "version")]
+        versions: Vec<String>,
+    },
+    /// Delete a run (its creator, a project admin, or the operator)
     Rm { id: String },
 }
 

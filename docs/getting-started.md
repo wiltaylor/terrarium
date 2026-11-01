@@ -1175,8 +1175,8 @@ A skill is a folder with a `SKILL.md` file: YAML front matter with a
 `name` and a `description`, then instructions in Markdown. It can also
 hold `scripts/`, `references/`, and `assets/`. An agent sees the name and
 the description of each of its skills. When a skill fits the task, the
-agent loads the instructions. Terrarium ships one skill, `terrarium-db`
-(§2.13b, PLAN §8.6).
+agent loads the instructions. Terrarium ships two skills, `terrarium-db`
+(§2.13b) and `terrarium-tests` (§2.13d) (PLAN §8.6).
 
 1. Add a skill to the library. It goes to `config/terrarium/skills/<name>/`:
 
@@ -1332,6 +1332,55 @@ run finish their work, and no agent starts or wakes on it until you
 enable it again. **Stop all now** stops its running agents at once. The
 CLI is `terrarium admin subscription disable|enable <name>` and
 `terrarium admin subscription stop-all <name> [--disable]`.
+
+### 2.13d Test runs: proof that the tests pass
+
+An agent uploads the result file of a test run with `terrarium test
+push`. You see each test case on the Tests tab of the Board screen
+(`/p/<project>/board/tests`), on the card, and in the Version modal
+(PLAN §15.5).
+
+1. Give the packaged skill `terrarium-tests` to the agents that run tests.
+   It gives the command that makes a standard file for each test
+   framework. The `--skill` flag replaces the list, so name the other
+   skills of the agent too:
+
+   ```bash
+   terrarium admin agent set worker --skill terrarium-tests --skill terrarium-db
+   ```
+
+2. Make a standard result file with the test framework:
+
+   | Framework | Command | File |
+   |---|---|---|
+   | cargo-nextest | `cargo nextest run --profile ci` with `[profile.ci.junit]` `path = "junit.xml"` in `.config/nextest.toml` | `target/nextest/ci/junit.xml` |
+   | cargo test | `RUSTC_BOOTSTRAP=1 cargo test -- -Z unstable-options --format json --report-time > results.json` | `results.json` |
+   | Vitest | `npx vitest run --reporter=junit --outputFile=junit.xml` | `junit.xml` |
+   | Jest | `npx jest --json --outputFile=jest.json` | `jest.json` |
+   | pytest | `pytest --junitxml=junit.xml` | `junit.xml` |
+   | .NET | `dotnet test --logger "trx;LogFileName=results.trx"` | `TestResults/results.trx` |
+   | Go | `go test -v ./... 2>&1 \| go-junit-report > junit.xml` | `junit.xml` |
+   | Node | `node --test --test-reporter=tap > results.tap` | `results.tap` |
+
+3. Upload the file, and link it to a card or a version:
+
+   ```bash
+   terrarium -p demo test push target/nextest/ci/junit.xml --name unit --card DEMO-1 \
+     --commit "$(git rev-parse HEAD)"
+   terrarium -p demo test ls --card DEMO-1
+   terrarium -p demo test compare <run id>
+   ```
+
+   The command exits with 0 also when tests fail. Add
+   `--fail-on-failures` to make a failure stop a script.
+
+4. Open the run in the dashboard. The page shows the counts, the
+   failing cases first, and the message, the trace, and the output of
+   each case. "Compare with previous" shows the newly failing and the
+   fixed tests. "Download original" gives the uploaded file.
+
+The script `scripts/seed-test-runs.sh` uploads example runs in each
+format to the project `demo`.
 
 ### 2.14 Install on a server
 

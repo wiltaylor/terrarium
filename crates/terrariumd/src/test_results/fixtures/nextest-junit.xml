@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="6" failures="1" errors="1" uuid="4f1d6c3e-0b5a-4a43-9c55-2a7f0f0e3b71" timestamp="2026-11-01T22:10:04.512+00:00" time="3.207">
+    <testsuite name="calc" tests="4" disabled="1" errors="0" failures="1">
+        <testcase name="tests::adds_two_numbers" classname="calc" timestamp="2026-11-01T22:10:04.530+00:00" time="0.004">
+        </testcase>
+        <testcase name="tests::adds_negative_numbers" classname="calc" timestamp="2026-11-01T22:10:04.531+00:00" time="0.006">
+            <failure type="test failure">thread &apos;tests::adds_negative_numbers&apos; panicked at src/lib.rs:10:64:
+assertion `left == right` failed: sum of negatives
+  left: -2
+ right: -3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>checking -1 + -1
+</system-out>
+            <system-err>
+thread &apos;tests::adds_negative_numbers&apos; panicked at src/lib.rs:10:64:
+assertion `left == right` failed: sum of negatives
+  left: -2
+ right: -3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+        <testcase name="tests::division::divides" classname="calc" timestamp="2026-11-01T22:10:04.532+00:00" time="0.003">
+        </testcase>
+        <testcase name="tests::adds_many_numbers" classname="calc" timestamp="2026-11-01T22:10:04.533+00:00" time="0.000">
+            <skipped/>
+        </testcase>
+    </testsuite>
+    <testsuite name="calc::integration" tests="2" disabled="0" errors="1" failures="0">
+        <testcase name="talks_to_the_server" classname="calc::integration" timestamp="2026-11-01T22:10:04.600+00:00" time="2.501">
+            <flakyFailure type="test failure" message="connection refused" time="1.002">connection refused (os error 111)</flakyFailure>
+        </testcase>
+        <testcase name="survives_a_restart" classname="calc::integration" timestamp="2026-11-01T22:10:07.101+00:00" time="60.000">
+            <error type="test timeout" message="test timed out after 60s">test timed out after 60s</error>
+            <rerunError type="test timeout" message="test timed out after 60s" time="60.000">test timed out after 60s</rerunError>
+        </testcase>
+    </testsuite>
+</testsuites>

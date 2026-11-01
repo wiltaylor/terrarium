@@ -872,6 +872,46 @@ minutes), so a page must use the embed, not the URL.
 seconds. Between rounds, it reads the version, so that a rejection also
 ends the wait.
 
+### Test runs
+
+```
+terrarium test push <file> [--format auto|junit|trx|ctrf|libtest-json|vitest-json|jest-json|tap]
+                    [--name n] [--card id]... [--version v]... [--commit sha] [--branch b]
+                    [--fail-on-failures]
+terrarium test ls [--card id] [--version v] [--name n] [--failed]
+terrarium test show <id> [--failed] [--json]
+terrarium test compare <id> [--with <id> | previous]
+terrarium test link <id> [--card id]... [--version v]...
+terrarium test unlink <id> [--card id]... [--version v]...
+terrarium test rm <id>                        the creator, admins, operator
+```
+
+`test push` reads a standard test result file and sends its text in JSON
+(`{"content": ...}`, docs/api.md §29.3). The daemon finds the format from
+the content; `--format` skips the detection. The limit is 20 MiB. The
+command prints the counts and the dashboard link of the run, for example:
+
+```
+pushed 01JB7… unit (junit, cargo-nextest): 120 passed, 2 failed, 1 errored, 3 skipped in 5.3s
+dashboard: /p/demo/board/tests/01JB7…
+```
+
+`test push` exits with 0 also when tests fail: it uploads, it does not
+judge. With `--fail-on-failures`, it exits with 1 when the run has a
+failed or an errored test. `--card` and `--version` link the run; give
+each flag more than once for more links. The links follow the edit rights
+of the card and of the version (docs/api.md §29.4).
+
+`test ls --failed` shows only the runs with the status `failed`.
+`test show --failed` shows only the failed and the errored cases, with
+their messages. `test compare` compares the run with the previous run of
+the same name (the default), or with the run that `--with` gives. It
+lists the newly failing, the fixed, and the still failing tests, and the
+new and the removed tests.
+
+The packaged skill `terrarium-tests` gives the command that makes a
+standard file for each test framework.
+
 ### Usage, status, and targets
 
 ```
@@ -1639,8 +1679,10 @@ Hand a result to the user (agent):
 
 ```sh
 terrarium artifact push target/coverage --page reports/coverage --card TER-42
+terrarium test push target/nextest/ci/junit.xml --name unit --card TER-42
 terrarium wiki new reports/coverage -m "Coverage for TER-42" --body - < report.md
 terrarium version new v0.3.0 --card TER-42 --notes "Parser and coverage."
+terrarium test link <run id> --version v0.3.0
 terrarium version submit v0.3.0
 terrarium version wait v0.3.0
 ```
@@ -1660,5 +1702,8 @@ terrarium --json card ls --unassigned --column ready | jq -r '.[0].id'
   yet. The CLI says so on stderr.
 - `artifact ls` sends `--page`, `--version`, and `--card` as query
   filters. The daemon does not filter on them yet.
+- `test push` sends the whole file in one request. Through the tunnel
+  (agent mode), the 4 MiB line limit of the runner applies, so a result
+  file larger than about 3 MiB fails there.
 - `card wait` without `--mine`, or with cards assigned already, polls the
   event firehose every 2 seconds. The firehose has no `?wait=`.

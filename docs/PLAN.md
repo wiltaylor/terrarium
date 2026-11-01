@@ -2149,6 +2149,48 @@ The packaged skill `terrarium-db` (`defaults/skills/terrarium-db/`) tells
 an agent when to use the DB, the CLI, the query language, and the wiki
 block. An agent gets it when its `skills` list names it (§8.6).
 
+### 15.5 Test runs
+
+An agent says "the tests pass". The operator wants to see the tests. A
+test run is the proof: the agent uploads the result file that the test
+tool wrote, and the operator reads each test case in the dashboard.
+
+- **Formats.** JUnit XML (the common format: cargo-nextest, Vitest,
+  jest-junit, pytest, go-junit-report, Maven Surefire, `dotnet test`
+  with a JUnit logger), TRX (.NET VSTest), CTRF JSON, libtest JSON
+  (`cargo test`, nextest), Vitest and Jest JSON, and TAP 13/14. The
+  daemon finds the format from the content. The parsers are pure Rust,
+  read no DTD, and expand no entities. The limits: 20 MiB per file,
+  100 000 cases, 64 KiB for each message, trace, and output.
+- **Model.** A run has a name, a format, a tool, the counts (passed,
+  failed, errored, skipped, total), a duration, a commit, and a branch.
+  It has suites, and each suite has cases with a status, a duration, a
+  message, a trace, and the output. The daemon keeps the original file
+  for a download (migration 50: `test_runs`, `test_cases`, and the link
+  tables to cards and versions).
+- **Links.** A run links to cards and to versions (many to many), with
+  the edit rights of the card and of the version. A card on the board
+  shows a chip for its latest run (`✓ 120 passed`, `✗ 3 failed`): colour
+  and text. The card drawer lists the runs of the card, and the Version
+  modal lists the runs of the version with a combined status.
+- **Compare.** A run compares with the previous run of the same name, or
+  with any run of the project: newly failing, fixed, still failing, new,
+  and removed tests. The key of a case is its suite, its classname, and
+  its name.
+- **No automatic actions.** A failing run moves no card. The agents and
+  the operator decide.
+- **Surfaces.** The API (docs/api.md §29), `terrarium test push | ls |
+  show | compare | link | unlink | rm` (docs/cli.md), the Tests tab of
+  the Board screen (`/p/<project>/board/tests`), and the event
+  `test_run`.
+
+The packaged skill `terrarium-tests` (`defaults/skills/terrarium-tests/`)
+tells an agent when to push a run (after each test run that proves the
+work of a card, before a move to review, before a version submit) and
+the command that makes a standard file for each test framework. The
+default prompts tell each agent to prove test results with
+`terrarium test push`.
+
 ---
 
 ## 16. Subscriptions and usage

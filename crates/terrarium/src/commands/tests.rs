@@ -7624,3 +7624,224 @@ async fn board_columns_from_file() {
     assert!(r.result.is_err());
     assert!(r.reqs.is_empty());
 }
+
+/// `test`: push sends the file as text with its links, prints the counts
+/// and the link, and exits 0 with failures unless --fail-on-failures.
+#[tokio::test]
+async fn test_runs() {
+    let dir = std::env::temp_dir().join(format!("terrarium-test-push-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("junit.xml");
+    std::fs::write(&file, "<testsuites/>").unwrap();
+    let path = file.to_string_lossy().into_owned();
+    let run = json!({
+        "id": "01RUN", "name": "unit", "format": "junit", "tool": "cargo-nextest",
+        "status": "failed", "duration_ms": 5321,
+        "counts": {"passed": 120, "failed": 2, "errored": 1, "skipped": 0, "total": 123},
+        "cards": ["TER-1"], "versions": [{"id": "01V", "name": "v1"}], "notes": [],
+        "url": "/p/terra/board/tests/01RUN"
+    });
+    let args = [
+        "test",
+        "push",
+        &path,
+        "--name",
+        "unit",
+        "--card",
+        "TER-1",
+        "--card",
+        "TER-2",
+        "--version",
+        "v1",
+        "--commit",
+        "abc",
+        "--branch",
+        "main",
+    ];
+    let r = exec(true, &args, vec![(201, run.clone())], None).await;
+    r.result.unwrap();
+    check(
+        &args,
+        &r.reqs,
+        &[(
+            Post,
+            "/api/projects/terra/test-runs",
+            vec![],
+            Some(json!({
+                "file_name": "junit.xml", "format": "auto", "content": "<testsuites/>",
+                "name": "unit", "cards": ["TER-1", "TER-2"], "versions": ["v1"],
+                "commit": "abc", "branch": "main"
+            })),
+        )],
+    );
+    assert!(
+        r.out.contains(
+            "pushed 01RUN unit (junit, cargo-nextest): 120 passed, 2 failed, 1 errored in 5.3s"
+        ),
+        "{}",
+        r.out
+    );
+    assert!(
+        r.out.contains("linked: cards TER-1  versions v1"),
+        "{}",
+        r.out
+    );
+    assert!(
+        r.out.contains("dashboard: /p/terra/board/tests/01RUN"),
+        "{}",
+        r.out
+    );
+    // --fail-on-failures: exit 1 after the upload.
+    let r = exec(
+        true,
+        &[
+            "test",
+            "push",
+            &path,
+            "--format",
+            "junit",
+            "--fail-on-failures",
+        ],
+        vec![(201, run.clone())],
+        None,
+    )
+    .await;
+    let e = r.result.unwrap_err();
+    assert_eq!(exit_code_of(&e), 1);
+    assert_eq!(e.to_string(), "3 tests failed or errored");
+    assert_eq!(r.reqs[0].body.as_ref().unwrap()["format"], "junit");
+    // A bad format is a usage error before any request.
+    assert!(
+        Cli::try_parse_from(["terrarium", "test", "push", "x.xml", "--format", "xunit"]).is_err()
+    );
+    // A file that is not UTF-8 goes as base64.
+    std::fs::write(&file, [0xFF, 0xFE, b'<', 0]).unwrap();
+    let r = exec(
+        true,
+        &["test", "push", &path],
+        vec![(201, run.clone())],
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    assert_eq!(r.reqs[0].body.as_ref().unwrap()["data_base64"], "//48AA==");
+    std::fs::remove_dir_all(&dir).ok();
+
+    let out = ok(
+        true,
+        &["test", "ls", "--card", "TER-1", "--failed"],
+        vec![(200, json!([run.clone()]))],
+        vec![(
+            Get,
+            "/api/projects/terra/test-runs",
+            vec![("card", "TER-1"), ("status", "failed")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("120 passed, 2 failed, 1 errored"), "{out}");
+    assert!(out.contains("5.3s"), "{out}");
+
+    let mut detail = run.clone();
+    detail["suites"] = json!([{"name": "calc", "duration_ms": 120,
+        "counts": {"passed": 1, "failed": 1, "errored": 0, "skipped": 0, "total": 2}}]);
+    detail["cases"] = json!([
+        {"seq": 0, "suite": "calc", "name": "a", "classname": null, "status": "passed", "duration_ms": 1},
+        {"seq": 1, "suite": "calc", "name": "b", "classname": "m", "status": "failed", "duration_ms": 2,
+         "message": "left != right\nleft: 1"}
+    ]);
+    detail["cases_total"] = json!(2);
+    let out = ok(
+        true,
+        &["test", "show", "01RUN"],
+        vec![(200, detail.clone())],
+        vec![(Get, "/api/test-runs/01RUN", vec![("limit", "5000")], None)],
+    )
+    .await;
+    assert!(out.contains("  calc: 1 passed, 1 failed (120ms)"), "{out}");
+    assert!(
+        out.contains("  [FAILED] calc / m :: b  (2ms)\n      left != right\n      left: 1"),
+        "{out}"
+    );
+    assert!(!out.contains("[ok]"), "{out}");
+    ok(
+        true,
+        &["test", "show", "01RUN", "--failed"],
+        vec![(200, detail)],
+        vec![(
+            Get,
+            "/api/test-runs/01RUN",
+            vec![("limit", "5000"), ("status", "failed")],
+            None,
+        )],
+    )
+    .await;
+
+    let cmp = json!({
+        "run": run, "base": run,
+        "counts": {"newly_failing": 1, "fixed": 0, "still_failing": 0, "new_tests": 0, "removed_tests": 0},
+        "newly_failing": [{"suite": "calc", "classname": null, "name": "b", "status": "failed",
+                            "base_status": "passed", "message": "boom"}],
+        "fixed": [], "still_failing": [], "new_tests": [], "removed_tests": []
+    });
+    let out = ok(
+        true,
+        &["test", "compare", "01RUN"],
+        vec![(200, cmp)],
+        vec![(
+            Get,
+            "/api/test-runs/01RUN/compare",
+            vec![("with", "previous")],
+            None,
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("newly failing (1):\n  calc / b  (passed -> failed)\n      boom"),
+        "{out}"
+    );
+    ok(
+        true,
+        &[
+            "test",
+            "link",
+            "01RUN",
+            "--card",
+            "TER-3",
+            "--version",
+            "v2",
+        ],
+        vec![(
+            200,
+            json!({"id": "01RUN", "cards": ["TER-3"], "versions": []}),
+        )],
+        vec![(
+            Patch,
+            "/api/test-runs/01RUN/links",
+            vec![],
+            Some(json!({"add_cards": ["TER-3"], "add_versions": ["v2"]})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["test", "unlink", "01RUN", "--card", "TER-3"],
+        vec![(200, json!({"id": "01RUN", "cards": [], "versions": []}))],
+        vec![(
+            Patch,
+            "/api/test-runs/01RUN/links",
+            vec![],
+            Some(json!({"remove_cards": ["TER-3"], "remove_versions": []})),
+        )],
+    )
+    .await;
+    let r = exec(true, &["test", "link", "01RUN"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), 2);
+    ok(
+        true,
+        &["test", "rm", "01RUN"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/test-runs/01RUN")],
+    )
+    .await;
+}

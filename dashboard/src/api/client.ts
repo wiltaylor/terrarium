@@ -44,6 +44,12 @@ import type {
   FetchModelsResult,
   StopAllResult,
   SubscriptionPatch,
+  TestCompare,
+  TestRun,
+  TestRunCaseQuery,
+  TestRunLinksPatch,
+  TestRunListQuery,
+  TestRunSummary,
   Artifact,
   ArtifactJsonUpload,
   ArtifactLinkKind,
@@ -428,6 +434,28 @@ export interface Api {
     url(id: string, ttl?: number): Promise<ArtifactUrl>;
     /** Text content for text, Markdown, and code previews, from a signed URL. */
     text(url: string): Promise<string>;
+  };
+
+  /**
+   * Test runs (docs/api.md, test runs): standard test result files (JUnit XML, TRX, CTRF, libtest JSON, Vitest and
+   * Jest JSON, TAP) that the daemon parses. `id` is the run ULID. Errors: `422 invalid` for a file that does not
+   * parse, `413 too_large` over 20 MiB.
+   */
+  testRuns: {
+    /** Newest first. `card`, `version` (name or ID), `name`, and `status` filter. */
+    list(project: string, q?: TestRunListQuery): Promise<Page<TestRunSummary>>;
+    /** Multipart: `file`, and the text parts `name`, `format`, `card` (repeat), `version` (repeat), `commit`, `branch`. */
+    upload(project: string, form: FormData): Promise<TestRunSummary>;
+    /** The summary, every suite, and one page of cases. `status: "failed"` gives the failed and the errored cases. */
+    get(id: string, q?: TestRunCaseQuery): Promise<TestRun>;
+    /** `with`: a run ID, or `previous` (the newest older run with the same name). Default `previous`. */
+    compare(id: string, withRun?: string): Promise<TestCompare>;
+    /** The original upload, as the daemon keeps it, and its file name from `Content-Disposition`. */
+    raw(id: string): Promise<{ blob: Blob; fileName: string }>;
+    /** Add or remove card and version links. The card and version edit rights apply. */
+    links(id: string, patch: TestRunLinksPatch): Promise<TestRunSummary>;
+    /** The creator, a project admin, or the operator. */
+    remove(id: string): Promise<void>;
   };
 
   /** docs/api.md §13. `id` is the ULID or `project/name`. */
@@ -1016,6 +1044,19 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       },
     },
 
+    testRuns: {
+      list: (project, q = {}) => page(`${p(project)}/test-runs`, { ...q }),
+      upload: (project, form) => t.request("POST", `${p(project)}/test-runs`, { form }),
+      get: (id, q = {}) => get(`/api/test-runs/${seg(id)}`, { ...q }),
+      compare: (id, withRun = "previous") => get(`/api/test-runs/${seg(id)}/compare`, { with: withRun }),
+      raw: async (id) => {
+        const { blob, headers } = await t.bytes(`/api/test-runs/${seg(id)}/raw`);
+        return { blob, fileName: dispositionName(headers.get("Content-Disposition")) ?? `test-run-${id}` };
+      },
+      links: (id, body) => patch(`/api/test-runs/${seg(id)}/links`, body),
+      remove: (id) => del(`/api/test-runs/${seg(id)}`),
+    },
+
     versions: {
       list: (project, q = {}) => all(`${p(project)}/versions`, { ...q }),
       create: (project, v) => post(`${p(project)}/versions`, v),
@@ -1205,4 +1246,20 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       },
     },
   };
+}
+
+/** The file name of a `Content-Disposition` header: `filename*=UTF-8''...` first, then `filename="..."`. */
+export function dispositionName(h: string | null): string | undefined {
+  if (!h) return undefined;
+  const star = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/.exec(h);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1]!.trim());
+    } catch {
+      /* fall through to the plain form */
+    }
+  }
+  const plain = /filename\s*=\s*"([^"]*)"|filename\s*=\s*([^;]+)/.exec(h);
+  const name = (plain?.[1] ?? plain?.[2])?.trim();
+  return name || undefined;
 }

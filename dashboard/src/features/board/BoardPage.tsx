@@ -11,6 +11,7 @@ import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "..
 import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { CardQuestions } from "./CardQuestions";
+import { CardTestsChip, LinkedRuns } from "../tests/parts";
 import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkable } from "./questions";
 import { emptyNewCardForm, type NewCardErrors, type NewCardForm, newCardBody, newCardColumn, nextNewCardForm } from "./newCard";
 import { columnTitle, isBlockedColumn, overLimit } from "./columns";
@@ -173,9 +174,9 @@ export function BoardPage() {
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
   let questionTimer: ReturnType<typeof setTimeout> | undefined;
   let versionTimer: ReturnType<typeof setTimeout> | undefined;
-  // Live: card and board events of this project reload the board; question events reload the badges; version events reload the versions.
+  // Live: card, board, and test run events of this project reload the board (a test run changes the test chip of its cards); question events reload the badges; version events reload the versions.
   const off = events.on((e) => {
-    if ((e.kind === "card" || e.kind === "board") && e.project === params.project && !dragging()) {
+    if ((e.kind === "card" || e.kind === "board" || e.kind === "test_run") && e.project === params.project && !dragging()) {
       clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => void board.reload(), 300);
     }
@@ -765,6 +766,7 @@ function KCard(props: {
       </Show>
       <EtaChip card={props.card} now={props.now} />
       <div class="row small">
+        <Show when={props.card.tests}>{(t) => <CardTestsChip project={props.card.project} tests={t()} />}</Show>
         <For each={props.card.labels}>{(l) => <span class="chip">{l}</span>}</For>
       </div>
       <Show when={props.versions.length}>
@@ -1185,6 +1187,8 @@ function CardDrawer(props: {
       </dl>
 
       <CardQuestions card={props.card} linkable={props.linkable} onChanged={() => props.onQuestionsChanged()} />
+
+      <LinkedRuns project={props.card.project} card={props.card.id} />
 
       <section class="stack" style={{ gap: "8px" }}>
         <h3 style={{ margin: 0 }}>Comments</h3>

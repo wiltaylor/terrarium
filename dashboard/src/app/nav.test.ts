@@ -220,6 +220,8 @@ describe("navigation", () => {
       "/p/:project/artifacts",
       "/p/:project/artifacts/:id",
       "/p/:project/schedules",
+      "/p/:project/tests",
+      "/p/:project/tests/:id",
       "/p/:project/wiki/*path",
       "/p/:project/memory",
       "/p/:project/knowledge",
@@ -253,10 +255,11 @@ describe("navigation", () => {
     }
   });
 
-  it("has Board with the tabs Cards, Artifacts, Schedules, each with a route; Cards is the index route at /p/:project/board", () => {
+  it("has Board with the tabs Cards, Artifacts, Tests, Schedules, each with a route; Cards is the index route at /p/:project/board", () => {
     expect(BOARD_TABS).toEqual([
       { path: "", label: "Cards" },
       { path: "artifacts", label: "Artifacts" },
+      { path: "tests", label: "Tests" },
       { path: "schedules", label: "Schedules" },
     ]);
     expect(app).toMatch(/<Route path="\/p\/:project\/board" component=\{BoardScreen\}>/);
@@ -267,10 +270,14 @@ describe("navigation", () => {
     expect(app).not.toMatch(/VersionsPage/);
     expect(block).toMatch(/path="\/artifacts\/:id\?" component=\{ArtifactsPage\}/);
     expect(block).toMatch(/path="\/schedules" component=\{SchedulesPage\}/);
+    expect(block).toMatch(/path="\/tests" component=\{TestRunsPage\}/);
+    expect(block).toMatch(/path="\/tests\/:id" component=\{TestRunPage\}/);
+    expect(movedTo("/p/terrarium/tests")).toBe("/p/terrarium/board/tests");
+    expect(movedTo("/p/terrarium/tests/01JBTRUN1")).toBe("/p/terrarium/board/tests/01JBTRUN1");
     for (const gone of ["versions", "artifacts", "wiki", "memory"]) expect(app).not.toMatch(new RegExp(`path="/p/:project/${gone}[^"]*" component=`));
     // The Cards tab and its `?card=` links keep the path.
     expect(movedTo("/p/terrarium/board")).toBeUndefined();
-    for (const now of ["/p/terrarium/board/artifacts/ART-2", "/p/terrarium/board/schedules"]) expect(movedTo(now)).toBeUndefined();
+    for (const now of ["/p/terrarium/board/artifacts/ART-2", "/p/terrarium/board/schedules", "/p/terrarium/board/tests", "/p/terrarium/board/tests/01JBTRUN1"]) expect(movedTo(now)).toBeUndefined();
   });
 
   it("has Knowledge with the tabs Wiki, Memory, and DB, each with a route; /p/:project/knowledge opens the Wiki tab", () => {

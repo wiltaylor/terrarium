@@ -159,6 +159,9 @@ pub struct Card {
     /// When the card last moved to `done`. A reopen clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<String>,
+    /// The latest test run linked to the card (PLAN §15.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<crate::store::test_runs::CardTests>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -460,6 +463,7 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         .map(|a| name_of(conn, a))
         .transpose()?;
     Ok(Card {
+        tests: crate::store::test_runs::card_chip(conn, &row.id)?,
         depends_on: deps(conn, &row.id)?,
         blocked_by: unmet(conn, &row.id)?,
         created_by_name: name_of(conn, &row.created_by)?,
@@ -817,6 +821,27 @@ fn may_edit(actor: &Actor, card: &CardRow) -> ApiResult<()> {
         "{} is not your card; only its assignee, a project admin, or the operator may change it",
         card.id
     )))
+}
+
+/// Check a link from a test run of `project` to a card (PLAN §15.5): the
+/// edit rights of the card. Returns the card ID.
+pub fn check_test_link(
+    conn: &Connection,
+    actor: &Actor,
+    id: &str,
+    project: &str,
+) -> ApiResult<String> {
+    let card = find_row(conn, id)?;
+    policy::read_project(actor, &card.project)?;
+    if card.project != project {
+        return Err(ApiError::invalid(format!(
+            "a test run links to a card of its project; {} is in `{}`",
+            card.id, card.project
+        )));
+    }
+    not_archived(&card)?;
+    may_edit(actor, &card)?;
+    Ok(card.id)
 }
 
 fn not_archived(card: &CardRow) -> ApiResult<()> {

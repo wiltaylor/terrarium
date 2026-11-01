@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.shop.AllTests" tests="4" failures="0" errors="0" skipped="1" time="1.250">
+  <properties>
+    <property name="java.version" value="21.0.4"/>
+    <property name="maven.version" value="3.9.9"/>
+  </properties>
+  <testsuite name="com.example.shop.CartTest" tests="2" time="0.750">
+    <testcase name="addsAnItem" classname="com.example.shop.CartTest" time="0.5"/>
+    <testcase name="removesAnItem" classname="com.example.shop.CartTest" time="0.25">
+      <system-out><![CDATA[removed <item id="7"/> from the cart]]></system-out>
+    </testcase>
+  </testsuite>
+  <testsuite name="com.example.shop.PriceTest" tests="2" time="0.5">
+    <testcase name="roundsHalfUp" classname="com.example.shop.PriceTest" time="0.5"/>
+    <testcase name="usesTheLiveRate" classname="com.example.shop.PriceTest" time="0">
+      <skipped message="@Disabled: rate service"/>
+    </testcase>
+  </testsuite>
+</testsuite>

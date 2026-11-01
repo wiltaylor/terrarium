@@ -137,11 +137,11 @@ struct JsonUpload {
     attach: Option<NewArtifactLink>,
 }
 
-struct Part {
-    name: String,
-    filename: Option<String>,
-    content_type: Option<String>,
-    data: Vec<u8>,
+pub(crate) struct Part {
+    pub name: String,
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+    pub data: Vec<u8>,
 }
 
 fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
@@ -159,7 +159,7 @@ fn header_param(value: &str, key: &str) -> Option<String> {
 }
 
 /// A small `multipart/form-data` parser over a buffered body.
-fn parse_multipart(content_type: &str, body: &[u8]) -> ApiResult<Vec<Part>> {
+pub(crate) fn parse_multipart(content_type: &str, body: &[u8]) -> ApiResult<Vec<Part>> {
     let boundary = header_param(content_type, "boundary")
         .ok_or_else(|| ApiError::bad_request("multipart body without a boundary"))?;
     let delim = format!("--{boundary}").into_bytes();

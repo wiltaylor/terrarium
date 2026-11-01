@@ -22,6 +22,8 @@ export const PROJECT_ITEMS = [
 export const BOARD_TABS = [
   { path: "", label: "Cards" },
   { path: "artifacts", label: "Artifacts" },
+  // The test runs of the project (docs/api.md, test runs); `tests/:id` is the page of one run.
+  { path: "tests", label: "Tests" },
   // The schedules and triggers of the project; the page keeps its own `?tab=triggers` sub-tab.
   { path: "schedules", label: "Schedules" },
 ] as const;
@@ -136,6 +138,8 @@ export const PROJECT_LOGS_TABS = [
  *   hop to `/p/<project>/board?rows=version&version=<id>`, which opens the
  *   version.
  * - The project Schedules page is a tab of the board screen (BOARD_TABS).
+ * - The Tests tab of the board shows the test runs. A short link
+ *   `/p/<project>/tests[/<id>]` goes to the tab.
  *   A schedule link of an old mail or a bookmark has the old path with a
  *   query (`?open=...&tab=triggers`), so the old path stays as a redirect.
  * - The project Wiki and Memory pages are tabs of the knowledge screen
@@ -171,6 +175,8 @@ export const MOVED_ROUTES = [
   { path: "/p/:project/artifacts", to: "/p/:project/board/artifacts" },
   { path: "/p/:project/artifacts/:id", to: "/p/:project/board/artifacts/:id" },
   { path: "/p/:project/schedules", to: "/p/:project/board/schedules" },
+  { path: "/p/:project/tests", to: "/p/:project/board/tests" },
+  { path: "/p/:project/tests/:id", to: "/p/:project/board/tests/:id" },
   { path: "/p/:project/wiki/*path", to: "/p/:project/knowledge/wiki/*path" },
   { path: "/p/:project/memory", to: "/p/:project/knowledge/memory" },
   { path: "/p/:project/knowledge", to: "/p/:project/knowledge/wiki" },

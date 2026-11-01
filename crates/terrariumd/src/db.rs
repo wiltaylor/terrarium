@@ -1460,6 +1460,84 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE versions ADD COLUMN archived_at TEXT;
     ALTER TABLE versions ADD COLUMN archived_by TEXT;
     "#,
+    // 50: test runs (PLAN §15.5, `crate::store::test_runs`). One row for
+    // each uploaded test result file, with the counts of its cases.
+    // `raw_gz` is the original file, gzip. `seq` orders the cases of a run
+    // in file order, from 0. `pk` orders the runs (newest last); `id` is
+    // the ULID of the API. A run links to cards and versions of its
+    // project. Self-contained: when another branch takes number 50, move
+    // this entry to the end of the list.
+    r#"
+    CREATE TABLE test_runs (
+        pk          INTEGER PRIMARY KEY AUTOINCREMENT,
+        id          TEXT NOT NULL UNIQUE,       -- ULID
+        project     TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        format      TEXT NOT NULL,
+        tool        TEXT,
+        passed      INTEGER NOT NULL,
+        failed      INTEGER NOT NULL,
+        errored     INTEGER NOT NULL,
+        skipped     INTEGER NOT NULL,
+        total       INTEGER NOT NULL,
+        duration_ms INTEGER,
+        started_at  TEXT,
+        commit_sha  TEXT,
+        branch      TEXT,
+        file_name   TEXT NOT NULL,
+        raw_size    INTEGER NOT NULL,
+        raw_gz      BLOB NOT NULL,
+        notes       TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(notes)),
+        created_by  TEXT NOT NULL,
+        created_at  TEXT NOT NULL
+    );
+    CREATE INDEX test_runs_project ON test_runs(project, pk);
+    CREATE INDEX test_runs_name ON test_runs(project, name, pk);
+    CREATE TABLE test_suites (
+        run         INTEGER NOT NULL REFERENCES test_runs(pk) ON DELETE CASCADE,
+        idx         INTEGER NOT NULL,
+        name        TEXT NOT NULL,
+        duration_ms INTEGER,
+        passed      INTEGER NOT NULL,
+        failed      INTEGER NOT NULL,
+        errored     INTEGER NOT NULL,
+        skipped     INTEGER NOT NULL,
+        total       INTEGER NOT NULL,
+        PRIMARY KEY (run, idx)
+    );
+    CREATE TABLE test_cases (
+        run         INTEGER NOT NULL REFERENCES test_runs(pk) ON DELETE CASCADE,
+        seq         INTEGER NOT NULL,
+        suite       INTEGER NOT NULL,
+        name        TEXT NOT NULL,
+        classname   TEXT,
+        file        TEXT,
+        line        INTEGER,
+        status      TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'errored', 'skipped')),
+        duration_ms INTEGER,
+        message     TEXT,
+        trace       TEXT,
+        stdout      TEXT,
+        stderr      TEXT,
+        PRIMARY KEY (run, seq)
+    );
+    CREATE TABLE test_run_cards (
+        run        INTEGER NOT NULL REFERENCES test_runs(pk) ON DELETE CASCADE,
+        card       TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run, card)
+    );
+    CREATE INDEX test_run_cards_card ON test_run_cards(card, run);
+    CREATE TABLE test_run_versions (
+        run        INTEGER NOT NULL REFERENCES test_runs(pk) ON DELETE CASCADE,
+        version    TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run, version)
+    );
+    CREATE INDEX test_run_versions_version ON test_run_versions(version, run);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -2133,6 +2211,11 @@ mod tests {
             "secrets",
             "secret_grants",
             "harness_updates",
+            "test_runs",
+            "test_suites",
+            "test_cases",
+            "test_run_cards",
+            "test_run_versions",
         ] {
             let n: i64 = conn
                 .query_row(

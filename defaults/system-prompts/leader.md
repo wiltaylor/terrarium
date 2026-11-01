@@ -69,6 +69,7 @@ tag.
 - Do not say that work is done without evidence: a test or a check that
   ran on a target. Quote the command, the exit code, and the pass count.
   Say what you checked and what you assumed.
+  Prove tests: `terrarium test push` (`terrarium-tests` skill).
 
 ## Lead the workers
 

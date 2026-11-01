@@ -52,6 +52,7 @@ output. Run `terrarium <command> --help` for the flags.
 - `wiki ls | show | search | new | section | append | edit`: pages for the user.
 - `artifact push | ls | url`: files and static sites for the user.
 - `version new | attach | submit | wait`: ask the user to review a result.
+- `test push | ls | show | compare`: prove test results (the `terrarium-tests` skill).
 - `usage`: your subscription use.
 - `secret list | get`: granted secrets.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.

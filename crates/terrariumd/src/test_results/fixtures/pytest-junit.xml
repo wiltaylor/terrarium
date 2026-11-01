@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="1" skipped="1" tests="5" time="0.412" timestamp="2026-11-02T08:15:30.104511+10:00" hostname="build-01"><properties><property name="python" value="3.13.1" /></properties><testcase classname="tests.test_orders" name="test_creates_an_order" file="tests/test_orders.py" line="12" time="0.002" /><testcase classname="tests.test_orders" name="test_rejects_an_empty_cart" file="tests/test_orders.py" line="20" time="0.003"><failure message="AssertionError: assert 201 == 422">def test_rejects_an_empty_cart(client):
+        r = client.post("/orders", json={"items": []})
+&gt;       assert r.status_code == 422
+E       AssertionError: assert 201 == 422
+E        +  where 201 = &lt;Response [201]&gt;.status_code
+
+tests/test_orders.py:23: AssertionError</failure><system-out>POST /orders 201
+</system-out></testcase><testcase classname="tests.test_orders" name="test_sends_a_receipt" file="tests/test_orders.py" line="31" time="0.000"><skipped type="pytest.skip" message="smtp is not configured">tests/test_orders.py:31: smtp is not configured</skipped></testcase><testcase classname="tests.test_payments" name="test_charges_the_card[visa]" file="tests/test_payments.py" line="8" time="0.004" /><testcase classname="tests.test_payments" name="test_refunds" file="tests/test_payments.py" line="40" time="0.001"><error message="failed on setup with &quot;ConnectionError: stripe-mock is not running&quot;">@pytest.fixture
+    def stripe():
+&gt;       return connect("http://localhost:12111")
+E       ConnectionError: stripe-mock is not running
+
+tests/conftest.py:14: ConnectionError</error><system-err>WARNING  stripe retrying in 1s
+</system-err></testcase></testsuite></testsuites>

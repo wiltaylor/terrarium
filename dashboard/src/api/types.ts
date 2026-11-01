@@ -905,6 +905,8 @@ export const EVENT_KINDS = [
   // The project DB (docs/api.md §27): `data: {change, project, type, id, revision}`.
   "db.type",
   "db.record",
+  // A test run (docs/api.md, test runs): `{change, project, id, name, counts, cards, versions}`.
+  "test_run",
   "artifact.created",
   "artifact.linked",
   "artifact.deleted",
@@ -1262,6 +1264,8 @@ export interface Card {
   eta_set_by_name?: string | null;
   /** When the card last moved to `done`; a reopen clears it. */
   done_at?: string | null;
+  /** The latest test run linked to the card (docs/api.md, test runs). Absent when no run is linked. */
+  tests?: CardTests;
 }
 
 export interface Board {
@@ -3325,4 +3329,139 @@ export interface TargetTestReport {
   exit_code: number | null;
   stderr: string;
   elapsed_ms: number;
+}
+
+// ---- test runs (docs/api.md, test runs) ----
+
+/** The file formats of a test run. `auto` on upload detects the format from the content. */
+export type TestFormat = "junit" | "trx" | "ctrf" | "libtest-json" | "vitest-json" | "jest-json" | "tap";
+/** `failed`: failed + errored > 0. `passed`: one or more cases and none failed or errored. `empty`: no cases. */
+export type TestRunStatus = "passed" | "failed" | "empty";
+export type TestCaseStatus = "passed" | "failed" | "errored" | "skipped";
+
+export interface TestCounts {
+  passed: number;
+  failed: number;
+  errored: number;
+  skipped: number;
+  total: number;
+}
+
+/** A list item of `GET /api/projects/{p}/test-runs`, and the answer of `POST` and `PATCH .../links`. */
+export interface TestRunSummary {
+  /** A ULID. */
+  id: string;
+  project: string;
+  name: string;
+  format: TestFormat;
+  tool: string | null;
+  status: TestRunStatus;
+  counts: TestCounts;
+  duration_ms: number | null;
+  started_at: string | null;
+  commit: string | null;
+  branch: string | null;
+  /** The name of the original upload. */
+  file_name: string;
+  /** The bytes of the original upload. */
+  raw_size: number;
+  /** Notes of the parser, for example truncated messages. */
+  notes: string[];
+  /** The linked card IDs. */
+  cards: string[];
+  versions: { id: string; name: string }[];
+  created_by: string;
+  created_by_name: string;
+  created_at: string;
+  /** The dashboard page: `/p/<project>/board/tests/<id>`. */
+  url: string;
+}
+
+export interface TestSuite {
+  name: string;
+  duration_ms: number | null;
+  counts: TestCounts;
+}
+
+export interface TestCase {
+  /** The position in the file: the paging cursor. */
+  seq: number;
+  suite: string;
+  name: string;
+  classname: string | null;
+  file: string | null;
+  line: number | null;
+  status: TestCaseStatus;
+  duration_ms: number | null;
+  /** Plain text as uploaded. It can hold ANSI colour codes. */
+  message: string | null;
+  trace: string | null;
+  stdout: string | null;
+  stderr: string | null;
+}
+
+/** `GET /api/test-runs/{id}?status=&q=&limit=&cursor=`: the summary, every suite, and one page of cases in file order. */
+export interface TestRun extends TestRunSummary {
+  suites: TestSuite[];
+  cases: TestCase[];
+  /** The number of cases that match the filter (all pages). */
+  cases_total: number;
+  next_cursor: string | null;
+}
+
+/** `status=failed` means failed or errored. */
+export interface TestRunCaseQuery {
+  status?: TestCaseStatus;
+  q?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface TestRunListQuery {
+  card?: string;
+  version?: string;
+  name?: string;
+  status?: TestRunStatus;
+  limit?: number;
+  cursor?: string;
+}
+
+/** One case in a compare. `status` is in the run; `base_status` is in the base run. */
+export interface TestCaseDiff {
+  suite: string;
+  classname: string | null;
+  name: string;
+  status: TestCaseStatus | null;
+  base_status: TestCaseStatus | null;
+  message: string | null;
+}
+
+/** `GET /api/test-runs/{id}/compare?with=<id>|previous`. Each list has at most 1000 items; `counts` has the full numbers. */
+export interface TestCompare {
+  run: TestRunSummary;
+  /** Null when there is no run to compare with: then every list is empty. */
+  base: TestRunSummary | null;
+  counts: { newly_failing: number; fixed: number; still_failing: number; new_tests: number; removed_tests: number };
+  newly_failing: TestCaseDiff[];
+  fixed: TestCaseDiff[];
+  still_failing: TestCaseDiff[];
+  new_tests: TestCaseDiff[];
+  removed_tests: TestCaseDiff[];
+}
+
+/** `PATCH /api/test-runs/{id}/links`. A card is its ID; a version is its name or ID. */
+export interface TestRunLinksPatch {
+  add_cards?: string[];
+  remove_cards?: string[];
+  add_versions?: string[];
+  remove_versions?: string[];
+}
+
+/** `Card.tests`: the latest linked run. */
+export interface CardTests {
+  id: string;
+  name: string;
+  status: TestRunStatus;
+  counts: TestCounts;
+  created_at: string;
 }

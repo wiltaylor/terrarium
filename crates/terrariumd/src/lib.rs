@@ -48,6 +48,7 @@ pub mod supervisor;
 pub mod system_prompts;
 pub mod target_test;
 pub mod template_files;
+pub mod test_results;
 pub mod time_param;
 pub mod transcripts;
 pub mod trash;

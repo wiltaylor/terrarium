@@ -1,0 +1,12 @@
+{ "type": "suite", "event": "started", "test_count": 5 }
+{ "type": "test", "event": "started", "name": "tests::adds_many_numbers" }
+{ "type": "test", "event": "started", "name": "tests::adds_negative_numbers" }
+{ "type": "test", "event": "started", "name": "tests::adds_two_numbers" }
+{ "type": "test", "event": "started", "name": "tests::division::divides" }
+{ "type": "test", "event": "started", "name": "tests::division::divides_by_zero_panics" }
+{ "type": "test", "name": "tests::adds_many_numbers", "event": "ignored", "message": "slow on CI" }
+{ "type": "test", "name": "tests::adds_two_numbers", "event": "ok", "exec_time": 0.000003556 }
+{ "type": "test", "name": "tests::division::divides", "event": "ok", "exec_time": 0.000002605 }
+{ "type": "test", "name": "tests::adds_negative_numbers", "event": "failed", "exec_time": 0.000319454, "stdout": "checking -1 + -1\n\nthread 'tests::adds_negative_numbers' (4242) panicked at src/lib.rs:10:64:\nassertion `left == right` failed: sum of negatives\n  left: -2\n right: -3\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" }
+{ "type": "test", "name": "tests::division::divides_by_zero_panics", "event": "ok", "exec_time": 0.000132115 }
+{ "type": "suite", "event": "failed", "passed": 3, "failed": 1, "ignored": 1, "measured": 0, "filtered_out": 0, "exec_time": 0.002147724 }

@@ -13,6 +13,7 @@ import { renderWiki } from "../../lib/markdown";
 import { api } from "../../stores";
 import { takesCards } from "./lanes";
 import { VERSION_CHIP } from "./versions";
+import { LinkedRuns } from "../tests/parts";
 
 /** A list of the project's cards with check boxes and a search field. */
 export function CardPicker(props: { cards: Card[]; selected: string[]; onChange: (ids: string[]) => void; label?: string }) {
@@ -258,6 +259,10 @@ export function VersionModal(props: { version: Version; all: Version[]; cards: C
               </div>
             )}
           </Show>
+        </div>
+
+        <div class="card-box">
+          <LinkedRuns project={v().project} version={v().id} />
         </div>
 
         <Show when={v().artifacts.length}>

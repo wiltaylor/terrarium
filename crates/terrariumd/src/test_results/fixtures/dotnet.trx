@@ -1,0 +1,118 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TestRun id="2713dde6-6abd-4b49-a3a2-132bb2d81506" name="@build-01 2026-11-02 07:44:03" xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+  <Times creation="2026-11-02T07:44:03.9475626+10:00" queuing="2026-11-02T07:44:03.9475627+10:00" start="2026-11-02T07:44:02.4380164+10:00" finish="2026-11-02T07:44:03.9636476+10:00" />
+  <TestSettings name="default" id="46cabbe6-0f7c-4415-90e2-725e5fbf69fd">
+    <Deployment runDeploymentRoot="_build-01_2026-11-02_07_44_03" />
+  </TestSettings>
+  <Results>
+    <UnitTestResult executionId="0eaaa699-b9f8-4954-854e-89a14815d2ce" testId="6d5db0d2-6256-1f20-f113-fbc335c698cf" testName="Shop.Tests.CartTests.TotalsThePrices" computerName="build-01" duration="00:00:00.0045938" startTime="2026-11-02T07:44:03.6838033+10:00" endTime="2026-11-02T07:44:03.6854671+10:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Failed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="0eaaa699-b9f8-4954-854e-89a14815d2ce">
+      <Output>
+        <StdOut>total is 25</StdOut>
+        <ErrorInfo>
+          <Message>Assert.Equal() Failure: Values differ
+Expected: 30
+Actual:   25</Message>
+          <StackTrace>   at Shop.Tests.CartTests.TotalsThePrices() in /home/dev/shop/CartTests.cs:line 9
+   at System.Reflection.MethodBaseInvoker.InterpretedInvoke_Method(Object obj, IntPtr* args)
+   at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)</StackTrace>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+    <UnitTestResult executionId="62a4616c-b547-436e-8274-628665e2ca36" testId="444a5360-3d4b-101d-58fa-f0d886fbae51" testName="Shop.Tests.CartTests.AppliesTenPercent(price: 100, expected: 90)" computerName="build-01" duration="00:00:00.0128962" startTime="2026-11-02T07:44:03.6174324+10:00" endTime="2026-11-02T07:44:03.6466758+10:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Passed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="62a4616c-b547-436e-8274-628665e2ca36" />
+    <UnitTestResult executionId="81ea41a8-b0f3-45b6-95ce-1558b275ec07" testId="cb067ded-00bc-38df-b574-12f8dbdfb88d" testName="Shop.Tests.CartTests.AddsAnItem" computerName="build-01" duration="00:00:00.0002781" startTime="2026-11-02T07:44:03.6903493+10:00" endTime="2026-11-02T07:44:03.6904522+10:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Passed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="81ea41a8-b0f3-45b6-95ce-1558b275ec07" />
+    <UnitTestResult executionId="915326e1-d50f-4a8f-9657-e4a14baa3646" testId="7f524638-5195-c0a0-09d3-2e779044fd83" testName="Shop.Tests.CartTests.AppliesTenPercent(price: 50, expected: 45)" computerName="build-01" duration="00:00:00.0009759" startTime="2026-11-02T07:44:03.6677896+10:00" endTime="2026-11-02T07:44:03.6679259+10:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Passed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="915326e1-d50f-4a8f-9657-e4a14baa3646" />
+    <UnitTestResult executionId="e70f46d1-1f87-48fc-9a54-8bdd53d23c94" testId="203ccf99-980f-d0b5-175e-12b1ad1255f0" testName="Shop.Tests.CartTests.FetchesLivePrices" computerName="build-01" duration="00:00:00.0010000" startTime="2026-11-02T07:44:03.6869186+10:00" endTime="2026-11-02T07:44:03.6876178+10:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="NotExecuted" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="e70f46d1-1f87-48fc-9a54-8bdd53d23c94">
+      <Output>
+        <ErrorInfo>
+          <Message>pricing service is down</Message>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+    <UnitTestResult executionId="0b833315-fbb0-4e6a-aff6-2c0d64dee79e" testId="11427460-f9f9-f2c3-3b21-d17bac18c229" testName="Shop.Tests.CartTests.ParsesCoupon" computerName="build-01" duration="00:00:00.0010642" startTime="2026-11-02T07:44:03.6705857+10:00" endTime="2026-11-02T07:44:03.6718404+10:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Failed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="0b833315-fbb0-4e6a-aff6-2c0d64dee79e">
+      <Output>
+        <ErrorInfo>
+          <Message>System.FormatException : coupon code 'SAVE' has no digits</Message>
+          <StackTrace>   at Shop.Tests.CartTests.ParsesCoupon() in /home/dev/shop/CartTests.cs:line 12
+   at System.Reflection.MethodBaseInvoker.InterpretedInvoke_Method(Object obj, IntPtr* args)
+   at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)</StackTrace>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+  </Results>
+  <TestDefinitions>
+    <UnitTest name="Shop.Tests.CartTests.ParsesCoupon" storage="/home/dev/shop/bin/debug/net10.0/shop.tests.dll" id="11427460-f9f9-f2c3-3b21-d17bac18c229">
+      <Execution id="0b833315-fbb0-4e6a-aff6-2c0d64dee79e" />
+      <TestMethod codeBase="/home/dev/shop/bin/Debug/net10.0/Shop.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Shop.Tests.CartTests" name="ParsesCoupon" />
+    </UnitTest>
+    <UnitTest name="Shop.Tests.CartTests.AppliesTenPercent(price: 50, expected: 45)" storage="/home/dev/shop/bin/debug/net10.0/shop.tests.dll" id="7f524638-5195-c0a0-09d3-2e779044fd83">
+      <Execution id="915326e1-d50f-4a8f-9657-e4a14baa3646" />
+      <TestMethod codeBase="/home/dev/shop/bin/Debug/net10.0/Shop.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Shop.Tests.CartTests" name="AppliesTenPercent" />
+    </UnitTest>
+    <UnitTest name="Shop.Tests.CartTests.TotalsThePrices" storage="/home/dev/shop/bin/debug/net10.0/shop.tests.dll" id="6d5db0d2-6256-1f20-f113-fbc335c698cf">
+      <Execution id="0eaaa699-b9f8-4954-854e-89a14815d2ce" />
+      <TestMethod codeBase="/home/dev/shop/bin/Debug/net10.0/Shop.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Shop.Tests.CartTests" name="TotalsThePrices" />
+    </UnitTest>
+    <UnitTest name="Shop.Tests.CartTests.AddsAnItem" storage="/home/dev/shop/bin/debug/net10.0/shop.tests.dll" id="cb067ded-00bc-38df-b574-12f8dbdfb88d">
+      <Execution id="81ea41a8-b0f3-45b6-95ce-1558b275ec07" />
+      <TestMethod codeBase="/home/dev/shop/bin/Debug/net10.0/Shop.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Shop.Tests.CartTests" name="AddsAnItem" />
+    </UnitTest>
+    <UnitTest name="Shop.Tests.CartTests.AppliesTenPercent(price: 100, expected: 90)" storage="/home/dev/shop/bin/debug/net10.0/shop.tests.dll" id="444a5360-3d4b-101d-58fa-f0d886fbae51">
+      <Execution id="62a4616c-b547-436e-8274-628665e2ca36" />
+      <TestMethod codeBase="/home/dev/shop/bin/Debug/net10.0/Shop.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Shop.Tests.CartTests" name="AppliesTenPercent" />
+    </UnitTest>
+    <UnitTest name="Shop.Tests.CartTests.FetchesLivePrices" storage="/home/dev/shop/bin/debug/net10.0/shop.tests.dll" id="203ccf99-980f-d0b5-175e-12b1ad1255f0">
+      <Execution id="e70f46d1-1f87-48fc-9a54-8bdd53d23c94" />
+      <TestMethod codeBase="/home/dev/shop/bin/Debug/net10.0/Shop.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner3/netcore/" className="Shop.Tests.CartTests" name="FetchesLivePrices" />
+    </UnitTest>
+  </TestDefinitions>
+  <TestEntries>
+    <TestEntry testId="6d5db0d2-6256-1f20-f113-fbc335c698cf" executionId="0eaaa699-b9f8-4954-854e-89a14815d2ce" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="444a5360-3d4b-101d-58fa-f0d886fbae51" executionId="62a4616c-b547-436e-8274-628665e2ca36" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="cb067ded-00bc-38df-b574-12f8dbdfb88d" executionId="81ea41a8-b0f3-45b6-95ce-1558b275ec07" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="7f524638-5195-c0a0-09d3-2e779044fd83" executionId="915326e1-d50f-4a8f-9657-e4a14baa3646" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="203ccf99-980f-d0b5-175e-12b1ad1255f0" executionId="e70f46d1-1f87-48fc-9a54-8bdd53d23c94" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="11427460-f9f9-f2c3-3b21-d17bac18c229" executionId="0b833315-fbb0-4e6a-aff6-2c0d64dee79e" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+  </TestEntries>
+  <TestLists>
+    <TestList name="Results Not in a List" id="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestList name="All Loaded Results" id="19431567-8539-422a-85d7-44ee4e166bda" />
+  </TestLists>
+  <ResultSummary outcome="Failed">
+    <Counters total="6" executed="5" passed="3" failed="2" error="0" timeout="0" aborted="0" inconclusive="0" passedButRunAborted="0" notRunnable="0" notExecuted="0" disconnected="0" warning="0" completed="0" inProgress="0" pending="0" />
+    <Output>
+      <StdOut>[xUnit.net 00:00:00.00] xUnit.net VSTest Adapter v3.1.4+50e68bbb8b (64-bit .NET 10.0.12)
+[xUnit.net 00:00:00.16]   Discovering: Shop.Tests
+[xUnit.net 00:00:00.27]   Discovered:  Shop.Tests
+[xUnit.net 00:00:00.33]   Starting:    Shop.Tests
+[xUnit.net 00:00:00.45]       System.FormatException : coupon code 'SAVE' has no digits
+[xUnit.net 00:00:00.45]       Stack Trace:
+[xUnit.net 00:00:00.45]         /home/dev/shop/CartTests.cs(12,0): at Shop.Tests.CartTests.ParsesCoupon()
+[xUnit.net 00:00:00.45]            at System.Reflection.MethodBaseInvoker.InterpretedInvoke_Method(Object obj, IntPtr* args)
+[xUnit.net 00:00:00.45]            at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+[xUnit.net 00:00:00.45]       Assert.Equal() Failure: Values differ
+[xUnit.net 00:00:00.45]       Expected: 30
+[xUnit.net 00:00:00.45]       Actual:   25
+[xUnit.net 00:00:00.45]       Stack Trace:
+[xUnit.net 00:00:00.45]         /home/dev/shop/CartTests.cs(9,0): at Shop.Tests.CartTests.TotalsThePrices()
+[xUnit.net 00:00:00.45]            at System.Reflection.MethodBaseInvoker.InterpretedInvoke_Method(Object obj, IntPtr* args)
+[xUnit.net 00:00:00.45]            at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+[xUnit.net 00:00:00.45]       Output:
+[xUnit.net 00:00:00.45]         total is 25
+[xUnit.net 00:00:00.46]       pricing service is down
+[xUnit.net 00:00:00.46]   Finished:    Shop.Tests
+Test 'Shop.Tests.CartTests.FetchesLivePrices' was skipped in the test run.
+</StdOut>
+    </Output>
+    <RunInfos>
+      <RunInfo computerName="build-01" outcome="Error" timestamp="2026-11-02T07:44:03.6782820+10:00">
+        <Text>[xUnit.net 00:00:00.44]     Shop.Tests.CartTests.ParsesCoupon [FAIL]</Text>
+      </RunInfo>
+      <RunInfo computerName="build-01" outcome="Error" timestamp="2026-11-02T07:44:03.6861902+10:00">
+        <Text>[xUnit.net 00:00:00.45]     Shop.Tests.CartTests.TotalsThePrices [FAIL]</Text>
+      </RunInfo>
+      <RunInfo computerName="build-01" outcome="Warning" timestamp="2026-11-02T07:44:03.6896760+10:00">
+        <Text>[xUnit.net 00:00:00.46]     Shop.Tests.CartTests.FetchesLivePrices [SKIP]</Text>
+      </RunInfo>
+    </RunInfos>
+  </ResultSummary>
+</TestRun>

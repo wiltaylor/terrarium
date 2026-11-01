@@ -1,0 +1,21 @@
+{
+  "reportFormat": "CTRF",
+  "specVersion": "0.0.0",
+  "results": {
+    "tool": { "name": "playwright", "version": "1.48.2" },
+    "summary": {
+      "tests": 5, "passed": 3, "failed": 1, "skipped": 1, "pending": 0, "other": 0,
+      "start": 1793570400000, "stop": 1793570412500
+    },
+    "tests": [
+      { "name": "checkout > pays with a card", "status": "passed", "duration": 2310, "suite": "checkout.spec.ts > checkout", "filePath": "e2e/checkout.spec.ts", "line": 12, "browser": "chromium" },
+      { "name": "checkout > shows the receipt", "status": "failed", "duration": 5120, "suite": "checkout.spec.ts > checkout", "filePath": "e2e/checkout.spec.ts", "line": 31,
+        "message": "Error: expect(locator).toHaveText(expected)\n\nLocator: getByRole('heading')\nExpected string: \"Thank you\"\nReceived string: \"Payment failed\"",
+        "trace": "at /home/dev/shop-web/e2e/checkout.spec.ts:35:7", "stdout": ["POST /api/pay 502"], "stderr": [], "retries": 1, "flaky": false },
+      { "name": "search > finds a product", "status": "passed", "duration": 1840, "suite": "search.spec.ts > search", "filePath": "e2e/search.spec.ts" },
+      { "name": "search > filters by price", "status": "passed", "duration": 990, "suite": "search.spec.ts > search", "filePath": "e2e/search.spec.ts", "flaky": true, "retries": 1 },
+      { "name": "search > saves a search", "status": "skipped", "duration": 0, "suite": "search.spec.ts > search", "message": "fixme: needs accounts" }
+    ],
+    "environment": { "appName": "shop-web", "branchName": "main", "commit": "4be1c0d" }
+  }
+}
