@@ -1180,7 +1180,8 @@ hold `scripts/`, `references/`, and `assets/`. An agent sees the name and
 the description of each of its skills. When a skill fits the task, the
 agent loads the instructions. Terrarium ships four skills, `terrarium-db`
 (§2.13b), `terrarium-tests` (§2.13d), `terrarium-spawn` (§2.13e), and
-`terrarium-reset` (§2.13f) (PLAN §8.6).
+`terrarium-reset` (§2.13f) (PLAN §8.6). These four are default on: each
+agent gets them, unless it turns them off (step 5).
 
 1. Add a skill to the library. It goes to `config/terrarium/skills/<name>/`:
 
@@ -1219,6 +1220,27 @@ agent loads the instructions. Terrarium ships four skills, `terrarium-db`
    agent dir, read-only. An agent with no skill has no skill tool. The
    dashboard shows "restart to apply" on a running agent whose skills
    changed after its start.
+
+5. Turn off a default skill for one agent or template, or all of them:
+
+   ```bash
+   terrarium admin agent set worker --skill-off terrarium-spawn
+   terrarium admin agent set worker --no-default-skills
+   terrarium template edit worker --skill-off terrarium-spawn
+   terrarium agent show worker      # effective_skills: each skill, with (default) or (explicit)
+   ```
+
+   In a file, write `skills_off = ["terrarium-spawn"]` or
+   `default_skills = false`. In the dashboard, clear the box of the skill,
+   or clear "Use default skills".
+
+To make your own skill default on, add this to the front matter of its
+`SKILL.md`:
+
+```yaml
+metadata:
+  terrarium-default: "true"
+```
 
 `terrarium skill usage fern-check` lists the agents and templates that
 use a skill. When you delete a skill, the agents that name it start

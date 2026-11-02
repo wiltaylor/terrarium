@@ -1696,8 +1696,11 @@ An agent is the core `Agent` with bookkeeping fields:
 | `subscription_pool` | The account pool (PLAN §16.3): subscription names of one provider that the harness can spend, which a swap may pick (§6.2). The current `subscription` is always a member. Absent when empty. |
 | `system_prompt` | The agent's base system prompt (below). Absent when not set. |
 | `persona` | The persona (below): `leader`, `worker`, `none`, or an entry of the system prompt library (§28). Absent: by role. |
-| `skills` | The skills of the agent from the skill library (§26): skill names, or `*` for every skill. Absent: none. |
-| `skills_restart` | `true` when the live agent runs with other skills than its `skills` now picks from the library (the list or a skill changed after its start). A restart applies them. Absent when false. |
+| `skills` | The explicit skills of the agent from the skill library (§26): skill names, or `*` for every skill. `[]`: none. The agent also gets the default-on skills (§26.3). |
+| `skills_off` | The skills that the agent does not get: a default-on skill, or a skill of `skills`. `[]`: none. `*` is not valid. |
+| `default_skills` | `false`: the agent gets no default-on skill, only its `skills`. Default `true`. |
+| `effective_skills` | The skills that the agent gets at its next start, sorted by name: `[{"name","source"}]`, with `source` `default` (the skill is default on) or `explicit` (`skills` names it, or has `*`). The rule: (the default-on skills, when `default_skills`) + `skills` - `skills_off`. `[]` when the daemon has no config repo. |
+| `skills_restart` | `true` when the live agent runs with other skills than its `effective_skills` now (its settings, a skill, or the default-on marker of a skill changed after its start). A restart, a wake, or a new session applies them; the daemon does not restart the agent for it. Absent when false. |
 | `roles` | Roles above `member`: `project_admin`, `sysadmin`. |
 | `status` | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. `waiting`: the turn ended, and the agent has one or more open waits (§6.7). `idle`: the turn ended, and the agent has no open wait. |
 | `status_reason` | The reason of the last status change: `idle` after an idle stop, `paused` after the stop of a pause, `subscription_disabled` (the subscription is disabled, §16.2), `stream_limit: waiting for a free stream on `<sub>`` (the work waits for a stream of a self-hosted subscription, §16.2), `stopped`, an exit, or an error text. Absent when not known. |
@@ -1726,7 +1729,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
 | `POST /api/agents` | an agent definition, or `template` and the fields that differ (§21.3) | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
-| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "skills"?, "policy"?, "restart"?, "idle_stop"?, "compact_on_idle"?, "compact_max_age"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
+| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "skills"?, "skills_off"?, "default_skills"?, "policy"?, "restart"?, "idle_stop"?, "compact_on_idle"?, "compact_max_age"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204`; emits `agent_removed` (§9) | project_admin |
 
 `DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
@@ -6562,7 +6565,7 @@ A template:
 |---|---|
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
-| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `skills`, `skills_off`, `default_skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` and no `default_skills` when it is `true`, no empty `skills_off`. A template in an answer also has `effective_skills`: the skills that an agent of the template gets now, as on an agent (§6.1). A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. A change of the file by hand adds `1` when the load finds it (also a change of a comment only): one revision is one version of the file. |
 | `source` | `config` (a file of the config repo), or `fleet:<name>` (§18.1; its file is in the config repo too). `api` and `file` are templates from before the files: the first load writes their files and makes them `config`. |
 | `file` | The file in the config repo (§21.5): `templates/<name>.wcl`, or `templates/<project>/<name>.wcl`. `null` until the file is written (a daemon with no config repo). |
@@ -6757,6 +6760,8 @@ type AgentTemplate {
   compact_on_idle: bool?
   compact_max_age: utf8?
   skills: list<utf8>?
+  skills_off: list<utf8>?
+  default_skills: bool?
   new_session_on_prompt_change: bool?
   system_prompt: utf8?
   @child("policy") policy: TemplatePolicy?
@@ -7018,8 +7023,8 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
 The skill library (PLAN §8.6): `skills/<name>/` in the config repo, in
 the Agent Skills format (`SKILL.md` with `name` and `description` in its
 front matter, and optional files). The operator and a sysadmin read and
-write all of it. Another agent reads only its own skills (the ones its
-`skills` list picks), and a write is `403 forbidden`. A daemon with no
+write all of it. Another agent reads only its own skills (its effective
+skills, §26.3), and a write is `403 forbidden`. A daemon with no
 config repo answers `501 not_available`. A write goes to the work tree of
 the config repo and stays uncommitted: `POST /api/config/commit` (§25)
 commits it, with the secret scan.
@@ -7037,6 +7042,7 @@ A skill in a list:
 |---|---|
 | `description` | From the front matter. Empty when it does not parse. Show it as plain text. |
 | `files`, `bytes` | All files of the skill, `SKILL.md` included. |
+| `default_on` | `true` when the skill is default on: its front matter has `metadata` with `terrarium-default: "true"` (§26.3). Read-only here: edit `SKILL.md` to change it. |
 | `errors` | The problems of the checks (§26.3). No agent gets a skill with problems. Absent when none. |
 
 One skill (`GET /api/skills/{name}`): the fields above, `skill_md` (the
@@ -7067,7 +7073,7 @@ A write body:
 | `GET /api/skills/{name}` | | `200` skill; `404` when missing | any; an agent only its own skill (`403`) |
 | `PUT /api/skills/{name}` | write body | `200` skill; `404` when missing; `422` when it fails the checks | sysadmin |
 | `DELETE /api/skills/{name}` | | `204`; `404` when missing | sysadmin |
-| `GET /api/skills/{name}/usage` | | `200 {"agents":[{"id","name","all"}],"templates":[{"id","name","all"}]}`: the agents and templates whose `skills` name it; `all` is `true` for a name through `*` | sysadmin |
+| `GET /api/skills/{name}/usage` | | `200 {"agents":[{"id","name","all","default"?}],"templates":[...]}`: the agents and templates whose effective skills have it; `all` is `true` for a name through `*`; `default` is `true` when they get it only because it is default on | sysadmin |
 
 ### 26.3 Rules
 
@@ -7081,18 +7087,41 @@ A write body:
   finds nothing. A write that fails is `422 invalid` with
   `details.problems` (a list of text); nothing is written. A finding
   names the file, the line, and the rule, never the value.
+- **Default-on skills.** A skill is default on when the front matter of
+  its `SKILL.md` has this marker (in the `metadata` map of the Agent
+  Skills format, so each harness reads the file as it is):
+
+  ```yaml
+  metadata:
+    terrarium-default: "true"
+  ```
+
+  The packaged skills (`terrarium-db`, `terrarium-tests`,
+  `terrarium-spawn`, `terrarium-reset`) are default on. A skill that the
+  operator makes is opt-in, unless its `SKILL.md` has the same marker.
+- **Effective skills.** An agent gets (the default-on skills of the
+  library, when `default_skills` is `true`) + (its `skills`; `*` is every
+  skill) - (its `skills_off`). An agent from before this rule, and a new
+  agent with no skill settings, get the default-on skills.
 - **Assignment.** `skills` on an agent (§6), a template spec (§21), and a
   fleet agent or template (§18) takes skill names and `*`. A name that is
   not in the library is `422 invalid` with `details.unknown_skills`. A
-  daemon with no config repo takes only `*`.
+  daemon with no config repo takes only `*`. `skills_off` takes skill
+  names (a name that the library does not have has no effect); `*` in it
+  is `422 invalid`. A create with a template copies `skills_off` and
+  `default_skills` from the spec, and the body wins over each.
 - **Delete.** The agents and templates that name the skill keep the name.
   The next start of such an agent gives a `warning` event, and the agent
   starts without the skill.
-- **Delivery.** At each start the agent gets a fresh copy of its skills,
-  read-only (PLAN §8.6). A change of the library or of the list applies
-  at the next start; until then the agent shows `skills_restart: true`.
+- **Delivery.** At each start the agent gets a fresh copy of its
+  effective skills, read-only (PLAN §8.6). The harness gets the files,
+  and its own short index (the name and the description of each skill);
+  the body of a skill loads only when the agent uses it. A change of the
+  library, of the default-on marker, or of the skill settings applies at
+  the next start, wake, or new session; until then the agent shows
+  `skills_restart: true`.
 - **Audit.** `skill.create`, `skill.update`, and `skill.delete`; an
-  agent `PATCH` audits `skills`.
+  agent `PATCH` audits `skills`, `skills_off`, and `default_skills`.
 
 ## 27. DB
 

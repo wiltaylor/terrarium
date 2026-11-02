@@ -48,6 +48,29 @@ pub struct Template {
     /// The SHA-256 of the file that the row holds.
     #[serde(skip)]
     pub file_hash: Option<String>,
+    /// The skills that an agent of the template gets now (PLAN §8.6): the
+    /// default-on skills of the library and the spec's `skills`, less its
+    /// `skills_off`, with the source of each. The API fills it.
+    pub effective_skills: Vec<terrarium_core::skills::EffectiveSkill>,
+}
+
+impl Template {
+    /// The skill settings of the spec: `skills`, `skills_off`, and
+    /// `default_skills` (default true). A bad value counts as absent.
+    pub fn skill_settings(&self) -> (Vec<String>, Vec<String>, bool) {
+        let list = |k: &str| -> Vec<String> {
+            self.spec
+                .get(k)
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default()
+        };
+        let defaults = self
+            .spec
+            .get("default_skills")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        (list("skills"), list("skills_off"), defaults)
+    }
 }
 
 /// The template that an agent was made from: `agents.template`.
@@ -129,6 +152,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<Template> {
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
         file_hash,
+        effective_skills: Vec::new(),
     })
 }
 

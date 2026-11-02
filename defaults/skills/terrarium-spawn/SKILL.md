@@ -1,6 +1,8 @@
 ---
 name: terrarium-spawn
-description: Spawn ephemeral agents with `terrarium agent spawn` to do one task each (parallel independent subtasks, research, isolated experiments), wait for their results, and end the work of an ephemeral agent with `terrarium agent done`. Use it when you have spawn rights and a part of your work can run on its own.
+description: Spawn ephemeral agents with `terrarium agent spawn` for independent subtasks, and wait for their results. End the task of an ephemeral agent with `terrarium agent done`. Use it when you have spawn rights.
+metadata:
+  terrarium-default: "true"
 ---
 
 # Ephemeral agents

@@ -3,7 +3,7 @@
 // agent or a template, and the count of "used by". Pure.
 
 import { ApiError, isMissingEndpoint } from "../../api/http";
-import type { SkillSummary, SkillUsage } from "../../api/types";
+import type { EffectiveSkill, SkillSummary, SkillUsage } from "../../api/types";
 import { splitFrontMatter } from "../../lib/markdown";
 
 /** The name in a skill list that means every skill. */
@@ -14,6 +14,12 @@ export const NO_SKILLS_NOTE = "This daemon has no config repo, so it has no skil
 
 /** The note under a write: the Harness config page commits it. */
 export const COMMIT_NOTE = "A change to a skill stays in the config repo as a local change. Commit it on the Harness config page.";
+
+/** The title of a "default" badge in Settings: the marker lives in SKILL.md. */
+export const DEFAULT_ON_TITLE = 'Default on: each agent gets this skill unless it turns it off. To change it, edit SKILL.md: metadata, terrarium-default: "true".';
+
+/** The note of the default-on skills. */
+export const DEFAULT_NOTE = "A default skill goes to each agent. Clear its box to turn it off for this agent. A skill is default on when its SKILL.md has metadata terrarium-default: \"true\".";
 
 /** The note of a changed skill list: the agent gets it at the next start. */
 export const RESTART_NOTE = "The skills of a live agent change at the next start or restart.";
@@ -69,6 +75,66 @@ export function toggleSkill(value: string[], name: string, on: boolean): string[
   return value.includes(name) ? value : [...value.filter((x) => x !== ALL_SKILLS), name];
 }
 
+/** The skill settings of an agent or a template. */
+export interface SkillSelection {
+  /** The explicit skills, or `["*"]`. */
+  skills: string[];
+  /** The skills that the agent does not get. */
+  skills_off: string[];
+  /** False: no default-on skill. */
+  default_skills: boolean;
+}
+
+/** The names of the default-on skills of the list. */
+export const defaultOnNames = (list: Pick<SkillSummary, "name" | "default_on">[]): Set<string> => new Set(list.filter((s) => s.default_on).map((s) => s.name));
+
+/** True when the selection gives the skill `name` only because it is default on. */
+export const byDefault = (sel: SkillSelection, name: string, defaultOn: Set<string>): boolean => sel.default_skills && defaultOn.has(name) && !sel.skills.includes(name) && !sel.skills.includes(ALL_SKILLS);
+
+/** True when the selection gives the skill `name`: (default on, when `default_skills`) or explicit, and not in `skills_off`. */
+export function skillOn(sel: SkillSelection, name: string, defaultOn: Set<string>): boolean {
+  if (sel.skills_off.includes(name)) return false;
+  if (sel.skills.includes(ALL_SKILLS) || sel.skills.includes(name)) return true;
+  return sel.default_skills && defaultOn.has(name);
+}
+
+/**
+ * The selection after a pick of one skill. On: the name leaves
+ * `skills_off`, and goes in `skills` when the defaults or `*` do not give
+ * it. Off: the name leaves `skills`, and goes in `skills_off` when the
+ * defaults or `*` give it.
+ */
+export function pickSkill(sel: SkillSelection, name: string, on: boolean, defaultOn: Set<string>): SkillSelection {
+  const all = sel.skills.includes(ALL_SKILLS);
+  const fromDefault = sel.default_skills && defaultOn.has(name);
+  if (on) {
+    const skills_off = sel.skills_off.filter((x) => x !== name);
+    const skills = fromDefault || all ? sel.skills : toggleSkill(sel.skills, name, true);
+    return { ...sel, skills, skills_off };
+  }
+  const skills = sel.skills.filter((x) => x !== name);
+  const skills_off = (fromDefault || all) && !sel.skills_off.includes(name) ? [...sel.skills_off, name] : sel.skills_off;
+  return { ...sel, skills, skills_off };
+}
+
+/** The effective skills of a selection, as the daemon computes them, sorted by name. */
+export function effectiveOf(sel: SkillSelection, list: Pick<SkillSummary, "name" | "default_on">[]): EffectiveSkill[] {
+  const names = list.map((s) => s.name);
+  const defaultOn = defaultOnNames(list);
+  const out = new Map<string, EffectiveSkill["source"]>();
+  if (sel.default_skills) for (const n of names) if (defaultOn.has(n)) out.set(n, "default");
+  const explicit = sel.skills.includes(ALL_SKILLS) ? names : sel.skills.filter((n) => names.includes(n));
+  for (const n of explicit) out.set(n, "explicit");
+  for (const n of sel.skills_off) out.delete(n);
+  return [...out.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, source]) => ({ name, source }));
+}
+
+/** "none", or "fern-check, terrarium-db (default)". */
+export function effectiveLabel(list: EffectiveSkill[] | undefined): string {
+  if (!list?.length) return "none";
+  return list.map((e) => (e.source === "default" ? `${e.name} (default)` : e.name)).join(", ");
+}
+
 /** "none", "all skills", or "fern-check, release-notes". */
 export function skillsLabel(list: string[] | undefined): string {
   if (!list?.length) return "none";
@@ -82,10 +148,11 @@ export function unknownSkills(value: string[], list: Pick<SkillSummary, "name">[
   return value.filter((v) => v !== ALL_SKILLS && !names.has(v));
 }
 
-/** The number of agents and templates that use a skill, and how many of them through `*`. */
-export function usedBy(u: SkillUsage): { agents: number; templates: number; all: number; total: number } {
+/** The number of agents and templates that use a skill, and how many of them through `*` (`all`) and as a default skill (`byDefault`). */
+export function usedBy(u: SkillUsage): { agents: number; templates: number; all: number; byDefault: number; total: number } {
   const all = [...u.agents, ...u.templates].filter((x) => x.all).length;
-  return { agents: u.agents.length, templates: u.templates.length, all, total: u.agents.length + u.templates.length };
+  const defaults = [...u.agents, ...u.templates].filter((x) => x.default).length;
+  return { agents: u.agents.length, templates: u.templates.length, all, byDefault: defaults, total: u.agents.length + u.templates.length };
 }
 
 /** "2 agents, 1 template", or "nothing". */

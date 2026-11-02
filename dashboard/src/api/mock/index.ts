@@ -788,6 +788,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   });
   if (w.projects.some((x) => x.name === "terrarium") && w.cards.some((c) => c.id === "TER-12")) testRunMock.seed();
   const skillMock = createSkillMock({ w, reply, fail, audit, caller: opts.scheduleCaller, available: opts.configRepo });
+  // The effective skills of an agent (PLAN §8.6), as the API fills them.
+  const withSkills = (a: Agent): Agent => Object.assign(a, { effective_skills: skillMock.effective(a) });
   const systemPromptMock = createSystemPromptMock({ w, iso, reply, fail, audit, emit, caller: opts.scheduleCaller, available: opts.configRepo });
   const waitMock = createWaitMock({ w, iso, now, ulid, reply, fail, emit, agent, setStatus, sendMail: (to, from, subject, body) => sendMail(to, from, subject, body) });
   // ----- ephemeral agents (docs/api.md §6.10): ./spawns.ts -----
@@ -2264,10 +2266,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     agents: {
       // The ephemeral agents only with `?include=ephemeral` (docs/api.md §6.10).
-      list: (proj, o = {}) => reply(() => w.agents.filter((a) => (!proj || a.project === proj) && (o.ephemeral || !a.ephemeral)).sort((a, b) => a.id.localeCompare(b.id))),
+      list: (proj, o = {}) => reply(() => w.agents.filter((a) => (!proj || a.project === proj) && (o.ephemeral || !a.ephemeral)).sort((a, b) => a.id.localeCompare(b.id)).map(withSkills)),
       get: (id) =>
         reply(() => {
-          const a = agent(id);
+          const a = withSkills(agent(id));
           const s = a.subscription ? w.subscriptions.find((x) => x.name === a.subscription) : undefined;
           const open = waitMock.openWaits(a);
           const detail = { ...a, ...(open.length ? { open_waits: open } : {}) };
@@ -2310,6 +2312,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             ...(def.system_prompt ? { system_prompt: def.system_prompt } : {}),
             ...(def.persona?.trim() ? { persona: def.persona.trim() } : {}),
             ...(def.skills?.length ? { skills: [...def.skills] } : {}),
+            ...(def.skills_off?.length ? { skills_off: [...def.skills_off] } : {}),
+            ...(def.default_skills === false ? { default_skills: false } : {}),
             workspace: `/state/agents/${id}/workspace`,
             roles: (def.roles ?? []).filter((r): r is Role => r !== "member"),
             // Like the daemon: `cross_project` is left out when empty.
@@ -2328,7 +2332,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           };
           w.agents.push(a);
           audit("agent.create", a.id, a.project, { name: a.name, harness: a.harness, ...(tpl ? { template: templateRef(tpl) } : {}) });
-          return a;
+          return withSkills(a);
         }),
       update: (id, patch) =>
         reply(() => {
@@ -2365,6 +2369,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             else delete a.skills;
             if (LIVE.includes(a.status)) a.skills_restart = true;
           }
+          if (patch.skills_off !== undefined && JSON.stringify(patch.skills_off) !== JSON.stringify(a.skills_off ?? [])) {
+            if (patch.skills_off.includes("*")) fail(422, "invalid", "`*` is not valid in `skills_off`; to turn off every default skill, set `default_skills` to false");
+            if (patch.skills_off.length) a.skills_off = [...patch.skills_off];
+            else delete a.skills_off;
+            if (LIVE.includes(a.status)) a.skills_restart = true;
+          }
+          if (patch.default_skills !== undefined && patch.default_skills !== (a.default_skills ?? true)) {
+            if (patch.default_skills) delete a.default_skills;
+            else a.default_skills = false;
+            if (LIVE.includes(a.status)) a.skills_restart = true;
+          }
           if (patch.policy) a.policy = { targets: patch.policy.targets, mail_to: patch.policy.mail_to, ...(patch.policy.cross_project?.length ? { cross_project: patch.policy.cross_project } : {}), ...(patch.policy.spawn ? { spawn: patch.policy.spawn } : {}) };
           if (patch.restart) a.restart = patch.restart;
           // null or empty: the global default.
@@ -2383,7 +2398,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (patch.harness) a.compact_supported = MOCK_COMPACT_HARNESSES.includes(patch.harness);
           a.updated_at = iso();
           audit("agent.update", a.id, a.project, { ...patch });
-          return a;
+          return withSkills(a);
         }),
       // PLAN §16.3: move the agent to another account of its pool.
       swapSubscription: (id, to) =>

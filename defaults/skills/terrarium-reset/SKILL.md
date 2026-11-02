@@ -1,6 +1,8 @@
 ---
 name: terrarium-reset
-description: Compact your session or start a new, clean session with `terrarium agent compact --self` and `terrarium agent new-session --self`, and send yourself a self-contained `--then` prompt to go on after the reset. Use it when your context is long, when you switch to unrelated work, or when you are in a confused state. Leads can reset their workers the same way.
+description: Compact your session or start a new session with `terrarium agent compact --self` or `terrarium agent new-session --self`, with a `--then` prompt to go on. Use it when your context is long or you change to unrelated work.
+metadata:
+  terrarium-default: "true"
 ---
 
 # Compact or start a new session

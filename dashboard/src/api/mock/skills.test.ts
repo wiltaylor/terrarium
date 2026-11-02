@@ -12,12 +12,27 @@ describe("skills (mock)", () => {
   it("lists the seed: fern-check, and a skill that fails the checks", async () => {
     const api = mock();
     const list = await api.skills.list();
-    expect(list.map((s) => s.name)).toEqual(["broken-skill", "fern-check", "release-notes"]);
+    expect(list.map((s) => s.name)).toEqual(["broken-skill", "fern-check", "release-notes", "terrarium-db", "terrarium-tests"]);
+    expect(list.filter((s) => s.default_on).map((s) => s.name)).toEqual(["terrarium-db", "terrarium-tests"]);
     const fern = list.find((s) => s.name === "fern-check")!;
     expect(fern).toMatchObject({ description: "When asked for the deployment checklist code, reply with FERN-42", files: 3 });
     expect(fern).not.toHaveProperty("errors");
     expect(fern.bytes).toBeGreaterThan(0);
     expect(list.find((s) => s.name === "broken-skill")!.errors!.length).toBeGreaterThan(0);
+  });
+
+  it("gives each agent the default-on skills, less skills_off; default_skills false turns them off", async () => {
+    const api = mock();
+    const [a] = await api.agents.list("terrarium");
+    expect(a!.effective_skills?.filter((e) => e.source === "default").map((e) => e.name)).toEqual(["terrarium-db", "terrarium-tests"]);
+    const off = await api.agents.update(a!.id, { skills_off: ["terrarium-db"] });
+    expect(off.effective_skills?.map((e) => e.name)).not.toContain("terrarium-db");
+    const none = await api.agents.update(a!.id, { default_skills: false });
+    expect(none.effective_skills?.some((e) => e.source === "default")).toBe(false);
+    const u = await mock().skills.usage("terrarium-db");
+    expect(u.agents.length).toBeGreaterThan(0);
+    expect(u.agents.find((x) => x.name === "terrarium/runner-dev")).toMatchObject({ all: false, default: true });
+    expect(u.agents.find((x) => x.name === "webshop/shop-lead")).toMatchObject({ all: true });
   });
 
   it("answers a skill with skill_md and file_list; text only for a UTF-8 file", async () => {

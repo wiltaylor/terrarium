@@ -15,7 +15,7 @@ import type { SkillDetail, SkillSummary } from "../../api/types";
 import { bytes } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
 import { api } from "../../stores";
-import { COMMIT_NOTE, descriptionProblem, filterSkills, nameProblem, NO_SKILLS_NOTE, noSkills, previewBody, RESTART_NOTE, skillProblems, usedBy, usedByText } from "./model";
+import { COMMIT_NOTE, DEFAULT_ON_TITLE, descriptionProblem, filterSkills, nameProblem, NO_SKILLS_NOTE, noSkills, previewBody, RESTART_NOTE, skillProblems, usedBy, usedByText } from "./model";
 
 /** The note with a link to the Harness config page. */
 function CommitNote() {
@@ -199,6 +199,15 @@ function SkillEditor(props: { name: string; onSaved: () => void; onDeleted: () =
               <dl class="kv">
                 <dt>Description</dt>
                 <dd>{s().description || <span class="muted">none</span>}</dd>
+                <dt>Default</dt>
+                <dd>
+                  <Show when={s().default_on} fallback={<span class="muted">No. An agent gets it only when its skills list names it.</span>}>
+                    <span class="chip" title={DEFAULT_ON_TITLE}>
+                      default
+                    </span>{" "}
+                    <span class="muted small">Each agent gets it, unless the agent turns it off.</span>
+                  </Show>
+                </dd>
                 <dt>Size</dt>
                 <dd>
                   {s().files} file{s().files === 1 ? "" : "s"}, {bytes(s().bytes)}
@@ -216,6 +225,9 @@ function SkillEditor(props: { name: string; onSaved: () => void; onDeleted: () =
                                 <Show when={x.all}>
                                   <span class="muted"> (all skills)</span>
                                 </Show>
+                                <Show when={x.default}>
+                                  <span class="muted"> (default)</span>
+                                </Show>
                               </li>
                             )}
                           </For>
@@ -225,6 +237,9 @@ function SkillEditor(props: { name: string; onSaved: () => void; onDeleted: () =
                                 template <A href="/settings/templates">{x.name}</A>
                                 <Show when={x.all}>
                                   <span class="muted"> (all skills)</span>
+                                </Show>
+                                <Show when={x.default}>
+                                  <span class="muted"> (default)</span>
                                 </Show>
                               </li>
                             )}
@@ -389,6 +404,12 @@ export default function SkillsPage() {
                         <A class="mono" href={`/settings/skills/${encodeURIComponent(s.name)}`}>
                           {s.name}
                         </A>
+                        <Show when={s.default_on}>
+                          {" "}
+                          <span class="chip" title={DEFAULT_ON_TITLE}>
+                            default
+                          </span>
+                        </Show>
                       </td>
                       <td class="small">{s.description || <span class="muted">none</span>}</td>
                       <td>{s.files}</td>

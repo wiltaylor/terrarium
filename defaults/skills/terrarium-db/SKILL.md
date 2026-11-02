@@ -1,6 +1,8 @@
 ---
 name: terrarium-db
-description: Keep structured data of the project in the Terrarium DB (record types with a schema, records, and queries) with `terrarium db`, and show query results in wiki pages with a `db` block. Use it for lists of items, inventories, results, measurements, and decisions that you add to, filter, or count again later.
+description: Keep structured project data (lists, inventories, results, decisions) in the Terrarium DB with `terrarium db` (record types, records, and queries). Show query results in wiki pages with a `db` block.
+metadata:
+  terrarium-default: "true"
 ---
 
 # The Terrarium DB

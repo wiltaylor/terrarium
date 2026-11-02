@@ -888,7 +888,10 @@ A skill is a folder in the open Agent Skills format: `SKILL.md` with YAML
 front matter (`name`, `description`), then Markdown instructions, and
 optional files in `scripts/`, `references/`, and `assets/`. Terrarium
 manages the skills of all agents. Each harness gets the same skills by
-its own mechanism. Terrarium ships no skill.
+its own mechanism. Terrarium ships four packaged skills in
+`defaults/skills/` (`terrarium-db`, `terrarium-tests`,
+`terrarium-spawn`, `terrarium-reset`); they teach the agents the
+Terrarium features, and they are default on.
 
 **The library.** The skills are in the config repo, at
 `skills/<name>/` (§8.3). Git keeps their versions, and a config sync
@@ -916,12 +919,38 @@ A write that fails the checks is `422 invalid`, with each problem in
 `details.problems`. A skill in the library that fails them (an edit by
 hand) shows its problems in the list, and no agent gets it.
 
+**Default-on skills.** A skill is default on when the front matter of its
+`SKILL.md` has the marker in the `metadata` map of the Agent Skills
+format (`terrarium_core::skills::DEFAULT_KEY`):
+
+```yaml
+metadata:
+  terrarium-default: "true"
+```
+
+The marker lives in the file, so it survives the seed of the config repo
+(§8.3): an unedited packaged skill gets a new marker with the new
+default, and an edited one gets it in `SKILL.md.new`. The operator turns
+a skill off for all agents with a removal of the marker. A skill that
+the operator makes is opt-in, unless its `SKILL.md` has the marker.
+
 **Assignment.** `skills = [...]` on an agent, a template, and a fleet
-agent or template names skills of the library. The default is none. `*`
-is every skill of the library. An unknown name is `422 invalid` at the
-assignment (an API create or patch, a template write, a fleet check). A
-skill that is deleted later stays in the list; the next start gives a
-`warning` event and goes on without it.
+agent or template names the explicit skills of the library. The default
+is none. `*` is every skill of the library. An unknown name is `422
+invalid` at the assignment (an API create or patch, a template write, a
+fleet check). A skill that is deleted later stays in the list; the next
+start gives a `warning` event and goes on without it. `skills_off =
+[...]` names the skills that the agent does not get (a default-on skill,
+or an explicit skill; `*` is not valid). `default_skills = false` turns
+off every default-on skill (default `true`). A create with a template
+copies all three.
+
+**The effective set** (`terrarium_core::skills::Selection`):
+(the default-on skills, when `default_skills`) + `skills` - `skills_off`.
+The API shows it on an agent and a template as `effective_skills`, with
+the source of each (`default` or `explicit`). An agent from before the
+default-on skills gets them with no data migration (migration 53 adds the
+two columns with their defaults).
 
 ```toml
 # agents/reviewer.toml
@@ -929,13 +958,21 @@ name = "reviewer"
 project = "terra"
 harness = "claude"
 skills = ["code-review", "release-notes"]
+skills_off = ["terrarium-spawn"]
 ```
 
-**Delivery.** At each start the daemon copies only the agent's skills
+**Delivery.** At each start the daemon copies only the agent's effective skills
 from the library into `<harness dir>/skills/` (a new, empty dir each
 time). The sandbox binds the harness dir read-only, so the agent cannot
 change its skills. `private/skills.json` records the delivered skills
-and their hash. Each adapter points its harness at the dir:
+and their hash. A running agent whose record differs from its effective
+set now (a change of its settings, of a skill, or of a marker) shows
+`skills_restart`; it gets the new set at its next start, wake, or new
+session (the idle stop makes that soon), and the daemon forces no
+restart. Each harness gets the files and its own short index (the name
+and the description of each skill); the body loads only when the agent
+uses the skill. So a packaged skill keeps its description short (about
+200 characters). Each adapter points its harness at the dir:
 
 | Harness | Mechanism | The skill tool |
 |---|---|---|
@@ -2151,7 +2188,8 @@ page.
 
 The packaged skill `terrarium-db` (`defaults/skills/terrarium-db/`) tells
 an agent when to use the DB, the CLI, the query language, and the wiki
-block. An agent gets it when its `skills` list names it (§8.6).
+block. It is default on: each agent gets it unless it turns it off
+(§8.6).
 
 ### 15.5 Test runs
 

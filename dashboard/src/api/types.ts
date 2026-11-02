@@ -453,8 +453,12 @@ export interface AgentDef {
   restart?: RestartPolicy;
   /** Start a new session, not a resume, when the prompt changed (Codex). The daemon leaves it out when true. */
   new_session_on_prompt_change?: boolean;
-  /** Terrarium-managed skills (`GET /api/skills` names). Absent or empty: none. `"*"`: every skill. */
+  /** The explicit Terrarium-managed skills (`GET /api/skills` names). Absent or empty: none. `"*"`: every skill. The agent also gets the default-on skills. */
   skills?: string[];
+  /** The skills that the agent does not get: a default-on skill, or a skill of `skills`. Absent or empty: none. */
+  skills_off?: string[];
+  /** False: no default-on skill, only `skills`. Absent: true. */
+  default_skills?: boolean;
   /**
    * The time that the agent stays `idle` or `waiting` before the daemon stops it:
    * `off` (or `0`) never stops it, else a duration such as `30m` or `1h30m`.
@@ -504,6 +508,10 @@ export type AgentPatch = Partial<Pick<AgentDef, "harness" | "policy" | "restart"
   persona?: string | null;
   /** The skill names; `[]` clears them. An unknown name is a 422. Applies at the next start. */
   skills?: string[];
+  /** The skills that the agent does not get; `[]` clears them. Applies at the next start. */
+  skills_off?: string[];
+  /** False turns off every default-on skill. Applies at the next start. */
+  default_skills?: boolean;
   /** `off`, `0`, or a duration. `null` goes back to the global default. */
   idle_stop?: string | null;
   /** `null` goes back to the global default. */
@@ -576,7 +584,13 @@ export interface Agent {
   open_waits?: Wait[];
   /** See `AgentDef.skills`. Absent: none. */
   skills?: string[];
-  /** True when the live agent runs with other skills than its list now gives: a restart applies them. */
+  /** See `AgentDef.skills_off`. */
+  skills_off?: string[];
+  /** See `AgentDef.default_skills`. Absent: true. */
+  default_skills?: boolean;
+  /** The skills that the agent gets at its next start: the default-on skills and `skills`, less `skills_off`. Absent: the daemon has no skill library (or is older). */
+  effective_skills?: EffectiveSkill[];
+  /** True when the live agent runs with other skills than its effective skills now: a restart applies them. */
   skills_restart?: true;
   /** True when the operator paused the agent: it does not run, and nothing wakes it. Turns and mail stay queued. */
   paused?: boolean;
@@ -3019,6 +3033,8 @@ export interface AgentTemplate {
   updated_at: string;
   /** The WCL file in the config repo: `templates/<name>.wcl` or `templates/<project>/<name>.wcl`. Null until the file is written. */
   file?: string | null;
+  /** The skills that an agent of the template gets now. */
+  effective_skills?: EffectiveSkill[];
 }
 
 /** `GET /api/templates/{key}/wcl`: the template's WCL file (docs/api.md §21.5). */
@@ -3251,8 +3267,17 @@ export interface SkillSummary {
   description: string;
   files: number;
   bytes: number;
+  /** True when the skill is default on (`metadata.terrarium-default: "true"` in SKILL.md): each agent gets it unless it turns it off. */
+  default_on?: boolean;
   /** The problems of the checks. A skill with problems is not given to agents. Absent when none. */
   errors?: string[];
+}
+
+/** One skill of the effective set of an agent or a template, and why it has it. */
+export interface EffectiveSkill {
+  name: string;
+  /** `default`: the skill is default on. `explicit`: the `skills` list names it (or has `*`). */
+  source: "default" | "explicit";
 }
 
 /** One file of a skill other than SKILL.md. */
@@ -3294,6 +3319,8 @@ export interface SkillUser {
   name: string;
   /** True when the list names the skill through `"*"`. */
   all: boolean;
+  /** True when the user gets the skill only because it is default on. */
+  default?: boolean;
 }
 
 /** `GET /api/skills/{name}/usage`. */

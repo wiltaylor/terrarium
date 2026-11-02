@@ -34,6 +34,8 @@ export function specToForm(spec: TemplateSpec, project = "", name = ""): AgentFo
     cross_project: (spec.policy?.cross_project ?? []).join(", "),
     restart: spec.restart ?? "on-failure",
     skills: spec.skills ?? [],
+    skills_off: spec.skills_off ?? [],
+    default_skills: spec.default_skills ?? true,
     idle_stop: spec.idle_stop ?? "",
     compact_on_idle: switchOf(spec.compact_on_idle),
     compact_max_age: spec.compact_max_age ?? "",

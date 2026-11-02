@@ -216,7 +216,7 @@ async fn assignment_checks_the_library() {
     let r = td
         .patch(&format!("/api/agents/{a}"), json!({"skills": []}))
         .await;
-    assert!(r.ok().get("skills").is_none(), "{}", r.body);
+    assert_eq!(r.ok()["skills"], json!([]), "{}", r.body);
     td.patch(&format!("/api/agents/{a}"), json!({"skills": ["Bad Name"]}))
         .await
         .err(422, "invalid");
@@ -253,6 +253,122 @@ async fn assignment_checks_the_library() {
     let u = u.ok();
     assert_eq!(u["agents"][0]["name"], "p/b");
     assert_eq!(u["templates"][0]["name"], "t");
+}
+
+/// PLAN §8.6: a default-on skill goes to each agent with no settings;
+/// `skills_off` and `default_skills` take it away; a template carries them
+/// to the agents made from it; the views show `effective_skills`.
+#[tokio::test]
+async fn default_skills_and_skills_off() {
+    let (td, _repo) = instance().await;
+    td.project("p").await;
+    let md = "---\nname: platform\ndescription: d\nmetadata:\n  terrarium-default: \"true\"\n---\nbody\n";
+    td.post("/api/skills", json!({"name": "platform", "skill_md": md}))
+        .await
+        .ok();
+    td.post(
+        "/api/skills",
+        json!({"name": "fern-check", "description": FERN}),
+    )
+    .await
+    .ok();
+    let l = td.get("/api/skills").await;
+    let l = l.ok();
+    let platform = l
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "platform")
+        .unwrap();
+    assert_eq!(platform["default_on"], true);
+
+    // No settings: the default-on skill.
+    let a = td
+        .post(
+            "/api/agents",
+            json!({"name": "a", "project": "p", "harness": "claude"}),
+        )
+        .await;
+    let a = a.ok().clone();
+    assert_eq!(a["default_skills"], true);
+    assert_eq!(a["skills_off"], json!([]));
+    assert_eq!(
+        a["effective_skills"],
+        json!([{"name": "platform", "source": "default"}])
+    );
+    let a = id(&a);
+    // Explicit and default together; then off.
+    let r = td
+        .patch(
+            &format!("/api/agents/{a}"),
+            json!({"skills": ["fern-check"]}),
+        )
+        .await;
+    assert_eq!(
+        r.ok()["effective_skills"],
+        json!([{"name": "fern-check", "source": "explicit"},
+               {"name": "platform", "source": "default"}])
+    );
+    let r = td
+        .patch(
+            &format!("/api/agents/{a}"),
+            json!({"skills_off": ["platform"]}),
+        )
+        .await;
+    assert_eq!(
+        r.ok()["effective_skills"],
+        json!([{"name": "fern-check", "source": "explicit"}])
+    );
+    td.patch(&format!("/api/agents/{a}"), json!({"skills_off": ["*"]}))
+        .await
+        .err(422, "invalid");
+    let r = td
+        .patch(
+            &format!("/api/agents/{a}"),
+            json!({"skills_off": [], "default_skills": false}),
+        )
+        .await;
+    assert_eq!(r.ok()["default_skills"], false);
+    let shown = td.get(&format!("/api/agents/{a}")).await;
+    assert_eq!(
+        shown.ok()["effective_skills"],
+        json!([{"name": "fern-check", "source": "explicit"}])
+    );
+
+    // A template copies `skills_off` and `default_skills`.
+    let t = td
+        .post(
+            "/api/templates",
+            json!({"name": "t", "spec": {"harness": "codex", "skills_off": ["platform"]}}),
+        )
+        .await;
+    let t = t.ok().clone();
+    assert_eq!(t["spec"]["skills_off"], json!(["platform"]));
+    assert_eq!(t["effective_skills"], json!([]));
+    let b = td
+        .post(
+            "/api/agents",
+            json!({"name": "b", "project": "p", "template": "t"}),
+        )
+        .await;
+    assert_eq!(b.ok()["skills_off"], json!(["platform"]));
+    let c = td
+        .post(
+            "/api/agents",
+            json!({"name": "c", "project": "p", "template": "t", "skills_off": []}),
+        )
+        .await;
+    assert_eq!(
+        c.ok()["effective_skills"],
+        json!([{"name": "platform", "source": "default"}])
+    );
+    // The usage counts the default-on users.
+    let u = td.get("/api/skills/platform/usage").await;
+    let u = u.ok();
+    assert_eq!(
+        u["agents"],
+        json!([{"id": id(c.ok()), "name": "p/c", "all": false, "default": true}])
+    );
 }
 
 #[tokio::test]

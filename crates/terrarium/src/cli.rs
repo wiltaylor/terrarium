@@ -669,9 +669,17 @@ pub struct AgentNewArgs {
     /// `TERRARIUM_COMPACT_MAX_AGE`
     #[arg(long)]
     pub compact_max_age: Option<String>,
-    /// A skill of the skill library; `*` is every skill; repeat for more
+    /// A skill of the skill library; `*` is every skill; repeat for more.
+    /// The agent also gets the default-on skills of the library
     #[arg(long = "skill")]
     pub skills: Vec<String>,
+    /// A skill that the agent does not get (a default-on skill, for
+    /// example); repeat for more
+    #[arg(long = "skill-off")]
+    pub skills_off: Vec<String>,
+    /// No default-on skills: the agent gets only its `--skill` skills
+    #[arg(long)]
+    pub no_default_skills: bool,
 }
 
 /// The agent's base system prompt (PLAN §8). Set, it replaces the
@@ -736,13 +744,27 @@ pub struct AgentSetArgs {
     /// harness keeps the prompt of a session (Codex)
     #[arg(long)]
     pub new_session_on_prompt_change: Option<bool>,
-    /// Set the skills: a skill of the skill library, `*` for all; repeat
-    /// for more. The agent gets them at its next start
+    /// Set the explicit skills: a skill of the skill library, `*` for
+    /// all; repeat for more. The agent gets them at its next start
     #[arg(long = "skill", conflicts_with = "no_skills")]
     pub skills: Vec<String>,
-    /// Remove every skill of the agent
+    /// Remove every explicit skill of the agent (the default-on skills
+    /// stay; see `--no-default-skills`)
     #[arg(long)]
     pub no_skills: bool,
+    /// Set the skills that the agent does not get (a default-on skill,
+    /// for example); repeat for more. The flag replaces the list
+    #[arg(long = "skill-off", conflicts_with = "skills_off_clear")]
+    pub skills_off: Vec<String>,
+    /// Clear the `skills_off` list
+    #[arg(long)]
+    pub skills_off_clear: bool,
+    /// Turn off every default-on skill of the agent
+    #[arg(long, conflicts_with = "default_skills")]
+    pub no_default_skills: bool,
+    /// Give the agent the default-on skills again
+    #[arg(long)]
+    pub default_skills: bool,
     /// Save the agent's own system prompt text in the system prompt
     /// library as this name, and select it (`--persona <name>`, the text
     /// cleared)
@@ -2585,9 +2607,23 @@ pub struct TemplateSpecArgs {
     /// A skill of the skill library; `*` is every skill; repeat for more
     #[arg(long = "skill", conflicts_with = "no_skills")]
     pub skills: Vec<String>,
-    /// No skills (`template edit`: remove them)
+    /// No explicit skills (`template edit`: remove them). The default-on
+    /// skills stay; see `--no-default-skills`
     #[arg(long)]
     pub no_skills: bool,
+    /// A skill that an agent of the template does not get (a default-on
+    /// skill, for example); repeat for more. The flag replaces the list
+    #[arg(long = "skill-off", conflicts_with = "skills_off_clear")]
+    pub skills_off: Vec<String>,
+    /// Clear the `skills_off` list (`template edit`)
+    #[arg(long)]
+    pub skills_off_clear: bool,
+    /// No default-on skills for an agent of the template
+    #[arg(long, conflicts_with = "default_skills")]
+    pub no_default_skills: bool,
+    /// Give the default-on skills again (`template edit`)
+    #[arg(long)]
+    pub default_skills: bool,
 }
 
 /// `terrarium system-prompt ...` (docs/api.md §28).
@@ -3614,6 +3650,91 @@ mod tests {
             };
             assert_eq!(skills, ["x"]);
         }
+    }
+
+    /// PLAN §8.6: `--skill-off`, `--skills-off-clear`, and the default
+    /// skill switches.
+    #[test]
+    fn skill_off_flags_parse() {
+        let cli = parse(&[
+            "agent",
+            "new",
+            "a",
+            "--harness",
+            "pi",
+            "--skill-off",
+            "terrarium-db",
+            "--skill-off",
+            "terrarium-tests",
+            "--no-default-skills",
+        ]);
+        let Command::Agent {
+            command: AgentCmd::New(a),
+        } = cli.command
+        else {
+            panic!("agent new");
+        };
+        assert_eq!(a.skills_off, ["terrarium-db", "terrarium-tests"]);
+        assert!(a.no_default_skills);
+        let cli = parse(&[
+            "agent",
+            "set",
+            "a",
+            "--skills-off-clear",
+            "--default-skills",
+        ]);
+        let Command::Agent {
+            command: AgentCmd::Set(a),
+        } = cli.command
+        else {
+            panic!("agent set");
+        };
+        assert!(a.skills_off_clear && a.default_skills && !a.no_default_skills);
+        for bad in [
+            &[
+                "agent",
+                "set",
+                "a",
+                "--skill-off",
+                "x",
+                "--skills-off-clear",
+            ][..],
+            &[
+                "agent",
+                "set",
+                "a",
+                "--default-skills",
+                "--no-default-skills",
+            ][..],
+            &[
+                "template",
+                "edit",
+                "t",
+                "--skill-off",
+                "x",
+                "--skills-off-clear",
+            ][..],
+        ] {
+            let mut args = vec!["terrarium"];
+            args.extend_from_slice(bad);
+            assert!(Cli::try_parse_from(args).is_err(), "{bad:?}");
+        }
+        let cli = parse(&[
+            "template",
+            "new",
+            "t",
+            "--skill-off",
+            "x",
+            "--no-default-skills",
+        ]);
+        let Command::Template {
+            command: TemplateCmd::New(a),
+        } = cli.command
+        else {
+            panic!("template new");
+        };
+        assert_eq!(a.spec.skills_off, ["x"]);
+        assert!(a.spec.no_default_skills);
     }
 
     /// `repo-add <URL>`: the positional is the repo URL before and after

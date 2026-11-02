@@ -48,6 +48,11 @@ pub struct Summary {
     pub description: String,
     pub files: usize,
     pub bytes: usize,
+    /// The skill is default on: its front matter has
+    /// `metadata.terrarium-default: "true"`. Each agent gets it unless the
+    /// agent turns it off (`skills_off`, `default_skills`).
+    #[serde(default)]
+    pub default_on: bool,
     /// The problems of the checks (`terrarium_core::skills::check`). A
     /// skill with problems is not delivered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -150,12 +155,12 @@ fn summary(name: &str, files: Result<Files, Vec<String>>) -> (Summary, Files) {
         Ok(f) => (f, Vec::new()),
         Err(p) => (Files::new(), p),
     };
-    let description = files
+    let meta = files
         .get(core::SKILL_FILE)
         .and_then(|b| std::str::from_utf8(b).ok())
-        .and_then(|t| core::parse_front_matter(t).ok())
-        .map(|m| m.description)
-        .unwrap_or_default();
+        .and_then(|t| core::parse_front_matter(t).ok());
+    let default_on = meta.as_ref().is_some_and(|m| m.default_on);
+    let description = meta.map(|m| m.description).unwrap_or_default();
     if errors.is_empty()
         && let Err(p) = core::check(name, &files)
     {
@@ -167,6 +172,7 @@ fn summary(name: &str, files: Result<Files, Vec<String>>) -> (Summary, Files) {
             description,
             files: files.len(),
             bytes: files.values().map(Vec::len).sum(),
+            default_on,
             errors,
         },
         files,
@@ -341,11 +347,40 @@ pub fn check_assignment(lib: Option<&Path>, list: &[String]) -> ApiResult<()> {
     .with_details(json!({ "unknown_skills": unknown })))
 }
 
-/// The hash of the skills that `assigned` picks from the library now, for
-/// the "restart to apply" check: the same value as the delivery would
-/// record.
-pub fn current_hash(lib: &Path, assigned: &[String]) -> String {
-    core::collect(lib, assigned).1.hash
+/// The hash of the skills that the selection `sel` picks from the library
+/// now (default-on skills included), for the "restart to apply" check:
+/// the same value as the delivery would record.
+pub fn current_hash(lib: &Path, sel: core::Selection<'_>) -> String {
+    core::collect(lib, &sel.assigned_in(lib)).1.hash
+}
+
+/// The effective skills of the selection `sel` (PLAN §8.6), with the
+/// source of each. `None` for `lib`: the daemon has no config repo, and
+/// no skill.
+pub fn effective(lib: Option<&Path>, sel: core::Selection<'_>) -> Vec<core::EffectiveSkill> {
+    lib.map(|l| sel.effective_in(l)).unwrap_or_default()
+}
+
+/// The skill names of the library and its default-on skills, read once
+/// for many [`core::Selection::effective`] calls.
+#[derive(Debug, Clone, Default)]
+pub struct LibraryIndex {
+    pub names: Vec<String>,
+    pub default_on: Vec<String>,
+}
+
+impl LibraryIndex {
+    pub fn read(lib: Option<&Path>) -> Self {
+        lib.map(|l| Self {
+            names: core::library_names(l),
+            default_on: core::default_names(l),
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn effective(&self, sel: core::Selection<'_>) -> Vec<core::EffectiveSkill> {
+        sel.effective(&self.names, &self.default_on)
+    }
 }
 
 /// The record of the last delivery of agent `private_dir`, if any.
@@ -354,10 +389,11 @@ pub fn delivered(private_dir: &Path) -> Option<core::Delivery> {
     serde_json::from_str(&text).ok()
 }
 
-/// Is the skill set of a running agent out of date: the library or the
-/// agent's list changed after its start? `false` when there is no record.
-pub fn restart_needed(lib: &Path, private_dir: &Path, assigned: &[String]) -> bool {
-    delivered(private_dir).is_some_and(|d| d.hash != current_hash(lib, assigned))
+/// Is the skill set of a running agent out of date: the library (a skill,
+/// or the default-on marker of a skill) or the agent's skill settings
+/// changed after its start? `false` when there is no record.
+pub fn restart_needed(lib: &Path, private_dir: &Path, sel: core::Selection<'_>) -> bool {
+    delivered(private_dir).is_some_and(|d| d.hash != current_hash(lib, sel))
 }
 
 #[cfg(test)]
@@ -488,8 +524,23 @@ mod tests {
         b.description = Some("d".into());
         write(&lib, "a", &b, true).expect("create");
         let assigned = vec!["a".to_owned()];
+        let sel = |skills: &'static [&'static str], default_skills: bool| {
+            let skills: Vec<String> = skills.iter().map(|s| (*s).to_owned()).collect();
+            (skills, default_skills)
+        };
+        let check = |(skills, default_skills): (Vec<String>, bool)| {
+            restart_needed(
+                &lib,
+                &private,
+                core::Selection {
+                    skills: &skills,
+                    off: &[],
+                    default_skills,
+                },
+            )
+        };
         // No record: no restart.
-        assert!(!restart_needed(&lib, &private, &assigned));
+        assert!(!check(sel(&["a"], true)));
         let dest = d.path().join("harness/skills");
         let rec = core::deliver(&lib, &assigned, &dest).expect("deliver");
         std::fs::write(
@@ -497,11 +548,31 @@ mod tests {
             serde_json::to_vec(&rec).expect("json"),
         )
         .expect("write");
-        assert!(!restart_needed(&lib, &private, &assigned));
+        assert!(!check(sel(&["a"], true)));
         // A change of the skill, or of the list.
         let md = "---\nname: a\ndescription: new\n---\n";
         write(&lib, "a", &body(Some(md), None), false).expect("put");
-        assert!(restart_needed(&lib, &private, &assigned));
-        assert!(restart_needed(&lib, &private, &[]));
+        assert!(check(sel(&["a"], true)));
+        assert!(check(sel(&[], true)));
+        // A new default-on skill: a running agent with no change of its
+        // own needs a restart to get it; an agent with `default_skills =
+        // false` does not.
+        let rec = core::deliver(&lib, &assigned, &dest).expect("deliver");
+        std::fs::write(
+            private.join(DELIVERED_FILE),
+            serde_json::to_vec(&rec).expect("json"),
+        )
+        .expect("write");
+        assert!(!check(sel(&["a"], true)));
+        let platform =
+            "---\nname: platform\ndescription: d\nmetadata:\n  terrarium-default: \"true\"\n---\n";
+        write(&lib, "platform", &body(Some(platform), None), true).expect("create");
+        assert!(check(sel(&["a"], true)));
+        assert!(!check(sel(&["a"], false)));
+        assert!(
+            list(&lib)
+                .iter()
+                .any(|s| s.name == "platform" && s.default_on)
+        );
     }
 }

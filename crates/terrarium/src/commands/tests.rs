@@ -7940,3 +7940,101 @@ async fn test_runs() {
     )
     .await;
 }
+
+/// PLAN §8.6: the default skill flags send `skills_off` and
+/// `default_skills`; `agent show` prints the effective skills on one line.
+#[tokio::test]
+async fn default_skill_flags_and_effective_skills() {
+    use Method::*;
+    ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "agent",
+            "new",
+            "w",
+            "--harness",
+            "claude",
+            "--skill-off",
+            "terrarium-db",
+            "--no-default-skills",
+        ],
+        vec![(201, json!({}))],
+        vec![(
+            Post,
+            "/api/agents",
+            vec![],
+            Some(json!({"name": "w", "project": "terra", "harness": "claude",
+                        "skills_off": ["terrarium-db"], "default_skills": false})),
+        )],
+    )
+    .await;
+    for (args, want) in [
+        (
+            &["agent", "set", "w", "--skill-off", "a", "--skill-off", "b"][..],
+            json!({"skills_off": ["a", "b"]}),
+        ),
+        (
+            &[
+                "agent",
+                "set",
+                "w",
+                "--skills-off-clear",
+                "--default-skills",
+            ][..],
+            json!({"skills_off": [], "default_skills": true}),
+        ),
+        (
+            &["agent", "set", "w", "--no-default-skills"][..],
+            json!({"default_skills": false}),
+        ),
+    ] {
+        ok(
+            false,
+            args,
+            vec![(200, json!({}))],
+            vec![(Patch, "/api/agents/w", vec![], Some(want))],
+        )
+        .await;
+    }
+    ok(
+        false,
+        &[
+            "template",
+            "new",
+            "rev",
+            "--harness",
+            "claude",
+            "--skill-off",
+            "terrarium-spawn",
+            "--no-default-skills",
+        ],
+        vec![(201, json!({}))],
+        vec![(
+            Post,
+            "/api/templates",
+            vec![],
+            Some(json!({"name": "rev",
+                        "spec": {"harness": "claude", "skills_off": ["terrarium-spawn"],
+                                 "default_skills": false}})),
+        )],
+    )
+    .await;
+    let out = ok(
+        false,
+        &["agent", "show", "w"],
+        vec![(
+            200,
+            json!({"name": "w", "effective_skills": [
+                {"name": "fern-check", "source": "explicit"},
+                {"name": "terrarium-db", "source": "default"}]}),
+        )],
+        vec![req(Get, "/api/agents/w")],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "effective_skills  fern-check (explicit), terrarium-db (default)\nname              w\n"
+    );
+}

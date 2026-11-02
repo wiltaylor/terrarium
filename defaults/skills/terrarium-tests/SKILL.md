@@ -1,6 +1,8 @@
 ---
 name: terrarium-tests
-description: Prove test results with `terrarium test push`. Make a standard test result file (JUnit XML, TRX, CTRF, libtest JSON, Vitest or Jest JSON, TAP) with your test framework, upload it, and link it to the card or the version. Use it after each test run that proves work, before you move a card to review, and before you submit a version.
+description: Push test result files (JUnit XML, TRX, CTRF, libtest JSON, Vitest, Jest, TAP) with `terrarium test push`, and link them to the card or the version. Do it after each test run that proves work.
+metadata:
+  terrarium-default: "true"
 ---
 
 # Test results in Terrarium

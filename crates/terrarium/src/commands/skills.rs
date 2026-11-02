@@ -32,6 +32,7 @@ pub async fn skill(ctx: &Ctx, cmd: &SkillCmd) -> anyhow::Result<()> {
                     .into_iter()
                     .map(|mut s| {
                         let n = s["errors"].as_array().map_or(0, Vec::len);
+                        s["default"] = if s["default_on"] == true { "on" } else { "-" }.into();
                         s["status"] = if n == 0 {
                             "ok".into()
                         } else {
@@ -46,6 +47,7 @@ pub async fn skill(ctx: &Ctx, cmd: &SkillCmd) -> anyhow::Result<()> {
                     &[
                         ("NAME", "name"),
                         ("FILES", "files"),
+                        ("DEFAULT", "default"),
                         ("STATUS", "status"),
                         ("DESCRIPTION", "description"),
                     ],
@@ -156,7 +158,13 @@ pub async fn skill(ctx: &Ctx, cmd: &SkillCmd) -> anyhow::Result<()> {
                         rows.push(json!({
                             "kind": kind,
                             "name": u["name"],
-                            "via": if u["all"] == true { "*" } else { "name" },
+                            "via": if u["default"] == true {
+                                "default"
+                            } else if u["all"] == true {
+                                "*"
+                            } else {
+                                "name"
+                            },
                         }));
                     }
                 }

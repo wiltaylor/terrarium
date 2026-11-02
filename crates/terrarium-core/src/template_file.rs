@@ -63,6 +63,8 @@ const FIELDS: &[(&str, Kind)] = &[
     ("compact_on_idle", Kind::Bool),
     ("compact_max_age", Kind::Text),
     ("skills", Kind::List),
+    ("skills_off", Kind::List),
+    ("default_skills", Kind::Bool),
     ("new_session_on_prompt_change", Kind::Bool),
     ("system_prompt", Kind::Text),
 ];
@@ -568,6 +570,8 @@ mod tests {
             "compact_on_idle": true,
             "compact_max_age": "6h",
             "skills": ["fern-check", "*"],
+            "skills_off": ["terrarium-db"],
+            "default_skills": false,
             "new_session_on_prompt_change": false,
             "system_prompt": "You are a worker.\n\n  Indented line with ${not_a_slot} and \\d.\nPROMPT\nLast line.\n",
             "policy": {"targets": ["box"], "mail_to": ["lead", "*"], "cross_project": ["ops/*"]},

@@ -45,7 +45,8 @@ pub fn library_opt(state: &Shared) -> Option<std::path::PathBuf> {
 }
 
 /// The skills an agent caller may read: `None` for all (the operator, a
-/// sysadmin), else the names its own `skills` list picks.
+/// sysadmin), else its own effective skills (the default-on skills and
+/// its `skills`, less `skills_off`).
 async fn visible(
     state: &Shared,
     actor: &Actor,
@@ -58,15 +59,18 @@ async fn visible(
         return Ok(None);
     }
     let id = a.id.clone();
-    let assigned = state
+    let agent = state
         .db
         .read(move |c| crate::store::agents::get(c, &id))
         .await?
-        .agent
-        .skills;
-    let names = terrarium_core::skills::library_names(lib);
+        .agent;
     Ok(Some(
-        terrarium_core::skills::resolve(&assigned, &names).wanted,
+        agent
+            .skill_selection()
+            .effective_in(lib)
+            .into_iter()
+            .map(|e| e.name)
+            .collect(),
     ))
 }
 
@@ -180,6 +184,9 @@ struct User {
     name: String,
     /// `true` when the list names the skill through `*`.
     all: bool,
+    /// `true` when the user gets the skill only because it is default on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    default: bool,
 }
 
 /// `GET /api/skills/{name}/usage`.
@@ -196,17 +203,18 @@ async fn usage(
 ) -> ApiResult<Json<Usage>> {
     policy::sysadmin(&actor, "reading the users of a skill")?;
     terrarium_core::skills::check_name(&name).map_err(ApiError::invalid)?;
+    let index = skills::LibraryIndex::read(library_opt(&state).as_deref());
     let u = state
         .db
         .read(move |c| {
-            let pick = |list: &[String]| -> Option<bool> {
-                if list.contains(&name) {
-                    Some(false)
-                } else if list.iter().any(|n| n == terrarium_core::skills::ALL) {
-                    Some(true)
-                } else {
-                    None
-                }
+            use terrarium_core::skills::{ALL, Selection, Source};
+            // `Some((all, default))` when the selection gives the skill.
+            let pick = |sel: Selection<'_>| -> Option<(bool, bool)> {
+                let e = index.effective(sel).into_iter().find(|e| e.name == name)?;
+                Some((
+                    !sel.skills.contains(&name) && sel.skills.iter().any(|n| n == ALL),
+                    e.source == Source::Default,
+                ))
             };
             let page = crate::store::Page {
                 limit: Some(crate::store::Page::MAX),
@@ -221,11 +229,12 @@ async fn usage(
                 };
                 let rows = crate::store::agents::list(c, None, &p)?;
                 for v in &rows.items {
-                    if let Some(all) = pick(&v.agent.skills) {
+                    if let Some((all, default)) = pick(v.agent.skill_selection()) {
                         agents.push(User {
                             id: v.agent.id.to_string(),
                             name: format!("{}/{}", v.agent.project, v.agent.name),
                             all,
+                            default,
                         });
                     }
                 }
@@ -240,12 +249,13 @@ async fn usage(
                 ..Default::default()
             };
             for t in crate::store::templates::list(c, &all)? {
-                let list: Vec<String> = t
-                    .spec
-                    .get("skills")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                if let Some(all) = pick(&list) {
+                let (list, off, default_skills) = t.skill_settings();
+                let sel = Selection {
+                    skills: &list,
+                    off: &off,
+                    default_skills,
+                };
+                if let Some((all, default)) = pick(sel) {
                     templates.push(User {
                         id: t.id.clone(),
                         name: match &t.project {
@@ -253,6 +263,7 @@ async fn usage(
                             None => t.name.clone(),
                         },
                         all,
+                        default,
                     });
                 }
             }

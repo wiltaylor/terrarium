@@ -9,7 +9,7 @@
 // daemon with no config repo (`501 not_available`).
 
 import type { Api } from "../client";
-import type { SkillDetail, SkillFileBody, SkillSummary, SkillUsage } from "../types";
+import type { AgentDef, EffectiveSkill, SkillDetail, SkillFileBody, SkillSummary, SkillUsage } from "../types";
 import type { MockWorld } from "./data";
 import type { ScheduleCaller } from "./schedules";
 
@@ -64,6 +64,21 @@ export function frontMatter(md: string): { name: string; description: string } |
     if (kv) out[kv[1] as "name" | "description"] = kv[2]!.trim().replace(/^(["'])(.*)\1$/, "$2");
   }
   return out;
+}
+
+/** True when the front matter marks the skill default on: `metadata:` then `  terrarium-default: "true"`. */
+export function defaultOn(md: string): boolean {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(md);
+  if (!m) return false;
+  const lines = m[1]!.split(/\r?\n/);
+  const i = lines.findIndex((l) => /^metadata:\s*$/.test(l));
+  if (i < 0) return /^metadata:\s*\{[^}]*terrarium-default:\s*["']?(true|yes)["']?/m.test(m[1]!);
+  for (const l of lines.slice(i + 1)) {
+    if (!/^\s/.test(l)) break;
+    const kv = /^\s+terrarium-default:\s*["']?(\w+)["']?\s*$/.exec(l);
+    if (kv) return ["true", "yes"].includes(kv[1]!.toLowerCase());
+  }
+  return false;
 }
 
 /** A new SKILL.md with `name` and `description`. */
@@ -136,6 +151,14 @@ function seedSkills(): Map<string, Stored> {
     skill_md: "---\nname: release-notes\ndescription: Write release notes from the merged cards of a version. Use plain words and short lines.\n---\n\n# Release notes\n\nRead the cards in `done`. Write one line for each card.\n",
     files: new Map([["scripts/collect.sh", { text: "#!/bin/sh\nterrarium card list --column done\n", size: 0 }]]),
   });
+  m.set("terrarium-db", {
+    skill_md: '---\nname: terrarium-db\ndescription: Keep structured data of the project in the Terrarium DB with `terrarium db`.\nmetadata:\n  terrarium-default: "true"\n---\n\n# The Terrarium DB\n\nUse the DB for structured data that repeats.\n',
+    files: new Map(),
+  });
+  m.set("terrarium-tests", {
+    skill_md: '---\nname: terrarium-tests\ndescription: Prove test results with `terrarium test push`.\nmetadata:\n  terrarium-default: "true"\n---\n\n# Test results in Terrarium\n\nPush the result file of each test run.\n',
+    files: new Map(),
+  });
   m.set("broken-skill", {
     skill_md: "---\nname: Broken_Skill\ndescription: <b>An old skill</b> with a bad name.\n---\n\nThis skill fails the checks.\n",
     files: new Map([["run.exe", { text: "MZ", size: 2 }]]),
@@ -145,7 +168,7 @@ function seedSkills(): Map<string, Stored> {
 }
 
 /** The skills part of the mock: the API, and the names an agent may use. */
-export function createSkillMock(c: SkillMockContext): { api: Api["skills"]; names: () => string[] } {
+export function createSkillMock(c: SkillMockContext): { api: Api["skills"]; names: () => string[]; effective: (sel: Partial<Pick<AgentDef, "skills" | "skills_off" | "default_skills">>) => EffectiveSkill[] } {
   const { w, fail } = c;
   const lib = seedSkills();
   const available = () => c.available !== false;
@@ -165,6 +188,7 @@ export function createSkillMock(c: SkillMockContext): { api: Api["skills"]; name
       description: frontMatter(s.skill_md)?.description ?? "",
       files: s.files.size + 1,
       bytes: utf8(s.skill_md) + [...s.files.values()].reduce((n, f) => n + f.size, 0),
+      ...(defaultOn(s.skill_md) ? { default_on: true } : {}),
       ...(errors.length ? { errors } : {}),
     };
   };
@@ -232,19 +256,35 @@ export function createSkillMock(c: SkillMockContext): { api: Api["skills"]; name
         need();
         if (!isAdmin()) fail(403, "forbidden", "reading the users of a skill needs sysadmin or the operator");
         if (!NAME_RE.test(name)) fail(422, "invalid", `the name \`${name}\` is not valid`);
-        const pick = (list: string[] | undefined): boolean | null => (list?.includes(name) ? false : list?.includes(ALL_SKILLS) ? true : null);
+        const pick = (sel: Partial<Pick<AgentDef, "skills" | "skills_off" | "default_skills">>): { all: boolean; default?: true } | null => {
+          const e = effective(sel).find((x) => x.name === name);
+          if (!e) return null;
+          const all = !sel.skills?.includes(name) && !!sel.skills?.includes(ALL_SKILLS);
+          return e.source === "default" ? { all, default: true } : { all };
+        };
         const agents = w.agents.flatMap((a) => {
-          const all = pick(a.skills);
-          return all === null ? [] : [{ id: a.id, name: `${a.project}/${a.name}`, all }];
+          const p = pick(a);
+          return p === null ? [] : [{ id: a.id, name: `${a.project}/${a.name}`, ...p }];
         });
         const templates = w.templates.flatMap((t) => {
-          const all = pick(t.spec.skills);
-          return all === null ? [] : [{ id: t.id, name: t.project ? `${t.project}/${t.name}` : t.name, all }];
+          const p = pick(t.spec);
+          return p === null ? [] : [{ id: t.id, name: t.project ? `${t.project}/${t.name}` : t.name, ...p }];
         });
         return { agents, templates };
       }),
   };
-  return { api, names: () => (available() ? [...lib.keys()] : []) };
+  /** The effective skills of a selection, as the daemon computes them (`terrarium_core::skills::Selection::effective`). */
+  function effective(sel: Partial<Pick<AgentDef, "skills" | "skills_off" | "default_skills">>): EffectiveSkill[] {
+    if (!available()) return [];
+    const names = [...lib.keys()].sort((a, b) => a.localeCompare(b));
+    const out = new Map<string, EffectiveSkill["source"]>();
+    if (sel.default_skills !== false) for (const n of names) if (defaultOn(lib.get(n)!.skill_md)) out.set(n, "default");
+    const explicit = sel.skills?.includes(ALL_SKILLS) ? names : (sel.skills ?? []).filter((n) => lib.has(n));
+    for (const n of explicit) out.set(n, "explicit");
+    for (const n of sel.skills_off ?? []) out.delete(n);
+    return [...out.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, source]) => ({ name, source }));
+  }
+  return { api, names: () => (available() ? [...lib.keys()] : []), effective };
 }
 
 /** The daemon's check of a skill list on an agent or a template: a message on an unknown name, else null. */

@@ -439,12 +439,31 @@ pub struct AgentDef {
     /// names, or `*` for every skill of the library. Default none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
+    /// The skills that the agent does not get (PLAN §8.6): a default-on
+    /// skill, or a skill of `skills`. Default none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills_off: Vec<String>,
+    /// Give the agent the default-on skills of the library (PLAN §8.6).
+    /// False: only the skills of `skills`. Default true.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub default_skills: bool,
     /// Start a fresh session, not a resume, when the rendered prompt
     /// changed and the harness keeps the prompt of a session
     /// (`Adapter::prompt_frozen_on_resume`, for example Codex). The old
     /// session stays in the history. Default true.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub new_session_on_prompt_change: bool,
+}
+
+impl AgentDef {
+    /// The skill settings of the definition (PLAN §8.6).
+    pub fn skill_selection(&self) -> crate::skills::Selection<'_> {
+        crate::skills::Selection {
+            skills: &self.skills,
+            off: &self.skills_off,
+            default_skills: self.default_skills,
+        }
+    }
 }
 
 fn yes() -> bool {

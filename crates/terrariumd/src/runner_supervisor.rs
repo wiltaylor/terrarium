@@ -1598,13 +1598,15 @@ impl RunnerSupervisor {
                 let path = dirs.1.join("prompt.md");
                 std::fs::write(&path, text)
                     .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-                // The agent's skills (PLAN §8.6): a fresh copy in
-                // `harness/skills/` at each start, which the sandbox binds
-                // read-only, and the record for "restart to apply".
+                // The agent's effective skills (PLAN §8.6: the default-on
+                // skills and its `skills`, less `skills_off`): a fresh copy
+                // in `harness/skills/` at each start, which the sandbox
+                // binds read-only, and the record for "restart to apply".
                 let skills_dir = terrarium_core::skills::delivered_dir(&dirs.1);
                 let no_library = dirs.1.join(".no-skill-library");
                 let library = skill_library.as_deref().unwrap_or(&no_library);
-                let delivery = terrarium_core::skills::deliver(library, &a.skills, &skills_dir)?;
+                let assigned = a.skill_selection().assigned_in(library);
+                let delivery = terrarium_core::skills::deliver(library, &assigned, &skills_dir)?;
                 let record = dirs.2.join(crate::skills::DELIVERED_FILE);
                 let json = serde_json::to_vec(&delivery).map_err(|e| e.to_string())?;
                 safefs::write_private(&record, &json).map_err(|e| {
@@ -5023,7 +5025,8 @@ mod tests {
         assert!(e.contains("line 3"), "{e}");
     }
 
-    /// PLAN §8.6: each start copies only the agent's skills into
+    /// PLAN §8.6: each start copies only the agent's effective skills (the
+    /// default-on skills and its `skills`, less `skills_off`) into
     /// `harness/skills/`, records the delivery in `private/`, and the
     /// adapter gives the harness the skills and the skill tool. An agent
     /// without skills gets an empty dir and no skill tool.
@@ -5045,6 +5048,14 @@ mod tests {
             )
             .unwrap();
         }
+        // A default-on skill: each agent gets it unless it turns it off.
+        let platform = repo.join("skills/platform");
+        std::fs::create_dir_all(&platform).unwrap();
+        std::fs::write(
+            platform.join("SKILL.md"),
+            "---\nname: platform\ndescription: d\nmetadata:\n  terrarium-default: \"true\"\n---\nbody\n",
+        )
+        .unwrap();
         let mut cfg = RunnerSupervisorConfig::new(
             state.clone(),
             tmp.path().join("run"),
@@ -5057,13 +5068,17 @@ mod tests {
         );
         cfg.config_repo = Some(repo.clone());
         let sup = RunnerSupervisor::new(cfg);
-        let agent = |name: &str, skills: serde_json::Value| {
-            let def: terrarium_core::config::AgentDef = serde_json::from_value(
-                serde_json::json!({"name": name, "project": "p", "harness": "claude",
-                                   "skills": skills}),
-            )
-            .unwrap();
+        let agent_with = |name: &str, skills: serde_json::Value, more: serde_json::Value| {
+            let mut v = serde_json::json!({"name": name, "project": "p", "harness": "claude",
+                                           "skills": skills});
+            if let (Some(o), Some(m)) = (v.as_object_mut(), more.as_object()) {
+                o.extend(m.clone());
+            }
+            let def: terrarium_core::config::AgentDef = serde_json::from_value(v).unwrap();
             Agent::from_def(&def, &state)
+        };
+        let agent = |name: &str, skills: serde_json::Value| {
+            agent_with(name, skills, serde_json::json!({"default_skills": false}))
         };
         let value_after = |spec: &LaunchSpec, flag: &str| {
             let i = spec.args.iter().position(|a| a == flag)?;
@@ -5097,13 +5112,41 @@ mod tests {
         // makes it stale.
         let private = terrarium_runner::private_dir(&state, with.id);
         let lib = crate::skills::library_dir(&repo);
-        assert!(!crate::skills::restart_needed(&lib, &private, &with.skills));
+        assert!(!crate::skills::restart_needed(
+            &lib,
+            &private,
+            with.skill_selection()
+        ));
         std::fs::write(
             lib.join("fern-check/SKILL.md"),
             "---\nname: fern-check\ndescription: new\n---\n",
         )
         .unwrap();
-        assert!(crate::skills::restart_needed(&lib, &private, &with.skills));
+        assert!(crate::skills::restart_needed(
+            &lib,
+            &private,
+            with.skill_selection()
+        ));
+
+        // The default-on skill comes with no `skills` list; `skills_off`
+        // takes it out again.
+        let defaults = agent_with(
+            "defaults",
+            serde_json::json!(["other"]),
+            serde_json::json!({}),
+        );
+        sup.launch_spec(&defaults, None).await.unwrap();
+        let record = crate::skills::delivered(&terrarium_runner::private_dir(&state, defaults.id))
+            .expect("record");
+        assert_eq!(record.names, ["other", "platform"]);
+        let off = agent_with(
+            "off",
+            serde_json::json!([]),
+            serde_json::json!({"skills_off": ["platform"]}),
+        );
+        sup.launch_spec(&off, None).await.unwrap();
+        let delivered = terrarium_runner::harness_dir(&state, off.id).join("skills");
+        assert_eq!(std::fs::read_dir(&delivered).unwrap().count(), 0);
 
         let without = agent("without", serde_json::json!([]));
         let spec = sup.launch_spec(&without, None).await.unwrap();

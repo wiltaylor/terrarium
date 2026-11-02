@@ -193,7 +193,7 @@ export function AgentFields(props: {
       </fieldset>
 
       <SystemPromptSelect value={{ persona: v().persona, system_prompt: v().system_prompt }} roles={v().roles} onChange={(f) => props.onChange({ ...v(), ...f })} />
-      <SkillsPicker value={v().skills} onChange={(s) => set("skills", s)} />
+      <SkillsPicker value={{ skills: v().skills, skills_off: v().skills_off, default_skills: v().default_skills }} onChange={(s) => props.onChange({ ...v(), ...s })} />
 
       <Show when={props.roles} fallback={<Show when={props.rolesNote}>{(n) => <p class="muted small">{n()}</p>}</Show>}>
         <fieldset class="row">

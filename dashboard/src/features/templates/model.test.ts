@@ -168,4 +168,18 @@ describe("template model", () => {
     expect(applyTemplate(t.spec, { name: "w1", project: "p", template: "w" }).skills).toEqual(["fern-check"]);
     expect(formToCreate({ ...form, skills: [] }, null)).not.toHaveProperty("skills");
   });
+
+  it("copies skills_off and default_skills from a template, and a create that differs sends them", () => {
+    const t = tpl("w", "p", { spec: { ...tpl("w", "p").spec, skills_off: ["terrarium-db"], default_skills: false } });
+    const form = specToForm(t.spec, "p", "w1");
+    expect(form).toMatchObject({ skills_off: ["terrarium-db"], default_skills: false });
+    expect(formToSpec(form)).toMatchObject({ skills_off: ["terrarium-db"], default_skills: false });
+    expect(formToSpec(specToForm(tpl("w", "p").spec))).not.toHaveProperty("default_skills");
+    const pick = { key: "w", base: form };
+    expect(formToCreate(form, pick)).not.toHaveProperty("skills_off");
+    expect(formToCreate({ ...form, default_skills: true, skills_off: [] }, pick)).toMatchObject({ default_skills: true, skills_off: [] });
+    const tf = templateToForm(t);
+    expect(formToTemplatePatch(t, tf)).toEqual({});
+    expect(formToTemplatePatch(t, { ...tf, agent: { ...tf.agent, default_skills: true } }).spec).not.toHaveProperty("default_skills");
+  });
 });

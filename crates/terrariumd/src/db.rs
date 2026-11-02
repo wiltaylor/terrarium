@@ -1582,6 +1582,16 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE agents ADD COLUMN pending_reset TEXT;
     "#,
+    // 53: the default skills of an agent (PLAN §8.6): `skills_off`, a JSON
+    // array of the skill names that the agent does not get, and
+    // `default_skills`, 0 to turn off every default-on skill of the
+    // library. An agent from before keeps its `skills` and gets the
+    // default-on skills. Self-contained: when another branch takes number
+    // 53, move this entry to the end of the list.
+    r#"
+    ALTER TABLE agents ADD COLUMN skills_off TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE agents ADD COLUMN default_skills INTEGER NOT NULL DEFAULT 1;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

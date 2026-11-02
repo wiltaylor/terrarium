@@ -248,6 +248,24 @@ pub fn print_object(ctx: &Ctx, v: &Value) {
     }
 }
 
+/// `v` with `effective_skills` (PLAN §8.6) as one line: `name (source)`
+/// for each skill, or `-` for none. Unchanged when `v` has no such field.
+pub fn with_effective_skills_text(v: &Value) -> Value {
+    let mut out = v.clone();
+    if let Some(list) = v["effective_skills"].as_array() {
+        let text = if list.is_empty() {
+            "-".to_owned()
+        } else {
+            list.iter()
+                .map(|e| format!("{} ({})", field(e, "name"), field(e, "source")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        out["effective_skills"] = text.into();
+    }
+    out
+}
+
 /// `v` as [`print_object`], with the long text field `key` (for example
 /// `system_prompt`) left out of the table and printed in full after it.
 pub fn print_object_with_text(ctx: &Ctx, v: &Value, key: &str) {

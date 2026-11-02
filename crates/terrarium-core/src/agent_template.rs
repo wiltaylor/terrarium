@@ -42,6 +42,8 @@ pub const SPEC_KEYS: &[&str] = &[
     "compact_on_idle",
     "compact_max_age",
     "skills",
+    "skills_off",
+    "default_skills",
     "new_session_on_prompt_change",
 ];
 
@@ -123,6 +125,7 @@ pub fn to_def(spec: &Spec, name: &str, project: &str) -> Result<AgentDef, String
     def.system_prompt = crate::config::clean_system_prompt(def.system_prompt)?;
     def.persona = crate::config::clean_persona(def.persona)?;
     def.skills = crate::skills::clean_list(&def.skills)?;
+    def.skills_off = crate::skills::clean_off_list(&def.skills_off)?;
     Ok(def)
 }
 
@@ -232,6 +235,8 @@ fn full(def: &AgentDef) -> Spec {
     m.insert("compact_on_idle".into(), to(&def.compact_on_idle));
     m.insert("compact_max_age".into(), to(&def.compact_max_age));
     m.insert("skills".into(), to(&def.skills));
+    m.insert("skills_off".into(), to(&def.skills_off));
+    m.insert("default_skills".into(), Value::Bool(def.default_skills));
     m.insert(
         "new_session_on_prompt_change".into(),
         Value::Bool(def.new_session_on_prompt_change),
@@ -321,6 +326,29 @@ mod tests {
             let e = normalize(&spec(bad.clone())).unwrap_err();
             assert!(e.contains(why), "{bad}: {e}");
         }
+    }
+
+    /// PLAN §8.6: a create copies `skills_off` and `default_skills` from
+    /// the template; the body wins over each.
+    #[test]
+    fn skill_settings_copy_from_the_template() {
+        let t = spec(json!({"harness": "claude", "skills": ["a"],
+                            "skills_off": ["terrarium-db"], "default_skills": false}));
+        let def = to_def(&merge(&t, &Spec::new()), "w", "p").unwrap();
+        assert_eq!(def.skills, ["a"]);
+        assert_eq!(def.skills_off, ["terrarium-db"]);
+        assert!(!def.default_skills);
+        let body = spec(json!({"default_skills": true, "skills_off": null}));
+        let def = to_def(&merge(&t, &body), "w", "p").unwrap();
+        assert!(def.default_skills);
+        assert!(def.skills_off.is_empty());
+        // The normal form writes `default_skills` only when it is false.
+        let n = normalize(&t).unwrap();
+        assert_eq!(n.get("default_skills"), Some(&json!(false)));
+        let n = normalize(&spec(json!({"harness": "claude"}))).unwrap();
+        assert!(!n.contains_key("default_skills") && !n.contains_key("skills_off"));
+        let e = normalize(&spec(json!({"harness": "claude", "skills_off": ["*"]}))).unwrap_err();
+        assert!(e.contains("default_skills"), "{e}");
     }
 
     #[test]

@@ -8,11 +8,17 @@
 //! `references/`, `assets/`). The library is `<config repo>/skills/`.
 //! Terrarium ships no skill.
 //!
-//! An agent, a template, or a fleet entry names its skills in `skills`
-//! (default none; `"*"` is every skill of the library). At each start the
-//! daemon copies only those skills into `<harness dir>/skills/`
-//! ([`deliver`]), which the sandbox binds read-only, and each adapter
-//! points its harness there.
+//! A skill can be "default on": its front matter has
+//! `metadata: {terrarium-default: "true"}` ([`DEFAULT_KEY`]). The packaged
+//! skills are default on. An agent, a template, or a fleet entry names
+//! its explicit skills in `skills` (`"*"` is every skill of the library),
+//! the default-on skills that it does not want in `skills_off`, and
+//! `default_skills = false` turns off all default-on skills. The
+//! effective set ([`effective`]) is (default-on skills, when
+//! `default_skills`) + (explicit skills) - (`skills_off`). At each start
+//! the daemon copies only the effective skills into
+//! `<harness dir>/skills/` ([`deliver`]), which the sandbox binds
+//! read-only, and each adapter points its harness there.
 //!
 //! The checks ([`check`]) run on each write through the API and at each
 //! delivery. A skill that fails them is not delivered.
@@ -31,6 +37,9 @@ pub const DELIVERED_DIR: &str = "skills";
 pub const SKILL_FILE: &str = "SKILL.md";
 /// The name in a `skills` list that means "every skill of the library".
 pub const ALL: &str = "*";
+/// The key in the `metadata` map of the front matter that makes a skill
+/// default on: `metadata:` then `  terrarium-default: "true"`.
+pub const DEFAULT_KEY: &str = "terrarium-default";
 /// The suffix of a new packaged default next to the operator's file
 /// (PLAN §8.3). The skill reader skips such a file.
 pub const NEW_DEFAULT_SUFFIX: &str = ".new";
@@ -59,6 +68,10 @@ pub type Files = BTreeMap<String, Vec<u8>>;
 pub struct Meta {
     pub name: String,
     pub description: String,
+    /// The skill is default on: `metadata.terrarium-default` is `true`
+    /// ([`DEFAULT_KEY`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default_on: bool,
 }
 
 /// Is `name` a valid skill name? Lowercase letters, digits, and single
@@ -146,10 +159,11 @@ fn unquote(v: &str) -> String {
     v.to_owned()
 }
 
-/// Read `name` and `description` from the YAML front matter of a
-/// `SKILL.md`. Only the top-level scalar keys are read: a plain, quoted,
-/// or block (`|`, `>`) value. Other keys (`license`, `metadata`, ...)
-/// may be there and are not read.
+/// Read `name`, `description`, and the default-on marker from the YAML
+/// front matter of a `SKILL.md`. The top-level scalar keys are read: a
+/// plain, quoted, or block (`|`, `>`) value. Of the `metadata` map, only
+/// the scalar [`DEFAULT_KEY`] is read. Other keys (`license`, ...) may be
+/// there and are not read.
 pub fn parse_front_matter(text: &str) -> Result<Meta, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.lines();
@@ -174,6 +188,7 @@ pub fn parse_front_matter(text: &str) -> Result<Meta, String> {
         ));
     }
     let mut keys: BTreeMap<String, String> = BTreeMap::new();
+    let mut metadata: BTreeMap<String, String> = BTreeMap::new();
     let mut i = 0;
     while i < body.len() {
         let line = body[i];
@@ -186,6 +201,26 @@ pub fn parse_front_matter(text: &str) -> Result<Meta, String> {
         };
         let k = k.trim().to_owned();
         let v = v.trim();
+        if k == "metadata" && v.is_empty() {
+            // A map: one `key: value` on each indented line.
+            while i < body.len() && (body[i].starts_with([' ', '\t']) || body[i].trim().is_empty())
+            {
+                if let Some((mk, mv)) = body[i].split_once(':') {
+                    metadata.insert(mk.trim().to_owned(), unquote(mv));
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if k == "metadata" && v.starts_with('{') && v.ends_with('}') {
+            // A flow map: `{terrarium-default: "true"}`.
+            for part in v[1..v.len() - 1].split(',') {
+                if let Some((mk, mv)) = part.split_once(':') {
+                    metadata.insert(unquote(mk), unquote(mv));
+                }
+            }
+            continue;
+        }
         if v.starts_with('|') || v.starts_with('>') {
             let mut parts = Vec::new();
             while i < body.len() && (body[i].starts_with([' ', '\t']) || body[i].trim().is_empty())
@@ -220,9 +255,13 @@ pub fn parse_front_matter(text: &str) -> Result<Meta, String> {
             "the front matter of {SKILL_FILE} has no `description`"
         ));
     }
+    let default_on = metadata
+        .get(DEFAULT_KEY)
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "yes"));
     Ok(Meta {
         name: name.trim().to_owned(),
         description: description.trim().to_owned(),
+        default_on,
     })
 }
 
@@ -391,6 +430,113 @@ pub fn library_names(library: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+/// The default-on skills of the library dir `library`, sorted: each skill
+/// whose `SKILL.md` front matter parses and has the marker
+/// ([`DEFAULT_KEY`]). The full checks run at delivery.
+pub fn default_names(library: &Path) -> Vec<String> {
+    library_names(library)
+        .into_iter()
+        .filter(|n| {
+            std::fs::read_to_string(library.join(n).join(SKILL_FILE))
+                .ok()
+                .and_then(|t| parse_front_matter(&t).ok())
+                .is_some_and(|m| m.default_on)
+        })
+        .collect()
+}
+
+/// Check a `skills_off` list and give it as it is stored: as
+/// [`clean_list`], but `*` is not valid (`default_skills = false` turns
+/// off every default-on skill). A name that the library does not have is
+/// valid: it has no effect.
+pub fn clean_off_list(list: &[String]) -> Result<Vec<String>, String> {
+    let out = clean_list(list)?;
+    if out.iter().any(|n| n == ALL) {
+        return Err(format!(
+            "`{ALL}` is not valid in `skills_off`; to turn off every default skill, set \
+             `default_skills` to false"
+        ));
+    }
+    Ok(out)
+}
+
+/// Why an agent has a skill: the skill is default on, or the agent's
+/// `skills` list names it (or has `*`). A skill that is both is
+/// `explicit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    Default,
+    Explicit,
+}
+
+/// One skill of the effective set of an agent or a template.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveSkill {
+    pub name: String,
+    pub source: Source,
+}
+
+/// The skill settings of an agent, a template, or a fleet entry: the
+/// explicit `skills`, `skills_off`, and `default_skills`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection<'a> {
+    pub skills: &'a [String],
+    pub off: &'a [String],
+    pub default_skills: bool,
+}
+
+impl Selection<'_> {
+    /// The effective set, sorted by name: (the default-on skills
+    /// `default_on`, when `default_skills`) + (the explicit skills that
+    /// the library names `library` has; `*` is all of them) - `off`.
+    pub fn effective(&self, library: &[String], default_on: &[String]) -> Vec<EffectiveSkill> {
+        let off = |n: &String| self.off.contains(n);
+        let mut out: BTreeMap<String, Source> = BTreeMap::new();
+        if self.default_skills {
+            for n in default_on.iter().filter(|n| library.contains(n) && !off(n)) {
+                out.insert(n.clone(), Source::Default);
+            }
+        }
+        for n in &resolve(self.skills, library).wanted {
+            if !off(n) {
+                out.insert(n.clone(), Source::Explicit);
+            }
+        }
+        out.into_iter()
+            .map(|(name, source)| EffectiveSkill { name, source })
+            .collect()
+    }
+
+    /// The names that a delivery copies: the effective set, and each
+    /// explicit name that the library does not have (the delivery
+    /// reports it as missing).
+    pub fn assigned(&self, library: &[String], default_on: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .effective(library, default_on)
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        out.extend(
+            resolve(self.skills, library)
+                .missing
+                .into_iter()
+                .filter(|n| !self.off.contains(n)),
+        );
+        out
+    }
+
+    /// [`Self::effective`] for the library dir `library`.
+    pub fn effective_in(&self, library: &Path) -> Vec<EffectiveSkill> {
+        self.effective(&library_names(library), &default_names(library))
+    }
+
+    /// [`Self::assigned`] for the library dir `library`.
+    pub fn assigned_in(&self, library: &Path) -> Vec<String> {
+        self.assigned(&library_names(library), &default_names(library))
+    }
 }
 
 /// The skills that a `skills` list picks from the library names `library`:
@@ -650,6 +796,80 @@ mod tests {
     }
 
     #[test]
+    fn the_default_marker_is_in_metadata() {
+        let block = "---\nname: a\ndescription: d\nmetadata:\n  terrarium-default: \"true\"\n  other: x\n---\n";
+        assert!(parse_front_matter(block).expect("block").default_on);
+        let flow = "---\nname: a\ndescription: d\nmetadata: {terrarium-default: true}\n---\n";
+        assert!(parse_front_matter(flow).expect("flow").default_on);
+        let off = "---\nname: a\ndescription: d\nmetadata:\n  terrarium-default: \"false\"\n---\n";
+        assert!(!parse_front_matter(off).expect("off").default_on);
+        // Only in `metadata`: a top-level key is not the marker.
+        let top = "---\nname: a\ndescription: d\nterrarium-default: true\n---\n";
+        assert!(!parse_front_matter(top).expect("top").default_on);
+        // A key after the map is read again.
+        let after = "---\nname: a\nmetadata:\n  terrarium-default: yes\ndescription: d\n---\n";
+        let m = parse_front_matter(after).expect("after");
+        assert!(m.default_on);
+        assert_eq!(m.description, "d");
+    }
+
+    fn sel<'a>(skills: &'a [String], off: &'a [String], default_skills: bool) -> Selection<'a> {
+        Selection {
+            skills,
+            off,
+            default_skills,
+        }
+    }
+
+    fn v(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_effective_set_is_defaults_and_explicit_minus_off() {
+        let lib = v(&["a", "b", "db", "tests"]);
+        let defaults = v(&["db", "tests", "gone-default"]);
+        let names = |e: Vec<EffectiveSkill>| {
+            e.into_iter()
+                .map(|e| format!("{}:{:?}", e.name, e.source))
+                .collect::<Vec<_>>()
+        };
+        // No settings: the default-on skills of the library.
+        assert_eq!(
+            names(sel(&[], &[], true).effective(&lib, &defaults)),
+            ["db:Default", "tests:Default"]
+        );
+        // Explicit skills come in; a default that is also explicit is explicit.
+        assert_eq!(
+            names(sel(&v(&["a", "db"]), &[], true).effective(&lib, &defaults)),
+            ["a:Explicit", "db:Explicit", "tests:Default"]
+        );
+        // `skills_off` takes out a default and an explicit skill.
+        assert_eq!(
+            names(sel(&v(&["a", "b"]), &v(&["tests", "b"]), true).effective(&lib, &defaults)),
+            ["a:Explicit", "db:Default"]
+        );
+        // `default_skills = false`: only the explicit skills.
+        assert_eq!(
+            names(sel(&v(&["a"]), &[], false).effective(&lib, &defaults)),
+            ["a:Explicit"]
+        );
+        assert!(sel(&[], &[], false).effective(&lib, &defaults).is_empty());
+        // `*` with an off list.
+        assert_eq!(
+            names(sel(&v(&["*"]), &v(&["b"]), false).effective(&lib, &defaults)),
+            ["a:Explicit", "db:Explicit", "tests:Explicit"]
+        );
+        // The delivery list keeps a missing explicit name, for the warning.
+        assert_eq!(
+            sel(&v(&["a", "nope"]), &[], true).assigned(&lib, &defaults),
+            ["a", "db", "tests", "nope"]
+        );
+        assert!(clean_off_list(&v(&["*"])).is_err());
+        assert_eq!(clean_off_list(&v(&[" a ", "a"])).expect("ok"), ["a"]);
+    }
+
+    #[test]
     fn a_valid_skill_passes() {
         let f = files(&[
             (SKILL_FILE, &md("fern-check", "When asked, reply FERN-42.")),
@@ -776,6 +996,25 @@ mod tests {
         let none = deliver(&lib, &[], &dest).expect("none");
         assert!(none.names.is_empty() && none.hash.is_empty());
         assert_eq!(std::fs::read_dir(&dest).expect("dir").count(), 0);
+
+        // A default-on skill comes with no `skills` list.
+        write_files(
+            &lib.join("platform"),
+            &files(&[(
+                SKILL_FILE,
+                b"---\nname: platform\ndescription: d\nmetadata:\n  terrarium-default: \"true\"\n---\n",
+            )]),
+        )
+        .expect("write");
+        assert_eq!(default_names(&lib), ["platform"]);
+        let s = sel(&[], &[], true);
+        let got_default = deliver(&lib, &s.assigned_in(&lib), &dest).expect("default");
+        assert_eq!(got_default.names, ["platform"]);
+        assert!(dest.join("platform/SKILL.md").is_file());
+        let off = v(&["platform"]);
+        let got_off = deliver(&lib, &sel(&[], &off, true).assigned_in(&lib), &dest).expect("off");
+        assert!(got_off.names.is_empty());
+        std::fs::remove_dir_all(lib.join("platform")).expect("rm");
 
         // The hash follows the content.
         let one = deliver(&lib, &["fern-check".into()], &dest).expect("one");

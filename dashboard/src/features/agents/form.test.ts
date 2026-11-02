@@ -112,6 +112,20 @@ describe("agent form", () => {
     expect(formToPatch(agent, { ...agentToForm(agent), skills: ["fern-check"] })).toEqual({ skills: ["fern-check"] });
   });
 
+  it("carries skills_off and default_skills: only when not the default, and in the patch when changed", () => {
+    const base = { ...emptyAgentForm("p"), name: "w" };
+    expect(base.skills_off).toEqual([]);
+    expect(base.default_skills).toBe(true);
+    expect(formToDef(base)).not.toHaveProperty("skills_off");
+    expect(formToDef(base)).not.toHaveProperty("default_skills");
+    expect(formToDef({ ...base, skills_off: ["terrarium-db"], default_skills: false })).toMatchObject({ skills_off: ["terrarium-db"], default_skills: false });
+    const off: Agent = { ...agent, skills_off: ["terrarium-db"], default_skills: false };
+    expect(agentToForm(off)).toMatchObject({ skills_off: ["terrarium-db"], default_skills: false });
+    expect(agentToForm(agent)).toMatchObject({ skills_off: [], default_skills: true });
+    expect(formToPatch(off, agentToForm(off))).toEqual({});
+    expect(formToPatch(off, { ...agentToForm(off), skills_off: [], default_skills: true })).toEqual({ skills_off: [], default_skills: true });
+  });
+
   it("takes off, 0, or a duration of d, h, m, and s parts as the idle stop; empty is the default", () => {
     for (const ok of ["", "  ", "off", "0", "90s", "30m", "2h", "1h30m", "1d2h3m4s", " 10m "]) expect(idleStopProblem(ok)).toBeNull();
     for (const bad of ["10", "m", "1.5h", "10 m", "1h 30m", "-5m", "10min", "OFF", "never", "1w"]) expect(idleStopProblem(bad)).toMatch(/Idle stop/);

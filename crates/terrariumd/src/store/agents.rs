@@ -49,6 +49,12 @@ pub struct AgentView {
     /// API fills it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skills_restart: bool,
+    /// The skills that the agent gets at its next start (PLAN §8.6): the
+    /// default-on skills of the library (when `default_skills`) and its
+    /// `skills`, less `skills_off`, with the source of each (`default` or
+    /// `explicit`). The API fills it.
+    #[serde(default)]
+    pub effective_skills: Vec<terrarium_core::skills::EffectiveSkill>,
     /// Nothing wakes the agent while it is paused (PLAN §18): its turns
     /// and mail wait. A pause stops a running agent.
     #[serde(default)]
@@ -147,6 +153,8 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             system_prompt: r.get("system_prompt")?,
             persona: r.get("persona")?,
             skills: json_col(&r.get::<_, String>("skills")?),
+            skills_off: json_col(&r.get::<_, String>("skills_off")?),
+            default_skills: r.get("default_skills")?,
             delivered_skills: Vec::new(),
             roles: Vec::new(),
             policy: serde_json::from_str(&policy).unwrap_or_default(),
@@ -172,6 +180,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
         waiting_on: None,
         harness_version: None,
         skills_restart: false,
+        effective_skills: Vec::new(),
         paused: r.get("paused")?,
         status_reason: r.get("status_reason")?,
         queued: 0,
@@ -655,12 +664,19 @@ fn check_def(def: &AgentDef) -> ApiResult<()> {
         terrarium_core::config::check_persona(p.trim()).map_err(ApiError::invalid)?;
     }
     terrarium_core::skills::clean_list(&def.skills).map_err(ApiError::invalid)?;
+    terrarium_core::skills::clean_off_list(&def.skills_off).map_err(ApiError::invalid)?;
     Ok(())
 }
 
 /// A skills list as the store keeps it (`terrarium_core::skills::clean_list`).
 fn stored_skills(list: &[String]) -> ApiResult<Vec<String>> {
     terrarium_core::skills::clean_list(list).map_err(ApiError::invalid)
+}
+
+/// A `skills_off` list as the store keeps it
+/// (`terrarium_core::skills::clean_off_list`).
+fn stored_skills_off(list: &[String]) -> ApiResult<Vec<String>> {
+    terrarium_core::skills::clean_off_list(list).map_err(ApiError::invalid)
 }
 
 /// The persona as the store keeps it: `None` for an empty name.
@@ -750,6 +766,7 @@ pub fn create_from(
     agent.system_prompt = stored_system_prompt(agent.system_prompt.as_ref()).cloned();
     agent.persona = stored_persona(agent.persona.as_ref());
     agent.skills = stored_skills(&agent.skills)?;
+    agent.skills_off = stored_skills_off(&agent.skills_off)?;
     let id = agent.id.to_string();
     let at = now();
     t.execute(
@@ -757,9 +774,9 @@ pub fn create_from(
                              restart, status, workspace, source, created_at, updated_at,
                              new_session_on_prompt_change, template, system_prompt,
                              subscription_pool, persona, skills, idle_stop,
-                             compact_on_idle, compact_max_age)
+                             compact_on_idle, compact_max_age, skills_off, default_skills)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13, ?14,
-                 ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             id,
             agent.name,
@@ -781,7 +798,9 @@ pub fn create_from(
             serde_json::to_string(&agent.skills)?,
             agent.idle_stop.map(IdleStop::as_text),
             agent.compact_on_idle,
-            agent.compact_max_age.map(CompactMaxAge::as_text)
+            agent.compact_max_age.map(CompactMaxAge::as_text),
+            serde_json::to_string(&agent.skills_off)?,
+            agent.default_skills
         ],
     )?;
     set_roles(t, &id, &def.project, &def.roles)?;
@@ -848,6 +867,13 @@ pub struct AgentPatch {
     /// clears them. The API checks that each name is in the library.
     #[serde(default)]
     pub skills: Option<Vec<String>>,
+    /// The skills that the agent does not get (PLAN §8.6): default-on or
+    /// explicit skill names. `[]` clears them.
+    #[serde(default)]
+    pub skills_off: Option<Vec<String>>,
+    /// Give the agent the default-on skills of the library.
+    #[serde(default)]
+    pub default_skills: Option<bool>,
 }
 
 /// A field that is present: `Some(None)` for `null`, `Some(Some(v))` for a
@@ -874,6 +900,8 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             system_prompt: None,
             persona: None,
             skills: Vec::new(),
+            skills_off: Vec::new(),
+            default_skills: true,
             roles: Vec::new(),
             policy: policy.clone(),
             restart: RestartPolicy::default(),
@@ -895,6 +923,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
         terrarium_core::config::check_persona(name).map_err(ApiError::invalid)?;
     }
     let skills = p.skills.as_deref().map(stored_skills).transpose()?;
+    let skills_off = p.skills_off.as_deref().map(stored_skills_off).transpose()?;
     // `?N IS NOT NULL` is the "field present" flag of each nullable column.
     t.execute(
         "UPDATE agents SET
@@ -912,6 +941,8 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             idle_stop = CASE WHEN ?19 THEN ?20 ELSE idle_stop END,
             compact_on_idle = CASE WHEN ?21 THEN ?22 ELSE compact_on_idle END,
             compact_max_age = CASE WHEN ?23 THEN ?24 ELSE compact_max_age END,
+            skills_off = coalesce(?25, skills_off),
+            default_skills = coalesce(?26, default_skills),
             updated_at = ?8
          WHERE id = ?1",
         params![
@@ -942,6 +973,8 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             p.compact_on_idle.flatten(),
             p.compact_max_age.is_some(),
             p.compact_max_age.flatten().map(CompactMaxAge::as_text),
+            skills_off.as_ref().map(serde_json::to_string).transpose()?,
+            p.default_skills,
         ],
     )?;
     if p.harness.is_some() || p.subscription.is_some() || p.subscription_pool.is_some() {
@@ -1361,6 +1394,7 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
     check_plan_logins(t, def.harness, subscription.as_deref(), &pool)?;
     let persona = stored_persona(def.persona.as_ref());
     let skills = stored_skills(&def.skills)?;
+    let skills_off = stored_skills_off(&def.skills_off)?;
     let changed = before.source != projects::SOURCE_FILE
         || before.agent.harness != def.harness
         || before.agent.subscription != subscription
@@ -1370,6 +1404,8 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
         || before.agent.system_prompt.as_ref() != system_prompt
         || before.agent.persona != persona
         || before.agent.skills != skills
+        || before.agent.skills_off != skills_off
+        || before.agent.default_skills != def.default_skills
         || before.agent.policy != def.policy
         || before.agent.restart != def.restart
         || before.agent.idle_stop != def.idle_stop
@@ -1381,7 +1417,8 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
                     policy = ?6, restart = ?7, source = 'file', updated_at = ?8,
                     new_session_on_prompt_change = ?9, system_prompt = ?10,
                     subscription_pool = ?11, persona = ?12, skills = ?13, idle_stop = ?14,
-                    compact_on_idle = ?15, compact_max_age = ?16
+                    compact_on_idle = ?15, compact_max_age = ?16, skills_off = ?17,
+                    default_skills = ?18
              WHERE id = ?1",
             params![
                 id,
@@ -1399,7 +1436,9 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
                 serde_json::to_string(&skills)?,
                 def.idle_stop.map(IdleStop::as_text),
                 def.compact_on_idle,
-                def.compact_max_age.map(CompactMaxAge::as_text)
+                def.compact_max_age.map(CompactMaxAge::as_text),
+                serde_json::to_string(&skills_off)?,
+                def.default_skills
             ],
         )?;
     }

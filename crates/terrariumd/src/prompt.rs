@@ -857,6 +857,8 @@ mod tests {
             compact_on_idle: None,
             compact_max_age: None,
             skills: vec![],
+            skills_off: vec![],
+            default_skills: true,
             new_session_on_prompt_change: true,
         };
         Agent::from_def(&def, Path::new("/state"))

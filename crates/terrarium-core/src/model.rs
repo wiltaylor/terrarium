@@ -66,8 +66,14 @@ pub struct Agent {
     #[serde(default = "yes")]
     pub new_session_on_prompt_change: bool,
     /// See [`AgentDef::skills`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub skills: Vec<String>,
+    /// See [`AgentDef::skills_off`].
+    #[serde(default)]
+    pub skills_off: Vec<String>,
+    /// See [`AgentDef::default_skills`].
+    #[serde(default = "yes")]
+    pub default_skills: bool,
     /// The skills that the daemon copied into `<harness dir>/skills/` for
     /// this start (PLAN §8.6), sorted. The supervisor sets it before it
     /// calls the adapter; the adapter gives the harness these skills and
@@ -89,6 +95,15 @@ fn yes() -> bool {
 }
 
 impl Agent {
+    /// The skill settings of the agent (PLAN §8.6).
+    pub fn skill_selection(&self) -> crate::skills::Selection<'_> {
+        crate::skills::Selection {
+            skills: &self.skills,
+            off: &self.skills_off,
+            default_skills: self.default_skills,
+        }
+    }
+
     /// True when the agent has its own base system prompt: the adapter
     /// then replaces the harness's default prompt (PLAN §8), else it
     /// appends the Terrarium prompt to the default one.
@@ -128,6 +143,8 @@ impl Agent {
             session: None,
             new_session_on_prompt_change: def.new_session_on_prompt_change,
             skills: def.skills.clone(),
+            skills_off: def.skills_off.clone(),
+            default_skills: def.default_skills,
             delivered_skills: Vec::new(),
             harness_settings: None,
         }

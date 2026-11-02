@@ -405,6 +405,8 @@ fn agent_spec(def: &AgentDef) -> Value {
         "compact_on_idle": def.compact_on_idle,
         "compact_max_age": def.compact_max_age,
         "skills": def.skills,
+        "skills_off": def.skills_off,
+        "default_skills": def.default_skills,
         "new_session_on_prompt_change": def.new_session_on_prompt_change,
     })
 }
@@ -428,6 +430,8 @@ fn view_def(v: &AgentView) -> AgentDef {
         compact_on_idle: a.compact_on_idle,
         compact_max_age: a.compact_max_age,
         skills: a.skills.clone(),
+        skills_off: a.skills_off.clone(),
+        default_skills: a.default_skills,
         new_session_on_prompt_change: a.new_session_on_prompt_change,
     }
 }
@@ -1634,6 +1638,8 @@ fn apply_agent(t: &mut Tx<'_>, v: &AgentView, def: &AgentDef) -> ApiResult<()> {
         compact_max_age: Some(def.compact_max_age),
         new_session_on_prompt_change: Some(def.new_session_on_prompt_change),
         skills: Some(def.skills.clone()),
+        skills_off: Some(def.skills_off.clone()),
+        default_skills: Some(def.default_skills),
     };
     agents::write_def(t, &id, &patch)?;
     let want = role_list(&def.roles);

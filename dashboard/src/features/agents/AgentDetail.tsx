@@ -29,7 +29,7 @@ import { autoCompactText, idleStopText, systemPromptProblem } from "./form";
 import { WaitsPanel, WatchesPanel } from "./Waits";
 import { QuestionsPanel } from "../inbox/QuestionsPanel";
 import { SkillsPicker } from "../skills/SkillsPicker";
-import { RESTART_NOTE, skillsLabel } from "../skills/model";
+import { RESTART_NOTE, skillsLabel, type SkillSelection } from "../skills/model";
 import { compactButton, lastCompactedText, lifecycleActions, newSessionButton, resetChip, resetNotice, type LifecycleAction } from "../../lib/lifecycle";
 import { ResetDialog } from "./ResetDialog";
 import { EphemeralLine, SpawnedPanel } from "./Spawned";
@@ -736,23 +736,24 @@ function SystemPromptCell(props: { agent: Agent; running: boolean; onError: (e: 
 }
 
 /**
- * The agent's skills, and a control to change them with
- * `PATCH /api/agents/{id}` (`[]` clears them). The live agent keeps its
- * skills until the next start: `skills_restart` says that a restart applies
- * the list.
+ * The agent's effective skills (the default-on skills and its `skills`,
+ * less `skills_off`), and a control to change the settings with
+ * `PATCH /api/agents/{id}`. The live agent keeps its skills until the next
+ * start: `skills_restart` says that a restart applies them.
  */
 function SkillsCell(props: { agent: Agent; running: boolean; onError: (e: unknown) => void }) {
   const [editing, setEditing] = createSignal(false);
-  const [draft, setDraft] = createSignal<string[]>([]);
+  const [draft, setDraft] = createSignal<SkillSelection>({ skills: [], skills_off: [], default_skills: true });
   const [busy, setBusy] = createSignal(false);
   const fileManaged = () => props.agent.source === "file";
-  const current = () => props.agent.skills ?? [];
-  const same = () => draft().length === current().length && draft().every((x, i) => x === current()[i]);
+  const current = (): SkillSelection => ({ skills: props.agent.skills ?? [], skills_off: props.agent.skills_off ?? [], default_skills: props.agent.default_skills ?? true });
+  const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+  const same = () => sameList(draft().skills, current().skills) && sameList(draft().skills_off, current().skills_off) && draft().default_skills === current().default_skills;
 
   const save = async () => {
     setBusy(true);
     try {
-      agents.upsert(await api.agents.update(props.agent.id, { skills: draft() }));
+      agents.upsert(await api.agents.update(props.agent.id, { ...draft() }));
       setEditing(false);
     } catch (e) {
       props.onError(e);
@@ -787,9 +788,36 @@ function SkillsCell(props: { agent: Agent; running: boolean; onError: (e: unknow
           </>
         }
       >
-        <span class="row" style={{ "flex-wrap": "wrap" }}>
-          <Show when={current().length} fallback={<span class="muted">none</span>}>
-            <span class="mono small">{skillsLabel(current())}</span>
+        <span class="row" style={{ "flex-wrap": "wrap" }} data-testid="agent-effective-skills">
+          <Show
+            when={props.agent.effective_skills}
+            fallback={
+              <Show when={current().skills.length} fallback={<span class="muted">none</span>}>
+                <span class="mono small">{skillsLabel(current().skills)}</span>
+              </Show>
+            }
+          >
+            {(eff) => (
+              <Show when={eff().length} fallback={<span class="muted">none</span>}>
+                <For each={eff()}>
+                  {(e) => (
+                    <span class="row" style={{ gap: "2px" }}>
+                      <span class="mono small">{e.name}</span>
+                      <Show when={e.source === "default"}>
+                        <span class="chip" title="A default skill: the agent gets it because it is default on.">
+                          default
+                        </span>
+                      </Show>
+                    </span>
+                  )}
+                </For>
+              </Show>
+            )}
+          </Show>
+          <Show when={!current().default_skills}>
+            <span class="chip warn" title="default_skills is off: the agent gets no default skill.">
+              no defaults
+            </span>
           </Show>
           <button
             class="small"
@@ -810,7 +838,7 @@ function SkillsCell(props: { agent: Agent; running: boolean; onError: (e: unknow
       <Show when={props.agent.skills_restart}>
         <span class="small row" role="status">
           <span class="chip warn">restart to apply</span>
-          <span class="muted">The live agent runs with other skills than this list.</span>
+          <span class="muted">The live agent runs with other skills than its effective skills now.</span>
           <Show when={props.running}>
             <button class="small" onClick={restart}>
               Restart now

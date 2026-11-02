@@ -105,7 +105,22 @@ async fn list(
         },
     };
     template_files::refresh_quiet(&state).await;
-    Ok(Json(state.db.read(move |c| templates::list(c, &f)).await?))
+    let mut rows = state.db.read(move |c| templates::list(c, &f)).await?;
+    fill_skills(&state, &mut rows);
+    Ok(Json(rows))
+}
+
+/// Fill `effective_skills` of each template (PLAN §8.6).
+fn fill_skills(state: &Shared, rows: &mut [Template]) {
+    let lib = crate::skills::LibraryIndex::read(super::skills::library_opt(state).as_deref());
+    for t in rows {
+        let (skills, off, default_skills) = t.skill_settings();
+        t.effective_skills = lib.effective(terrarium_core::skills::Selection {
+            skills: &skills,
+            off: &off,
+            default_skills,
+        });
+    }
 }
 
 /// Find the template of the path and check that the actor may read it.
@@ -181,6 +196,8 @@ async fn create(
             templates::create(t, &new, repo.as_deref())
         })
         .await?;
+    let mut t = t;
+    fill_skills(&state, std::slice::from_mut(&mut t));
     Ok((StatusCode::CREATED, Json(t)))
 }
 
@@ -189,7 +206,9 @@ async fn show(
     actor: Actor,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Template>> {
-    Ok(Json(load(&state, &actor, id).await?))
+    let mut t = load(&state, &actor, id).await?;
+    fill_skills(&state, std::slice::from_mut(&mut t));
+    Ok(Json(t))
 }
 
 /// The body of `PATCH /api/templates/{id}`.
@@ -229,6 +248,8 @@ async fn update(
             templates::update(tx, &t.id, &patch, repo.as_deref())
         })
         .await?;
+    let mut v = v;
+    fill_skills(&state, std::slice::from_mut(&mut v));
     Ok(Json(v))
 }
 
@@ -378,6 +399,8 @@ async fn from_agent(
         compact_on_idle: a.agent.compact_on_idle,
         compact_max_age: a.agent.compact_max_age,
         skills: a.agent.skills.clone(),
+        skills_off: a.agent.skills_off.clone(),
+        default_skills: a.agent.default_skills,
         new_session_on_prompt_change: a.agent.new_session_on_prompt_change,
     };
     let new = NewTemplate {
@@ -398,6 +421,8 @@ async fn from_agent(
             templates::create(t, &new, repo.as_deref())
         })
         .await?;
+    let mut t = t;
+    fill_skills(&state, std::slice::from_mut(&mut t));
     Ok((StatusCode::CREATED, Json(t)))
 }
 

@@ -300,13 +300,17 @@ persona = "none"        # the harness's own default prompt
 ```
 
 An agent or a template can set `skills` (PLAN §8.6): names of the skill
-library in the config repo, or `*` for every skill. Not set: no skills. A
-name that is not in the library is an error of the plan.
+library in the config repo, or `*` for every skill. Not set: no explicit
+skills. A name that is not in the library is an error of the plan. Each
+agent also gets the default-on skills of the library (the packaged
+`terrarium-*` skills), less the names in `skills_off`; `default_skills =
+false` turns off all of them. `*` in `skills_off` is an error.
 
 ```toml
 [[projects.agents]]
 name = "w2"
 skills = ["fern-check"]
+skills_off = ["terrarium-spawn"]
 ```
 
 The config repo (PLAN §8.3) keeps an export of each project as a fleet
@@ -320,7 +324,7 @@ it as `fleet apply` does (no prune, no start).
 `[[projects.templates]]` a template of the project. The spec keys
 (`harness`, `subscription`, `model`, `prompt`, `system_prompt`, `persona`, `roles`,
 `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `skills`,
-`new_session_on_prompt_change`) sit next to `name` and
+`skills_off`, `default_skills`, `new_session_on_prompt_change`) sit next to `name` and
 `description`. An agent entry with `template = "worker"` gets the values
 in this order: `[defaults]`, then the template, then the keys of the entry.
 `policy` merges key by key. `worker` is the project's template, else the

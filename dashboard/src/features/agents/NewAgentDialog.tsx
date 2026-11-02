@@ -219,6 +219,14 @@ export function NewAgentDialog(props: { project: string; onClose: () => void; on
                   <dt>Skills</dt>
                   <dd>{base().skills.join(", ")}</dd>
                 </Show>
+                <Show when={base().skills_off.length}>
+                  <dt>Skills off</dt>
+                  <dd>{base().skills_off.join(", ")}</dd>
+                </Show>
+                <Show when={!base().default_skills}>
+                  <dt>Default skills</dt>
+                  <dd>off</dd>
+                </Show>
                 <dt>Restart</dt>
                 <dd>{base().restart}</dd>
                 <Show when={s().line}>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../../api/http";
-import { descriptionProblem, filterSkills, nameProblem, noSkills, previewBody, skillOptions, skillProblems, skillsLabel, toggleSkill, unknownSkills, usedBy, usedByText } from "./model";
+import { byDefault, defaultOnNames, descriptionProblem, effectiveLabel, effectiveOf, filterSkills, pickSkill, skillOn, type SkillSelection, nameProblem, noSkills, previewBody, skillOptions, skillProblems, skillsLabel, toggleSkill, unknownSkills, usedBy, usedByText } from "./model";
 
 describe("skills model", () => {
   it("checks a new name: kebab-case, at most 64", () => {
@@ -58,7 +58,7 @@ describe("skills model", () => {
 
   it("counts the users of a skill", () => {
     const u = { agents: [{ id: "1", name: "p/a", all: false }, { id: "2", name: "p/b", all: true }], templates: [{ id: "3", name: "worker", all: false }] };
-    expect(usedBy(u)).toEqual({ agents: 2, templates: 1, all: 1, total: 3 });
+    expect(usedBy(u)).toEqual({ agents: 2, templates: 1, all: 1, byDefault: 0, total: 3 });
     expect(usedByText(u)).toBe("2 agents, 1 template");
     expect(usedByText({ agents: [], templates: [] })).toBe("nothing");
     expect(usedByText({ agents: [u.agents[0]!], templates: [] })).toBe("1 agent");
@@ -77,5 +77,53 @@ describe("skills model", () => {
     expect(filterSkills(list, "").length).toBe(2);
     expect(filterSkills(list, "FERN").map((s) => s.name)).toEqual(["fern-check"]);
     expect(filterSkills(list, "checklist").map((s) => s.name)).toEqual(["fern-check"]);
+  });
+
+  describe("default skills", () => {
+    const list = [{ name: "a" }, { name: "fern" }, { name: "terrarium-db", default_on: true }, { name: "terrarium-tests", default_on: true }];
+    const d = defaultOnNames(list);
+    const sel = (over: Partial<SkillSelection> = {}): SkillSelection => ({ skills: [], skills_off: [], default_skills: true, ...over });
+
+    it("checks a default-on skill with no list, and not with default_skills off", () => {
+      expect([...d]).toEqual(["terrarium-db", "terrarium-tests"]);
+      expect(skillOn(sel(), "terrarium-db", d)).toBe(true);
+      expect(byDefault(sel(), "terrarium-db", d)).toBe(true);
+      expect(skillOn(sel(), "a", d)).toBe(false);
+      expect(skillOn(sel({ default_skills: false }), "terrarium-db", d)).toBe(false);
+      expect(skillOn(sel({ skills_off: ["terrarium-db"] }), "terrarium-db", d)).toBe(false);
+      expect(skillOn(sel({ skills: ["*"], skills_off: ["a"] }), "a", d)).toBe(false);
+      expect(byDefault(sel({ skills: ["terrarium-db"] }), "terrarium-db", d)).toBe(false);
+    });
+
+    it("puts a cleared default skill in skills_off, and a checked one back", () => {
+      const off = pickSkill(sel(), "terrarium-db", false, d);
+      expect(off).toEqual(sel({ skills_off: ["terrarium-db"] }));
+      expect(pickSkill(off, "terrarium-db", true, d)).toEqual(sel());
+      // An explicit skill goes in and out of `skills`.
+      const on = pickSkill(sel(), "a", true, d);
+      expect(on).toEqual(sel({ skills: ["a"] }));
+      expect(pickSkill(on, "a", false, d)).toEqual(sel());
+      // With no defaults, a default-on skill is explicit.
+      expect(pickSkill(sel({ default_skills: false }), "terrarium-db", true, d)).toEqual(sel({ default_skills: false, skills: ["terrarium-db"] }));
+      // A skill that `*` gives goes in skills_off.
+      expect(pickSkill(sel({ skills: ["*"] }), "a", false, d)).toEqual(sel({ skills: ["*"], skills_off: ["a"] }));
+      // An explicit default-on skill that is cleared leaves `skills` and goes off.
+      expect(pickSkill(sel({ skills: ["terrarium-db"] }), "terrarium-db", false, d)).toEqual(sel({ skills_off: ["terrarium-db"] }));
+    });
+
+    it("computes the effective skills as the daemon does", () => {
+      expect(effectiveOf(sel(), list)).toEqual([
+        { name: "terrarium-db", source: "default" },
+        { name: "terrarium-tests", source: "default" },
+      ]);
+      expect(effectiveOf(sel({ skills: ["fern", "terrarium-db", "gone"], skills_off: ["terrarium-tests"] }), list)).toEqual([
+        { name: "fern", source: "explicit" },
+        { name: "terrarium-db", source: "explicit" },
+      ]);
+      expect(effectiveOf(sel({ default_skills: false }), list)).toEqual([]);
+      expect(effectiveOf(sel({ skills: ["*"], skills_off: ["a", "terrarium-db"] }), list).map((e) => e.name)).toEqual(["fern", "terrarium-tests"]);
+      expect(effectiveLabel(effectiveOf(sel({ skills: ["fern"] }), list))).toBe("fern, terrarium-db (default), terrarium-tests (default)");
+      expect(effectiveLabel([])).toBe("none");
+    });
   });
 });

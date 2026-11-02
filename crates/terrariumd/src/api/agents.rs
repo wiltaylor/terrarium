@@ -111,14 +111,15 @@ async fn list(
     for v in &mut rows.items {
         v.harness_version = harness_version(&runs, v.agent.id);
     }
-    mark_skills_restart(&state, &runs, &mut rows.items).await;
+    mark_skills(&state, &runs, &mut rows.items).await;
     Ok(paged(rows))
 }
 
-/// Set `skills_restart` on each live agent of `views` whose delivered
-/// skills differ from what its `skills` list picks from the library now
-/// (PLAN §8.6).
-async fn mark_skills_restart(
+/// Fill `effective_skills` of each agent of `views`, and set
+/// `skills_restart` on each live agent whose delivered skills differ from
+/// its effective skills now (PLAN §8.6): a change of its skill settings,
+/// of a skill, or of the default-on skills of the library.
+async fn mark_skills(
     state: &Shared,
     runs: &[crate::supervisor::HarnessRun],
     views: &mut [AgentView],
@@ -126,7 +127,17 @@ async fn mark_skills_restart(
     let Some(lib) = super::skills::library_opt(state) else {
         return;
     };
-    let live: Vec<(usize, std::path::PathBuf, Vec<String>)> = views
+    let index = {
+        let lib = lib.clone();
+        tokio::task::spawn_blocking(move || crate::skills::LibraryIndex::read(Some(&lib)))
+            .await
+            .unwrap_or_default()
+    };
+    for v in views.iter_mut() {
+        v.effective_skills = index.effective(v.agent.skill_selection());
+    }
+    type Live = (usize, std::path::PathBuf, Vec<String>, Vec<String>, bool);
+    let live: Vec<Live> = views
         .iter()
         .enumerate()
         .filter(|(_, v)| runs.iter().any(|r| r.agent == v.agent.id))
@@ -135,6 +146,8 @@ async fn mark_skills_restart(
                 i,
                 terrarium_runner::private_dir(&state.state_dir, v.agent.id),
                 v.agent.skills.clone(),
+                v.agent.skills_off.clone(),
+                v.agent.default_skills,
             )
         })
         .collect();
@@ -143,8 +156,18 @@ async fn mark_skills_restart(
     }
     let marks = tokio::task::spawn_blocking(move || {
         live.into_iter()
-            .filter(|(_, private, list)| crate::skills::restart_needed(&lib, private, list))
-            .map(|(i, _, _)| i)
+            .filter(|(_, private, skills, off, default_skills)| {
+                crate::skills::restart_needed(
+                    &lib,
+                    private,
+                    terrarium_core::skills::Selection {
+                        skills,
+                        off,
+                        default_skills: *default_skills,
+                    },
+                )
+            })
+            .map(|(i, ..)| i)
             .collect::<Vec<_>>()
     })
     .await
@@ -210,6 +233,9 @@ async fn create(
     // the first start. A failure is a `repo.checkout` event and an entry
     // in `checkout`; the agent stays created.
     let checkout = super::repos::checkout_on_create(&state, &actor, &a).await;
+    let mut a = a;
+    let runs = state.supervisor.harness_runs();
+    mark_skills(&state, &runs, std::slice::from_mut(&mut a)).await;
     Ok((StatusCode::CREATED, Json(Created { view: a, checkout })))
 }
 
@@ -253,7 +279,7 @@ async fn show(
     let mut view = load(&state, &actor, id).await?;
     let runs = state.supervisor.harness_runs();
     view.harness_version = harness_version(&runs, view.agent.id);
-    mark_skills_restart(&state, &runs, std::slice::from_mut(&mut view)).await;
+    mark_skills(&state, &runs, std::slice::from_mut(&mut view)).await;
     let subscription_detail = match view.agent.subscription.clone() {
         Some(name) => {
             let harness = view.agent.harness;
@@ -355,6 +381,8 @@ async fn update(
                     }),
                     "persona": patch.persona,
                     "skills": patch.skills,
+                    "skills_off": patch.skills_off,
+                    "default_skills": patch.default_skills,
                     "policy": patch.policy,
                     "restart": patch.restart,
                     "idle_stop": patch.idle_stop,
@@ -365,6 +393,9 @@ async fn update(
             agents::get(t, &id)
         })
         .await?;
+    let mut v = v;
+    let runs = state.supervisor.harness_runs();
+    mark_skills(&state, &runs, std::slice::from_mut(&mut v)).await;
     Ok(Json(v))
 }
 

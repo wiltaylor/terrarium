@@ -256,7 +256,14 @@ and the keyboard map in `app/treeNav.ts`. Settings
 (`features/settings/SettingsPage.tsx`) is one page with a tab for each of
 Account, Subscriptions, Secrets, Templates, System prompts, Skills, Targets,
 Harness config, and Hosts. Each tab is a route under `/settings`. The Skills tab also has the
-editor of one skill at `/settings/skills/<name>`. Logs
+editor of one skill at `/settings/skills/<name>`. A skill whose `SKILL.md`
+has `metadata` `terrarium-default: "true"` shows a read-only "default" badge
+there. The skills picker of the agent and template forms
+(`features/skills/SkillsPicker.tsx`, model in `features/skills/model.ts`)
+has a "Use default skills" box (`default_skills`), and shows each default-on
+skill checked with a "default" badge; a clear of its box puts it in
+`skills_off`. The picker shows the effective skills ("The agent gets"), and
+the agent page lists `effective_skills` with the source of each. Logs
 (`features/logs/LogsPage.tsx`) is the same: the top Logs item has a tab for
 each of Mail, Events, and Audit, under `/logs`. The **Logs** item of a project has the Mail and Events tabs of that
 project, under `/p/<project>/logs`. The project settings screen is the

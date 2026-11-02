@@ -70,7 +70,9 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
         AgentCmd::Spawned { agent, limit } => super::spawns::spawned(ctx, agent, *limit).await,
         AgentCmd::Show { agent } => {
             let a = ctx.api.get(&agent_path(agent), vec![]).await?;
-            ctx.emit(&a, |c, v| print_object_with_text(c, v, "system_prompt"))
+            ctx.emit(&a, |c, v| {
+                print_object_with_text(c, &super::with_effective_skills_text(v), "system_prompt")
+            })
         }
         AgentCmd::New(a) => new(ctx, a).await,
         AgentCmd::Set(a) => set(ctx, a).await,
@@ -303,6 +305,12 @@ pub async fn definition(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<Value> {
     if !a.skills.is_empty() {
         def["skills"] = json!(a.skills);
     }
+    if !a.skills_off.is_empty() {
+        def["skills_off"] = json!(a.skills_off);
+    }
+    if a.no_default_skills {
+        def["default_skills"] = false.into();
+    }
     if !(a.targets.is_empty() && a.mail_to.is_empty() && a.cross_project.is_empty()) {
         // With a template, the daemon merges `policy` key by key: send
         // only the keys that the flags give.
@@ -415,6 +423,16 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
         body["skills"] = json!([]);
     } else if !a.skills.is_empty() {
         body["skills"] = json!(a.skills);
+    }
+    if a.skills_off_clear {
+        body["skills_off"] = json!([]);
+    } else if !a.skills_off.is_empty() {
+        body["skills_off"] = json!(a.skills_off);
+    }
+    if a.no_default_skills {
+        body["default_skills"] = false.into();
+    } else if a.default_skills {
+        body["default_skills"] = true.into();
     }
     if body.as_object().is_some_and(serde_json::Map::is_empty) {
         return Err(CliError::usage("give at least one field to change"));

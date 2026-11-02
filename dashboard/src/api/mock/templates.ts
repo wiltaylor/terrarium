@@ -15,7 +15,7 @@ import type { ScheduleCaller } from "./schedules";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const ULID_RE = /^[0-9A-Z]{26}$/;
-const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "persona", "roles", "policy", "restart", "new_session_on_prompt_change", "skills", "idle_stop", "compact_on_idle", "compact_max_age"] as const;
+const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "persona", "roles", "policy", "restart", "new_session_on_prompt_change", "skills", "skills_off", "default_skills", "idle_stop", "compact_on_idle", "compact_max_age"] as const;
 /** The daemon's limit on `system_prompt`: 32 KiB of UTF-8. */
 export const SYSTEM_PROMPT_MAX_BYTES = 32 * 1024;
 
@@ -110,6 +110,9 @@ export function normalizeSpec(raw: unknown): TemplateSpec {
   if (o.new_session_on_prompt_change === false) spec.new_session_on_prompt_change = false;
   if (o.skills !== undefined && (!Array.isArray(o.skills) || o.skills.some((x) => typeof x !== "string"))) throw new Error("spec: skills: use a list of skill names");
   if ((o.skills as string[] | undefined)?.length) spec.skills = o.skills as string[];
+  if (o.skills_off !== undefined && (!Array.isArray(o.skills_off) || o.skills_off.some((x) => typeof x !== "string" || x === "*"))) throw new Error("spec: skills_off: use a list of skill names, without `*`");
+  if ((o.skills_off as string[] | undefined)?.length) spec.skills_off = o.skills_off as string[];
+  if (o.default_skills === false) spec.default_skills = false;
   if (typeof o.idle_stop === "string" && o.idle_stop.trim()) spec.idle_stop = o.idle_stop.trim();
   if (typeof o.compact_on_idle === "boolean") spec.compact_on_idle = o.compact_on_idle;
   if (typeof o.compact_max_age === "string" && o.compact_max_age.trim()) spec.compact_max_age = o.compact_max_age.trim();
@@ -291,6 +294,8 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
           ...(a.system_prompt ? { system_prompt: a.system_prompt } : {}),
           ...(a.persona ? { persona: a.persona } : {}),
           ...(a.skills?.length ? { skills: a.skills } : {}),
+          ...(a.skills_off?.length ? { skills_off: a.skills_off } : {}),
+          ...(a.default_skills === false ? { default_skills: false } : {}),
           ...(a.idle_stop ? { idle_stop: a.idle_stop } : {}),
           ...(a.compact_on_idle !== undefined ? { compact_on_idle: a.compact_on_idle } : {}),
           ...(a.compact_max_age ? { compact_max_age: a.compact_max_age } : {}),
@@ -313,7 +318,7 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
 export const wclPath = (project: string | null, name: string) => (project ? `templates/${project}/${name}.wcl` : `templates/${name}.wcl`);
 
 /** The top-level fields of a template file, in the daemon's order (`template_file::FIELDS`). */
-const WCL_FIELDS = ["description", "harness", "subscription", "subscription_pool", "model", "prompt", "persona", "roles", "restart", "idle_stop", "compact_on_idle", "compact_max_age", "skills", "new_session_on_prompt_change", "system_prompt"] as const;
+const WCL_FIELDS = ["description", "harness", "subscription", "subscription_pool", "model", "prompt", "persona", "roles", "restart", "idle_stop", "compact_on_idle", "compact_max_age", "skills", "skills_off", "default_skills", "new_session_on_prompt_change", "system_prompt"] as const;
 
 const quote = (s: string) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\t/g, "\\t").replace(/\r/g, "\\r")}"`;
 const literal = (v: unknown): string => (typeof v === "string" ? quote(v) : Array.isArray(v) ? `[${v.map((x) => quote(String(x))).join(", ")}]` : String(v));

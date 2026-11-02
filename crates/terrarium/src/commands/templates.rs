@@ -196,6 +196,10 @@ fn has_spec_flags(a: &TemplateSpecArgs) -> bool {
         || !a.cross_project.is_empty()
         || !a.skills.is_empty()
         || a.no_skills
+        || !a.skills_off.is_empty()
+        || a.skills_off_clear
+        || a.no_default_skills
+        || a.default_skills
 }
 
 /// The spec: `base` (or the file), then the flags over it. The second
@@ -245,6 +249,18 @@ fn spec_of(
     } else if !a.skills.is_empty() {
         flags.insert("skills".into(), json!(a.skills));
     }
+    if a.skills_off_clear {
+        // `null` removes the key: no skill is off.
+        flags.insert("skills_off".into(), Value::Null);
+    } else if !a.skills_off.is_empty() {
+        flags.insert("skills_off".into(), json!(a.skills_off));
+    }
+    if a.no_default_skills {
+        flags.insert("default_skills".into(), false.into());
+    } else if a.default_skills {
+        // `null` removes the key: the default, true.
+        flags.insert("default_skills".into(), Value::Null);
+    }
     let mut policy = Map::new();
     for (k, v) in [
         ("targets", &a.targets),
@@ -291,7 +307,7 @@ fn print_list(ctx: &Ctx, v: &Value) {
 }
 
 fn print_one(ctx: &Ctx, v: &Value) {
-    let mut head = v.clone();
+    let mut head = super::with_effective_skills_text(v);
     if let Some(o) = head.as_object_mut() {
         o.remove("spec");
         o.insert("key".into(), key_of(v).into());

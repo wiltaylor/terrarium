@@ -312,6 +312,7 @@ terrarium agent new <name> --harness <h> [--subscription s] [--pool s1,s2] [--mo
                     [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
                     [--role r]... [--target t]... [--mail-to a]... [--cross-project p/a]...
                     [--restart always|on-failure|never] [--idle-stop 30m|off] [--skill s]...
+                    [--skill-off s]... [--no-default-skills]
                     [--compact-on-idle on|off] [--compact-max-age 24h|off]
 terrarium agent new --from-file agents/lead.toml [flags that override the file]
 terrarium agent new <name> --template <t> [flags that override the template]
@@ -319,6 +320,7 @@ terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--m
                     [--system-prompt <text | -> | --system-prompt-file path | --no-system-prompt]
                     [--persona p] [--restart r] [--idle-stop 30m|off|default] [--policy JSON]
                     [--new-session-on-prompt-change true|false] [--skill s... | --no-skills]
+                    [--skill-off s... | --skills-off-clear] [--no-default-skills | --default-skills]
                     [--compact-on-idle on|off|default] [--compact-max-age 24h|off|default]
                     [--spawn-template t]... [--spawn-max-concurrent n] [--spawn-max-per-day n|0]
                     [--spawn-max-lifetime 2h] [--spawn-children on|off] [--no-spawn]
@@ -439,8 +441,16 @@ Claude Code for a Claude plan and Codex for a ChatGPT plan").
 `--skill` gives the agent a skill of the skill library (PLAN §8.6);
 repeat it for more, and give `*` for every skill. `agent set --skill`
 replaces the list, and `agent set --no-skills` clears it. A name that is
-not in the library is refused (exit code 1, `422`). The agent gets its
-skills at its next start ("Skills" below).
+not in the library is refused (exit code 1, `422`). The agent also gets
+each default-on skill of the library (the packaged `terrarium-*` skills).
+`--skill-off <name>` (repeat it) turns off one skill, for example a
+default-on skill; `agent set --skill-off` replaces the `skills_off` list,
+and `--skills-off-clear` clears it. `--no-default-skills` turns off every
+default-on skill, and `agent set --default-skills` turns them on again.
+`--no-skills` clears only the explicit skills. `agent show` prints
+`effective_skills`: each skill that the agent gets, with `(default)` or
+`(explicit)`. The agent gets its skills at its next start ("Skills"
+below).
 
 `agent swap` (also `admin agent swap`) moves the agent to another plan
 account ([api.md §6.2](api.md#62-lifecycle-and-turns)). The rights are the
@@ -638,7 +648,7 @@ terrarium template new <name> [--global] [--description d] --harness <h> [--subs
                        [--cross-project p/a]... [--restart r] [--idle-stop 30m|off]
                        [--compact-on-idle on|off] [--compact-max-age 24h|off]
                        [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
-                       [--skill s]...
+                       [--skill s]... [--skill-off s]... [--no-default-skills]
 terrarium template new [<name>] --from-file worker.wcl [flags that override the file]
 terrarium template new <name> --from-file worker.toml [flags that override the file]
 terrarium template edit <template> [--rename n] [--description d] [spec flags as in new]
@@ -675,7 +685,11 @@ hand. `terrarium admin config commit` (or `sync`) commits the files.
   whole `system_prompt` after the other spec fields. A TOML `--from-file`
   can give `system_prompt_file = "<path>"`, relative to the file.
 - `--skill` sets the skills of the spec, as with `agent new`. With `edit`,
-  `--no-skills` removes them.
+  `--no-skills` removes them. `--skill-off` and `--no-default-skills` set
+  `skills_off` and `default_skills = false` in the spec; with `edit`,
+  `--skills-off-clear` and `--default-skills` remove them. A create with
+  the template copies them. `show` prints the `effective_skills` of an
+  agent of the template.
 
 ### Skills
 
@@ -685,14 +699,14 @@ The operator and a sysadmin write the library. Another agent sees only
 its own skills.
 
 ```
-terrarium skill ls                                 the skills, with their problems
+terrarium skill ls                                 the skills, with DEFAULT (on: default on) and their problems
 terrarium skill show <name>                        SKILL.md and the file list
 terrarium skill new <name> --description d         a new SKILL.md with this description
 terrarium skill new <name> --from-dir ./my-skill   SKILL.md and the other files of a dir
 terrarium skill edit <name> --file SKILL.md        replace SKILL.md (`-` reads stdin); the other files stay
 terrarium skill rm <name>
 terrarium skill validate [<name>]                  exit code 2 when a skill has a problem
-terrarium skill usage <name>                       the agents and templates that name it
+terrarium skill usage <name>                       the agents and templates that get it (VIA: name, *, or default)
 ```
 
 - A write goes to the work tree of the config repo. Commit it with
@@ -704,6 +718,11 @@ terrarium skill usage <name>                       the agents and templates that
   it; `*` is every skill) and take them away with `agent set --no-skills`.
   The agent gets them at its next start. `agent show` has
   `skills_restart: true` until then.
+- A skill is default on when its `SKILL.md` front matter has
+  `metadata:` with `terrarium-default: "true"`. Each agent gets a
+  default-on skill unless it has the skill in `skills_off` or has
+  `default_skills = false`. The packaged skills are default on; a skill
+  that you make is opt-in unless you add the marker.
 
 ### System prompts
 

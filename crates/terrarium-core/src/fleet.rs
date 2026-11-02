@@ -98,6 +98,8 @@ const AGENT_KEYS: &[&str] = &[
     "compact_on_idle",
     "compact_max_age",
     "skills",
+    "skills_off",
+    "default_skills",
     "new_session_on_prompt_change",
     "start",
 ];
@@ -140,6 +142,8 @@ const TEMPLATE_KEYS: &[&str] = &[
     "compact_on_idle",
     "compact_max_age",
     "skills",
+    "skills_off",
+    "default_skills",
     "new_session_on_prompt_change",
 ];
 
@@ -883,6 +887,13 @@ fn project(
                     return None;
                 }
             };
+            def.skills_off = match crate::skills::clean_off_list(&def.skills_off) {
+                Ok(l) => l,
+                Err(e) => {
+                    issues.push(Issue::error(&at, e));
+                    return None;
+                }
+            };
             Some(FleetAgent {
                 def,
                 start,
@@ -1612,12 +1623,26 @@ name = "alpha"
 name = "one"
 harness = "codex"
 skills = ["fern-check"]
+skills_off = ["terrarium-db"]
+default_skills = false
 "#;
         let f = parse(text, None).ok().unwrap();
-        assert_eq!(f.projects[0].agents[0].def.skills, ["fern-check"]);
+        let one = &f.projects[0].agents[0].def;
+        assert_eq!(one.skills, ["fern-check"]);
+        assert_eq!(one.skills_off, ["terrarium-db"]);
+        assert!(!one.default_skills);
         let spec = &f.templates[0].spec;
         let def = crate::agent_template::to_def(spec, "x", "alpha").unwrap();
         assert_eq!(def.skills, ["code-review", "*"]);
+        assert!(def.default_skills, "default true");
+        assert!(def.skills_off.is_empty());
+        let star = text.replace("skills_off = [\"terrarium-db\"]", "skills_off = [\"*\"]");
+        let p = parse(&star, None);
+        assert!(
+            errors(&p).iter().any(|e| e.contains("default_skills")),
+            "{:?}",
+            errors(&p)
+        );
         let bad = text.replace("[\"fern-check\"]", "[\"Fern Check\"]");
         let p = parse(&bad, None);
         assert!(

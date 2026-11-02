@@ -23,8 +23,12 @@ export interface AgentFormValues {
   mail_to: string;
   cross_project: string;
   restart: RestartPolicy;
-  /** Skill names, or `["*"]` for all. Empty: none. */
+  /** The explicit skill names, or `["*"]` for all. Empty: none. */
   skills: string[];
+  /** The skills that the agent does not get (a default-on skill, for example). */
+  skills_off: string[];
+  /** False: no default-on skill. */
+  default_skills: boolean;
   /** `off`, `0`, or a duration such as `30m` or `1h30m`. Empty: the global default. */
   idle_stop: string;
   /** `on` or `off`. Empty: the global default. */
@@ -49,7 +53,7 @@ export const parseList = (s: string): string[] =>
     .filter(Boolean);
 
 export function emptyAgentForm(project = ""): AgentFormValues {
-  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", persona: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure", skills: [], idle_stop: "", compact_on_idle: "", compact_max_age: "" };
+  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", persona: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure", skills: [], skills_off: [], default_skills: true, idle_stop: "", compact_on_idle: "", compact_max_age: "" };
 }
 
 export function agentToForm(a: Agent): AgentFormValues {
@@ -70,6 +74,8 @@ export function agentToForm(a: Agent): AgentFormValues {
     cross_project: (a.policy?.cross_project ?? []).join(", "),
     restart: a.restart ?? "on-failure",
     skills: a.skills ?? [],
+    skills_off: a.skills_off ?? [],
+    default_skills: a.default_skills ?? true,
     idle_stop: a.idle_stop ?? "",
     compact_on_idle: switchOf(a.compact_on_idle),
     compact_max_age: a.compact_max_age ?? "",
@@ -187,6 +193,8 @@ export function formToDef(v: AgentFormValues): AgentDef {
   const persona = opt(v.persona);
   if (persona) def.persona = persona;
   if (v.skills.length) def.skills = v.skills;
+  if (v.skills_off.length) def.skills_off = v.skills_off;
+  if (!v.default_skills) def.default_skills = false;
   const idleStop = opt(v.idle_stop);
   if (idleStop) def.idle_stop = idleStop;
   if (v.compact_on_idle) def.compact_on_idle = v.compact_on_idle === "on";
@@ -245,6 +253,8 @@ export function formDiff(before: AgentFormValues, v: AgentFormValues): AgentPatc
   if (v.restart !== before.restart) patch.restart = v.restart;
   // `[]` clears the skills.
   if (!sameList(v.skills, before.skills)) patch.skills = v.skills;
+  if (!sameList(v.skills_off, before.skills_off)) patch.skills_off = v.skills_off;
+  if (v.default_skills !== before.default_skills) patch.default_skills = v.default_skills;
   // An emptied idle stop goes as null: back to the global default.
   const idleStop = changed(v.idle_stop, before.idle_stop);
   if (idleStop !== undefined) patch.idle_stop = idleStop;
