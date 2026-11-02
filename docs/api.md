@@ -1702,11 +1702,12 @@ An agent is the core `Agent` with bookkeeping fields:
 | `status` | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. `waiting`: the turn ended, and the agent has one or more open waits (§6.7). `idle`: the turn ended, and the agent has no open wait. |
 | `status_reason` | The reason of the last status change: `idle` after an idle stop, `paused` after the stop of a pause, `subscription_disabled` (the subscription is disabled, §16.2), `stream_limit: waiting for a free stream on `<sub>`` (the work waits for a stream of a self-hosted subscription, §16.2), `stopped`, an exit, or an error text. Absent when not known. |
 | `paused` | `true` while the agent is paused (§6.2): nothing wakes it, and its work waits. Always present. |
-| `queued` | The work that waits for the agent: queued turns, `queued` mail, and card and nudge lines (§6.2). Absent when 0. |
+| `queued` | The work that waits for the agent: queued turns, `queued` mail, card and nudge lines, and a pending reset with a `then` prompt (§6.2). Absent when 0. |
 | `idle_stop` | The idle stop of the agent (§6.2): `off`, or a duration such as `30m`. Absent: the daemon's `TERRARIUM_IDLE_STOP`. |
 | `compact_on_idle` | `true` or `false`: the agent compacts its session at its idle stop (§6.2, "Auto compact"). Absent: the daemon's `TERRARIUM_COMPACT_ON_IDLE`. |
 | `compact_max_age` | The maximum age of the session context (§6.2, "Auto compact"): `off`, or a duration such as `24h`. Absent: the daemon's `TERRARIUM_COMPACT_MAX_AGE`. |
 | `compact_supported` | `false` when the daemon cannot compact agents of the harness: it ignores `compact_on_idle` and `compact_max_age`, and `POST /api/agents/{id}/compact` is `409`. Always present. |
+| `reset_pending` | A compaction or a new session that waits (§6.2, "Compact and new session on request"): `{kind, by, then_set, recap, deferred, requested_at}`. Absent when none. |
 | `last_compact_at`, `last_compact_ok` | The end of the last compaction that the daemon ran (RFC 3339, also a failed one) and its result. Absent when none. |
 | `waits` | The number of open waits (§6.7). Absent when it is 0. |
 | `waiting_on` | What the agent waits on, in one short line: the summaries of the oldest 3 open waits and a count of the others. Absent when the agent has no open wait. |
@@ -1866,15 +1867,17 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/restart` | none | `202` agent. Also on an agent in `error`: a new launch. A paused agent gets `409 conflict`. |
 | `POST /api/agents/{id}/pause` | none | `202` agent, `paused: true`. A running agent stops (reason `paused`). |
 | `POST /api/agents/{id}/unpause` | none | `202` agent, `paused: false`. It wakes when work waits. |
-| `POST /api/agents/{id}/compact` | none | `202` agent, `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused, held, not idle, or compacts already. `409 not_running`: the agent does not run. |
+| `POST /api/agents/{id}/compact` | none, or `{"then"?: "<prompt>", "defer"?: false}` | `202` agent with `reset` (below). At rest: `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused or held. `409 not_running`: the agent does not run. |
+| `POST /api/agents/{id}/new-session` | none, or `{"then"?: "<prompt>", "recap"?: true, "defer"?: false}` | `202` agent with `reset` (below). A new harness session, not a resume. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run) |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/subscription` | `{"subscription": "anthropic-max-20x-2"}` | `200 {"agent", "from"?, "to", "applied"}` (below) |
 
-All need project_admin. The work happens in the background. A `send`
-writes a row to the delivery log first (§6.6).
+All need project_admin; an agent may `compact` and `new-session`
+itself. The work happens in the background. A `send` writes a row to the
+delivery log first (§6.6).
 
 **A turn is tagged (PLAN §8.5).** A `send` waits until the agent is
 `idle`, and types `[User] <text>` when the operator calls it (the
@@ -1947,9 +1950,9 @@ default.
 - **Once for each turn.** An automatic compaction runs only after a turn
   that is newer than the last compaction and the start of the session.
   A manual one has no such rule.
-- **Manual.** `POST /api/agents/{id}/compact` compacts an idle agent now.
-  The rights are those of `restart`. It writes the audit row
-  `agent.compact`. `terrarium agent compact <agent>` calls it.
+- **Manual.** `POST /api/agents/{id}/compact` compacts an agent at rest
+  now, or at the end of its turn (below, "Compact and new session on
+  request"). `terrarium agent compact <agent>` calls it.
 - **Not compacted:** a paused agent, an agent with a quota or budget hold,
   an agent that is not `idle` or `waiting`, an agent in `error`, and an
   agent of a harness with no compaction (`compact_supported` `false`).
@@ -1964,6 +1967,53 @@ default.
   the waiting work goes out.
 - Each end writes `agent.compacted` (§9) and `last_compact_at` (also for a
   failed compaction, so that it does not run again without a new turn).
+
+**Compact and new session on request (PLAN §18).** An agent can compact
+its session or start a new, clean harness session, for itself or (with the
+rights) for another agent, and attach a prompt that goes after the reset:
+
+- **Rights.** Each agent may reset itself. A reset of another agent needs
+  project_admin of its project (a lead on its workers), sysadmin, or the
+  operator; else `403`.
+- **`then`.** At most 32 KiB; a blank text is `400`. It goes as the next
+  turn after the end of the compaction (whatever its outcome), or after
+  the recap turn of the new session: `[System:reset requested by <who>]
+  <text>`, where `<who>` is `self`, `operator`, or `<project>/<agent>`.
+  Its tag-like lines are defused as in each turn. When the compaction did
+  not complete, the text starts with the line `Note: the compaction did
+  not complete: <reason>.` It is a normal turn: a quota hold, the pause,
+  and the stream limit of a self-hosted subscription apply.
+- **When.** An agent at rest resets at once (`state` `started`). A request
+  of the agent itself, `"defer": true`, and a request for a busy agent
+  (working, blocked, starting, or compacting) wait for the end of the
+  current turn (`state` `queued`); a compaction that runs is not
+  interrupted. While a reset waits, the supervisor keeps the other work of
+  the agent (turns, the recap, push pointers) back, so the reset runs
+  first. A paused agent keeps a reset queued until the unpause.
+- **One at a time.** Each agent has at most one pending reset
+  (`reset_pending` on the agent: `{kind, by, then_set, recap, deferred,
+  requested_at}`; the `then` text does not show). A new request replaces
+  it (`replaced: true`).
+- **New session.** The daemon ends the harness gracefully (its exit keys
+  at rest, else a kill) and starts it with no resume. The store opens a
+  new session row (the old one ends with the outcome `new_session`), so
+  the Sessions tab and the session links show it. The status reason of
+  the start is `new session: requested by <who>`. With `recap` (the
+  default), the first turn is a short `[System:recap]` turn: the open
+  cards of the agent, the number of open waits and of unread mail, and
+  the open questions. Then `then`. An agent that does not run starts at
+  once in a new session when `then` is set (`agent.woken` with the cause
+  `reset`); without `then`, its next wake starts a new session (`state`
+  `next_wake`). An ephemeral agent keeps its spawn record and its
+  deadline.
+- **The answer** is the agent with `reset`: `{kind, state, replaced,
+  deferred, then_set}`. `kind` is `compact` or `new_session`; `state` is
+  `started`, `queued`, or `next_wake`.
+- **Events and audit.** Each request writes `agent.reset` (§9). A request
+  on another agent writes the audit row `agent.compact` or
+  `agent.new_session` (`{then_set, deferred, replaced}`); a request of
+  the agent itself writes none. `terrarium agent compact` and `terrarium
+  agent new-session` call these endpoints (`--self` for the caller).
 
 - `start` opens a new session and resumes the last harness session.
   A running agent gets `409 already_running`. It is a wake now: the
@@ -3499,9 +3549,10 @@ Kinds:
 | `kind` | `data` |
 |---|---|
 | `status` | `{status, from, reason, waits, waiting_on?}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. `waits` is the number of open waits; `waiting_on` is the line of §6.7. |
-| `agent.woken` | `{cause, queued}`: the daemon woke the agent (§6.2). `cause` is `mail`, `turn`, `card`, `nudge`, `start`, `unpause`, `hold_end`, `queued`, or `daemon_start`; `queued` is the work that waited. A `status` event follows. An idle stop is a `status` event with `reason: "idle"`. |
+| `agent.woken` | `{cause, queued}`: the daemon woke the agent (§6.2). `cause` is `mail`, `turn`, `card`, `nudge`, `start`, `unpause`, `hold_end`, `queued`, `reset`, or `daemon_start`; `queued` is the work that waited. A `status` event follows. An idle stop is a `status` event with `reason: "idle"`. |
 | `agent.paused`, `agent.unpaused` | `{paused, queued}`: a pause or an unpause changed the flag (§6.2). The actor is the caller. |
-| `agent.compacted` | `{cause, ok, duration_ms, reason?}`: a compaction that the daemon ran ended (§6.2, "Auto compact"). `cause` is `idle`, `max_age`, or `manual`. `ok` is false for a failure that the harness reports, a stop of the agent, or no end signal in 5 minutes; `reason` says which. |
+| `agent.reset` | `{kind, by, then_set, deferred, replaced, state}`: an actor asked for a compaction or a new session (§6.2, "Compact and new session on request"). `kind` is `compact` or `new_session`; `by` is `self`, `operator`, or `<project>/<agent>`; `state` is `started`, `queued`, or `next_wake`. The actor is the caller. |
+| `agent.compacted` | `{cause, ok, duration_ms, reason?}`: a compaction that the daemon ran ended (§6.2, "Auto compact"). `cause` is `idle`, `max_age`, or `manual` (also a requested one). `ok` is false for a failure that the harness reports, a stop of the agent, or no end signal in 5 minutes; `reason` says which. |
 | `compact_started`, `compact_finished` | `{trigger?}` and `{ok, trigger?, message?}`: the harness reported the start or the end of a compaction (docs/compat.md, "Compaction"). `trigger` is the harness's word (`manual`, `auto`, `threshold`, ...). A compaction that the harness starts by itself also writes them. |
 | `agent_removed` | `{agent_id, project, name}`. The daemon deleted the agent: `DELETE /api/agents/{id}`, a fleet apply with prune, or a definitions sync that removes a file agent. The delete of a live agent stops it first, so a `status` event with `stopped` comes before this event. Clients remove the agent from their lists. `GET /api/agents` does not show the agent again. |
 | `wait` | `{wait_id, change, kind, summary, state, result?}`. `change` is `opened`, `resolved`, `timed_out`, `cancelled`, or `failed`. The `agent` is the waiter (§6.7). |

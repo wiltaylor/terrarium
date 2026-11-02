@@ -656,7 +656,9 @@ async fn max_age_compacts_at_the_next_rest() {
 }
 
 /// A manual compaction: the rights of `restart`, an audit row, and `409`
-/// for an agent that does not run, is not idle, or is paused.
+/// for an agent that does not run or is paused. A request while the agent
+/// compacts waits (`queued`) and does not interrupt the compaction
+/// (`crate::reset`).
 #[tokio::test]
 async fn manual_compaction_rights_and_states() {
     let (td, w) = setup().await;
@@ -685,10 +687,12 @@ async fn manual_compaction_rights_and_states() {
     })
     .await;
     td.wait_status(&w, "idle").await;
-    // Not idle: a turn runs.
+    // Not idle: a compaction runs. The next request waits for its end.
     td.sup.set_compact(aid(&w), FakeCompact::Silent);
     td.post_empty(&path).await.ok();
-    td.post_empty(&path).await.err(409, "conflict");
+    let r = td.post_empty(&path).await;
+    assert_eq!(r.ok()["reset"]["state"], "queued", "{}", r.body);
+    assert_eq!(td.sup.compactions(aid(&w)), 3, "not interrupted");
     let audit = td.get("/api/audit?limit=200").await;
     let n = audit
         .ok()
@@ -697,7 +701,7 @@ async fn manual_compaction_rights_and_states() {
         .iter()
         .filter(|r| r["action"] == "agent.compact")
         .count();
-    assert_eq!(n, 3);
+    assert_eq!(n, 4);
     // Paused.
     td.post_empty(&format!("/api/agents/{w}/pause")).await.ok();
     td.wait_status(&w, "stopped").await;

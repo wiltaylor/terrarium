@@ -94,6 +94,9 @@ import type {
   UsageTotals,
   Version,
   WikiPage,
+  ResetPending,
+  ResetResult,
+  ResetState,
 } from "../types";
 import { paginate, type PageQuery } from "../../lib/paging";
 import { fakeUlid, seed, type MockWorld, type UsageRow } from "./data";
@@ -113,7 +116,7 @@ import { createSpawnMock } from "./spawns";
 import { applyTemplate, compactMaxAgeError, compactOnIdleError, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createSecretMock } from "./secrets";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
-import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
+import { appendBlock, fakeReply, mockModel, systemTurn, titleOf, type Draft as BlockDraft } from "./transcripts";
 
 /** The daemon URL of the mock, for the host install line (the daemon uses TERRARIUM_PUBLIC_URL). */
 const MOCK_PUBLIC_URL = "http://localhost:8080";
@@ -749,6 +752,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
   const agentEvent = (a: Agent, kind: AgentEvent["kind"], summary: string, data: Record<string, unknown> = {}, actor = "system") =>
     emit({ kind, actor, agent: a.name, agent_id: a.id, project: a.project, session: w.sessions.find((s) => s.agent === a.id && s.current)?.id, summary, data });
+  /** Set below (resets): a reset that waits runs when the agent comes to rest. */
+  let onRest: (a: Agent) => void = () => {};
   const setStatus = (a: Agent, status: AgentStatus, reason: string | null = null) => {
     const from = a.status;
     if (from === status) return;
@@ -760,6 +765,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const cur = currentSession(a);
     if (cur) frame(cur.id, { type: "status", status });
     waitMock.statusChanged(a, status);
+    if (status === "idle" || status === "waiting") onRest(a);
   };
   // ----- waits and watches -----
   // The skill library lives in the config repo: no repo, no skills.
@@ -848,20 +854,24 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   /** Start a stopped agent (with resume) for `cause`, then deliver its queued work. A paused, live, or errored agent does not wake. */
   const wake = (a: Agent, cause: string) => {
     if (a.paused || a.status === "error" || LIVE.includes(a.status) || !w.agents.includes(a)) return;
+    // A new session that waits for the next wake: the wake starts it.
+    const fresh = a.reset_pending?.kind === "new_session" ? takeReset(a) : null;
     agentEvent(a, "agent.woken", `${a.name}: woken (${cause})`, { cause });
     openSession(a);
-    setStatus(a, "starting", "woken");
+    setStatus(a, "starting", fresh ? `new session: requested by ${fresh.by}` : "woken");
     later(() => {
       setStatus(a, waitMock.restStatus(a));
+      if (fresh) resetTurns(a, fresh);
       flushQueue(a);
     });
   };
   /**
    * One turn to a live agent. The daemon queues the turn until the agent is
    * idle; the fake harness then writes the user block, thinks, calls a tool,
-   * and streams a reply.
+   * and streams a reply. `system` is a daemon turn (`[System:<kind>] ...`)
+   * in place of an operator turn.
    */
-  const deliverTurn = (a: Agent, text: string) => {
+  const deliverTurn = (a: Agent, text: string, system?: { kind: string; detail?: string }) => {
     const s = currentSession(a);
     const model = mockModel(a);
     const r = fakeReply(text, model);
@@ -870,8 +880,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       if (!LIVE.includes(a.status) || currentSession(a) !== s) return;
       if (a.status !== "idle" && a.status !== "waiting") return void later(typeTurn, Math.max(pace, 1));
       if (s) s.turns++;
-      writeBlock(a, { role: "user", kind: "text", text: `[User] ${text}`, origin: "operator", parts: [{ source: "user", body: text }] });
-      agentEvent(a, "turn_start", `Turn typed by operator: ${text.slice(0, 60)}`, { text }, "operator");
+      if (system) {
+        writeBlock(a, systemTurn(system.kind, text, system.detail));
+        agentEvent(a, "turn_start", `Turn typed by the daemon: ${text.slice(0, 60)}`, { text });
+      } else {
+        writeBlock(a, { role: "user", kind: "text", text: `[User] ${text}`, origin: "operator", parts: [{ source: "user", body: text }] });
+        agentEvent(a, "turn_start", `Turn typed by operator: ${text.slice(0, 60)}`, { text }, "operator");
+      }
       setStatus(a, "working");
       const steps: (() => void)[] = [
         () => void writeBlock(a, r.thinking),
@@ -894,6 +909,80 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       later(() => run(0), pace);
     };
     later(typeTurn, 0);
+  };
+  // ----- resets by hand: a compaction or a new session (docs/api.md §6.5) -----
+  // One reset at most waits for each agent (`reset_pending`); a new request
+  // replaces it. It runs when the agent comes to rest and is not paused.
+  type Reset = ResetPending & { then?: string };
+  /** The "then" prompt of the reset that waits, by agent. */
+  const resetThen: Record<string, string> = {};
+  const atRest = (a: Agent) => a.status === "idle" || a.status === "waiting";
+  /** Remove the reset that waits, and give it with its "then" prompt. */
+  const takeReset = (a: Agent): Reset | null => {
+    const p = a.reset_pending;
+    const then = resetThen[a.id];
+    delete a.reset_pending;
+    delete resetThen[a.id];
+    return p ? { ...p, ...(then !== undefined ? { then } : {}) } : null;
+  };
+  /** The turns after a reset: the recap (new session only), then the "then" prompt. */
+  const resetTurns = (a: Agent, r: Reset) => {
+    if (r.kind === "new_session" && r.recap) deliverTurn(a, "Your last session ended. A recap: you worked on the cards of your project. Read your cards and your mail to continue.", { kind: "recap" });
+    if (r.then) deliverTurn(a, r.then, { kind: "reset", detail: `requested by ${r.by}` });
+  };
+  const runCompact = (a: Agent, r: Reset) => {
+    const began = now();
+    setStatus(a, "working", "compacting");
+    later(() => {
+      if (a.status !== "working" || a.status_reason !== "compacting") return;
+      a.last_compact_at = iso();
+      a.last_compact_ok = true;
+      agentEvent(a, "agent.compacted", `${a.name}: compacted (manual)`, { cause: "manual", ok: true, duration_ms: now() - began });
+      setStatus(a, waitMock.restStatus(a), "compacted");
+      resetTurns(a, r);
+      flushQueue(a);
+    }, 1500);
+  };
+  /** End the current session (`new_session`) and start a new, clean one. */
+  const runNewSession = (a: Agent, r: Reset) => {
+    endSession(a, "new_session");
+    openSession(a);
+    setStatus(a, "starting", `new session: requested by ${r.by}`);
+    later(() => {
+      setStatus(a, waitMock.restStatus(a));
+      resetTurns(a, r);
+      flushQueue(a);
+    });
+  };
+  onRest = (a: Agent) => {
+    if (!a.reset_pending || a.paused) return;
+    later(() => {
+      if (!a.reset_pending || a.paused || !atRest(a) || !w.agents.includes(a)) return;
+      const r = takeReset(a)!;
+      if (r.kind === "compact") runCompact(a, r);
+      else runNewSession(a, r);
+    }, 0);
+  };
+  /** The "then" prompt of a reset request: absent, or not blank and at most 32 KiB. */
+  const resetThenOf = (then: unknown): string | undefined => {
+    if (then === undefined || then === null) return undefined;
+    if (typeof then !== "string" || !then.trim()) fail(400, "bad_request", "`then` is blank; give a prompt, or leave it out");
+    if (new TextEncoder().encode(then).length > 32 * 1024) fail(400, "bad_request", "`then` is longer than 32 KiB");
+    return then;
+  };
+  /** Record the request: `reset_pending` for a reset that waits, `agent.reset`, and the 202 answer. */
+  const acceptReset = (a: Agent, r: Reset, state: ResetState): ResetResult => {
+    const replaced = !!a.reset_pending;
+    if (replaced) takeReset(a);
+    if (state !== "started") {
+      const { then, ...pending } = r;
+      a.reset_pending = pending;
+      if (then !== undefined) resetThen[a.id] = then;
+    }
+    a.updated_at = iso();
+    const what = r.kind === "compact" ? "compaction" : "new session";
+    agentEvent(a, "agent.reset", `${a.name}: ${what} ${state === "started" ? "started" : state === "queued" ? "queued" : "at the next wake"} (by ${r.by})`, { kind: r.kind, by: r.by, then_set: r.then_set, deferred: r.deferred, replaced, state }, r.by);
+    return { ...clone(a), reset: { kind: r.kind, state, replaced, deferred: r.deferred, then_set: r.then_set } };
   };
   const openSession = (a: Agent) => {
     // A start runs the active harness version.
@@ -2396,27 +2485,48 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           }
           return clone(a);
         }),
-      // 202 at the start. The agent shows `working` (`compacting`) until the end, then `agent.compacted`.
-      compact: (id) =>
+      // 202. At rest: the compaction starts now (`working`, `compacting`), then `agent.compacted`.
+      // Busy or `defer`: `reset_pending`, and it runs when the turn ends. `then` goes as the next turn.
+      compact: (id, body = {}) =>
         reply(() => {
           const a = agent(id);
+          const then = resetThenOf(body.then);
           if (!MOCK_COMPACT_HARNESSES.includes(a.harness)) fail(409, "conflict", `auto compact not supported for ${a.harness}`);
           if (a.paused) fail(409, "conflict", `agent \`${a.project}/${a.name}\` is paused; it does not compact`);
           if (!LIVE.includes(a.status)) fail(409, "not_running", `agent ${a.id} is not running`);
-          if (a.status !== "idle" && a.status !== "waiting") fail(409, "conflict", `agent \`${a.project}/${a.name}\` is not idle (${a.status}); it compacts only at rest`);
-          const snap = clone(a);
-          audit("agent.compact", a.id, a.project);
-          const began = now();
-          setStatus(a, "working", "compacting");
-          later(() => {
-            if (a.status !== "working" || a.status_reason !== "compacting") return;
-            a.last_compact_at = iso();
-            a.last_compact_ok = true;
-            agentEvent(a, "agent.compacted", `${a.name}: compacted (manual)`, { cause: "manual", ok: true, duration_ms: now() - began });
-            setStatus(a, waitMock.restStatus(a), "compacted");
-            flushQueue(a);
-          }, 1500);
-          return snap;
+          if (w.holds.some((h) => h.agent === a.id)) fail(409, "conflict", `agent \`${a.project}/${a.name}\` has a quota or budget hold; it does not compact until the hold ends`);
+          const deferred = body.defer === true;
+          const r: Reset = { kind: "compact", by: "operator", then_set: then !== undefined, recap: false, deferred, requested_at: iso(), ...(then !== undefined ? { then } : {}) };
+          const state: ResetState = atRest(a) && !deferred ? "started" : "queued";
+          audit("agent.compact", a.id, a.project, { state, then_set: r.then_set, deferred });
+          const res = acceptReset(a, r, state);
+          if (state === "started") {
+            runCompact(a, r);
+            return { ...clone(a), reset: res.reset };
+          }
+          return res;
+        }),
+      // 202. At rest: a new session now. Busy, paused, or `defer`: `reset_pending`, and it runs when the turn ends.
+      // Stopped: with `then` it starts at once in a new session; without, the next wake starts a new session.
+      newSession: (id, body = {}) =>
+        reply(() => {
+          const a = agent(id);
+          const then = resetThenOf(body.then);
+          const deferred = body.defer === true;
+          const live = LIVE.includes(a.status);
+          const state: ResetState = a.paused ? "queued" : !live ? (then !== undefined ? "started" : "next_wake") : atRest(a) && !deferred ? "started" : "queued";
+          if (state === "started" && !live) {
+            const dis = disabledRefusal(a.subscription);
+            if (dis) fail(409, "conflict", dis);
+          }
+          const r: Reset = { kind: "new_session", by: "operator", then_set: then !== undefined, recap: body.recap !== false, deferred, requested_at: iso(), ...(then !== undefined ? { then } : {}) };
+          audit("agent.new_session", a.id, a.project, { state, then_set: r.then_set, recap: r.recap, deferred });
+          const res = acceptReset(a, r, state);
+          if (state === "started") {
+            runNewSession(a, r);
+            return { ...clone(a), reset: res.reset };
+          }
+          return res;
         }),
       // 202, idempotent. The agent wakes at once only when work waits for it.
       unpause: (id) =>

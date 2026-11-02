@@ -1,7 +1,7 @@
 {
   "version": 1,
   "files": {
-    "README.md": "d542ca1e8b7628078077a3231d8c78244f662c3380ec4b328ed5b7464ba8437f",
+    "README.md": "3c8c56684c7bf1d2b4feff8959934bd3937ab1b2314292627fe33ea0ba756c82",
     "harness/claude/settings.json": "d5b5ea9dd861dbdfa4b41bcde785c5b30fbb1ee7502ec0db1042a1f179fe0fbf",
     "harness/codex/config.toml": "055e812aae3e09fc401dbe619fbce23beb04b06dcb4373a327eb99e1b66ae59e",
     "harness/copilot/settings.json": "13fd01aea6238c828d706954ec693cb818d5b4b6b03ac1179673e18437bb9c34",
@@ -15,7 +15,8 @@
     "prompts/project-lead.md": "bd2fc1c3aaef700ad8157155e5e95a11617b302218af86974d2e9d90a90a72ad",
     "prompts/system-lead.md": "63b760e4f830d7105f446b2bde578695b155fa806f9f547dacdd964c9ebb4fc7",
     "skills/terrarium-db/SKILL.md": "60cc33f52e73d25513bd9a013629702adefe650d0bf2438dc6aea2a1420dd412",
-    "skills/terrarium-spawn/SKILL.md": "e947879e6b1616a664e26b20606fbd41f8f3e869b0a5dce945e85b219e5d8b76",
+    "skills/terrarium-reset/SKILL.md": "04d9b32aac3fff468d689b1f8ffdd3ff055e8e14f15f7207e3976005543fd970",
+    "skills/terrarium-spawn/SKILL.md": "6541c5866cea039c04496a81c53a15f4b6e1173ece895f2e52c3127b555c9f10",
     "skills/terrarium-tests/SKILL.md": "dc7d4ce4093d5cf5b5cae693798359036727464f9acdc46c1c295c4f90ddb130",
     "system-prompts/leader.md": "2da535035d495d643c862256b58d40e11ac994f61ed6657ef653059f7cd09197",
     "system-prompts/worker.md": "4826798f1b84ad1032e0561a387c32cddda145e74e0d09aa904fc9a5fc36d97c",

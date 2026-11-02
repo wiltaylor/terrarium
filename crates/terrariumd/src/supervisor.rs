@@ -128,6 +128,39 @@ pub struct CompactEnd {
 /// The end of a compaction that runs ([`Supervisor::compact`]).
 pub type CompactWait = BoxFuture<'static, CompactEnd>;
 
+/// The prompt to send after a compaction that an actor requested
+/// ([`Supervisor::compact`], `crate::reset`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactThen {
+    /// Who asked: `self`, `operator`, or `project/agent`.
+    pub by: String,
+    /// The prompt, as the actor wrote it.
+    pub text: String,
+}
+
+impl CompactThen {
+    /// The turn after a compaction that ended with `end`: the tag, a note
+    /// when the compaction did not complete, and the prompt.
+    pub fn turn(&self, end: &CompactEnd) -> String {
+        let failed = (!end.ok).then(|| end.reason.as_deref().unwrap_or("no reason given"));
+        crate::reset::then_turn(&self.by, &self.text, failed)
+    }
+}
+
+/// A new harness session that an actor requested
+/// ([`Supervisor::new_session`], `crate::reset`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewSessionPlan {
+    /// The status reason of the start (`new session: requested by <who>`).
+    pub reason: String,
+    /// The text of the recap turn. The supervisor adds the tag
+    /// `[System:recap]` and the open questions. `None`: no recap.
+    pub recap: Option<String>,
+    /// The prompt turn after the recap, with its tag. It goes before the
+    /// other turns that wait.
+    pub then: Option<String>,
+}
+
 /// What [`Supervisor::recover`] found for an agent after a daemon start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recovery {
@@ -292,15 +325,48 @@ pub trait Supervisor: Send + Sync + 'static {
     /// the agent is not idle, or compacts already. `Unsupported`: the
     /// harness has no compaction that the daemon can see the end of. The
     /// default cannot compact.
+    ///
+    /// `then`: the turn to type after the end, whatever the outcome
+    /// ([`CompactThen::turn`]). It goes before the other work that waited.
+    /// A compaction also opens the reset gate ([`Supervisor::reset_gate`]).
     fn compact(
         &self,
         agent: AgentId,
         wait: std::time::Duration,
+        then: Option<CompactThen>,
     ) -> BoxFuture<'_, Result<CompactWait, SupervisorError>> {
-        let _ = (agent, wait);
+        let _ = (agent, wait, then);
         Box::pin(async {
             Err(SupervisorError::Unsupported(
                 "this supervisor cannot compact".into(),
+            ))
+        })
+    }
+    /// Close (`on`) or open the reset gate of `agent` (`crate::reset`):
+    /// while it is closed, the supervisor types no turn, recap, or push
+    /// pointer into the agent; they wait. So a pending compaction or new
+    /// session runs before the other work when the current turn ends. A
+    /// compaction or a new session opens the gate. The gate stays over a
+    /// stop. The default does nothing.
+    fn reset_gate(&self, agent: AgentId, on: bool) {
+        let _ = (agent, on);
+    }
+    /// Start a new harness session for `agent`, not a resume (`crate::reset`).
+    /// A live agent ends its harness gracefully (the exit keys at rest,
+    /// else a kill) and starts again with no resume. An agent that does
+    /// not run starts in a new session now. The recap turn and the `then`
+    /// turn of `plan` go out at the first idle, before the turns that
+    /// wait. It opens the reset gate. `NotReady`: the agent restarts now.
+    /// The default cannot.
+    fn new_session(
+        &self,
+        agent: Agent,
+        plan: NewSessionPlan,
+    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        let _ = (agent, plan);
+        Box::pin(async {
+            Err(SupervisorError::Unsupported(
+                "this supervisor cannot start a new session".into(),
             ))
         })
     }
@@ -428,9 +494,9 @@ mod fake {
     use tokio::sync::{broadcast, mpsc, oneshot};
 
     use super::{
-        AnswerInput, BoxFuture, CompactEnd, CompactWait, OLD_RUNNER, PtyAttachment, PtyInput,
-        REASON_COMPACTING, Supervisor, SupervisorError, SupervisorEvent, SupervisorEventKind,
-        TurnHold,
+        AnswerInput, BoxFuture, CompactEnd, CompactThen, CompactWait, NewSessionPlan, OLD_RUNNER,
+        PtyAttachment, PtyInput, REASON_COMPACTING, Supervisor, SupervisorError, SupervisorEvent,
+        SupervisorEventKind, TurnHold,
     };
 
     /// How the fake harness answers a compact command. For tests.
@@ -468,8 +534,16 @@ mod fake {
         prompts: Vec<String>,
         /// The harness of the last start.
         harness: Option<HarnessId>,
-        /// The compaction that runs: its number and where its end goes.
-        compacting: Option<(u64, Option<oneshot::Sender<CompactEnd>>)>,
+        /// The compaction that runs: its number, where its end goes, and
+        /// the turn after it.
+        compacting: Option<(
+            u64,
+            Option<oneshot::Sender<CompactEnd>>,
+            Option<CompactThen>,
+        )>,
+        /// The reset gate ([`Supervisor::reset_gate`]): no early turn and
+        /// no mail pointer goes out while it is closed.
+        gated: bool,
         /// How the next compactions end.
         compact: FakeCompact,
         /// The compactions that started. For tests.
@@ -575,6 +649,16 @@ mod fake {
         }
 
         fn boot(&self, agent: AgentId, resume: Option<HarnessSessionId>) {
+            self.boot_with(agent, resume, None);
+        }
+
+        /// [`Self::boot`] with the status reason of the start.
+        fn boot_with(
+            &self,
+            agent: AgentId,
+            resume: Option<HarnessSessionId>,
+            reason: Option<&str>,
+        ) {
             let epoch = {
                 let mut inner = self.lock();
                 let a = inner.agents.entry(agent).or_default();
@@ -582,7 +666,7 @@ mod fake {
                 a.compacting = None;
                 a.epoch
             };
-            self.set_status(agent, AgentStatus::Starting, None);
+            self.set_status(agent, AgentStatus::Starting, reason);
             self.later(agent, epoch, move |me| {
                 let session =
                     resume.unwrap_or_else(|| HarnessSessionId(format!("fake-{}", AgentId::new())));
@@ -611,6 +695,7 @@ mod fake {
                     Some(a)
                         if a.status == AgentStatus::Idle
                             && a.held.is_none()
+                            && !a.gated
                             && !a.early.is_empty() =>
                     {
                         a.early.remove(0)
@@ -685,7 +770,7 @@ mod fake {
                 let idle = inner
                     .agents
                     .get(&agent)
-                    .is_some_and(|a| a.status == AgentStatus::Idle && a.held.is_none());
+                    .is_some_and(|a| a.status == AgentStatus::Idle && a.held.is_none() && !a.gated);
                 if !inner.mail_push || !idle {
                     return;
                 }
@@ -799,6 +884,21 @@ mod fake {
             self.lock().no_compact.insert(harness);
         }
 
+        /// The early turns of `agent` that wait (for the start, a
+        /// compaction, or the reset gate). For tests.
+        pub fn early_turns(&self, agent: AgentId) -> Vec<String> {
+            self.lock()
+                .agents
+                .get(&agent)
+                .map(|a| a.early.clone())
+                .unwrap_or_default()
+        }
+
+        /// True while the reset gate of `agent` is closed. For tests.
+        pub fn gated(&self, agent: AgentId) -> bool {
+            self.lock().agents.get(&agent).is_some_and(|a| a.gated)
+        }
+
         /// The number of compactions of `agent` that started. For tests.
         pub fn compactions(&self, agent: AgentId) -> usize {
             self.lock().agents.get(&agent).map_or(0, |a| a.compactions)
@@ -830,11 +930,14 @@ mod fake {
                 if !a
                     .compacting
                     .as_ref()
-                    .is_some_and(|(t, _)| token.is_none_or(|w| w == *t))
+                    .is_some_and(|(t, _, _)| token.is_none_or(|w| w == *t))
                 {
                     return None;
                 }
-                let (_, done) = a.compacting.take()?;
+                let (_, done, then) = a.compacting.take()?;
+                if let Some(then) = then {
+                    a.early.insert(0, then.turn(&end));
+                }
                 end.work = !a.early.is_empty();
                 (done, a.held.clone())
             };
@@ -1021,6 +1124,7 @@ mod fake {
                         && a.status.is_live()
                         && (a.status == AgentStatus::Starting
                             || !a.early.is_empty()
+                            || a.gated
                             || a.compacting.is_some())
                     {
                         a.early.push(text);
@@ -1187,6 +1291,7 @@ mod fake {
             &self,
             agent: AgentId,
             wait: Duration,
+            then: Option<CompactThen>,
         ) -> BoxFuture<'_, Result<CompactWait, SupervisorError>> {
             Box::pin(async move {
                 let (rx, token, epoch, command, mode) = {
@@ -1213,14 +1318,20 @@ mod fake {
                             "the agent compacts already".into(),
                         ));
                     }
-                    if a.held.is_some() || a.status != AgentStatus::Idle || !a.early.is_empty() {
+                    // Behind the reset gate, the early turns wait for the
+                    // compaction.
+                    if a.held.is_some()
+                        || a.status != AgentStatus::Idle
+                        || (!a.early.is_empty() && !a.gated)
+                    {
                         return Err(SupervisorError::NotReady(format!(
                             "the agent is not idle ({})",
                             a.status
                         )));
                     }
                     let (tx, rx) = oneshot::channel();
-                    a.compacting = Some((token, Some(tx)));
+                    a.compacting = Some((token, Some(tx), then));
+                    a.gated = false;
                     a.compactions += 1;
                     (rx, token, a.epoch, command, a.compact)
                 };
@@ -1277,6 +1388,56 @@ mod fake {
                     }
                 });
                 Ok(end)
+            })
+        }
+
+        fn reset_gate(&self, agent: AgentId, on: bool) {
+            let open = {
+                let mut inner = self.lock();
+                let a = inner.agents.entry(agent).or_default();
+                let was = a.gated;
+                a.gated = on;
+                was && !on
+            };
+            if open {
+                self.next_early(agent);
+                self.push_mail(agent);
+            }
+        }
+
+        /// A new fake session: `restarting` for a live agent, then a boot
+        /// with no resume. The recap (with its tag) and the `then` turn go
+        /// first in the early turns.
+        fn new_session(
+            &self,
+            agent: Agent,
+            plan: NewSessionPlan,
+        ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            Box::pin(async move {
+                let live = self.current(agent.id).is_some_and(|(s, _)| s.is_live());
+                if live {
+                    self.set_status(agent.id, AgentStatus::Restarting, Some("new session"));
+                }
+                {
+                    let mut inner = self.lock();
+                    let a = inner.agents.entry(agent.id).or_default();
+                    a.harness = Some(agent.harness);
+                    a.gated = false;
+                    a.viewers.clear();
+                    let mut first = Vec::new();
+                    if let Some(r) = plan.recap {
+                        first.push(terrarium_core::turn_tag::render(
+                            &terrarium_core::turn_tag::TurnSource::system(
+                                terrarium_core::turn_tag::SystemKind::Recap,
+                            ),
+                            &r,
+                        ));
+                    }
+                    first.extend(plan.then);
+                    a.early.splice(0..0, first);
+                }
+                self.boot_with(agent.id, None, Some(&plan.reason));
+                Ok(())
             })
         }
 

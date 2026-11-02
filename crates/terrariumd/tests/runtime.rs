@@ -3222,3 +3222,154 @@ async fn selfhosted_stream_limit_queues_the_second_turn() {
     let sub = td.get("/api/subscriptions/gpu").await;
     assert_eq!(sub["streams"]["waiting"], 0);
 }
+
+/// PLAN §18 "Compact and new session on request" with the real supervisor
+/// and runner: a new session ends the harness on its exit keys and starts
+/// it with no resume (a new harness session and a new `sessions` row), with
+/// the status reason that names who asked. The recap turn and the `then`
+/// turn go out in that order. A compaction with `then` types the prompt as
+/// the next turn after the end of the compaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_requested_new_session_and_compaction_send_then() {
+    let td = Td::start().await;
+    *td.adapter.exit_keys.lock().unwrap() = b"/exit 7\r".to_vec();
+    let id = td.agent("demo", "nina", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "first"})),
+    )
+    .await;
+    td.wait_events(&id, "turn_end", |e| !e.is_empty()).await;
+    td.wait_status(&id, "idle").await;
+
+    // A compaction with a prompt after it.
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/compact"),
+            Some(json!({"then": "After the compaction."})),
+        )
+        .await;
+    assert_eq!(r["reset"]["state"], "started", "{r}");
+    let done = td
+        .wait_events(&id, "agent.compacted", |e| !e.is_empty())
+        .await;
+    assert_eq!(done[0]["data"]["ok"], true, "{done:#?}");
+    let starts = td.wait_events(&id, "turn_start", |e| e.len() == 2).await;
+    assert_eq!(
+        starts[1]["data"]["prompt"],
+        "[System:reset requested by operator] After the compaction."
+    );
+    let finished = td.events(&id, "compact_finished").await;
+    assert!(starts[1]["seq"].as_u64() > finished[0]["seq"].as_u64());
+    td.wait_events(&id, "turn_end", |e| e.len() == 2).await;
+    td.wait_status(&id, "idle").await;
+
+    // A new session.
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/new-session"),
+            Some(json!({"then": "Start the next card."})),
+        )
+        .await;
+    assert_eq!(r["reset"]["state"], "started", "{r}");
+    let started = td
+        .wait_events(&id, "session_started", |e| e.len() == 2)
+        .await;
+    assert_eq!(started[1]["data"]["source"], "startup", "{started:#?}");
+    assert_ne!(
+        started[1]["data"]["harness_session"],
+        started[0]["data"]["harness_session"]
+    );
+    // The old harness ended on its exit keys.
+    let exits = td.wait_events(&id, "exit", |e| !e.is_empty()).await;
+    assert_eq!(exits[0]["data"]["code"], 7, "{exits:#?}");
+    let starts = td.wait_events(&id, "turn_start", |e| e.len() == 4).await;
+    let recap = starts[2]["data"]["prompt"].as_str().unwrap();
+    assert!(
+        recap.starts_with(
+            "[System:recap] Terrarium started you in a new session, as operator requested."
+        ),
+        "{starts:#?}"
+    );
+    assert_eq!(
+        starts[3]["data"]["prompt"],
+        "[System:reset requested by operator] Start the next card."
+    );
+    let statuses = td.events(&id, "status").await;
+    assert!(
+        statuses
+            .iter()
+            .any(|e| e["data"]["reason"] == "new session: requested by operator"),
+        "{statuses:#?}"
+    );
+    let sessions = td.get(&format!("/api/agents/{id}/sessions")).await;
+    let sessions = sessions.as_array().unwrap();
+    assert_eq!(sessions.len(), 2, "{sessions:#?}");
+    assert_eq!(sessions[1]["outcome"], "new_session");
+    assert_eq!(
+        sessions[0]["harness_session_id"],
+        started[1]["data"]["harness_session"]
+    );
+}
+
+/// The stream limit applies to the turns of a new session: with one
+/// stream, the recap and the `then` turn of the second agent wait until
+/// the turn of the first agent ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_then_turn_waits_for_a_free_stream() {
+    let td = Td::start().await;
+    // A turn of the fake TUI takes 1.5 s.
+    td.adapter.set_env("FAKE_TUI_DELAY_MS", "1500");
+    td.post(
+        "/api/subscriptions",
+        Some(
+            json!({"name": "gpu", "provider": "selfhosted", "selfhosted": {
+            "api": "anthropic", "base_url": "http://127.0.0.1:9", "models": ["m"],
+            "max_concurrent": 1}}),
+        ),
+    )
+    .await;
+    let bob = td
+        .agent("demo", "bob", json!({"subscription": "gpu"}))
+        .await;
+    let carol = td
+        .agent("demo", "carol", json!({"subscription": "gpu"}))
+        .await;
+    for id in [&bob, &carol] {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+    }
+    for id in [&bob, &carol] {
+        td.wait_status(id, "idle").await;
+    }
+    td.post(
+        &format!("/api/agents/{bob}/send"),
+        Some(json!({"text": "long"})),
+    )
+    .await;
+    td.wait_events(&bob, "turn_start", |e| !e.is_empty()).await;
+    td.post(
+        &format!("/api/agents/{carol}/new-session"),
+        Some(json!({"then": "Go.", "recap": false})),
+    )
+    .await;
+    td.wait_events(&carol, "session_started", |e| e.len() == 2)
+        .await;
+    let starts = td
+        .wait_events(&carol, "turn_start", |e| !e.is_empty())
+        .await;
+    assert_eq!(
+        starts[0]["data"]["prompt"],
+        "[System:reset requested by operator] Go."
+    );
+    let bob_end = td.events(&bob, "turn_end").await;
+    assert!(!bob_end.is_empty(), "bob's turn ended first");
+    let statuses = td.events(&carol, "status").await;
+    assert!(
+        statuses.iter().any(|x| x["data"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("stream_limit"))),
+        "{statuses:#?}"
+    );
+}

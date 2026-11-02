@@ -819,6 +819,7 @@ line, and name it in the personas:
 | `lease` | The agent's access to a target started or ended (§19). |
 | `nudge` | A board change for a lead: a new card in `ready`, a card in `review` or `blocked`. |
 | `schedule <name>` | The `turn` action of the schedule `<name>` (§12b). |
+| `reset requested by <who>` | The prompt after a compaction or a new session that `<who>` (`self`, `operator`, `<project>/<agent>`) requested (§18, "Compact and new session on request"). The personas do not name it yet (their word caps); the packaged skill `terrarium-reset` explains it. |
 
 A wait result (§12d), a question answer (§12e), and a question that the
 guard catches (§8.4) are mail from `system`: they come as `[Mailbox:system]`.
@@ -3275,10 +3276,10 @@ model call, so all of it is off by default.
   of the session. So an agent never compacts twice with no turn between,
   and a new session with no turn does not compact.
 - **Manual.** `POST /api/agents/{id}/compact` and `terrarium agent compact
-  <agent>`, with the rights of `restart`, compact an idle agent now. The
-  dashboard has **Compact now** on the agent page; it is off, with the
-  reason, when the daemon would refuse it. Only the manual compaction
-  writes an audit row (`agent.compact`).
+  <agent>` compact an agent now, or at the end of its turn ("Compact and
+  new session on request" below). The dashboard has **Compact** on the
+  agent page; it is off, with the reason, when the daemon would refuse it.
+  Only a request on another agent writes an audit row (`agent.compact`).
 - **Not compacted.** A paused agent, an agent with a quota or budget
   hold, an agent that is not `idle` or `waiting` (also `starting` and
   `error`), and an agent of a harness with no compaction
@@ -3302,6 +3303,79 @@ model call, so all of it is off by default.
   `idle`, `max_age`, or `manual`). A failed compaction counts too, so that
   it does not run again without a new turn. The agent page shows "last
   compacted ...".
+
+### Compact and new session on request
+
+Asked for on 2026-11-02: agents compact or clear (start a new session for)
+themselves and other agents, and attach a prompt that goes after the
+reset, so that an agent can reset itself and set itself up for new work.
+The contract is in api.md §6.2; the code is in `crate::reset`, with hooks
+in `crate::lifecycle` and the supervisor.
+
+- **Endpoints.** `POST /api/agents/{id}/compact` `{then?, defer?}` and
+  `POST /api/agents/{id}/new-session` `{then?, recap? (default true),
+  defer?}`. CLI: `terrarium agent compact [<agent> | --self] [--then ... |
+  --then-file f|-] [--defer]` and `terrarium agent new-session [<agent> |
+  --self] [--then ...] [--no-recap] [--defer]`. The dashboard has
+  **Compact** and **New session** on the agent page, each with a dialog
+  ("Then send…", and "Include recap" for a new session), and a "reset
+  queued" chip while a reset waits.
+- **Rights.** Any agent may reset itself, an ephemeral agent too. A reset
+  of another agent keeps the rule of `restart`: project_admin of its
+  project (leads on their workers), sysadmin, or the operator.
+- **Pending reset.** Migration 52 adds `agents.pending_reset` (JSON:
+  `kind`, `then`, `recap`, `by`, `actor`, `deferred`, `requested_at`). One
+  for each agent; a new request replaces it (`replaced: true`). A request
+  runs at once only when it is not deferred and the agent is at rest
+  (`idle`, no compaction). A request of the agent itself (the actor is the
+  agent), `defer: true`, and a request for a busy agent wait for the end of
+  the current turn. The CLI returns at once ("queued: runs when your turn
+  ends"); the skill tells the agent to end its turn. A compaction that runs
+  is not interrupted.
+- **The reset gate.** While a reset waits, the supervisor closes the gate
+  of the agent (`Supervisor::reset_gate`): no turn, recap, or push pointer
+  goes out; they wait in the slot. When the agent comes to rest (the
+  `status` event, and each idle pass as a retry), `reset::run_pending`
+  runs the reset. The compaction or the new session opens the gate. The
+  gate stays over a stop. The daemon start closes it again for each agent
+  with a pending reset.
+- **Compaction.** The same mechanism as the auto compact, with the cause
+  `manual`. The `then` turn waits in the compaction state of the
+  supervisor; at the end it goes first, before the work that waited. A
+  compaction that fails adds the line `Note: the compaction did not
+  complete: <reason>.` in front of the prompt. A compaction that cannot
+  wait (no free stream, a hold that came) stays pending and runs at a
+  later rest.
+- **New session.** The same new session as after a prompt change: no
+  resume, so the harness begins a new conversation. The store opens a new
+  `sessions` row (the old one ends with the outcome `new_session`), then
+  `Supervisor::new_session` ends a live harness gracefully (its exit keys
+  at rest, else a kill) and launches it again with no resume. The status
+  reason is `new session: requested by <who>`. The recap turn (unless
+  `recap: false`) names the open cards of the agent, the counts of open
+  waits and unread mail, and the open questions; then the `then` turn,
+  then the turns that waited. An agent that does not run: with `then`, the
+  request wakes it into the new session (`agent.woken`, cause `reset`);
+  without it, the pending reset waits, and the next wake starts the new
+  session (`state` `next_wake`). A pending reset with `then` counts as
+  queued work, so it keeps an agent from its idle stop, and an unpause or
+  the end of a hold wakes the agent.
+- **The `then` turn.** At most 32 KiB. `[System:reset requested by <who>]
+  <text>`; `<who>` is `self`, `operator`, or `<project>/<agent>`. It is
+  defused as each turn. It is a normal turn: holds, the pause, and the
+  stream limit apply.
+- **Ephemeral agents.** A new session keeps the spawn record and the
+  deadline; only the conversation is new. The `then` prompt must restate
+  the task, because the first turn is gone.
+- **Record.** Each request writes `agent.reset` (`{kind, by, then_set,
+  deferred, replaced, state}`); each compaction writes `agent.compacted`
+  as before. Audit rows (`agent.compact`, `agent.new_session`) only for a
+  request on another agent, to keep the audit quiet.
+- **Skill.** The packaged skill `terrarium-reset` says when to compact
+  (the same work, a shorter context) and when to start a new session
+  (unrelated work, or a confused state), to write a self-contained
+  `--then` prompt (the goal, the files, the card IDs, the next steps), and
+  to end the turn after the request.
 
 ### Ephemeral agents
 

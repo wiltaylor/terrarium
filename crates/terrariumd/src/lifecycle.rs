@@ -38,6 +38,11 @@
 //!   harness with no compaction ([`HarnessId::compact_command`]). The
 //!   supervisor types the command; turns wait for the end. Each
 //!   compaction writes `agent.compacted` (`{cause, ok, duration_ms}`).
+//! - **Reset on request** (`crate::reset`): a compaction or a new session
+//!   that an actor requested waits in `agents.pending_reset` and runs when
+//!   the agent comes to rest (and in each idle pass), before its other
+//!   work. A wake of an agent with a pending new session starts it with no
+//!   resume.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -166,6 +171,9 @@ pub struct Lifecycle {
     /// Ephemeral agents (PLAN §18, "Ephemeral agents"): the close guard
     /// and the times (`crate::spawn`).
     pub spawns: crate::spawn::Runtime,
+    /// The agents with a run of a pending reset on the way
+    /// (`crate::reset::run_pending`).
+    pub resets: crate::reset::Runs,
 }
 
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -288,7 +296,8 @@ impl Drop for CompactGuard {
 /// What [`wake`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Woke {
-    /// The agent starts now, with resume.
+    /// The agent starts now, with resume (or in a new session, for a
+    /// pending new session, `crate::reset`).
     Started,
     /// The agent runs (or restarts) already. The queued turns went to it.
     Running,
@@ -319,9 +328,10 @@ async fn runs(state: &Shared, id: AgentId) -> bool {
 }
 
 /// Wake agent `id` for `cause` (`mail`, `turn`, `card`, `nudge`,
-/// `unpause`, `hold_end`, `daemon_start`, ...): start it with resume when
-/// it does not run, then give it its queued turns. See the module doc for
-/// the agents that do not wake.
+/// `unpause`, `hold_end`, `daemon_start`, `reset`, ...): start it with
+/// resume when it does not run, then give it its queued turns. A pending
+/// new session (`crate::reset`) starts it with no resume instead. See the
+/// module doc for the agents that do not wake.
 pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
     let Some(_guard) = WakeGuard::take(&state.lifecycle, id) else {
         return Woke::Busy;
@@ -389,8 +399,14 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
     let begun = state
         .db
         .write("system", move |t| {
-            let resume = agents::last_harness_session(t, &key)?;
-            agents::begin_session(t, &key, "superseded")?;
+            let plan = crate::reset::take_new_session(t, &key)?;
+            let resume = if plan.is_some() {
+                None
+            } else {
+                let resume = agents::last_harness_session(t, &key)?;
+                agents::begin_session(t, &key, "superseded")?;
+                resume
+            };
             let v = agents::get(t, &key)?;
             t.emit(
                 EventDraft::new(
@@ -401,10 +417,10 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
                 .agent(key.clone(), v.agent.name.clone())
                 .project(v.agent.project.clone()),
             )?;
-            Ok((v, resume))
+            Ok((v, resume, plan))
         })
         .await;
-    let (view, resume) = match begun {
+    let (view, resume, plan) = match begun {
         Ok(r) => r,
         Err(e) => {
             warn!(agent = %id, "cannot begin the session of a wake: {e}");
@@ -412,7 +428,11 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
         }
     };
     info!(agent = %id, name = %view.agent.name, %cause, resume = ?resume, "waking the agent");
-    match state.supervisor.start(view.agent, resume).await {
+    let started = match plan {
+        Some(plan) => state.supervisor.new_session(view.agent, plan).await,
+        None => state.supervisor.start(view.agent, resume).await,
+    };
+    match started {
         Ok(()) => {
             deliver_turns(state, id).await;
             Woke::Started
@@ -643,16 +663,31 @@ pub async fn idle_pass(state: &Shared) {
         }
         resting.retain(|id, _| seen.contains(id));
     }
+    // A pending reset (`crate::reset`) comes before the rest.
+    let resets: HashSet<AgentId> = state
+        .db
+        .read(agents::with_pending_reset)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i.parse().ok())
+        .collect();
     for r in at_rest {
         let rested = now.duration_since(r.since);
         let stop_due = r.stop_after.is_some_and(|l| rested >= l);
         if state.lifecycle.compacting(r.id) {
             continue;
         }
+        if resets.contains(&r.id) {
+            let ran = crate::reset::run_pending(state, r.id).await;
+            if ran != crate::reset::Ran::Nothing {
+                continue;
+            }
+        }
         if let Some(cause) = compact_cause(state, &r, rested).await {
             // A compaction on idle comes before the idle stop.
             let then_stop = cause == CAUSE_IDLE && r.stop_after.is_some();
-            match start_compaction(state, r.id, cause, then_stop).await {
+            match start_compaction(state, r.id, cause, then_stop, None).await {
                 Ok(()) => continue,
                 // The idle stop goes on without a compaction.
                 Err(SupervisorError::Unsupported(e)) => {
@@ -718,14 +753,16 @@ async fn compact_cause(state: &Shared, r: &Resting, rested: Duration) -> Option<
 /// `manual`): the supervisor types the compact command, and a task waits
 /// for the end, writes `agent.compacted`, and notes the time. With
 /// `then_stop`, the agent stops for idleness after the end, unless work
-/// came or it must keep running. The error comes before the start: the
-/// agent compacts already, does not run, is not idle (`NotReady`), or its
-/// harness has no compaction (`Unsupported`).
+/// came or it must keep running. `then`: the prompt turn after the end
+/// (`crate::reset`). The error comes before the start: the agent compacts
+/// already, does not run, is not idle (`NotReady`), or its harness has no
+/// compaction (`Unsupported`).
 pub async fn start_compaction(
     state: &Shared,
     id: AgentId,
     cause: &'static str,
     then_stop: bool,
+    then: Option<crate::supervisor::CompactThen>,
 ) -> Result<(), SupervisorError> {
     let Some(held) = CompactGuard::take(&state.lifecycle, id) else {
         return Err(SupervisorError::NotReady(
@@ -734,7 +771,7 @@ pub async fn start_compaction(
     };
     let began = Instant::now();
     let wait = state.lifecycle.tuning().compact_wait;
-    let end = state.supervisor.compact(id, wait).await?;
+    let end = state.supervisor.compact(id, wait, then).await?;
     info!(agent = %id, %cause, "the agent compacts its session");
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
@@ -848,9 +885,11 @@ fn on_event(state: &Shared, ev: &crate::events::StoredEvent) {
                     wake_with_work(&state, Some(agent), "queued").await;
                 });
             } else if status.is_resting() && !was_resting {
-                // A turn that was queued while the agent stopped or
-                // started goes out now.
+                // A pending reset runs first (`crate::reset`). A turn that
+                // was queued while the agent stopped or started goes out
+                // now.
                 tokio::spawn(async move {
+                    crate::reset::at_rest(&state, agent).await;
                     let key = agent.to_string();
                     let waiting = state
                         .db
@@ -901,6 +940,7 @@ pub fn spawn(state: &Shared) -> Vec<JoinHandle<()>> {
     let weak: Weak<AppState> = Arc::downgrade(state);
     let timer = tokio::spawn(async move {
         if let Some(state) = weak.upgrade() {
+            crate::reset::close_gates(&state).await;
             wake_with_work(&state, None, "daemon_start").await;
         }
         loop {

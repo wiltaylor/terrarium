@@ -34,6 +34,7 @@ pub mod question_guard;
 pub mod quota_notices;
 pub mod quota_policy;
 pub mod repo_browse;
+pub mod reset;
 pub mod runner_supervisor;
 pub mod sandbox;
 pub mod scheduler;

@@ -459,10 +459,24 @@ pub enum AgentCmd {
     /// Unpause an agent. It wakes now when turns or mail wait for it, else
     /// at its next work
     Unpause { agent: String },
-    /// Compact the session of an idle agent now: the daemon types the
-    /// harness's `/compact` and holds new turns until the end. The event
-    /// `agent.compacted` gives the result
-    Compact { agent: String },
+    /// Compact the session of an agent: the daemon types the harness's
+    /// `/compact` and holds new turns until the end. At rest it starts
+    /// now; for a busy agent or your own session, when the current turn
+    /// ends. `--then` goes as the next turn after the compaction. The
+    /// event `agent.compacted` gives the result
+    Compact(ResetArgs),
+    /// End the harness session of an agent and start a new, clean session
+    /// (not a resume). The new session gets a short recap turn, then the
+    /// `--then` prompt. For a busy agent or your own session, it runs when
+    /// the current turn ends. A stopped agent starts now with `--then`,
+    /// else at its next wake
+    NewSession {
+        #[command(flatten)]
+        args: ResetArgs,
+        /// Do not send the recap turn (open cards, waits, unread mail)
+        #[arg(long)]
+        no_recap: bool,
+    },
     /// Type one turn into the agent. Without `--raw`, the turn waits for
     /// the agent to be idle, and a text that starts with `/` or `!` stays
     /// plain text for the model
@@ -556,6 +570,29 @@ pub enum AgentCmd {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+}
+
+/// The target and the prompt of `agent compact` and `agent new-session`.
+#[derive(Debug, Args)]
+pub struct ResetArgs {
+    /// The agent. An agent can give `--self` instead
+    #[arg(required_unless_present = "me", conflicts_with = "me")]
+    pub agent: Option<String>,
+    /// Your own session (an agent only). The request waits until your
+    /// turn ends: end your turn after the command
+    #[arg(long = "self", id = "me")]
+    pub me: bool,
+    /// The prompt to send after the reset (at most 32 KiB). A new session
+    /// forgets: restate the goal, the files, the card IDs, and the next
+    /// steps. `-` reads stdin
+    #[arg(long, conflicts_with = "then_file")]
+    pub then: Option<String>,
+    /// Read the `--then` prompt from this file; `-` reads stdin
+    #[arg(long, value_name = "FILE")]
+    pub then_file: Option<String>,
+    /// Wait until the current turn of the agent ends, also when it rests
+    #[arg(long)]
+    pub defer: bool,
 }
 
 #[derive(Debug, Args)]

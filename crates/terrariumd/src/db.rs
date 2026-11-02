@@ -1572,6 +1572,16 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX spawns_owner ON spawns(owner, id);
     CREATE INDEX spawns_open ON spawns(finished_at);
     "#,
+    // 52: the pending reset of an agent (PLAN §18, "Compact and new
+    // session on request", `crate::reset`): a compaction or a new session
+    // that waits for the end of the current turn, as JSON (`kind`, `then`,
+    // `recap`, `by`, `actor`, `deferred`, `requested_at`). NULL: none. One
+    // for each agent; a new request replaces it. Self-contained: when
+    // another branch takes number 52, move this entry to the end of the
+    // list.
+    r#"
+    ALTER TABLE agents ADD COLUMN pending_reset TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

@@ -133,3 +133,9 @@ Your system prompt says so, and names your owner. Then:
 - Push or upload each output that must stay before you run `agent done`:
   your workspace goes to the trash.
 - Your owner may mail you while you work. Read the mail as for any agent.
+- If your context gets long, compact your own session:
+  `terrarium agent compact --self --then "<task and progress>"`, then end
+  your turn. A new session (`terrarium agent new-session --self --then
+  "<task and progress>"`) keeps your spawn record and your deadline, but it
+  forgets your first turn: restate the whole task in `--then`. The
+  `terrarium-reset` skill has the details.

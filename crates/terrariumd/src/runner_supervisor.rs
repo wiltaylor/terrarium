@@ -92,9 +92,9 @@ use crate::prompt::{self, Peer, PromptContext};
 use crate::sandbox::{self, AgentLayout, HarnessHome, SandboxConfig, SandboxMode};
 use crate::store::subscriptions::Subscription;
 use crate::supervisor::{
-    AnswerInput, BoxFuture, CompactEnd, CompactWait, HarnessRun, PtyAttachment, PtyInput,
-    REASON_COMPACTING, Recovery, Supervisor, SupervisorError, SupervisorEvent, SupervisorEventKind,
-    SwapApplied, TurnHold, wants_restart,
+    AnswerInput, BoxFuture, CompactEnd, CompactThen, CompactWait, HarnessRun, NewSessionPlan,
+    PtyAttachment, PtyInput, REASON_COMPACTING, Recovery, Supervisor, SupervisorError,
+    SupervisorEvent, SupervisorEventKind, SwapApplied, TurnHold, wants_restart,
 };
 
 /// One harness adapter and its prompt-ready detector.
@@ -955,6 +955,12 @@ struct Slot {
     /// The compaction that runs ([`Supervisor::compact`]). A drop of its
     /// sender (an exit, a new launch) ends the wait of the caller.
     compacting: Option<Compacting>,
+    /// The reset gate ([`Supervisor::reset_gate`]): while it is closed, no
+    /// turn, recap, or pointer goes out. It stays over a stop and a start.
+    reset_gate: bool,
+    /// The status reason of the next start, for a new session that an
+    /// actor requested ([`Supervisor::new_session`]).
+    start_reason: Option<String>,
 }
 
 /// A compaction that runs: its number, and where its end goes.
@@ -964,6 +970,8 @@ struct Compacting {
     /// this compaction ([`Supervisor::session_signal`]).
     started: chrono::DateTime<chrono::Utc>,
     done: Option<tokio::sync::oneshot::Sender<CompactEnd>>,
+    /// The turn to type after the end ([`CompactThen::turn`]).
+    then: Option<CompactThen>,
 }
 
 impl Slot {
@@ -990,6 +998,8 @@ impl Slot {
             bound: Vec::new(),
             swap_pending: false,
             compacting: None,
+            reset_gate: false,
+            start_reason: None,
         }
     }
 
@@ -1079,6 +1089,10 @@ struct Inner {
     /// round. `pending_pointers` keeps the same items, so they live through
     /// a daemon restart ([`RunnerSupervisor::load_parked`]).
     parked: Mutex<HashMap<AgentId, Pointer>>,
+    /// The closed reset gates of agents with no slot yet
+    /// ([`Supervisor::reset_gate`]): the first claim takes them. Locked
+    /// only inside `slots`.
+    gates: Mutex<std::collections::HashSet<AgentId>>,
     /// The `id` of the last `pending_pointers` row: a newer item gets a
     /// higher one.
     pointer_seq: AtomicI64,
@@ -1201,6 +1215,7 @@ impl RunnerSupervisor {
                 holds: Mutex::new(HashMap::new()),
                 nudges: Mutex::new(HashMap::new()),
                 parked: Mutex::new(HashMap::new()),
+                gates: Mutex::new(std::collections::HashSet::new()),
                 pointer_seq: AtomicI64::new(0),
                 tx,
                 state: OnceLock::new(),
@@ -1800,15 +1815,127 @@ impl RunnerSupervisor {
 
     /// Boxed, because a relaunch after an exit calls it again from the task
     /// that it spawned.
+    /// Set up `slot` for a new session ([`Supervisor::new_session`]): no
+    /// resume, the status reason, the recap turn, and the `then` turn
+    /// before the turns that wait. The reset gate opens.
+    fn prepare_new_session(slot: &mut Slot, plan: NewSessionPlan) {
+        slot.resume = None;
+        slot.session = None;
+        slot.start_reason = Some(plan.reason);
+        slot.recap = plan.recap;
+        if let Some(then) = plan.then {
+            slot.turns.insert(0, then);
+        }
+        slot.reset_gate = false;
+    }
+
+    /// [`Supervisor::start`], and for a new session the set-up of
+    /// [`RunnerSupervisor::prepare_new_session`] after the claim.
+    async fn start_with(
+        &self,
+        agent: Agent,
+        resume: Option<HarnessSessionId>,
+        plan: Option<NewSessionPlan>,
+    ) -> Result<(), SupervisorError> {
+        self.entry(agent.harness)?;
+        let id = agent.id;
+        let epoch = self.claim(&agent, resume)?;
+        if let Some(plan) = plan
+            && let Some(slot) = lock(&self.inner.slots).get_mut(&id)
+        {
+            Self::prepare_new_session(slot, plan);
+        }
+        // A runner process that an earlier daemon started still holds
+        // the agent: take it over. A second runner cannot start.
+        if self.is_process_mode()
+            && let Some(pid) = live_runner_pid(&self.inner.cfg.runtime_dir, id)
+        {
+            warn!(agent = %id, pid, "a runner process still holds the agent; taking it over");
+            let remote = match self.connect_runner(id, None).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.release(id, epoch, AgentStatus::Stopped);
+                    return Err(e);
+                }
+            };
+            self.adopt(id, epoch, remote, None);
+            return Ok(());
+        }
+        self.targets_up(&agent).await;
+        let result = self.launch(id, epoch).await;
+        match &result {
+            Ok(()) => {}
+            // A planted entry in the agent dir: `error` with the path,
+            // so the operator sees it (F11).
+            Err(e) if is_unsafe_launch(e) => {
+                warn!(agent = %id, "the launch refused the agent dir: {e}");
+                self.release(id, epoch, AgentStatus::Error);
+                self.emit_status(id, AgentStatus::Error, e.to_string());
+                self.targets_down(&agent);
+            }
+            Err(_) => {
+                self.release(id, epoch, AgentStatus::Stopped);
+                self.targets_down(&agent);
+            }
+        }
+        result
+    }
+
+    /// End the harness of `agent` gracefully: an idle harness with known
+    /// exit keys gets them, and a kill only when it has not exited in
+    /// time. Else a kill now. With an exit-key pause, the final CR goes
+    /// after the pause.
+    async fn exit_gracefully(
+        &self,
+        agent: AgentId,
+        r: Arc<dyn RunnerHandle>,
+        harness: HarnessId,
+    ) -> Result<(), SupervisorError> {
+        let (writes, pause) = self
+            .entry(harness)
+            .map(|e| {
+                let pause = e.adapter.exit_key_pause();
+                (
+                    terrarium_core::adapter::exit_key_writes(&e.adapter.exit_keys(), pause),
+                    pause,
+                )
+            })
+            .unwrap_or_default();
+        let mut writes = writes.into_iter();
+        if let Some(first) = writes.next()
+            && r.status() == AgentStatus::Idle
+            && r.write(&first).await.is_ok()
+        {
+            tokio::spawn(async move {
+                for w in writes {
+                    tokio::time::sleep(pause).await;
+                    if let Err(e) = r.write(&w).await {
+                        debug!(agent = %agent, "cannot type the exit keys: {e}");
+                    }
+                }
+                if tokio::time::timeout(GRACEFUL_STOP, r.wait()).await.is_err() {
+                    debug!(agent = %agent, "the harness did not exit on its exit keys; killing it");
+                    let _ = r.kill().await;
+                }
+            });
+            return Ok(());
+        }
+        r.kill().await.map_err(other)
+    }
+
     fn launch(&self, id: AgentId, epoch: u64) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(self.launch_inner(id, epoch))
     }
 
     async fn launch_inner(&self, id: AgentId, epoch: u64) -> Result<(), SupervisorError> {
-        let (agent, resume) = {
-            let slots = lock(&self.inner.slots);
-            let slot = slots.get(&id).ok_or(SupervisorError::NotRunning(id))?;
-            (slot.agent.clone(), slot.resume.clone())
+        let (agent, resume, start_reason) = {
+            let mut slots = lock(&self.inner.slots);
+            let slot = slots.get_mut(&id).ok_or(SupervisorError::NotRunning(id))?;
+            (
+                slot.agent.clone(),
+                slot.resume.clone(),
+                slot.start_reason.take(),
+            )
         };
         let entry = self.entry(agent.harness)?;
         let view = self.store_view(&agent).await;
@@ -1964,7 +2091,7 @@ impl RunnerSupervisor {
         let reason = match &resume {
             Some(s) => format!("resuming session {s}"),
             None if fresh_for_prompt => "new session: the prompt changed".to_owned(),
-            None => "new session".to_owned(),
+            None => start_reason.unwrap_or_else(|| "new session".to_owned()),
         };
         info!(agent = %id, name = %agent.name, %reason, "agent started");
         self.emit_status(id, AgentStatus::Starting, reason);
@@ -2467,7 +2594,7 @@ impl RunnerSupervisor {
             let Some(slot) = slots.get_mut(&id) else {
                 return;
             };
-            if slot.compacting.is_some() {
+            if slot.compacting.is_some() || slot.reset_gate {
                 return;
             }
             let Some(runner) = slot.runner.clone() else {
@@ -2543,6 +2670,10 @@ impl RunnerSupervisor {
                 return None;
             }
             let c = slot.compacting.take()?;
+            // The prompt of the actor that asked goes first.
+            if let Some(then) = &c.then {
+                slot.turns.insert(0, then.turn(&end));
+            }
             end.work = !slot.turns.is_empty() || slot.recap.is_some() || !slot.pointer.is_empty();
             (c.done, slot.runner.clone())
         };
@@ -2629,9 +2760,14 @@ impl RunnerSupervisor {
                 )
             } else if slot.restart_requested {
                 slot.restart_requested = false;
+                let reason = if slot.start_reason.is_some() {
+                    "new session"
+                } else {
+                    "restart"
+                };
                 Next::Relaunch {
                     delay: Duration::ZERO,
-                    reason: "restart".into(),
+                    reason: reason.into(),
                     new_session: None,
                 }
             } else if resume_failed {
@@ -2789,6 +2925,9 @@ impl RunnerSupervisor {
             return Err(SupervisorError::AlreadyRunning(agent.id));
         }
         slot.agent = agent.clone();
+        if lock(&self.inner.gates).remove(&agent.id) {
+            slot.reset_gate = true;
+        }
         slot.epoch += 1;
         slot.stop_requested = false;
         slot.restart_requested = false;
@@ -2988,6 +3127,7 @@ impl RunnerSupervisor {
                 || slot.pointer.is_empty()
                 || slot.recap.is_some()
                 || slot.compacting.is_some()
+                || slot.reset_gate
                 || slot.seen != AgentStatus::Idle
             {
                 return;
@@ -3766,44 +3906,72 @@ impl Supervisor for RunnerSupervisor {
         agent: Agent,
         resume: Option<HarnessSessionId>,
     ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        Box::pin(self.start_with(agent, resume, None))
+    }
+
+    fn reset_gate(&self, agent: AgentId, on: bool) {
+        let open = {
+            let mut slots = lock(&self.inner.slots);
+            let Some(slot) = slots.get_mut(&agent) else {
+                // An agent that has not run since the daemon start: its
+                // first claim takes the gate.
+                let mut gates = lock(&self.inner.gates);
+                if on {
+                    gates.insert(agent);
+                } else {
+                    gates.remove(&agent);
+                }
+                return;
+            };
+            let was = slot.reset_gate;
+            slot.reset_gate = on;
+            was && !on && slot.reached_idle
+        };
+        if open {
+            self.deliver_pending(agent);
+        }
+    }
+
+    fn new_session(
+        &self,
+        agent: Agent,
+        plan: NewSessionPlan,
+    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(async move {
             self.entry(agent.harness)?;
             let id = agent.id;
-            let epoch = self.claim(&agent, resume)?;
-            // A runner process that an earlier daemon started still holds
-            // the agent: take it over. A second runner cannot start.
-            if self.is_process_mode()
-                && let Some(pid) = live_runner_pid(&self.inner.cfg.runtime_dir, id)
-            {
-                warn!(agent = %id, pid, "a runner process still holds the agent; taking it over");
-                let remote = match self.connect_runner(id, None).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        self.release(id, epoch, AgentStatus::Stopped);
-                        return Err(e);
+            let live = {
+                let mut slots = lock(&self.inner.slots);
+                match slots.get_mut(&id) {
+                    Some(slot) if slot.runner.is_some() => {
+                        if slot.stop_requested {
+                            return Err(SupervisorError::NotReady(
+                                "the agent stops now; it starts no new session".into(),
+                            ));
+                        }
+                        slot.restart_requested = true;
+                        slot.agent = agent.clone();
+                        Self::prepare_new_session(slot, plan.clone());
+                        Some((slot.runner.clone(), slot.agent.harness))
                     }
-                };
-                self.adopt(id, epoch, remote, None);
-                return Ok(());
-            }
-            self.targets_up(&agent).await;
-            let result = self.launch(id, epoch).await;
-            match &result {
-                Ok(()) => {}
-                // A planted entry in the agent dir: `error` with the path,
-                // so the operator sees it (F11).
-                Err(e) if is_unsafe_launch(e) => {
-                    warn!(agent = %id, "the launch refused the agent dir: {e}");
-                    self.release(id, epoch, AgentStatus::Error);
-                    self.emit_status(id, AgentStatus::Error, e.to_string());
-                    self.targets_down(&agent);
+                    Some(slot) if slot.live() => {
+                        return Err(SupervisorError::NotReady(
+                            "the agent restarts now; ask again when it runs".into(),
+                        ));
+                    }
+                    _ => None,
                 }
-                Err(_) => {
-                    self.release(id, epoch, AgentStatus::Stopped);
-                    self.targets_down(&agent);
+            };
+            match live {
+                Some((Some(r), harness)) => {
+                    info!(agent = %id, reason = %plan.reason, "ending the session for a new one");
+                    if let Err(e) = r.set_stopped_by(StoppedBy::Policy).await {
+                        debug!(agent = %id, "cannot record the stop reason: {e}");
+                    }
+                    self.exit_gracefully(id, r, harness).await
                 }
+                _ => self.start_with(agent, None, Some(plan)).await,
             }
-            result
         })
     }
 
@@ -3851,39 +4019,8 @@ impl Supervisor for RunnerSupervisor {
             if let Err(e) = r.set_stopped_by(by).await {
                 debug!(agent = %agent, "cannot record the stop reason: {e}");
             }
-            // A graceful stop: an idle harness with known exit keys gets
-            // them, and a kill only when it has not exited in time. With an
-            // exit-key pause, the final CR goes after the pause.
-            let (writes, pause) = self
-                .entry(harness)
-                .map(|e| {
-                    let pause = e.adapter.exit_key_pause();
-                    (
-                        terrarium_core::adapter::exit_key_writes(&e.adapter.exit_keys(), pause),
-                        pause,
-                    )
-                })
-                .unwrap_or_default();
-            let mut writes = writes.into_iter();
-            if let Some(first) = writes.next()
-                && r.status() == AgentStatus::Idle
-                && r.write(&first).await.is_ok()
-            {
-                tokio::spawn(async move {
-                    for w in writes {
-                        tokio::time::sleep(pause).await;
-                        if let Err(e) = r.write(&w).await {
-                            debug!(agent = %agent, "cannot type the exit keys: {e}");
-                        }
-                    }
-                    if tokio::time::timeout(GRACEFUL_STOP, r.wait()).await.is_err() {
-                        debug!(agent = %agent, "the harness did not exit on its exit keys; killing it");
-                        let _ = r.kill().await;
-                    }
-                });
-                return Ok(());
-            }
-            r.kill().await.map_err(other)
+            // A graceful stop.
+            self.exit_gracefully(agent, r, harness).await
         })
     }
 
@@ -3968,7 +4105,7 @@ impl Supervisor for RunnerSupervisor {
                 let mut slots = lock(&self.inner.slots);
                 if let Some(slot) = slots
                     .get_mut(&agent)
-                    .filter(|s| !s.reached_idle || s.compacting.is_some())
+                    .filter(|s| !s.reached_idle || s.compacting.is_some() || s.reset_gate)
                 {
                     slot.turns.push(text);
                     return Ok(());
@@ -4199,6 +4336,7 @@ impl Supervisor for RunnerSupervisor {
         &self,
         agent: AgentId,
         wait: Duration,
+        then: Option<CompactThen>,
     ) -> BoxFuture<'_, Result<CompactWait, SupervisorError>> {
         Box::pin(async move {
             if self.held(agent).is_some() {
@@ -4226,12 +4364,14 @@ impl Supervisor for RunnerSupervisor {
                     ));
                 }
                 let status = runner.status();
+                // Behind the reset gate, the recap and the turns wait for
+                // the compaction.
+                let waiting = !slot.reset_gate && (slot.recap.is_some() || !slot.turns.is_empty());
                 if !slot.reached_idle
                     || slot.seen != AgentStatus::Idle
                     || status != AgentStatus::Idle
                     || slot.pointer_busy
-                    || slot.recap.is_some()
-                    || !slot.turns.is_empty()
+                    || waiting
                     || slot.swap_pending
                 {
                     return Err(SupervisorError::NotReady(format!(
@@ -4257,7 +4397,9 @@ impl Supervisor for RunnerSupervisor {
                     // A session-file time has milliseconds at most.
                     started: chrono::Utc::now() - chrono::Duration::seconds(1),
                     done: Some(tx),
+                    then,
                 });
+                slot.reset_gate = false;
                 (rx, token, command)
             };
             info!(agent = %agent, %command, "compacting the session");

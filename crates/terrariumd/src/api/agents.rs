@@ -28,6 +28,7 @@ pub fn routes() -> Router<Shared> {
         .route("/agents/{id}/pause", post(pause))
         .route("/agents/{id}/unpause", post(unpause))
         .route("/agents/{id}/compact", post(compact))
+        .route("/agents/{id}/new-session", post(new_session))
         .route("/agents/{id}/send", post(send))
         .route("/agents/{id}/keys", post(keys))
         .route("/agents/{id}/answer", post(answer))
@@ -498,17 +499,25 @@ pub(super) async fn start(
     }
     let id = a.agent.id.to_string();
     let project = a.agent.project.clone();
-    let resume = state
+    let (resume, plan) = state
         .db
         .write(actor.label(), move |t| {
-            agents::begin_session(t, &id, "superseded")?;
             t.audit("agent.start", &id, Some(&project), json!({}))?;
-            agents::last_harness_session(t, &id)
+            // A pending new session (`crate::reset`): no resume.
+            if let Some(plan) = crate::reset::take_new_session(t, &id)? {
+                return Ok((None, Some(plan)));
+            }
+            agents::begin_session(t, &id, "superseded")?;
+            Ok((agents::last_harness_session(t, &id)?, None))
         })
         .await?;
     // A start is a retry: a usage-limit hold ends (`crate::usage_limit`).
     crate::usage_limit::release_all(&state, &a.agent.id.to_string()).await?;
-    if let Err(e) = state.supervisor.start(a.agent.clone(), resume).await {
+    let started = match plan {
+        Some(plan) => state.supervisor.new_session(a.agent.clone(), plan).await,
+        None => state.supervisor.start(a.agent.clone(), resume).await,
+    };
+    if let Err(e) = started {
         let id = a.agent.id.to_string();
         state
             .db
@@ -623,74 +632,130 @@ pub(super) async fn unpause(
     Ok((StatusCode::ACCEPTED, Json(v)))
 }
 
-/// `POST /api/agents/{id}/compact`: compact the session of an idle agent
-/// now (PLAN §18, "Auto compact"). The rights are those of `restart`. The
-/// answer comes when the compaction starts; the event `agent.compacted`
-/// gives its end. `409 conflict`: the harness has no compaction, or the
-/// agent is paused, held, not idle, or compacts already. `409
-/// not_running`: the agent does not run. Writes the audit row
-/// `agent.compact`.
+/// The body of `POST /api/agents/{id}/compact`. An empty body is `{}`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactBody {
+    /// The prompt to send after the compaction (at most 32 KiB).
+    #[serde(default)]
+    then: Option<String>,
+    /// Wait for the end of the current turn.
+    #[serde(default)]
+    defer: bool,
+}
+
+/// The body of `POST /api/agents/{id}/new-session`. An empty body is `{}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewSessionBody {
+    /// The prompt to send after the new session is ready (at most 32 KiB).
+    #[serde(default)]
+    then: Option<String>,
+    /// Start with the recap turn. Default true.
+    #[serde(default = "yes")]
+    recap: bool,
+    /// Wait for the end of the current turn.
+    #[serde(default)]
+    defer: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for NewSessionBody {
+    fn default() -> Self {
+        Self {
+            then: None,
+            recap: true,
+            defer: false,
+        }
+    }
+}
+
+/// An optional JSON body: empty (or white space) gives the default.
+fn optional_body<T: serde::de::DeserializeOwned + Default>(body: &[u8]) -> ApiResult<T> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(T::default());
+    }
+    serde_json::from_slice(body).map_err(|e| ApiError::bad_request(e.to_string()))
+}
+
+/// The answer of a reset request: the agent, and what the request did.
+#[derive(Debug, Serialize)]
+pub(super) struct ResetAnswer {
+    #[serde(flatten)]
+    agent: AgentView,
+    reset: crate::reset::Outcome,
+}
+
+/// `POST /api/agents/{id}/compact` (`{then?, defer?}`): compact the
+/// session of the agent (PLAN §18, "Compact and new session on request",
+/// `crate::reset`). The agent itself may ask; for another agent, the
+/// rights are those of `restart`. At rest, the compaction starts now;
+/// for a busy agent, a request of the agent itself, or `defer`, it waits
+/// for the end of the current turn. `then` goes as the next turn after
+/// the end. The event `agent.compacted` gives the end. `409 conflict`: the
+/// harness has no compaction, or the agent is paused or held. `409
+/// not_running`: the agent does not run. A request on another agent
+/// writes the audit row `agent.compact`.
 pub(super) async fn compact(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-) -> ApiResult<(StatusCode, Json<AgentView>)> {
+    body: axum::body::Bytes,
+) -> ApiResult<(StatusCode, Json<ResetAnswer>)> {
+    let b: CompactBody = optional_body(&body)?;
     let a = load(&state, &actor, id).await?;
-    policy::admin_project(&actor, &a.agent.project, "compacting an agent")?;
-    let conflict = |m: String| ApiError::new(Code::Conflict, m);
-    if !a.compact_supported {
-        return Err(conflict(crate::lifecycle::compact_unsupported(
-            a.agent.harness,
-        )));
-    }
-    if a.paused {
-        return Err(conflict(format!(
-            "agent `{}/{}` is paused; it does not compact",
-            a.agent.project, a.agent.name
-        )));
-    }
-    let key = a.agent.id.to_string();
-    let holds = state
-        .db
-        .read(move |c| crate::store::usage::holds_of(c, &key))
-        .await?
-        .len();
-    if holds > 0 {
-        return Err(conflict(
-            "a quota or budget hold lasts; the agent does not compact".into(),
-        ));
-    }
-    match state.supervisor.status(agent_id(&a)).await {
-        Some(AgentStatus::Idle) => {}
-        Some(s) if s.is_live() => {
-            let what = if state.lifecycle.compacting(agent_id(&a)) {
-                "compacts already".to_owned()
-            } else {
-                format!("is not idle ({s})")
-            };
-            return Err(conflict(format!(
-                "agent `{}/{}` {what}; it compacts only at rest",
-                a.agent.project, a.agent.name
-            )));
-        }
-        _ => return Err(supervisor_error(SupervisorError::NotRunning(agent_id(&a)))),
-    }
-    crate::lifecycle::start_compaction(&state, agent_id(&a), crate::lifecycle::CAUSE_MANUAL, false)
-        .await
-        .map_err(|e| match e {
-            SupervisorError::NotReady(m) | SupervisorError::Unsupported(m) => conflict(m),
-            e => supervisor_error(e),
-        })?;
+    let req = crate::reset::Request {
+        kind: agents::ResetKind::Compact,
+        then: b.then,
+        recap: false,
+        defer: b.defer,
+    };
+    reset(&state, &actor, &a, req).await
+}
+
+/// `POST /api/agents/{id}/new-session` (`{then?, recap?, defer?}`): end
+/// the harness session of the agent and start a new one, not a resume
+/// (`crate::reset`). The same rights and the same wait as `compact`. The
+/// new session starts with the recap turn (unless `recap: false`), then
+/// `then`. An agent that does not run starts now when `then` is set, else
+/// at its next wake. A request on another agent writes the audit row
+/// `agent.new_session`.
+pub(super) async fn new_session(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<(StatusCode, Json<ResetAnswer>)> {
+    let b: NewSessionBody = optional_body(&body)?;
+    let a = load(&state, &actor, id).await?;
+    let req = crate::reset::Request {
+        kind: agents::ResetKind::NewSession,
+        then: b.then,
+        recap: b.recap,
+        defer: b.defer,
+    };
+    reset(&state, &actor, &a, req).await
+}
+
+async fn reset(
+    state: &Shared,
+    actor: &Actor,
+    a: &AgentView,
+    req: crate::reset::Request,
+) -> ApiResult<(StatusCode, Json<ResetAnswer>)> {
+    let outcome = crate::reset::request(state, actor, a, req).await?;
     let id = a.agent.id.to_string();
-    let project = a.agent.project.clone();
-    let v = state
-        .db
-        .write(actor.label(), move |t| {
-            t.audit("agent.compact", &id, Some(&project), json!({}))?;
-            agents::get(t, &id)
-        })
-        .await?;
-    Ok((StatusCode::ACCEPTED, Json(v)))
+    let v = state.db.read(move |c| agents::get(c, &id)).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ResetAnswer {
+            agent: v,
+            reset: outcome,
+        }),
+    ))
 }
 
 /// Write the `paused` flag. A change writes the audit row `agent.pause` or

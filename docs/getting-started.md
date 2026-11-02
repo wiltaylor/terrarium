@@ -310,8 +310,11 @@ than 24 hours at its next rest. Each compaction is one model call, so both
 are off by default (`TERRARIUM_COMPACT_ON_IDLE`,
 `TERRARIUM_COMPACT_MAX_AGE` in `.env`). An automatic compaction runs only
 after a new turn. To compact now, run `t agent compact demo/worker`, or
-click **Compact now** on the agent page. While the session compacts, the
-agent shows `working (compacting)`, and new turns wait.
+click **Compact** on the agent page. While the session compacts, the
+agent shows `working (compacting)`, and new turns wait. To start a clean
+session instead (not a resume), run `t agent new-session demo/worker`, or
+click **New session**. Both can carry a prompt that goes after the reset
+(`--then "..."`, or **Then send…** in the dialog); §2.13f has the details.
 
 Give the agent a turn, and look at its status:
 
@@ -1175,8 +1178,9 @@ A skill is a folder with a `SKILL.md` file: YAML front matter with a
 `name` and a `description`, then instructions in Markdown. It can also
 hold `scripts/`, `references/`, and `assets/`. An agent sees the name and
 the description of each of its skills. When a skill fits the task, the
-agent loads the instructions. Terrarium ships three skills, `terrarium-db`
-(§2.13b), `terrarium-tests` (§2.13d), and `terrarium-spawn` (§2.13e) (PLAN §8.6).
+agent loads the instructions. Terrarium ships four skills, `terrarium-db`
+(§2.13b), `terrarium-tests` (§2.13d), `terrarium-spawn` (§2.13e), and
+`terrarium-reset` (§2.13f) (PLAN §8.6).
 
 1. Add a skill to the library. It goes to `config/terrarium/skills/<name>/`:
 
@@ -1429,6 +1433,43 @@ then the daemon closes it and archives its session.
 An ephemeral agent that does not run `agent done` stays idle until its
 lifetime ends (outcome `timeout`). When you remove the lead, its
 ephemeral agents and their history go with it.
+
+### 2.13f Compact or start a new session, with a prompt after it
+
+An agent can compact its own session, or start a new, clean session, and
+send itself a prompt for the work after the reset (PLAN §18, "Compact and
+new session on request"; api.md §6.2). A lead can do the same for its
+workers, and you for any agent.
+
+1. Give the agents the packaged skill `terrarium-reset`, so that they know
+   when to compact (the same work, a shorter context) and when to start a
+   new session (unrelated work, or a confused state):
+   `terrarium admin agent set demo/worker --skill terrarium-reset` (name
+   its other skills too), then restart it.
+
+2. An agent resets itself, then ends its turn:
+
+   ```bash
+   terrarium agent new-session --self \
+     --then "Card TER-12, branch ter-12-retries. Done: the retry loop. Next: the tests in tests/client.rs."
+   ```
+
+   The command answers at once: `queued: the new session runs when your
+   turn ends`. When the turn ends, the daemon starts a new harness session
+   (not a resume), sends a short recap turn (open cards, waits, unread
+   mail), and then the prompt, tagged `[System:reset requested by self]`.
+
+3. You (or a lead) reset an agent from the agent page: click **Compact**
+   or **New session**, write the prompt in **Then send…** (optional), and
+   for a new session choose **Include recap**. A busy agent resets when
+   its turn ends; the page shows a "reset queued" chip until then. The
+   **Sessions** tab shows the new session. With the CLI:
+   `t agent compact demo/worker --then "..."`, or
+   `t agent new-session demo/worker --then-file next.md --no-recap`.
+
+Only one reset waits for each agent: a new request replaces it. A stopped
+agent with a prompt starts at once in the new session; without a prompt,
+its next wake starts the new session.
 
 ### 2.14 Install on a server
 

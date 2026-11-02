@@ -61,7 +61,7 @@ const mailTurn = (sender: string, subject: string, thread: string, message: stri
   };
 };
 /** A daemon turn: `[System:<kind>] <text>`. */
-const systemTurn = (kind: string, text: string, detail?: string): Draft => ({
+export const systemTurn = (kind: string, text: string, detail?: string): Draft => ({
   role: "user",
   kind: "text",
   text: `[System:${kind}${detail ? ` ${detail}` : ""}] ${text}`,

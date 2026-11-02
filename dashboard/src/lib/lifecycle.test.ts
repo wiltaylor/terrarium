@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "../api/types";
-import { compactAction, idleStopped, lastCompactedText, lifecycleActions, lifecycleBadge, queuedLabel } from "./lifecycle";
+import { compactButton, idleStopped, lastCompactedText, lifecycleActions, lifecycleBadge, newSessionButton, queuedLabel, resetBody, resetChip, resetNotice, resetThenProblem } from "./lifecycle";
 
 type L = Pick<Agent, "status" | "paused" | "status_reason" | "waiting_on" | "queued">;
 const a = (over: Partial<L> = {}): L => ({ status: "idle", paused: false, ...over });
@@ -62,29 +62,98 @@ describe("lifecycleActions", () => {
   });
 });
 
-describe("compactAction", () => {
-  type C = Parameters<typeof compactAction>[0];
+describe("compactButton", () => {
+  type C = Parameters<typeof compactButton>[0];
   const c = (over: Partial<C> = {}): C => ({ harness: "claude", status: "idle", paused: false, compact_supported: true, ...over });
 
-  it("is on for an agent at rest", () => {
-    expect(compactAction(c()).disabled).toBe(false);
-    expect(compactAction(c({ status: "waiting" })).disabled).toBe(false);
+  it("is on for an agent at rest, and for a busy agent (the request waits for the end of the turn)", () => {
+    expect(compactButton(c()).disabled).toBe(false);
+    expect(compactButton(c({ status: "waiting" })).disabled).toBe(false);
+    expect(compactButton(c({ status: "working" }))).toMatchObject({ disabled: false, title: expect.stringMatching(/working.*until the current turn ends/) });
+    expect(compactButton(c({ status: "blocked" })).disabled).toBe(false);
+    expect(compactButton(c({ status: "starting" })).disabled).toBe(false);
+    expect(compactButton(c({ status: "working", status_reason: "compacting" }))).toMatchObject({ disabled: false, title: expect.stringMatching(/compacts its session now/) });
   });
 
   it("is off, with the reason, when the daemon would refuse it", () => {
-    expect(compactAction(c({ compact_supported: false, harness: "pi" }))).toEqual({ disabled: true, title: "auto compact not supported for pi" });
-    expect(compactAction(c({ paused: true, status: "stopped" })).title).toMatch(/paused/);
-    expect(compactAction(c(), true).title).toMatch(/hold/);
-    expect(compactAction(c({ status: "working", status_reason: "compacting" })).title).toMatch(/compacts its session now/);
-    expect(compactAction(c({ status: "working" })).title).toMatch(/working.*wait until it is idle/);
-    expect(compactAction(c({ status: "stopped" })).title).toMatch(/stopped/);
-    expect(compactAction(c({ status: "starting" })).disabled).toBe(true);
+    expect(compactButton(c({ compact_supported: false, harness: "pi" }))).toEqual({ disabled: true, title: "auto compact not supported for pi" });
+    expect(compactButton(c({ paused: true, status: "stopped" }))).toMatchObject({ disabled: true, title: expect.stringMatching(/paused/) });
+    expect(compactButton(c(), true)).toMatchObject({ disabled: true, title: expect.stringMatching(/hold/) });
+    expect(compactButton(c({ status: "stopped" }))).toMatchObject({ disabled: true, title: expect.stringMatching(/stopped.*only while it runs/) });
+    expect(compactButton(c({ status: "error" })).disabled).toBe(true);
+  });
+});
+
+describe("newSessionButton", () => {
+  it("is always on, and the title tells when the new session starts", () => {
+    expect(newSessionButton({ status: "idle", paused: false })).toMatchObject({ disabled: false, title: expect.stringMatching(/now/) });
+    expect(newSessionButton({ status: "working", paused: false })).toMatchObject({ disabled: false, title: expect.stringMatching(/until the current turn ends/) });
+    expect(newSessionButton({ status: "stopped", paused: false })).toMatchObject({ disabled: false, title: expect.stringMatching(/Without one, its next wake starts a new session/) });
+    expect(newSessionButton({ status: "stopped", paused: true })).toMatchObject({ disabled: false, title: expect.stringMatching(/paused.*until you resume/) });
+  });
+});
+
+describe("resetChip", () => {
+  const pending = { kind: "compact" as const, by: "operator", then_set: true, recap: false, deferred: false, requested_at: "T" };
+
+  it("is null when no reset waits", () => {
+    expect(resetChip({ status: "working" })).toBeNull();
   });
 
+  it("names the kind, who asked, and the then prompt", () => {
+    const chip = resetChip({ status: "working", reset_pending: pending }, (iso) => `at ${iso}`)!;
+    expect(chip.label).toBe("compaction queued");
+    expect(chip.title).toMatch(/Requested by operator at T\./);
+    expect(chip.title).toMatch(/A "then" prompt follows it/);
+    expect(chip.title).not.toMatch(/recap/);
+    const fresh = resetChip({ status: "working", reset_pending: { ...pending, kind: "new_session", by: "demo/lead", then_set: false, recap: true } })!;
+    expect(fresh.label).toBe("new session queued");
+    expect(fresh.title).toMatch(/Requested by demo\/lead\..*No "then" prompt\..*A recap turn goes first/);
+  });
+
+  it("says that a stopped agent starts the new session at its next wake", () => {
+    const chip = resetChip({ status: "stopped", reset_pending: { ...pending, kind: "new_session" } })!;
+    expect(chip.label).toBe("new session at next wake");
+    expect(chip.title).toMatch(/next wake/);
+  });
+});
+
+describe("resetNotice", () => {
+  const r = { kind: "compact" as const, state: "started" as const, replaced: false, deferred: false, then_set: false };
+
+  it("tells when the reset runs", () => {
+    expect(resetNotice(r)).toBe("Compaction started.");
+    expect(resetNotice({ ...r, state: "queued", then_set: true })).toBe('Compaction queued: it runs when the current turn ends. The "then" prompt goes as the next turn.');
+    expect(resetNotice({ ...r, kind: "new_session", state: "queued" }, true)).toBe("New session queued: it runs after you resume the agent.");
+    expect(resetNotice({ ...r, kind: "new_session", state: "next_wake" })).toMatch(/^New session at the next wake/);
+  });
+
+  it("says when the request replaced a queued request", () => {
+    expect(resetNotice({ ...r, state: "queued", replaced: true })).toMatch(/It replaced the queued request\.$/);
+  });
+});
+
+describe("lastCompactedText", () => {
   it("says when the last compaction was, and when it failed", () => {
     const at = (iso: string) => `at ${iso}`;
     expect(lastCompactedText({}, at)).toBeNull();
     expect(lastCompactedText({ last_compact_at: "T", last_compact_ok: true }, at)).toBe("last compacted at T");
     expect(lastCompactedText({ last_compact_at: "T", last_compact_ok: false }, at)).toBe("last compacted at T (failed)");
+  });
+});
+
+describe("resetThenProblem and resetBody", () => {
+  it("allows at most 32 KiB", () => {
+    expect(resetThenProblem("x".repeat(32 * 1024))).toBeNull();
+    expect(resetThenProblem("x".repeat(32 * 1024 + 1))).toMatch(/at most 32768/);
+    // Bytes, not characters.
+    expect(resetThenProblem("é".repeat(16 * 1024 + 1))).not.toBeNull();
+  });
+
+  it("leaves out a blank then prompt, and sends recap only for a new session", () => {
+    expect(resetBody("compact", "  ", true)).toEqual({});
+    expect(resetBody("compact", "go on", true)).toEqual({ then: "go on" });
+    expect(resetBody("new_session", "", false)).toEqual({ recap: false });
+    expect(resetBody("new_session", "go on", true)).toEqual({ then: "go on", recap: true });
   });
 });

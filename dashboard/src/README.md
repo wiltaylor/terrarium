@@ -486,18 +486,53 @@ The model is pure and in `lib/lifecycle.ts`.
   is not in `compact_harnesses`, the group says "auto compact not
   supported for <harness>". The agent page shows the settings
   (`autoCompactText`) and "last compacted ..." (`lastCompactedText`), with
-  "(failed)" for a failed one. **Compact now** (`POST .../compact`) is off,
-  with the reason in its title, for an agent that is not `idle` or
-  `waiting`, is paused or held, compacts now, or cannot compact
-  (`compactAction` in `lib/lifecycle.ts`). While it compacts, the agent is
-  `working` with `status_reason` `compacting`.
+  "(failed)" for a failed one.
+- **Compact and New session.** The agent page has two buttons.
+  **Compact** (`POST .../compact`) compacts the session. **New session**
+  (`POST .../new-session`) ends the session and starts a new, clean
+  harness session. Each button opens a small dialog (`ResetDialog.tsx`)
+  with an optional "Then send…" text area: the daemon sends that prompt
+  as the next turn after the reset (`[System:reset requested by <who>]`).
+  A new session forgets the conversation, so the prompt must restate the
+  goal. The New session dialog also has "Include recap" (default on): a
+  recap turn goes first. The dialog does not send a blank prompt, and it
+  refuses a prompt of more than 32 KiB (`resetThenProblem`, `resetBody`).
+  Compact is off, with the reason in its title, for an agent that is
+  stopped or in `error`, is paused or held, or cannot compact
+  (`compactButton` in `lib/lifecycle.ts`). It is on for a busy agent: the
+  compaction waits until the current turn ends. New session is always on
+  (`newSessionButton`); its title says when the new session starts. A
+  stopped agent with a "then" prompt starts at once in a new session.
+  Without one, its next wake starts a new session. A paused agent keeps the
+  request until the resume. After the request, the notice says `started`,
+  `queued`, or "at the next wake", and "It replaced the queued request."
+  when the request replaced one (`resetNotice`). While a reset waits
+  (`reset_pending`), the page header shows a "compaction queued", "new
+  session queued", or "new session at next wake" chip. Its title names who
+  asked and whether a "then" prompt follows (`resetChip`). One reset at
+  most waits for an agent: a new request replaces it. While a compaction
+  runs, the agent is `working` with `status_reason` `compacting`. A new
+  session starts with `status_reason` `new session: requested by <who>`,
+  and the Sessions tab shows it as the current session. The old session
+  ends with the outcome `new_session`.
+- **Store (resets).** `agent.reset` (`{kind, by, then_set, deferred,
+  replaced, state}`) sets `reset_pending` for a `queued` or `next_wake`
+  request, and clears it for a `started` one. A `status` event with the
+  reason `compacting` or `new session: ...` clears it. The event also reads
+  the list again, for the exact fields.
 - **Mock.** `docs-writer` is stopped by the idle timeout with 2 queued, and
   `seo-worker` is paused with 1 queued. A send to a stopped agent wakes it
   (`agent.woken`), and the mock runs the turn. The mock does not stop idle
   agents by time, and does not compact by itself. `lead` has
-  `compact_max_age` `24h` and a compaction 5 hours ago. Compact now makes an
+  `compact_max_age` `24h` and a compaction 5 hours ago. Compact makes an
   idle agent `working` (`compacting`) for 1.5 s, then writes
-  `agent.compacted`. Every harness can compact, as in the daemon.
+  `agent.compacted`. Every harness can compact, as in the daemon. The mock
+  caller is the operator. A reset of a busy agent waits in `reset_pending`
+  and runs when the agent comes to rest. A new session ends the session
+  (`new_session`), opens a new one, and types the recap and the "then"
+  turns. Each request writes `agent.reset` and the audit row
+  `agent.compact` or `agent.new_session`. `runner-dev` works all the time,
+  so a reset on it stays queued.
 
 ### Ephemeral agents
 

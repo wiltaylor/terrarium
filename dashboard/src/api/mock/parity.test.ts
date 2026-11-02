@@ -12,6 +12,8 @@ import { fakeClock, waitFor } from "../../test/wait";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
+/** A mock whose fake turns take some time, so that a test sees the agent busy. */
+const slowMock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 30 });
 
 describe("mock parity with docs/api.md", () => {
   it("answers a reply with an array, one message per participant", async () => {
@@ -120,13 +122,123 @@ describe("mock parity with docs/api.md", () => {
     const s = api.events.stream({ since: api.world.seq });
     s.subscribe((e) => frames.push(e));
     // The lead of the seed is idle.
-    await api.agents.compact("terrarium/lead");
+    const first = await api.agents.compact("terrarium/lead");
+    expect(first.reset).toEqual({ kind: "compact", state: "started", replaced: false, deferred: false, then_set: false });
     expect(api.world.agents.find((x) => x.name === "lead")).toMatchObject({ status: "working", status_reason: "compacting" });
-    await expect(api.agents.compact("terrarium/lead")).rejects.toMatchObject({ status: 409 });
-    await waitFor(() => expect(frames.some((e) => e.kind === "agent.compacted")).toBe(true));
-    expect(api.world.agents.find((x) => x.name === "lead")).toMatchObject({ status: "idle", last_compact_ok: true });
+    // A second request while the agent compacts waits for the end (202, `queued`).
+    const second = await api.agents.compact("terrarium/lead");
+    expect(second.reset).toMatchObject({ kind: "compact", state: "queued", replaced: false });
+    expect(second.reset_pending).toMatchObject({ kind: "compact", by: "operator", then_set: false, recap: false, deferred: false });
+    expect(frames.filter((e) => e.kind === "agent.reset").map((e) => e.data?.state)).toEqual(["started", "queued"]);
+    await waitFor(() => expect(frames.filter((e) => e.kind === "agent.compacted")).toHaveLength(2), 6000);
+    await waitFor(() => expect(api.world.agents.find((x) => x.name === "lead")).toMatchObject({ status: "idle", last_compact_ok: true }));
+    expect(api.world.agents.find((x) => x.name === "lead")!.reset_pending).toBeUndefined();
     s.close();
+  }, 10000);
+
+  it("refuses a compaction that the daemon refuses, and checks the then prompt", async () => {
+    const api = mock();
+    await expect(api.agents.compact("terrarium/lead", { then: "   " })).rejects.toMatchObject({ status: 400 });
+    await expect(api.agents.compact("terrarium/lead", { then: "x".repeat(32 * 1024 + 1) })).rejects.toMatchObject({ status: 400 });
+    await expect(api.agents.newSession("terrarium/lead", { then: "" })).rejects.toMatchObject({ status: 400 });
+    await api.agents.pause("terrarium/lead");
+    await expect(api.agents.compact("terrarium/lead")).rejects.toMatchObject({ status: 409, message: expect.stringContaining("paused") });
+    const audit = (await api.audit({ limit: 500 })).items.map((x) => x.action);
+    expect(audit).not.toContain("agent.compact");
   });
+
+  it("queues a compaction of a busy agent, replaces it, and sends the then prompt after the compaction", async () => {
+    const api = slowMock();
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
+    const lead = () => api.world.agents.find((x) => x.name === "lead")!;
+    await api.agents.send("terrarium/lead", "work on TER-12");
+    await waitFor(() => expect(lead().status).toBe("working"));
+    const a = await api.agents.compact("terrarium/lead", { then: "first" });
+    expect(a.reset).toEqual({ kind: "compact", state: "queued", replaced: false, deferred: false, then_set: true });
+    const b = await api.agents.compact("terrarium/lead", { then: "Continue with TER-12: write the tests.", defer: true });
+    expect(b.reset).toEqual({ kind: "compact", state: "queued", replaced: true, deferred: true, then_set: true });
+    expect(b.reset_pending).toMatchObject({ kind: "compact", by: "operator", then_set: true, deferred: true });
+    expect(frames.find((e) => e.kind === "agent.reset" && e.data?.replaced === true)?.data).toMatchObject({ kind: "compact", by: "operator", state: "queued" });
+    await waitFor(() => expect(frames.some((e) => e.kind === "agent.compacted")).toBe(true), 6000);
+    await waitFor(() => expect(frames.some((e) => e.kind === "turn_start" && e.data?.text === "Continue with TER-12: write the tests.")).toBe(true), 6000);
+    expect(frames.some((e) => e.kind === "turn_start" && e.data?.text === "first")).toBe(false);
+    expect(frames.filter((e) => e.kind === "agent.compacted")).toHaveLength(1);
+    const session = (await api.agents.sessions("terrarium/lead")).items.find((x) => x.current)!;
+    const blocks = (await api.agents.transcript("terrarium/lead", session.id, { limit: 500 })).blocks;
+    expect(blocks.some((x) => x.text === "[System:reset requested by operator] Continue with TER-12: write the tests.")).toBe(true);
+    s.close();
+  }, 15000);
+
+  it("starts a new session for an agent at rest, with a recap and the then prompt", async () => {
+    const api = mock();
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
+    const before = (await api.agents.sessions("terrarium/lead")).items.find((x) => x.current)!;
+    const r = await api.agents.newSession("terrarium/lead", { then: "Go on with TER-12." });
+    expect(r.reset).toEqual({ kind: "new_session", state: "started", replaced: false, deferred: false, then_set: true });
+    expect(r.reset_pending).toBeUndefined();
+    expect(api.world.agents.find((x) => x.name === "lead")).toMatchObject({ status: "starting", status_reason: "new session: requested by operator" });
+    const list = (await api.agents.sessions("terrarium/lead")).items;
+    const now = list.find((x) => x.current)!;
+    expect(now.id).not.toBe(before.id);
+    expect(list.find((x) => x.id === before.id)).toMatchObject({ current: false, outcome: "new_session" });
+    await waitFor(() => expect(frames.some((e) => e.kind === "turn_start" && e.data?.text === "Go on with TER-12.")).toBe(true), 6000);
+    const blocks = (await api.agents.transcript("terrarium/lead", now.id, { limit: 500 })).blocks.map((x) => x.text ?? "");
+    const recap = blocks.findIndex((t) => t.startsWith("[System:recap] "));
+    const then = blocks.indexOf("[System:reset requested by operator] Go on with TER-12.");
+    expect(recap).toBeGreaterThan(-1);
+    expect(then).toBeGreaterThan(recap);
+    expect((await api.audit({ limit: 500 })).items.some((x) => x.action === "agent.new_session")).toBe(true);
+    expect(frames.find((e) => e.kind === "agent.reset")?.data).toMatchObject({ kind: "new_session", by: "operator", then_set: true, deferred: false, replaced: false, state: "started" });
+    s.close();
+  }, 15000);
+
+  it("starts a stopped agent in a new session with a then prompt, and waits for the next wake without one", async () => {
+    const api = mock();
+    const stopped = api.world.agents.find((x) => x.status === "stopped" && !x.paused && x.project === "terrarium")!;
+    const id = stopped.id;
+    const r = await api.agents.newSession(id, { recap: false });
+    expect(r.reset).toMatchObject({ kind: "new_session", state: "next_wake", replaced: false });
+    expect(r.reset_pending).toMatchObject({ kind: "new_session", by: "operator", then_set: false, recap: false });
+    expect(api.world.agents.find((x) => x.id === id)!.status).toBe("stopped");
+    // A turn wakes the agent: the wake starts the new session.
+    await api.agents.send(id, "hello");
+    await waitFor(() => expect(api.world.agents.find((x) => x.id === id)!.status_reason).toBe("new session: requested by operator"));
+    expect(api.world.agents.find((x) => x.id === id)!.reset_pending).toBeUndefined();
+    await waitFor(() => expect(["idle", "working", "waiting"]).toContain(api.world.agents.find((x) => x.id === id)!.status));
+
+    const api2 = mock();
+    const b = api2.world.agents.find((x) => x.id === id)!;
+    const s2 = await api2.agents.newSession(id, { then: "Start TER-12." });
+    expect(s2.reset).toMatchObject({ kind: "new_session", state: "started" });
+    expect(b).toMatchObject({ status: "starting", status_reason: "new session: requested by operator" });
+    expect((await api2.agents.sessions(id)).items.filter((x) => x.current)).toHaveLength(1);
+  }, 15000);
+
+  it("queues a new session of a busy or paused agent, and runs it when the turn ends", async () => {
+    const api = slowMock();
+    const lead = () => api.world.agents.find((x) => x.name === "lead")!;
+    await api.agents.send("terrarium/lead", "work on TER-12");
+    await waitFor(() => expect(lead().status).toBe("working"));
+    const q = await api.agents.newSession("terrarium/lead");
+    expect(q.reset).toEqual({ kind: "new_session", state: "queued", replaced: false, deferred: false, then_set: false });
+    expect(q.reset_pending).toMatchObject({ kind: "new_session", recap: true });
+    // A compaction request replaces the new session that waits.
+    const c = await api.agents.compact("terrarium/lead");
+    expect(c.reset).toMatchObject({ kind: "compact", state: "queued", replaced: true });
+    const n = await api.agents.newSession("terrarium/lead", { recap: false });
+    expect(n.reset).toMatchObject({ kind: "new_session", state: "queued", replaced: true });
+    await waitFor(() => expect(lead().status_reason).toBe("new session: requested by operator"), 6000);
+    expect(lead().reset_pending).toBeUndefined();
+
+    await api.agents.pause("terrarium/lead");
+    const p = await api.agents.newSession("terrarium/lead");
+    expect(p.reset).toMatchObject({ state: "queued" });
+    expect(p.reset_pending).toMatchObject({ kind: "new_session" });
+  }, 15000);
 
   it("emits agent_removed when an agent is deleted, after the stop", async () => {
     const api = mock();

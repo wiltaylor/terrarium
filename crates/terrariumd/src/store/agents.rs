@@ -88,6 +88,11 @@ pub struct AgentView {
     /// The ephemeral agents of this agent that run now. Absent when 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub spawned_running: usize,
+    /// A compaction or a new session that waits (PLAN §18, "Compact and
+    /// new session on request", `crate::reset`). Absent when none. It
+    /// does not show the `then` text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_pending: Option<ResetPendingView>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -179,6 +184,10 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
         ephemeral: r.get::<_, Option<String>>("owner")?.is_some(),
         spawn: None,
         spawned_running: 0,
+        reset_pending: r
+            .get::<_, Option<String>>("pending_reset")?
+            .and_then(|s| serde_json::from_str::<PendingReset>(&s).ok())
+            .map(|p| p.view()),
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -219,15 +228,18 @@ fn complete(conn: &Connection, mut v: AgentView) -> ApiResult<AgentView> {
 }
 
 /// The work that waits for agent `id` (PLAN §18): its queued turns, its
-/// `queued` mail, and its parked card and nudge pointers. A lease line
-/// waits too, but it does not count: it does not wake the agent.
+/// `queued` mail, its parked card and nudge pointers, and a pending reset
+/// with a `then` prompt (`crate::reset`). A lease line waits too, but it
+/// does not count: it does not wake the agent.
 pub fn queued_count(conn: &Connection, id: &str) -> ApiResult<usize> {
     let n: i64 = conn.query_row(
         "SELECT (SELECT count(*) FROM queued_turns WHERE agent = ?1)
               + (SELECT count(*) FROM messages
                  WHERE to_agent = ?1 AND to_kind = 'agent' AND state = 'queued')
               + (SELECT count(*) FROM pending_pointers
-                 WHERE agent = ?1 AND kind IN ('card', 'lead'))",
+                 WHERE agent = ?1 AND kind IN ('card', 'lead'))
+              + (SELECT count(*) FROM agents
+                 WHERE id = ?1 AND json_extract(pending_reset, '$.then') IS NOT NULL)",
         [id],
         |r| r.get(0),
     )?;
@@ -239,8 +251,115 @@ pub fn with_queued_work(conn: &Connection) -> ApiResult<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT agent FROM queued_turns
          UNION SELECT to_agent FROM messages WHERE to_kind = 'agent' AND state = 'queued'
-         UNION SELECT agent FROM pending_pointers WHERE kind IN ('card', 'lead')",
+         UNION SELECT agent FROM pending_pointers WHERE kind IN ('card', 'lead')
+         UNION SELECT id FROM agents WHERE json_extract(pending_reset, '$.then') IS NOT NULL",
     )?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The kinds of a reset (PLAN §18, "Compact and new session on
+/// request").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetKind {
+    Compact,
+    NewSession,
+}
+
+impl ResetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::NewSession => "new_session",
+        }
+    }
+}
+
+/// A compaction or a new session that waits for its agent
+/// (`agents.pending_reset`, `crate::reset`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingReset {
+    pub kind: ResetKind,
+    /// The prompt to send after the compaction or the new session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub then: Option<String>,
+    /// A new session starts with the recap turn.
+    #[serde(default = "yes")]
+    pub recap: bool,
+    /// Who asked, for the tag: `self`, `operator`, or `project/agent`.
+    pub by: String,
+    /// The actor label of the request (`operator`, `agent:<ulid>`).
+    pub actor: String,
+    /// The request waited for the end of the turn on purpose (`defer`, or
+    /// a request of the agent itself).
+    #[serde(default)]
+    pub deferred: bool,
+    pub requested_at: String,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// What the agent view shows of a [`PendingReset`]: not the `then` text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetPendingView {
+    pub kind: ResetKind,
+    pub by: String,
+    pub then_set: bool,
+    pub recap: bool,
+    pub deferred: bool,
+    pub requested_at: String,
+}
+
+impl PendingReset {
+    pub fn view(&self) -> ResetPendingView {
+        ResetPendingView {
+            kind: self.kind,
+            by: self.by.clone(),
+            then_set: self.then.is_some(),
+            recap: self.recap,
+            deferred: self.deferred,
+            requested_at: self.requested_at.clone(),
+        }
+    }
+}
+
+/// The pending reset of agent `id`, if any.
+pub fn pending_reset(conn: &Connection, id: &str) -> ApiResult<Option<PendingReset>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT pending_reset FROM agents WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
+}
+
+/// Set (`Some`) or clear (`None`) the pending reset of agent `id`.
+/// Returns the one before.
+pub fn set_pending_reset(
+    t: &mut Tx<'_>,
+    id: &str,
+    reset: Option<&PendingReset>,
+) -> ApiResult<Option<PendingReset>> {
+    let before = pending_reset(t, id)?;
+    let text = reset.map(|r| serde_json::to_string(r).unwrap_or_default());
+    t.execute(
+        "UPDATE agents SET pending_reset = ?2 WHERE id = ?1",
+        params![id, text],
+    )?;
+    Ok(before)
+}
+
+/// The agents with a pending reset.
+pub fn with_pending_reset(conn: &Connection) -> ApiResult<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM agents WHERE pending_reset IS NOT NULL")?;
     let rows = stmt
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;

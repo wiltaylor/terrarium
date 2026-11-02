@@ -5,8 +5,8 @@ import type { Api } from "../api/client";
 import { AGENT_STATUSES, type Agent, type AgentEvent, type AgentStatus } from "../api/types";
 import type { EventsStore } from "./events";
 
-/** The lifecycle events after which the list is read again (the queued count). */
-const LIFECYCLE = new Set<AgentEvent["kind"]>(["agent.paused", "agent.unpaused", "agent.woken"]);
+/** The lifecycle events after which the list is read again (the queued count, `reset_pending`). */
+const LIFECYCLE = new Set<AgentEvent["kind"]>(["agent.paused", "agent.unpaused", "agent.woken", "agent.reset"]);
 
 const isStatus = (s: unknown): s is AgentStatus => AGENT_STATUSES.includes(s as AgentStatus);
 
@@ -45,6 +45,15 @@ export function applyAgentEvent(agents: Agent[], e: AgentEvent): Agent[] {
     else delete a.waiting_on;
     if (status === "working") a.turn_started_at ??= e.at;
     else delete a.turn_started_at;
+    // A reset that waited runs now: a compaction, or a new session.
+    if (reason === "compacting" || (typeof reason === "string" && reason.startsWith("new session:"))) delete a.reset_pending;
+  }
+  // A compaction or a new session by hand: `reset_pending` while it waits. The list read after the event brings the exact fields.
+  if (e.kind === "agent.reset") {
+    const kind = e.data?.kind;
+    if (e.data?.state === "started") delete a.reset_pending;
+    else if (kind === "compact" || kind === "new_session")
+      a.reset_pending = { kind, by: String(e.data?.by ?? ""), then_set: e.data?.then_set === true, recap: kind === "new_session", deferred: e.data?.deferred === true, requested_at: e.at };
   }
   if (e.kind === "session_started" && typeof e.data?.harness_session === "string") a.session = e.data.harness_session;
   if (e.kind === "turn_start") {
@@ -105,7 +114,7 @@ export function mergeFresh(fresh: Agent[], old: Agent[], recent: AgentEvent[], r
   const replayed = recent.slice().reverse().reduce(applyAgentEvent, merged);
   return replayed.map((a) => {
     const f = merged.find((x) => x.id === a.id)!;
-    return { ...a, status: f.status, status_reason: f.status_reason, paused: f.paused, current_card: f.current_card, waits: f.waits, waiting_on: f.waiting_on, turn_started_at: f.status === "working" ? a.turn_started_at : undefined };
+    return { ...a, status: f.status, status_reason: f.status_reason, paused: f.paused, reset_pending: f.reset_pending, current_card: f.current_card, waits: f.waits, waiting_on: f.waiting_on, turn_started_at: f.status === "working" ? a.turn_started_at : undefined };
   });
 }
 

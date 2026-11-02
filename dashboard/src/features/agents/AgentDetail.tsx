@@ -7,7 +7,7 @@ import { EventHistory } from "../../components/EventHistory";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Terminal } from "../../components/Terminal";
 import { ConfirmButton, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
-import { GRANTABLE_ROLES, type Agent, type AgentStatus, type Role } from "../../api/types";
+import { GRANTABLE_ROLES, type Agent, type AgentStatus, type ResetKind, type ResetResult, type Role } from "../../api/types";
 import { ago, compact, orderWindows, subscriptionTitle, timeUntil, windowLabel, windowValue } from "../../lib/format";
 import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
 import { describeCause } from "../../stores/quota";
@@ -30,7 +30,8 @@ import { WaitsPanel, WatchesPanel } from "./Waits";
 import { QuestionsPanel } from "../inbox/QuestionsPanel";
 import { SkillsPicker } from "../skills/SkillsPicker";
 import { RESTART_NOTE, skillsLabel } from "../skills/model";
-import { compactAction, lastCompactedText, lifecycleActions, type LifecycleAction } from "../../lib/lifecycle";
+import { compactButton, lastCompactedText, lifecycleActions, newSessionButton, resetChip, resetNotice, type LifecycleAction } from "../../lib/lifecycle";
+import { ResetDialog } from "./ResetDialog";
 import { EphemeralLine, SpawnedPanel } from "./Spawned";
 import { spawnedTabLabel, spawnRightsText } from "./spawn";
 
@@ -71,6 +72,8 @@ export default function AgentDetail() {
   const [turn, setTurn] = createSignal("");
   const [editing, setEditing] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
+  // The open reset dialog: Compact or New session.
+  const [resetting, setResetting] = createSignal<ResetKind | null>(null);
   const [fetched] = createResource(id, (key) => api.agents.get(key).catch((e: unknown) => (setError(e), null)));
   const agent = (): Agent | undefined => agents.byId(id()) ?? agents.byId(fetched()?.id ?? "") ?? fetched() ?? undefined;
   const running = () => RUNNING.includes(agent()?.status ?? "stopped");
@@ -105,6 +108,16 @@ export default function AgentDetail() {
     } catch (e) {
       setError(e);
     }
+  };
+
+  /** The answer of a reset request: the notice, and `reset_pending` at once (the events bring the rest). */
+  const resetDone = (r: ResetResult) => {
+    const { reset, ...view } = r;
+    setError(null);
+    agents.upsert(view);
+    setNotice(resetNotice(reset, !!view.paused));
+    setTimeout(() => setNotice(null), 6000);
+    agents.refreshSoon(300);
   };
 
   /** Cancel an ephemeral agent: the daemon closes it; the page then shows it removed. */
@@ -144,6 +157,13 @@ export default function AgentDetail() {
             title={
               <span class="row">
                 {a().name} <StatusBadge agent={a()} /> <HoldBadge agentId={a().id} long /> <LeaseChips agentId={a().id} />
+                <Show when={resetChip(a(), ago)}>
+                  {(chip) => (
+                    <span class="chip warn" title={chip().title} aria-label={`${chip().label}. ${chip().title}`}>
+                      {chip().label}
+                    </span>
+                  )}
+                </Show>
               </span>
             }
           >
@@ -157,11 +177,17 @@ export default function AgentDetail() {
               )}
             </For>
             {(() => {
-              const c = () => compactAction(a(), quota.holdsFor(a().id).length > 0);
+              const c = () => compactButton(a(), quota.holdsFor(a().id).length > 0);
+              const n = () => newSessionButton(a());
               return (
-                <button onClick={() => act("Compaction", () => api.agents.compact(a().id))} disabled={c().disabled} title={c().title}>
-                  Compact now
-                </button>
+                <>
+                  <button onClick={() => setResetting("compact")} disabled={c().disabled} title={c().title}>
+                    Compact
+                  </button>
+                  <button onClick={() => setResetting("new_session")} disabled={n().disabled} title={n().title}>
+                    New session
+                  </button>
+                </>
               );
             })()}
             <button onClick={() => setEditing(true)}>Edit</button>
@@ -337,6 +363,9 @@ export default function AgentDetail() {
 
           <Show when={editing()}>
             <AgentForm agent={a()} onClose={() => setEditing(false)} onSaved={() => setNotice("Saved.")} />
+          </Show>
+          <Show when={resetting()}>
+            {(kind) => <ResetDialog agent={a()} kind={kind()} title={kind() === "compact" ? "Compact" : "New session"} onClose={() => setResetting(null)} onDone={resetDone} />}
           </Show>
           <Show when={saving()}>
             <SaveAsTemplateDialog agent={a()} onClose={() => setSaving(false)} onSaved={(t) => setNotice(`Saved template ${t.project ?? "global"}/${t.name}.`)} />

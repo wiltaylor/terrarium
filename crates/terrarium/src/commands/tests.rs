@@ -6956,9 +6956,15 @@ async fn agent_compact_and_the_auto_compact_flags() {
         vec![(
             202,
             json!({"name": "w", "project": "terra", "status": "working",
-                   "status_reason": "compacting"}),
+                   "status_reason": "compacting",
+                   "reset": {"kind": "compact", "state": "started", "replaced": false}}),
         )],
-        vec![req(Post, "/api/agents/terra%2Fw/compact")],
+        vec![(
+            Post,
+            "/api/agents/terra%2Fw/compact",
+            vec![],
+            Some(json!({})),
+        )],
     )
     .await;
     assert!(out.starts_with("terra/w compacts its session"), "{out}");
@@ -7044,6 +7050,95 @@ async fn agent_compact_and_the_auto_compact_flags() {
     .await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     assert!(Cli::try_parse_from(["terrarium", "agent", "compact"]).is_err());
+}
+
+/// `agent compact` and `agent new-session` with `--self`, `--then`,
+/// `--then-file`, `--defer`, and `--no-recap` (PLAN §18, "Compact and new
+/// session on request").
+#[tokio::test]
+async fn agent_reset_commands() {
+    let me = format!("/api/agents/{ME}/compact");
+    let me: &'static str = Box::leak(me.into_boxed_str());
+    let out = ok(
+        true,
+        &["agent", "compact", "--self", "--then", "Go on with TER-4."],
+        vec![(
+            202,
+            json!({"name": "worker", "project": "terra",
+                   "reset": {"kind": "compact", "state": "queued", "replaced": true}}),
+        )],
+        vec![(Post, me, vec![], Some(json!({"then": "Go on with TER-4."})))],
+    )
+    .await;
+    assert!(
+        out.starts_with("queued: the compaction runs when your turn ends; end your turn now"),
+        "{out}"
+    );
+    assert!(out.contains("replaced"), "{out}");
+    let out = ok_in(
+        false,
+        &[
+            "agent",
+            "new-session",
+            "terra/w",
+            "--then-file",
+            "-",
+            "--no-recap",
+            "--defer",
+        ],
+        vec![(
+            202,
+            json!({"name": "w", "project": "terra",
+                   "reset": {"kind": "new_session", "state": "queued"}}),
+        )],
+        Some("Start TER-5.\n"),
+        vec![(
+            Post,
+            "/api/agents/terra%2Fw/new-session",
+            vec![],
+            Some(json!({"then": "Start TER-5.\n", "recap": false, "defer": true})),
+        )],
+    )
+    .await;
+    assert!(
+        out.starts_with("queued: the new session of terra/w runs when its current turn ends"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["agent", "new-session", "w"],
+        vec![(
+            202,
+            json!({"name": "w", "project": "terra",
+                   "reset": {"kind": "new_session", "state": "next_wake"}}),
+        )],
+        vec![(Post, "/api/agents/w/new-session", vec![], Some(json!({})))],
+    )
+    .await;
+    assert!(out.contains("its next wake starts a new session"), "{out}");
+    // The operator has no self.
+    let r = exec(false, &["agent", "compact", "--self"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    // An empty prompt.
+    let r = exec(
+        false,
+        &["agent", "compact", "w", "--then", " "],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    for bad in [
+        vec!["agent", "new-session"],
+        vec!["agent", "new-session", "w", "--self"],
+        vec!["agent", "compact", "w", "--then", "a", "--then-file", "f"],
+        vec!["agent", "compact", "w", "--no-recap"],
+    ] {
+        assert!(
+            Cli::try_parse_from(std::iter::once("terrarium").chain(bad.iter().copied())).is_err(),
+            "{bad:?}"
+        );
+    }
 }
 
 /// The type of the `db` tests: what `rec new` and `rec set` read first.

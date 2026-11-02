@@ -121,7 +121,10 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
         AgentCmd::Restart { agent, no_wait } => lifecycle(ctx, agent, "restart", *no_wait).await,
         AgentCmd::Pause { agent } => pause(ctx, agent, "pause").await,
         AgentCmd::Unpause { agent } => pause(ctx, agent, "unpause").await,
-        AgentCmd::Compact { agent } => compact(ctx, agent).await,
+        AgentCmd::Compact(args) => reset(ctx, args, "compact", None).await,
+        AgentCmd::NewSession { args, no_recap } => {
+            reset(ctx, args, "new-session", Some(!*no_recap)).await
+        }
         AgentCmd::Send {
             agent,
             text,
@@ -438,18 +441,69 @@ pub(crate) fn switch(v: &str, flag: &str) -> anyhow::Result<bool> {
     }
 }
 
-/// `agent compact`: the daemon answers when the compaction starts.
-async fn compact(ctx: &Ctx, agent: &str) -> anyhow::Result<()> {
+/// `agent compact` and `agent new-session` (`action`): the daemon answers
+/// when the reset starts or waits. `recap` is for a new session only.
+async fn reset(
+    ctx: &Ctx,
+    a: &crate::cli::ResetArgs,
+    action: &str,
+    recap: Option<bool>,
+) -> anyhow::Result<()> {
+    let agent = match (&a.agent, a.me) {
+        (Some(agent), _) => agent.clone(),
+        (None, true) if ctx.is_agent() => ctx.me().await?,
+        (None, _) => {
+            return Err(CliError::usage(
+                "--self is for an agent; the operator names the agent",
+            ));
+        }
+    };
+    let then = match (&a.then, &a.then_file) {
+        (Some(t), _) => Some(ctx.text(t)?),
+        (None, Some(f)) if f == "-" => Some(ctx.text("-")?),
+        (None, Some(f)) => Some(
+            std::fs::read_to_string(f)
+                .map_err(|e| CliError::usage(format!("cannot read {f}: {e}")))?,
+        ),
+        (None, None) => None,
+    };
+    if then.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        return Err(CliError::usage("the --then prompt is empty"));
+    }
+    let mut body = json!({});
+    if let Some(t) = then {
+        body["then"] = json!(t);
+    }
+    if a.defer {
+        body["defer"] = json!(true);
+    }
+    if recap == Some(false) {
+        body["recap"] = json!(false);
+    }
     let r = ctx
         .api
-        .post(&format!("{}/compact", agent_path(agent)), None)
+        .post(&format!("{}/{action}", agent_path(&agent)), Some(body))
         .await?;
     ctx.emit(&r, |c, r| {
-        c.line(format!(
-            "{}/{} compacts its session; the event agent.compacted gives the result",
-            field(r, "project"),
-            field(r, "name")
-        ));
+        let who = format!("{}/{}", field(r, "project"), field(r, "name"));
+        let what = if action == "compact" {
+            "compaction"
+        } else {
+            "new session"
+        };
+        let line = match r["reset"]["state"].as_str() {
+            Some("started") if action == "compact" => {
+                format!("{who} compacts its session; the event agent.compacted gives the result")
+            }
+            Some("started") => format!("{who} starts a new session"),
+            Some("next_wake") => format!("{who} does not run; its next wake starts a new session"),
+            _ if a.me => format!("queued: the {what} runs when your turn ends; end your turn now"),
+            _ => format!("queued: the {what} of {who} runs when its current turn ends"),
+        };
+        c.line(line);
+        if r["reset"]["replaced"].as_bool() == Some(true) {
+            c.line("(it replaced the reset request that waited)");
+        }
     })
 }
 

@@ -327,7 +327,8 @@ terrarium agent swap <agent> <subscription>  move to another plan account of the
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
 terrarium agent pause|unpause <agent>         nothing wakes a paused agent
-terrarium agent compact <agent>               compact the session of an idle agent now
+terrarium agent compact [<agent> | --self] [--then "<prompt>" | --then-file f|-] [--defer]
+terrarium agent new-session [<agent> | --self] [--then "<prompt>" | --then-file f|-] [--no-recap] [--defer]
 terrarium agent send <agent> <text | -> [--raw]  --raw: project_admin, sysadmin, or the operator
 terrarium agent send <agent> [text | -] --image <file>...  attach images to the turn
 terrarium agent keys <agent> <key>...         project_admin, sysadmin, or the operator
@@ -390,11 +391,44 @@ compact"). Each compaction is one model call, so it is off by default.
 stop. `--compact-max-age 24h` compacts a session whose context is older
 than 24 hours, at the next rest. An automatic compaction runs only after
 a new turn. `default` (in `agent set`) goes back to the daemon's
-`TERRARIUM_COMPACT_ON_IDLE` and `TERRARIUM_COMPACT_MAX_AGE`. `agent compact
-<agent>` compacts an idle agent now, with the rights of `restart`; it
-prints when the compaction starts, and the event `agent.compacted` gives
-the result. It is refused (`409`) for an agent that does not run, is not
-idle, is paused or held, or whose harness cannot compact.
+`TERRARIUM_COMPACT_ON_IDLE` and `TERRARIUM_COMPACT_MAX_AGE`.
+
+`agent compact` and `agent new-session` reset the session of an agent on
+request (PLAN §18, "Compact and new session on request"):
+
+- `agent compact` compacts the session: the harness writes a summary and
+  goes on from it. The event `agent.compacted` gives the result. It is
+  refused (`409`) for an agent that does not run, is paused or held, or
+  whose harness cannot compact.
+- `agent new-session` ends the harness session and starts a new one, not
+  a resume. The new session gets a short recap turn (the open cards, the
+  open waits, the unread mail, and the open questions) unless you give
+  `--no-recap`. A stopped agent starts at once when you give `--then`,
+  else its next wake starts the new session.
+- `--then "<prompt>"` (or `--then-file <file>`, `-` for stdin; at most 32
+  KiB) goes as the next turn after the compaction or after the recap:
+  `[System:reset requested by <who>] <prompt>`. A new session forgets the
+  old one, so restate the goal, the files, the card IDs, and the next
+  steps. When the compaction does not complete, the prompt starts with
+  `Note: the compaction did not complete: <reason>.`
+- `--self` names the calling agent. Each agent may reset itself; a reset
+  of another agent needs project_admin of its project, sysadmin, or the
+  operator.
+- An agent at rest resets at once. A request for yourself, `--defer`, and
+  a request for a busy agent wait until the current turn of the agent
+  ends; the command returns at once (`queued: ... runs when your turn
+  ends`). End your turn after a request for yourself. A compaction that
+  runs is not interrupted.
+- Only one reset waits for each agent: a new request replaces it, and
+  the output says so. `agent show` shows `reset_pending` while it waits.
+
+```sh
+terrarium agent compact --self --then "TER-12: go on with the tests in tests/client.rs."
+terrarium agent new-session terra/w1 --then-file next-task.md
+```
+
+The packaged skill `terrarium-reset` tells agents when to compact and when
+to start a new session.
 
 `--pool` sets the account pool (PLAN §16.3): subscriptions of one
 provider that a swap may pick, comma-separated. The current subscription

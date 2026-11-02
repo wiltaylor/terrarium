@@ -39,6 +39,19 @@ describe("applyAgentEvent", () => {
     expect(b).toMatchObject({ last_compact_at: "2026-10-24T10:01:00Z", last_compact_ok: false });
   });
 
+  it("sets reset_pending from agent.reset, and clears it when the reset runs", () => {
+    const [a] = applyAgentEvent([agent({ status: "working" })], ev({ kind: "agent.reset", data: { kind: "new_session", by: "operator", then_set: true, deferred: false, replaced: false, state: "queued" } }));
+    expect(a!.reset_pending).toEqual({ kind: "new_session", by: "operator", then_set: true, recap: true, deferred: false, requested_at: "2026-10-24T10:00:00Z" });
+    const [b] = applyAgentEvent([a!], ev({ data: { status: "starting", from: "idle", reason: "new session: requested by operator" } }));
+    expect(b!.reset_pending).toBeUndefined();
+    const [c] = applyAgentEvent([agent({ status: "working" })], ev({ kind: "agent.reset", data: { kind: "compact", by: "self", state: "queued" } }));
+    expect(c!.reset_pending).toMatchObject({ kind: "compact", by: "self", recap: false });
+    const [d] = applyAgentEvent([c!], ev({ data: { status: "working", from: "idle", reason: "compacting" } }));
+    expect(d!.reset_pending).toBeUndefined();
+    const [e] = applyAgentEvent([c!], ev({ kind: "agent.reset", data: { kind: "compact", by: "operator", state: "started" } }));
+    expect(e!.reset_pending).toBeUndefined();
+  });
+
   it("applies status events and tracks turn start", () => {
     const [a] = applyAgentEvent([agent()], ev({ data: { status: "working" } }));
     expect(a!.status).toBe("working");

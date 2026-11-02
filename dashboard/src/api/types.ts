@@ -604,7 +604,61 @@ export interface Agent {
   spawn?: SpawnInfo;
   /** The ephemeral agents of this agent that run now. Absent when 0. */
   spawned_running?: number;
+  /** A compaction or a new session that waits (one at most). Absent when none waits. */
+  reset_pending?: ResetPending;
 }
+
+/** The kind of a reset: a compaction of the session, or a new, clean harness session. */
+export type ResetKind = "compact" | "new_session";
+
+/** A reset that waits for the end of the current turn, or for the next wake. */
+export interface ResetPending {
+  kind: ResetKind;
+  /** Who asked: `self`, `operator`, or `project/agent`. */
+  by: string;
+  /** True when a "then" prompt goes as the next turn after the reset. */
+  then_set: boolean;
+  /** True when a recap turn goes first (new session only). */
+  recap: boolean;
+  /** True when the caller asked to wait for the end of the turn. */
+  deferred: boolean;
+  /** The time of the request (RFC 3339). */
+  requested_at: string;
+}
+
+/**
+ * When a reset runs. `started`: now. `queued`: when the current turn ends
+ * (or after the pause, for a paused agent). `next_wake`: the next wake of a
+ * stopped agent starts a new session.
+ */
+export type ResetState = "started" | "queued" | "next_wake";
+
+/** The `reset` field of the answer to `POST .../compact` and `POST .../new-session`. */
+export interface ResetOutcome {
+  kind: ResetKind;
+  state: ResetState;
+  /** True when this request replaced a reset that waited. */
+  replaced: boolean;
+  deferred: boolean;
+  then_set: boolean;
+}
+
+/** The body of `POST /api/agents/{id}/compact`. */
+export interface CompactRequest {
+  /** The next turn after the compaction (at most 32 KiB, not blank). */
+  then?: string;
+  /** True: wait for the end of the current turn. */
+  defer?: boolean;
+}
+
+/** The body of `POST /api/agents/{id}/new-session`. */
+export interface NewSessionRequest extends CompactRequest {
+  /** Send a recap turn first. Default: true. */
+  recap?: boolean;
+}
+
+/** The 202 answer of a reset request: the agent, and how the reset runs. */
+export type ResetResult = Agent & { reset: ResetOutcome };
 
 /** How a subscription swap took effect (`POST /api/agents/{id}/subscription`). */
 export type SwapApplied = "live" | "restart_scheduled" | "restarted" | "next_start";
@@ -1018,6 +1072,8 @@ export const EVENT_KINDS = [
   "agent.woken",
   // The end of a compaction that the daemon ran: `{cause, ok, duration_ms, reason?}`.
   "agent.compacted",
+  // A compaction or a new session was asked for: `{kind, by, then_set, deferred, replaced, state}`.
+  "agent.reset",
   // Ephemeral agents (docs/api.md §6.10), on the owner: `{spawn_id, name, template, owner_id, owner_name, session_id, task, deadline_at}`
   // and `{spawn_id, name, template, owner_id, owner_name, outcome, session_id, duration_secs}`.
   "agent.spawned",
