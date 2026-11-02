@@ -1125,6 +1125,9 @@ struct StoreView {
     repo_urls: Vec<String>,
     /// What the agent's secret grants give the start (PLAN §16b.4).
     secrets: crate::secrets::grants::LaunchSecrets,
+    /// An ephemeral agent (PLAN §18, "Ephemeral agents"): the name of its
+    /// owner and its lifetime, for the ephemeral part of the prompt.
+    ephemeral: Option<(String, String)>,
 }
 
 enum SubscriptionCheck {
@@ -1365,6 +1368,7 @@ impl RunnerSupervisor {
                     }
                     _ => None,
                 };
+                let ephemeral = crate::spawn::prompt_info(c, &id)?;
                 Ok(StoreView {
                     peers,
                     queued,
@@ -1373,6 +1377,7 @@ impl RunnerSupervisor {
                     state_dir: Some(state_dir),
                     repo_urls,
                     secrets: Default::default(),
+                    ephemeral,
                 })
             })
             .await;
@@ -1498,7 +1503,15 @@ impl RunnerSupervisor {
         // The hash below covers the whole text, so a change of the base
         // system prompt also starts a new session of a harness that keeps
         // the prompt of a session.
-        let text = prompt::compose(base.as_deref(), &template, &ctx);
+        let mut text = prompt::compose(base.as_deref(), &template, &ctx);
+        // An ephemeral agent learns its owner and how to finish.
+        if let Some((owner, lifetime)) = &view.ephemeral {
+            text = format!(
+                "{}\n\n{}",
+                text.trim_end(),
+                crate::spawn::prompt_section(owner, lifetime)
+            );
+        }
 
         let adapter = entry.adapter.clone();
         let home = cfg.home(agent.harness);

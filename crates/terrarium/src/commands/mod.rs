@@ -19,6 +19,7 @@ pub mod schedules;
 pub mod screen;
 pub mod secrets;
 pub mod skills;
+pub mod spawns;
 pub mod ssh_keys;
 pub mod system;
 pub mod system_prompts;

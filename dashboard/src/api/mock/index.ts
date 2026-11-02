@@ -109,6 +109,7 @@ import { createSkillMock, skillsError } from "./skills";
 import { createSystemPromptMock } from "./systemPrompts";
 import { createDbMock } from "./db";
 import { createTestRunMock } from "./testRuns";
+import { createSpawnMock } from "./spawns";
 import { applyTemplate, compactMaxAgeError, compactOnIdleError, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createSecretMock } from "./secrets";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
@@ -783,6 +784,43 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const skillMock = createSkillMock({ w, reply, fail, audit, caller: opts.scheduleCaller, available: opts.configRepo });
   const systemPromptMock = createSystemPromptMock({ w, iso, reply, fail, audit, emit, caller: opts.scheduleCaller, available: opts.configRepo });
   const waitMock = createWaitMock({ w, iso, now, ulid, reply, fail, emit, agent, setStatus, sendMail: (to, from, subject, body) => sendMail(to, from, subject, body) });
+  // ----- ephemeral agents (docs/api.md §6.10): ./spawns.ts -----
+  /** `agent rm` of one agent: the tombstone, the ended sessions, and `agent_removed`. */
+  const removeAgentRow = (a: Agent) => {
+    if (LIVE.includes(a.status)) setStatus(a, "stopped", "stopped by operator");
+    w.agents = w.agents.filter((x) => x.id !== a.id);
+    // The sessions stay and end; the tombstone names the agent (docs/api.md §6.6).
+    w.removedAgents.push({ id: a.id, project: a.project, name: a.name, harness: a.harness });
+    for (const s of w.sessions.filter((x) => x.agent === a.id)) {
+      s.current = false;
+      s.ended_at ??= iso();
+      s.outcome ??= "removed";
+    }
+    audit("agent.delete", a.id, a.project, { name: a.name });
+    emit({ kind: "agent_removed", actor: "operator", agent: a.name, agent_id: a.id, project: a.project, summary: `${a.project}/${a.name}: removed`, data: { agent_id: a.id, project: a.project, name: a.name } });
+  };
+  const spawnMock = createSpawnMock({
+    w,
+    iso,
+    now,
+    ulid,
+    reply,
+    fail,
+    emit,
+    audit,
+    agent,
+    setStatus,
+    sendMail: (to, from, subject, body) => sendMail(to, from, subject, body),
+    startWithTurn: (a, text) => {
+      openSession(a);
+      setStatus(a, "starting");
+      later(() => {
+        setStatus(a, waitMock.restStatus(a));
+        deliverTurn(a, text);
+      });
+    },
+    removeAgent: removeAgentRow,
+  });
   // ----- questions to the operator -----
   const questionMock = createQuestionMock({
     w,
@@ -2136,7 +2174,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     },
 
     agents: {
-      list: (proj) => reply(() => w.agents.filter((a) => !proj || a.project === proj).sort((a, b) => a.id.localeCompare(b.id))),
+      // The ephemeral agents only with `?include=ephemeral` (docs/api.md §6.10).
+      list: (proj, o = {}) => reply(() => w.agents.filter((a) => (!proj || a.project === proj) && (o.ephemeral || !a.ephemeral)).sort((a, b) => a.id.localeCompare(b.id))),
       get: (id) =>
         reply(() => {
           const a = agent(id);
@@ -2237,7 +2276,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             else delete a.skills;
             if (LIVE.includes(a.status)) a.skills_restart = true;
           }
-          if (patch.policy) a.policy = { targets: patch.policy.targets, mail_to: patch.policy.mail_to, ...(patch.policy.cross_project?.length ? { cross_project: patch.policy.cross_project } : {}) };
+          if (patch.policy) a.policy = { targets: patch.policy.targets, mail_to: patch.policy.mail_to, ...(patch.policy.cross_project?.length ? { cross_project: patch.policy.cross_project } : {}), ...(patch.policy.spawn ? { spawn: patch.policy.spawn } : {}) };
           if (patch.restart) a.restart = patch.restart;
           // null or empty: the global default.
           if (patch.idle_stop !== undefined) {
@@ -2280,19 +2319,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       remove: (id, confirm) =>
         reply(() => {
           const a = agent(id);
+          // An ephemeral agent: the delete is a cancel.
+          if (spawnMock.cancelOnRemove(a)) return;
           if (a.source === "file") fail(409, "file_managed", `agent \`${a.project}/${a.name}\` is declared in a definition file`);
           if (LIVE.includes(a.status) && !confirm) fail(409, "confirm_required", `agent \`${a.project}/${a.name}\` has a live session; send ?confirm=true`);
-          if (LIVE.includes(a.status)) setStatus(a, "stopped", "stopped by operator");
-          w.agents = w.agents.filter((x) => x.id !== a.id);
-          // The sessions stay and end; the tombstone names the agent (docs/api.md §6.6).
-          w.removedAgents.push({ id: a.id, project: a.project, name: a.name, harness: a.harness });
-          for (const s of w.sessions.filter((x) => x.agent === a.id)) {
-            s.current = false;
-            s.ended_at ??= iso();
-            s.outcome ??= "removed";
-          }
-          audit("agent.delete", a.id, a.project, { name: a.name });
-          emit({ kind: "agent_removed", actor: "operator", agent: a.name, agent_id: a.id, project: a.project, summary: `${a.project}/${a.name}: removed`, data: { agent_id: a.id, project: a.project, name: a.name } });
+          removeAgentRow(a);
+          // Its ephemeral agents go with it.
+          spawnMock.ownerRemoved(a.id);
         }),
       // 202: the answer shows the agent as the daemon accepted the call. The
       // fake supervisor then steps through the statuses, as the daemon's does.
@@ -2350,6 +2383,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       pause: (id) =>
         reply(() => {
           const a = agent(id);
+          if (a.ephemeral) fail(409, "conflict", `\`${a.name}\` is an ephemeral agent: it is not paused. Cancel it with \`terrarium agent cancel ${a.name}\``);
           if (!a.paused) {
             a.paused = true;
             a.updated_at = iso();
@@ -2509,6 +2543,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const text = [`✻ ${a.harness}  (mock screen for ${a.name})`, `cwd: ${a.workspace}`, "", a.status === "working" ? "● Working…" : ">"].join("\n");
           return { agent: `${a.project}/${a.name}`, agent_id: a.id, status: a.status, rows: 24, cols: 80, text, cursor: { row: 3, col: 2 }, at: iso() };
         }),
+      spawn: (owner, body) => spawnMock.spawn(owner, body),
+      spawned: (owner, q) => spawnMock.spawned(owner, q),
+      cancel: (id) => spawnMock.cancel(id),
+      spawnGet: (id) => spawnMock.get(id),
       pty: (id) => {
         const a = w.agents.find((x) => x.id === id || `${x.project}/${x.name}` === id || x.name === id);
         const name = a?.name ?? id;

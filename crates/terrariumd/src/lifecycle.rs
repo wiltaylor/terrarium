@@ -163,6 +163,9 @@ pub struct Lifecycle {
     stop_reasons: Mutex<HashMap<AgentId, String>>,
     /// The agents with a compaction on the way.
     compacting: Mutex<HashSet<AgentId>>,
+    /// Ephemeral agents (PLAN §18, "Ephemeral agents"): the close guard
+    /// and the times (`crate::spawn`).
+    pub spawns: crate::spawn::Runtime,
 }
 
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -908,6 +911,8 @@ pub fn spawn(state: &Shared) -> Vec<JoinHandle<()>> {
             tokio::time::sleep(tick).await;
             let Some(state) = weak.upgrade() else { return };
             idle_pass(&state).await;
+            // The lifetime and the owner of each ephemeral agent.
+            crate::spawn::pass(&state).await;
         }
     });
     vec![listener, timer]

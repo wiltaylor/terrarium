@@ -31,6 +31,8 @@ import { QuestionsPanel } from "../inbox/QuestionsPanel";
 import { SkillsPicker } from "../skills/SkillsPicker";
 import { RESTART_NOTE, skillsLabel } from "../skills/model";
 import { compactAction, lastCompactedText, lifecycleActions, type LifecycleAction } from "../../lib/lifecycle";
+import { EphemeralLine, SpawnedPanel } from "./Spawned";
+import { spawnedTabLabel, spawnRightsText } from "./spawn";
 
 /** The API call of a lifecycle button. Resume clears the pause (`unpause`). */
 const lifecycleCall = (kind: LifecycleAction["kind"], id: string) =>
@@ -105,6 +107,16 @@ export default function AgentDetail() {
     }
   };
 
+  /** Cancel an ephemeral agent: the daemon closes it; the page then shows it removed. */
+  const cancelEphemeral = async (a: Agent) => {
+    try {
+      await api.agents.cancel(a.id);
+      setRemovedKey(id());
+    } catch (e) {
+      setError(e);
+    }
+  };
+
   const remove = async (a: Agent) => {
     try {
       await api.agents.remove(a.id, true);
@@ -136,7 +148,8 @@ export default function AgentDetail() {
             }
           >
             {/* No Start and no Stop: work wakes the agent, and the idle timeout stops it. */}
-            <For each={lifecycleActions(a())}>
+            {/* An ephemeral agent has no pause: Cancel closes it (docs/api.md §6.10). */}
+            <For each={lifecycleActions(a()).filter((b) => !a().ephemeral || b.kind === "restart")}>
               {(b) => (
                 <button onClick={() => act(b.label, () => lifecycleCall(b.kind, a().id))} disabled={b.disabled} title={b.title}>
                   {b.label}
@@ -153,8 +166,16 @@ export default function AgentDetail() {
             })()}
             <button onClick={() => setEditing(true)}>Edit</button>
             <button onClick={() => setSaving(true)}>Save as template</button>
-            <ConfirmButton label="Delete" confirmLabel={running() ? "Yes, stop and delete" : "Yes, delete"} onConfirm={() => remove(a())} />
+            <Show
+              when={a().ephemeral}
+              fallback={<ConfirmButton label="Delete" confirmLabel={running() ? "Yes, stop and delete" : "Yes, delete"} onConfirm={() => remove(a())} />}
+            >
+              <ConfirmButton label="Cancel" confirmLabel="Yes, cancel the agent" onConfirm={() => cancelEphemeral(a())} />
+            </Show>
           </PageHead>
+          <Show when={a().ephemeral}>
+            <EphemeralLine agent={a()} />
+          </Show>
           <ErrorBanner error={error()} onDismiss={() => setError(null)} />
           <Show when={notice()}>
             <p class="notice small" style={{ margin: 0 }}>
@@ -197,6 +218,10 @@ export default function AgentDetail() {
               </dd>
               <dt>Restart</dt>
               <dd>{a().restart ?? "on-failure"}</dd>
+              <dt>Spawn rights</dt>
+              <dd>
+                <span classList={{ muted: !a().policy?.spawn }}>{spawnRightsText(a().policy?.spawn)}</span>
+              </dd>
               <dt>Idle stop</dt>
               <dd>
                 {idleStopText(a().idle_stop, globalIdleStop())}
@@ -287,7 +312,7 @@ export default function AgentDetail() {
           </Show>
 
           <div>
-            <Tabs tabs={AGENT_TABS} active={tab()} onChange={setTab} />
+            <Tabs tabs={AGENT_TABS.map((t) => (t.id === "spawned" ? { ...t, label: spawnedTabLabel(a().spawned_running) } : t))} active={tab()} onChange={setTab} />
             <Switch>
               <Match when={tab() === "conversation"}>
                 <Conversation agent={a()} onOpenTerminal={() => setTab("terminal")} />
@@ -303,6 +328,9 @@ export default function AgentDetail() {
               </Match>
               <Match when={tab() === "sessions"}>
                 <SessionsPanel agent={a()} open={view().session} onOpen={openSession} onOpenConversation={() => setTab("conversation")} />
+              </Match>
+              <Match when={tab() === "spawned"}>
+                <SpawnedPanel owner={a()} />
               </Match>
             </Switch>
           </div>

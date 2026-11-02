@@ -20,6 +20,7 @@ pub mod records;
 pub mod repos;
 pub mod schedules;
 pub mod session_refs;
+pub mod spawns;
 pub mod subscriptions;
 pub mod sync;
 pub mod targets;

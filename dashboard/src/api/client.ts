@@ -135,6 +135,9 @@ import type {
   ScheduleRun,
   Session,
   AgentScreen,
+  Spawn,
+  Spawned,
+  SpawnRequest,
   SessionGrant,
   SessionInfo,
   PasswordChange,
@@ -254,7 +257,8 @@ export interface Api {
   };
 
   agents: {
-    list(project?: string): Promise<Agent[]>;
+    /** `ephemeral` adds `?include=ephemeral`: the ephemeral agents too (docs/api.md §6.10). */
+    list(project?: string, opts?: { ephemeral?: boolean }): Promise<Agent[]>;
     /** `id` is a ULID, `project/name`, or a unique name. */
     get(id: string): Promise<Agent>;
     /** With `template`, the given fields override the template's (docs/api.md §21). */
@@ -303,6 +307,14 @@ export interface Api {
     pty(id: string): PtySocket;
     /** `GET /api/agents/{id}/screen` (docs/api.md §6.5): a read-only text snapshot of the harness screen. 409 when the agent is not running. */
     screen(id: string): Promise<AgentScreen>;
+    /** `POST /api/agents/{owner}/spawn` (docs/api.md §6.10): an ephemeral agent for `owner` (an agent, or `operator` with `project`). */
+    spawn(owner: string, body: SpawnRequest): Promise<Spawned>;
+    /** `GET /api/agents/{owner}/spawned`: the ephemeral agents of the owner, running and finished, newest first. */
+    spawned(owner: string, q?: PageQuery): Promise<Page<Spawn>>;
+    /** `POST /api/agents/{id}/cancel`: close an ephemeral agent (`cancelled`). The owner, a project_admin, or the operator. */
+    cancel(id: string): Promise<Spawn>;
+    /** `GET /api/spawns/{id}`: one spawn, also after the finish. */
+    spawnGet(id: string): Promise<Spawn>;
   };
 
   waits: {
@@ -894,7 +906,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
     },
 
     agents: {
-      list: (project) => all("/api/agents", { project }),
+      list: (project, o = {}) => all("/api/agents", o.ephemeral ? { project, include: "ephemeral" } : { project }),
       get: (id) => get(a(id)),
       create: (def) => post("/api/agents", def),
       update: (id, body) => patch(a(id), body),
@@ -930,6 +942,10 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       watch: (id, body) => post(`${a(id)}/watches`, body),
       pty: (id) => socket(`${a(id)}/pty`),
       screen: (id) => get(`${a(id)}/screen`),
+      spawn: (owner, body) => post(`${a(owner)}/spawn`, body),
+      spawned: (owner, q = {}) => page(`${a(owner)}/spawned`, { ...q }),
+      cancel: (id) => post(`${a(id)}/cancel`),
+      spawnGet: (id) => get(`/api/spawns/${seg(id)}`),
     },
 
     waits: {

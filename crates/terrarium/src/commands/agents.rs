@@ -60,7 +60,14 @@ async fn attach_images(
 
 pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
     match cmd {
-        AgentCmd::Ls { all_projects } => ls(ctx, *all_projects).await,
+        AgentCmd::Ls {
+            all_projects,
+            ephemeral,
+        } => ls(ctx, *all_projects, *ephemeral).await,
+        AgentCmd::Spawn(a) => super::spawns::spawn(ctx, a).await,
+        AgentCmd::Done { message } => super::spawns::done(ctx, message).await,
+        AgentCmd::Cancel { agent } => super::spawns::cancel(ctx, agent).await,
+        AgentCmd::Spawned { agent, limit } => super::spawns::spawned(ctx, agent, *limit).await,
         AgentCmd::Show { agent } => {
             let a = ctx.api.get(&agent_path(agent), vec![]).await?;
             ctx.emit(&a, |c, v| print_object_with_text(c, v, "system_prompt"))
@@ -230,7 +237,8 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
     }
 }
 
-async fn ls(ctx: &Ctx, all_projects: bool) -> anyhow::Result<()> {
+async fn ls(ctx: &Ctx, all_projects: bool, ephemeral: bool) -> anyhow::Result<()> {
+    let include = ephemeral.then(|| "ephemeral".to_owned());
     let items = if all_projects && ctx.is_agent() && ctx.project.is_none() {
         // The daemon defaults an agent to its own project. Ask for each
         // project the agent can see.
@@ -241,7 +249,7 @@ async fn ls(ctx: &Ctx, all_projects: bool) -> anyhow::Result<()> {
         }
         out
     } else {
-        let q = query([("project", ctx.project.clone())]);
+        let q = query([("project", ctx.project.clone()), ("include", include)]);
         ctx.api.list("/api/agents", q, None).await?
     };
     let v = Value::Array(items);
@@ -387,9 +395,14 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
         Some(v) => body["compact_max_age"] = v.into(),
         None => {}
     }
-    if let Some(p) = &a.policy {
-        let p: Value = serde_json::from_str(p)
-            .map_err(|e| CliError::usage(format!("--policy is not JSON: {e}")))?;
+    let policy = match &a.policy {
+        Some(p) => Some(
+            serde_json::from_str::<Value>(p)
+                .map_err(|e| CliError::usage(format!("--policy is not JSON: {e}")))?,
+        ),
+        None => None,
+    };
+    if let Some(p) = super::spawns::policy_with_spawn(ctx, &a.agent, policy, &a.spawn).await? {
         body["policy"] = p;
     }
     if let Some(b) = a.new_session_on_prompt_change {

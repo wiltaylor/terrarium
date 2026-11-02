@@ -1,7 +1,8 @@
 // The agent form model: AgentDef fields as editable strings, and the
 // conversions to a create body and a patch. Pure.
 
-import type { Agent, AgentDef, AgentPatch, Harness, RestartPolicy, Role } from "../../api/types";
+import type { Agent, AgentDef, AgentPatch, AgentPolicy, Harness, RestartPolicy, Role, SpawnPolicy } from "../../api/types";
+import { sameSpawn, spawnProblem } from "./spawn";
 
 export interface AgentFormValues {
   name: string;
@@ -30,6 +31,8 @@ export interface AgentFormValues {
   compact_on_idle: CompactSwitch;
   /** `off`, `0`, or a duration such as `24h`. Empty: the global default. */
   compact_max_age: string;
+  /** The spawn rights (`policy.spawn`, docs/api.md §6.10). Null: none. Optional: a template form has none. */
+  spawn?: SpawnPolicy | null;
 }
 
 /** The form value of `compact_on_idle`: empty is the global default. */
@@ -61,6 +64,7 @@ export function agentToForm(a: Agent): AgentFormValues {
     system_prompt: a.system_prompt ?? "",
     persona: a.persona ?? "",
     roles: a.roles.filter((r) => r !== "member"),
+    spawn: a.policy?.spawn ?? null,
     targets: a.policy?.targets ?? [],
     mail_to: (a.policy?.mail_to ?? ["*"]).join(", "),
     cross_project: (a.policy?.cross_project ?? []).join(", "),
@@ -153,6 +157,8 @@ export function validateAgentForm(v: AgentFormValues): string[] {
   if (ip) out.push(ip);
   const cp = compactMaxAgeProblem(v.compact_max_age);
   if (cp) out.push(cp);
+  const spawnErr = v.spawn ? spawnProblem(v.spawn) : null;
+  if (spawnErr) out.push(spawnErr);
   return out;
 }
 
@@ -166,7 +172,7 @@ export function formToDef(v: AgentFormValues): AgentDef {
     project: v.project,
     harness: v.harness,
     roles: v.roles,
-    policy: { targets: v.targets, mail_to: parseList(v.mail_to), cross_project: parseList(v.cross_project) },
+    policy: policyOf(v),
     restart: v.restart,
   };
   const subscription = opt(v.subscription);
@@ -190,6 +196,14 @@ export function formToDef(v: AgentFormValues): AgentDef {
 }
 
 export const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/** The policy of the form: the lists, and `spawn` when the agent has spawn rights. */
+export function policyOf(v: AgentFormValues): AgentPolicy {
+  // Plain copies: the values can come from a store proxy, and a client may clone the body.
+  const p: AgentPolicy = { targets: [...v.targets], mail_to: parseList(v.mail_to), cross_project: parseList(v.cross_project) };
+  if (v.spawn) p.spawn = { ...v.spawn, templates: [...v.spawn.templates] };
+  return p;
+}
 
 /** A changed optional field: the new value, `null` to clear it, or `undefined` for no change. */
 const changed = (now: string, before: string): string | null | undefined => {
@@ -238,8 +252,9 @@ export function formDiff(before: AgentFormValues, v: AgentFormValues): AgentPatc
   if (v.compact_on_idle !== before.compact_on_idle) patch.compact_on_idle = v.compact_on_idle ? v.compact_on_idle === "on" : null;
   const maxAge = changed(v.compact_max_age, before.compact_max_age);
   if (maxAge !== undefined) patch.compact_max_age = maxAge;
-  const policy = { targets: v.targets, mail_to: parseList(v.mail_to), cross_project: parseList(v.cross_project) };
-  const oldPolicy = { targets: before.targets, mail_to: parseList(before.mail_to), cross_project: parseList(before.cross_project) };
-  if (!sameList(policy.targets, oldPolicy.targets) || !sameList(policy.mail_to, oldPolicy.mail_to) || !sameList(policy.cross_project, oldPolicy.cross_project)) patch.policy = policy;
+  // The policy goes whole, with its spawn block: a policy without `spawn` removes the spawn rights.
+  const policy = policyOf(v);
+  const oldPolicy = policyOf(before);
+  if (!sameList(policy.targets, oldPolicy.targets) || !sameList(policy.mail_to, oldPolicy.mail_to) || !sameList(policy.cross_project ?? [], oldPolicy.cross_project ?? []) || !sameSpawn(policy.spawn, oldPolicy.spawn)) patch.policy = policy;
   return patch;
 }

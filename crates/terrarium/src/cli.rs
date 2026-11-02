@@ -402,6 +402,9 @@ pub enum AgentCmd {
         /// Agents of every project the caller may read
         #[arg(long)]
         all_projects: bool,
+        /// The ephemeral agents too (PLAN §18, "Ephemeral agents")
+        #[arg(long)]
+        ephemeral: bool,
     },
     /// Show one agent
     Show { agent: String },
@@ -531,6 +534,27 @@ pub enum AgentCmd {
     Roles {
         #[command(subcommand)]
         command: RolesCmd,
+    },
+    /// Spawn an ephemeral agent from a template to do one task (PLAN §18,
+    /// "Ephemeral agents"). Needs spawn rights; the result comes by mail
+    Spawn(Box<crate::commands::spawns::SpawnArgs>),
+    /// End the work of this ephemeral agent: the result goes to the owner,
+    /// then the daemon closes the agent
+    Done {
+        /// The result for the owner; `-` reads stdin. Default: your last
+        /// message
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+    },
+    /// Cancel an ephemeral agent (its owner, a project_admin, or the
+    /// operator)
+    Cancel { agent: String },
+    /// The ephemeral agents of an agent, running and finished, newest
+    /// first. Default: your own
+    Spawned {
+        agent: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
     },
 }
 
@@ -687,6 +711,9 @@ pub struct AgentSetArgs {
     /// cleared)
     #[arg(long, conflicts_with_all = ["system_prompt", "system_prompt_file", "no_system_prompt", "persona"])]
     pub save_system_prompt: Option<String>,
+    /// The spawn rights (PLAN §18, "Ephemeral agents")
+    #[command(flatten)]
+    pub spawn: crate::commands::spawns::SpawnRightsArgs,
 }
 
 #[derive(Debug, Args)]

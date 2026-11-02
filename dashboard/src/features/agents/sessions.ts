@@ -10,6 +10,7 @@ export const AGENT_TABS = [
   { id: "screen", label: "Screen" },
   { id: "events", label: "Events" },
   { id: "sessions", label: "Sessions" },
+  { id: "spawned", label: "Spawned" },
 ] as const;
 export type AgentTab = (typeof AGENT_TABS)[number]["id"];
 

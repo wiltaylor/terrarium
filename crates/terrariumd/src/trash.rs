@@ -103,6 +103,8 @@ pub async fn retire_agent(state: &Shared, agent: AgentId) {
         tracing::warn!(agent = %agent, "cannot stop a deleted agent: {e}");
     }
     trash_agent(state, agent, None).await;
+    // Its ephemeral agents go with it (PLAN §18, "Ephemeral agents").
+    Box::pin(crate::spawn::owner_removed(state, &agent.to_string())).await;
 }
 
 /// The name of the workspace in a trash entry.

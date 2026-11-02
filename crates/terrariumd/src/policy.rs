@@ -339,6 +339,93 @@ pub fn grant_policy(actor: &Actor, grants: &[String]) -> ApiResult<()> {
     )
 }
 
+/// Write the `spawn` block of an agent's policy (PLAN §18, "Ephemeral
+/// agents"): the right to spawn ephemeral agents. The caller checked
+/// `project_admin` of the agent's project. `target` is the agent (`None`
+/// for a new agent), `target_roles` its roles after the write, `old` its
+/// policy now. No change of the block: no check.
+///
+/// - The block must be valid ([`terrarium_core::config::SpawnPolicy::check`]).
+/// - The operator and a sysadmin may write any block.
+/// - A project_admin may write the block of a member (an agent with no
+///   role above `member`) of its project, with templates of the project
+///   or global ones (the entries name nothing else). It may not write its
+///   own block or the block of an admin, and it may not set
+///   `may_spawn_children`.
+pub fn set_spawn_policy(
+    actor: &Actor,
+    target: Option<&str>,
+    target_roles: &[Role],
+    old: Option<&Policy>,
+    new: &Policy,
+) -> ApiResult<()> {
+    let before = old.and_then(|o| o.spawn.as_ref());
+    if before == new.spawn.as_ref() {
+        return Ok(());
+    }
+    if let Some(sp) = &new.spawn {
+        sp.check().map_err(ApiError::invalid)?;
+    }
+    let Actor::Agent(a) = actor else {
+        return Ok(());
+    };
+    if a.is_sysadmin() {
+        return Ok(());
+    }
+    if target.is_some_and(|t| t == a.id) {
+        return Err(deny(
+            "changing your own spawn rights",
+            "sysadmin or the operator",
+        ));
+    }
+    if target_roles
+        .iter()
+        .any(|r| matches!(r, Role::ProjectAdmin | Role::Sysadmin))
+    {
+        return Err(deny(
+            "setting the spawn rights of a project_admin or sysadmin",
+            "sysadmin or the operator",
+        ));
+    }
+    if new.spawn.as_ref().is_some_and(|s| s.may_spawn_children)
+        && !before.is_some_and(|b| b.may_spawn_children)
+    {
+        return Err(deny(
+            "setting spawn.may_spawn_children",
+            "sysadmin or the operator",
+        ));
+    }
+    Ok(())
+}
+
+/// Spawn an ephemeral agent for `owner` of `project` (PLAN §18,
+/// "Ephemeral agents"): the owner itself, a `project_admin` of the
+/// project, a sysadmin, or the operator. The owner's `spawn` policy
+/// then limits the spawn ([`crate::spawn`]).
+pub fn spawn_for(actor: &Actor, owner: &str, project: &str) -> ApiResult<()> {
+    if let Actor::Agent(a) = actor
+        && a.id == owner
+    {
+        return Ok(());
+    }
+    admin_project(
+        actor,
+        project,
+        "spawning an ephemeral agent for another agent",
+    )
+}
+
+/// Cancel an ephemeral agent: its owner, a `project_admin` of its
+/// project, a sysadmin, or the operator.
+pub fn cancel_spawn(actor: &Actor, owner: &str, project: &str) -> ApiResult<()> {
+    if let Actor::Agent(a) = actor
+        && a.id == owner
+    {
+        return Ok(());
+    }
+    admin_project(actor, project, "cancelling an ephemeral agent")
+}
+
 /// Define, change, or delete a target: a global target needs sysadmin; a
 /// project target needs project_admin of that project (PLAN §10).
 pub fn define_target(actor: &Actor, project: Option<&str>) -> ApiResult<()> {
@@ -944,6 +1031,7 @@ mod tests {
             targets: vec![],
             mail_to: vec!["lead".into()],
             cross_project: vec!["q/triage".into()],
+            spawn: None,
         };
         let a = agent("p", &[], policy);
         assert!(mail_to(&a, &peer("p", "lead")).is_ok());
@@ -959,6 +1047,7 @@ mod tests {
             targets: vec![],
             mail_to: vec!["*".into()],
             cross_project: vec!["q/*".into()],
+            spawn: None,
         };
         let a = agent("p", &[], policy);
         assert!(mail_to(&a, &peer("q", "x")).is_ok());
@@ -1007,6 +1096,7 @@ mod tests {
             targets: targets.iter().map(|s| s.to_string()).collect(),
             mail_to: mail.iter().map(|s| s.to_string()).collect(),
             cross_project: cross.iter().map(|s| s.to_string()).collect(),
+            spawn: None,
         };
         let in_project = policy(&["p-box"], &["*", "lead", "p/dev"], &[]);
         assert!(set_policy(&admin, "p", None, &in_project, &local).is_ok());
@@ -1163,5 +1253,73 @@ mod tests {
         assert!(release_version(&member, "p").is_err());
         assert!(release_version(&admin, "p").is_ok());
         assert!(prune_artifacts(&admin).is_err());
+    }
+
+    #[test]
+    fn spawn_policy_rules() {
+        use terrarium_core::config::SpawnPolicy;
+        let with = |sp: Option<SpawnPolicy>| Policy {
+            spawn: sp.map(Box::new),
+            ..Policy::default()
+        };
+        let some = with(Some(SpawnPolicy {
+            templates: vec!["project:*".into()],
+            ..SpawnPolicy::default()
+        }));
+        let children = with(Some(SpawnPolicy {
+            templates: vec!["*".into()],
+            may_spawn_children: true,
+            ..SpawnPolicy::default()
+        }));
+        let none = Policy::default();
+        let lead = Actor::Agent(agent("p", &[Role::ProjectAdmin], Policy::default()));
+        let sys = Actor::Agent(agent("q", &[Role::Sysadmin], Policy::default()));
+        // No change: no check, also for a member.
+        let member = Actor::Agent(agent("p", &[], Policy::default()));
+        assert!(set_spawn_policy(&member, Some("x"), &[], Some(&some), &some).is_ok());
+        // A lead on a member: yes; on itself, on an admin, children: no.
+        assert!(set_spawn_policy(&lead, Some("w"), &[], Some(&none), &some).is_ok());
+        assert!(set_spawn_policy(&lead, None, &[], None, &some).is_ok());
+        assert!(
+            set_spawn_policy(
+                &lead,
+                Some("p-id"),
+                &[Role::ProjectAdmin],
+                Some(&none),
+                &some
+            )
+            .is_err()
+        );
+        assert!(
+            set_spawn_policy(&lead, Some("l2"), &[Role::ProjectAdmin], Some(&none), &some).is_err()
+        );
+        assert!(set_spawn_policy(&lead, Some("w"), &[], Some(&none), &children).is_err());
+        // A lead may remove the block of a member.
+        assert!(set_spawn_policy(&lead, Some("w"), &[], Some(&some), &none).is_ok());
+        // Sysadmin and the operator: anything valid.
+        assert!(
+            set_spawn_policy(
+                &sys,
+                Some("l2"),
+                &[Role::ProjectAdmin],
+                Some(&none),
+                &children
+            )
+            .is_ok()
+        );
+        assert!(set_spawn_policy(&Actor::Operator, Some("w"), &[], None, &children).is_ok());
+        let bad = with(Some(SpawnPolicy {
+            max_concurrent: 0,
+            ..SpawnPolicy::default()
+        }));
+        let e = set_spawn_policy(&Actor::Operator, Some("w"), &[], None, &bad).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Invalid);
+        // Spawn and cancel: the owner itself, else an admin.
+        assert!(spawn_for(&member, "p-id", "p").is_ok());
+        assert!(spawn_for(&member, "other", "p").is_err());
+        assert!(spawn_for(&lead, "other", "p").is_ok());
+        assert!(cancel_spawn(&member, "p-id", "p").is_ok());
+        assert!(cancel_spawn(&member, "other", "p").is_err());
+        assert!(cancel_spawn(&Actor::Operator, "other", "p").is_ok());
     }
 }

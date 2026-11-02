@@ -25,6 +25,167 @@ pub struct Policy {
     /// Explicit `project/agent` names outside the project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_project: Vec<String>,
+    /// The right to spawn ephemeral agents (PLAN §18, "Ephemeral
+    /// agents"). Absent: the agent may not spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Boxed: most agents have none, and an actor carries the policy.
+    pub spawn: Option<Box<SpawnPolicy>>,
+}
+
+/// The default of [`SpawnPolicy::max_concurrent`].
+pub const SPAWN_DEFAULT_CONCURRENT: u32 = 2;
+/// The default lifetime of an ephemeral agent.
+pub const SPAWN_DEFAULT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(2 * 3600);
+/// The longest lifetime of an ephemeral agent.
+pub const SPAWN_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+/// The highest `max_concurrent` and `max_per_day`.
+pub const SPAWN_MAX_COUNT: u32 = 50;
+
+/// What an agent may spawn (PLAN §18, "Ephemeral agents"): the policy
+/// block `spawn`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnPolicy {
+    /// The templates that the agent may spawn: a template name (the
+    /// project's template, else the global one), `global:<name>`,
+    /// `project:*` (each template of the project), `global:*` (each
+    /// global template), or `*` (both).
+    #[serde(default)]
+    pub templates: Vec<String>,
+    /// The ephemeral agents of this owner that may run at one time.
+    #[serde(default = "default_spawn_concurrent")]
+    pub max_concurrent: u32,
+    /// The spawns in the last 24 hours. Absent: no daily limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_day: Option<u32>,
+    /// The lifetime of each ephemeral agent: a duration such as `30m` or
+    /// `2h`. Absent: 2 h. At most 24 h.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lifetime: Option<String>,
+    /// The ephemeral agents may spawn too, with a copy of this policy
+    /// that has `may_spawn_children = false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub may_spawn_children: bool,
+}
+
+fn default_spawn_concurrent() -> u32 {
+    SPAWN_DEFAULT_CONCURRENT
+}
+
+impl Default for SpawnPolicy {
+    fn default() -> Self {
+        Self {
+            templates: Vec::new(),
+            max_concurrent: SPAWN_DEFAULT_CONCURRENT,
+            max_per_day: None,
+            max_lifetime: None,
+            may_spawn_children: false,
+        }
+    }
+}
+
+/// The template that a spawn names, for [`SpawnPolicy::allows`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnTemplate<'a> {
+    pub name: &'a str,
+    /// True for a global template, false for a template of the project.
+    pub global: bool,
+}
+
+impl SpawnPolicy {
+    /// The lifetime of each ephemeral agent.
+    pub fn lifetime(&self) -> std::result::Result<std::time::Duration, String> {
+        let Some(text) = self
+            .max_lifetime
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+        else {
+            return Ok(SPAWN_DEFAULT_LIFETIME);
+        };
+        let d = crate::eta::parse_duration(text.trim())
+            .ok()
+            .and_then(|d| d.to_std().ok())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| {
+                format!("spawn.max_lifetime `{text}` is not a duration such as 30m or 2h")
+            })?;
+        if d > SPAWN_MAX_LIFETIME {
+            return Err(format!(
+                "spawn.max_lifetime `{text}` is longer than the maximum, 24h"
+            ));
+        }
+        Ok(d)
+    }
+
+    /// Check the block: each template entry has a valid form, the counts
+    /// are in range, and the lifetime parses.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        for t in &self.templates {
+            check_spawn_entry(t)?;
+        }
+        if self.max_concurrent == 0 || self.max_concurrent > SPAWN_MAX_COUNT {
+            return Err(format!(
+                "spawn.max_concurrent must be 1 to {SPAWN_MAX_COUNT}, not {}",
+                self.max_concurrent
+            ));
+        }
+        if let Some(n) = self.max_per_day
+            && (n == 0 || n > SPAWN_MAX_COUNT * 20)
+        {
+            return Err(format!(
+                "spawn.max_per_day must be 1 to {}, not {n}",
+                SPAWN_MAX_COUNT * 20
+            ));
+        }
+        self.lifetime().map(|_| ())
+    }
+
+    /// Does an entry of `templates` allow the template `t`?
+    pub fn allows(&self, t: SpawnTemplate<'_>) -> bool {
+        self.templates.iter().any(|e| {
+            let e = e.trim();
+            match e {
+                "*" => true,
+                "project:*" => !t.global,
+                "global:*" => t.global,
+                _ => match e.strip_prefix(crate::agent_template::GLOBAL_PREFIX) {
+                    Some(n) => t.global && n == t.name,
+                    None => e == t.name,
+                },
+            }
+        })
+    }
+
+    /// The policy of a child: a copy with `may_spawn_children = false`.
+    pub fn for_child(&self) -> Self {
+        Self {
+            may_spawn_children: false,
+            ..self.clone()
+        }
+    }
+}
+
+/// Check one entry of `spawn.templates`.
+fn check_spawn_entry(e: &str) -> std::result::Result<(), String> {
+    let e = e.trim();
+    if matches!(e, "*" | "project:*" | "global:*") {
+        return Ok(());
+    }
+    let name = e
+        .strip_prefix(crate::agent_template::GLOBAL_PREFIX)
+        .unwrap_or(e);
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "spawn.templates entry `{e}` must be a template name, `global:<name>`, \
+             `project:*`, `global:*`, or `*`"
+        ))
+    }
 }
 
 fn default_mail_to() -> Vec<String> {
@@ -37,6 +198,7 @@ impl Default for Policy {
             targets: Vec::new(),
             mail_to: default_mail_to(),
             cross_project: Vec::new(),
+            spawn: None,
         }
     }
 }
@@ -1009,5 +1171,51 @@ You are a careful reviewer for {{project.name}}.
         let (defs, errors) = Definitions::load(Path::new("/nonexistent/terrarium"));
         assert!(errors.is_empty());
         assert_eq!(defs, Definitions::default());
+    }
+
+    #[test]
+    fn spawn_policy_checks_and_matches_templates() {
+        let sp: SpawnPolicy =
+            serde_json::from_str(r#"{"templates": ["worker", "global:helper", "project:*"]}"#)
+                .unwrap();
+        assert_eq!(sp.max_concurrent, SPAWN_DEFAULT_CONCURRENT);
+        assert_eq!(sp.lifetime().unwrap(), SPAWN_DEFAULT_LIFETIME);
+        sp.check().unwrap();
+        let t = |name, global| SpawnTemplate { name, global };
+        assert!(sp.allows(t("worker", false)));
+        assert!(sp.allows(t("worker", true)));
+        assert!(sp.allows(t("helper", true)));
+        assert!(sp.allows(t("other", false)));
+        assert!(!sp.allows(t("other", true)));
+        let only_global = SpawnPolicy {
+            templates: vec!["global:*".into()],
+            ..SpawnPolicy::default()
+        };
+        assert!(only_global.allows(t("x", true)));
+        assert!(!only_global.allows(t("x", false)));
+        assert!(!SpawnPolicy::default().allows(t("x", false)));
+        for (json, why) in [
+            (r#"{"templates": ["a b"]}"#, "spawn.templates"),
+            (r#"{"max_concurrent": 0}"#, "max_concurrent"),
+            (r#"{"max_per_day": 0}"#, "max_per_day"),
+            (r#"{"max_lifetime": "25h"}"#, "24h"),
+            (r#"{"max_lifetime": "0s"}"#, "max_lifetime"),
+        ] {
+            let sp: SpawnPolicy = serde_json::from_str(json).unwrap();
+            let e = sp.check().unwrap_err();
+            assert!(e.contains(why), "{json}: {e}");
+        }
+        assert!(serde_json::from_str::<SpawnPolicy>(r#"{"bogus": 1}"#).is_err());
+        let p = SpawnPolicy {
+            may_spawn_children: true,
+            max_lifetime: Some("30m".into()),
+            ..SpawnPolicy::default()
+        };
+        assert_eq!(p.lifetime().unwrap().as_secs(), 1800);
+        assert!(!p.for_child().may_spawn_children);
+        // A policy without the block reads and writes as before.
+        let pol: Policy = serde_json::from_str(r#"{"targets": []}"#).unwrap();
+        assert!(pol.spawn.is_none());
+        assert!(!serde_json::to_string(&pol).unwrap().contains("spawn"));
     }
 }

@@ -7,6 +7,7 @@ import type { Agent } from "../../api/types";
 import { agents, api, projects } from "../../stores";
 import { agentToForm, formToPatch, validateAgentForm, type AgentFormValues } from "./form";
 import { AgentFields } from "./AgentFields";
+import { SpawnRightsFields } from "./Spawned";
 
 const ROLES_NOTE = "Change roles in the Roles panel of the agent page. An emptied model or prompt is cleared. A new subscription, model, system prompt, or skill list applies at the next start.";
 
@@ -85,6 +86,7 @@ export function AgentForm(props: { agent: Agent; onClose: () => void; onSaved: (
       </Show>
       <form class="stack" onSubmit={submit}>
         <AgentFormFields value={v()} onChange={setV} editing />
+        <SpawnRightsFields project={v().project} value={v().spawn} onChange={(sp) => setV({ ...v(), spawn: sp })} />
         <div class="row">
           <button class="primary" type="submit" disabled={busy() || problems().length > 0}>
             Save

@@ -5,11 +5,13 @@ import { seedSchedules } from "./schedules";
 import { seedEventSources, type EventSourceRow } from "./eventSources";
 import { seedTemplates } from "./templates";
 import { seedTranscripts } from "./transcripts";
+import { seedSpawns } from "./spawns";
 import { seedWaits, syncWaitFields } from "./waits";
 import type {
   Agent,
   AgentEvent,
   AgentTemplate,
+  Spawn,
   Block,
   Artifact,
   AuditEntry,
@@ -102,6 +104,8 @@ export interface MockWorld {
   eventSourceSecrets: Record<string, string>;
   /** Agent templates (docs/api.md §21). */
   templates: AgentTemplate[];
+  /** Ephemeral agents, running and finished (docs/api.md §6.10, ./spawns.ts). */
+  spawns?: Spawn[];
   audit: AuditEntry[];
   /** The last `seq` handed out. */
   seq: number;
@@ -942,9 +946,12 @@ type:bug sevrity=high
 
   const sched = seedSchedules(now, agents);
 
-  return {
+  const world: MockWorld = {
     schedules: sched.schedules, scheduleRuns: sched.runs, eventSources: seedEventSources(now), eventSourceSecrets: {}, templates: seedTemplates(now),
     projects, repos, agents, sessions, removedAgents: [], transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
     cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, heldMail: [fakeUlid("msg", 11)], targets, hostSnapshots, leases, ...waitSeed, hosts, hostTokens, audit, seq,
   };
+  // Ephemeral agents of terrarium/lead (./spawns.ts).
+  seedSpawns(world, now);
+  return world;
 }

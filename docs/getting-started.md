@@ -1175,8 +1175,8 @@ A skill is a folder with a `SKILL.md` file: YAML front matter with a
 `name` and a `description`, then instructions in Markdown. It can also
 hold `scripts/`, `references/`, and `assets/`. An agent sees the name and
 the description of each of its skills. When a skill fits the task, the
-agent loads the instructions. Terrarium ships two skills, `terrarium-db`
-(§2.13b) and `terrarium-tests` (§2.13d) (PLAN §8.6).
+agent loads the instructions. Terrarium ships three skills, `terrarium-db`
+(§2.13b), `terrarium-tests` (§2.13d), and `terrarium-spawn` (§2.13e) (PLAN §8.6).
 
 1. Add a skill to the library. It goes to `config/terrarium/skills/<name>/`:
 
@@ -1381,6 +1381,54 @@ push`. You see each test case on the Tests tab of the Board screen
 
 The script `scripts/seed-test-runs.sh` uploads example runs in each
 format to the project `demo`.
+
+### 2.13e Ephemeral agents: a lead spawns helpers
+
+A lead can split its work: it spawns short-lived agents from a template,
+each with one task, and gets each result by mail (PLAN §18, "Ephemeral
+agents"; api.md §6.10). An ephemeral agent ends with `terrarium agent done`;
+then the daemon closes it and archives its session.
+
+1. Give the lead spawn rights. In the dashboard, open the lead, click
+   **Edit**, and fill in **Spawn rights**: the templates, how many may run
+   at one time, how many in a day, and the lifetime. With the CLI:
+
+   ```bash
+   terrarium admin agent set demo/lead --spawn-template project:* \
+     --spawn-template global:claude-worker --spawn-max-concurrent 3 \
+     --spawn-max-per-day 20 --spawn-max-lifetime 2h
+   ```
+
+   A lead can set the same rights on a worker of its project. Only you (or
+   a sysadmin) set them on a lead, and only you allow the ephemeral agents
+   to spawn too (`--spawn-children on`).
+
+2. Give the lead the packaged skill `terrarium-spawn`, so that it knows
+   when and how to spawn: `terrarium admin agent set demo/lead --skill
+   terrarium-spawn` (or add it to its other skills), then restart it.
+
+3. The lead spawns, for example:
+
+   ```bash
+   terrarium agent spawn claude-worker --wait \
+     --task "Run the tests of crates/runner 20 times and report which fail. End with terrarium agent done -m <result>."
+   ```
+
+   You can spawn one yourself for an agent:
+   `terrarium admin agent spawn claude-worker --for demo/lead --task "..." --wait`.
+
+4. Watch them on the lead's agent page, tab **Spawned**: the status, the
+   task, the result, the duration, a **session** link for each, and
+   **Cancel** for a running one. Click a row to read the whole task and
+   result. The **Events** tab of the lead has a line for each spawn and
+   each finish, with the session link. The page of an ephemeral agent says
+   "Ephemeral agent of lead" and the lifetime left; it has **Cancel**, not
+   **Pause**. The agent lists and the sidebar do not show ephemeral agents
+   (`terrarium agent ls --ephemeral` does).
+
+An ephemeral agent that does not run `agent done` stays idle until its
+lifetime ends (outcome `timeout`). When you remove the lead, its
+ephemeral agents and their history go with it.
 
 ### 2.14 Install on a server
 

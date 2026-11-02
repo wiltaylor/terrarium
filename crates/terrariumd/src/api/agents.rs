@@ -80,6 +80,9 @@ fn file_managed(a: &AgentView) -> ApiError {
 #[derive(Debug, Default, Deserialize)]
 struct ListQuery {
     project: Option<String>,
+    /// `ephemeral`: the ephemeral agents too (PLAN §18, "Ephemeral
+    /// agents"). Default: without them.
+    include: Option<String>,
 }
 
 async fn list(
@@ -95,9 +98,13 @@ async fn list(
     if let Some(p) = &project {
         policy::read_project(&actor, p)?;
     }
+    let ephemeral = q
+        .include
+        .as_deref()
+        .is_some_and(|i| i.split(',').any(|p| p.trim() == "ephemeral"));
     let mut rows = state
         .db
-        .read(move |c| agents::list(c, project.as_deref(), &page))
+        .read(move |c| agents::list_with(c, project.as_deref(), &page, ephemeral))
         .await?;
     let runs = state.supervisor.harness_runs();
     for v in &mut rows.items {
@@ -188,6 +195,7 @@ async fn create(
         .db
         .write(actor.label(), move |t| {
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
+            policy::set_spawn_policy(&who, None, &def.roles, None, &def.policy)?;
             def.subscription_pool = agents::check_pool(
                 t,
                 def.harness,
@@ -302,8 +310,9 @@ async fn update(
         .db
         .write(actor.label(), move |t| {
             if let Some(new) = &patch.policy {
-                let old = agents::get(t, &id)?.agent.policy;
-                agents::check_policy(t, &who, &project, Some(&old), new)?;
+                let now = agents::get(t, &id)?.agent;
+                agents::check_policy(t, &who, &project, Some(&now.policy), new)?;
+                policy::set_spawn_policy(&who, Some(&id), &now.roles, Some(&now.policy), new)?;
             }
             let mut patch = patch;
             // The pool after the patch: each member exists, has the
@@ -409,6 +418,12 @@ async fn remove(
     ApiQuery(c): ApiQuery<RemoveQuery>,
 ) -> ApiResult<Response> {
     let a = load(&state, &actor, id).await?;
+    // An ephemeral agent: the delete is a cancel (PLAN §18, "Ephemeral
+    // agents"), with the rights of a cancel.
+    if a.ephemeral {
+        crate::spawn::cancel(&state, &actor, &a.agent.id.to_string()).await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     policy::admin_project(&actor, &a.agent.project, "deleting an agent")?;
     if actor
         .agent()
@@ -457,6 +472,8 @@ async fn remove(
         && crate::workspace::rel(&state.work_dir, &a.agent.workspace).is_some())
     .then(|| a.agent.workspace.clone());
     crate::trash::trash_agent(&state, agent_id(&a), ws).await;
+    // Its ephemeral agents go with it (PLAN §18, "Ephemeral agents").
+    crate::spawn::owner_removed(&state, &a.agent.id.to_string()).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -679,6 +696,9 @@ pub(super) async fn compact(
 /// Write the `paused` flag. A change writes the audit row `agent.pause` or
 /// `agent.unpause` and the event `agent.paused` or `agent.unpaused`.
 async fn set_paused(state: &Shared, actor: &Actor, a: &AgentView, paused: bool) -> ApiResult<()> {
+    if paused {
+        crate::spawn::refuse_pause(a)?;
+    }
     let (id, project, name) = (
         a.agent.id.to_string(),
         a.agent.project.clone(),

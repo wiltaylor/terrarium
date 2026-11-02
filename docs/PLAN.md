@@ -1154,6 +1154,9 @@ to the audit log with the agent's ID.
 | Edit or delete any memory | no | in project | anywhere |
 | Attach repos, define project targets | no | in project | anywhere |
 | Lease a target to an agent at run time (§19; a global target needs sysadmin) | no | in project | anywhere |
+| Spawn ephemeral agents (§18, "Ephemeral agents"; needs the policy block `spawn`) | with `spawn` | with `spawn` | with `spawn` |
+| Set the `spawn` block of an agent (not on itself, not on an admin, not `may_spawn_children`) | no | members in project | anywhere |
+| Cancel an ephemeral agent | its own | in project | anywhere |
 | Wait on and watch agents (§12d; another project needs a `cross_project` entry) | own project | own project | anywhere |
 | See and cancel the waits and watches of other agents (§12d) | no | in project | anywhere |
 | Ask the operator a question; update and retract its own (§12e) | no | yes | yes |
@@ -3299,6 +3302,60 @@ model call, so all of it is off by default.
   `idle`, `max_age`, or `manual`). A failed compaction counts too, so that
   it does not run again without a new turn. The agent page shows "last
   compacted ...".
+
+### Ephemeral agents
+
+Asked for on 2026-11-02: a lead (or any agent with the right) spawns a
+short-lived agent from a template to do one task, and gets the result.
+The contract is in api.md §6.10; the code is in `crate::spawn`,
+`store::spawns`, and `api::spawns`. The CLI is `terrarium agent spawn`,
+`agent done`, `agent cancel`, and `agent spawned` (cli.md); the packaged
+skill `terrarium-spawn` teaches agents to use it.
+
+- **Rights.** The policy block `spawn` (`templates`, `max_concurrent`,
+  `max_per_day`, `max_lifetime`, `may_spawn_children`). Absent: no spawn
+  rights. The operator and a sysadmin set it on any agent. A
+  project_admin sets it on a member of its project, not on itself and not
+  on an admin, and never sets `may_spawn_children` (`policy::set_spawn_policy`).
+  A template carries no spawn rights. The checks of a spawn are in the
+  daemon: the template is in the list, the running count is under
+  `max_concurrent`, the spawns of 24 hours are under `max_per_day`, and
+  the create of the agent passes the normal checks (roles, policy,
+  subscription). The stream limit applies at the start.
+- **Model and storage.** An ephemeral agent is a normal agent row with
+  `owner` (migration 51): the ULID of the owner, or `operator`. The
+  `spawns` table keeps one row for each spawn: the task, the deadline,
+  the wait of the owner, and after the finish the outcome, the result
+  (16 KiB), and the last session. The finish removes the agent row as
+  `agent rm` does, so every live view (the lists, the peers in the prompt,
+  the idle pass, the board) sees no finished agent. The `spawns` row is
+  the history, and the session row and the session archive keep the
+  transcript for the session link. The other choice, a finished flag on
+  the agent row, needed a filter in each query of live agents.
+- **Life.** The daemon makes the agent from the template in the owner's
+  project, with its own workspace, `idle_stop = off`, and the task as the
+  first queued turn, and wakes it. Its prompt gets a part that names the
+  owner, the lifetime, and `terrarium agent done -m "<result>"`. An idle
+  ephemeral agent stays idle: there is no auto finish. Only these end it:
+  `agent done` (`done`), a cancel (`cancelled`), the end of the lifetime
+  (`timeout`, the lifecycle timer), a failed start (`failed`), and the
+  removal of the owner (`owner_gone`). A pause of an ephemeral agent is
+  refused; a pause or a stop of the owner does not touch it.
+- **Close.** The result goes to the owner: the wait of `spawn --wait`
+  resolves with it (its wake mail carries it), else a mail from `system`
+  (`Spawned <name> finished: <outcome>`). No mail for `owner_gone`. Then
+  the event `agent.finished` (on the owner, with the session of the
+  ephemeral agent), the stop, the session archive, the workspace in the
+  trash, and the removal of the row.
+- **Owner removal.** Each removal of an agent (API delete, reload, fleet
+  prune, and the close of an ephemeral agent) closes the running
+  ephemeral agents of that owner and deletes its `spawns` rows, so the
+  rule goes down each level. The lifecycle timer closes what a removal
+  leaves.
+- **Visibility.** The agent lists (`?include=ephemeral` to see them), the
+  sidebar tree, the project health dots, the counts of the project cards,
+  and the address book leave them out. The owner's agent page has the
+  Spawned tab; the page of an ephemeral agent says whose it is.
 
 ### Restart policy and the daemon start
 

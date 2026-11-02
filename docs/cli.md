@@ -306,7 +306,7 @@ terrarium secret get door --field pin
 `agent` has the alias `agents`.
 
 ```
-terrarium agent ls [--all-projects]
+terrarium agent ls [--all-projects] [--ephemeral]
 terrarium agent show <agent>
 terrarium agent new <name> --harness <h> [--subscription s] [--pool s1,s2] [--model m] [--prompt p]
                     [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
@@ -320,6 +320,8 @@ terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--m
                     [--persona p] [--restart r] [--idle-stop 30m|off|default] [--policy JSON]
                     [--new-session-on-prompt-change true|false] [--skill s... | --no-skills]
                     [--compact-on-idle on|off|default] [--compact-max-age 24h|off|default]
+                    [--spawn-template t]... [--spawn-max-concurrent n] [--spawn-max-per-day n|0]
+                    [--spawn-max-lifetime 2h] [--spawn-children on|off] [--no-spawn]
 terrarium agent set <agent> --save-system-prompt <name>  save the custom text in the library, and select it
 terrarium agent swap <agent> <subscription>  move to another plan account of the pool
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
@@ -338,6 +340,11 @@ terrarium agent screen <agent> [--json]       project_admin, sysadmin, or the op
 terrarium agent leases <agent> [--all]          the target leases it holds
 terrarium agent roles get <agent>
 terrarium agent roles set <agent> [role]...   no roles means member only
+terrarium agent spawn <template> (--task <text | -> | --task-file <file | ->) [--name n]
+                      [--wait [--timeout 1h]] [--for <agent> | --for operator --project p]
+terrarium agent done [-m <result | ->]          an ephemeral agent ends its work
+terrarium agent cancel <agent>                  close an ephemeral agent now
+terrarium agent spawned [<agent>] [--limit n]   the ephemeral agents of an owner
 ```
 
 `<agent>` is a ULID, `project/name`, or a name. The CLI encodes the `/`.
@@ -409,10 +416,50 @@ reads the new login at its next request)`. Claude Code swaps live.
 Codex, Copilot, and pi (which moves between API keys) restart with resume,
 at once when the agent is idle, else when its turn ends. A stopped agent uses the new account at its next start.
 
+**Ephemeral agents** (PLAN §18, [api.md §6.10](api.md#610-ephemeral-agents)).
+An agent with spawn rights runs `agent spawn` to make a short-lived agent
+from a template for one task. The CLI prints `spawned terra/lead-worker-1
+(template worker, claude); lifetime until 2026-11-02 12:00`, the session,
+and what comes next:
+
+- With `--wait`, an agent gets a wait on the finish: the CLI prints `wait
+  <id> registered: spawned lead-worker-1 finishes` and "End your turn
+  now". The wake mail of the wait has the result. `--timeout` sets the
+  time of the wait (default: the lifetime and one minute).
+- Without `--wait`, the result comes as a mail from `system`: `Spawned
+  <name> finished: <outcome>`, with the task, the result, the duration,
+  and the session link.
+- The operator names the owner with `--for <agent>` (a lead may too, for a
+  member of its project). With `--for operator --project p`, the
+  ephemeral agent is the operator's own. In operator mode, `--wait` polls
+  `GET /api/spawns/{id}` and prints the result between `BEGIN RESULT` and
+  `END RESULT` markers when the agent finishes.
+
+`agent done [-m result]` is for an ephemeral agent only: the daemon closes
+it 3 s later, and the owner gets the result (without `-m`: the agent's
+last message). The CLI prints "done: the daemon closes <name> in a few
+seconds and sends the result to <owner>. End your turn now." `agent
+cancel` closes an ephemeral agent at once (the owner, a project_admin, or
+the operator). `agent spawned` lists the ephemeral agents of the caller
+(or of `<agent>`), running and finished, newest first, with the columns
+`NAME`, `TEMPLATE`, `STATUS` (the live status, or the outcome), `STARTED`,
+`DURATION`, and `TASK`. `agent ls` leaves the ephemeral agents out;
+`--ephemeral` lists them too.
+
+The `--spawn-*` flags of `agent set` change only the `spawn` block of the
+policy (the CLI reads the policy first, or takes `--policy`):
+`--spawn-template` (repeat it; it replaces the list), `--spawn-max-concurrent`,
+`--spawn-max-per-day` (`0` removes the limit), `--spawn-max-lifetime`,
+`--spawn-children on|off`, and `--no-spawn`, which removes the rights. A
+lead sets them on a member of its project; `--spawn-children on` needs a
+sysadmin or the operator.
+
 `agent rm` deletes the agent. The daemon moves the agent dir and the
 workspace `work/<project>/<agent>` to `<state>/trash/<ulid>-<ts>/` (the
 workspace goes to `<that dir>/workspace`). The trash prune removes the
-entry after `TERRARIUM_TRASH_DAYS` days. `--keep-workspace` leaves the
+entry after `TERRARIUM_TRASH_DAYS` days. Its ephemeral agents go with it (their
+outcome is `owner_gone`, with no mail); `agent rm` of an ephemeral agent
+is a cancel. `--keep-workspace` leaves the
 workspace in `work/<project>/<agent>`. A live agent needs `--confirm`
 ([api.md §6.1](api.md#61-crud)).
 

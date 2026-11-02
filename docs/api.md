@@ -1715,6 +1715,8 @@ An agent is the core `Agent` with bookkeeping fields:
 | `current_card` | The card the agent has in the `working` column of its board (§8.1), if any. |
 | `source` | `file`, `api`, or `fleet:<name>` (§18.1). |
 | `template` | The agent template that the create copied: `{"id", "name", "project", "revision"}` (§21). Absent when the create named none. For display only. |
+| `ephemeral`, `owner`, `spawn` | An ephemeral agent (§6.10): `true`, the owner (an agent ULID or `operator`), and `{"owner_name", "template", "task", "spawned_at", "deadline_at"}`. Absent for other agents. |
+| `spawned_running` | The ephemeral agents of this agent that run now (§6.10). Absent when 0. |
 
 ### 6.1 CRUD
 
@@ -2900,6 +2902,165 @@ with a message that sends it to `terrarium question ls`.
 Each change of an item emits an `inbox` event: `{item, kind, change,
 project?}`, where `change` is `opened`, `updated`, or `closed`. The
 acknowledgement of a mail writes an `inbox.ack` audit row.
+
+### 6.10 Ephemeral agents
+
+PLAN §18 ("Ephemeral agents") gives the design. The code is in
+`crates/terrariumd/src/spawn.rs`, `crates/terrariumd/src/store/spawns.rs`,
+and `crates/terrariumd/src/api/spawns.rs`.
+
+An ephemeral agent does one task for its owner, and then the daemon
+closes it. The owner is the agent that spawned it, or `operator`. The
+daemon makes it from a template in the project of the owner, with its own
+workspace and no idle stop, and types the task as its first turn. The
+turn names the owner (`[Agent:<project>/<owner>]`, or `[User]` for the
+operator). The system prompt of an ephemeral agent tells it its owner,
+its lifetime, and to end with `terrarium agent done -m "<result>"`.
+
+**Spawn rights.** The policy block `spawn` of an agent (§6.1, `policy`)
+gives the right to spawn. Without it, an agent cannot spawn.
+
+```json
+"policy": {"targets": [], "mail_to": ["*"],
+           "spawn": {"templates": ["worker", "global:helper", "project:*"],
+                     "max_concurrent": 2, "max_per_day": 20, "max_lifetime": "2h",
+                     "may_spawn_children": false}}
+```
+
+| Field | Meaning |
+|---|---|
+| `templates` | The templates that the agent may spawn: a name (the project's template, else the global one), `global:<name>`, `project:*` (each template of the project), `global:*` (each global template), or `*`. |
+| `max_concurrent` | The ephemeral agents of the owner that may run at one time: 1 to 50. Default 2. |
+| `max_per_day` | The spawns of the owner in the last 24 hours, running or finished. Absent: no limit. |
+| `max_lifetime` | The lifetime of each ephemeral agent: a duration such as `30m` or `2h`. Default `2h`, at most `24h`. |
+| `may_spawn_children` | The ephemeral agents may spawn too. Each one gets a copy of this block with `may_spawn_children: false`, so it goes one level down only. Default false. |
+
+Who writes the block (`PATCH /api/agents/{id}` with `policy`, or the
+create): the operator and a sysadmin on any agent. A project_admin on a
+member of its project (an agent with no role above `member`), with
+templates of the project or global ones, but not on itself, not on an
+admin, and not `may_spawn_children: true`. A write that does not change
+the block needs no right. A bad block is `422 invalid`. The `agent.update`
+audit row has the new policy. A template carries no spawn rights: the
+template files have no `spawn` key, and a template made from an agent
+leaves it out.
+
+**The lists.** `GET /api/agents` and `GET /api/projects/{name}/agents`
+leave the ephemeral agents out. `GET /api/agents?include=ephemeral` lists
+them too. They are not peers in the prompt of other agents. The events,
+the mail, the audit rows, and the session links of the logs show them as
+for any agent.
+
+| Endpoint | Body or query | Answer |
+|---|---|---|
+| `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
+| `GET /api/agents/{owner}/spawned` | `?limit=&cursor=`; for `operator`: `?project=` | `200` the spawns of the owner, running and finished, newest first, paged (§2.4). |
+| `GET /api/spawns/{id}` | | `200` one spawn, also after the finish. |
+| `POST /api/agents/{id}/done` | `{"result"?}` | `202` the spawn. The close follows after 3 s. |
+| `POST /api/agents/{id}/cancel` | | `200` the spawn, closed with the outcome `cancelled`. |
+
+`{owner}` is an agent (ULID, `project/name`, or a name), or `operator`.
+For `operator`, the body needs `project`; only the operator spawns as
+`operator`.
+
+**Spawn.** The owner itself, a project_admin of its project, a sysadmin,
+or the operator may spawn for an owner. The checks, in order:
+
+- The owner has a `spawn` block: else `403 forbidden` ("has no spawn
+  rights"). The operator spawns for any agent with no block.
+- The task is not empty and has at most 64 KiB; `name`, when given, is a
+  valid agent name: else `422 invalid`.
+- The template exists in the project or among the global templates: else
+  `404 not_found`. It is in `templates`: else `403 forbidden`, with the
+  allowed list. The operator is not bound to the list or the counts.
+- The running ephemeral agents of the owner are fewer than
+  `max_concurrent`, and its spawns of the last 24 hours fewer than
+  `max_per_day`: else `409 conflict`, with the name of the limit.
+- The roles and the policy of the template need the rights of a create by
+  the caller (§6.1); a disabled subscription is `422 invalid` (§16.2).
+
+The name is `<owner>-<template>-<n>`, with the lowest `n` that no agent
+and no spawn of the project has, unless the body gives `name`. The agent
+starts at once (a wake, §6.2); the stream limit of its subscription
+applies as for any agent. A start that fails closes it with the outcome
+`failed`, and the reason as the result.
+
+With `"wait": true`, and only when the owner itself spawns, the owner gets
+an open wait of the kind `agent` with the spec `{"spawn", "name", "until":
+"finished"}` and the summary `spawned <name> finishes`. Its timeout is
+`timeout` (a duration or an RFC 3339 time, as in §6.7), else the lifetime
+and one minute. The close resolves it with `{"outcome", "result",
+"session_id", "duration_secs", "name", "spawn"}`, and the wake mail of the
+wait (§6.7) carries the result. Then no other mail goes to the owner.
+
+**The spawn object.**
+
+```json
+{"id":"01M6...","owner":"01M5...","owner_name":"lead","project":"demo","name":"lead-worker-1",
+ "template":"global:worker","harness":"claude","task":"Find the bug in foo.rs\nand fix it",
+ "summary":"Find the bug in foo.rs","spawned_by":"agent:01M5...",
+ "spawned_at":"2026-11-02T10:00:00.000Z","deadline_at":"2026-11-02T12:00:00.000Z",
+ "wait_id":"01M6...","status":"finished","finished_at":"2026-11-02T10:04:12.000Z",
+ "outcome":"done","result":"Fixed in foo.rs:42; branch fix/foo","session_id":"01M6...",
+ "duration_secs":252}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | The ULID of the ephemeral agent. It stays after the finish. |
+| `template` | The template as the spawn named it: a project template by name, a global one as `global:<name>`. |
+| `summary` | The first line of the task, at most 120 characters. |
+| `status` | The live status of the agent, or `finished`. |
+| `outcome` | `done`, `failed`, `timeout`, `owner_gone`, or `cancelled`. Absent while it runs. |
+| `result` | The result, at most 16 KiB (the daemon redacts secrets). Absent when none. |
+| `session_id` | The current session while it runs, the last session after the finish. `GET /api/sessions/{id}` (§6.6) opens it while the session archive keeps its file. |
+| `duration_secs` | From the spawn to the finish, or to now. |
+
+**Finish.** Only these end an ephemeral agent:
+
+| Outcome | Cause | Result | Mail to the owner |
+|---|---|---|---|
+| `done` | The agent runs `POST /api/agents/{id}/done` (`terrarium agent done`). Only the agent itself: else `403`. A second call is `409`. | The `result` of the call, else its last assistant message (from the transcript). | yes |
+| `cancelled` | `POST /api/agents/{id}/cancel`, or `DELETE /api/agents/{id}`: the owner, a project_admin of the project, a sysadmin, or the operator. | The one of `done`, if any. | yes |
+| `timeout` | The lifetime ended (the lifecycle timer, every 15 s). | Its last assistant message. | yes |
+| `failed` | The start failed. | The reason. | yes |
+| `owner_gone` | The owner was removed (below). | Its last assistant message. | no |
+
+An idle ephemeral agent that did not run `done` stays idle: it has no idle
+stop, and only its lifetime ends it. A pause of an ephemeral agent is
+`409 conflict`: cancel it instead. A pause or a stop of the owner does
+not touch its ephemeral agents.
+
+The close, in order: the daemon writes the outcome, the result, and the
+session into the spawn; resolves the wait of the owner, else mails the
+owner from `system` with the subject `Spawned <name> finished: <outcome>`
+and the task, the result, the duration, and `Session: /sessions/<id>`;
+writes the event `agent.finished` and the audit row `agent.spawn_finish`;
+stops the agent; and removes it as `DELETE /api/agents/{id}` does (the
+`agent.delete` audit row and the `agent_removed` event, the name in the
+tombstones, the session files in the archive, the workspace in the trash).
+The spawn row stays as the history.
+
+**Owner removal.** The removal of an agent (`DELETE /api/agents/{id}`, a
+reload without its file, a fleet prune) closes each running ephemeral
+agent that it owns with the outcome `owner_gone`, with no mail, and
+deletes the spawn rows that it owns. A closed ephemeral agent is a removed
+owner too, so the rule goes down each level. Their sessions stay in the
+archive for the retention of §6.6, and the session links of the logs open
+them. The lifecycle timer closes the rest that a removal leaves.
+
+**Events.** On the owner (`agent_id` is the owner; for `operator`, the
+ephemeral agent), with `session` set to the session of the ephemeral
+agent:
+
+| Kind | `data` |
+|---|---|
+| `agent.spawned` | `{spawn_id, name, template, owner_id, owner_name, session_id, task, deadline_at}`. The summary is `spawned <name> (<template>)`. |
+| `agent.finished` | `{spawn_id, name, template, owner_id, owner_name, outcome, session_id, duration_secs}`. The summary is `<name> finished: <outcome>`. |
+
+The audit rows: `agent.spawn` (`{owner, owner_name, name, template,
+task_bytes, deadline_at}`) and `agent.spawn_finish` (`{owner, name,
+outcome}`).
 
 ## 7. Mail
 

@@ -28,6 +28,7 @@ mod secrets_generate;
 pub mod session;
 mod session_links;
 mod skills;
+mod spawns;
 mod streams;
 mod subscriptions;
 pub mod system;
@@ -253,6 +254,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(secrets_generate::routes())
         .merge(secret_grants::routes())
         .merge(agents::routes())
+        .merge(spawns::routes())
         .merge(attachments::routes())
         .merge(transcripts::routes())
         .merge(session_links::routes())

@@ -119,12 +119,19 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
   // The agents the daemon removed in this session. Their later events do not
   // ask for a refresh, and a list fetched before the removal does not bring them back.
   const removed = new Set<string>();
+  // The agents whose events asked for a refresh that did not bring them:
+  // ephemeral agents (docs/api.md §6.10), which the list leaves out. Their
+  // later events do not ask again.
+  const asked = new Set<string>();
+  const unlisted = new Set<string>();
 
   const refresh = async () => {
     setState("loading", true);
     try {
       const list = await api.agents.list();
-      const final = mergeFresh(list, state.agents, events?.recent?.() ?? [], removed);
+      const final = mergeFresh(list, state.agents, events?.recent?.() ?? [], removed).filter((a) => !a.ephemeral);
+      for (const id of asked) if (!final.some((a) => a.id === id)) unlisted.add(id);
+      asked.clear();
       setState("agents", reconcile(final, { key: "id" }));
       setState("error", null);
     } catch (e) {
@@ -146,7 +153,11 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
     const next = applyAgentEvent(state.agents, e);
     const known = next !== state.agents;
     if (known) setState("agents", reconcile(next, { key: "id" }));
-    else if (id && !removed.has(id) && !state.loading) refreshSoon(); // an agent this list does not have yet
+    else if (id && !removed.has(id) && !unlisted.has(id) && !state.loading) {
+      // An agent this list does not have yet.
+      asked.add(id);
+      refreshSoon();
+    }
     // No event carries the queued count: a wake, a pause, an unpause, or a stop changes it.
     if (known && (LIFECYCLE.has(e.kind) || (e.kind === "status" && e.data?.status === "stopped"))) refreshSoon();
   });
@@ -161,6 +172,8 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
     /** Put a fresh copy from the daemon into the list. */
     upsert(agent: Agent) {
       const i = state.agents.findIndex((a) => a.id === agent.id);
+      // The list has no ephemeral agents (docs/api.md §6.10): their page reads them itself.
+      if (i < 0 && agent.ephemeral) return;
       if (i < 0) setState("agents", (list) => [...list, agent]);
       else setState("agents", i, (old) => ({ ...agent, last_event: old.last_event, self_report: old.self_report, turn_started_at: old.turn_started_at }));
     },

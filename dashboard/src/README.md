@@ -499,6 +499,50 @@ The model is pure and in `lib/lifecycle.ts`.
   idle agent `working` (`compacting`) for 1.5 s, then writes
   `agent.compacted`. Every harness can compact, as in the daemon.
 
+### Ephemeral agents
+
+An agent with spawn rights spawns ephemeral agents: one task each, then
+`terrarium agent done`, and the daemon closes them (docs/api.md §6.10,
+PLAN §18). The pure model is `features/agents/spawn.ts`; the views are in
+`features/agents/Spawned.tsx`.
+
+- **Hidden from the lists.** `api.agents.list()` asks without
+  `?include=ephemeral`, so the agents store, the sidebar tree, the project
+  health dots, the counts of the project cards, and the mail address book
+  have no ephemeral agents. The store does not upsert one, and the events
+  of an agent that a refresh did not bring ask for no more refreshes.
+- **Spawned tab.** The agent page has a **Spawned** tab, with the count
+  of running ones in its label (`spawned_running`). The table
+  (`GET /api/agents/{id}/spawned`) shows the running rows first: a status
+  chip (the live status, or the outcome), the name (a link while it
+  runs), the template, the first line of the task, the first lines of
+  the result, the duration, a **session** link (`/sessions/<id>`, also
+  after the finish while the archive keeps the file), and **Cancel** for
+  a running one. A row opens a drawer with the whole task and result as
+  plain text. `agent.spawned`, `agent.finished`, and the status events of
+  the children read the list again.
+- **Timeline.** The Conversation tab shows only the transcript, so the
+  lines `spawned <name> (<template>)` and `<name> finished: <outcome>`
+  are the `agent.spawned` and `agent.finished` events in the **Events**
+  tab of the owner, each with the session link of the ephemeral agent.
+- **Ephemeral page.** The page of an ephemeral agent says "Ephemeral agent
+  of <owner> · template · task · lifetime left", with a link to the
+  owner's Spawned tab. It has **Cancel** (`POST .../cancel`) in place of
+  Pause and Delete.
+- **Spawn rights.** The **Edit** form has a **Spawn rights** group
+  (`SpawnRightsFields`): on or off, the templates (`project:*`,
+  `global:*`, and each template), max concurrent, max per day, max
+  lifetime, and "its ephemeral agents may spawn too". The form checks the
+  block as the daemon does (`spawnProblem`). A policy patch always carries
+  the spawn block, so a change of the targets does not drop it. The agent
+  page shows the rights (`spawnRightsText`).
+- **Mock.** `terrarium/lead` may spawn `global:worker` and `project:*`.
+  Two of its ephemeral agents run (`lead-worker-3` working,
+  `lead-reviewer-2` idle), and three finished (`done` with a result,
+  `timeout`, `cancelled`), with tombstones and sessions that open. A spawn
+  types the task as the first turn; a cancel mails the owner; the removal
+  of an owner removes its ephemeral agents and their rows.
+
 ## Self-hosted models, enable and disable, stop all
 
 Settings, Subscriptions (`features/subscriptions/`). The pure logic is in

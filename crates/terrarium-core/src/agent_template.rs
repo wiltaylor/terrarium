@@ -135,6 +135,11 @@ pub fn spec_of(def: &AgentDef) -> Spec {
     };
     m.remove("name");
     m.remove("project");
+    // A template carries no spawn rights (PLAN §18, "Ephemeral agents"):
+    // they are set on each agent.
+    if let Some(Value::Object(p)) = m.get_mut("policy") {
+        p.remove("spawn");
+    }
     m
 }
 

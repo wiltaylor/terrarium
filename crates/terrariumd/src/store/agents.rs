@@ -74,6 +74,20 @@ pub struct AgentView {
     /// The result of the last compaction. Absent when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compact_ok: Option<bool>,
+    /// An ephemeral agent (PLAN §18, "Ephemeral agents"): it does one
+    /// task for its `owner`, and the finish removes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ephemeral: bool,
+    /// The owner of an ephemeral agent: an agent ULID, or `operator`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The spawn of an ephemeral agent: the owner's name, the template,
+    /// the task, and the deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn: Option<crate::store::spawns::SpawnInfo>,
+    /// The ephemeral agents of this agent that run now. Absent when 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub spawned_running: usize,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -161,6 +175,10 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             .is_some(),
         last_compact_at: r.get("last_compact_at")?,
         last_compact_ok: r.get("last_compact_ok")?,
+        owner: r.get("owner")?,
+        ephemeral: r.get::<_, Option<String>>("owner")?.is_some(),
+        spawn: None,
+        spawned_running: 0,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -193,6 +211,10 @@ fn complete(conn: &Connection, mut v: AgentView) -> ApiResult<AgentView> {
         v.waiting_on = crate::store::waits::waiting_on(conn, &id)?;
     }
     v.queued = queued_count(conn, &id)?;
+    if v.ephemeral {
+        v.spawn = crate::store::spawns::info(conn, &id)?;
+    }
+    v.spawned_running = crate::store::spawns::running_count(conn, &id)?;
     Ok(v)
 }
 
@@ -413,14 +435,32 @@ pub fn actor_for(conn: &Connection, key: &str) -> ApiResult<Option<AgentActor>> 
 
 /// Agents ordered by ID, optionally of one project.
 pub fn list(conn: &Connection, project: Option<&str>, page: &Page) -> ApiResult<Paged<AgentView>> {
+    list_with(conn, project, page, false)
+}
+
+/// [`list`], with the ephemeral agents (PLAN §18, "Ephemeral agents")
+/// when `ephemeral` is true. [`list`] leaves them out: they are not
+/// peers, not in the address book, and not in the project's counts.
+pub fn list_with(
+    conn: &Connection,
+    project: Option<&str>,
+    page: &Page,
+    ephemeral: bool,
+) -> ApiResult<Paged<AgentView>> {
     let limit = page.limit();
     let mut stmt = conn.prepare(
         "SELECT * FROM agents WHERE id > ?1 AND (?2 IS NULL OR project = ?2)
+           AND (?4 OR owner IS NULL)
          ORDER BY id LIMIT ?3",
     )?;
     let rows = stmt
         .query_map(
-            params![page.cursor().unwrap_or(""), project, (limit + 1) as i64],
+            params![
+                page.cursor().unwrap_or(""),
+                project,
+                (limit + 1) as i64,
+                ephemeral
+            ],
             base_row,
         )?
         .collect::<Result<Vec<_>, _>>()?;

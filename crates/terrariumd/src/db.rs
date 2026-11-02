@@ -1538,6 +1538,40 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX test_run_versions_version ON test_run_versions(version, run);
     "#,
+    // 51: ephemeral agents (PLAN §18, "Ephemeral agents",
+    // `crate::store::spawns`). `agents.owner` is the owner of an
+    // ephemeral agent: the ULID of the agent that spawned it, or
+    // `operator`; NULL for every other agent. `spawns` keeps one row for
+    // each spawn, also after the finish removes the agent: the task, the
+    // deadline, the outcome (`done`, `failed`, `timeout`, `owner_gone`,
+    // `cancelled`), the result, and the last session (for the session
+    // link). `wait_id` is the wait of the owner on the finish, if any.
+    // Self-contained: when another branch takes number 51, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE agents ADD COLUMN owner TEXT;
+    CREATE INDEX agents_owner ON agents(owner);
+    CREATE TABLE spawns (
+        id          TEXT PRIMARY KEY,
+        owner       TEXT NOT NULL,
+        owner_name  TEXT NOT NULL,
+        project     TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        template    TEXT NOT NULL,
+        harness     TEXT NOT NULL,
+        task        TEXT NOT NULL,
+        spawned_by  TEXT NOT NULL,
+        spawned_at  TEXT NOT NULL,
+        deadline_at TEXT NOT NULL,
+        wait_id     TEXT,
+        finished_at TEXT,
+        outcome     TEXT,
+        result      TEXT,
+        session_id  TEXT
+    );
+    CREATE INDEX spawns_owner ON spawns(owner, id);
+    CREATE INDEX spawns_open ON spawns(finished_at);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -2216,6 +2250,7 @@ mod tests {
             "test_cases",
             "test_run_cards",
             "test_run_versions",
+            "spawns",
         ] {
             let n: i64 = conn
                 .query_row(
@@ -3219,5 +3254,69 @@ mod tests {
             [],
         );
         assert!(bad.is_err());
+    }
+
+    /// Migration 51 (ephemeral agents) as the dev stack applied it on
+    /// 2026-11-01: `agents.owner` and the `spawns` table with these
+    /// columns. A database at 51 migrates on to the end, and a spawn row
+    /// written at 51 reads back.
+    #[test]
+    fn migration_51_spawns_as_applied() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("CREATE TABLE spawns"))
+            .unwrap()
+            + 1;
+        assert_eq!(n, 51);
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        let cols = |table: &str| -> Vec<String> {
+            let mut st = conn
+                .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            cols("spawns"),
+            [
+                "id",
+                "owner",
+                "owner_name",
+                "project",
+                "name",
+                "template",
+                "harness",
+                "task",
+                "spawned_by",
+                "spawned_at",
+                "deadline_at",
+                "wait_id",
+                "finished_at",
+                "outcome",
+                "result",
+                "session_id"
+            ]
+        );
+        assert!(cols("agents").contains(&"owner".to_owned()));
+        conn.execute(
+            "INSERT INTO spawns (id, owner, owner_name, project, name, template, harness, task,
+                                 spawned_by, spawned_at, deadline_at)
+             VALUES ('E1', 'O1', 'lead', 'p', 'lead-w-1', 'w', 'claude', 't', 'operator',
+                     '2026-11-01T00:00:00.000Z', '2026-11-01T02:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - n);
+        let name: String = conn
+            .query_row("SELECT name FROM spawns WHERE id = 'E1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "lead-w-1");
     }
 }

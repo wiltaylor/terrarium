@@ -41,6 +41,7 @@ pub mod secrets;
 pub mod session_archive;
 pub mod settings;
 pub mod skills;
+pub mod spawn;
 pub mod ssh_agent;
 pub mod store;
 pub mod stream_limit;

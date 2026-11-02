@@ -15,8 +15,12 @@ describe("mock log session links", () => {
       expect(e.agent_id).toBeTruthy();
       expect(e.session_label).toMatch(/ · \d{4}-\d\d-\d\d \d\d:\d\d UTC$/);
     }
-    const s = await api.sessions.get(linked[0]!.session_id!);
-    expect(s.agent_id).toBe(linked[0]!.agent_id);
+    // `agent.spawned` and `agent.finished` are on the owner and link the session of the ephemeral agent (docs/api.md §6.10).
+    const own = linked.filter((e) => e.kind !== "agent.spawned" && e.kind !== "agent.finished");
+    const s = await api.sessions.get(own[0]!.session_id!);
+    expect(s.agent_id).toBe(own[0]!.agent_id);
+    const spawned = linked.find((e) => e.kind === "agent.spawned")!;
+    expect((await api.sessions.get(spawned.session_id!)).agent_id).toBe(spawned.data?.spawn_id);
     // An event with no agent has no session.
     expect(page.items.filter((e) => !e.agent_id).every((e) => !e.session_id)).toBe(true);
   });

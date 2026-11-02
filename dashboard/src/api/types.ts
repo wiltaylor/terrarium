@@ -355,6 +355,77 @@ export interface AgentPolicy {
   mail_to: string[];
   /** `project/agent` entries outside the project. The daemon leaves it out when empty. */
   cross_project?: string[];
+  /** The right to spawn ephemeral agents (docs/api.md §6.10). Absent: no spawn rights. */
+  spawn?: SpawnPolicy;
+}
+
+/** The policy block `spawn` (docs/api.md §6.10): what an agent may spawn. */
+export interface SpawnPolicy {
+  /** Template names, `global:<name>`, `project:*`, `global:*`, or `*`. */
+  templates: string[];
+  /** The ephemeral agents of the owner that run at one time. Default 2. */
+  max_concurrent?: number;
+  /** The spawns in 24 hours. Absent: no limit. */
+  max_per_day?: number;
+  /** A duration such as `30m` or `2h`. Absent: 2h. At most 24h. */
+  max_lifetime?: string;
+  /** The ephemeral agents may spawn too, one level (sysadmin or the operator). */
+  may_spawn_children?: boolean;
+}
+
+/** The outcome of a finished ephemeral agent. */
+export type SpawnOutcome = "done" | "failed" | "timeout" | "owner_gone" | "cancelled";
+
+/** The spawn facts on an ephemeral agent (`Agent.spawn`). */
+export interface SpawnInfo {
+  owner_name: string;
+  template: string;
+  task: string;
+  spawned_at: string;
+  /** The end of the lifetime. */
+  deadline_at: string;
+}
+
+/** One ephemeral agent of an owner (`GET /api/agents/{id}/spawned`, `GET /api/spawns/{id}`). */
+export interface Spawn {
+  /** The ULID of the ephemeral agent. */
+  id: string;
+  /** An agent ULID, or `operator`. */
+  owner: string;
+  owner_name: string;
+  project: string;
+  name: string;
+  template: string;
+  harness: Harness;
+  task: string;
+  /** The first line of the task. */
+  summary: string;
+  spawned_by: string;
+  spawned_at: string;
+  deadline_at: string;
+  wait_id?: string;
+  /** The live status of the agent, or `finished`. */
+  status: AgentStatus | "finished";
+  finished_at?: string;
+  outcome?: SpawnOutcome;
+  result?: string;
+  /** The current session while it runs; the last one after the finish. */
+  session_id?: string;
+  duration_secs: number;
+}
+
+/** `POST /api/agents/{owner}/spawn`. */
+export interface SpawnRequest {
+  template: string;
+  task: string;
+  name?: string;
+  /** The project of an ephemeral agent of the operator (`owner` = `operator`). */
+  project?: string;
+}
+
+/** The answer of a spawn: the spawn, and the agent while it exists. */
+export interface Spawned extends Spawn {
+  agent?: Agent | null;
 }
 
 /** The agent definition, the TOML file as JSON (docs/api.md §6.1). */
@@ -525,6 +596,14 @@ export interface Agent {
   status_reason?: string;
   /** The turns, mail, and card or nudge pointers that wait for the agent. Absent when 0. */
   queued?: number;
+  /** An ephemeral agent (docs/api.md §6.10): it does one task for its owner. Absent when false. */
+  ephemeral?: boolean;
+  /** The owner of an ephemeral agent: an agent ULID, or `operator`. */
+  owner?: string;
+  /** The spawn of an ephemeral agent. */
+  spawn?: SpawnInfo;
+  /** The ephemeral agents of this agent that run now. Absent when 0. */
+  spawned_running?: number;
 }
 
 /** How a subscription swap took effect (`POST /api/agents/{id}/subscription`). */
@@ -939,6 +1018,10 @@ export const EVENT_KINDS = [
   "agent.woken",
   // The end of a compaction that the daemon ran: `{cause, ok, duration_ms, reason?}`.
   "agent.compacted",
+  // Ephemeral agents (docs/api.md §6.10), on the owner: `{spawn_id, name, template, owner_id, owner_name, session_id, task, deadline_at}`
+  // and `{spawn_id, name, template, owner_id, owner_name, outcome, session_id, duration_secs}`.
+  "agent.spawned",
+  "agent.finished",
   // docs/api.md §9, §17.7.
   "lease",
   // Waits: `{wait_id, change, kind, summary, state}`.
