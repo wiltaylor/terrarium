@@ -78,6 +78,8 @@ mime_guess = "2.0.5"
 # Artifacts, wiki diffs
 sha2 = "0.11"
 hmac = "0.13"
+# The host of a webhook URL (`terrariumd::webhooks::net`); reqwest's own URL type.
+url = "2.5"
 base64 = "0.22"
 tar = { version = "0.4.46", default-features = false }
 # Target displays (PLAN §19b): crop and scale screenshots in the host agent.
