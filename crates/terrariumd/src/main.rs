@@ -194,7 +194,8 @@ async fn main() -> anyhow::Result<()> {
     );
     let host_task = match host_listen {
         Some(listen) => {
-            let (task, _) = listen.serve(daemon.state.clone()).await?;
+            let (task, addr) = listen.serve(daemon.state.clone()).await?;
+            daemon.state.webhooks.add_own_port(addr.port());
             Some(task)
         }
         None => None,

@@ -262,7 +262,7 @@ describe("createScheduleDialog against the mock", () => {
 describe("the card action", () => {
   const base = emptyScheduleForm("terrarium", { name: "review", actionType: "card" });
   it("is a choice of a time schedule too", () => {
-    expect(actionTypesFor("cron").map((a) => a.id)).toEqual(["mail", "turn", "exec", "agent", "probe", "card"]);
+    expect(actionTypesFor("cron").map((a) => a.id)).toEqual(["mail", "turn", "exec", "agent", "probe", "card", "webhook"]);
   });
 
   it("maps op and key; title, body, and column only when given", () => {
@@ -290,13 +290,13 @@ describe("the card action", () => {
 describe("a trigger in the schedule form", () => {
   const trig = emptyScheduleForm("terrarium", { name: "ci-failed", specKind: "on", kinds: "ci.run.failed", mailTo: "terrarium/lead", mailSubject: "CI failed: {{event.data.repo}}", mailBody: "Fix it." });
 
-  it("offers only mail, exec, and card", () => {
-    expect(actionTypesFor("on").map((a) => a.id)).toEqual(["mail", "exec", "card"]);
+  it("offers only mail, exec, card, and webhook", () => {
+    expect(actionTypesFor("on").map((a) => a.id)).toEqual(["mail", "exec", "card", "webhook"]);
   });
 
   it("refuses turn, agent, and probe on the action field, before a request", () => {
     for (const actionType of ["turn", "agent", "probe"] as const)
-      expect(scheduleBody({ ...trig, actionType, agent: "terrarium/lead", text: "x", subscription: "s" })).toEqual({ error: "A trigger runs only mail, exec, or card. To notify an agent, mail it.", field: "actionType" });
+      expect(scheduleBody({ ...trig, actionType, agent: "terrarium/lead", text: "x", subscription: "s" })).toEqual({ error: "A trigger runs only mail, exec, card, or webhook. To notify an agent, mail it.", field: "actionType" });
   });
 
   it("sends the spec on with the action", () => {

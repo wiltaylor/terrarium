@@ -141,6 +141,17 @@ terrarium schedule new disk-alert --on monitor.status \
   --mail lead -s "disk-root is critical" --body "{{event.summary}}"
 ```
 
+A webhook trigger pages a person or a tool (Slack, Discord, ntfy, or a
+JSON receiver). Use `monitor.status`, not `monitor.result`: a result
+comes at each run and floods the receiver.
+
+```sh
+terrarium schedule new disk-page --on monitor.status --match data.to=crit \
+  --webhook https://ntfy.example/alerts --format ntfy
+terrarium schedule test disk-page        # a sample event, now
+terrarium schedule deliveries disk-page  # the log: status, HTTP status, answer
+```
+
 ## Change and remove
 
 ```sh

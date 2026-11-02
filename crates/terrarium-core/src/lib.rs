@@ -38,6 +38,7 @@ pub mod template;
 pub mod template_file;
 pub mod transcript;
 pub mod turn_tag;
+pub mod webhook;
 pub mod zai;
 
 pub use adapter::{Adapter, Answer, ScreenHint};

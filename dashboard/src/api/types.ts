@@ -1057,6 +1057,8 @@ export const EVENT_KINDS = [
   // Monitors (docs/api.md §30): each result, and a change of status `{project, monitor, monitor_id, from, to, value?, unit?, message?}`.
   "monitor.result",
   "monitor.status",
+  // A webhook attempt ended (docs/api.md §19.5): `{trigger, name, delivery, status, http_status, attempt, test, event_seq}`.
+  "webhook.delivery",
   "dashboard.updated",
   "artifact.created",
   "artifact.linked",
@@ -2844,11 +2846,82 @@ export type ScheduleAction =
    * on the open card with that label. `close`: move it to `column`
    * (default `done`). A global schedule cannot have it.
    */
-  | { type: "card"; op: CardOp; key: string; title?: string; body?: string; column?: string };
+  | { type: "card"; op: CardOp; key: string; title?: string; body?: string; column?: string }
+  | WebhookAction;
 export type ScheduleActionType = ScheduleAction["type"];
 export type CardOp = "open" | "close";
 /** The actions a trigger may run. `turn`, `agent`, and `probe` on a trigger are `422`. */
-export type TriggerActionType = Extract<ScheduleActionType, "mail" | "exec" | "card">;
+export type TriggerActionType = Extract<ScheduleActionType, "mail" | "exec" | "card" | "webhook">;
+
+/** The body of a webhook (docs/api.md §19.5). */
+export type WebhookFormat = "json" | "slack" | "discord" | "ntfy" | "template";
+export type WebhookMethod = "POST" | "PUT";
+
+/** One request header: a fixed `value`, or the main value of the secret `secret`. */
+export interface WebhookHeader {
+  name: string;
+  value?: string;
+  secret?: string;
+}
+
+/**
+ * Send an HTTP request about each event (docs/api.md §19.5). `url` (http or
+ * https, no user or password) or `url_secret` (a secret whose value is the
+ * URL). `template`: the body of `format: "template"`, with `{{event.kind}}`,
+ * `{{event.data.status}}`, `{{trigger.name}}`, and `{{path | json}}`.
+ * `timeout_secs`: default 10, at most 30.
+ */
+export interface WebhookAction {
+  type: "webhook";
+  url?: string;
+  url_secret?: string;
+  method?: WebhookMethod;
+  format?: WebhookFormat;
+  template?: string;
+  content_type?: string;
+  headers?: WebhookHeader[];
+  signing?: { secret: string; header?: string; algo?: "sha256" };
+  timeout_secs?: number;
+}
+
+/** `pending` waits for an attempt (or a retry at `next_attempt_at`); `dropped` is a rate-limit note. */
+export type DeliveryStatus = "pending" | "ok" | "failed" | "giving_up" | "dropped";
+
+/** One webhook delivery (`GET /api/schedules/{id}/deliveries`), newest first. */
+export interface WebhookDelivery {
+  id: string;
+  schedule: string;
+  event_seq: number | null;
+  event_kind: string;
+  /** A test send. */
+  test: boolean;
+  redelivery_of?: string;
+  /** For the log: no credentials, no query. */
+  url: string;
+  method: string;
+  content_type: string;
+  attempt: number;
+  status: DeliveryStatus;
+  http_status: number | null;
+  duration_ms: number | null;
+  /** The start of the answer (redacted, at most 2 KiB). */
+  response: string | null;
+  error: string | null;
+  /** `dropped`: the events that the rate limit dropped in its minute. */
+  dropped?: number;
+  next_attempt_at: string | null;
+  created_at: string;
+  updated_at: string;
+  /** The start of the request body (at most 4 KiB). */
+  request: string;
+  request_bytes: number;
+}
+
+/** `POST /api/schedules/{id}/test`: the delivery and the request, with each secret value as `[secret:<name>]`. */
+export interface WebhookTestResult {
+  delivery: WebhookDelivery;
+  request: { method: string; url: string; headers: [string, string][]; body: string };
+}
 
 export type CatchUp = "skip" | "once";
 
@@ -2887,6 +2960,8 @@ export interface Schedule {
   consecutive_skips?: number;
   /** Why the daemon disabled the schedule, when it did. */
   disabled_reason?: string;
+  /** A webhook action: the failed attempts in a row (the 20th disables it). */
+  webhook_failures?: number;
   created_at: string;
   updated_at: string;
 }

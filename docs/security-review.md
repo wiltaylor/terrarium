@@ -1327,3 +1327,71 @@ read sandbox. Two small findings:
   Each request walks all of `.git` once (at most 2 s and 1 000 000
   entries). The tree list opens each agent tree on its own, so each agent
   tree has its own 20 s.
+
+## 16. Webhook actions and SSRF (2026-11-03)
+
+The `webhook` action of a trigger (docs/api.md §19.5, `crate::webhooks`)
+makes the daemon send an HTTP request to a URL that a person typed. This
+is a server-side request (SSRF) risk: the daemon can reach places that
+the person cannot, for example the LAN, the daemon's own ports, or the
+cloud metadata address.
+
+### Who sets the URL
+
+Only a project_admin of the project, a sysadmin, or the operator writes a
+trigger (`policy::schedule_scope`). A member cannot. An agent with
+project_admin can, so a prompt-injected lead can point a webhook at an
+address of its choice. The default stance accepts that on a trusted LAN
+and gives a switch for a public deployment.
+
+### Controls
+
+- **Schemes and credentials.** `http` and `https` only. A URL with a user
+  or a password is `422` (a credential goes in a header from a secret).
+- **No DNS rebinding.** Each attempt resolves the host one time, checks
+  the addresses, and connects to the address that it checked
+  (`reqwest::ClientBuilder::resolve`). A second DNS answer cannot move the
+  request. The client uses no proxy from the environment, so a proxy
+  cannot resolve the name again.
+- **No redirects.** A `3xx` is a failed attempt, with no retry. A
+  redirect to `127.0.0.1` cannot pass a check of the first URL.
+- **`TERRARIUM_WEBHOOK_PRIVATE`.** `allow` (the default) reaches any
+  address: self-hosted receivers (ntfy, Gotify, Home Assistant, n8n) on
+  the LAN are common. `deny` refuses loopback, link-local (with
+  `169.254.169.254`), private (RFC 1918 and `100.64.0.0/10`),
+  unique-local (`fc00::/7`), unspecified, multicast, the IPv4-mapped,
+  NAT64, and 6to4 forms of these, and the ports of the daemon's own
+  listeners. **Set `deny` on a public deployment**, or wherever an
+  untrusted person can be a project_admin.
+- **Limits.** A time limit of 10 s (30 s at most) for the whole request;
+  64 KiB of the answer at most, 2 KiB kept; a body of 256 KiB at most;
+  8 requests at once, 2 to one host; 60 deliveries of a trigger in a
+  minute.
+- **Secrets.** A header value, a signing key, or a URL from the secret
+  manager needs a right of the trigger's `run_as` at the write and at
+  each attempt (a project secret for a project_admin, or a grant of a
+  global one). The delivery row keeps only the rendered body, which comes
+  from the event log (already redacted). The log URL drops the query. The
+  answer and the error have each secret value replaced, and then the
+  redactor runs. A test send shows `[secret:<name>]` in place of a value.
+- **The API token.** No request may carry `TERRARIUM_TOKEN` in its URL,
+  a header, or the body: the attempt fails with no send.
+- **Loops.** Each attempt emits `webhook.delivery` with the actor
+  `schedule:<id>` and the cause of the event, so the trigger loop guard
+  and the chain depth (4) apply. The 20th failed attempt in a row
+  disables the trigger and mails the operator one time.
+
+### Residuals
+
+- **`allow` is the default.** A project_admin can make the daemon send a
+  `POST` to a LAN service or to a port on the daemon's host. The request
+  carries no daemon credential, and the answer shows only in the delivery
+  log of that trigger (2 KiB), which the project's members can read. A
+  public deployment sets `deny`.
+- **`deny` checks the port of the daemon's own listeners on any address**,
+  because the daemon does not know each address of its host. A public
+  receiver on the same port number as a listener of the daemon is
+  refused too; use another port.
+- **A blind request.** Even with `deny`, a webhook reaches any public
+  address. That is the purpose of the feature.
+

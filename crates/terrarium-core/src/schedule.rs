@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::template::{EventView, value_text};
+pub use crate::webhook::WebhookAction;
 
 /// When a schedule runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +285,9 @@ pub enum ScheduleAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         column: Option<String>,
     },
+    /// Send an HTTP request about the event (docs/api.md §19.5). The
+    /// daemon queues a delivery and sends it with retries.
+    Webhook(Box<WebhookAction>),
 }
 
 /// The `op` of a `card` action.
@@ -317,15 +321,17 @@ impl ScheduleAction {
             Self::Agent { .. } => "agent",
             Self::Probe { .. } => "probe",
             Self::Card { .. } => "card",
+            Self::Webhook(_) => "webhook",
         }
     }
 
-    /// May a trigger (spec `on`) run this action? Only `mail`, `exec`, and
-    /// `card`: a trigger notifies an agent by mail, never with a turn.
+    /// May a trigger (spec `on`) run this action? Only `mail`, `exec`,
+    /// `card`, and `webhook`: a trigger notifies an agent by mail, never
+    /// with a turn.
     pub fn allowed_on_trigger(&self) -> bool {
         matches!(
             self,
-            Self::Mail { .. } | Self::Exec { .. } | Self::Card { .. }
+            Self::Mail { .. } | Self::Exec { .. } | Self::Card { .. } | Self::Webhook(_)
         )
     }
 
@@ -619,5 +625,34 @@ action = { type = "card", op = "open", key = "{{event.data.repo}}", title = "CI 
             serde_json::from_value(serde_json::json!({"type": "turn", "agent": "w", "text": "x"}))
                 .unwrap();
         assert!(!turn.allowed_on_trigger());
+        // A webhook, in JSON and in TOML.
+        let w: ScheduleAction = serde_json::from_value(serde_json::json!(
+            {"type": "webhook", "url": "https://hooks.example/x", "format": "slack"}
+        ))
+        .unwrap();
+        assert_eq!(w.kind(), "webhook");
+        assert!(w.allowed_on_trigger());
+        let ScheduleAction::Webhook(a) = &w else {
+            panic!("not webhook")
+        };
+        assert_eq!(a.format, crate::webhook::WebhookFormat::Slack);
+        assert_eq!(serde_json::to_value(&w).unwrap()["type"], "webhook");
+        assert!(
+            serde_json::from_value::<ScheduleAction>(
+                serde_json::json!({"type": "webhook", "url": "https://x", "bogus": 1})
+            )
+            .is_err()
+        );
+        let d: ScheduleDef = toml::from_str(
+            r#"
+name = "page"
+spec = { kind = "on", kinds = ["monitor.status"] }
+action = { type = "webhook", url = "https://ntfy.example/alerts", format = "ntfy" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(d.action.kind(), "webhook");
+        let back: ScheduleDef = toml::from_str(&toml::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back, d);
     }
 }

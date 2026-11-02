@@ -3585,6 +3585,7 @@ Kinds:
 | `monitor.result` | `{project, monitor, monitor_id, status, value, unit, message, error, at, duration_ms, result_id}` for each result of a monitor (§30.3). |
 | `monitor.status` | `{project, monitor, monitor_id, from, to, value, unit, message, error}` when the status of a monitor changes; `from` is `null` for the first result (§30.3). |
 | `dashboard.updated` | `{project, blocks}` after a save of the dashboard layout (§30.4). |
+| `webhook.delivery` | `{trigger, name, delivery, status, http_status, attempt, test, event_seq}` when an attempt of a webhook delivery ends (§19.5). `status` is `ok`, `pending` (a retry waits), `failed`, or `giving_up`. The actor is `schedule:<id>`; a project trigger's event has its project. |
 | `ci.run.*`, `ci.job.failed`, `git.push`, `pr.*`, `ext.*` | A webhook of an event source (§20.4), or `POST /api/events` (§20.5). The actor is `source:<project>/<name>`, or the caller of `POST /api/events`. |
 
 A `memory.*`, `wiki.*`, `artifact.*`, or `version.*` event that an agent
@@ -5989,7 +5990,8 @@ files in the config dir, as `<path>: <message>`.
 ## 19. Schedules
 
 A schedule runs one action on a time spec: mail, a turn, an exec on a
-target, an agent verb, a quota probe, or a card on the board. A trigger is
+target, an agent verb, a quota probe, a card on the board, or a webhook (an
+HTTP request, §19.5). A trigger is
 a schedule whose spec is `on`: an event of the log (§9, §20) that matches
 starts its run (§19.4). The daemon runs a schedule as the actor that made
 it (`run_as`). Before each run, the daemon checks the rights of that
@@ -6057,11 +6059,12 @@ The actions:
 | `{"type": "exec", "target", "cmd": ["make", "test"], "cwd"?, "timeout_secs"?}` | Run a command on a target through the executor (§17.4), as `run_as`, with the same policy, leases, and `target.exec` audit row as any exec. `timeout_secs` is 300 by default, 3600 at most. |
 | `{"type": "agent", "agent", "verb": "start\|stop\|restart"}` | The agent verb of §6.2, as `run_as`. |
 | `{"type": "probe", "subscription"}` | Run the quota probe of the subscription (§16.3). |
+| `{"type": "webhook", "url" \| "url_secret", "method"?, "format"?, "template"?, "content_type"?, "headers"?, "signing"?, "timeout_secs"?}` | Send an HTTP request about the event (or about the run of a time schedule). The run queues a delivery, and the delivery worker sends it with retries. See §19.5. |
 | `{"type": "card", "op": "open\|close", "key", "title"?, "body"?, "column"?}` | A card on the board of the schedule's project (§8), as `run_as`. `open`: make a card with the label `trigger:<key>` in `column` (default `backlog`), or, when a card with that label is open (not in `done`, not archived), add `body` to it as a comment. `close`: move the open card with that label to `column` (default `done`), with `body` as the comment. No open card to close is `ok`. A global schedule cannot have a card action. |
 
-A trigger runs only `mail`, `exec`, and `card`. To notify an agent, a
-trigger mails it: `turn`, `agent`, and `probe` on a trigger are `422`
-(`details.field` is `action`).
+A trigger runs only `mail`, `exec`, `card`, and `webhook`. To notify an
+agent, a trigger mails it: `turn`, `agent`, and `probe` on a trigger are
+`422` (`details.field` is `action`).
 
 A run:
 
@@ -6086,7 +6089,7 @@ A run:
 | `status` | `running`, then `ok`, `failed`, or `skipped`. |
 | `trigger` | `cron` (the timer, for each spec kind), `manual` (`POST .../run`), `catch_up`, or `event` (a trigger). |
 | `summary` | One line. A skip starts with `skipped:`. |
-| `output` | `exec`: `target`, `cmd`, `exit_code`, `end`, and the last 4000 bytes of `stdout` and `stderr`. `mail`: `message_id`, `thread_id`, `to`, `held`, `held_reason`. `turn`: `agent`, `started`, `delivery`, `status_before`. `agent`: `agent`, `verb`, `status`. `probe`: the probe outcome with `windows`. `card`: `card` (the ID, or `null`), `op` (`open`, `comment`, or `close`), and `column` for a close. |
+| `output` | `webhook`: `delivery` (the ID) and `url` (§19.5). `exec`: `target`, `cmd`, `exit_code`, `end`, and the last 4000 bytes of `stdout` and `stderr`. `mail`: `message_id`, `thread_id`, `to`, `held`, `held_reason`. `turn`: `agent`, `started`, `delivery`, `status_before`. `agent`: `agent`, `verb`, `status`. `probe`: the probe outcome with `windows`. `card`: `card` (the ID, or `null`), `op` (`open`, `comment`, or `close`), and `column` for a close. |
 | `error` | Why the run failed or was skipped. |
 | `actor` | Who triggered the run: `run_as` for a timed run, the caller for a run-now, the actor of the event for a trigger run (for example `source:terra/github`). |
 | `event_seq` | The `seq` of the event that started a trigger run. `null` for the other runs. |
@@ -6105,12 +6108,15 @@ A run:
 | `POST /api/schedules/{id}/enable` | | `200`, the schedule, with a new `next_run_at`. An enable sets `consecutive_skips` to 0. |
 | `POST /api/schedules/{id}/disable` | | `200`, the schedule. |
 | `GET /api/schedules/{id}/runs?limit=&cursor=` | | `200`, the runs, newest first, with `X-Next-Cursor` (§2.4). |
+| `GET /api/schedules/{id}/deliveries?limit=&cursor=` | | `200`, the webhook deliveries, newest first, with `X-Next-Cursor` (§19.5). The read rights of the schedule. |
+| `POST /api/schedules/{id}/deliveries/{delivery}/redeliver` | | `202`, a new `pending` delivery: a copy of `{delivery}` with `redelivery_of`, due now. The rights of a run-now. A `dropped` row is `422`. |
+| `POST /api/schedules/{id}/test` | | `200`, `{delivery, request}`: a sample event of the trigger's first kind (`schedule.tick` for a time schedule), sent now, one attempt, no retry. `request` is `{method, url, headers, body}` with each secret value as `[secret:<name>]`. The rights of a run-now; a secret that the caller or `run_as` may not use is `403`. A schedule with another action is `422`. |
 
 Errors:
 
 | Error | When |
 |---|---|
-| `422 invalid` | A field is not valid. The message starts with the field, and `details.field` names it: `name`, `spec`, `spec.expr`, `spec.tz`, `spec.every`, `spec.at`, `action`, `action.to`, `action.body`, `action.agent`, `action.text`, `action.target`, `action.cmd`, `action.cwd`, `action.timeout_secs`, `action.subscription`, `action.subject`, `action.key`, `action.title`, `action.column`, `max_concurrency`, `project`, and for a trigger `spec.kinds`, `spec.match`, `spec.dedupe.key`, `spec.dedupe.window`, `spec.escalate.key`, `spec.escalate.after`, `spec.escalate.reset_on`, `spec.escalate.to`, `spec.max_per_hour`. A cron error shows the expression: ``spec.expr: bad cron expression `*/15 * * *`: use five fields ...``. An interval under 60 s and an `at` in the past are `422`. |
+| `422 invalid` | A field is not valid. The message starts with the field, and `details.field` names it: `name`, `spec`, `spec.expr`, `spec.tz`, `spec.every`, `spec.at`, `action`, `action.to`, `action.body`, `action.agent`, `action.text`, `action.target`, `action.cmd`, `action.cwd`, `action.timeout_secs`, `action.subscription`, `action.subject`, `action.key`, `action.title`, `action.column`, for a webhook `action.url`, `action.url_secret`, `action.template`, `action.content_type`, `action.headers`, `action.signing.secret`, `action.signing.header`, `max_concurrency`, `project`, and for a trigger `spec.kinds`, `spec.match`, `spec.dedupe.key`, `spec.dedupe.window`, `spec.escalate.key`, `spec.escalate.after`, `spec.escalate.reset_on`, `spec.escalate.to`, `spec.max_per_hour`. A cron error shows the expression: ``spec.expr: bad cron expression `*/15 * * *`: use five fields ...``. An interval under 60 s and an `at` in the past are `422`. |
 | `403 forbidden` | The rules of §19.3. |
 | `409 conflict` | The name is in use in the scope, or the project has `TERRARIUM_MAX_SCHEDULES_PER_PROJECT` (default 20) schedules. |
 | `409 file_managed` | A `PATCH`, `DELETE`, `enable`, or `disable` of a `file` schedule. Edit `projects/<name>.toml`, then `POST /api/reload`. A run-now is allowed. |
@@ -6152,6 +6158,10 @@ curl ... 'localhost/api/schedules/terrarium%2Ftests/runs?limit=1'
   policy error.
 - `probe`: a subscription that an agent of the project uses.
 - `card`: the board of the project.
+- `webhook`: any URL that the address rules of §19.5 allow. A secret of a
+  header, the URL, or the signature: a secret of the project, or a global
+  secret that a grant (`use` or `read`) gives to the project or to the
+  agent.
 - A trigger's `escalate.to`: as for `mail`.
 
 A global schedule needs a sysadmin. An enable and a run-now check the
@@ -6338,6 +6348,175 @@ curl ... localhost/api/schedules -d '{"name": "ci-card-close", "project": "terra
   "spec": {"kind": "on", "kinds": ["ci.run.succeeded"]},
   "action": {"type": "card", "op": "close", "key": "ci:{{event.data.repo}}", "body": "Green again."}}'
 curl ... 'localhost/api/schedules?kind=trigger'
+```
+
+### 19.5 Webhooks
+
+The `webhook` action sends an HTTP request about each event of a trigger
+(or about each run of a time schedule). A run does not send: it renders
+the body, writes one `pending` delivery, and is `ok` with
+`output: {delivery, url}`. The delivery worker sends it and records each
+attempt. Use it to page a person (Slack, Discord, ntfy) or to call a
+self-hosted tool when a monitor changes status.
+
+```json
+{
+  "type": "webhook",
+  "url": "https://hooks.example.com/terrarium",
+  "method": "POST",
+  "format": "json",
+  "headers": [{"name": "Authorization", "secret": "hook-token"},
+              {"name": "X-Env", "value": "prod"}],
+  "signing": {"secret": "hook-sign", "header": "X-Terrarium-Signature", "algo": "sha256"},
+  "timeout_secs": 10
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `url` | `http` or `https`. A URL with a user or a password is `422`. Give `url` or `url_secret`, not both. |
+| `url_secret` | The name of a secret whose value is the URL. A Slack or Discord webhook URL is a credential: keep it in a secret. The project's secret first, then the global one. |
+| `method` | `POST` (the default) or `PUT`. |
+| `format` | `json` (the default), `slack`, `discord`, `ntfy`, or `template`. See below. |
+| `template` | The body of `format: "template"`. |
+| `content_type` | The `Content-Type`. Default `application/json`; `text/plain; charset=utf-8` for `ntfy`. |
+| `headers` | At most 20. `{name, value}` or `{name, secret}`: the value is the main field of the secret (the `value` of an `api_key`, `token`, or `github_token`; the one field of a `generic`). `Host`, `Content-Length`, `Content-Type`, `Transfer-Encoding`, `Connection`, the other hop-by-hop headers, and `X-Terrarium-*` are `422`. |
+| `signing` | `{secret, header?, algo?}`. The daemon sends `<header>: sha256=<hex HMAC-SHA256 of the raw body, with the secret as the key>`. `header` is `X-Terrarium-Signature` by default; `algo` is `sha256`. |
+| `timeout_secs` | The limit of one request: 10 by default, 30 at most. |
+
+The document of a delivery:
+
+```json
+{"event": {"seq": 812, "id": "01MB...", "kind": "monitor.status", "at": "2026-11-03T10:00:00.000Z",
+           "project": "terra", "agent": null, "actor": "system",
+           "summary": "monitor disk-usage: ok → crit 93 %",
+           "data": {"monitor": "disk-usage", "from": "ok", "to": "crit", "value": 93, "unit": "%"}},
+ "trigger": {"name": "disk-alert", "project": "terra"}}
+```
+
+| `format` | Body |
+|---|---|
+| `json` | The document. |
+| `slack` | `{"text": "[<project>] <kind>: <summary>"}`. The summary is the one of the event log, as in the trigger mail. |
+| `discord` | `{"content": "[<project>] <kind>: <summary>"}`, at most 2000 characters. |
+| `ntfy` | The summary as plain text, with `Title: <project>: <kind>`, `Priority`, and `Tags`. A monitor event takes its priority from its new status: `crit` 5, `warn` and `unknown` 4, `ok` 2. A `*.failed` event is 4; any other event is 3. `Tags` is an emoji short code (`rotating_light`, `warning`, `white_check_mark`, `x`, `bell`) and the kind. |
+| `template` | The template with each `{{path}}` filled from the document: `{{event.kind}}`, `{{event.summary}}`, `{{event.project}}`, `{{event.at}}`, `{{event.data.status}}`, `{{trigger.name}}`. A missing value is empty. With a JSON content type, a value is escaped for the inside of a JSON string, so `"{{event.summary}}"` stays valid JSON. `{{path \| json}}` puts the value as a JSON literal (a string with its quotes, `null` when missing), for a place outside a string. Another placeholder or filter is `422`. With a JSON content type, a template that does not render valid JSON for a sample event is `422`. |
+
+Each request also has `X-Terrarium-Delivery` (the delivery ID: a
+receiver can drop a repeat), `X-Terrarium-Event` (the kind),
+`X-Terrarium-Timestamp` (Unix seconds), and `User-Agent:
+terrarium/<version>`. A body over 256 KiB fails the run.
+
+**Secrets.** A secret of `url_secret`, `headers`, or `signing` needs a
+right of the trigger's `run_as` at the write and again at each attempt:
+the operator and a sysadmin use any secret; a project_admin uses a secret
+of its project, or a global secret with a grant (`use` or `read`) to its
+project or to itself. No right is `403` at the write and at a test send;
+a queued delivery fails with `refused: ...` and no request. A missing
+secret is `422`. The daemon opens the secrets at each attempt and never
+stores or logs a value: the row keeps only the rendered body, the log
+URL has no query (`?…`), and the answer and the error have each secret
+value replaced. No request may carry the daemon's API token
+(`TERRARIUM_TOKEN`): such a request fails with no send.
+
+**Delivery and retries.**
+
+- At most 8 requests at once in the daemon, and 2 to one host and port.
+- A `2xx` is `ok`. A network error, a time-out, a `5xx`, or a `429` is
+  tried again after 10 s, 1 min, 5 min, 30 min, and 2 h; a longer
+  `Retry-After` (seconds or an HTTP date, at most 2 h) wins. After the
+  sixth attempt the delivery is `giving_up`. Any other answer (a `3xx`,
+  a `4xx`) is `failed`, with no retry.
+- The `pending` rows stay in the store: after a daemon restart, the worker
+  sends them when they are due. The delivery of a disabled trigger waits
+  until the enable.
+- Each attempt ends with a `webhook.delivery` event (§9).
+- The 20th failed attempt in a row of a trigger (a test send does not
+  count) disables it, writes `disabled_reason`, and mails the operator one
+  time ("Webhook trigger `<project>/<name>` disabled"). An `ok` sets the
+  count to 0, and so does an enable. The schedule shows the count in
+  `webhook_failures` when it is not 0.
+- Retention: the daily prune deletes the deliveries older than 7 days.
+
+**The rate limit.** At most 60 deliveries of one trigger in a minute. An
+event over it is dropped: its run is `skipped: rate limit ...`, and one
+`dropped` row for the minute counts the dropped events (`dropped`). The
+`max_per_hour` of the trigger (§19.4) applies first. A noisy event such
+as `monitor.result` (one for each run of each monitor) can flood a
+receiver: a trigger on `monitor.status` (only a change of status) is
+usually the right one.
+
+**The address rules (SSRF).** The URL comes from a project_admin, a
+sysadmin, or the operator (the rights of a trigger write). The daemon:
+
+- takes `http` and `https` only, and no user or password in the URL;
+- resolves the host one time for each attempt and connects to that
+  address, so a DNS answer that changes between the check and the connect
+  cannot move the request; it uses no proxy from the environment;
+- never follows a redirect: a `3xx` is `failed`, and the error names the
+  `Location`;
+- reads at most 64 KiB of the answer and keeps the first 2 KiB.
+
+`TERRARIUM_WEBHOOK_PRIVATE` sets which addresses a webhook can reach:
+`allow` (the default: a self-hosted tool on the LAN or the same host is
+common) or `deny`. With `deny`, an address that is loopback, link-local
+(`169.254.0.0/16`, `fe80::/10`, the cloud metadata address), private
+(RFC 1918, `100.64.0.0/10`), unique-local (`fc00::/7`), unspecified,
+multicast, or an IPv4 address in an IPv6 form of these, and any port of the
+daemon's own listeners (the API, the artifact origin, the ingest, and the
+host listener), is refused before the connect: the attempt is `failed`
+with `refused: ...`. A public deployment where untrusted people are
+project_admins sets `deny`.
+
+A delivery:
+
+```json
+{
+  "id": "01MB2...",
+  "schedule": "01MA0V7N6Q1Y3K2P4R5S6T7U8V",
+  "event_seq": 812,
+  "event_kind": "monitor.status",
+  "test": false,
+  "url": "https://hooks.example.com/terrarium",
+  "method": "POST",
+  "content_type": "application/json",
+  "attempt": 2,
+  "status": "pending",
+  "http_status": 503,
+  "duration_ms": 41,
+  "response": "busy",
+  "error": "status 503",
+  "next_attempt_at": "2026-11-03T10:01:10.000Z",
+  "created_at": "2026-11-03T10:00:00.000Z",
+  "updated_at": "2026-11-03T10:00:10.050Z",
+  "request": "{\"event\": ...}",
+  "request_bytes": 412
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `status` | `pending` (queued, or a retry waits for `next_attempt_at`), `ok`, `failed`, `giving_up`, or `dropped` (a rate-limit note with `dropped`, the count). |
+| `attempt` | The attempts so far. |
+| `url` | For the log: scheme, host, port, and path. A query shows as `?…`; a URL from a secret shows as `(secret <name>)`; the `url` of a test send shows its host. |
+| `response` | The start of the answer (at most 2 KiB), redacted. |
+| `error` | Why the attempt failed: `status 503`, `timed out after 10 s`, `refused: ...`. |
+| `request`, `request_bytes` | The start of the body (at most 4 KiB) and its size. |
+| `test`, `redelivery_of` | A test send; the delivery that a redeliver copied. |
+
+**Audit.** A trigger write writes `schedule.create`, `schedule.update`,
+and `schedule.delete` as for any schedule; a redeliver writes
+`schedule.webhook.redeliver` (`{id, delivery, of}`).
+
+Example: page ntfy when a monitor of `terra` goes `crit`.
+
+```sh
+curl ... localhost/api/schedules -d '{"name": "page-crit", "project": "terra",
+  "spec": {"kind": "on", "kinds": ["monitor.status"],
+           "match": [{"path": "data.to", "op": "eq", "value": "crit"}]},
+  "action": {"type": "webhook", "url": "https://ntfy.example/terra-alerts", "format": "ntfy"}}'
+curl -X POST ... localhost/api/schedules/terra%2Fpage-crit/test
+curl ... 'localhost/api/schedules/terra%2Fpage-crit/deliveries?limit=10'
 ```
 
 ## 20. Event sources and ingest

@@ -444,9 +444,32 @@ The page has two tabs, kept in the URL as `?tab=triggers`: Schedules
 §19.4). A trigger uses the same dialog with the spec `on`: the kinds, the
 match rules, the optional dedupe and escalation, and `max_per_hour`
 (`features/schedules/trigger.ts`). A trigger offers only the actions `mail`,
-`exec`, and `card`; a time schedule offers all six. The preset "CI failure
-→ mail an agent" fills the example of docs/api.md §19.4. A trigger run shows
-the event (`seq`, `kind`, `summary`) that started it.
+`exec`, `card`, and `webhook`; a time schedule offers all seven. The preset
+"CI failure → mail an agent" fills the example of docs/api.md §19.4. A
+trigger run shows the event (`seq`, `kind`, `summary`) that started it.
+
+The action "Send a webhook" (docs/api.md §19.5,
+`features/schedules/WebhookFields.tsx`, `webhook.ts`) has the URL (or a
+secret that holds it), the format (JSON, Slack, Discord, ntfy, or a
+template), the method, the time limit, the content type, the headers (a
+value, or a secret from the `CredentialSelect` with `kind="webhook"`: a
+secret with one main value), and an optional signing secret. A live
+preview shows the request for a sample event of the first kind
+(`previewRequest`): the headers with each secret as `[secret:<name>]`, and
+the body as the daemon renders it, with a warning when a JSON content type
+gets a body that is not JSON. The daemon has the last word: its `422` shows
+under the field that `details.field` names.
+
+The row of a webhook trigger opens to its Deliveries panel
+(`Deliveries.tsx`, `deliveries.ts`) above the runs: `GET
+.../deliveries`, newest first, with a status chip (`queued`, `retry N at
+<time>`, `ok`, `failed`, `giving up`, `dropped`), the HTTP status, the time
+taken, the attempt, the answer, and the request body. **Redeliver** queues
+a copy; **Send test** sends a sample event at once and shows the request
+and the answer. A `webhook.delivery` event of the trigger reads the newest
+page again. The mock answers from the URL: `fail` in it is a 503 (a
+retry), `404` a 404, `redirect` a 302; the seed has the trigger
+`page-ntfy` of terrarium with an ok, a retry, a 404, and a dropped row.
 
 The Triggers tab also lists the event sources (docs/api.md §20,
 `features/schedules/EventSources.tsx`). A create and a rotate answer with
@@ -929,7 +952,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/spend` | Gone: redirects to `/` (`app/nav.ts` `MOVED_ROUTES`). The daemon's budget alert mail still links it. | none |
 | `/p/:project/board/schedules` | Board, Schedules tab: schedules of the project and the global ones, scope filter, run history, run now, enable, create, edit, delete | `GET /api/schedules?project=`, `POST /api/schedules`, `PATCH`, `DELETE /api/schedules/{id}`, `POST .../run\|enable\|disable`, `GET .../runs?limit=&cursor=` (docs/api.md §19) |
 | `/schedules` | All schedules, grouped by scope | `GET /api/schedules` and the calls above |
-| `/p/:project/board/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §20) |
+| `/p/:project/board/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; webhook deliveries, redeliver, and test send; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET .../deliveries`, `POST .../deliveries/{id}/redeliver`, `POST .../test`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §19.5, §20) |
 | `/settings/targets` | Settings, Targets tab: targets, lifecycle, snapshots (list, take, restore, delete), exec console, leases (grant, extend, revoke, history), the resource limits chip (`limits_info.summary`, for example `2 CPU · 4G`; red with the host agent's `problem`), and the limit fields of the New target dialog for `host` and `docker` targets | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `GET .../snapshots`, `DELETE .../snapshots/{snap}`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/settings/hosts` | Settings, Hosts tab: host agents: status, capabilities (also the `limits` or `no limits` chip of `capabilities.limits`, with the controllers or the reason as the tooltip), add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/logs/events` | Logs, Events tab: event log with history; all projects or the selected one, kind and agent filters | `GET /api/events?since=&kind=&project=&agent=`, events socket |

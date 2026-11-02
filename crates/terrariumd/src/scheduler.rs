@@ -291,6 +291,7 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                             warn!("the trigger state prune failed: {e}");
                         }
                         crate::monitors::prune(&state).await;
+                        crate::webhooks::prune(&state).await;
                     }
                 }
                 r = rx.recv() => {

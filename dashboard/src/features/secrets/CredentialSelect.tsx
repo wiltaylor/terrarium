@@ -4,12 +4,14 @@
 // secrets and the global ones; a global target, the global ones only. A
 // global secret that the project holds no grant of gets a hint: the
 // operator can set it, a project_admin needs a grant. An ssh target has
-// "New key…": it generates a key in the store and selects it.
+// "New key…": it generates a key in the store and selects it. A webhook
+// (docs/api.md §19.5) uses the same select for a header value or a signing
+// key: a secret with one main value (`kind="webhook"`).
 
 import { createResource, createSignal, For, Show } from "solid-js";
-import type { Secret, TargetKind } from "../../api/types";
+import type { Secret } from "../../api/types";
 import { api } from "../../stores";
-import { credentialChoices, credentialKind, GLOBAL, NEEDS_GRANT_HINT } from "./model";
+import { credentialChoices, credentialKinds, GLOBAL, NEEDS_GRANT_HINT, type CredentialUse } from "./model";
 import { GenerateKeyForm } from "./GenerateKey";
 import { PublicKey } from "./PublicKey";
 
@@ -17,7 +19,9 @@ import { PublicKey } from "./PublicKey";
 const NEW_KEY = "+new-key";
 
 export function CredentialSelect(props: {
-  kind: TargetKind;
+  kind: CredentialUse;
+  /** The accessible name of the select (default "Credential"). */
+  label?: string;
   /** A project name or `global`; "" when not chosen yet. */
   scope: string;
   value: string;
@@ -26,7 +30,7 @@ export function CredentialSelect(props: {
   targetName?: string;
 }) {
   const [secrets, { refetch }] = createResource(
-    () => (props.scope && credentialKind(props.kind) ? { scope: props.scope } : null),
+    () => (props.scope && credentialKinds(props.kind).length ? { scope: props.scope } : null),
     async (v): Promise<Secret[]> => {
       const reads = [api.secrets.list({ scope: GLOBAL }).catch(() => [] as Secret[])];
       if (v.scope !== GLOBAL) reads.push(api.secrets.list({ scope: v.scope }).catch(() => [] as Secret[]));
@@ -38,9 +42,9 @@ export function CredentialSelect(props: {
   // operator needs no grant, a project_admin does.
   const [granted] = createResource(
     () => {
-      const want = credentialKind(props.kind);
-      if (!props.scope || props.scope === GLOBAL || !want || !secrets.latest) return null;
-      return { project: props.scope, names: secrets.latest.filter((s) => s.scope === GLOBAL && s.kind === want).map((s) => s.name) };
+      const want = credentialKinds(props.kind);
+      if (!props.scope || props.scope === GLOBAL || !want.length || !secrets.latest) return null;
+      return { project: props.scope, names: secrets.latest.filter((s) => s.scope === GLOBAL && want.includes(s.kind)).map((s) => s.name) };
     },
     async (v): Promise<Set<string>> => {
       const who = `project:${v.project}`;
@@ -56,12 +60,13 @@ export function CredentialSelect(props: {
   /** A value that is not in the list: an old name, or a secret this viewer cannot read. */
   const unknown = () => !!props.value && !choices().some((c) => c.name === props.value);
   const ssh = () => props.kind === "ssh";
-  const what = () => (ssh() ? "an ssh_key" : "a login");
+  const hook = () => props.kind === "webhook";
+  const what = () => (ssh() ? "an ssh_key" : hook() ? "an api_key, token, or generic" : "a login");
 
   return (
     <div class="stack" style={{ gap: "6px" }}>
       <select
-        aria-label="Credential"
+        aria-label={props.label ?? "Credential"}
         value={props.value}
         disabled={!props.scope}
         onChange={(e) => {
@@ -73,7 +78,7 @@ export function CredentialSelect(props: {
         }}
       >
         <option value="" selected={!props.value}>
-          {!props.scope ? "Choose a scope first" : secrets.loading ? "Loading…" : `None (${ssh() ? "no key" : "no login"})`}
+          {!props.scope ? "Choose a scope first" : secrets.loading ? "Loading…" : hook() ? "Pick a secret" : `None (${ssh() ? "no key" : "no login"})`}
         </option>
         <Show when={unknown()}>
           <option value={props.value} selected>
@@ -102,7 +107,7 @@ export function CredentialSelect(props: {
       </Show>
       <Show when={props.scope && !secrets.loading && !choices().length && !generating()}>
         <span class="small muted">
-          No {what()} secret that this target can use{props.scope === GLOBAL ? " (a global target uses a global secret only)" : ""}.{" "}
+          No {what()} secret that this {hook() ? "webhook" : "target"} can use{props.scope === GLOBAL ? ` (a global ${hook() ? "trigger" : "target"} uses a global secret only)` : ""}.{" "}
           {ssh() ? "Pick New key…, or store one on the Secrets tab of Settings." : "Store one on the Secrets tab of Settings."}
         </span>
       </Show>

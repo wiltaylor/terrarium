@@ -230,7 +230,7 @@ async fn a_ci_failure_mails_the_agent_with_the_event_as_quoted_data() {
 }
 
 #[tokio::test]
-async fn a_trigger_takes_only_mail_exec_and_card() {
+async fn a_trigger_takes_only_mail_exec_card_and_webhook() {
     let td = TestDaemon::start().await;
     let (lead, _) = setup(&td).await;
     let on = json!({"kind": "on", "kinds": ["ci.run.failed"]});
@@ -252,7 +252,7 @@ async fn a_trigger_takes_only_mail_exec_and_card() {
             r.body["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("mail, exec, or card"),
+                .contains("mail, exec, card, or webhook"),
             "{}",
             r.body
         );

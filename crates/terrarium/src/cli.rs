@@ -2888,6 +2888,17 @@ pub enum ScheduleCmd {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// The webhook deliveries of a schedule, newest first
+    Deliveries {
+        schedule: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Send a webhook delivery again (a new delivery, due now)
+    Redeliver { schedule: String, delivery: String },
+    /// Send a sample event of the trigger's kind to its webhook now and
+    /// print the request and the answer; exit 1 when it failed
+    Test { schedule: String },
 }
 
 /// The time spec and the action of `schedule new` and `schedule set`.
@@ -2944,13 +2955,13 @@ pub struct ScheduleArgs {
     #[arg(long, value_name = "JSON")]
     pub spec_json: Option<String>,
     /// The action as JSON (docs/api.md §19), in place of the action flags
-    #[arg(long, value_name = "JSON", conflicts_with_all = ["mail", "turn", "exec", "agent", "probe", "card"])]
+    #[arg(long, value_name = "JSON", conflicts_with_all = ["mail", "turn", "exec", "agent", "probe", "card", "webhook", "webhook_url_secret"])]
     pub action_json: Option<String>,
     /// The zone of a cron expression: UTC (the default) or an IANA zone
     #[arg(long, requires = "cron")]
     pub tz: Option<String>,
     /// Action: send mail to an agent, `project:<name>`, or `operator`
-    #[arg(long, value_name = "TO", conflicts_with_all = ["turn", "exec", "agent", "probe", "card"])]
+    #[arg(long, value_name = "TO", conflicts_with_all = ["turn", "exec", "agent", "probe", "card", "webhook", "webhook_url_secret"])]
     pub mail: Option<String>,
     /// The mail subject
     #[arg(long, short = 's', requires = "mail")]
@@ -2962,7 +2973,7 @@ pub struct ScheduleArgs {
     #[arg(long, requires = "mail")]
     pub thread: Option<String>,
     /// Action: type a turn into this agent (not on a trigger)
-    #[arg(long, value_name = "AGENT", conflicts_with_all = ["exec", "agent", "probe", "card"])]
+    #[arg(long, value_name = "AGENT", conflicts_with_all = ["exec", "agent", "probe", "card", "webhook", "webhook_url_secret"])]
     pub turn: Option<String>,
     /// The turn text, or `-` for stdin
     #[arg(long, allow_hyphen_values = true, requires = "turn")]
@@ -2971,22 +2982,23 @@ pub struct ScheduleArgs {
     #[arg(long, requires = "turn")]
     pub start_if_stopped: bool,
     /// Action: run the command after `--` on this target
-    #[arg(long, value_name = "TARGET", conflicts_with_all = ["agent", "probe", "card"])]
+    #[arg(long, value_name = "TARGET", conflicts_with_all = ["agent", "probe", "card", "webhook", "webhook_url_secret"])]
     pub exec: Option<String>,
     /// The working directory on the target (an absolute path)
     #[arg(long, requires = "exec")]
     pub cwd: Option<String>,
-    /// The run limit in seconds (default 300, at most 3600)
-    #[arg(long, requires = "exec")]
-    pub timeout: Option<u64>,
+    /// The run limit: seconds or a duration (`600`, `10s`). Exec: default
+    /// 300 s, at most 3600 s. Webhook: default 10 s, at most 30 s
+    #[arg(long, value_name = "DURATION")]
+    pub timeout: Option<String>,
     /// Action: start, stop, or restart this agent (with --verb)
-    #[arg(long, value_name = "AGENT", conflicts_with_all = ["probe", "card"])]
+    #[arg(long, value_name = "AGENT", conflicts_with_all = ["probe", "card", "webhook", "webhook_url_secret"])]
     pub agent: Option<String>,
     /// `start`, `stop`, or `restart`
     #[arg(long, requires = "agent")]
     pub verb: Option<String>,
     /// Action: run the quota probe of this subscription
-    #[arg(long, value_name = "SUBSCRIPTION", conflicts_with = "card")]
+    #[arg(long, value_name = "SUBSCRIPTION", conflicts_with_all = ["card", "webhook", "webhook_url_secret"])]
     pub probe: Option<String>,
     /// Action: `open` a card (or comment on the open card with the same
     /// --key), or `close` it (move it to done)
@@ -3001,6 +3013,40 @@ pub struct ScheduleArgs {
     /// open: the column of a new card; close: the column to move to
     #[arg(long, requires = "card")]
     pub column: Option<String>,
+    /// Action: send an HTTP request about each event to this URL (http
+    /// or https)
+    #[arg(long, value_name = "URL", conflicts_with_all = ["card", "webhook_url_secret"])]
+    pub webhook: Option<String>,
+    /// Action: a webhook whose URL is the value of this secret (a Slack or
+    /// Discord URL is a credential)
+    #[arg(long, value_name = "SECRET", conflicts_with = "card")]
+    pub webhook_url_secret: Option<String>,
+    /// The webhook body: json (the default), slack, discord, ntfy, or
+    /// template
+    #[arg(long, value_name = "FORMAT")]
+    pub format: Option<String>,
+    /// The body template of --format template, from a file (`-`: stdin)
+    #[arg(long, value_name = "FILE")]
+    pub template_file: Option<String>,
+    /// A webhook header 'Name: value' (repeat)
+    #[arg(long = "header", value_name = "NAME: VALUE")]
+    pub headers: Vec<String>,
+    /// A webhook header from a secret: 'Name=secretname' (repeat)
+    #[arg(long = "header-secret", value_name = "NAME=SECRET")]
+    pub header_secrets: Vec<String>,
+    /// Sign the webhook body (HMAC-SHA256) with this secret
+    #[arg(long, value_name = "SECRET")]
+    pub sign_secret: Option<String>,
+    /// The header of the signature (default X-Terrarium-Signature)
+    #[arg(long, value_name = "NAME", requires = "sign_secret")]
+    pub sign_header: Option<String>,
+    /// The webhook method: POST (the default) or PUT
+    #[arg(long, value_name = "POST|PUT")]
+    pub method: Option<String>,
+    /// The webhook Content-Type (default application/json; ntfy:
+    /// text/plain)
+    #[arg(long, value_name = "TYPE")]
+    pub content_type: Option<String>,
     /// A global schedule (sysadmin or the operator), not one of a project
     #[arg(long)]
     pub global: bool,

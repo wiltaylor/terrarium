@@ -3925,6 +3925,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       sendMail: (to, from, subject, body) => sendMail(to, from, subject, body),
       runMs: opts.scheduleRunMs ?? (latency > 0 ? 1500 : step),
       caller: opts.scheduleCaller,
+      webhookSecret: (project, name) => secrets.webhookSecret(project, name),
     }),
 
     // The same caller as the schedules: the rights of §20 follow those of §19.

@@ -131,6 +131,9 @@ pub struct AppState {
     /// The monitor runs: which run now, and the parallel slots
     /// (`crate::monitors`).
     pub monitors: Arc<crate::monitors::Runtime>,
+    /// The webhook deliveries: the slots, the rate windows, and the
+    /// address rules (`crate::webhooks`).
+    pub webhooks: Arc<crate::webhooks::Runtime>,
 }
 
 impl AppState {
@@ -895,6 +898,7 @@ mod tests {
             config_repo: Arc::default(),
             lifecycle: Arc::default(),
             monitors: Arc::default(),
+            webhooks: Arc::default(),
         })
     }
 

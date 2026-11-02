@@ -1,8 +1,8 @@
 // The create and edit dialog of a schedule or a trigger (docs/api.md §19,
 // §19.4). The state is in ./form; this file only draws it. A `403` and a
 // `422` show inline: the `422` under the field that the daemon names. A
-// trigger has the spec `on` (./TriggerFields) and runs only mail, exec, or
-// card.
+// trigger has the spec `on` (./TriggerFields) and runs only mail, exec,
+// card, or webhook (./WebhookFields).
 
 import { createMemo, createResource, For, Index, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
@@ -12,6 +12,7 @@ import { everyWords, parseEvery, utcText, WEEKDAYS } from "../../lib/schedule";
 import { actionTypesFor, agentOptions, CRON_PRESETS, createScheduleDialog, GLOBAL, targetOptions, timeZones, type CronPreset, type ScheduleOutcome } from "./form";
 import { fieldKit } from "./fields";
 import { TemplateHelp, TriggerSpecFields } from "./TriggerFields";
+import { WebhookActionFields } from "./WebhookFields";
 
 const SPEC_KINDS: readonly { id: ScheduleSpecKind; label: string }[] = [
   { id: "cron", label: "Cron" },
@@ -306,10 +307,13 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
         <Show when={f().actionType === "mail"}>
           {field("mailBody", "Body", <textarea rows={3} value={f().mailBody} onInput={(e) => dlg.set("mailBody", e.currentTarget.value)} />)}
         </Show>
+        <Show when={f().actionType === "webhook"}>
+          <WebhookActionFields dlg={dlg} kit={kit} />
+        </Show>
         <Show when={f().actionType === "card"}>
           {field("cardBody", f().cardOp === "open" ? "Body (a comment when the card is open)" : "Comment", <textarea rows={3} value={f().cardBody} onInput={(e) => dlg.set("cardBody", e.currentTarget.value)} />)}
         </Show>
-        <Show when={trigger}>
+        <Show when={trigger && f().actionType !== "webhook"}>
           <TemplateHelp />
         </Show>
         <Show when={f().actionType === "turn"}>

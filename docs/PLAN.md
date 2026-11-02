@@ -1556,12 +1556,47 @@ Asked for on 2026-10-26.
   - A project trigger sees only the events of its project. A global
     trigger (sysadmin) sees all.
 - **Trigger actions.** `mail` (the way to notify an agent: no `turn`
-  action on a trigger), `exec` on a target (the way to run a script), and
+  action on a trigger), `exec` on a target (the way to run a script),
   `card` (`open` a card, or comment on the open card with the same `key`;
-  `close` it). Strings in the action can use `{{event.kind}}`,
+  `close` it), and `webhook` (an HTTP request, below). Strings in the action can use `{{event.kind}}`,
   `{{event.summary}}`, `{{event.project}}`, `{{event.seq}}`, and
   `{{event.data.<path>}}`; a missing value is empty. An exec `cmd` is an
   argv, so a value from an event is one argument and never shell text.
+- **Webhook action** (asked for on 2026-11-03; `docs/api.md` §19.5). A
+  trigger (or a time schedule) sends an HTTP request about each event:
+  `url` or `url_secret`, `POST` or `PUT`, a format (`json`: the event as
+  `{event, trigger}`; `slack`; `discord`; `ntfy` with `Title`,
+  `Priority`, and `Tags` from the event; `template` with `{{path}}`
+  placeholders, JSON-escaped for a JSON content type), headers with a
+  fixed value or a secret, an optional HMAC-SHA256 signature of the raw
+  body (`X-Terrarium-Signature: sha256=<hex>`), and a time limit (10 s,
+  at most 30 s).
+  - **Outbox.** A run renders the body and writes a `pending` row of
+    `webhook_deliveries` (migration 55). A worker (`crate::webhooks`)
+    sends the due rows: 8 at once, 2 to one host. A network error, a
+    time-out, a `5xx`, or a `429` is tried again after 10 s, 1 min,
+    5 min, 30 min, and 2 h (a longer `Retry-After` wins); another `4xx`
+    or a `3xx` is `failed`. A restart resumes the `pending` rows. The
+    daily prune keeps 7 days.
+  - **Secrets.** The row keeps the body only. The URL, the headers, and
+    the signing key are opened at each attempt, as `run_as`: a
+    project_admin uses its project's secrets, or a global one with a
+    grant. No value is stored or logged.
+  - **Guards.** At most 60 deliveries of a trigger in a minute; an event
+    over it is dropped and counted in a `dropped` row. The 20th failed
+    attempt in a row disables the trigger and mails the operator one
+    time. Each attempt emits `webhook.delivery`, with the actor
+    `schedule:<id>`, so the loop guard and the chain depth apply.
+  - **SSRF.** `http` and `https` only, no credentials in the URL, no
+    redirects, one DNS lookup per attempt and a connect to that address
+    (no rebinding), no proxy, 64 KiB of the answer at most.
+    `TERRARIUM_WEBHOOK_PRIVATE=deny` also refuses loopback, link-local,
+    private, unique-local, and the daemon's own ports; the default
+    `allow` reaches the LAN, because self-hosted receivers are common.
+  - **Dashboard.** The Triggers tab has the action "Send a webhook": the
+    URL, the format, a template editor with a live preview of the body
+    for a sample event, headers with secret pickers, the signing secret,
+    the time limit, Send test, and a Deliveries panel with Redeliver.
 - **Who gets the event.** The project decides: each trigger names its
   `to` (an agent, `project:<name>`, or `operator`). There is no default
   owner.

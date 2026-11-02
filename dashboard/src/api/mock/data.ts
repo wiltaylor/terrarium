@@ -29,6 +29,7 @@ import type {
   Revision,
   Schedule,
   ScheduleRun,
+  WebhookDelivery,
   Session,
   Subscription,
   Target,
@@ -98,6 +99,8 @@ export interface MockWorld {
   schedules: Schedule[];
   /** Schedule runs, oldest first. */
   scheduleRuns: ScheduleRun[];
+  /** Webhook deliveries (docs/api.md §19.5), oldest first. */
+  webhookDeliveries: WebhookDelivery[];
   /** Event sources (docs/api.md §20), without the hook fields. */
   eventSources: EventSourceRow[];
   /** The secret of each source by ID. The API shows it only at create and rotate. */
@@ -947,7 +950,7 @@ type:bug sevrity=high
   const sched = seedSchedules(now, agents);
 
   const world: MockWorld = {
-    schedules: sched.schedules, scheduleRuns: sched.runs, eventSources: seedEventSources(now), eventSourceSecrets: {}, templates: seedTemplates(now),
+    schedules: sched.schedules, scheduleRuns: sched.runs, webhookDeliveries: sched.deliveries, eventSources: seedEventSources(now), eventSourceSecrets: {}, templates: seedTemplates(now),
     projects, repos, agents, sessions, removedAgents: [], transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
     cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, heldMail: [fakeUlid("msg", 11)], targets, hostSnapshots, leases, ...waitSeed, hosts, hostTokens, audit, seq,
   };

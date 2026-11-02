@@ -144,6 +144,8 @@ import type {
   SchedulePatch,
   ScheduleQuery,
   ScheduleRun,
+  WebhookDelivery,
+  WebhookTestResult,
   Session,
   AgentScreen,
   Spawn,
@@ -669,6 +671,12 @@ export interface Api {
     disable(id: string): Promise<Schedule>;
     /** `GET /api/schedules/{id}/runs?limit=&cursor=`, newest first. */
     runs(id: string, q?: PageQuery): Promise<Page<ScheduleRun>>;
+    /** `GET /api/schedules/{id}/deliveries?limit=&cursor=`: the webhook deliveries, newest first (§19.5). */
+    deliveries(id: string, q?: PageQuery): Promise<Page<WebhookDelivery>>;
+    /** `POST /api/schedules/{id}/deliveries/{delivery}/redeliver`: a copy, due now (`202`). */
+    redeliver(id: string, delivery: string): Promise<WebhookDelivery>;
+    /** `POST /api/schedules/{id}/test`: send a sample event now; the answer has the delivery and the request. */
+    test(id: string): Promise<WebhookTestResult>;
   };
 
   /**
@@ -1229,6 +1237,9 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       enable: (id) => post(`/api/schedules/${seg(id)}/enable`),
       disable: (id) => post(`/api/schedules/${seg(id)}/disable`),
       runs: (id, q = {}) => page(`/api/schedules/${seg(id)}/runs`, { ...q }),
+      deliveries: (id, q = {}) => page(`/api/schedules/${seg(id)}/deliveries`, { ...q }),
+      redeliver: (id, delivery) => post(`/api/schedules/${seg(id)}/deliveries/${seg(delivery)}/redeliver`),
+      test: (id) => post(`/api/schedules/${seg(id)}/test`),
     },
 
     eventSources: {

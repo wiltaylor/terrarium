@@ -1640,6 +1640,49 @@ const MIGRATIONS: &[&str] = &[
         updated_by TEXT NOT NULL
     );
     "#,
+    // 55: webhook deliveries (docs/api.md §19.5, `crate::store::webhooks`).
+    // One row for each delivery of a `webhook` action: the outbox that the
+    // delivery worker (`crate::webhooks`) sends from, and the log that
+    // the API shows. `body` is the rendered body; the headers, the URL,
+    // and the signature come from the trigger's action at each attempt,
+    // so no secret value is stored. `status` is `pending` (queued or
+    // waiting for a retry at `next_attempt_at`), `ok`, `failed` (no retry:
+    // a 4xx, a refused URL), `giving_up` (the retries are used up), or
+    // `dropped` (the rate limit: `dropped` counts the events of one
+    // minute). `cause` is the `data.cause` of the delivery events.
+    // `schedules.webhook_failures` counts the failed attempts in a row;
+    // the 20th disables the trigger. The daily prune keeps 7 days.
+    // Self-contained: when another branch takes number 55, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE webhook_deliveries (
+        id              TEXT PRIMARY KEY,          -- ULID
+        schedule        TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+        event_seq       INTEGER,
+        event_kind      TEXT NOT NULL DEFAULT '',
+        test            INTEGER NOT NULL DEFAULT 0,
+        redelivery_of   TEXT,
+        url             TEXT NOT NULL,             -- for the log: no credentials, no query
+        method          TEXT NOT NULL,
+        content_type    TEXT NOT NULL,
+        body            TEXT NOT NULL,
+        format_headers  TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(format_headers)),
+        attempt         INTEGER NOT NULL DEFAULT 0,
+        status          TEXT NOT NULL CHECK (status IN ('pending', 'ok', 'failed', 'giving_up', 'dropped')),
+        http_status     INTEGER,
+        duration_ms     INTEGER,
+        response        TEXT,
+        error           TEXT,
+        dropped         INTEGER NOT NULL DEFAULT 0,
+        cause           TEXT CHECK (cause IS NULL OR json_valid(cause)),
+        next_attempt_at TEXT,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+    );
+    CREATE INDEX webhook_deliveries_schedule ON webhook_deliveries(schedule, id);
+    CREATE INDEX webhook_deliveries_due ON webhook_deliveries(status, next_attempt_at);
+    ALTER TABLE schedules ADD COLUMN webhook_failures INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -2319,6 +2362,8 @@ mod tests {
             "test_run_cards",
             "test_run_versions",
             "spawns",
+            "monitors",
+            "webhook_deliveries",
         ] {
             let n: i64 = conn
                 .query_row(

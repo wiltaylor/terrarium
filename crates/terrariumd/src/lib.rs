@@ -58,6 +58,7 @@ pub mod trash;
 pub mod usage_collector;
 pub mod usage_limit;
 pub mod waits;
+pub mod webhooks;
 pub mod workspace;
 
 use std::path::PathBuf;
@@ -204,7 +205,10 @@ pub async fn start_with_usage(
         config_repo: Arc::default(),
         lifecycle: Arc::default(),
         monitors: Arc::default(),
+        webhooks: Arc::default(),
     });
+    // No webhook may carry the API token (docs/security-review.md).
+    state.webhooks.set_own_token(cfg.token.as_deref());
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");
     }
@@ -269,6 +273,7 @@ pub async fn start_with_usage(
         (Some(token), Some(listen)) => {
             let (task, addr) = api::serve_tcp(state.clone(), listen, token.to_owned()).await?;
             tasks.push(task);
+            state.webhooks.add_own_port(addr.port());
             tcp_addr = Some(addr);
         }
         (None, Some(listen)) => warn!(
@@ -289,11 +294,15 @@ pub async fn start_with_usage(
                 error!("artifact origin failed: {e}");
             }
         }));
+        state.webhooks.add_own_port(local.port());
         artifact_addr = Some(local);
     }
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
+    // The webhook deliveries (docs/api.md §19.5): the pending rows of the
+    // old daemon are due again.
+    tasks.push(webhooks::spawn(state.clone()));
     tasks.extend(waits::spawn(&state));
     // After the reconcile: the agents with queued work wake.
     tasks.extend(lifecycle::spawn(&state));

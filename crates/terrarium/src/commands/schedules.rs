@@ -68,6 +68,17 @@ fn action_text(a: &Value) -> String {
         Some("agent") => format!("{} {}", field(a, "verb"), field(a, "agent")),
         Some("probe") => format!("probe {}", field(a, "subscription")),
         Some("card") => format!("card {} {}", field(a, "op"), field(a, "key")),
+        Some("webhook") => {
+            let to = match a["url_secret"].as_str() {
+                Some(s) => format!("(secret {s})"),
+                None => field(a, "url"),
+            };
+            format!(
+                "webhook {} {to} ({})",
+                a["method"].as_str().unwrap_or("POST"),
+                a["format"].as_str().unwrap_or("json")
+            )
+        }
         _ => a.to_string(),
     }
 }
@@ -94,6 +105,72 @@ const COLS: &[(&str, &str)] = &[
     ("NEXT", "next_run_at"),
     ("LAST", "last"),
 ];
+
+const DELIVERY_COLS: &[(&str, &str)] = &[
+    ("DELIVERY", "id"),
+    ("CREATED", "created_at"),
+    ("EVENT", "event_text"),
+    ("STATUS", "status"),
+    ("HTTP", "http_status"),
+    ("TRY", "attempt"),
+    ("MS", "duration_ms"),
+    ("NOTE", "note"),
+];
+
+/// A delivery with `event_text` and `note` (the error, the next retry,
+/// or the response).
+fn delivery_row(d: &Value) -> Value {
+    let mut d = d.clone();
+    let mut event = match d["event_seq"].as_i64() {
+        Some(seq) => format!("{seq} {}", field(&d, "event_kind")),
+        None => field(&d, "event_kind"),
+    };
+    if d["test"] == true {
+        event = format!("test {event}");
+    }
+    let mut note = d["error"].as_str().unwrap_or_default().to_owned();
+    if d["status"] == "pending"
+        && let Some(n) = d["next_attempt_at"].as_str()
+    {
+        note = format!("{note} (next {})", short_time(n)).trim().to_owned();
+    }
+    if note.is_empty() {
+        note = d["response"]
+            .as_str()
+            .unwrap_or_default()
+            .replace('\n', " ")
+            .chars()
+            .take(60)
+            .collect();
+    }
+    d["event_text"] = json!(event.trim());
+    d["note"] = json!(note);
+    d["created_at"] = json!(short_time(&field(&d, "created_at")));
+    d
+}
+
+fn print_delivery(ctx: &Ctx, d: &Value) {
+    ctx.line(format!(
+        "delivery {}  {} {}: {}{}",
+        field(d, "id"),
+        field(d, "method"),
+        field(d, "url"),
+        field(d, "status"),
+        d["http_status"]
+            .as_i64()
+            .map(|h| format!(" ({h})"))
+            .unwrap_or_default()
+    ));
+    if let Some(e) = d["error"].as_str() {
+        ctx.line(format!("error:     {e}"));
+    }
+    if let Some(n) = d["next_attempt_at"].as_str() {
+        ctx.line(format!("next try:  {}", short_time(n)));
+    }
+    if let Some(r) = d["response"].as_str().filter(|r| !r.is_empty()) {
+        ctx.line(format!("response:  {r}"));
+    }
+}
 
 const RUN_COLS: &[(&str, &str)] = &[
     ("RUN", "id"),
@@ -403,8 +480,8 @@ fn action_of(ctx: &Ctx, a: &ScheduleArgs) -> anyhow::Result<Option<Value>> {
         if let Some(c) = &a.cwd {
             v["cwd"] = json!(c);
         }
-        if let Some(t) = a.timeout {
-            v["timeout_secs"] = json!(t);
+        if let Some(t) = &a.timeout {
+            v["timeout_secs"] = json!(seconds("--timeout", t)?);
         }
         return Ok(Some(v));
     }
@@ -420,12 +497,127 @@ fn action_of(ctx: &Ctx, a: &ScheduleArgs) -> anyhow::Result<Option<Value>> {
     if let Some(sub) = &a.probe {
         return Ok(Some(json!({"type": "probe", "subscription": sub})));
     }
+    if a.webhook.is_some() || a.webhook_url_secret.is_some() {
+        return webhook_action(ctx, a).map(Some);
+    }
+    if a.format.is_some()
+        || a.template_file.is_some()
+        || !a.headers.is_empty()
+        || !a.header_secrets.is_empty()
+        || a.sign_secret.is_some()
+        || a.method.is_some()
+        || a.content_type.is_some()
+    {
+        return Err(CliError::usage(
+            "--format, --template-file, --header, --header-secret, --sign-secret, --method, and \
+             --content-type go with --webhook <url> or --webhook-url-secret <secret>",
+        ));
+    }
     if !a.cmd.is_empty() {
         return Err(CliError::usage(
             "a command after `--` needs --exec <target>",
         ));
     }
     Ok(None)
+}
+
+/// A time limit: seconds (`600`) or a duration (`10s`, `5m`).
+fn seconds(flag: &str, s: &str) -> anyhow::Result<u64> {
+    let bad = || CliError::usage(format!("bad {flag} `{s}`: use seconds or 10s, 5m"));
+    let s = s.trim();
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+    let (num, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: u64 = num.parse().map_err(|_| bad())?;
+    match unit {
+        "s" => Ok(n),
+        "m" => Ok(n * 60),
+        "h" => Ok(n * 3600),
+        _ => Err(bad()),
+    }
+}
+
+/// The `webhook` action of the flags.
+fn webhook_action(ctx: &Ctx, a: &ScheduleArgs) -> anyhow::Result<Value> {
+    let mut v = json!({"type": "webhook"});
+    match (&a.webhook, &a.webhook_url_secret) {
+        (Some(u), _) => v["url"] = json!(u),
+        (_, Some(s)) => v["url_secret"] = json!(s),
+        _ => {}
+    }
+    if let Some(m) = &a.method {
+        let m = m.to_ascii_uppercase();
+        if !matches!(m.as_str(), "POST" | "PUT") {
+            return Err(CliError::usage(format!(
+                "bad --method `{m}`: use POST or PUT"
+            )));
+        }
+        v["method"] = json!(m);
+    }
+    let format = a.format.as_deref().unwrap_or(if a.template_file.is_some() {
+        "template"
+    } else {
+        "json"
+    });
+    if !matches!(format, "json" | "slack" | "discord" | "ntfy" | "template") {
+        return Err(CliError::usage(format!(
+            "bad --format `{format}`: use json, slack, discord, ntfy, or template"
+        )));
+    }
+    v["format"] = json!(format);
+    match (&a.template_file, format) {
+        (Some(f), "template") => {
+            let text = if f == "-" {
+                ctx.text("-")?
+            } else {
+                std::fs::read_to_string(f)
+                    .map_err(|e| CliError::usage(format!("cannot read {f}: {e}")))?
+            };
+            v["template"] = json!(text);
+        }
+        (None, "template") => {
+            return Err(CliError::usage(
+                "--format template needs --template-file <file|->",
+            ));
+        }
+        (Some(_), _) => {
+            return Err(CliError::usage(
+                "--template-file goes with --format template",
+            ));
+        }
+        (None, _) => {}
+    }
+    if let Some(c) = &a.content_type {
+        v["content_type"] = json!(c);
+    }
+    let mut headers = Vec::new();
+    for h in &a.headers {
+        let (name, value) = h
+            .split_once(':')
+            .ok_or_else(|| CliError::usage(format!("bad --header `{h}`: use 'Name: value'")))?;
+        headers.push(json!({"name": name.trim(), "value": value.trim()}));
+    }
+    for h in &a.header_secrets {
+        let (name, secret) = h.split_once('=').ok_or_else(|| {
+            CliError::usage(format!("bad --header-secret `{h}`: use 'Name=secretname'"))
+        })?;
+        headers.push(json!({"name": name.trim(), "secret": secret.trim()}));
+    }
+    if !headers.is_empty() {
+        v["headers"] = json!(headers);
+    }
+    if let Some(s) = &a.sign_secret {
+        let mut sig = json!({"secret": s});
+        if let Some(h) = &a.sign_header {
+            sig["header"] = json!(h);
+        }
+        v["signing"] = sig;
+    }
+    if let Some(t) = &a.timeout {
+        v["timeout_secs"] = json!(seconds("--timeout", t)?);
+    }
+    Ok(v)
 }
 
 fn catch_up_of(a: &ScheduleArgs) -> anyhow::Result<Option<Value>> {
@@ -488,7 +680,7 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
             let action = action_of(ctx, args)?.ok_or_else(|| {
                 CliError::usage(
                     "give the action: --mail, --turn, --exec, --agent with --verb, --probe, \
-                     or --card",
+                     --card, or --webhook",
                 )
             })?;
             let project = if args.global {
@@ -605,6 +797,66 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
                 let rows: Vec<Value> = as_items(v).iter().map(run_row).collect();
                 print_table(c, &rows, RUN_COLS, "no runs");
             })
+        }
+        ScheduleCmd::Deliveries { schedule, limit } => {
+            let items = ctx
+                .api
+                .list(
+                    &format!("{}/deliveries", path(schedule)),
+                    Vec::new(),
+                    Some(*limit),
+                )
+                .await?;
+            let v = Value::Array(items);
+            ctx.emit(&v, |c, v| {
+                let rows: Vec<Value> = as_items(v).iter().map(delivery_row).collect();
+                print_table(c, &rows, DELIVERY_COLS, "no deliveries");
+            })
+        }
+        ScheduleCmd::Redeliver { schedule, delivery } => {
+            let d = ctx
+                .api
+                .post(
+                    &format!(
+                        "{}/deliveries/{}/redeliver",
+                        path(schedule),
+                        encode(delivery)
+                    ),
+                    None,
+                )
+                .await?;
+            ctx.emit(&d, |c, d| {
+                c.line(format!(
+                    "queued delivery {} (a copy of {})",
+                    field(d, "id"),
+                    field(d, "redelivery_of")
+                ));
+            })
+        }
+        ScheduleCmd::Test { schedule } => {
+            let r = ctx
+                .api
+                .post(&format!("{}/test", path(schedule)), None)
+                .await?;
+            ctx.emit(&r, |c, r| {
+                let q = &r["request"];
+                c.line(format!("{} {}", field(q, "method"), field(q, "url")));
+                for h in q["headers"].as_array().into_iter().flatten() {
+                    c.line(format!(
+                        "{}: {}",
+                        h[0].as_str().unwrap_or_default(),
+                        h[1].as_str().unwrap_or_default()
+                    ));
+                }
+                c.line("");
+                c.line(field(q, "body"));
+                c.line("");
+                print_delivery(c, &r["delivery"]);
+            })?;
+            if r["delivery"]["status"] != "ok" {
+                return Err(CliError::RemoteExit(1).into());
+            }
+            Ok(())
         }
     }
 }

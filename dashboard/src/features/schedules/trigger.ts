@@ -1,7 +1,7 @@
 // The trigger part of the schedule form (docs/api.md §19.4): the kinds, the
 // match rules, the optional dedupe and escalation, and max_per_hour, to and
-// from the spec `on`. A trigger runs only mail, exec, or card: to notify an
-// agent, it mails it. The daemon has the last word on each field; its `422`
+// from the spec `on`. A trigger runs only mail, exec, card, or webhook: to
+// notify an agent, it mails it. The daemon has the last word on each field; its `422`
 // shows under the field that `details.field` names. Pure; no Solid imports.
 
 import type { MatchOp, MatchRule, ScheduleActionType, TriggerActionType, TriggerSpec } from "../../api/types";
@@ -38,7 +38,7 @@ export interface TriggerFields {
 export type TriggerKey = keyof TriggerFields;
 
 /** The actions of a trigger. `turn`, `agent`, and `probe` are not: the daemon refuses them (`422`, field `action`). */
-export const TRIGGER_ACTIONS: readonly TriggerActionType[] = ["mail", "exec", "card"];
+export const TRIGGER_ACTIONS: readonly TriggerActionType[] = ["mail", "exec", "card", "webhook"];
 export const isTriggerAction = (t: ScheduleActionType): t is TriggerActionType => (TRIGGER_ACTIONS as readonly string[]).includes(t);
 
 export const MATCH_OPS: readonly { id: MatchOp; label: string }[] = [
@@ -49,7 +49,7 @@ export const MATCH_OPS: readonly { id: MatchOp; label: string }[] = [
 ];
 
 /** The kinds the forges send (docs/api.md §20.4), for the suggestions. */
-export const KIND_SUGGESTIONS: readonly string[] = ["ci.run.failed", "ci.run.succeeded", "ci.job.failed", "ci.run.*", "git.push", "pr.*", "pr.opened", "pr.merged"];
+export const KIND_SUGGESTIONS: readonly string[] = ["ci.run.failed", "ci.run.succeeded", "ci.job.failed", "ci.run.*", "git.push", "pr.*", "pr.opened", "pr.merged", "monitor.status"];
 
 /** The match paths that the events of a forge have. */
 export const PATH_SUGGESTIONS: readonly string[] = ["data.branch", "data.repo", "data.workflow", "data.job", "data.conclusion", "data.sender", "data.provider", "data.pr.base", "project", "kind", "actor", "summary"];

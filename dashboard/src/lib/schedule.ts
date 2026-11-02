@@ -214,6 +214,17 @@ export function actionWords(action: ScheduleAction, project: string | null): str
       return `probe ${action.subscription}`;
     case "card":
       return `card ${action.op} ${action.key}${action.title ? `: ${action.title}` : ""}`;
+    case "webhook":
+      return `webhook ${action.method ?? "POST"} ${action.url_secret ? `(secret ${action.url_secret})` : webhookHost(action.url ?? "")} · ${action.format ?? "json"}`;
+  }
+}
+
+/** The host of a webhook URL (no path: a path can hold a token), or the text when it does not parse. */
+export function webhookHost(url: string): string {
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
   }
 }
 

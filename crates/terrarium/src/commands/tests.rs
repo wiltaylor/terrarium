@@ -4410,6 +4410,285 @@ async fn schedules_every_command() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), 3);
 }
 
+/// `schedule` with a webhook action (docs/api.md §19.5): the flags, the
+/// deliveries, a redeliver, and a test send.
+#[tokio::test]
+async fn schedule_webhooks() {
+    let sched = json!({"id": "01HOOK", "name": "page", "project": "terra", "enabled": true,
+        "spec": {"kind": "on", "kinds": ["monitor.status"]},
+        "action": {"type": "webhook", "url": "https://ntfy.example/alerts", "format": "ntfy"},
+        "catch_up": "skip", "run_as": "operator", "created_by": "operator", "source": "api",
+        "next_run_at": null, "runs_count": 0});
+    let at = |body: Value| (Post, "/api/schedules", vec![], Some(body));
+    let out = ok(
+        false,
+        &["-p", "terra", "schedule", "ls"],
+        vec![(200, json!([sched.clone()]))],
+        vec![(Get, "/api/schedules", vec![("project", "terra")], None)],
+    )
+    .await;
+    assert!(
+        out.contains("webhook POST https://ntfy.example/alerts (ntfy)"),
+        "{out}"
+    );
+    ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "page",
+            "--on",
+            "monitor.status",
+            "--match",
+            "data.to=crit",
+            "--webhook",
+            "https://hooks.example/x",
+            "--format",
+            "slack",
+            "--header",
+            "X-Env: prod",
+            "--header-secret",
+            "Authorization=hook-token",
+            "--sign-secret",
+            "hook-sign",
+            "--method",
+            "put",
+            "--timeout",
+            "15s",
+        ],
+        vec![(201, sched.clone())],
+        vec![at(json!({"name": "page", "project": "terra",
+            "spec": {"kind": "on", "kinds": ["monitor.status"],
+                     "match": [{"path": "data.to", "op": "eq", "value": "crit"}]},
+            "action": {"type": "webhook", "url": "https://hooks.example/x", "method": "PUT",
+                       "format": "slack",
+                       "headers": [{"name": "X-Env", "value": "prod"},
+                                   {"name": "Authorization", "secret": "hook-token"}],
+                       "signing": {"secret": "hook-sign"}, "timeout_secs": 15}}))],
+    )
+    .await;
+    // A template from stdin; the format defaults to template; a URL from a
+    // secret.
+    ok_in(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "tpl",
+            "--on",
+            "ci.*",
+            "--webhook-url-secret",
+            "slack-url",
+            "--template-file",
+            "-",
+        ],
+        vec![(201, sched.clone())],
+        Some("{\"k\": \"{{event.kind}}\"}"),
+        vec![at(json!({"name": "tpl", "project": "terra",
+            "spec": {"kind": "on", "kinds": ["ci.*"]},
+            "action": {"type": "webhook", "url_secret": "slack-url", "format": "template",
+                       "template": "{\"k\": \"{{event.kind}}\"}"}}))],
+    )
+    .await;
+    // The exec timeout takes seconds and a duration too.
+    ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "set",
+            "01HOOK",
+            "--exec",
+            "box",
+            "--timeout",
+            "2m",
+            "--",
+            "true",
+        ],
+        vec![(200, sched.clone())],
+        vec![(
+            Patch,
+            "/api/schedules/01HOOK",
+            vec![],
+            Some(
+                json!({"action": {"type": "exec", "target": "box", "cmd": ["true"],
+                                   "timeout_secs": 120}}),
+            ),
+        )],
+    )
+    .await;
+    // Usage errors: webhook flags without --webhook, a bad format, a bad
+    // header, a bad method, a template with no file.
+    for args in [
+        vec![
+            "-p", "terra", "schedule", "new", "x", "--on", "a", "--format", "slack",
+        ],
+        vec![
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "x",
+            "--on",
+            "a",
+            "--webhook",
+            "https://x",
+            "--format",
+            "xml",
+        ],
+        vec![
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "x",
+            "--on",
+            "a",
+            "--webhook",
+            "https://x",
+            "--header",
+            "NoColon",
+        ],
+        vec![
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "x",
+            "--on",
+            "a",
+            "--webhook",
+            "https://x",
+            "--method",
+            "GET",
+        ],
+        vec![
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "x",
+            "--on",
+            "a",
+            "--webhook",
+            "https://x",
+            "--format",
+            "template",
+        ],
+        vec![
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "x",
+            "--on",
+            "a",
+            "--webhook",
+            "https://x",
+            "--timeout",
+            "soon",
+        ],
+    ] {
+        let r = exec(false, &args, vec![], None).await;
+        let e = r.result.unwrap_err();
+        assert_eq!(exit_code_of(&e), exit::USAGE, "{args:?}: {e}");
+        assert!(r.reqs.is_empty(), "{args:?}");
+    }
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "schedule",
+            "new",
+            "x",
+            "--on",
+            "a",
+            "--webhook",
+            "https://x",
+            "--mail",
+            "lead",
+        ])
+        .is_err()
+    );
+    // deliveries, redeliver, test.
+    let d = json!({"id": "01DEL", "schedule": "01HOOK", "event_seq": 9,
+                   "event_kind": "monitor.status", "test": false, "url": "https://hooks.example/x",
+                   "method": "POST", "status": "pending", "http_status": 503, "attempt": 1,
+                   "duration_ms": 12, "error": "status 503",
+                   "next_attempt_at": "2026-11-03T10:00:10.000Z",
+                   "created_at": "2026-11-03T10:00:00.000Z"});
+    let out = ok(
+        false,
+        &["schedule", "deliveries", "terra/page", "--limit", "5"],
+        vec![(200, json!([d.clone()]))],
+        vec![(
+            Get,
+            "/api/schedules/terra%2Fpage/deliveries",
+            vec![("limit", "5")],
+            None,
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("01DEL") && out.contains("9 monitor.status"),
+        "{out}"
+    );
+    assert!(out.contains("status 503 (next"), "{out}");
+    let mut copy = d.clone();
+    copy["id"] = json!("01NEW");
+    copy["redelivery_of"] = json!("01DEL");
+    let out = ok(
+        false,
+        &["schedule", "redeliver", "01HOOK", "01DEL"],
+        vec![(202, copy)],
+        vec![req(
+            Post,
+            "/api/schedules/01HOOK/deliveries/01DEL/redeliver",
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("queued delivery 01NEW (a copy of 01DEL)"),
+        "{out}"
+    );
+    let mut done = d.clone();
+    done["status"] = json!("ok");
+    done["http_status"] = json!(200);
+    done["error"] = Value::Null;
+    done["response"] = json!("thanks");
+    let test = json!({"delivery": done,
+        "request": {"method": "POST", "url": "https://hooks.example/x",
+                    "headers": [["Content-Type", "application/json"],
+                                ["Authorization", "[secret:hook-token]"]],
+                    "body": "{\"text\": \"hi\"}"}});
+    let out = ok(
+        false,
+        &["schedule", "test", "01HOOK"],
+        vec![(200, test.clone())],
+        vec![req(Post, "/api/schedules/01HOOK/test")],
+    )
+    .await;
+    assert!(out.contains("Authorization: [secret:hook-token]"), "{out}");
+    assert!(
+        out.contains("ok (200)") && out.contains("response:  thanks"),
+        "{out}"
+    );
+    let mut failed = test;
+    failed["delivery"]["status"] = json!("failed");
+    let r = exec(
+        false,
+        &["schedule", "test", "01HOOK"],
+        vec![(200, failed)],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), 1);
+}
+
 /// `event emit` and `event source` (docs/api.md §20).
 #[tokio::test]
 async fn event_emit_and_sources() {

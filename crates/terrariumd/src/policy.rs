@@ -740,6 +740,10 @@ pub fn manage_schedule(actor: &Actor, project: Option<&str>, reach: &Reach) -> A
         )),
         Reach::Card { project: q } if q == p => Ok(()),
         Reach::Card { project: q } => outside(format!("the board of `{q}` is another project's")),
+        // The URL is the project_admin's to choose (the SSRF rules of
+        // `crate::webhooks::net` apply to every caller); the secrets of
+        // its headers are checked on their own (`webhooks::check_secrets`).
+        Reach::Webhook { .. } => Ok(()),
     }
 }
 

@@ -16,6 +16,7 @@ import type { Agent, AgentVerb, CardOp, CatchUp, NewSchedule, Project, Schedule,
 import { previewCron } from "../../lib/cron";
 import { commandLine, parseEvery, splitCommand } from "../../lib/schedule";
 import { buildTriggerSpec, ciFailurePreset, emptyRow, emptyTriggerFields, isTriggerAction, triggerFieldsFromSpec, type MatchRow, type TriggerFields } from "./trigger";
+import { buildWebhookAction, emptyHeaderRow, emptyWebhookFields, webhookFieldsFromAction, type HeaderRow, type WebhookFields } from "./webhook";
 
 export const GLOBAL = "global" as const;
 
@@ -38,12 +39,13 @@ export const ACTION_TYPES: readonly { id: ScheduleActionType; label: string }[] 
   { id: "agent", label: "Start, stop, or restart an agent" },
   { id: "probe", label: "Probe a subscription" },
   { id: "card", label: "Open or close a card on the board" },
+  { id: "webhook", label: "Send a webhook (an HTTP request)" },
 ];
 
-/** The action choices of a spec kind: a trigger runs only mail, exec, or card. */
+/** The action choices of a spec kind: a trigger runs only mail, exec, card, or webhook. */
 export const actionTypesFor = (specKind: ScheduleSpecKind) => (specKind === "on" ? ACTION_TYPES.filter((a) => isTriggerAction(a.id)) : ACTION_TYPES);
 
-export interface ScheduleForm extends TriggerFields {
+export interface ScheduleForm extends TriggerFields, WebhookFields {
   name: string;
   /** A project name, `GLOBAL`, or "" (not chosen). */
   scope: string;
@@ -76,6 +78,7 @@ export interface ScheduleForm extends TriggerFields {
   /** The command as one line; `splitCommand` makes the argv. */
   cmd: string;
   cwd: string;
+  /** The time limit in seconds: of an exec (1-3600), or of a webhook request (1-30). */
   timeout: string;
   subscription: string;
   cardOp: CardOp;
@@ -128,6 +131,16 @@ export const FIELD_OF: Record<string, FormKey> = {
   "spec.escalate.reset_on": "escalateResetOn",
   "spec.escalate.to": "escalateTo",
   "spec.max_per_hour": "maxPerHour",
+  "action.url": "hookUrl",
+  "action.url_secret": "hookUrlSecret",
+  "action.method": "hookMethod",
+  "action.format": "hookFormat",
+  "action.template": "hookTemplate",
+  "action.content_type": "hookContentType",
+  "action.headers": "hookHeaders",
+  "action.signing": "hookSignSecret",
+  "action.signing.secret": "hookSignSecret",
+  "action.signing.header": "hookSignHeader",
   catch_up: "catchUp",
   enabled: "enabled",
 };
@@ -234,6 +247,7 @@ export const emptyScheduleForm = (selectedProject: string | null | undefined, in
   cardBody: "",
   cardColumn: "",
   ...emptyTriggerFields(),
+  ...emptyWebhookFields(),
   ...init,
 });
 
@@ -250,6 +264,7 @@ export function formFromSchedule(s: Schedule): ScheduleForm {
   else if (a.type === "exec") Object.assign(f, { target: a.target, cmd: commandLine(a.cmd), cwd: a.cwd ?? "", timeout: a.timeout_secs ? String(a.timeout_secs) : "" });
   else if (a.type === "agent") Object.assign(f, { agent: a.agent, verb: a.verb });
   else if (a.type === "probe") f.subscription = a.subscription;
+  else if (a.type === "webhook") Object.assign(f, webhookFieldsFromAction(a));
   else Object.assign(f, { cardOp: a.op, cardKey: a.key, cardTitle: a.title ?? "", cardBody: a.body ?? "", cardColumn: a.column ?? "" });
   return f;
 }
@@ -310,6 +325,8 @@ function buildAction(f: ScheduleForm): Built<ScheduleAction> {
       const opt = (k: "title" | "body" | "column", v: string) => (v.trim() ? { [k]: k === "body" ? v : v.trim() } : {});
       return { value: { type: "card", op: f.cardOp, key: f.cardKey.trim(), ...opt("title", f.cardTitle), ...opt("body", f.cardBody), ...opt("column", f.cardColumn) } };
     }
+    case "webhook":
+      return buildWebhookAction(f);
   }
 }
 
@@ -318,7 +335,7 @@ export function scheduleBody(f: ScheduleForm): { body: NewSchedule } | { error: 
   const name = f.name.trim();
   if (!name) return { error: "Give the schedule a name.", field: "name" };
   if (!f.scope) return { error: "Choose a scope: a project, or global.", field: "scope" };
-  if (f.specKind === "on" && !isTriggerAction(f.actionType)) return { error: "A trigger runs only mail, exec, or card. To notify an agent, mail it.", field: "actionType" };
+  if (f.specKind === "on" && !isTriggerAction(f.actionType)) return { error: "A trigger runs only mail, exec, card, or webhook. To notify an agent, mail it.", field: "actionType" };
   const spec = buildSpec(f);
   if ("error" in spec) return spec;
   const action = buildAction(f);
@@ -405,6 +422,7 @@ export function createScheduleDialog(api: Pick<Api, "schedules">, opts: { projec
     if (outcome().kind !== "sending" && outcome().kind !== "done") setOutcome({ kind: "idle" });
   };
   const setRules = (fn: (rows: MatchRow[]) => MatchRow[]) => set("rules", fn(form().rules));
+  const setHeaders = (fn: (rows: HeaderRow[]) => HeaderRow[]) => set("hookHeaders", fn(form().hookHeaders));
 
   return {
     form,
@@ -416,6 +434,9 @@ export function createScheduleDialog(api: Pick<Api, "schedules">, opts: { projec
     addRule: () => setRules((rows) => [...rows, emptyRow()]),
     setRule: (i: number, patch: Partial<MatchRow>) => setRules((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r))),
     removeRule: (i: number) => setRules((rows) => rows.filter((_, j) => j !== i)),
+    addHeader: () => setHeaders((rows) => [...rows, emptyHeaderRow()]),
+    setHeader: (i: number, patch: Partial<HeaderRow>) => setHeaders((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r))),
+    removeHeader: (i: number) => setHeaders((rows) => rows.filter((_, j) => j !== i)),
     /** Fill the form with "CI failure → mail an agent". `agent` is the recipient when the form has none. */
     ciPreset(agent?: string) {
       setForm((f) => ({ ...f, ...ciFailurePreset(f, agent) }));

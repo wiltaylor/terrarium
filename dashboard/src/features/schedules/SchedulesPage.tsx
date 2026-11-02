@@ -8,6 +8,8 @@
 // under the triggers. A row opens to its run history; a trigger run shows
 // the event that started it. `schedule` events keep the list live:
 // `run_started` shows a spinner on the row, `run_finished` sets the last run.
+// A webhook action (§19.5) also opens to its Deliveries panel, with Send
+// test and Redeliver.
 
 import { A, useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
@@ -22,6 +24,7 @@ import { EventSourcesSection } from "./EventSources";
 import { createRunHistory } from "./history";
 import { applyRunAnswer, applyScheduleEvent, eventRun, filterSchedules, groupSchedules, RUN_CHIP, runOutputText, runSeconds, SCHEDULE_TABS, scheduleScope, scheduleScopeLabel, sortSchedules, tabOf, tabParam, touchesRuns, upsertSchedule, type ScheduleKind, type ScheduleListState } from "./model";
 import { ScheduleDialog } from "./ScheduleDialog";
+import { DeliveriesPanel } from "./Deliveries";
 
 const COLS = 8;
 
@@ -282,7 +285,7 @@ export default function SchedulesPage() {
                                   )}
                                 </Show>
                                 <button class="link small" onClick={() => toggleOpen(s.id)}>
-                                  {isOpen() ? "hide runs" : `runs (${s.runs_count})`}
+                                  {isOpen() ? "hide runs" : s.action.type === "webhook" ? `runs (${s.runs_count}) and deliveries` : `runs (${s.runs_count})`}
                                 </button>
                               </td>
                               <td>
@@ -319,6 +322,9 @@ export default function SchedulesPage() {
                             <Show when={isOpen()}>
                               <tr class="lease-row">
                                 <td colSpan={COLS}>
+                                  <Show when={s.action.type === "webhook"}>
+                                    <DeliveriesPanel schedule={s} />
+                                  </Show>
                                   <RunHistoryPanel schedule={s} />
                                 </td>
                               </tr>
@@ -355,7 +361,7 @@ export default function SchedulesPage() {
         <EventSourcesSection project={project()} />
       </Show>
       <MockOnlyNote label="new API">
-        <code>GET</code>, <code>POST /api/schedules</code>, <code>GET</code>, <code>PATCH</code>, <code>DELETE /api/schedules/{"{id}"}</code>, <code>POST .../run|enable|disable</code>, and <code>GET .../runs</code> are docs/api.md §19; <code>/api/event-sources</code> is §20.
+        <code>GET</code>, <code>POST /api/schedules</code>, <code>GET</code>, <code>PATCH</code>, <code>DELETE /api/schedules/{"{id}"}</code>, <code>POST .../run|enable|disable</code>, <code>GET .../runs</code>, and the webhook <code>GET .../deliveries</code>, <code>POST .../deliveries/{"{id}"}/redeliver</code>, <code>POST .../test</code> are docs/api.md §19; <code>/api/event-sources</code> is §20.
       </MockOnlyNote>
     </>
   );

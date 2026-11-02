@@ -1461,6 +1461,79 @@ and the top 5 processes by CPU) and a dashboard with a block of each
 kind. It picks the first host target that the project may use, and says
 which one.
 
+### 2.13d3 Webhooks: page Slack, Discord, or ntfy when a monitor goes critical
+
+A trigger can send an HTTP request about each event: the `webhook`
+action (docs/api.md §19.5). The daemon queues each delivery, and tries
+it again after a network error or a `5xx`. Use the event
+`monitor.status`: it comes only when the status of a monitor changes.
+`monitor.result` comes at each run of each monitor, and floods a
+receiver.
+
+1. Keep the URL of a Slack or Discord webhook in a secret: the URL is the
+   credential.
+
+   ```bash
+   terrarium secret set slack-alerts --kind api_key -p demo   # paste the URL
+   terrarium secret set discord-alerts --kind api_key -p demo
+   ```
+
+2. Make the trigger, and send a test. The test sends a sample
+   `monitor.status` event at once and prints the request and the answer:
+
+   ```bash
+   # Slack: {"text": "[demo] monitor.status: monitor disk-root: ok → crit 93 %"}
+   terrarium -p demo schedule new disk-slack --on monitor.status --match data.to=crit \
+     --webhook-url-secret slack-alerts --format slack
+   # Discord: {"content": "..."}; the URL is a secret too.
+   terrarium -p demo schedule new disk-discord --on monitor.status --match data.to=crit \
+     --webhook-url-secret discord-alerts --format discord
+   # ntfy: the summary as text, with Title, Priority 5 for crit, and Tags.
+   terrarium -p demo schedule new disk-ntfy --on monitor.status --match data.to=crit \
+     --webhook https://ntfy.sh/my-terrarium-alerts --format ntfy
+   terrarium -p demo schedule test disk-ntfy
+   terrarium -p demo schedule deliveries disk-ntfy
+   ```
+
+   In the dashboard: **Schedules** > **Triggers** > **New trigger**, the
+   action **Send a webhook**. The dialog shows a live preview of the body
+   for a sample event. Open the row of the trigger for **Send test** and
+   the **Deliveries** panel (status, HTTP status, time, the answer, and
+   **Redeliver**).
+
+3. A generic receiver of your own: send the event as JSON, signed with a
+   secret, and check the signature before you trust the body.
+
+   ```bash
+   terrarium secret set hook-sign --kind api_key -p demo    # paste a long random value
+   terrarium secret set hook-token --kind api_key -p demo   # the Authorization value
+   terrarium -p demo schedule new disk-hook --on monitor.status \
+     --webhook https://tools.lan/terrarium --sign-secret hook-sign \
+     --header-secret 'Authorization=hook-token'
+   ```
+
+   The body is `{"event": {"kind", "at", "project", "summary", "data", ...},
+   "trigger": {"name", "project"}}`. The header `X-Terrarium-Signature`
+   is `sha256=` and the hex HMAC-SHA256 of the raw body. Check it on the
+   raw bytes, before you parse the JSON:
+
+   ```python
+   import hashlib, hmac
+
+   def valid(raw_body: bytes, header: str, secret: bytes) -> bool:
+       want = "sha256=" + hmac.new(secret, raw_body, hashlib.sha256).hexdigest()
+       return hmac.compare_digest(want, header)
+   ```
+
+   `X-Terrarium-Delivery` is the delivery ID: a retry or a redeliver can
+   send the same event again, so drop an ID that you saw before.
+
+A trigger that fails 20 times in a row stops (it is disabled), and the
+operator gets one mail. Fix the receiver, then run `terrarium schedule
+enable <name>`. On a public server, set `TERRARIUM_WEBHOOK_PRIVATE=deny`
+in `.env`, so that a webhook cannot reach the LAN, this host, or the
+cloud metadata address.
+
 ### 2.13e Ephemeral agents: a lead spawns helpers
 
 A lead can split its work: it spawns short-lived agents from a template,

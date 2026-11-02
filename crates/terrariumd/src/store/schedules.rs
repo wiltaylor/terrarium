@@ -65,6 +65,10 @@ pub fn max_per_project() -> usize {
     })
 }
 
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
 /// A time as stored.
 pub fn stamp(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Millis, true)
@@ -356,7 +360,7 @@ pub fn check_trigger_shape(spec: &ScheduleSpec, action: &ScheduleAction) -> ApiR
         return Err(field_error(
             "action",
             format!(
-                "a trigger (spec `on`) runs a mail, exec, or card action, not `{}`; \
+                "a trigger (spec `on`) runs a mail, exec, card, or webhook action, not `{}`; \
                  to notify an agent, mail it",
                 action.kind()
             ),
@@ -463,6 +467,10 @@ pub struct Schedule {
     /// Why the daemon disabled the schedule, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+    /// A webhook action: the failed attempts in a row (the 20th disables
+    /// it).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub webhook_failures: i64,
     pub created_at: String,
     pub updated_at: String,
     #[serde(skip)]
@@ -514,6 +522,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<(Schedule, String, String, Option<String
         source: r.get("source")?,
         consecutive_skips: r.get("skips")?,
         disabled_reason: r.get("disabled_reason")?,
+        webhook_failures: r.get("webhook_failures")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
         anchor_at: r.get("anchor_at")?,
@@ -678,6 +687,11 @@ pub enum Reach {
     Card {
         project: String,
     },
+    /// An HTTP request to a URL (a `webhook` action). `host` is for the
+    /// summaries: the host, or `secret <name>` for a URL from a secret.
+    Webhook {
+        host: String,
+    },
 }
 
 impl Reach {
@@ -688,6 +702,7 @@ impl Reach {
             Self::Agent { name, project, .. } => format!("{project}/{name}"),
             Self::Target { name, .. } | Self::Subscription { name, .. } => name.clone(),
             Self::Card { project } => format!("the board of {project}"),
+            Self::Webhook { host } => format!("webhook {host}"),
         }
     }
 }
@@ -818,6 +833,18 @@ pub fn resolve_reach(
             Ok(Reach::Card {
                 project: p.to_owned(),
             })
+        }
+        ScheduleAction::Webhook(a) => {
+            a.check().map_err(|(f, m)| field_error(f, m))?;
+            let host = match &a.url_secret {
+                Some(name) => format!("secret {name}"),
+                None => crate::webhooks::net::check_url(&a.url)
+                    .map_err(|e| field_error("action.url", e))?
+                    .host_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            };
+            Ok(Reach::Webhook { host })
         }
     }
 }
@@ -1017,6 +1044,7 @@ pub fn update(
     if changed.contains(&"enabled") && s.enabled {
         s.consecutive_skips = 0;
         s.disabled_reason = None;
+        crate::store::webhooks::reset_failures(t, id)?;
     }
     if changed.is_empty() && s.source == old.source {
         return Ok(old);

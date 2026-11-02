@@ -273,6 +273,16 @@ export const authorizedKeysLine = (pub: string): string => `echo '${pub.replace(
 /** The secret kind that the `credential` of a target kind names. */
 export const credentialKind = (k: TargetKind): SecretKind | null => (k === "ssh" ? "ssh_key" : k === "vnc" || k === "rdp" ? "login" : null);
 
+/** What names a secret: a target (by its kind), or a webhook (a header value or a signing key, docs/api.md §19.5). */
+export type CredentialUse = TargetKind | "webhook";
+
+/** The secret kinds of a use. A webhook takes a secret with one main value: not a login, not an ssh_key. */
+export const credentialKinds = (k: CredentialUse): SecretKind[] => {
+  if (k === "webhook") return ["api_key", "token", "github_token", "generic"];
+  const one = credentialKind(k);
+  return one ? [one] : [];
+};
+
 export interface CredentialChoice {
   name: string;
   scope: string;
@@ -298,10 +308,10 @@ export const NEEDS_GRANT_HINT = "operator-set; a project_admin needs a grant";
  * label. The dashboard is the operator's, and the operator needs no grant,
  * so the choice stays in the list.
  */
-export function credentialChoices(list: readonly Secret[], kind: TargetKind, scope: string, granted?: ReadonlySet<string>): CredentialChoice[] {
-  const want = credentialKind(kind);
-  if (!want) return [];
-  const ok = list.filter((s) => s.kind === want && (s.scope === GLOBAL || (scope !== GLOBAL && s.scope === scope)));
+export function credentialChoices(list: readonly Secret[], kind: CredentialUse, scope: string, granted?: ReadonlySet<string>): CredentialChoice[] {
+  const want = credentialKinds(kind);
+  if (!want.length) return [];
+  const ok = list.filter((s) => want.includes(s.kind) && (s.scope === GLOBAL || (scope !== GLOBAL && s.scope === scope)));
   const byName = new Map<string, Secret>();
   for (const s of ok) {
     const had = byName.get(s.name);

@@ -358,6 +358,19 @@ export function createSecretMock(c: SecretMockContext) {
   return {
     api,
     /**
+     * The secret that a webhook names (docs/api.md §19.5): the project's
+     * first, then the global one; its main value (not shown by any API);
+     * and whether a project_admin of `project` may use it (its own project's
+     * secret, or a global one with a grant to the project).
+     */
+    webhookSecret(project: string | null, name: string): { scope: string; kind: SecretKind; value: string; usable: boolean } | undefined {
+      const r = (project ? get(project, name) : undefined) ?? get(GLOBAL, name);
+      if (!r) return undefined;
+      const value = r.values.value ?? r.values.password ?? Object.values(r.values)[0] ?? "";
+      const usable = r.info.scope !== GLOBAL || (!!project && grants.some((g) => g.secret === r.info.id && g.grantee === `project:${project}`));
+      return { scope: r.info.scope, kind: r.info.kind, value, usable };
+    },
+    /**
      * `credential_info` of a target view; undefined with no `credential`.
      * The mock's viewer is the operator, so each target and repo of the mock
      * counts as set by an admin (`credential_admin`, PLAN §16b.6a): a global

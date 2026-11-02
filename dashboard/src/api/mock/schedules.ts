@@ -11,11 +11,16 @@
 // A `file` schedule changes only in its file (`409 file_managed`).
 // Triggers (spec `on`, §19.4) are rows of the same list; `?kind=time|trigger`
 // filters them. The mock checks a trigger as the daemon does (the kinds, the
-// match rules, dedupe, escalate, max_per_hour, and only mail, exec, or card),
-// but it does not run triggers on events: the seed has trigger runs.
+// match rules, dedupe, escalate, max_per_hour, and only mail, exec, card, or
+// webhook), but it does not run triggers on events: the seed has trigger runs.
+// A webhook action (§19.5) has a delivery log: a run-now or a test send
+// makes a delivery at once; a redeliver makes a copy that ends after
+// `runMs`. The mock answers from the URL: `fail` in it is a 503 (a retry),
+// `404` a 404, `redirect` a 302 (no follow); any other URL is a 200.
 
 import type { Api } from "../client";
-import type { Agent, AgentEvent, MatchRule, Message, NewSchedule, Schedule, ScheduleAction, ScheduleRun, ScheduleSpec, Subscription, Target, TriggerSpec } from "../types";
+import type { Agent, AgentEvent, MatchRule, Message, NewSchedule, Schedule, ScheduleAction, ScheduleRun, ScheduleSpec, SecretKind, Subscription, Target, TriggerSpec, WebhookAction, WebhookDelivery, WebhookTestResult } from "../types";
+import { contentTypeOf, headerNameProblem, MAX_TIMEOUT, previewRequest, sampleEvent, templateProblem, urlProblem } from "../../features/schedules/webhook";
 import { nextRuns, parseCron, validTimeZone } from "../../lib/cron";
 import { paginate } from "../../lib/paging";
 import { parseEvery } from "../../lib/schedule";
@@ -36,7 +41,7 @@ export interface ScheduleMockContext {
   ulid: (tag: string) => string;
   reply: <T>(fn: () => T) => Promise<T>;
   fail: Fail;
-  emit: (d: { kind: "schedule"; actor?: string; project?: string; agent?: string; agent_id?: string; summary: string; data: Record<string, unknown> }) => AgentEvent;
+  emit: (d: { kind: "schedule" | "webhook.delivery"; actor?: string; project?: string; agent?: string; agent_id?: string; summary: string; data: Record<string, unknown> }) => AgentEvent;
   audit: (action: string, target: string, project: string | undefined, detail?: Record<string, unknown>) => unknown;
   agent: (key: string) => Agent;
   target: (name: string) => Target;
@@ -46,6 +51,8 @@ export interface ScheduleMockContext {
   /** How long a run takes before `run_finished`. */
   runMs: number;
   caller?: ScheduleCaller;
+  /** The secret that a webhook names: the project's first, then the global one (./secrets.ts). */
+  webhookSecret?: (project: string | null, name: string) => { scope: string; kind: SecretKind; value: string; usable: boolean } | undefined;
 }
 
 /** When the schedule fires next, from `from` (ms), or null. */
@@ -71,7 +78,7 @@ export function computeNext(s: Pick<Schedule, "enabled" | "spec" | "last_run">, 
 }
 
 /** The seed: two schedules of terrarium, one of webshop, one global; runs for each. */
-export function seedSchedules(now: number, agents: Agent[]): { schedules: Schedule[]; runs: ScheduleRun[] } {
+export function seedSchedules(now: number, agents: Agent[]): { schedules: Schedule[]; runs: ScheduleRun[]; deliveries: WebhookDelivery[] } {
   const ago = (min: number) => new Date(now - min * 60_000).toISOString();
   const id = (tag: string, n: number) => `01JB${tag.toUpperCase().padEnd(6, "0").slice(0, 6)}${String(n).padStart(16, "0")}`;
   const runs: ScheduleRun[] = [];
@@ -162,7 +169,51 @@ export function seedSchedules(now: number, agents: Agent[]): { schedules: Schedu
   evRun(60 * 2, 88, "ci.run.failed", "CI failed: wil/terrarium on main (ci.yml)", "ok", "mail to terrarium/lead", { message_id: id("msg", 8), thread_id: id("th", 8), to: "terrarium/lead" });
   evRun(60 * 2 - 30, 90, "ci.run.failed", "CI failed: wil/terrarium on main (ci.yml)", "skipped", "skipped: rate limit");
 
-  const schedules = [standup, tests, nudge, probe, ci];
+  // A webhook trigger (§19.5): a monitor that goes crit pages ntfy. Its deliveries: ok, a retry, a 404, a dropped note.
+  const page = base(
+    6,
+    "page-ntfy",
+    "terrarium",
+    { kind: "on", kinds: ["monitor.status"], match: [{ path: "data.to", op: "eq", value: "crit" }], max_per_hour: 30 },
+    { type: "webhook", url: "https://ntfy.example/terrarium-alerts", format: "ntfy", headers: [{ name: "Authorization", secret: "github-deploy" }] },
+  );
+  const deliveries: WebhookDelivery[] = [];
+  const delivery = (n: number, min: number, seq: number | null, status: WebhookDelivery["status"], http: number | null, attempt: number, extra: Partial<WebhookDelivery> = {}): WebhookDelivery => {
+    const d: WebhookDelivery = {
+      id: id("dlv", n),
+      schedule: page.id,
+      event_seq: seq,
+      event_kind: seq ? "monitor.status" : "",
+      test: false,
+      url: "https://ntfy.example/terrarium-alerts",
+      method: "POST",
+      content_type: "text/plain; charset=utf-8",
+      attempt,
+      status,
+      http_status: http,
+      duration_ms: http ? 80 + n * 7 : null,
+      response: http === 200 ? '{"id":"mock","event":"message"}' : null,
+      error: null,
+      next_attempt_at: null,
+      created_at: ago(min),
+      updated_at: ago(min - 0.1),
+      request: "monitor disk-usage: ok → crit 93 %",
+      request_bytes: 36,
+      ...extra,
+    };
+    deliveries.push(d);
+    return d;
+  };
+  const pageRun = (min: number, seq: number, d: WebhookDelivery) => {
+    const r = run(page.id, min, "ok", `webhook delivery ${d.id} queued (${d.url})`, { delivery: d.id, url: d.url }, null, "event");
+    Object.assign(r, { actor: "system", event_seq: seq, event: { seq, kind: "monitor.status", summary: "monitor disk-usage: ok → crit 93 %" } });
+  };
+  pageRun(60 * 6, 61, delivery(1, 60 * 6, 61, "ok", 200, 1));
+  pageRun(60 * 3, 72, delivery(2, 60 * 3, 72, "failed", 404, 1, { error: "status 404", response: "topic not found" }));
+  pageRun(12, 95, delivery(3, 12, 95, "pending", 503, 2, { error: "status 503", response: "busy", next_attempt_at: new Date(now + 4 * 60_000).toISOString() }));
+  delivery(4, 5, null, "dropped", null, 0, { dropped: 3, error: "rate limit: 3 events dropped in this minute", request: "", request_bytes: 0 });
+
+  const schedules = [standup, tests, nudge, probe, ci, page];
   for (const s of schedules) {
     const mine = runs.filter((r) => r.schedule === s.id);
     s.runs_count = mine.length;
@@ -170,7 +221,7 @@ export function seedSchedules(now: number, agents: Agent[]): { schedules: Schedu
     s.last_run = l ? last(l) : null;
     s.next_run_at = computeNext(s, now);
   }
-  return { schedules, runs };
+  return { schedules, runs, deliveries };
 }
 
 /** The `Api["schedules"]` of the mock. */
@@ -298,10 +349,10 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
     }
   };
 
-  /** A trigger runs only mail, exec, and card; its strings may use templates. */
+  /** A trigger runs only mail, exec, card, and webhook; its strings may use templates. */
   const checkTrigger = (spec: ScheduleSpec, action: ScheduleAction) => {
     if (spec.kind !== "on") return;
-    if (action.type !== "mail" && action.type !== "exec" && action.type !== "card") invalid("action", `a trigger runs only mail, exec, or card, not \`${action.type}\`: to notify an agent, mail it`);
+    if (action.type !== "mail" && action.type !== "exec" && action.type !== "card" && action.type !== "webhook") invalid("action", `a trigger runs a mail, exec, card, or webhook action, not \`${action.type}\`; to notify an agent, mail it`);
     if (action.type === "mail") {
       template("action.subject", action.subject);
       template("action.body", action.body);
@@ -380,10 +431,99 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         }
         return { type: "card", op: action.op, key: action.key, ...(action.title ? { title: action.title } : {}), ...(action.body ? { body: action.body } : {}), ...(column ? { column } : {}) };
       }
+      case "webhook":
+        return checkWebhook(action, project);
       default:
-        return invalid("action.type", `\`${String((action as { type?: unknown }).type)}\` is not mail, turn, exec, agent, probe, or card`);
+        return invalid("action.type", `\`${String((action as { type?: unknown }).type)}\` is not mail, turn, exec, agent, probe, card, or webhook`);
     }
   };
+
+  /** The daemon's `WebhookAction::check`, `net::check_url`, and the secret rights (`webhooks::check_secrets`). */
+  const checkWebhook = (a: WebhookAction, project: string | null): WebhookAction => {
+    const hasUrl = !!a.url?.trim();
+    if (!hasUrl && !a.url_secret) invalid("action.url", "give a URL or a url_secret");
+    if (hasUrl && a.url_secret) invalid("action.url", "give a URL or a url_secret, not both");
+    if (hasUrl) {
+      const p = urlProblem(a.url!);
+      if (p) invalid("action.url", p);
+    }
+    if (a.method && a.method !== "POST" && a.method !== "PUT") invalid("action", `unknown variant \`${String(a.method)}\`, expected \`POST\` or \`PUT\``);
+    const format = a.format ?? "json";
+    if (!["json", "slack", "discord", "ntfy", "template"].includes(format)) invalid("action", `unknown variant \`${String(format)}\``);
+    if (a.timeout_secs !== undefined && (!Number.isInteger(a.timeout_secs) || a.timeout_secs < 1 || a.timeout_secs > MAX_TIMEOUT)) invalid("action.timeout_secs", `${String(a.timeout_secs)} is not 1-${MAX_TIMEOUT}`);
+    if (format === "template") {
+      if (!a.template) invalid("action.template", "format `template` needs a template");
+      const p = templateProblem(a.template!);
+      if (p) invalid("action.template", p);
+    } else if (a.template) invalid("action.template", "a template needs format `template`");
+    for (const h of a.headers ?? []) {
+      const p = headerNameProblem(h.name);
+      if (p) invalid("action.headers", p);
+      const hasValue = h.value !== undefined;
+      const hasSecret = h.secret !== undefined;
+      if (hasValue === hasSecret || (hasSecret && !h.secret!.trim())) invalid("action.headers", `header \`${h.name}\`: give a value or a secret, not both`);
+    }
+    if (a.signing && !a.signing.secret?.trim()) invalid("action.signing.secret", "name a secret");
+    const out: WebhookAction = { type: "webhook", ...(hasUrl ? { url: a.url!.trim() } : { url_secret: a.url_secret }), method: a.method ?? "POST", format, ...(a.template ? { template: a.template } : {}), ...(a.content_type ? { content_type: a.content_type } : {}), ...(a.headers?.length ? { headers: a.headers.map((h) => ({ ...h })) } : {}), ...(a.signing ? { signing: { secret: a.signing.secret, header: a.signing.header || "X-Terrarium-Signature", algo: "sha256" as const } } : {}), ...(a.timeout_secs ? { timeout_secs: a.timeout_secs } : {}) };
+    // A template with a JSON content type must render JSON for a sample event.
+    if (format === "template") {
+      const r = previewRequest(out, sampleEvent("monitor.status", project, c.iso()), "sample", project);
+      if (r.problem) invalid("action.template", r.problem);
+    }
+    const names: [string, string][] = [...(a.url_secret ? [["action.url_secret", a.url_secret] as [string, string]] : []), ...(a.headers ?? []).filter((h) => h.secret).map((h) => ["action.headers", h.secret!] as [string, string]), ...(a.signing?.secret ? [["action.signing.secret", a.signing.secret] as [string, string]] : [])];
+    for (const [field, name] of names) {
+      if (!c.webhookSecret) continue;
+      const s = c.webhookSecret(project, name);
+      if (!s) invalid(field, `no secret \`${name}\` in ${project ? `project \`${project}\` or the global secrets` : "the global secrets"}`);
+      const who = caller();
+      if (who.role === "project_admin" && !s!.usable)
+        fail(403, "forbidden", `\`${name}\` is a global secret with no grant to your project: a webhook header or signature uses a global secret only with a \`use\` grant (terrarium secret grant ${name} project:${project})`);
+    }
+    return out;
+  };
+
+  /** A delivery of a webhook action now, answered from the URL (see the file comment). */
+  const deliver = (s: Schedule, a: WebhookAction, opts: { seq?: number | null; kind?: string; test?: boolean; of?: WebhookDelivery }): { delivery: WebhookDelivery; request: WebhookTestResult["request"] } => {
+    const kind = opts.kind ?? (s.spec.kind === "on" ? (s.spec.kinds[0] ?? "monitor.status") : "schedule.tick");
+    const e = sampleEvent(kind, s.project, c.iso());
+    const r = previewRequest(a, e, s.name, s.project);
+    const url = a.url ?? "";
+    const [status, http, error, response]: [WebhookDelivery["status"], number, string | null, string] = /redirect/.test(url)
+      ? ["failed", 302, "status 302 (a redirect); Terrarium does not follow redirects, so give the final URL", ""]
+      : /404/.test(url)
+        ? ["failed", 404, "status 404", "not found"]
+        : /fail/.test(url)
+          ? [opts.test ? "failed" : "pending", 503, "status 503", "busy"]
+          : ["ok", 200, null, a.format === "ntfy" ? '{"id":"mock","event":"message"}' : "ok"];
+    const d: WebhookDelivery = {
+      id: c.ulid("dlv"),
+      schedule: s.id,
+      event_seq: opts.seq ?? null,
+      event_kind: opts.of?.event_kind ?? e.kind,
+      test: !!opts.test,
+      ...(opts.of ? { redelivery_of: opts.of.id } : {}),
+      url: a.url_secret ? `(secret ${a.url_secret})` : url.replace(/\?.*$/, (q) => (q ? "?…" : "")),
+      method: a.method ?? "POST",
+      content_type: contentTypeOf(a),
+      attempt: 1,
+      status,
+      http_status: http,
+      duration_ms: 40 + Math.round(Math.random() * 80),
+      response: response || null,
+      error,
+      next_attempt_at: status === "pending" ? new Date(c.now() + 10_000).toISOString() : null,
+      created_at: c.iso(),
+      updated_at: c.iso(),
+      request: opts.of?.request ?? r.body,
+      request_bytes: new TextEncoder().encode(opts.of?.request ?? r.body).length,
+    };
+    w.webhookDeliveries.push(d);
+    s.webhook_failures = status === "ok" ? 0 : (s.webhook_failures ?? 0) + (d.test ? 0 : 1);
+    c.emit({ kind: "webhook.delivery", actor: `schedule:${s.id}`, ...(s.project ? { project: s.project } : {}), summary: `webhook ${key(s)}: ${d.status} (${http})`, data: { trigger: s.id, name: s.name, delivery: d.id, status: d.status, http_status: http, attempt: d.attempt, test: d.test, event_seq: d.event_seq } });
+    return { delivery: d, request: { method: r.method, url: d.url, headers: r.headers, body: r.body } };
+  };
+
+  const webhookOf = (s: Schedule): WebhookAction => (s.action.type === "webhook" ? s.action : fail(422, "invalid", `schedule \`${key(s)}\` runs a ${s.action.type} action, not a webhook`));
 
   const checkName = (name: unknown, project: string | null, self?: string) => {
     if (typeof name !== "string" || !NAME_RE.test(name)) invalid("name", `\`${String(name)}\` is not a valid name: lowercase letters, digits, - and _`);
@@ -438,6 +578,10 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         case "card":
           // The mock does not touch the board: a run-now of a trigger fills each template with nothing.
           return { status: "ok", summary: `card ${a.op} trigger:${a.key.replace(/\{\{[^}]*\}\}/g, "")}`, output: { card: null, op: a.op, ...(a.op === "close" ? { column: a.column ?? "done" } : {}) }, error: null };
+        case "webhook": {
+          const { delivery: d } = deliver(s, a, {});
+          return { status: "ok", summary: `webhook delivery ${d.id} queued (${d.url})`, output: { delivery: d.id, url: d.url }, error: null };
+        }
         case "probe": {
           const sub = c.sub(a.subscription);
           return { status: "ok", summary: `probe ${sub.name}: ok`, output: { subscription: sub.name, windows: (sub.windows ?? []).map((x) => ({ window: x.window, used_pct: x.used_pct })) }, error: null };
@@ -586,6 +730,40 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         const s = schedule(id);
         const list = w.scheduleRuns.filter((r) => r.schedule === s.id).reverse();
         return paginate(list, { limit: q.limit ?? 20, cursor: q.cursor }, (r) => r.id);
+      }),
+    deliveries: (id, q = {}) =>
+      c.reply(() => {
+        const s = schedule(id);
+        mayRead(s.project);
+        const list = w.webhookDeliveries.filter((d) => d.schedule === s.id).reverse();
+        return paginate(structuredClone(list), { limit: q.limit ?? 100, cursor: q.cursor }, (d) => d.id);
+      }),
+    // `202`: a copy, due now. The mock ends it after `runMs`.
+    redeliver: (id, delivery) =>
+      c.reply(() => {
+        const s = schedule(id);
+        mayRead(s.project);
+        mayWrite(s.project);
+        const a = webhookOf(s);
+        const old = w.webhookDeliveries.find((d) => d.id === delivery && d.schedule === s.id) ?? fail(404, "not_found", `no webhook delivery \`${delivery}\` of schedule \`${key(s)}\``);
+        if (old.status === "dropped") fail(422, "invalid", "a `dropped` row is a rate-limit note: it has no request to send again");
+        const { delivery: d } = deliver(s, a, { seq: old.event_seq, of: old });
+        const done = { ...d };
+        Object.assign(d, { status: "pending", attempt: 0, http_status: null, duration_ms: null, response: null, error: null, next_attempt_at: c.iso() });
+        const answer = structuredClone(d);
+        setTimeout(() => Object.assign(d, done, { updated_at: c.iso() }), c.runMs);
+        c.audit("schedule.webhook.redeliver", key(s), s.project ?? undefined, { id: s.id, delivery: d.id, of: old.id });
+        return answer;
+      }),
+    test: (id) =>
+      c.reply(() => {
+        const s = schedule(id);
+        mayRead(s.project);
+        mayWrite(s.project);
+        const a = webhookOf(s);
+        checkWebhook(a, s.project);
+        const r = deliver(s, a, { test: true });
+        return structuredClone(r);
       }),
   };
 

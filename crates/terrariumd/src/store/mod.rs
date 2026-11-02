@@ -31,6 +31,7 @@ pub mod transcripts;
 pub mod usage;
 pub mod versions;
 pub mod waits;
+pub mod webhooks;
 pub mod wiki;
 
 use serde::Deserialize;

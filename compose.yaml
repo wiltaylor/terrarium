@@ -39,6 +39,9 @@ services:
       # hook URL of each event source starts with it.
       TERRARIUM_INGEST_ADDR: 0.0.0.0:8083
       TERRARIUM_INGEST_PUBLIC_URL: ${TERRARIUM_INGEST_PUBLIC_URL:-}
+      # The addresses that a webhook action can reach (docs/api.md §19.5):
+      # allow (the default) or deny (no private, loopback, or own ports).
+      TERRARIUM_WEBHOOK_PRIVATE: ${TERRARIUM_WEBHOOK_PRIVATE:-allow}
       TERRARIUM_WS_QUERY_TOKEN: ${TERRARIUM_WS_QUERY_TOKEN:-}
       # The operator password at the first start, when none is set (remove it
       # from .env after that), and the session lives (docs/api.md §1.1).

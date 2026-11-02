@@ -1419,10 +1419,15 @@ terrarium schedule new <name> (--cron "*/15 * * * *" [--tz Europe/London] | --ev
                         | --spec-json '<json>')
                        (--mail <to> [-s subject] --body <text|-> [--thread T]
                         | --turn <agent> --text <text|-> [--start-if-stopped]
-                        | --exec <target> [--cwd dir] [--timeout s] -- <cmd...>
+                        | --exec <target> [--cwd dir] [--timeout 600|10m] -- <cmd...>
                         | --agent <agent> --verb start|stop|restart
                         | --probe <subscription>
                         | --card open|close --key KEY [--title T] [--body <text|->] [--column C]
+                        | (--webhook <url> | --webhook-url-secret <secret>)
+                          [--format json|slack|discord|ntfy|template] [--template-file f|-]
+                          [--header 'Name: value']... [--header-secret 'Name=secret']...
+                          [--sign-secret <secret> [--sign-header H]] [--method POST|PUT]
+                          [--content-type T] [--timeout 10s]
                         | --action-json '<json>')
                        [--project p | --global] [--catch-up skip|once] [--disabled]
 terrarium schedule set <id> [--rename n] [a new time or trigger] [a new action] [--catch-up c] [--enabled | --disabled]
@@ -1430,6 +1435,9 @@ terrarium schedule rm <id>
 terrarium schedule run <id>                   run now; prints the run; exit 1 when it failed
 terrarium schedule enable|disable <id>
 terrarium schedule runs <id> [--limit 20]     newest first
+terrarium schedule deliveries <id> [--limit 20]   the webhook deliveries, newest first
+terrarium schedule redeliver <id> <delivery>  send a delivery again (a copy, due now)
+terrarium schedule test <id>                  send a sample event to the webhook now; exit 1 when it failed
 ```
 
 - `<id>` is the ULID, `project/name`, or a name in your project.
@@ -1450,8 +1458,8 @@ terrarium schedule runs <id> [--limit 20]     newest first
 
 **Triggers.** `--on` makes a trigger: each event of a kind in the list
 (globs, for example `ci.job.*`) that passes every `--match` rule starts a
-run. A trigger runs only `--mail`, `--exec`, or `--card`. To notify an
-agent, mail it; a `--turn` on a trigger is an error.
+run. A trigger runs only `--mail`, `--exec`, `--card`, or `--webhook`. To
+notify an agent, mail it; a `--turn` on a trigger is an error.
 
 - `--match` rules: `PATH=VALUE`, `PATH!=VALUE`, `PATH=glob:PATTERN`, or
   `PATH=in:A,B`. `PATH` is `project`, `kind`, `actor`, `summary`, or
@@ -1470,6 +1478,35 @@ agent, mail it; a `--turn` on a trigger is an error.
   `skip` (the default) ignores them.
 - `--spec-json` and `--action-json` take the JSON shapes of api.md §19.
 - `schedule runs` shows the event (`seq` and kind) of each trigger run.
+
+**Webhooks.** `--webhook <url>` sends an HTTP request about each event
+([api.md §19.5](api.md#195-webhooks)). `--webhook-url-secret` takes the URL
+from a secret (a Slack or Discord URL is a credential).
+
+- `--format`: `json` (the event, the default), `slack`, `discord`, `ntfy`,
+  or `template`. `--template-file` gives the body template and sets the
+  format to `template`. The template takes `{{event.kind}}`,
+  `{{event.summary}}`, `{{event.data.<path>}}`, `{{trigger.name}}`, and
+  `{{<path> | json}}` for a JSON literal.
+- `--header 'Name: value'` sends a fixed header. `--header-secret
+  'Name=secret'` sends the value of a secret; a project_admin needs its
+  project's secret, or a grant of a global one. Repeat both.
+- `--sign-secret` adds `X-Terrarium-Signature: sha256=<HMAC of the body>`.
+- `--timeout` is the request limit, 10 s by default, 30 s at most. It takes
+  seconds or a duration (`15s`); for `--exec` too.
+- `schedule test` prints the request (each secret as `[secret:<name>]`),
+  then the answer. `schedule deliveries` shows the status, the HTTP
+  status, the attempt, the time taken, and the error or the answer of
+  each delivery.
+
+Example: page ntfy when a monitor of `terra` goes `crit`, and try it.
+
+```sh
+terrarium -p terra schedule new page-crit --on monitor.status --match 'data.to=crit' \
+  --webhook https://ntfy.example/terra-alerts --format ntfy
+terrarium -p terra schedule test page-crit
+terrarium -p terra schedule deliveries page-crit
+```
 
 Example: mail the worker when CI fails on `main`, one time for each repo
 and branch in 10 minutes. After 3 failures in a row, mail the operator

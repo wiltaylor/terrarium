@@ -119,6 +119,7 @@ pub async fn serve(
         .with_context(|| format!("cannot bind the ingest listener {addr}"))?;
     let local = listener.local_addr()?;
     info!(addr = %local, "ingest listener (webhooks) listening on TCP");
+    state.webhooks.add_own_port(local.port());
     let app = router(state);
     Ok((
         tokio::spawn(async move {

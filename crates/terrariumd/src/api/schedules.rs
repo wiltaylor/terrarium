@@ -46,6 +46,12 @@ pub fn routes() -> Router<Shared> {
         .route("/schedules/{id}/enable", post(enable))
         .route("/schedules/{id}/disable", post(disable))
         .route("/schedules/{id}/runs", get(runs))
+        .route("/schedules/{id}/deliveries", get(deliveries))
+        .route(
+            "/schedules/{id}/deliveries/{delivery}/redeliver",
+            post(redeliver),
+        )
+        .route("/schedules/{id}/test", post(test_webhook))
 }
 
 /// The bytes of stdout and stderr that an exec run keeps.
@@ -178,6 +184,9 @@ fn check_write(
     schedules::check_trigger(t, project, spec, action)?;
     let reach = schedules::resolve_reach(t, project, action)?;
     policy::manage_schedule(actor, project, &reach)?;
+    if let ScheduleAction::Webhook(a) = action {
+        crate::webhooks::check_write(t, actor, project, spec, a)?;
+    }
     if let ScheduleSpec::On {
         escalate: Some(e), ..
     } = spec
@@ -395,6 +404,79 @@ async fn run_now(
     ))
 }
 
+/// `GET /api/schedules/{id}/deliveries`: the webhook deliveries of a
+/// schedule, newest first (docs/api.md §19.5).
+async fn deliveries(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiQuery(page): ApiQuery<Page>,
+) -> ApiResult<Response> {
+    let s = load(&state, &actor, id).await?;
+    let rows = state
+        .db
+        .read(move |c| crate::store::webhooks::list(c, &s.id, &page))
+        .await?;
+    Ok(paged(rows))
+}
+
+/// The rights of a redeliver or a test send: those of a run-now.
+async fn may_send(state: &Shared, actor: &Actor, s: &Schedule) -> ApiResult<()> {
+    if crate::webhooks::action_of(s).is_none() {
+        return Err(ApiError::invalid(format!(
+            "schedule `{}` runs a {} action, not a webhook",
+            s.key(),
+            s.action.kind()
+        )));
+    }
+    let check = actor.clone();
+    let (project, spec, action) = (s.project.clone(), s.spec.clone(), s.action.clone());
+    let reach = state
+        .db
+        .read(move |c| check_write(c, &check, project.as_deref(), &spec, &action))
+        .await?;
+    caller_may_act(state, actor, s, &reach).await
+}
+
+/// `POST /api/schedules/{id}/deliveries/{delivery}/redeliver`: queue a
+/// copy of a delivery, due now. `202` with the new delivery.
+async fn redeliver(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((id, delivery)): Path<(String, String)>,
+) -> ApiResult<(StatusCode, Json<crate::store::webhooks::Delivery>)> {
+    let s = load(&state, &actor, id).await?;
+    may_send(&state, &actor, &s).await?;
+    let d = state
+        .db
+        .write(actor.label(), move |t| {
+            let d = crate::store::webhooks::get(t, &delivery)?;
+            if d.schedule != s.id {
+                return Err(ApiError::not_found(format!(
+                    "no webhook delivery `{delivery}` of schedule `{}`",
+                    s.key()
+                )));
+            }
+            crate::store::webhooks::redeliver(t, &delivery, Utc::now())
+        })
+        .await?;
+    state.webhooks.wake();
+    Ok((StatusCode::ACCEPTED, Json(d)))
+}
+
+/// `POST /api/schedules/{id}/test`: send a sample event of the trigger's
+/// first kind now, and answer with the delivery and the request (no
+/// secret value).
+async fn test_webhook(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::webhooks::TestResult>> {
+    let s = load(&state, &actor, id).await?;
+    may_send(&state, &actor, &s).await?;
+    Ok(Json(crate::webhooks::test_send(&state, &s, &actor).await?))
+}
+
 async fn runs(
     State(state): State<Shared>,
     actor: Actor,
@@ -411,17 +493,7 @@ async fn runs(
 
 // ---------------------------------------------------------------- the run
 
-/// The actor of a `run_as` string, as the store knows it now: `None` when
-/// the agent is gone.
-fn actor_of(conn: &rusqlite::Connection, run_as: &str) -> ApiResult<Option<Actor>> {
-    if run_as == "operator" {
-        return Ok(Some(Actor::Operator));
-    }
-    match run_as.strip_prefix("agent:") {
-        Some(id) => Ok(crate::store::agents::actor_for(conn, id)?.map(Actor::Agent)),
-        None => Ok(None),
-    }
-}
+use crate::webhooks::actor_of;
 
 /// The context of one run: the event of a trigger run, and the label and
 /// cause of its writes.
@@ -734,6 +806,9 @@ async fn execute(
                 column,
             };
             card_action(state, actor, card, ctx).await
+        }
+        (ScheduleAction::Webhook(a), Reach::Webhook { .. }) => {
+            crate::webhooks::queue(state, s, &a, ctx.event.as_ref(), ctx.cause.clone()).await
         }
         _ => Outcome::failed(
             "failed: the action and its target do not match",
@@ -1094,6 +1169,7 @@ mod tests {
             source: "api".into(),
             consecutive_skips: 0,
             disabled_reason: None,
+            webhook_failures: 0,
             created_at: String::new(),
             updated_at: String::new(),
             anchor_at: String::new(),
