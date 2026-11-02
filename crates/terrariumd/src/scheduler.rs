@@ -5,6 +5,9 @@
 //! down. Both take the time as an argument, so tests drive them with a
 //! fake clock.
 //!
+//! The monitor tick (`crate::monitors::tick`) is in the same task, with
+//! its own period ([`crate::monitors::TICK`]).
+//!
 //! The trigger engine (PLAN §12c) is in the same task. It reads the event
 //! log from `trigger_cursor`, not only the live hub: a new event on the
 //! hub only wakes it, and [`trigger_pass`] reads the rows after the
@@ -264,9 +267,17 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
         let boundary = trigger_startup(&state, point, Utc::now()).await;
         drain_triggers(&state, boundary).await;
         let mut next_tick = tokio::time::Instant::now() + TICK;
+        let mut next_monitor = tokio::time::Instant::now() + crate::monitors::TICK;
         let mut ticks: u64 = 0;
         loop {
             tokio::select! {
+                // The monitors (docs/api.md §30) on the same timer, at
+                // their own period: a monitor runs as often as every 15 s.
+                () = tokio::time::sleep_until(next_monitor) => {
+                    drop(crate::monitors::tick(&state, Utc::now()).await);
+                    next_monitor = tokio::time::Instant::now() + crate::monitors::TICK;
+                    continue;
+                }
                 () = tokio::time::sleep_until(next_tick) => {
                     ticks += 1;
                     drop(tick(&state, Utc::now()).await);
@@ -279,6 +290,7 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                         if let Err(e) = pruned {
                             warn!("the trigger state prune failed: {e}");
                         }
+                        crate::monitors::prune(&state).await;
                     }
                 }
                 r = rx.recv() => {

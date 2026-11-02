@@ -15,6 +15,7 @@ pub mod install;
 mod longpoll;
 mod mail;
 mod memory;
+mod monitors;
 mod projects;
 mod questions;
 mod records;
@@ -127,6 +128,9 @@ pub struct AppState {
     /// Wake on demand, the idle stop, and the stop reasons (PLAN §18,
     /// `crate::lifecycle`).
     pub lifecycle: Arc<crate::lifecycle::Lifecycle>,
+    /// The monitor runs: which run now, and the parallel slots
+    /// (`crate::monitors`).
+    pub monitors: Arc<crate::monitors::Runtime>,
 }
 
 impl AppState {
@@ -267,6 +271,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(artifacts::routes())
         .merge(versions::routes())
         .merge(test_runs::routes())
+        .merge(monitors::routes())
         .merge(subscriptions::routes())
         .merge(usage::routes())
         .merge(fleet::routes())
@@ -889,6 +894,7 @@ mod tests {
             waits: Arc::default(),
             config_repo: Arc::default(),
             lifecycle: Arc::default(),
+            monitors: Arc::default(),
         })
     }
 

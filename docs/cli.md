@@ -1012,6 +1012,56 @@ new and the removed tests.
 The packaged skill `terrarium-tests` gives the command that makes a
 standard file for each test framework.
 
+### Monitors and the dashboard
+
+```
+terrarium monitor ls
+terrarium monitor show <monitor> [--json]
+terrarium monitor new <name> --target t (--script s | --script-file f) (--every 1m | --cron "*/5 * * * *" [--tz z])
+                      --kind number|status|text|json [--unit u] [--warn n] [--crit n]
+                      [--direction above|below] [--timeout secs] [--retention days]
+                      [--description d] [--disabled]
+terrarium monitor edit <monitor> [the flags of new] [--rename n] [--clear-thresholds] [--enable]
+terrarium monitor rm <monitor>
+terrarium monitor run <monitor>
+terrarium monitor results <monitor> [--since 24h] [--limit 20] [--bucket 1h]
+terrarium dashboard show [--json]
+terrarium dashboard set --from-file layout.json     (`-` reads stdin)
+```
+
+A monitor runs a script with `sh -c` on a target on a schedule
+(docs/api.md §30). `<monitor>` is a name in the project (`--project`, or
+the agent's own), `project/name`, or the ID. Reads need a member of the
+project; the writes (`new`, `edit`, `rm`, `run`, `dashboard set`) need a
+project admin, a sysadmin, or the operator, and a target that the caller
+may use.
+
+`--kind` says how the daemon reads the output: `number` takes the first
+number on stdout and the thresholds give the status; `status` maps the
+exit code (0 ok, 1 warn, 2 crit, other unknown); `text` keeps stdout;
+`json` reads one object (`value`, `unit`, `status`, `message`, `rows`).
+`--every` is 15 s or more. `--script -` reads the script from stdin.
+
+`monitor run` runs the monitor now, keeps the result, and prints the
+status, the value, the exit code, stdout, and stderr. Use it to check a
+new script. `monitor results --bucket 1h` prints one line for each hour:
+the mean, the range, and the count.
+
+`dashboard show` prints each monitor with its last status, value,
+message, and time, then a count of the monitors that are not ok:
+
+```
+MONITOR    STATUS  VALUE  MESSAGE            AT
+disk-root  warn    84 %                      2026-11-02T10:00:00.120Z
+docker     ok      -      docker is active   2026-11-02T10:00:31.002Z
+2 monitors, 1 not ok; 6 dashboard blocks
+```
+
+`dashboard set` replaces the layout with the JSON of the file
+(`{"blocks": [...]}`, docs/api.md §30.4). `scripts/seed-monitors.sh`
+makes example monitors and a layout. The packaged skill
+`terrarium-monitors` tells the lead agents how to use monitors.
+
 ### Usage, status, and targets
 
 ```

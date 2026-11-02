@@ -156,6 +156,19 @@ pub enum Command {
         #[command(subcommand)]
         command: TestCmd,
     },
+    /// Monitors: scripts that run on a target on a schedule and give a
+    /// value or a status for the project dashboard
+    #[command(visible_alias = "monitors")]
+    Monitor {
+        #[command(subcommand)]
+        command: MonitorCmd,
+    },
+    /// The project dashboard: the latest value of each monitor, and the
+    /// layout of its blocks
+    Dashboard {
+        #[command(subcommand)]
+        command: DashboardCmd,
+    },
     /// Subscription usage
     Usage {
         #[command(subcommand)]
@@ -1596,6 +1609,119 @@ pub enum TestCmd {
     },
     /// Delete a run (its creator, a project admin, or the operator)
     Rm { id: String },
+}
+
+/// The output kinds of a monitor.
+pub const MONITOR_KINDS: [&str; 4] = ["number", "status", "text", "json"];
+
+#[derive(Debug, Subcommand)]
+pub enum MonitorCmd {
+    /// List the monitors of the project with their last status
+    Ls,
+    /// Show one monitor (`name`, `project/name`, or the ID) and its last result
+    Show { monitor: String },
+    /// Make a monitor: a script that runs with `sh -c` on a target
+    ///
+    /// Kinds: `number` (the first number on stdout; --warn and --crit
+    /// give the status), `status` (exit 0 ok, 1 warn, 2 crit, other
+    /// unknown; the first line is the message), `text` (stdout), `json`
+    /// (one object: value, unit, status, message, rows).
+    New {
+        name: String,
+        #[command(flatten)]
+        args: MonitorArgs,
+    },
+    /// Change a monitor: only the flags given change
+    Edit {
+        monitor: String,
+        /// A new name
+        #[arg(long)]
+        rename: Option<String>,
+        /// Remove the warn and crit thresholds
+        #[arg(long, conflicts_with_all = ["warn", "crit"])]
+        clear_thresholds: bool,
+        /// Turn the monitor on
+        #[arg(long, conflicts_with = "disabled")]
+        enable: bool,
+        #[command(flatten)]
+        args: MonitorArgs,
+    },
+    /// Delete a monitor, its results, and its dashboard blocks
+    Rm { monitor: String },
+    /// Run a monitor now; prints the result and the output of the script
+    Run { monitor: String },
+    /// The results of a monitor, oldest first
+    Results {
+        monitor: String,
+        /// From this time: RFC 3339, or back from now (30m, 24h, 7d)
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// One point per bucket (5m, 1h): the mean, min, and max
+        #[arg(long)]
+        bucket: Option<String>,
+    },
+}
+
+/// The fields of `monitor new` and `monitor edit`.
+#[derive(Debug, Args)]
+pub struct MonitorArgs {
+    /// The target that runs the script (global, or of the project)
+    #[arg(long)]
+    pub target: Option<String>,
+    /// The script (shell text), or `-` for stdin
+    #[arg(long, conflicts_with = "script_file")]
+    pub script: Option<String>,
+    /// Read the script from this file
+    #[arg(long)]
+    pub script_file: Option<PathBuf>,
+    /// Run every 15s, 30s, 1m, 5m, 1h... (15 s or more)
+    #[arg(long, conflicts_with = "cron")]
+    pub every: Option<String>,
+    /// A five-field cron expression, for example "*/5 * * * *"
+    #[arg(long)]
+    pub cron: Option<String>,
+    /// The zone of --cron: UTC (the default) or an IANA zone
+    #[arg(long, requires = "cron")]
+    pub tz: Option<String>,
+    /// The output kind
+    #[arg(long, value_parser = MONITOR_KINDS)]
+    pub kind: Option<String>,
+    /// The unit of a number (%, ms, GB)
+    #[arg(long)]
+    pub unit: Option<String>,
+    /// The warn threshold of a number
+    #[arg(long, allow_negative_numbers = true)]
+    pub warn: Option<f64>,
+    /// The crit threshold of a number
+    #[arg(long, allow_negative_numbers = true)]
+    pub crit: Option<f64>,
+    /// Which side of a threshold is bad: above (the default) or below
+    #[arg(long, value_parser = ["above", "below"])]
+    pub direction: Option<String>,
+    /// Kill the script after this many seconds (default 30, at most 600)
+    #[arg(long)]
+    pub timeout: Option<u64>,
+    /// Keep the results this many days (default 7, at most 90)
+    #[arg(long)]
+    pub retention: Option<i64>,
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Make it, or turn it, off
+    #[arg(long)]
+    pub disabled: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DashboardCmd {
+    /// The latest value and status of each monitor, and the blocks
+    Show,
+    /// Replace the layout with a JSON file: {"blocks": [...]} (`-` for stdin)
+    Set {
+        #[arg(long)]
+        from_file: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

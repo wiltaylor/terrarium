@@ -1592,6 +1592,54 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE agents ADD COLUMN skills_off TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE agents ADD COLUMN default_skills INTEGER NOT NULL DEFAULT 1;
     "#,
+    // 54: monitors and the project dashboard (docs/api.md §30,
+    // `crate::store::monitors`). `def` is the JSON of the fields that a
+    // client writes (`MonitorDef`); `name`, `kind`, and `enabled` are
+    // copies for the unique name, the queries, and the due index.
+    // `anchor_at` starts the interval; `next_run_at` is NULL when the
+    // monitor is disabled. `run_as` is the actor whose rights each run
+    // checks. `monitor_results` keeps one row for each run; `pk` orders
+    // them. `dashboards` keeps the layout of a project's dashboard (JSON
+    // `{blocks}`). Self-contained: when another branch takes number 54,
+    // move this entry to the end of the list.
+    r#"
+    CREATE TABLE monitors (
+        id          TEXT PRIMARY KEY,          -- ULID
+        project     TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        kind        TEXT NOT NULL CHECK (kind IN ('number', 'status', 'text', 'json')),
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        def         TEXT NOT NULL CHECK (json_valid(def)),
+        created_by  TEXT NOT NULL,
+        run_as      TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        anchor_at   TEXT NOT NULL,
+        next_run_at TEXT,
+        skipped     INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (project, name)
+    );
+    CREATE INDEX monitors_due ON monitors(enabled, next_run_at);
+    CREATE TABLE monitor_results (
+        pk          INTEGER PRIMARY KEY AUTOINCREMENT,
+        monitor     TEXT NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+        at          TEXT NOT NULL,
+        status      TEXT NOT NULL CHECK (status IN ('ok', 'warn', 'crit', 'unknown')),
+        value       REAL,
+        text        TEXT,
+        json        TEXT CHECK (json IS NULL OR json_valid(json)),
+        duration_ms INTEGER NOT NULL,
+        error       TEXT
+    );
+    CREATE INDEX monitor_results_at ON monitor_results(monitor, at);
+    CREATE INDEX monitor_results_pk ON monitor_results(monitor, pk);
+    CREATE TABLE dashboards (
+        project    TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,
+        layout     TEXT NOT NULL CHECK (json_valid(layout)),
+        updated_at TEXT NOT NULL,
+        updated_by TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

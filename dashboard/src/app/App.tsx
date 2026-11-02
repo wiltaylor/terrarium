@@ -19,6 +19,7 @@ const WikiPage = lazy(() => import("../features/wiki/WikiPage"));
 const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
 const TestRunsPage = lazy(() => import("../features/tests/TestRunsPage"));
 const TestRunPage = lazy(() => import("../features/tests/TestRunPage"));
+const DashboardPage = lazy(() => import("../features/dashboard/DashboardPage"));
 const TargetsPage = lazy(() => import("../features/targets/TargetsPage"));
 const SchedulesPage = lazy(() => import("../features/schedules/SchedulesPage"));
 const TemplatesPage = lazy(() => import("../features/templates/TemplatesPage"));
@@ -43,9 +44,10 @@ const SecretsPage = lazy(() => import("../features/secrets/SecretsPage"));
 // Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
 const XssPage = lazy(() => import("../features/devxss/XssPage"));
 
+/** The page of a project is its dashboard: the first item of the project in the tree. */
 function ProjectIndex() {
   const params = useParams();
-  return <Navigate href={`/p/${params.project}/board`} />;
+  return <Navigate href={`/p/${params.project}/dashboard`} />;
 }
 
 function NotFound() {
@@ -97,6 +99,7 @@ export function App() {
           <Route path="/hosts" component={HostsPage} />
         </Route>
         <Route path="/p/:project" component={ProjectIndex} />
+        <Route path="/p/:project/dashboard" component={DashboardPage} />
         <Route path="/p/:project/agents" component={AgentsPage} />
         {/* The board screen: the tabs Cards, Artifacts, Tests, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it manages the versions too (?version=<id>). */}
         <Route path="/p/:project/board" component={BoardScreen}>

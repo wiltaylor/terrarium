@@ -26,6 +26,7 @@ pub mod leases;
 pub mod lifecycle;
 pub mod login_session;
 pub mod models;
+pub mod monitors;
 pub mod password;
 pub mod policy;
 pub mod probes;
@@ -202,6 +203,7 @@ pub async fn start_with_usage(
         waits: Arc::default(),
         config_repo: Arc::default(),
         lifecycle: Arc::default(),
+        monitors: Arc::default(),
     });
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");

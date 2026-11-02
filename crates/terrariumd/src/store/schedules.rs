@@ -390,6 +390,17 @@ pub fn next_after(
     anchor: DateTime<Utc>,
     after: DateTime<Utc>,
 ) -> ApiResult<Option<DateTime<Utc>>> {
+    next_after_min(spec, anchor, after, MIN_INTERVAL_SECS)
+}
+
+/// [`next_after`] with another shortest interval: a monitor
+/// (`crate::store::monitors`) runs as often as every 15 s.
+pub fn next_after_min(
+    spec: &ScheduleSpec,
+    anchor: DateTime<Utc>,
+    after: DateTime<Utc>,
+    min_secs: i64,
+) -> ApiResult<Option<DateTime<Utc>>> {
     match spec {
         ScheduleSpec::Cron { expr, tz } => {
             let sched = parse_cron(expr).map_err(|e| {
@@ -402,7 +413,7 @@ pub fn next_after(
         ScheduleSpec::Interval { every } => {
             let secs = parse_every(every)
                 .map_err(|e| field_error("spec.every", e))?
-                .max(MIN_INTERVAL_SECS);
+                .max(min_secs.max(1));
             let gone = (after - anchor).num_milliseconds();
             let step = secs * 1000;
             let k = if gone < 0 { 1 } else { gone / step + 1 };

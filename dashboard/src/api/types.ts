@@ -1054,6 +1054,10 @@ export const EVENT_KINDS = [
   "db.record",
   // A test run (docs/api.md, test runs): `{change, project, id, name, counts, cards, versions}`.
   "test_run",
+  // Monitors (docs/api.md §30): each result, and a change of status `{project, monitor, monitor_id, from, to, value?, unit?, message?}`.
+  "monitor.result",
+  "monitor.status",
+  "dashboard.updated",
   "artifact.created",
   "artifact.linked",
   "artifact.deleted",
@@ -3630,4 +3634,152 @@ export interface CardTests {
   status: TestRunStatus;
   counts: TestCounts;
   created_at: string;
+}
+
+// ----- monitors and the project dashboard (docs/api.md §30) -----
+
+/** The output kind of a monitor: how the daemon reads the stdout of its script. */
+export type MonitorKind = "number" | "status" | "text" | "json";
+/** The status of a result. `status` monitors map the exit code as Nagios does: 0 ok, 1 warn, 2 crit, other unknown. */
+export type MonitorStatus = "ok" | "warn" | "crit" | "unknown";
+/** Which side of a threshold is bad. */
+export type MonitorDirection = "above" | "below";
+/** The schedule of a monitor: an interval of 15 s or more, or a cron spec. */
+export type MonitorSchedule = { kind: "interval"; every: string } | { kind: "cron"; expr: string; tz: string };
+
+/** The fields of a monitor that a client writes. */
+export interface MonitorDef {
+  name: string;
+  description?: string | null;
+  /** A global target, or a target of the project. */
+  target: string;
+  /** Shell text; the target runs it with `sh -c`. */
+  script: string;
+  schedule: MonitorSchedule;
+  /** 1-600; default 30. */
+  timeout_secs?: number;
+  kind: MonitorKind;
+  unit?: string | null;
+  warn?: number | null;
+  crit?: number | null;
+  direction?: MonitorDirection;
+  enabled?: boolean;
+  /** 1-90; default 7. */
+  retention_days?: number;
+}
+
+/** The rows of a `json` result: one object per row, at most 200 rows of 20 columns. */
+export type MonitorRow = Record<string, string | number | boolean | null>;
+
+/** The checked object of a `json` result. */
+export interface MonitorJson {
+  value?: number;
+  unit?: string;
+  status?: MonitorStatus;
+  message?: string;
+  rows?: MonitorRow[];
+  /** Rows, columns, or text past the caps were cut. */
+  truncated?: boolean;
+}
+
+/** One result of a monitor. */
+export interface MonitorResult {
+  id: number;
+  monitor: string;
+  at: string;
+  status: MonitorStatus;
+  value?: number;
+  /** The message (`status`, `json`), or the text (`text`). */
+  text?: string;
+  json?: MonitorJson;
+  duration_ms: number;
+  error?: string;
+}
+
+/** A monitor as the API shows it. */
+export interface Monitor extends Required<Pick<MonitorDef, "name" | "target" | "script" | "schedule" | "kind">> {
+  id: string;
+  project: string;
+  description: string | null;
+  timeout_secs: number;
+  unit: string | null;
+  warn: number | null;
+  crit: number | null;
+  direction: MonitorDirection;
+  enabled: boolean;
+  retention_days: number;
+  /** The seconds between two runs. A block is stale after three periods with no result. */
+  period_secs: number;
+  created_by: string;
+  /** The actor whose rights each run checks again. */
+  run_as: string;
+  created_at: string;
+  updated_at: string;
+  next_run_at: string | null;
+  /** Ticks that found the previous run still running. */
+  skipped: number;
+  last: MonitorResult | null;
+  /** A run is in progress now. */
+  running: boolean;
+}
+
+/** One point of `GET /api/monitors/{id}/results?bucket=`: the mean, min, and max of a bucket, and its worst status. */
+export interface MonitorPoint {
+  at: string;
+  status: MonitorStatus;
+  value?: number;
+  min?: number;
+  max?: number;
+  count: number;
+}
+
+export interface MonitorResultsQuery {
+  /** RFC 3339, or a duration back from now (`24h`). */
+  since?: string;
+  until?: string;
+  /** Default 500, at most 10 000: the newest. */
+  limit?: number;
+}
+
+/** The raw output of a run now or a test run. Null when the command did not start (target down, refused). */
+export interface MonitorOutput {
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/** The answer of a run now (`result` is kept) or a test run (nothing is kept; `result.id` is absent). */
+export interface MonitorRunReport {
+  result: Omit<MonitorResult, "id" | "monitor"> & { id?: number; monitor?: string };
+  output: MonitorOutput | null;
+}
+
+export type DashboardBlockKind = "stat" | "status" | "chart" | "text" | "table" | "note";
+/** The width of a block: 1, 2, or 4 columns of the desktop grid. */
+export type DashboardBlockSize = "s" | "m" | "l";
+export type DashboardRange = "1h" | "6h" | "24h" | "7d";
+
+export interface DashboardBlock {
+  id: string;
+  kind: DashboardBlockKind;
+  /** The monitor ID. None for a note. */
+  monitor?: string;
+  size: DashboardBlockSize;
+  title?: string;
+  /** The Markdown of a note. */
+  text?: string;
+  options: { range?: DashboardRange; sparkline?: boolean; decimals?: number };
+}
+
+export interface DashboardLayout {
+  blocks: DashboardBlock[];
+}
+
+/** `GET /api/projects/{name}/dashboard`. */
+export interface DashboardView extends DashboardLayout {
+  project: string;
+  updated_at: string | null;
+  updated_by: string | null;
+  /** Every monitor of the project, with its last result. */
+  monitors: Monitor[];
 }

@@ -1408,6 +1408,59 @@ push`. You see each test case on the Tests tab of the Board screen
 The script `scripts/seed-test-runs.sh` uploads example runs in each
 format to the project `demo`.
 
+### 2.13d2 Monitors: a dashboard of checks for a project
+
+A monitor runs a shell script on a target on a schedule and keeps each
+result. The Dashboard of a project (the first item of the project in the
+sidebar, `/p/<project>/dashboard`) shows the monitors as blocks
+(PLAN §15.6, docs/api.md §30).
+
+1. Make a monitor. The operator, a sysadmin, and the leads (project
+   admins) make monitors, on a target that they may use. Run it once to
+   check the script:
+
+   ```bash
+   terrarium -p demo monitor new disk-root --target build-box --kind number --unit % \
+     --warn 80 --crit 90 --every 5m --script "df -P / | awk 'NR==2 {print \$5}'"
+   terrarium -p demo monitor run disk-root
+   ```
+
+   The `--kind` says how Terrarium reads the output: `number` (the first
+   number on stdout, with the thresholds), `status` (the exit code: 0 ok,
+   1 warning, 2 critical), `text` (stdout), or `json` (an object with
+   `value`, `status`, `message`, and `rows` for a table).
+
+2. Open the Dashboard of the project, and click **Edit dashboard**. Click
+   **Add block**, pick the monitor and the kind of block (stat, status,
+   chart, text, or table), then the size. A note block is a Markdown
+   header for a section. Drag the blocks, or use the arrows, to put them
+   in order. Click **Save layout**.
+
+   The **Monitors** tab lists the monitors with their state, the last run,
+   and the next run. **Run now** runs one at once. **Edit** opens the
+   script editor; **Test run** runs the script once and shows the raw
+   output and the result before you save.
+
+3. Get a mail when a monitor goes critical. A monitor emits the event
+   `monitor.status` when its status changes, so a trigger can mail you:
+
+   ```bash
+   terrarium -p demo schedule new disk-alert --on monitor.status \
+     --match data.monitor=disk-root --match data.to=crit \
+     --mail operator -s "disk-root is critical" --body "{{event.summary}}"
+   ```
+
+4. Agents read the latest values with `terrarium dashboard show`. The
+   packaged skill `terrarium-monitors` (on for every agent by default)
+   tells a lead how to add monitors that prove a service is healthy.
+
+The script `scripts/seed-monitors.sh [project] [target]` makes eight
+example monitors on a host target (load, memory, root disk, uptime, the
+docker service, the running containers, an HTTP check of the dashboard,
+and the top 5 processes by CPU) and a dashboard with a block of each
+kind. It picks the first host target that the project may use, and says
+which one.
+
 ### 2.13e Ephemeral agents: a lead spawns helpers
 
 A lead can split its work: it spawns short-lived agents from a template,

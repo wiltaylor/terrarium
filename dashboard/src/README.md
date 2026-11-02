@@ -915,6 +915,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/logs/mail` | Project logs, Mail tab: the mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
+| `/p/:project/dashboard`, `/p/:project` | Dashboard: the blocks of the monitors (stat, status, chart, text, table, note), Edit dashboard (add, change, drag or move, remove, save), and the Monitors tab (`?tab=monitors`: state, last and next run, on/off, Run now, the edit dialog with Test run); see "The project dashboard". `/p/:project` redirects here. | `GET`, `PUT .../dashboard`, `GET .../monitors`, `POST .../monitors`, `POST .../monitors/test`, `PATCH`, `DELETE /api/monitors/{id}`, `POST .../run`, `GET .../results?since=&bucket=` |
 | `/p/:project/board` | Board, Cards tab: drag and drop, New card dialog (the "+" of the backlog column), Edit columns dialog, ETA countdowns, question badges, version chips, the version lanes and the Version modal (`?version=<id>`), "+ Version", the Versions menu, card drawer with its questions and versions (see "The board") | `GET .../board`, `PATCH .../board`, `GET .../versions?archived=all`, `POST .../versions`, `PATCH /api/versions/{id}`, `POST /api/versions/{id}/submit\|approve\|reject\|release\|archive\|unarchive`, `compare`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
 | `/p/:project/versions/:id?`, `/p/:project/board/versions/:id?` | Gone: redirect in one hop to `/p/:project/board`, with `?version=<id>` when the path has an ID (`app/nav.ts` `MOVED_ROUTES`). The Version modal opens. The redirect adds the old query (`withQuery`). The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. | none |
 | `/p/:project/board/tests`, `/p/:project/board/tests/:id` | Board, Tests tab: the test runs (filters, counts bar, links) and one run (counts, compare with the previous run, suites and cases, Failed only, search, output, Download original, link and unlink, delete); see "Test runs" | `GET .../test-runs?card=&version=&name=&status=&cursor=`, `GET /api/test-runs/{id}?status=&q=&cursor=`, `GET .../compare?with=previous`, `GET .../raw`, `PATCH .../links`, `DELETE /api/test-runs/{id}` |
@@ -959,6 +960,57 @@ daemon stays the judge (`422`). The target chip uses the daemon's
 shares the budget: each agent on a `host` target, all agents on a `docker`
 target. The mock applies the daemon's rules and merges a `PATCH` of
 `limits`.
+
+## The project dashboard
+
+`features/dashboard/` (docs/api.md §30). The Dashboard item is the first
+item of each project in the tree (`app/nav.ts` `PROJECT_ITEMS`), and
+`/p/:project` opens it. The project name in the tree still only opens
+and closes the node.
+
+- **Grid.** CSS grid of four columns on a desktop, two up to 1100 px, one
+  on a phone. A block is `s` (one column), `m` (two), or `l` (the full
+  width). Each monitor block has a head (the title, and the state as a
+  badge with a glyph and a word: never colour alone), a body by its kind,
+  and a foot (the time of the last result, the error, and "stale" when
+  the last result is older than `3 × period_secs + timeout_secs`).
+- **Kinds.** `stat`: the value at 2 rem with its unit, the thresholds as
+  text, and a 24-hour sparkline. `status`: the message and the value.
+  `chart`: a line chart of the range (1 h, 6 h, 24 h, 7 d) from
+  `GET .../results?bucket=` (the mean as a 2 px line, the min-max of
+  each bucket as a 10 % wash, labelled warn and crit lines, hairline
+  grid, y ticks and three time labels), a crosshair with a readout on
+  hover and on the arrow keys, an `aria-label` summary, and a "Data
+  table". `text`: monospace, a text node. `table`: the `rows` of the last
+  `json` result; number columns align right. `note`: Markdown through the
+  safe `Markdown` component.
+- **Colours.** The one series colour is `--series-1` (`#2a78d6` light,
+  `#3987e5` dark: slot 1 of the dataviz palette, checked with its
+  validator). The states use the app's status tokens (`--accent`,
+  `--warn`, `--danger`, `--muted`).
+- **Edit mode.** "Edit dashboard" copies the layout to a draft. Each
+  block gets a tool row: up and down, Edit (the block dialog), Remove.
+  A block can also be dragged onto another. `layoutProblems`
+  (`model.ts`) shows the errors that the daemon would refuse, and Save
+  is off while there are some.
+- **Monitors tab.** A table (a list of cards on a phone): the state, the
+  last value, the last and next run, an on/off switch, Run now (with the
+  raw output), Edit, and Delete. The dialog has the script editor
+  (monospace), the target (global and project targets), the schedule
+  (interval or cron, with the next runs), the timeout, the retention,
+  the kind, and the unit and thresholds. **Test run** calls
+  `POST .../monitors/test` and shows the parsed result and the raw
+  output before a save.
+- **Live.** A `monitor.result` or `dashboard.updated` event of the
+  project loads the dashboard again (debounced); the series of a block
+  load again when the last result of its monitor changes. A
+  `dashboard.updated` does not drop an open draft.
+- **Mock.** `api/mock/monitors.ts`: project `terrarium` has ten monitors
+  of every kind (one on the stopped target `ci-box`, so it is unknown),
+  a week of synthetic history, and a layout with a block of each kind.
+  The activity timer runs the due monitors, so values move and statuses
+  change. A plain `echo <text>; exit <n>` script runs as written, so the
+  Test run of the editor shows its own output.
 
 ## Home: hosts
 

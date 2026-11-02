@@ -53,6 +53,14 @@ import type {
   TestRunLinksPatch,
   TestRunListQuery,
   TestRunSummary,
+  DashboardLayout,
+  DashboardView,
+  Monitor,
+  MonitorDef,
+  MonitorPoint,
+  MonitorResult,
+  MonitorResultsQuery,
+  MonitorRunReport,
   Artifact,
   ArtifactJsonUpload,
   ArtifactLinkKind,
@@ -479,6 +487,29 @@ export interface Api {
     links(id: string, patch: TestRunLinksPatch): Promise<TestRunSummary>;
     /** The creator, a project admin, or the operator. */
     remove(id: string): Promise<void>;
+  };
+
+  /**
+   * Monitors and the project dashboard (docs/api.md §30). `id` is the ULID or `project/name`. Members read; a write needs
+   * project_admin, sysadmin, or the operator, and a target that the caller may use.
+   */
+  monitors: {
+    list(project: string): Promise<Monitor[]>;
+    get(id: string): Promise<Monitor>;
+    create(project: string, def: MonitorDef): Promise<Monitor>;
+    /** A JSON merge: a key replaces the field, `null` clears an optional field. */
+    update(id: string, patch: Partial<MonitorDef>): Promise<Monitor>;
+    remove(id: string): Promise<void>;
+    /** Run now: the result is kept, and the answer has the raw output. `409 conflict` while a run is running. */
+    run(id: string): Promise<MonitorRunReport>;
+    /** Run a monitor that is not saved, once, as the caller. Nothing is kept. `name` and `schedule` may be absent. */
+    test(project: string, def: Partial<MonitorDef> & Pick<MonitorDef, "target" | "script" | "kind">): Promise<MonitorRunReport>;
+    /** Oldest first; with more than `limit`, the newest. */
+    results(id: string, q?: MonitorResultsQuery): Promise<MonitorResult[]>;
+    /** One point per bucket of `bucket` seconds. */
+    series(id: string, q: MonitorResultsQuery & { bucket: number }): Promise<MonitorPoint[]>;
+    dashboard(project: string): Promise<DashboardView>;
+    saveDashboard(project: string, layout: DashboardLayout): Promise<DashboardView>;
   };
 
   /** docs/api.md §13. `id` is the ULID or `project/name`. */
@@ -1083,6 +1114,20 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       },
       links: (id, body) => patch(`/api/test-runs/${seg(id)}/links`, body),
       remove: (id) => del(`/api/test-runs/${seg(id)}`),
+    },
+
+    monitors: {
+      list: (project) => get(`${p(project)}/monitors`),
+      get: (id) => get(`/api/monitors/${seg(id)}`),
+      create: (project, def) => post(`${p(project)}/monitors`, def),
+      update: (id, body) => patch(`/api/monitors/${seg(id)}`, body),
+      remove: (id) => del(`/api/monitors/${seg(id)}`),
+      run: (id) => post(`/api/monitors/${seg(id)}/run`),
+      test: (project, def) => post(`${p(project)}/monitors/test`, def),
+      results: (id, q = {}) => get(`/api/monitors/${seg(id)}/results`, { ...q }),
+      series: (id, q) => get(`/api/monitors/${seg(id)}/results`, { ...q }),
+      dashboard: (project) => get(`${p(project)}/dashboard`),
+      saveDashboard: (project, layout) => put(`${p(project)}/dashboard`, layout),
     },
 
     versions: {

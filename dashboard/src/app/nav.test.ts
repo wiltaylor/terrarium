@@ -59,7 +59,7 @@ describe("navigation", () => {
   it("has no Templates, Secrets, or Settings item under the project: they are tabs of the project settings screen, each with a route", () => {
     const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
     for (const gone of ["templates", "secrets", "settings"]) expect(paths).not.toContain(gone);
-    expect(paths).toEqual(["board", "repos", "logs", "knowledge", "agents"]);
+    expect(paths).toEqual(["dashboard", "board", "repos", "logs", "knowledge", "agents"]);
     expect(PROJECT_SETTINGS_TABS).toEqual([
       { path: "general", label: "General" },
       { path: "secrets", label: "Secrets" },

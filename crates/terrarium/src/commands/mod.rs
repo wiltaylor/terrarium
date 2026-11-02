@@ -12,6 +12,7 @@ pub mod fleet;
 pub mod inspect;
 pub mod knowledge;
 pub mod mail;
+pub mod monitors;
 pub mod projects;
 pub mod questions;
 pub mod remote;
@@ -63,6 +64,8 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Db { command } => db::db(ctx, command).await,
         Command::Artifact { command } => artifacts::artifact(ctx, command).await,
         Command::Test { command } => test_runs::test(ctx, command).await,
+        Command::Monitor { command } => monitors::monitor(ctx, command).await,
+        Command::Dashboard { command } => monitors::dashboard(ctx, command).await,
         Command::Version { command } => artifacts::version(ctx, command).await,
         Command::Usage { command } => system::usage(ctx, command.as_ref()).await,
         Command::Status { command } => agents::status(ctx, command).await,

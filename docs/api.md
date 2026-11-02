@@ -21,7 +21,7 @@ Sections: [1 Transports](#1-transports-and-callers) ·
 [18 Fleet](#18-fleet) · [19 Schedules](#19-schedules) ·
 [20 Event sources](#20-event-sources-and-ingest) ·
 [21 Agent templates](#21-agent-templates) · [27 DB](#27-db) ·
-[28 System prompts](#28-system-prompts) · [29 Test runs](#29-test-runs).
+[28 System prompts](#28-system-prompts) · [29 Test runs](#29-test-runs) · [30 Monitors and the project dashboard](#30-monitors-and-the-project-dashboard).
 
 ## 1. Transports and callers
 
@@ -3582,6 +3582,9 @@ Kinds:
 | `event_source` | `{change, source, name, key, kind, enabled}` after a change of an event source (§20). |
 | `system_prompt` | `{change, name, path}` after a write through the API of the system prompt library (§28). `change` is `created`, `updated`, or `deleted`. An edit of a file by hand gives no event. |
 | `test_run` | `{change, project, id, name, counts, cards, versions}` after a change of a test run (§29). `change` is `created`, `linked`, `unlinked`, or `deleted`. `cards` are card IDs and `versions` are version names. |
+| `monitor.result` | `{project, monitor, monitor_id, status, value, unit, message, error, at, duration_ms, result_id}` for each result of a monitor (§30.3). |
+| `monitor.status` | `{project, monitor, monitor_id, from, to, value, unit, message, error}` when the status of a monitor changes; `from` is `null` for the first result (§30.3). |
+| `dashboard.updated` | `{project, blocks}` after a save of the dashboard layout (§30.4). |
 | `ci.run.*`, `ci.job.failed`, `git.push`, `pr.*`, `ext.*` | A webhook of an event source (§20.4), or `POST /api/events` (§20.5). The actor is `source:<project>/<name>`, or the caller of `POST /api/events`. |
 
 A `memory.*`, `wiki.*`, `artifact.*`, or `version.*` event that an agent
@@ -7654,3 +7657,230 @@ exist, change nothing.
 - **Events.** The event `test_run` (§9) has `{"change","project","id",
   "name","counts","cards","versions"}`, with `change` = `created`,
   `linked`, `unlinked`, or `deleted`.
+
+## 30. Monitors and the project dashboard
+
+A monitor is a shell script that the daemon runs on a target on a
+schedule. The script gives a value, a status, text, or JSON. The daemon
+keeps each result. The dashboard of a project shows the monitors as
+blocks. With the triggers (§19.4), the results become alerts. The code is
+in `crates/terrariumd/src/monitors/` (the runs, the output parse, the
+layout) and `crates/terrariumd/src/store/monitors.rs` (the rows).
+
+### 30.1 Rights
+
+| Action | Who |
+|---|---|
+| Read the monitors, the results, and the dashboard | The members of the project and its agents, a sysadmin, the operator |
+| Create, change, delete, run now, test run; save the layout | project_admin of the project (a lead), a sysadmin, the operator |
+
+A monitor runs a script on a target, so each write that sets the script
+or the target also needs the caller to use the target: the target is in
+the caller's `policy.targets`, or the caller holds a lease on it (§17.7).
+The operator uses any target. The target is a global target or a target
+of the project; another project's target is `422 invalid` with
+`details.field` `target`. A target that takes no commands (`vnc`) is
+`422 invalid`.
+
+`run_as` is the actor whose rights each run checks again: the creator,
+or the last caller that changed the script or the target. When the
+`run_as` agent is gone, or lost its role or the target, the run records
+`unknown` with the reason. Save the monitor again to run it as you.
+
+The audit log has `monitor.create`, `monitor.update` (with `changed`),
+`monitor.delete`, `monitor.run` (a run now), `monitor.test` (a test run),
+and `dashboard.update`. The timed runs write no audit row.
+
+### 30.2 Output kinds
+
+The target runs the script with `sh -c`, in the target's default dir.
+The daemon reads at most 64 KiB of stdout and of stderr.
+
+| `kind` | The script gives | The status |
+|---|---|---|
+| `number` | The first number on stdout: an optional sign, digits with optional `,` thousands separators, an optional fraction and exponent. `42%`, `3.5GB`, `load: 0.42`, `1,234,567`, and `-12` give their number. A sign counts only at the start of a word. | From the thresholds: `crit` when the value is at or past `crit`, `warn` when at or past `warn`, else `ok`. `direction` `above` (the default) or `below` says which side is bad. No number: `unknown`, with the first line of stdout as `text`. |
+| `status` | An exit code. The first line of stdout that is not blank is the message (`text`, at most 500 characters). | Nagios: 0 `ok`, 1 `warn`, 2 `crit`, any other code `unknown`. |
+| `text` | Stdout, without the trailing white space, cut to 8 KiB on a character boundary (`json.truncated` then is `true`). | The exit code, as for `status`. |
+| `json` | One JSON object: `value` (a number, or text with a number), `unit` (at most 32 characters), `status` (`ok`, `warn`, `crit`, `unknown`), `message` (at most 500 characters), `rows` (an array of objects). | `status` when given; else the thresholds when the object has a `value` and the monitor has a threshold; else the exit code. A bad `status`, a `value` that is not a number, or `rows` that is not an array of objects is `unknown` with the error. |
+
+`rows` keeps at most 200 objects of at most 20 keys each; more sets
+`truncated`. A cell that is an object or an array becomes its JSON text.
+A cell or a key is cut to 500 (key: 64) characters.
+
+These runs are `unknown` with an `error`:
+
+- The run passed `timeout_secs`: `timed out after N s`.
+- The target is down: a docker or vmlab target that is `stopped` or
+  `absent`, or a target whose host agent is offline. A monitor does not
+  bring a target up: `target down: ...`.
+- The rights check failed, or the command did not start (the error of the
+  executor).
+
+Known secret values in the text, the JSON, and the error are replaced
+with `[secret:<name>]`, as in the event log.
+
+### 30.3 Runs
+
+The scheduler task (§19) checks the monitors every 5 s. A monitor is due
+when it is enabled and its `next_run_at` passed; the tick moves
+`next_run_at` on and starts the run. The time math is the schedules':
+
+- `{"kind": "interval", "every": "30s"}`: 15 s or more. The runs are at
+  the start of the interval and each `every` after it. A new monitor, a
+  new schedule, and a monitor that is turned on run at once and start a
+  new interval.
+- `{"kind": "cron", "expr": "*/5 * * * *", "tz": "UTC"}`: as §19.
+
+Limits:
+
+- **One run at a time for each monitor.** A tick that finds the previous
+  run still running starts nothing and adds 1 to `skipped`. A run now of
+  a running monitor is `409 conflict`.
+- **At most 8 runs at once in the daemon** (`TERRARIUM_MONITOR_PARALLEL`).
+  A run waits for a free slot.
+- **Resource limits.** On a `host` target with `limits` (§17.2), the runs
+  of a project use the budget of the holder `<project>/monitors`.
+- **Leases.** A monitor is not an agent and holds no lease. It uses the
+  target with the rights of `run_as`: the policy of that agent, or a
+  lease that the agent holds. When the lease ends, the runs are
+  `unknown`.
+
+**Retention.** A monitor keeps its results `retention_days` (default 7,
+1-90) and at most 10 000 results; older ones go at each new result and at
+the daily prune.
+
+**Events.** Each result emits `monitor.result`:
+`{"project","monitor","monitor_id","status","value","unit","message","error","at","duration_ms","result_id"}`.
+A result whose status differs from the result before it (or the first
+result) also emits `monitor.status`:
+`{"project","monitor","monitor_id","from","to","value","unit","message","error"}`;
+`from` is `null` for the first result. Both are events of the project:
+its members see them, and the triggers of the project take them. A saved
+layout emits `dashboard.updated` `{"project","blocks"}`.
+
+Example: mail the lead when monitor `disk-root` goes critical, at most
+once in 30 minutes:
+
+```json
+POST /api/schedules
+{"name": "disk-alert", "project": "demo",
+ "spec": {"kind": "on", "kinds": ["monitor.status"],
+          "match": [{"path": "data.monitor", "value": "disk-root"},
+                    {"path": "data.to", "value": "crit"}],
+          "dedupe": {"key": "{{event.data.monitor}}", "window": "30m"}},
+ "action": {"type": "mail", "to": "lead", "subject": "disk-root is critical",
+            "body": "{{event.summary}}"}}
+```
+
+### 30.4 Endpoints
+
+#### `GET /api/projects/{name}/monitors`
+
+The monitors of the project, by name:
+
+```json
+[{"id":"01JC…","project":"demo","name":"disk-root","description":null,
+  "target":"build-box","script":"df -P / | awk 'NR==2 {print $5}'",
+  "schedule":{"kind":"interval","every":"5m"},"timeout_secs":30,
+  "kind":"number","unit":"%","warn":80.0,"crit":90.0,"direction":"above",
+  "enabled":true,"retention_days":7,"period_secs":300,
+  "created_by":"operator","run_as":"operator",
+  "created_at":"…","updated_at":"…","next_run_at":"2026-11-02T10:05:00.000Z",
+  "skipped":0,"running":false,
+  "last":{"id":412,"monitor":"01JC…","at":"2026-11-02T10:00:00.120Z",
+          "status":"warn","value":84.0,"duration_ms":38}}]
+```
+
+`period_secs` is the interval, or for a cron spec the time between its
+next two runs. A dashboard block is stale when its last result is older
+than `3 × period_secs + timeout_secs`. `next_run_at` is `null` when the
+monitor is off. `last` is `null` before the first run.
+
+#### `POST /api/projects/{name}/monitors`
+
+Body: `name` (1-63 of `a-z`, `0-9`, `-`, `_`; unique in the project),
+`description?` (at most 500 characters), `target`, `script` (at most
+64 KiB), `schedule`, `timeout_secs?` (1-600, default 30), `kind`,
+`unit?`, `warn?`, `crit?`, `direction?` (`above`), `enabled?` (`true`),
+`retention_days?` (1-90, default 7). Answers `201` with the monitor.
+Thresholds need kind `number` or `json`, and `warn` comes before `crit`
+in the direction. A project has at most 100 monitors (`409 conflict`).
+A name in use is `409 conflict`.
+
+Errors: `422 invalid` with `details.field` (`name`, `target`, `script`,
+`schedule`, `schedule.every`, `schedule.expr`, `schedule.tz`,
+`timeout_secs`, `unit`, `warn`, `retention_days`); `403 forbidden` for
+the rights of §30.1.
+
+#### `GET /api/monitors/{id}`, `PATCH /api/monitors/{id}`, `DELETE /api/monitors/{id}`
+
+`id` is the ULID or `project/name` (`%2F` in the path). The patch is a
+JSON merge into the fields: a key replaces the field, and `null` clears
+an optional field (`{"warn": null}`). An unknown key is `422 invalid`.
+The delete answers `204`, and removes the results and the blocks of the
+monitor on the dashboard.
+
+#### `POST /api/monitors/{id}/run`
+
+Run now, as `run_as`, and keep the result. An agent that is not the
+`run_as` must be able to use the target. Answers when the run ends:
+
+```json
+{"result":{"id":413,"monitor":"01JC…","at":"…","status":"crit","value":95.0,"duration_ms":41},
+ "output":{"exit_code":0,"stdout":"95%\n","stderr":"","end":{"type":"exit","code":0,"reason":"…"}}}
+```
+
+`output` (at most 8 KiB of each stream) is `null` when the command did
+not start (target down, refused).
+
+#### `POST /api/projects/{name}/monitors/test`
+
+Run a monitor that is not saved, once, as the caller, and keep nothing.
+The body is the body of a create; `name` and `schedule` may be absent.
+The answer has the shape of a run now, without `result.id`.
+
+#### `GET /api/monitors/{id}/results`
+
+Query: `since`, `until` (§2.1: RFC 3339 or a duration back from now),
+`limit` (default 500, at most 10 000), `bucket`. The results, oldest
+first; with more than `limit`, the newest `limit`. Each is
+`{"id","monitor","at","status","value?","text?","json?","duration_ms","error?"}`.
+
+With `bucket` (seconds, or a duration such as `5m`; 1 s to 7 d), one
+point for each bucket of time that has results:
+`{"at","status","value?","min?","max?","count"}`. `at` is the start of
+the bucket, `value` the mean of the values, `min` and `max` their range,
+`status` the worst status (`crit`, then `warn`, then `unknown`, then
+`ok`), and `count` the results. The charts of the dashboard use it.
+
+#### `GET /api/projects/{name}/dashboard`
+
+```json
+{"project":"demo","updated_at":"…","updated_by":"operator",
+ "blocks":[{"id":"head","kind":"note","size":"l","text":"## Host","options":{}},
+           {"id":"disk","kind":"stat","monitor":"01JC…","size":"s","title":"Root disk",
+            "options":{"decimals":0}}],
+ "monitors":[ … every monitor of the project, as in the list … ]}
+```
+
+A block whose monitor is gone, or whose kind no longer fits the
+monitor, stays out of the answer. `terrarium dashboard show` reads this.
+
+#### `PUT /api/projects/{name}/dashboard`
+
+Body: `{"blocks": [...]}`, at most 100 blocks, in order. Answers with the
+dashboard as `GET` does. A block:
+
+| Field | Meaning |
+|---|---|
+| `id` | 1-40 of `A-Z`, `a-z`, `0-9`, `-`, `_`; unique in the layout |
+| `kind` | `stat` (the last value, big, with a 24-hour sparkline), `status` (the badge and the message), `chart` (a line chart of the range), `text` (the last text), `table` (the `rows` of the last `json` result), or `note` (Markdown, no monitor) |
+| `monitor` | The monitor ID, of this project. Not for a note. |
+| `size` | `s` (one column of four), `m` (two), or `l` (the full width). Default `s`. |
+| `title` | Optional, at most 120 characters. Default: the monitor name. |
+| `text` | The Markdown of a note, at most 4000 characters |
+| `options` | `range` of a chart (`1h`, `6h`, `24h` default, `7d`); `sparkline` of a stat (default `true`); `decimals` (0-6) |
+
+`stat` and `chart` need a `number` or `json` monitor; `table` needs a
+`json` monitor. Several blocks can show the same monitor. A bad layout is
+`422 invalid` with `details.field` such as `blocks[2].kind`.

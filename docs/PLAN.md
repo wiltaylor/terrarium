@@ -2233,6 +2233,49 @@ the command that makes a standard file for each test framework. The
 default prompts tell each agent to prove test results with
 `terrarium test push`.
 
+### 15.6 Monitors and the project dashboard
+
+A test run proves the work once. A monitor proves, every minute, that a
+service still works. The operator opens a project and sees its
+dashboard first: one block for each check, with its state.
+
+- **Model.** A monitor (migration 54: `monitors`, `monitor_results`,
+  `dashboards`) is a shell script for a target, a schedule (an interval
+  of 15 s or more, or a cron spec), a timeout, and an output kind:
+  `number` (the first number on stdout, with warn and crit thresholds
+  above or below), `status` (the Nagios exit codes: 0 ok, 1 warn, 2 crit,
+  other unknown), `text`, or `json` (`value`, `unit`, `status`,
+  `message`, and up to 200 `rows`). Each run keeps a result: the status,
+  the value, the text or JSON, the duration, and the error. Results go
+  after the retention (7 days by default, 90 at most) and past 10 000
+  for one monitor.
+- **Engine.** The scheduler task (§12c, `crate::scheduler`) runs a
+  monitor tick every 5 s, with the time math of the schedules. A run
+  checks the rights of its `run_as` actor again, then runs `sh -c` on the
+  target through the executor, as `terrarium exec` does. One run at a
+  time for each monitor (a tick that finds a run still running counts a
+  skip), and at most 8 runs at once in the daemon. A monitor is not an
+  agent: it holds no lease, and uses the target with the rights of its
+  `run_as` (the policy or a lease of that agent). It does not bring a
+  stopped target up: the result is `unknown`, "target down".
+- **Alerts.** Each result is a `monitor.result` event, and a change of
+  status is a `monitor.status` event. The triggers (§12c) turn them into
+  mail or an exec. There is no second alert system.
+- **Dashboard.** A layout of ordered blocks for each project: `stat` (a
+  big value with a 24-hour sparkline), `status`, `chart` (1 h, 6 h, 24 h,
+  or 7 d), `text`, `table` (the JSON rows), and `note` (a Markdown
+  section header). A block is small, medium, or large (one, two, or four
+  columns). Each block shows its state as a colour, a glyph, and a word,
+  the time of the last result, and a stale marker after three periods
+  with no result. The Dashboard item is the first item of a project in
+  the tree, and `/p/<project>` opens it.
+- **Rights.** Members and their agents read; project admins (leads),
+  sysadmins, and the operator write, with a target that they may use.
+- **Surfaces.** The API (docs/api.md §30), `terrarium monitor` and
+  `terrarium dashboard` (docs/cli.md), the Dashboard page and its
+  Monitors tab, the packaged skill `terrarium-monitors`, and
+  `scripts/seed-monitors.sh`.
+
 ---
 
 ## 16. Subscriptions and usage

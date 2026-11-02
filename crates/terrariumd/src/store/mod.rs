@@ -13,6 +13,7 @@ pub mod inbox;
 pub mod leases;
 pub mod mail;
 pub mod memory;
+pub mod monitors;
 pub mod pointers;
 pub mod projects;
 pub mod questions;

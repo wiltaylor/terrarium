@@ -8038,3 +8038,234 @@ async fn default_skill_flags_and_effective_skills() {
         "effective_skills  fern-check (explicit), terrarium-db (default)\nname              w\n"
     );
 }
+
+#[tokio::test]
+async fn monitors_and_the_dashboard() {
+    let m = json!({"id": "01MONMONMONMONMONMONMONMON", "name": "disk", "project": "terra",
+                   "kind": "number", "target": "box", "script": "df -P / | awk 'NR==2{print $5}'",
+                   "schedule": {"kind": "interval", "every": "1m"}, "unit": "%", "warn": 80.0,
+                   "crit": 90.0, "direction": "above", "enabled": true, "timeout_secs": 30,
+                   "retention_days": 7, "skipped": 0, "run_as": "operator",
+                   "next_run_at": "2026-11-02T10:01:00.000Z",
+                   "last": {"status": "warn", "value": 85.5, "at": "2026-11-02T10:00:00.000Z",
+                            "duration_ms": 12}});
+    // ls in the agent's own project.
+    let out = ok(
+        true,
+        &["monitor", "ls"],
+        vec![(200, json!([m.clone()]))],
+        vec![req(Get, "/api/projects/terra/monitors")],
+    )
+    .await;
+    assert!(
+        out.contains("disk") && out.contains("85.5 %") && out.contains("every 1m"),
+        "{out}"
+    );
+    assert!(out.contains("warn"), "{out}");
+
+    // new from flags: a bare name is in the project.
+    let args = [
+        "monitor",
+        "new",
+        "disk",
+        "--target",
+        "box",
+        "--script",
+        "df",
+        "--every",
+        "1m",
+        "--kind",
+        "number",
+        "--unit",
+        "%",
+        "--warn",
+        "80",
+        "--crit",
+        "90",
+        "--timeout",
+        "10",
+        "--retention",
+        "14",
+    ];
+    let out = ok(
+        true,
+        &args,
+        vec![(201, m.clone())],
+        vec![(
+            Post,
+            "/api/projects/terra/monitors",
+            vec![],
+            Some(json!({"name": "disk", "target": "box", "script": "df",
+                        "schedule": {"kind": "interval", "every": "1m"}, "kind": "number",
+                        "unit": "%", "warn": 80.0, "crit": 90.0, "timeout_secs": 10,
+                        "retention_days": 14})),
+        )],
+    )
+    .await;
+    assert!(out.starts_with("created monitor disk"), "{out}");
+    // A cron spec, a negative threshold, and the below direction.
+    let r = exec(
+        true,
+        &[
+            "monitor",
+            "new",
+            "free",
+            "--target",
+            "box",
+            "--script",
+            "x",
+            "--cron",
+            "*/5 * * * *",
+            "--kind",
+            "number",
+            "--warn",
+            "-5",
+            "--direction",
+            "below",
+            "--disabled",
+        ],
+        vec![(201, m.clone())],
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    let b = r.reqs[0].body.clone().unwrap();
+    assert_eq!(
+        b["schedule"],
+        json!({"kind": "cron", "expr": "*/5 * * * *", "tz": "UTC"})
+    );
+    assert_eq!(b["warn"], -5.0);
+    assert_eq!(b["direction"], "below");
+    assert_eq!(b["enabled"], false);
+    // Missing flags are usage errors; a bad kind does not parse.
+    let r = exec(
+        true,
+        &["monitor", "new", "x", "--target", "box", "--kind", "text"],
+        vec![],
+        None,
+    )
+    .await;
+    assert!(r.result.is_err() && r.reqs.is_empty());
+    assert!(Cli::try_parse_from(["terrarium", "monitor", "new", "x", "--kind", "gauge"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "monitor",
+            "new",
+            "x",
+            "--every",
+            "1m",
+            "--cron",
+            "* * * * *"
+        ])
+        .is_err()
+    );
+
+    // edit: only the flags given, and null to clear the thresholds.
+    ok(
+        true,
+        &[
+            "monitor",
+            "edit",
+            "terra/disk",
+            "--clear-thresholds",
+            "--enable",
+            "--rename",
+            "root",
+        ],
+        vec![(200, m.clone())],
+        vec![(
+            Patch,
+            "/api/monitors/terra%2Fdisk",
+            vec![],
+            Some(json!({"name": "root", "warn": null, "crit": null, "enabled": true})),
+        )],
+    )
+    .await;
+    let r = exec(true, &["monitor", "edit", "disk"], vec![], None).await;
+    assert!(r.result.is_err());
+
+    // run prints the result and the output.
+    let out = ok(
+        true,
+        &["monitor", "run", "disk"],
+        vec![(
+            200,
+            json!({"result": {"status": "crit", "value": 95.0, "duration_ms": 8},
+                           "output": {"exit_code": 0, "stdout": "95%\n", "stderr": ""}}),
+        )],
+        vec![req(Post, "/api/monitors/terra%2Fdisk/run")],
+    )
+    .await;
+    assert!(out.starts_with("CRIT  95"), "{out}");
+    assert!(
+        out.contains("exit code: 0") && out.contains("  95%"),
+        "{out}"
+    );
+
+    // results with the query.
+    ok(
+        true,
+        &[
+            "monitor",
+            "results",
+            "01MONMONMONMONMONMONMONMON",
+            "--since",
+            "24h",
+            "--bucket",
+            "1h",
+        ],
+        vec![(
+            200,
+            json!([{"at": "2026-11-02T10:00:00.000Z", "status": "ok", "value": 1.5,
+                           "min": 1.0, "max": 2.0, "count": 60}]),
+        )],
+        vec![(
+            Get,
+            "/api/monitors/01MONMONMONMONMONMONMONMON/results",
+            vec![("since", "24h"), ("limit", "20"), ("bucket", "1h")],
+            None,
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["monitor", "rm", "disk"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/monitors/terra%2Fdisk")],
+    )
+    .await;
+
+    // dashboard show: the latest values for an agent.
+    let out = ok(
+        true,
+        &["dashboard", "show"],
+        vec![(
+            200,
+            json!({"project": "terra", "blocks": [{"id": "a"}], "monitors": [m.clone()]}),
+        )],
+        vec![req(Get, "/api/projects/terra/dashboard")],
+    )
+    .await;
+    assert!(out.contains("disk") && out.contains("85.5 %"), "{out}");
+    assert!(
+        out.contains("1 monitors, 1 not ok; 1 dashboard blocks"),
+        "{out}"
+    );
+    // dashboard set from stdin.
+    let layout = json!({"blocks": [{"id": "n", "kind": "note", "text": "## Hosts"}]});
+    let out = ok_in(
+        true,
+        &["dashboard", "set", "--from-file", "-"],
+        vec![(200, json!({"blocks": [{"id": "n"}]}))],
+        Some(&layout.to_string()),
+        vec![(
+            Put,
+            "/api/projects/terra/dashboard",
+            vec![],
+            Some(layout.clone()),
+        )],
+    )
+    .await;
+    assert_eq!(out, "saved the dashboard of terra: 1 blocks\n");
+}
