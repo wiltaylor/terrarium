@@ -67,6 +67,14 @@ services:
       # An Inbox mail for each installed harness update: off or on. A failed
       # install always sends a mail.
       TERRARIUM_HARNESS_UPDATE_MAIL: ${TERRARIUM_HARNESS_UPDATE_MAIL:-off}
+      # Backups (docs/api.md §32): the dir (default /state/backups) and the
+      # schedule: off (the default), daily, weekly, or a duration of 1h or more.
+      TERRARIUM_BACKUP_DIR: ${TERRARIUM_BACKUP_DIR:-}
+      TERRARIUM_BACKUP_SCHEDULE: ${TERRARIUM_BACKUP_SCHEDULE:-off}
+      TERRARIUM_BACKUP_FULL_EVERY: ${TERRARIUM_BACKUP_FULL_EVERY:-7d}
+      TERRARIUM_BACKUP_KEEP: ${TERRARIUM_BACKUP_KEEP:-4}
+      TERRARIUM_BACKUP_WORK: ${TERRARIUM_BACKUP_WORK:-off}
+      TERRARIUM_BACKUP_PASSPHRASE_FILE: ${TERRARIUM_BACKUP_PASSPHRASE_FILE:-}
       # The config repo auto-sync (PLAN §8.3): off, pull, or sync, every interval.
       TERRARIUM_CONFIG_SYNC: ${TERRARIUM_CONFIG_SYNC:-off}
       TERRARIUM_CONFIG_SYNC_INTERVAL: ${TERRARIUM_CONFIG_SYNC_INTERVAL:-15m}

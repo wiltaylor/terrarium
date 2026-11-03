@@ -329,6 +329,42 @@ pub enum DaemonCmd {
     Status,
     /// Read the definition files again (sysadmin)
     Reload,
+    /// Backups of the daemon's data (the operator). A backup holds every
+    /// secret of the daemon. Restore with `terrariumd backup restore`, with
+    /// the daemon stopped
+    Backup {
+        #[command(subcommand)]
+        command: BackupCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BackupCmd {
+    /// Make a backup in the daemon's backup dir now
+    Create {
+        /// `full`, or `diff` (the files that changed since the newest full backup)
+        #[arg(long, default_value = "full", value_parser = ["full", "diff"])]
+        kind: String,
+        /// Add the agent workspaces
+        #[arg(long)]
+        work: bool,
+        /// The base of a diff: a backup file name. Default: the newest full backup
+        #[arg(long)]
+        base: Option<String>,
+        /// Seal the backup with the passphrase on the first line of stdin
+        #[arg(long)]
+        passphrase_stdin: bool,
+    },
+    /// List the backups in the daemon's backup dir
+    Ls,
+    /// Download a backup file
+    Download {
+        /// The file name (from `backup ls`)
+        name: String,
+        /// The file to write. Default: the name, in the current dir
+        #[arg(long, short = 'o')]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

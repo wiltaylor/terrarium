@@ -10,8 +10,8 @@ use terrariumd::harness_tools::ToolsConfig;
 use terrariumd::runner_supervisor::{RunnerMode, RunnerSupervisor, RunnerSupervisorConfig};
 use terrariumd::sandbox::{self, SandboxConfig};
 use terrariumd::settings::{
-    Command, ConfigCommand, DefaultsCommand, HarnessCommand, PasswordCommand, SecretsCommand,
-    Settings,
+    BackupCommand, Command, ConfigCommand, DefaultsCommand, HarnessCommand, PassphraseArgs,
+    PasswordCommand, SecretsCommand, Settings,
 };
 use terrariumd::usage_collector::UsageConfig;
 use terrariumd::{DaemonConfig, start_with_usage};
@@ -43,6 +43,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(Command::Config { command }) = &settings.command {
         return config_command(command);
+    }
+    if let Some(Command::Backup { command }) = &settings.command {
+        return backup_command(&settings, command);
     }
     // TERRARIUM_PASSWORD(_FILE): set the first password now, then start
     // again without the two variables, so no child process (a harness, git,
@@ -205,6 +208,12 @@ async fn main() -> anyhow::Result<()> {
     let ingest_task = terrariumd::ingest::serve_from_env(daemon.state.clone())
         .await?
         .map(|(task, _)| task);
+    // The scheduled backup (TERRARIUM_BACKUP_SCHEDULE, docs/api.md §32.4).
+    // A bad setting stops the start: a backup that silently does not run
+    // is worse than no start.
+    let backup_cfg =
+        terrariumd::backup::schedule::Config::from_env().map_err(anyhow::Error::msg)?;
+    let backup_task = terrariumd::backup::schedule::spawn(daemon.state.clone(), backup_cfg);
 
     // Check the installed harness versions once at start, in the
     // background, so the log shows the version of each harness.
@@ -229,6 +238,9 @@ async fn main() -> anyhow::Result<()> {
         t.abort();
     }
     if let Some(t) = ingest_task {
+        t.abort();
+    }
+    if let Some(t) = backup_task {
         t.abort();
     }
     if let Some(t) = sync_task {
@@ -571,6 +583,223 @@ fn secrets_command(settings: &Settings, command: &SecretsCommand) -> anyhow::Res
             "new key in {}; {n} secret(s) sealed again",
             terrariumd::secrets::crypto::key_path(&settings.state_dir).display()
         );
+    }
+    Ok(())
+}
+
+/// The passphrase from `--passphrase-file` or `--passphrase-stdin`.
+fn given_passphrase(args: &PassphraseArgs) -> anyhow::Result<Option<String>> {
+    let line = if let Some(p) = &args.passphrase_file {
+        std::fs::read_to_string(p)
+            .with_context(|| format!("cannot read {}", p.display()))?
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    } else if args.passphrase_stdin {
+        let mut s = String::new();
+        std::io::stdin().read_line(&mut s)?;
+        s.trim_end_matches(['\r', '\n']).to_owned()
+    } else {
+        return Ok(None);
+    };
+    if line.is_empty() {
+        anyhow::bail!("the passphrase is empty");
+    }
+    Ok(Some(line))
+}
+
+/// Run `f` with the given passphrase. When the backup is sealed and none
+/// was given, ask on the terminal once and run `f` again.
+fn with_passphrase<T>(
+    args: &PassphraseArgs,
+    f: impl Fn(Option<String>) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let given = given_passphrase(args)?;
+    let asked = given.is_none();
+    match f(given) {
+        Err(e)
+            if asked
+                && e.downcast_ref::<terrariumd::backup::NeedsPassphrase>()
+                    .is_some()
+                && std::io::IsTerminal::is_terminal(&std::io::stdin()) =>
+        {
+            let p = rpassword::prompt_password("Backup passphrase: ")
+                .context("cannot read the passphrase")?;
+            f(Some(p))
+        }
+        r => r,
+    }
+}
+
+/// `terrariumd backup ...` (docs/api.md §32).
+fn backup_command(settings: &Settings, command: &BackupCommand) -> anyhow::Result<()> {
+    use terrariumd::backup::{self, CreateOptions, DbSource, RestoreOptions, Roots};
+    let default_dir = backup::default_dir(&settings.state_dir);
+    let roots = |work: bool| Roots {
+        state: settings.state_dir.clone(),
+        config: Some(settings.config_repo.clone()).filter(|p| p.is_dir()),
+        work: work.then(|| settings.work_dir.clone()),
+    };
+    let print = |json: bool, v: &serde_json::Value, text: String| {
+        #[allow(clippy::print_stdout)]
+        if json {
+            println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        } else {
+            println!("{text}");
+        }
+    };
+    match command {
+        BackupCommand::Create {
+            kind,
+            work,
+            base,
+            dir,
+            encrypt,
+            passphrase,
+            json,
+        } => {
+            let mut pass = given_passphrase(passphrase)?;
+            if *encrypt && pass.is_none() {
+                let a = rpassword::prompt_password("Backup passphrase: ")
+                    .context("cannot read the passphrase")?;
+                let b =
+                    rpassword::prompt_password("Again: ").context("cannot read the passphrase")?;
+                if a != b {
+                    anyhow::bail!("the two passphrases differ");
+                }
+                if a.is_empty() {
+                    anyhow::bail!("the passphrase is empty");
+                }
+                pass = Some(a);
+            }
+            let created = backup::create(
+                &roots(*work),
+                &CreateOptions {
+                    kind: *kind,
+                    dir: dir.clone().unwrap_or(default_dir),
+                    base: base.clone(),
+                    passphrase: pass,
+                    db: DbSource::File(settings.state_dir.join(backup::DB_FILE)),
+                },
+            )?;
+            let h = &created.header;
+            let sealed = if h.encryption.is_some() {
+                "sealed with the passphrase"
+            } else {
+                "NOT sealed: anyone with the file can read the secrets in it"
+            };
+            print(
+                *json,
+                &serde_json::to_value(&created)?,
+                format!(
+                    "{} backup {} ({} bytes): {} entries, {} files stored; {sealed}",
+                    h.kind,
+                    created.path.display(),
+                    created.size,
+                    h.entries,
+                    h.stored_files
+                ),
+            );
+        }
+        BackupCommand::Ls { dir, json } => {
+            let items = backup::list(dir.as_deref().unwrap_or(&default_dir))?;
+            let mut text = Vec::new();
+            for l in &items {
+                text.push(match &l.header {
+                    Some(h) => format!(
+                        "{}  {}  {}  {} bytes{}{}",
+                        l.name,
+                        h.kind,
+                        h.created_at.format("%Y-%m-%d %H:%M:%SZ"),
+                        l.size,
+                        h.base
+                            .as_ref()
+                            .map(|b| format!("  base {}", b.name))
+                            .unwrap_or_default(),
+                        if h.encryption.is_some() {
+                            "  sealed"
+                        } else {
+                            ""
+                        }
+                    ),
+                    None => format!(
+                        "{}  error: {}",
+                        l.name,
+                        l.error.as_deref().unwrap_or_default()
+                    ),
+                });
+            }
+            if text.is_empty() {
+                text.push("no backups".into());
+            }
+            print(*json, &serde_json::to_value(&items)?, text.join("\n"));
+        }
+        BackupCommand::Verify {
+            file,
+            base,
+            passphrase,
+            json,
+        } => {
+            let v = with_passphrase(passphrase, |p| {
+                backup::verify(file, base.as_deref(), p.as_deref())
+            })?;
+            print(
+                *json,
+                &serde_json::to_value(&v)?,
+                format!(
+                    "{} backup {} is good: {} entries, {} files checked",
+                    v.kind, v.id, v.entries, v.checked_files
+                ),
+            );
+        }
+        BackupCommand::Restore {
+            file,
+            base,
+            skip_work,
+            passphrase,
+            json,
+        } => {
+            if std::os::unix::net::UnixStream::connect(&settings.socket).is_ok() {
+                anyhow::bail!(
+                    "a daemon answers on {}: stop it first, then restore",
+                    settings.socket.display()
+                );
+            }
+            let roots = Roots {
+                state: settings.state_dir.clone(),
+                config: Some(settings.config_repo.clone()),
+                work: Some(settings.work_dir.clone()),
+            };
+            let r = with_passphrase(passphrase, |p| {
+                backup::restore(
+                    file,
+                    &roots,
+                    &RestoreOptions {
+                        base: base.clone(),
+                        passphrase: p,
+                        skip_work: *skip_work,
+                        keep: vec![default_dir.clone(), file.clone()],
+                    },
+                )
+            })?;
+            let mut text = vec![format!(
+                "restored {} backup {} ({} entries)",
+                r.kind, r.id, r.entries
+            )];
+            for root in &r.roots {
+                text.push(match &root.previous {
+                    Some(p) => format!(
+                        "  {}: {} (the old content is in {}; delete it when the daemon runs well)",
+                        root.root,
+                        root.dir.display(),
+                        p.display()
+                    ),
+                    None => format!("  {}: {}", root.root, root.dir.display()),
+                });
+            }
+            print(*json, &serde_json::to_value(&r)?, text.join("\n"));
+        }
     }
     Ok(())
 }

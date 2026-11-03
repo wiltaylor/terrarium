@@ -8455,3 +8455,138 @@ Answers:
 
 A failed poll answers `200` with `error` set and no runs. Use it to
 write a script: `terrarium pipeline test` prints the same.
+
+## 32. Backups
+
+A backup is one zip file of the daemon's data. The code is in
+`crates/terrariumd/src/backup/`. The files go in the backup dir:
+`TERRARIUM_BACKUP_DIR`, else `<state>/backups`.
+
+**A backup holds every secret of the daemon.** The state root has
+`secrets.key`, the database with the sealed secrets, the plan logins of the
+accounts, the git credentials, and the session key. Anyone with an unsealed
+backup can read all of them. Seal a backup that leaves the server with a
+passphrase (§31.2).
+
+### 32.1 What a backup holds
+
+| Root | Dir | Content |
+|---|---|---|
+| `state` | `TERRARIUM_STATE_DIR` | The database (as a `VACUUM INTO` copy), the agent dirs, the trash, the artifacts, the credentials, `secrets.key`, `session.key`, `operator.password`. |
+| `config` | `TERRARIUM_CONFIG_REPO` | The config repo, with its `.git`. |
+| `work` | `TERRARIUM_WORK_DIR` | The agent workspaces. Only with `work` (`--work`). |
+
+The database is never a raw file copy: the daemon copies it with
+`VACUUM INTO`, which gives one consistent snapshot while the daemon writes.
+The walk skips the backup dir, the live database files (`terrarium.db`,
+`-wal`, `-shm`, `-journal`), the restore dirs (§32.3), sockets, and the
+dirs named `target`, `node_modules`, and `.cache`, at any depth. The tools
+dir is not a root. Symlinks stay symlinks. The manifest records the mode of
+each file and dir and the time of each file.
+
+The entries of the zip:
+
+| Entry | Content |
+|---|---|
+| `README.txt` | A warning that the file holds secrets. Always plain. |
+| `backup.json` | The header: `format` (`terrarium-backup`), `version` (1), `id` (a ULID), `kind`, `created_at`, `base` (a diff: `{id, name, created_at}`), `terrarium_version`, `db_user_version`, `contains_secrets` (`true`), `roots`, `encryption`, `entries`, `stored_files`, `stored_bytes`. Always plain. |
+| `manifest.json` | `{id, entries: [{path, kind, mode, size, mtime_ns, sha256, link, stored_in}]}`: every file, dir (`kind: dir`), and symlink (`kind: symlink`, `link`). `path` is `<root>/<relative path>`. `stored_in` is the ID of the backup whose zip has the content. |
+| `files/<root>/<path>` | The content of each file that this backup stores. |
+
+**Full and diff.** A `full` backup stores every file. A `diff` backup
+names a full backup as its `base` (default: the newest full backup in the
+dir) and stores only the files that changed since that base. A file with
+the same size, time, and mode as in the base, or with the same SHA-256, is
+not stored again: its entry has `stored_in` = the base ID. The manifest of
+a diff still lists every file, so a restore of the diff gives the exact
+tree at the time of the diff. Files that were deleted after the base do not
+come back. Each backup has the whole database. A diff needs its base: do
+not delete a full backup while you need a diff of it.
+
+### 32.2 Sealed backups
+
+With a passphrase, the daemon seals the manifest and each file. The key is
+Argon2id of the passphrase and a random salt (the default parameters of
+the `argon2` crate, in `backup.json` `encryption`). Each entry is a stream
+of XChaCha20-Poly1305 chunks of 64 KiB (the files are deflated first). The
+associated data is `<backup id>|<entry name>`: an entry that is changed,
+cut, or copied to another name or backup does not open. A wrong passphrase
+fails at once (`encryption.check`). The header and `README.txt` stay
+plain, so `ls` shows a sealed backup. The file names and sizes are in the
+sealed manifest, not in the header; the zip directory shows the entry
+names. There is no recovery of a lost passphrase.
+
+### 32.3 Restore
+
+A restore is offline only: `terrariumd backup restore <file>`, with the
+daemon stopped (it refuses while a daemon answers on the socket). The API
+has no restore, because a restore replaces the database under the daemon.
+
+1. Open the backup. For a diff, open its base: `--base`, else the backup
+   with the base ID in the dir of the diff.
+2. Check each manifest path (a known root, no `..`, no absolute path).
+3. Write every entry into `<root>/.terrarium-restore-<id>/` and check the
+   size and SHA-256 of each file. Any error removes the staging dirs and
+   stops: the old data does not change.
+4. In each root, move the old content to
+   `<root>/.terrarium-pre-restore-<time>/`, then move the new content into
+   place. The backup dir and the restored file stay where they are. A
+   root that the backup does not have (`work`, without `--work`) does not
+   change; `--skip-work` leaves the work root too.
+
+Delete the `.terrarium-pre-restore-*` dirs when the daemon runs well. The
+restore writes the files as the user that runs it: run it as the user of
+the daemon. A database from an older terrariumd migrates at the next
+start. A database from a newer one (`db_user_version` larger than the
+migrations of this build) does not start.
+
+### 32.4 Scheduled backups
+
+`TERRARIUM_BACKUP_SCHEDULE` (default `off`; `daily`, `weekly`, or a
+duration of `1h` or more): a daemon task makes a backup one interval after
+the newest backup in the dir, and not before 10 minutes after the start. A
+failed run waits one interval too. The backup is `full` when the dir has no
+full backup or when the newest is older than `TERRARIUM_BACKUP_FULL_EVERY`
+(default `7d`); else it is a `diff` of the newest full backup. Then the
+task keeps the newest `TERRARIUM_BACKUP_KEEP` (default `4`) full backups and
+their diffs, and deletes the rest (audit `backup.prune`).
+`TERRARIUM_BACKUP_WORK=on` adds the workspaces.
+`TERRARIUM_BACKUP_PASSPHRASE_FILE` seals each backup with the first line
+of that file. The audit actor is `system:backup`. A failure writes the
+audit row `backup.failed` with the error.
+
+This task is not a project schedule (§19): a project schedule starts agent
+turns in one project, and a backup is of the whole daemon.
+
+### 32.5 The API
+
+The operator only (`403` for an agent, also a sysadmin). One backup runs at
+a time: a create while one runs is `409 conflict`.
+
+#### `POST /api/backups`
+
+Make a backup now. The body is optional:
+
+| Field | Meaning |
+|---|---|
+| `kind` | `full` (the default) or `diff` |
+| `work` | `true`: add the workspaces. Default `false`. |
+| `passphrase` | Seal the backup (§32.2). Empty is `422 invalid`. |
+| `base` | The base of a diff: a file name in the backup dir. Default: the newest full backup. |
+
+Answers `201` with `{name, path, size, header}` (`header` is
+`backup.json`). A diff with no full backup is `422 invalid`. The audit row
+is `backup.create` (target: the file name; detail: `id`, `kind`, `base`,
+`roots`, `encrypted`, `entries`, `stored_files`, `size`). The database
+copy holds the database lock while it runs.
+
+#### `GET /api/backups`
+
+The backups in the dir, oldest first: `[{name, size, ...header}]`. A file
+whose header does not read has `error` and no header fields.
+
+#### `GET /api/backups/{name}`
+
+The zip file (`application/zip`, `Content-Disposition: attachment`,
+`Cache-Control: no-store`). `name` is a file name from the list; any other
+name is `404 not_found`. The audit row is `backup.download`.

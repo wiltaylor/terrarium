@@ -209,6 +209,12 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_QUESTION_GUARD` | `on`. A member whose turn ends with a question in plain text, and that reported nothing, becomes `blocked`, and its lead (or the operator) gets the question by mail (PLAN §8.4). `off` (or `0`, `false`, `no`): no check. |
 | `TERRARIUM_HARNESS_AUTO_UPDATE` | `daily`. The background check for harness updates (PLAN §6, "Auto-update and pins"): for each harness with the policy `auto`, the daemon installs the latest release on npm (majors too) into a new version dir and switches to it. Running agents keep their version until their next start. `off`, or a duration of `1h` or more (`6h`). The first check is 5 minutes after the start, or one interval after the last check when that is later. A pin (`POST /api/harnesses/{name}/pin`) stops the update of one harness. |
 | `TERRARIUM_HARNESS_UPDATE_MAIL` | `off`. An installed auto-update sends no mail; the audit row (`harness.auto_update`), the `harness` event, and the dashboard table (Settings → Subscriptions) show it. `on`: one Inbox mail for each installed update, with the rollback command. A failed install sends one mail for each failed version with both values. |
+| `TERRARIUM_BACKUP_DIR` | `<state>/backups`. The backup zip files ([api.md](api.md) §32). The walk of a backup skips this dir. |
+| `TERRARIUM_BACKUP_SCHEDULE` | `off`. `daily`, `weekly`, or a duration of `1h` or more: the daemon makes a backup one interval after the newest one ([api.md](api.md) §32.4). |
+| `TERRARIUM_BACKUP_FULL_EVERY` | `7d`. A scheduled backup is full when the newest full backup is older than this; else it is a diff. |
+| `TERRARIUM_BACKUP_KEEP` | `4`. The scheduled backup keeps this many full backups and their diffs, and deletes the older ones. |
+| `TERRARIUM_BACKUP_WORK` | `off`. On: the scheduled backups have the workspaces too. |
+| `TERRARIUM_BACKUP_PASSPHRASE_FILE` | unset. The first line of the file seals each scheduled backup. |
 
 ### The directories
 

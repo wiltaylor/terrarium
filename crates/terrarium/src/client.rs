@@ -236,6 +236,38 @@ impl HttpTransport {
         Ok(None)
     }
 
+    /// Write the body of a GET to `out`, for a file download. A non-2xx
+    /// answer comes back as a response, and `out` stays empty. Answers the
+    /// bytes written.
+    pub async fn download(
+        &self,
+        req: &ApiRequest,
+        out: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    ) -> anyhow::Result<Result<u64, ApiResponse>> {
+        use tokio::io::AsyncWriteExt;
+        let resp = self.raw(req, "application/octet-stream").await?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.into_body().collect().await?.to_bytes();
+            return Ok(Err(ApiResponse {
+                status,
+                headers: Default::default(),
+                body: decode_body(&body),
+            }));
+        }
+        let mut body = resp.into_body();
+        let mut n = 0u64;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.context("the download broke")?;
+            if let Some(chunk) = frame.data_ref() {
+                out.write_all(chunk).await?;
+                n += chunk.len() as u64;
+            }
+        }
+        out.flush().await?;
+        Ok(Ok(n))
+    }
+
     /// Open a WebSocket on `path`, for `agent attach`.
     pub async fn websocket(
         &self,

@@ -1635,6 +1635,37 @@ bare `HH:MM` or `HH:MM:SS` (today, in local time), or a duration back from
 now (`90s`, `30m`, `2h`, `1d`). The CLI sends the API an RFC 3339 time in
 UTC.
 
+### Backups
+
+```
+terrarium daemon backup create [--kind full|diff] [--work] [--base <file name>] [--passphrase-stdin]
+terrarium daemon backup ls
+terrarium daemon backup download <name> [-o <file>]
+```
+
+The operator only ([api.md §32](api.md#32-backups)). `create` makes a
+backup in the daemon's backup dir while the daemon runs.
+`--passphrase-stdin` seals it with the first line of stdin. `download`
+writes the file with mode `0600`. **A backup holds every secret of the
+daemon.**
+
+The daemon binary has the offline commands. They need no running daemon,
+and they read the same `--state-dir`, `--config-repo`, and `--work-dir`
+(and env) as the daemon:
+
+```
+terrariumd backup create [--kind full|diff] [--work] [--base <file>] [--dir <dir>] [--encrypt | --passphrase-file <f> | --passphrase-stdin] [--json]
+terrariumd backup ls [--dir <dir>] [--json]
+terrariumd backup verify <file> [--base <file>] [--passphrase-file <f> | --passphrase-stdin] [--json]
+terrariumd backup restore <file> [--base <file>] [--skip-work] [--passphrase-file <f> | --passphrase-stdin] [--json]
+```
+
+`create` can run while the daemon runs (the database copy is a
+`VACUUM INTO`). `--encrypt` asks for the passphrase on the terminal,
+twice. `verify` reads each file and checks it against the manifest.
+`restore` refuses while a daemon answers on the socket. For a sealed backup
+with no passphrase option, `verify` and `restore` ask on the terminal.
+
 ## 6. Agent commands
 
 PLAN §9 lists the agent commands. Each one is in §4. These are for agents

@@ -1794,6 +1794,47 @@ uses it. Each install has its own compose project, `terrarium-<name of the
 dir>` (`terrarium-deploy` for `~/terrarium`), so the stacks stay apart. Use
 a `--port` that the dev stack does not use.
 
+### 2.15 Back up and restore
+
+A backup is a zip file of the state dir (the database, the agents, the
+credentials, and the secret store key), the config repo, and, if you ask,
+the workspaces ([api.md](api.md) §32). **It holds every secret of the
+daemon.** Seal a backup that leaves the server with a passphrase.
+
+Make a full backup while the daemon runs, then a diff (only the changed
+files) later:
+
+```bash
+docker compose exec terrarium terrariumd backup create --encrypt
+docker compose exec terrarium terrariumd backup create --kind diff --encrypt
+docker compose exec terrarium terrariumd backup ls
+```
+
+The files are in `state/backups/` on the host. From another machine, use
+`terrarium daemon backup create --passphrase-stdin` and
+`terrarium daemon backup download <name>`.
+
+For a backup each night, set these in `.env` and run `just up`:
+
+```bash
+TERRARIUM_BACKUP_SCHEDULE=daily
+TERRARIUM_BACKUP_PASSPHRASE_FILE=/state/backup.pass   # mode 0600
+```
+
+To restore, stop the daemon, then run the restore in a new container with
+the same mounts:
+
+```bash
+docker compose stop terrarium
+docker compose run --rm --no-deps terrarium terrariumd backup verify /state/backups/<file>
+docker compose run --rm --no-deps terrarium terrariumd backup restore /state/backups/<file>
+docker compose up -d terrarium
+```
+
+A diff restores with its base: keep both files in the same dir. The old
+data moves to `.terrarium-pre-restore-<time>/` in each dir. Delete it when
+the daemon runs well.
+
 ## 3. Configuration directories
 
 Compose bind-mounts these host directories into the container:

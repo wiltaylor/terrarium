@@ -4370,6 +4370,19 @@ does steps 1, 3, 5, and 6; `just deploy::rollback` swaps `src.prev` and
 machine, never in the repo dir. getting-started §2.14 is the operator
 guide.
 
+### 23.7 Backup and restore
+
+`terrariumd backup create|ls|verify|restore` and `POST/GET /api/backups`
+(the operator only, audited) make and read zip backups of the state dir,
+the config repo, and optionally the workspaces ([api.md](api.md) §32). The
+database goes in as a `VACUUM INTO` copy. A `diff` backup stores only the
+files that changed since its full `base`, and its manifest lists every
+file, so a restore gives the exact tree. A passphrase seals the entries
+(Argon2id, XChaCha20-Poly1305). A restore is offline: it checks every
+SHA-256 in a staging dir first, then moves the old content of each root to
+`.terrarium-pre-restore-<time>/`. `TERRARIUM_BACKUP_SCHEDULE` turns on a
+daemon task with retention.
+
 ---
 
 ## 24. First concrete steps

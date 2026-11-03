@@ -294,6 +294,90 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Backups of the daemon's data in zip files (docs/api.md §32). The
+    /// files hold secrets.
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
+}
+
+/// The passphrase of a sealed backup.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct PassphraseArgs {
+    /// Read the passphrase from the first line of this file.
+    #[arg(long, conflicts_with = "passphrase_stdin")]
+    pub passphrase_file: Option<PathBuf>,
+    /// Read the passphrase from the first line of stdin.
+    #[arg(long)]
+    pub passphrase_stdin: bool,
+}
+
+/// `terrariumd backup ...`.
+#[derive(Debug, Subcommand)]
+pub enum BackupCommand {
+    /// Make a backup: the state dir (with the database copy and the
+    /// secrets), the config repo, and with `--work` the workspaces. A
+    /// running daemon can stay up.
+    Create {
+        /// `full`, or `diff`: the files that changed since the newest full
+        /// backup (or `--base`).
+        #[arg(long, value_enum, default_value_t = crate::backup::Kind::Full)]
+        kind: crate::backup::Kind,
+        /// Add the agent workspaces (`--work-dir`).
+        #[arg(long)]
+        work: bool,
+        /// The base of a diff. Default: the newest full backup in the dir.
+        #[arg(long)]
+        base: Option<PathBuf>,
+        /// The backup dir. Default: `TERRARIUM_BACKUP_DIR`, else
+        /// `<state>/backups`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Seal the backup with a passphrase: ask for it on the terminal,
+        /// twice. Or give `--passphrase-file` or `--passphrase-stdin`.
+        #[arg(long)]
+        encrypt: bool,
+        #[command(flatten)]
+        passphrase: PassphraseArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the backups in the backup dir, oldest first.
+    Ls {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read every file of a backup (and of the base of a diff) and check
+    /// it against the manifest.
+    Verify {
+        file: PathBuf,
+        /// The base of a diff. Default: the backup with the base ID in the
+        /// dir of the diff.
+        #[arg(long)]
+        base: Option<PathBuf>,
+        #[command(flatten)]
+        passphrase: PassphraseArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore a backup (a full, or a diff and its base) into the state
+    /// dir, the config repo, and the work dir. Stop the daemon first. The
+    /// old content of each dir moves to `.terrarium-pre-restore-<time>/`.
+    Restore {
+        file: PathBuf,
+        #[arg(long)]
+        base: Option<PathBuf>,
+        /// Leave the work dir as it is.
+        #[arg(long)]
+        skip_work: bool,
+        #[command(flatten)]
+        passphrase: PassphraseArgs,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `terrariumd defaults ...`.

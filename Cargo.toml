@@ -82,6 +82,10 @@ hmac = "0.13"
 url = "2.5"
 base64 = "0.22"
 tar = { version = "0.4.46", default-features = false }
+# Backups (`terrariumd backup`, docs/api.md §32): the zip archive, deflate
+# through flate2 (zlib-rs) above. No zip AES: a passphrase seals the entries
+# with XChaCha20-Poly1305 and Argon2id, as the secret store does.
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Target displays (PLAN §19b): crop and scale screenshots in the host agent.
 png = "0.17"
 similar = "2.7"

@@ -1,0 +1,342 @@
+//! Round trips: full, diff, sealed, and the checks of a restore.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use super::*;
+use std::fs;
+
+struct Fixture {
+    _tmp: tempfile::TempDir,
+    state: PathBuf,
+    config: PathBuf,
+    work: PathBuf,
+    dir: PathBuf,
+}
+
+fn fixture() -> Fixture {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("state");
+    let config = tmp.path().join("config");
+    let work = tmp.path().join("work");
+    let dir = state.join("backups");
+    fs::create_dir_all(state.join("agents/A1/private")).unwrap();
+    fs::set_permissions(
+        state.join("agents/A1/private"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::write(state.join("agents/A1/private/events.jsonl"), "{}\n").unwrap();
+    fs::write(state.join("secrets.key"), [7u8; 32]).unwrap();
+    fs::set_permissions(state.join("secrets.key"), fs::Permissions::from_mode(0o600)).unwrap();
+    fs::create_dir_all(state.join("credentials/accounts/claude/a")).unwrap();
+    fs::write(
+        state.join("credentials/accounts/claude/a/.credentials.json"),
+        "tok",
+    )
+    .unwrap();
+    fs::create_dir_all(state.join("agents/A1/harness/cred")).unwrap();
+    std::os::unix::fs::symlink(
+        "../../../../credentials/accounts/claude/a",
+        state.join("agents/A1/harness/cred/account"),
+    )
+    .unwrap();
+    // The database, in WAL mode, as the daemon has it.
+    let c = rusqlite::Connection::open(state.join(DB_FILE)).unwrap();
+    c.pragma_update(None, "journal_mode", "WAL").unwrap();
+    c.execute_batch(
+        "CREATE TABLE t(v TEXT); INSERT INTO t VALUES ('one'); PRAGMA user_version = 57;",
+    )
+    .unwrap();
+    drop(c);
+    fs::create_dir_all(config.join("prompts")).unwrap();
+    fs::write(config.join("prompts/lead.md"), "lead").unwrap();
+    fs::create_dir_all(work.join("p/a/target/debug")).unwrap();
+    fs::write(work.join("p/a/main.rs"), "fn main() {}").unwrap();
+    fs::write(work.join("p/a/target/debug/big"), vec![0u8; 1000]).unwrap();
+    fs::create_dir_all(work.join("p/a/node_modules/x")).unwrap();
+    fs::write(work.join("p/a/node_modules/x/i.js"), "x").unwrap();
+    Fixture {
+        _tmp: tmp,
+        state,
+        config,
+        work,
+        dir,
+    }
+}
+
+impl Fixture {
+    fn roots(&self, work: bool) -> Roots {
+        Roots {
+            state: self.state.clone(),
+            config: Some(self.config.clone()),
+            work: work.then(|| self.work.clone()),
+        }
+    }
+
+    fn make(&self, kind: Kind, work: bool, pass: Option<&str>) -> Created {
+        create(
+            &self.roots(work),
+            &CreateOptions {
+                kind,
+                dir: self.dir.clone(),
+                base: None,
+                passphrase: pass.map(str::to_owned),
+                db: DbSource::File(self.state.join(DB_FILE)),
+            },
+        )
+        .unwrap()
+    }
+
+    fn db_value(&self) -> Vec<String> {
+        let c = rusqlite::Connection::open(self.state.join(DB_FILE)).unwrap();
+        let mut s = c.prepare("SELECT v FROM t ORDER BY v").unwrap();
+        s.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn set_db(&self, sql: &str) {
+        let c = rusqlite::Connection::open(self.state.join(DB_FILE)).unwrap();
+        c.execute_batch(sql).unwrap();
+    }
+
+    fn restore(&self, c: &Created, pass: Option<&str>) -> Restored {
+        restore(
+            &c.path,
+            &self.roots(true),
+            &RestoreOptions {
+                passphrase: pass.map(str::to_owned),
+                keep: vec![self.dir.clone()],
+                ..RestoreOptions::default()
+            },
+        )
+        .unwrap()
+    }
+}
+
+fn names(c: &Created) -> Vec<String> {
+    let f = File::open(&c.path).unwrap();
+    let z = ZipArchive::new(f).unwrap();
+    z.file_names().map(str::to_owned).collect()
+}
+
+#[test]
+fn a_full_backup_round_trips() {
+    let fx = fixture();
+    let full = fx.make(Kind::Full, true, None);
+    assert_eq!(full.header.kind, Kind::Full);
+    assert!(full.header.contains_secrets);
+    assert_eq!(full.header.db_user_version, 57);
+    assert_eq!(full.header.roots, ["state", "config", "work"]);
+    let n = names(&full);
+    assert!(n.contains(&"README.txt".to_owned()));
+    assert!(n.contains(&"files/state/terrarium.db".to_owned()));
+    assert!(n.contains(&"files/state/secrets.key".to_owned()));
+    assert!(n.contains(&"files/work/p/a/main.rs".to_owned()));
+    // No live DB files, no caches, no build output, no backups in it.
+    assert!(!n.iter().any(|x| x.contains("-wal") || x.contains("-shm")));
+    assert!(
+        !n.iter()
+            .any(|x| x.contains("target/") || x.contains("node_modules"))
+    );
+    assert!(!n.iter().any(|x| x.contains("backups/")));
+    assert_eq!(
+        fs::metadata(&full.path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let v = verify(&full.path, None, None).unwrap();
+    assert_eq!(v.checked_files, full.header.stored_files);
+
+    // Change everything, then restore.
+    fx.set_db("INSERT INTO t VALUES ('two');");
+    fs::write(fx.state.join("secrets.key"), [9u8; 32]).unwrap();
+    fs::write(fx.config.join("prompts/new.md"), "new").unwrap();
+    fs::remove_file(fx.work.join("p/a/main.rs")).unwrap();
+    let r = fx.restore(&full, None);
+    assert_eq!(r.roots.len(), 3);
+    assert_eq!(fx.db_value(), ["one"]);
+    assert_eq!(fs::read(fx.state.join("secrets.key")).unwrap(), [7u8; 32]);
+    assert!(!fx.config.join("prompts/new.md").exists());
+    assert_eq!(
+        fs::read_to_string(fx.work.join("p/a/main.rs")).unwrap(),
+        "fn main() {}"
+    );
+    assert_eq!(
+        fs::read_link(fx.state.join("agents/A1/harness/cred/account")).unwrap(),
+        Path::new("../../../../credentials/accounts/claude/a")
+    );
+    assert_eq!(
+        fs::metadata(fx.state.join("agents/A1/private"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    // The old content is aside, and the backups stay in place.
+    let prev = r.roots[0].previous.clone().unwrap();
+    assert_eq!(fs::read(prev.join("secrets.key")).unwrap(), [9u8; 32]);
+    assert!(full.path.exists());
+    assert!(
+        !fx.state
+            .join(format!("{STAGING_PREFIX}{}", full.header.id))
+            .exists()
+    );
+}
+
+#[test]
+fn a_diff_stores_the_changes_and_restores_the_exact_tree() {
+    let fx = fixture();
+    let full = fx.make(Kind::Full, false, None);
+    // A change, a new file, and a deleted file.
+    fs::write(fx.config.join("prompts/lead.md"), "lead v2").unwrap();
+    fs::write(fx.state.join("agents/A1/private/new.txt"), "n").unwrap();
+    fs::remove_file(
+        fx.state
+            .join("credentials/accounts/claude/a/.credentials.json"),
+    )
+    .unwrap();
+    fx.set_db("INSERT INTO t VALUES ('two');");
+    let diff = fx.make(Kind::Diff, false, None);
+    assert_eq!(diff.header.kind, Kind::Diff);
+    assert_eq!(diff.header.base.as_ref().unwrap().id, full.header.id);
+    let n = names(&diff);
+    assert!(n.contains(&"files/config/prompts/lead.md".to_owned()));
+    assert!(n.contains(&"files/state/agents/A1/private/new.txt".to_owned()));
+    assert!(n.contains(&"files/state/terrarium.db".to_owned()));
+    // An unchanged file stays in the base only.
+    assert!(!n.contains(&"files/state/secrets.key".to_owned()));
+    assert!(diff.header.stored_files < full.header.stored_files);
+    verify(&diff.path, None, None).unwrap();
+
+    // Change again, then restore the diff (with its base).
+    fs::write(fx.config.join("prompts/lead.md"), "lead v3").unwrap();
+    fx.set_db("INSERT INTO t VALUES ('three');");
+    let r = fx.restore(&diff, None);
+    assert_eq!(r.base.as_deref(), Some(full.header.id.as_str()));
+    assert_eq!(fx.db_value(), ["one", "two"]);
+    assert_eq!(
+        fs::read_to_string(fx.config.join("prompts/lead.md")).unwrap(),
+        "lead v2"
+    );
+    assert_eq!(fs::read(fx.state.join("secrets.key")).unwrap(), [7u8; 32]);
+    assert!(fx.state.join("agents/A1/private/new.txt").exists());
+    assert!(
+        !fx.state
+            .join("credentials/accounts/claude/a/.credentials.json")
+            .exists()
+    );
+    // A work root that the backup does not have stays as it is.
+    assert!(fx.work.join("p/a/main.rs").exists());
+}
+
+#[test]
+fn a_diff_with_no_base_is_an_error() {
+    let fx = fixture();
+    let err = create(
+        &fx.roots(false),
+        &CreateOptions {
+            kind: Kind::Diff,
+            dir: fx.dir.clone(),
+            base: None,
+            passphrase: None,
+            db: DbSource::File(fx.state.join(DB_FILE)),
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("no full backup"), "{err}");
+}
+
+#[test]
+fn a_sealed_backup_needs_the_passphrase() {
+    let fx = fixture();
+    fs::write(fx.config.join("prompts/lead.md"), "PLAIN-TEXT-MARKER-1234").unwrap();
+    let full = fx.make(Kind::Full, false, Some("correct horse"));
+    let diff = fx.make(Kind::Diff, false, Some("correct horse"));
+    assert!(full.header.encryption.is_some());
+    // The content does not read without the key: no plain text in the zip
+    // (the entry names are visible, as docs/api.md §32.2 says).
+    let raw = fs::read(&full.path).unwrap();
+    assert!(!raw.windows(22).any(|w| w == b"PLAIN-TEXT-MARKER-1234"));
+    assert!(!raw.windows(32).any(|w| w == [7u8; 32]));
+    let e = Archive::open(&full.path, None).unwrap_err();
+    assert!(e.downcast_ref::<NeedsPassphrase>().is_some());
+    assert!(Archive::open(&full.path, Some("wrong")).is_err());
+    verify(&diff.path, None, Some("correct horse")).unwrap();
+    fs::write(fx.state.join("secrets.key"), [1u8; 32]).unwrap();
+    fx.restore(&diff, Some("correct horse"));
+    assert_eq!(fs::read(fx.state.join("secrets.key")).unwrap(), [7u8; 32]);
+}
+
+#[test]
+fn a_bad_file_stops_the_restore_and_changes_nothing() {
+    let fx = fixture();
+    let full = fx.make(Kind::Full, false, None);
+    // Copy the zip with one entry changed (the same name and size).
+    let bad = fx.dir.join("bad.zip");
+    {
+        let mut src = ZipArchive::new(File::open(&full.path).unwrap()).unwrap();
+        let mut out = ZipWriter::new(File::create(&bad).unwrap());
+        for i in 0..src.len() {
+            let mut f = src.by_index(i).unwrap();
+            let name = f.name().to_owned();
+            let mut data = Vec::new();
+            f.read_to_end(&mut data).unwrap();
+            if name == "files/config/prompts/lead.md" {
+                data = b"evil".to_vec();
+            }
+            out.start_file(name, SimpleFileOptions::default()).unwrap();
+            out.write_all(&data).unwrap();
+        }
+        out.finish().unwrap();
+    }
+    fs::write(fx.config.join("prompts/lead.md"), "live").unwrap();
+    assert!(verify(&bad, None, None).is_err());
+    let err = restore(&bad, &fx.roots(false), &RestoreOptions::default()).unwrap_err();
+    assert!(format!("{err:#}").contains("does not match"), "{err:#}");
+    assert_eq!(
+        fs::read_to_string(fx.config.join("prompts/lead.md")).unwrap(),
+        "live"
+    );
+    assert!(
+        !fx.config
+            .join(format!("{STAGING_PREFIX}{}", full.header.id))
+            .exists()
+    );
+}
+
+#[test]
+fn a_manifest_path_out_of_the_root_is_refused() {
+    let m = Manifest {
+        id: "X".into(),
+        entries: vec![Entry {
+            path: "state/../../etc/passwd".into(),
+            kind: EntryKind::File,
+            mode: 0o600,
+            size: 0,
+            mtime_ns: 0,
+            sha256: None,
+            link: None,
+            stored_in: None,
+        }],
+    };
+    assert!(check_paths(&m).is_err());
+}
+
+#[test]
+fn list_and_prune_keep_the_newest_fulls_and_their_diffs() {
+    let fx = fixture();
+    let f1 = fx.make(Kind::Full, false, None);
+    let d1 = fx.make(Kind::Diff, false, None);
+    let f2 = fx.make(Kind::Full, false, None);
+    let d2 = fx.make(Kind::Diff, false, None);
+    assert_eq!(d2.header.base.as_ref().unwrap().id, f2.header.id);
+    let l = list(&fx.dir).unwrap();
+    assert_eq!(l.len(), 4);
+    let removed = prune(&fx.dir, 1).unwrap();
+    assert_eq!(removed.len(), 2);
+    assert!(removed.contains(&f1.name) && removed.contains(&d1.name));
+    assert!(f2.path.exists() && d2.path.exists());
+    assert!(is_backup_name(&f2.name));
+    assert!(!is_backup_name("../x.zip") && !is_backup_name(".x.zip.partial"));
+}

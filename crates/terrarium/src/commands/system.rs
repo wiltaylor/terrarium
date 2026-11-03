@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use super::{event_line, print_generic, print_table, set_opt};
 use crate::api::{ServerError, query};
 use crate::cli::{
-    AdminTargetCmd, AuditArgs, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, SnapshotArgs,
+    AdminTargetCmd, AuditArgs, BackupCmd, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, SnapshotArgs,
     SnapshotCmd, SnapshotOn, SubscriptionCmd, UsageCmd,
 };
 use crate::ctx::Ctx;
@@ -38,6 +38,7 @@ pub async fn daemon(ctx: &Ctx, cmd: &DaemonCmd) -> anyhow::Result<()> {
                 ));
             })
         }
+        DaemonCmd::Backup { command } => backup(ctx, command).await,
         DaemonCmd::Reload => {
             let r = ctx.api.post("/api/reload", None).await?;
             ctx.emit(&r, |c, r| {
@@ -57,6 +58,118 @@ pub async fn daemon(ctx: &Ctx, cmd: &DaemonCmd) -> anyhow::Result<()> {
                     ));
                 }
             })
+        }
+    }
+}
+
+/// `terrarium daemon backup ...` (docs/cli.md, "Backups").
+async fn backup(ctx: &Ctx, cmd: &BackupCmd) -> anyhow::Result<()> {
+    match cmd {
+        BackupCmd::Create {
+            kind,
+            work,
+            base,
+            passphrase_stdin,
+        } => {
+            let mut body = json!({"kind": kind, "work": work});
+            set_opt(&mut body, "base", base.as_deref());
+            if *passphrase_stdin {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                let p = line.trim_end_matches(['\r', '\n']);
+                if p.is_empty() {
+                    return Err(crate::api::CliError::usage("the passphrase is empty"));
+                }
+                body["passphrase"] = json!(p);
+            }
+            let r = ctx.api.post("/api/backups", Some(body)).await?;
+            ctx.emit(&r, |c, r| {
+                let sealed = if r["header"]["encryption"].is_object() {
+                    "sealed with the passphrase"
+                } else {
+                    "not sealed: it holds the daemon's secrets in plain form"
+                };
+                c.line(format!(
+                    "{} backup {} ({} bytes, {} files stored); {sealed}",
+                    field(&r["header"], "kind"),
+                    field(r, "name"),
+                    field(r, "size"),
+                    field(&r["header"], "stored_files"),
+                ));
+            })
+        }
+        BackupCmd::Ls => {
+            let r = ctx.api.get("/api/backups", vec![]).await?;
+            ctx.emit(&r, |c, r| {
+                let items = r.as_array().cloned().unwrap_or_default();
+                let items: Vec<Value> = items
+                    .into_iter()
+                    .map(|mut v| {
+                        v["sealed"] = json!(v["encryption"].is_object());
+                        v["base_name"] = v["base"]["name"].clone();
+                        v
+                    })
+                    .collect();
+                print_table(
+                    c,
+                    &items,
+                    &[
+                        ("NAME", "name"),
+                        ("KIND", "kind"),
+                        ("CREATED", "created_at"),
+                        ("SIZE", "size"),
+                        ("BASE", "base_name"),
+                        ("SEALED", "sealed"),
+                    ],
+                    "no backups",
+                );
+            })
+        }
+        BackupCmd::Download { name, output } => {
+            let Some(http) = &ctx.http else {
+                return Err(crate::api::CliError::usage(
+                    "a download needs the operator CLI (the daemon socket or TERRARIUM_URL)",
+                ));
+            };
+            let out = output.clone().unwrap_or_else(|| name.into());
+            let req = ApiRequest {
+                method: Method::Get,
+                path: format!("/api/backups/{}", crate::transport::encode(name)),
+                query: vec![],
+                body: None,
+            };
+            let part = out.with_extension("zip.partial");
+            let mut f = {
+                use std::os::unix::fs::OpenOptionsExt;
+                let f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&part)?;
+                tokio::fs::File::from_std(f)
+            };
+            match http.download(&req, &mut f).await {
+                Ok(Ok(n)) => {
+                    drop(f);
+                    std::fs::rename(&part, &out)?;
+                    let v = json!({"name": name, "path": out, "size": n});
+                    ctx.emit(&v, |c, _| {
+                        c.line(format!(
+                            "{} ({n} bytes); it holds secrets: keep it safe",
+                            out.display()
+                        ));
+                    })
+                }
+                Ok(Err(resp)) => {
+                    let _ = std::fs::remove_file(&part);
+                    Err(ServerError::from_response(&resp).into())
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&part);
+                    Err(e)
+                }
+            }
         }
     }
 }

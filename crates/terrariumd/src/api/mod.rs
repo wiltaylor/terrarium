@@ -5,6 +5,7 @@
 pub(crate) mod agents;
 mod artifacts;
 pub mod attachments;
+pub mod backups;
 mod board;
 mod config;
 mod event_sources;
@@ -257,6 +258,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(targets::routes())
         .route("/reload", post(system::reload))
         .route("/audit", get(system::audit))
+        .merge(backups::routes())
         .route("/events", get(streams::firehose).post(event_sources::emit))
         .route("/events/latest", get(streams::latest))
         .merge(projects::routes())
