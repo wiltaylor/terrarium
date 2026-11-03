@@ -1683,6 +1683,67 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX webhook_deliveries_due ON webhook_deliveries(status, next_attempt_at);
     ALTER TABLE schedules ADD COLUMN webhook_failures INTEGER NOT NULL DEFAULT 0;
     "#,
+    // 56: pipelines (docs/api.md §31, `crate::store::pipelines`). `def` is
+    // the JSON of the fields that a client writes (`PipelineDef`); `name`,
+    // `adapter`, and `enabled` are copies for the unique name, the
+    // queries, and the due index. `anchor_at` starts the interval;
+    // `next_run_at` is NULL when the pipeline is disabled. `run_as` is the
+    // actor whose rights each poll checks. `status` is the status of the
+    // newest run; `polled_at` the last poll, `ok_at` the last good one,
+    // `error` the error of the last poll. `pipeline_runs` keeps the recent
+    // runs of each pipeline, one row for each run ID: `sort_at` (the start,
+    // else the first sight) and `ord` (the place in the last poll that had
+    // it) order them; `steps` is NULL until the steps are read.
+    // Self-contained: when another branch takes number 56, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE pipelines (
+        id          TEXT PRIMARY KEY,          -- ULID
+        project     TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        adapter     TEXT NOT NULL CHECK (adapter IN ('github', 'script')),
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        def         TEXT NOT NULL CHECK (json_valid(def)),
+        created_by  TEXT NOT NULL,
+        run_as      TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        anchor_at   TEXT NOT NULL,
+        next_run_at TEXT,
+        skipped     INTEGER NOT NULL DEFAULT 0,
+        status      TEXT,
+        polled_at   TEXT,
+        ok_at       TEXT,
+        error       TEXT,
+        UNIQUE (project, name)
+    );
+    CREATE INDEX pipelines_due ON pipelines(enabled, next_run_at);
+    CREATE TABLE pipeline_runs (
+        pk          INTEGER PRIMARY KEY AUTOINCREMENT,
+        pipeline    TEXT NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+        run_id      TEXT NOT NULL,
+        name        TEXT,
+        status      TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting', 'success',
+                                                    'failed', 'cancelled', 'skipped', 'unknown')),
+        url         TEXT,
+        branch      TEXT,
+        commit_sha  TEXT,
+        actor       TEXT,
+        event       TEXT,
+        environment TEXT,
+        started_at  TEXT,
+        finished_at TEXT,
+        summary     TEXT,
+        steps       TEXT CHECK (steps IS NULL OR json_valid(steps)),
+        sort_at     TEXT NOT NULL,
+        ord         INTEGER NOT NULL DEFAULT 0,
+        first_seen  TEXT NOT NULL,
+        changed_at  TEXT NOT NULL,
+        seen_at     TEXT NOT NULL,
+        UNIQUE (pipeline, run_id)
+    );
+    CREATE INDEX pipeline_runs_sort ON pipeline_runs(pipeline, sort_at);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

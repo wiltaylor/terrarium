@@ -48,7 +48,12 @@ fn live(state: &Shared, mut m: Monitor) -> Monitor {
 
 /// The target must be usable by the caller (its policy or a lease), and
 /// global or of the project.
-async fn check_target(state: &Shared, actor: &Actor, project: &str, target: &str) -> ApiResult<()> {
+pub(super) async fn check_target(
+    state: &Shared,
+    actor: &Actor,
+    project: &str,
+    target: &str,
+) -> ApiResult<()> {
     let row = executor::usable(state, actor, target)
         .await
         .map_err(|e| match e.code {

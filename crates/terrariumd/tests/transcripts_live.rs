@@ -122,6 +122,7 @@ async fn live_transcripts() {
         lifecycle: Arc::default(),
         monitors: Arc::default(),
         webhooks: Arc::default(),
+        pipelines: Arc::default(),
     });
     let agents = std::env::var("TERRARIUM_LIVE_AGENTS").unwrap_or_default();
     for key in agents.split(',').filter(|k| !k.is_empty()) {

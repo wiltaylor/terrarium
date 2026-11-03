@@ -14,6 +14,7 @@ pub mod leases;
 pub mod mail;
 pub mod memory;
 pub mod monitors;
+pub mod pipelines;
 pub mod pointers;
 pub mod projects;
 pub mod questions;

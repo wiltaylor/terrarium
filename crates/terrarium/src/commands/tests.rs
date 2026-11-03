@@ -8548,3 +8548,224 @@ async fn monitors_and_the_dashboard() {
     .await;
     assert_eq!(out, "saved the dashboard of terra: 1 blocks\n");
 }
+
+#[tokio::test]
+async fn pipelines_commands() {
+    let run = json!({"id": "9123", "name": "CI #12", "status": "failed", "branch": "main",
+                     "commit": "deadbeefcafe", "started_at": "2026-11-03T00:00:00.000Z",
+                     "url": "https://github.com/o/r/actions/runs/9123",
+                     "steps": [{"name": "build", "status": "success"},
+                               {"name": "test", "status": "failed"}]});
+    let p = json!({"id": "01PIPEPIPEPIPEPIPEPIPEPIPE", "name": "ci", "project": "terra",
+                   "source": {"kind": "github", "repo": "o/r", "workflow": "ci.yml",
+                              "branch": "main", "token_secret": "gh"},
+                   "schedule": {"kind": "interval", "every": "5m"}, "enabled": true,
+                   "max_runs": 20, "status": "failed", "error": null,
+                   "polled_at": "2026-11-03T00:05:00.000Z", "latest": run.clone(),
+                   "run_as": "operator"});
+    // ls in the agent's own project.
+    let out = ok(
+        true,
+        &["pipeline", "ls"],
+        vec![(200, json!([p.clone()]))],
+        vec![req(Get, "/api/projects/terra/pipelines")],
+    )
+    .await;
+    assert!(
+        out.contains("ci") && out.contains("failed") && out.contains("CI #12"),
+        "{out}"
+    );
+    assert!(out.contains("github o/r ci.yml@main"), "{out}");
+
+    // new: GitHub.
+    let out = ok(
+        true,
+        &[
+            "pipeline",
+            "new",
+            "ci",
+            "--github",
+            "o/r",
+            "--workflow",
+            "ci.yml",
+            "--token-secret",
+            "gh",
+            "--every",
+            "2m",
+            "--max-runs",
+            "30",
+        ],
+        vec![(201, p.clone())],
+        vec![(
+            Post,
+            "/api/projects/terra/pipelines",
+            vec![],
+            Some(
+                json!({"name": "ci", "source": {"kind": "github", "repo": "o/r",
+                        "workflow": "ci.yml", "token_secret": "gh"},
+                        "schedule": {"kind": "interval", "every": "2m"}, "max_runs": 30}),
+            ),
+        )],
+    )
+    .await;
+    assert!(out.starts_with("created pipeline ci"), "{out}");
+
+    // new: a script with env secrets.
+    let r = exec(
+        true,
+        &[
+            "pipeline",
+            "new",
+            "deploys",
+            "--target",
+            "wsl",
+            "--script",
+            "python3 octo.py",
+            "--env-secret",
+            "OCTOPUS_API_KEY=octo-key",
+            "--timeout",
+            "90",
+            "--disabled",
+        ],
+        vec![(201, p.clone())],
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    assert_eq!(
+        r.reqs[0].body.clone().unwrap(),
+        json!({"name": "deploys", "source": {"kind": "script", "target": "wsl",
+               "script": "python3 octo.py", "timeout_secs": 90,
+               "env_secrets": {"OCTOPUS_API_KEY": "octo-key"}}, "enabled": false})
+    );
+    // No source, a script with no target, and a bad env secret are usage errors.
+    for args in [
+        &["pipeline", "new", "x", "--every", "5m"][..],
+        &["pipeline", "new", "x", "--script", "true"][..],
+        &[
+            "pipeline",
+            "new",
+            "x",
+            "--target",
+            "wsl",
+            "--script",
+            "true",
+            "--env-secret",
+            "NOEQUALS",
+        ][..],
+    ] {
+        let r = exec(true, args, vec![], None).await;
+        assert!(r.result.is_err(), "{args:?}");
+        assert!(r.reqs.is_empty(), "{args:?}");
+    }
+    // --github and --target do not go together.
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "pipeline",
+            "new",
+            "x",
+            "--github",
+            "o/r",
+            "--target",
+            "t"
+        ])
+        .is_err()
+    );
+
+    // edit: only the branch; the source keeps its other fields (no kind).
+    ok(
+        true,
+        &["pipeline", "edit", "ci", "--branch", "dev", "--enable"],
+        vec![(200, p.clone())],
+        vec![(
+            Patch,
+            "/api/pipelines/terra%2Fci",
+            vec![],
+            Some(json!({"source": {"branch": "dev"}, "enabled": true})),
+        )],
+    )
+    .await;
+
+    // refresh, runs, run, rm.
+    let out = ok(
+        true,
+        &["pipeline", "refresh", "ci"],
+        vec![(
+            200,
+            json!({"pipeline": p.clone(),
+                          "poll": {"runs": 3, "new": 1, "changed": 1}, "output": null}),
+        )],
+        vec![req(Post, "/api/pipelines/terra%2Fci/refresh")],
+    )
+    .await;
+    assert!(out.contains("3 runs, 1 new, 1 changed"), "{out}");
+    let mut broken = p.clone();
+    broken["error"] = json!("the script exited with code 3: no login");
+    let out = ok(
+        true,
+        &["pipeline", "refresh", "ci"],
+        vec![(
+            200,
+            json!({"pipeline": broken, "poll": {},
+                          "output": {"exit_code": 3, "stdout": "", "stderr": "no login\n"}}),
+        )],
+        vec![req(Post, "/api/pipelines/terra%2Fci/refresh")],
+    )
+    .await;
+    assert!(out.contains("the poll failed: the script exited"), "{out}");
+    assert!(
+        out.contains("exit code: 3") && out.contains("no login"),
+        "{out}"
+    );
+    let out = ok(
+        true,
+        &["pipeline", "runs", "ci", "--limit", "5"],
+        vec![(200, json!([run.clone()]))],
+        vec![(
+            Get,
+            "/api/pipelines/terra%2Fci/runs",
+            vec![("limit", "5")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("CI #12") && out.contains("main"), "{out}");
+    let out = ok(
+        true,
+        &["pipeline", "run", "ci", "9123"],
+        vec![(200, run.clone())],
+        vec![req(Get, "/api/pipelines/terra%2Fci/runs/9123")],
+    )
+    .await;
+    assert!(out.contains("test") && out.contains("failed"), "{out}");
+    assert!(
+        out.contains("url: https://github.com/o/r/actions/runs/9123"),
+        "{out}"
+    );
+    ok(
+        true,
+        &["pipeline", "rm", "ci"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/pipelines/terra%2Fci")],
+    )
+    .await;
+
+    // test: the runs, nothing kept.
+    let out = ok(
+        true,
+        &["pipeline", "test", "--github", "o/r"],
+        vec![(
+            200,
+            json!({"runs": [run], "error": null, "duration_ms": 42, "output": null}),
+        )],
+        vec![(
+            Post,
+            "/api/projects/terra/pipelines/test",
+            vec![],
+            Some(json!({"source": {"kind": "github", "repo": "o/r"}})),
+        )],
+    )
+    .await;
+    assert!(out.starts_with("1 runs in 42 ms"), "{out}");
+}

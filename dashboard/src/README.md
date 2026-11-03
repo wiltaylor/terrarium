@@ -939,6 +939,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
 | `/p/:project/dashboard`, `/p/:project` | Dashboard: the blocks of the monitors (stat, status, chart, text, table, note), Edit dashboard (add, change, drag or move, remove, save), and the Monitors tab (`?tab=monitors`: state, last and next run, on/off, Run now, the edit dialog with Test run); see "The project dashboard". `/p/:project` redirects here. | `GET`, `PUT .../dashboard`, `GET .../monitors`, `POST .../monitors`, `POST .../monitors/test`, `PATCH`, `DELETE /api/monitors/{id}`, `POST .../run`, `GET .../results?since=&bucket=` |
+| `/p/:project/pipelines` | Pipelines: each CI/CD pipeline with the state of its newest run, the last poll, on/off, Refresh, Edit, Delete; a row opens the recent runs, a run opens its steps; the dialog (GitHub Actions or a script) has a Test poll; see "Pipelines". | `GET`, `POST .../pipelines`, `POST .../pipelines/test`, `PATCH`, `DELETE /api/pipelines/{id}`, `POST .../refresh`, `GET .../runs`, `GET .../runs/{run}` |
 | `/p/:project/board` | Board, Cards tab: drag and drop, New card dialog (the "+" of the backlog column), Edit columns dialog, ETA countdowns, question badges, version chips, the version lanes and the Version modal (`?version=<id>`), "+ Version", the Versions menu, card drawer with its questions and versions (see "The board") | `GET .../board`, `PATCH .../board`, `GET .../versions?archived=all`, `POST .../versions`, `PATCH /api/versions/{id}`, `POST /api/versions/{id}/submit\|approve\|reject\|release\|archive\|unarchive`, `compare`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
 | `/p/:project/versions/:id?`, `/p/:project/board/versions/:id?` | Gone: redirect in one hop to `/p/:project/board`, with `?version=<id>` when the path has an ID (`app/nav.ts` `MOVED_ROUTES`). The Version modal opens. The redirect adds the old query (`withQuery`). The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. | none |
 | `/p/:project/board/tests`, `/p/:project/board/tests/:id` | Board, Tests tab: the test runs (filters, counts bar, links) and one run (counts, compare with the previous run, suites and cases, Failed only, search, output, Download original, link and unlink, delete); see "Test runs" | `GET .../test-runs?card=&version=&name=&status=&cursor=`, `GET /api/test-runs/{id}?status=&q=&cursor=`, `GET .../compare?with=previous`, `GET .../raw`, `PATCH .../links`, `DELETE /api/test-runs/{id}` |
@@ -1034,6 +1035,29 @@ and closes the node.
   The activity timer runs the due monitors, so values move and statuses
   change. A plain `echo <text>; exit <n>` script runs as written, so the
   Test run of the editor shows its own output.
+
+## Pipelines
+
+`features/pipelines/` (docs/api.md §31): the second item of a project in
+the tree.
+
+- **List.** One row for each pipeline: the name and the source, the state
+  badge (the status of the newest run, `Poll error` with the error, `Not
+  polled yet`, or `Off`; a glyph and a word, not only a colour), the
+  newest run (its environment or branch, when, and how long), the last
+  poll, the on/off switch, Refresh, Edit, and Delete. A count of the
+  pipelines by state is above the table.
+- **Runs.** A row opens its recent runs. A run opens a dialog with its
+  facts, a link to the CI system (`http` and `https` only), and its steps
+  (the jobs of a GitHub run, read on demand).
+- **Dialog.** GitHub (repo, workflow, branch, token secret, API URL) or a
+  script (target, script, timeout, `VAR=secret` lines), the interval and
+  the runs to keep. Test poll shows the runs or the error, and the raw
+  output of a script, before a save.
+- **Live.** A `pipeline.*` event of the project loads the list again.
+- **Mock.** `api/mock/pipelines.ts`: project `terrarium` has a GitHub
+  pipeline, an Octopus Deploy script pipeline, and a pipeline that fails;
+  the activity timer polls the due ones, so runs start and end.
 
 ## Home: hosts
 

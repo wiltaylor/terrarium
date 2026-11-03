@@ -2316,6 +2316,37 @@ dashboard first: one block for each check, with its state.
   Monitors tab, the packaged skill `terrarium-monitors`, and
   `scripts/seed-monitors.sh`.
 
+### 15.7 Pipelines
+
+The operator wants to see, in the project, whether the last build is
+green and where the last deploy is, without a trip to GitHub or Octopus
+Deploy.
+
+- **Model.** A pipeline (migration 56: `pipelines`, `pipeline_runs`) is a
+  source, a schedule (an interval of 30 s or more, 5 minutes by default,
+  or a cron spec), and the count of runs to keep (20 by default, 100 at
+  most). Each run has a normal status (`queued`, `running`, `waiting`,
+  `success`, `failed`, `cancelled`, `skipped`, `unknown`), a link, the
+  branch or the environment, the times, and its steps.
+- **Adapters.** `github` reads GitHub Actions from the daemon, with a
+  token from the secret store, under the address rules of the webhooks.
+  `script` runs a user script on a target through the executor, as a
+  monitor does; the script prints the runs as JSON (docs/api.md §31.2).
+  The script adapter is the way to every other system: the first one is
+  a Python script for Octopus Deploy on a WSL host. A script gets
+  secrets in its environment, never in its text.
+- **Engine.** The pipeline tick runs with the monitor tick in the
+  scheduler task. One poll at a time for each pipeline, at most 4 at
+  once in the daemon. Each poll checks the rights of its `run_as` actor
+  again. Refresh polls now. A run detail reads the jobs of a GitHub run
+  on demand.
+- **Alerts.** `pipeline.run` (a new run, or a run that changed),
+  `pipeline.status`, and `pipeline.error` are events of the project. The
+  triggers (§12c) turn them into mail, a webhook, or an exec.
+- **Surfaces.** The API (docs/api.md §31), `terrarium pipeline`
+  (docs/cli.md), the Pipelines page of a project (the second item of the
+  project in the tree), and the packaged skill `terrarium-pipelines`.
+
 ---
 
 ## 16. Subscriptions and usage

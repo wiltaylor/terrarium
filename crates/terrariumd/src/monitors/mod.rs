@@ -164,15 +164,15 @@ fn shown(b: &[u8]) -> String {
     parse::cut_bytes(&s, SHOWN_MAX).0
 }
 
-/// Why a target is down for a monitor, or `None`.
-fn down(state: &Shared, row: &TargetRow) -> Option<String> {
+/// Why a target is down for a monitor (or a pipeline poll), or `None`.
+pub(crate) fn down(state: &Shared, row: &TargetRow) -> Option<String> {
     let name = &row.def.name;
     match row.def.kind {
         TargetKind::Docker | TargetKind::Vmlab
             if matches!(row.state.as_str(), "stopped" | "absent") =>
         {
             return Some(format!(
-                "target `{name}` is {}; a monitor does not bring a target up",
+                "target `{name}` is {}; a monitor or a pipeline does not bring a target up",
                 row.state
             ));
         }

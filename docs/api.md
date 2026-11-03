@@ -8071,3 +8071,293 @@ dashboard as `GET` does. A block:
 `stat` and `chart` need a `number` or `json` monitor; `table` needs a
 `json` monitor. Several blocks can show the same monitor. A bad layout is
 `422 invalid` with `details.field` such as `blocks[2].kind`.
+
+## 31. Pipelines
+
+A pipeline shows the runs of a CI/CD system in a project: the builds of
+GitHub Actions, the deploys of Octopus Deploy. The daemon polls each
+pipeline on a schedule through an adapter, and keeps the recent runs.
+The Pipelines page of a project shows them; the triggers (§19.4) turn
+their events into alerts. The code is in `crates/terrariumd/src/pipelines/`
+(the polls, the adapters, the script contract) and
+`crates/terrariumd/src/store/pipelines.rs` (the rows).
+
+There are two adapters:
+
+| `source.kind` | Reads the runs from |
+|---|---|
+| `github` | The GitHub Actions REST API (§31.3), from the daemon. |
+| `script` | A user script on a target (§31.2): the way to any other system (Octopus Deploy, Jenkins, GitLab, Azure DevOps). The script asks the system for its runs and prints them as JSON. |
+
+### 31.1 Rights
+
+| Action | Who |
+|---|---|
+| Read the pipelines and the runs, open a run | The members of the project and its agents, a sysadmin, the operator |
+| Create, change, delete, refresh, test | project_admin of the project (a lead), a sysadmin, the operator |
+
+- A `script` source needs a target that the caller may use, as a monitor
+  does (§30.1): in `policy.targets`, or a lease. The target is global or
+  of the project. Otherwise `422 invalid` (`details.field`
+  `source.target`) or `403`.
+- Each secret that a source names (`source.token_secret`,
+  `source.env_secrets.<VAR>`) must be one that the caller may use, as for
+  a webhook (§19.5): a secret of the project for its project_admin, or a
+  global secret with a `use` grant to the project. The operator and a
+  sysadmin use any secret. A missing secret is `422 invalid` with the
+  field; no right is `403`.
+- `run_as` is the actor whose rights each poll checks again: the creator,
+  or the last caller that changed the adapter, the target, the script,
+  the token secret, the API URL, or the env secrets. A gone `run_as`, a
+  lost role, a lost target, or a revoked grant makes the next poll fail
+  with the reason.
+
+The audit log has `pipeline.create`, `pipeline.update` (with
+`changed`), `pipeline.delete`, `pipeline.refresh`, and `pipeline.test`.
+The rows show the secret names, never a value. The timed polls write no
+audit row.
+
+### 31.2 The script contract
+
+The target runs `source.script` with `sh -c`, with these variables in
+its environment (never on a command line):
+
+| Variable | Value |
+|---|---|
+| `TERRARIUM_PROJECT` | The project |
+| `TERRARIUM_PIPELINE` | The pipeline name |
+| each key of `source.env_secrets` | The main value of the named secret (the project's secret first, then the global one). A secret with more than one secret field is an error. |
+
+The script prints one JSON document on stdout and exits with 0. The
+document is `{"runs": [...]}` or the array of runs alone, **newest run
+first** (the first run gives the status of the pipeline):
+
+```json
+{"runs": [
+  {"id": "Deployments-123",
+   "name": "1.4.2 to Production",
+   "status": "Executing",
+   "url": "https://octopus.example/app#/Spaces-1/deployments/Deployments-123",
+   "environment": "Production",
+   "branch": "main",
+   "commit": "9fceb02",
+   "actor": "wil",
+   "event": "manual",
+   "started_at": "2026-11-03T10:00:00+10:00",
+   "finished_at": null,
+   "summary": "Deploys release 1.4.2",
+   "steps": [{"name": "Deploy web", "status": "Success",
+              "started_at": "2026-11-03T00:00:05Z", "finished_at": "2026-11-03T00:01:10Z"},
+             {"name": "Smoke test", "status": "Executing"}]}
+]}
+```
+
+| Key of a run | |
+|---|---|
+| `id` | Necessary. A string (1-200 characters) or a number: the ID of the run in the system, unique in the pipeline. A repeated ID keeps the first. |
+| `status` | Necessary. A status of the table below, or one of its aliases, in any case. |
+| `name` | The title of the run (at most 200 characters). Without it, `number` gives `#<number>`. |
+| `number` | A run number, for `name`. |
+| `url` | A link to the run: `http` or `https` only. |
+| `branch`, `commit`, `actor`, `event`, `environment` | Text, at most 200 characters each. |
+| `started_at`, `finished_at` | RFC 3339 times. The daemon keeps them in UTC. |
+| `summary` | Text, at most 2000 characters. |
+| `steps` | An array of at most 100 steps: `{"name", "status", "started_at"?, "finished_at"?, "url"?, "summary"?}`. Absent: the daemon keeps the steps it has. |
+
+| `status` | Aliases | Meaning |
+|---|---|---|
+| `queued` | `pending`, `requested`, `created`, `scheduled`, `not_started`, `waiting_for_resource`, `preparing` | Waits to start |
+| `running` | `in_progress`, `executing`, `started`, `cancelling` | Runs now |
+| `waiting` | `manual`, `action_required`, `approval`, `paused`, `blocked` | Waits for a person (an approval, a manual intervention) |
+| `success` | `succeeded`, `successful`, `passed`, `ok`, `completed`, `done` | Ended well |
+| `failed` | `failure`, `error`, `errored`, `timed_out`, `timedout`, `broken`, `startup_failure` | Ended badly |
+| `cancelled` | `canceled`, `aborted`, `stopped` | Stopped by a person or the system |
+| `skipped` | `neutral`, `stale`, `not_run` | Did not run |
+| `unknown` | | Any other state |
+
+A space or a `-` counts as `_` (`In Progress`, `not-started`). An
+unknown key, a missing `id` or `status`, a bad status, a bad time, a URL
+that is not `http` or `https`, or text that is not JSON is a poll error
+that names the path (`runs[2].status: \`meh\` is not a status`). At most
+100 runs are read. The daemon reads at most 1 MiB of stdout.
+
+An exit code that is not 0 is a poll error: `the script exited with code
+N: <the last line of stderr>`. A timeout (`source.timeout_secs`, default
+60, at most 600) is `timed out after N s`. A target that is down (as for
+a monitor, §30.2) is `target down: ...`; a pipeline does not bring a
+target up. On a `host` target with `limits`, the polls use the budget of
+the holder `<project>/pipelines`.
+
+Known secret values in the stored runs, the error, a refresh answer,
+and a test answer are replaced with `[secret:<name>]`.
+
+### 31.3 GitHub Actions
+
+`{"kind": "github", "repo": "owner/name", "workflow"?: "ci.yml",
+"branch"?: "main", "token_secret"?: "github-token", "api_url"?: "..."}`.
+
+- The list: `GET {api_url}/repos/{owner}/{repo}/actions/runs`, or
+  `.../actions/workflows/{workflow}/runs` with a `workflow` (its file
+  name or ID), with `per_page` = `max_runs`, `branch`, and
+  `exclude_pull_requests=true`. `api_url` is `https://api.github.com` by
+  default; GitHub Enterprise Server is `https://<host>/api/v3`.
+- A run: `id` is the run ID; `name` is `<workflow name> #<run number>`;
+  `summary` is the title of the commit or the PR; `status` is the
+  GitHub `status`, or its `conclusion` when it is `completed`
+  (`failure`, `timed_out`, and `startup_failure` are `failed`;
+  `neutral` and `skipped` are `skipped`; `action_required` is `waiting`).
+- The steps of a run are its jobs (`.../actions/runs/{id}/jobs`). A poll
+  reads them for at most 5 runs that are new, that changed, or that have
+  not ended. `GET /api/pipelines/{id}/runs/{run}` reads them for a run
+  that has none.
+- The token is the main value of the secret `token_secret`, sent as
+  `Authorization: Bearer`. It needs read access to Actions. Without a
+  token, GitHub gives public repos only, and 60 requests an hour from
+  one address: a poll is 1 request, and 1 more for each run whose jobs
+  it reads.
+- The requests keep the address rules of the webhooks (§19.5,
+  `TERRARIUM_WEBHOOK_PRIVATE`): one DNS answer for each request, no
+  proxy, no redirect (a renamed repo answers `301`: give the new name).
+  A time limit of 20 s, and at most 4 MiB of each answer.
+- The errors are sentences: `GitHub refused the token (401)`, `GitHub
+  rate limit (403), it resets at ...`, `GitHub has no such repo or
+  workflow (404)`.
+
+### 31.4 Polls
+
+The scheduler task (§19) checks the pipelines every 5 s. A pipeline is
+due when it is enabled and its `next_run_at` passed. The schedule is
+`{"kind": "interval", "every": "5m"}` (the default; 30 s or more) or a
+cron spec (§19). A new pipeline, a new schedule or source, and a
+pipeline that is turned on poll at once.
+
+- **One poll at a time for each pipeline.** A tick that finds a poll
+  still running adds 1 to `skipped`. A refresh of a polling pipeline is
+  `409 conflict`.
+- **At most 4 polls at once in the daemon** (`TERRARIUM_PIPELINE_PARALLEL`).
+- **The runs.** A good poll writes each run it got (an upsert by `id`)
+  and keeps the newest `max_runs` (default 20, 1-100), by `started_at`
+  (else the time the daemon first saw the run). `status` of the pipeline
+  is the status of the first run of the poll. A failed poll keeps the
+  runs and the status, and sets `error`. A change of the adapter, the
+  repo, the workflow, the branch, or the API URL deletes the runs.
+
+**Events.** All three are events of the project; its members see them,
+and its triggers take them:
+
+| Kind | When | `data` |
+|---|---|---|
+| `pipeline.run` | A run is new, or its status changed. Not on the first good poll of a pipeline: that poll only learns the history. | `{"project","pipeline","pipeline_id","run_id","name","from","to","url","branch","commit","environment","summary"}`; `from` is `null` for a new run |
+| `pipeline.status` | The status of the pipeline changed (the first good poll too) | `{"project","pipeline","pipeline_id","from","to","run_id","run_name","url","branch"}` |
+| `pipeline.error` | A poll failed, and the poll before it did not | `{"project","pipeline","pipeline_id","error"}` |
+
+Example: mail the lead when a deploy to production fails:
+
+```json
+POST /api/schedules
+{"name": "deploy-failed", "project": "demo",
+ "spec": {"kind": "on", "kinds": ["pipeline.run"],
+          "match": [{"path": "data.to", "value": "failed"},
+                    {"path": "data.environment", "value": "Production"}]},
+ "action": {"type": "mail", "to": "lead", "subject": "A deploy failed",
+            "body": "{{event.summary}} {{event.data.url}}"}}
+```
+
+### 31.5 Endpoints
+
+#### `GET /api/projects/{name}/pipelines`
+
+The pipelines of the project, by name:
+
+```json
+[{"id":"01JD…","project":"demo","name":"ci","description":null,
+  "source":{"kind":"github","repo":"o/r","workflow":"ci.yml","token_secret":"github-token"},
+  "schedule":{"kind":"interval","every":"5m"},"enabled":true,"max_runs":20,
+  "period_secs":300,"created_by":"operator","run_as":"operator",
+  "created_at":"…","updated_at":"…","next_run_at":"2026-11-03T10:05:00.000Z","skipped":0,
+  "status":"failed","polled_at":"…","ok_at":"…","error":null,"running":false,
+  "latest":{"id":"9123456789","pipeline":"01JD…","name":"CI #412","status":"failed",
+            "url":"https://github.com/o/r/actions/runs/9123456789","branch":"main",
+            "commit":"9fceb02…","actor":"wil","event":"push","environment":null,
+            "started_at":"…","finished_at":"…","summary":"Fix the build",
+            "steps":[{"name":"build","status":"success"},{"name":"test","status":"failed"}],
+            "first_seen":"…","changed_at":"…"}}]
+```
+
+`status` is `null` before the first good poll, or when the system has no
+run. `polled_at` is the last poll, `ok_at` the last good one, `error` the
+error of the last poll (`null` when it was good). `latest` is the newest
+run. A run's `steps` is `null` when the steps were not read yet.
+
+#### `POST /api/projects/{name}/pipelines`
+
+Body: `name` (1-63 of `a-z`, `0-9`, `-`, `_`; unique in the project),
+`description?` (at most 500 characters), `source`, `schedule?`,
+`enabled?` (`true`), `max_runs?` (1-100, default 20). Answers `201` with
+the pipeline. A project has at most 50 pipelines (`409 conflict`). A name
+in use is `409 conflict`.
+
+`source` of `kind` `github`: §31.3. `source` of `kind` `script`:
+`target`, `script` (at most 64 KiB), `timeout_secs?` (1-600, default 60),
+`env_secrets?` (at most 20 of `VAR: secret`; `VAR` is `A-Z`, `0-9`, `_`,
+not a digit first, not `TERRARIUM_…`).
+
+Errors: `422 invalid` with `details.field` (`name`, `description`,
+`source.repo`, `source.workflow`, `source.branch`, `source.token_secret`,
+`source.api_url`, `source.target`, `source.script`,
+`source.timeout_secs`, `source.env_secrets`,
+`source.env_secrets.<VAR>`, `schedule`, `schedule.every`,
+`schedule.expr`, `schedule.tz`, `max_runs`); `403 forbidden` for the
+rights of §31.1.
+
+#### `GET /api/pipelines/{id}`, `PATCH /api/pipelines/{id}`, `DELETE /api/pipelines/{id}`
+
+`id` is the ULID or `project/name` (`%2F` in the path). The patch is a
+JSON merge into the fields: a key replaces the field, and `null` clears
+an optional field. `source` merges one level down: `{"source":
+{"branch": "main"}}` keeps the other fields of the source, and
+`{"source": {"workflow": null}}` clears one. A `source` with another
+`kind` replaces the source. An unknown key is `422 invalid`. The delete
+answers `204` and removes the runs.
+
+#### `POST /api/pipelines/{id}/refresh`
+
+Poll now, as `run_as`, and keep the runs. An agent that is not the
+`run_as` must be able to use the target and the secrets. Answers when
+the poll ends:
+
+```json
+{"pipeline": { … the pipeline, as GET … },
+ "poll": {"runs": 3, "new": 1, "changed": 1, "status": "queued", "error": null},
+ "output": {"exit_code": 0, "stdout": "{\"runs\": …", "stderr": "", "end": {…}}}
+```
+
+`output` (at most 8 KiB of each stream) is `null` for `github`, and when
+the script did not start.
+
+#### `GET /api/pipelines/{id}/runs`
+
+Query: `limit` (default and highest 100). The kept runs, newest first.
+
+#### `GET /api/pipelines/{id}/runs/{run}`
+
+One run, with `project`, `pipeline_name`, and `adapter`. A `github` run
+with no steps reads its jobs now, as `run_as`, and keeps them; when that
+fails, `steps` stays `null` and `steps_error` says why. An unknown run
+is `404`.
+
+#### `POST /api/projects/{name}/pipelines/test`
+
+Poll a pipeline that is not saved, once, as the caller, and keep
+nothing. The body is the body of a create; `name` may be absent.
+Answers:
+
+```json
+{"at": "…", "duration_ms": 420,
+ "runs": [{"id": "Deployments-123", "status": "running", "name": "…", "steps": […]}],
+ "error": null,
+ "output": {"exit_code": 0, "stdout": "…", "stderr": ""}}
+```
+
+A failed poll answers `200` with `error` set and no runs. Use it to
+write a script: `terrarium pipeline test` prints the same.

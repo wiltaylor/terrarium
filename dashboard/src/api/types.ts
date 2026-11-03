@@ -1057,6 +1057,11 @@ export const EVENT_KINDS = [
   // Monitors (docs/api.md §30): each result, and a change of status `{project, monitor, monitor_id, from, to, value?, unit?, message?}`.
   "monitor.result",
   "monitor.status",
+  // Pipelines (docs/api.md §31): a run that is new or changed `{project, pipeline, pipeline_id, run_id, name, from, to, url, branch, commit, environment, summary}`,
+  // a change of the pipeline status `{project, pipeline, pipeline_id, from, to, run_id, run_name, url, branch}`, and a poll that failed `{project, pipeline, pipeline_id, error}`.
+  "pipeline.run",
+  "pipeline.status",
+  "pipeline.error",
   // A webhook attempt ended (docs/api.md §19.5): `{trigger, name, delivery, status, http_status, attempt, test, event_seq}`.
   "webhook.delivery",
   "dashboard.updated",
@@ -3857,4 +3862,139 @@ export interface DashboardView extends DashboardLayout {
   updated_by: string | null;
   /** Every monitor of the project, with its last result. */
   monitors: Monitor[];
+}
+
+// ---------------------------------------------------------------- pipelines
+
+/** The status of a pipeline run or step (docs/api.md §31.2), the same for every adapter. */
+export type PipelineRunStatus = "queued" | "running" | "waiting" | "success" | "failed" | "cancelled" | "skipped" | "unknown";
+
+/** GitHub Actions (docs/api.md §31.3). */
+export interface PipelineGithubSource {
+  kind: "github";
+  /** `owner/name`. */
+  repo: string;
+  /** One workflow: its file name (`ci.yml`) or ID. Absent: every workflow. */
+  workflow?: string | null;
+  branch?: string | null;
+  /** The secret whose value is the token. */
+  token_secret?: string | null;
+  /** GitHub Enterprise Server: `https://<host>/api/v3`. */
+  api_url?: string | null;
+}
+
+/** A script on a target that prints the runs as JSON (docs/api.md §31.2). */
+export interface PipelineScriptSource {
+  kind: "script";
+  target: string;
+  script: string;
+  timeout_secs?: number;
+  /** Environment variable → secret name. */
+  env_secrets?: Record<string, string>;
+}
+
+export type PipelineSource = PipelineGithubSource | PipelineScriptSource;
+
+/** The fields of a pipeline that a client writes. */
+export interface PipelineDef {
+  name: string;
+  description?: string | null;
+  source: PipelineSource;
+  /** Default `{"kind": "interval", "every": "5m"}`; 30 s or more. */
+  schedule?: MonitorSchedule;
+  enabled?: boolean;
+  /** The runs to keep (1-100, default 20). */
+  max_runs?: number;
+}
+
+export interface PipelineStep {
+  name: string;
+  status: PipelineRunStatus;
+  started_at?: string;
+  finished_at?: string;
+  url?: string;
+  summary?: string;
+}
+
+/** One run of a pipeline. `id` is the adapter's ID. */
+export interface PipelineRun {
+  id: string;
+  pipeline: string;
+  name: string | null;
+  status: PipelineRunStatus;
+  url: string | null;
+  branch: string | null;
+  commit: string | null;
+  actor: string | null;
+  event: string | null;
+  environment: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  summary: string | null;
+  /** `null`: not read yet. */
+  steps: PipelineStep[] | null;
+  first_seen: string;
+  changed_at: string;
+}
+
+/** `GET /api/pipelines/{id}/runs/{run}`: the run, with its steps read when needed. */
+export interface PipelineRunDetail extends PipelineRun {
+  project: string;
+  pipeline_name: string;
+  adapter: PipelineSource["kind"];
+  /** Why the steps did not load. */
+  steps_error?: string;
+}
+
+export interface Pipeline extends Required<Pick<PipelineDef, "name" | "source" | "schedule" | "enabled" | "max_runs">> {
+  id: string;
+  project: string;
+  description: string | null;
+  period_secs: number;
+  created_by: string;
+  run_as: string;
+  created_at: string;
+  updated_at: string;
+  next_run_at: string | null;
+  skipped: number;
+  /** The status of the newest run; `null` before the first good poll. */
+  status: PipelineRunStatus | null;
+  polled_at: string | null;
+  ok_at: string | null;
+  /** The error of the last poll; `null` when it was good. */
+  error: string | null;
+  latest: PipelineRun | null;
+  running: boolean;
+}
+
+/** What one poll changed. */
+export interface PipelinePoll {
+  runs: number;
+  new: number;
+  changed: number;
+  status: PipelineRunStatus | null;
+  error: string | null;
+}
+
+/** The raw output of a script poll. */
+export interface PipelineOutput {
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/** `POST /api/pipelines/{id}/refresh`. */
+export interface PipelineRefresh {
+  pipeline: Pipeline;
+  poll: PipelinePoll;
+  output: PipelineOutput | null;
+}
+
+/** `POST /api/projects/{name}/pipelines/test`: nothing is kept. */
+export interface PipelineTestReport {
+  at: string;
+  duration_ms: number;
+  runs: Omit<PipelineRun, "pipeline" | "first_seen" | "changed_at">[];
+  error: string | null;
+  output: PipelineOutput | null;
 }

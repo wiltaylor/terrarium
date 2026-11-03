@@ -3,6 +3,8 @@
 export const PROJECT_ITEMS = [
   // The monitors of the project as blocks (docs/api.md §30); the first item, and the page of /p/:project.
   { path: "dashboard", label: "Dashboard" },
+  // The CI/CD pipelines of the project and their runs (docs/api.md §31).
+  { path: "pipelines", label: "Pipelines" },
   { path: "board", label: "Board" },
   // The repos of the project (PLAN §9a). In the tree a node, not a link: open, it shows the repos, each a link to its browser.
   // The page /p/:project/repos stays (other links go to it).

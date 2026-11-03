@@ -113,6 +113,7 @@ import { createSystemPromptMock } from "./systemPrompts";
 import { createDbMock } from "./db";
 import { createTestRunMock } from "./testRuns";
 import { createMonitorMock } from "./monitors";
+import { createPipelineMock } from "./pipelines";
 import { createSpawnMock } from "./spawns";
 import { applyTemplate, compactMaxAgeError, compactOnIdleError, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createSecretMock } from "./secrets";
@@ -793,6 +794,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   let monitorCounter = 0;
   const monitorMock = createMonitorMock({ reply, fail, emit, audit, project: (name) => project(name), targets: () => w.targets, caller: opts.scheduleCaller, ulid: (tag) => fakeUlid(tag, ++monitorCounter), now });
   if (w.projects.some((x) => x.name === "terrarium")) monitorMock.seed();
+  // Pipelines (docs/api.md §31): ./pipelines. The seed gives project `terrarium` a GitHub pipeline, an Octopus Deploy
+  // script pipeline, and one that fails; the activity timer polls the due ones.
+  let pipelineCounter = 0;
+  const pipelineMock = createPipelineMock({ reply, fail, emit, audit, project: (name) => project(name), caller: opts.scheduleCaller, ulid: (tag) => fakeUlid(tag, ++pipelineCounter), now });
+  if (w.projects.some((x) => x.name === "terrarium")) pipelineMock.seed();
   const skillMock = createSkillMock({ w, reply, fail, audit, caller: opts.scheduleCaller, available: opts.configRepo });
   // The effective skills of an agent (PLAN §8.6), as the API fills them.
   const withSkills = (a: Agent): Agent => Object.assign(a, { effective_skills: skillMock.effective(a) });
@@ -1099,6 +1105,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   let tick = 0;
   const activity = () => {
     monitorMock.tick();
+    pipelineMock.tick();
     tick++;
     const working = w.agents.filter((a) => a.status === "working");
     const a = working[tick % Math.max(working.length, 1)];
@@ -3950,6 +3957,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     db: dbMock.api,
     testRuns: testRunMock.api,
     monitors: monitorMock.api,
+    pipelines: pipelineMock.api,
 
     hosts: {
       list: () => reply(() => w.hosts.map((h) => withMetrics(h))),

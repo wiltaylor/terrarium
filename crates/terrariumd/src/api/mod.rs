@@ -16,6 +16,7 @@ mod longpoll;
 mod mail;
 mod memory;
 mod monitors;
+mod pipelines;
 mod projects;
 mod questions;
 mod records;
@@ -134,6 +135,9 @@ pub struct AppState {
     /// The webhook deliveries: the slots, the rate windows, and the
     /// address rules (`crate::webhooks`).
     pub webhooks: Arc<crate::webhooks::Runtime>,
+    /// The pipeline polls: which poll now, and the parallel slots
+    /// (`crate::pipelines`).
+    pub pipelines: Arc<crate::pipelines::Runtime>,
 }
 
 impl AppState {
@@ -275,6 +279,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(versions::routes())
         .merge(test_runs::routes())
         .merge(monitors::routes())
+        .merge(pipelines::routes())
         .merge(subscriptions::routes())
         .merge(usage::routes())
         .merge(fleet::routes())
@@ -899,6 +904,7 @@ mod tests {
             lifecycle: Arc::default(),
             monitors: Arc::default(),
             webhooks: Arc::default(),
+            pipelines: Arc::default(),
         })
     }
 

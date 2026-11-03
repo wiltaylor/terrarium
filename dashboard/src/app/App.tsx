@@ -20,6 +20,7 @@ const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
 const TestRunsPage = lazy(() => import("../features/tests/TestRunsPage"));
 const TestRunPage = lazy(() => import("../features/tests/TestRunPage"));
 const DashboardPage = lazy(() => import("../features/dashboard/DashboardPage"));
+const PipelinesPage = lazy(() => import("../features/pipelines/PipelinesPage"));
 const TargetsPage = lazy(() => import("../features/targets/TargetsPage"));
 const SchedulesPage = lazy(() => import("../features/schedules/SchedulesPage"));
 const TemplatesPage = lazy(() => import("../features/templates/TemplatesPage"));
@@ -100,6 +101,7 @@ export function App() {
         </Route>
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/dashboard" component={DashboardPage} />
+        <Route path="/p/:project/pipelines" component={PipelinesPage} />
         <Route path="/p/:project/agents" component={AgentsPage} />
         {/* The board screen: the tabs Cards, Artifacts, Tests, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it manages the versions too (?version=<id>). */}
         <Route path="/p/:project/board" component={BoardScreen}>

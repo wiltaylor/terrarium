@@ -28,6 +28,7 @@ pub mod login_session;
 pub mod models;
 pub mod monitors;
 pub mod password;
+pub mod pipelines;
 pub mod policy;
 pub mod probes;
 pub mod prompt;
@@ -206,6 +207,7 @@ pub async fn start_with_usage(
         lifecycle: Arc::default(),
         monitors: Arc::default(),
         webhooks: Arc::default(),
+        pipelines: Arc::default(),
     });
     // No webhook may carry the API token (docs/security-review.md).
     state.webhooks.set_own_token(cfg.token.as_deref());

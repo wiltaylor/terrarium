@@ -601,6 +601,7 @@ pub fn sample_event(kind: &str, project: Option<&str>, at: &str) -> EventDoc {
         let k = kind.replace('?', "x");
         match k.as_str() {
             "*" | "monitor.*" => "monitor.status".to_owned(),
+            "pipeline.*" => "pipeline.status".to_owned(),
             other => other.replace('*', "sample"),
         }
     } else {
@@ -619,6 +620,27 @@ pub fn sample_event(kind: &str, project: Option<&str>, at: &str) -> EventDoc {
             json!({"project": p, "monitor": "disk-usage", "monitor_id": "01SAMPLE",
                    "status": "crit", "value": 93, "unit": "%", "message": "/ is 93% full",
                    "error": null, "duration_ms": 120}),
+        ),
+        "pipeline.status" => (
+            "pipeline ci: success → failed (CI #412)".to_owned(),
+            json!({"project": p, "pipeline": "ci", "pipeline_id": "01SAMPLE",
+                   "from": "success", "to": "failed", "run_id": "9123456789",
+                   "run_name": "CI #412", "url": "https://github.com/o/r/actions/runs/9123456789",
+                   "branch": "main"}),
+        ),
+        "pipeline.run" => (
+            "pipeline deploys: 1.4.2 to Production running → failed".to_owned(),
+            json!({"project": p, "pipeline": "deploys", "pipeline_id": "01SAMPLE",
+                   "run_id": "Deployments-123", "name": "1.4.2 to Production",
+                   "from": "running", "to": "failed",
+                   "url": "https://octopus.example/app#/deployments/Deployments-123",
+                   "branch": null, "commit": null, "environment": "Production",
+                   "summary": "Step 2 failed"}),
+        ),
+        "pipeline.error" => (
+            "pipeline ci: the poll failed: GitHub refused the token (401)".to_owned(),
+            json!({"project": p, "pipeline": "ci", "pipeline_id": "01SAMPLE",
+                   "error": "GitHub refused the token (401)"}),
         ),
         k if k.starts_with("ci.") => (
             format!("{k} on main"),
@@ -706,6 +728,11 @@ mod tests {
         assert_eq!(ntfy_priority(&ci), 4);
         assert_eq!(sample_event("ci.*", None, "t").kind, "ci.sample");
         assert_eq!(sample_event("*", None, "t").kind, "monitor.status");
+        assert_eq!(
+            sample_event("pipeline.*", None, "t").kind,
+            "pipeline.status"
+        );
+        assert_eq!(sample_event("pipeline.run", None, "t").data["to"], "failed");
     }
 
     #[test]

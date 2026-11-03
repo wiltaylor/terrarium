@@ -6,7 +6,8 @@
 //! fake clock.
 //!
 //! The monitor tick (`crate::monitors::tick`) is in the same task, with
-//! its own period ([`crate::monitors::TICK`]).
+//! its own period ([`crate::monitors::TICK`]), and the pipeline tick
+//! (`crate::pipelines::tick`) runs with it.
 //!
 //! The trigger engine (PLAN §12c) is in the same task. It reads the event
 //! log from `trigger_cursor`, not only the live hub: a new event on the
@@ -275,6 +276,8 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                 // their own period: a monitor runs as often as every 15 s.
                 () = tokio::time::sleep_until(next_monitor) => {
                     drop(crate::monitors::tick(&state, Utc::now()).await);
+                    // The pipelines (docs/api.md §31) on the same timer.
+                    drop(crate::pipelines::tick(&state, Utc::now()).await);
                     next_monitor = tokio::time::Instant::now() + crate::monitors::TICK;
                     continue;
                 }

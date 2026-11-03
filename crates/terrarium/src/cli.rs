@@ -169,6 +169,13 @@ pub enum Command {
         #[command(subcommand)]
         command: DashboardCmd,
     },
+    /// Pipelines: the CI/CD runs of the project (GitHub Actions, or a
+    /// script for any other system), polled on a schedule
+    #[command(visible_alias = "pipelines")]
+    Pipeline {
+        #[command(subcommand)]
+        command: PipelineCmd,
+    },
     /// Subscription usage
     Usage {
         #[command(subcommand)]
@@ -1706,6 +1713,107 @@ pub struct MonitorArgs {
     /// Keep the results this many days (default 7, at most 90)
     #[arg(long)]
     pub retention: Option<i64>,
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Make it, or turn it, off
+    #[arg(long)]
+    pub disabled: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PipelineCmd {
+    /// List the pipelines of the project with the status of the newest run
+    Ls,
+    /// Show one pipeline (`name`, `project/name`, or the ID) and its newest run
+    Show { pipeline: String },
+    /// Make a pipeline: `--github owner/repo`, or `--target` and a script
+    ///
+    /// A script prints the runs as JSON on stdout, newest first:
+    /// {"runs": [{"id", "status", "name"?, "url"?, "branch"?, "commit"?,
+    /// "environment"?, "started_at"?, "finished_at"?, "summary"?,
+    /// "steps"?: [{"name", "status"}]}]} (docs/api.md §31.2).
+    New {
+        name: String,
+        #[command(flatten)]
+        args: PipelineArgs,
+    },
+    /// Change a pipeline: only the flags given change
+    Edit {
+        pipeline: String,
+        /// A new name
+        #[arg(long)]
+        rename: Option<String>,
+        /// Turn the pipeline on
+        #[arg(long, conflicts_with = "disabled")]
+        enable: bool,
+        #[command(flatten)]
+        args: PipelineArgs,
+    },
+    /// Delete a pipeline and its runs
+    Rm { pipeline: String },
+    /// Poll a pipeline now; prints the new status and what changed
+    Refresh { pipeline: String },
+    /// The recent runs of a pipeline, newest first
+    Runs {
+        pipeline: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// One run with its steps (jobs, stages, deploy steps)
+    Run { pipeline: String, run: String },
+    /// Poll a pipeline that is not saved, once, and print the runs (nothing is kept)
+    Test {
+        #[command(flatten)]
+        args: PipelineArgs,
+    },
+}
+
+/// The fields of `pipeline new`, `edit`, and `test`.
+#[derive(Debug, Args)]
+pub struct PipelineArgs {
+    /// GitHub Actions: the repo, `owner/name`
+    #[arg(long, conflicts_with_all = ["target", "script", "script_file"])]
+    pub github: Option<String>,
+    /// GitHub: one workflow, by its file name (`ci.yml`) or ID
+    #[arg(long)]
+    pub workflow: Option<String>,
+    /// GitHub: the runs of one branch
+    #[arg(long)]
+    pub branch: Option<String>,
+    /// GitHub: the secret that holds the token
+    #[arg(long)]
+    pub token_secret: Option<String>,
+    /// GitHub Enterprise Server: the API base URL (`https://host/api/v3`)
+    #[arg(long)]
+    pub api_url: Option<String>,
+    /// Script: the target that runs it (global, or of the project)
+    #[arg(long)]
+    pub target: Option<String>,
+    /// Script: the shell text, or `-` for stdin
+    #[arg(long, conflicts_with = "script_file")]
+    pub script: Option<String>,
+    /// Script: read it from this file
+    #[arg(long)]
+    pub script_file: Option<PathBuf>,
+    /// Script: kill it after this many seconds (default 60, at most 600)
+    #[arg(long)]
+    pub timeout: Option<u64>,
+    /// Script: put the value of a secret in an environment variable,
+    /// `VAR=secret` (repeat the flag)
+    #[arg(long = "env-secret", value_name = "VAR=SECRET")]
+    pub env_secret: Vec<String>,
+    /// Poll every 30s, 1m, 5m (the default), 1h... (30 s or more)
+    #[arg(long, conflicts_with = "cron")]
+    pub every: Option<String>,
+    /// A five-field cron expression, for example "*/10 * * * *"
+    #[arg(long)]
+    pub cron: Option<String>,
+    /// The zone of --cron: UTC (the default) or an IANA zone
+    #[arg(long, requires = "cron")]
+    pub tz: Option<String>,
+    /// Keep this many runs (default 20, at most 100)
+    #[arg(long)]
+    pub max_runs: Option<i64>,
     #[arg(long)]
     pub description: Option<String>,
     /// Make it, or turn it, off

@@ -61,6 +61,12 @@ import type {
   MonitorResult,
   MonitorResultsQuery,
   MonitorRunReport,
+  Pipeline,
+  PipelineDef,
+  PipelineRefresh,
+  PipelineRun,
+  PipelineRunDetail,
+  PipelineTestReport,
   Artifact,
   ArtifactJsonUpload,
   ArtifactLinkKind,
@@ -512,6 +518,27 @@ export interface Api {
     series(id: string, q: MonitorResultsQuery & { bucket: number }): Promise<MonitorPoint[]>;
     dashboard(project: string): Promise<DashboardView>;
     saveDashboard(project: string, layout: DashboardLayout): Promise<DashboardView>;
+  };
+
+  /**
+   * Pipelines (docs/api.md §31): the CI/CD runs of a project. `id` is the ULID or `project/name`. Members read; a write
+   * needs project_admin, sysadmin, or the operator, with the target and the secrets of the source.
+   */
+  pipelines: {
+    list(project: string): Promise<Pipeline[]>;
+    get(id: string): Promise<Pipeline>;
+    create(project: string, def: PipelineDef): Promise<Pipeline>;
+    /** A JSON merge; `source` merges one level down. */
+    update(id: string, patch: Partial<Omit<PipelineDef, "source">> & { source?: Partial<PipelineDef["source"]> }): Promise<Pipeline>;
+    remove(id: string): Promise<void>;
+    /** Poll now. `409 conflict` while a poll runs. */
+    refresh(id: string): Promise<PipelineRefresh>;
+    /** Newest first. */
+    runs(id: string, limit?: number): Promise<PipelineRun[]>;
+    /** One run with its steps; a GitHub run reads its jobs when the store has none. */
+    run(id: string, run: string): Promise<PipelineRunDetail>;
+    /** Poll a pipeline that is not saved, once, as the caller. `name` may be absent. */
+    test(project: string, def: Omit<PipelineDef, "name"> & { name?: string }): Promise<PipelineTestReport>;
   };
 
   /** docs/api.md §13. `id` is the ULID or `project/name`. */
@@ -1136,6 +1163,18 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       series: (id, q) => get(`/api/monitors/${seg(id)}/results`, { ...q }),
       dashboard: (project) => get(`${p(project)}/dashboard`),
       saveDashboard: (project, layout) => put(`${p(project)}/dashboard`, layout),
+    },
+
+    pipelines: {
+      list: (project) => get(`${p(project)}/pipelines`),
+      get: (id) => get(`/api/pipelines/${seg(id)}`),
+      create: (project, def) => post(`${p(project)}/pipelines`, def),
+      update: (id, body) => patch(`/api/pipelines/${seg(id)}`, body),
+      remove: (id) => del(`/api/pipelines/${seg(id)}`),
+      refresh: (id) => post(`/api/pipelines/${seg(id)}/refresh`),
+      runs: (id, limit) => get(`/api/pipelines/${seg(id)}/runs`, limit ? { limit } : {}),
+      run: (id, run) => get(`/api/pipelines/${seg(id)}/runs/${seg(run)}`),
+      test: (project, def) => post(`${p(project)}/pipelines/test`, def),
     },
 
     versions: {

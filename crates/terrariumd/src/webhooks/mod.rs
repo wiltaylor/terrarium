@@ -133,6 +133,17 @@ impl Runtime {
             .map(|t| Zeroizing::new(t.to_owned()));
     }
 
+    /// The address rules for another HTTP client of the daemon (the
+    /// GitHub adapter of the pipelines): the mode of private addresses,
+    /// the daemon's own ports, and the resolver.
+    pub fn net_rules(&self) -> (PrivateMode, Vec<u16>, Option<Resolver>) {
+        (
+            self.private_mode(),
+            lock(&self.own_ports).clone(),
+            lock(&self.resolver).clone(),
+        )
+    }
+
     /// A fake DNS resolver (the tests).
     pub fn set_resolver(&self, r: Option<Resolver>) {
         *lock(&self.resolver) = r;
@@ -209,6 +220,19 @@ pub fn check_secret_use(
     name: &str,
     field: &str,
 ) -> ApiResult<()> {
+    check_secret_use_in(conn, actor, project, name, field, "a webhook")
+}
+
+/// [`check_secret_use`] for another user of a secret: `what` names it in
+/// the errors (`a webhook`, `a pipeline`).
+pub fn check_secret_use_in(
+    conn: &Connection,
+    actor: &Actor,
+    project: Option<&str>,
+    name: &str,
+    field: &str,
+    what: &str,
+) -> ApiResult<()> {
     let project = project.filter(|p| *p != GLOBAL);
     let own = match project {
         Some(p) => secrets::get(conn, p, name)?,
@@ -232,7 +256,7 @@ pub fn check_secret_use(
             return Ok(());
         }
         return Err(ApiError::forbidden(format!(
-            "using secret `{p}/{name}` in a webhook needs project_admin of `{p}`"
+            "using secret `{p}/{name}` in {what} needs project_admin of `{p}`"
         )));
     }
     let granted = grants::find(conn, &a.id, &a.project, name)?
@@ -241,9 +265,8 @@ pub fn check_secret_use(
         return Ok(());
     }
     Err(ApiError::forbidden(format!(
-        "`{name}` is a global secret with no grant to {} or its project: a webhook header or \
-         signature uses a global secret only with a `use` grant (terrarium secret grant {name} \
-         project:{})",
+        "`{name}` is a global secret with no grant to {} or its project: {what} uses a global \
+         secret only with a `use` grant (terrarium secret grant {name} project:{})",
         actor.label(),
         a.project
     )))
@@ -264,7 +287,7 @@ pub fn check_secrets(
 
 /// The main value of secret `name`: the project's first, then the global
 /// one.
-fn open_value(
+pub(crate) fn open_value(
     conn: &Connection,
     state_dir: &std::path::Path,
     project: Option<&str>,
@@ -275,7 +298,7 @@ fn open_value(
         .ok_or_else(|| ApiError::invalid(format!("no secret `{name}`")))?;
     let field = grants::main_field(o.info.kind, &o.info.secret_fields).ok_or_else(|| {
         ApiError::invalid(format!(
-            "secret `{name}` has more than one secret field: a webhook needs one value"
+            "secret `{name}` has more than one secret field: give a secret with one value"
         ))
     })?;
     o.values

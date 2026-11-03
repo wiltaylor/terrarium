@@ -1080,6 +1080,54 @@ docker     ok      -      docker is active   2026-11-02T10:00:31.002Z
 makes example monitors and a layout. The packaged skill
 `terrarium-monitors` tells the lead agents how to use monitors.
 
+### Pipelines
+
+```
+terrarium pipeline ls
+terrarium pipeline show <pipeline> [--json]
+terrarium pipeline new <name> (--github owner/repo [--workflow ci.yml] [--branch b] [--token-secret s] [--api-url u]
+                              | --target t (--script s | --script-file f) [--timeout secs] [--env-secret VAR=secret]...)
+                       [--every 5m | --cron "*/10 * * * *" [--tz z]] [--max-runs n] [--description d] [--disabled]
+terrarium pipeline edit <pipeline> [the flags of new] [--rename n] [--enable]
+terrarium pipeline rm <pipeline>
+terrarium pipeline refresh <pipeline>
+terrarium pipeline runs <pipeline> [--limit 20]
+terrarium pipeline run <pipeline> <run-id>
+terrarium pipeline test (the source flags of new)
+```
+
+A pipeline shows the runs of a CI/CD system (docs/api.md §31).
+`<pipeline>` is a name in the project (`--project`, or the agent's own),
+`project/name`, or the ID. Reads need a member of the project; the writes
+(`new`, `edit`, `rm`, `refresh`, `test`) need a project admin, a
+sysadmin, or the operator, and a target and secrets that the caller may
+use.
+
+`--github` reads GitHub Actions; `--token-secret` names the secret with
+the token (a private repo needs it). `--target` with a script reads any
+other system: the script prints the runs as JSON on stdout, newest first
+(`{"runs": [{"id", "status", "name"?, "url"?, "environment"?,
+"started_at"?, "steps"?: [...]}]}`, docs/api.md §31.2).
+`--env-secret OCTOPUS_API_KEY=octopus-key` puts the value of a secret in
+the environment of the script. `--every` is 30 s or more (default 5m).
+`edit` with only `--branch` (or another field of the source) keeps the
+other fields of the source.
+
+`pipeline ls` prints each pipeline with the status of its newest run:
+
+```
+NAME     STATUS   LATEST                STARTED                   SOURCE                        ID
+ci       failed   CI #412               2026-11-03T00:01:00.000Z  github o/r ci.yml@main        01JD…
+deploys  waiting  1.4.2 to Production   2026-11-03T00:00:00.000Z  script on wsl                 01JD…
+```
+
+`pipeline refresh` polls now, and prints the status and the count of new
+and changed runs, or the error with the output of the script.
+`pipeline run` prints one run and its steps (the jobs of a GitHub run).
+`pipeline test` polls once with the flags and keeps nothing: use it to
+write a script. The packaged skill `terrarium-pipelines` tells the
+agents how to use pipelines.
+
 ### Usage, status, and targets
 
 ```

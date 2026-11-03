@@ -95,7 +95,7 @@ describe("ProjectTree", () => {
     const el = mount("/p/alpha/board");
     const group = el.querySelector<HTMLElement>('[data-project="alpha"] > [role="group"]')!;
     const keys = Array.from(group.querySelectorAll<HTMLElement>('[role="treeitem"][data-key^="i:"]')).map((r) => r.dataset.key);
-    expect(keys).toEqual(["dashboard", "board", "repos", "logs", "knowledge", "agents"].map((p) => `i:alpha/${p}`));
+    expect(keys).toEqual(["dashboard", "pipelines", "board", "repos", "logs", "knowledge", "agents"].map((p) => `i:alpha/${p}`));
   });
 
   it("keeps the Board row active on the Schedules tab of the board", () => {

@@ -3315,6 +3315,8 @@ pre.spawn-text {
 .mon-badge.warn { background: var(--warn-soft); color: var(--warn); }
 .mon-badge.crit { background: var(--danger-soft); color: var(--danger); }
 .mon-badge.unknown { background: var(--surface-3); color: var(--muted); }
+/* A pipeline run that runs now (docs/api.md §31). */
+.mon-badge.running { background: var(--info-soft); color: var(--info); }
 .mon-glyph {
   font-size: 0.85em;
 }
@@ -3634,3 +3636,10 @@ pre.spawn-text {
 .dash-table th.num {
   text-align: right;
 }
+
+/* ------------------------------------------------------------- pipelines */
+.pl-err { max-width: 36ch; overflow-wrap: anywhere; margin-top: 4px; }
+.pl-runs { padding: 4px 0 8px 16px; }
+.pl-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; font-size: 0.9em; }
+.pl-facts dt { color: var(--muted); }
+.pl-facts dd { margin: 0; overflow-wrap: anywhere; }
