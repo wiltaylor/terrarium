@@ -137,18 +137,19 @@ async fn bad_keys_a_stopped_agent_and_the_rate_limit() {
         .err(400, "bad_request");
     assert!(td.sup.typed(id).is_empty());
 
-    // 20 keys pass; the next key in the same second is refused.
-    let r = td.post(&keys, json!({"keys": vec!["a"; 20]})).await;
+    // 20 keys pass; the next key in the same second is refused. The 20 keys
+    // take 19 key gaps (950 ms) to type, so the refused requests go while
+    // they are typed, not after: after them, the window is nearly over.
+    let send = format!("/api/agents/{id}/send");
+    let (r, late) = tokio::join!(td.post(&keys, json!({"keys": vec!["a"; 20]})), async {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let key = td.post(&keys, json!({"keys": ["b"]})).await;
+        let raw = td.post(&send, json!({"text": "/x", "raw": true})).await;
+        (key, raw)
+    });
     assert_eq!(r.status.as_u16(), 202, "{}", r.body);
-    td.post(&keys, json!({"keys": ["b"]}))
-        .await
-        .err(429, "rate_limited");
-    td.post(
-        &format!("/api/agents/{id}/send"),
-        json!({"text": "/x", "raw": true}),
-    )
-    .await
-    .err(429, "rate_limited");
+    late.0.err(429, "rate_limited");
+    late.1.err(429, "rate_limited");
 
     let stopped = td.agent("p", "s", json!({})).await;
     let sid = stopped["id"].as_str().unwrap();
