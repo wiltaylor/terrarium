@@ -2246,17 +2246,20 @@ ends its row with `new_session`.
 `turns` counts the `turn_start` events of the session, its resumes
 included.
 
-**One row for each harness session.** A start, a restart, or a daemon
-restart that resumes the same harness session (the same
-`harness_session_id`) reuses the agent's row of that harness session. The
-row becomes current again, its end goes, `resumes` goes up by one, and
-`resumed_at` is the start of the resume. A new row comes only with a new
-harness session: a fresh start, a resume that failed, or a new
-conversation of the harness. A start whose harness has not reported its
-session yet has a row of its own for a short time; when the harness
-reports a session that an older row has, that row takes its events, and
-the short row goes. Migration 34 merged the rows that earlier resumes made
-into the earliest row of each harness session.
+**One row for each harness session.** A start, a restart, a wake, a
+restart of the restart policy, or a daemon restart that resumes the same
+harness session (the same `harness_session_id`) reuses the agent's row of
+that harness session. The row becomes current again when the start
+begins, before the harness reports its session, so the current session ID
+that a reader gets does not change after that. Its end goes, `resumes`
+goes up by one, and `resumed_at` is the start of the resume. A new row
+comes only with a new harness session: a fresh start, a resume that failed
+(the resumed row ends with `resume_failed`; its `resumes` counts the
+attempt), or a new conversation of the harness. A start with no harness
+session to resume has a new row at once; when the harness reports a
+session that an older row has, that row takes its events, and the new row
+goes. Migration 34 merged the rows that earlier resumes made into the
+earliest row of each harness session.
 
 | Field | Meaning |
 |---|---|

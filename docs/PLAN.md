@@ -3567,9 +3567,11 @@ skill `terrarium-spawn` teaches agents to use it.
   session after a prompt change gets a recap turn only when the agent has
   such questions. The recap turn starts with `[System:recap]` (§8.5).
 - One session row for each harness session. A resume of the same harness
-  session reuses its row: the row is current again, and its `resumes`
-  count and `resumed_at` change. Only a new harness session makes a new
-  row (api.md §6.3).
+  session reuses its row: the row is current again as the start begins
+  (before the harness reports its session), and its `resumes` count and
+  `resumed_at` change. Only a new harness session makes a new row (api.md
+  §6.3). So the current session ID that the dashboard reads at a wake
+  stays valid (issue #8).
 - Sessions outlive their agent. A delete keeps the session rows (no
   cascade since migration 37) and ends the open ones with `removed`. Before
   the agent dir goes to the trash, the daemon copies the session file of

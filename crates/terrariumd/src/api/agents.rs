@@ -538,8 +538,7 @@ pub(super) async fn start(
             if let Some(plan) = crate::reset::take_new_session(t, &id)? {
                 return Ok((None, Some(plan)));
             }
-            agents::begin_session(t, &id, "superseded")?;
-            Ok((agents::last_harness_session(t, &id)?, None))
+            Ok((agents::begin_resume(t, &id, "superseded")?, None))
         })
         .await?;
     // A start is a retry: a usage-limit hold ends (`crate::usage_limit`).
@@ -903,8 +902,7 @@ pub(super) async fn restart(
     let resume = state
         .db
         .write(actor.label(), move |t| {
-            let resume = agents::last_harness_session(t, &id)?;
-            agents::begin_session(t, &id, "restarted")?;
+            let resume = agents::begin_resume(t, &id, "restarted")?;
             t.audit(
                 "agent.restart",
                 &id,

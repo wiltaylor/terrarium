@@ -783,8 +783,8 @@ fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
             }
             return apply_status(t, &id, *to, reason.as_deref());
         }
-        SupervisorEventKind::NewSession { outcome } => {
-            agents::begin_session(t, &id, outcome)?;
+        SupervisorEventKind::NewSession { outcome, resume } => {
+            agents::reopen_session(t, &id, outcome, resume.as_ref().map(|h| h.0.as_str()))?;
             return Ok(());
         }
         SupervisorEventKind::Harness(e) => e,
@@ -899,8 +899,7 @@ async fn reconcile(state: &Shared) -> ApiResult<()> {
         let (view, resume) = state
             .db
             .write("system", move |t| {
-                let resume = agents::last_harness_session(t, &key)?;
-                agents::begin_session(t, &key, "daemon_restart")?;
+                let resume = agents::begin_resume(t, &key, "daemon_restart")?;
                 Ok((agents::get(t, &key)?, resume))
             })
             .await?;

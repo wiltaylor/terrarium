@@ -9,8 +9,11 @@
 // - `composerState`: when the operator may type a turn.
 // - `tailOnScroll` / `tailOnAppend`: auto-scroll that pauses when the
 //   operator scrolls up.
+// - `sessionGone`: the open session is not there (any more), so the view
+//   reads the current session again.
 
 import type { AgentStatus, Block, BlockOrigin, BlockUsage, TranscriptPage, TurnPart } from "../../../api/types";
+import { ApiError } from "../../../api/http";
 import { renderMarkdown } from "../../../lib/markdown";
 import { compact } from "../../../lib/format";
 
@@ -339,3 +342,12 @@ export async function loadEarlier(fetch: FetchTranscript, floor: number, size = 
 
 /** The `after` for the live stream: the newest block loaded, else the floor. */
 export const streamAfter = (w: { blocks: Block[]; floor: number }): number => w.blocks.at(-1)?.seq ?? w.floor;
+
+/**
+ * True when a transcript page or its stream says `404`: the session that the
+ * view has is not there (any more). For example, a daemon before the fix of
+ * issue #8 deleted the short session row of a resume when the harness
+ * reported its session. The view then reads the current session again; it
+ * does not keep a dead ID.
+ */
+export const sessionGone = (e: unknown): boolean => e instanceof ApiError && e.status === 404;

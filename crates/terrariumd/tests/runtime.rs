@@ -1293,21 +1293,20 @@ async fn daemon_restart_relaunches_with_resume() {
     let started = td.events(&id, "session_started").await;
     assert_eq!(started.last().unwrap()["data"]["source"], "startup");
     assert_ne!(started.last().unwrap()["data"]["harness_session"], first);
-    // A new harness session is a new row; the old one keeps its resume.
-    // The failed attempt has a row of its own, with no harness session.
+    // A new harness session is a new row. The start reopened the old row
+    // for the resume, so the failed attempt counts on it and ends it.
     let sessions = td.get(&format!("/api/agents/{id}/sessions")).await;
-    assert_eq!(sessions.as_array().unwrap().len(), 3, "{sessions}");
+    assert_eq!(sessions.as_array().unwrap().len(), 2, "{sessions}");
     assert_eq!(
         sessions[0]["harness_session_id"],
         started.last().unwrap()["data"]["harness_session"]
     );
     assert_eq!(sessions[0]["resumes"], 0);
     assert_eq!(sessions[0]["current"], true);
+    assert_eq!(sessions[1]["harness_session_id"], first);
+    assert_eq!(sessions[1]["resumes"], 2);
     assert_eq!(sessions[1]["outcome"], "resume_failed");
-    assert!(sessions[1]["harness_session_id"].is_null());
-    assert_eq!(sessions[2]["harness_session_id"], first);
-    assert_eq!(sessions[2]["resumes"], 1);
-    assert_eq!(sessions[2]["outcome"], "daemon_restart");
+    assert_eq!(sessions[1]["current"], false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2986,6 +2985,76 @@ async fn work_wakes_a_stopped_agent_and_rest_stops_it() {
         !after.iter().any(|x| x["data"]["status"] == "restarting"),
         "{after:#?}"
     );
+}
+
+/// Issue #8: a message to a sleeping agent wakes it, and the dashboard's
+/// Conversation tab reads the current session at once, before the harness
+/// reports its session. That session ID still answers after the harness
+/// reported it: the wake reopened the row of the resumed harness session,
+/// so there is no short row that goes (the old cause of "agent `bob` has
+/// no session `…`").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wake_keeps_the_session_id_that_a_reader_has() {
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let sessions = td.get(&format!("/api/agents/{id}/sessions")).await;
+    let first = sessions[0]["id"].as_str().unwrap().to_owned();
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+
+    // The harness holds its SessionStart hook until the gate file exists.
+    let gate = td.dir.path().join("startup-gate");
+    td.adapter
+        .set_env("FAKE_TUI_STARTUP_GATE", &gate.display().to_string());
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/send"),
+            Some(json!({"text": "wake up"})),
+        )
+        .await;
+    assert_eq!(r["queued"], true, "{r}");
+
+    // The reader: the current session while the harness starts.
+    let start = Instant::now();
+    let seen = loop {
+        let rows = td.get(&format!("/api/agents/{id}/sessions")).await;
+        if let Some(cur) = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["current"] == true)
+        {
+            break cur["id"].as_str().unwrap().to_owned();
+        }
+        assert!(start.elapsed() < WAIT, "no current session: {rows}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        seen, first,
+        "the wake reopens the row of its harness session"
+    );
+    let transcript = format!("/api/agents/{id}/sessions/{seen}/transcript");
+    let (s, b) = td.req(Method::GET, &transcript, None, None).await;
+    assert_eq!(s, 200, "{b}");
+
+    std::fs::write(&gate, "").unwrap();
+    let started = td
+        .wait_events(&id, "session_started", |e| e.len() == 2)
+        .await;
+    assert_eq!(started[1]["data"]["source"], "resume");
+    let (s, b) = td.req(Method::GET, &transcript, None, None).await;
+    assert_eq!(s, 200, "the session the reader has still answers: {b}");
+    let sessions = td.get(&format!("/api/agents/{id}/sessions")).await;
+    assert_eq!(sessions.as_array().unwrap().len(), 1, "{sessions}");
+    assert_eq!(sessions[0]["id"], first.as_str());
+    assert_eq!(sessions[0]["resumes"], 1);
+    assert_eq!(sessions[0]["current"], true);
+    td.wait_events(&id, "turn_start", |e| {
+        e.iter().any(|x| x["data"]["prompt"] == "[User] wake up")
+    })
+    .await;
 }
 
 /// A wake whose start fails puts the agent in `error`, and later work

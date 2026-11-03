@@ -2729,7 +2729,10 @@ impl RunnerSupervisor {
             Relaunch {
                 delay: Duration,
                 reason: String,
-                new_session: Option<String>,
+                /// End the current session with this outcome, and open the
+                /// session of the relaunch: the row of the harness session
+                /// that it resumes, if any.
+                new_session: Option<(String, Option<HarnessSessionId>)>,
             },
         }
         let clean = status.success();
@@ -2783,7 +2786,7 @@ impl RunnerSupervisor {
                         "the resume of session {} failed ({how}); starting a new session",
                         old.map(|s| s.0).unwrap_or_default()
                     ),
-                    new_session: Some("resume_failed".into()),
+                    new_session: Some(("resume_failed".into(), None)),
                 }
             } else {
                 let wanted = wants_restart(slot.agent.restart, clean);
@@ -2823,7 +2826,10 @@ impl RunnerSupervisor {
                             delay.as_millis(),
                             crate::store::agents::restart_str(slot.agent.restart)
                         ),
-                        new_session: Some(if clean { "exited" } else { "crashed" }.into()),
+                        new_session: Some((
+                            if clean { "exited" } else { "crashed" }.into(),
+                            slot.resume.clone(),
+                        )),
                     }
                 }
             };
@@ -2853,8 +2859,8 @@ impl RunnerSupervisor {
             } => {
                 info!(agent = %id, %reason, "agent restarting");
                 self.emit_status(id, AgentStatus::Restarting, reason);
-                if let Some(outcome) = new_session {
-                    self.emit(id, SupervisorEventKind::NewSession { outcome });
+                if let Some((outcome, resume)) = new_session {
+                    self.emit(id, SupervisorEventKind::NewSession { outcome, resume });
                 }
                 let me = self.clone();
                 tokio::spawn(async move {

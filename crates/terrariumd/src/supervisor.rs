@@ -83,9 +83,14 @@ pub enum SupervisorEventKind {
     /// A normalised harness event: hooks, session ID, exit.
     Harness(Event),
     /// The supervisor started the harness again on its own (restart policy,
-    /// a failed resume). End the current session with `outcome` and open a
-    /// new one.
-    NewSession { outcome: String },
+    /// a failed resume). End the current session with `outcome` and open
+    /// the session of the relaunch: the row of `resume`, the harness
+    /// session it resumes, or a new row
+    /// (`crate::store::agents::reopen_session`).
+    NewSession {
+        outcome: String,
+        resume: Option<HarnessSessionId>,
+    },
 }
 
 /// Why an agent's new turns wait (PLAN §16.2): the provider refused a turn

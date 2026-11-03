@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ApiError } from "../../../api/http";
 import type { Block, BlockUsage, TranscriptPage, TurnPart } from "../../../api/types";
 import {
   bodySegments,
@@ -13,6 +14,7 @@ import {
   nearBottom,
   originChip,
   partBadge,
+  sessionGone,
   streamAfter,
   TAIL_START,
   tailOnAppend,
@@ -263,5 +265,16 @@ describe("tagged turns (PLAN §8.5)", () => {
     expect(items[0]!.type === "user" && items[0]!.parts).toEqual(parts);
     const plain = groupBlocks([userText(2, "typed", "user")]);
     expect(plain[0]!.type === "user" && plain[0]!.parts).toEqual([]);
+  });
+});
+
+describe("sessionGone", () => {
+  // Issue #8: a 404 from the page or the stream of the open session ("agent `lead` has no session `…`").
+  it("is true for a 404 only", () => {
+    expect(sessionGone(new ApiError(404, "agent `lead` has no session `01M6`"))).toBe(true);
+    expect(sessionGone(new ApiError(403, "no"))).toBe(false);
+    expect(sessionGone(new ApiError(500, "boom"))).toBe(false);
+    expect(sessionGone(new Error("network"))).toBe(false);
+    expect(sessionGone(null)).toBe(false);
   });
 });

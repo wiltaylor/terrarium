@@ -13,7 +13,7 @@ import { api } from "../../../stores";
 import { currentSession } from "../sessions";
 import { bytes } from "../../../lib/format";
 import { canSend, imageProblem, imagesFromFiles, imagesFromItems, submitTurn, thumbnailOf, type DraftImage } from "./attachments";
-import { composerState, isSendKey } from "./model";
+import { composerState, isSendKey, sessionGone } from "./model";
 import { createTranscriptView, StreamChip, TranscriptLog } from "./TranscriptLog";
 
 const LIVE = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
@@ -50,6 +50,16 @@ export function Conversation(props: { agent: Agent; onOpenTerminal: () => void }
 
   const view = createTranscriptView(() => props.agent, session);
   const t = view.t;
+  // The session went (a 404 from its page or its stream): read the current session again.
+  // The same ID again keeps the same object, so this does not loop.
+  createEffect(
+    on(
+      () => sessionGone(t.error()) || sessionGone(t.streamError()),
+      (gone) => {
+        if (gone) void loadCurrent();
+      },
+    ),
+  );
 
   // The transcript's own `active` (its page, then `status` frames). When it cannot load, the list's word.
   const isActive = () => {

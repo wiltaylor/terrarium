@@ -1318,6 +1318,63 @@ pub fn begin_session(t: &mut Tx<'_>, agent: &str, outcome_of_previous: &str) -> 
     Ok(id)
 }
 
+/// End the current session and open the session of a start that resumes
+/// `resume` (PLAN §18): the agent's row of that harness session becomes
+/// current again at once. Its end goes, `resumes` goes up by one, and
+/// `resumed_at` is now. Answers the ID of the current row.
+///
+/// So a resume has no short row of its own. A short row went when the
+/// harness reported its session, and a reader that had its ID (the
+/// dashboard's Conversation tab) got `404` (issue #8). With no `resume`, or
+/// no row of it, a new row opens, as [`begin_session`] does.
+pub fn reopen_session(
+    t: &mut Tx<'_>,
+    agent: &str,
+    outcome_of_previous: &str,
+    resume: Option<&str>,
+) -> ApiResult<String> {
+    let row: Option<String> = match resume {
+        Some(h) => t
+            .query_row(
+                "SELECT id FROM sessions WHERE agent_id = ?1 AND harness_session_id = ?2
+                 ORDER BY id LIMIT 1",
+                params![agent, h],
+                |r| r.get(0),
+            )
+            .optional()?,
+        None => None,
+    };
+    let Some(id) = row else {
+        return begin_session(t, agent, outcome_of_previous);
+    };
+    end_session(t, agent, outcome_of_previous)?;
+    t.execute(
+        "UPDATE sessions SET current = 1, resumes = resumes + 1, resumed_at = ?2,
+                ended_at = NULL, end_reason = NULL
+         WHERE id = ?1",
+        params![id, now()],
+    )?;
+    Ok(id)
+}
+
+/// End the current session and open the session of a start that resumes
+/// the last harness session ([`last_harness_session`], then
+/// [`reopen_session`]). Answers the harness session to resume, if any.
+pub fn begin_resume(
+    t: &mut Tx<'_>,
+    agent: &str,
+    outcome_of_previous: &str,
+) -> ApiResult<Option<HarnessSessionId>> {
+    let resume = last_harness_session(t, agent)?;
+    reopen_session(
+        t,
+        agent,
+        outcome_of_previous,
+        resume.as_ref().map(|h| h.0.as_str()),
+    )?;
+    Ok(resume)
+}
+
 /// Record the harness session that the current session runs (PLAN §18).
 ///
 /// - The same harness session again (a compact, a second report): no
@@ -1694,5 +1751,54 @@ mod tests {
             .iter()
             .find(|s| s.harness_session_id.as_deref() == Some("H1"));
         assert_eq!(h1.unwrap().outcome.as_deref(), Some("new_session"));
+    }
+
+    /// Issue #8: a start that resumes opens the row of its harness session
+    /// at once. The ID that a reader got from the wake is still the
+    /// current row after the harness reported the session.
+    #[tokio::test]
+    async fn a_resume_opens_its_row_before_the_harness_reports() {
+        let db = db();
+        run(&db, "superseded", "H1").await;
+        let first = rows(&db).await[0].id.clone();
+        db.write("system", |t| end_session(t, "A1", "idle"))
+            .await
+            .unwrap();
+
+        let resume = db
+            .write("system", |t| begin_resume(t, "A1", "superseded"))
+            .await
+            .unwrap();
+        assert_eq!(resume.map(|h| h.0).as_deref(), Some("H1"));
+        let r = rows(&db).await;
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].id, first);
+        assert!(r[0].current && r[0].ended_at.is_none() && r[0].outcome.is_none());
+        assert_eq!(r[0].resumes, 1);
+
+        db.write("system", |t| set_harness_session(t, "A1", "H1"))
+            .await
+            .unwrap();
+        let r = rows(&db).await;
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!((r[0].id.as_str(), r[0].current), (first.as_str(), true));
+        assert_eq!(r[0].resumes, 1);
+
+        // A relaunch of the restart policy names the session it resumes.
+        db.write("system", |t| reopen_session(t, "A1", "crashed", Some("H1")))
+            .await
+            .unwrap();
+        let r = rows(&db).await;
+        assert_eq!((r.len(), r[0].resumes, r[0].current), (1, 2, true));
+
+        // No harness session to resume: a new row.
+        db.write("system", |t| reopen_session(t, "A1", "resume_failed", None))
+            .await
+            .unwrap();
+        let r = rows(&db).await;
+        assert_eq!(r.len(), 2, "{r:?}");
+        let old = r.iter().find(|s| s.id == first).unwrap();
+        assert_eq!(old.outcome.as_deref(), Some("resume_failed"));
+        assert!(!old.current);
     }
 }

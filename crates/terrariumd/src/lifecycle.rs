@@ -403,9 +403,7 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
             let resume = if plan.is_some() {
                 None
             } else {
-                let resume = agents::last_harness_session(t, &key)?;
-                agents::begin_session(t, &key, "superseded")?;
-                resume
+                agents::begin_resume(t, &key, "superseded")?
             };
             let v = agents::get(t, &key)?;
             t.emit(

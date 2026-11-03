@@ -384,14 +384,14 @@ async fn start_agent(state: &Shared, actor: &Actor, project: &str, name: &str) -
     let resume = state
         .db
         .write(actor.label(), move |t| {
-            agents::begin_session(t, &id, "superseded")?;
+            let resume = agents::begin_resume(t, &id, "superseded")?;
             t.audit(
                 "agent.start",
                 &id,
                 Some(&project),
                 json!({"source": "fleet"}),
             )?;
-            agents::last_harness_session(t, &id)
+            Ok(resume)
         })
         .await?;
     if let Err(e) = state.supervisor.start(a.agent.clone(), resume).await {
