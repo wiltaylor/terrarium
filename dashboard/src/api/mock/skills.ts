@@ -2,8 +2,9 @@
 // `api/skills.rs` and `skills.rs`: a small in-memory skill library in the
 // config repo. The checks are those of `terrarium_core::skills::check`: the
 // name (kebab-case, the folder name in the front matter), the description
-// (at most 1024 characters), the file types, at most 64 files, at most
-// 1 MiB, and no secrets. A failed write is `422 invalid` with
+// (at most 1024 characters), the file types, at most 256 files, at most
+// 8 MiB (the daemon defaults; `TERRARIUM_SKILL_MAX_FILES` and
+// `TERRARIUM_SKILL_MAX_BYTES` change them), and no secrets. A failed write is `422 invalid` with
 // `details.problems`. The seed has `fern-check`, `release-notes`, and
 // `broken-skill`, which fails the checks. `available: false` acts as a
 // daemon with no config repo (`501 not_available`).
@@ -31,9 +32,9 @@ export const ALL_SKILLS = "*";
 const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const MAX_NAME = 64;
 const MAX_DESCRIPTION = 1024;
-const MAX_FILES = 64;
-const MAX_BYTES = 1024 * 1024;
-const TYPES = ["md", "txt", "json", "yaml", "yml", "toml", "py", "sh", "js", "ts", "png", "jpg", "jpeg", "gif", "svg", "webp"];
+const MAX_FILES = 256;
+const MAX_BYTES = 8 * 1024 * 1024;
+const TYPES = ["md", "txt", "json", "yaml", "yml", "toml", "py", "sh", "js", "ts", "jsx", "tsx", "css", "html", "ps1", "psm1", "sql", "png", "jpg", "jpeg", "gif", "svg", "webp"];
 const BINARY = ["png", "jpg", "jpeg", "gif", "webp"];
 const SECRET_RE = /(sk-ant-[A-Za-z0-9_-]{8,}|sk-kimi-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/;
 
@@ -104,7 +105,7 @@ export function checkSkill(name: string, s: Stored): string[] {
   }
   if (s.files.size + 1 > MAX_FILES) out.push(`the skill has ${s.files.size + 1} files; the limit is ${MAX_FILES}`);
   const total = utf8(s.skill_md) + [...s.files.values()].reduce((n, f) => n + f.size, 0);
-  if (total > MAX_BYTES) out.push(`the skill has ${total} bytes; the limit is ${MAX_BYTES} (1 MiB)`);
+  if (total > MAX_BYTES) out.push(`the skill has ${total} bytes; the limit is ${MAX_BYTES} (8 MiB)`);
   for (const [path, text] of [["SKILL.md", s.skill_md] as const, ...[...s.files].map(([p, f]) => [p, f.text ?? ""] as const)])
     if (SECRET_RE.test(text)) out.push(`\`${path}\` holds what looks like a secret: remove it`);
   return out;

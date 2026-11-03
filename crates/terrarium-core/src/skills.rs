@@ -47,18 +47,68 @@ pub const NEW_DEFAULT_SUFFIX: &str = ".new";
 pub const NAME_MAX: usize = 64;
 /// The longest description.
 pub const DESCRIPTION_MAX: usize = 1024;
-/// The most bytes in one skill, all files together.
-pub const SKILL_MAX_BYTES: usize = 1024 * 1024;
-/// The most files in one skill, `SKILL.md` included.
-pub const SKILL_MAX_FILES: usize = 64;
+/// The default of the most bytes in one skill, all files together
+/// ([`max_bytes`]).
+pub const SKILL_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// The default of the most files in one skill, `SKILL.md` included
+/// ([`max_files`]).
+pub const SKILL_MAX_FILES: usize = 256;
+/// The env var that sets [`max_files`].
+pub const MAX_FILES_ENV: &str = "TERRARIUM_SKILL_MAX_FILES";
+/// The env var that sets [`max_bytes`]: a number of bytes, or a number
+/// with `K`, `KiB`, `M`, or `MiB`.
+pub const MAX_BYTES_ENV: &str = "TERRARIUM_SKILL_MAX_BYTES";
 /// The most directory levels of a file path in a skill.
 pub const PATH_MAX_DEPTH: usize = 4;
 /// The file types that a skill may hold. The config repo `.gitignore`
 /// admits the same types under `skills/`.
 pub const EXTENSIONS: &[&str] = &[
-    "md", "txt", "json", "yaml", "yml", "toml", "py", "sh", "js", "ts", "png", "jpg", "jpeg",
-    "gif", "svg", "webp",
+    "md", "txt", "json", "yaml", "yml", "toml", "py", "sh", "js", "ts", "jsx", "tsx", "css",
+    "html", "ps1", "psm1", "sql", "png", "jpg", "jpeg", "gif", "svg", "webp",
 ];
+/// The types of [`EXTENSIONS`] that may hold binary data. A file of any
+/// other type must be UTF-8 text with no NUL byte.
+pub const BINARY_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+/// The file of an import dir that lists the files to skip, in gitignore
+/// syntax ([`read_import_dir`]).
+pub const IGNORE_FILE: &str = ".skillignore";
+
+/// The most files in one skill: [`MAX_FILES_ENV`], else
+/// [`SKILL_MAX_FILES`]. A value that does not parse, or `0`, is the
+/// default.
+pub fn max_files() -> usize {
+    std::env::var(MAX_FILES_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(SKILL_MAX_FILES)
+}
+
+/// The most bytes in one skill: [`MAX_BYTES_ENV`], else
+/// [`SKILL_MAX_BYTES`]. A value that does not parse, or `0`, is the
+/// default.
+pub fn max_bytes() -> usize {
+    std::env::var(MAX_BYTES_ENV)
+        .ok()
+        .and_then(|v| parse_size(&v))
+        .filter(|n| *n > 0)
+        .unwrap_or(SKILL_MAX_BYTES)
+}
+
+/// `8388608`, `8192K`, `8KiB`, `8M`, `8MiB` (any case) as bytes.
+pub fn parse_size(v: &str) -> Option<usize> {
+    let v = v.trim();
+    let split = v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len());
+    let (n, unit) = v.split_at(split);
+    let n: usize = n.parse().ok()?;
+    let mult = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        _ => return None,
+    };
+    n.checked_mul(mult)
+}
 
 /// The files of one skill: the path in the skill dir, and the bytes.
 pub type Files = BTreeMap<String, Vec<u8>>;
@@ -142,6 +192,28 @@ pub fn check_path(rel: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Is `bytes` a valid content for the file `rel` (a valid path)? A file
+/// of a type of [`BINARY_EXTENSIONS`] may hold any bytes; a file of any
+/// other type must be UTF-8 text with no NUL byte, so a text type does not
+/// carry a binary.
+pub fn check_content(rel: &str, bytes: &[u8]) -> Result<(), String> {
+    let ext = Path::new(rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if BINARY_EXTENSIONS.contains(&ext.as_str())
+        || (!bytes.contains(&0) && std::str::from_utf8(bytes).is_ok())
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{rel}`: a `.{ext}` file must be UTF-8 text; only {} may be binary",
+            BINARY_EXTENSIONS.join(", ")
+        ))
+    }
 }
 
 /// A YAML scalar as it is written after `key:`, without its quotes.
@@ -268,27 +340,31 @@ pub fn parse_front_matter(text: &str) -> Result<Meta, String> {
 /// Check one skill: the name, `SKILL.md` and its front matter (the name
 /// in it is the folder name, the description has at most
 /// [`DESCRIPTION_MAX`] characters), each path ([`check_path`]), the caps
-/// ([`SKILL_MAX_FILES`], [`SKILL_MAX_BYTES`]), and the secret scan of each
-/// file. The error is the list of every problem.
+/// ([`max_files`], [`max_bytes`]), the content of each file
+/// ([`check_content`]), and the secret scan of each file. The error is the
+/// list of every problem.
 pub fn check(name: &str, files: &Files) -> Result<Meta, Vec<String>> {
     let mut problems = Vec::new();
     if let Err(e) = check_name(name) {
         problems.push(e);
     }
-    if files.len() > SKILL_MAX_FILES {
+    let (max_files, max_bytes) = (max_files(), max_bytes());
+    if files.len() > max_files {
         problems.push(format!(
-            "the skill has {} files; the limit is {SKILL_MAX_FILES}",
+            "the skill has {} files; the limit is {max_files} ({MAX_FILES_ENV})",
             files.len()
         ));
     }
     let total: usize = files.values().map(Vec::len).sum();
-    if total > SKILL_MAX_BYTES {
+    if total > max_bytes {
         problems.push(format!(
-            "the skill has {total} bytes; the limit is {SKILL_MAX_BYTES}"
+            "the skill has {total} bytes; the limit is {max_bytes} ({MAX_BYTES_ENV})"
         ));
     }
     for (path, bytes) in files {
         if let Err(e) = check_path(path) {
+            problems.push(e);
+        } else if let Err(e) = check_content(path, bytes) {
             problems.push(e);
         }
         for f in crate::secret_scan::scan(&format!("{LIBRARY_DIR}/{name}/{path}"), bytes) {
@@ -341,12 +417,57 @@ pub fn check(name: &str, files: &Files) -> Result<Meta, Vec<String>> {
 /// not a regular file, and a skill past the caps are errors. A missing
 /// dir is an empty map.
 pub fn read_dir(dir: &Path) -> Result<Files, Vec<String>> {
-    fn walk(root: &Path, d: &Path, out: &mut Files, total: &mut usize, problems: &mut Vec<String>) {
+    walk_dir(dir, None).map(|i| i.files)
+}
+
+/// A skill dir read for an import ([`read_import_dir`]): the files, and
+/// the paths that the import skipped, sorted (a skipped dir ends in `/`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Import {
+    pub files: Files,
+    pub skipped: Vec<String>,
+}
+
+/// Read a skill dir for an import (`terrarium skill new --from-dir`,
+/// `terrarium skill import`): as [`read_dir`], but skip what is not part
+/// of the skill instead of refusing it. Skipped: a hidden file or dir
+/// (`.git/`, `.skillignore`, ...), `__pycache__/`, `*.pyc`, `*.pyo`, and
+/// each path that [`IGNORE_FILE`] in `dir` matches (gitignore syntax).
+/// The caps count only the files that are read.
+pub fn read_import_dir(dir: &Path) -> Result<Import, Vec<String>> {
+    let rules = match std::fs::read_to_string(dir.join(IGNORE_FILE)) {
+        Ok(t) => IgnoreRules::parse(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => IgnoreRules::default(),
+        Err(e) => return Err(vec![format!("cannot read {IGNORE_FILE}: {e}")]),
+    };
+    walk_dir(dir, Some(&rules))
+}
+
+/// Should an import skip `rel` (a path in the skill, `/` between parts)?
+fn import_skips(rules: &IgnoreRules, rel: &str, is_dir: bool) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name.starts_with('.')
+        || (is_dir && name == "__pycache__")
+        || (!is_dir && (name.ends_with(".pyc") || name.ends_with(".pyo")))
+        || rules.ignored(rel, is_dir)
+}
+
+fn walk_dir(dir: &Path, import: Option<&IgnoreRules>) -> Result<Import, Vec<String>> {
+    struct Walk<'a> {
+        root: &'a Path,
+        import: Option<&'a IgnoreRules>,
+        out: Import,
+        total: usize,
+        max_files: usize,
+        max_bytes: usize,
+        problems: Vec<String>,
+    }
+    fn walk(w: &mut Walk<'_>, d: &Path) {
         let entries = match std::fs::read_dir(d) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
-                problems.push(format!("cannot read {}: {e}", d.display()));
+                w.problems.push(format!("cannot read {}: {e}", d.display()));
                 return;
             }
         };
@@ -355,14 +476,14 @@ pub fn read_dir(dir: &Path) -> Result<Files, Vec<String>> {
         for e in entries {
             let path = e.path();
             let rel = path
-                .strip_prefix(root)
+                .strip_prefix(w.root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
             let meta = match std::fs::symlink_metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
-                    problems.push(format!("cannot read {rel}: {e}"));
+                    w.problems.push(format!("cannot read {rel}: {e}"));
                     continue;
                 }
             };
@@ -372,47 +493,194 @@ pub fn read_dir(dir: &Path) -> Result<Files, Vec<String>> {
             if ft.is_file() && rel.ends_with(NEW_DEFAULT_SUFFIX) {
                 continue;
             }
+            if let Some(rules) = w.import
+                && import_skips(rules, &rel, ft.is_dir())
+            {
+                w.out
+                    .skipped
+                    .push(if ft.is_dir() { format!("{rel}/") } else { rel });
+                continue;
+            }
             if ft.is_symlink() {
-                problems.push(format!("`{rel}` is a symbolic link; a skill holds none"));
+                w.problems
+                    .push(format!("`{rel}` is a symbolic link; a skill holds none"));
             } else if ft.is_dir() {
-                walk(root, &path, out, total, problems);
+                walk(w, &path);
             } else if !ft.is_file() {
-                problems.push(format!("`{rel}` is not a regular file"));
-            } else if out.len() >= SKILL_MAX_FILES {
-                problems.push(format!("the skill has more than {SKILL_MAX_FILES} files"));
+                w.problems.push(format!("`{rel}` is not a regular file"));
+            } else if w.out.files.len() >= w.max_files {
+                w.problems.push(format!(
+                    "the skill has more than {} files ({MAX_FILES_ENV})",
+                    w.max_files
+                ));
                 return;
-            } else if *total + meta.len() as usize > SKILL_MAX_BYTES {
-                problems.push(format!("the skill has more than {SKILL_MAX_BYTES} bytes"));
+            } else if w.total + meta.len() as usize > w.max_bytes {
+                w.problems.push(format!(
+                    "the skill has more than {} bytes ({MAX_BYTES_ENV})",
+                    w.max_bytes
+                ));
                 return;
             } else {
                 match std::fs::read(&path) {
                     Ok(b) => {
-                        *total += b.len();
-                        out.insert(rel, b);
+                        w.total += b.len();
+                        w.out.files.insert(rel, b);
                     }
-                    Err(e) => problems.push(format!("cannot read {rel}: {e}")),
+                    Err(e) => w.problems.push(format!("cannot read {rel}: {e}")),
                 }
             }
         }
     }
-    let mut out = Files::new();
-    let mut problems = Vec::new();
-    match std::fs::symlink_metadata(dir) {
-        Ok(m) if m.file_type().is_symlink() => {
-            return Err(vec![format!(
-                "{} is a symbolic link; a skill holds none",
-                dir.display()
-            )]);
-        }
-        _ => {}
+    if let Ok(m) = std::fs::symlink_metadata(dir)
+        && m.file_type().is_symlink()
+    {
+        return Err(vec![format!(
+            "{} is a symbolic link; a skill holds none",
+            dir.display()
+        )]);
     }
-    let mut total = 0;
-    walk(dir, dir, &mut out, &mut total, &mut problems);
-    if problems.is_empty() {
-        Ok(out)
+    let mut w = Walk {
+        root: dir,
+        import,
+        out: Import::default(),
+        total: 0,
+        max_files: max_files(),
+        max_bytes: max_bytes(),
+        problems: Vec::new(),
+    };
+    walk(&mut w, dir);
+    if w.problems.is_empty() {
+        w.out.skipped.sort();
+        Ok(w.out)
     } else {
-        Err(problems)
+        Err(w.problems)
     }
+}
+
+/// The patterns of an [`IGNORE_FILE`], in gitignore syntax: one pattern
+/// on each line; `#` starts a comment; `!` makes a pattern an exception;
+/// a `/` at the end matches only a dir; a `/` at the start or in the
+/// middle anchors the pattern at the skill dir, else it matches a name at
+/// any level; `*` and `?` do not match `/`; `**` matches any number of
+/// dirs; `[...]` is a class. The last pattern that matches wins. A file in
+/// an ignored dir is ignored (the walk does not go into the dir).
+#[derive(Debug, Clone, Default)]
+pub struct IgnoreRules {
+    rules: Vec<IgnoreRule>,
+}
+
+#[derive(Debug, Clone)]
+struct IgnoreRule {
+    re: regex::Regex,
+    negate: bool,
+    dir_only: bool,
+}
+
+impl IgnoreRules {
+    /// Parse the text of an [`IGNORE_FILE`]. A pattern that does not
+    /// compile is left out.
+    pub fn parse(text: &str) -> Self {
+        let rules = text
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim_end_matches(['\r', ' ', '\t']);
+                if l.is_empty() || l.starts_with('#') {
+                    return None;
+                }
+                let (negate, l) = match l.strip_prefix('!') {
+                    Some(r) => (true, r),
+                    None => (false, l.strip_prefix('\\').unwrap_or(l)),
+                };
+                let (dir_only, l) = match l.strip_suffix('/') {
+                    Some(r) => (true, r),
+                    None => (false, l),
+                };
+                let anchored = l.contains('/');
+                let l = l.trim_start_matches('/');
+                if l.is_empty() {
+                    return None;
+                }
+                let body = glob_regex(l);
+                let re = if anchored {
+                    format!("^{body}$")
+                } else {
+                    format!("^(?:.*/)?{body}$")
+                };
+                regex::Regex::new(&re).ok().map(|re| IgnoreRule {
+                    re,
+                    negate,
+                    dir_only,
+                })
+            })
+            .collect();
+        Self { rules }
+    }
+
+    /// Does a pattern ignore `rel` (a path in the skill dir, `/` between
+    /// parts)?
+    pub fn ignored(&self, rel: &str, is_dir: bool) -> bool {
+        let mut out = false;
+        for r in &self.rules {
+            if (!r.dir_only || is_dir) && r.re.is_match(rel) {
+                out = !r.negate;
+            }
+        }
+        out
+    }
+}
+
+/// The regex (not anchored) of a gitignore glob.
+fn glob_regex(glob: &str) -> String {
+    let chars: Vec<char> = glob.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '*' if chars.get(i + 1) == Some(&'*') => {
+                let at_start = i == 0 || chars[i - 1] == '/';
+                let at_end = i + 2 == chars.len();
+                let slash_after = chars.get(i + 2) == Some(&'/');
+                if at_start && slash_after {
+                    // `**/`: zero or more dirs.
+                    out.push_str("(?:.*/)?");
+                    i += 3;
+                    continue;
+                }
+                if at_start && at_end {
+                    out.push_str(".*");
+                } else {
+                    out.push_str("[^/]*");
+                }
+                i += 2;
+                continue;
+            }
+            '*' => out.push_str("[^/]*"),
+            '?' => out.push_str("[^/]"),
+            '[' => {
+                if let Some(close) = chars[i + 1..].iter().position(|c| *c == ']') {
+                    let class: String = chars[i + 1..i + 1 + close].iter().collect();
+                    let class = class
+                        .strip_prefix('!')
+                        .map_or_else(|| class.clone(), |r| format!("^{r}"));
+                    out.push('[');
+                    out.push_str(&class.replace('\\', "\\\\").replace('[', "\\["));
+                    out.push(']');
+                    i += close + 2;
+                    continue;
+                }
+                out.push_str("\\[");
+            }
+            '\\' if i + 1 < chars.len() => {
+                out.push_str(&regex::escape(&chars[i + 1].to_string()));
+                i += 2;
+                continue;
+            }
+            c => out.push_str(&regex::escape(&c.to_string())),
+        }
+        i += 1;
+    }
+    out
 }
 
 /// The skill names in the library dir `library`, sorted: each sub dir
@@ -907,14 +1175,14 @@ mod tests {
         }
         // The caps.
         let mut many = files(&[(SKILL_FILE, &md("fern", "d"))]);
-        for i in 0..SKILL_MAX_FILES {
+        for i in 0..max_files() {
             many.insert(format!("r/{i}.txt"), b"x".to_vec());
         }
         let e = check("fern", &many).expect_err("count");
         assert!(e.iter().any(|p| p.contains("files")), "{e:?}");
         let big = files(&[
             (SKILL_FILE, &md("fern", "d")),
-            ("big.txt", &vec![b'a'; SKILL_MAX_BYTES]),
+            ("big.txt", &vec![b'a'; max_bytes()]),
         ]);
         let e = check("fern", &big).expect_err("bytes");
         assert!(e.iter().any(|p| p.contains("bytes")), "{e:?}");
@@ -932,6 +1200,112 @@ mod tests {
             "{e:?}"
         );
         assert!(!e.iter().any(|p| p.contains("ghp_")), "never the value");
+    }
+
+    #[test]
+    fn the_new_text_types_pass_and_a_text_type_holds_no_binary() {
+        let mut f = files(&[(SKILL_FILE, &md("kit", "d"))]);
+        for p in [
+            "kit/button.jsx",
+            "kit/card.tsx",
+            "kit/theme.css",
+            "pages/index.html",
+            "win/setup.ps1",
+            "win/Helpers.psm1",
+            "db/schema.sql",
+        ] {
+            f.insert(p.to_owned(), b"text\n".to_vec());
+        }
+        check("kit", &f).expect("valid");
+        // A binary in a text type is refused; an image may be binary.
+        assert!(check_content("scripts/run.sh", b"\x7fELF\0\0").is_err());
+        assert!(check_content("notes.txt", &[0xff, 0xfe, b'a']).is_err());
+        assert!(check_content("assets/a.png", b"\x89PNG\0").is_ok());
+        assert!(check_content("assets/a.svg", b"<svg/>").is_ok());
+        let bad = files(&[(SKILL_FILE, &md("kit", "d")), ("tool.sh", b"\0\0")]);
+        let e = check("kit", &bad).expect_err("binary");
+        assert!(e.iter().any(|p| p.contains("UTF-8 text")), "{e:?}");
+    }
+
+    #[test]
+    fn sizes_parse() {
+        assert_eq!(parse_size("8388608"), Some(8 * 1024 * 1024));
+        assert_eq!(parse_size("8M"), Some(8 * 1024 * 1024));
+        assert_eq!(parse_size(" 16MiB "), Some(16 * 1024 * 1024));
+        assert_eq!(parse_size("512k"), Some(512 * 1024));
+        assert_eq!(parse_size("8G"), None);
+        assert_eq!(parse_size("M"), None);
+        assert_eq!(parse_size(""), None);
+    }
+
+    #[test]
+    fn ignore_rules_follow_gitignore() {
+        let r = IgnoreRules::parse(
+            "# comment\n\n*.log\n/build/\ndocs/**/draft-*.md\n!keep.log\nsnap?.txt\n\
+             [ab].tmp.md\nnode_modules/\n",
+        );
+        assert!(r.ignored("x.log", false));
+        assert!(r.ignored("a/b/x.log", false));
+        assert!(!r.ignored("keep.log", false), "a later `!` wins");
+        assert!(!r.ignored("a/keep.log", false));
+        assert!(r.ignored("build", true));
+        assert!(!r.ignored("build", false), "dir only");
+        assert!(!r.ignored("src/build", true), "anchored");
+        assert!(r.ignored("docs/draft-1.md", false));
+        assert!(r.ignored("docs/a/b/draft-1.md", false));
+        assert!(!r.ignored("other/draft-1.md", false));
+        assert!(r.ignored("snap1.txt", false));
+        assert!(!r.ignored("snap12.txt", false));
+        assert!(r.ignored("a.tmp.md", false));
+        assert!(!r.ignored("c.tmp.md", false));
+        assert!(r.ignored("web/node_modules", true));
+        assert!(!r.ignored("SKILL.md", false));
+        assert!(!IgnoreRules::default().ignored("x.log", false));
+    }
+
+    #[test]
+    fn an_import_skips_caches_hidden_paths_and_ignored_files() {
+        let d = tempfile::tempdir().expect("tmp");
+        let s = d.path().join("kit");
+        for dir in ["scripts/__pycache__", ".playwright-cli", "out", "docs"] {
+            std::fs::create_dir_all(s.join(dir)).expect("mkdir");
+        }
+        std::fs::write(s.join(SKILL_FILE), md("kit", "d")).expect("write");
+        std::fs::write(s.join("scripts/run.py"), b"print(1)\n").expect("write");
+        std::fs::write(s.join("scripts/__pycache__/run.cpython-312.pyc"), b"\0").expect("w");
+        std::fs::write(s.join("scripts/old.pyc"), b"\0").expect("write");
+        std::fs::write(s.join(".playwright-cli/console.log"), b"x").expect("write");
+        std::fs::write(s.join(".DS_Store"), b"\0").expect("write");
+        std::fs::write(s.join("out/page.yml"), b"x").expect("write");
+        std::fs::write(s.join("docs/a.md"), b"a").expect("write");
+        std::fs::write(s.join("docs/draft.md"), b"d").expect("write");
+        std::fs::write(s.join(IGNORE_FILE), b"out/\ndraft.md\n").expect("write");
+
+        let got = read_import_dir(&s).expect("import");
+        assert_eq!(
+            got.files.keys().collect::<Vec<_>>(),
+            [SKILL_FILE, "docs/a.md", "scripts/run.py"]
+        );
+        assert_eq!(
+            got.skipped,
+            [
+                ".DS_Store",
+                ".playwright-cli/",
+                ".skillignore",
+                "docs/draft.md",
+                "out/",
+                "scripts/__pycache__/",
+                "scripts/old.pyc",
+            ]
+        );
+        check("kit", &got.files).expect("valid after the skips");
+        // The library read skips nothing: the hidden dir is a problem for
+        // the checks, and the cache is not a valid type.
+        let lib = read_dir(&s).expect("read");
+        assert!(check("kit", &lib).is_err());
+        // A symbolic link is still refused.
+        std::os::unix::fs::symlink("/etc/passwd", s.join("passwd.txt")).expect("link");
+        assert!(read_import_dir(&s).is_err());
     }
 
     #[test]

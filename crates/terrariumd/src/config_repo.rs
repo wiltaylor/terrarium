@@ -123,6 +123,13 @@ pub const GITIGNORE: &str = "\
 !/skills/**/*.sh
 !/skills/**/*.js
 !/skills/**/*.ts
+!/skills/**/*.jsx
+!/skills/**/*.tsx
+!/skills/**/*.css
+!/skills/**/*.html
+!/skills/**/*.ps1
+!/skills/**/*.psm1
+!/skills/**/*.sql
 !/skills/**/*.png
 !/skills/**/*.jpg
 !/skills/**/*.jpeg

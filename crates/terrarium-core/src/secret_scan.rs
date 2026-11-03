@@ -22,7 +22,7 @@
 //! | `jwt` | `eyJ...` `.` `eyJ...` `.` (a JWT, as the CLI session tokens) |
 //! | `terrarium-host-token` | `thk_...` (a host agent token), `the_...` (an enrol token) |
 //! | `credential-key` | a key named like `token`, `secret`, `password`, `api_key`, or `authorization`, with a value of 16 characters or more |
-//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character |
+//! | `high-entropy` | a run of 32 or more base64 or hex characters with a Shannon entropy over 4.0 bits per character, unless the run is a path of words ([`is_word_path`]) |
 //! | `credential-file` | a file name that holds credentials: `.env`, `auth.json`, `.credentials.json`, `id_rsa`, `*.pem`, `*.key`, ... |
 //!
 //! A line with the marker `terrarium-scan: allow` skips the
@@ -157,6 +157,46 @@ pub const ENTROPY_MIN_LEN: usize = 32;
 /// The shortest value of the `credential-key` rule.
 pub const KEY_VALUE_MIN_LEN: usize = 16;
 
+/// The longest part of a [`is_word_path`] run.
+const WORD_MAX_LEN: usize = 24;
+
+/// Is the run `run` a path or a name made of words, as the path of a URL
+/// (`com/manage-profile/security/api-tokens`), and not an encoded value?
+/// The run has no `+` or `=` (base64 has them, a URL path does not), and
+/// it has at least two parts between `/`, `-`, and `_`. Each part is one
+/// word: at most [`WORD_MAX_LEN`] characters, letters in one case form
+/// (`api`, `API`, `Api`) and then at most 4 digits (`v2`), or only digits
+/// (`2024`). A random base64 or hex value of 32 characters or more almost
+/// never splits into such parts (mixed case and digits in a part), so the
+/// `high-entropy` rule keeps it.
+pub fn is_word_path(run: &str) -> bool {
+    if run.contains(['+', '=']) {
+        return false;
+    }
+    let parts: Vec<&str> = run
+        .split(['/', '-', '_'])
+        .filter(|p| !p.is_empty())
+        .collect();
+    parts.len() >= 2 && parts.iter().all(|p| is_word(p))
+}
+
+fn is_word(part: &str) -> bool {
+    if part.len() > WORD_MAX_LEN {
+        return false;
+    }
+    let letters = part.trim_end_matches(|c: char| c.is_ascii_digit());
+    let digits = part.len() - letters.len();
+    if letters.is_empty() {
+        return digits <= 8;
+    }
+    if digits > 4 || !letters.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    // ASCII letters only, so `[1..]` is on a char boundary.
+    letters[1..].chars().all(|c| c.is_ascii_lowercase())
+        || letters.chars().all(|c| c.is_ascii_uppercase())
+}
+
 /// Is `name` (the last part of a path) a file that holds credentials?
 pub fn is_credential_file(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -243,6 +283,7 @@ pub fn scan(path: &str, text: &[u8]) -> Vec<Finding> {
             for m in re.find_iter(line) {
                 if m.as_str().len() >= ENTROPY_MIN_LEN
                     && shannon_entropy(m.as_str()) > ENTROPY_THRESHOLD
+                    && !is_word_path(m.as_str())
                 {
                     hit("high-entropy");
                 }
@@ -408,6 +449,42 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    /// A URL made of words is not a secret (issue #5); a secret in a URL
+    /// still hits.
+    #[test]
+    fn urls_of_words_do_not_hit_and_secrets_in_urls_do() {
+        let he = "high-entropy".to_owned();
+        for line in [
+            "Make an API token at <https://id.atlassian.com/manage-profile/security/api-tokens>.",
+            "See https://docs.example.com/en/v2/getting-started/install-on-linux-and-macos",
+            "https://github.com/wiltaylor/terrarium/blob/main/docs/security-review/Config-Repo",
+            "https://example.com/Users/Wil/Projects/2024/release-notes/README",
+            "scripts/references/templates/component-kit/button-group",
+        ] {
+            assert!(!rules("skills/a/SKILL.md", line).contains(&he), "{line}");
+        }
+        // A random value in a URL path, a query, or a webhook URL still hits.
+        let random = "Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe";
+        for line in [
+            format!("https://hooks.example.com/services/T0001/B0001/{random}"),
+            format!("https://example.com/download?sig={random}"),
+            format!("https://example.com/api/{random}/items"),
+            "https://example.com/x/Zx8Qp2Lm/Vt4Rn9Ks/1Wd6Hy3F/j5Bc0GaU/eKq7".to_owned(),
+            "https://example.com/a-Zx8Qp2Lm7Vt4-Rn9Ks1Wd6Hy3-Fj5Bc0GaUe".to_owned(),
+        ] {
+            assert!(rules("skills/a/SKILL.md", &line).contains(&he), "{line}");
+        }
+        // A hex token in a query hits through its key name.
+        let line = "https://example.com/feed?token=0123456789abcdef0123456789abcdef";
+        assert!(rules("skills/a/SKILL.md", line).contains(&"credential-key".to_owned()));
+        // A token pattern in a URL still hits.
+        let line = format!("https://x.com/?k=ghp_{}", "FAKEfake0123456789".repeat(2));
+        assert!(rules("skills/a/SKILL.md", &line).contains(&"github-token".to_owned()));
+        assert!(is_word_path("manage-profile/security/api-tokens"));
+        assert!(!is_word_path("Zx8Qp2Lm7Vt4Rn9Ks1Wd6Hy3Fj5Bc0GaUe"));
+        assert!(!is_word_path("abc/def+ghi=="));
     }
 
     #[test]

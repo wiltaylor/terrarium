@@ -5,7 +5,7 @@
 //! library). A write goes to the work tree of the config repo and stays
 //! uncommitted (`crate::skills`).
 
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -19,10 +19,21 @@ use crate::policy;
 use crate::skills::{self, Detail, Summary, WriteBody};
 
 pub fn routes() -> Router<Shared> {
+    let limit = DefaultBodyLimit::max(body_limit(terrarium_core::skills::max_bytes()));
     Router::new()
-        .route("/skills", get(list).post(create))
-        .route("/skills/{name}", get(show).put(update).delete(remove))
+        .route("/skills", get(list).post(create).layer(limit))
+        .route(
+            "/skills/{name}",
+            get(show).put(update).delete(remove).layer(limit),
+        )
         .route("/skills/{name}/usage", get(usage))
+}
+
+/// The body limit of a skill write: a skill of `max_bytes` as JSON. A
+/// binary file grows by 4/3 as base64, and the escapes of a text file
+/// (`\n`, `\"`) can double it; 1 MiB more for the keys.
+pub fn body_limit(max_bytes: usize) -> usize {
+    max_bytes.saturating_mul(2).saturating_add(1024 * 1024)
 }
 
 fn allow_write(actor: &Actor) -> ApiResult<()> {

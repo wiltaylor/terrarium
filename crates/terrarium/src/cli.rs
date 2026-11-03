@@ -2811,9 +2811,20 @@ pub enum SkillCmd {
         /// The description in the front matter of a new SKILL.md
         #[arg(long, conflicts_with = "from_dir")]
         description: Option<String>,
-        /// A skill dir: SKILL.md and its other files
+        /// A skill dir: SKILL.md and its other files. Hidden paths,
+        /// `__pycache__/`, `*.pyc`, and the paths of `.skillignore` are
+        /// skipped
         #[arg(long)]
         from_dir: Option<PathBuf>,
+    },
+    /// Import each child dir of `<dir>` that holds a SKILL.md, as `new
+    /// --from-dir` does; the skill name is the dir name. Prints the
+    /// result of each skill
+    Import {
+        dir: PathBuf,
+        /// Replace a skill that exists (its SKILL.md and all its files)
+        #[arg(long)]
+        update: bool,
     },
     /// Replace the SKILL.md of a skill; the other files stay
     Edit {
@@ -3743,6 +3754,8 @@ mod tests {
             vec!["skill", "validate", "x"],
             vec!["skill", "usage", "x"],
             vec!["skill", "new", "x", "--from-dir", "./x"],
+            vec!["skill", "import", "./skills"],
+            vec!["skill", "import", "./skills", "--update"],
         ] {
             parse(&args);
         }

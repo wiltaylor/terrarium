@@ -1195,7 +1195,9 @@ agent gets them, unless it turns them off (step 5).
    a whole dir with `terrarium skill new <name> --from-dir ./my-skill`. The
    daemon checks each write: the name is kebab-case and the same as the
    folder name, the description is required, only text and image file
-   types, at most 64 files and 1 MiB, no symbolic link, and no secret.
+   types, at most 256 files and 8 MiB, no symbolic link, and no secret.
+   To import a dir of skills (each child dir with a `SKILL.md`), use
+   `terrarium skill import ./skills`.
    `terrarium skill validate` checks the library again, for example after
    an edit by hand.
 

@@ -714,7 +714,8 @@ and session transcripts. Three controls (`docs/security-review.md`,
    JWT, the host tokens `thk_` and `the_`), a credential-like key name
    (`token`, `secret`, `password`, `api_key`, `authorization`) with a value
    of 16 characters or more, a run of 32 or more characters with a Shannon
-   entropy over 4.0, and the credential file names. A hit blocks the
+   entropy over 4.0 that is not a path of words (a documentation URL such
+   as `manage-profile/security/api-tokens`), and the credential file names. A hit blocks the
    commit and names the file, the line, and the rule, never the value.
 3. The export names a credential or a subscription by its name only, and
    drops the user part of a repo URL.
@@ -910,9 +911,13 @@ at each start:
 - The front matter has a `description` of 1 to 1024 characters.
 - Each file is a regular file (no symbolic link), at most 4 levels deep,
   with no hidden part, of a type of `md`, `txt`, `json`, `yaml`, `yml`,
-  `toml`, `py`, `sh`, `js`, `ts`, `png`, `jpg`, `jpeg`, `gif`, `svg`, or
-  `webp`.
-- A skill has at most 64 files and 1 MiB.
+  `toml`, `py`, `sh`, `js`, `ts`, `jsx`, `tsx`, `css`, `html`, `ps1`,
+  `psm1`, `sql`, `png`, `jpg`, `jpeg`, `gif`, `svg`, or `webp`. Only the
+  image types `png`, `jpg`, `jpeg`, `gif`, and `webp` may be binary; a
+  file of another type is UTF-8 text with no NUL byte.
+- A skill has at most 256 files and 8 MiB. `TERRARIUM_SKILL_MAX_FILES`
+  and `TERRARIUM_SKILL_MAX_BYTES` change the caps (in the daemon, and in
+  the CLI for its local check of an import).
 - The secret scan of the config repo (§8.3) finds nothing in each file.
 
 A write that fails the checks is `422 invalid`, with each problem in

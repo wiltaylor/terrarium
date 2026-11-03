@@ -127,9 +127,11 @@ describe("skills (mock)", () => {
     expect(checkSkill("ok", ok)).toEqual([]);
     expect(checkSkill("ok", { skill_md: newSkillMd("other", "Fine."), files: new Map() })).toEqual([expect.stringMatching(/folder name/)]);
     expect(checkSkill("ok", { skill_md: newSkillMd("ok", "a".repeat(1025)), files: new Map() })).toEqual([expect.stringMatching(/1024/)]);
-    const many = new Map(Array.from({ length: 64 }, (_, i) => [`f${i}.md`, { text: "", size: 0 }]));
-    expect(checkSkill("ok", { ...ok, files: many })).toEqual([expect.stringMatching(/65 files/)]);
-    expect(checkSkill("ok", { ...ok, files: new Map([["big.txt", { size: 1024 * 1024 }]]) })).toEqual([expect.stringMatching(/1 MiB/)]);
+    const many = new Map(Array.from({ length: 256 }, (_, i) => [`f${i}.md`, { text: "", size: 0 }]));
+    expect(checkSkill("ok", { ...ok, files: many })).toEqual([expect.stringMatching(/257 files/)]);
+    expect(checkSkill("ok", { ...ok, files: new Map([["big.txt", { size: 8 * 1024 * 1024 }]]) })).toEqual([expect.stringMatching(/8 MiB/)]);
+    const kit = new Map(["a.jsx", "b.tsx", "c.css", "d.html", "e.ps1", "f.psm1", "g.sql"].map((p) => [p, { text: "x", size: 1 }]));
+    expect(checkSkill("ok", { ...ok, files: kit })).toEqual([]);
     expect(checkSkill("ok", { ...ok, files: new Map([["../x.md", { text: "", size: 0 }]]) })).toEqual([expect.stringMatching(/not valid/)]);
   });
 

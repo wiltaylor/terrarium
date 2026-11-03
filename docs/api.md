@@ -7264,8 +7264,13 @@ A write body:
   matter. The `description` has 1 to 1024 characters. Each file has a
   relative path with at most 4 parts and no hidden part, and one of the
   types `md`, `txt`, `json`, `yaml`, `yml`, `toml`, `py`, `sh`, `js`,
-  `ts`, `png`, `jpg`, `jpeg`, `gif`, `svg`, `webp`. A skill has at most 64
-  files and 1 MiB. No file is a symbolic link. The secret scan of §25
+  `ts`, `jsx`, `tsx`, `css`, `html`, `ps1`, `psm1`, `sql`, `png`, `jpg`,
+  `jpeg`, `gif`, `svg`, `webp`. Only `png`, `jpg`, `jpeg`, `gif`, and
+  `webp` may be binary; a file of another type is UTF-8 text with no NUL
+  byte. A skill has at most 256 files and 8 MiB. The daemon env
+  `TERRARIUM_SKILL_MAX_FILES` and `TERRARIUM_SKILL_MAX_BYTES` (bytes, or
+  a number with `K` or `M`) change the caps; the body limit of a write is
+  two times the byte cap plus 1 MiB. No file is a symbolic link. The secret scan of §25
   finds nothing. A write that fails is `422 invalid` with
   `details.problems` (a list of text); nothing is written. A finding
   names the file, the line, and the rule, never the value.

@@ -108,7 +108,44 @@ fn stub() -> axum::Router {
         .route("/api/agents", get(agents))
         .route("/api/mail", post(refuse))
         .route("/api/events", get(events))
+        .route("/api/skills", post(skill_create))
+        .route("/api/skills/{name}", axum::routing::put(skill_update))
         .fallback(missing)
+}
+
+/// `POST /api/skills` of the stub: `taken` exists, `bad` fails the
+/// checks, any other name is created.
+async fn skill_create(Json(b): Json<Value>) -> axum::response::Response {
+    let files = b["files"].as_object().map_or(0, serde_json::Map::len) + 1;
+    match b["name"].as_str().unwrap_or_default() {
+        "taken" => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"code": "conflict", "message": "the skill `taken` exists"}})),
+        )
+            .into_response(),
+        "bad" => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(
+                json!({"error": {"code": "invalid", "message": "the skill fails the checks",
+                "details": {"problems": ["`x.exe`: the file type is not allowed"]}}}),
+            ),
+        )
+            .into_response(),
+        n => (
+            StatusCode::CREATED,
+            Json(json!({"name": n, "files": files})),
+        )
+            .into_response(),
+    }
+}
+
+async fn skill_update(
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(b): Json<Value>,
+) -> Json<Value> {
+    assert!(b.get("name").is_none(), "a PUT has no name");
+    let files = b["files"].as_object().map_or(0, serde_json::Map::len) + 1;
+    Json(json!({"name": name, "files": files}))
 }
 
 fn serve_unix(dir: &Path) -> PathBuf {
@@ -193,6 +230,72 @@ fn operator_mode_over_the_unix_socket() {
     let out = text(&o.stdout);
     assert!(out.contains("lead: starting -> idle"), "{out}");
     assert!(out.contains("mail to lead"), "{out}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `skill import <dir>`: each child dir with a SKILL.md, with the result
+/// of each (issue #2); a failure does not stop the others; `--update`
+/// replaces a skill that exists.
+#[test]
+fn skill_import_reports_each_skill() {
+    let dir = temp_dir("skill-import");
+    let socket = serve_unix(&dir);
+    let lib = dir.join("lib");
+    for n in ["fresh", "taken", "bad"] {
+        let d = lib.join(n);
+        std::fs::create_dir_all(d.join("scripts/__pycache__")).unwrap();
+        std::fs::write(
+            d.join("SKILL.md"),
+            format!("---\nname: {n}\ndescription: d\n---\n"),
+        )
+        .unwrap();
+        std::fs::write(d.join("scripts/run.py"), "print(1)\n").unwrap();
+        std::fs::write(d.join("scripts/__pycache__/run.pyc"), b"\0").unwrap();
+    }
+    std::fs::create_dir_all(lib.join("not-a-skill")).unwrap();
+
+    let o = run(&socket, &["skill", "import", lib.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    assert!(out.contains("fresh: created (2 file(s))"), "{out}");
+    assert!(
+        out.contains("taken: exists: the skill exists; give --update"),
+        "{out}"
+    );
+    assert!(
+        out.contains("bad: failed: the skill fails the checks"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  `x.exe`: the file type is not allowed"),
+        "{out}"
+    );
+    assert!(out.contains("  skipped: scripts/__pycache__/"), "{out}");
+    assert!(!out.contains("not-a-skill"), "{out}");
+    assert!(text(&o.stderr).contains("2 of 3 skill(s) failed"));
+
+    let o = run(
+        &socket,
+        &[
+            "--json",
+            "skill",
+            "import",
+            "--update",
+            lib.to_str().unwrap(),
+        ],
+    );
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["imported"], 2, "{v}");
+    assert_eq!(v["failed"], 1);
+    let taken = v["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "taken")
+        .unwrap();
+    assert_eq!(taken["result"], "updated");
+    assert_eq!(taken["skipped"], json!(["scripts/__pycache__/"]));
 
     std::fs::remove_dir_all(&dir).ok();
 }

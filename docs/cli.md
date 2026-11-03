@@ -703,6 +703,7 @@ terrarium skill ls                                 the skills, with DEFAULT (on:
 terrarium skill show <name>                        SKILL.md and the file list
 terrarium skill new <name> --description d         a new SKILL.md with this description
 terrarium skill new <name> --from-dir ./my-skill   SKILL.md and the other files of a dir
+terrarium skill import <dir> [--update]            each child dir of <dir> with a SKILL.md, a result for each
 terrarium skill edit <name> --file SKILL.md        replace SKILL.md (`-` reads stdin); the other files stay
 terrarium skill rm <name>
 terrarium skill validate [<name>]                  exit code 2 when a skill has a problem
@@ -714,6 +715,23 @@ terrarium skill usage <name>                       the agents and templates that
 - `new --from-dir` refuses a symbolic link, and sends a binary file (an
   image) as base64. The daemon checks the rest: the name, the front
   matter, the file types, the caps, and the secret scan.
+- `new --from-dir` and `import` skip the files that are not part of the
+  skill, and print them as `skipped:`: a hidden file or dir (`.git/`,
+  `.DS_Store`), `__pycache__/`, `*.pyc`, `*.pyo`, and each path of a
+  `.skillignore` file in the skill dir. `.skillignore` has the gitignore
+  syntax: `*`, `?`, `**`, `[...]`, `!` for an exception, a `/` at the end
+  for a dir only, and a `/` at the start or in the middle to anchor the
+  pattern at the skill dir.
+- `import <dir>` imports each child dir that holds a `SKILL.md`; the skill
+  name is the dir name. A failure does not stop the other skills. The
+  output has one line for each skill: `created`, `updated`, `exists` (the
+  skill is in the library; `--update` replaces it, all its files
+  included), or `failed` with the problems. The exit code is 1 when a
+  skill did not import. `--json` gives `{"imported","failed","skills":[{"name","result","files","skipped","error","problems"}]}`.
+- The caps are 256 files and 8 MiB for each skill.
+  `TERRARIUM_SKILL_MAX_FILES` and `TERRARIUM_SKILL_MAX_BYTES` change
+  them in the daemon; set the same values for the CLI, which checks the
+  caps before it sends.
 - Give skills to an agent with `agent new|set --skill <name>` (repeat
   it; `*` is every skill) and take them away with `agent set --no-skills`.
   The agent gets them at its next start. `agent show` has

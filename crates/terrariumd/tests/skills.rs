@@ -463,3 +463,44 @@ async fn no_config_repo_no_library() {
         .await;
     assert_eq!(r.ok()["skills"], json!(["*"]));
 }
+
+/// A large skill (issue #2): a body over the default axum limit of 2 MiB
+/// goes through, the new text types pass, and a skill over the cap is
+/// `422` with the cap and its env var.
+#[tokio::test]
+async fn a_large_skill_with_the_new_types_is_written() {
+    let (td, repo) = instance().await;
+    let md = format!("---\nname: kit\ndescription: {FERN}\n---\n\nUse the kit.\n");
+    let big = "the quick brown fox\n".repeat(3 * 1024 * 1024 / 20);
+    let r = td
+        .post(
+            "/api/skills",
+            json!({"name": "kit", "skill_md": md,
+                   "files": {"pages/specimen.html": big, "kit/button.jsx": "export {}\n",
+                             "kit/theme.css": "a{}\n", "win/setup.ps1": "Write-Host hi\n",
+                             "db/schema.sql": "select 1;\n"}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["files"], 6);
+    assert!(repo.join("skills/kit/pages/specimen.html").is_file());
+
+    let over = "the quick brown fox\n".repeat(terrarium_core::skills::max_bytes() / 20 + 1);
+    let r = td
+        .put("/api/skills/kit", json!({"files": {"big.txt": over}}))
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    assert!(
+        r.body.to_string().contains("TERRARIUM_SKILL_MAX_BYTES"),
+        "{}",
+        r.body
+    );
+    // A binary in a text type is refused.
+    let r = td
+        .put(
+            "/api/skills/kit",
+            json!({"files": {"tool.sh": {"base64": "f0VMRgAA"}}}),
+        )
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+}
