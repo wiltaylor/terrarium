@@ -117,7 +117,7 @@ impl Fixture {
 fn names(c: &Created) -> Vec<String> {
     let f = File::open(&c.path).unwrap();
     let z = ZipArchive::new(f).unwrap();
-    z.file_names().map(str::to_owned).collect()
+    z.file_names().map(|n| n.unwrap().into_owned()).collect()
 }
 
 #[test]
@@ -279,7 +279,7 @@ fn a_bad_file_stops_the_restore_and_changes_nothing() {
         let mut out = ZipWriter::new(File::create(&bad).unwrap());
         for i in 0..src.len() {
             let mut f = src.by_index(i).unwrap();
-            let name = f.name().to_owned();
+            let name = f.name().unwrap().into_owned();
             let mut data = Vec::new();
             f.read_to_end(&mut data).unwrap();
             if name == "files/config/prompts/lead.md" {
