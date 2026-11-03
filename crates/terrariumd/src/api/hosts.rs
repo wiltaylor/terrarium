@@ -35,6 +35,18 @@ fn view(state: &Shared, h: Host) -> Value {
     v["status"] = if live.online { "online" } else { "offline" }.into();
     v["online"] = live.online.into();
     v["sessions"] = live.sessions.into();
+    // Why the host is offline, when it is (docs/api.md §17).
+    v["offline_reason"] = if live.online {
+        Value::Null
+    } else {
+        crate::hosts::offline_reason(
+            &h,
+            state.executor.hosts.last_error(&h.name).as_ref(),
+            state.web.install.host_listen.as_ref(),
+            &crate::db::now(),
+        )
+        .into()
+    };
     if let Some(info) = live.info {
         v["capabilities"] = serde_json::to_value(&info.capabilities).unwrap_or(Value::Null);
         v["os"] = info.os.clone().into();

@@ -1,6 +1,8 @@
 // Home, Hosts: one card per host agent with CPU, memory, network IO, disk
 // IO, and disk space (docs/api.md §17.1). The page polls every 10 s: the
-// daemon sends no event for a sample.
+// daemon sends no event for a sample. Each card takes the full row, so the
+// disk space list has room for long mount paths (a WSL2 host has many). A
+// long path ends in an ellipsis and shows in full in its tooltip.
 
 import { A } from "@solidjs/router";
 import { createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
@@ -128,6 +130,9 @@ function HostCard(props: { host: Host; samples: HostMetricsSample[]; now: number
       <Show when={state() === "offline" && !last()}>
         <p class="muted small">Offline. Last seen {ago(props.host.last_seen ?? undefined, props.now)}.</p>
       </Show>
+      <Show when={state() === "offline" && props.host.offline_reason}>
+        {(r) => <p class="muted small offline-reason">{r()}</p>}
+      </Show>
 
       <Show when={last()}>
         {(l) => (
@@ -166,24 +171,26 @@ function HostCard(props: { host: Host; samples: HostMetricsSample[]; now: number
             <Show when={fs().all.length}>
               <div class={`host-fs${dim() ? " dim" : ""}`}>
                 <div class="muted small">Disk space</div>
-                <For each={allFs() ? fs().all : fs().shown}>
-                  {(f) => (
-                    <div class="meter" title={`${f.device} (${f.fstype})`}>
-                      <div class="meter-label">
-                        <span class="mono ellipsis" style={{ color: "var(--text)" }}>
-                          {f.mount}
-                        </span>
-                        <span>
-                          <strong style={{ color: "var(--text)" }}>{pct(f.used_pct)}</strong> · {size(f.used_bytes)} of {size(f.total_bytes)}
-                          <Show when={spaceLevel(f.used_pct) !== "ok"}> · {spaceLevel(f.used_pct) === "full" ? "almost full" : "filling"}</Show>
-                        </span>
+                <div class="fs-list">
+                  <For each={allFs() ? fs().all : fs().shown}>
+                    {(f) => (
+                      <div class="meter" title={`${f.mount}\n${f.device} (${f.fstype})`}>
+                        <div class="meter-label">
+                          <span class="mono ellipsis fs-mount" style={{ color: "var(--text)" }}>
+                            {f.mount}
+                          </span>
+                          <span>
+                            <strong style={{ color: "var(--text)" }}>{pct(f.used_pct)}</strong> · {size(f.used_bytes)} of {size(f.total_bytes)}
+                            <Show when={spaceLevel(f.used_pct) !== "ok"}> · {spaceLevel(f.used_pct) === "full" ? "almost full" : "filling"}</Show>
+                          </span>
+                        </div>
+                        <div class={`meter-bar ${spaceLevel(f.used_pct)}`} role="progressbar" aria-valuenow={Math.round(f.used_pct)} aria-valuemin={0} aria-valuemax={100} aria-label={`Disk space used on ${f.mount}`}>
+                          <span style={{ width: `${Math.min(100, f.used_pct)}%` }} />
+                        </div>
                       </div>
-                      <div class={`meter-bar ${spaceLevel(f.used_pct)}`} role="progressbar" aria-valuenow={Math.round(f.used_pct)} aria-valuemin={0} aria-valuemax={100} aria-label={`Disk space used on ${f.mount}`}>
-                        <span style={{ width: `${Math.min(100, f.used_pct)}%` }} />
-                      </div>
-                    </div>
-                  )}
-                </For>
+                    )}
+                  </For>
+                </div>
                 <Show when={fs().hidden > 0}>
                   <button class="small link-button" onClick={() => setAllFs(!allFs())} aria-expanded={allFs()}>
                     {allFs() ? "Show less" : `${fs().hidden} more`}

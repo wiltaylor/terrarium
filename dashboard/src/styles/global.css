@@ -910,23 +910,36 @@ a.project-name {
 .host-section h2 {
   margin: 0 0 10px;
 }
+/* One host per row: the metrics go across, and the disk space list has
+   room for long mount paths (#4). */
 .host-strip {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  grid-template-columns: minmax(0, 1fr);
   margin-bottom: 22px;
 }
 .host-card {
   display: grid;
+  /* One track that never grows past the card: a long mount path shrinks. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   align-content: start;
+}
+.offline-reason {
+  max-width: 60ch;
+  overflow-wrap: anywhere;
+}
+td .offline-reason {
+  margin-top: 4px;
+  max-width: 32ch;
 }
 .host-card p {
   margin: 0;
 }
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* Six across on a wide card, two on a phone. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
   gap: 10px 14px;
 }
 .metric-grid.dim,
@@ -968,14 +981,33 @@ a.project-name {
 }
 .host-fs {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
 }
-.host-fs .meter-label > span:first-child {
+/* The filesystems in columns of at least 440px, so a long mount path keeps
+   most of its text; one column on a phone. */
+.fs-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr));
+  gap: 8px 24px;
+}
+.host-fs .meter {
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
-  margin-right: 8px;
+}
+/* The mount takes the free space and ends in an ellipsis; when the line is
+   too narrow, the numbers go to a line of their own. */
+.host-fs .meter-label {
+  flex-wrap: wrap;
+  gap: 0 8px;
+}
+.host-fs .meter-label > .fs-mount {
+  flex: 1 1 22ch;
+  min-width: 0;
 }
 .host-fs .meter-label > span:last-child {
   white-space: nowrap;
+  margin-left: auto;
 }
 button.link-button {
   justify-self: start;
@@ -984,11 +1016,6 @@ button.link-button {
   padding: 0;
   color: var(--link);
   cursor: pointer;
-}
-@media (max-width: 360px) {
-  .metric-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 /* Agents */

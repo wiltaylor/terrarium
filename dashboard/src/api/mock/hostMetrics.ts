@@ -44,8 +44,15 @@ const PROFILES: Record<string, Profile> = {
     mem: 71,
     net: 900 * 1024,
     disk: 140 * 1024 ** 2,
-    fs: [{ mount: "/", fstype: "ext4", device: "/dev/vda1", total_bytes: 240 * GB }],
-    used: [0.82],
+    // WSL2 mounts: long paths, and small full ones (#4).
+    fs: [
+      { mount: "/", fstype: "ext4", device: "/dev/sdd", total_bytes: 1007 * GB },
+      { mount: "/usr/lib/linux-tools/6.18.54.1-microsoft-standard-WSL2", fstype: "overlay", device: "none", total_bytes: 96.4 * 1024 ** 2 },
+      { mount: "/usr/lib/modules/6.18.54.1-microsoft-standard-WSL2", fstype: "overlay", device: "none", total_bytes: 140 * 1024 ** 2 },
+      { mount: "/mnt/wslg/distro", fstype: "ext4", device: "/dev/sdd", total_bytes: 1007 * GB },
+      { mount: "/mnt/c", fstype: "9p", device: "C:\\", total_bytes: 951 * GB },
+    ],
+    used: [0.15, 0.999, 0.998, 0.15, 0.71],
   },
 };
 

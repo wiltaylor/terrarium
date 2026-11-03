@@ -1,6 +1,7 @@
 // Settings, Hosts tab: host agents (PLAN §19, docs/host-protocol.md):
 // online or offline, the capabilities each host reported in `hello`, last
-// seen, add with a token that shows once, and revoke. The running targets of each host against
+// seen, why an offline host is offline (`offline_reason`), add with a token
+// that shows once, and revoke. The running targets of each host against
 // its `max_running_targets` (docs/api.md §17.3), counted as the daemon
 // counts them, and `work_dir` and `instances_dir` when the API reports them.
 // "Add host" makes an enrol token and shows the one line that installs the
@@ -98,6 +99,13 @@ export default function HostsPage() {
                     </td>
                     <td>
                       <span class={`chip ${h.status === "online" ? "ok" : "bad"}`}>{h.status}</span>
+                      <Show when={h.status !== "online" && h.offline_reason}>
+                        {(r) => (
+                          <div class="small muted offline-reason" aria-label={`Why ${h.name} is offline`}>
+                            {r()}
+                          </div>
+                        )}
+                      </Show>
                     </td>
                     <td class="small">{h.os && h.arch ? `${h.os}/${h.arch}` : "—"}</td>
                     <td>

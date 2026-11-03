@@ -23,6 +23,10 @@
 //!   address logs a warning (security review F2).
 //! - An enrol token is swapped for a long-lived token after `hello`; the
 //!   new token goes in `welcome.token` (docs/host-protocol.md "Tokens").
+//! - The registry keeps the last link error of each host (a bad `hello`, a
+//!   spent enrol token, the reason of a disconnect) in memory, and
+//!   [`offline_reason`] turns it and the row into the text that the API
+//!   shows for an offline host.
 //! - `welcome.metrics` asks for `metrics` frames. The registry keeps the
 //!   last [`METRICS_HISTORY`] samples of each host in memory only: a
 //!   restart of the daemon loses them (docs/api.md §17.1).
@@ -195,6 +199,17 @@ struct Entry {
     /// The last [`METRICS_HISTORY`] samples, oldest first. They stay when
     /// the link drops.
     metrics: VecDeque<MetricsSample>,
+    /// The last thing that ended or refused a link, since the daemon
+    /// started. A new link clears it.
+    last_error: Option<LinkError>,
+}
+
+/// Why the last link of a host failed or ended, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkError {
+    /// RFC 3339.
+    pub at: String,
+    pub message: String,
 }
 
 /// One `metrics` frame, with the time the daemon got it.
@@ -283,6 +298,19 @@ impl HostRegistry {
                 info: None,
             },
         }
+    }
+
+    /// Keep the reason that a link of `host` failed or ended.
+    pub fn note_error(&self, host: &str, message: impl Into<String>) {
+        self.lock().entry(host.to_owned()).or_default().last_error = Some(LinkError {
+            at: crate::db::now(),
+            message: message.into(),
+        });
+    }
+
+    /// The last link error of `host` since the daemon started.
+    pub fn last_error(&self, host: &str) -> Option<LinkError> {
+        self.lock().get(host).and_then(|e| e.last_error.clone())
     }
 
     /// The `max_running_targets` of a host from its last `hello`.
@@ -402,6 +430,7 @@ impl HostRegistry {
         let e = g.entry(row.name.clone()).or_default();
         let old = e.conn.replace(conn);
         e.generation += 1;
+        e.last_error = None;
         let offers: HashMap<SessionId, u64> = match (&hello.resume, &e.resume_token) {
             (Some(r), Some(t)) if r.token == *t => {
                 r.sessions.iter().map(|o| (o.session, o.sent)).collect()
@@ -1059,32 +1088,27 @@ async fn serve_link(
         Ok(h) => h,
         Err(e) => {
             warn!(host = %row.name, "bad hello: {e}");
+            reg.note_error(&row.name, format!("refused: bad hello: {e}"));
             goodbye(&mut socket, "protocol", e).await;
             return;
         }
     };
     if hello.protocol != PROTOCOL_VERSION {
-        goodbye(
-            &mut socket,
-            "protocol",
-            format!(
-                "protocol {} is not supported; this daemon speaks {PROTOCOL_VERSION}",
-                hello.protocol
-            ),
-        )
-        .await;
+        let m = format!(
+            "protocol {} is not supported; this daemon speaks {PROTOCOL_VERSION}",
+            hello.protocol
+        );
+        reg.note_error(&row.name, format!("refused: {m}"));
+        goodbye(&mut socket, "protocol", m).await;
         return;
     }
     if hello.host != row.name {
-        goodbye(
-            &mut socket,
-            "protocol",
-            format!(
-                "this token belongs to host `{}`, not `{}`",
-                row.name, hello.host
-            ),
-        )
-        .await;
+        let m = format!(
+            "this token belongs to host `{}`, not `{}`",
+            row.name, hello.host
+        );
+        reg.note_error(&row.name, format!("refused: {m}"));
+        goodbye(&mut socket, "protocol", m).await;
         return;
     }
     // An enrol token: swap it for the long-lived token now. Only one dial
@@ -1113,6 +1137,10 @@ async fn serve_link(
             match r {
                 Ok(Some(t)) => Some(t),
                 Ok(None) => {
+                    reg.note_error(
+                        &row.name,
+                        "refused: the enrol token was used already or ran out",
+                    );
                     goodbye(
                         &mut socket,
                         "token_revoked",
@@ -1123,6 +1151,10 @@ async fn serve_link(
                 }
                 Err(e) => {
                     warn!(host = %row.name, "cannot complete the enrol: {e}");
+                    reg.note_error(
+                        &row.name,
+                        format!("refused: cannot complete the enrol: {e}"),
+                    );
                     goodbye(&mut socket, "shutdown", "cannot complete the enrol".into()).await;
                     return;
                 }
@@ -1272,6 +1304,7 @@ async fn serve_link(
     let _ = sink.close().await;
     if let Some(generation) = reg.detach(&row.name, conn_id) {
         info!(host = %row.name, why, "host agent disconnected");
+        reg.note_error(&row.name, format!("disconnected: {why}"));
         let name = row.name.clone();
         record(
             &state,
@@ -1292,10 +1325,187 @@ async fn serve_link(
     }
 }
 
+/// Why `row` is offline, for `GET /api/hosts` (docs/api.md §17). `last`:
+/// the last link error since the daemon started. `listen`: the host
+/// listener of the daemon. `now`: RFC 3339, as [`crate::db::now`].
+pub fn offline_reason(
+    row: &Host,
+    last: Option<&LinkError>,
+    listen: Option<&HostListen>,
+    now: &str,
+) -> String {
+    let name = &row.name;
+    // A rotate after the error makes the error old news.
+    let last = last.filter(|e| row.rotated_at.as_deref().is_none_or(|r| r < e.at.as_str()));
+    if let Some(e) = last {
+        return format!("{} (at {})", e.message, e.at);
+    }
+    if let Some(exp) = row.enrol_expires_at.as_deref() {
+        return if exp <= now {
+            format!(
+                "the enrol token ran out at {exp} before the host agent used it; \
+                 make a new one: terrarium admin host rotate {name} --enrol"
+            )
+        } else {
+            format!(
+                "waiting for the host agent to dial in with its enrol token (it runs out at {exp})"
+            )
+        };
+    }
+    let rotated_since_use = match (row.rotated_at.as_deref(), row.last_used_at.as_deref()) {
+        (Some(r), Some(u)) => r > u,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    if row.last_used_at.is_none() && row.last_seen.is_none() {
+        let mut m = "never connected: the host agent has not reached the daemon. \
+                     Check `daemon_url` in /etc/terrarium-host/config.toml and \
+                     `journalctl -u terrarium-host` on the host"
+            .to_owned();
+        if let Some(l) = listen
+            && l.tls.is_none()
+            && loopback_addr(&l.addr)
+        {
+            m.push_str(&format!(
+                ". The host listener is plaintext on {} (loopback only): \
+                 a published container port cannot reach it. Set \
+                 TERRARIUM_HOST_LISTEN=0.0.0.0:8082 and publish the port on \
+                 loopback, or set up TLS",
+                l.addr
+            ));
+        }
+        return m;
+    }
+    if rotated_since_use {
+        let at = row.rotated_at.as_deref().unwrap_or_default();
+        return format!("the token was rotated at {at}: give the host agent the new token");
+    }
+    match row.last_seen.as_deref().or(row.last_used_at.as_deref()) {
+        Some(t) => format!("not connected since {t}"),
+        None => "not connected".to_owned(),
+    }
+}
+
+/// `127.0.0.1:8082`, `[::1]:8082`, `localhost:8082`.
+fn loopback_addr(addr: &str) -> bool {
+    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn host_row() -> Host {
+        Host {
+            name: "lab1".into(),
+            id: "h1".into(),
+            created_by: "operator".into(),
+            capabilities: json!({}),
+            os: None,
+            arch: None,
+            version: None,
+            status: "offline".into(),
+            last_seen: None,
+            created_at: "2026-11-01T10:00:00.000Z".into(),
+            first_used_at: None,
+            last_used_at: None,
+            last_used_from: None,
+            rotated_at: None,
+            enrol_expires_at: None,
+        }
+    }
+
+    const NOW: &str = "2026-11-03T12:00:00.000Z";
+
+    #[test]
+    fn a_host_that_never_connected_says_so() {
+        let r = offline_reason(&host_row(), None, None, NOW);
+        assert!(r.starts_with("never connected"), "{r}");
+        assert!(!r.contains("loopback"), "{r}");
+        // A plaintext loopback listener is the likely cause (#3).
+        let listen = HostListen {
+            addr: DEFAULT_PLAIN_LISTEN.into(),
+            tls: None,
+        };
+        let r = offline_reason(&host_row(), None, Some(&listen), NOW);
+        assert!(
+            r.contains("plaintext on 127.0.0.1:8082 (loopback only)"),
+            "{r}"
+        );
+        let open = HostListen {
+            addr: "0.0.0.0:8082".into(),
+            tls: None,
+        };
+        assert!(!offline_reason(&host_row(), None, Some(&open), NOW).contains("loopback"));
+    }
+
+    #[test]
+    fn an_open_or_spent_enrol_token() {
+        let mut row = host_row();
+        row.enrol_expires_at = Some("2026-11-03T12:10:00.000Z".into());
+        let r = offline_reason(&row, None, None, NOW);
+        assert!(r.starts_with("waiting for the host agent"), "{r}");
+        row.enrol_expires_at = Some("2026-11-03T11:50:00.000Z".into());
+        let r = offline_reason(&row, None, None, NOW);
+        assert!(r.contains("ran out at 2026-11-03T11:50:00.000Z"), "{r}");
+        assert!(
+            r.contains("terrarium admin host rotate lab1 --enrol"),
+            "{r}"
+        );
+    }
+
+    #[test]
+    fn the_last_link_error_wins_until_a_rotate() {
+        let mut row = host_row();
+        row.last_used_at = Some("2026-11-03T09:00:00.000Z".into());
+        row.last_seen = Some("2026-11-03T11:00:00.000Z".into());
+        assert_eq!(
+            offline_reason(&row, None, None, NOW),
+            "not connected since 2026-11-03T11:00:00.000Z"
+        );
+        let e = LinkError {
+            at: "2026-11-03T11:00:00.000Z".into(),
+            message: "disconnected: heartbeat timeout".into(),
+        };
+        assert_eq!(
+            offline_reason(&row, Some(&e), None, NOW),
+            "disconnected: heartbeat timeout (at 2026-11-03T11:00:00.000Z)"
+        );
+        row.rotated_at = Some("2026-11-03T11:30:00.000Z".into());
+        let r = offline_reason(&row, Some(&e), None, NOW);
+        assert!(
+            r.starts_with("the token was rotated at 2026-11-03T11:30"),
+            "{r}"
+        );
+    }
+
+    #[test]
+    fn the_registry_keeps_the_last_error_until_a_link() {
+        let reg = HostRegistry::default();
+        assert!(reg.last_error("lab1").is_none());
+        reg.note_error("lab1", "refused: bad hello: closed");
+        assert_eq!(
+            reg.last_error("lab1").unwrap().message,
+            "refused: bad hello: closed"
+        );
+        assert!(!reg.is_online("lab1"));
+    }
+
+    #[test]
+    fn loopback_addresses() {
+        for a in ["127.0.0.1:8082", "[::1]:8082", "localhost:8082"] {
+            assert!(loopback_addr(a), "{a}");
+        }
+        for a in ["0.0.0.0:8082", "10.0.0.2:8082", "[::]:8082"] {
+            assert!(!loopback_addr(a), "{a}");
+        }
+    }
 
     fn sample(cores: u32) -> HostMetrics {
         HostMetrics {

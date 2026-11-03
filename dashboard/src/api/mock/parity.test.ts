@@ -921,6 +921,9 @@ describe("mock parity with docs/api.md", () => {
     const made = await api.hosts.create("lab2");
     expect(made.token).toMatch(/^thk_/);
     expect(made).toMatchObject({ name: "lab2", status: "offline", online: false, sessions: 0, capabilities: {}, last_seen: null });
+    // As the daemon's `hosts::offline_reason`.
+    expect(made.offline_reason).toMatch(/^never connected/);
+    expect((await api.hosts.create("lab3", { enrol: true })).offline_reason).toMatch(/^waiting for the host agent/);
     expect(JSON.stringify(await api.hosts.list())).not.toContain(made.token);
     await expect(api.hosts.create("lab2")).rejects.toMatchObject({ code: "conflict" });
     await api.hosts.revoke("lab2");

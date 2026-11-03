@@ -208,13 +208,48 @@ class Env(unittest.TestCase):
         lines = text.splitlines()
         self.assertTrue(lines[0].startswith("# Made by `just deploy`"))
         for want in (f"TERRARIUM_TOKEN={TOKEN}", "TERRARIUM_UID=1001", "TERRARIUM_GID=1002",
-                     "TERRARIUM_PORT=9000", "TERRARIUM_ARTIFACT_PORT=9001", "TERRARIUM_HOST_PORT=9002",
+                     "TERRARIUM_PORT=9000", "TERRARIUM_ARTIFACT_PORT=9001", "TERRARIUM_HOST_PORT=127.0.0.1:9002",
                      "TERRARIUM_INGEST_PORT=9003", "TERRARIUM_PUBLIC_URL=http://t.lan:9000", "RUST_LOG=info"):
             self.assertIn(want, lines)
         self.assertNotIn("change-me", text)
         self.assertNotIn("#TERRARIUM_UID=1000", lines)
         # Each deploy sets the image: no active TERRARIUM_IMAGE line.
         self.assertFalse(any(l.startswith("TERRARIUM_IMAGE=") for l in lines))
+
+    def test_new_env_opens_the_host_dial_in_on_loopback(self):
+        # No host TLS in a new .env: the listener on all addresses in the
+        # container, the port on loopback only, and daemon_url at the
+        # published port (#3).
+        v = dp.env_values(TOKEN, "1000", "1000", "http://t.lan:8090", 8090)
+        self.assertEqual(v["TERRARIUM_HOST_PORT"], "127.0.0.1:8092")
+        self.assertEqual(v["TERRARIUM_HOST_LISTEN"], "0.0.0.0:8082")
+        self.assertEqual(v["TERRARIUM_HOST_DAEMON_URL"], "ws://localhost:8092")
+        self.assertEqual(dp.published_port(v["TERRARIUM_HOST_PORT"]), 8092)
+        v = dp.env_values(TOKEN, "1000", "1000", "http://t.lan:8080", 8080)
+        self.assertEqual(v["TERRARIUM_HOST_DAEMON_URL"], "ws://localhost:8082")
+
+    def test_new_env_sets_the_commented_host_lines_of_the_real_example(self):
+        example = (dp.REPO / ".env.example").read_text()
+        lines = dp.render_env(example, dp.env_values(TOKEN, "1000", "1000", "http://x:8090", 8090), NOW).splitlines()
+        for want in ("TERRARIUM_HOST_PORT=127.0.0.1:8092", "TERRARIUM_HOST_LISTEN=0.0.0.0:8082",
+                     "TERRARIUM_HOST_DAEMON_URL=ws://localhost:8092"):
+            self.assertEqual(lines.count(want), 1, want)
+        self.assertNotIn("#TERRARIUM_HOST_LISTEN=auto", lines)
+        # No TLS in a new .env.
+        self.assertFalse(any(l.startswith("TERRARIUM_HOST_TLS_") for l in lines))
+
+    def test_host_link_note(self):
+        new = dp.host_link_note(None, 8090)
+        self.assertIn("127.0.0.1:8092", new)
+        self.assertIn("only a host agent on this machine", new)
+        self.assertIn("Remote host agents need TLS", new)
+        # An old .env with no listener: no host agent can connect at all.
+        old = dp.host_link_note({"TERRARIUM_TOKEN"}, 8080)
+        self.assertIn("no host agent can connect", old)
+        self.assertIn("TERRARIUM_HOST_LISTEN=0.0.0.0:8082", old)
+        plain = dp.host_link_note({"TERRARIUM_HOST_LISTEN"}, 8080)
+        self.assertTrue(plain.startswith("no host TLS. Remote host agents need TLS"), plain)
+        self.assertIsNone(dp.host_link_note(set(dp.HOST_TLS_KEYS), 8080))
 
     def test_render_appends_an_unknown_key(self):
         text = dp.render_env("A=1\n", {"B": "2"}, NOW)
@@ -372,7 +407,11 @@ class Flows(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("TERRARIUM_PUBLIC_URL=http://t.lan:18090\n", r.stdin["env"])
         self.assertIn("TERRARIUM_INGEST_PORT=18093\n", r.stdin["env"])
+        self.assertIn("TERRARIUM_HOST_PORT=127.0.0.1:18092\n", r.stdin["env"])
+        self.assertIn("TERRARIUM_HOST_DAEMON_URL=ws://localhost:18092\n", r.stdin["env"])
         self.assertIn("pass --public-url", out)
+        # The no-TLS warning: as the step runs, and again in the summary.
+        self.assertEqual(out.count("only a host agent on this machine can connect"), 2, out)
         self.assertEqual(script_of(r.argv["health"])[1], ["/home/wil/terrarium", "18090"])
 
     def test_reinstall_keeps_the_env(self):
@@ -384,6 +423,7 @@ class Flows(unittest.TestCase):
         self.assertIn("keep the existing /home/wil/terrarium/.env", out)
         self.assertIn(".env has no line for: TERRARIUM_ARTIFACT_PORT", out)
         self.assertIn("--port 8080 applies only to a new .env", out)
+        self.assertIn("no host agent can connect", out)
         self.assertEqual(script_of(r.argv["health"])[1][1], "9090")
         # The image of the old src stays, for a rollback.
         self.assertEqual(script_of(r.argv["prune"])[1], ["terrarium-deploy", COMMIT[:12], "eeeeeeeeeeee"])

@@ -2682,6 +2682,8 @@ export interface Host {
   /** `online` while the host agent's link is up. */
   status: "online" | "offline";
   online?: boolean;
+  /** Why the host is offline (docs/api.md §17): the last link error, an open or spent enrol token, or "never connected". Null while online. */
+  offline_reason?: string | null;
   /** Live exec sessions. */
   sessions?: number;
   /** From the last `hello`. `{}` before the first connect. */

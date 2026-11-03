@@ -1671,7 +1671,13 @@ server (a key is best), uv, and just.
      and the time to `src.new/.deployed-ref`.
    - It makes `~/terrarium/.env` from `.env.example`, when `.env` does not
      exist: a new random `TERRARIUM_TOKEN`, the UID and GID of the user,
-     `TERRARIUM_PUBLIC_URL`, and the ports.
+     `TERRARIUM_PUBLIC_URL`, and the ports. A new `.env` has no host TLS.
+     So the deploy publishes the host agent port on loopback only
+     (`TERRARIUM_HOST_PORT=127.0.0.1:<port + 2>`), sets
+     `TERRARIUM_HOST_LISTEN=0.0.0.0:8082`, and sets
+     `TERRARIUM_HOST_DAEMON_URL=ws://localhost:<port + 2>`. A host agent
+     on the server itself can then connect. The deploy prints a warning
+     that remote host agents need TLS (section 2.7).
    - It builds the image from `src.new` (`docker compose build`).
    - After a good build, it moves `src` to `src.prev` and `src.new` to
      `src`. Then it starts the stack (`up -d --wait`) and waits for the
@@ -1722,7 +1728,10 @@ Compose binds the data directories through `TERRARIUM_DATA_DIR`, which
 install, and ignores the `TERRARIUM_*` variables of your shell.
 
 When `.env` exists, the deploy keeps it. It tells you the keys of
-`.env.example` that `.env` does not have. Then the defaults apply. To
+`.env.example` that `.env` does not have. Then the defaults apply. When
+`.env` has no host TLS, the deploy prints a warning. When `.env` also has
+no `TERRARIUM_HOST_LISTEN`, the warning tells you that no host agent can
+connect, and gives the three lines to add. To
 change a setting, edit `.env` on the server, and run
 `~/terrarium/terrarium-compose up -d`.
 

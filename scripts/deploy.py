@@ -75,6 +75,11 @@ PORT_KEYS = [
 ]
 NOT_IN_ENV = {"TERRARIUM_IMAGE"}
 
+# The host agent dial-in in the container (compose.yaml: `<published>:8082`).
+HOST_CONTAINER_PORT = 8082
+# The .env keys of host TLS. A new .env has none of them.
+HOST_TLS_KEYS = ("TERRARIUM_HOST_TLS_CERT", "TERRARIUM_HOST_TLS_KEY")
+
 
 class DeployError(Exception):
     """A problem that stops the deploy, with a message for the operator."""
@@ -551,7 +556,48 @@ def env_values(token: str, uid: str, gid: str, public_url: str, port: int) -> di
          "TERRARIUM_PUBLIC_URL": public_url}
     for key, offset in PORT_KEYS:
         v[key] = str(port + offset)
+    v.update(host_link_values(port))
     return v
+
+
+def host_link_values(port: int) -> dict[str, str]:
+    """The host agent dial-in of a new .env, which has no host TLS.
+
+    Without TLS, `TERRARIUM_HOST_LISTEN=auto` binds 127.0.0.1:8082 in the
+    container, and the published port cannot reach a loopback bind. So the
+    listener goes on all addresses in the container, and compose publishes
+    it on loopback only: a host agent on the Docker host can connect, and
+    the plaintext link stays off the network. The only URL that reaches it
+    is `localhost` with the published port, so the installer gets it as
+    `daemon_url` (the default is the host of the public URL, port 8082)."""
+    host_port = port + dict(PORT_KEYS)["TERRARIUM_HOST_PORT"]
+    return {
+        "TERRARIUM_HOST_PORT": f"127.0.0.1:{host_port}",
+        "TERRARIUM_HOST_LISTEN": f"0.0.0.0:{HOST_CONTAINER_PORT}",
+        "TERRARIUM_HOST_DAEMON_URL": f"ws://localhost:{host_port}",
+    }
+
+
+def host_link_note(env_keys: set[str] | None, port: int) -> str | None:
+    """A warning about the host agent dial-in. `env_keys`: the active keys of
+    an existing .env, or None for a new .env (made by `host_link_values`).
+    None: the .env has host TLS."""
+    if env_keys is not None and all(k in env_keys for k in HOST_TLS_KEYS):
+        return None
+    tls = ("Remote host agents need TLS: run `just host::cert <name>`, then set "
+           f"{' and '.join(HOST_TLS_KEYS)}, TERRARIUM_HOST_PORT, and "
+           "TERRARIUM_HOST_DAEMON_URL in .env (docs/getting-started.md, section 2.7)")
+    if env_keys is None:
+        host_port = port + dict(PORT_KEYS)["TERRARIUM_HOST_PORT"]
+        return (f"no host TLS: the host agent dial-in is plaintext on 127.0.0.1:{host_port}, "
+                f"so only a host agent on this machine can connect. {tls}")
+    if "TERRARIUM_HOST_LISTEN" not in env_keys:
+        return ("no host TLS and no TERRARIUM_HOST_LISTEN in .env: the dial-in binds loopback "
+                "in the container, so no host agent can connect. For a host agent on this "
+                "machine, set TERRARIUM_HOST_LISTEN=0.0.0.0:8082, "
+                "TERRARIUM_HOST_PORT=127.0.0.1:<port>, and "
+                "TERRARIUM_HOST_DAEMON_URL=ws://localhost:<port> in .env. " + tls)
+    return f"no host TLS. {tls}"
 
 
 def example_keys(example: str) -> list[str]:
@@ -738,6 +784,7 @@ def deploy(o: Options, runner: Runner, run_git: GitFn = git,
                   "that your browser and your host agents use")
         token = "<new token>" if o.dry_run else token_fn()
         content = render_env(example, env_values(token, p.uid, p.gid, public_url, port), now)
+        host_note = host_link_note(None, port)
         runner.run(t.argv(ENV_WRITE, d), stdin=content,
                    stdin_label="<.env from .env.example, with a new TERRARIUM_TOKEN>")
         if o.dry_run:
@@ -753,6 +800,9 @@ def deploy(o: Options, runner: Runner, run_git: GitFn = git,
             print(f"# warning: --port {o.port} applies only to a new .env; the .env has TERRARIUM_PORT={p.env_port}")
         if o.public_url and o.public_url != p.env_public_url:
             print("# warning: --public-url applies only to a new .env; edit TERRARIUM_PUBLIC_URL there")
+        host_note = host_link_note(p.env_keys, port)
+    if host_note:
+        print(f"# warning: {host_note}")
 
     # 4. Build from src.new. A failure leaves src/ and the stack as they were.
     r = runner.run(t.argv(BUILD, d), check=False)
@@ -778,11 +828,12 @@ def deploy(o: Options, runner: Runner, run_git: GitFn = git,
         keep.append(prev)
     runner.run(t.argv(PRUNE, project, *keep), check=False)
 
-    summary(o, d, public_url, token, project, health.returncode == 0)
+    summary(o, d, public_url, token, project, health.returncode == 0, host_note)
     return 0
 
 
-def summary(o: Options, d: str, public_url: str, token: str | None, project: str, healthy: bool) -> None:
+def summary(o: Options, d: str, public_url: str, token: str | None, project: str, healthy: bool,
+            host_note: str | None = None) -> None:
     t = o.target
     compose = f"{d}/{WRAPPER}"
     if o.dry_run:
@@ -800,6 +851,8 @@ def summary(o: Options, d: str, public_url: str, token: str | None, project: str
         print("               then log in with the password (or select \"Use the token instead\")")
         print(f"  Host agent:  {t.shell_hint(f'{compose} exec terrarium terrarium admin host new <name> --enrol')}")
         print(f"               prints `curl -fsSL {public_url}/install/host.sh | sudo sh -s -- --token ... --name <name>`")
+    if host_note:
+        print(f"warning: {host_note}")
     print(f"  Compose:     {t.shell_hint(f'{compose} ps')} (logs -f, exec, ...)")
     print(f"  Update:      {recipe_hint(o, 'update')}")
     print(f"  Roll back:   {recipe_hint(o, 'rollback')}")

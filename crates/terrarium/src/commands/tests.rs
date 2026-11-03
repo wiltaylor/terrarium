@@ -2379,6 +2379,20 @@ async fn agent_targets_and_hosts() {
     )
     .await;
     assert!(out.contains("online"), "{out}");
+    // `admin host ls` shows why a host is offline (#3).
+    let out = ok(
+        false,
+        &["admin", "host", "ls"],
+        vec![(
+            200,
+            json!([{"name": "lab1", "status": "offline", "offline_reason": "never connected"},
+                   {"name": "lab2", "status": "online", "offline_reason": null}]),
+        )],
+        vec![req(Get, "/api/hosts")],
+    )
+    .await;
+    assert!(out.contains("OFFLINE REASON"), "{out}");
+    assert!(out.contains("never connected"), "{out}");
     let out = ok(
         false,
         &["admin", "host", "new", "lab1"],

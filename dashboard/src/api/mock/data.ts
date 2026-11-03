@@ -926,6 +926,7 @@ type:bug sevrity=high
     },
     {
       name: "pi-cluster", id: fakeUlid("host", 2), host_id: fakeUlid("host", 2), status: "offline", online: false, sessions: 0, os: "linux", arch: "aarch64", version: "0.0.9", last_seen: ago(60 * 7),
+      offline_reason: `disconnected: heartbeat timeout (at ${ago(60 * 7)})`,
       capabilities: { docker: { present: true, version: "27.1.1" }, vmlab: { present: false }, shell: "/bin/sh" },
     },
   ];

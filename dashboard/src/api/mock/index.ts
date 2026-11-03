@@ -4011,7 +4011,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const enrol = !!opts?.enrol;
           const token = `${enrol ? "the" : "thk"}_${ulid("tok").toLowerCase()}`;
           const id = ulid("host");
-          const host: Host = { name, id, host_id: id, status: "offline", online: false, sessions: 0, capabilities: {}, summary: { os: "", arch: "", docker: false, vmlab: false }, last_seen: null, os: null, arch: null, version: null, created_at: iso(), created_by: "operator" };
+          const enrolUntil = new Date(Date.now() + 10 * 60_000).toISOString();
+          // As the daemon's `hosts::offline_reason` for a host that never dialled in.
+          const offline_reason = opts?.enrol
+            ? `waiting for the host agent to dial in with its enrol token (it runs out at ${enrolUntil})`
+            : "never connected: the host agent has not reached the daemon. Check `daemon_url` in /etc/terrarium-host/config.toml and `journalctl -u terrarium-host` on the host";
+          const host: Host = { name, id, host_id: id, status: "offline", online: false, offline_reason, sessions: 0, capabilities: {}, summary: { os: "", arch: "", docker: false, vmlab: false }, last_seen: null, os: null, arch: null, version: null, created_at: iso(), created_by: "operator" };
           w.hosts.push(host);
           w.hostTokens[name] = token;
           audit("host.create", name, undefined, { host_id: id, token_kind: enrol ? "enrol" : "host" });
@@ -4021,7 +4026,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             ...host,
             token,
             token_kind: "enrol" as const,
-            token_expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+            token_expires_at: enrolUntil,
             install_command: installCommand(MOCK_PUBLIC_URL, token, name),
           };
         }),

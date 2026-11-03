@@ -6,7 +6,7 @@ import type { Host, HostFilesystem, HostMetricsSample } from "../../api/types";
 /** The minutes of history that a card shows. */
 export const CARD_MINUTES = 15;
 /** How many filesystems a card shows before "more". */
-export const FS_SHOWN = 3;
+export const FS_SHOWN = 4;
 
 /**
  * - `live`: online, with a fresh sample.

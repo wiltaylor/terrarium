@@ -4870,6 +4870,22 @@ Rules:
   `host.connected` carries the peer as `from`.
 - `status`, `online`, and `sessions` come from the live link.
   `capabilities` comes from the last `hello`, `{}` before the first one.
+- `offline_reason` is `null` for an online host. For an offline host, it is
+  a text that tells why, in this order:
+  - The last link error since the daemon started, with its time: a refused
+    `hello` (`refused: ...`), a spent enrol token, or the reason of a
+    disconnect (`disconnected: heartbeat timeout`). A rotate after the
+    error hides it. A restart of the daemon loses it.
+  - An open enrol token (`waiting for the host agent to dial in ...`), or
+    an enrol token that ran out before its use.
+  - `never connected: ...`, when the host has no `last_used_at` and no
+    `last_seen`. When the host listener is plaintext on a loopback address,
+    the text tells you that a published container port cannot reach it.
+  - `the token was rotated at ...`, when no link used the current token.
+  - `not connected since <last_seen>`.
+  A link that does not reach the daemon (a refused or reset TCP
+  connection) leaves no error. Look at `journalctl -u terrarium-host` on
+  the host.
 - `DELETE` revokes the token. A live link gets `goodbye token_revoked` and
   closes. Its sessions end with the error `lost`.
 - A second link with the same token replaces the first. The first gets

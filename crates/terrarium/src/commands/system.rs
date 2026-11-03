@@ -648,6 +648,7 @@ pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
                         ("VERSION", "version"),
                         ("SESSIONS", "sessions"),
                         ("LAST SEEN", "last_seen"),
+                        ("OFFLINE REASON", "offline_reason"),
                     ],
                     "no host agents",
                 )
@@ -1308,10 +1309,11 @@ fn print_token(ctx: &Ctx, v: &Value) {
 /// `admin host show`: the link, the capabilities, and the token use record
 /// (docs/api.md §17.1).
 fn print_host(ctx: &Ctx, v: &Value) {
-    let rows: [(&str, String); 15] = [
+    let rows: [(&str, String); 16] = [
         ("host", field(v, "name")),
         ("id", field(v, "id")),
         ("status", field(v, "status")),
+        ("offline_reason", field(v, "offline_reason")),
         ("online", field(v, "online")),
         ("sessions", field(v, "sessions")),
         ("os", format!("{}/{}", field(v, "os"), field(v, "arch"))),

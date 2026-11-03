@@ -48,11 +48,11 @@ describe("host cards", () => {
     expect(spaceLevel(90)).toBe("full");
   });
 
-  it("shows the fullest filesystems first, 3 at most", () => {
-    const r = fullestFirst([fsys("a", 10), fsys("b", 95), fsys("c", 50), fsys("d", 81)]);
-    expect(r.shown.map((f) => f.mount)).toEqual(["b", "d", "c"]);
+  it("shows the fullest filesystems first, 4 at most", () => {
+    const r = fullestFirst([fsys("a", 10), fsys("b", 95), fsys("c", 50), fsys("d", 81), fsys("e", 5)]);
+    expect(r.shown.map((f) => f.mount)).toEqual(["b", "d", "c", "a"]);
     expect(r.hidden).toBe(1);
-    expect(r.all).toHaveLength(4);
+    expect(r.all).toHaveLength(5);
     expect(fullestFirst([fsys("a", 1)]).hidden).toBe(0);
   });
 

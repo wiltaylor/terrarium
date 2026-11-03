@@ -1692,8 +1692,8 @@ terrarium admin target grant <target> <agent> [--until 30m|time] [--exclusive] [
 terrarium admin target revoke <target> <agent>
 terrarium admin target extend <target> <agent> --until 30m|time|none
 terrarium admin target leases <target> [--all]
-terrarium admin host ls
-terrarium admin host show <name>               the link, the capabilities, and the token use record
+terrarium admin host ls                        each host: status, platform, last seen, and why it is offline
+terrarium admin host show <name>               the link, the capabilities, the token use record, and offline_reason
 terrarium admin host new <name> [--enrol]      prints the token once, alone on stdout
 terrarium admin host rotate <name> [--enrol]   a new token, printed once, alone on stdout
 terrarium admin host rm <name>                 revokes the token
