@@ -414,7 +414,7 @@ mod tests {
             json!({"system_prompt": "Own."})
         );
         let long = spec(json!({"harness": "codex",
-                               "system_prompt": "x".repeat(crate::config::SYSTEM_PROMPT_MAX + 1)}));
+                               "system_prompt": "x".repeat(crate::config::system_prompt_max() + 1)}));
         assert!(normalize(&long).is_err());
     }
 

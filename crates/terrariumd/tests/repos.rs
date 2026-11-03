@@ -701,3 +701,85 @@ async fn the_browser_reads_main_and_agent_trees() {
     clean(&r.body);
     r.err(404, "not_found");
 }
+
+/// Issue #1: a repo's `hooks_dir` and `push_deny` (from a project file and
+/// the API) put hooks into the agent's checkout on agent create; bad
+/// values are `422`.
+#[tokio::test]
+async fn a_checkout_gets_the_hooks_of_the_repo() {
+    let root = tempfile::tempdir().unwrap();
+    let origin = bare_repo(root.path());
+    sh(
+        &root.path().join("src"),
+        "mkdir .githooks && printf '#!/bin/sh\\nexit 0\\n' > .githooks/commit-msg && \
+         git add .githooks && git commit -q -m hooks && git push -q ../origin.git main",
+    );
+    let url = origin.to_string_lossy().into_owned();
+    let td = TestDaemon::with_config(|c| {
+        write(
+            c,
+            "projects/demo.toml",
+            &format!(
+                r#"
+[[repos]]
+name = "app"
+url = "{url}"
+default_branch = "main"
+hooks_dir = ".githooks"
+push_deny = ["op/*"]
+
+[checkout]
+on_agent_create = ["app"]
+"#
+            ),
+        );
+    })
+    .await;
+    let repos = td.get("/api/projects/demo/repos").await;
+    let repo = &repos.ok()[0];
+    assert_eq!(repo["hooks_dir"], ".githooks", "{repo}");
+    assert_eq!(repo["push_deny"], json!(["op/*"]));
+    let created = td
+        .post(
+            "/api/agents",
+            json!({"name": "w", "project": "demo", "harness": "claude"}),
+        )
+        .await;
+    let a = created.ok().clone();
+    let checkout = &a["checkout"][0];
+    assert_eq!(checkout["action"], "cloned", "{a}");
+    assert_eq!(checkout["hooks"], json!(["commit-msg", "pre-push"]), "{a}");
+    let hooks = PathBuf::from(a["workspace"].as_str().unwrap()).join("app/.git/hooks");
+    assert!(hooks.join("commit-msg").is_file());
+    let guard = std::fs::read_to_string(hooks.join("pre-push")).unwrap();
+    assert!(guard.contains("op/*"), "{guard}");
+
+    // The API: the fields in the answer, and the checks.
+    td.project("p").await;
+    let r = td
+        .post(
+            "/api/projects/p/repos",
+            json!({"url": "https://git.example.com/team/app.git",
+                   "hooks_dir": "tools/hooks", "push_deny": ["op/*", "wip"]}),
+        )
+        .await;
+    assert_eq!(r.ok()["hooks_dir"], "tools/hooks");
+    assert_eq!(r.body["push_deny"], json!(["op/*", "wip"]));
+    let plain = td
+        .post(
+            "/api/projects/p/repos",
+            json!({"url": "https://git.example.com/team/plain.git"}),
+        )
+        .await;
+    assert!(plain.ok().get("hooks_dir").is_none());
+    assert!(plain.body.get("push_deny").is_none());
+    for bad in [
+        json!({"url": "https://git.example.com/team/x.git", "hooks_dir": "../x"}),
+        json!({"url": "https://git.example.com/team/y.git", "hooks_dir": ".git/hooks"}),
+        json!({"url": "https://git.example.com/team/z.git", "push_deny": ["$(id)"]}),
+    ] {
+        td.post("/api/projects/p/repos", bad)
+            .await
+            .err(422, "invalid");
+    }
+}

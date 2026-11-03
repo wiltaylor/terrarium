@@ -115,6 +115,7 @@ export function createSystemPromptMock(c: SystemPromptMockContext): { api: Api["
     source: s.isDefault ? "default" : "config",
     path: `system-prompts/${name}.md`,
     builtin: (BUILTIN_PROMPTS as readonly string[]).includes(name),
+    over_limit: utf8(fileText(s)) > MAX_BYTES,
     updated: s.updated,
   });
   const detail = (name: string, s: Stored): SystemPromptDetail => ({ ...summary(name, s), text: s.text, users: users(name) });
@@ -127,7 +128,7 @@ export function createSystemPromptMock(c: SystemPromptMockContext): { api: Api["
     if (!body.trim()) fail(422, "invalid", "a system prompt needs `text`");
     const s: Stored = { description: oneLine(description), text: `${body.trimEnd()}\n`, isDefault: false, updated: c.iso() };
     const bytes = utf8(fileText(s));
-    if (bytes > MAX_BYTES) fail(422, "invalid", `the system prompt has ${bytes} bytes; the limit is ${MAX_BYTES}`);
+    if (bytes > MAX_BYTES) fail(422, "invalid", `the system prompt has ${bytes} bytes; the limit is ${MAX_BYTES} (TERRARIUM_SYSTEM_PROMPT_MAX)`);
     if (SECRET_RE.test(fileText(s))) fail(422, "invalid", `the secret scan refused the system prompt (1 finding(s)): system-prompts/${name}.md:1: a token. A system prompt holds no secret`, { findings: [{ path: `system-prompts/${name}.md`, line: 1, rule: "token" }] });
     return s;
   };

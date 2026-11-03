@@ -14,7 +14,7 @@ import { api } from "../../stores";
 import { systemPromptProblem } from "../agents/form";
 import { refreshPromptLibrary } from "../agents/SystemPromptSelect";
 import { promptNameProblem } from "../agents/systemPrompt";
-import { COMMIT_NOTE, filterPrompts, sourceText, userLine, usersOfConflict } from "./model";
+import { COMMIT_NOTE, filterPrompts, overLimitNote, sourceText, userLine, usersOfConflict } from "./model";
 
 function CommitNote() {
   return (
@@ -200,6 +200,13 @@ function PromptDetail(props: { name: string; onChanged: () => void; onDeleted: (
               <span class="mono">{d().path}</span> · {sourceText(d())} · {bytes(d().size)}
               <Show when={d().updated}> · changed {ago(d().updated)}</Show>
             </p>
+            <Show when={overLimitNote(d())}>
+              {(note) => (
+                <div class="error-banner" role="alert">
+                  {note()}
+                </div>
+              )}
+            </Show>
             <Show when={inUse()}>
               {(users) => (
                 <div class="error-banner" role="alert" style={{ gap: "4px", "flex-direction": "column", "align-items": "flex-start" }}>
@@ -301,7 +308,17 @@ export default function SystemPromptsPage() {
                     </td>
                     <td>{e.description || <span class="muted">—</span>}</td>
                     <td class="small">{sourceText(e)}</td>
-                    <td class="small">{bytes(e.size)}</td>
+                    <td class="small">
+                      {bytes(e.size)}
+                      <Show when={overLimitNote(e)}>
+                        {(note) => (
+                          <>
+                            {" "}
+                            <span class="chip" title={note()}>over limit</span>
+                          </>
+                        )}
+                      </Show>
+                    </td>
                     <td class="small muted">{e.updated ? ago(e.updated) : "—"}</td>
                   </tr>
                 )}

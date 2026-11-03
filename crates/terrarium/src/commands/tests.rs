@@ -281,6 +281,32 @@ async fn projects_and_repos() {
         )],
     )
     .await;
+    // The git hooks of the repo (issue #1).
+    ok(
+        false,
+        &[
+            "-p",
+            "ops",
+            "project",
+            "repo-add",
+            "https://x/app.git",
+            "--hooks-dir",
+            ".githooks",
+            "--push-deny",
+            "op/*",
+            "--push-deny",
+            "wip/*",
+        ],
+        vec![(201, json!({"name": "app", "project": "ops"}))],
+        vec![(
+            Post,
+            "/api/projects/ops/repos",
+            vec![],
+            Some(json!({"url": "https://x/app.git", "hooks_dir": ".githooks",
+                        "push_deny": ["op/*", "wip/*"]})),
+        )],
+    )
+    .await;
     // Agent mode: the project comes from whoami.
     ok(
         true,

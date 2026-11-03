@@ -382,6 +382,14 @@ pub struct RepoAddArgs {
     pub credential: Option<String>,
     #[arg(long)]
     pub path: Option<String>,
+    /// A tracked dir of the repo (for example `.githooks`): each clone and
+    /// update copies its files into `.git/hooks` of the agent's checkout
+    #[arg(long)]
+    pub hooks_dir: Option<String>,
+    /// A branch glob (for example `op/*`) that a push from an agent
+    /// checkout must not touch. Repeat it for more globs
+    #[arg(long = "push-deny", value_name = "GLOB")]
+    pub push_deny: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]

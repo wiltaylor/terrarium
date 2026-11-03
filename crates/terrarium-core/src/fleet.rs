@@ -2028,7 +2028,7 @@ template = "worker"
         // Over the limit: an error.
         let long = format!(
             "name = \"sp\"\n[[projects]]\nname = \"sp\"\n[[projects.agents]]\nname = \"a\"\nharness = \"pi\"\nsystem_prompt = \"{}\"\n",
-            "x".repeat(crate::config::SYSTEM_PROMPT_MAX + 1)
+            "x".repeat(crate::config::system_prompt_max() + 1)
         );
         assert!(parse(&long, None).has_errors());
     }

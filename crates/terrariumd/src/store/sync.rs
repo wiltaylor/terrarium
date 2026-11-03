@@ -115,6 +115,8 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
                 default_branch: r.default_branch.clone(),
                 credential: r.credential.clone(),
                 path: r.path.clone(),
+                hooks_dir: r.hooks_dir.clone(),
+                push_deny: r.push_deny.clone(),
             };
             if let Err(e) = projects::attach_repo(t, &def.name, &new, SOURCE_FILE) {
                 report.errors.push(format!(

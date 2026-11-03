@@ -33,6 +33,14 @@ pub struct Repo {
     pub credential_admin: bool,
     /// The checkout directory name.
     pub path: String,
+    /// A tracked dir of the repo whose files the daemon copies into
+    /// `.git/hooks` at each clone and update (`crate::git::Hooks`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks_dir: Option<String>,
+    /// Branch globs that the daemon's `pre-push` hook refuses
+    /// (`crate::git::Hooks`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_deny: Vec<String>,
     pub source: String,
     pub created_at: String,
 }
@@ -44,6 +52,14 @@ impl Repo {
             project: &self.project,
             name: &self.name,
             admin_set: self.credential_admin,
+        }
+    }
+
+    /// The hooks that a checkout of the repo gets.
+    pub fn hooks(&self) -> crate::git::Hooks {
+        crate::git::Hooks {
+            dir: self.hooks_dir.clone(),
+            push_deny: self.push_deny.clone(),
         }
     }
 }
@@ -61,6 +77,8 @@ fn repo_row(r: &Row<'_>) -> rusqlite::Result<Repo> {
         default_branch: r.get("default_branch")?,
         credential: r.get("credential")?,
         credential_admin: r.get("credential_admin")?,
+        hooks_dir: r.get("hooks_dir")?,
+        push_deny: serde_json::from_str(&r.get::<_, String>("push_deny")?).unwrap_or_default(),
         source: r.get("source")?,
         created_at: r.get("created_at")?,
     })
@@ -94,6 +112,12 @@ pub struct NewRepo {
     pub credential: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
+    /// See [`Repo::hooks_dir`].
+    #[serde(default)]
+    pub hooks_dir: Option<String>,
+    /// See [`Repo::push_deny`].
+    #[serde(default)]
+    pub push_deny: Vec<String>,
 }
 
 fn name_from_url(url: &str) -> String {
@@ -128,6 +152,16 @@ pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> 
     {
         return Err(ApiError::invalid(format!("bad checkout path `{path}`")));
     }
+    let hooks_dir = r
+        .hooks_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_owned);
+    if let Some(d) = &hooks_dir {
+        terrarium_core::config::check_hooks_dir(d).map_err(ApiError::invalid)?;
+    }
+    terrarium_core::config::check_push_deny(&r.push_deny).map_err(ApiError::invalid)?;
     let exists: i64 = t.query_row(
         "SELECT count(*) FROM repos WHERE project = ?1 AND name = ?2",
         params![project, name],
@@ -145,8 +179,8 @@ pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> 
     let id = ulid::Ulid::new().to_string();
     t.execute(
         "INSERT INTO repos (id, project, name, url, default_branch, credential, path, source,
-                            created_at, credential_admin)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            created_at, credential_admin, hooks_dir, push_deny)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             id,
             project,
@@ -157,14 +191,17 @@ pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> 
             r.path,
             source,
             now(),
-            admin
+            admin,
+            hooks_dir,
+            serde_json::to_string(&r.push_deny)?
         ],
     )?;
     t.audit(
         "repo.attach",
         &format!("{project}/{name}"),
         Some(project),
-        json!({"url": r.url, "source": source}),
+        json!({"url": r.url, "source": source, "hooks_dir": hooks_dir,
+               "push_deny": r.push_deny}),
     )?;
     Ok(t.query_row("SELECT * FROM repos WHERE id = ?1", [&id], repo_row)?)
 }

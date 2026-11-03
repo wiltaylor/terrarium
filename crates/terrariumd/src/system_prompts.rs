@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use terrarium_core::config::{PERSONA_LEADER, PERSONA_NONE, PERSONA_WORKER, SYSTEM_PROMPT_MAX};
+use terrarium_core::config::{
+    PERSONA_LEADER, PERSONA_NONE, PERSONA_WORKER, system_prompt_max, system_prompt_too_large,
+};
 
 use crate::error::{ApiError, ApiResult};
 
@@ -159,6 +161,11 @@ pub struct Summary {
     pub path: String,
     /// `leader` or `worker`: the persona by role. It cannot be deleted.
     pub builtin: bool,
+    /// The file has more bytes than the system prompt limit
+    /// (`TERRARIUM_SYSTEM_PROMPT_MAX`): an agent with this persona does
+    /// not start.
+    #[serde(default)]
+    pub over_limit: bool,
     /// The time of the last change of the file (RFC 3339).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated: Option<String>,
@@ -221,6 +228,7 @@ fn summary_of(dirs: &Dirs, repo: Option<&Path>, name: &str, file: &Path) -> Opti
         source: source.to_owned(),
         path: rel,
         builtin: BUILTIN.contains(&name),
+        over_limit: text.len() > system_prompt_max(),
         updated: meta.and_then(|m| m.modified().ok()).map(|t| {
             chrono::DateTime::<chrono::Utc>::from(t)
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -304,7 +312,7 @@ fn scan_refusal(findings: &[terrarium_core::secret_scan::Finding]) -> ApiError {
 }
 
 /// The checked file of a write: the text with its description line, at
-/// most [`SYSTEM_PROMPT_MAX`] bytes, not empty, and clean of secrets.
+/// most [`system_prompt_max`] bytes, not empty, and clean of secrets.
 /// Returns the rel path and the bytes.
 pub fn checked_file(name: &str, description: &str, text: &str) -> ApiResult<(String, Vec<u8>)> {
     check_name(name)?;
@@ -315,11 +323,8 @@ pub fn checked_file(name: &str, description: &str, text: &str) -> ApiResult<(Str
         return Err(ApiError::invalid("a system prompt needs `text`"));
     }
     let file = compose(description, text);
-    if file.len() > SYSTEM_PROMPT_MAX {
-        return Err(ApiError::invalid(format!(
-            "the system prompt has {} bytes; the limit is {SYSTEM_PROMPT_MAX}",
-            file.len()
-        )));
+    if let Some(e) = system_prompt_too_large("the system prompt", file.len()) {
+        return Err(ApiError::invalid(e));
     }
     let rel = format!("{DIR}/{name}.{EXTENSION}");
     let findings = terrarium_core::secret_scan::scan(&rel, file.as_bytes());
@@ -469,6 +474,26 @@ mod tests {
         let leader = l.iter().find(|s| s.name == "leader").unwrap();
         assert_eq!(leader.path, "prompts/leader.md");
         assert!(leader.builtin);
+        assert!(!leader.over_limit);
+
+        // A file by hand over the limit is listed, with `over_limit`.
+        put(
+            r,
+            "system-prompts/big.md",
+            &"z".repeat(system_prompt_max() + 1),
+        );
+        let big = list(&d, None)
+            .into_iter()
+            .find(|s| s.name == "big")
+            .unwrap();
+        assert!(big.over_limit);
+        put(r, "system-prompts/big.md", &"z".repeat(system_prompt_max()));
+        let big = list(&d, None)
+            .into_iter()
+            .find(|s| s.name == "big")
+            .unwrap();
+        assert!(!big.over_limit);
+        std::fs::remove_file(r.join("system-prompts/big.md")).unwrap();
 
         let g = get(&d, None, "terse").unwrap();
         assert_eq!(g.text, "Be terse.\n");
@@ -509,7 +534,7 @@ mod tests {
         }
         assert!(checked_file("x", "", "  \n").is_err());
         assert!(checked_file("x", "a --> b", "text").is_err());
-        assert!(checked_file("x", "", &"y".repeat(SYSTEM_PROMPT_MAX + 1)).is_err());
+        assert!(checked_file("x", "", &"y".repeat(system_prompt_max() + 1)).is_err());
         let e =
             checked_file("x", "", &format!("token ghp_{}", "a1B2c3D4e5".repeat(4))).unwrap_err();
         assert!(e.message.contains("secret scan"), "{}", e.message);

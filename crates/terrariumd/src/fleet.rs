@@ -298,17 +298,48 @@ fn repo_spec(name: &str, url: &str, branch: Option<&str>, cred: Option<&str>, pa
     })
 }
 
+/// [`repo_spec`] with the hook settings (issue #1). A key is there only
+/// when it is set, so the spec of a repo without them stays as before.
+fn with_hooks(mut spec: Value, hooks_dir: Option<&str>, push_deny: &[String]) -> Value {
+    if let Some(d) = hooks_dir {
+        spec["hooks_dir"] = json!(d);
+    }
+    if !push_deny.is_empty() {
+        spec["push_deny"] = json!(push_deny);
+    }
+    spec
+}
+
+/// The spec of a repo of the store, as [`desired_repos`] makes it.
+fn live_repo_spec(r: &repos::Repo) -> Value {
+    with_hooks(
+        repo_spec(
+            &r.name,
+            &r.url,
+            r.default_branch.as_deref(),
+            r.credential.as_deref(),
+            &r.path,
+        ),
+        r.hooks_dir.as_deref(),
+        &r.push_deny,
+    )
+}
+
 fn desired_repos(def: &ProjectDef) -> Vec<Value> {
     let mut v: Vec<Value> = def
         .repos
         .iter()
         .map(|r: &RepoDef| {
-            repo_spec(
-                &r.name,
-                &r.url,
-                r.default_branch.as_deref(),
-                r.credential.as_deref(),
-                r.path.as_deref().unwrap_or(&r.name),
+            with_hooks(
+                repo_spec(
+                    &r.name,
+                    &r.url,
+                    r.default_branch.as_deref(),
+                    r.credential.as_deref(),
+                    r.path.as_deref().unwrap_or(&r.name),
+                ),
+                r.hooks_dir.as_deref(),
+                &r.push_deny,
             )
         })
         .collect();
@@ -343,15 +374,7 @@ fn live_project(
     let mut repos: Vec<Value> = all_repos(conn, &p.name)?
         .into_iter()
         .filter(|r| names.contains(&r.name))
-        .map(|r| {
-            repo_spec(
-                &r.name,
-                &r.url,
-                r.default_branch.as_deref(),
-                r.credential.as_deref(),
-                &r.path,
-            )
-        })
+        .map(|r| live_repo_spec(&r))
         .collect();
     repos.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Ok(json!({
@@ -1530,15 +1553,7 @@ fn apply_project(t: &mut Tx<'_>, fleet_name: &str, def: &ProjectDef) -> ApiResul
     let live = all_repos(t, &def.name)?;
     for name in &managed {
         let want = wanted.iter().find(|w| w["name"] == name.as_str());
-        let have = live.iter().find(|r| r.name == *name).map(|r| {
-            repo_spec(
-                &r.name,
-                &r.url,
-                r.default_branch.as_deref(),
-                r.credential.as_deref(),
-                &r.path,
-            )
-        });
+        let have = live.iter().find(|r| r.name == *name).map(live_repo_spec);
         if want == have.as_ref() {
             continue;
         }
@@ -1556,6 +1571,8 @@ fn apply_project(t: &mut Tx<'_>, fleet_name: &str, def: &ProjectDef) -> ApiResul
                     default_branch: r.default_branch.clone(),
                     credential: r.credential.clone(),
                     path: r.path.clone(),
+                    hooks_dir: r.hooks_dir.clone(),
+                    push_deny: r.push_deny.clone(),
                 },
                 SOURCE_API,
             )?;
@@ -1745,6 +1762,8 @@ pub fn export(
             url: r.url,
             default_branch: r.default_branch,
             credential: r.credential,
+            hooks_dir: r.hooks_dir,
+            push_deny: r.push_deny,
         })
         .collect();
     let mut agent_views = Vec::new();

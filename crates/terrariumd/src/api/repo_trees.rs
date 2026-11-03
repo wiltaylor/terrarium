@@ -116,6 +116,7 @@ async fn ensure_mirror(state: &Shared, repo: &Repo, force: bool) -> ApiResult<Mi
             store: RunDirs::new(&state.state_dir),
             deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
             timeout: MIRROR_TIMEOUT,
+            hooks: git::Hooks::default(),
         };
         let r = tokio::task::spawn_blocking(move || git::refresh_mirror(&c))
             .await

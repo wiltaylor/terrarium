@@ -153,6 +153,7 @@ terrarium project set [name] [-d text] [--prefix P]        project_admin
 terrarium project rm <name> --confirm         sysadmin
 terrarium project repos [name]
 terrarium project repo-add <url> [--name n] [--branch b] [--credential key] [--path p]
+                          [--hooks-dir .githooks] [--push-deny 'op/*' ...]
 terrarium repo ls
 terrarium repo add <url> ...                  the same as project repo-add
 terrarium repo checkout <repo> [--target T] [--branch b] [--path p] [--depth n] [--agent a]
@@ -512,7 +513,9 @@ replaces the harness's default system prompt, and Terrarium's protocol
 prompt (`--prompt`) comes after it. It can use the variables of the
 prompt templates (`defaults/prompts/README.md`). `-` reads stdin, and
 `--system-prompt-file` reads a file. `--no-system-prompt` clears it: the
-harness keeps its default prompt again. The limit is 32 KiB. A change
+harness keeps its default prompt again. The limit is the daemon's
+`TERRARIUM_SYSTEM_PROMPT_MAX` (default 32 KiB); a persona file has the same
+limit, and an agent with a persona over it does not start. A change
 applies at the next start or restart. `agent show` prints the whole text
 after the other fields, under `system_prompt:`. `agent ls` does not show
 it.
@@ -751,7 +754,7 @@ an entry with `--persona <name>`. The operator, a sysadmin, and a
 project_admin read the library and add to it.
 
 ```
-terrarium system-prompt ls                                   the entries: name, source, size, description
+terrarium system-prompt ls                                   the entries: name, source, size, limit (`ok` or `over limit`), description
 terrarium system-prompt show <name>                          the text, and the agents and templates that use it
 terrarium system-prompt new <name> --file f.md [--description d] [--replace]   `-` reads stdin
 terrarium system-prompt edit <name> [--file f.md] [--description d]            `--description ''` removes it

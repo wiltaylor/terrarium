@@ -470,8 +470,66 @@ fn yes() -> bool {
     true
 }
 
-/// The most bytes in an agent's `system_prompt`.
+/// The default of the most bytes in a system prompt: an agent's
+/// `system_prompt`, or a persona file of the library. See
+/// [`system_prompt_max`].
 pub const SYSTEM_PROMPT_MAX: usize = 32 * 1024;
+
+/// `TERRARIUM_SYSTEM_PROMPT_MAX`: the most bytes in a system prompt
+/// (bytes, or a size with `K` or `M`, for example `64K`). Default
+/// [`SYSTEM_PROMPT_MAX`].
+pub const ENV_SYSTEM_PROMPT_MAX: &str = "TERRARIUM_SYSTEM_PROMPT_MAX";
+
+/// The highest value of [`ENV_SYSTEM_PROMPT_MAX`]. Claude Code gets the
+/// system prompt as one command line argument, and Linux refuses an
+/// argument over 128 KiB (`MAX_ARG_STRLEN`). The protocol template and the
+/// harness section come after the base prompt in that argument, so the
+/// base prompt keeps 32 KiB free for them.
+pub const SYSTEM_PROMPT_MAX_CEILING: usize = 96 * 1024;
+
+/// The value of [`ENV_SYSTEM_PROMPT_MAX`]: `None` or an empty text gives
+/// [`SYSTEM_PROMPT_MAX`]. The error is the reason that the value is not
+/// valid.
+pub fn parse_system_prompt_max(value: Option<&str>) -> std::result::Result<usize, String> {
+    let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(SYSTEM_PROMPT_MAX);
+    };
+    let n = crate::limits::bytes(&crate::limits::LimitValue::Text(v.to_owned()))
+        .map_err(|e| format!("bad value `{v}`: {e}"))?;
+    let n = usize::try_from(n).map_err(|_| format!("bad value `{v}`: too large"))?;
+    if n == 0 {
+        return Err(format!("bad value `{v}`: the limit must be more than 0"));
+    }
+    if n > SYSTEM_PROMPT_MAX_CEILING {
+        return Err(format!(
+            "bad value `{v}`: the highest limit is {SYSTEM_PROMPT_MAX_CEILING} bytes (96K)"
+        ));
+    }
+    Ok(n)
+}
+
+/// The most bytes in a system prompt, from [`ENV_SYSTEM_PROMPT_MAX`]. The
+/// process reads the variable one time. A value that is not valid gives
+/// [`SYSTEM_PROMPT_MAX`], with a warning.
+pub fn system_prompt_max() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        let v = std::env::var(ENV_SYSTEM_PROMPT_MAX).ok();
+        parse_system_prompt_max(v.as_deref()).unwrap_or_else(|e| {
+            tracing::warn!("{ENV_SYSTEM_PROMPT_MAX}: {e}; the limit is {SYSTEM_PROMPT_MAX} bytes");
+            SYSTEM_PROMPT_MAX
+        })
+    })
+}
+
+/// The refusal of a system prompt of `len` bytes, or `None` when `len` is
+/// in the limit ([`system_prompt_max`]). `what` names the prompt, for
+/// example "`system_prompt`" or "the persona `big`".
+pub fn system_prompt_too_large(what: &str, len: usize) -> Option<String> {
+    let max = system_prompt_max();
+    (len > max)
+        .then(|| format!("{what} has {len} bytes; the limit is {max} ({ENV_SYSTEM_PROMPT_MAX})"))
+}
 
 /// The persona that keeps the harness's default system prompt.
 pub const PERSONA_NONE: &str = "none";
@@ -516,13 +574,10 @@ pub const SYSTEM_PROMPT_FILE_KEY: &str = "system_prompt_file";
 /// Is `text` a system prompt that the agent may have? An empty text is
 /// valid: it means "no system prompt".
 pub fn check_system_prompt(text: &str) -> std::result::Result<(), String> {
-    if text.len() > SYSTEM_PROMPT_MAX {
-        return Err(format!(
-            "`system_prompt` has {} bytes; the limit is {SYSTEM_PROMPT_MAX}",
-            text.len()
-        ));
+    match system_prompt_too_large("`system_prompt`", text.len()) {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// A system prompt as an agent keeps it: checked, and `None` for a text
@@ -586,6 +641,78 @@ pub struct RepoDef {
     /// The checkout directory name. The default is the repo name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// A tracked dir of the repo (for example `.githooks`). At each clone
+    /// and update, the daemon copies its files from `HEAD` into
+    /// `.git/hooks` of the agent's checkout. See [`check_hooks_dir`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks_dir: Option<String>,
+    /// Branch globs that a push from an agent checkout must not touch
+    /// (for example `op/*`). The daemon writes a `pre-push` hook that
+    /// refuses them. See [`check_push_deny`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_deny: Vec<String>,
+}
+
+/// The most entries in a repo's `push_deny`.
+pub const PUSH_DENY_MAX: usize = 64;
+
+/// Is `dir` a `hooks_dir` that a repo may have? A path relative to the
+/// root of the repo, with `/` between the parts, and no `.`, `..`, or
+/// `.git` part. At most 200 bytes.
+pub fn check_hooks_dir(dir: &str) -> std::result::Result<(), String> {
+    let bad = |why: &str| Err(format!("bad `hooks_dir` `{dir}`: {why}"));
+    if dir.is_empty() || dir.len() > 200 {
+        return bad("give a dir of the repo, at most 200 bytes, for example `.githooks`");
+    }
+    if dir.starts_with('/') || dir.ends_with('/') {
+        return bad("give a path relative to the root of the repo, with no `/` at the ends");
+    }
+    for part in dir.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return bad("a part is empty, `.`, or `..`");
+        }
+        if part.eq_ignore_ascii_case(".git") {
+            return bad("a part is `.git`");
+        }
+        if part.chars().any(|c| c.is_control() || c == '\\') {
+            return bad("a part has a control character or `\\`");
+        }
+    }
+    Ok(())
+}
+
+/// Is `glob` an entry of `push_deny` that a repo may have? A branch name
+/// glob without `refs/heads/`: letters, digits, and `.`, `_`, `-`, `/`,
+/// `+`, `@`, with `*` (any text, `/` too) and `?` (one character). The
+/// pre-push hook uses it as a shell `case` pattern, so no other character
+/// is allowed. At most 200 bytes.
+pub fn check_push_deny_glob(glob: &str) -> std::result::Result<(), String> {
+    let ok = !glob.is_empty()
+        && glob.len() <= 200
+        && !glob.starts_with("refs/")
+        && glob.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '+' | '@' | '*' | '?')
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "bad `push_deny` entry `{glob}`: give a branch glob without `refs/heads/`, such as \
+             `op/*`, with letters, digits, `.`, `_`, `-`, `/`, `+`, `@`, `*`, and `?`"
+        ))
+    }
+}
+
+/// [`check_push_deny_glob`] for each entry, and at most
+/// [`PUSH_DENY_MAX`] entries.
+pub fn check_push_deny(list: &[String]) -> std::result::Result<(), String> {
+    if list.len() > PUSH_DENY_MAX {
+        return Err(format!(
+            "`push_deny` has {} entries; the limit is {PUSH_DENY_MAX}",
+            list.len()
+        ));
+    }
+    list.iter().try_for_each(|g| check_push_deny_glob(g))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1183,6 +1310,61 @@ You are a careful reviewer for {{project.name}}.
         assert_eq!(clean_system_prompt(Some(max.clone())), Ok(Some(max)));
         let e = clean_system_prompt(Some("x".repeat(SYSTEM_PROMPT_MAX + 1))).unwrap_err();
         assert!(e.contains("32768"), "{e}");
+        assert!(e.contains(ENV_SYSTEM_PROMPT_MAX), "{e}");
+    }
+
+    #[test]
+    fn repo_hooks_dir_and_push_deny() {
+        for ok in [".githooks", "tools/hooks", "a.b/c_d"] {
+            assert_eq!(check_hooks_dir(ok), Ok(()), "{ok}");
+        }
+        for bad in [
+            "", "/abs", "x/", "a//b", "./x", "a/../b", ".git", "x/.GIT/h", "a\\b",
+        ] {
+            assert!(check_hooks_dir(bad).is_err(), "{bad}");
+        }
+        for ok in ["op/*", "main", "release/v?.*", "user@x+y"] {
+            assert_eq!(check_push_deny_glob(ok), Ok(()), "{ok}");
+        }
+        for bad in [
+            "",
+            "refs/heads/x",
+            "a b",
+            "x;rm",
+            "$(x)",
+            "a|b",
+            "[ab]",
+            "a)",
+        ] {
+            assert!(check_push_deny_glob(bad).is_err(), "{bad}");
+        }
+        assert!(check_push_deny(&vec!["x".to_owned(); PUSH_DENY_MAX]).is_ok());
+        assert!(check_push_deny(&vec!["x".to_owned(); PUSH_DENY_MAX + 1]).is_err());
+        let def: RepoDef = toml::from_str(
+            "name = \"app\"\nurl = \"https://x/app\"\nhooks_dir = \".githooks\"\npush_deny = [\"op/*\"]\n",
+        )
+        .unwrap();
+        assert_eq!(def.hooks_dir.as_deref(), Some(".githooks"));
+        assert_eq!(def.push_deny, ["op/*"]);
+    }
+
+    #[test]
+    fn system_prompt_max_from_the_env_value() {
+        assert_eq!(parse_system_prompt_max(None), Ok(SYSTEM_PROMPT_MAX));
+        assert_eq!(parse_system_prompt_max(Some(" ")), Ok(SYSTEM_PROMPT_MAX));
+        assert_eq!(parse_system_prompt_max(Some("65536")), Ok(64 * 1024));
+        assert_eq!(parse_system_prompt_max(Some("64K")), Ok(64 * 1024));
+        assert_eq!(parse_system_prompt_max(Some("16KiB")), Ok(16 * 1024));
+        assert_eq!(
+            parse_system_prompt_max(Some("96k")),
+            Ok(SYSTEM_PROMPT_MAX_CEILING)
+        );
+        for bad in ["0", "97K", "1M", "lots", "-5"] {
+            assert!(parse_system_prompt_max(Some(bad)).is_err(), "{bad}");
+        }
+        assert!(system_prompt_too_large("x", system_prompt_max()).is_none());
+        let e = system_prompt_too_large("the persona `big`", system_prompt_max() + 1).unwrap();
+        assert!(e.starts_with("the persona `big` has "), "{e}");
     }
 
     #[test]

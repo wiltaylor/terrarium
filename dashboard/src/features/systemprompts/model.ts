@@ -29,3 +29,8 @@ export function filterPrompts(list: readonly SystemPromptSummary[], q: string): 
 export function sourceText(e: Pick<SystemPromptSummary, "source" | "builtin">): string {
   return `${e.source === "default" ? "packaged default" : "config repo"}${e.builtin ? " · by role" : ""}`;
 }
+
+/** The note on an entry over the daemon's size limit, or null. */
+export function overLimitNote(e: Pick<SystemPromptSummary, "over_limit">): string | null {
+  return e.over_limit ? "Over the size limit (TERRARIUM_SYSTEM_PROMPT_MAX): an agent with this system prompt does not start." : null;
+}

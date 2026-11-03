@@ -214,6 +214,10 @@ export interface Repo {
    */
   credential_admin?: boolean;
   path?: string;
+  /** A tracked dir whose files each checkout copies into `.git/hooks` (docs/api.md §5.1, "Git hooks"). */
+  hooks_dir?: string;
+  /** Branch globs that the daemon's `pre-push` hook refuses (docs/api.md §5.1, "Git hooks"). */
+  push_deny?: string[];
   source?: Source;
   created_at?: string;
 }
@@ -3442,6 +3446,8 @@ export interface SystemPromptSummary {
   path: string;
   /** `leader` or `worker`: the persona by role. It cannot be deleted. */
   builtin: boolean;
+  /** The file has more bytes than the daemon's limit (`TERRARIUM_SYSTEM_PROMPT_MAX`, default 32 KiB): an agent with this persona does not start. Absent from an older daemon. */
+  over_limit?: boolean;
   /** The last change of the file (RFC 3339). */
   updated?: string;
 }

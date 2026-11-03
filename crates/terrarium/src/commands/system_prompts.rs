@@ -57,7 +57,15 @@ pub async fn system_prompt(ctx: &Ctx, cmd: &SystemPromptCmd) -> anyhow::Result<(
         SystemPromptCmd::Ls => {
             let v = ctx.api.get("/api/system-prompts", vec![]).await?;
             ctx.emit(&v, |c, v| {
-                let items = v.as_array().cloned().unwrap_or_default();
+                let mut items = v.as_array().cloned().unwrap_or_default();
+                // `over limit`: an agent with this persona does not start.
+                for o in items.iter_mut().filter_map(Value::as_object_mut) {
+                    let over = o.get("over_limit").and_then(Value::as_bool) == Some(true);
+                    o.insert(
+                        "limit".into(),
+                        Value::from(if over { "over limit" } else { "ok" }),
+                    );
+                }
                 print_table(
                     c,
                     &items,
@@ -65,6 +73,7 @@ pub async fn system_prompt(ctx: &Ctx, cmd: &SystemPromptCmd) -> anyhow::Result<(
                         ("NAME", "name"),
                         ("SOURCE", "source"),
                         ("SIZE", "size"),
+                        ("LIMIT", "limit"),
                         ("DESCRIPTION", "description"),
                     ],
                     "no system prompts",
@@ -271,6 +280,15 @@ mod tests {
         r.unwrap();
         assert_eq!(reqs[0].1, "/api/system-prompts");
         assert!(out.contains("terse") && out.contains("Short"), "{out}");
+        assert!(out.contains("LIMIT") && out.contains("ok"), "{out}");
+        assert!(!out.contains("over limit"), "{out}");
+
+        // A hand-placed file over the limit (issue #6).
+        let big = json!({"name": "big", "description": "", "size": 41255, "source": "config",
+            "path": "system-prompts/big.md", "builtin": false, "over_limit": true});
+        let (r, _, out) = run(&["system-prompt", "ls"], vec![(200, json!([big]))], None).await;
+        r.unwrap();
+        assert!(out.contains("over limit"), "{out}");
 
         let (r, _, out) = run(
             &["system-prompt", "show", "terse"],

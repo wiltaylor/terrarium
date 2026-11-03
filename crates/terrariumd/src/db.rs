@@ -1760,6 +1760,15 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX pinned_agents_agent ON pinned_agents(agent);
     "#,
+    // 58: git hooks of a repo (PLAN §9, "Git hooks in agent checkouts").
+    // `hooks_dir`: a tracked dir of the repo whose files each clone and
+    // update copies into `.git/hooks`. `push_deny`: a JSON list of branch
+    // globs that the daemon's `pre-push` hook refuses. Self-contained:
+    // when another branch takes number 58, move this entry to the end.
+    r#"
+    ALTER TABLE repos ADD COLUMN hooks_dir TEXT;
+    ALTER TABLE repos ADD COLUMN push_deny TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(push_deny));
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

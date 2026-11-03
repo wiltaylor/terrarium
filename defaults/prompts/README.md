@@ -120,7 +120,8 @@ A template is not the whole system prompt. By default the harness keeps its
 own system prompt, and the adapter appends the rendered template to it.
 
 An agent can also have its own base system prompt: `system_prompt` in the
-agent definition (text, at most 32 KiB), `--system-prompt <text>` or
+agent definition (text, at most `TERRARIUM_SYSTEM_PROMPT_MAX` bytes,
+default 32 KiB), `--system-prompt <text>` or
 `--system-prompt-file <path>` on `terrarium agent new|set` and
 `terrarium template new|edit`, or the "System prompt" field in the
 dashboard. `--no-system-prompt` clears it. When it is set:

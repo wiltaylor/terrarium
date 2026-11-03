@@ -131,6 +131,226 @@ pub struct Checkout {
     /// other agents' workspaces and the run dirs of the secrets).
     pub deny_local_under: Vec<PathBuf>,
     pub timeout: Duration,
+    /// The hooks that the checkout gets ([`install_hooks`]).
+    pub hooks: Hooks,
+}
+
+/// The git hooks of a repo in an agent checkout (PLAN §9, "Git hooks in
+/// agent checkouts"). git never copies hooks on a clone, so the daemon
+/// writes them into `.git/hooks` after each clone and update. They run
+/// for the agent's own git commands in the sandbox. The daemon's own git
+/// commands never run them ([`HARDEN`]: `core.hooksPath=/dev/null`).
+///
+/// A client-side hook is a guard against mistakes, not a hard control: the
+/// agent can push with `--no-verify`, or edit `.git/hooks`. The agent can
+/// also read the repo token (PLAN §16b, "`use` is `read` for tokens"), so
+/// no check in the daemon's credential helper can stop a push either; and
+/// git does not send the pushed refs to a credential helper. A hard rule
+/// is a branch protection rule on the git server.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Hooks {
+    /// A tracked dir of the repo: each regular file in it at `HEAD` goes
+    /// to `.git/hooks/<name>`, mode 0755.
+    pub dir: Option<String>,
+    /// Branch globs (`op/*`): the daemon writes a `pre-push` hook that
+    /// refuses a push whose local or remote branch matches one. The
+    /// repo's own `pre-push` from `dir` becomes `pre-push.repo` and runs
+    /// after the check.
+    pub push_deny: Vec<String>,
+}
+
+impl Hooks {
+    fn is_empty(&self) -> bool {
+        self.dir.is_none() && self.push_deny.is_empty()
+    }
+}
+
+/// The name of the repo's own `pre-push` when the daemon writes the
+/// `push_deny` hook in its place.
+pub const REPO_PRE_PUSH: &str = "pre-push.repo";
+/// The largest hook file that the daemon copies.
+const MAX_HOOK: u64 = 1 << 20;
+/// The most hook files that the daemon copies from one `hooks_dir`.
+const MAX_HOOKS: usize = 64;
+
+/// The `pre-push` hook of a `push_deny` list. The globs passed
+/// `terrarium_core::config::check_push_deny_glob`, so they are safe as
+/// shell `case` patterns.
+pub fn push_deny_hook(push_deny: &[String]) -> String {
+    let patterns = push_deny.join("|");
+    format!(
+        r#"#!/bin/sh
+# Written by terrariumd from the repo's push_deny list. Each checkout by
+# the daemon writes it again: change push_deny on the repo, not this file.
+# The repo's own pre-push (hooks_dir) is {REPO_PRE_PUSH} and runs after it.
+input=$(cat)
+refused=
+while read -r local_ref _ remote_ref _; do
+  for ref in "$local_ref" "$remote_ref"; do
+    branch=${{ref#refs/heads/}}
+    test "$branch" = "$ref" && continue
+    case "$branch" in
+      {patterns})
+        echo "pre-push: the branch $branch matches push_deny of this repo; Terrarium refuses the push" >&2
+        refused=1
+        ;;
+    esac
+  done
+done <<TERRARIUM_REFS
+$input
+TERRARIUM_REFS
+test -n "$refused" && exit 1
+repo_hook="${{0%/*}}/{REPO_PRE_PUSH}"
+if test -x "$repo_hook"; then
+  if test -n "$input"; then printf '%s\n' "$input"; fi | "$repo_hook" "$@"
+  exit $?
+fi
+exit 0
+"#
+    )
+}
+
+/// The checks of a hook file name from `hooks_dir`: a plain name that git
+/// could run (`pre-commit`, `commit-msg`, ...).
+fn hook_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Write the hooks of `c.hooks` into `.git/hooks` of `c.dest`, and answer
+/// the names written. The files of `hooks_dir` come from the commit at
+/// `HEAD` (`git ls-tree`, `git cat-file`), not from the work tree, so a
+/// symlink in the work tree cannot make the daemon copy a file of the
+/// host. Each file goes in by a new temp file and a rename, opened from
+/// the fd of `.git/hooks` with no symlink followed. A `hooks_dir` that
+/// `HEAD` does not have copies nothing. A hook that is there and not in
+/// `hooks_dir` stays.
+fn install_hooks(c: &Checkout, r: &Runner) -> Result<Vec<String>, GitError> {
+    if c.hooks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    if let Some(dir) = &c.hooks.dir {
+        terrarium_core::config::check_hooks_dir(dir).map_err(GitError::Refused)?;
+        files = hook_files(c, r, dir)?;
+    }
+    if !c.hooks.push_deny.is_empty() {
+        terrarium_core::config::check_push_deny(&c.hooks.push_deny).map_err(GitError::Refused)?;
+        if let Some(f) = files.iter_mut().find(|(n, _)| n == "pre-push") {
+            REPO_PRE_PUSH.clone_into(&mut f.0);
+        }
+        files.push((
+            "pre-push".to_owned(),
+            push_deny_hook(&c.hooks.push_deny).into_bytes(),
+        ));
+    }
+    let git_dir = open_git_dir(&c.dest, false)?;
+    let shown = Path::new(".git");
+    let hooks = match check_entry(&git_dir, "hooks", Want::OptDir, shown)? {
+        Some(fd) => fd,
+        None => {
+            nix::sys::stat::mkdirat(&git_dir, "hooks", Mode::from_bits_truncate(0o755))
+                .map_err(|e| io(format!(".git/hooks: {e}")))?;
+            check_entry(&git_dir, "hooks", Want::Dir, shown)?
+                .ok_or_else(|| refused_layout(&shown.join("hooks"), "is not there"))?
+        }
+    };
+    let mut names = Vec::new();
+    for (name, bytes) in files {
+        write_hook(&hooks, &name, &bytes)?;
+        names.push(name);
+    }
+    Ok(names)
+}
+
+/// The regular files directly in `dir` at `HEAD`: name and bytes. No
+/// `HEAD`, or no such dir: none.
+fn hook_files(c: &Checkout, r: &Runner, dir: &str) -> Result<Vec<(String, Vec<u8>)>, GitError> {
+    let spec = format!("{dir}/");
+    let Ok((list, _)) = r.exec_named(
+        Some(&c.dest),
+        &["ls-tree", "-z", "--full-tree", "HEAD", "--", &spec],
+        "ls-tree",
+        Some(1 << 20),
+        r.deadline,
+    ) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for entry in list.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let entry = String::from_utf8_lossy(entry);
+        // `<mode> <type> <object>\t<path>`
+        let Some((meta, path)) = entry.split_once('\t') else {
+            continue;
+        };
+        let mut meta = meta.split(' ');
+        let (Some(mode), Some(kind), Some(oid)) = (meta.next(), meta.next(), meta.next()) else {
+            continue;
+        };
+        // A symlink (120000), a dir, or a submodule is not a hook file.
+        if kind != "blob" || !matches!(mode, "100755" | "100644") {
+            continue;
+        }
+        let Some(name) = path.strip_prefix(&spec).filter(|n| hook_name_ok(n)) else {
+            continue;
+        };
+        if out.len() >= MAX_HOOKS {
+            return Err(GitError::Refused(format!(
+                "{dir} has more than {MAX_HOOKS} files; the daemon copies at most {MAX_HOOKS} hooks"
+            )));
+        }
+        if !oid.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let (bytes, cut) = r.exec_named(
+            Some(&c.dest),
+            &["cat-file", "blob", oid],
+            "cat-file",
+            Some(usize::try_from(MAX_HOOK).unwrap_or(usize::MAX)),
+            r.deadline,
+        )?;
+        if cut {
+            return Err(GitError::Refused(format!(
+                "{dir}/{name} is larger than {MAX_HOOK} bytes; the daemon does not copy it"
+            )));
+        }
+        out.push((name.to_owned(), bytes));
+    }
+    Ok(out)
+}
+
+/// Write `bytes` to `<hooks>/<name>` with mode 0755: a new temp file
+/// (`O_EXCL`, `O_NOFOLLOW`), then a rename over the old entry. A rename
+/// replaces a symlink, never follows it.
+fn write_hook(hooks: &OwnedFd, name: &str, bytes: &[u8]) -> Result<(), GitError> {
+    use std::io::Write as _;
+    let tmp = format!(".{name}.terrarium-tmp");
+    let shown = |n: &str| format!(".git/hooks/{n}");
+    match nix::unistd::unlinkat(hooks, tmp.as_str(), nix::unistd::UnlinkatFlags::NoRemoveDir) {
+        Ok(()) | Err(Errno::ENOENT) => {}
+        Err(e) => return Err(io(format!("{}: {e}", shown(&tmp)))),
+    }
+    let fd = openat(
+        hooks,
+        tmp.as_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o755),
+    )
+    .map_err(|e| io(format!("{}: {e}", shown(&tmp))))?;
+    let mut f = std::fs::File::from(fd);
+    f.write_all(bytes)
+        .and_then(|()| {
+            use std::os::unix::fs::PermissionsExt as _;
+            f.set_permissions(std::fs::Permissions::from_mode(0o755))
+        })
+        .map_err(|e| io(format!("{}: {e}", shown(&tmp))))?;
+    drop(f);
+    nix::fcntl::renameat(hooks, tmp.as_str(), hooks, name)
+        .map_err(|e| io(format!("{}: {e}", shown(name))))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -152,6 +372,9 @@ pub struct Outcome {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The hooks that the daemon wrote into `.git/hooks` ([`Hooks`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<String>,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -1079,6 +1302,7 @@ impl GitRunner {
             store,
             deny_local_under: Vec::new(),
             timeout,
+            hooks: Hooks::default(),
         };
         Runner::new(&c).map(Self)
     }
@@ -1764,11 +1988,13 @@ fn clone(
     args.extend(["--", c.url.as_str(), dest.as_str()]);
     r.git(None, &args, progress)?;
     r.write_local_config(&c.dest)?;
+    let hooks = install_hooks(c, &r)?;
     Ok(Outcome {
         action: Action::Cloned,
         head: r.head(&c.dest),
         branch: r.branch(&c.dest),
         note: None,
+        hooks,
     })
 }
 
@@ -1805,13 +2031,27 @@ fn update(
     // The agent may have edited the config during the fetch. Check again
     // before the commands that touch the work tree (they can run filters).
     check_config_snapshot(c, &r)?;
+    let mut out = fast_forward(&r, dest, &branch, current.as_deref())?;
+    // The hooks of the new HEAD.
+    out.hooks = install_hooks(c, &r)?;
+    Ok(out)
+}
 
+/// The work tree part of [`update`]: switch to `branch` and fast-forward
+/// it to `origin/<branch>`, when the work tree is clean.
+fn fast_forward(
+    r: &Runner,
+    dest: &Path,
+    branch: &str,
+    current: Option<&str>,
+) -> Result<Outcome, GitError> {
     let status = r.quiet(dest, &["status", "--porcelain", "--untracked-files=no"])?;
     let not_updated = |note: String| Outcome {
         action: Action::NotUpdated,
         head: r.head(dest),
         branch: r.branch(dest),
         note: Some(note),
+        hooks: Vec::new(),
     };
     if !status.trim().is_empty() {
         return Ok(not_updated(format!(
@@ -1819,17 +2059,17 @@ fn update(
         )));
     }
     let remote_ref = format!("refs/remotes/origin/{branch}");
-    if current.as_deref() != Some(branch.as_str()) {
+    if current != Some(branch) {
         let local_ref = format!("refs/heads/{branch}");
         let exists = r
             .quiet(dest, &["rev-parse", "-q", "--verify", &local_ref])
             .is_ok();
         let switched = if exists {
-            r.quiet(dest, &["checkout", "-q", &branch])
+            r.quiet(dest, &["checkout", "-q", branch])
         } else {
             r.quiet(
                 dest,
-                &["checkout", "-q", "--no-track", "-b", &branch, &remote_ref],
+                &["checkout", "-q", "--no-track", "-b", branch, &remote_ref],
             )
         };
         if let Err(e) = switched {
@@ -1854,6 +2094,7 @@ fn update(
         head,
         branch: r.branch(dest),
         note: None,
+        hooks: Vec::new(),
     })
 }
 
@@ -1912,6 +2153,7 @@ mod tests {
             store: RunDirs::new(&dir.join("state")),
             deny_local_under: vec![dir.join("state")],
             timeout: Duration::from_secs(60),
+            hooks: Hooks::default(),
         }
     }
 
@@ -1923,6 +2165,143 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8_lossy(&o.stdout).trim().to_owned()
+    }
+
+    /// `git` in `dir` with no global or system config (the test machine's
+    /// `core.hooksPath` must not apply). The exit status and stderr.
+    fn git_clean(dir: &Path, args: &[&str]) -> (bool, String) {
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    }
+
+    /// Issue #1: a clone gets the repo's tracked hooks and the
+    /// `push_deny` guard; both run for a push from the checkout. An
+    /// update writes the hooks of the new `HEAD`.
+    #[test]
+    fn a_checkout_gets_the_repo_hooks_and_the_push_deny_guard() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = bare_repo(tmp.path());
+        sh(
+            &tmp.path().join("src"),
+            "mkdir -p .githooks/sub && \
+             printf '#!/bin/sh\nwhile read -r l _ _ _; do case \"$l\" in refs/heads/op/*) echo \"repo hook: op/ stays local\" >&2; exit 1;; esac; done\nexit 0\n' > .githooks/pre-push && \
+             printf '#!/bin/sh\nexit 0\n' > .githooks/commit-msg && \
+             echo x > .githooks/sub/inner && ln -s /etc/hostname .githooks/evil && \
+             git add .githooks && git commit -q -m hooks && git push -q ../origin.git main",
+        );
+        let dest = tmp.path().join("state/agents/A/workspace/proj");
+        let mut c = checkout(tmp.path(), &origin, &dest);
+        c.deny_local_under = vec![];
+        c.hooks = Hooks {
+            dir: Some(".githooks".into()),
+            push_deny: vec!["wip/*".into()],
+        };
+        let out = clone_or_update(&c, &mut |_| {}).unwrap();
+        let mut names = out.hooks.clone();
+        names.sort();
+        assert_eq!(names, ["commit-msg", "pre-push", "pre-push.repo"]);
+        let hooks = dest.join(".git/hooks");
+        assert!(!hooks.join("evil").exists(), "a symlink is not a hook file");
+        assert!(!hooks.join("inner").exists() && !hooks.join("sub").exists());
+        for n in &names {
+            let mode = std::fs::metadata(hooks.join(n))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755, "{n}");
+        }
+        assert!(
+            std::fs::read_to_string(hooks.join("pre-push"))
+                .unwrap()
+                .contains("wip/*")
+        );
+
+        // A push from the checkout: the guard, then the repo's own hook.
+        let (ok, err) = git_clean(&dest, &["checkout", "-q", "-b", "wip/x"]);
+        assert!(ok, "{err}");
+        let (ok, err) = git_clean(&dest, &["push", "-q", "origin", "wip/x"]);
+        assert!(!ok, "push_deny refuses wip/x");
+        assert!(err.contains("matches push_deny"), "{err}");
+        // `wip/x` on the remote side refuses too.
+        let (ok, _) = git_clean(&dest, &["push", "-q", "origin", "HEAD:refs/heads/wip/y"]);
+        assert!(!ok);
+        let (ok, err) = git_clean(&dest, &["checkout", "-q", "-b", "op/x"]);
+        assert!(ok, "{err}");
+        let (ok, err) = git_clean(&dest, &["push", "-q", "origin", "op/x"]);
+        assert!(!ok, "the repo hook refuses op/x");
+        assert!(err.contains("repo hook: op/ stays local"), "{err}");
+        let (ok, err) = git_clean(&dest, &["checkout", "-q", "-b", "feature"]);
+        assert!(ok, "{err}");
+        let (ok, err) = git_clean(&dest, &["push", "-q", "origin", "feature"]);
+        assert!(ok, "{err}");
+        // `--no-verify` skips a client hook: it is a guard, not a control.
+        let (ok, err) = git_clean(&dest, &["push", "-q", "--no-verify", "origin", "wip/x"]);
+        assert!(ok, "{err}");
+
+        // An update writes the hooks of the new HEAD.
+        sh(
+            &tmp.path().join("src"),
+            "printf '#!/bin/sh\n# v2\nexit 0\n' > .githooks/commit-msg && \
+             git commit -q -am v2 && git push -q ../origin.git main",
+        );
+        let (ok, err) = git_clean(&dest, &["checkout", "-q", "main"]);
+        assert!(ok, "{err}");
+        let out = clone_or_update(&c, &mut |_| {}).unwrap();
+        assert_eq!(out.action, Action::Updated);
+        assert!(
+            std::fs::read_to_string(hooks.join("commit-msg"))
+                .unwrap()
+                .contains("v2")
+        );
+        // No hooks: nothing written, nothing in the answer.
+        c.hooks = Hooks::default();
+        assert!(clone_or_update(&c, &mut |_| {}).unwrap().hooks.is_empty());
+        // A `hooks_dir` that HEAD does not have copies nothing.
+        c.hooks.dir = Some("no-such-dir".into());
+        assert!(clone_or_update(&c, &mut |_| {}).unwrap().hooks.is_empty());
+    }
+
+    /// A hook goes in by a rename: a symlink in its place is replaced,
+    /// and its target stays as it was.
+    #[test]
+    fn write_hook_replaces_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = tmp.path().join("hooks");
+        std::fs::create_dir(&hooks).unwrap();
+        let target = tmp.path().join("target");
+        std::fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, hooks.join("pre-commit")).unwrap();
+        let fd = openat(nix::fcntl::AT_FDCWD, &hooks, DIR_FLAGS, Mode::empty()).unwrap();
+        write_hook(&fd, "pre-commit", b"#!/bin/sh\nexit 0\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        let m = std::fs::symlink_metadata(hooks.join("pre-commit")).unwrap();
+        assert!(m.is_file());
+        assert!(!hooks.join(".pre-commit.terrarium-tmp").exists());
+    }
+
+    #[test]
+    fn push_deny_hook_text() {
+        let h = push_deny_hook(&["op/*".into(), "wip".into()]);
+        assert!(h.starts_with("#!/bin/sh\n"));
+        assert!(h.contains("      op/*|wip)\n"), "{h}");
+        assert!(h.contains(REPO_PRE_PUSH));
+        assert!(hook_name_ok("pre-push") && hook_name_ok("commit-msg"));
+        assert!(!hook_name_ok(".hidden") && !hook_name_ok("a/b") && !hook_name_ok(""));
     }
 
     #[test]
@@ -2383,6 +2762,7 @@ mod tests {
             store,
             deny_local_under: vec![],
             timeout: Duration::from_secs(5),
+            hooks: Hooks::default(),
         };
         let r = Runner::new(&c).unwrap();
         let helper = r

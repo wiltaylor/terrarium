@@ -192,6 +192,7 @@ async fn checkout_inner(
         store: RunDirs::new(&state.state_dir),
         deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
         timeout: git::DEFAULT_TIMEOUT,
+        hooks: repo.hooks(),
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();

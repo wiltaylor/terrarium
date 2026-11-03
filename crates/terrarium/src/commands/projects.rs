@@ -27,6 +27,7 @@ const REPO_COLS: &[(&str, &str)] = &[
     ("BRANCH", "default_branch"),
     ("PATH", "path"),
     ("CREDENTIAL", "credential"),
+    ("HOOKS", "hooks_dir"),
 ];
 
 pub const AGENT_COLS: &[(&str, &str)] = &[
@@ -175,6 +176,10 @@ async fn repo_add(ctx: &Ctx, a: &RepoAddArgs) -> anyhow::Result<()> {
     set_opt(&mut body, "default_branch", a.branch.clone());
     set_opt(&mut body, "credential", a.credential.clone());
     set_opt(&mut body, "path", a.path.clone());
+    set_opt(&mut body, "hooks_dir", a.hooks_dir.clone());
+    if !a.push_deny.is_empty() {
+        body["push_deny"] = json!(a.push_deny);
+    }
     let r = ctx
         .api
         .post(&format!("{}/repos", project_path(&name)), Some(body))

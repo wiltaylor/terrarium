@@ -307,6 +307,16 @@ pub fn load_persona_in(
             ));
         }
     };
+    // The same limit as a write through the API: the size of the file.
+    if let Some(e) = terrarium_core::config::system_prompt_too_large(
+        &format!("the persona `{name}`"),
+        text.len(),
+    ) {
+        return Err(format!(
+            "{e}: make {} shorter, or raise the limit",
+            path.display()
+        ));
+    }
     let text = strip_comments(&text);
     Ok((!text.trim().is_empty()).then(|| text.trim().to_owned()))
 }
@@ -361,7 +371,11 @@ pub fn base_prompt_in(
 ) -> Result<Option<String>, String> {
     let prompts_dir = dirs.prompts.as_path();
     let (base, with_harness) = match agent.system_prompt.as_deref() {
-        Some(t) if !t.trim().is_empty() => (t.trim_end().to_owned(), !persona_is_none(agent)),
+        Some(t) if !t.trim().is_empty() => {
+            // A text saved under a higher limit does not start either.
+            terrarium_core::config::check_system_prompt(t)?;
+            (t.trim_end().to_owned(), !persona_is_none(agent))
+        }
         _ => match load_persona_in(dirs, agent)? {
             Some(p) => (p, true),
             None => return Ok(None),
@@ -911,6 +925,28 @@ mod tests {
             load_persona(empty.path(), &agent(vec![], None, None)).unwrap(),
             None
         );
+    }
+
+    /// One size rule for every route (issue #6): a persona file put in
+    /// the library by hand, or a `system_prompt` saved under a higher
+    /// limit, over the limit stops the start with a clear error.
+    #[test]
+    fn a_prompt_over_the_limit_stops_the_start() {
+        let max = terrarium_core::config::system_prompt_max();
+        let dir = tempfile::tempdir().unwrap();
+        personas(dir.path());
+        let d = dir.path();
+        std::fs::write(d.join("big.md"), "b".repeat(max + 1)).unwrap();
+        let e = base_prompt(d, &agent(vec![], Some("big"), None)).unwrap_err();
+        assert!(e.contains("the persona `big` has"), "{e}");
+        assert!(e.contains("TERRARIUM_SYSTEM_PROMPT_MAX"), "{e}");
+        // At the limit: it starts.
+        std::fs::write(d.join("big.md"), "b".repeat(max)).unwrap();
+        assert!(base_prompt(d, &agent(vec![], Some("big"), None)).is_ok());
+        // The agent's own text.
+        let long = "s".repeat(max + 1);
+        let e = base_prompt(d, &agent(vec![], None, Some(&long))).unwrap_err();
+        assert!(e.contains("`system_prompt` has"), "{e}");
     }
 
     /// The system prompt library (`system-prompts/<name>.md`) comes

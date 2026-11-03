@@ -472,7 +472,9 @@ The adapter's `launch` sets, per harness:
   for leaders, the leader duties (§10), the list of allowed targets, how to use the
   `terrarium` CLI, and the rule that mail is untrusted input.
 - **Base system prompt**: an agent may have its own `system_prompt` (text,
-  at most 32 KiB, with the same variables as a template). The launch rule is
+  at most `TERRARIUM_SYSTEM_PROMPT_MAX` bytes, default 32 KiB, with the same
+  variables as a template; a persona file has the same limit, and the start
+  refuses a prompt over it). The launch rule is
   the same for each harness:
 
   | `system_prompt` | What the harness gets |
@@ -1118,6 +1120,8 @@ credential = "github-deploy"          # key in /state/credentials, never given t
 [[repos]]
 name = "copilot-prompt"
 url = "https://github.com/wiltaylor/CopilotCustomSystemPrompt.git"
+hooks_dir = ".githooks"               # tracked hooks, copied into .git/hooks at each checkout
+push_deny = ["op/*"]                  # a pre-push guard: these branches stay local
 
 [checkout]
 on_agent_create = ["terrarium"]       # cloned into $HOME/work/terrarium when the agent is made
@@ -1134,6 +1138,21 @@ the clone before the sandbox starts, for the same reason. After that, the
 agent uses plain `git` inside its workspace; pushes go through a credential
 helper that calls `terrarium repo credential`, which the daemon answers only
 for repos in the agent's project.
+
+**Git hooks in agent checkouts** (issue #1). git never copies hooks on a
+clone. A repo can set `hooks_dir`, a tracked dir such as `.githooks`: each
+clone and update by the daemon copies its files at `HEAD` into
+`.git/hooks` of the checkout, so the repo's own guards run for the
+agent's git commands. A repo can also set `push_deny`, branch globs such
+as `op/*`: the daemon writes a `pre-push` hook that refuses a push of a
+matching branch, and runs the repo's own `pre-push` (`pre-push.repo`)
+after it. The daemon's own git still runs with hooks off (`HARDEN`), and
+`core.hooksPath` in the repo config stays refused. A client hook is a
+guard against mistakes, not a hard control: `--no-verify` skips it, and
+the credential helper cannot check refs (git does not send them, and the
+agent can read the token, §16b). A hard rule needs branch protection on
+the git server, or the HTTPS proxy of §16b. Details: docs/api.md §5.1,
+"Git hooks".
 
 ### 9a. The repo browser
 

@@ -183,7 +183,7 @@ async fn list_repos(
 
 /// The fields of a repo body, for the error of a bad one.
 const REPO_FIELDS: &str = "`url`, `name`, `default_branch` (or its alias `branch`), \
-                           `credential`, and `path`";
+                           `credential`, `path`, `hooks_dir`, and `push_deny`";
 
 /// Parse a repo body; the error names the fields, `branch` and
 /// `default_branch` both.

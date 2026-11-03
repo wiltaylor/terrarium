@@ -51,6 +51,8 @@ services:
       TERRARIUM_SESSION_MAX_AGE: ${TERRARIUM_SESSION_MAX_AGE:-90d}
       TERRARIUM_MAIL_LOOP_LIMIT: ${TERRARIUM_MAIL_LOOP_LIMIT:-}
       TERRARIUM_TRASH_DAYS: ${TERRARIUM_TRASH_DAYS:-}
+      # The most bytes in a system prompt (an agent's own, or a persona file).
+      TERRARIUM_SYSTEM_PROMPT_MAX: ${TERRARIUM_SYSTEM_PROMPT_MAX:-}
       # The idle stop of an agent that sets none (PLAN §18): a duration, or off.
       TERRARIUM_IDLE_STOP: ${TERRARIUM_IDLE_STOP:-10m}
       # Auto compact of an agent that sets none (PLAN §18): on or off, and a

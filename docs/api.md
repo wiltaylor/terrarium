@@ -283,6 +283,7 @@ gives them to the routers and the mail code.
 | `TERRARIUM_MAIL_LOOP_LIMIT` | none | `6` | The mail loop guard (§6, PLAN §12): the agent-to-agent messages a thread can have since the last operator or project-inbox message before new agent mail on it types no pointer. The daemon reads it once. |
 | `TERRARIUM_HARNESS_AUTO_UPDATE` | `--harness-auto-update` | `daily` | The background check for harness updates (§4, "Auto-update and pins"): `daily`, `off`, or a duration of `1h` or more (`6h`). A value that does not parse stops the daemon at start. |
 | `TERRARIUM_HARNESS_UPDATE_MAIL` | `--harness-update-mail` | `off` | An Inbox mail for each update that the auto-update installs (§4, "Auto-update and pins"): `off` or `on`. A failed install sends one mail for each failed version with both values. |
+| `TERRARIUM_SYSTEM_PROMPT_MAX` | none | `32K` | The most bytes in a system prompt: an agent's `system_prompt` and a file of the system prompt library (§28), on every route (the API, a fleet or agent file, and the agent start). Bytes, or a size with `K` (`64K`). The highest value is `96K`: Claude Code gets the system prompt as one command line argument, and Linux refuses an argument over 128 KiB. A value that is not valid gives `32K`, with a warning. The daemon reads it once. |
 | `TERRARIUM_IDLE_STOP` | none | `10m` | The idle stop of an agent that sets no `idle_stop` (§6.2, PLAN §18): a duration (`30m`, `1h30m`), or `off` (also `0`). The daemon reads it once. |
 | `TERRARIUM_COMPACT_ON_IDLE` | none | `off` | The `compact_on_idle` of an agent that sets none (§6.2, "Auto compact"): `on` or `off` (also `1`, `true`, `yes`, and `0`, `false`, `no`). The daemon reads it once. |
 | `TERRARIUM_COMPACT_MAX_AGE` | none | `off` | The `compact_max_age` of an agent that sets none (§6.2, "Auto compact"): a duration (`24h`, `12h30m`), or `off` (also `0`). The daemon reads it once. |
@@ -861,6 +862,15 @@ when the operator, a sysadmin, or a project file attached the repo.
 bad_request`. A body with an unknown field is `400 bad_request`, and the
 message names the fields.
 
+`hooks_dir` (optional) is a tracked dir of the repo, for example
+`.githooks`: a path relative to the repo root, with no `.`, `..`, or `.git`
+part. `push_deny` (optional) is a list of at most 64 branch globs, for
+example `["op/*"]`: letters, digits, `.`, `_`, `-`, `/`, `+`, `@`, `*`
+(any text, `/` too), and `?`, with no `refs/heads/`. A bad value is `422
+invalid`. Both are in the answer only when they are set. See §5.1, "Git
+hooks". There is no edit of a repo: detach it and attach it again, or
+change the project file.
+
 ### 5.1 Repos, checkouts, and credentials
 
 PLAN §9 and §21. The daemon clones and fetches with the `git` binary,
@@ -928,6 +938,38 @@ POST /api/repos/01M5PA0T0TH91WNYTGH66DA2SP/checkout
 
 `action` is `cloned`, `updated`, `up_to_date`, or `not_updated`. `head` and
 `branch` are `null` when the repo has no commit or HEAD is detached.
+`hooks` lists the hooks that the checkout wrote into `.git/hooks` (below).
+It is absent when there are none.
+
+**Git hooks.** git never copies hooks on a clone. So for a repo with
+`hooks_dir` or `push_deny`, each clone and each update in a workspace
+(not on a target) writes hooks into `.git/hooks` of the checkout:
+
+- `hooks_dir`: each regular file directly in the dir at `HEAD` (mode
+  `100644` or `100755`, a name of letters, digits, `-`, `_`, `.`, not
+  starting with `.`) goes to `.git/hooks/<name>` with mode 0755. The daemon
+  reads the files from the commit (`git ls-tree`, `git cat-file`), not from
+  the work tree, so a symlink is never followed. A symlink, a subdir, or a
+  file over 1 MiB in the dir is skipped or refused. More than 64 files is
+  `409 conflict`. A `HEAD` with no such dir copies nothing. A hook that is
+  in `.git/hooks` and not in the dir stays.
+- `push_deny`: the daemon writes its own `pre-push`. It refuses a push when
+  the local branch or the remote branch matches a glob, with the message
+  `pre-push: the branch <b> matches push_deny of this repo`. The repo's own
+  `pre-push` from `hooks_dir` becomes `pre-push.repo`, and runs after the
+  check with the same input. A repo attached again without `push_deny`
+  keeps the old `pre-push` in a checkout until the agent removes it.
+- The hooks run for the agent's git commands in the sandbox. The daemon's
+  own git commands run with `core.hooksPath=/dev/null` and never run them.
+  `core.hooksPath` in the repo config stays refused (`409`): `hooks_dir`
+  is the supported way, and the refusal keeps the daemon's second line of
+  defence if a future git command of the daemon forgets the override.
+- A client-side hook is a guard against mistakes, not a hard control. The
+  agent can push with `git push --no-verify` or edit `.git/hooks`, and the
+  next checkout by the daemon writes the hooks again. The daemon cannot
+  check the pushed refs itself: git does not send them to a credential
+  helper, and the agent can read the repo token (§5.2, PLAN §16b). For a
+  hard rule, use a branch protection rule on the git server.
 
 Each checkout writes `repo.checkout` events on the agent: `data.phase` is
 `progress` (git progress lines, at most one per phase each second), `done`
@@ -1756,7 +1798,8 @@ instead of a resume. The status reason is `new session: the prompt
 changed`. The old session stays in the history. `POST /api/agents` without
 the field sets `true`, the same as an agent file.
 
-`system_prompt` (optional, at most 32 KiB, else `422 invalid`): the
+`system_prompt` (optional, at most `TERRARIUM_SYSTEM_PROMPT_MAX` bytes,
+default 32 KiB, else `422 invalid`): the
 agent's base system prompt (PLAN §8). It can use the variables of the
 prompt templates (`defaults/prompts/README.md`). An empty text is the same as no
 text.
@@ -6794,7 +6837,7 @@ A template:
 |---|---|
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
-| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `skills`, `skills_off`, `default_skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` and no `default_skills` when it is `true`, no empty `skills_off`. A template in an answer also has `effective_skills`: the skills that an agent of the template gets now, as on an agent (§6.1). A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `skills`, `skills_off`, `default_skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` and no `default_skills` when it is `true`, no empty `skills_off`. A template in an answer also has `effective_skills`: the skills that an agent of the template gets now, as on an agent (§6.1). A `system_prompt` over the limit (`TERRARIUM_SYSTEM_PROMPT_MAX`, default 32 KiB) is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. A change of the file by hand adds `1` when the load finds it (also a change of a comment only): one revision is one version of the file. |
 | `source` | `config` (a file of the config repo), or `fleet:<name>` (§18.1; its file is in the config repo too). `api` and `file` are templates from before the files: the first load writes their files and makes them `config`. |
 | `file` | The file in the config repo (§21.5): `templates/<name>.wcl`, or `templates/<project>/<name>.wcl`. `null` until the file is written (a daemon with no config repo). |
@@ -7615,7 +7658,7 @@ An entry in a list:
 ```json
 {"name":"reviewer","description":"Review the cards in review","size":412,
  "source":"config","path":"system-prompts/reviewer.md","builtin":false,
- "updated":"2026-11-01T09:12:00Z"}
+ "over_limit":false,"updated":"2026-11-01T09:12:00Z"}
 ```
 
 | Field | Meaning |
@@ -7625,6 +7668,7 @@ An entry in a list:
 | `source` | `default`: an unedited packaged default. `config`: any other file. |
 | `path` | The file in the config repo: `system-prompts/<name>.md`, or `prompts/<name>.md` in an older repo. |
 | `builtin` | `true` for `leader` and `worker`. They cannot be deleted. |
+| `over_limit` | `true` when the file has more bytes than `TERRARIUM_SYSTEM_PROMPT_MAX` (default 32 KiB). An agent with this persona does not start (§28.3, "Size at the start"). |
 | `updated` | The time of the last change of the file. |
 
 One entry (`GET /api/system-prompts/{name}`): the fields above, `text`
@@ -7655,8 +7699,9 @@ and templates that select it:
 - **Names.** 1 to 63 of `a-z`, `0-9`, `-`, and `_`, starting with a
   letter or a digit (the rules of a template name). `none` is not a
   name: it means the harness's default prompt.
-- **Checks.** The text is not empty, and the file is at most 32 KiB (the
-  limit of `system_prompt`). The description has no `-->`. The secret
+- **Checks.** The text is not empty, and the file is at most
+  `TERRARIUM_SYSTEM_PROMPT_MAX` bytes (default 32 KiB, the limit of
+  `system_prompt`). The description has no `-->`. The secret
   scan of §25 finds nothing. A write that fails is `422 invalid`; a
   finding of the scan is in `details.findings` and names the file, the
   line, and the rule, never the value. Nothing is written.
@@ -7665,6 +7710,11 @@ and templates that select it:
   operator when the entry is `leader` or `worker`, or when an agent or a
   template outside the caller's project selects it (a global template
   counts as outside). Else a project_admin may.
+- **Size at the start.** The start of an agent checks the same limit: a
+  persona file over it (for example a file put in `system-prompts/` by
+  hand), or a `system_prompt` saved under a higher limit, stops the start
+  with an error that names the file, its size, and the limit. An entry in
+  the list has `over_limit: true` when its file is over the limit.
 - **Delete in use.** A delete of an entry that agents or templates select
   is `409 conflict` with `details.users` (the shape of `users` above).
   With `?force=true` the file goes; the next start of such an agent
