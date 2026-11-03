@@ -3297,6 +3297,17 @@ Dashboard (SolidJS, built with Vite, embedded in `terrariumd` with
 - **Mail** view: threads across agents, compose as operator.
 - **Targets** view: state, up/down, snapshot.
 - **Event log**: filterable firehose.
+- **Pinned conversations**: a side bar on the right of every page, with
+  one tab for each pinned agent (for example the leads). A tab shows the
+  agent's status and its Conversation view with the composer. The operator
+  pins and unpins on the agent page, with the pin button of an agent row
+  in the sidebar tree, or with the `p` key on that row. The `×` of a tab
+  unpins too. The list is on the daemon (`/api/pins`, docs/api.md §6.11),
+  so it follows the operator to each browser. The open tab and the
+  collapsed state stay in the browser. On a wide screen the side bar
+  collapses to a rail of status dots. On a phone it is an overlay that the
+  `Pinned` button of the top bar opens. The delete of an agent removes its
+  pin.
 
 Rust crates: `tokio`, `axum`, `portable-pty`, `vt100`, `rusqlite`, `clap`,
 `serde`, `rust-embed`, `tracing`.

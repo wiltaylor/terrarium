@@ -16,6 +16,8 @@ export interface TreeRow {
   button?: boolean;
   /** True for a row with an add action (the "+" button): the `+` key runs it. */
   add?: boolean;
+  /** True for an agent row: the `p` key pins or unpins its conversation. */
+  pin?: boolean;
 }
 
 /** The result of a key on a row. */
@@ -28,6 +30,8 @@ export type TreeAction =
   | { click: true }
   /** `+` on a row with an add action. */
   | { add: true }
+  /** `p` on an agent row: pin or unpin. */
+  | { pin: true }
   /** The key belongs to the tree, but there is nothing to do. */
   | { none: true };
 
@@ -59,6 +63,8 @@ export function treeKeyAction(keys: readonly string[], row: TreeRow, key: string
       return row.button ? { activate: true } : { click: true };
     case "+":
       return row.add ? { add: true } : null;
+    case "p":
+      return row.pin ? { pin: true } : null;
   }
   return null;
 }
@@ -104,6 +110,7 @@ export function createRovingTree(opts: { keys: () => string[]; preferred?: () =>
             onClose?: () => void;
             onActivate?: () => void;
             onAdd?: () => void;
+            onPin?: () => void;
           })
         | null,
     ) => {
@@ -119,6 +126,7 @@ export function createRovingTree(opts: { keys: () => string[]; preferred?: () =>
       else if ("activate" in action) r.onActivate?.();
       else if ("click" in action) target.click();
       else if ("add" in action) r.onAdd?.();
+      else if ("pin" in action) r.onPin?.();
     },
   };
 }

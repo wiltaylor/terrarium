@@ -17,6 +17,7 @@ mod mail;
 mod memory;
 mod monitors;
 mod pipelines;
+mod pins;
 mod projects;
 mod questions;
 mod records;
@@ -280,6 +281,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(test_runs::routes())
         .merge(monitors::routes())
         .merge(pipelines::routes())
+        .merge(pins::routes())
         .merge(subscriptions::routes())
         .merge(usage::routes())
         .merge(fleet::routes())

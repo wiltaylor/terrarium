@@ -58,6 +58,11 @@ describe("treeKeyAction", () => {
     expect(treeKeyAction(keys, button, "+")).toEqual({ add: true });
   });
 
+  it("gives `p` to an agent row only: pin or unpin", () => {
+    expect(treeKeyAction(keys, { ...leaf("pa:1"), pin: true }, "p")).toEqual({ pin: true });
+    expect(treeKeyAction(keys, leaf("a:1"), "p")).toBeNull();
+  });
+
   it("gives `+` to a row with an add action only", () => {
     expect(treeKeyAction(keys, leaf("a:1"), "+")).toBeNull();
     expect(treeKeyAction(keys, { ...leaf("a:1"), button: true }, "+")).toBeNull();

@@ -3118,6 +3118,34 @@ The audit rows: `agent.spawn` (`{owner, owner_name, name, template,
 task_bytes, deadline_at}`) and `agent.spawn_finish` (`{owner, name,
 outcome}`).
 
+### 6.11 Pinned conversations
+
+The code is in `crates/terrariumd/src/store/pins.rs` and
+`crates/terrariumd/src/api/pins.rs`. The table is `pinned_agents`
+(migration 57).
+
+The operator pins the conversation of an agent, for example a lead. The
+dashboard shows each pinned agent as a tab in a side bar on the right of
+every page (PLAN §17). The list is on the daemon, so it is the same in
+each browser and on the phone. Only the operator has pins: an agent gets
+`403`.
+
+```json
+[{"agent":"01JQ...","project":"demo","name":"lead","pinned_at":"2026-11-03T09:00:00.000Z"}]
+```
+
+| Endpoint | Answer |
+|---|---|
+| `GET /api/pins` | `200` the pins, oldest pin first. A plain array, no cursor. |
+| `PUT /api/pins/{agent}` | `200` the new list. `{agent}` is the ULID or `project/name`. A new pin goes to the end; a pin that exists stays where it is. An unknown agent is `404`. No body. |
+| `DELETE /api/pins/{agent}` | `200` the new list. An agent that is not pinned, or that is gone, is no error. |
+
+The delete of an agent removes its pin (a foreign key). The dashboard
+removes the tab at the `agent_removed` event. A pin writes the audit row
+`agent.pin`, and an unpin writes `agent.unpin` (`{owner}`). A pin emits
+no event: the dashboard reads the list again when its window gets the
+focus.
+
 ## 7. Mail
 
 A message:

@@ -14,6 +14,7 @@ import { createTranscriptStream, type TranscriptStream } from "./sse";
 import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 // Secrets (PLAN §16b): a block of its own.
+import type { Pin } from "./types";
 import type { NewSecret, NewSecretGrant, RevealedSecret, Secret, SecretGenerate, SecretGrant, SecretPut, TargetPatch, TargetTestReport } from "./types";
 import type {
   SessionDetail,
@@ -495,6 +496,19 @@ export interface Api {
     links(id: string, patch: TestRunLinksPatch): Promise<TestRunSummary>;
     /** The creator, a project admin, or the operator. */
     remove(id: string): Promise<void>;
+  };
+
+  /**
+   * Pinned conversations (docs/api.md §6.11): the agents in the dashboard's right-hand side bar, oldest pin first.
+   * Kept on the daemon, so they follow the operator to each browser. Operator only. `agent` is a ULID or `project/name`.
+   * Each call answers with the new list.
+   */
+  pins: {
+    list(): Promise<Pin[]>;
+    /** `PUT /api/pins/{agent}`: pin at the end. A pin that exists stays where it is. */
+    pin(agent: string): Promise<Pin[]>;
+    /** `DELETE /api/pins/{agent}`: unpin. No pin is no error. */
+    unpin(agent: string): Promise<Pin[]>;
   };
 
   /**
@@ -1149,6 +1163,12 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       },
       links: (id, body) => patch(`/api/test-runs/${seg(id)}/links`, body),
       remove: (id) => del(`/api/test-runs/${seg(id)}`),
+    },
+
+    pins: {
+      list: () => get("/api/pins"),
+      pin: (agent) => put(`/api/pins/${seg(agent)}`, {}),
+      unpin: (agent) => t.request("DELETE", `/api/pins/${seg(agent)}`),
     },
 
     monitors: {

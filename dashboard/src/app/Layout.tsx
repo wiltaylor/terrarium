@@ -1,5 +1,6 @@
 // The app shell: sidebar with Home, Inbox, Logs, and Schedules, the project
-// tree, the Settings section, and the footer.
+// tree, the Settings section, and the footer; on the right, the side bar of
+// pinned conversations (./PinnedBar).
 
 import { A, useLocation, type RouteSectionProps } from "@solidjs/router";
 import { createEffect, createResource, createSignal, ErrorBoundary, For, on, onCleanup, onMount, Show } from "solid-js";
@@ -7,12 +8,13 @@ import { isMock } from "../api";
 import { CriticalBanner } from "../components/CriticalBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
-import { agents, api, auth, events, inbox, projects, signOutNow, subscriptions, theme } from "../stores";
+import { agents, api, auth, events, inbox, pins, projects, signOutNow, subscriptions, theme } from "../stores";
 import { badge } from "../features/inbox/model";
 import { SETTINGS_ITEMS, TOP_ITEMS } from "./nav";
 import { ProjectTree } from "./ProjectTree";
 import { projectFromPath } from "./treeModel";
 import { LoginScreen } from "./LoginScreen";
+import { PinnedBar } from "./PinnedBar";
 
 export function Layout(props: RouteSectionProps) {
   const location = useLocation();
@@ -23,6 +25,17 @@ export function Layout(props: RouteSectionProps) {
     void projects.refresh().catch(() => undefined);
     void agents.refresh();
     void inbox.refresh();
+    void pins.refresh();
+    // The pins are on the daemon: read them again when the operator comes back (another browser may have changed them).
+    const again = () => {
+      if (document.visibilityState === "visible") void pins.refresh();
+    };
+    document.addEventListener("visibilitychange", again);
+    window.addEventListener("focus", again);
+    onCleanup(() => {
+      document.removeEventListener("visibilitychange", again);
+      window.removeEventListener("focus", again);
+    });
     subscriptions.poll(isMock ? 5000 : 30_000);
     events.start();
     const t = setInterval(refetch, 30_000);
@@ -38,12 +51,13 @@ export function Layout(props: RouteSectionProps) {
   createEffect(() => {
     void location.pathname;
     setOpen(false);
+    pins.setOverlay(false);
   });
 
   const inboxBadge = () => badge(inbox.counts());
 
   return (
-    <div class="shell">
+    <div class="shell" classList={{ "has-pins": pins.pins().length > 0, "pins-collapsed": pins.collapsed() }}>
       <Show when={auth.needsToken()}>
         <LoginScreen overlay />
       </Show>
@@ -124,6 +138,13 @@ export function Layout(props: RouteSectionProps) {
           </button>
           <strong>Terrarium</strong>
           <span class="muted small">{projects.selected()}</span>
+          <Show when={pins.pins().length}>
+            {(n) => (
+              <button class="ghost topbar-pins" onClick={() => pins.setOverlay(!pins.overlay())} aria-label={`Pinned conversations (${n()})`} aria-expanded={pins.overlay()}>
+                Pinned {n()}
+              </button>
+            )}
+          </Show>
         </header>
         <CriticalBanner />
         <ConnectionBanner />
@@ -146,6 +167,7 @@ export function Layout(props: RouteSectionProps) {
           </ErrorBoundary>
         </main>
       </div>
+      <PinnedBar />
     </div>
   );
 }

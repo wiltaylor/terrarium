@@ -1744,6 +1744,22 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX pipeline_runs_sort ON pipeline_runs(pipeline, sort_at);
     "#,
+    // 57: pinned conversations (docs/api.md §6.11, `crate::store::pins`).
+    // The agents whose conversation the dashboard keeps in its right-hand
+    // side bar, for each owner (`operator`), in `position` order. The
+    // foreign key removes the pin of a deleted agent. Self-contained: when
+    // another branch takes number 57, move this entry to the end of the
+    // list.
+    r#"
+    CREATE TABLE pinned_agents (
+        owner     TEXT NOT NULL,
+        agent     TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        position  INTEGER NOT NULL,
+        pinned_at TEXT NOT NULL,
+        PRIMARY KEY (owner, agent)
+    );
+    CREATE INDEX pinned_agents_agent ON pinned_agents(agent);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

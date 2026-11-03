@@ -12,7 +12,7 @@ import type { Agent, Repo } from "../api/types";
 import { ProjectDot } from "../components/ProjectDot";
 import { AddRepoDialog } from "../features/repos/AddRepoForm";
 import { projectHealth, projectHealthLabel } from "../lib/projectHealth";
-import { agents, projects, repos } from "../stores";
+import { agents, pins, projects, repos } from "../stores";
 import { AgentRow } from "./AgentRow";
 import { PROJECT_ITEMS } from "./nav";
 import { expanded, ROOT_KEY, TreeNode, TreeRoot } from "./TreeRoot";
@@ -152,7 +152,11 @@ export function ProjectTree() {
           onActivate: () => expanded.toggle(node),
           onAdd: () => setAdding({ kind: key === agentsItem ? "agent" : "repo", project }),
         };
-      if (key.startsWith("pa:")) return { key, parent: agentsItem };
+      // An agent row: `p` pins or unpins its conversation (the side bar on the right).
+      if (key.startsWith("pa:")) {
+        const id = target.dataset.agent;
+        return { key, parent: agentsItem, pin: !!id, onPin: () => id && void pins.toggle(id).catch(() => undefined) };
+      }
       if (key.startsWith("pr:")) return { key, parent: reposItem };
       if (key !== projectKey(project)) return { key, parent: projectKey(project) };
       return {

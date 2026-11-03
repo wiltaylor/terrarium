@@ -495,16 +495,16 @@ th {
   border: 1.5px solid var(--st);
   box-sizing: border-box;
 }
-.tree-agent.st-starting { --st: var(--st-starting); }
-.tree-agent.st-idle { --st: var(--st-idle); }
-.tree-agent.st-waiting { --st: var(--st-waiting); }
-.tree-agent.st-working { --st: var(--st-working); }
-.tree-agent.st-blocked { --st: var(--st-blocked); }
-.tree-agent.st-error { --st: var(--st-error); }
-.tree-agent.st-stopped { --st: var(--st-stopped); }
-.tree-agent.st-restarting { --st: var(--st-restarting); }
+:is(.tree-agent, .pin-dot-host).st-starting { --st: var(--st-starting); }
+:is(.tree-agent, .pin-dot-host).st-idle { --st: var(--st-idle); }
+:is(.tree-agent, .pin-dot-host).st-waiting { --st: var(--st-waiting); }
+:is(.tree-agent, .pin-dot-host).st-working { --st: var(--st-working); }
+:is(.tree-agent, .pin-dot-host).st-blocked { --st: var(--st-blocked); }
+:is(.tree-agent, .pin-dot-host).st-error { --st: var(--st-error); }
+:is(.tree-agent, .pin-dot-host).st-stopped { --st: var(--st-stopped); }
+:is(.tree-agent, .pin-dot-host).st-restarting { --st: var(--st-restarting); }
 /* A paused agent: grey, with a pause glyph (two bars) in place of the dot. */
-.tree-agent.paused { --st: var(--st-stopped); }
+:is(.tree-agent, .pin-dot-host).paused { --st: var(--st-stopped); }
 .tree-agent.paused .status-dot {
   border-radius: 0;
   background: transparent;
@@ -3643,3 +3643,216 @@ pre.spawn-text {
 .pl-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; font-size: 0.9em; }
 .pl-facts dt { color: var(--muted); }
 .pl-facts dd { margin: 0; overflow-wrap: anywhere; }
+/* ---------- Pinned conversations (app/PinnedBar.tsx) ---------- */
+
+:root {
+  --pinbar: clamp(340px, 30vw, 520px);
+  --pinbar-rail: 48px;
+}
+.shell.has-pins {
+  grid-template-columns: var(--sidebar) minmax(0, 1fr) var(--pinbar);
+}
+.shell.has-pins.pins-collapsed {
+  grid-template-columns: var(--sidebar) minmax(0, 1fr) var(--pinbar-rail);
+}
+.pinbar {
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.pinbar.collapsed:not(.open) {
+  padding: 10px 4px;
+}
+.pinbar-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.pinbar-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.pin-tab {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2, var(--surface));
+  max-width: 100%;
+}
+.pin-tab.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.pin-tab button {
+  background: none;
+  border: 0;
+  padding: 4px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: inherit;
+}
+.pin-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 14ch;
+}
+.pin-tab button.pin-tab-close {
+  padding: 4px 6px 4px 2px;
+  color: var(--muted);
+}
+.pin-tab button.pin-tab-close:hover {
+  color: var(--text);
+}
+.pin-dot-host .status-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--st);
+}
+.pin-dot-host.st-waiting .status-dot {
+  background: transparent;
+  border: 1.5px solid var(--st);
+  box-sizing: border-box;
+}
+.pin-dot-host.paused .status-dot {
+  border-radius: 0;
+  background: transparent;
+  border-left: 3px solid var(--st);
+  border-right: 3px solid var(--st);
+  box-sizing: border-box;
+}
+.pinbar-title {
+  margin-bottom: 4px;
+}
+/* The panel fills the height: the transcript scrolls, the composer stays at the bottom. */
+.pinbar-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pinbar-panel .convo-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pinbar-panel .convo-scroll-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pinbar-panel .convo-scroll {
+  flex: 1;
+  height: auto;
+  min-height: 160px;
+}
+.pinbar-panel .convo-compose-row {
+  flex-wrap: wrap;
+}
+.pinbar-panel .convo-compose-row textarea {
+  flex: 1 1 100%;
+}
+.pinbar-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.pinbar-rail-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 2px;
+  width: 40px;
+  font-size: 0.7rem;
+}
+.pinbar-rail-item.active {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.pinbar-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.35);
+  z-index: 30;
+}
+.topbar-pins {
+  margin-left: auto;
+}
+/* The pin button of an agent row in the tree: shown on hover, and always when pinned. */
+.tree-agent-row {
+  display: flex;
+  align-items: center;
+}
+.tree-agent-row > a {
+  flex: 1;
+  min-width: 0;
+}
+.tree button.tree-pin {
+  flex: none;
+  background: none;
+  border: 0;
+  padding: 2px 4px;
+  color: var(--muted);
+  opacity: 0;
+}
+.tree-agent-row:hover button.tree-pin,
+.tree-agent-row:focus-within button.tree-pin,
+.tree button.tree-pin.pinned {
+  opacity: 1;
+}
+.tree button.tree-pin.pinned {
+  color: var(--accent);
+}
+@media (hover: none) {
+  .tree button.tree-pin {
+    opacity: 1;
+  }
+}
+@media (max-width: 760px) {
+  /* A phone: no column; the top bar opens the side bar as an overlay from the right. */
+  .shell.has-pins,
+  .shell.has-pins.pins-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pinbar {
+    position: fixed;
+    inset: 0 0 0 auto;
+    width: min(94vw, 460px);
+    z-index: 40;
+    transform: translateX(100%);
+    visibility: hidden;
+    transition: transform 0.18s ease, visibility 0.18s;
+    box-shadow: var(--shadow);
+  }
+  .pinbar.open {
+    transform: none;
+    visibility: visible;
+  }
+  .tree button.tree-pin {
+    padding: 10px;
+  }
+}
+@media (min-width: 761px) {
+  .topbar-pins {
+    display: none;
+  }
+}

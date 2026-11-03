@@ -64,6 +64,7 @@ import type {
   HarnessReport,
   HarnessVersion,
   Host,
+  Pin,
   LoginKind,
   LoginSession,
   InboxEventData,
@@ -809,6 +810,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const removeAgentRow = (a: Agent) => {
     if (LIVE.includes(a.status)) setStatus(a, "stopped", "stopped by operator");
     w.agents = w.agents.filter((x) => x.id !== a.id);
+    // The foreign key of `pinned_agents` removes the pin.
+    w.pins = w.pins.filter((p) => p.agent !== a.id);
     // The sessions stay and end; the tombstone names the agent (docs/api.md §6.6).
     w.removedAgents.push({ id: a.id, project: a.project, name: a.name, harness: a.harness });
     for (const s of w.sessions.filter((x) => x.agent === a.id)) {
@@ -3958,6 +3961,46 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     testRuns: testRunMock.api,
     monitors: monitorMock.api,
     pipelines: pipelineMock.api,
+
+    // docs/api.md §6.11: operator only; each call answers with the list.
+    pins: (() => {
+      const pinList = (): Pin[] =>
+        w.pins.flatMap((p) => {
+          const a = w.agents.find((x) => x.id === p.agent);
+          return a ? [{ agent: a.id, project: a.project, name: a.name, pinned_at: p.pinned_at }] : [];
+        });
+      const operatorOnly = () => {
+        const c = opts.scheduleCaller;
+        if (c && c.role !== "operator") fail(403, "forbidden", "pinned conversations needs the operator");
+      };
+      return {
+        list: () =>
+          reply(() => {
+            operatorOnly();
+            return pinList();
+          }),
+        pin: (key: string) =>
+          reply(() => {
+            operatorOnly();
+            const a = agent(key);
+            if (!w.pins.some((p) => p.agent === a.id)) {
+              w.pins.push({ agent: a.id, pinned_at: iso() });
+              audit("agent.pin", a.id, a.project, { owner: "operator" });
+            }
+            return pinList();
+          }),
+        unpin: (key: string) =>
+          reply(() => {
+            operatorOnly();
+            const id = w.agents.find((x) => x.id === key || `${x.project}/${x.name}` === key)?.id ?? key;
+            if (w.pins.some((p) => p.agent === id)) {
+              w.pins = w.pins.filter((p) => p.agent !== id);
+              audit("agent.unpin", id, w.agents.find((x) => x.id === id)?.project, { owner: "operator" });
+            }
+            return pinList();
+          }),
+      };
+    })(),
 
     hosts: {
       list: () => reply(() => w.hosts.map((h) => withMetrics(h))),

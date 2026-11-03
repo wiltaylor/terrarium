@@ -16,6 +16,7 @@ import { ApiError } from "../../api/http";
 import { AgentForm } from "./AgentForm";
 import { SaveAsTemplateDialog } from "../templates/TemplateDialog";
 import { Conversation } from "./conversation/Conversation";
+import { PinButton } from "../../app/PinnedBar";
 import { ScreenPanel } from "./ScreenPanel";
 import { SessionsPanel } from "./SessionsPanel";
 import { AGENT_TABS, agentViewQuery, parseAgentView, type AgentTab } from "./sessions";
@@ -190,6 +191,10 @@ export default function AgentDetail() {
                 </>
               );
             })()}
+            {/* Pin: the conversation stays in the side bar on the right (docs/api.md §6.11). An ephemeral agent is short-lived: no pin. */}
+            <Show when={!a().ephemeral}>
+              <PinButton agent={a()} onError={setError} />
+            </Show>
             <button onClick={() => setEditing(true)}>Edit</button>
             <button onClick={() => setSaving(true)}>Save as template</button>
             <Show

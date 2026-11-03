@@ -47,6 +47,8 @@ export interface MockWorld {
   sessions: Session[];
   /** The tombstones of deleted agents (the daemon's `agents_removed`); their sessions stay (docs/api.md §6.6). */
   removedAgents: { id: string; project: string; name: string; harness: Agent["harness"] }[];
+  /** The operator's pinned conversations (docs/api.md §6.11), oldest first. The daemon's `pinned_agents`. */
+  pins: { agent: string; pinned_at: string }[];
   /** Transcript blocks by terrarium session ID, oldest first (docs/api.md §6, transcripts). */
   transcripts: Record<string, Block[]>;
   /** The event log, oldest first, like the daemon's. */
@@ -951,7 +953,7 @@ type:bug sevrity=high
 
   const world: MockWorld = {
     schedules: sched.schedules, scheduleRuns: sched.runs, webhookDeliveries: sched.deliveries, eventSources: seedEventSources(now), eventSourceSecrets: {}, templates: seedTemplates(now),
-    projects, repos, agents, sessions, removedAgents: [], transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
+    projects, repos, agents, sessions, removedAgents: [], pins: [], transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
     cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, heldMail: [fakeUlid("msg", 11)], targets, hostSnapshots, leases, ...waitSeed, hosts, hostTokens, audit, seq,
   };
   // Ephemeral agents of terrarium/lead (./spawns.ts).

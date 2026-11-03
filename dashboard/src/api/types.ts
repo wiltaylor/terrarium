@@ -1713,6 +1713,15 @@ export interface DbQueryResult {
 
 export type ArtifactLinkKind = "page" | "version" | "card";
 
+/** One pinned conversation (`GET /api/pins`, docs/api.md §6.11). Oldest pin first. */
+export interface Pin {
+  /** The agent ULID. */
+  agent: string;
+  project: string;
+  name: string;
+  pinned_at: string;
+}
+
 /** `POST /api/agents/{id}/attachments` (docs/api.md §6.5): an image in the agent's workspace. */
 export interface Attachment {
   /** The path of the file as the agent sees it (in the sandbox). Never the host path. */
