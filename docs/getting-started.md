@@ -2096,7 +2096,7 @@ just ci::check
 ```
 
 The gate runs `ci::fmt-check` (rustfmt), `ci::lint` (clippy with
-`-D warnings`), `ci::test` (`cargo test --workspace`), `ci::scripts-test`
+`-D warnings`), `ci::test` (`cargo test --workspace --no-fail-fast`), `ci::scripts-test`
 (the Python tests under `scripts/`, which also check that the Dockerfile is
 in step with `harnesses.toml`), and `ci::dashboard-check` (TypeScript,
 ESLint, and the dashboard unit tests). A change must pass it before it
