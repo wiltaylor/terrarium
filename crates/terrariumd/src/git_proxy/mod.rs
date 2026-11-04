@@ -29,10 +29,11 @@
 
 pub mod pkt;
 
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -51,8 +52,11 @@ use terrarium_core::config::{PushVia, push_deny_match};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
+use rusqlite::{Connection, OptionalExtension};
+
 use crate::actor::AgentActor;
 use crate::api::Shared;
+use crate::error::{ApiError, ApiResult};
 use crate::secrets::Secret;
 use crate::store::repos::{self, Repo};
 
@@ -83,6 +87,11 @@ const TOTAL_TIMEOUT: Duration = Duration::from_secs(3600);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(120);
 /// The most requests through the proxy at one time.
 const MAX_ACTIVE: usize = 32;
+/// The most requests of one agent at one time (review P6).
+const MAX_PER_AGENT: usize = 4;
+/// The longest wait for the next bytes of the agent's request body
+/// (review P6).
+const UPLOAD_IDLE: Duration = Duration::from_secs(60);
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -100,6 +109,8 @@ struct Live {
 pub struct Runtime {
     live: RwLock<Option<Live>>,
     active: Arc<AtomicUsize>,
+    /// The requests of each agent now.
+    per_agent: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -182,20 +193,57 @@ impl Runtime {
         Some(agent.to_owned())
     }
 
-    /// Take a request slot, or `None` when [`MAX_ACTIVE`] run.
-    fn slot(&self) -> Option<Slot> {
+    /// Take a request slot of `agent`, or the reason why not: at most
+    /// [`MAX_ACTIVE`] requests run, and at most [`MAX_PER_AGENT`] of one
+    /// agent.
+    fn slot(&self, agent: &str) -> Result<Slot, String> {
+        {
+            let mut m = lock(&self.per_agent);
+            let n = m.entry(agent.to_owned()).or_default();
+            if *n >= MAX_PER_AGENT {
+                return Err(format!(
+                    "the Terrarium git proxy runs {MAX_PER_AGENT} requests of this agent now; \
+                     try again"
+                ));
+            }
+            *n += 1;
+        }
         let n = self.active.fetch_add(1, Ordering::SeqCst);
-        let s = Slot(self.active.clone());
-        (n < MAX_ACTIVE).then_some(s)
+        let s = Slot {
+            active: self.active.clone(),
+            per_agent: self.per_agent.clone(),
+            agent: agent.to_owned(),
+        };
+        if n >= MAX_ACTIVE {
+            return Err(format!(
+                "the Terrarium git proxy runs {MAX_ACTIVE} requests now; try again"
+            ));
+        }
+        Ok(s)
     }
 }
 
-/// One request through the proxy; the count goes down on drop.
-struct Slot(Arc<AtomicUsize>);
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One request through the proxy; the counts go down on drop.
+struct Slot {
+    active: Arc<AtomicUsize>,
+    per_agent: Arc<Mutex<HashMap<String, usize>>>,
+    agent: String,
+}
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        let mut m = lock(&self.per_agent);
+        if let Some(n) = m.get_mut(&self.agent) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(&self.agent);
+            }
+        }
     }
 }
 
@@ -309,6 +357,7 @@ pub fn push_via(repo: &Repo, proxy_on: bool) -> PushVia {
         None => {
             let https = repo
                 .url
+                .trim()
                 .get(..8)
                 .is_some_and(|s| s.eq_ignore_ascii_case("https://"));
             if proxy_on
@@ -323,6 +372,147 @@ pub fn push_via(repo: &Repo, proxy_on: bool) -> PushVia {
             }
         }
     }
+}
+
+/// Why a repo with `push_deny` is `direct`, so its `push_deny` is only
+/// the client hook (review P8). `None`: the repo has no `push_deny`, or it
+/// goes through the proxy.
+pub fn direct_reason(repo: &Repo, proxy_on: bool) -> Option<String> {
+    if repo.push_deny.is_empty() || push_via(repo, proxy_on) == PushVia::Proxy {
+        return None;
+    }
+    let url = repo.url.trim();
+    let why = if repo.push_via == Some(PushVia::Direct) {
+        "push_via = direct"
+    } else if !proxy_on {
+        "the git proxy is off (TERRARIUM_GIT_PROXY_LISTEN)"
+    } else if !url
+        .get(..8)
+        .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+    {
+        "the URL is not https (ssh, local, and http repos are not proxied by default)"
+    } else if repo.credential.is_none() {
+        "the repo has no credential"
+    } else {
+        "the URL is not one that the proxy takes (a user, a query, or a fragment)"
+    };
+    Some(format!(
+        "push_deny is only the pre-push hook here, not a hard rule: {why}"
+    ))
+}
+
+/// The view of a repo for the API: `via` is `proxy`, `direct`, or
+/// `direct` with the reason of [`direct_reason`].
+pub fn via_label(repo: &Repo, proxy_on: bool) -> String {
+    match (push_via(repo, proxy_on), direct_reason(repo, proxy_on)) {
+        (PushVia::Proxy, _) => "proxy".to_owned(),
+        (PushVia::Direct, None) => "direct".to_owned(),
+        (PushVia::Direct, Some(r)) => format!("direct ({r})"),
+    }
+}
+
+/// The secret (`scope`, `name`) that a repo's credential names: the
+/// project's secret of that name, else the global one (as
+/// `crate::secrets::resolve`). `None`: no credential, or no such secret.
+pub fn secret_of_repo(conn: &Connection, repo: &Repo) -> ApiResult<Option<(String, String)>> {
+    let Some(name) = repo.credential.as_deref() else {
+        return Ok(None);
+    };
+    let scope: Option<String> = conn
+        .query_row(
+            "SELECT scope FROM secrets WHERE name = ?1 AND scope IN (?2, 'global')
+             ORDER BY scope = 'global' LIMIT 1",
+            rusqlite::params![name, repo.project],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(scope.map(|sc| (sc, name.to_owned())))
+}
+
+/// The secrets that are "use only" (review P1): each secret that a repo
+/// which goes through the proxy names, in any project. The credential
+/// helper, the grants, `secret get`, and the launch env never give such a
+/// secret to an agent, also for another repo or a grant: else a direct
+/// repo with the same token opens the proxied repo past the proxy.
+pub fn use_only_secrets(conn: &Connection, proxy_on: bool) -> ApiResult<HashSet<(String, String)>> {
+    let mut out = HashSet::new();
+    for r in repos::all(conn)? {
+        if push_via(&r, proxy_on) == PushVia::Proxy
+            && let Some(id) = secret_of_repo(conn, &r)?
+        {
+            out.insert(id);
+        }
+    }
+    Ok(out)
+}
+
+/// Fill the API fields of repos (review P1, P8): `via`, and a warning
+/// when `push_deny` is only the hook, or when the repo's secret is shared
+/// between a proxied repo and a direct one (the direct repo then gets no
+/// token from the credential helper).
+pub fn annotate(conn: &Connection, repos: &mut [Repo], proxy_on: bool) -> ApiResult<()> {
+    if repos.is_empty() {
+        return Ok(());
+    }
+    let all = repos::all(conn)?;
+    let mut users: HashMap<(String, String), Vec<(String, PushVia)>> = HashMap::new();
+    for r in &all {
+        if let Some(id) = secret_of_repo(conn, r)? {
+            users
+                .entry(id)
+                .or_default()
+                .push((format!("{}/{}", r.project, r.name), push_via(r, proxy_on)));
+        }
+    }
+    for r in repos.iter_mut() {
+        let via = push_via(r, proxy_on);
+        r.via = Some(via_label(r, proxy_on));
+        if let Some(why) = direct_reason(r, proxy_on) {
+            r.warnings.push(why);
+        }
+        let Some(id) = secret_of_repo(conn, r)? else {
+            continue;
+        };
+        let me = format!("{}/{}", r.project, r.name);
+        let others = users.get(&id).map(Vec::as_slice).unwrap_or_default();
+        let (scope, name) = &id;
+        match via {
+            PushVia::Proxy => {
+                let direct: Vec<&str> = others
+                    .iter()
+                    .filter(|(n, v)| *n != me && *v == PushVia::Direct)
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+                if !direct.is_empty() {
+                    r.warnings.push(format!(
+                        "secret `{scope}/{name}` is shared with direct repos ({}): it is use only \
+                         now, so their checkouts get no token from the credential helper; give \
+                         them their own token, or let them go through the proxy",
+                        direct.join(", ")
+                    ));
+                }
+            }
+            PushVia::Direct => {
+                if others.iter().any(|(_, v)| *v == PushVia::Proxy) {
+                    r.warnings.push(format!(
+                        "secret `{scope}/{name}` is the token of a repo that goes through the git \
+                         proxy: it is use only, so the credential helper gives no token for this \
+                         repo"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The refusal of a use-only secret.
+pub fn use_only_error(scope: &str, name: &str) -> ApiError {
+    ApiError::conflict(format!(
+        "secret `{scope}/{name}` is the token of a repo that goes through the Terrarium git \
+         proxy, so it stays in the daemon (use only); give the other repos their own token, or \
+         let them go through the proxy too"
+    ))
 }
 
 /// The base URL for a bound address: an unspecified address is reached
@@ -462,12 +652,6 @@ async fn open(
     project: &str,
     repo: &str,
 ) -> Result<Ctx, Response> {
-    let Some(slot) = state.git_proxy.slot() else {
-        return Err(text(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("the Terrarium git proxy runs {MAX_ACTIVE} requests now; try again"),
-        ));
-    };
     let Some(pass) = basic_password(headers) else {
         return Err(unauthorized(
             "the Terrarium git proxy needs the agent's proxy credential \
@@ -491,6 +675,11 @@ async fn open(
         }
         Err(e) => return Err(text(StatusCode::INTERNAL_SERVER_ERROR, e.message)),
     };
+    // The slot after the authentication: a stranger takes none.
+    let slot = state
+        .git_proxy
+        .slot(&agent.id)
+        .map_err(|m| text(StatusCode::SERVICE_UNAVAILABLE, m))?;
     if agent.project != project {
         tracing::warn!(agent = %agent.id, project, repo, "git proxy: an agent asked for a repo of another project");
         return Err(text(
@@ -650,8 +839,14 @@ async fn forward(
             );
         }
     };
+    // The push advertisement is rewritten (no `push-options`), so it
+    // must come plain, not compressed.
+    let push_ad = want_type == RECEIVE_PACK_AD;
     let mut req = client.request(method, url.clone());
     for name in FORWARD_REQUEST {
+        if push_ad && *name == header::ACCEPT_ENCODING {
+            continue;
+        }
         if let Some(v) = headers.get(name) {
             req = req.header(name, v);
         }
@@ -740,6 +935,12 @@ async fn forward(
             ),
         );
     }
+    if push_ad && resp.headers().contains_key(header::CONTENT_ENCODING) {
+        return text(
+            StatusCode::BAD_GATEWAY,
+            format!("Terrarium git proxy: the forge of `{label}` sent a compressed advertisement"),
+        );
+    }
     let mut out = Response::builder().status(StatusCode::OK);
     for name in FORWARD_ANSWER {
         if let Some(v) = resp.headers().get(name) {
@@ -748,12 +949,69 @@ async fn forward(
     }
     // The slot lives until the answer is sent.
     let slot = ctx._slot;
-    let stream = capped(resp.bytes_stream(), MAX_ANSWER, "the answer of the forge").map(move |r| {
+    let stream = capped(resp.bytes_stream(), MAX_ANSWER, "the answer of the forge");
+    let stream: std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
+        if push_ad {
+            Box::pin(no_push_options(stream))
+        } else {
+            Box::pin(stream)
+        };
+    let stream = stream.map(move |r| {
         let _ = &slot;
         r
     });
     out.body(Body::from_stream(stream))
         .unwrap_or_else(|e| text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// The content type of the push advertisement.
+const RECEIVE_PACK_AD: &str = "application/x-git-receive-pack-advertisement";
+/// The most bytes before the first ref line of an advertisement.
+const MAX_AD_HEAD: usize = 1 << 20;
+
+/// The push advertisement with no `push-options` capability (review P3):
+/// the first bytes are held until the first ref line is complete, then
+/// rewritten ([`pkt::strip_push_options`]); the rest streams on.
+fn no_push_options<S>(s: S) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+{
+    // (stream, held bytes, the head is done)
+    let s = Box::pin(s);
+    futures_util::stream::unfold(Some((s, Vec::new(), false)), |state| async move {
+        let (mut s, mut held, done) = state?;
+        if done {
+            return s.next().await.map(|item| (item, Some((s, held, true))));
+        }
+        loop {
+            match pkt::strip_push_options(&held) {
+                Some(Ok((head, used))) => {
+                    let mut out = head;
+                    out.extend_from_slice(&held[used..]);
+                    held.clear();
+                    return Some((Ok(Bytes::from(out)), Some((s, held, true))));
+                }
+                Some(Err(m)) => return Some((Err(std::io::Error::other(m)), None)),
+                None => {}
+            }
+            if held.len() > MAX_AD_HEAD {
+                let m = "the forge's ref advertisement has no ref line in its first MiB";
+                return Some((Err(std::io::Error::other(m)), None));
+            }
+            match s.next().await {
+                Some(Ok(b)) => held.extend_from_slice(&b),
+                Some(Err(e)) => return Some((Err(e), None)),
+                // The end: what is held goes as it is (a short answer).
+                None => {
+                    if held.is_empty() {
+                        return None;
+                    }
+                    let out = std::mem::take(&mut held);
+                    return Some((Ok(Bytes::from(out)), Some((s, held, true))));
+                }
+            }
+        }
+    })
 }
 
 /// The deepest cause of a reqwest error, with no URL.
@@ -809,7 +1067,7 @@ async fn upload_pack(
     };
     let url = forge_url(&ctx.base, "git-upload-pack", None);
     let stream = capped(
-        body.into_data_stream(),
+        idle_limited(body.into_data_stream()),
         MAX_FETCH_REQUEST,
         "the fetch request",
     );
@@ -832,9 +1090,12 @@ async fn read_commands(
     stream: &mut (impl Stream<Item = Result<Bytes, axum::Error>> + Unpin),
 ) -> Result<(Vec<u8>, pkt::Commands), Response> {
     let mut buf: Vec<u8> = Vec::new();
+    // One parser for all the chunks: each chunk costs its own bytes only
+    // (review P2).
+    let mut parser = pkt::Parser::new();
     let read = async {
         loop {
-            match pkt::parse_commands(&buf) {
+            match parser.feed(&buf) {
                 pkt::Parse::Done(c) => return Ok(c),
                 pkt::Parse::Bad(m) => {
                     return Err(text(
@@ -923,15 +1184,11 @@ async fn receive_pack(
         Err(r) => return r,
     };
     let label = ctx.label();
-    let denied: Vec<(usize, &str)> = cmds
+    let denied: Vec<(usize, String)> = cmds
         .commands
         .iter()
         .enumerate()
-        .filter_map(|(i, c)| {
-            c.branch()
-                .and_then(|b| push_deny_match(&ctx.repo.push_deny, b))
-                .map(|g| (i, g))
-        })
+        .filter_map(|(i, c)| deny_reason(&ctx.repo, &c.refname).map(|why| (i, why)))
         .collect();
     let refs: Vec<serde_json::Value> = cmds
         .commands
@@ -945,7 +1202,7 @@ async fn receive_pack(
             .iter()
             .enumerate()
             .map(|(i, _)| match denied.iter().find(|(j, _)| *j == i) {
-                Some((_, g)) => format!("denied by push_deny `{g}` of repo {}", ctx.repo.name),
+                Some((_, why)) => why.clone(),
                 None => "not pushed: another ref of this push is denied by push_deny".to_owned(),
             })
             .collect();
@@ -997,7 +1254,7 @@ async fn receive_pack(
     }
     let first =
         futures_util::stream::once(async move { Ok::<Bytes, axum::Error>(Bytes::from(prefix)) });
-    let all = capped(first.chain(stream), MAX_PUSH, "the push");
+    let all = capped(first.chain(idle_limited(stream)), MAX_PUSH, "the push");
     let url = forge_url(&ctx.base, "git-receive-pack", None);
     forward(
         ctx,
@@ -1008,6 +1265,52 @@ async fn receive_pack(
         "application/x-git-receive-pack-result",
     )
     .await
+}
+
+/// Why the push of `refname` is refused by the `push_deny` of `repo`, or
+/// `None`. A repo with no `push_deny` refuses nothing. With it: a branch
+/// that matches a glob; a review ref `refs/for/<b>[%...]` whose `<b>`
+/// matches (Gerrit `%submit` lands on `<b>`); and any ref outside
+/// `refs/heads/`, `refs/tags/`, and `refs/for/` (review P3).
+fn deny_reason(repo: &Repo, refname: &str) -> Option<String> {
+    if repo.push_deny.is_empty() {
+        return None;
+    }
+    let name = &repo.name;
+    match pkt::target(refname) {
+        pkt::Target::Branch(b) => push_deny_match(&repo.push_deny, b)
+            .map(|g| format!("denied by push_deny `{g}` of repo {name}")),
+        pkt::Target::ReviewOf(b) => push_deny_match(&repo.push_deny, b).map(|g| {
+            format!("denied by push_deny `{g}` of repo {name} (a review ref for branch {b})")
+        }),
+        pkt::Target::Tag => None,
+        pkt::Target::Other => Some(format!(
+            "denied: repo {name} has push_deny, and the proxy takes only refs/heads/, \
+             refs/tags/, and refs/for/ refs"
+        )),
+    }
+}
+
+/// The agent's request body with an idle limit: no bytes for
+/// [`UPLOAD_IDLE`] ends it with an error (review P6).
+fn idle_limited<S>(s: S) -> impl Stream<Item = Result<Bytes, axum::Error>> + Send
+where
+    S: Stream<Item = Result<Bytes, axum::Error>> + Send + Unpin,
+{
+    futures_util::stream::unfold(Some(s), |state| async move {
+        let mut s = state?;
+        match tokio::time::timeout(UPLOAD_IDLE, s.next()).await {
+            Ok(Some(item)) => Some((item, Some(s))),
+            Ok(None) => None,
+            Err(_) => Some((
+                Err(axum::Error::new(std::io::Error::other(format!(
+                    "no bytes from the agent for {} s",
+                    UPLOAD_IDLE.as_secs()
+                )))),
+                None,
+            )),
+        }
+    })
 }
 
 /// A `repo.push` audit row. Best effort.
@@ -1044,6 +1347,8 @@ mod tests {
             hooks_dir: None,
             push_deny: deny.iter().map(|s| (*s).to_owned()).collect(),
             push_via: via,
+            via: None,
+            warnings: Vec::new(),
             source: "api".into(),
             created_at: String::new(),
         }

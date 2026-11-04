@@ -28,7 +28,7 @@ const REPO_COLS: &[(&str, &str)] = &[
     ("PATH", "path"),
     ("CREDENTIAL", "credential"),
     ("HOOKS", "hooks_dir"),
-    ("VIA", "push_via"),
+    ("VIA", "via"),
 ];
 
 pub const AGENT_COLS: &[(&str, &str)] = &[

@@ -100,52 +100,86 @@ fn pkt_len(b: &[u8]) -> Option<usize> {
     usize::from_str_radix(s, 16).ok()
 }
 
-/// Parse the command list at the start of a push body. `buf` holds the
-/// first bytes; [`Parse::More`] asks for more.
-pub fn parse_commands(buf: &[u8]) -> Parse {
-    let mut pos = 0usize;
-    let mut commands = Vec::new();
-    let mut caps = Vec::new();
-    loop {
-        let Some(head) = buf.get(pos..pos + 4) else {
+/// An incremental parser of the command list (review P2). Each
+/// [`Parser::feed`] gets the whole buffer so far, but parses only the
+/// pkt-lines that are new and complete, so a body that comes in many small
+/// chunks costs time linear in its size.
+#[derive(Debug, Default)]
+pub struct Parser {
+    /// The bytes parsed so far (whole pkt-lines).
+    pos: usize,
+    /// The buffer length that the next step needs: a smaller buffer is
+    /// [`Parse::More`] with no work.
+    need: usize,
+    commands: Vec<Command>,
+    caps: Vec<String>,
+    /// The pkt-line headers read: the work done, for the tests.
+    steps: usize,
+}
+
+impl Parser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Parse what `buf` (the first bytes of the body, a prefix of the next
+    /// call's `buf`) adds.
+    pub fn feed(&mut self, buf: &[u8]) -> Parse {
+        if buf.len() < self.need {
             return Parse::More;
-        };
-        let Some(len) = pkt_len(head) else {
-            return Parse::Bad("the push request is not in pkt-line form".into());
-        };
-        if len == 0 {
-            // The flush-pkt after the command list. A body of only a
-            // flush-pkt is an empty push (git sends one to probe the
-            // auth before a large push).
-            return Parse::Done(Commands {
-                commands,
-                caps,
-                end: pos + 4,
-            });
         }
-        if !(4..=MAX_PKT).contains(&len) {
-            return Parse::Bad(format!("bad pkt-line length {len} in the push request"));
+        loop {
+            let pos = self.pos;
+            let Some(head) = buf.get(pos..pos + 4) else {
+                self.need = pos + 4;
+                return Parse::More;
+            };
+            self.steps += 1;
+            let Some(len) = pkt_len(head) else {
+                return Parse::Bad("the push request is not in pkt-line form".into());
+            };
+            if len == 0 {
+                // The flush-pkt after the command list. A body of only a
+                // flush-pkt is an empty push (git sends one to probe the
+                // auth before a large push).
+                return Parse::Done(Commands {
+                    commands: std::mem::take(&mut self.commands),
+                    caps: std::mem::take(&mut self.caps),
+                    end: pos + 4,
+                });
+            }
+            if !(4..=MAX_PKT).contains(&len) {
+                return Parse::Bad(format!("bad pkt-line length {len} in the push request"));
+            }
+            let Some(raw) = buf.get(pos + 4..pos + len) else {
+                self.need = pos + len;
+                return Parse::More;
+            };
+            self.pos = pos + len;
+            if let Err(m) = self.line(raw) {
+                return Parse::Bad(m);
+            }
         }
-        let Some(raw) = buf.get(pos + 4..pos + len) else {
-            return Parse::More;
-        };
-        pos += len;
+    }
+
+    /// One complete pkt-line of the command list.
+    fn line(&mut self, raw: &[u8]) -> Result<(), String> {
         let line = raw.strip_suffix(b"\n").unwrap_or(raw);
         let (body, cap_bytes) = match line.iter().position(|b| *b == 0) {
             Some(i) => (&line[..i], Some(&line[i + 1..])),
             None => (line, None),
         };
         let Ok(body) = std::str::from_utf8(body) else {
-            return Parse::Bad("a command of the push request is not UTF-8".into());
+            return Err("a command of the push request is not UTF-8".into());
         };
-        if commands.is_empty() && body.starts_with("shallow ") {
+        if self.commands.is_empty() && body.starts_with("shallow ") {
             if cap_bytes.is_some() || !is_oid(&body["shallow ".len()..]) {
-                return Parse::Bad("bad shallow line in the push request".into());
+                return Err("bad shallow line in the push request".into());
             }
-            continue;
+            return Ok(());
         }
         if body == "push-cert" || body.starts_with("push-cert ") {
-            return Parse::Bad(
+            return Err(
                 "signed pushes (git push --signed) do not go through the Terrarium git proxy"
                     .into(),
             );
@@ -154,39 +188,147 @@ pub fn parse_commands(buf: &[u8]) -> Parse {
         let (Some(old), Some(new), Some(refname), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
         else {
-            return Parse::Bad("bad command line in the push request".into());
+            return Err("bad command line in the push request".into());
         };
         if !is_oid(old) || !is_oid(new) || old.len() != new.len() {
-            return Parse::Bad("bad object ID in the push request".into());
+            return Err("bad object ID in the push request".into());
         }
         if !refname_ok(refname) {
-            return Parse::Bad(format!(
+            return Err(format!(
                 "the ref `{}` is not a ref name that the Terrarium git proxy forwards",
                 refname.escape_default()
             ));
         }
-        match (commands.is_empty(), cap_bytes) {
+        match (self.commands.is_empty(), cap_bytes) {
             (true, Some(c)) => {
-                caps = String::from_utf8_lossy(c)
+                self.caps = String::from_utf8_lossy(c)
                     .split(' ')
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
                     .collect();
+                // Push options go to the forge after the command list,
+                // where the proxy does not read them, and some forges act
+                // on a branch from them (GitLab `merge_request.*`, Gerrit
+                // `submit`). The proxy does not advertise the capability
+                // ([`strip_push_options`]); a client that sends it anyway
+                // is refused (review P3).
+                if self.caps.iter().any(|c| c == "push-options") {
+                    return Err(
+                        "push options (git push -o) do not go through the Terrarium git proxy"
+                            .into(),
+                    );
+                }
             }
             (true, None) => {}
             (false, Some(_)) => {
-                return Parse::Bad("capabilities after the first command of the push".into());
+                return Err("capabilities after the first command of the push".into());
             }
             (false, None) => {}
         }
-        if commands.len() >= 10_000 {
-            return Parse::Bad("a push of more than 10000 refs".into());
+        if self.commands.len() >= 10_000 {
+            return Err("a push of more than 10000 refs".into());
         }
-        commands.push(Command {
+        self.commands.push(Command {
             old: old.to_owned(),
             new: new.to_owned(),
             refname: refname.to_owned(),
         });
+        Ok(())
+    }
+}
+
+/// Parse the command list at the start of a push body in one go. `buf`
+/// holds the first bytes; [`Parse::More`] asks for more.
+pub fn parse_commands(buf: &[u8]) -> Parse {
+    Parser::new().feed(buf)
+}
+
+/// What a pushed ref changes, for the `push_deny` check (review P3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target<'a> {
+    /// A branch, `refs/heads/<b>`: the glob check applies.
+    Branch(&'a str),
+    /// A review ref that lands on a branch: Gerrit and AGit
+    /// `refs/for/<b>` with `%<options>` (`refs/for/main%submit` submits
+    /// into `main`). The glob check applies to `<b>`.
+    ReviewOf(&'a str),
+    /// A tag, `refs/tags/<t>`: allowed.
+    Tag,
+    /// Any other ref (`refs/meta/config`, `refs/drafts/...`,
+    /// `refs/changes/...`, `refs/notes/...`): refused for a repo with
+    /// `push_deny`, because a forge can give it a meaning that the proxy
+    /// does not check.
+    Other,
+}
+
+/// The [`Target`] of a ref name.
+pub fn target(refname: &str) -> Target<'_> {
+    if let Some(b) = refname.strip_prefix("refs/heads/") {
+        return Target::Branch(b);
+    }
+    if refname.starts_with("refs/tags/") {
+        return Target::Tag;
+    }
+    if let Some(rest) = refname.strip_prefix("refs/for/") {
+        let b = rest.split('%').next().unwrap_or(rest);
+        let b = b.strip_prefix("refs/heads/").unwrap_or(b);
+        return Target::ReviewOf(b);
+    }
+    Target::Other
+}
+
+/// The advertisement of `git-receive-pack` with no `push-options`
+/// capability (review P3). `head` is the start of the answer of
+/// `info/refs`: the service line, a flush, an optional `version 1` line,
+/// then the first ref line with the capabilities after a NUL. `None`:
+/// `head` does not hold the first ref line yet (read more). `Some(Err)`:
+/// not an advertisement that the proxy takes.
+pub fn strip_push_options(head: &[u8]) -> Option<Result<(Vec<u8>, usize), String>> {
+    let mut pos = 0usize;
+    let mut flushed = false;
+    loop {
+        let h = head.get(pos..pos + 4)?;
+        let Some(len) = pkt_len(h) else {
+            return Some(Err(
+                "the forge's ref advertisement is not in pkt-line form".into()
+            ));
+        };
+        if len == 0 {
+            if flushed {
+                // No ref line (should not happen for receive-pack).
+                return Some(Ok((head[..pos + 4].to_vec(), pos + 4)));
+            }
+            flushed = true;
+            pos += 4;
+            continue;
+        }
+        if !(4..=MAX_PKT).contains(&len) {
+            return Some(Err("bad pkt-line in the forge's ref advertisement".into()));
+        }
+        let raw = head.get(pos + 4..pos + len)?;
+        if !flushed || raw.starts_with(b"version ") {
+            // `# service=...` before the flush; `version 1` after it.
+            pos += len;
+            continue;
+        }
+        // The first ref line: `<oid> <ref>\0<caps>\n`.
+        let mut out = head[..pos].to_vec();
+        let line = raw.strip_suffix(b"\n").unwrap_or(raw);
+        match line.iter().position(|b| *b == 0) {
+            None => out.extend_from_slice(&head[pos..pos + len]),
+            Some(i) => {
+                let caps = String::from_utf8_lossy(&line[i + 1..]);
+                let kept: Vec<&str> = caps
+                    .split(' ')
+                    .filter(|c| !c.is_empty() && *c != "push-options")
+                    .collect();
+                let mut data = line[..i + 1].to_vec();
+                data.extend_from_slice(kept.join(" ").as_bytes());
+                data.push(b'\n');
+                out.extend(pkt(&data));
+            }
+        }
+        return Some(Ok((out, pos + len)));
     }
 }
 
@@ -326,6 +468,106 @@ mod tests {
         ] {
             assert!(matches!(parse_commands(&bad), Parse::Bad(_)), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn one_byte_chunks_cost_linear_time() {
+        // Review P2: a 4 MiB command list fed one byte at a time, as a
+        // body of 1-byte HTTP chunks comes in.
+        let mut b = Vec::new();
+        let mut lines = 0;
+        while b.len() < 4 << 20 {
+            let caps = if lines == 0 { "\0report-status" } else { "" };
+            let r = format!("{A} {B} refs/heads/{}{lines}{caps}\n", "x".repeat(900));
+            b.extend(pkt(r.as_bytes()));
+            lines += 1;
+        }
+        b.extend_from_slice(FLUSH);
+        let t = std::time::Instant::now();
+        let mut p = Parser::new();
+        let mut done = None;
+        for n in 1..=b.len() {
+            match p.feed(&b[..n]) {
+                Parse::More => {}
+                other => {
+                    done = Some(other);
+                    break;
+                }
+            }
+        }
+        let took = t.elapsed();
+        let Some(Parse::Done(c)) = done else {
+            panic!("{done:?}")
+        };
+        assert_eq!(c.commands.len(), lines);
+        // Each pkt-line header is read about once (twice when the header
+        // came in before its line): linear, not one parse of the whole
+        // buffer for each byte (about 4 million times 4500 lines).
+        assert!(
+            p.steps <= 2 * (lines + 1),
+            "{} steps for {lines} lines",
+            p.steps
+        );
+        // Well under 1 s of CPU in a release build; a debug build is
+        // about 10 times slower.
+        let bound = if cfg!(debug_assertions) { 3000 } else { 300 };
+        assert!(took < std::time::Duration::from_millis(bound), "{took:?}");
+    }
+
+    #[test]
+    fn push_options_and_targets() {
+        let b = body(&[&format!("{A} {B} refs/heads/f\0report-status push-options")]);
+        assert!(matches!(parse_commands(&b), Parse::Bad(m) if m.contains("push options")));
+        assert_eq!(target("refs/heads/op/x"), Target::Branch("op/x"));
+        assert_eq!(target("refs/for/main%submit"), Target::ReviewOf("main"));
+        assert_eq!(
+            target("refs/for/refs/heads/main%r=a"),
+            Target::ReviewOf("main")
+        );
+        assert_eq!(target("refs/for/main"), Target::ReviewOf("main"));
+        assert_eq!(target("refs/tags/v1"), Target::Tag);
+        for o in [
+            "refs/meta/config",
+            "refs/drafts/main",
+            "refs/changes/01/1/1",
+            "refs/notes/x",
+        ] {
+            assert_eq!(target(o), Target::Other, "{o}");
+        }
+    }
+
+    #[test]
+    fn the_advertisement_loses_push_options() {
+        let mut ad = pkt(b"# service=git-receive-pack\n");
+        ad.extend_from_slice(FLUSH);
+        let first = format!("{A} refs/heads/main\0report-status push-options atomic\n");
+        ad.extend(pkt(first.as_bytes()));
+        ad.extend(pkt(format!("{B} refs/heads/dev\n").as_bytes()));
+        ad.extend_from_slice(FLUSH);
+        for cut in 0..40 {
+            assert!(strip_push_options(&ad[..cut]).is_none(), "{cut}");
+        }
+        let (out, used) = strip_push_options(&ad).unwrap().unwrap();
+        let mut whole = out.clone();
+        whole.extend_from_slice(&ad[used..]);
+        let text = String::from_utf8_lossy(&whole);
+        assert!(!text.contains("push-options"), "{text}");
+        assert!(text.contains("report-status atomic\n"), "{text}");
+        assert!(text.contains("refs/heads/dev"));
+        // The new length is right: the stream parses as pkt-lines.
+        let n = 4 + 27 + 4;
+        let len =
+            usize::from_str_radix(std::str::from_utf8(&whole[n..n + 4]).unwrap(), 16).unwrap();
+        assert_eq!(&whole[n + len - 1..n + len], b"\n");
+        // A `version 1` line before the refs is kept.
+        let mut v1 = pkt(b"# service=git-receive-pack\n");
+        v1.extend_from_slice(FLUSH);
+        v1.extend(pkt(b"version 1\n"));
+        v1.extend(pkt(first.as_bytes()));
+        let (out, _) = strip_push_options(&v1).unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&out).contains("version 1"));
+        assert!(!String::from_utf8_lossy(&out).contains("push-options"));
+        assert!(strip_push_options(b"zzzz").unwrap().is_err());
     }
 
     #[test]

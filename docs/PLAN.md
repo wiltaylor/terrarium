@@ -1180,7 +1180,14 @@ webhooks. So the token of a proxied repo stays in the daemon ("use only",
 covered: SSH and local repos (the hook only; use branch protection on the
 server), Git LFS (set `push_via = "direct"`), and target checkouts.
 The default picks the proxy only for repos with `push_deny`, so a repo
-without it keeps its behaviour. Details: docs/api.md §5.1, "The git
+without it keeps its behaviour. "Use only" is a property of the secret:
+a secret that any proxied repo names is never given to an agent, for
+any repo, grant, `secret get`, or env var. Limits (security review §17):
+an agent with `project_admin` can change the repo (`push_via`,
+`push_deny`, the URL) and so turn the rule off; and a token that an
+agent read before its repo moved to the proxy stays valid until the
+operator rotates it on the forge (do that when a repo moves to the
+proxy). Details: docs/api.md §5.1, "The git
 proxy"; the threat model: docs/security-review.md §17.
 
 ### 9a. The repo browser

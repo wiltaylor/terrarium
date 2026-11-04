@@ -93,7 +93,11 @@ pub fn mirror_dir(state: &Shared, repo: &Repo) -> PathBuf {
 /// The mirror of `repo`, fetched when it is old (or `force`). A failed
 /// fetch keeps the old mirror and says so in `error`; with no mirror, it
 /// is the error of the request.
-async fn ensure_mirror(state: &Shared, repo: &Repo, force: bool) -> ApiResult<MirrorView> {
+pub(crate) async fn ensure_mirror(
+    state: &Shared,
+    repo: &Repo,
+    force: bool,
+) -> ApiResult<MirrorView> {
     let dest = mirror_dir(state, repo);
     let lock = mirror_lock(&repo.id);
     let mut m = lock.lock().await;
@@ -118,6 +122,7 @@ async fn ensure_mirror(state: &Shared, repo: &Repo, force: bool) -> ApiResult<Mi
             timeout: MIRROR_TIMEOUT,
             hooks: git::Hooks::default(),
             origin: git::Origin::default(),
+            fetch_from: None,
         };
         let r = tokio::task::spawn_blocking(move || git::refresh_mirror(&c))
             .await

@@ -1025,7 +1025,7 @@ mod tests {
         let again = run(&mut c, &files);
         assert_eq!(again, Report::default());
         // The placeholders give nothing at a start, with a warning each.
-        let l = grants::launch(&c, &k, AGENT, "p").unwrap();
+        let l = grants::launch(&c, &k, AGENT, "p", &Default::default()).unwrap();
         assert!(l.env.is_empty());
         assert!(l.git_hosts.is_empty());
         assert!(!l.ssh_keys);

@@ -256,6 +256,7 @@ async fn read_value(
             format!("`secret get` answers at most {GET_LIMIT} times a minute per agent"),
         ));
     }
+    let proxy_on = state.git_proxy.is_on();
     let key = secrets::key(&state.state_dir)?;
     let n = name.clone();
     let answer = state
@@ -266,6 +267,12 @@ async fn read_value(
                     "no secret `{n}` is granted to you; `terrarium secret list` shows your grants"
                 )));
             };
+            // A token of a proxied repo is use only (review P1).
+            if crate::git_proxy::use_only_secrets(t, proxy_on)?
+                .contains(&(e.scope.clone(), e.name.clone()))
+            {
+                return Err(crate::git_proxy::use_only_error(&e.scope, &e.name));
+            }
             if e.level != Level::Read {
                 return Err(ApiError::forbidden(format!(
                     "your grant of secret `{}/{}` is `use`: the brokers use it, and you cannot \
@@ -370,11 +377,13 @@ async fn launch_env(State(state): State<Shared>, actor: Actor) -> ApiResult<Resp
     }
     let key = secrets::key(&state.state_dir)?;
     let state_dir = state.state_dir.clone();
+    let proxy_on = state.git_proxy.is_on();
     let answer = state
         .db
         .write(actor.label(), move |t| {
             let credentials = credential_env(t, &state_dir, &me.id)?;
-            let l = grants::launch(t, &key, &me.id, &me.project)?;
+            let use_only = crate::git_proxy::use_only_secrets(t, proxy_on)?;
+            let l = grants::launch(t, &key, &me.id, &me.project, &use_only)?;
             let vars: BTreeMap<String, EnvValue> = l
                 .env
                 .into_iter()
@@ -439,12 +448,19 @@ pub async fn helper_answer(
 ) -> ApiResult<Option<(String, zeroize::Zeroizing<String>)>> {
     let key = secrets::key(&state.state_dir)?;
     let (id, p, h) = (agent_id.to_owned(), project.to_owned(), host.to_owned());
+    let proxy_on = state.git_proxy.is_on();
     state
         .db
         .write(actor.label(), move |t| {
             let Some((e, opened)) = grants::token_for_host(t, &key, &id, &p, &h)? else {
                 return Ok(None);
             };
+            // A token of a proxied repo is use only (review P1).
+            if crate::git_proxy::use_only_secrets(t, proxy_on)?
+                .contains(&(e.scope.clone(), e.name.clone()))
+            {
+                return Err(crate::git_proxy::use_only_error(&e.scope, &e.name));
+            }
             let secrets::Secret::Token { username, token } = opened.to_secret()? else {
                 return Ok(None);
             };

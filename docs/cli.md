@@ -186,7 +186,11 @@ forge URL of a proxied repo it prints an error and no token: run
 to a `--push-deny` branch, even with `git push --no-verify`) or `direct`.
 Without it, an `https` repo with a credential and `--push-deny` goes
 through the proxy, and the other repos are direct (`docs/api.md` §5.1,
-"The git proxy"). `repo ls` shows it in the `VIA` column when it is set.
+"The git proxy"). `repo ls` shows the path that the checkouts take in the
+`VIA` column: `proxy`, `direct`, or `direct (...)` with the reason when
+`push_deny` is only the hook (the proxy is off, the URL is not https, no
+credential, or `push_via = direct`). The daemon also logs this reason at
+start.
 
 `--credential` names a secret (see "Secrets"). The daemon uses the
 project's secret of that name, else the global one. A global secret

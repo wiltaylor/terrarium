@@ -874,7 +874,12 @@ picks `proxy` for an `https` repo with a `credential` and a `push_deny`
 list (when the proxy is on), and `direct` for every other repo. `proxy`
 needs an `http` or `https` URL with no user, password, query, or fragment
 (`422 invalid`). Another value is `400 bad_request`. It is in the answer
-only when it is set. There is no edit of a repo: detach it and attach it
+only when it is set. The daemon trims spaces at the ends of `url`. The
+answer of an attach, `GET /api/projects/{p}/repos`, and `GET
+/api/repos/{id}` also have `via` (`proxy`, `direct`, or `direct (<why
+push_deny is only the hook>)`) and `warnings` (a `push_deny` that is only
+the hook, and a secret that a proxied repo shares with a direct repo).
+There is no edit of a repo: detach it and attach it
 again, or change the project file.
 
 ### 5.1 Repos, checkouts, and credentials
@@ -1002,14 +1007,30 @@ For such a repo:
   question for the forge URL of the repo is `409 conflict` with a hint to
   run `terrarium repo checkout <repo>` (a checkout from before the proxy
   still names the forge). So the token is "use only".
+- "Use only" is a property of the **secret**: each secret that a proxied
+  repo names (in any project) is use only everywhere. The helper refuses
+  it for every other repo too (`409 conflict`), a grant of it gives no
+  helper answer (`409`), no `terrarium secret get` (`409`), and no env
+  var at the start (a warning event). Else a direct repo with the same
+  token would open the proxied repo past the proxy. Give the other repos
+  their own token, or let them go through the proxy. The attach answer
+  warns when a secret is shared this way.
+- An update of a proxied checkout fetches from the daemon's mirror of the
+  repo (§5.3), with no credential: the token never goes to git in a repo
+  that the agent controls. The first clone still runs with the token.
 - The proxy serves `GET .../info/refs?service=git-upload-pack|git-receive-pack`,
   `POST .../git-upload-pack`, and `POST .../git-receive-pack`, and nothing
   else (no dumb HTTP, `404`). No credential or a bad one is `401` with a
   Basic challenge. An agent of another project is `403`. A repo that is
   not there, or not proxied, is `404`.
 - A push: the proxy reads the ref commands. When a pushed branch
-  (`refs/heads/<b>`, a delete too) matches `push_deny`, it refuses the
-  whole push and changes no ref: git shows `! [remote rejected] <ref>
+  (`refs/heads/<b>`, a delete too), or the branch `<b>` of a review ref
+  `refs/for/<b>[%...]` (Gerrit `%submit` lands on `<b>`), matches
+  `push_deny`, it refuses the whole push and changes no ref. A repo with
+  `push_deny` also refuses each ref outside `refs/heads/`, `refs/tags/`,
+  and `refs/for/` (`refs/meta/config`, `refs/drafts/...`). Push options
+  (`git push -o`, GitLab `merge_request.*`) are not advertised and are
+  refused (`400`): some forges change a branch from them. git shows `! [remote rejected] <ref>
   (denied by push_deny `<glob>` of repo <repo>)` for each denied ref, and
   `not pushed: another ref of this push is denied` for the others. Else it
   forwards the push to the forge with the repo's token, and streams the
@@ -1019,8 +1040,9 @@ For such a repo:
   the refs).
 - A fetch or a clone is forwarded as it is (protocol v2 too).
 - Limits: a push body of 2 GiB, a fetch request of 256 MiB, an answer of
-  8 GiB; 30 s to connect, 5 min with no bytes from the forge, 1 h for one
-  request; 32 requests at one time (`503`). The proxy follows no
+  8 GiB; 30 s to connect, 5 min with no bytes from the forge, 60 s with
+  no bytes from the agent, 1 h for one request; 32 requests at one time,
+  4 of one agent (`503`). The proxy follows no
   redirect. It connects with the address rules of the webhooks
   (`TERRARIUM_WEBHOOK_PRIVATE`, one DNS answer for each request, pinned).
   An error of the forge is `502` with a text that git shows; it never

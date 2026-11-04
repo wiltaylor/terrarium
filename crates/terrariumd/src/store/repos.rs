@@ -46,6 +46,15 @@ pub struct Repo {
     /// `crate::git_proxy::push_via`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_via: Option<PushVia>,
+    /// The path that the checkouts take now, for the API answer:
+    /// `proxy`, `direct`, or `direct (<why push_deny is only the hook>)`
+    /// (`crate::git_proxy::annotate`). Not stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// Warnings for the operator, for the API answer
+    /// (`crate::git_proxy::annotate`). Not stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub source: String,
     pub created_at: String,
 }
@@ -87,6 +96,8 @@ fn repo_row(r: &Row<'_>) -> rusqlite::Result<Repo> {
         push_via: r
             .get::<_, Option<String>>("push_via")?
             .and_then(|v| PushVia::parse(&v).ok()),
+        via: None,
+        warnings: Vec::new(),
         source: r.get("source")?,
         created_at: r.get("created_at")?,
     })
@@ -147,6 +158,13 @@ fn name_from_url(url: &str) -> String {
 /// file (`source` `file`) counts as the operator.
 pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> ApiResult<Repo> {
     projects::get(t, project)?;
+    // A URL with spaces at the ends would not match git's view of it
+    // (the credential helper, the proxy rule; review P8).
+    let trimmed = NewRepo {
+        url: r.url.trim().to_owned(),
+        ..r.clone()
+    };
+    let r = &trimmed;
     if r.url.trim().is_empty() {
         return Err(ApiError::invalid("the repo needs a url"));
     }
@@ -256,6 +274,15 @@ pub fn resolve(conn: &Connection, key: &str, context: Option<&str>) -> ApiResult
 }
 
 /// Every repo of a project, by name.
+/// Each repo of each project.
+pub fn all(conn: &Connection) -> ApiResult<Vec<Repo>> {
+    let mut stmt = conn.prepare("SELECT * FROM repos ORDER BY project, name")?;
+    let rows = stmt
+        .query_map([], repo_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub fn all_for_project(conn: &Connection, project: &str) -> ApiResult<Vec<Repo>> {
     let mut stmt = conn.prepare("SELECT * FROM repos WHERE project = ?1 ORDER BY name")?;
     let rows = stmt

@@ -1474,10 +1474,11 @@ author of the code; an independent review is still to do.
 
 ### Residuals and open questions
 
-- **A grant of a token for the forge host** gives the agent that token
-  through the helper (PLAN §16b.4), and any token with push rights undoes
-  the hard rule. The proxy cannot see a push that does not go through it.
-  The docs say so; the grants API does not warn yet.
+- **Another token with push rights.** A secret that a proxied repo names
+  is use only everywhere (review P1, below). A *different* token with
+  push rights on the same forge repo (another secret, or one outside
+  Terrarium) still undoes the hard rule: the proxy cannot see a push that
+  does not go through it.
 - **Not covered:** SSH repos and local repos (`/repos`, bound read-write
   into the sandbox) keep the hook only. Decision: document, not refuse;
   refusing `push_deny` on them would break the setups from issue #1. A
@@ -1507,6 +1508,40 @@ author of the code; an independent review is still to do.
   the old path (and the readable token). A checkout from before the proxy
   still names the forge: its push fails with the `409` hint until the next
   `terrarium repo checkout`.
-- **Concurrency.** The 32 slots are shared by all agents: one agent can
-  hold them for up to the request time limit.
+- **Concurrency.** 32 slots for all agents, 4 for one agent. Agents
+  of different projects still share the 32.
+- **An agent with `project_admin`** (review P5) can change its repos:
+  set `push_via = direct`, change `push_deny`, grant itself the secret,
+  or point a proxied repo's URL at its own server, which then gets the
+  token from the proxy (`TERRARIUM_WEBHOOK_PRIVATE=allow` allows any
+  address). The hard rule holds only for agents that are not
+  `project_admin` of the project. Give that role only to agents that may
+  push anywhere.
+- **A token read before the proxy** (review P7). Before a repo moved to
+  the proxy, its agents could read its token (S3). The proxy does not
+  stop a copy that an agent kept. Rotate the forge token when a repo moves
+  to the proxy.
+- **The first clone** still runs with the token in a directory that the
+  agent can make (review P4: the update is fixed; the clone into a new
+  dir is not). The window is the clone itself, into a path that does not
+  exist before it.
+
+### Independent review (2026-11-04): P1 to P10
+
+An independent reviewer read the code of `16d9261` and proved P1, P2, and
+P3 with tests (now in `tests/git_proxy.rs` as `review_*`, which assert
+that each attack is refused).
+
+| # | Finding | Status |
+|---|---|---|
+| P1 (HIGH) | A direct repo with the same credential gave the agent the token of the proxied repo, and the agent pushed a denied branch straight to the forge. | **Fixed.** "Use only" is a property of the secret (`git_proxy::use_only_secrets`): each secret that a proxied repo names is refused by the credential helper for every repo (`409`), by a grant's helper answer (`409`), by `secret get` (`409`), and in the launch env (a warning). The attach and list answers warn when a secret is shared between a proxied and a direct repo. Test: `review_p1_a_shared_credential_stays_use_only`. |
+| P2 (HIGH) | The command list was parsed again from byte 0 after each body chunk: O(n²) CPU from 1-byte chunks (128 KiB: 50 s). | **Fixed.** `pkt::Parser` is incremental: it keeps its place and the length it needs next, so each byte costs O(1). 4 MiB in 1-byte steps: 40 ms (release). Tests: `one_byte_chunks_cost_linear_time` (a work counter and a time bound), `review_p2_one_byte_chunks_are_cheap` (end to end). |
+| P3 (MEDIUM) | Push options and forge "magic refs" (GitLab `merge_request.*`, Gerrit `refs/for/main%submit`, `refs/meta/config`) went to the forge with no check. | **Fixed.** The proxy removes `push-options` from the push advertisement (`pkt::strip_push_options`, asks for it uncompressed) and refuses a command list with that capability. With `push_deny`, `refs/for/<b>[%...]` is checked as branch `<b>`, and refs outside `refs/heads/`, `refs/tags/`, and `refs/for/` are refused. Test: `review_p3_push_options_and_magic_refs_are_refused` (the forge's hook never runs). Residual: a forge that changes a branch from another route (a merge API) is not a push. |
+| P4 (MEDIUM) | The daemon's update fetch ran with the token in the agent's repo, whose config the agent can race. | **Fixed for the update.** An update of a proxied repo first refreshes the daemon's mirror (`<state>/repo-mirrors/<ULID>.git`, the repo browser's) with the token, then fetches from the mirror path into the checkout with no secret (`Checkout::fetch_from`). The first clone still uses the token (residual above). A `direct` repo is as before (its token is readable anyway). |
+| P5 (MEDIUM) | A `project_admin` agent can turn the rule off or redirect the token. | **Documented** (residual above, PLAN §9). |
+| P6 (LOW) | One agent could hold all 32 slots for up to 1 h. | **Fixed.** At most 4 requests of one agent; the slot is taken after the authentication; the agent's request body has an idle limit of 60 s. Test: `review_p6_one_agent_cannot_take_every_slot`. |
+| P7 (LOW) | A token read before the proxy stays valid. | **Documented** (residual above, PLAN §9, README): rotate the token. |
+| P8 (LOW) | The default fell back to `direct` with no warning (proxy off, `http://`, a leading space). | **Fixed.** The daemon logs a warning at start for each repo with `push_deny` that is `direct`, with the reason; the repo answers have `via` and `warnings`, and `repo ls` shows them in `VIA`. An attach trims the URL, and the rule trims it too. |
+| P9 (INFO) | Checked and not found. | — |
+| P10 (INFO) | Two `409` texts had a run of spaces. | **Fixed.** |
 

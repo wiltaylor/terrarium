@@ -171,11 +171,14 @@ async fn list_repos(
     ApiQuery(page): ApiQuery<Page>,
 ) -> ApiResult<Response> {
     policy::read_project(&actor, &name)?;
+    let proxy_on = state.git_proxy.is_on();
     let rows = state
         .db
         .read(move |c| {
             projects::get(c, &name)?;
-            projects::list_repos(c, &name, &page)
+            let mut rows = projects::list_repos(c, &name, &page)?;
+            crate::git_proxy::annotate(c, &mut rows.items, proxy_on)?;
+            Ok(rows)
         })
         .await?;
     Ok(paged(rows))
@@ -206,11 +209,19 @@ async fn attach_repo(
 ) -> ApiResult<(StatusCode, Json<Repo>)> {
     policy::admin_project(&actor, &name, "attaching a repo")?;
     let body = new_repo(body)?;
+    let proxy_on = state.git_proxy.is_on();
     let r = state
         .db
         .write(actor.label(), move |t| {
-            projects::attach_repo(t, &name, &body, projects::SOURCE_API)
+            let r = projects::attach_repo(t, &name, &body, projects::SOURCE_API)?;
+            let mut one = [r];
+            crate::git_proxy::annotate(t, &mut one, proxy_on)?;
+            let [r] = one;
+            Ok(r)
         })
         .await?;
+    for w in &r.warnings {
+        tracing::warn!(repo = %format!("{}/{}", r.project, r.name), "{w}");
+    }
     Ok((StatusCode::CREATED, Json(r)))
 }

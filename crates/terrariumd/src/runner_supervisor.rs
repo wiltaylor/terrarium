@@ -1415,11 +1415,13 @@ impl RunnerSupervisor {
             agent.project.clone(),
             state.state_dir.clone(),
         );
+        let proxy_on = state.git_proxy.is_on();
         let result = state
             .db
             .read(move |c| {
                 let key = crate::secrets::key(&dir)?;
-                crate::secrets::grants::launch(c, &key, &id, &project)
+                let use_only = crate::git_proxy::use_only_secrets(c, proxy_on)?;
+                crate::secrets::grants::launch(c, &key, &id, &project, &use_only)
             })
             .await;
         result.unwrap_or_else(|e| {

@@ -714,15 +714,26 @@ fn open_effective(conn: &Connection, key: &MasterKey, e: &Effective) -> ApiResul
 /// What the start of the agent `agent_id` of `project` gets from its
 /// grants (PLAN §16b.4): the env vars of the `read` grants with an `env`
 /// name (a `github_token` with none sets `GH_TOKEN`), the git hosts, and
-/// whether it gets an ssh-agent socket.
+/// whether it gets an ssh-agent socket. A secret in `use_only` (the
+/// token of a repo that goes through the git proxy,
+/// `crate::git_proxy::use_only_secrets`) gives no env var and no git host.
 pub fn launch(
     conn: &Connection,
     key: &MasterKey,
     agent_id: &str,
     project: &str,
+    use_only: &std::collections::HashSet<(String, String)>,
 ) -> ApiResult<LaunchSecrets> {
     let mut out = LaunchSecrets::default();
     for e in effective(conn, agent_id, project)? {
+        if use_only.contains(&(e.scope.clone(), e.name.clone())) {
+            out.warnings.push(format!(
+                "secret `{}/{}` is the token of a repo that goes through the git proxy (use \
+                 only): its grant gives no env var and no git credential",
+                e.scope, e.name
+            ));
+            continue;
+        }
         if !e.has_value {
             // A placeholder from a config import: no broker, no env var.
             out.warnings.push(format!(
@@ -1061,7 +1072,7 @@ pub(crate) mod tests {
         // The other agent has none of them.
         assert!(effective(&c, OTHER, "q").unwrap().is_empty());
         // The env at start: the read grants, and GH_TOKEN for the github_token.
-        let l = launch(&c, &k, AGENT, "p").unwrap();
+        let l = launch(&c, &k, AGENT, "p", &Default::default()).unwrap();
         assert_eq!(l.env["X_GLOBAL"].as_str(), "global-X-Value-1");
         assert_eq!(l.env[GH_TOKEN].as_str(), "ghp_x");
         assert_eq!(l.env.len(), 2);
@@ -1102,7 +1113,7 @@ pub(crate) mod tests {
             }),
         );
         grant(&c, &s, "agent:p/a", Some(Level::Read), Some("DB")).unwrap();
-        let l = launch(&c, &k, AGENT, "p").unwrap();
+        let l = launch(&c, &k, AGENT, "p", &Default::default()).unwrap();
         let names: Vec<_> = l.env.keys().cloned().collect();
         assert_eq!(names, ["DB_HOST_NAME", "DB_PASSWORD"]);
     }
@@ -1160,7 +1171,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         }
-        let l = launch(&c, &k, AGENT, "p").unwrap();
+        let l = launch(&c, &k, AGENT, "p", &Default::default()).unwrap();
         let names: Vec<&String> = l.env.keys().collect();
         assert!(names.is_empty(), "{names:?}");
         for n in [

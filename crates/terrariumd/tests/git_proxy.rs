@@ -417,6 +417,23 @@ async fn the_proxy_enforces_push_deny_and_keeps_the_token() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(clones.path().join("copy/b.txt").exists());
 
+    // An update of the proxied checkout fetches from the daemon's mirror,
+    // with no token in the agent's repo (review P4).
+    let r = td
+        .post_as("p/w", "/api/repos/app/checkout", json!({"branch": "main"}))
+        .await;
+    assert!(r.ok()["action"].as_str().is_some(), "{:?}", r.body);
+    assert_eq!(r.body["push_via"], "proxy");
+    let mirrors: Vec<_> = std::fs::read_dir(td.state.join("repo-mirrors"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(mirrors.len(), 1);
+    assert_eq!(
+        git_ok(&ws, &["config", "--get", "remote.origin.url"]),
+        proxy_url
+    );
+
     // No credential: 401 with a Basic challenge. A bad token: 401. An
     // agent of another project: 403. A repo that is not there: 404.
     let refs = format!("{proxy_url}/info/refs?service=git-upload-pack");
@@ -447,12 +464,18 @@ async fn the_proxy_enforces_push_deny_and_keeps_the_token() {
         403
     );
 
-    // The forge saw the token on each request that the proxy sent (the
-    // first request is the daemon's own clone, which git sends with no
-    // credential first). Only the allowed push reached its receive-pack.
+    // The forge saw the token on each request that the proxy sent. Only the allowed push reached its receive-pack.
     let seen = seen.lock().unwrap().requests.clone();
-    assert!(!seen[0].1, "{seen:?}");
-    assert!(seen[1..].iter().all(|(_, ok)| *ok), "{seen:?}");
+    // The daemon's own clones (the workspace and the mirror) ask with no
+    // credential first; every other request has the token.
+    let bare: Vec<_> = seen.iter().filter(|(_, ok)| !ok).collect();
+    assert_eq!(bare.len(), 2, "{seen:?}");
+    assert!(bare.iter().all(|(l, _)| l.starts_with("GET ")), "{seen:?}");
+    assert!(
+        seen.iter()
+            .filter(|(l, _)| l.starts_with("POST"))
+            .all(|(_, ok)| *ok)
+    );
     let pushes = seen
         .iter()
         .filter(|(l, _)| l.starts_with("POST /app.git/git-receive-pack"))
@@ -559,14 +582,35 @@ async fn push_via_rules_at_attach_and_with_the_proxy_off() {
     assert_eq!(r.status.as_u16(), 409);
     assert!(!r.body.to_string().contains(FORGE_TOKEN));
     // With no push_via and the proxy off, an https repo with push_deny is
-    // direct: the helper answers as before.
+    // direct: the helper answers as before (with its own token: `tok` is
+    // use only, because `app` is a proxy repo). The answer says why
+    // push_deny is only the hook (review P8).
     td.post(
-        "/api/projects/p/repos",
-        json!({"name": "hub", "url": "https://git.example.com/a/hub.git",
-               "credential": "tok", "push_deny": ["op/*"]}),
+        "/api/credentials",
+        json!({"name": "tok2", "kind": "token", "value": FORGE_TOKEN}),
     )
     .await
     .ok();
+    let r = td
+        .post(
+            "/api/projects/p/repos",
+            json!({"name": "hub", "url": " https://git.example.com/a/hub.git",
+                   "credential": "tok2", "push_deny": ["op/*"]}),
+        )
+        .await;
+    assert!(
+        r.ok()["via"]
+            .as_str()
+            .unwrap()
+            .contains("the git proxy is off"),
+        "{:?}",
+        r.body
+    );
+    assert!(
+        r.body["warnings"]
+            .to_string()
+            .contains("only the pre-push hook")
+    );
     let r = td
         .post_as(
             "p/w",
@@ -589,11 +633,22 @@ async fn the_default_rule_proxies_https_repos_with_push_deny() {
     .await
     .ok();
     td.project("p").await;
-    for (name, deny) in [("guarded", json!(["op/*"])), ("open", json!([]))] {
+    td.post(
+        "/api/credentials",
+        json!({"name": "tok2", "kind": "token", "value": FORGE_TOKEN}),
+    )
+    .await
+    .ok();
+    // `shared` has the token of `guarded`; `open` has its own.
+    for (name, deny, tok) in [
+        ("guarded", json!(["op/*"]), "tok"),
+        ("open", json!([]), "tok2"),
+        ("shared", json!([]), "tok"),
+    ] {
         td.post(
             "/api/projects/p/repos",
             json!({"name": name, "url": format!("https://git.example.com/a/{name}.git"),
-                   "credential": "tok", "push_deny": deny}),
+                   "credential": tok, "push_deny": deny}),
         )
         .await
         .ok();
@@ -605,9 +660,399 @@ async fn the_default_rule_proxies_https_repos_with_push_deny() {
         .post_as("p/w", "/api/repos/credential", ask("guarded"))
         .await;
     assert_eq!(r.status.as_u16(), 409);
-    // With no push_deny: direct, as before the proxy.
+    // With no push_deny and its own token: direct, as before the proxy.
     let r = td
         .post_as("p/w", "/api/repos/credential", ask("open"))
         .await;
     assert_eq!(r.ok()["password"], FORGE_TOKEN);
+    // With no push_deny and the token of a proxied repo: use only.
+    let r = td
+        .post_as("p/w", "/api/repos/credential", ask("shared"))
+        .await;
+    assert_eq!(r.status.as_u16(), 409);
+}
+
+// ---- The attacks of the independent review (P1, P2, P3, P6): each one
+// must now be refused. ----
+
+fn bare(root: &Path, name: &str) {
+    git_ok(root, &["init", "-q", "--bare", "-b", "main", name]);
+    git_ok(&root.join(name), &["config", "http.receivepack", "true"]);
+}
+
+fn forge_ref(root: &Path, repo: &str, r: &str) -> Option<String> {
+    let o = git(&root.join(repo), &["rev-parse", "-q", "--verify", r]);
+    o.status
+        .success()
+        .then(|| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+}
+
+/// A forge with `app.git` (one commit on main), a daemon with the proxy,
+/// the global token `forge`, project `p` with agent `w`.
+async fn review_setup() -> (tempfile::TempDir, SocketAddr, TestDaemon, SocketAddr) {
+    let forge_dir = tempfile::tempdir().unwrap();
+    let root = forge_dir.path();
+    bare(root, "app.git");
+    let seed = root.join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    git_ok(&seed, &["init", "-q", "-b", "main"]);
+    git_ok(&seed, &["commit", "-q", "--allow-empty", "-m", "one"]);
+    git_ok(&seed, &["push", "-q", "../app.git", "main"]);
+    let (forge_addr, _seen) = start_forge(root).await;
+    let mut td = TestDaemon::start().await;
+    td.web.git_proxy_listen = Some("127.0.0.1:0".into());
+    td.boot(None, None).await;
+    let proxy_addr = td.daemon.as_ref().unwrap().git_proxy_addr.unwrap();
+    td.post(
+        "/api/credentials",
+        json!({"name": "forge", "kind": "token", "value": FORGE_TOKEN, "username": "bot"}),
+    )
+    .await
+    .ok();
+    td.project("p").await;
+    td.agent("p", "w", json!({})).await;
+    (forge_dir, forge_addr, td, proxy_addr)
+}
+
+async fn proxy_token(td: &TestDaemon, agent: &str, proxy_addr: SocketAddr) -> String {
+    td.post_as(
+        agent,
+        "/api/repos/credential",
+        json!({"protocol": "http", "host": proxy_addr.to_string()}),
+    )
+    .await
+    .ok()["password"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Review P1: a direct repo with the token of a proxied repo, a grant of
+/// that token, `secret get`, and the launch env give nothing: the token
+/// is use only for every route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_p1_a_shared_credential_stays_use_only() {
+    let (forge_dir, forge_addr, td, _proxy_addr) = review_setup().await;
+    let root = forge_dir.path();
+    bare(root, "docs.git");
+    td.post(
+        "/api/projects/p/repos",
+        json!({"name": "app", "url": format!("http://{forge_addr}/app.git"), "credential": "forge",
+               "push_deny": ["op/*"], "push_via": "proxy"}),
+    )
+    .await
+    .ok();
+    // The second repo: the same token, no push_deny (direct). The attach
+    // answer warns that it gets no token.
+    let r = td
+        .post(
+            "/api/projects/p/repos",
+            json!({"name": "docs", "url": format!("http://{forge_addr}/docs.git"),
+                   "credential": "forge"}),
+        )
+        .await;
+    assert_eq!(r.ok()["via"], "direct");
+    assert!(
+        r.body["warnings"].to_string().contains("use only"),
+        "{:?}",
+        r.body
+    );
+    let list = td.get("/api/projects/p/repos").await;
+    let app = list.ok().as_array().unwrap()[0].clone();
+    assert_eq!(app["via"], "proxy");
+    assert!(app["warnings"].to_string().contains("p/docs"), "{app:?}");
+
+    // The helper for the direct repo: refused, no token.
+    for path in ["app.git", "docs.git"] {
+        let r = td
+            .post_as(
+                "p/w",
+                "/api/repos/credential",
+                json!({"protocol": "http", "host": forge_addr.to_string(), "path": path}),
+            )
+            .await;
+        assert_eq!(r.status.as_u16(), 409, "{path}: {:?}", r.body);
+        assert!(!r.body.to_string().contains(FORGE_TOKEN));
+    }
+    // A read grant of the same token, for the forge host, with an env
+    // var: the helper, `secret get`, and the launch env give nothing.
+    td.put(
+        "/api/secrets/global/forge",
+        json!({"kind": "token", "fields": {"value": FORGE_TOKEN, "username": "bot",
+                                          "hosts": [forge_addr.to_string()]}}),
+    )
+    .await
+    .ok();
+    let r = td
+        .post(
+            "/api/secrets/global/forge/grants",
+            json!({"grantee": "agent:p/w", "level": "read", "env": "FORGE_TOKEN"}),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 201, "{:?}", r.body);
+    let r = td
+        .post_as(
+            "p/w",
+            "/api/repos/credential",
+            json!({"protocol": "https", "host": forge_addr.to_string()}),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 409, "{:?}", r.body);
+    assert!(!r.body.to_string().contains(FORGE_TOKEN));
+    let r = td
+        .post_as("p/w", "/api/agent/secrets/forge/get", json!({}))
+        .await;
+    assert_eq!(r.status.as_u16(), 409, "{:?}", r.body);
+    assert!(!r.body.to_string().contains(FORGE_TOKEN));
+    let r = td.post_as("p/w", "/api/agent/secrets/env", json!({})).await;
+    assert!(r.ok()["vars"].get("FORGE_TOKEN").is_none(), "{:?}", r.body);
+    assert!(!r.body.to_string().contains(FORGE_TOKEN));
+
+    // So the attack of the review fails: with no token, a push of a
+    // denied ref straight to the forge's app.git is refused.
+    let seed = root.join("seed");
+    let helpers = tempfile::tempdir().unwrap();
+    let empty = helper_script(helpers.path(), "none", "");
+    let o = agent_git(
+        &seed,
+        &empty,
+        &[
+            "push",
+            "--no-verify",
+            &format!("http://{forge_addr}/app.git"),
+            "main:refs/heads/op/x",
+        ],
+    );
+    assert!(!o.status.success());
+    assert!(forge_ref(root, "app.git", "refs/heads/op/x").is_none());
+}
+
+/// Review P3: push options are not advertised and are refused, a review
+/// ref for a denied branch (`refs/for/main%submit`) is refused, and a ref
+/// outside refs/heads, refs/tags, and refs/for is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_p3_push_options_and_magic_refs_are_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let (forge_dir, forge_addr, td, proxy_addr) = review_setup().await;
+    let root = forge_dir.path();
+    git_ok(
+        &root.join("app.git"),
+        &["config", "receive.advertisePushOptions", "true"],
+    );
+    let log = root.join("push.log");
+    let hook = root.join("app.git/hooks/pre-receive");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho \"options ${{GIT_PUSH_OPTION_COUNT:-0}}\" >> {l}\ncat >> {l}\n",
+            l = log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    td.post(
+        "/api/projects/p/repos",
+        json!({"name": "app", "url": format!("http://{forge_addr}/app.git"), "credential": "forge",
+               "push_deny": ["main"], "push_via": "proxy"}),
+    )
+    .await
+    .ok();
+    let token = proxy_token(&td, "p/w", proxy_addr).await;
+    let helpers = tempfile::tempdir().unwrap();
+    let helper = helper_script(helpers.path(), "agent", &token);
+    let proxy_url = format!("http://{proxy_addr}/git/p/app.git");
+    let seed = root.join("seed");
+    git_ok(&seed, &["commit", "-q", "--allow-empty", "-m", "two"]);
+
+    // The advertisement through the proxy has no push-options.
+    let (s, _, ad) = proxy_get(
+        &format!("{proxy_url}/info/refs?service=git-receive-pack"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(ad.contains("report-status"), "{ad}");
+    assert!(!ad.contains("push-options"), "{ad}");
+
+    // The review's push: options on an allowed branch, and a Gerrit
+    // submit into the denied main. git cannot send the options.
+    let o = agent_git(
+        &seed,
+        &helper,
+        &[
+            "push",
+            "--no-verify",
+            "-o",
+            "merge_request.create",
+            "-o",
+            "merge_request.target=main",
+            &proxy_url,
+            "HEAD:refs/heads/feature",
+            "HEAD:refs/for/main%submit",
+        ],
+    );
+    assert!(!o.status.success());
+    // With no options: the review ref for main is refused, so the whole
+    // push is.
+    let o = agent_git(
+        &seed,
+        &helper,
+        &[
+            "push",
+            "--no-verify",
+            &proxy_url,
+            "HEAD:refs/heads/feature",
+            "HEAD:refs/for/main%submit",
+        ],
+    );
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(!o.status.success(), "{err}");
+    assert!(err.contains("review ref for branch main"), "{err}");
+    // Other refs (Gerrit ACLs, drafts) are refused when push_deny is set.
+    let o = agent_git(
+        &seed,
+        &helper,
+        &["push", "--no-verify", &proxy_url, "HEAD:refs/meta/config"],
+    );
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(!o.status.success(), "{err}");
+    assert!(
+        err.contains("refs/heads/, refs/tags/, and refs/for/"),
+        "{err}"
+    );
+    // A client that sends push-options anyway: 400, nothing forwarded.
+    let a = "1".repeat(40);
+    let mut body = Vec::new();
+    let l = format!("{a} {a} refs/heads/feature\0report-status push-options\n");
+    body.extend(format!("{:04x}", l.len() + 4).into_bytes());
+    body.extend(l.into_bytes());
+    body.extend(b"0000merge_request.target=main0000");
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy_url}/git-receive-pack"))
+        .basic_auth("terrarium", Some(&token))
+        .header("content-type", "application/x-git-receive-pack-request")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+    // The forge saw none of it: no hook run, no ref.
+    assert!(
+        !log.exists(),
+        "{}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    assert!(forge_ref(root, "app.git", "refs/heads/feature").is_none());
+    // A tag and an allowed branch still go through.
+    let o = agent_git(
+        &seed,
+        &helper,
+        &[
+            "push",
+            "--no-verify",
+            &proxy_url,
+            "HEAD:refs/heads/feature",
+            "HEAD:refs/tags/v1",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(forge_ref(root, "app.git", "refs/tags/v1").is_some());
+}
+
+/// Review P2: a command list in 1-byte chunks. Before the fix, 128 KiB
+/// took about 50 s of CPU (release) and hit the 120 s limit in a debug
+/// build; the parse is now linear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_p2_one_byte_chunks_are_cheap() {
+    let (_forge_dir, _forge_addr, td, proxy_addr) = review_setup().await;
+    // A forge that is never reached: the last ref is denied.
+    td.post(
+        "/api/projects/p/repos",
+        json!({"name": "far", "url": "http://127.0.0.1:9/far.git", "credential": "forge",
+               "push_deny": ["main"], "push_via": "proxy"}),
+    )
+    .await
+    .ok();
+    let token = proxy_token(&td, "p/w", proxy_addr).await;
+    let a = "1".repeat(40);
+    let name = "x".repeat(900);
+    let mut body = Vec::new();
+    let mut i = 0;
+    while body.len() < 128 * 1024 {
+        let caps = if i == 0 { "\0report-status" } else { "" };
+        let l = format!("{a} {a} refs/heads/{name}{i}{caps}\n");
+        body.extend(format!("{:04x}", l.len() + 4).into_bytes());
+        body.extend(l.into_bytes());
+        i += 1;
+    }
+    let l = format!("{a} {a} refs/heads/main\n");
+    body.extend(format!("{:04x}", l.len() + 4).into_bytes());
+    body.extend(l.into_bytes());
+    body.extend(b"0000");
+    let chunks: Vec<Result<Bytes, std::io::Error>> = body
+        .iter()
+        .map(|b| Ok(Bytes::copy_from_slice(&[*b])))
+        .collect();
+    let t = std::time::Instant::now();
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "http://{proxy_addr}/git/p/far.git/git-receive-pack"
+        ))
+        .basic_auth("terrarium", Some(&token))
+        .header("content-type", "application/x-git-receive-pack-request")
+        .body(reqwest::Body::wrap_stream(futures_util::stream::iter(
+            chunks,
+        )))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let answer = resp.bytes().await.unwrap();
+    let took = t.elapsed();
+    assert_eq!(status, 200);
+    assert!(String::from_utf8_lossy(&answer).contains("ng refs/heads/main"));
+    // Most of this is the HTTP chunk handling of a debug build.
+    assert!(took < std::time::Duration::from_secs(30), "{took:?}");
+}
+
+/// Review P6: one agent holds at most 4 requests at one time; another
+/// agent still gets in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_p6_one_agent_cannot_take_every_slot() {
+    let (_forge_dir, forge_addr, td, proxy_addr) = review_setup().await;
+    td.post(
+        "/api/projects/p/repos",
+        json!({"name": "app", "url": format!("http://{forge_addr}/app.git"), "credential": "forge",
+               "push_deny": ["op/*"], "push_via": "proxy"}),
+    )
+    .await
+    .ok();
+    td.agent("p", "v", json!({})).await;
+    let token = proxy_token(&td, "p/w", proxy_addr).await;
+    let other = proxy_token(&td, "p/v", proxy_addr).await;
+    let url = format!("http://{proxy_addr}/git/p/app.git/git-receive-pack");
+    // Four pushes that never send their command list.
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let (url, token) = (url.clone(), token.clone());
+        held.push(tokio::spawn(async move {
+            let never = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+            let _ = reqwest::Client::new()
+                .post(url)
+                .basic_auth("terrarium", Some(&token))
+                .body(reqwest::Body::wrap_stream(never))
+                .send()
+                .await;
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let refs = format!("http://{proxy_addr}/git/p/app.git/info/refs?service=git-upload-pack");
+    let (s, _, body) = proxy_get(&refs, Some(&token)).await;
+    assert_eq!(s, 503, "{body}");
+    assert!(body.contains("of this agent"), "{body}");
+    let (s, _, body) = proxy_get(&refs, Some(&other)).await;
+    assert_eq!(s, 200, "{body}");
+    for h in held {
+        h.abort();
+    }
 }

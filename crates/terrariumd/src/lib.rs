@@ -313,6 +313,7 @@ pub async fn start_with_usage(
         tasks.push(task);
         git_proxy_addr = Some(local);
     }
+    warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
@@ -331,6 +332,24 @@ pub async fn start_with_usage(
         git_proxy_addr,
         tasks,
     })
+}
+
+/// Log a warning for each repo with `push_deny` whose checkouts go
+/// straight to the forge, where `push_deny` is only the client hook
+/// (review P8).
+async fn warn_direct_push_deny(state: &Shared) {
+    let proxy_on = state.git_proxy.is_on();
+    let found = state.db.read(store::repos::all).await;
+    match found {
+        Ok(all) => {
+            for r in all {
+                if let Some(why) = git_proxy::direct_reason(&r, proxy_on) {
+                    warn!(repo = %format!("{}/{}", r.project, r.name), "{why}");
+                }
+            }
+        }
+        Err(e) => warn!("cannot read the repos: {e}"),
+    }
 }
 
 /// Start the usage subsystem (PLAN §16): the probe scheduler, the quota

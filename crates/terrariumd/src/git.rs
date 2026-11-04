@@ -135,6 +135,11 @@ pub struct Checkout {
     pub hooks: Hooks,
     /// The `origin` URL that a workspace checkout gets ([`Origin`]).
     pub origin: Origin,
+    /// An update fetches from this local repo of the daemon (the mirror of
+    /// a proxied repo), with no credential, not from `url` with the
+    /// secret. So no git command with the token runs in a repo that the
+    /// agent controls (review P4). A clone still uses `url` and the secret.
+    pub fetch_from: Option<PathBuf>,
 }
 
 /// The `origin` URL of a workspace checkout (issue #11, PLAN §9 "The git
@@ -1353,6 +1358,7 @@ impl GitRunner {
             timeout,
             hooks: Hooks::default(),
             origin: Origin::default(),
+            fetch_from: None,
         };
         Runner::new(&c).map(Self)
     }
@@ -2055,7 +2061,18 @@ fn update(
     progress: &mut dyn FnMut(&str),
 ) -> Result<Outcome, GitError> {
     check_workspace_repo(&c.dest)?;
-    let r = Runner::new(c)?;
+    // From the daemon's mirror: no secret in this run at all.
+    let no_secret;
+    let (r, from) = match &c.fetch_from {
+        Some(m) => {
+            no_secret = Checkout {
+                secret: None,
+                ..c.clone()
+            };
+            (Runner::new(&no_secret)?, m.to_string_lossy().into_owned())
+        }
+        None => (Runner::new(c)?, c.url.clone()),
+    };
     check_config_snapshot(c, &r)?;
     let dest = &c.dest;
     let current = r.branch(dest);
@@ -2076,7 +2093,7 @@ fn update(
     if let Some(d) = depth {
         args.extend(["--depth", d]);
     }
-    args.extend(["--", c.url.as_str(), refspec.as_str()]);
+    args.extend(["--", from.as_str(), refspec.as_str()]);
     r.git(Some(dest), &args, progress)?;
     r.write_local_config(dest)?;
     r.write_origin(c)?;
@@ -2207,6 +2224,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             hooks: Hooks::default(),
             origin: Origin::default(),
+            fetch_from: None,
         }
     }
 
@@ -2817,6 +2835,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             hooks: Hooks::default(),
             origin: Origin::default(),
+            fetch_from: None,
         };
         let r = Runner::new(&c).unwrap();
         let helper = r

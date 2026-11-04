@@ -48,9 +48,16 @@ async fn show(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Repo>> {
     let context = actor.project().map(str::to_owned);
+    let proxy_on = state.git_proxy.is_on();
     let r = state
         .db
-        .read(move |c| repos::resolve(c, &id, context.as_deref()))
+        .read(move |c| {
+            let r = repos::resolve(c, &id, context.as_deref())?;
+            let mut one = [r];
+            crate::git_proxy::annotate(c, &mut one, proxy_on)?;
+            let [r] = one;
+            Ok(r)
+        })
         .await?;
     policy::read_project(&actor, &r.project)?;
     Ok(Json(r))
@@ -181,7 +188,8 @@ async fn checkout_inner(
         (PushVia::Proxy, Some(url)) => git::Origin::Proxy(url),
         (PushVia::Proxy, None) => {
             return Err(ApiError::conflict(format!(
-                "repo `{}` has push_via = proxy, but the git proxy is off                  (TERRARIUM_GIT_PROXY_LISTEN); turn it on, or set push_via = direct",
+                "repo `{}` has push_via = proxy, but the git proxy is off \
+                 (TERRARIUM_GIT_PROXY_LISTEN); turn it on, or set push_via = direct",
                 repo.name
             )));
         }
@@ -203,6 +211,15 @@ async fn checkout_inner(
             .ok_or_else(|| {
                 ApiError::internal(format!("cannot create {}", agent.agent.workspace.display()))
             })?;
+    // An update of a proxied repo fetches from the daemon's mirror, so
+    // the token never goes to git in the agent's repo (review P4).
+    let has_git = std::fs::symlink_metadata(workspace.join(&dir).join(".git")).is_ok();
+    let fetch_from = if has_git && matches!(origin, git::Origin::Proxy(_)) {
+        super::repo_trees::ensure_mirror(state, repo, true).await?;
+        Some(super::repo_trees::mirror_dir(state, repo))
+    } else {
+        None
+    };
     let c = Checkout {
         url: repo.url.clone(),
         dest: workspace.join(&dir),
@@ -214,6 +231,7 @@ async fn checkout_inner(
         timeout: git::DEFAULT_TIMEOUT,
         hooks: repo.hooks(),
         origin,
+        fetch_from,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -540,11 +558,27 @@ async fn credential_helper(
     // A proxied repo: the token is "use only", it stays in the daemon
     // (security review S3). The checkout's origin is the proxy; an old
     // checkout still names the forge.
-    if crate::git_proxy::push_via(&repo, state.git_proxy.is_on()) == PushVia::Proxy {
+    let proxy_on = state.git_proxy.is_on();
+    if crate::git_proxy::push_via(&repo, proxy_on) == PushVia::Proxy {
         return Err(ApiError::conflict(format!(
-            "repo `{}` goes through the Terrarium git proxy, and its token stays in the daemon;              run `terrarium repo checkout {}` to point origin at the proxy",
+            "repo `{}` goes through the Terrarium git proxy, and its token stays in the daemon; \
+             run `terrarium repo checkout {}` to point origin at the proxy",
             repo.name, repo.name
         )));
+    }
+    // "Use only" is a property of the secret (review P1): a direct repo
+    // with the token of a proxied repo does not give it out either.
+    let r2 = repo.clone();
+    let shared = state
+        .db
+        .read(move |c| {
+            let id = crate::git_proxy::secret_of_repo(c, &r2)?;
+            let use_only = crate::git_proxy::use_only_secrets(c, proxy_on)?;
+            Ok(id.filter(|id| use_only.contains(id)))
+        })
+        .await?;
+    if let Some((scope, name)) = shared {
+        return Err(crate::git_proxy::use_only_error(&scope, &name));
     }
     let name = repo.credential.clone().unwrap_or_default();
     // A `token` or a `github_token` of the project, else a global one.
