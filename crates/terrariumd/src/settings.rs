@@ -8,7 +8,12 @@ use crate::sandbox::SandboxMode;
 
 /// The Terrarium daemon. Every option also reads an env var.
 #[derive(Debug, Parser)]
-#[command(name = "terrariumd", version, about)]
+#[command(
+    name = "terrariumd",
+    version = terrarium_version::FULL,
+    long_version = terrarium_version::LONG,
+    about
+)]
 pub struct Settings {
     /// The Unix socket for the operator CLI. No token is needed on it.
     #[arg(long, env = paths::ENV_SOCKET, default_value_os_t = paths::api_socket())]

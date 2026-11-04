@@ -7,6 +7,7 @@ members = [
     "crates/terrarium-host",
     "crates/terrarium-runner",
     "crates/terrarium-compat",
+    "crates/terrarium-version",
     "crates/adapters/claude",
     "crates/adapters/codex",
     "crates/adapters/copilot",
@@ -24,6 +25,8 @@ repository = "https://github.com/wiltaylor/terrarium"
 # Internal crates
 terrarium-core = { path = "crates/terrarium-core" }
 terrarium-runner = { path = "crates/terrarium-runner" }
+# The build version of the binaries (`<version>+<git ref>`); only bins use it.
+terrarium-version = { path = "crates/terrarium-version" }
 terrarium-adapter-claude = { path = "crates/adapters/claude" }
 terrarium-adapter-codex = { path = "crates/adapters/codex" }
 terrarium-adapter-copilot = { path = "crates/adapters/copilot" }

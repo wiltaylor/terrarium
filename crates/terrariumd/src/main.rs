@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         return dry_run(&settings, supervisor_config(sandbox), agent).await;
     }
 
-    info!(version = terrarium_core::VERSION, sandbox = %sandbox.mode, "terrariumd starting");
+    info!(version = terrarium_version::FULL, sandbox = %sandbox.mode, "terrariumd starting");
     let bwrap = sandbox.check().map_err(anyhow::Error::msg)?;
     if sandbox.mode == sandbox::SandboxMode::Bwrap {
         info!(bwrap = %bwrap.display(), "sandbox ready");

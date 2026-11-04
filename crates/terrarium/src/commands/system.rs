@@ -196,6 +196,48 @@ pub async fn whoami(ctx: &Ctx) -> anyhow::Result<()> {
     })
 }
 
+/// `version`: this CLI's build and `GET /api/system/version`. A daemon
+/// that cannot answer (older, or down) is an error after the client line.
+pub async fn version(ctx: &Ctx) -> anyhow::Result<()> {
+    let client = terrarium_version::FULL;
+    let daemon = match ctx.api.get("/api/system/version", vec![]).await {
+        Ok(d) => d,
+        Err(e) => {
+            ctx.line(format!("client: terrarium {client}"));
+            return Err(e);
+        }
+    };
+    let daemon_version = daemon["version"].as_str().unwrap_or_default().to_owned();
+    let stale = terrarium_version::is_stale(client, &daemon_version);
+    let v = json!({
+        "client": {
+            "version": client,
+            "git_ref": terrarium_version::GIT_REF,
+            "dirty": terrarium_version::DIRTY,
+            "build_time": terrarium_version::BUILD_TIME,
+        },
+        "daemon": daemon,
+        "stale": stale,
+    });
+    ctx.emit(&v, |c, v| {
+        c.line(format!(
+            "client: terrarium {client} (built {})",
+            terrarium_version::BUILD_TIME
+        ));
+        c.line(format!(
+            "daemon: terrariumd {} (built {})",
+            field(&v["daemon"], "version"),
+            field(&v["daemon"], "build_time")
+        ));
+        if stale {
+            c.line(format!(
+                "warning: this CLI is built from another ref than the daemon ({client} vs \
+                 {daemon_version}). Install the CLI of the daemon's build"
+            ));
+        }
+    })
+}
+
 const TARGET_COLS: &[(&str, &str)] = &[
     ("NAME", "name"),
     ("KIND", "kind"),
@@ -207,6 +249,19 @@ const TARGET_COLS: &[(&str, &str)] = &[
     ("ONLINE", "online"),
     ("KEY", "key"),
 ];
+
+/// The STALE cell of `admin host ls`: `STALE` for a host agent built from
+/// another ref than the daemon (`stale`, docs/api.md §17), else empty.
+fn with_stale_mark(items: &[Value]) -> Vec<Value> {
+    items
+        .iter()
+        .map(|h| {
+            let mut h = h.clone();
+            h["stale_mark"] = if h["stale"] == true { "STALE" } else { "" }.into();
+            h
+        })
+        .collect()
+}
 
 /// `host_online` as a word for the table: `online`, `offline`, or `-` (ssh).
 /// Also the KEY cell: the credential and the fingerprint of its key.
@@ -752,13 +807,14 @@ pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
             ctx.emit(&v, |c, v| {
                 print_table(
                     c,
-                    as_items(v),
+                    &with_stale_mark(as_items(v)),
                     &[
                         ("NAME", "name"),
                         ("STATUS", "status"),
                         ("OS", "os"),
                         ("ARCH", "arch"),
                         ("VERSION", "version"),
+                        ("STALE", "stale_mark"),
                         ("SESSIONS", "sessions"),
                         ("LAST SEEN", "last_seen"),
                         ("OFFLINE REASON", "offline_reason"),
@@ -1430,7 +1486,17 @@ fn print_host(ctx: &Ctx, v: &Value) {
         ("online", field(v, "online")),
         ("sessions", field(v, "sessions")),
         ("os", format!("{}/{}", field(v, "os"), field(v, "arch"))),
-        ("version", field(v, "version")),
+        (
+            "version",
+            if v["stale"] == true {
+                format!(
+                    "{} (STALE: another build than the daemon)",
+                    field(v, "version")
+                )
+            } else {
+                field(v, "version")
+            },
+        ),
         ("connected_at", field(v, "connected_at")),
         ("created_at", field(v, "created_at")),
         ("first_used_at", field(v, "first_used_at")),

@@ -255,7 +255,7 @@ project nodes use `app/TreeRoot.tsx`, one open set in `localStorage`,
 and the keyboard map in `app/treeNav.ts`. Settings
 (`features/settings/SettingsPage.tsx`) is one page with a tab for each of
 Account, Subscriptions, Secrets, Templates, System prompts, Skills, Targets,
-Harness config, and Hosts. Each tab is a route under `/settings`. The Skills tab also has the
+Harness config, Hosts, and Software. Each tab is a route under `/settings`. The Skills tab also has the
 editor of one skill at `/settings/skills/<name>`. A skill whose `SKILL.md`
 has `metadata` `terrarium-default: "true"` shows a read-only "default" badge
 there. The skills picker of the agent and template forms
@@ -957,10 +957,11 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/schedules` | All schedules, grouped by scope | `GET /api/schedules` and the calls above |
 | `/p/:project/board/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; webhook deliveries, redeliver, and test send; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET .../deliveries`, `POST .../deliveries/{id}/redeliver`, `POST .../test`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §19.5, §20) |
 | `/settings/targets` | Settings, Targets tab: targets, lifecycle, snapshots (list, take, restore, delete), exec console, leases (grant, extend, revoke, history), the resource limits chip (`limits_info.summary`, for example `2 CPU · 4G`; red with the host agent's `problem`), and the limit fields of the New target dialog for `host` and `docker` targets | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `GET .../snapshots`, `DELETE .../snapshots/{snap}`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
-| `/settings/hosts` | Settings, Hosts tab: host agents: status, capabilities (also the `limits` or `no limits` chip of `capabilities.limits`, with the controllers or the reason as the tooltip), add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
+| `/settings/hosts` | Settings, Hosts tab: host agents: status, the version with a `stale` chip for a host agent of another build than the daemon (`stale`, docs/api.md §17.1), capabilities (also the `limits` or `no limits` chip of `capabilities.limits`, with the controllers or the reason as the tooltip), add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/logs/events` | Logs, Events tab: event log with history; all projects or the selected one, kind and agent filters | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/logs/audit` | Logs, Audit tab: audit log, newest first, live mode; actor, action, and project filters | `GET /api/audit?order=desc&actor=&action=&project=`, `audit` frames of the events socket |
 | `/settings/account` | Settings, Account tab: session mode, end time, what the browser keeps; password; sign out, sign out everywhere | `GET`, `DELETE /api/session`, `DELETE /api/sessions`, `PUT /api/auth/password` |
+| `/settings/software` | Settings, Software tab: the daemon's build (version, git ref, `dirty`, build time) and the stale host agents, with a link to Hosts. Self-update (#19) extends it | `GET /api/system/version` (docs/api.md §4), `GET /api/hosts` |
 | `/settings/harness` | Settings, Harness config tab: the config repo, its changes and diffs, commit, sync, pull, push, secret grants to approve | `GET /api/config/...` (docs/api.md §25) |
 | `/settings/secrets` | Settings, Secrets tab: every secret that the caller manages, with a scope filter | `GET /api/secrets`, `POST /api/secrets`, `PUT`, `DELETE /api/secrets/{scope}/{name}`, `POST .../generate\|reveal`, `GET .../grants` |
 | `/settings/templates` | Settings, Templates tab: the global templates and those of each project, with a scope filter | `GET`, `POST /api/templates`, `PATCH`, `DELETE /api/templates/{key}`, `template` events |

@@ -10,7 +10,10 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-      args: { UID: "${TERRARIUM_UID:-1000}", GID: "${TERRARIUM_GID:-1000}" }
+      # TERRARIUM_GIT_REF: the git ref of the build (`terrarium version`).
+      # The deploy wrapper sets it from src/.deployed-ref, `just docker::up`
+      # from git. Empty: the binaries report `+unknown`.
+      args: { UID: "${TERRARIUM_UID:-1000}", GID: "${TERRARIUM_GID:-1000}", TERRARIUM_GIT_REF: "${TERRARIUM_GIT_REF:-}" }
     image: ${TERRARIUM_IMAGE:-terrarium:dev}
     restart: unless-stopped
     # The entrypoint stops terrariumd, then gives the agent runners

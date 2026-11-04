@@ -3859,6 +3859,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "terrarium-core",
+ "terrarium-version",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -3990,6 +3991,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "terrarium-core",
+ "terrarium-version",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -4019,12 +4021,17 @@ dependencies = [
  "terrarium-adapter-pi",
  "terrarium-core",
  "terrarium-runner",
+ "terrarium-version",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "vt100",
 ]
+
+[[package]]
+name = "terrarium-version"
+version = "0.1.0"
 
 [[package]]
 name = "terrariumd"
@@ -4075,6 +4082,7 @@ dependencies = [
  "terrarium-core",
  "terrarium-host",
  "terrarium-runner",
+ "terrarium-version",
  "terrariumd",
  "thiserror 2.0.21",
  "tokio",

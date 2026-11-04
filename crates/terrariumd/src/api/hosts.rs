@@ -58,6 +58,13 @@ fn view(state: &Shared, h: Host) -> Value {
         }
         v["connected_at"] = info.connected_at.into();
     }
+    // A host agent built from another ref than the daemon (docs/api.md
+    // §17): reinstall it. `false` when its version or the daemon ref is
+    // not known.
+    v["stale"] = v["version"]
+        .as_str()
+        .is_some_and(|ver| terrarium_version::is_stale(ver, terrarium_version::FULL))
+        .into();
     // The flat summary for the dashboard and for policy checks.
     let caps: terrarium_core::protocol::HostCapabilities =
         serde_json::from_value(v["capabilities"].clone()).unwrap_or_default();

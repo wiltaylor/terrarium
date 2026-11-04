@@ -42,6 +42,7 @@ path = "tests/runner.rs"
 
 [dependencies]
 terrarium-core.workspace = true
+terrarium-version.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

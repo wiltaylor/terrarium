@@ -4,6 +4,8 @@
 // that shows once, and revoke. The running targets of each host against
 // its `max_running_targets` (docs/api.md §17.3), counted as the daemon
 // counts them, and `work_dir` and `instances_dir` when the API reports them.
+// A host agent built from another ref than the daemon (`stale`) has a
+// "stale" chip next to its version: reinstall it.
 // "Add host" makes an enrol token and shows the one line that installs the
 // host agent on the machine (`GET /install/host.sh`, docs/api.md §17.9).
 //
@@ -20,6 +22,7 @@ import { runningLabel, runningOnHost } from "../../lib/target-runtime";
 import { api } from "../../stores";
 import { hostDisplayLabel, hostDisplayOn } from "../targets/display";
 import { hostLimitsChip } from "../../lib/limits";
+import { staleTitle } from "../../lib/build-version";
 
 /** The chips of a host's capabilities: `docker 29.8.0`, `vmlab 0.30.0-alpha`. */
 export function capabilityChips(h: Pick<Host, "capabilities">): { label: string; present: boolean }[] {
@@ -41,6 +44,8 @@ export default function HostsPage() {
     void refetchHosts();
     void refetchTargets();
   };
+  // The daemon's build, for the tooltip of a stale host agent.
+  const [daemon] = createResource(() => api.systemVersion().catch(() => null));
   const [error, setError] = createSignal<unknown>(null);
   const [adding, setAdding] = createSignal(false);
   const t = setInterval(() => refetch(), 15_000);
@@ -157,7 +162,15 @@ export default function HostsPage() {
                         }}
                       </Show>
                     </td>
-                    <td class="mono small">{h.version ?? "—"}</td>
+                    <td class="mono small">
+                      {h.version ?? "—"}
+                      <Show when={h.stale}>
+                        {" "}
+                        <span class="chip warn" aria-label={`${h.name} is stale`} title={staleTitle(h.version, daemon()?.version)}>
+                          stale
+                        </span>
+                      </Show>
+                    </td>
                     <td>
                       {h.status === "online" ? "now" : h.last_seen ? ago(h.last_seen, now()) : "never"}
                       <Show when={h.sessions}>

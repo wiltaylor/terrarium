@@ -100,7 +100,7 @@ import type {
   ResetState,
 } from "../types";
 import { paginate, type PageQuery } from "../../lib/paging";
-import { fakeUlid, seed, type MockWorld, type UsageRow } from "./data";
+import { fakeUlid, MOCK_DAEMON_VERSION, seed, type MockWorld, type UsageRow } from "./data";
 import { harnessUpdateKind } from "../../lib/harness-update";
 import { FakePty } from "./pty";
 import { createScheduleMock, type ScheduleCaller } from "./schedules";
@@ -2133,10 +2133,15 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           saveCookie();
         }),
     },
+    systemVersion: () =>
+      reply(() => {
+        const [cargo_version = "", git_ref = "unknown"] = MOCK_DAEMON_VERSION.split("+");
+        return { version: MOCK_DAEMON_VERSION, cargo_version, git_ref, dirty: false, build_time: new Date(startedAt - 86_400_000).toISOString().replace(/\.\d+Z$/, "Z") };
+      }),
     health: () =>
       reply(() => ({
         status: "ok",
-        version: "0.1.0-mock",
+        version: MOCK_DAEMON_VERSION,
         uptime: Math.round((now() - startedAt) / 1000) + 3600,
         started_at: new Date(startedAt - 3600_000).toISOString(),
         definitions: { projects: 1, agents: 1, targets: 0, subscriptions: 0 },
@@ -4056,7 +4061,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const offline_reason = opts?.enrol
             ? `waiting for the host agent to dial in with its enrol token (it runs out at ${enrolUntil})`
             : "never connected: the host agent has not reached the daemon. Check `daemon_url` in /etc/terrarium-host/config.toml and `journalctl -u terrarium-host` on the host";
-          const host: Host = { name, id, host_id: id, status: "offline", online: false, offline_reason, sessions: 0, capabilities: {}, summary: { os: "", arch: "", docker: false, vmlab: false }, last_seen: null, os: null, arch: null, version: null, created_at: iso(), created_by: "operator" };
+          const host: Host = { name, id, host_id: id, status: "offline", online: false, offline_reason, sessions: 0, capabilities: {}, summary: { os: "", arch: "", docker: false, vmlab: false }, last_seen: null, os: null, arch: null, version: null, stale: false, created_at: iso(), created_by: "operator" };
           w.hosts.push(host);
           w.hostTokens[name] = token;
           audit("host.create", name, undefined, { host_id: id, token_kind: enrol ? "enrol" : "host" });

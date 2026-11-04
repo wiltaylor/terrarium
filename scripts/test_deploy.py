@@ -369,6 +369,9 @@ class Names(unittest.TestCase):
         self.assertIn('--env-file "$d/.env"', w)
         self.assertIn('export TERRARIUM_DATA_DIR="$d"', w)
         self.assertIn('cd "$src"', w)  # compose reads the seccomp profile from the cwd
+        # The image build gets the deployed ref (#16): the source has no .git.
+        self.assertIn("ref=$(sed -n 's/^ref=//p' \"$src/.deployed-ref\"", w)
+        self.assertIn('export TERRARIUM_GIT_REF="$ref"', w)
 
 
 class Flows(unittest.TestCase):
@@ -670,7 +673,7 @@ class Scripts(unittest.TestCase):
         stub.write_text(
             "#!/bin/sh\n"
             f'echo "$PWD|TERRARIUM_DATA_DIR=$TERRARIUM_DATA_DIR|TERRARIUM_IMAGE=$TERRARIUM_IMAGE|'
-            f'TERRARIUM_PORT=${{TERRARIUM_PORT:-unset}}|$*" >> {shlex.quote(log)}\n'
+            f'TERRARIUM_PORT=${{TERRARIUM_PORT:-unset}}|TERRARIUM_GIT_REF=${{TERRARIUM_GIT_REF-unset}}|$*" >> {shlex.quote(log)}\n'
             'case "$1 $2" in\n'
             '  "info "*) exit 0 ;;\n'
             '  "compose version") echo 2.29.1 ;;\n'
@@ -691,13 +694,15 @@ class Scripts(unittest.TestCase):
             Path(d, "src", ".deployed-ref").write_text("ref=a\nimage=terrarium-inst:aaa\n")
             Path(d, "src.new", ".deployed-ref").write_text("ref=b\nimage=terrarium-inst:bbb\n")
             env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
-                       TERRARIUM_PORT="8080", TERRARIUM_IMAGE="terrarium:dev")
+                       TERRARIUM_PORT="8080", TERRARIUM_IMAGE="terrarium:dev",
+                       TERRARIUM_GIT_REF="caller")
             # No .deployed-ref: the wrapper still runs, with a fallback image.
             os.makedirs(os.path.join(d, "src.prev"))
             r = subprocess.run([os.path.join(d, dp.WRAPPER), "ps"], env=dict(env, TERRARIUM_SRC=os.path.join(d, "src.prev")),
                                capture_output=True, text=True, check=False)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("TERRARIUM_IMAGE=terrarium-inst:latest|", Path(log).read_text())
+            self.assertIn("|TERRARIUM_GIT_REF=|", Path(log).read_text())  # no ref: `+unknown`
             os.remove(log)
             self.assertEqual(self.sh(dp.BUILD, d, env=env).returncode, 0)
             self.assertEqual(self.sh(dp.UP, d, env=env).returncode, 0)
@@ -711,6 +716,10 @@ class Scripts(unittest.TestCase):
             self.assertIn(f"up -d --wait --wait-timeout {dp.UP_TIMEOUT_S}", up)
             # The caller's TERRARIUM_* (just exports them) do not reach compose.
             self.assertIn("TERRARIUM_PORT=unset", up)
+            # The ref of .deployed-ref goes to the image build (compose.yaml
+            # build arg TERRARIUM_GIT_REF), not the caller's.
+            self.assertIn("|TERRARIUM_GIT_REF=b|", build)
+            self.assertIn("|TERRARIUM_GIT_REF=a|", up)
 
     def test_probe(self):
         with tempfile.TemporaryDirectory() as tmp:

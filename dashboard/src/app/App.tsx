@@ -39,6 +39,7 @@ const DbRecordsPage = lazy(() => import("../features/db/DbRecordsPage"));
 const LogsPage = lazy(() => import("../features/logs/LogsPage"));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
 const AccountPage = lazy(() => import("../features/settings/AccountPage"));
+const SoftwarePage = lazy(() => import("../features/settings/SoftwarePage"));
 const ConfigPage = lazy(() => import("../features/config/ConfigPage"));
 const SkillsPage = lazy(() => import("../features/skills/SkillsPage"));
 const SessionPage = lazy(() => import("../features/sessions/SessionPage"));
@@ -99,6 +100,7 @@ export function App() {
           <Route path="/targets" component={TargetsPage} />
           <Route path="/harness" component={ConfigPage} />
           <Route path="/hosts" component={HostsPage} />
+          <Route path="/software" component={SoftwarePage} />
         </Route>
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/dashboard" component={DashboardPage} />

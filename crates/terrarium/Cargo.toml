@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 terrarium-core = { workspace = true, features = ["wcl"] }
+terrarium-version.workspace = true
 tokio.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true

@@ -12,6 +12,7 @@ fake-supervisor = []
 
 [dependencies]
 terrarium-core = { workspace = true, features = ["wcl"] }
+terrarium-version.workspace = true
 terrarium-runner.workspace = true
 terrarium-adapter-claude.workspace = true
 terrarium-adapter-codex.workspace = true

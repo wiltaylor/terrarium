@@ -168,6 +168,9 @@ jobs:
           file: docker/Dockerfile
           target: host-export
           outputs: type=local,dest=out
+          # `terrarium-host --version`: <version>+<commit> (crates/terrarium-version).
+          # The commit, not scripts/build-ref.sh: the stamp step leaves a dirty tree.
+          build-args: TERRARIUM_GIT_REF=${{ github.sha }}
           cache-from: type=gha,scope=host
           cache-to: type=gha,scope=host,mode=max
       - name: Stage asset

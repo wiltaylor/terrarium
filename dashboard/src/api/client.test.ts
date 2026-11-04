@@ -126,6 +126,7 @@ describe("createHttpApi", () => {
     await api.targets.action("TGT-1", "snapshot");
     await api.targets.snapshots("vm", { scope: "lab", agent: "terra/w1" });
     await api.targets.deleteSnapshot("vm", "pre up", { force: true });
+    await api.systemVersion();
 
     expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
       "GET /api/health",
@@ -141,6 +142,7 @@ describe("createHttpApi", () => {
       "POST /api/targets/TGT-1/snapshot",
       "GET /api/targets/vm/snapshots",
       "DELETE /api/targets/vm/snapshots/pre%20up",
+      "GET /api/system/version",
     ]);
     expect(calls[11]!.opts?.query).toEqual({ scope: "lab", agent: "terra/w1" });
     expect(calls[12]!.opts?.query).toEqual({ force: true });

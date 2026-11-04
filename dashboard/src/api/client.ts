@@ -96,6 +96,7 @@ import type {
   HarnessUpdateOptions,
   HarnessUpdateResult,
   Health,
+  SystemVersion,
   Host,
   HostMetricsHistory,
   InboxCounts,
@@ -209,6 +210,8 @@ import type {
 
 export interface Api {
   health(): Promise<Health>;
+  /** `GET /api/system/version`: the daemon's build (version, git ref, build time). */
+  systemVersion(): Promise<SystemVersion>;
   /**
    * `GET /api/harnesses`: each harness against its pin. `refresh` runs the binaries
    * again (and asks npm again); `latest` adds the latest npm release and the update kind.
@@ -974,6 +977,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
 
   return {
     health: () => get("/api/health"),
+    systemVersion: () => get("/api/system/version"),
     harnesses: (refresh, latest) => {
       const q: Query = {};
       if (refresh) q.refresh = true;

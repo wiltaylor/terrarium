@@ -5,6 +5,8 @@ import '../shared.just'
 image := env("TERRARIUM_IMAGE", "terrarium:dev")
 uid := env("TERRARIUM_UID", "1000")
 gid := env("TERRARIUM_GID", "1000")
+# The git ref of the build for the binaries' version (scripts/build-ref.sh); compose reads it too.
+export TERRARIUM_GIT_REF := env("TERRARIUM_GIT_REF", `scripts/build-ref.sh`)
 
 [default, private]
 main:
@@ -13,7 +15,7 @@ main:
 # Build the Terrarium image (daemon, CLI, dashboard, Node); the harnesses are not in it: the container installs them into ./tools
 [group('image')]
 image-build: require-docker
-	docker build -f docker/Dockerfile --build-arg UID={{uid}} --build-arg GID={{gid}} -t {{image}} .
+	docker build -f docker/Dockerfile --build-arg UID={{uid}} --build-arg GID={{gid}} --build-arg TERRARIUM_GIT_REF={{TERRARIUM_GIT_REF}} -t {{image}} .
 
 # Tag the image and push it to a registry of your own, for example `just docker::image-push registry.lan/terrarium:0.1.0` (CI pushes no image: see `just deploy`)
 [group('image')]

@@ -632,7 +632,7 @@ pub fn create(roots: &Roots, opts: &CreateOptions) -> anyhow::Result<Created> {
             kind: opts.kind,
             created_at,
             base: base_ref.clone(),
-            terrarium_version: terrarium_core::VERSION.into(),
+            terrarium_version: terrarium_version::FULL.into(),
             db_user_version,
             contains_secrets: true,
             roots: root_names.clone(),

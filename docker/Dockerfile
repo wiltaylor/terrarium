@@ -25,6 +25,11 @@
 #                and the static terrarium-host with its SHA-256 for the host installer
 
 ARG RUST_IMAGE=rust:1.97-trixie
+# The git ref of the build (crates/terrarium-version): `<commit>` or
+# `<commit>-dirty`. The build context has no .git, so the caller passes it:
+# `just docker::image-build` and `just host::build` (scripts/build-ref.sh),
+# the deploy wrapper (src/.deployed-ref), and CI. Empty: `+unknown`.
+ARG TERRARIUM_GIT_REF=
 # harnesses.toml [node] image.
 ARG NODE_IMAGE=node:22.23.4-trixie-slim
 
@@ -38,6 +43,7 @@ RUN npm run build && test -d dist
 
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS rust
+ARG TERRARIUM_GIT_REF
 WORKDIR /src
 COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
@@ -56,6 +62,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS host-build
+ARG TERRARIUM_GIT_REF
 RUN apt-get update \
     && apt-get install -y --no-install-recommends musl-tools \
     && rm -rf /var/lib/apt/lists/* \

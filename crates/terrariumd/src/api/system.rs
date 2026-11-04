@@ -55,7 +55,7 @@ pub async fn health(State(state): State<Shared>) -> Json<Health> {
     let d = state.definitions();
     Json(Health {
         status: "ok".into(),
-        version: terrarium_core::VERSION.into(),
+        version: terrarium_version::FULL.into(),
         uptime: state.started.elapsed().as_secs(),
         started_at: state.started_at,
         definitions: DefinitionCounts {
@@ -73,6 +73,40 @@ pub async fn health(State(state): State<Shared>) -> Json<Health> {
             .map(|h| h.as_str().to_owned())
             .collect(),
     })
+}
+
+/// The body of `GET /api/system/version` (docs/api.md §1): the build of
+/// the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionInfo {
+    /// The full version, for example `0.1.0+6e31754`.
+    pub version: String,
+    /// The crate version, for example `0.1.0`.
+    pub cargo_version: String,
+    /// The short commit of the build, or `unknown`.
+    pub git_ref: String,
+    /// The build tree had changes to tracked files.
+    pub dirty: bool,
+    /// The build time, RFC 3339 UTC.
+    pub build_time: String,
+}
+
+impl VersionInfo {
+    /// The build of this binary.
+    pub fn current() -> Self {
+        Self {
+            version: terrarium_version::FULL.into(),
+            cargo_version: terrarium_version::VERSION.into(),
+            git_ref: terrarium_version::GIT_REF.into(),
+            dirty: terrarium_version::DIRTY,
+            build_time: terrarium_version::BUILD_TIME.into(),
+        }
+    }
+}
+
+/// `GET /api/system/version`: any caller that passes auth.
+pub async fn version() -> Json<VersionInfo> {
+    Json(VersionInfo::current())
 }
 
 /// The query of `GET /api/harnesses`.

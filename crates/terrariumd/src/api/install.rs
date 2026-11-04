@@ -36,7 +36,7 @@ pub const ARCHES: &[&str] = &["x86_64"];
 
 const SCRIPT: &str = include_str!("../../../../scripts/install-host.sh");
 const UNIT: &str = include_str!("../../../terrarium-host/terrarium-host.service");
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = terrarium_version::FULL;
 
 pub fn routes() -> Router<Shared> {
     Router::new()

@@ -1749,7 +1749,22 @@ terrarium daemon reload                       reads the definition files again
 terrarium audit [--since time] [--actor a] [--action a] [--limit 100]
 terrarium events [--follow] [--since seq] [--kind k] [--agent a] [--limit 100]
 terrarium whoami                              prints `operator`
+terrarium version                             the CLI's build and the daemon's; warns when the refs differ
 ```
+
+`terrarium --version` prints the build version of the CLI and its build
+time: `terrarium 0.1.0+6e31754 (built 2026-11-04T10:20:30Z)`. `-V` prints
+the version only. `terrariumd`, `terrarium-runner`, and `terrarium-host`
+have the same flags. The version is `<crate version>+<git ref>`, with
+`-dirty` for a build tree with changes, or `+unknown` (docs/api.md §4,
+`GET /api/system/version`).
+
+`terrarium version` with no subcommand (the subcommands manage versions
+for review) works in both modes. It prints the client line and the
+daemon line (`GET /api/system/version`). When the two builds are from
+different commits, it adds a `warning:` line: install the CLI of the
+daemon's build. With `--json` it prints
+`{"client": {...}, "daemon": {...}, "stale": bool}`.
 
 `events --follow` and `agent logs --follow` read Server-Sent Events in
 operator mode. They print each event when it comes.
@@ -1850,7 +1865,7 @@ terrarium admin target grant <target> <agent> [--until 30m|time] [--exclusive] [
 terrarium admin target revoke <target> <agent>
 terrarium admin target extend <target> <agent> --until 30m|time|none
 terrarium admin target leases <target> [--all]
-terrarium admin host ls                        each host: status, platform, last seen, and why it is offline
+terrarium admin host ls                        each host: status, platform, version, STALE, last seen, and why it is offline
 terrarium admin host show <name>               the link, the capabilities, the token use record, and offline_reason
 terrarium admin host new <name> [--enrol]      prints the token once, alone on stdout
 terrarium admin host rotate <name> [--enrol]   a new token, printed once, alone on stdout
@@ -1982,7 +1997,8 @@ operator only (PLAN §10: host agent tokens are operator-only). An agent gets
 
 | Command | Request | Text output |
 |---|---|---|
-| `admin host show <name>` | `GET /api/hosts/{name}` | One `key value` line each for `host`, `id`, `status`, `online`, `sessions`, `os`, `version`, `connected_at`, `created_at`, `first_used_at`, `last_used_at`, `last_used_from`, `rotated_at`, `enrol_expires_at`, and `capabilities`. An empty value shows as `-`. |
+| `admin host ls` | `GET /api/hosts` | A table: `NAME`, `STATUS`, `OS`, `ARCH`, `VERSION`, `STALE`, `SESSIONS`, `LAST SEEN`, `OFFLINE REASON`. `STALE` shows `STALE` for a host agent built from another ref than the daemon (`stale`, api.md §17.1): reinstall it. |
+| `admin host show <name>` | `GET /api/hosts/{name}` | One `key value` line each for `host`, `id`, `status`, `online`, `sessions`, `os`, `version` (with `(STALE: ...)` for a stale host agent), `connected_at`, `created_at`, `first_used_at`, `last_used_at`, `last_used_from`, `rotated_at`, `enrol_expires_at`, and `capabilities`. An empty value shows as `-`. |
 | `admin host new <name>` | `POST /api/hosts` `{"name"}` | The `thk_` token, alone on stdout. |
 | `admin host new <name> --enrol` | `POST /api/hosts` `{"name", "enrol": true}` | The `the_` enrol token, alone on stdout. Lines on stderr give the expiry (`token_expires_at`, 10 minutes) and the command that installs the host agent on the host (`install_command`, docs/api.md §17.9). Without `install_command`, a hint says to set `TERRARIUM_PUBLIC_URL` on the daemon. |
 | `admin host rotate <name>` | `POST /api/hosts/{name}/rotate`, no body | The new `thk_` token, alone on stdout. |

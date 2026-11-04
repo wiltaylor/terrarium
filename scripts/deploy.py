@@ -263,9 +263,12 @@ done"""
 
 def wrapper_script(project: str) -> str:
     """`<dir>/terrarium-compose`: docker compose for this install. It reads the
-    image from `$TERRARIUM_SRC/.deployed-ref` (default `<dir>/src`), sets
-    TERRARIUM_DATA_DIR to its own dir, and drops every other TERRARIUM_*
-    variable of the caller, so only `<dir>/.env` counts."""
+    image and the git ref from `$TERRARIUM_SRC/.deployed-ref` (default
+    `<dir>/src`), sets TERRARIUM_DATA_DIR to its own dir, and drops every
+    other TERRARIUM_* variable of the caller, so only `<dir>/.env` counts.
+    The ref goes to the image build as TERRARIUM_GIT_REF (compose.yaml): the
+    `git archive` source has no .git, so the binaries get their version
+    (`terrarium version`) from it."""
     return f"""#!/bin/sh
 # Written by `just deploy` (scripts/deploy.py) at each deploy: do not edit.
 # docker compose for the Terrarium install in this dir: the code in src/
@@ -275,9 +278,11 @@ set -e
 d=$(cd "$(dirname "$0")" && pwd)
 src=${{TERRARIUM_SRC:-$d/src}}
 image=$(sed -n 's/^image=//p' "$src/.deployed-ref" 2>/dev/null || true)
+ref=$(sed -n 's/^ref=//p' "$src/.deployed-ref" 2>/dev/null || true)
 for v in $(env | sed -n 's/^\\(TERRARIUM_[A-Za-z0-9_]*\\)=.*/\\1/p'); do unset "$v"; done
 export TERRARIUM_DATA_DIR="$d"
 export TERRARIUM_IMAGE="${{image:-{project}:latest}}"
+export TERRARIUM_GIT_REF="$ref"
 cd "$src"
 exec docker compose --project-name {project} --project-directory "$src" --file "$src/compose.yaml" --env-file "$d/.env" "$@"
 """

@@ -155,7 +155,7 @@ The host agent sends `hello` as its first frame:
   "type": "hello",
   "protocol": 1,
   "host": "lab1",
-  "version": "0.1.0",
+  "version": "0.1.0+6e31754",
   "os": "linux",
   "arch": "x86_64",
   "capabilities": {
@@ -178,6 +178,10 @@ The host agent sends `hello` as its first frame:
 ```
 
 - `host` is the name that target definitions use (`host = "lab1"`).
+- `version` is the build version of the host agent: `<crate version>+<git
+  ref>` ([CONVENTIONS.md](CONVENTIONS.md), "Build version"). The daemon
+  marks a host agent of another build `stale` in `GET /api/hosts` and logs
+  a warning. An older host agent sends only `0.1.0`: it is stale too.
 - `capabilities` is `terrarium_core::protocol::HostCapabilities`. Docker is
   `present` when `docker version --format json` gets an answer from the
   Docker server. vmlab is `present` when `vmlab --version` succeeds.

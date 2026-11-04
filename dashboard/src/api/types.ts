@@ -45,6 +45,20 @@ export interface Health {
   compact_harnesses?: Harness[];
 }
 
+/** `GET /api/system/version` (docs/api.md §4): the build of the daemon. Any caller may read it. */
+export interface SystemVersion {
+  /** The full version: `<cargo version>+<git ref>`, with `-dirty` for a tree with changes, or `+unknown`. */
+  version: string;
+  /** The crate version, for example `0.1.0`. */
+  cargo_version: string;
+  /** The short commit of the build, or `unknown`. */
+  git_ref: string;
+  /** The build tree had changes to tracked files. */
+  dirty: boolean;
+  /** The build time, RFC 3339 UTC. */
+  build_time: string;
+}
+
 /** `GET /api/harnesses` (docs/api.md §4): one harness against its pin. */
 export interface HarnessVersion {
   harness: Harness;
@@ -2747,7 +2761,10 @@ export interface Host {
   last_seen?: string | null;
   os?: string | null;
   arch?: string | null;
+  /** The build version of the host agent (`0.1.0+6e31754`). */
   version?: string | null;
+  /** The host agent is built from another ref than the daemon (docs/api.md §17): reinstall it. `false` when a ref is not known. */
+  stale?: boolean;
   max_sessions?: number;
   /** docs/api.md §17.3: the docker and vmlab targets (and lab instances) that may run at one time. Absent: an older host agent, no limit. */
   max_running_targets?: number;

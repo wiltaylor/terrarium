@@ -21,7 +21,8 @@ const EXIT_ALREADY_RUNNING: i32 = 3;
 #[derive(Debug, Parser)]
 #[command(
     name = "terrarium-runner",
-    version,
+    version = terrarium_version::FULL,
+    long_version = terrarium_version::LONG,
     about = "The Terrarium agent runner process"
 )]
 struct Args {

@@ -71,7 +71,7 @@ pub use artifacts::{artifact_router, run_prune};
 pub use config::spawn_config_sync;
 pub use schedules::{run_schedule, run_triggered};
 pub use subscriptions::settle_defaults as settle_account_defaults;
-pub use system::{DefinitionCounts, Health};
+pub use system::{DefinitionCounts, Health, VersionInfo};
 
 use crate::actor::{Transport, resolve_actor};
 use crate::db::Db;
@@ -252,6 +252,7 @@ pub fn router_with(state: Shared, serve_artifacts: bool) -> Router {
 fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
     let api = Router::new()
         .route("/health", get(system::health))
+        .route("/system/version", get(system::version))
         .route("/harnesses", get(system::harnesses))
         .route("/harnesses/update", post(system::harness_update_all))
         .route("/harnesses/{name}/update", post(system::harness_update))
@@ -941,8 +942,40 @@ mod tests {
         let (status, body) = get(router(state()), "/api/health", None).await;
         assert_eq!(status, StatusCode::OK);
         let h: Health = serde_json::from_slice(&body).unwrap();
-        assert_eq!(h.version, terrarium_core::VERSION);
+        assert_eq!(h.version, terrarium_version::FULL);
+        assert!(h.version.starts_with(terrarium_core::VERSION));
         assert_eq!(h.status, "ok");
+    }
+
+    #[tokio::test]
+    async fn system_version_reports_the_build() {
+        let (status, body) = get(router(state()), "/api/system/version", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: VersionInfo = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, VersionInfo::current());
+        assert_eq!(v.version, terrarium_version::FULL);
+        assert_eq!(v.cargo_version, terrarium_core::VERSION);
+        assert_eq!(
+            terrarium_version::parts(&v.version)
+                .git_ref
+                .unwrap_or("unknown"),
+            v.git_ref
+        );
+        let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        for k in ["version", "cargo_version", "git_ref", "dirty", "build_time"] {
+            assert!(raw.get(k).is_some(), "no {k} in {raw}");
+        }
+        // TCP: the token is needed, as for every API route.
+        let s = state();
+        let app = || tcp_router_with(s.clone(), TokenAuth::new("secret".into(), false), false);
+        assert_eq!(
+            get(app(), "/api/system/version", None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get(app(), "/api/system/version", Some("secret")).await.0,
+            StatusCode::OK
+        );
     }
 
     fn toml_def(name: &str, project: &str) -> AgentDef {
@@ -1721,7 +1754,7 @@ mod tests {
         web.install.host_daemon_url = Some("wss://terrarium.lan:8082".into());
         let s = state_with_web(web);
         let app = || tcp_router_with(s.clone(), TokenAuth::new("secret".into(), false), false);
-        let version = env!("CARGO_PKG_VERSION");
+        let version = terrarium_version::FULL;
 
         // The script, with the URLs filled in.
         let r = send(

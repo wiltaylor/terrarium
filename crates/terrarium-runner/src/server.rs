@@ -215,7 +215,7 @@ impl ServerCtx {
         let r = &self.runner;
         Hello {
             protocol: PROTOCOL_VERSION,
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: terrarium_version::FULL.to_owned(),
             agent: r.agent(),
             harness: self.harness,
             runner_pid: std::process::id(),

@@ -10,7 +10,8 @@ use terrarium_core::paths;
 #[derive(Debug, Parser)]
 #[command(
     name = "terrarium",
-    version,
+    version = terrarium_version::FULL,
+    long_version = terrarium_version::LONG,
     about = "The Terrarium CLI",
     after_help = "Exit codes: 0 ok, 1 server error, 2 usage or not available, 3 refused by policy."
 )]
@@ -146,10 +147,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ArtifactCmd,
     },
-    /// Versions for review
+    /// Versions for review. With no subcommand: the build version of this
+    /// CLI and of the daemon, with a warning when their refs differ
     Version {
         #[command(subcommand)]
-        command: VersionCmd,
+        command: Option<VersionCmd>,
     },
     /// Test runs: upload test result files as proof, list, show, compare
     Test {

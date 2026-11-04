@@ -1,0 +1,11 @@
+[package]
+name = "terrarium-version"
+description = "The build version of the Terrarium binaries: the crate version, the git ref, and the build time"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lints]
+workspace = true

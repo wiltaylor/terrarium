@@ -1194,6 +1194,14 @@ async fn serve_link(
         }
     }
     info!(host = %row.name, resumed, enrolled, peer = peer.as_deref().unwrap_or("-"), "host agent connected");
+    if terrarium_version::is_stale(&hello.version, terrarium_version::FULL) {
+        warn!(
+            host = %row.name,
+            version = %hello.version,
+            daemon = terrarium_version::FULL,
+            "the host agent is built from another ref than the daemon: reinstall it"
+        );
+    }
     let caps = serde_json::to_value(&hello.capabilities).unwrap_or(Value::Null);
     let summary = hello.capabilities.summary(&hello.os, &hello.arch);
     {

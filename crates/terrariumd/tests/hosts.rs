@@ -271,10 +271,43 @@ async fn hello_welcome_and_capabilities() {
     assert_eq!(h["summary"]["docker"], true);
     assert_eq!(h["os"], std::env::consts::OS);
     assert!(h["host_id"].is_string());
+    // Built with the daemon: the same version, so not stale.
+    assert_eq!(h["version"], terrarium_version::FULL);
+    assert_eq!(h["stale"], false);
     let ev = events(&lab.td, "host.connected").await;
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0]["data"]["host"], "lab1");
     task.abort();
+}
+
+/// A host agent from another build: `stale` in the list, while it is
+/// online and after it goes offline (the row keeps the version).
+#[tokio::test]
+async fn a_host_agent_of_another_ref_is_stale() {
+    let lab = Lab::start().await;
+    let token = lab.register("old").await;
+    let mut o = ClientOptions::new(format!("ws://{}/hosts/connect", lab.addr), &token, "old");
+    o.version = "0.0.9+0000000".into();
+    o.backoff_min = Duration::from_millis(50);
+    o.backoff_max = Duration::from_millis(200);
+    let task = tokio::spawn(Client::new(o).run());
+    lab.wait_online("old", true).await;
+    let h = lab.td.get("/api/hosts/old").await;
+    let h = h.ok();
+    assert_eq!(h["version"], "0.0.9+0000000");
+    // The test build knows its ref unless git is missing; then nothing
+    // compares.
+    let known = terrarium_version::this().git_ref.is_some();
+    assert_eq!(h["stale"], known);
+    task.abort();
+    lab.wait_online("old", false).await;
+    let listed = lab.td.get("/api/hosts").await;
+    assert_eq!(listed.ok()[0]["stale"], known);
+    // Any caller reads the daemon build, an agent too.
+    lab.td.project("ops").await;
+    lab.td.agent("ops", "worker", json!({})).await;
+    let v = lab.td.get_as("worker", "/api/system/version").await;
+    assert_eq!(v.ok()["version"], terrarium_version::FULL);
 }
 
 #[tokio::test]

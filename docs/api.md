@@ -475,19 +475,45 @@ Limits that always hold:
 ### `GET /api/health`
 
 ```json
-{"status":"ok","version":"0.1.0","uptime":1,"started_at":"2026-10-24T06:36:53.143044982Z",
+{"status":"ok","version":"0.1.0+6e31754","uptime":1,"started_at":"2026-10-24T06:36:53.143044982Z",
  "definitions":{"projects":1,"agents":1,"targets":0,"subscriptions":0},"idle_stop":"10m",
  "compact_on_idle":false,"compact_max_age":"off",
  "compact_harnesses":["claude","codex","copilot","pi"]}
 ```
 
-`uptime` is in seconds. `definitions` counts the files loaded at the last
+`version` is the build version of the daemon (below). `uptime` is in
+seconds. `definitions` counts the files loaded at the last
 start or reload. `idle_stop` is the idle stop of an agent that sets none
 (`TERRARIUM_IDLE_STOP`, §6.2): `off`, or a duration such as `10m`.
 `compact_on_idle` and `compact_max_age` are the auto compact settings of
 an agent that sets none (`TERRARIUM_COMPACT_ON_IDLE`,
 `TERRARIUM_COMPACT_MAX_AGE`, §6.2). `compact_harnesses` lists the
 harnesses whose agents the daemon can compact.
+
+### `GET /api/system/version`
+
+The build of the daemon. Any caller that passes auth may read it: the
+operator, a dashboard session, and an agent.
+
+```json
+{"version":"0.1.0+6e31754","cargo_version":"0.1.0","git_ref":"6e31754",
+ "dirty":false,"build_time":"2026-11-04T10:20:30Z"}
+```
+
+- `version` is the build version: `<cargo_version>+<git_ref>`, with
+  `-dirty` when the build tree had changes to tracked files
+  (`0.1.0+6e31754-dirty`). The daemon, the CLI, the runner, and the host
+  agent have the same form (`--version`). It is `+unknown` when the build
+  did not know its commit.
+- `git_ref` is the short commit (7 characters), or `unknown`.
+- `build_time` is RFC 3339 UTC: `SOURCE_DATE_EPOCH` when the build set it,
+  else the time of the build.
+- The image build gets the commit from the `TERRARIUM_GIT_REF` build arg:
+  its source (`git archive`) has no `.git`. `just docker::image-build`,
+  `just host::build`, and the deploy (`src/.deployed-ref`) set it.
+- `terrarium version` shows this next to the CLI's own build, and warns when
+  the two refs differ. `GET /api/hosts` marks a host agent of another build
+  `stale` (§17.1).
 
 ### `GET /api/harnesses`
 
@@ -5134,7 +5160,7 @@ gets `401 unauthorized` before the upgrade.
  "capabilities":{"docker":{"present":true,"version":"29.8.0"},"vmlab":{"present":false},"shell":"/bin/bash",
    "limits":{"systemd":true,"controllers":["cpu","cpuset","io","memory","pids"],"docker":true}},
  "summary":{"os":"linux","arch":"x86_64","docker":true,"vmlab":false},
- "os":"linux","arch":"x86_64","version":"0.1.0","max_sessions":32,
+ "os":"linux","arch":"x86_64","version":"0.1.0+6e31754","stale":false,"max_sessions":32,
  "connected_at":"2026-10-24T06:36:54.149Z","last_seen":"2026-10-24T06:36:54.149Z",
  "created_at":"2026-10-24T06:30:00.000Z",
  "first_used_at":"2026-10-24T06:31:02.410Z","last_used_at":"2026-10-24T06:36:54.149Z",
@@ -5175,6 +5201,13 @@ Rules:
   writes the audit entry `host.rotate`. The old token stops working for new
   connections at once. A live link stays up until it ends; the host agent
   must then dial with the new token. `rotated_at` records the time.
+- `version` is the build version of the host agent from its last `hello`
+  (`0.1.0+6e31754`, §4 `GET /api/system/version`). `stale` is `true` when
+  that build is from another commit or crate version than the daemon's
+  (the `-dirty` mark does not count), or when the host agent sends no ref
+  (an older build). Reinstall a stale host agent (§17.9). `stale` is `false`
+  when the daemon does not know its own ref, or before the first `hello`.
+  The daemon also logs a warning when a stale host agent connects.
 - `first_used_at` is the first connect with the current token (a rotate
   clears it). `last_used_at` and `last_used_from` are the last connect and
   its TCP peer as the daemon sees it (a reverse proxy shows as itself).
@@ -5962,7 +5995,7 @@ listener and the ingest listener do not serve these routes.
 
 Rules:
 
-- Each answer has the header `X-Terrarium-Version` (the daemon version),
+- Each answer has the header `X-Terrarium-Version` (the build version of the daemon, `0.1.0+6e31754`),
   `Cache-Control: no-store`, and the API CSP (`default-src 'none'`).
 - `arch` is the name that the script makes from `uname -m`: `x86_64`
   (also for `amd64`) or `aarch64` (also for `arm64`). Only `x86_64` has a

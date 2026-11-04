@@ -12,6 +12,7 @@ The design is in [PLAN.md](PLAN.md).
 | `crates/terrarium-runner`     | `terrarium-runner` (lib + bin) | The agent runner: the PTY, the status machine, the runner socket, `events.jsonl`. The lib holds `Runner`, `RemoteRunner`, and `RunnerHandle`. The bin is the runner process, one per agent (feature `bin`, on by default). See [runner.md](runner.md). |
 | `crates/terrarium`            | `terrarium` (bin)           | The CLI. Operator mode talks to the daemon. Agent mode talks to the runner socket. |
 | `crates/terrarium-host`       | `terrarium-host` (lib + bin)| The host agent that runs on machines outside the container. The lib holds the wire protocol that the daemon uses. |
+| `crates/terrarium-version`    | `terrarium-version` (lib)   | The build version of the binaries: `<crate version>+<git ref>[-dirty]`, the build time, and the stale check (see "Build version"). Only the bins and their libs depend on it. |
 | `crates/terrarium-compat`     | `terrarium-compat` (lib)    | The adapter compatibility suite: real-harness scenarios against the pinned versions (`just ci::compat`, [compat-suite.md](compat-suite.md)). |
 | `crates/adapters/<harness>`   | `terrarium-adapter-<harness>` (lib) | One adapter per harness: launch flags, hook mapping, session ID capture. |
 | `dashboard/`                  | npm package                 | The SolidJS dashboard. The daemon embeds `dashboard/dist`.           |
@@ -146,6 +147,31 @@ Rules for the deploy:
 - Make each command on the target with `Target.argv()`, and each hint for
   the operator with `Target.shell_hint()` or `recipe_hint()`. Then
   `--ssh-option` and `--sudo-user` apply to all of them.
+
+## Build version
+
+The daemon, the CLI, the runner, and the host agent report one build
+version: `<crate version>+<git ref>`, for example `0.1.0+6e31754`, with
+`-dirty` when the build tree had changes to tracked files. `--version`
+adds the build time. `GET /api/system/version` serves the daemon's
+(docs/api.md §4).
+
+- `crates/terrarium-version/build.rs` makes the version. The ref is
+  `TERRARIUM_GIT_REF` when it is set, else it comes from git. Without
+  either, the ref is `unknown` (`0.1.0+unknown`). The build time is
+  `SOURCE_DATE_EPOCH` when it is set, else the time of the build.
+- The build script runs again only when `TERRARIUM_GIT_REF` or
+  `SOURCE_DATE_EPOCH` changes, or when git moves `HEAD`, the branch, or the
+  index. So `-dirty` shows the tree at that time, not at each edit. Only
+  the crates that depend on `terrarium-version` build again: keep
+  `terrarium-core` and the adapters free of it.
+- An image build has no `.git` (the deploy sends `git archive`). Give it the
+  ref as the `TERRARIUM_GIT_REF` build arg: `scripts/build-ref.sh` for
+  `just docker::*` and `just host::build`, `src/.deployed-ref` in the
+  deploy wrapper (`terrarium-compose`), and `github.sha` in CI.
+- A host agent whose commit or crate version differs from the daemon's is
+  `stale` (`GET /api/hosts`, `admin host ls`, the Hosts tab). The `-dirty`
+  mark does not count.
 
 ## Environment
 

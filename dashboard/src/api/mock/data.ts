@@ -147,6 +147,9 @@ const COLUMNS: Column[] = [
 ];
 
 /** A fake 26-character ULID with a readable tail. */
+/** The build of the mock daemon (`GET /api/system/version`). A host agent of another ref is `stale`. */
+export const MOCK_DAEMON_VERSION = "0.1.0+6e31754";
+
 export const fakeUlid = (tag: string, n: number): string => `01JB${tag.toUpperCase().replace(/[^0-9A-Z]/g, "").padEnd(6, "0").slice(0, 6)}${String(n).padStart(16, "0")}`;
 
 /** One snapshot of one machine, as `vmlab snapshot list <machine>` shows it. */
@@ -902,7 +905,7 @@ type:bug sevrity=high
 
   const hosts: Host[] = [
     {
-      name: "lab1", id: fakeUlid("host", 1), host_id: fakeUlid("host", 1), status: "online", online: true, sessions: 1, max_sessions: 32, max_running_targets: 4, connected_at: ago(60), os: "linux", arch: "x86_64", version: "0.1.0", last_seen: ago(0.1),
+      name: "lab1", id: fakeUlid("host", 1), host_id: fakeUlid("host", 1), status: "online", online: true, sessions: 1, max_sessions: 32, max_running_targets: 4, connected_at: ago(60), os: "linux", arch: "x86_64", version: MOCK_DAEMON_VERSION, stale: false, last_seen: ago(0.1),
       capabilities: {
         docker: { present: true, version: "29.8.0" }, vmlab: { present: true, version: "0.30.0-alpha" }, shell: "/bin/bash",
         display: { enabled: false, tesseract: true, tools: ["xdotool", "import"], drivers: ["vmlab", "docker"] },
@@ -912,7 +915,7 @@ type:bug sevrity=high
       summary: { os: "linux", arch: "x86_64", docker: true, vmlab: true, display: false },
     },
     {
-      name: "build1", id: fakeUlid("host", 3), host_id: fakeUlid("host", 3), status: "online", online: true, sessions: 0, max_sessions: 32, max_running_targets: 2, connected_at: ago(60 * 26), os: "linux", arch: "x86_64", version: "0.1.0", last_seen: ago(0.1),
+      name: "build1", id: fakeUlid("host", 3), host_id: fakeUlid("host", 3), status: "online", online: true, sessions: 0, max_sessions: 32, max_running_targets: 2, connected_at: ago(60 * 26), os: "linux", arch: "x86_64", version: MOCK_DAEMON_VERSION, stale: false, last_seen: ago(0.1),
       capabilities: {
         docker: { present: true, version: "29.8.0" }, vmlab: { present: false }, shell: "/bin/bash", metrics: true,
         limits: { systemd: false, reason: "`systemd-run` is not on PATH; the host agent's user needs a systemd user manager", docker: true },
@@ -920,12 +923,12 @@ type:bug sevrity=high
       summary: { os: "linux", arch: "x86_64", docker: true, vmlab: false, display: false },
     },
     {
-      name: "nas", id: fakeUlid("host", 4), host_id: fakeUlid("host", 4), status: "online", online: true, sessions: 0, max_sessions: 32, connected_at: ago(60 * 50), os: "linux", arch: "aarch64", version: "0.0.9", last_seen: ago(0.2),
+      name: "nas", id: fakeUlid("host", 4), host_id: fakeUlid("host", 4), status: "online", online: true, sessions: 0, max_sessions: 32, connected_at: ago(60 * 50), os: "linux", arch: "aarch64", version: "0.0.9", stale: true, last_seen: ago(0.2),
       capabilities: { docker: { present: false }, vmlab: { present: false }, shell: "/bin/sh" },
       summary: { os: "linux", arch: "aarch64", docker: false, vmlab: false, display: false },
     },
     {
-      name: "pi-cluster", id: fakeUlid("host", 2), host_id: fakeUlid("host", 2), status: "offline", online: false, sessions: 0, os: "linux", arch: "aarch64", version: "0.0.9", last_seen: ago(60 * 7),
+      name: "pi-cluster", id: fakeUlid("host", 2), host_id: fakeUlid("host", 2), status: "offline", online: false, sessions: 0, os: "linux", arch: "aarch64", version: "0.1.0+1f0c2aa", stale: true, last_seen: ago(60 * 7),
       offline_reason: `disconnected: heartbeat timeout (at ${ago(60 * 7)})`,
       capabilities: { docker: { present: true, version: "27.1.1" }, vmlab: { present: false }, shell: "/bin/sh" },
     },

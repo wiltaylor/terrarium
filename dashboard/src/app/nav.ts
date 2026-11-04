@@ -96,6 +96,8 @@ export const SETTINGS_TABS = [
   // The config repo: for the operator or a sysadmin.
   { path: "harness", label: "Harness config" },
   { path: "hosts", label: "Hosts" },
+  // The build of the daemon (docs/api.md §4) and the stale host agents. Self-update (#19) goes here.
+  { path: "software", label: "Software" },
 ] as const;
 
 /** The tabs of the logs screen, in order. Each is a route under /logs. */

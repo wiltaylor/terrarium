@@ -2497,6 +2497,27 @@ async fn agent_targets_and_hosts() {
     .await;
     assert!(out.contains("OFFLINE REASON"), "{out}");
     assert!(out.contains("never connected"), "{out}");
+    // `admin host ls` marks a host agent of another build (#16).
+    let out = ok(
+        false,
+        &["admin", "host", "ls"],
+        vec![(
+            200,
+            json!([{"name": "old", "status": "online", "version": "0.1.0", "stale": true},
+                   {"name": "new", "status": "online", "version": "0.1.0+6e31754", "stale": false}]),
+        )],
+        vec![req(Get, "/api/hosts")],
+    )
+    .await;
+    let row = |n: &str| {
+        out.lines()
+            .find(|l| l.starts_with(n))
+            .unwrap_or("")
+            .to_owned()
+    };
+    assert!(out.contains("STALE"), "{out}");
+    assert!(row("old ").contains("STALE"), "{out}");
+    assert!(!row("new ").contains("STALE"), "{out}");
     let out = ok(
         false,
         &["admin", "host", "new", "lab1"],
@@ -9429,4 +9450,58 @@ async fn card_file_commands() {
     assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"a");
     assert_eq!(std::fs::read(dir.join("b.txt")).unwrap(), b"b");
     assert!(out.contains("b.txt v3 ->"), "{out}");
+}
+
+/// `version`: the client and the daemon build, and a warning when the refs
+/// differ (#16).
+#[tokio::test]
+async fn version_prints_the_client_and_the_daemon() {
+    let same = json!({"version": terrarium_version::FULL, "git_ref": terrarium_version::GIT_REF,
+                      "build_time": "2026-11-04T10:00:00Z", "cargo_version": terrarium_version::VERSION,
+                      "dirty": false});
+    for agent in [false, true] {
+        let out = ok(
+            agent,
+            &["version"],
+            vec![(200, same.clone())],
+            vec![req(Get, "/api/system/version")],
+        )
+        .await;
+        assert!(
+            out.contains(&format!("client: terrarium {}", terrarium_version::FULL)),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "daemon: terrariumd {} (built 2026-11-04T10:00:00Z)",
+                terrarium_version::FULL
+            )),
+            "{out}"
+        );
+        assert!(!out.contains("warning"), "{out}");
+    }
+    let other = json!({"version": "9.9.9+0000000", "git_ref": "0000000",
+                       "build_time": "2026-11-04T10:00:00Z"});
+    let out = ok(
+        false,
+        &["version"],
+        vec![(200, other.clone())],
+        vec![req(Get, "/api/system/version")],
+    )
+    .await;
+    assert!(
+        out.contains("warning: this CLI is built from another ref"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["--json", "version"],
+        vec![(200, other)],
+        vec![req(Get, "/api/system/version")],
+    )
+    .await;
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["client"]["version"], terrarium_version::FULL);
+    assert_eq!(v["daemon"]["version"], "9.9.9+0000000");
+    assert_eq!(v["stale"], true);
 }

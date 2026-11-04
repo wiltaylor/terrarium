@@ -77,6 +77,9 @@ pub struct ClientOptions {
     /// The time between two `metrics` frames: [`METRICS_INTERVAL_SECS`].
     /// Only the tests change it.
     pub metrics_interval: Duration,
+    /// The version in `hello`: the build version
+    /// ([`terrarium_version::FULL`]). Only the tests change it.
+    pub version: String,
 }
 
 impl ClientOptions {
@@ -103,6 +106,7 @@ impl ClientOptions {
             token_file: None,
             display: crate::config::DisplayConfig::default(),
             metrics_interval: Duration::from_secs(METRICS_INTERVAL_SECS),
+            version: terrarium_version::FULL.to_owned(),
         }
     }
 }
@@ -365,7 +369,7 @@ impl Client {
         Hello {
             protocol: PROTOCOL_VERSION,
             host: self.opts.name.clone(),
-            version: terrarium_core::VERSION.to_owned(),
+            version: self.opts.version.clone(),
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
             capabilities: self.opts.capabilities.clone(),

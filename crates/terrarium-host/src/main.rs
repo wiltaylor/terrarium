@@ -19,7 +19,12 @@ use terrarium_host::{Client, ClientOptions, capabilities, tls};
 
 /// The Terrarium host agent.
 #[derive(Debug, Parser)]
-#[command(name = "terrarium-host", version, about)]
+#[command(
+    name = "terrarium-host",
+    version = terrarium_version::FULL,
+    long_version = terrarium_version::LONG,
+    about
+)]
 struct Args {
     /// The config file. The default is /etc/terrarium-host/config.toml when
     /// it exists.
@@ -204,7 +209,7 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
         .map(config::connect_url)
         .transpose()?;
     let report = serde_json::json!({
-        "version": terrarium_core::VERSION,
+        "version": terrarium_version::FULL,
         "name": cfg.resolve_name(),
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
@@ -231,7 +236,7 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
             (true, None) => "yes".to_owned(),
             (false, _) => "no".to_owned(),
         };
-        writeln!(out, "terrarium-host {}", terrarium_core::VERSION)?;
+        writeln!(out, "terrarium-host {}", terrarium_version::LONG)?;
         writeln!(out, "name:       {}", cfg.resolve_name())?;
         writeln!(
             out,

@@ -3,7 +3,9 @@ set working-directory := '../..'
 import '../shared.just'
 
 out := "target/host"
-build_cmd := "docker build -f docker/Dockerfile --target host-export --output type=local,dest=" + out + " ."
+# The git ref of the build for `terrarium-host --version` (scripts/build-ref.sh).
+git_ref := env("TERRARIUM_GIT_REF", `scripts/build-ref.sh`)
+build_cmd := "docker build -f docker/Dockerfile --target host-export --build-arg TERRARIUM_GIT_REF=" + git_ref + " --output type=local,dest=" + out + " ."
 version := `sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1`
 
 [default, private]
