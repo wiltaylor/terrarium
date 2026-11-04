@@ -40,14 +40,14 @@ fn aid(s: &str) -> AgentId {
     s.parse().unwrap()
 }
 
+/// Wait until `f` holds. A deadline, not a count of tries: each try is a
+/// request, and it is slow on a loaded machine.
 async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
-    for _ in 0..400 {
-        if f().await {
-            return;
-        }
+    let start = std::time::Instant::now();
+    while !f().await {
+        assert!(start.elapsed() < common::WAIT, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("timed out waiting for {what}");
 }
 
 async fn agent(td: &TestDaemon, a: &str) -> Value {
@@ -428,8 +428,10 @@ async fn reset_rights() {
 /// request runs.
 #[tokio::test]
 async fn a_busy_agent_queues_and_a_new_request_replaces_the_pending_one() {
+    // The time limit of `setup` (5 s), not a short one: the two requests
+    // below must come while the silent compaction runs, also on a loaded
+    // machine. A 400 ms limit could end it first.
     let (td, lead, w) = setup().await;
-    tune(&td, Duration::from_millis(400));
     start_with_a_turn(&td, &w).await;
     td.sup.set_compact(aid(&w), FakeCompact::Silent);
     let path = |verb: &str| format!("/api/agents/{w}/{verb}");

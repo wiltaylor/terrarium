@@ -1068,7 +1068,36 @@ async fn board_changes_nudge_the_project_leads() {
         td.wait_status(id, "idle").await;
     }
 
-    // A new card in ready, from the operator: one pointer at once.
+    // Bob claims his card, and the operator makes a second card, before
+    // the first nudge: none of this nudges, and then only the two moves
+    // below have to fit in one rate-limit interval on a slow machine.
+    let as_bob = |path: String, body: Value| {
+        let td = &td;
+        async move {
+            let (s, b) = td
+                .req(Method::POST, &path, Some(body), Some("demo/bob"))
+                .await;
+            assert!((200..300).contains(&s), "POST {path}: {s} {b}");
+        }
+    };
+    let cb = td
+        .post("/api/projects/demo/cards", Some(json!({"title": "Bob's"})))
+        .await;
+    let cb = cb["id"].as_str().unwrap().to_owned();
+    as_bob(format!("/api/cards/{cb}/claim"), json!({})).await;
+    as_bob(
+        format!("/api/cards/{cb}/move"),
+        json!({"column": "in_progress"}),
+    )
+    .await;
+    let c2 = td
+        .post("/api/projects/demo/cards", Some(json!({"title": "Two"})))
+        .await;
+    let c2 = c2["id"].as_str().unwrap().to_owned();
+
+    // A new card in ready, from the operator: one pointer at once. Its
+    // flush starts the interval, so the interval starts after `first`.
+    let first = Instant::now();
     let c1 = td
         .post(
             "/api/projects/demo/cards",
@@ -1088,41 +1117,25 @@ async fn board_changes_nudge_the_project_leads() {
     // Inside the rate limit: bob moves his card to review, and the
     // operator blocks another card. One pointer carries both, at the end
     // of the interval.
-    let as_bob = |path: String, body: Value| {
-        let td = &td;
-        async move {
-            let (s, b) = td
-                .req(Method::POST, &path, Some(body), Some("demo/bob"))
-                .await;
-            assert!((200..300).contains(&s), "POST {path}: {s} {b}");
-        }
-    };
-    as_bob(format!("/api/cards/{c1}/claim"), json!({})).await;
-    as_bob(
-        format!("/api/cards/{c1}/move"),
-        json!({"column": "in_progress"}),
-    )
-    .await;
-    as_bob(format!("/api/cards/{c1}/move"), json!({"column": "review"})).await;
-    let c2 = td
-        .post("/api/projects/demo/cards", Some(json!({"title": "Two"})))
-        .await;
-    let c2 = c2["id"].as_str().unwrap().to_owned();
+    as_bob(format!("/api/cards/{cb}/move"), json!({"column": "review"})).await;
     td.post(
         &format!("/api/cards/{c2}/move"),
         Some(json!({"column": "blocked", "comment": "needs the API key"})),
     )
     .await;
-    let batch = Instant::now();
     let starts = td.wait_events(&lead, "turn_start", |e| e.len() >= 2).await;
+    // The batch goes out one full interval after the first flush at the
+    // earliest, and that flush came after `first`. Slow requests cannot make
+    // this fail; a batch that does not wait fails it on a normal machine.
     assert!(
-        batch.elapsed() > LEAD_NUDGE / 2,
-        "the batch waited for the interval"
+        first.elapsed() >= LEAD_NUDGE,
+        "the batch waited for the interval: {:?}",
+        first.elapsed()
     );
     assert_eq!(
         starts[1]["data"]["prompt"],
         format!(
-            "[System:nudge] {c1} moved to review by demo/bob. Run `terrarium card show {c1}`.\n\n\
+            "[System:nudge] {cb} moved to review by demo/bob. Run `terrarium card show {cb}`.\n\n\
              [System:nudge] {c2} moved to blocked by operator: needs the API key. Run `terrarium card show {c2}`."
         )
         .as_str()
