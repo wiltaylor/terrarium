@@ -19,6 +19,8 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 pub const DELAY: Duration = Duration::from_millis(20);
+/// The longest time a helper waits for a state before the test fails.
+pub const WAIT: Duration = Duration::from_secs(15);
 
 pub struct TestDaemon {
     pub daemon: Option<Daemon>,
@@ -317,14 +319,21 @@ impl TestDaemon {
 
     /// Poll until the agent has `status`.
     pub async fn wait_status(&self, agent: &str, status: &str) {
-        for _ in 0..200 {
+        // A deadline, not a count of tries: on a loaded machine each GET is
+        // slow, and a start can take seconds. Only a failing test waits it out.
+        let start = std::time::Instant::now();
+        loop {
             let r = self.get(&format!("/api/agents/{agent}")).await;
             if r.body["status"] == status {
                 return;
             }
+            assert!(
+                start.elapsed() < WAIT,
+                "agent {agent} never reached {status}; last {}",
+                r.body["status"]
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("agent {agent} never reached {status}");
     }
 
     /// The mail of an agent, as that agent sees it.

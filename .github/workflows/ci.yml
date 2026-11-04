@@ -52,7 +52,18 @@ jobs:
           node-version: '22'
       - run: just ci::fmt-check
       - run: just ci::lint
-      - run: just ci::test
+      # libtest writes no annotations, and the job log needs a token. On a
+      # failure, one ::error annotation for each failed test makes the
+      # names public (check-runs/<job id>/annotations). The exit code stays.
+      - name: just ci::test
+        run: |
+          set -o pipefail
+          rc=0
+          just ci::test 2>&1 | tee "$RUNNER_TEMP/cargo-test.log" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            python3 scripts/annotate_test_failures.py "$RUNNER_TEMP/cargo-test.log" || true
+          fi
+          exit "$rc"
       - run: just ci::scripts-test
       - run: just ci::dashboard-check
 

@@ -480,19 +480,30 @@ async fn health_names_the_idle_stop() {
     assert_eq!(td.get("/api/health").await.ok()["idle_stop"], "off");
 }
 
-/// Start agent `a`, give it one turn, and wait until the turn ended.
+/// Start agent `a`, give it one turn, and wait until the turn ended and
+/// the agent rests.
+///
+/// The fake records the prompt before it sets `working`, and the status
+/// of the API comes from the event pump, which can lag. So `idle` right
+/// after the prompt can be the `idle` from before the turn. The pump
+/// stores the events in order (`working`, `turn_end`, `idle`), and the
+/// fake sets `idle` before it emits it: after the stored `turn_end` of
+/// this turn, the next `idle` of the API is the end of the turn.
 async fn start_with_a_turn(td: &TestDaemon, a: &str) {
     td.post_empty(&format!("/api/agents/{a}/start")).await.ok();
     td.wait_status(a, "idle").await;
-    let before = td.sup.prompts(aid(a)).len();
+    let ends = events(td, a, "turn_end").await.len();
     td.post(&format!("/api/agents/{a}/send"), json!({"text": "work"}))
         .await
         .ok();
-    until("the turn ran", || async {
-        td.sup.prompts(aid(a)).len() > before
+    until("the end of the turn", || async {
+        events(td, a, "turn_end").await.len() > ends
     })
     .await;
-    td.wait_status(a, "idle").await;
+    until("idle after the turn", || async {
+        agent(td, a).await["status"] == "idle"
+    })
+    .await;
 }
 
 /// The `agent.compacted` events of agent `a`, oldest first.
@@ -637,7 +648,13 @@ async fn max_age_compacts_at_the_next_rest() {
         compactions(&td, &w).await.len() == 2
     })
     .await;
-    assert_eq!(agent(&td, &w).await["status"], "idle");
+    // The agent goes on. `agent.compacted` is written by the compaction
+    // task, and the `idle` after it comes through the event pump, so the
+    // API can show `working` (compacting) for a moment after the event.
+    until("idle after the second compaction", || async {
+        agent(&td, &w).await["status"] == "idle"
+    })
+    .await;
     // `null` goes back to the global default (off).
     let r = td
         .patch(
@@ -789,14 +806,23 @@ async fn a_compaction_without_an_end_times_out_and_the_turns_wait() {
         IdleStop::Off,
         false,
         CompactMaxAge::Off,
-        Duration::from_millis(600),
+        // Long enough that the compaction still runs when the test sends
+        // the turn and checks that it waits, also on a slow runner.
+        Duration::from_secs(3),
     );
     td.sup.set_compact(aid(&w), FakeCompact::Silent);
     td.post_empty(&format!("/api/agents/{w}/compact"))
         .await
         .ok();
-    td.wait_status(&w, "working").await;
-    assert_eq!(agent(&td, &w).await["status_reason"], "compacting");
+    // The status event, not two reads of the agent: the compaction can
+    // end between two reads.
+    until("the compacting status", || async {
+        events(&td, &w, "status")
+            .await
+            .iter()
+            .any(|e| e["data"]["status"] == "working" && e["data"]["reason"] == "compacting")
+    })
+    .await;
     let r = td
         .post(&format!("/api/agents/{w}/send"), json!({"text": "after"}))
         .await;

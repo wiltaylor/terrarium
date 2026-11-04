@@ -41,14 +41,17 @@ fn aid(s: &str) -> AgentId {
     s.parse().unwrap()
 }
 
+/// Wait until `f` holds. A deadline, not a count of tries: each try is a
+/// request, and it is slow on a loaded machine.
 async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
-    for _ in 0..400 {
-        if f().await {
-            return;
-        }
+    let start = std::time::Instant::now();
+    while !f().await {
+        assert!(
+            start.elapsed() < common::WAIT,
+            "timed out waiting for {what}"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("timed out waiting for {what}");
 }
 
 async fn agent(td: &TestDaemon, a: &str) -> Value {
@@ -94,28 +97,50 @@ async fn setup() -> (TestDaemon, String, String) {
     (td, lead, w)
 }
 
-/// Start agent `a`, give it one turn, and wait until the turn ended and
-/// the agent rests.
-///
-/// The fake records the prompt before it sets `working`, and the status
-/// of the API comes from the event pump, which can lag: `idle` right after
-/// the prompt can be the `idle` from before the turn. The pump stores the
-/// events in order (`working`, `turn_end`, `idle`), so after the stored
-/// `turn_end` of this turn, the next `idle` is the end of the turn (as in
-/// `tests/lifecycle.rs`).
+/// The statuses of agent `a` in the daemon's status events, oldest first.
+async fn statuses(td: &TestDaemon, a: &str) -> Vec<String> {
+    events(td, a, "status")
+        .await
+        .iter()
+        .filter_map(|e| e["data"]["status"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Start agent `a`, give it one turn, and wait until the turn ended.
 async fn start_with_a_turn(td: &TestDaemon, a: &str) {
     td.post_empty(&format!("/api/agents/{a}/start")).await.ok();
     td.wait_status(a, "idle").await;
-    let ends = events(td, a, "turn_end").await.len();
+    let before = td.sup.prompts(aid(a)).len();
+    let seen = statuses(td, a).await.len();
     td.post(&format!("/api/agents/{a}/send"), json!({"text": "work"}))
         .await
         .ok();
-    until("the end of the turn", || async {
-        events(td, a, "turn_end").await.len() > ends
+    until("the turn ran", || async {
+        td.sup.prompts(aid(a)).len() > before
     })
     .await;
-    until("idle after the turn", || async {
-        agent(td, a).await["status"] == "idle"
+    // The end of the turn as the daemon saw it: a `working` and then an
+    // `idle` status event. The fake has the prompt before it is `working`,
+    // and the API status can still be the `idle` from before the turn, so
+    // `wait_status(idle)` alone can come back while the turn runs.
+    until("the end of the turn", || async {
+        let new = statuses(td, a).await.split_off(seen);
+        new.iter()
+            .position(|s| s == "working")
+            .is_some_and(|w| new[w..].iter().any(|s| s == "idle"))
+    })
+    .await;
+    td.wait_status(a, "idle").await;
+}
+
+/// Wait until the API shows agent `a` in a harness session other than
+/// `first`. The fake has the prompts of a new session before the daemon
+/// has stored its status and session, so a check right after `prompted`
+/// can still see the old state (`restarting`, no session).
+async fn new_session_shown(td: &TestDaemon, a: &str, first: &Value) {
+    until("the new session in the API", || async {
+        let now = agent(td, a).await;
+        now["session"].is_string() && now["session"] != *first
     })
     .await;
 }
@@ -285,6 +310,7 @@ async fn self_new_session_is_a_new_session_with_recap_then_then() {
     assert!(recap.contains("Unread mail: 0."), "{recap}");
     assert!(recap.contains(&format!("- {card_id} (")), "{recap}");
     assert!(recap.contains("Fix the parser"), "{recap}");
+    new_session_shown(&td, &w, &first).await;
     let now = agent(&td, &w).await;
     assert!(now["session"].is_string(), "{now}");
     assert_ne!(now["session"], first, "a new harness session, not a resume");
@@ -346,6 +372,7 @@ async fn a_stopped_agent_with_then_starts_in_a_new_session() {
     assert_eq!(r.status, 202, "{}", r.body);
     assert_eq!(r.body["reset"]["state"], "started");
     prompted(&td, &w, "[System:reset requested by operator] New work.").await;
+    new_session_shown(&td, &w, &first).await;
     let now = agent(&td, &w).await;
     assert_ne!(now["session"], first, "{now}");
     let woken = events(&td, &w, "agent.woken").await;
@@ -375,6 +402,7 @@ async fn a_stopped_agent_without_then_gets_a_new_session_at_the_next_wake() {
         .await
         .ok();
     prompted(&td, &w, "[User] hello").await;
+    new_session_shown(&td, &w, &first).await;
     let now = agent(&td, &w).await;
     assert_ne!(now["session"], first, "{now}");
     assert!(now.get("reset_pending").is_none(), "{now}");
@@ -440,14 +468,20 @@ async fn reset_rights() {
 /// request runs.
 #[tokio::test]
 async fn a_busy_agent_queues_and_a_new_request_replaces_the_pending_one() {
+    // The time limit of `setup` (5 s), not a short one: the two requests
+    // below must come while the silent compaction runs, also on a loaded
+    // machine. A 400 ms limit could end it first.
     let (td, lead, w) = setup().await;
-    tune(&td, Duration::from_millis(400));
     start_with_a_turn(&td, &w).await;
     td.sup.set_compact(aid(&w), FakeCompact::Silent);
     let path = |verb: &str| format!("/api/agents/{w}/{verb}");
     let r = td.post_empty(&path("compact")).await;
     assert_eq!(r.body["reset"]["state"], "started", "{}", r.body);
-    assert_eq!(agent(&td, &w).await["status_reason"], "compacting");
+    // The API shows the reason once the daemon has stored the status event.
+    until("compacting in the API", || async {
+        agent(&td, &w).await["status_reason"] == "compacting"
+    })
+    .await;
     let r = td
         .post_as(&lead, &path("compact"), json!({"then": "A"}))
         .await;
@@ -655,6 +689,7 @@ async fn a_paused_agent_keeps_the_then_queued() {
         "[System:reset requested by operator] After the pause.",
     )
     .await;
+    new_session_shown(&td, &w, &first).await;
     assert_ne!(agent(&td, &w).await["session"], first);
 }
 
@@ -696,6 +731,7 @@ async fn an_ephemeral_agent_resets_itself_and_keeps_its_spawn() {
         .await;
     assert_eq!(r.status, 202, "{}", r.body);
     prompted(&td, &e, "[System:reset requested by self] Go on with X.").await;
+    new_session_shown(&td, &e, &first).await;
     let now = agent(&td, &e).await;
     assert_ne!(now["session"], first);
     assert_eq!(now["ephemeral"], true);

@@ -388,17 +388,10 @@ fn write_file(path: &Path, data: &[u8], mode: u32) -> Result<(), UpdateError> {
 /// Run `<path> --version`: it must exit 0 and print the version `want`
 /// (`terrarium-host <version>` on its first line; `-dirty` does not count).
 pub async fn smoke_test(path: &Path, want: &str, timeout: Duration) -> Result<(), UpdateError> {
-    let out = tokio::time::timeout(
-        timeout,
-        tokio::process::Command::new(path)
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| UpdateError::Smoke(format!("did not answer --version in {timeout:?}")))?
-    .map_err(|e| UpdateError::Smoke(format!("does not run: {e}")))?;
+    let out = tokio::time::timeout(timeout, run_version(path))
+        .await
+        .map_err(|_| UpdateError::Smoke(format!("did not answer --version in {timeout:?}")))?
+        .map_err(|e| UpdateError::Smoke(format!("does not run: {e}")))?;
     if !out.status.success() {
         return Err(UpdateError::Smoke(format!(
             "exited with {} for --version",
@@ -417,6 +410,39 @@ pub async fn smoke_test(path: &Path, want: &str, timeout: Duration) -> Result<()
         )));
     }
     Ok(())
+}
+
+/// How long [`run_version`] tries again a start that fails with
+/// `ETXTBSY`, and the pause between two tries.
+const BUSY_RETRY: Duration = Duration::from_secs(1);
+const BUSY_PAUSE: Duration = Duration::from_millis(50);
+
+/// Start `<path> --version` and give its output. A start that fails with
+/// `ETXTBSY` ("Text file busy") is tried again for up to [`BUSY_RETRY`]:
+/// when another thread forks while `path` is open for writing, the child
+/// holds a copy of the write fd until its own exec, and the kernel refuses
+/// to run a file that is open for writing. `O_CLOEXEC` does not help, and
+/// the host starts session processes while it stages an update. Any other
+/// error comes back at once.
+async fn run_version(path: &Path) -> std::io::Result<std::process::Output> {
+    let began = tokio::time::Instant::now();
+    loop {
+        let r = tokio::process::Command::new(path)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await;
+        match r {
+            Err(e)
+                if e.raw_os_error() == Some(nix::errno::Errno::ETXTBSY as i32)
+                    && began.elapsed() < BUSY_RETRY =>
+            {
+                tokio::time::sleep(BUSY_PAUSE).await;
+            }
+            r => return r,
+        }
+    }
 }
 
 /// Put `<binary>.new` in place: keep the running binary as `.prev`, write
@@ -672,6 +698,43 @@ mod tests {
         // And swap with nothing staged changes nothing.
         assert!(swap(&bin, "0.3.0+bbbbbbb").is_err());
         assert!(!sidecar(&bin, PENDING).exists());
+    }
+
+    /// A file with a write fd open, as a child forked by another thread
+    /// holds it: the exec fails with ETXTBSY until the fd closes.
+    fn busy(dir: &Path) -> (PathBuf, std::fs::File) {
+        let path = install(dir, &script("0.3.0+bbbbbbb"));
+        let fd = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        (path, fd)
+    }
+
+    #[tokio::test]
+    async fn the_smoke_test_waits_out_a_short_text_file_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, fd) = busy(dir.path());
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(fd);
+        });
+        smoke_test(&path, "0.3.0+bbbbbbb", SMOKE_TIMEOUT)
+            .await
+            .unwrap();
+        closer.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_smoke_test_gives_up_on_a_long_text_file_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, fd) = busy(dir.path());
+        let began = std::time::Instant::now();
+        let e = smoke_test(&path, "0.3.0+bbbbbbb", SMOKE_TIMEOUT)
+            .await
+            .unwrap_err();
+        let took = began.elapsed();
+        drop(fd);
+        assert!(e.to_string().contains("Text file busy"), "{e}");
+        assert!(took >= BUSY_RETRY, "it tried again for {took:?}");
+        assert!(took < SMOKE_TIMEOUT, "{took:?}");
     }
 
     #[test]
