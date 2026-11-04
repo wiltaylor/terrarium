@@ -214,6 +214,12 @@ async fn main() -> anyhow::Result<()> {
     let backup_cfg =
         terrariumd::backup::schedule::Config::from_env().map_err(anyhow::Error::msg)?;
     let backup_task = terrariumd::backup::schedule::spawn(daemon.state.clone(), backup_cfg);
+    // The self-update (TERRARIUM_SELF_UPDATE, docs/api.md §34): the
+    // release check, the result mails, and the auto-update. A bad setting
+    // stops the start.
+    let self_update_cfg =
+        terrariumd::self_update::Config::from_env().map_err(anyhow::Error::msg)?;
+    let self_update_task = terrariumd::self_update::spawn(daemon.state.clone(), self_update_cfg);
 
     // Check the installed harness versions once at start, in the
     // background, so the log shows the version of each harness.
@@ -243,6 +249,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(t) = backup_task {
         t.abort();
     }
+    self_update_task.abort();
     if let Some(t) = sync_task {
         t.abort();
     }

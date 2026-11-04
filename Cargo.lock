@@ -4030,6 +4030,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "terrarium-updater"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "terrarium-version",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
+
+[[package]]
 name = "terrarium-version"
 version = "0.1.0"
 
@@ -4082,6 +4104,7 @@ dependencies = [
  "terrarium-core",
  "terrarium-host",
  "terrarium-runner",
+ "terrarium-updater",
  "terrarium-version",
  "terrariumd",
  "thiserror 2.0.21",

@@ -2771,6 +2771,13 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: HarnessCmd,
     },
+    /// Terrarium itself: the version, the newest release, and an update
+    /// or a rollback through the updater (docs/api.md §34). Needs sysadmin
+    /// or the operator
+    Update {
+        #[command(subcommand)]
+        command: UpdateCmd,
+    },
     /// Fleet files, as `terrarium fleet`
     Fleet {
         #[command(subcommand)]
@@ -4028,6 +4035,39 @@ pub enum HarnessCmd {
     /// Run the auto-update check now: ask npm, and install a newer release
     /// of each harness that is not pinned. Needs sysadmin or the operator
     Check,
+}
+
+/// `terrarium admin update ...` (docs/api.md §34).
+#[derive(Debug, Subcommand)]
+pub enum UpdateCmd {
+    /// The running version, the newest release, the policy, the updater,
+    /// and the last update or rollback with its steps
+    Status,
+    /// Read the GitHub releases now (else the daemon checks every 6 hours)
+    Check,
+    /// Update Terrarium: the updater checks the image signature, drains
+    /// the daemon, makes a full backup, starts the new image, and goes back
+    /// to the old image and the backup when the new one is not healthy
+    Apply {
+        /// A version like 0.3.0, `latest`, or `pre`. Default: the newest
+        /// release of the channel (TERRARIUM_UPDATE_CHANNEL)
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Go back to the image before the last update, and restore the backup
+    /// that the update made. The data since the update is lost (the
+    /// rollback backs it up first)
+    Rollback,
+    /// For the updater: stop new turns, and wait for the running turns
+    #[command(hide = true)]
+    Drain {
+        /// The most seconds to wait for the running turns
+        #[arg(long, default_value_t = 600)]
+        wait: u64,
+    },
+    /// For the updater: end a drain
+    #[command(hide = true)]
+    Resume,
 }
 
 #[derive(Debug, Args)]

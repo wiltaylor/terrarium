@@ -39,6 +39,7 @@ mod streams;
 mod subscriptions;
 pub mod system;
 mod system_prompts;
+mod system_update;
 mod targets;
 mod templates;
 mod test_runs;
@@ -114,6 +115,9 @@ pub struct AppState {
     /// The harness auto-update: the schedule, the next check, and the
     /// lock of a running check (`crate::harness_auto_update`).
     pub harness_auto_update: Arc<crate::harness_auto_update::Runtime>,
+    /// The self-update: the settings, the releases cache, and the drain
+    /// (`crate::self_update`).
+    pub self_update: Arc<crate::self_update::Runtime>,
     /// The origins, WebSocket auth, and sessions (`DaemonConfig::web`).
     pub web: crate::settings::WebConfig,
     /// The artifact listener address. Empty: no listener of its own, and
@@ -253,6 +257,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
     let api = Router::new()
         .route("/health", get(system::health))
         .route("/system/version", get(system::version))
+        .merge(system_update::routes())
         .route("/harnesses", get(system::harnesses))
         .route("/harnesses/update", post(system::harness_update_all))
         .route("/harnesses/{name}/update", post(system::harness_update))
@@ -904,6 +909,7 @@ mod tests {
             harness_latest: Arc::default(),
             harness_tools: Arc::default(),
             harness_auto_update: Arc::default(),
+            self_update: Arc::default(),
             web,
             artifact_listen: String::new(),
             transcripts: Arc::default(),

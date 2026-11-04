@@ -65,6 +65,7 @@ remote unauthenticated path to code execution or to another agent's secrets.
 | F14 | INFO | Dashboard | `eslint.config.js:24`, `lib/sanitize.ts:76` | The sink lint rule has gaps; the sanitizer keeps remote images (the CSP blocks them) | Fixed: the lint rule covers the gaps, with a fixture test; the daemon sends the CSP as a header. Remote images are accepted (§5) |
 | F15 | INFO | API auth | `password.rs`, `api/session.rs` | The new operator password login, JWT sessions, and the CLI session store: a design review of the change (2026-10-27) | Built with the controls of §10; the independent review findings R1 to R10 are fixed (§10); residuals in §10 |
 | F16 | INFO | Credentials | `accounts.rs`, `account_swap.rs`, `sandbox.rs` | Plan accounts: several plan logins per provider, per-account credentials, live swaps, and the refresh rule (2026-10-27) | Built with the controls of §11; a CI test keeps the token endpoints out of the code; residuals in §11 |
+| F19 | INFO | Self-update | `crates/terrarium-updater`, `self_update.rs`, compose.yaml | The updater holds docker.sock; what the daemon can make it do; the socket auth (2026-11-04, issue #19) | Built with the controls of §19; an independent review is to do; residuals in §19 |
 
 ---
 
@@ -1607,3 +1608,100 @@ the rights.
 - **Pipelines** stay actor-owned (a poll opens secrets as `run_as`). A
   pipeline whose `run_as` agent is deleted records an error at each poll,
   as before.
+
+## 19. The updater and docker.sock (2026-11-04, issue #19)
+
+The self-update (docs/api.md §34, PLAN §23.8) needs a process that can
+replace the terrarium container. That process holds `docker.sock`, and
+`docker.sock` is root on the host. This section is the threat model. It is
+written by the author of the code; an independent review is still to do.
+
+### Assets and actors
+
+- **`docker.sock`**: whoever can call the Engine API can start a privileged
+  container with `/` of the host bound in it.
+- **The data of the daemon**: the backups that an update makes hold every
+  secret (§32 of api.md).
+- **The attacker** is a prompt-injected agent in its sandbox, or code that
+  escaped the sandbox into the daemon process (uid `TERRARIUM_UID` in the
+  terrarium container), or a forged release image.
+
+### Controls
+
+- **The daemon never holds `docker.sock`.** Only the `terrarium-updater`
+  service binds it (compose.yaml, profile `updater`, off by default).
+  Test: `Layout.test_compose_binds_only_data_dirs` (scripts/test_deploy.py)
+  checks that docker.sock is bound once, and not in the daemon service.
+- **What the daemon can make the updater do.** The updater socket takes
+  three requests only: `status`, `update <target>`, and `rollback`. The
+  target must be a tag (`latest`, `pre`, or a version: letters, digits,
+  `.`, `-`, `_`; `machine::tag_of`), and the updater resolves it in its
+  own repository (`TERRARIUM_UPDATE_IMAGE`), checks the signature, and
+  pulls by digest. The daemon cannot name another image, a command, a
+  mount, or a container. So code in the daemon can at most move the
+  install to another signed release of the same repository (a downgrade
+  to an older signed release too), or roll back to the previous image,
+  which loses the data since the last update (it stays in a backup). It
+  cannot get a shell or a mount on the host through the updater. Tests:
+  `tags_and_commands`, `a_bad_tag_or_a_failed_pull_does_not_drain`,
+  `requests_are_tagged_json_lines`.
+- **The socket auth.** The socket dir is `0700` and the socket `0600`,
+  owned by `TERRARIUM_UID`; the updater also refuses a peer whose uid
+  (`SO_PEERCRED`) is not the owner's. The agent sandboxes do not bind the
+  dir (they bind named paths only, `sandbox.rs`). An agent in its sandbox
+  reaches the update only through the API, with the sysadmin role
+  (`policy::sysadmin`, audited `system.update` and `system.rollback`). A
+  worker agent gets `403`. Test:
+  `sysadmin_agents_and_the_operator_update_and_a_worker_is_refused`.
+- **The way back into the daemon.** The updater never takes a request from
+  the daemon's API: it calls the daemon only with `docker exec` of fixed
+  commands (`terrarium admin update drain|resume`, `terrariumd backup
+  create`, `terrarium daemon status`), which reach the daemon's own Unix
+  socket as the operator. The drain and resume routes are operator only,
+  so an agent, also a sysadmin, cannot drain the daemon.
+- **The image.** The tag is resolved to a digest, and the signature check
+  (`TERRARIUM_UPDATE_VERIFY`; by default `gh attestation verify
+  --signer-workflow` of the release workflow, with the bundle from the
+  registry) runs on the digest, before the pull. A
+  check that cannot run fails, and the update stops (fail closed). The
+  pull and the new container use the digest.
+- **The new container** gets the settings of the old one from its inspect
+  record: the same binds, ports, seccomp profile, and security options. The
+  updater adds no mount, no capability, and no privilege. The one-off
+  restore container has no network, no ports, and no restart.
+- **The data.** Each switch makes a full backup first, in the backup dir
+  of the daemon (the same place and mode as every backup).
+
+### Residuals
+
+- **The updater is root on the host** by its nature. A bug in the updater
+  (the JSON of the Engine API, the line protocol) is a bug in a root
+  process. It is small (`crates/terrarium-updater`), has no network
+  listener, and parses only fixed-size JSON lines (64 KiB) from one uid.
+- **Same uid.** The daemon and the updater share the uid, so a process
+  that runs as that uid in the terrarium container can talk to the socket.
+  The peer check stops another uid, not a process of the daemon's uid.
+  This is the design: the daemon must be able to ask. The limit on what it
+  can ask (above) is the control.
+- **A downgrade.** Code in the daemon can ask for an older signed release.
+  Both are signed by the release workflow; an older one can have a fixed
+  bug. Not refused: a rollback needs it.
+- **The gh placeholder token.** gh wants a token before it starts; with
+  none in the env, the updater gives it a fixed placeholder. With
+  `--bundle-from-oci` gh calls no GitHub API, so the placeholder reaches no
+  one that checks it. A gh version that starts to need a real token fails
+  the check (closed), and the operator sets `GH_TOKEN`.
+- **The signature check is online.** gh reads the Sigstore trust root
+  and the transparency log; there is no offline mode. With
+  `TERRARIUM_UPDATE_VERIFY=off`, an attacker who controls the registry or
+  the network path to it can make the updater run any image as the
+  terrarium container (not as root on the host: the container settings
+  stay). The updater logs a warning at start for `off`.
+- **The verify command.** `command:<shell command>` runs in the updater as
+  its uid with the docker group: it is root-equivalent. Only the operator
+  who edits `.env` sets it.
+- **An update in progress ends with the updater.** A stop of the updater
+  container (SIGTERM) in the middle of a run can leave the terrarium
+  container stopped or removed. The backup of the run is in the backup
+  dir, and the history names it; start the old image with the deploy
+  wrapper and restore it by hand (§32.3 of api.md).

@@ -16,16 +16,18 @@
 #
 # Stages:
 #   dashboard    npm ci && npm run build for the SolidJS app
-#   rust         cargo build --release for terrariumd, terrarium, and terrarium-runner
+#   rust         cargo build --release for terrariumd, terrarium, terrarium-runner, and terrarium-updater
 #                (terrariumd embeds the dashboard)
 #   host-build   static musl terrarium-host, for `just host::build` and for the
 #                runtime's /opt/terrarium/dist (GET /install/terrarium-host)
 #   host-export  scratch stage that holds only the host binary, for `--output`
+#   gh           the GitHub CLI, pinned with its SHA-256, for the updater's image check
 #   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3, ripgrep, uv (no harness),
-#                and the static terrarium-host with its SHA-256 for the host installer and
-#                the host agent self-update. The release image of CI
-#                (ghcr.io/wiltaylor/terrarium, docs/release.md): CI takes the release's
-#                terrarium-host asset out of this stage.
+#                the static terrarium-host with its SHA-256 for the host installer and
+#                the host agent self-update, and the updater with the gh CLI (the
+#                entrypoint of the terrarium-updater service, docs/api.md §34). The
+#                release image of CI (ghcr.io/wiltaylor/terrarium, docs/release.md): CI
+#                takes the release's terrarium-host asset out of this stage.
 
 ARG RUST_IMAGE=rust:1.97-trixie
 # The git ref of the build (crates/terrarium-version): `<commit>` or
@@ -59,9 +61,10 @@ COPY --from=dashboard /src/dashboard/dist ./dashboard/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/target,id=terrarium-target \
-    cargo build --release --locked -p terrariumd -p terrarium -p terrarium-runner \
+    cargo build --release --locked -p terrariumd -p terrarium -p terrarium-runner -p terrarium-updater \
     && mkdir -p /out \
-    && cp target/release/terrariumd target/release/terrarium target/release/terrarium-runner /out/
+    && cp target/release/terrariumd target/release/terrarium target/release/terrarium-runner \
+        target/release/terrarium-updater /out/
 
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS host-build
@@ -86,6 +89,29 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM scratch AS host-export
 COPY --from=host-build /out/terrarium-host /terrarium-host
+
+# ---------------------------------------------------------------------------
+# The GitHub CLI for the updater's image check (`gh attestation verify`,
+# docs/release.md). Pinned with the SHA-256 of the release archive of each
+# arch (cli/cli gh_<version>_checksums.txt); another arch stops the build.
+FROM ${RUST_IMAGE} AS gh
+ARG TARGETARCH
+ARG GH_VERSION=2.100.0
+ARG GH_SHA256_AMD64=e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be
+ARG GH_SHA256_ARM64=ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+        amd64) sum="$GH_SHA256_AMD64" ;; \
+        arm64) sum="$GH_SHA256_ARM64" ;; \
+        *) echo "no gh checksum for $arch" >&2; exit 1 ;; \
+    esac; \
+    file="gh_${GH_VERSION}_linux_${arch}.tar.gz"; \
+    curl -fsSL -o "/tmp/$file" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/$file"; \
+    echo "$sum  /tmp/$file" | sha256sum -c -; \
+    mkdir -p /out; \
+    tar -xzf "/tmp/$file" -C /tmp; \
+    cp "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /out/gh
 
 # ---------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS runtime
@@ -160,6 +186,12 @@ ENV HOME=/home/terrarium \
 # One terrarium-runner process holds each agent (PLAN §6), so an agent
 # lives through a restart of terrariumd.
 COPY --from=rust /out/terrariumd /out/terrarium /out/terrarium-runner /usr/local/bin/
+# The updater (docs/api.md §34): the same image with the entrypoint
+# terrarium-updater (compose.yaml, profile `updater`). `gh attestation
+# verify` checks the build provenance of a release image before the
+# updater pulls it (TERRARIUM_UPDATE_VERIFY=gh, the default; the gh stage).
+COPY --from=rust /out/terrarium-updater /usr/local/bin/
+COPY --from=gh /out/gh /usr/local/bin/gh
 # The host installer serves these (GET /install/terrarium-host?arch=<arch>,
 # TERRARIUM_HOST_DIST_DIR). One arch for now: the arch of the build.
 COPY --from=host-build /dist/ /opt/terrarium/dist/

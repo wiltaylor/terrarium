@@ -97,6 +97,7 @@ import type {
   HarnessUpdateResult,
   Health,
   SystemVersion,
+  SelfUpdateReport,
   Host,
   HostMetricsHistory,
   InboxCounts,
@@ -214,6 +215,17 @@ export interface Api {
   health(): Promise<Health>;
   /** `GET /api/system/version`: the daemon's build (version, git ref, build time). */
   systemVersion(): Promise<SystemVersion>;
+  /** The self-update (docs/api.md §34): the operator and sysadmins. */
+  selfUpdate: {
+    /** `GET /api/system/update`: the version, the newest release, the policy, the updater, the last run. */
+    status(): Promise<SelfUpdateReport>;
+    /** `POST /api/system/update/check`: read the releases now. */
+    check(): Promise<SelfUpdateReport>;
+    /** `POST /api/system/update`: update to `version` (default: the newest release of the channel). */
+    apply(version?: string): Promise<{ run: string; target: string }>;
+    /** `POST /api/system/update/rollback`: the image before the last update, and its backup. */
+    rollback(): Promise<{ run: string }>;
+  };
   /**
    * `GET /api/harnesses`: each harness against its pin. `refresh` runs the binaries
    * again (and asks npm again); `latest` adds the latest npm release and the update kind.
@@ -982,6 +994,12 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
   return {
     health: () => get("/api/health"),
     systemVersion: () => get("/api/system/version"),
+    selfUpdate: {
+      status: () => get("/api/system/update"),
+      check: () => post("/api/system/update/check"),
+      apply: (version) => post("/api/system/update", version ? { version } : {}),
+      rollback: () => post("/api/system/update/rollback"),
+    },
     harnesses: (refresh, latest) => {
       const q: Query = {};
       if (refresh) q.refresh = true;

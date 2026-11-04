@@ -54,6 +54,10 @@ import type {
   WikiPageSummary,
   AuditEntry,
   LogSessionLink,
+  SelfUpdateReport,
+  TerrariumRelease,
+  UpdateRun,
+  UpdaterImage,
   Card,
   CardComment,
   Column,
@@ -315,6 +319,77 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   Object.assign(harnessPolicy.claude!, { policy: "pinned", pinned_version: "2.1.310", latest: "2.1.310", checked_at: new Date(startedAt - 6 * 3600_000).toISOString(), result: "pinned", detail: "pinned to 2.1.310; no auto-update" });
   Object.assign(harnessPolicy.pi!, { previous: "1.4.0", latest: "1.5.1", checked_at: new Date(startedAt - 6 * 3600_000).toISOString(), result: "updated", detail: "1.4.0 -> 1.5.1" });
   harnessOnDisk.pi = ["1.4.0", "1.5.1"];
+  // The self-update (docs/api.md §34): the daemon runs MOCK_DAEMON_VERSION, a stable 0.2.0 is out, the updater answers.
+  const mockRelease = (version: string, prerelease: boolean): TerrariumRelease => ({
+    version,
+    tag: `v${version}`,
+    name: `v${version}`,
+    prerelease,
+    published_at: new Date(startedAt - 2 * 86_400_000).toISOString(),
+    notes: `## What's changed\n\n- The self-update: an updater service with a backup and a rollback\n- Settings > Software shows the newest release`,
+    url: `https://github.com/wiltaylor/terrarium/releases/tag/v${version}`,
+  });
+  const updater = {
+    releases: [mockRelease("0.2.0", false), mockRelease("0.3.0-alpha", true)],
+    checkedAt: new Date(startedAt - 3600_000).toISOString() as string | null,
+    running: MOCK_DAEMON_VERSION.split("+")[0]!,
+    current: { reference: "terrarium:dev", id: "sha256:1111", version: "0.1.0" } as UpdaterImage,
+    previous: null as UpdaterImage | null,
+    history: [] as UpdateRun[],
+  };
+
+  const selfUpdateLatest = () => {
+    const stable = updater.releases.filter((r) => !r.prerelease);
+    return stable[stable.length - 1] ?? null;
+  };
+  const selfUpdateReport = (): SelfUpdateReport => {
+    const latest = selfUpdateLatest();
+    const [cargo_version = "", git_ref = "unknown"] = MOCK_DAEMON_VERSION.split("+");
+    return {
+      current: { version: `${updater.running}+${git_ref}`, cargo_version: updater.running || cargo_version, git_ref, dirty: false, build_time: new Date(startedAt - 86_400_000).toISOString().replace(/\.\d+Z$/, "Z") },
+      policy: "notify",
+      channel: "stable",
+      latest,
+      update_available: !!latest && harnessUpdateKind(updater.running, latest.version) !== "none",
+      checked_at: updater.checkedAt,
+      check_error: null,
+      updater: {
+        reachable: true,
+        socket: "/run/terrarium-updater/updater.sock",
+        error: null,
+        status: { updater_version: MOCK_DAEMON_VERSION, repository: "ghcr.io/wiltaylor/terrarium", verify: "gh", current: updater.current, previous: updater.previous, running: null, history: updater.history },
+      },
+      last_result: updater.history[0] ?? null,
+      maintenance: null,
+      drain: { on: false, since: null, by: null, busy: [] },
+    };
+  };
+  /** The mock switch: every step passes at once. */
+  const mockSwitch = (kind: "update" | "rollback", target: string, to: UpdaterImage): UpdateRun => {
+    const names = kind === "update"
+      ? ["inspect", "resolve", "verify", "pull", "drain", "backup", "stop", "remove", "start", "health"]
+      : ["inspect", "pull", "verify", "drain", "backup", "stop", "restore", "remove", "start", "health"];
+    const backup = `/state/backups/terrarium-backup-${Date.now()}.zip`;
+    const run: UpdateRun = {
+      id: ulid("run"),
+      kind,
+      actor: "operator",
+      target,
+      from: updater.current,
+      to,
+      backup,
+      outcome: "succeeded",
+      error: null,
+      steps: names.map((name) => ({ name, state: kind === "rollback" && name === "verify" ? "skipped" : "ok", detail: name === "backup" ? `full backup ${backup}` : "", at: iso() })),
+      started_at: iso(),
+      ended_at: iso(),
+    };
+    updater.previous = updater.current;
+    updater.current = to;
+    updater.running = to.version ?? updater.running;
+    updater.history = [run, ...updater.history].slice(0, 20);
+    return run;
+  };
 
   const reply = <T>(fn: () => T): Promise<T> =>
     new Promise<T>((resolve, reject) => {
@@ -2132,6 +2207,31 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           authorize("DELETE");
           cookie = null;
           saveCookie();
+        }),
+    },
+    selfUpdate: {
+      status: () => reply(() => selfUpdateReport()),
+      check: () =>
+        reply(() => {
+          updater.checkedAt = iso();
+          return selfUpdateReport();
+        }),
+      apply: (version) =>
+        reply(() => {
+          const target = version ?? selfUpdateLatest()?.version ?? "latest";
+          if (!/^v?[0-9A-Za-z][0-9A-Za-z._-]*$/.test(target)) fail(422, "invalid", `\`${target}\` is not a version, \`latest\`, or \`pre\``);
+          const v = target === "latest" || target === "pre" ? (selfUpdateLatest()?.version ?? updater.running) : target.replace(/^v/, "");
+          const to: UpdaterImage = { reference: `ghcr.io/wiltaylor/terrarium@sha256:${v.replace(/\W/g, "")}`, id: `sha256:${v}`, digest: `sha256:${v}`, version: v };
+          const run = mockSwitch("update", target, to);
+          audit("system.update", target, undefined, { target, run: run.id, ok: true });
+          return { run: run.id, target };
+        }),
+      rollback: () =>
+        reply(() => {
+          if (!updater.previous) fail(409, "conflict", "no switch to roll back: the updater has no previous image");
+          const run = mockSwitch("rollback", "previous", updater.previous!);
+          audit("system.rollback", "previous", undefined, { run: run.id, ok: true });
+          return { run: run.id };
         }),
     },
     systemVersion: () =>

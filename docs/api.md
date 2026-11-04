@@ -21,7 +21,8 @@ Sections: [1 Transports](#1-transports-and-callers) ·
 [18 Fleet](#18-fleet) · [19 Schedules](#19-schedules) ·
 [20 Event sources](#20-event-sources-and-ingest) ·
 [21 Agent templates](#21-agent-templates) · [27 DB](#27-db) ·
-[28 System prompts](#28-system-prompts) · [29 Test runs](#29-test-runs) · [30 Monitors and the project dashboard](#30-monitors-and-the-project-dashboard).
+[28 System prompts](#28-system-prompts) · [29 Test runs](#29-test-runs) · [30 Monitors and the project dashboard](#30-monitors-and-the-project-dashboard) ·
+[34 Self-update](#34-self-update).
 
 ## 1. Transports and callers
 
@@ -455,6 +456,8 @@ everything. Every privileged action writes an audit row (§9).
 | Store, list, show, or delete secrets (§5.2); never a value | no | own project | any, global too |
 | Reveal the value of a secret (§5.2) | no | no | no (operator only) |
 | Create and delete projects; `POST /api/reload` | no | no | yes |
+| Read the self-update state, check for a release, update, roll back (§34) | no | no | yes |
+| Drain the daemon for an update (§34.5) | no | no | no (operator only) |
 | Grant or revoke `project_admin` | no | own project | any |
 | Grant or revoke `sysadmin` | no | no | no (operator only) |
 | Read the audit log | no | own project's rows | all |
@@ -514,6 +517,8 @@ operator, a dashboard session, and an agent.
 - `terrarium version` shows this next to the CLI's own build, and warns when
   the two refs differ. `GET /api/hosts` marks a host agent of another build
   `stale` (§17.1).
+- `GET /api/system/update` (§34) adds the newest release and the state of
+  the updater.
 
 ### `GET /api/harnesses`
 
@@ -9388,3 +9393,274 @@ Grant or revoke the calendar write right (`policy.calendar_write`) of an
 agent of the project. A lead, a sysadmin, or the operator. An agent from
 an agent file is `409 file_managed`: change the file. Answers `{agent,
 name, project, calendar_write, changed}`.
+
+## 34. Self-update
+
+Terrarium updates itself from release images:
+`ghcr.io/wiltaylor/terrarium:<version>`, `:latest` (the newest stable
+release), and `:pre` (the newest pre-release). CI makes them
+([release.md](release.md)). The design is in PLAN §23.8. The code is in
+`crates/terrarium-updater` (the updater) and
+`crates/terrariumd/src/self_update.rs` with
+`crates/terrariumd/src/api/system_update.rs` (the daemon).
+
+**The daemon never holds `docker.sock`.** A sandbox escape into the
+daemon must not give root on the host. A separate service,
+`terrarium-updater` (compose.yaml, profile `updater`), holds it. The
+updater runs no agents and opens no port. It listens only on the updater
+socket, which it shares with the daemon (§34.6). The daemon asks it for an
+update or a rollback; the updater does the work and keeps the record.
+
+### 34.1 Set it up
+
+1. Set these lines in `.env` (a deploy writes `TERRARIUM_DOCKER_GID` in a
+   new `.env`):
+
+   ```
+   COMPOSE_PROFILES=updater
+   TERRARIUM_DOCKER_GID=<the group of /var/run/docker.sock: stat -c %g /var/run/docker.sock>
+   ```
+
+2. Run `docker compose up -d` (a deploy: `<dir>/terrarium-compose up -d`).
+   The updater starts from the image of the daemon, with the entrypoint
+   `terrarium-updater`. `TERRARIUM_UPDATER_IMAGE` sets another image.
+3. Run `terrarium admin update status`. The line `updater:` shows its build
+   and the signature check.
+
+The updater runs as `TERRARIUM_UID` with the docker group added. It makes
+`<data>/updater/run` mode `0700` and the socket mode `0600`, and it refuses
+a peer with another uid (`SO_PEERCRED`). The daemon binds the same dir at
+`/run/terrarium-updater`. The agent sandboxes do not bind it.
+
+**An install from source** (`just deploy::server`, `just up`) runs a local
+image (`terrarium-<dir>:<commit>`, `terrarium:dev`). The first update
+switches it to the GHCR image: the updater makes the new container with the
+settings of the old one and the release image. After that, the image file
+`<data>/updater/state/image` names the release image, and the deploy
+wrapper `<dir>/terrarium-compose` uses it in place of `src/.deployed-ref`,
+so a later `terrarium-compose up -d` keeps it. A source deploy
+(`just deploy::update`) or a deploy rollback removes the file: the source
+wins again. In a dev checkout (`just up`), set `TERRARIUM_IMAGE` in `.env`
+to the release image, or `just up` builds and starts `terrarium:dev` again.
+
+### 34.2 Settings
+
+The daemon:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TERRARIUM_SELF_UPDATE` | `notify` | `off`: no background check and no mail (the API still checks and updates on request). `notify`: a check of the releases every 6 hours, and one Inbox mail for each new version. `auto`: `notify`, and an update inside a global calendar event of kind `maintenance` (§33), at most once for each occurrence. |
+| `TERRARIUM_UPDATE_CHANNEL` | `stable` | `stable`: releases only. `pre`: pre-releases too. |
+| `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium` | The GitHub repo of the releases (`GET https://api.github.com/repos/<repo>/releases`, cached for 1 hour). |
+| `TERRARIUM_UPDATER_SOCKET` | `/run/terrarium-updater/updater.sock` | The updater socket. |
+
+The updater:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TERRARIUM_UPDATE_VERIFY` | `gh` | The image check (§34.4): `gh`, `cosign`, `off`, or `command:<shell command>`. |
+| `TERRARIUM_UPDATE_WORKFLOW` | `.github/workflows/ci.yml` | The workflow in `TERRARIUM_UPDATE_REPO` that signs the releases (`--signer-workflow`). |
+| `TERRARIUM_UPDATE_IMAGE` | `ghcr.io/wiltaylor/terrarium` | The image repository of the releases. |
+| `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium` | The GitHub repo: the identity of the signing workflow. |
+| `TERRARIUM_UPDATE_DRAIN_WAIT` | `600` | Seconds that the drain waits for the running turns. |
+| `TERRARIUM_UPDATE_HEALTH_TIMEOUT` | `900` | Seconds that the new container has to become healthy. The first start installs the harnesses only when the tools dir has none; an update finds them. |
+| `TERRARIUM_UPDATER_TARGET` | the service `terrarium` of the compose project of the updater | The name of the terrarium container. |
+| `TERRARIUM_UPDATER_STATE` | `/updater` | The state dir: `history.json` (the last 20 runs), `previous.json` (the rollback target), and `image`. |
+
+A bad `TERRARIUM_SELF_UPDATE` or `TERRARIUM_UPDATE_CHANNEL` stops the start
+of the daemon. A bad `TERRARIUM_UPDATE_VERIFY` stops the start of the
+updater.
+
+### 34.3 An update
+
+The updater does these steps, and records each one (`steps` of a run):
+
+| Step | What it does |
+|---|---|
+| `inspect` | Finds the terrarium container and its image. |
+| `resolve` | Asks the registry for the digest of the tag (anonymous pull token). The container runs that digest already: the run ends as `current`. |
+| `verify` | Checks the signature of `<repo>@<digest>` (§34.4). A failure stops the run. With `off`, the step is `skipped`. |
+| `pull` | Pulls the image by digest. Before the drain, so a slow or failed pull stops no work. |
+| `drain` | Runs `terrarium admin update drain --wait <s>` in the container (§34.5). |
+| `backup` | Runs `terrariumd backup create --json` in the container: a full backup in the backup dir (§32). Migrations only go forward; the way back needs it. |
+| `stop`, `remove`, `start` | Stops the container (its stop timeout), removes it, and makes a new one with the same settings (binds, ports, networks, labels, the seccomp profile, the env of compose) and the new image. The env, command, and user of the old image do not carry over: the new image brings its own. |
+| `health` | Waits until the health check passes, then runs `terrarium daemon status` in the new container. |
+
+A failure before `stop` changes nothing: the updater ends the drain
+(`resume`) and the old container runs on. The outcome is `failed`.
+
+A failure from `stop` on goes back by itself (`rollback`): the updater
+removes the new container, restores the backup of the `backup` step with
+the old image (`terrariumd backup restore`, offline, in a one-off container
+with the same binds and no network), starts the old image again, and waits
+for its health. The outcome is `rolled_back`, or `rollback_failed` when the
+way back fails too. Then the operator must act: the mail names the backup,
+and §32.3 tells how to restore it.
+
+After a good update, the updater writes the image file and
+`previous.json`: the old image and the backup. The drain lives in the
+memory of the old daemon, so the new daemon starts without it.
+
+**A rollback** (`POST /api/system/update/rollback`) is the same switch to
+the image in `previous.json`. The image is not checked again (it ran here
+before); a local image that is gone is pulled by its digest. A rollback
+also restores the backup that the last update made, because the newer
+daemon can have migrated the database: **the data written since the update
+is lost**. It stays in the backup that the rollback makes first. A second
+rollback goes forward again.
+
+One run at a time: a request while a run runs is `409 conflict`.
+
+### 34.4 The signature check
+
+`TERRARIUM_UPDATE_VERIFY` names a program, so that the check follows the
+way the release signs its images ([release.md](release.md)):
+
+- `gh` (the default): `gh attestation verify oci://<repo image>@<digest>
+  --repo <repo> --signer-workflow <repo>/.github/workflows/ci.yml
+  --bundle-from-oci`. The release signs only with
+  `actions/attest-build-provenance` and pushes the Sigstore bundle to the
+  registry; this is the check of [release.md](release.md), "How to verify
+  a release". gh reads the bundle from GHCR, and checks the signature, the
+  transparency log entry, the digest, and that the certificate is of the
+  release workflow of the repo. The image has gh 2.100.0 (pinned with its
+  SHA-256 in the Dockerfile). gh asks for a token before it starts, also
+  with `--bundle-from-oci`: when the updater env has no `GH_TOKEN` or
+  `GITHUB_TOKEN`, the updater gives gh a placeholder. gh sends it to no
+  GitHub API in this mode; a call that needs a real token fails, and so
+  does the update. Set `GH_TOKEN` in the updater env to use a real one.
+- `cosign`: `cosign verify --certificate-identity-regexp
+  '^https://github\.com/<repo>/\.github/workflows/'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  <ref>`. The release makes no cosign signature and the image has no
+  cosign: this mode is for an image of your own (`TERRARIUM_UPDATE_IMAGE`,
+  `TERRARIUM_UPDATER_IMAGE`).
+
+Why gh and not cosign: the release has only the GitHub attestation, and
+`gh attestation verify` is the documented check for it. cosign v2.4 reads
+signatures and attestations in its own format; its reading of the GitHub
+bundle in the OCI referrers was not proved to work, so it is not the
+default.
+- `command:<shell command>`: `sh -c <command>` with the image in
+  `TERRARIUM_UPDATE_REF`. Exit 0 accepts the image.
+- `off`: no check. The `verify` step is `skipped`, and the updater logs a
+  warning at its start.
+
+**No check works offline.** gh and cosign read the Sigstore trust root and
+the bundle over the network (GHCR, and the Sigstore TUF repository). A check that cannot run (no
+program, no network, a timeout of 3 minutes) fails, and the update stops
+(fail closed). The registry digest pins the image that the check passed:
+the pull and the new container use the digest, never the tag.
+
+### 34.5 The drain
+
+The updater drains the daemon before it stops the container. The drain:
+
+- holds every wake: work for an agent that does not run waits
+  (`lifecycle::Woke::Draining`);
+- closes the stream gate for every agent: no new turn, mail pointer,
+  recap, or compaction goes to a running agent (`stream_limit`);
+- lets the running turns end. `terrarium admin update drain --wait <s>`
+  waits until no agent is `working` or `starting`, at most `<s>` seconds.
+  A turn that still runs then ends with the stop; the agent resumes its
+  session in the new daemon, as after any restart.
+
+The drain lives in memory. The new daemon starts without it, and the queued
+work goes out at its start. `POST /api/system/update/resume` (or the
+updater after an early failure) ends it and sends the work that waited.
+
+### 34.6 The updater socket
+
+`/run/terrarium-updater/updater.sock`: one connection carries one request
+and one answer, each one line of JSON.
+
+| Request | Answer |
+|---|---|
+| `{"cmd":"status"}` | `{"kind":"status", updater_version, repository, verify, current, previous, running, history}` |
+| `{"cmd":"update","target":"0.3.0","actor":"operator"}` | `{"kind":"accepted","run":"<ulid>"}` |
+| `{"cmd":"rollback","actor":"operator"}` | `{"kind":"accepted","run":"<ulid>"}` |
+| a refused request | `{"kind":"error","message":"...","busy":false}` |
+
+`current` and `previous` are images: `{reference, id, digest?, version?}`
+(`version` from the `org.opencontainers.image.version` label). A run is
+`{id, kind, actor, target, from, to, backup, outcome, error, steps:
+[{name, state, detail, at}], started_at, ended_at}`. `outcome` is
+`running`, `succeeded`, `current`, `failed`, `rolled_back`, or
+`rollback_failed`; a step `state` is `running`, `ok`, `failed`, or
+`skipped`.
+
+On the host, the operator talks to the updater with `docker compose exec
+terrarium-updater terrarium-updater status` (also `update <target>` and
+`rollback`).
+
+### 34.7 The API
+
+The operator and a sysadmin, **agents with the `sysadmin` role too**
+(`terrarium admin update` in the sandbox). Another agent gets `403`. The
+drain and its end are for the operator only (the updater runs them through
+the daemon's own Unix socket in the container).
+
+#### `GET /api/system/update`
+
+```json
+{"current": {"version":"0.1.0+6e31754","cargo_version":"0.1.0", "...": "§4"},
+ "policy":"notify","channel":"stable",
+ "latest":{"version":"0.2.0","tag":"v0.2.0","name":"v0.2.0","prerelease":false,
+           "published_at":"...","notes":"(Markdown)","url":"https://github.com/..."},
+ "update_available":true,"checked_at":"...","check_error":null,
+ "updater":{"reachable":true,"socket":"/run/terrarium-updater/updater.sock",
+            "error":null,"status":{"...": "§34.6"}},
+ "last_result":{"...": "a run"},
+ "maintenance":{"key":"<event>@<start>","event":"<ulid>","title":"...","start":"...","end":"..."},
+ "drain":{"on":false,"since":null,"by":null,"busy":[]}}
+```
+
+- `latest` is the newest release of the channel (semver order; no
+  drafts). `update_available` is true when it is newer than
+  `current.cargo_version`.
+- `updater.reachable` is false when no updater answers; `error` says why.
+- `last_result` is the run in progress, else the newest run.
+- `maintenance` is the global `maintenance` occurrence that runs now, or
+  `null`.
+
+#### `POST /api/system/update/check`
+
+Reads the releases now, sends the new-release mail when it is due, and
+answers as `GET`.
+
+#### `POST /api/system/update`
+
+`{"version": "0.3.0"}` (also `v0.3.0`, `latest`, or `pre`); no body: the
+newest release of the channel, else the channel tag. Answers `202` with
+`{run, target}`. A target that is no tag is `422 invalid`. No updater:
+`503 unavailable`. A run in progress: `409 conflict`. The audit row is
+`system.update` (target: the version; detail: `run`, `ok`, `error`,
+`from`).
+
+#### `POST /api/system/update/rollback`
+
+Answers `202` with `{run}`. No previous switch: the run fails at once
+(`failed`, "no switch to roll back"). The audit row is `system.rollback`.
+
+#### `POST /api/system/update/drain`, `POST /api/system/update/resume`
+
+The operator only. Answer `{on, since, by, busy}`. The drain writes the
+audit row `system.drain`.
+
+### 34.8 Mail
+
+The daemon sends the operator Inbox mail (from `system`):
+
+- one mail for each new version of the channel, "Terrarium 0.2.0 is
+  available", with the command (`notify`) or the next maintenance window
+  (`auto`);
+- one mail for each finished run of the updater, with the outcome, the
+  error, the backup, and the steps. A failure that needs the operator says
+  "ACTION NEEDED".
+
+The table `self_update_state` (migration 63) records the mails that went
+out and the window of the last auto-update, so a restart sends nothing
+twice. At the first read of the updater history, the older runs get no
+mail. The auto-update writes the window before it asks the updater: the
+backup holds the mark, so a rollback does not start the same update again
+in the same window.

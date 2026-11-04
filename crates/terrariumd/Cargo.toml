@@ -20,6 +20,8 @@ terrarium-adapter-copilot.workspace = true
 terrarium-adapter-pi.workspace = true
 # The host agent wire protocol (docs/host-protocol.md); lib + bin crate.
 terrarium-host = { path = "../terrarium-host" }
+# The updater protocol and client (docs/api.md §34): the lib only, no bin.
+terrarium-updater.workspace = true
 tower = { workspace = true, features = ["util"] }
 http-body-util.workspace = true
 tokio.workspace = true

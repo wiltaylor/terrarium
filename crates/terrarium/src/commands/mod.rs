@@ -28,6 +28,7 @@ pub mod system;
 pub mod system_prompts;
 pub mod templates;
 pub mod test_runs;
+pub mod update;
 pub mod waits;
 
 #[cfg(test)]
@@ -146,6 +147,7 @@ async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
         AdminCmd::Target { command } => system::admin_target(ctx, command).await,
         AdminCmd::Host { command } => system::hosts(ctx, command).await,
         AdminCmd::Harness { command } => system::harnesses(ctx, command).await,
+        AdminCmd::Update { command } => update::update(ctx, command).await,
         AdminCmd::Subscription { command } => system::subscriptions(ctx, command).await,
         AdminCmd::Fleet { command } => fleet::fleet(ctx, command).await,
         AdminCmd::Schedule { command } => schedules::schedule(ctx, command).await,

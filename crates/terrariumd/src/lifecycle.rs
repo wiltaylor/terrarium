@@ -9,10 +9,11 @@
 //!   mail in the store, card and nudge lines in `pending_pointers`, and
 //!   turns in `queued_turns`. One wake at a time for each agent: a wake
 //!   that comes while another one runs does nothing.
-//! - **No wake.** A paused agent, an agent in `error`, and an agent with a
-//!   quota or budget hold do not wake; their work waits. An unpause, the
-//!   end of the last hold, and the daemon start wake an agent that has
-//!   work. A wake whose start fails puts the agent in `error` with the
+//! - **No wake.** A paused agent, an agent in `error`, an agent with a
+//!   quota or budget hold, and every agent while the daemon drains for a
+//!   self-update (`crate::self_update`) do not wake; their work waits. An
+//!   unpause, the end of the last hold, the end of a drain, and the daemon
+//!   start wake an agent that has work. A wake whose start fails puts the agent in `error` with the
 //!   reason; the operator clears it (`start`, `restart`, or `stop`).
 //! - **Idle stop.** An agent at rest (`idle` or `waiting`) for its idle
 //!   stop (`idle_stop`, else `TERRARIUM_IDLE_STOP`, default 10 minutes)
@@ -307,6 +308,9 @@ pub enum Woke {
     Paused,
     /// The agent is in `error`: its work waits for the operator.
     Error,
+    /// The daemon drains for a self-update (`crate::self_update`): the
+    /// work waits for the new daemon, or for the end of the drain.
+    Draining,
     /// A quota or budget hold lasts: the work waits for its end.
     Held,
     /// The subscription of the agent is disabled: the work waits for the
@@ -363,6 +367,9 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
     if runs(state, id).await {
         deliver_turns(state, id).await;
         return Woke::Running;
+    }
+    if state.self_update.draining() {
+        return Woke::Draining;
     }
     if view.agent.status == AgentStatus::Error {
         return Woke::Error;

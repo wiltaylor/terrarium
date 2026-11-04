@@ -127,6 +127,10 @@ describe("createHttpApi", () => {
     await api.targets.snapshots("vm", { scope: "lab", agent: "terra/w1" });
     await api.targets.deleteSnapshot("vm", "pre up", { force: true });
     await api.systemVersion();
+    await api.selfUpdate.status();
+    await api.selfUpdate.apply("0.3.0");
+    await api.selfUpdate.rollback();
+    await api.selfUpdate.check();
 
     expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
       "GET /api/health",
@@ -143,7 +147,12 @@ describe("createHttpApi", () => {
       "GET /api/targets/vm/snapshots",
       "DELETE /api/targets/vm/snapshots/pre%20up",
       "GET /api/system/version",
+      "GET /api/system/update",
+      "POST /api/system/update",
+      "POST /api/system/update/rollback",
+      "POST /api/system/update/check",
     ]);
+    expect(calls[15]!.opts?.body).toEqual({ version: "0.3.0" });
     expect(calls[11]!.opts?.query).toEqual({ scope: "lab", agent: "terra/w1" });
     expect(calls[12]!.opts?.query).toEqual({ force: true });
     expect(calls[1]!.opts?.query).toMatchObject({ project: "terrarium", limit: 1000 });

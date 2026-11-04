@@ -46,6 +46,7 @@ pub mod runner_supervisor;
 pub mod sandbox;
 pub mod scheduler;
 pub mod secrets;
+pub mod self_update;
 pub mod session_archive;
 pub mod settings;
 pub mod skills;
@@ -200,6 +201,7 @@ pub async fn start_with_usage(
         harness_latest: Arc::default(),
         harness_tools: Arc::default(),
         harness_auto_update: Arc::default(),
+        self_update: Arc::default(),
         web: cfg.web.clone(),
         artifact_listen: cfg
             .artifact_listen

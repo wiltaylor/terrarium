@@ -1625,10 +1625,12 @@ its next wake starts the new session.
 
 ### 2.14 Install on a server
 
-The repository is private, so CI puts no image in a registry.
-`just deploy::server` sends the source to the server over ssh and builds
-the image on the server. The server does not need access to the
-repository. Run the commands of this section on your machine, in the
+A release publishes the image `ghcr.io/wiltaylor/terrarium`
+([release.md](release.md)), and an install keeps itself up to date from it
+(§2.16). `just deploy::server` is the install from source, for
+development: it sends the source to the server over ssh and builds the
+image on the server. The server does not need access to the repository.
+The first self-update (§2.16) moves such an install to the release image. Run the commands of this section on your machine, in the
 repository.
 
 The server needs:
@@ -1836,6 +1838,59 @@ docker compose up -d terrarium
 A diff restores with its base: keep both files in the same dir. The old
 data moves to `.terrarium-pre-restore-<time>/` in each dir. Delete it when
 the daemon runs well.
+
+### 2.16 Update Terrarium from a release
+
+A release is an image on GHCR (`ghcr.io/wiltaylor/terrarium`). The
+updater service pulls it and switches the container. It makes a backup
+first, and it goes back by itself when the new version does not start
+([api.md](api.md) §34). The daemon never gets `docker.sock`: only the
+updater has it.
+
+1. Turn on the updater. Add these lines to `.env` (a server install from
+   `just deploy::server` has `TERRARIUM_DOCKER_GID` already):
+
+   ```bash
+   COMPOSE_PROFILES=updater
+   TERRARIUM_DOCKER_GID=$(stat -c %g /var/run/docker.sock)   # write the number
+   ```
+
+2. Start it: `docker compose up -d` (on a server:
+   `<dir>/terrarium-compose up -d`).
+3. Look at the state:
+
+   ```bash
+   terrarium admin update status
+   ```
+
+   The dashboard shows the same in Settings > Software.
+4. Update. Select **Update** in Settings > Software, or run:
+
+   ```bash
+   terrarium admin update apply              # the newest release
+   terrarium admin update apply --version 0.3.0
+   ```
+
+   The daemon stops new turns, waits up to 10 minutes for the running
+   turns, makes a full backup, and restarts on the new image. The agents
+   resume their sessions. You get an Inbox mail with the result.
+5. To go back, select **Roll back**, or run `terrarium admin update
+   rollback`. A rollback also restores the backup of the update: **the data
+   since the update is lost** (the rollback backs it up first).
+
+By default (`TERRARIUM_SELF_UPDATE=notify`), the daemon checks the releases
+every 6 hours and mails you once for each new version. With `auto`, it also
+updates by itself, but only inside a global calendar event of kind
+`maintenance` (Calendar > Global), once for each event.
+
+The first update of an install from source switches it to the release
+image. After that, `<dir>/terrarium-compose up -d` keeps the release image
+(`<dir>/updater/state/image`). `just deploy::update` from source works as
+before and takes the install back to a source build.
+
+The updater checks the build provenance of each image with `gh attestation
+verify` before the pull (`TERRARIUM_UPDATE_VERIFY=gh`, docs/release.md). The check needs the network. When it
+fails, the update stops and nothing changes.
 
 ## 3. Configuration directories
 

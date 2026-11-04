@@ -8,6 +8,8 @@ dashboard/dist/
 /config/*
 !/config/README.md
 /state/
+# The updater: its socket dir and its state (docs/api.md §34)
+/updater/
 # The harnesses (bind mount at /opt/terrarium/tools, npm prefix)
 /tools/
 /.env

@@ -8,6 +8,7 @@ members = [
     "crates/terrarium-runner",
     "crates/terrarium-compat",
     "crates/terrarium-version",
+    "crates/terrarium-updater",
     "crates/adapters/claude",
     "crates/adapters/codex",
     "crates/adapters/copilot",
@@ -27,6 +28,8 @@ terrarium-core = { path = "crates/terrarium-core" }
 terrarium-runner = { path = "crates/terrarium-runner" }
 # The build version of the binaries (`<version>+<git ref>`); only bins use it.
 terrarium-version = { path = "crates/terrarium-version" }
+# The updater protocol and client (the daemon); the updater bin (feature `bin`).
+terrarium-updater = { path = "crates/terrarium-updater", default-features = false }
 terrarium-adapter-claude = { path = "crates/adapters/claude" }
 terrarium-adapter-codex = { path = "crates/adapters/codex" }
 terrarium-adapter-copilot = { path = "crates/adapters/copilot" }

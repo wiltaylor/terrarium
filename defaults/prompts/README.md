@@ -21,7 +21,7 @@ still works for an older config repo: the daemon looks in
 |---|---|---|
 | `default.md` | `member` | A worker: the CLI, and the mailbox, board, memory, and wiki protocols. |
 | `project-lead.md` | `project_admin` | The default content, plus the lead duties of PLAN §10: triage the inbox, keep `ready` stocked, run workers. |
-| `system-lead.md` | `sysadmin` | The default content, plus the system duties: make projects, appoint leads, watch hosts, agents, and usage. |
+| `system-lead.md` | `sysadmin` | The default content, plus the system duties: make projects, appoint leads, watch hosts, agents, and usage, and update Terrarium (`terrarium admin update`, docs/api.md §34). |
 
 ## Protocol rules
 

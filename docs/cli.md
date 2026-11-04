@@ -1850,6 +1850,38 @@ twice. `verify` reads each file and checks it against the manifest.
 `restore` refuses while a daemon answers on the socket. For a sealed backup
 with no passphrase option, `verify` and `restore` ask on the terminal.
 
+### Self-update
+
+```
+terrarium admin update status
+terrarium admin update check
+terrarium admin update apply [--version <v | latest | pre>]
+terrarium admin update rollback
+```
+
+The operator and a sysadmin, also an agent with the `sysadmin` role in its
+sandbox ([api.md §34](api.md#34-self-update)). `status` prints the running
+version, the newest release of the channel (`UPDATE AVAILABLE` when it is
+newer), the policy, the maintenance window that runs now, the updater (its
+build, the signature check, the image, the rollback target), and the last
+run with its steps. `check` reads the releases now. `apply` asks the
+updater for the update and returns at once: the daemon drains, backs up,
+and restarts, so a CLI in an agent can lose its turn. Follow it with
+`status`. `rollback` restores the backup of the last update: **the data
+since the update is lost** (the rollback backs it up first). With no
+updater, `apply` and `rollback` exit with `503 unavailable`.
+
+The updater uses two hidden commands in the terrarium container (the
+operator on the daemon's own socket):
+
+```
+terrarium admin update drain [--wait <s>]      no new turns; wait up to <s> s (600) for the running turns
+terrarium admin update resume                  end the drain
+```
+
+On the host, `docker compose exec terrarium-updater terrarium-updater
+status | update <target> | rollback` talks to the updater directly.
+
 ## 6. Agent commands
 
 PLAN §9 lists the agent commands. Each one is in §4. These are for agents
@@ -1935,6 +1967,10 @@ terrarium admin harness update --all [--force]   every harness and the extension
 terrarium admin harness pin <name> [version]   switch to a version (default: the previous one) and stop its auto-update
 terrarium admin harness unpin <name>           start the auto-update of the harness again
 terrarium admin harness check                  run the auto-update check now
+terrarium admin update status                  the version, the newest release, the policy, the updater, the last run
+terrarium admin update check                   read the GitHub releases now
+terrarium admin update apply [--version v]     update Terrarium through the updater (default: the newest release)
+terrarium admin update rollback                back to the image before the last update, with its backup
 terrarium admin audit [--since time] [--actor a] [--action a]
 terrarium admin question ls|show|answer|update|retract ...   the operator answers; a sysadmin answers other agents (§4)
 terrarium admin password set [--stdin]         the operator password; every session ends

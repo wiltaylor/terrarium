@@ -2530,7 +2530,12 @@ impl RunnerSupervisor {
         match state.usage.streams.take(sub, id) {
             crate::stream_limit::Take::Go => true,
             crate::stream_limit::Take::Wait { new } => {
-                if new && let Some(sub) = sub {
+                // A closed gate (the drain of a self-update) is no wait
+                // for a stream: no status reason.
+                if new
+                    && let Some(sub) = sub
+                    && !state.usage.streams.is_closed()
+                {
                     info!(agent = %id, subscription = %sub, "no free stream; the work of the agent waits");
                     self.emit_status(
                         id,

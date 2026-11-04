@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Deploy Terrarium to a machine and build the image there, from the source.
 
-The repo is private, so there is no image in a registry. The deploy sends
-the source over ssh (`git archive`), and the target builds the image with
+A release publishes an image on GHCR (docs/release.md), and the updater
+service moves an install to it (docs/api.md §34). This script is the
+install from source, for development: it sends the source over ssh
+(`git archive`), and the target builds the image with
 `docker compose build`. The target needs Docker with the compose plugin,
 and no access to the repo. `just deploy::...` runs this script:
 
@@ -65,7 +67,13 @@ DATA_DIRS = [
     "config/claude", "config/codex", "config/copilot", "config/pi",
     "config/terrarium", "config/tls", "state", "tools", "work", "repos",
     "projects", "agents", "targets", "subscriptions", "fleets",
+    "updater/run", "updater/state",
 ]
+
+# The image file of the updater (docs/api.md §34): the release image of
+# the last good self-update. The wrapper takes it over src/.deployed-ref;
+# a source deploy or a deploy rollback removes it (the source wins).
+UPDATER_IMAGE = "updater/state/image"
 
 # The .env keys that the deploy sets in a new .env. The image comes from
 # src/.deployed-ref at each deploy, so the .env does not set it.
@@ -159,6 +167,7 @@ echo "user=$(id -un)"
 echo "uid=$(id -u)"
 echo "gid=$(id -g)"
 echo "groups=$(id -nG)"
+echo "docker_gid=$(stat -c %g /var/run/docker.sock 2>/dev/null)"
 echo "arch=$(uname -m)"
 echo "docker=$(command -v docker)"
 if command -v docker >/dev/null 2>&1; then
@@ -210,20 +219,22 @@ mv .env.new .env"""
 BUILD = 'TERRARIUM_SRC="$1/src.new" "$1/terrarium-compose" build'
 
 # $1 the dir. Only after a good build.
-SWAP = """cd "$1"
+SWAP = f"""cd "$1"
 test -d src.new
 rm -rf src.prev
 if [ -d src ]; then mv src src.prev; fi
-mv src.new src"""
+mv src.new src
+rm -f {UPDATER_IMAGE}"""
 
 # $1 the dir. src and src.prev change places: a second rollback goes forward.
-ROLLBACK_SWAP = """cd "$1"
+ROLLBACK_SWAP = f"""cd "$1"
 test -d src.prev
 test -d src
 rm -rf src.swap
 mv src src.swap
 mv src.prev src
-mv src.swap src.prev"""
+mv src.swap src.prev
+rm -f {UPDATER_IMAGE}"""
 
 # $1 the dir.
 UP = f'"$1/terrarium-compose" up -d --wait --wait-timeout {UP_TIMEOUT_S}'
@@ -264,7 +275,8 @@ done"""
 def wrapper_script(project: str) -> str:
     """`<dir>/terrarium-compose`: docker compose for this install. It reads the
     image and the git ref from `$TERRARIUM_SRC/.deployed-ref` (default
-    `<dir>/src`), sets TERRARIUM_DATA_DIR to its own dir, and drops every
+    `<dir>/src`), or from `<dir>/updater/state/image` after a self-update
+    (docs/api.md §34), sets TERRARIUM_DATA_DIR to its own dir, and drops every
     other TERRARIUM_* variable of the caller, so only `<dir>/.env` counts.
     The ref goes to the image build as TERRARIUM_GIT_REF (compose.yaml): the
     `git archive` source has no .git, so the binaries get their version
@@ -278,6 +290,8 @@ set -e
 d=$(cd "$(dirname "$0")" && pwd)
 src=${{TERRARIUM_SRC:-$d/src}}
 image=$(sed -n 's/^image=//p' "$src/.deployed-ref" 2>/dev/null || true)
+# A self-update (the updater service) pins its release image here.
+if [ -s "$d/{UPDATER_IMAGE}" ]; then image=$(head -n 1 "$d/{UPDATER_IMAGE}"); fi
 ref=$(sed -n 's/^ref=//p' "$src/.deployed-ref" 2>/dev/null || true)
 for v in $(env | sed -n 's/^\\(TERRARIUM_[A-Za-z0-9_]*\\)=.*/\\1/p'); do unset "$v"; done
 export TERRARIUM_DATA_DIR="$d"
@@ -299,6 +313,7 @@ class Probe:
     uid: str = ""
     gid: str = ""
     groups: list[str] = field(default_factory=list)
+    docker_gid: str = ""
     arch: str = ""
     docker: str = ""
     docker_access: bool = False
@@ -556,9 +571,14 @@ def render_env(example: str, values: dict[str, str], now: datetime) -> str:
     return "\n".join(head + lines) + "\n"
 
 
-def env_values(token: str, uid: str, gid: str, public_url: str, port: int) -> dict[str, str]:
+def env_values(token: str, uid: str, gid: str, public_url: str, port: int,
+               docker_gid: str = "") -> dict[str, str]:
     v = {"TERRARIUM_TOKEN": token, "TERRARIUM_UID": uid, "TERRARIUM_GID": gid,
          "TERRARIUM_PUBLIC_URL": public_url}
+    # The group of docker.sock, for the updater service (compose profile
+    # `updater`, docs/api.md §34).
+    if docker_gid.isdigit():
+        v["TERRARIUM_DOCKER_GID"] = docker_gid
     for key, offset in PORT_KEYS:
         v[key] = str(port + offset)
     v.update(host_link_values(port))
@@ -788,7 +808,7 @@ def deploy(o: Options, runner: Runner, run_git: GitFn = git,
             print(f"# TERRARIUM_PUBLIC_URL={public_url}: pass --public-url with the name "
                   "that your browser and your host agents use")
         token = "<new token>" if o.dry_run else token_fn()
-        content = render_env(example, env_values(token, p.uid, p.gid, public_url, port), now)
+        content = render_env(example, env_values(token, p.uid, p.gid, public_url, port, p.docker_gid), now)
         host_note = host_link_note(None, port)
         runner.run(t.argv(ENV_WRITE, d), stdin=content,
                    stdin_label="<.env from .env.example, with a new TERRARIUM_TOKEN>")

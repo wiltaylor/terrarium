@@ -73,6 +73,22 @@ struct Book {
 struct State {
     limits: HashMap<String, u32>,
     books: HashMap<String, Book>,
+    /// The gate is closed for every agent: the daemon drains before a
+    /// self-update (`crate::self_update`). No new work goes out.
+    closed: bool,
+    /// The agents whose work waited at the closed gate.
+    parked: Vec<AgentId>,
+}
+
+impl State {
+    /// Park `agent` at the closed gate. True when it was not parked.
+    fn park(&mut self, agent: AgentId) -> bool {
+        if self.parked.contains(&agent) {
+            return false;
+        }
+        self.parked.push(agent);
+        true
+    }
 }
 
 impl State {
@@ -130,12 +146,33 @@ impl StreamGate {
         self.lock().limits.get(sub).copied()
     }
 
+    /// Close or open the gate for every agent (the drain of a
+    /// self-update). Opening returns the agents whose work waited.
+    pub fn set_closed(&self, closed: bool) -> Vec<AgentId> {
+        let mut s = self.lock();
+        s.closed = closed;
+        if closed {
+            Vec::new()
+        } else {
+            std::mem::take(&mut s.parked)
+        }
+    }
+
+    /// True while the gate is closed.
+    pub fn is_closed(&self) -> bool {
+        self.lock().closed
+    }
+
     /// May `agent` on `sub` run a turn now? See the module doc.
     pub fn take(&self, sub: Option<&str>, agent: AgentId) -> Take {
+        let mut s = self.lock();
+        if s.closed {
+            let new = s.park(agent);
+            return Take::Wait { new };
+        }
         let Some(sub) = sub else {
             return Take::Go;
         };
-        let mut s = self.lock();
         let Some(max) = s.limits.get(sub).copied() else {
             return Take::Go;
         };
@@ -160,10 +197,13 @@ impl StreamGate {
     /// is free and no agent waits (a compaction, which the idle pass tries
     /// again later).
     pub fn take_if_free(&self, sub: Option<&str>, agent: AgentId) -> bool {
+        let mut s = self.lock();
+        if s.closed {
+            return false;
+        }
         let Some(sub) = sub else {
             return true;
         };
-        let mut s = self.lock();
         let Some(max) = s.limits.get(sub).copied() else {
             return true;
         };
@@ -290,6 +330,26 @@ mod tests {
         let g = StreamGate::default();
         g.set_limits(HashMap::from([("gpu".to_owned(), max)]));
         g
+    }
+
+    /// The drain of a self-update closes the gate for every agent, the
+    /// ones with no limit and the ones that hold a slot too; the open
+    /// gives back the agents that waited, once each.
+    #[test]
+    fn a_closed_gate_parks_every_agent_until_it_opens() {
+        let g = gate(2);
+        let (a, b) = (AgentId::new(), AgentId::new());
+        assert_eq!(g.take(Some("gpu"), a), Take::Go);
+        g.set_closed(true);
+        assert!(g.is_closed());
+        assert_eq!(g.take(Some("gpu"), a), Take::Wait { new: true });
+        assert_eq!(g.take(None, b), Take::Wait { new: true });
+        assert_eq!(g.take(None, b), Take::Wait { new: false });
+        assert!(!g.take_if_free(None, b));
+        assert_eq!(g.set_closed(false), vec![a, b]);
+        assert!(!g.is_closed());
+        assert_eq!(g.take(None, b), Take::Go);
+        assert!(g.set_closed(false).is_empty());
     }
 
     /// Two slots, three agents: the third waits; the end of a turn gives

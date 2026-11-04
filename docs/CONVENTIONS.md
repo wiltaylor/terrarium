@@ -13,6 +13,7 @@ The design is in [PLAN.md](PLAN.md).
 | `crates/terrarium`            | `terrarium` (bin)           | The CLI. Operator mode talks to the daemon. Agent mode talks to the runner socket. |
 | `crates/terrarium-host`       | `terrarium-host` (lib + bin)| The host agent that runs on machines outside the container. The lib holds the wire protocol that the daemon uses. |
 | `crates/terrarium-version`    | `terrarium-version` (lib)   | The build version of the binaries: `<crate version>+<git ref>[-dirty]`, the build time, and the stale check (see "Build version"). Only the bins and their libs depend on it. |
+| `crates/terrarium-updater`    | `terrarium-updater` (lib + bin) | The updater service (docs/api.md §34): the update and rollback state machine, Docker on `docker.sock`, the registry client, the signature check, and the updater socket. The daemon uses the lib with `default-features = false` (the protocol and the client); feature `bin` adds the Docker and HTTP clients. |
 | `crates/terrarium-compat`     | `terrarium-compat` (lib)    | The adapter compatibility suite: real-harness scenarios against the pinned versions (`just ci::compat`, [compat-suite.md](compat-suite.md)). |
 | `crates/adapters/<harness>`   | `terrarium-adapter-<harness>` (lib) | One adapter per harness: launch flags, hook mapping, session ID capture. |
 | `dashboard/`                  | npm package                 | The SolidJS dashboard. The daemon embeds `dashboard/dist`.           |
@@ -128,7 +129,9 @@ pushes the image `ghcr.io/wiltaylor/terrarium:<version>` (and `:latest`
 or `:pre`) with a build provenance attestation, and makes a tag and a
 GitHub release with the `terrarium-host` asset and `SHA256SUMS`
 ([release.md](release.md)). The asset comes out of the image, so it is
-the binary that the daemon serves for the host agent self-update. Pin
+the binary that the daemon serves for the host agent self-update. The
+updater service moves an install to a release image (PLAN §23.8,
+[api.md](api.md) §34); keep `docker.sock` out of the daemon service. Pin
 each action in `.github/workflows/` to a full commit SHA with a version
 comment, and give each job the least `permissions:`. For development, a
 server builds its own image from the source: the `deploy` module (`.just/deploy/mod.just`,
@@ -249,6 +252,13 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_BACKUP_KEEP` | `4`. The scheduled backup keeps this many full backups and their diffs, and deletes the older ones. |
 | `TERRARIUM_BACKUP_WORK` | `off`. On: the scheduled backups have the workspaces too. |
 | `TERRARIUM_BACKUP_PASSPHRASE_FILE` | unset. The first line of the file seals each scheduled backup. |
+| `TERRARIUM_SELF_UPDATE` | `notify`. The self-update ([api.md](api.md) §34): `off` (no background check, no mail), `notify` (a check of the GitHub releases every 6 hours and one Inbox mail for each new version), or `auto` (`notify`, and an update through the updater inside a global calendar event of kind `maintenance`, once for each occurrence). A bad value stops the start. |
+| `TERRARIUM_UPDATE_CHANNEL` | `stable`. `pre`: pre-releases too. |
+| `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium`. The GitHub repo of the releases (the daemon), and the identity of the signing workflow (the updater). |
+| `TERRARIUM_UPDATER_SOCKET` | `/run/terrarium-updater/updater.sock`. The updater socket (the daemon and the updater). |
+| `TERRARIUM_UPDATE_VERIFY` | `gh`. The updater only: the image check of a release (`gh attestation verify` of the build provenance of the release workflow; `cosign`, `off`, or `command:<shell command>`; [api.md](api.md) §34.4). A check that fails stops the update. `TERRARIUM_UPDATE_WORKFLOW` (`.github/workflows/ci.yml`) is the signing workflow. |
+| `TERRARIUM_UPDATE_IMAGE`, `TERRARIUM_UPDATE_DRAIN_WAIT`, `TERRARIUM_UPDATE_HEALTH_TIMEOUT`, `TERRARIUM_UPDATER_TARGET`, `TERRARIUM_UPDATER_STATE` | The updater only ([api.md](api.md) §34.2). |
+| `TERRARIUM_DOCKER_GID`, `TERRARIUM_UPDATER_IMAGE` | compose.yaml only: the group of `docker.sock` for the updater service, and its image (default: the image of the daemon). The daemon never gets `docker.sock`. |
 
 ### The directories
 
@@ -263,6 +273,8 @@ data.
 | `state/` | `/state` (`TERRARIUM_STATE_DIR`) | SQLite, the agent dirs `agents/<ulid>/`, the trash, artifacts, the card files (`card-files/<sha256>`), credentials (git credentials, stored API keys in `credentials/subscriptions/`, the plan accounts in `credentials/accounts/<subscription>/`, and the migration backups in `credentials/backup/`), the session key `session.key`, and the operator password hash `operator.password`. Gitignored. |
 | `work/` | `/work` (`TERRARIUM_WORK_DIR`) | The agent workspaces, `<project>/<agent>/`. A host agent on this machine attaches them to targets (its `work_dir`). Gitignored. |
 | `repos/` | `/repos` (`TERRARIUM_REPOS_DIR`) | Local bare repos, `<name>.git`, bound into the sandboxes of their project. A host agent reads them for a local `lab_repo` (its `repos_dir`). Gitignored. |
+| `updater/run/` | `/run/terrarium-updater` (the daemon and the updater) | The updater socket (mode `0700` dir, `0600` socket). Gitignored. |
+| `updater/state/` | `/updater` (the updater only) | The updater history, the rollback target, and the image file of the last self-update (the deploy wrapper reads it). Gitignored. |
 | `labs/` | not bound | vmlab test labs (`labs/terrarium-test/vmlab.wcl`) for a host agent on this machine. In git. |
 | `config/terrarium/` | `/config/terrarium` (`TERRARIUM_CONFIG_REPO`) | The config repo (PLAN §8.3): the personas and protocol templates, the harness settings of the agents, the export. Its own git repo, shared between instances; never a secret. Gitignored in this repo. |
 | `defaults/` | `/opt/terrarium/defaults` (in the image) | The packaged defaults of the config repo, with `manifest.json`. In git. After a change, run `just defaults::manifest`. |

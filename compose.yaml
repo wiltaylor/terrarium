@@ -88,6 +88,14 @@ services:
       # The config repo auto-sync (PLAN §8.3): off, pull, or sync, every interval.
       TERRARIUM_CONFIG_SYNC: ${TERRARIUM_CONFIG_SYNC:-off}
       TERRARIUM_CONFIG_SYNC_INTERVAL: ${TERRARIUM_CONFIG_SYNC_INTERVAL:-15m}
+      # The self-update (docs/api.md §34): off, notify (a mail for each
+      # new release), or auto (an update inside a global maintenance
+      # window); the channel stable or pre. The updater service below does
+      # the work; the daemon reaches it on the updater socket only.
+      TERRARIUM_SELF_UPDATE: ${TERRARIUM_SELF_UPDATE:-notify}
+      TERRARIUM_UPDATE_CHANNEL: ${TERRARIUM_UPDATE_CHANNEL:-stable}
+      TERRARIUM_UPDATE_REPO: ${TERRARIUM_UPDATE_REPO:-wiltaylor/terrarium}
+      TERRARIUM_UPDATER_SOCKET: /run/terrarium-updater/updater.sock
     volumes:
       - ${TERRARIUM_DATA_DIR:-.}/config/claude:/auth/claude
       - ${TERRARIUM_DATA_DIR:-.}/config/codex:/auth/codex
@@ -104,6 +112,7 @@ services:
       - ${TERRARIUM_DATA_DIR:-.}/repos:/repos                           # local bare repos, bound rw into the agents of their project (TERRARIUM_REPOS_DIR)
       - ${TERRARIUM_DATA_DIR:-.}/work:/work                             # agent workspaces, <project>/<agent> (TERRARIUM_WORK_DIR); a host agent on this machine attaches them to targets (its work_dir is this ./work)
       - ${TERRARIUM_DATA_DIR:-.}/config/tls:/etc/terrarium/tls:ro   # `just host::cert <name>` writes here
+      - ${TERRARIUM_DATA_DIR:-.}/updater/run:/run/terrarium-updater  # the updater socket (the updater service); no docker.sock here
     security_opt:
       - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)
       - apparmor:unconfined
@@ -117,3 +126,40 @@ services:
       # two); a check that passes ends the start period at once.
       start_period: 600s
       start_interval: 2s
+
+  # The updater (docs/api.md §34, PLAN §23.8). It holds docker.sock and
+  # moves the terrarium container to a release image: it checks the
+  # signature, drains the daemon, makes a backup, starts the new image,
+  # and goes back to the old image and the backup when the new one is not
+  # healthy. The daemon never gets docker.sock: it asks the updater on the
+  # socket in updater/run (mode 0700, the same uid). Off by default: set
+  # COMPOSE_PROFILES=updater and TERRARIUM_DOCKER_GID in .env
+  # (.env.example). The same image as the daemon, another entrypoint.
+  terrarium-updater:
+    image: ${TERRARIUM_UPDATER_IMAGE:-${TERRARIUM_IMAGE:-terrarium:dev}}
+    profiles: ["updater"]
+    entrypoint: ["/usr/local/bin/terrarium-updater"]
+    command: ["serve"]
+    restart: unless-stopped
+    stop_grace_period: 10s
+    # The uid of the daemon, so the socket is the daemon's only; the group
+    # of docker.sock (`stat -c %g /var/run/docker.sock`) for the Engine API.
+    user: "${TERRARIUM_UID:-1000}:${TERRARIUM_GID:-1000}"
+    group_add: ["${TERRARIUM_DOCKER_GID:-0}"]
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      # The image check of a release: gh (the default: the build provenance
+      # attestation of the release workflow), cosign, off, or
+      # command:<shell command> (docs/api.md §34.4).
+      TERRARIUM_UPDATE_VERIFY: ${TERRARIUM_UPDATE_VERIFY:-gh}
+      TERRARIUM_UPDATE_WORKFLOW: ${TERRARIUM_UPDATE_WORKFLOW:-.github/workflows/ci.yml}
+      TERRARIUM_UPDATE_IMAGE: ${TERRARIUM_UPDATE_IMAGE:-ghcr.io/wiltaylor/terrarium}
+      TERRARIUM_UPDATE_REPO: ${TERRARIUM_UPDATE_REPO:-wiltaylor/terrarium}
+      TERRARIUM_UPDATE_DRAIN_WAIT: ${TERRARIUM_UPDATE_DRAIN_WAIT:-600}
+      TERRARIUM_UPDATE_HEALTH_TIMEOUT: ${TERRARIUM_UPDATE_HEALTH_TIMEOUT:-900}
+      TERRARIUM_UPDATER_SOCKET: /run/terrarium-updater/updater.sock
+      TERRARIUM_UPDATER_STATE: /updater
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock                  # root on the host: only this service has it
+      - ${TERRARIUM_DATA_DIR:-.}/updater/run:/run/terrarium-updater  # the socket, shared with the daemon
+      - ${TERRARIUM_DATA_DIR:-.}/updater/state:/updater              # the history, the rollback target, and the image file

@@ -1901,6 +1901,19 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX target_grants_project ON target_grants(project);
     "#,
+    // 63: the self-update (docs/api.md §34, `crate::self_update`). One
+    // row for each key: `notified:<version>` (the new-release mail went
+    // out), `run:<id>` (the result mail of an updater run went out),
+    // `results_baseline` (the first read of the updater history: older
+    // runs get no mail), and `auto_window` (the maintenance occurrence of
+    // the last auto-update). Self-contained: when another branch takes this
+    // number, move this entry to the end of the list.
+    r#"
+    CREATE TABLE self_update_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

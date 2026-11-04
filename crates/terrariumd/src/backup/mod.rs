@@ -1,5 +1,5 @@
 //! Backup and restore of the daemon's data into zip files (docs/api.md
-//! §32, PLAN §23.7).
+//! §32, PLAN §23.8).
 //!
 //! A backup is one zip file in the backup dir (`TERRARIUM_BACKUP_DIR`,
 //! default `<state>/backups`). It holds:

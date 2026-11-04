@@ -228,6 +228,17 @@ class Env(unittest.TestCase):
         v = dp.env_values(TOKEN, "1000", "1000", "http://t.lan:8080", 8080)
         self.assertEqual(v["TERRARIUM_HOST_DAEMON_URL"], "ws://localhost:8082")
 
+    def test_new_env_takes_the_group_of_docker_sock(self):
+        # The updater service (compose profile `updater`) gets the group of
+        # docker.sock; a probe with no socket sets nothing.
+        v = dp.env_values(TOKEN, "1000", "1000", "http://t.lan:8080", 8080, "967")
+        self.assertEqual(v["TERRARIUM_DOCKER_GID"], "967")
+        self.assertNotIn("TERRARIUM_DOCKER_GID", dp.env_values(TOKEN, "1000", "1000", "http://x", 8080, ""))
+        example = (dp.REPO / ".env.example").read_text()
+        lines = dp.render_env(example, v, NOW).splitlines()
+        self.assertIn("TERRARIUM_DOCKER_GID=967", lines)
+        self.assertEqual(dp.parse_probe("docker_gid=967\n").docker_gid, "967")
+
     def test_new_env_sets_the_commented_host_lines_of_the_real_example(self):
         example = (dp.REPO / ".env.example").read_text()
         lines = dp.render_env(example, dp.env_values(TOKEN, "1000", "1000", "http://x:8090", 8090), NOW).splitlines()
@@ -668,6 +679,19 @@ class Scripts(unittest.TestCase):
             self.assertNotEqual(self.sh(dp.SWAP, d).returncode, 0)
             self.assertEqual(Path(d, "src", "compose.yaml").read_text(), "v2")
 
+            # A source deploy and a deploy rollback drop the image of a
+            # self-update (the source wins); the data stays.
+            for script in (dp.ROLLBACK_SWAP,):
+                Path(d, dp.UPDATER_IMAGE).write_text("ghcr.io/x/t@sha256:1\n")
+                Path(d, "updater", "state", "history.json").write_text("[]")
+                self.assertEqual(self.sh(script, d).returncode, 0)
+                self.assertFalse(Path(d, dp.UPDATER_IMAGE).exists())
+                self.assertTrue(Path(d, "updater", "state", "history.json").exists())
+            receive("v3")
+            Path(d, dp.UPDATER_IMAGE).write_text("ghcr.io/x/t@sha256:1\n")
+            self.assertEqual(self.sh(dp.SWAP, d).returncode, 0)
+            self.assertFalse(Path(d, dp.UPDATER_IMAGE).exists())
+
     def stub_docker(self, bindir: str, log: str) -> None:
         stub = Path(bindir, "docker")
         stub.write_text(
@@ -716,6 +740,12 @@ class Scripts(unittest.TestCase):
             self.assertIn(f"up -d --wait --wait-timeout {dp.UP_TIMEOUT_S}", up)
             # The caller's TERRARIUM_* (just exports them) do not reach compose.
             self.assertIn("TERRARIUM_PORT=unset", up)
+            # After a self-update, the wrapper keeps the updater's image.
+            os.remove(log)
+            Path(d, dp.UPDATER_IMAGE).write_text("ghcr.io/x/t@sha256:9\n")
+            self.assertEqual(self.sh(dp.UP, d, env=env).returncode, 0)
+            self.assertIn("|TERRARIUM_IMAGE=ghcr.io/x/t@sha256:9|", Path(log).read_text())
+            os.remove(Path(d, dp.UPDATER_IMAGE))
             # The ref of .deployed-ref goes to the image build (compose.yaml
             # build arg TERRARIUM_GIT_REF), not the caller's.
             self.assertIn("|TERRARIUM_GIT_REF=b|", build)
@@ -758,6 +788,12 @@ class Layout(unittest.TestCase):
         text = (dp.REPO / "compose.yaml").read_text()
         binds = re.findall(r"^\s*- (\S+?):/", text, re.MULTILINE)
         sources = [b for b in binds if not b.startswith(("seccomp", "apparmor", "systempaths", '"'))]
+        # docker.sock is the one bind outside the data dir: the updater
+        # service has it, the daemon never does (docs/api.md §34).
+        self.assertEqual(sources.count("/var/run/docker.sock"), 1)
+        daemon = text.split("\n  terrarium-updater:", 1)[0]
+        self.assertNotIn("docker.sock:/", daemon)
+        sources = [b for b in sources if b != "/var/run/docker.sock"]
         self.assertTrue(sources)
         for s in sources:
             self.assertTrue(s.startswith("${TERRARIUM_DATA_DIR:-.}/"), s)

@@ -59,6 +59,87 @@ export interface SystemVersion {
   build_time: string;
 }
 
+/** An image as the updater knows it (docs/api.md §34.6). */
+export interface UpdaterImage {
+  /** `ghcr.io/...@sha256:...`, or a local tag (the image of a source deploy). */
+  reference: string;
+  /** The image ID. */
+  id: string;
+  digest?: string;
+  /** The `org.opencontainers.image.version` label. */
+  version?: string;
+}
+
+export type UpdateOutcome = "running" | "succeeded" | "current" | "failed" | "rolled_back" | "rollback_failed";
+export type UpdateStepState = "running" | "ok" | "failed" | "skipped";
+
+/** One step of an update or a rollback. */
+export interface UpdateStep {
+  name: string;
+  state: UpdateStepState;
+  detail: string;
+  at: string;
+}
+
+/** One update or rollback of the updater. */
+export interface UpdateRun {
+  id: string;
+  kind: "update" | "rollback";
+  actor: string;
+  target: string;
+  from: UpdaterImage | null;
+  to: UpdaterImage | null;
+  backup: string | null;
+  outcome: UpdateOutcome;
+  error: string | null;
+  steps: UpdateStep[];
+  started_at: string;
+  ended_at: string | null;
+}
+
+/** A GitHub release of Terrarium. */
+export interface TerrariumRelease {
+  version: string;
+  tag: string;
+  name: string;
+  prerelease: boolean;
+  published_at: string | null;
+  /** Markdown. */
+  notes: string;
+  url: string;
+}
+
+/** `GET /api/system/update` (docs/api.md §34): the operator and sysadmins. */
+export interface SelfUpdateReport {
+  current: SystemVersion;
+  /** `TERRARIUM_SELF_UPDATE`. */
+  policy: "off" | "notify" | "auto";
+  /** `TERRARIUM_UPDATE_CHANNEL`. */
+  channel: "stable" | "pre";
+  latest: TerrariumRelease | null;
+  update_available: boolean;
+  checked_at: string | null;
+  check_error: string | null;
+  updater: {
+    reachable: boolean;
+    socket: string;
+    error: string | null;
+    status: {
+      updater_version: string;
+      repository: string;
+      verify: string;
+      current: UpdaterImage | null;
+      current_error?: string;
+      previous: UpdaterImage | null;
+      running: UpdateRun | null;
+      history: UpdateRun[];
+    } | null;
+  };
+  last_result: UpdateRun | null;
+  maintenance: { key: string; event: string; title: string; start: string; end: string } | null;
+  drain: { on: boolean; since: string | null; by: string | null; busy: string[] };
+}
+
 /** `GET /api/harnesses` (docs/api.md §4): one harness against its pin. */
 export interface HarnessVersion {
   harness: Harness;

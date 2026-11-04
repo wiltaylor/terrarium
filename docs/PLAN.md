@@ -4450,6 +4450,16 @@ services:
     healthcheck:
       test: ["CMD", "terrarium", "daemon", "status"]
       interval: 30s
+  terrarium-updater:                         # §23.8; off until COMPOSE_PROFILES=updater
+    image: ${TERRARIUM_UPDATER_IMAGE:-${TERRARIUM_IMAGE}}
+    profiles: ["updater"]
+    entrypoint: ["/usr/local/bin/terrarium-updater"]
+    user: "${TERRARIUM_UID}:${TERRARIUM_GID}"
+    group_add: ["${TERRARIUM_DOCKER_GID}"]   # the group of docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # only this service has it
+      - ./updater/run:/run/terrarium-updater        # the socket; the daemon binds it too
+      - ./updater/state:/updater
 ```
 
 The seccomp profile alone is not enough for `bwrap`. Docker masks paths
@@ -4496,7 +4506,8 @@ SBOM and a build provenance attestation, a tag, and a GitHub release with
 generated notes, the static `terrarium-host` binary (taken out of the
 image), and `SHA256SUMS`. [release.md](release.md) says how to make a
 release and how to verify it. Host agents follow the daemon's build by
-themselves ([host-protocol.md, "Self-update"](host-protocol.md#self-update)).
+themselves ([host-protocol.md, "Self-update"](host-protocol.md#self-update)),
+and the updater service moves an install to a new image (§23.8).
 
 For development, a server builds its own image from the source. `just deploy::server
 user@host` (`scripts/deploy.py`) does these steps:
@@ -4541,6 +4552,39 @@ file, so a restore gives the exact tree. A passphrase seals the entries
 SHA-256 in a staging dir first, then moves the old content of each root to
 `.terrarium-pre-restore-<time>/`. `TERRARIUM_BACKUP_SCHEDULE` turns on a
 daemon task with retention.
+
+### 23.8 Self-update
+
+A release image on GHCR (`ghcr.io/wiltaylor/terrarium:<version>`,
+`:latest`, `:pre`) lets a server update with no source and no Rust build.
+The daemon never holds `docker.sock`: a sandbox escape into the daemon
+must not give root on the host. A separate service, `terrarium-updater`
+(the same image with another entrypoint; compose profile `updater`), holds
+it, runs no agents, and listens only on a Unix socket that it shares with
+the daemon (mode `0700`/`0600`, the same uid, a peer uid check).
+
+An update ([api.md](api.md) §34): resolve the tag to a digest, check the
+build provenance of the digest (`gh attestation verify` of the release
+workflow by default; a program, so it can change; fail closed), pull,
+drain the daemon (no new turns; the running turns get 10 minutes), make a full backup (`terrariumd backup create`), make a new
+container with the settings of the old one and the new image, and wait for
+the health check and `terrarium daemon status`. A failure after the stop
+goes back: the old image and the backup, restored offline. A rollback is
+the same switch to the previous image, with the backup of the last update.
+
+The operator, a sysadmin, and an agent with the `sysadmin` role start an
+update (`POST /api/system/update`, `terrarium admin update apply`, Settings
+> Software). `TERRARIUM_SELF_UPDATE` is `off`, `notify` (the default: an
+Inbox mail for each new release), or `auto` (an update inside a global
+calendar event of kind `maintenance`, once for each). The updater keeps
+the last 20 runs with their steps; the daemon mails each result.
+
+The updater makes the new container from the inspect record of the old one
+through the Engine API, not from compose files, so it works for a deploy
+from source too: the first update moves such an install to the GHCR image.
+The image file `<data>/updater/state/image` keeps the release image for the
+deploy wrapper; a source deploy removes it. The host agents follow the
+daemon version by themselves ([host-protocol.md](host-protocol.md)).
 
 ---
 

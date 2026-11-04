@@ -1,0 +1,52 @@
+[package]
+name = "terrarium-updater"
+description = "The Terrarium updater: it holds docker.sock and moves the terrarium container to a new image, with a backup and a rollback"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["bin"]
+# The `terrarium-updater` binary: the Docker Engine client on docker.sock,
+# the registry client, the CLI, and the log setup. The daemon uses the lib
+# with `default-features = false`: the protocol, the client, and no HTTP
+# stack of its own.
+bin = [
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+    "dep:reqwest",
+    "dep:clap",
+    "dep:anyhow",
+    "dep:tracing-subscriber",
+    "dep:terrarium-version",
+]
+
+[[bin]]
+name = "terrarium-updater"
+path = "src/bin/terrarium-updater/main.rs"
+required-features = ["bin"]
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+ulid.workspace = true
+terrarium-version = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
