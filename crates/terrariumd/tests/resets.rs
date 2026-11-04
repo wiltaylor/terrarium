@@ -45,7 +45,10 @@ fn aid(s: &str) -> AgentId {
 async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
     let start = std::time::Instant::now();
     while !f().await {
-        assert!(start.elapsed() < common::WAIT, "timed out waiting for {what}");
+        assert!(
+            start.elapsed() < common::WAIT,
+            "timed out waiting for {what}"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
