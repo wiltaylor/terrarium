@@ -27,6 +27,16 @@ service is still up.
   it. The target is a global target or a target of your project.
 - Each run uses your rights again. When you lose the target, the monitor
   shows `unknown` with the reason.
+- A health check that must outlive you belongs to the project: add
+  `--owner project` (`terrarium monitor new ... --owner project`, or
+  `terrarium monitor edit <m> --owner project` for one you have). Its
+  rights then come from the project: the project's targets, and a global
+  target that a sysadmin granted to the project
+  (`terrarium project show` lists the grants). Ask the operator for a
+  grant by mail when you need a global target.
+- When an agent is deleted, its own monitors are disabled, and you get a
+  notice. Take one over with `terrarium monitor edit <m> --owner project
+  --enable` (or `--owner actor` to run it as you).
 
 A worker that wants a monitor asks its lead by mail, with the script.
 

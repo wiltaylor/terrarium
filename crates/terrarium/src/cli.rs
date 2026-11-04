@@ -409,6 +409,21 @@ pub enum ProjectCmd {
     },
     /// List the repos of a project
     Repos { name: Option<String> },
+    /// Grant a global target to the project (`--project`, or the current
+    /// one) for its project-owned monitors or schedules (sysadmin)
+    Grant {
+        target: String,
+        /// `monitors` or `schedules`
+        #[arg(long = "for", value_parser = GRANT_USES)]
+        purpose: String,
+    },
+    /// Take back a grant of a global target (sysadmin)
+    Ungrant {
+        target: String,
+        /// `monitors` or `schedules`
+        #[arg(long = "for", value_parser = GRANT_USES)]
+        purpose: String,
+    },
     /// Attach a repo to the project (project_admin)
     RepoAdd(RepoAddArgs),
 }
@@ -1837,7 +1852,18 @@ pub struct MonitorArgs {
     /// Make it, or turn it, off
     #[arg(long)]
     pub disabled: bool,
+    /// Who owns it: `actor` (the default: it runs as you), `project` (its
+    /// rights come from the project's targets and grants; project_admin),
+    /// or `system` (sysadmin). On `edit`, `actor` takes it over
+    #[arg(long, value_parser = OWNERS)]
+    pub owner: Option<String>,
 }
+
+/// The owners of a monitor or a schedule (docs/api.md §30.7).
+pub const OWNERS: [&str; 3] = ["actor", "project", "system"];
+
+/// The uses of a target grant to a project.
+pub const GRANT_USES: [&str; 2] = ["monitors", "schedules"];
 
 /// The kinds of a calendar event.
 pub const CALENDAR_KINDS: [&str; 6] =
@@ -3272,10 +3298,16 @@ pub enum ScheduleCmd {
     /// action
     New {
         name: String,
+        /// Who owns it: `actor` (the default: it runs as you), `project`
+        /// (its rights come from the project; project_admin), or `system`
+        /// (sysadmin)
+        #[arg(long, value_parser = OWNERS)]
+        owner: Option<String>,
         #[command(flatten)]
         args: Box<ScheduleArgs>,
     },
     /// Change a schedule: only the flags given change
+    #[command(visible_alias = "edit")]
     Set {
         schedule: String,
         /// A new name
@@ -3284,6 +3316,10 @@ pub enum ScheduleCmd {
         /// Enable it
         #[arg(long, conflicts_with = "disabled")]
         enabled: bool,
+        /// A new owner: `actor` takes it over (it runs as you), `project`
+        /// gives it to the project, `system` to the system (sysadmin)
+        #[arg(long, value_parser = OWNERS)]
+        owner: Option<String>,
         #[command(flatten)]
         args: Box<ScheduleArgs>,
     },

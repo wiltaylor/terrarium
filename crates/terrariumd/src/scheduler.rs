@@ -67,7 +67,10 @@ pub async fn tick(state: &Shared, now: DateTime<Utc>) -> Vec<Started> {
     match due {
         Ok(due) => due
             .into_iter()
-            .map(|s| start(state, s.id, "cron", s.run_as))
+            .map(|s| {
+                let by = s.run_label();
+                start(state, s.id, "cron", by)
+            })
             .collect(),
         Err(e) => {
             warn!("the schedule tick cannot read the due schedules: {e}");
@@ -100,7 +103,10 @@ pub async fn startup(state: &Shared, now: DateTime<Utc>) -> Vec<Started> {
         Ok(missed) => missed
             .into_iter()
             .filter(|s| s.catch_up == CatchUp::Once)
-            .map(|s| start(state, s.id, "catch_up", s.run_as))
+            .map(|s| {
+                let by = s.run_label();
+                start(state, s.id, "catch_up", by)
+            })
             .collect(),
         Err(e) => {
             warn!("the schedule catch-up failed: {e}");

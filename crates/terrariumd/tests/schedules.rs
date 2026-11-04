@@ -675,15 +675,19 @@ async fn rights_are_checked_again_at_each_run() {
         0
     );
 
-    // `agent rm` of the creator: three skips, then the schedule is
-    // disabled, and the operator gets mail.
-    td.delete(&format!("/api/agents/{lead}")).await;
+    // The role goes again: three skips, then the schedule is disabled,
+    // and the operator gets mail. (An `agent rm` of the creator disables
+    // it at once: tests/monitors.rs,
+    // `a_deleted_run_as_agent_disables_its_monitors_and_schedules`.)
+    td.put(&format!("/api/agents/{lead}/roles"), json!({"roles": []}))
+        .await
+        .ok();
     for (i, h) in [6, 8, 10].into_iter().enumerate() {
         let runs = tick(&td, hours(h)).await;
         assert_eq!(runs.len(), 1, "tick {i}");
         assert_eq!(runs[0].status, "skipped");
         assert!(
-            runs[0].summary.contains("no longer exists"),
+            runs[0].summary.contains("project_admin"),
             "{}",
             runs[0].summary
         );

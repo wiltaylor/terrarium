@@ -170,6 +170,7 @@ import type {
   Subscription,
   NewTarget,
   Target,
+  TargetGrant,
   DisplayInfo,
   DisplayOpName,
   DisplayOpResult,
@@ -268,6 +269,8 @@ export interface Api {
     remove(name: string): Promise<void>;
     agents(name: string): Promise<Agent[]>;
     targets(name: string): Promise<Target[]>;
+    /** The global targets granted to the project for its project-owned monitors and schedules (docs/api.md §30.7). */
+    targetGrants(name: string): Promise<TargetGrant[]>;
     repos(name: string): Promise<Repo[]>;
     attachRepo(name: string, repo: NewRepo): Promise<Repo>;
   };
@@ -1032,6 +1035,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       remove: (name) => del(p(name), { confirm: true }),
       agents: (name) => all(`${p(name)}/agents`),
       targets: async (name) => (await all<Target>(`${p(name)}/targets`)).map(withScope),
+      targetGrants: (name) => get(`${p(name)}/target-grants`),
       repos: (name) => all(`${p(name)}/repos`),
       attachRepo: (name, repo) => post(`${p(name)}/repos`, repo),
     },

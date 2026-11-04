@@ -3,7 +3,7 @@
 // bucket, the y scale and ticks, the table columns, the layout checks that
 // the daemon makes, and the block moves of the edit mode.
 
-import type { DashboardBlock, DashboardBlockKind, DashboardBlockSize, DashboardRange, Monitor, MonitorKind, MonitorPoint, MonitorRow, MonitorStatus } from "../../api/types";
+import type { DashboardBlock, DashboardBlockKind, DashboardBlockSize, DashboardRange, ItemOwner, Monitor, MonitorKind, MonitorPoint, MonitorRow, MonitorStatus } from "../../api/types";
 
 /** The state that a block shows: a result status, or why it has none. */
 export type BlockState = MonitorStatus | "stale" | "pending" | "off";
@@ -268,3 +268,8 @@ export function stateCounts(monitors: readonly Monitor[], now: number): Record<B
   for (const m of monitors) out[blockState(m, now)]++;
   return out;
 }
+
+/** The owner of a monitor or a schedule (docs/api.md §30.7): `owned by the project`, `owned by the system`, or
+ * `runs as <actor>`. A row with no owner is actor-owned. */
+export const ownerText = (m: { owner?: ItemOwner; run_as: string }): string =>
+  m.owner === "project" ? "owned by the project" : m.owner === "system" ? "owned by the system" : `runs as ${m.run_as}`;

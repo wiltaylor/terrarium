@@ -773,6 +773,14 @@ pub fn manage_schedule(actor: &Actor, project: Option<&str>, reach: &Reach) -> A
     if a.is_sysadmin() {
         return Ok(());
     }
+    inside_project(p, reach)
+}
+
+/// The action of a schedule of project `p` stays inside it: the rule of
+/// [`manage_schedule`] for a project_admin, and for a project-owned
+/// schedule (`crate::owner::schedule_reach`, which also needs a grant for
+/// a global target).
+pub fn inside_project(p: &str, reach: &Reach) -> ApiResult<()> {
     let outside = |what: String| {
         Err(ApiError::forbidden(format!(
             "a schedule of project `{p}` stays inside it: {what}; that needs sysadmin or the operator"

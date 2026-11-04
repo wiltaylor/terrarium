@@ -8,6 +8,13 @@
 //! `schedule:<id>` and `data.cause` on each event, so the trigger engine
 //! sees which events a trigger made (the loop guard and the chain depth).
 //! The rights stay those of `run_as`.
+//!
+//! A project- or system-owned schedule (`crate::owner`, docs/api.md §19.6)
+//! has no actor behind it: each run checks the owner's rights (the
+//! project's rules and grants, or the system's), then does the action
+//! with the operator's paths. Its writes and its `target.exec` audit rows
+//! have the actor `schedule:<id>`; its mail comes from `project:<name>`
+//! (project-owned) or `system`.
 
 use std::time::Duration;
 
@@ -28,7 +35,8 @@ use super::{ApiJson, ApiQuery, Shared, paged};
 use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::events::StoredEvent;
-use crate::executor::{self, End, RemoteCmd, Stream};
+use crate::executor::{self, End, OnBehalf, RemoteCmd, Stream};
+use crate::owner::{self, Owner};
 use crate::policy;
 use crate::store::mail::Address;
 use crate::store::projects::SOURCE_FILE;
@@ -169,6 +177,9 @@ struct NewBody {
     catch_up: Option<CatchUp>,
     #[serde(default)]
     max_concurrency: Option<u32>,
+    /// `actor` (the default), `project`, or `system`.
+    #[serde(default)]
+    owner: Option<Owner>,
 }
 
 /// The project and the action rights of a schedule write, for `actor`. A
@@ -176,25 +187,48 @@ struct NewBody {
 fn check_write(
     t: &rusqlite::Connection,
     actor: &Actor,
+    owner: Owner,
     project: Option<&str>,
     spec: &ScheduleSpec,
     action: &ScheduleAction,
 ) -> ApiResult<Reach> {
     policy::schedule_scope(actor, project)?;
+    owner::may_manage(actor, owner, project, "managing a schedule")?;
     schedules::check_trigger(t, project, spec, action)?;
     let reach = schedules::resolve_reach(t, project, action)?;
-    policy::manage_schedule(actor, project, &reach)?;
+    reach_ok(t, actor, owner, project, &reach)?;
     if let ScheduleAction::Webhook(a) = action {
-        crate::webhooks::check_write(t, actor, project, spec, a)?;
+        if owner.is_owned() {
+            // The shape checks; the secrets with the owner's rights.
+            crate::webhooks::check_write(t, &Actor::Operator, project, spec, a)?;
+            crate::webhooks::check_owned_secrets(t, owner, project, a)?;
+        } else {
+            crate::webhooks::check_write(t, actor, project, spec, a)?;
+        }
     }
     if let ScheduleSpec::On {
         escalate: Some(e), ..
     } = spec
     {
         let to = schedules::escalation_reach(t, project, e)?;
-        policy::manage_schedule(actor, project, &to)?;
+        reach_ok(t, actor, owner, project, &to)?;
     }
     Ok(reach)
+}
+
+/// May the action of a schedule of `owner` touch `reach`? An actor-owned
+/// schedule: the actor's rules. Another: the owner's.
+fn reach_ok(
+    t: &rusqlite::Connection,
+    actor: &Actor,
+    owner: Owner,
+    project: Option<&str>,
+    reach: &Reach,
+) -> ApiResult<()> {
+    match owner {
+        Owner::Actor => policy::manage_schedule(actor, project, reach),
+        o => owner::schedule_reach(t, o, project, reach),
+    }
 }
 
 async fn create(
@@ -226,11 +260,19 @@ async fn create(
         catch_up: b.catch_up.unwrap_or_default(),
         created_by: actor.label(),
         source: crate::store::projects::SOURCE_API.into(),
+        owner: b.owner.unwrap_or_default(),
     };
     let s = state
         .db
         .write(actor.label(), move |t| {
-            check_write(t, &actor, new.project.as_deref(), &new.spec, &new.action)?;
+            check_write(
+                t,
+                &actor,
+                new.owner,
+                new.project.as_deref(),
+                &new.spec,
+                &new.action,
+            )?;
             schedules::create(t, &new, Utc::now())
         })
         .await?;
@@ -259,6 +301,10 @@ struct PatchBody {
     enabled: Option<bool>,
     #[serde(default)]
     catch_up: Option<CatchUp>,
+    /// A new owner. `actor`: the caller takes the schedule over (the runs
+    /// act as it).
+    #[serde(default)]
+    owner: Option<Owner>,
 }
 
 async fn update(
@@ -272,6 +318,8 @@ async fn update(
         return Err(file_managed(&s));
     }
     policy::schedule_scope(&actor, s.project.as_deref())?;
+    owner::may_manage(&actor, s.owner, s.project.as_deref(), "changing a schedule")?;
+    let owner = b.owner.unwrap_or(s.owner);
     let patch = SchedulePatch {
         name: b.name,
         spec: b.spec.map(parse_spec).transpose()?,
@@ -280,15 +328,18 @@ async fn update(
         catch_up: b.catch_up,
         // The caller who changes the action owns it: the runs act as it,
         // so an edit cannot borrow the rights of the schedule's creator.
+        // So does a caller that gives `owner: actor` (a take-over).
         run_as: Some(actor.label()),
         source: None,
+        owner: b.owner,
+        take_over: b.owner == Some(Owner::Actor),
     };
     let v = state
         .db
         .write(actor.label(), move |t| {
             let action = patch.action.as_ref().unwrap_or(&s.action);
             let spec = patch.spec.as_ref().unwrap_or(&s.spec);
-            check_write(t, &actor, s.project.as_deref(), spec, action)?;
+            check_write(t, &actor, owner, s.project.as_deref(), spec, action)?;
             schedules::update(t, &s.id, &patch, Utc::now())
         })
         .await?;
@@ -305,6 +356,7 @@ async fn remove(
         return Err(file_managed(&s));
     }
     policy::schedule_scope(&actor, s.project.as_deref())?;
+    owner::may_manage(&actor, s.owner, s.project.as_deref(), "deleting a schedule")?;
     state
         .db
         .write(actor.label(), move |t| schedules::delete(t, &s.id))
@@ -322,22 +374,56 @@ async fn set_enabled(
     if s.source == SOURCE_FILE {
         return Err(file_managed(&s));
     }
+    owner::may_manage(
+        &actor,
+        s.owner,
+        s.project.as_deref(),
+        if enabled {
+            "enabling a schedule"
+        } else {
+            "disabling a schedule"
+        },
+    )?;
+    let mut gone = false;
     if enabled {
         let check = actor.clone();
-        let (project, spec, action) = (s.project.clone(), s.spec.clone(), s.action.clone());
-        let reach = state
+        let (project, spec, action, owner, run_as) = (
+            s.project.clone(),
+            s.spec.clone(),
+            s.action.clone(),
+            s.owner,
+            s.run_as.clone(),
+        );
+        let (reach, missing) = state
             .db
-            .read(move |c| check_write(c, &check, project.as_deref(), &spec, &action))
+            .read(move |c| {
+                let reach = check_write(c, &check, owner, project.as_deref(), &spec, &action)?;
+                let missing = owner == Owner::Actor && actor_of(c, &run_as)?.is_none();
+                Ok((reach, missing))
+            })
             .await?;
-        caller_may_act(&state, &actor, &s, &reach).await?;
+        // The `run_as` agent is gone: the caller takes the schedule over.
+        gone = missing;
+        if !gone {
+            caller_may_act(&state, &actor, &s, &reach).await?;
+        }
     }
     let v = state
         .db
         .write(actor.label(), move |t| {
             if enabled {
-                check_write(t, &actor, s.project.as_deref(), &s.spec, &s.action)?;
+                check_write(t, &actor, s.owner, s.project.as_deref(), &s.spec, &s.action)?;
             } else {
                 policy::schedule_scope(&actor, s.project.as_deref())?;
+            }
+            if gone {
+                let patch = SchedulePatch {
+                    enabled: Some(true),
+                    run_as: Some(actor.label()),
+                    take_over: true,
+                    ..Default::default()
+                };
+                return schedules::update(t, &s.id, &patch, Utc::now());
             }
             schedules::set_enabled(t, &s.id, enabled, None, Utc::now())
         })
@@ -371,6 +457,10 @@ async fn caller_may_act(
     s: &Schedule,
     reach: &Reach,
 ) -> ApiResult<()> {
+    if s.owner.is_owned() {
+        // The owner's rights act, and the caller manages the owner's items.
+        return owner::may_manage(actor, s.owner, s.project.as_deref(), "running a schedule");
+    }
     let Actor::Agent(a) = actor else {
         return Ok(());
     };
@@ -393,10 +483,11 @@ async fn run_now(
 ) -> ApiResult<Json<Run>> {
     let s = load(&state, &actor, id).await?;
     let check = actor.clone();
-    let (project, spec, action) = (s.project.clone(), s.spec.clone(), s.action.clone());
+    let (project, spec, action, owner) =
+        (s.project.clone(), s.spec.clone(), s.action.clone(), s.owner);
     let reach = state
         .db
-        .read(move |c| check_write(c, &check, project.as_deref(), &spec, &action))
+        .read(move |c| check_write(c, &check, owner, project.as_deref(), &spec, &action))
         .await?;
     caller_may_act(&state, &actor, &s, &reach).await?;
     Ok(Json(
@@ -430,10 +521,11 @@ async fn may_send(state: &Shared, actor: &Actor, s: &Schedule) -> ApiResult<()> 
         )));
     }
     let check = actor.clone();
-    let (project, spec, action) = (s.project.clone(), s.spec.clone(), s.action.clone());
+    let (project, spec, action, owner) =
+        (s.project.clone(), s.spec.clone(), s.action.clone(), s.owner);
     let reach = state
         .db
-        .read(move |c| check_write(c, &check, project.as_deref(), &spec, &action))
+        .read(move |c| check_write(c, &check, owner, project.as_deref(), &spec, &action))
         .await?;
     caller_may_act(state, actor, s, &reach).await
 }
@@ -507,6 +599,11 @@ struct RunCtx {
     event: Option<StoredEvent>,
     /// The escalation of a trigger run: the matches in a row.
     escalate: Option<i64>,
+    /// The sender of the run's mail. `None`: the actor.
+    from: Option<Address>,
+    /// The resource budget of an exec (`<project>/schedules`). `None`: the
+    /// actor's.
+    holder: Option<String>,
 }
 
 impl RunCtx {
@@ -549,6 +646,7 @@ pub async fn run_triggered(
             _ => None,
         },
         event: Some(event),
+        ..Default::default()
     };
     run_with(state, id, "event", label, by, ctx).await
 }
@@ -654,8 +752,28 @@ fn render_action(s: &Schedule, event: Option<&EventView<'_>>) -> ScheduleAction 
     }
 }
 
-/// Check the rights of the `run_as` actor again, then do the action.
+/// Check the rights of the owner again (the `run_as` actor, or the
+/// project's or the system's), then do the action.
 async fn perform(state: &Shared, s: &Schedule, ctx: &RunCtx) -> Outcome {
+    // A project- or system-owned schedule acts with the operator's paths
+    // after the owner's check below; its writes show the schedule.
+    let owned_ctx;
+    let ctx = if s.owner.is_owned() {
+        let mut c = ctx.clone();
+        c.label.get_or_insert_with(|| schedules::run_label(&s.id));
+        c.from = Some(match (&s.owner, &s.project) {
+            (Owner::Project, Some(p)) => Address::Project(p.clone()),
+            _ => Address::System,
+        });
+        c.holder = Some(format!(
+            "{}/schedules",
+            s.project.as_deref().unwrap_or("global")
+        ));
+        owned_ctx = c;
+        &owned_ctx
+    } else {
+        ctx
+    };
     let view = ctx.event.as_ref().map(schedules::event_view);
     let action = render_action(s, view.as_ref());
     let escalate = match (&s.spec, ctx.escalate) {
@@ -667,15 +785,22 @@ async fn perform(state: &Shared, s: &Schedule, ctx: &RunCtx) -> Outcome {
         ) => Some((e.clone(), n)),
         _ => None,
     };
-    let (run_as, project) = (s.run_as.clone(), s.project.clone());
+    let (run_as, project, owner) = (s.run_as.clone(), s.project.clone(), s.owner);
     let (checked_action, esc) = (action.clone(), escalate.clone());
     let checked = state
         .db
         .read(move |c| {
-            let Some(actor) = actor_of(c, &run_as)? else {
-                return Ok(Err(format!(
-                    "the schedule runs as `{run_as}`, which no longer exists"
-                )));
+            let actor = match owner {
+                Owner::Actor => match actor_of(c, &run_as)? {
+                    Some(a) => a,
+                    None => {
+                        return Ok(Err(format!(
+                            "the schedule runs as `{run_as}`, which no longer exists; take it \
+                             over with an edit (--owner actor or --owner project)"
+                        )));
+                    }
+                },
+                _ => Actor::Operator,
             };
             let reach = match &esc {
                 Some((e, _)) => schedules::escalation_reach(c, project.as_deref(), e),
@@ -688,8 +813,17 @@ async fn perform(state: &Shared, s: &Schedule, ctx: &RunCtx) -> Outcome {
                 }
                 Err(e) => return Err(e),
             };
-            if let Err(e) = policy::manage_schedule(&actor, project.as_deref(), &reach) {
-                return Ok(Err(format!("{} (runs as {run_as})", e.message)));
+            match owner {
+                Owner::Actor => {
+                    if let Err(e) = policy::manage_schedule(&actor, project.as_deref(), &reach) {
+                        return Ok(Err(format!("{} (runs as {run_as})", e.message)));
+                    }
+                }
+                o => {
+                    if let Err(e) = owner::schedule_reach(c, o, project.as_deref(), &reach) {
+                        return Ok(Err(format!("{} (owner {})", e.message, o.as_str())));
+                    }
+                }
             }
             Ok(Ok((actor, reach)))
         })
@@ -780,7 +914,7 @@ async fn execute(
                 ..
             },
             Reach::Target { name, .. },
-        ) => exec(state, actor, &name, cmd, cwd, timeout_secs).await,
+        ) => exec(state, s, actor, &name, cmd, cwd, timeout_secs, ctx).await,
         (ScheduleAction::Probe { .. }, Reach::Subscription { name, .. }) => {
             probe(state, &name).await
         }
@@ -828,11 +962,14 @@ async fn mail(
     ctx: &RunCtx,
 ) -> Outcome {
     let cause = ctx.cause.clone();
+    let from = ctx
+        .from
+        .clone()
+        .unwrap_or_else(|| Address::from_actor(&actor));
     let result = state
         .db
         .write(ctx.label(&actor), move |t| {
             t.cause = cause;
-            let from = Address::from_actor(&actor);
             super::mail::send_checked(t, &actor, &from, &to, &subject, &body, thread.as_deref())
         })
         .await;
@@ -1038,13 +1175,16 @@ fn keep_tail(buf: &mut Vec<u8>, more: &[u8]) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exec(
     state: &Shared,
+    s: &Schedule,
     actor: Actor,
     target: &str,
     cmd: Vec<String>,
     cwd: Option<String>,
     timeout_secs: Option<u64>,
+    ctx: &RunCtx,
 ) -> Outcome {
     let limit = timeout_secs
         .unwrap_or(schedules::DEFAULT_EXEC_TIMEOUT)
@@ -1056,7 +1196,18 @@ async fn exec(
         timeout_secs: Some(limit),
         ..Default::default()
     };
-    let sess = match executor::start_exec(state, &actor, target, rc).await {
+    let mut detail = serde_json::Map::new();
+    detail.insert("schedule".into(), json!(s.id));
+    detail.insert("owner".into(), json!(s.owner.as_str()));
+    if !s.owner.is_owned() {
+        detail.insert("run_as".into(), json!(s.run_as));
+    }
+    let on = OnBehalf {
+        label: ctx.label.clone(),
+        holder: ctx.holder.clone(),
+        detail,
+    };
+    let sess = match executor::start_exec_as(state, &actor, target, rc, Some(on)).await {
         Ok(s) => s,
         Err(e) => return failed(&e, json!({"target": target, "cmd": shown})),
     };
@@ -1162,6 +1313,7 @@ mod tests {
             catch_up: CatchUp::Skip,
             max_concurrency: 1,
             created_by: "operator".into(),
+            owner: Owner::Actor,
             run_as: "operator".into(),
             next_run_at: None,
             last_run: None,

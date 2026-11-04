@@ -31,6 +31,7 @@ pub mod lifecycle;
 pub mod login_session;
 pub mod models;
 pub mod monitors;
+pub mod owner;
 pub mod password;
 pub mod pipelines;
 pub mod policy;

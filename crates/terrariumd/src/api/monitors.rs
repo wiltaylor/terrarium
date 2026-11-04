@@ -4,10 +4,13 @@
 //! Members of a project (and its agents) read the monitors, the results,
 //! and the dashboard. A monitor runs a script on a target, so a write
 //! (create, change, delete, run now, test run, a layout save) needs
-//! project_admin of the project, sysadmin, or the operator, and the
-//! caller must be able to use the target: its policy or a lease (the
-//! operator uses any target). The target is a global target or one of
-//! the project.
+//! project_admin of the project, sysadmin, or the operator. For an
+//! actor-owned monitor the caller must be able to use the target: its
+//! policy or a lease (the operator uses any target). A project-owned
+//! monitor uses the targets of the project and the global targets granted
+//! to it for monitors; a system-owned monitor needs sysadmin or the
+//! operator for each write (`crate::owner`, docs/api.md §30.7). The
+//! target is a global target or one of the project.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -22,10 +25,12 @@ use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::executor;
 use crate::monitors::layout::{self, Layout};
-use crate::monitors::{self as engine};
+use crate::monitors::{self as engine, Rights};
+use crate::owner::{self, Owner};
 use crate::policy;
 use crate::store::monitors::{self, Monitor, MonitorDef};
 use crate::store::schedules::field_error;
+use crate::store::target_grants::Purpose;
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -75,6 +80,61 @@ pub(super) async fn check_target(
         ));
     }
     Ok(())
+}
+
+/// The target of a project- or system-owned monitor: of the project, or
+/// global (a project-owned monitor needs the grant), and one that takes
+/// commands.
+async fn check_owned_target(
+    state: &Shared,
+    owner: Owner,
+    project: &str,
+    target: &str,
+) -> ApiResult<()> {
+    let (p, t) = (project.to_owned(), target.to_owned());
+    let row = state
+        .db
+        .read(move |c| owner::owned_target(c, owner, Some(&p), &t, Purpose::Monitors))
+        .await
+        .map_err(|e| match e.code {
+            Code::NotFound | Code::Forbidden => field_error("target", e.message),
+            _ => e,
+        })?;
+    if executor::no_exec(&row.def).is_err() {
+        return Err(field_error(
+            "target",
+            format!("target `{target}` takes no commands"),
+        ));
+    }
+    Ok(())
+}
+
+/// The target check of a write for `owner`: the caller's rights for an
+/// actor-owned monitor, the owner's for another.
+async fn check_target_for(
+    state: &Shared,
+    actor: &Actor,
+    owner: Owner,
+    project: &str,
+    target: &str,
+) -> ApiResult<()> {
+    match owner {
+        Owner::Actor => check_target(state, actor, project, target).await,
+        o => check_owned_target(state, o, project, target).await,
+    }
+}
+
+/// Take `owner` out of a monitor body: the rest is the monitor's fields.
+fn take_owner(body: &mut Value) -> ApiResult<Option<Owner>> {
+    let Value::Object(m) = body else {
+        return Err(ApiError::bad_request("the body is a JSON object"));
+    };
+    match m.remove("owner") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => serde_json::from_value(v)
+            .map(Some)
+            .map_err(|_| field_error("owner", "bad owner: use actor, project, or system")),
+    }
 }
 
 async fn load(state: &Shared, key: String) -> ApiResult<Monitor> {
@@ -196,17 +256,19 @@ async fn create(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
-    ApiJson(body): ApiJson<Value>,
+    ApiJson(mut body): ApiJson<Value>,
 ) -> ApiResult<(StatusCode, Json<Monitor>)> {
     policy::admin_project(&actor, &name, "creating a monitor")?;
+    let owner = take_owner(&mut body)?.unwrap_or_default();
+    owner::may_manage(&actor, owner, Some(&name), "creating a monitor")?;
     let def: MonitorDef = serde_json::from_value(body).map_err(bad_def)?;
     monitors::validate(&def)?;
-    check_target(&state, &actor, &name, &def.target).await?;
+    check_target_for(&state, &actor, owner, &name, &def.target).await?;
     let label = actor.label();
     let m = state
         .db
         .write(actor.label(), move |t| {
-            monitors::create(t, &name, &def, &label, Utc::now())
+            monitors::create(t, &name, &def, owner, &label, Utc::now())
         })
         .await?;
     Ok((StatusCode::CREATED, Json(live(&state, m))))
@@ -236,27 +298,54 @@ async fn update(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-    ApiJson(patch): ApiJson<Value>,
+    ApiJson(mut patch): ApiJson<Value>,
 ) -> ApiResult<Json<Monitor>> {
     let m = load(&state, id).await?;
     policy::admin_project(&actor, &m.project, "changing a monitor")?;
+    let asked = take_owner(&mut patch)?;
+    let owner = asked.unwrap_or(m.owner);
+    owner::may_manage(&actor, m.owner, Some(&m.project), "changing a monitor")?;
+    owner::may_manage(&actor, owner, Some(&m.project), "changing a monitor")?;
     let def = merged(&m.def, patch)?;
     monitors::validate(&def)?;
-    // A new script or target runs as the caller: the caller must be able
-    // to use the target. So must an agent that turns on another actor's
-    // monitor.
-    let takes_over = def.script != m.def.script
-        || def.target != m.def.target
-        || (def.enabled && !m.def.enabled && actor.label() != m.run_as);
-    if takes_over {
-        check_target(&state, &actor, &m.project, &def.target).await?;
-    }
-    let label = actor.label();
+    let reruns = def.script != m.def.script || def.target != m.def.target;
+    let enables = def.enabled && !m.def.enabled;
+    let run_as = match owner {
+        Owner::Actor => {
+            // A new script or target runs as the caller, and so does a
+            // monitor that the caller takes over: `owner: actor` given, a
+            // move back from the project or the system, or an enable of a
+            // monitor whose `run_as` agent is gone. The caller must be
+            // able to use the target. So must an agent that turns on
+            // another actor's monitor.
+            let gone = enables && {
+                let r = m.run_as.clone();
+                state
+                    .db
+                    .read(move |c| engine::actor_of(c, &r))
+                    .await?
+                    .is_none()
+            };
+            let takes_over = asked.is_some() || m.owner != Owner::Actor || reruns || gone;
+            if takes_over || (enables && actor.label() != m.run_as) {
+                check_target(&state, &actor, &m.project, &def.target).await?;
+            }
+            takes_over.then(|| actor.label())
+        }
+        o => {
+            // The project's (or the system's) rights: checked when the
+            // owner, the script, or the target changes, or at an enable.
+            if o != m.owner || reruns || enables {
+                check_owned_target(&state, o, &m.project, &def.target).await?;
+            }
+            (o != m.owner || reruns).then(|| actor.label())
+        }
+    };
     let id = m.id.clone();
     let m = state
         .db
         .write(actor.label(), move |t| {
-            monitors::update(t, &id, &def, &label, Utc::now())
+            monitors::update(t, &id, &def, owner, run_as.as_deref(), Utc::now())
         })
         .await?;
     Ok(Json(live(&state, m)))
@@ -269,6 +358,7 @@ async fn remove(
 ) -> ApiResult<StatusCode> {
     let m = load(&state, id).await?;
     policy::admin_project(&actor, &m.project, "deleting a monitor")?;
+    owner::may_manage(&actor, m.owner, Some(&m.project), "deleting a monitor")?;
     state
         .db
         .write(actor.label(), move |t| monitors::delete(t, &m.id))
@@ -277,9 +367,10 @@ async fn remove(
 }
 
 /// `POST /api/monitors/{id}/run`: run now, keep the result, and answer
-/// with it and the raw output. The run acts as the monitor's `run_as`, as
-/// a timed run does; an agent that is not the `run_as` must be able to
-/// use the target itself.
+/// with it and the raw output. The run has the owner's rights, as a timed
+/// run does. For an actor-owned monitor, an agent that is not the
+/// `run_as` must be able to use the target itself; a system-owned
+/// monitor needs sysadmin or the operator.
 async fn run_now(
     State(state): State<Shared>,
     actor: Actor,
@@ -287,7 +378,8 @@ async fn run_now(
 ) -> ApiResult<Json<Value>> {
     let m = load(&state, id).await?;
     policy::admin_project(&actor, &m.project, "running a monitor")?;
-    if matches!(actor, Actor::Agent(_)) && actor.label() != m.run_as {
+    owner::may_manage(&actor, m.owner, Some(&m.project), "running a monitor")?;
+    if m.owner == Owner::Actor && matches!(actor, Actor::Agent(_)) && actor.label() != m.run_as {
         check_target(&state, &actor, &m.project, &m.def.target).await?;
     }
     let Some(claim) = state.monitors.claim(&m.id) else {
@@ -308,8 +400,9 @@ async fn run_now(
 }
 
 /// `POST /api/projects/{name}/monitors/test`: run a monitor that is not
-/// saved, once, as the caller, and answer with the parsed result and the
-/// raw output. Nothing is kept. `name` and `schedule` may be absent.
+/// saved, once, as the caller (with `owner` `project` or `system`: with
+/// that owner's rights), and answer with the parsed result and the raw
+/// output. Nothing is kept. `name` and `schedule` may be absent.
 async fn test_run(
     State(state): State<Shared>,
     actor: Actor,
@@ -317,6 +410,9 @@ async fn test_run(
     ApiJson(body): ApiJson<Value>,
 ) -> ApiResult<Json<Value>> {
     policy::admin_project(&actor, &name, "running a monitor")?;
+    let mut body = body;
+    let owner = take_owner(&mut body)?.unwrap_or_default();
+    owner::may_manage(&actor, owner, Some(&name), "running a monitor")?;
     let Value::Object(mut b) = body else {
         return Err(ApiError::bad_request("the body is a JSON object"));
     };
@@ -335,7 +431,7 @@ async fn test_run(
         .db
         .read(move |c| crate::store::projects::get(c, &p).map(|_| ()))
         .await?;
-    check_target(&state, &actor, &name, &def.target).await?;
+    check_target_for(&state, &actor, owner, &name, &def.target).await?;
     let (target, script) = (
         def.target.clone(),
         crate::monitors::parse::cut_chars(&def.script, 200),
@@ -344,10 +440,19 @@ async fn test_run(
     state
         .db
         .write(actor.label(), move |t| {
-            t.audit("monitor.test", &target, Some(&p), json!({"script": script}))
+            t.audit(
+                "monitor.test",
+                &target,
+                Some(&p),
+                json!({"script": script, "owner": owner.as_str()}),
+            )
         })
         .await?;
-    let e = engine::execute(&state, &actor, &name, &def).await;
+    let rights = match owner {
+        Owner::Actor => Rights::Actor(&actor),
+        o => Rights::Owned(o),
+    };
+    let e = engine::execute(&state, rights, &name, &def).await;
     let parsed = &e.parsed;
     Ok(Json(json!({
         "result": {

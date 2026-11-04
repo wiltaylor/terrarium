@@ -637,3 +637,434 @@ async fn retention_and_the_point_cap() {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+// ------------------------------------------------ owners (issue #18, §30.7)
+
+async fn audit_rows(td: &TestDaemon, action: &str) -> Vec<Value> {
+    td.get(&format!("/api/audit?action={action}"))
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[tokio::test]
+async fn project_owned_monitors_rights_grants_and_the_audit_actor() {
+    let lab = Lab::start().await;
+    let (lead, worker, other, _h) = setup(&lab).await;
+    let td = &lab.td;
+    let path = "/api/projects/terra/monitors";
+    // A target of the project; the lead has it in no policy and no lease.
+    lab.target(json!({"name": "terra-tbox", "kind": "host", "host": "lab1", "project": "terra"}))
+        .await;
+    let owned = |name: &str, target: &str, owner: &str| {
+        let mut b = body(name, target, "echo 42", "number");
+        b["owner"] = json!(owner);
+        b
+    };
+
+    // A worker agent must not create a project-owned monitor.
+    td.post_as(&worker, path, owned("w", "terra-tbox", "project"))
+        .await
+        .err(403, "forbidden");
+    // Nor a lead of another project.
+    td.post_as(&other, path, owned("o", "terra-tbox", "project"))
+        .await
+        .err(403, "forbidden");
+    // The lead makes one on a project target: the project's right, not
+    // the lead's policy.
+    let r = td
+        .post_as(&lead, path, owned("ptarget", "terra-tbox", "project"))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["owner"], "project");
+    let ptarget = id(&r.body);
+    // A global target needs a grant, even when it is in the lead's policy.
+    let r = td
+        .post_as(&lead, path, owned("pbox", "box", "project"))
+        .await;
+    r.err(422, "invalid");
+    assert_eq!(r.body["error"]["details"]["field"], "target");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not granted"),
+        "{}",
+        r.body
+    );
+    // A target of another project: never.
+    td.post(path, owned("pops", "opsbox", "project"))
+        .await
+        .err(422, "invalid");
+
+    // Only a sysadmin or the operator grants a global target.
+    let grants = "/api/projects/terra/target-grants";
+    td.post_as(&lead, grants, json!({"target": "box", "for": "monitors"}))
+        .await
+        .err(403, "forbidden");
+    td.post(grants, json!({"target": "terra-tbox", "for": "monitors"}))
+        .await
+        .err(422, "invalid");
+    td.post(grants, json!({"target": "box", "for": "pies"}))
+        .await
+        .err(422, "invalid");
+    let r = td
+        .post(grants, json!({"target": "box", "for": "monitors"}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["for"], "monitors");
+    assert_eq!(r.body["granted_by"], "operator");
+    let r = td
+        .post(grants, json!({"target": "box", "for": "monitors"}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // The grant is visible to the members.
+    let list = td.get_as(&worker, grants).await;
+    assert_eq!(list.ok().as_array().unwrap().len(), 1);
+    assert_eq!(list.body[0]["target"], "box");
+    assert_eq!(audit_rows(td, "target.grant").await.len(), 1);
+    // A grant for schedules is not one for monitors.
+    let r = td
+        .post_as(&lead, path, owned("pbox", "box", "project"))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let pbox = id(&r.body);
+
+    // System-owned: sysadmin or the operator.
+    td.post_as(&lead, path, owned("sys", "far", "system"))
+        .await
+        .err(403, "forbidden");
+    let r = td.post(path, owned("sys", "far", "system")).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let sys = id(&r.body);
+    // The lead does not change, run, or delete it.
+    td.patch_as(&lead, &format!("/api/monitors/{sys}"), json!({"unit": "x"}))
+        .await
+        .err(403, "forbidden");
+    td.post_empty_as(&lead, &format!("/api/monitors/{sys}/run"))
+        .await
+        .err(403, "forbidden");
+    delete_as(td, &lead, &format!("/api/monitors/{sys}"))
+        .await
+        .err(403, "forbidden");
+    // Nor takes it over.
+    td.patch_as(
+        &lead,
+        &format!("/api/monitors/{sys}"),
+        json!({"owner": "actor"}),
+    )
+    .await
+    .err(403, "forbidden");
+
+    // The runs: the result rows carry the monitor as the actor. No run
+    // writes a target.exec row; the first status (none -> ok) writes one
+    // monitor.status audit row with the monitor as the actor.
+    for m in [&ptarget, &pbox] {
+        let r = td
+            .post_empty_as(&lead, &format!("/api/monitors/{m}/run"))
+            .await;
+        assert_eq!(r.ok()["result"]["status"], "ok", "{}", r.body);
+        assert_eq!(r.body["result"]["value"], 42.0);
+    }
+    let res = td.get(&format!("/api/monitors/{pbox}/results")).await;
+    assert_eq!(res.ok()[0]["actor"], "monitor:terra/pbox", "{}", res.body);
+    assert!(audit_rows(td, "target.exec").await.is_empty());
+    let rows = audit_rows(td, "monitor.status").await;
+    let row = rows
+        .iter()
+        .find(|r| r["actor"] == "monitor:terra/pbox")
+        .expect("a monitor.status audit row");
+    assert_eq!(row["detail"]["to"], "ok");
+    assert_eq!(row["detail"]["owner"], "project");
+    assert_eq!(row["detail"]["id"], pbox.as_str());
+    // A second run with the same status writes no audit row.
+    td.post_empty(&format!("/api/monitors/{pbox}/run"))
+        .await
+        .ok();
+    let n = |rows: &[Value]| {
+        rows.iter()
+            .filter(|r| r["actor"] == "monitor:terra/pbox")
+            .count()
+    };
+    assert_eq!(n(&audit_rows(td, "monitor.status").await), 1);
+    // The result events show the monitor too.
+    let evs = events(td, "monitor.result").await;
+    assert!(
+        evs.iter().any(|e| e["actor"] == "monitor:terra/pbox"),
+        "{evs:?}"
+    );
+
+    // The lead goes: a project-owned monitor still runs.
+    let r = td.delete(&format!("/api/agents/{lead}")).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    let r = td.post_empty(&format!("/api/monitors/{pbox}/run")).await;
+    assert_eq!(r.ok()["result"]["status"], "ok", "{}", r.body);
+    let m = td.get(&format!("/api/monitors/{pbox}")).await;
+    assert_eq!(m.ok()["owner"], "project");
+    assert!(m.body["disabled_reason"].is_null());
+
+    // A revoked grant refuses the next run.
+    let r = td.delete(&format!("{grants}/box/monitors")).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    assert_eq!(audit_rows(td, "target.ungrant").await.len(), 1);
+    let r = td.post_empty(&format!("/api/monitors/{pbox}/run")).await;
+    assert_eq!(r.ok()["result"]["status"], "unknown", "{}", r.body);
+    assert!(
+        r.body["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not granted"),
+        "{}",
+        r.body
+    );
+    // ok -> unknown is a status change: one more audit row.
+    let rows = audit_rows(td, "monitor.status").await;
+    assert_eq!(n(&rows), 2);
+    assert!(rows.iter().any(|r| r["actor"] == "monitor:terra/pbox"
+        && r["detail"]["from"] == "ok"
+        && r["detail"]["to"] == "unknown"));
+}
+
+#[tokio::test]
+async fn moving_a_monitor_to_the_project_is_one_edit() {
+    let lab = Lab::start().await;
+    let (lead, worker, _other, _h) = setup(&lab).await;
+    let td = &lab.td;
+    let path = "/api/projects/terra/monitors";
+    lab.target(json!({"name": "terra-tbox", "kind": "host", "host": "lab1", "project": "terra"}))
+        .await;
+    let r = td
+        .post(path, body("load", "terra-tbox", "echo 1", "number"))
+        .await;
+    let load = id(r.ok());
+    assert_eq!(r.body["owner"], "actor");
+    assert_eq!(r.body["run_as"], "operator");
+    // A worker cannot move it.
+    td.patch_as(
+        &worker,
+        &format!("/api/monitors/{load}"),
+        json!({"owner": "project"}),
+    )
+    .await
+    .err(403, "forbidden");
+    let r = td
+        .patch_as(
+            &lead,
+            &format!("/api/monitors/{load}"),
+            json!({"owner": "project"}),
+        )
+        .await;
+    assert_eq!(r.ok()["owner"], "project", "{}", r.body);
+    let audit = audit_rows(td, "monitor.update").await;
+    let last = audit.last().unwrap();
+    assert!(
+        last["detail"]["changed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("owner")),
+        "{last}"
+    );
+    assert_eq!(last["actor"], format!("agent:{lead}"));
+    // Back to an actor: the caller takes it over and must use the target.
+    td.patch_as(
+        &lead,
+        &format!("/api/monitors/{load}"),
+        json!({"owner": "actor"}),
+    )
+    .await
+    .err(403, "forbidden");
+    let r = td
+        .patch(&format!("/api/monitors/{load}"), json!({"owner": "actor"}))
+        .await;
+    assert_eq!(r.ok()["owner"], "actor");
+    assert_eq!(r.body["run_as"], "operator");
+}
+
+#[tokio::test]
+async fn a_deleted_run_as_agent_disables_its_monitors_and_schedules() {
+    let lab = Lab::start().await;
+    let (lead, _worker, _other, _h) = setup(&lab).await;
+    let td = &lab.td;
+    let lead2 = id(&td
+        .agent(
+            "terra",
+            "lead2",
+            json!({"roles": ["project_admin"], "policy": {"targets": ["box"]}}),
+        )
+        .await);
+    // An enabled monitor and an enabled schedule that run as the lead.
+    let mut b = body("load", "box", "echo 1", "number");
+    b["enabled"] = json!(true);
+    b["schedule"] = json!({"kind": "cron", "expr": "0 0 1 1 *"});
+    let r = td.post_as(&lead, "/api/projects/terra/monitors", b).await;
+    let load = id(r.ok());
+    // A disabled one stays as it is.
+    let r = td
+        .post_as(
+            &lead,
+            "/api/projects/terra/monitors",
+            body("off", "box", "echo 1", "number"),
+        )
+        .await;
+    let off = id(r.ok());
+    let r = td
+        .post_as(
+            &lead,
+            "/api/schedules",
+            json!({"name": "nag", "project": "terra",
+                   "spec": {"kind": "interval", "every": "1h"},
+                   "action": {"type": "mail", "to": "operator", "body": "hi"}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let nag = id(&r.body);
+    assert_eq!(r.body["owner"], "actor");
+
+    let r = td.delete(&format!("/api/agents/{lead}")).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+
+    let m = td.get(&format!("/api/monitors/{load}")).await;
+    assert_eq!(m.ok()["enabled"], false, "{}", m.body);
+    assert!(m.body["next_run_at"].is_null());
+    let why = m.body["disabled_reason"].as_str().unwrap();
+    assert!(why.contains("terra/lead was deleted"), "{why}");
+    let m = td.get(&format!("/api/monitors/{off}")).await;
+    assert!(m.ok()["disabled_reason"].is_null());
+    let s = td.get(&format!("/api/schedules/{nag}")).await;
+    assert_eq!(s.ok()["enabled"], false, "{}", s.body);
+    assert!(
+        s.body["disabled_reason"]
+            .as_str()
+            .unwrap()
+            .contains("was deleted")
+    );
+    assert_eq!(audit_rows(td, "monitor.disable").await.len(), 1);
+
+    // The notice: the operator's Inbox and the other lead.
+    let ops = td.get("/api/mail?to=operator").await;
+    let notice = ops
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["from"] == "system")
+        .cloned()
+        .expect("a notice to the operator");
+    let subject = notice["subject"].as_str().unwrap();
+    assert!(subject.contains("terra/lead was deleted"), "{subject}");
+    let body_text = notice["body"].as_str().unwrap();
+    assert!(body_text.contains("monitor terra/load"), "{body_text}");
+    assert!(body_text.contains("schedule terra/nag"), "{body_text}");
+    let inbox = td.get("/api/inbox?kind=mail").await;
+    assert!(
+        inbox
+            .ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i.to_string().contains("was deleted")),
+        "{}",
+        inbox.body
+    );
+    let to_lead2 = td.get(&format!("/api/mail?to={lead2}")).await;
+    assert!(
+        to_lead2
+            .ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["from"] == "system"),
+        "{}",
+        to_lead2.body
+    );
+
+    // A run of the orphan says what to do.
+    let r = td.post_empty(&format!("/api/monitors/{off}/run")).await;
+    let err = r.ok()["result"]["error"].as_str().unwrap().to_owned();
+    assert!(err.contains("take it over"), "{err}");
+
+    // Take-over: the other lead runs it as itself and enables it.
+    let r = td
+        .patch_as(
+            &lead2,
+            &format!("/api/monitors/{load}"),
+            json!({"owner": "actor", "enabled": true}),
+        )
+        .await;
+    assert_eq!(r.ok()["run_as"], format!("agent:{lead2}"), "{}", r.body);
+    assert_eq!(r.body["enabled"], true);
+    assert!(r.body["disabled_reason"].is_null());
+    // An enable of an orphan schedule takes it over too.
+    let r = td
+        .post_empty_as(&lead2, &format!("/api/schedules/{nag}/enable"))
+        .await;
+    assert_eq!(r.ok()["run_as"], format!("agent:{lead2}"), "{}", r.body);
+    assert_eq!(r.body["enabled"], true);
+    assert!(r.body["disabled_reason"].is_null());
+}
+
+#[tokio::test]
+async fn project_owned_schedules_exec_with_the_project_rights() {
+    let lab = Lab::start().await;
+    let (lead, worker, _other, _h) = setup(&lab).await;
+    let td = &lab.td;
+    lab.target(json!({"name": "terra-tbox", "kind": "host", "host": "lab1", "project": "terra"}))
+        .await;
+    let sched = |name: &str, target: &str, owner: &str| {
+        json!({"name": name, "project": "terra", "owner": owner, "enabled": false,
+               "spec": {"kind": "interval", "every": "1h"},
+               "action": {"type": "exec", "target": target, "cmd": ["echo", "hi"]}})
+    };
+    // A worker must not create a project-owned schedule.
+    td.post_as(
+        &worker,
+        "/api/schedules",
+        sched("w", "terra-tbox", "project"),
+    )
+    .await
+    .err(403, "forbidden");
+    // A global target needs a grant for schedules; one for monitors is not it.
+    td.post(
+        "/api/projects/terra/target-grants",
+        json!({"target": "box", "for": "monitors"}),
+    )
+    .await;
+    td.post_as(&lead, "/api/schedules", sched("g", "box", "project"))
+        .await
+        .err(403, "forbidden");
+    // A system-owned schedule needs sysadmin or the operator.
+    td.post_as(&lead, "/api/schedules", sched("s", "terra-tbox", "system"))
+        .await
+        .err(403, "forbidden");
+    // A global schedule cannot be project-owned.
+    let mut g = sched("gl", "box", "project");
+    g["project"] = Value::Null;
+    td.post("/api/schedules", g).await.err(422, "invalid");
+
+    let r = td
+        .post_as(
+            &lead,
+            "/api/schedules",
+            sched("ping", "terra-tbox", "project"),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["owner"], "project");
+    let ping = id(&r.body);
+    // The lead goes; the schedule runs with the project's rights.
+    let r = td.delete(&format!("/api/agents/{lead}")).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    let s = td.get(&format!("/api/schedules/{ping}")).await;
+    assert!(s.ok()["disabled_reason"].is_null());
+    let r = td.post_empty(&format!("/api/schedules/{ping}/run")).await;
+    assert_eq!(r.ok()["status"], "ok", "{}", r.body);
+    let rows = audit_rows(td, "target.exec").await;
+    let row = rows
+        .iter()
+        .find(|r| r["target"] == "terra-tbox")
+        .expect("a target.exec row");
+    assert_eq!(row["actor"], format!("schedule:{ping}"));
+    assert_eq!(row["detail"]["owner"], "project");
+}

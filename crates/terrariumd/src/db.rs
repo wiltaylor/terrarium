@@ -1874,6 +1874,33 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX card_files_sha ON card_files(sha256);
     "#,
+    // 62: the owner of a monitor and of a schedule (issue #18, docs/api.md
+    // §30.7): `actor` (the runs act as `run_as`), `project` (the rights
+    // come from the project), or `system`. `disabled_reason` on a monitor:
+    // why the daemon disabled it (its `run_as` agent was deleted).
+    // `monitor_results.actor`: the actor of each run, `monitor:<p>/<name>`
+    // (the runs write no audit row; the results have a retention). And the
+    // grants of a global target to a project for its project-owned
+    // monitors or schedules (`crate::store::target_grants`); a project
+    // target needs none. Self-contained: when another branch takes this
+    // number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE monitors ADD COLUMN owner TEXT NOT NULL DEFAULT 'actor'
+        CHECK (owner IN ('actor', 'project', 'system'));
+    ALTER TABLE monitors ADD COLUMN disabled_reason TEXT;
+    ALTER TABLE monitor_results ADD COLUMN actor TEXT;
+    ALTER TABLE schedules ADD COLUMN owner TEXT NOT NULL DEFAULT 'actor'
+        CHECK (owner IN ('actor', 'project', 'system'));
+    CREATE TABLE target_grants (
+        target     TEXT NOT NULL REFERENCES targets(name) ON DELETE CASCADE,
+        project    TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        purpose    TEXT NOT NULL CHECK (purpose IN ('monitors', 'schedules')),
+        granted_by TEXT NOT NULL,
+        granted_at TEXT NOT NULL,
+        PRIMARY KEY (target, project, purpose)
+    );
+    CREATE INDEX target_grants_project ON target_grants(project);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

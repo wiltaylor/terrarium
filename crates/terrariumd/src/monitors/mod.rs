@@ -3,7 +3,8 @@
 //! The scheduler task (`crate::scheduler`) calls [`tick`] every [`TICK`].
 //! A tick finds the due monitors and moves their next run on in one
 //! write, as the schedule tick does, then starts one run for each. The
-//! run checks the rights of the monitor's `run_as` actor again, runs the
+//! run checks the rights of the monitor's owner again (its `run_as` actor,
+//! or the project's targets and grants, `crate::owner`), runs the
 //! script with `sh -c` on the target through the executor
 //! ([`crate::executor::start_cmd`], the path of `terrarium exec`), reads
 //! the output by the output kind ([`parse`]), and keeps the result
@@ -16,9 +17,16 @@
 //! - At most [`DEFAULT_PARALLEL`] runs at once in the daemon
 //!   ([`ENV_PARALLEL`]). A run waits for a free slot.
 //!
-//! A monitor is not an agent. It uses the target with the rights of its
-//! `run_as` actor: the target's policy or a lease of that agent (the
-//! operator may use any target). Its commands run in the resource budget
+//! A monitor is not an agent. An actor-owned monitor uses the target with
+//! the rights of its `run_as` actor: the target's policy or a lease of
+//! that agent (the operator may use any target). A project-owned monitor
+//! uses the targets of its project and the global targets granted to the
+//! project for monitors; a system-owned one any global target or one of
+//! its project. Each run's result row carries the actor
+//! `monitor:<project>/<name>`; a status change writes a `monitor.status`
+//! audit row with that actor (`crate::store::monitors::record`). The runs
+//! write no `target.exec` row: a 15 s monitor would add 5 760 rows a day to
+//! an audit log with no prune. Its commands run in the resource budget
 //! `<project>/monitors` of a `host` target with `limits`. A docker or
 //! vmlab target that is stopped is not brought up for a monitor: the run
 //! records `unknown` with "target down". An offline host agent is the
@@ -42,8 +50,10 @@ use crate::actor::Actor;
 use crate::api::Shared;
 use crate::error::ApiResult;
 use crate::executor::{self, End, RemoteCmd};
+use crate::owner::Owner;
 use crate::policy;
 use crate::store::monitors::{self, MonitorDef, MonitorResult};
+use crate::store::target_grants::Purpose;
 use crate::store::targets::TargetRow;
 use parse::Parsed;
 
@@ -187,10 +197,53 @@ pub(crate) fn down(state: &Shared, row: &TargetRow) -> Option<String> {
     }
 }
 
-/// Run the script of `def` once on its target as `actor`, for `project`.
-/// Never fails: a refused right, a target that is down, and a timeout are
-/// each an `unknown` result with the error.
-pub async fn execute(state: &Shared, actor: &Actor, project: &str, def: &MonitorDef) -> Execution {
+/// The rights of one run: an actor's (an actor-owned monitor, a test run),
+/// or those of a project- or system-owned monitor.
+#[derive(Debug, Clone, Copy)]
+pub enum Rights<'a> {
+    Actor(&'a Actor),
+    Owned(Owner),
+}
+
+/// The target of a run with `rights`, for `project`.
+async fn target_for(
+    state: &Shared,
+    rights: Rights<'_>,
+    project: &str,
+    target: &str,
+) -> ApiResult<TargetRow> {
+    match rights {
+        Rights::Actor(actor) => {
+            policy::admin_project(actor, project, "running a monitor").map_err(|e| {
+                crate::error::ApiError::forbidden(format!(
+                    "{} (runs as {})",
+                    e.message,
+                    actor.label()
+                ))
+            })?;
+            executor::usable(state, actor, target).await
+        }
+        Rights::Owned(owner) => {
+            let (p, t) = (project.to_owned(), target.to_owned());
+            state
+                .db
+                .read(move |c| {
+                    crate::owner::owned_target(c, owner, Some(&p), &t, Purpose::Monitors)
+                })
+                .await
+        }
+    }
+}
+
+/// Run the script of `def` once on its target with `rights`, for
+/// `project`. Never fails: a refused right, a target that is down, and a
+/// timeout are each an `unknown` result with the error.
+pub async fn execute(
+    state: &Shared,
+    rights: Rights<'_>,
+    project: &str,
+    def: &MonitorDef,
+) -> Execution {
     let at = Utc::now();
     let started = Instant::now();
     let done = |parsed: Parsed, output: Option<Output>| Execution {
@@ -199,13 +252,7 @@ pub async fn execute(state: &Shared, actor: &Actor, project: &str, def: &Monitor
         at,
         duration_ms: i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
     };
-    if let Err(e) = policy::admin_project(actor, project, "running a monitor") {
-        return done(
-            Parsed::unknown(format!("{} (runs as {})", e.message, actor.label())),
-            None,
-        );
-    }
-    let row = match executor::usable(state, actor, &def.target).await {
+    let row = match target_for(state, rights, project, &def.target).await {
         Ok(r) => r,
         Err(e) => return done(Parsed::unknown(e.message), None),
     };
@@ -224,7 +271,11 @@ pub async fn execute(state: &Shared, actor: &Actor, project: &str, def: &Monitor
     let Some(_slot) = state.monitors.slot().await else {
         return done(Parsed::unknown("the monitor runtime is closed"), None);
     };
-    let tdef = match executor::resolved_def(state, &row, Some(actor), None).await {
+    let actor = match rights {
+        Rights::Actor(a) => Some(a),
+        Rights::Owned(_) => None,
+    };
+    let tdef = match executor::resolved_def(state, &row, actor, None).await {
         Ok(d) => d,
         Err(e) => return done(Parsed::unknown(e.message), None),
     };
@@ -268,7 +319,7 @@ pub async fn execute(state: &Shared, actor: &Actor, project: &str, def: &Monitor
     done(parsed, Some(output))
 }
 
-fn actor_of(conn: &rusqlite::Connection, run_as: &str) -> ApiResult<Option<Actor>> {
+pub(crate) fn actor_of(conn: &rusqlite::Connection, run_as: &str) -> ApiResult<Option<Actor>> {
     if run_as == "operator" {
         return Ok(Some(Actor::Operator));
     }
@@ -290,15 +341,22 @@ pub async fn run(
         .db
         .read(move |c| {
             let m = monitors::get(c, &key)?;
-            let actor = actor_of(c, &m.run_as)?;
+            let actor = match m.owner {
+                Owner::Actor => actor_of(c, &m.run_as)?,
+                _ => None,
+            };
             Ok((m, actor))
         })
         .await?;
-    let exec = match actor {
-        Some(a) => execute(state, &a, &m.project, &m.def).await,
-        None => Execution {
+    let exec = match (m.owner, actor) {
+        (Owner::Actor, Some(a)) => execute(state, Rights::Actor(&a), &m.project, &m.def).await,
+        (owner @ (Owner::Project | Owner::System), _) => {
+            execute(state, Rights::Owned(owner), &m.project, &m.def).await
+        }
+        (Owner::Actor, None) => Execution {
             parsed: Parsed::unknown(format!(
-                "the monitor runs as `{}`, which no longer exists; save the monitor again to run it as you",
+                "the monitor runs as `{}`, which no longer exists; take it over with an edit \
+                 (--owner actor runs it as you, --owner project gives it to the project)",
                 m.run_as
             )),
             output: None,
@@ -310,7 +368,7 @@ pub async fn run(
     let (parsed, at, ms) = (exec.parsed.clone(), exec.at, exec.duration_ms);
     let r = state
         .db
-        .write("system", move |t| {
+        .write(m.label(), move |t| {
             monitors::record(t, &key, &parsed, at, ms)
         })
         .await;

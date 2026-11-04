@@ -1495,11 +1495,35 @@ pub async fn start_exec(
     name: &str,
     cmd: RemoteCmd,
 ) -> ApiResult<Arc<ExecSession>> {
+    start_exec_as(state, actor, name, cmd, None).await
+}
+
+/// Who a command runs for, when it is not the actor itself: a schedule
+/// run. `label` is the actor of the `target.exec` audit row
+/// (`schedule:<id>`), and `holder` the resource budget of the command.
+#[derive(Debug, Clone, Default)]
+pub struct OnBehalf {
+    pub label: Option<String>,
+    pub holder: Option<String>,
+    /// More fields of the audit row (`run_as`, `owner`).
+    pub detail: serde_json::Map<String, Value>,
+}
+
+/// [`start_exec`] for a schedule run: the rights are `actor`'s, the
+/// audit row and the budget are `on`'s.
+pub async fn start_exec_as(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+    cmd: RemoteCmd,
+    on: Option<OnBehalf>,
+) -> ApiResult<Arc<ExecSession>> {
+    let on = on.unwrap_or_default();
     let row = usable(state, actor, name).await?;
     check_cap(state, actor)?;
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
     let mut cmd = cmd;
-    cmd.holder = holder_of(actor);
+    cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
     let run = start_cmd(state, &def, &cmd)?;
     let kind = if cmd.shell { "shell" } else { "exec" };
     let (sess, ctl) = ExecSession::new(
@@ -1510,16 +1534,20 @@ pub async fn start_exec(
     );
     tokio::spawn(attach(run, sess.clone(), ctl, false, false));
     state.executor.insert(sess.clone());
-    audit(
-        state,
-        actor,
-        &row,
-        "target.exec",
-        json!({"session": sess.id, "kind": targets::kind_str(row.def.kind),
-               "command": cmd_text(&cmd), "cwd": cmd.cwd, "pty": cmd.pty.is_some(),
-               "env": cmd.env.keys().collect::<Vec<_>>()}),
-    )
-    .await?;
+    let mut detail = json!({"session": sess.id, "kind": targets::kind_str(row.def.kind),
+           "command": cmd_text(&cmd), "cwd": cmd.cwd, "pty": cmd.pty.is_some(),
+           "env": cmd.env.keys().collect::<Vec<_>>()});
+    if let Value::Object(m) = &mut detail {
+        m.extend(on.detail);
+    }
+    let (target, project) = (row.def.name.clone(), row.def.project.clone());
+    let label = on.label.unwrap_or_else(|| actor.label());
+    state
+        .db
+        .write(label, move |t| {
+            t.audit("target.exec", &target, project.as_deref(), detail)
+        })
+        .await?;
     Ok(sess)
 }
 

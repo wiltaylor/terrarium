@@ -25,6 +25,7 @@ import { createRunHistory } from "./history";
 import { applyRunAnswer, applyScheduleEvent, eventRun, filterSchedules, groupSchedules, RUN_CHIP, runOutputText, runSeconds, SCHEDULE_TABS, scheduleScope, scheduleScopeLabel, sortSchedules, tabOf, tabParam, touchesRuns, upsertSchedule, type ScheduleKind, type ScheduleListState } from "./model";
 import { ScheduleDialog } from "./ScheduleDialog";
 import { DeliveriesPanel } from "./Deliveries";
+import { ownerText } from "../dashboard/model";
 
 const COLS = 8;
 
@@ -247,7 +248,7 @@ export default function SchedulesPage() {
                                     </div>
                                   )}
                                 </Show>
-                                <div class="small muted">runs as {s.run_as}</div>
+                                <div class="small muted">{ownerText(s)}</div>
                               </td>
                               <td>
                                 <span class={`chip ${scheduleScope(s) === "global" ? "info" : ""}`} title={s.project ? `A schedule of project ${s.project}` : "A global schedule: sysadmin only"}>

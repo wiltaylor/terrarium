@@ -1104,6 +1104,9 @@ pub fn set_subscription(t: &mut Tx<'_>, id: &str, subscription: &str) -> ApiResu
 pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     let a = get(t, id)?;
     crate::store::waits::on_agent_deleted(t, id)?;
+    // The monitors and schedules that run as it: disabled, with a notice
+    // to the project leads and the operator (`crate::owner`).
+    crate::owner::on_agent_deleted(t, id, &format!("{}/{}", a.agent.project, a.agent.name))?;
     crate::store::questions::on_agent_deleted(t, id)?;
     // Its secret grants (PLAN §16b.3): a new agent with the same name
     // gets none of them.

@@ -285,6 +285,36 @@ pub fn check_secrets(
     Ok(())
 }
 
+/// Check every secret of a webhook action for a project- or system-owned
+/// schedule (`crate::owner::secret_use`).
+pub fn check_owned_secrets(
+    conn: &Connection,
+    owner: crate::owner::Owner,
+    project: Option<&str>,
+    a: &WebhookAction,
+) -> ApiResult<()> {
+    for (field, name) in a.secrets() {
+        crate::owner::secret_use(conn, owner, project, name, field)?;
+    }
+    Ok(())
+}
+
+/// The secrets of the action for the owner of `s`: its `run_as` actor, or
+/// the project or the system.
+fn check_owner_secrets(conn: &Connection, s: &Schedule, a: &WebhookAction) -> ApiResult<()> {
+    let project = s.project.as_deref();
+    if s.owner.is_owned() {
+        return check_owned_secrets(conn, s.owner, project, a);
+    }
+    let actor = actor_of(conn, &s.run_as)?.ok_or_else(|| {
+        ApiError::forbidden(format!(
+            "the trigger runs as `{}`, which no longer exists",
+            s.run_as
+        ))
+    })?;
+    check_secrets(conn, &actor, project, a)
+}
+
 /// The main value of secret `name`: the project's first, then the global
 /// one.
 pub(crate) fn open_value(
@@ -382,7 +412,7 @@ fn tick_doc(s: &Schedule, now: DateTime<Utc>) -> EventDoc {
         at: schedules::stamp(now),
         project: s.project.clone(),
         agent: None,
-        actor: Some(s.run_as.clone()),
+        actor: Some(s.run_label()),
         summary: format!("schedule {}", s.key()),
         data: json!({"schedule": s.id, "name": s.name}),
     }
@@ -503,14 +533,8 @@ fn prepare(
             "the action of the trigger is no longer a webhook",
         ));
     };
-    let actor = actor_of(conn, &s.run_as)?.ok_or_else(|| {
-        ApiError::forbidden(format!(
-            "the trigger runs as `{}`, which no longer exists",
-            s.run_as
-        ))
-    })?;
+    check_owner_secrets(conn, s, a)?;
     let project = s.project.as_deref();
-    check_secrets(conn, &actor, project, a)?;
     let mut opened: Vec<Zeroizing<String>> = Vec::new();
     let (url, log_url) = match &a.url_secret {
         Some(name) => {
@@ -734,22 +758,12 @@ pub async fn test_send(state: &Shared, s: &Schedule, actor: &Actor) -> ApiResult
             s.action.kind()
         )));
     };
-    let (run_as, project, check, a2) = (
-        s.run_as.clone(),
-        s.project.clone(),
-        actor.clone(),
-        a.clone(),
-    );
+    let (s2, check, a2) = (s.clone(), actor.clone(), a.clone());
     state
         .db
         .read(move |c| {
-            check_secrets(c, &check, project.as_deref(), &a2)?;
-            let owner = actor_of(c, &run_as)?.ok_or_else(|| {
-                ApiError::forbidden(format!(
-                    "the trigger runs as `{run_as}`, which no longer exists"
-                ))
-            })?;
-            check_secrets(c, &owner, project.as_deref(), &a2)
+            check_secrets(c, &check, s2.project.as_deref(), &a2)?;
+            check_owner_secrets(c, &s2, &a2)
         })
         .await?;
     let e = sample_for(&s.spec, s.project.as_deref(), Utc::now());

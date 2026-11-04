@@ -28,6 +28,7 @@ pub mod session_refs;
 pub mod spawns;
 pub mod subscriptions;
 pub mod sync;
+pub mod target_grants;
 pub mod targets;
 pub mod templates;
 pub mod test_runs;

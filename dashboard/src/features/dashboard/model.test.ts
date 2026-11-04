@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DashboardBlock, Monitor, MonitorResult } from "../../api/types";
-import { blockFor, blockState, columnsOf, isStale, kindsFor, layoutProblems, linePath, moveBlock, nearestIndex, newBlockId, niceTicks, noteBlock, numericPoints, rangeOf, stateCounts, unitOf, valueText, yScale } from "./model";
+import { blockFor, blockState, columnsOf, isStale, kindsFor, layoutProblems, linePath, moveBlock, nearestIndex, newBlockId, niceTicks, noteBlock, numericPoints, ownerText, rangeOf, stateCounts, unitOf, valueText, yScale } from "./model";
 
 const NOW = Date.parse("2026-11-02T12:00:00Z");
 const result = (over: Partial<MonitorResult> = {}): MonitorResult => ({ id: 1, monitor: "m", at: new Date(NOW - 10_000).toISOString(), status: "ok", duration_ms: 5, ...over });
@@ -177,5 +177,14 @@ describe("table cells", () => {
     expect(cellText(24.456)).toBe("24.5");
     expect(cellText(null)).toBe("");
     expect([...numericColumns([{ pid: 1, cmd: "a" }, { pid: 2, cmd: "b" }], ["pid", "cmd"])]).toEqual(["pid"]);
+  });
+});
+
+describe("ownerText", () => {
+  it("names the owner, or the actor a run acts as", () => {
+    expect(ownerText({ owner: "project", run_as: "agent:01X" })).toBe("owned by the project");
+    expect(ownerText({ owner: "system", run_as: "operator" })).toBe("owned by the system");
+    expect(ownerText({ owner: "actor", run_as: "agent:01X" })).toBe("runs as agent:01X");
+    expect(ownerText({ run_as: "operator" })).toBe("runs as operator");
   });
 });

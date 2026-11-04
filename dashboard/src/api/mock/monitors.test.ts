@@ -73,3 +73,19 @@ describe("mock monitors", () => {
     expect(parseOutput("json", {}, "{nope", 0).status).toBe("unknown");
   });
 });
+
+describe("mock monitor owners", () => {
+  it("keeps the owner, moves it with one edit, and lists the target grants", async () => {
+    const api = mock();
+    const m = await api.monitors.create("terrarium", { name: "owned", target: "pi-runner", script: "echo 1", kind: "number", schedule: { kind: "interval", every: "30s" }, owner: "project" });
+    expect(m.owner).toBe("project");
+    const back = await api.monitors.update(m.id, { owner: "actor" });
+    expect(back.owner).toBe("actor");
+    expect(back.run_as).toBe("operator");
+    const plain = await api.monitors.create("terrarium", { name: "plain", target: "pi-runner", script: "echo 1", kind: "number", schedule: { kind: "interval", every: "30s" } });
+    expect(plain.owner).toBe("actor");
+    const grants = await api.projects.targetGrants("terrarium");
+    expect(grants[0]).toMatchObject({ target: "pi-runner", project: "terrarium", for: "monitors" });
+    expect(await api.projects.targetGrants("webshop")).toEqual([]);
+  });
+});

@@ -3,16 +3,18 @@
 // edit, and delete. The edit dialog has a script editor, the target, the
 // schedule, the kind and the thresholds, and a Test run that runs the
 // script once and shows the raw output and the parsed result before a save.
+// Each monitor shows its owner (docs/api.md §30.7), and the panel lists the
+// global targets granted to the project for its project-owned monitors.
 
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
-import type { Monitor, MonitorDef, MonitorDirection, MonitorKind, MonitorRunReport } from "../../api/types";
+import type { ItemOwner, Monitor, MonitorDef, MonitorDirection, MonitorKind, MonitorRunReport } from "../../api/types";
 import { ConfirmButton, Empty, ErrorBanner, Modal } from "../../components/ui";
 import { previewCron } from "../../lib/cron";
 import { ago } from "../../lib/format";
 import { everyWords, parseEvery } from "../../lib/schedule";
 import { api } from "../../stores";
 import { StateBadge } from "./blocks";
-import { blockState, scheduleText, unitOf, valueText } from "./model";
+import { blockState, ownerText, scheduleText, unitOf, valueText } from "./model";
 
 const KINDS: readonly { id: MonitorKind; label: string; help: string }[] = [
   { id: "number", label: "Number", help: "The first number on stdout (1,234.5, -3, 42%). The warn and crit thresholds give the status." },
@@ -39,7 +41,15 @@ interface Form {
   direction: MonitorDirection;
   retention: string;
   enabled: boolean;
+  owner: ItemOwner;
 }
+
+/** The owners of a monitor (docs/api.md §30.7). */
+export const OWNERS: { id: ItemOwner; label: string; help: string }[] = [
+  { id: "actor", label: "You", help: "The runs act as you: your policy or lease on the target. When you lose the right, the monitor goes unknown." },
+  { id: "project", label: "The project", help: "No agent is behind it: it uses the project's targets, and a global target that a sysadmin granted to the project for monitors." },
+  { id: "system", label: "The system", help: "The rights of the operator. Only a sysadmin or the operator makes or changes it." },
+];
 
 const formOf = (m?: Monitor): Form => ({
   name: m?.name ?? "",
@@ -58,14 +68,17 @@ const formOf = (m?: Monitor): Form => ({
   direction: m?.direction ?? "above",
   retention: String(m?.retention_days ?? 7),
   enabled: m?.enabled ?? true,
+  owner: m?.owner ?? "actor",
 });
 
 const num = (s: string): number | null => (s.trim() === "" || !Number.isFinite(Number(s)) ? null : Number(s));
 
-/** The body of a create or an update. */
-export function defOf(f: Form): MonitorDef {
+/** The body of a create or an update. `owner` goes only when it differs from `was`: an `actor` owner on a change
+ * takes the monitor over. */
+export function defOf(f: Form, was: ItemOwner = "actor"): MonitorDef {
   const hasValue = f.kind === "number" || f.kind === "json";
   return {
+    ...(f.owner !== was ? { owner: f.owner } : {}),
     name: f.name.trim(),
     description: f.description.trim() || null,
     target: f.target,
@@ -106,7 +119,7 @@ export function MonitorDialog(props: { project: string; monitor?: Monitor; onClo
     setError(null);
     setTest(null);
     try {
-      setTest(await api.monitors.test(props.project, defOf(f())));
+      setTest(await api.monitors.test(props.project, { ...defOf(f()), owner: f().owner }));
     } catch (e) {
       setError(e);
     } finally {
@@ -118,7 +131,7 @@ export function MonitorDialog(props: { project: string; monitor?: Monitor; onClo
     setBusy(true);
     setError(null);
     try {
-      const d = defOf(f());
+      const d = defOf(f(), props.monitor?.owner ?? "actor");
       const m = props.monitor ? await api.monitors.update(props.monitor.id, d) : await api.monitors.create(props.project, d);
       props.onSaved(m);
     } catch (err) {
@@ -226,6 +239,20 @@ export function MonitorDialog(props: { project: string; monitor?: Monitor; onClo
           </Show>
         </div>
         <p class="muted small">{KINDS.find((k) => k.id === f().kind)?.help}</p>
+        <label>
+          Owner
+          <select value={f().owner} onChange={(e) => set("owner", e.currentTarget.value as ItemOwner)}>
+            <For each={OWNERS}>
+              {(o) => (
+                <option value={o.id} selected={o.id === f().owner}>
+                  {o.label}
+                </option>
+              )}
+            </For>
+          </select>
+        </label>
+        <p class="muted small">{OWNERS.find((o) => o.id === f().owner)?.help}</p>
+        <Show when={props.monitor?.disabled_reason}>{(r) => <p class="small warn-text">Disabled by the daemon: {r()}</p>}</Show>
         <label class="row small">
           <input type="checkbox" checked={f().enabled} onChange={(e) => set("enabled", e.currentTarget.checked)} /> On: run on the schedule
         </label>
@@ -290,6 +317,11 @@ export function MonitorsPanel(props: { project: string; monitors: Monitor[]; now
   const [report, setReport] = createSignal<{ id: string; report: MonitorRunReport } | null>(null);
   const [running, setRunning] = createSignal<string | null>(null);
   const sorted = createMemo(() => [...props.monitors].sort((a, b) => a.name.localeCompare(b.name)));
+  // A failed read shows no grants; the monitors still work.
+  const [grants] = createResource(
+    () => props.project,
+    (p) => api.projects.targetGrants(p).catch(() => []),
+  );
   const act = async (fn: () => Promise<unknown>) => {
     setError(null);
     try {
@@ -318,6 +350,19 @@ export function MonitorsPanel(props: { project: string; monitors: Monitor[]; now
           New monitor
         </button>
       </div>
+      <Show when={grants()?.length}>
+        <p class="muted small" aria-label="Target grants">
+          Global targets granted to the project for its project-owned monitors and schedules:{" "}
+          <For each={grants()}>
+            {(g, i) => (
+              <>
+                {i() > 0 ? ", " : ""}
+                <code>{g.target}</code> ({g.for}, by {g.granted_by})
+              </>
+            )}
+          </For>
+        </p>
+      </Show>
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
       <Show when={sorted().length} fallback={<Empty>No monitors yet. Make one to show values on the dashboard.</Empty>}>
         <div class="table-wrap">
@@ -343,9 +388,10 @@ export function MonitorsPanel(props: { project: string; monitors: Monitor[]; now
                       <td>
                         <div style={{ "font-weight": 600 }}>{m.name}</div>
                         <div class="muted small">
-                          {m.kind} · {m.target} · {scheduleText(m.schedule)}
+                          {m.kind} · {m.target} · {scheduleText(m.schedule)} · {ownerText(m)}
                           <Show when={m.skipped > 0}> · {m.skipped} skipped</Show>
                         </div>
+                        <Show when={m.disabled_reason}>{(r) => <div class="small warn-text">Disabled: {r()}</div>}</Show>
                       </td>
                       <td>
                         <StateBadge state={blockState(m, props.now)} />

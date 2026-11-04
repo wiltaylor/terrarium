@@ -1099,6 +1099,7 @@ export const EVENT_KINDS = [
   // A webhook attempt ended (docs/api.md §19.5): `{trigger, name, delivery, status, http_status, attempt, test, event_seq}`.
   "webhook.delivery",
   "dashboard.updated",
+  "target.grant",
   "artifact.created",
   "artifact.linked",
   "artifact.deleted",
@@ -3035,7 +3036,9 @@ export interface Schedule {
   max_concurrency?: number;
   /** `operator` or `agent:<ulid>`. */
   created_by: string;
-  /** The actor the runs act as; the daemon checks its rights at each run. */
+  /** `actor` (the runs act as `run_as`), `project`, or `system` (docs/api.md §19.6). */
+  owner?: ItemOwner;
+  /** The actor the runs of an actor-owned schedule act as; the daemon checks its rights at each run. */
   run_as: string;
   /** Null when disabled, or when a one-shot `at` schedule has run. */
   next_run_at: string | null;
@@ -3061,6 +3064,8 @@ export interface NewSchedule {
   spec: ScheduleSpec;
   action: ScheduleAction;
   catch_up?: CatchUp;
+  /** Default `actor`. On a change, `actor` takes the schedule over (docs/api.md §19.6). */
+  owner?: ItemOwner;
 }
 
 /** `PATCH /api/schedules/{id}`: a `spec` or an `action` replaces the whole object. The scope does not change. */
@@ -3812,8 +3817,26 @@ export type MonitorDirection = "above" | "below";
 export type MonitorSchedule = { kind: "interval"; every: string } | { kind: "cron"; expr: string; tz: string };
 
 /** The fields of a monitor that a client writes. */
+/**
+ * Who owns a monitor or a schedule (docs/api.md §30.7): `actor` (the runs act as `run_as`), `project` (the rights
+ * come from the project's targets and grants), or `system` (sysadmin or the operator).
+ */
+export type ItemOwner = "actor" | "project" | "system";
+
+/** A global target granted to a project for its project-owned monitors or schedules (docs/api.md §30.7). */
+export interface TargetGrant {
+  target: string;
+  project: string;
+  for: "monitors" | "schedules";
+  /** `operator` or `agent:<ulid>`. */
+  granted_by: string;
+  granted_at: string;
+}
+
 export interface MonitorDef {
   name: string;
+  /** A write field: the owner of a new monitor, or a new owner (`actor` on a change takes it over). */
+  owner?: ItemOwner;
   description?: string | null;
   /** A global target, or a target of the project. */
   target: string;
@@ -3848,6 +3871,8 @@ export interface MonitorJson {
 
 /** One result of a monitor. */
 export interface MonitorResult {
+  /** The actor of the run: `monitor:<project>/<name>`. */
+  actor?: string;
   id: number;
   monitor: string;
   at: string;
@@ -3875,8 +3900,11 @@ export interface Monitor extends Required<Pick<MonitorDef, "name" | "target" | "
   /** The seconds between two runs. A block is stale after three periods with no result. */
   period_secs: number;
   created_by: string;
-  /** The actor whose rights each run checks again. */
+  owner: ItemOwner;
+  /** The actor whose rights each run of an actor-owned monitor checks again. */
   run_as: string;
+  /** Why the daemon disabled it: its `run_as` agent was deleted. */
+  disabled_reason?: string;
   created_at: string;
   updated_at: string;
   next_run_at: string | null;

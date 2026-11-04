@@ -200,16 +200,21 @@ async fn projects_and_repos() {
             (200, json!([{"id": "A1", "name": "lead", "project": "ops", "harness": "claude", "status": "idle"}])),
             (200, json!([])),
             (200, json!([])),
+            (200, json!([{"target": "box", "project": "ops", "for": "monitors",
+                          "granted_by": "operator", "granted_at": "2026-11-04T00:00:00Z"}])),
         ],
         vec![
             req(Get, "/api/projects/ops"),
             req(Get, "/api/projects/ops/agents"),
             req(Get, "/api/projects/ops/repos"),
             req(Get, "/api/projects/ops/targets"),
+            req(Get, "/api/projects/ops/target-grants"),
         ],
     )
     .await;
     assert!(out.contains("project: ops  prefix: OPS"), "{out}");
+    assert!(out.contains("target grants"), "{out}");
+    assert!(out.contains("box") && out.contains("monitors"), "{out}");
     assert!(out.contains("lead"), "{out}");
     ok(
         false,
@@ -317,6 +322,7 @@ async fn projects_and_repos() {
             req(Get, "/api/projects/terra/agents"),
             req(Get, "/api/projects/terra/repos"),
             req(Get, "/api/projects/terra/targets"),
+            req(Get, "/api/projects/terra/target-grants"),
         ],
     )
     .await;
@@ -4260,7 +4266,7 @@ async fn schedules_every_command() {
     )
     .await;
     assert!(out.contains("last run:  2026-10-26 09:00 ok"), "{out}");
-    assert!(out.contains("runs as:   operator"), "{out}");
+    assert!(out.contains("owner:     actor (runs as operator)"), "{out}");
 
     // new: each action type.
     let at = |body: Value| (Post, "/api/schedules", vec![], Some(body));
@@ -9504,4 +9510,140 @@ async fn version_prints_the_client_and_the_daemon() {
     assert_eq!(v["client"]["version"], terrarium_version::FULL);
     assert_eq!(v["daemon"]["version"], "9.9.9+0000000");
     assert_eq!(v["stale"], true);
+}
+
+#[tokio::test]
+async fn owners_and_target_grants() {
+    // `--owner` on monitor new and edit, and on schedule new and set (edit).
+    let m = json!({"id": "01MONMONMONMONMONMONMONMON", "name": "disk", "project": "terra",
+                   "kind": "number", "target": "box", "script": "df",
+                   "schedule": {"kind": "interval", "every": "1m"}, "owner": "project",
+                   "run_as": "agent:01X", "enabled": false, "timeout_secs": 30,
+                   "retention_days": 7, "skipped": 0,
+                   "disabled_reason": "its run_as agent terra/lead was deleted"});
+    let r = exec(
+        true,
+        &[
+            "monitor", "new", "disk", "--target", "box", "--script", "df", "--every", "1m",
+            "--kind", "number", "--owner", "project",
+        ],
+        vec![(201, m.clone())],
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    assert_eq!(r.reqs[0].body.as_ref().unwrap()["owner"], "project");
+    ok(
+        true,
+        &["monitor", "edit", "disk", "--owner", "project", "--enable"],
+        vec![(200, m.clone())],
+        vec![(
+            Patch,
+            "/api/monitors/terra%2Fdisk",
+            vec![],
+            Some(json!({"owner": "project", "enabled": true})),
+        )],
+    )
+    .await;
+    assert!(
+        Cli::try_parse_from(["terrarium", "monitor", "edit", "disk", "--owner", "lead"]).is_err()
+    );
+    // show prints the owner and why the daemon disabled it.
+    let out = ok(
+        true,
+        &["monitor", "show", "disk"],
+        vec![(200, m.clone())],
+        vec![req(Get, "/api/monitors/terra%2Fdisk")],
+    )
+    .await;
+    assert!(out.contains("owner: project"), "{out}");
+    assert!(out.contains("disabled: its run_as agent"), "{out}");
+
+    let s = json!({"id": "01SCHSCHSCHSCHSCHSCHSCHSCH", "name": "nag", "project": "terra",
+                   "enabled": true, "spec": {"kind": "interval", "every": "1h"},
+                   "action": {"type": "mail", "to": "operator", "body": "hi"},
+                   "catch_up": "skip", "owner": "system", "run_as": "operator",
+                   "created_by": "operator", "source": "api", "runs_count": 0});
+    let r = exec(
+        true,
+        &[
+            "schedule", "new", "nag", "--every", "1h", "--mail", "operator", "-b", "hi", "--owner",
+            "system",
+        ],
+        vec![(201, s.clone())],
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    assert_eq!(r.reqs[0].body.as_ref().unwrap()["owner"], "system");
+    let r = exec(
+        true,
+        &["schedule", "edit", "nag", "--owner", "actor"],
+        vec![(200, s.clone())],
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    let patch = r.reqs.iter().find(|q| q.method == Patch).unwrap();
+    assert_eq!(patch.body.as_ref().unwrap()["owner"], "actor");
+    let r = exec(
+        true,
+        &["schedule", "show", "nag"],
+        vec![(200, s.clone())],
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    assert!(r.out.contains("owner:     system"), "{}", r.out);
+
+    // project grant and ungrant.
+    let out = ok(
+        false,
+        &[
+            "project",
+            "grant",
+            "box",
+            "--for",
+            "monitors",
+            "--project",
+            "terra",
+        ],
+        vec![(
+            201,
+            json!({"target": "box", "project": "terra", "for": "monitors",
+                          "granted_by": "operator", "granted_at": "2026-11-04T00:00:00Z"}),
+        )],
+        vec![(
+            Post,
+            "/api/projects/terra/target-grants",
+            vec![],
+            Some(json!({"target": "box", "for": "monitors"})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("granted target box to project terra for monitors"),
+        "{out}"
+    );
+    ok(
+        false,
+        &[
+            "project",
+            "ungrant",
+            "box",
+            "--for",
+            "schedules",
+            "--project",
+            "terra",
+        ],
+        vec![(204, Value::Null)],
+        vec![req(
+            Delete,
+            "/api/projects/terra/target-grants/box/schedules",
+        )],
+    )
+    .await;
+    assert!(
+        Cli::try_parse_from(["terrarium", "project", "grant", "box", "--for", "pies"]).is_err()
+    );
 }

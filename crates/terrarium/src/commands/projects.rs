@@ -85,8 +85,12 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
                 .api
                 .list(&format!("{base}/targets"), vec![], None)
                 .await?;
-            let v =
-                json!({"project": project, "agents": agents, "repos": repos, "targets": targets});
+            let grants = ctx
+                .api
+                .get(&format!("{base}/target-grants"), vec![])
+                .await?;
+            let v = json!({"project": project, "agents": agents, "repos": repos,
+                           "targets": targets, "target_grants": grants});
             ctx.emit(&v, |c, v| {
                 let p = &v["project"];
                 c.line(format!(
@@ -109,7 +113,62 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
                     &[("NAME", "name"), ("KIND", "kind"), ("SCOPE", "scope")],
                     "  none",
                 );
+                c.line("\ntarget grants (global targets for project-owned items):");
+                print_table(
+                    c,
+                    as_items(&v["target_grants"]),
+                    &[
+                        ("TARGET", "target"),
+                        ("FOR", "for"),
+                        ("BY", "granted_by"),
+                        ("AT", "granted_at"),
+                    ],
+                    "  none",
+                );
             })
+        }
+        ProjectCmd::Grant { target, purpose } => {
+            let name = ctx.project_or(None).await?;
+            let v = ctx
+                .api
+                .post(
+                    &format!("{}/target-grants", project_path(&name)),
+                    Some(json!({"target": target, "for": purpose})),
+                )
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "granted target {} to project {} for {}",
+                    field(v, "target"),
+                    field(v, "project"),
+                    field(v, "for")
+                ));
+            })
+        }
+        ProjectCmd::Ungrant { target, purpose } => {
+            let name = ctx.project_or(None).await?;
+            ctx.api
+                .delete(
+                    &format!(
+                        "{}/target-grants/{}/{}",
+                        project_path(&name),
+                        encode(target),
+                        encode(purpose)
+                    ),
+                    vec![],
+                )
+                .await?;
+            ctx.emit(
+                &json!({"target": target, "project": name, "for": purpose}),
+                |c, v| {
+                    c.line(format!(
+                        "revoked target {} from project {} for {}",
+                        field(v, "target"),
+                        field(v, "project"),
+                        field(v, "for")
+                    ));
+                },
+            )
         }
         ProjectCmd::New {
             name,

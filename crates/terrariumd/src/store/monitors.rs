@@ -26,6 +26,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
 use crate::monitors::layout::{self, Layout};
 use crate::monitors::parse::{Direction, Kind, Parsed, Status, Thresholds};
+use crate::owner::Owner;
 use crate::store::schedules::{self, field_error, stamp};
 use crate::store::{projects, valid_name};
 
@@ -116,6 +117,10 @@ pub struct MonitorResult {
     pub duration_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The actor of the run: `monitor:<project>/<name>`. Absent on a result
+    /// from before migration 62.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 /// A monitor as the API shows it.
@@ -129,9 +134,18 @@ pub struct Monitor {
     /// two). A block is stale after three periods with no result.
     pub period_secs: i64,
     pub created_by: String,
-    /// The actor whose rights each run checks again: the creator, or the
-    /// last caller that changed the script or the target.
+    /// `actor` (the runs act as `run_as`), `project` (the rights come from
+    /// the project), or `system` (docs/api.md §30.7).
+    pub owner: Owner,
+    /// The actor whose rights each run of an actor-owned monitor checks
+    /// again: the creator, or the last caller that changed the script, the
+    /// target, or the owner. A project- or system-owned monitor does not
+    /// use it.
     pub run_as: String,
+    /// Why the daemon disabled the monitor, when it did (its `run_as`
+    /// agent was deleted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub next_run_at: Option<String>,
@@ -146,6 +160,11 @@ impl Monitor {
     /// `project/name`.
     pub fn key(&self) -> String {
         format!("{}/{}", self.project, self.def.name)
+    }
+
+    /// The actor label of the runs: `monitor:<project>/<name>`.
+    pub fn label(&self) -> String {
+        crate::owner::monitor_label(&self.project, &self.def.name)
     }
 }
 
@@ -261,7 +280,7 @@ pub fn validate(d: &MonitorDef) -> ApiResult<()> {
 // -------------------------------------------------------------------- rows
 
 const COLS: &str = "id, project, def, created_by, run_as, created_at, updated_at, \
-                    next_run_at, skipped";
+                    next_run_at, skipped, owner, disabled_reason";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<(Monitor, String)> {
     let def: String = r.get(2)?;
@@ -286,7 +305,9 @@ fn row(r: &Row<'_>) -> rusqlite::Result<(Monitor, String)> {
             },
             period_secs: 0,
             created_by: r.get(3)?,
+            owner: Owner::from_db(&r.get::<_, String>(9)?),
             run_as: r.get(4)?,
+            disabled_reason: r.get(10)?,
             created_at: r.get(5)?,
             updated_at: r.get(6)?,
             next_run_at: r.get(7)?,
@@ -410,6 +431,7 @@ pub fn create(
     t: &mut Tx<'_>,
     project: &str,
     def: &MonitorDef,
+    owner: Owner,
     actor: &str,
     now: DateTime<Utc>,
 ) -> ApiResult<Monitor> {
@@ -445,8 +467,8 @@ pub fn create(
     let at = stamp(now);
     t.execute(
         "INSERT INTO monitors (id, project, name, kind, enabled, def, created_by, run_as,
-                               created_at, updated_at, anchor_at, next_run_at, skipped)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?8, ?8, ?9, 0)",
+                               created_at, updated_at, anchor_at, next_run_at, skipped, owner)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?8, ?8, ?9, 0, ?10)",
         params![
             id,
             project,
@@ -456,7 +478,8 @@ pub fn create(
             serde_json::to_string(def).map_err(|e| ApiError::internal(e.to_string()))?,
             actor,
             at,
-            next
+            next,
+            owner.as_str()
         ],
     )?;
     let m = get(t, &id)?;
@@ -464,7 +487,7 @@ pub fn create(
         "monitor.create",
         &m.key(),
         Some(project),
-        json!({"id": m.id, "target": def.target, "kind": def.kind.as_str(),
+        json!({"id": m.id, "owner": owner.as_str(), "target": def.target, "kind": def.kind.as_str(),
                "schedule": def.schedule, "script": cut_script(&def.script)}),
     )?;
     Ok(m)
@@ -474,14 +497,16 @@ fn cut_script(s: &str) -> String {
     crate::monitors::parse::cut_chars(s, 200)
 }
 
-/// Replace the fields of monitor `id`. A new schedule, or a monitor that
-/// is enabled again, runs at once and starts a new interval. A change of
-/// the script or the target makes the caller the `run_as`.
+/// Replace the fields and the owner of monitor `id`. A new schedule, or a
+/// monitor that is enabled again, runs at once and starts a new interval.
+/// `run_as`: the new `run_as` (the caller that takes the monitor over; the
+/// API decides, `crate::api::monitors`).
 pub fn update(
     t: &mut Tx<'_>,
     id: &str,
     def: &MonitorDef,
-    actor: &str,
+    owner: Owner,
+    run_as: Option<&str>,
     now: DateTime<Utc>,
 ) -> ApiResult<Monitor> {
     validate(def)?;
@@ -506,7 +531,8 @@ pub fn update(
     let restart = def.schedule != old.def.schedule || (def.enabled && !old.def.enabled);
     let reruns = def.script != old.def.script || def.target != old.def.target;
     t.execute(
-        "UPDATE monitors SET name = ?2, kind = ?3, enabled = ?4, def = ?5, updated_at = ?6
+        "UPDATE monitors SET name = ?2, kind = ?3, enabled = ?4, def = ?5, updated_at = ?6,
+                owner = ?7
          WHERE id = ?1",
         params![
             id,
@@ -514,13 +540,20 @@ pub fn update(
             def.kind.as_str(),
             def.enabled,
             serde_json::to_string(def).map_err(|e| ApiError::internal(e.to_string()))?,
-            at
+            at,
+            owner.as_str()
         ],
     )?;
-    if reruns {
+    if let Some(r) = run_as {
         t.execute(
             "UPDATE monitors SET run_as = ?2 WHERE id = ?1",
-            params![id, actor],
+            params![id, r],
+        )?;
+    }
+    if def.enabled {
+        t.execute(
+            "UPDATE monitors SET disabled_reason = NULL WHERE id = ?1",
+            [id],
         )?;
     }
     if !def.enabled {
@@ -546,6 +579,8 @@ pub fn update(
         ("thresholds", a.thresholds() != b.thresholds()),
         ("enabled", a.enabled != b.enabled),
         ("retention_days", a.retention_days != b.retention_days),
+        ("owner", old.owner != owner),
+        ("run_as", run_as.is_some_and(|r| r != old.run_as)),
     ] {
         if diff {
             changed.push(name);
@@ -555,11 +590,39 @@ pub fn update(
         "monitor.update",
         &m.key(),
         Some(&m.project),
-        json!({"id": id, "changed": changed, "enabled": def.enabled,
-               "target": def.target, "script": reruns.then(|| cut_script(&def.script))}),
+        json!({"id": id, "changed": changed, "enabled": def.enabled, "owner": owner.as_str(),
+               "run_as": m.run_as, "target": def.target,
+               "script": reruns.then(|| cut_script(&def.script))}),
     )?;
     // A kind change can leave a block that the layout no longer allows:
     // the dashboard read skips it, and the next layout save says why.
+    Ok(m)
+}
+
+/// Disable monitor `id` with `reason` (the daemon's own disable: its
+/// `run_as` agent was deleted, `crate::owner::on_agent_deleted`).
+pub fn disable(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<Monitor> {
+    let old = get(t, id)?;
+    let mut def = old.def.clone();
+    def.enabled = false;
+    t.execute(
+        "UPDATE monitors SET enabled = 0, def = ?2, next_run_at = NULL, disabled_reason = ?3,
+                updated_at = ?4
+         WHERE id = ?1",
+        params![
+            id,
+            serde_json::to_string(&def).map_err(|e| ApiError::internal(e.to_string()))?,
+            reason,
+            crate::db::now()
+        ],
+    )?;
+    let m = get(t, id)?;
+    t.audit(
+        "monitor.disable",
+        &m.key(),
+        Some(&m.project),
+        json!({"id": id, "reason": reason, "run_as": m.run_as}),
+    )?;
     Ok(m)
 }
 
@@ -583,7 +646,7 @@ pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<Monitor> {
 
 // ----------------------------------------------------------------- results
 
-const RCOLS: &str = "pk, monitor, at, status, value, text, json, duration_ms, error";
+const RCOLS: &str = "pk, monitor, at, status, value, text, json, duration_ms, error, actor";
 
 fn result_row(r: &Row<'_>) -> rusqlite::Result<MonitorResult> {
     let status: String = r.get(3)?;
@@ -598,6 +661,7 @@ fn result_row(r: &Row<'_>) -> rusqlite::Result<MonitorResult> {
         json: json.and_then(|j| serde_json::from_str(&j).ok()),
         duration_ms: r.get(7)?,
         error: r.get(8)?,
+        actor: r.get(9)?,
     })
 }
 
@@ -635,8 +699,9 @@ pub fn results(
     Ok(rows)
 }
 
-/// Keep the result of one run: write it, emit `monitor.result` (and
-/// `monitor.status` when the status changed), and prune.
+/// Keep the result of one run: write it with the actor
+/// `monitor:<project>/<name>`, emit `monitor.result` (and, when the status
+/// changed, `monitor.status` and a `monitor.status` audit row), and prune.
 pub fn record(
     t: &mut Tx<'_>,
     id: &str,
@@ -657,8 +722,9 @@ pub fn record(
         error: p.error.clone().map(|s| t.redact_string(s)),
     };
     t.execute(
-        "INSERT INTO monitor_results (monitor, at, status, value, text, json, duration_ms, error)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO monitor_results (monitor, at, status, value, text, json, duration_ms, error,
+                                      actor)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             id,
             at_s,
@@ -667,7 +733,8 @@ pub fn record(
             p.text,
             p.json.as_ref().map(Value::to_string),
             duration_ms,
-            p.error
+            p.error,
+            m.label()
         ],
     )?;
     let pk = t.last_insert_rowid();
@@ -681,6 +748,7 @@ pub fn record(
         json: p.json.clone(),
         duration_ms,
         error: p.error.clone(),
+        actor: Some(m.label()),
     };
     let unit = p
         .json
@@ -710,6 +778,15 @@ pub fn record(
     )?;
     if prev != Some(p.status) {
         let from = prev.map(Status::as_str);
+        // A status change is the one audit row of the runs; the caller
+        // writes with the actor `monitor:<project>/<name>`.
+        t.audit(
+            "monitor.status",
+            &m.key(),
+            Some(&m.project),
+            json!({"id": id, "from": from, "to": p.status.as_str(), "value": p.value,
+                   "error": p.error, "result_id": pk, "owner": m.owner.as_str()}),
+        )?;
         t.emit(
             EventDraft::new(
                 "monitor.status",

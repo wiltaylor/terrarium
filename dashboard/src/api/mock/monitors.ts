@@ -200,7 +200,7 @@ export function createMonitorMock(ctx: MonitorMockContext) {
   };
   const view = (s: Stored): Monitor => ({ ...s.m, last: s.results.at(-1) ?? null, running: running.has(s.m.id) });
 
-  type Normal = Required<Omit<MonitorDef, "description" | "unit" | "warn" | "crit">> & { description: string | null; unit: string | null; warn: number | null; crit: number | null };
+  type Normal = Required<Omit<MonitorDef, "description" | "unit" | "warn" | "crit" | "owner">> & { description: string | null; unit: string | null; warn: number | null; crit: number | null };
   const normalize = (project: string, def: Partial<MonitorDef>): Normal => {
     if (!def.name || !NAME_RE.test(def.name)) field("name", `bad monitor name \`${def.name ?? ""}\`: use 1-63 of a-z, 0-9, \`-\`, \`_\``);
     if (!def.target) field("target", "name a target");
@@ -247,7 +247,7 @@ export function createMonitorMock(ctx: MonitorMockContext) {
   /** Keep a result; emit `monitor.result`, and `monitor.status` on a change. */
   const record = (s: Stored, r: MonitorRunReport["result"], quiet = false): MonitorResult => {
     const prev = s.results.at(-1)?.status ?? null;
-    const row: MonitorResult = { id: ++pk, monitor: s.m.id, ...r, at: r.at } as MonitorResult;
+    const row: MonitorResult = { id: ++pk, monitor: s.m.id, ...r, at: r.at, actor: `monitor:${s.m.project}/${s.m.name}` } as MonitorResult;
     s.results.push(row);
     const cut = Date.parse(r.at) - s.m.retention_days * 86_400_000;
     while (s.results.length && (Date.parse(s.results[0]!.at) < cut || s.results.length > MAX_POINTS)) s.results.shift();
@@ -257,7 +257,7 @@ export function createMonitorMock(ctx: MonitorMockContext) {
     const message = s.m.kind !== "text" ? (row.text ?? null) : null;
     ctx.emit({
       kind: "monitor.result",
-      actor: "system",
+      actor: `monitor:${s.m.project}/${s.m.name}`,
       project: s.m.project,
       summary: `monitor ${s.m.name}: ${row.status}${shown}`,
       data: { project: s.m.project, monitor: s.m.name, monitor_id: s.m.id, status: row.status, value: row.value ?? null, unit, message, error: row.error ?? null, at: row.at, duration_ms: row.duration_ms, result_id: row.id },
@@ -265,7 +265,7 @@ export function createMonitorMock(ctx: MonitorMockContext) {
     if (prev !== row.status)
       ctx.emit({
         kind: "monitor.status",
-        actor: "system",
+        actor: `monitor:${s.m.project}/${s.m.name}`,
         project: s.m.project,
         summary: `monitor ${s.m.name}: ${prev ?? "none"} → ${row.status}${shown}`,
         data: { project: s.m.project, monitor: s.m.name, monitor_id: s.m.id, from: prev, to: row.status, value: row.value ?? null, unit, message, error: row.error ?? null },
@@ -287,6 +287,7 @@ export function createMonitorMock(ctx: MonitorMockContext) {
       project,
       period_secs: periodOf(d.schedule),
       created_by: by,
+      owner: def.owner ?? "actor",
       run_as: by,
       created_at: iso(at),
       updated_at: iso(at),
@@ -379,6 +380,12 @@ export function createMonitorMock(ctx: MonitorMockContext) {
         const restart = JSON.stringify(d.schedule) !== JSON.stringify(s.m.schedule) || (d.enabled && !s.m.enabled);
         const at = ctx.now();
         Object.assign(s.m, d, { period_secs: periodOf(d.schedule), updated_at: iso(at) });
+        // A new owner (docs/api.md §30.7): `actor` takes the monitor over.
+        if (patch.owner) {
+          if (patch.owner === "actor") s.m.run_as = "operator";
+          s.m.owner = patch.owner;
+        }
+        if (d.enabled) delete s.m.disabled_reason;
         if (!d.enabled) s.m.next_run_at = null;
         else if (restart || !s.m.next_run_at) {
           s.anchor = at;

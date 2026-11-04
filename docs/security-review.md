@@ -1545,3 +1545,65 @@ that each attack is refused).
 | P9 (INFO) | Checked and not found. | — |
 | P10 (INFO) | Two `409` texts had a run of spaces. | **Fixed.** |
 
+
+## 18. Project- and system-owned monitors and schedules (2026-11-04, issue #18)
+
+Before this change, every monitor and schedule ran as an actor
+(`run_as`), and the daemon checked that actor's rights at each run. Now
+an item can be owned by its project or by the system (docs/api.md §30.7,
+§19.6). The change adds a principal that is not an actor, so it changes
+the rights.
+
+### Controls
+
+- **No implied target.** A project-owned item uses the targets of its
+  project, and a global target only with an explicit grant
+  (`target_grants`, one use each: `monitors` or `schedules`). Only a
+  sysadmin or the operator grants or revokes; each is audited
+  (`target.grant`, `target.ungrant`) and visible to the project's members.
+  A lead's `policy.targets` or lease does not give a project-owned item
+  a target. A target of another project is always refused.
+- **Checked at each run.** The owner's rights are read from the store at
+  each run (`crate::owner::owned_target`, `schedule_reach`). A revoked
+  grant refuses the next run; a deleted target or project drops its
+  grants (`ON DELETE CASCADE`).
+- **Who writes.** A project-owned item needs project_admin of its
+  project, sysadmin, or the operator for each write, run-now, enable, and
+  delete (`owner::may_manage`); a system-owned item needs sysadmin or the
+  operator. A worker agent cannot make one (test
+  `project_owned_monitors_rights_grants_and_the_audit_actor`). A global
+  schedule cannot be project-owned.
+- **A project-owned schedule stays inside the project.** Its action has
+  the project_admin rules of §19.3 (`policy::inside_project`), a webhook
+  secret is a project secret or a global secret granted to the project,
+  and an exec on a global target needs a `schedules` grant.
+- **Attribution.** Each monitor result has the actor
+  `monitor:<project>/<name>`, and a status change of a monitor writes a
+  `monitor.status` audit row with that actor. The monitor runs write no
+  `target.exec` row, so the audit log does not grow with each run (it
+  has no prune); the results have their retention. Each `exec` run of a
+  schedule writes a `target.exec` row with `schedule:<id>` as the actor
+  (a project- or system-owned schedule, and a trigger run), with the
+  owner (and `run_as` for an actor-owned item) in the detail. The
+  definition changes (create, edit, owner move, take-over, enable,
+  disable, run now) are audited with the caller.
+- **A deleted `run_as` agent.** Its enabled actor-owned items are
+  disabled in the delete's write, with a reason and a notice to the leads
+  and the operator. A take-over (an edit with `owner`, or an enable of an
+  orphan) makes the caller the `run_as`, after the caller's own target
+  check.
+
+### Residuals
+
+- **A project admin acts for the project.** A lead can make a
+  project-owned monitor that runs any script on any target of its
+  project, and on each global target granted to the project. That is the
+  point of the grant: grant a `host` target only to a project whose leads
+  may run a shell as the host agent's user.
+- **The operator's paths.** After the owner's check, the action of a
+  project- or system-owned schedule runs through the operator's paths
+  (mail from `project:<name>` or `system`; a card with the author
+  `operator`). The check before it is the boundary.
+- **Pipelines** stay actor-owned (a poll opens secrets as `run_as`). A
+  pipeline whose `run_as` agent is deleted records an error at each poll,
+  as before.

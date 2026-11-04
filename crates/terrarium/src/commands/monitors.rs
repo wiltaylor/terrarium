@@ -8,6 +8,7 @@ use super::print_table;
 use crate::api::{CliError, query};
 use crate::cli::{DashboardCmd, MonitorArgs, MonitorCmd};
 use crate::commands::projects::project_path;
+use crate::commands::schedules::owner_text;
 use crate::commands::system::as_items;
 use crate::ctx::Ctx;
 use crate::output::field;
@@ -116,6 +117,9 @@ pub fn monitor_body(ctx: &Ctx, a: &MonitorArgs) -> anyhow::Result<Map<String, Va
     if a.disabled {
         b.insert("enabled".into(), json!(false));
     }
+    if let Some(o) = &a.owner {
+        b.insert("owner".into(), json!(o));
+    }
     Ok(b)
 }
 
@@ -151,11 +155,14 @@ fn print_monitor(c: &Ctx, m: &Value) {
         ));
     }
     c.line(format!(
-        "next run: {}  skipped: {}  runs as: {}",
+        "next run: {}  skipped: {}",
         field(m, "next_run_at"),
         field(m, "skipped"),
-        field(m, "run_as")
     ));
+    c.line(format!("owner: {}", owner_text(m)));
+    if let Some(r) = m["disabled_reason"].as_str() {
+        c.line(format!("disabled: {r}"));
+    }
     match m["last"].as_object() {
         Some(_) => c.line(format!(
             "last: {}  at {}",
@@ -230,6 +237,7 @@ pub async fn monitor(ctx: &Ctx, cmd: &MonitorCmd) -> anyhow::Result<()> {
                         ("STATUS", "status"),
                         ("VALUE", "value"),
                         ("TARGET", "target"),
+                        ("OWNER", "owner"),
                         ("SCHEDULE", "every"),
                         ("LAST", "last_at"),
                         ("ID", "id"),

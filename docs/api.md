@@ -856,6 +856,9 @@ three letters and digits in upper case, then longer, then with a number
 | `DELETE /api/projects/{name}?confirm=true` | | `204` | sysadmin |
 | `GET /api/projects/{name}/agents` | | `200` agents by ID | read |
 | `GET /api/projects/{name}/targets` | | `200` targets, the project's and the global ones | read |
+| `GET /api/projects/{name}/target-grants` | | `200` the global targets granted to the project for its project-owned monitors and schedules (§30.7) | read |
+| `POST /api/projects/{name}/target-grants` | `{target, for}` | `201` the grant | sysadmin |
+| `DELETE /api/projects/{name}/target-grants/{target}/{for}` | | `204` | sysadmin |
 | `GET /api/projects/{name}/repos` | | `200` repos by name | read |
 | `POST /api/projects/{name}/repos` | repo, below | `201` repo | project_admin |
 
@@ -3953,6 +3956,7 @@ Kinds:
 | `monitor.result` | `{project, monitor, monitor_id, status, value, unit, message, error, at, duration_ms, result_id}` for each result of a monitor (§30.3). |
 | `monitor.status` | `{project, monitor, monitor_id, from, to, value, unit, message, error}` when the status of a monitor changes; `from` is `null` for the first result (§30.3). |
 | `dashboard.updated` | `{project, blocks}` after a save of the dashboard layout (§30.4). |
+| `target.grant` | `{target, project, for, change}` after a grant or a revoke of a global target to a project (§30.7). `change` is `granted to` or `revoked from`. |
 | `webhook.delivery` | `{trigger, name, delivery, status, http_status, attempt, test, event_seq}` when an attempt of a webhook delivery ends (§19.5). `status` is `ok`, `pending` (a retry waits), `failed`, or `giving_up`. The actor is `schedule:<id>`; a project trigger's event has its project. |
 | `ci.run.*`, `ci.job.failed`, `git.push`, `pr.*`, `ext.*` | A webhook of an event source (§20.4), or `POST /api/events` (§20.5). The actor is `source:<project>/<name>`, or the caller of `POST /api/events`. |
 
@@ -6386,7 +6390,8 @@ HTTP request, §19.5). A trigger is
 a schedule whose spec is `on`: an event of the log (§9, §20) that matches
 starts its run (§19.4). The daemon runs a schedule as the actor that made
 it (`run_as`). Before each run, the daemon checks the rights of that
-actor again. PLAN §12b and §12c have the design.
+actor again. A project- or system-owned schedule has no actor behind it
+(§19.6). PLAN §12b and §12c have the design.
 
 ### 19.1 Shapes
 
@@ -6403,6 +6408,7 @@ A schedule:
   "catch_up": "skip",
   "max_concurrency": 1,
   "created_by": "agent:01M5PA0T0Z0K16V6G88P3SE78W",
+  "owner": "actor",
   "run_as": "agent:01M5PA0T0Z0K16V6G88P3SE78W",
   "next_run_at": "2026-10-27T09:00:00.000Z",
   "last_run": {"at": "2026-10-26T09:00:01.204Z", "status": "ok",
@@ -6424,7 +6430,8 @@ A schedule:
 | `catch_up` | `skip` (the default) or `once`. What the daemon does at its start with a run that it missed while it was down. For a trigger: `skip` ignores the events that came while the daemon was down; `once` runs them. |
 | `max_concurrency` | Always `1`: one run at a time. |
 | `created_by` | `operator` or `agent:<ulid>`. |
-| `run_as` | The actor of the runs. It is `created_by`, until a caller changes the `action`: then it is that caller. |
+| `owner` | `actor` (the default), `project`, or `system` (§19.6). |
+| `run_as` | The actor of the runs of an actor-owned schedule. It is `created_by`, until a caller changes the `action` or the `owner`, or takes the schedule over: then it is that caller. A project- or system-owned schedule does not use it. |
 | `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, and always for a trigger. |
 | `last_run` | `{at, status, summary, run_id}` of the last run, or `null`. |
 | `runs_count` | The runs so far, the skipped runs too. |
@@ -6491,11 +6498,11 @@ A run:
 | Method and path | Body | Answer |
 |---|---|---|
 | `GET /api/schedules?project=&enabled=&kind=` | | `200`, a list. With `project`: the project's schedules, and the global ones when the caller may read them. Without: all for the operator and a sysadmin; the caller's project for another agent. `kind=time` gives only the time schedules, `kind=trigger` only the triggers; another value is `400`. |
-| `POST /api/schedules` | `{name, project?, spec, action, enabled?: true, catch_up?: "skip"}` | `201`, the schedule. An absent `project` is the agent caller's project (the operator: global). `null` is global. |
+| `POST /api/schedules` | `{name, project?, spec, action, enabled?: true, catch_up?: "skip", owner?: "actor"}` | `201`, the schedule. An absent `project` is the agent caller's project (the operator: global). `null` is global. |
 | `GET /api/schedules/{id}` | | `200`, the schedule. `{id}` is a ULID, `project/name` (encode the `/` as `%2F`), or a name. |
-| `PATCH /api/schedules/{id}` | `{name?, spec?, action?, enabled?, catch_up?}` | `200`, the schedule. A new `action` makes the caller the `run_as`. |
+| `PATCH /api/schedules/{id}` | `{name?, spec?, action?, enabled?, catch_up?, owner?}` | `200`, the schedule. A new `action` makes the caller the `run_as`. `owner` moves it (§19.6); `owner: actor` makes the caller the `run_as` (a take-over). |
 | `DELETE /api/schedules/{id}` | | `204`. The runs go with it. |
-| `POST /api/schedules/{id}/run` | | `200`, the run when it ends. It runs as `run_as`. |
+| `POST /api/schedules/{id}/run` | | `200`, the run when it ends. It runs as `run_as`, or with the owner's rights (§19.6). |
 | `POST /api/schedules/{id}/enable` | | `200`, the schedule, with a new `next_run_at`. An enable sets `consecutive_skips` to 0. |
 | `POST /api/schedules/{id}/disable` | | `200`, the schedule. |
 | `GET /api/schedules/{id}/runs?limit=&cursor=` | | `200`, the runs, newest first, with `X-Next-Cursor` (§2.4). |
@@ -6563,8 +6570,10 @@ a lease), and mail the recipient of a `mail` under its own §7.1 rules.
 Else it is `403`, so a run-now cannot borrow the rights of `run_as`.
 
 **The rights check at each run.** Before each run, the daemon reads the
-`run_as` actor from the store and applies the rules above to it. When the
-agent is gone (`agent rm`), lost its role, or the action names an object
+`run_as` actor from the store and applies the rules above to it (a
+project- or system-owned schedule: the owner's rules, §19.6). When the
+agent is deleted (`agent rm`), the daemon disables the schedule at once
+(§30.7). When the agent lost its role, or the action names an object
 that is gone, the run is `skipped` with the reason, and
 `consecutive_skips` goes up by 1. At 3, the daemon disables the schedule,
 writes `disabled_reason`, and mails the operator from `system` ("Schedule
@@ -6601,7 +6610,11 @@ schedule.
 too), `schedule.delete`, and `schedule.run` (`{id, run, trigger, status,
 summary, run_as}`), with the actor of the request, or `run_as` for a
 timed run. The actions write their own rows as well: `agent.send`,
-`agent.start`, `target.exec`, and so on, with the `run_as` actor.
+`agent.start`, `target.exec`, and so on, with the `run_as` actor. The
+writes of a trigger run, and of each run of a project- or system-owned
+schedule, have the actor `schedule:<id>`; the `target.exec` row of such a
+run has it too, with `schedule`, `owner`, and `run_as` (an actor-owned
+schedule) in the detail.
 
 **Fleet and definition files.** `[[projects.schedules]]` in a fleet file
 (fleet.md §1) and `[[schedules]]` in `projects/<name>.toml` take the
@@ -6909,6 +6922,40 @@ curl ... localhost/api/schedules -d '{"name": "page-crit", "project": "terra",
 curl -X POST ... localhost/api/schedules/terra%2Fpage-crit/test
 curl ... 'localhost/api/schedules/terra%2Fpage-crit/deliveries?limit=10'
 ```
+
+### 19.6 Owners
+
+A schedule has an `owner`, as a monitor has (§30.7):
+
+- `actor` (the default): the runs act as `run_as`, with the rules of
+  §19.3.
+- `project`: the runs have the rights of the project. The action stays
+  inside the project, as a project_admin's (§19.3). An `exec` uses a
+  target of the project, or a global target that is granted to the
+  project for `schedules` (§30.7). A webhook secret is a secret of the
+  project, or a global secret with a grant to the project. A global
+  schedule cannot be project-owned (`422`). No agent is behind it, so a
+  lead that goes changes nothing.
+- `system`: the rights of the operator.
+
+To make, change, run, enable, delete, or take over a project-owned
+schedule needs project_admin of the project, a sysadmin, or the operator;
+a system-owned schedule needs a sysadmin or the operator. The store
+audits each write (`schedule.update` with `owner` in `changed`). Move a
+schedule in one command: `terrarium schedule set <s> --owner project`
+(`schedule edit` is the same command).
+
+The action of a project- or system-owned schedule goes through the
+operator's paths after the owner's rights check. Its writes, and the
+`target.exec` rows of its `exec` runs, have the actor `schedule:<id>`.
+Its mail comes from `project:<name>` (project-owned) or `system`
+(system-owned). The card of a `card` action has the author `operator`.
+An `exec` uses the resource budget of the holder `<project>/schedules`
+on a `host` target with `limits`.
+
+When the `run_as` agent of an actor-owned schedule is deleted, the daemon
+disables the schedule with a reason and mails the leads and the operator
+(§30.7). An enable by a project admin then makes it the `run_as`.
 
 ## 20. Event sources and ingest
 
@@ -8255,23 +8302,36 @@ layout) and `crates/terrariumd/src/store/monitors.rs` (the rows).
 |---|---|
 | Read the monitors, the results, and the dashboard | The members of the project and its agents, a sysadmin, the operator |
 | Create, change, delete, run now, test run; save the layout | project_admin of the project (a lead), a sysadmin, the operator |
+| The same for a system-owned monitor (§30.7) | a sysadmin, the operator |
 
-A monitor runs a script on a target, so each write that sets the script
-or the target also needs the caller to use the target: the target is in
-the caller's `policy.targets`, or the caller holds a lease on it (§17.7).
-The operator uses any target. The target is a global target or a target
-of the project; another project's target is `422 invalid` with
-`details.field` `target`. A target that takes no commands (`vnc`) is
-`422 invalid`.
+A monitor has an owner (§30.7): `actor` (the default), `project`, or
+`system`. An actor-owned monitor runs a script on a target with the
+rights of an actor, so each write that sets the script or the target also
+needs the caller to use the target: the target is in the caller's
+`policy.targets`, or the caller holds a lease on it (§17.7). The operator
+uses any target. A project-owned monitor uses the targets of the
+project, and a global target only with a grant (§30.7). The target is a
+global target or a target of the project; another project's target is
+`422 invalid` with `details.field` `target`. A target that takes no
+commands (`vnc`) is `422 invalid`.
 
-`run_as` is the actor whose rights each run checks again: the creator,
-or the last caller that changed the script or the target. When the
-`run_as` agent is gone, or lost its role or the target, the run records
-`unknown` with the reason. Save the monitor again to run it as you.
+`run_as` is the actor whose rights each run of an actor-owned monitor
+checks again: the creator, or the last caller that changed the script,
+the target, or the owner. When the `run_as` agent lost its role or the
+target, the run records `unknown` with the reason. When the `run_as`
+agent is deleted, the daemon disables the monitor (§30.7).
 
-The audit log has `monitor.create`, `monitor.update` (with `changed`),
-`monitor.delete`, `monitor.run` (a run now), `monitor.test` (a test run),
-and `dashboard.update`. The timed runs write no audit row.
+The audit log has `monitor.create`, `monitor.update` (with `changed`,
+the `owner`, and the `run_as`), `monitor.delete`, `monitor.disable` (the
+daemon's disable, with the `reason`), `monitor.run` (a run now),
+`monitor.test` (a test run), and `dashboard.update`. A run writes no
+`target.exec` row: a monitor every 15 s would add 5 760 rows a day to an
+audit log with no prune. The result of each run (§30.4, with the
+retention of §30.3) has `actor` `monitor:<project>/<name>`. A result
+whose status differs from the one before (`ok` → `crit`, and the first
+result) also writes a `monitor.status` audit row with that actor and the
+detail `id`, `from`, `to`, `value`, `error`, `result_id`, and `owner`.
+The `monitor.result` and `monitor.status` events have the same actor.
 
 ### 30.2 Output kinds
 
@@ -8322,10 +8382,11 @@ Limits:
   A run waits for a free slot.
 - **Resource limits.** On a `host` target with `limits` (§17.2), the runs
   of a project use the budget of the holder `<project>/monitors`.
-- **Leases.** A monitor is not an agent and holds no lease. It uses the
-  target with the rights of `run_as`: the policy of that agent, or a
-  lease that the agent holds. When the lease ends, the runs are
-  `unknown`.
+- **Leases.** A monitor is not an agent and holds no lease. An
+  actor-owned monitor uses the target with the rights of `run_as`: the
+  policy of that agent, or a lease that the agent holds. When the lease
+  ends, the runs are `unknown`. A project-owned monitor does not depend
+  on a lease (§30.7).
 
 **Retention.** A monitor keeps its results `retention_days` (default 7,
 1-90) and at most 10 000 results; older ones go at each new result and at
@@ -8366,7 +8427,7 @@ The monitors of the project, by name:
   "schedule":{"kind":"interval","every":"5m"},"timeout_secs":30,
   "kind":"number","unit":"%","warn":80.0,"crit":90.0,"direction":"above",
   "enabled":true,"retention_days":7,"period_secs":300,
-  "created_by":"operator","run_as":"operator",
+  "created_by":"operator","owner":"actor","run_as":"operator",
   "created_at":"…","updated_at":"…","next_run_at":"2026-11-02T10:05:00.000Z",
   "skipped":0,"running":false,
   "last":{"id":412,"monitor":"01JC…","at":"2026-11-02T10:00:00.120Z",
@@ -8376,7 +8437,9 @@ The monitors of the project, by name:
 `period_secs` is the interval, or for a cron spec the time between its
 next two runs. A dashboard block is stale when its last result is older
 than `3 × period_secs + timeout_secs`. `next_run_at` is `null` when the
-monitor is off. `last` is `null` before the first run.
+monitor is off. `last` is `null` before the first run. `owner` is
+`actor`, `project`, or `system` (§30.7). `disabled_reason` is there when
+the daemon disabled the monitor.
 
 #### `POST /api/projects/{name}/monitors`
 
@@ -8384,7 +8447,8 @@ Body: `name` (1-63 of `a-z`, `0-9`, `-`, `_`; unique in the project),
 `description?` (at most 500 characters), `target`, `script` (at most
 64 KiB), `schedule`, `timeout_secs?` (1-600, default 30), `kind`,
 `unit?`, `warn?`, `crit?`, `direction?` (`above`), `enabled?` (`true`),
-`retention_days?` (1-90, default 7). Answers `201` with the monitor.
+`retention_days?` (1-90, default 7), `owner?` (`actor`, the default;
+`project`; `system`; §30.7). Answers `201` with the monitor.
 Thresholds need kind `number` or `json`, and `warn` comes before `crit`
 in the direction. A project has at most 100 monitors (`409 conflict`).
 A name in use is `409 conflict`.
@@ -8399,13 +8463,17 @@ the rights of §30.1.
 `id` is the ULID or `project/name` (`%2F` in the path). The patch is a
 JSON merge into the fields: a key replaces the field, and `null` clears
 an optional field (`{"warn": null}`). An unknown key is `422 invalid`.
-The delete answers `204`, and removes the results and the blocks of the
-monitor on the dashboard.
+`owner` moves the monitor (§30.7): `{"owner": "project"}` gives it to the
+project, and `{"owner": "actor"}` makes the caller its `run_as` (a
+take-over). The delete answers `204`, and removes the results and the
+blocks of the monitor on the dashboard.
 
 #### `POST /api/monitors/{id}/run`
 
-Run now, as `run_as`, and keep the result. An agent that is not the
-`run_as` must be able to use the target. Answers when the run ends:
+Run now, with the owner's rights (as a timed run), and keep the result.
+For an actor-owned monitor, an agent that is not the `run_as` must be
+able to use the target. A system-owned monitor needs a sysadmin or the
+operator. Answers when the run ends:
 
 ```json
 {"result":{"id":413,"monitor":"01JC…","at":"…","status":"crit","value":95.0,"duration_ms":41},
@@ -8419,6 +8487,8 @@ not start (target down, refused).
 
 Run a monitor that is not saved, once, as the caller, and keep nothing.
 The body is the body of a create; `name` and `schedule` may be absent.
+With `owner` `project` or `system`, the run has the rights of that owner
+(and the caller needs the rights to make such a monitor).
 The answer has the shape of a run now, without `result.id`.
 
 #### `GET /api/monitors/{id}/results`
@@ -8426,7 +8496,9 @@ The answer has the shape of a run now, without `result.id`.
 Query: `since`, `until` (§2.1: RFC 3339 or a duration back from now),
 `limit` (default 500, at most 10 000), `bucket`. The results, oldest
 first; with more than `limit`, the newest `limit`. Each is
-`{"id","monitor","at","status","value?","text?","json?","duration_ms","error?"}`.
+`{"id","monitor","at","status","value?","text?","json?","duration_ms","error?","actor?"}`.
+`actor` is `monitor:<project>/<name>` (absent on a result from before
+migration 62).
 
 With `bucket` (seconds, or a duration such as `5m`; 1 s to 7 d), one
 point for each bucket of time that has results:
@@ -8466,6 +8538,62 @@ dashboard as `GET` does. A block:
 `stat` and `chart` need a `number` or `json` monitor; `table` needs a
 `json` monitor. Several blocks can show the same monitor. A bad layout is
 `422 invalid` with `details.field` such as `blocks[2].kind`.
+
+### 30.7 Owners and target grants
+
+Monitors and schedules (§19.6) are often meant to outlive the agent that
+wrote them. So each has an `owner`:
+
+| `owner` | Its rights | Who makes it, changes it, or takes it over |
+|---|---|---|
+| `actor` (the default) | Those of `run_as`, checked at each run: the policy or a lease of that agent (the operator: any target) | As §30.1 |
+| `project` | Those of the project, checked at each run: the targets of the project, and a global target that is granted to the project for monitors (below). No agent is behind it, so a lease that ends or a lead that goes changes nothing. | project_admin of the project, a sysadmin, the operator |
+| `system` | Those of the operator: a global target or a target of the project | a sysadmin, the operator |
+
+- **Move an item in one command.** `terrarium monitor edit <m> --owner
+  project` (`PATCH {"owner": "project"}`). `--owner actor` takes it over:
+  the caller becomes `run_as`, and must be able to use the target. The
+  store audits each move (`monitor.update` with `owner` in `changed`).
+- **The runs show the item as the actor.** Each result of a monitor has
+  `actor` `monitor:<project>/<name>`, and so do the `monitor.result` and
+  `monitor.status` events and the `monitor.status` audit row of a status
+  change (§30.1). The definition changes are audited with the caller
+  (`monitor.create`, `monitor.update` for an edit, an owner move, a
+  take-over, an enable, and a disable; `monitor.run` for a run now). The
+  runs of a project- or system-owned schedule keep their `target.exec`
+  row (§19.6).
+
+**Target grants.** A monitor on a `host` target runs a shell as the host
+agent's user. So one agent's policy does not give a project-owned
+monitor a global target: a sysadmin or the operator grants the target to
+the project, for one use. The grant is visible in `terrarium project
+show`, `GET /api/projects/{name}/target-grants`, and the Monitors tab of
+the Dashboard page.
+
+| Endpoint | Body | Answer |
+|---|---|---|
+| `GET /api/projects/{name}/target-grants` | | `200`, `[{"target","project","for","granted_by","granted_at"}]`. The members of the project read it. |
+| `POST /api/projects/{name}/target-grants` | `{"target": "<global target>", "for": "monitors\|schedules"}` | `201`, the grant (`200` when it was there). A sysadmin or the operator. A target of a project is `422 invalid`: the project's items use their own targets with no grant. Audited as `target.grant`; emits `target.grant`. |
+| `DELETE /api/projects/{name}/target-grants/{target}/{for}` | | `204`. A sysadmin or the operator. Audited as `target.ungrant`. The next run of a project-owned item on the target records the refusal (`unknown` with `not granted`). |
+
+`for` is `monitors` (project-owned monitors) or `schedules` (the `exec`
+action of project-owned schedules, §19.6). A grant goes with its target
+and with its project.
+
+**A deleted `run_as` agent.** When an agent is deleted, the daemon
+disables each enabled actor-owned monitor and schedule whose `run_as` is
+that agent, in the same write. Each gets `disabled_reason` (`its run_as
+agent <project>/<name> was deleted; ...`); a monitor also gets a
+`monitor.disable` audit row, a schedule a `schedule.update`. The daemon
+mails a notice from `system` to the operator (one item of the operator's
+Inbox) and to the leads (project_admin agents) of each item's project,
+with the list of the items. A project admin takes an item over with an
+edit, then enables it: `terrarium monitor edit <m> --owner project
+--enable`, or `--owner actor` to run it as the caller. An enable of an
+actor-owned item whose `run_as` agent is gone makes the caller its
+`run_as`. A disabled item stays disabled; its runs (a run now) record
+`unknown` with the reason. A project- or system-owned item does not
+change.
 
 ## 31. Pipelines
 

@@ -2276,6 +2276,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         }),
       agents: (name) => reply(() => (project(name), w.agents.filter((a) => a.project === name).sort((a, b) => a.id.localeCompare(b.id)))),
       targets: (name) => reply(() => (project(name), w.targets.filter((t) => !t.project || t.project === name).map(targetView))),
+      // The seed grants the global `pi-runner` to `terrarium` for its project-owned monitors.
+      targetGrants: (name) =>
+        reply(() => (project(name), name === "terrarium" ? [{ target: "pi-runner", project: name, for: "monitors" as const, granted_by: "operator", granted_at: new Date(now() - 86_400_000).toISOString() }] : [])),
       repos: (name) => reply(() => (project(name), w.repos.filter((r) => r.project === name).sort((a, b) => a.name.localeCompare(b.name)))),
       attachRepo: (name, r) =>
         reply(() => {

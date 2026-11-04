@@ -3,7 +3,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::Value;
@@ -14,6 +14,7 @@ use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
 use crate::store::projects::{self, NewProject, NewRepo, Project, ProjectPatch, Repo};
+use crate::store::target_grants::{self, Purpose, TargetGrant};
 use crate::store::{Page, agents};
 
 pub fn routes() -> Router<Shared> {
@@ -22,6 +23,14 @@ pub fn routes() -> Router<Shared> {
         .route("/projects/{name}", get(show).patch(update).delete(remove))
         .route("/projects/{name}/agents", get(list_agents))
         .route("/projects/{name}/targets", get(list_targets))
+        .route(
+            "/projects/{name}/target-grants",
+            get(list_grants).post(add_grant),
+        )
+        .route(
+            "/projects/{name}/target-grants/{target}/{purpose}",
+            delete(remove_grant),
+        )
         .route("/projects/{name}/repos", get(list_repos).post(attach_repo))
 }
 
@@ -162,6 +171,83 @@ async fn list_targets(
     Ok(Json(
         super::targets::for_project(&state, &actor, &name).await?,
     ))
+}
+
+/// `GET /api/projects/{name}/target-grants`: the global targets granted
+/// to the project for its project-owned monitors and schedules
+/// (docs/api.md §30.7). Members read them.
+async fn list_grants(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Vec<TargetGrant>>> {
+    policy::read_project(&actor, &name)?;
+    Ok(Json(
+        state
+            .db
+            .read(move |c| {
+                projects::get(c, &name)?;
+                target_grants::list(c, &name)
+            })
+            .await?,
+    ))
+}
+
+/// The body of `POST /api/projects/{name}/target-grants`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantBody {
+    target: String,
+    /// `monitors` or `schedules`.
+    #[serde(rename = "for")]
+    purpose: String,
+}
+
+/// `POST /api/projects/{name}/target-grants`: grant a global target to
+/// the project for `monitors` or `schedules`. Sysadmin or the operator: a
+/// project-owned item then runs commands on the target with no agent
+/// behind it. `201` with the grant (`200` when it was there).
+async fn add_grant(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(b): ApiJson<GrantBody>,
+) -> ApiResult<(StatusCode, Json<TargetGrant>)> {
+    policy::sysadmin(&actor, "granting a global target to a project")?;
+    let purpose = Purpose::parse(&b.purpose)?;
+    let label = actor.label();
+    let (g, new) = state
+        .db
+        .write(actor.label(), move |t| {
+            let had = target_grants::has(t, &b.target, &name, purpose)?;
+            let g = target_grants::grant(t, &b.target, &name, purpose, &label)?;
+            Ok((g, !had))
+        })
+        .await?;
+    let code = if new {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((code, Json(g)))
+}
+
+/// `DELETE /api/projects/{name}/target-grants/{target}/{purpose}`: take a
+/// grant back. Sysadmin or the operator.
+async fn remove_grant(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((name, target, purpose)): Path<(String, String, String)>,
+) -> ApiResult<StatusCode> {
+    policy::sysadmin(&actor, "revoking a target grant")?;
+    let purpose = Purpose::parse(&purpose)?;
+    state
+        .db
+        .write(actor.label(), move |t| {
+            target_grants::revoke(t, &target, &name, purpose)
+        })
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_repos(

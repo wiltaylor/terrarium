@@ -938,7 +938,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/logs/mail` | Project logs, Mail tab: the mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
-| `/p/:project/dashboard`, `/p/:project` | Dashboard: the blocks of the monitors (stat, status, chart, text, table, note), Edit dashboard (add, change, drag or move, remove, save), and the Monitors tab (`?tab=monitors`: state, last and next run, on/off, Run now, the edit dialog with Test run); see "The project dashboard". `/p/:project` redirects here. | `GET`, `PUT .../dashboard`, `GET .../monitors`, `POST .../monitors`, `POST .../monitors/test`, `PATCH`, `DELETE /api/monitors/{id}`, `POST .../run`, `GET .../results?since=&bucket=` |
+| `/p/:project/dashboard`, `/p/:project` | Dashboard: the blocks of the monitors (stat, status, chart, text, table, note), Edit dashboard (add, change, drag or move, remove, save), and the Monitors tab (`?tab=monitors`: state, last and next run, on/off, Run now, the edit dialog with Test run); see "The project dashboard". `/p/:project` redirects here. | `GET`, `PUT .../dashboard`, `GET .../monitors`, `POST .../monitors`, `POST .../monitors/test`, `PATCH`, `DELETE /api/monitors/{id}`, `POST .../run`, `GET .../results?since=&bucket=`, `GET .../target-grants` |
 | `/p/:project/pipelines` | Pipelines: each CI/CD pipeline with the state of its newest run, the last poll, on/off, Refresh, Edit, Delete; a row opens the recent runs, a run opens its steps; the dialog (GitHub Actions or a script) has a Test poll; see "Pipelines". | `GET`, `POST .../pipelines`, `POST .../pipelines/test`, `PATCH`, `DELETE /api/pipelines/{id}`, `POST .../refresh`, `GET .../runs`, `GET .../runs/{run}` |
 | `/p/:project/calendar` | Calendar: the project's events and the global ones in a month grid, a week, or an agenda; an occurrence opens the event (Edit, Remove, Skip); the dialog makes or changes an event; see "Calendar". | `GET .../calendar`, `POST .../calendar/events`, `GET`, `PATCH`, `DELETE /api/calendar/events/{id}`, `POST .../skip`, `GET`, `POST`, `DELETE .../calendar/watches` |
 | `/calendar` | The combined calendar of every project and the global calendar (the operator). | `GET /api/calendar`, `GET /api/calendar/global`, `POST /api/calendar/global/events` |
@@ -1027,7 +1027,12 @@ and closes the node.
   (interval or cron, with the next runs), the timeout, the retention,
   the kind, and the unit and thresholds. **Test run** calls
   `POST .../monitors/test` and shows the parsed result and the raw
-  output before a save.
+  output before a save. Each row shows the owner (`runs as <actor>`,
+  `owned by the project`, `owned by the system`) and the reason when the
+  daemon disabled the monitor; the dialog has an **Owner** select
+  (docs/api.md §30.7), and sends `owner` only when it changes. Above the
+  table, the panel lists the global targets granted to the project
+  (`GET /api/projects/{name}/target-grants`).
 - **Live.** A `monitor.result` or `dashboard.updated` event of the
   project loads the dashboard again (debounced); the series of a block
   load again when the last result of its monitor changes. A

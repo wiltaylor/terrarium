@@ -147,11 +147,13 @@ needs `--body` or `--body=`.
 
 ```
 terrarium project ls
-terrarium project show [name]                 the project, its agents, repos, and targets
+terrarium project show [name]                 the project, its agents, repos, targets, and target grants
 terrarium project new <name> [-d text] [--prefix TER]      sysadmin
 terrarium project set [name] [-d text] [--prefix P]        project_admin
 terrarium project rm <name> --confirm         sysadmin
 terrarium project repos [name]
+terrarium project grant <target> --for monitors|schedules       sysadmin (--project p names the project)
+terrarium project ungrant <target> --for monitors|schedules     sysadmin
 terrarium project repo-add <url> [--name n] [--branch b] [--credential key] [--path p]
                           [--hooks-dir .githooks] [--push-deny 'op/*' ...]
                           [--push-via proxy|direct]
@@ -1107,7 +1109,7 @@ terrarium monitor show <monitor> [--json]
 terrarium monitor new <name> --target t (--script s | --script-file f) (--every 1m | --cron "*/5 * * * *" [--tz z])
                       --kind number|status|text|json [--unit u] [--warn n] [--crit n]
                       [--direction above|below] [--timeout secs] [--retention days]
-                      [--description d] [--disabled]
+                      [--description d] [--disabled] [--owner actor|project|system]
 terrarium monitor edit <monitor> [the flags of new] [--rename n] [--clear-thresholds] [--enable]
 terrarium monitor rm <monitor>
 terrarium monitor run <monitor>
@@ -1122,6 +1124,16 @@ the agent's own), `project/name`, or the ID. Reads need a member of the
 project; the writes (`new`, `edit`, `rm`, `run`, `dashboard set`) need a
 project admin, a sysadmin, or the operator, and a target that the caller
 may use.
+
+`--owner` says who owns the monitor (docs/api.md §30.7). `actor` (the
+default) runs it as you: when your lease ends or you go, it stops. With
+`project`, its rights come from the project: the targets of the project,
+and a global target that a sysadmin granted to the project with
+`terrarium project grant <target> --for monitors`. `system` needs a
+sysadmin. `monitor edit <m> --owner project` moves a monitor to the
+project in one command; `--owner actor` takes it over (it then runs as
+you). `monitor show` prints the owner, and the reason when the daemon
+disabled the monitor (its `run_as` agent was deleted).
 
 `--kind` says how the daemon reads the output: `number` takes the first
 number on stdout and the thresholds give the status; `status` maps the
@@ -1623,7 +1635,9 @@ terrarium schedule new <name> (--cron "*/15 * * * *" [--tz Europe/London] | --ev
                           [--content-type T] [--timeout 10s]
                         | --action-json '<json>')
                        [--project p | --global] [--catch-up skip|once] [--disabled]
+                       [--owner actor|project|system]
 terrarium schedule set <id> [--rename n] [a new time or trigger] [a new action] [--catch-up c] [--enabled | --disabled]
+                       [--owner actor|project|system]      (`schedule edit` is the same command)
 terrarium schedule rm <id>
 terrarium schedule run <id>                   run now; prints the run; exit 1 when it failed
 terrarium schedule enable|disable <id>
@@ -1634,6 +1648,11 @@ terrarium schedule test <id>                  send a sample event to the webhook
 ```
 
 - `<id>` is the ULID, `project/name`, or a name in your project.
+- `--owner` (docs/api.md §19.6): `actor` (the default) runs the schedule as
+  you; `project` gives its rights to the project (project_admin;
+  an `exec` on a global target needs `terrarium project grant <target>
+  --for schedules`); `system` needs a sysadmin. On `set`, `--owner actor`
+  takes the schedule over. `schedule show` prints the owner.
 - `new` needs one time and one action. The project is `--project`, or the
   agent's own project. The operator names a project or gives `--global`
   (a global schedule needs sysadmin or the operator).

@@ -1524,7 +1524,8 @@ wake a stopped worker. `docs/api.md` §19 is the contract.
   that the check refuses is `skipped` with the reason; after 3 in a row,
   the daemon disables the schedule and mails the operator. A caller that
   changes the action becomes the `run_as`, so an edit cannot borrow the
-  rights of the creator.
+  rights of the creator. A schedule can instead be owned by its project or
+  by the system (§15.6, "Owners"): then no actor is behind it.
 - **Rights.** The §10 table: a project_admin keeps the action inside its
   project (mail to the project's agents, its inbox, or the operator; a
   turn or a verb on the project's agents; an exec on a global or project
@@ -2398,6 +2399,29 @@ dashboard first: one block for each check, with its state.
   the tree, and `/p/<project>` opens it.
 - **Rights.** Members and their agents read; project admins (leads),
   sysadmins, and the operator write, with a target that they may use.
+- **Owners** (issue #18, migration 62). Health checks and timed jobs
+  usually outlive the agent that wrote them. So a monitor and a schedule
+  have an `owner`: `actor` (the default: the runs act as `run_as`),
+  `project`, or `system`. A project-owned item has the rights of the
+  project, checked at each run: the targets of the project, and a global
+  target that a sysadmin or the operator granted to the project for that
+  use (`monitors` or `schedules`; table `target_grants`). The grant is
+  explicit and visible (`project show`, the Monitors tab), because a
+  monitor on a `host` target runs a shell as the host agent's user. A
+  system-owned item has the operator's rights. A write of a project-owned
+  item needs project_admin, sysadmin, or the operator; of a system-owned
+  one, sysadmin or the operator. One edit moves an item (`--owner
+  project`); `--owner actor` takes it over. The runs show the item as
+  the actor: each monitor result has `monitor:<project>/<name>` (a status
+  change also writes a `monitor.status` audit row with it; the runs write
+  no `target.exec` row, as the audit log has no prune), and the
+  `target.exec` row of an owned schedule's exec has `schedule:<id>`. When an agent is
+  deleted, each enabled actor-owned monitor and schedule that runs as it
+  is disabled with a reason, and the leads and the operator get a notice
+  (mail from `system`; the operator's Inbox). A project admin takes it
+  over with an edit. `crate::owner` has the rules; docs/api.md §30.7 and
+  §19.6 the contract. Pipelines stay actor-owned: a poll opens secrets as
+  `run_as`, and a project has no secret rights of its own yet.
 - **Surfaces.** The API (docs/api.md §30), `terrarium monitor` and
   `terrarium dashboard` (docs/cli.md), the Dashboard page and its
   Monitors tab, the packaged skill `terrarium-monitors`, and

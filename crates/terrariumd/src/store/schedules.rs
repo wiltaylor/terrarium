@@ -28,6 +28,7 @@ use terrarium_core::template;
 use crate::db::Tx;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::events::EventDraft;
+use crate::owner::Owner;
 use crate::store::mail::{self, Address, Outgoing};
 use crate::store::{Page, Paged, agents, board, projects, subscriptions, targets, valid_name};
 
@@ -455,7 +456,12 @@ pub struct Schedule {
     pub max_concurrency: u32,
     /// `operator` or `agent:<ulid>`.
     pub created_by: String,
-    /// The actor the runs act as. The daemon checks its rights at each run.
+    /// `actor` (the runs act as `run_as`), `project` (the rights come from
+    /// the project), or `system` (docs/api.md §19.6).
+    pub owner: Owner,
+    /// The actor the runs of an actor-owned schedule act as. The daemon
+    /// checks its rights at each run. A project- or system-owned schedule
+    /// does not use it.
     pub run_as: String,
     pub next_run_at: Option<String>,
     pub last_run: Option<LastRun>,
@@ -490,6 +496,16 @@ impl Schedule {
         parse_time(&self.anchor_at).unwrap_or_else(Utc::now)
     }
 
+    /// The actor label of a timed run's writes: the `run_as`, or
+    /// `schedule:<id>` for a project- or system-owned schedule.
+    pub fn run_label(&self) -> String {
+        if self.owner.is_owned() {
+            run_label(&self.id)
+        } else {
+            self.run_as.clone()
+        }
+    }
+
     /// The definition (for a fleet export and the fleet plan).
     pub fn def(&self) -> ScheduleDef {
         ScheduleDef {
@@ -515,6 +531,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<(Schedule, String, String, Option<String
         catch_up: CatchUp::Skip,
         max_concurrency: r.get("max_concurrency")?,
         created_by: r.get("created_by")?,
+        owner: Owner::from_db(&r.get::<_, String>("owner")?),
         run_as: r.get("run_as")?,
         next_run_at: r.get("next_run_at")?,
         last_run: None,
@@ -888,6 +905,7 @@ pub struct NewSchedule {
     pub created_by: String,
     /// `api`, `file`, or `fleet:<name>`.
     pub source: String,
+    pub owner: Owner,
 }
 
 /// The check that every write of a name does.
@@ -943,8 +961,8 @@ pub fn create(t: &mut Tx<'_>, n: &NewSchedule, now: DateTime<Utc>) -> ApiResult<
     t.execute(
         "INSERT INTO schedules (id, name, project, scope, enabled, spec, action, catch_up,
                                 max_concurrency, created_by, run_as, anchor_at, next_run_at,
-                                source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, ?10, ?11, ?12, ?10, ?10)",
+                                source, created_at, updated_at, owner)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, ?10, ?11, ?12, ?10, ?10, ?13)",
         params![
             id,
             n.name,
@@ -958,6 +976,7 @@ pub fn create(t: &mut Tx<'_>, n: &NewSchedule, now: DateTime<Utc>) -> ApiResult<
             at,
             next,
             n.source,
+            n.owner.as_str(),
         ],
     )?;
     let s = get(t, &id)?;
@@ -966,7 +985,8 @@ pub fn create(t: &mut Tx<'_>, n: &NewSchedule, now: DateTime<Utc>) -> ApiResult<
         "schedule.create",
         &s.key(),
         s.project.as_deref(),
-        json!({"id": s.id, "spec": s.spec, "action": s.action.kind(), "source": s.source}),
+        json!({"id": s.id, "spec": s.spec, "action": s.action.kind(), "source": s.source,
+               "owner": s.owner.as_str()}),
     )?;
     Ok(s)
 }
@@ -979,9 +999,15 @@ pub struct SchedulePatch {
     pub action: Option<ScheduleAction>,
     pub enabled: Option<bool>,
     pub catch_up: Option<CatchUp>,
-    /// A new `run_as`: the caller that changed the action.
+    /// A new `run_as`: the caller that changed the action. It applies
+    /// when the action or the owner changes, or with `take_over`.
     pub run_as: Option<String>,
     pub source: Option<String>,
+    /// A new owner (docs/api.md §19.6).
+    pub owner: Option<Owner>,
+    /// The caller takes the schedule over: `run_as` applies with no other
+    /// change.
+    pub take_over: bool,
 }
 
 /// Change a schedule. The caller checked the rights. A new spec starts a
@@ -1013,9 +1039,15 @@ pub fn update(
     if let Some(a) = p.action.as_ref().filter(|x| **x != old.action) {
         s.action = a.clone();
         changed.push("action");
-        if let Some(r) = &p.run_as {
-            s.run_as = r.clone();
-        }
+    }
+    if let Some(o) = p.owner.filter(|x| *x != old.owner) {
+        s.owner = o;
+        changed.push("owner");
+    }
+    let takes = changed.contains(&"action") || changed.contains(&"owner") || p.take_over;
+    if let Some(r) = p.run_as.as_ref().filter(|r| takes && **r != old.run_as) {
+        s.run_as = r.clone();
+        changed.push("run_as");
     }
     if let Some(c) = p.catch_up.filter(|x| *x != old.catch_up) {
         s.catch_up = c;
@@ -1052,7 +1084,7 @@ pub fn update(
     t.execute(
         "UPDATE schedules SET name = ?2, spec = ?3, action = ?4, catch_up = ?5, enabled = ?6,
                 run_as = ?7, anchor_at = ?8, next_run_at = ?9, skips = ?10,
-                disabled_reason = ?11, source = ?12, updated_at = ?13
+                disabled_reason = ?11, source = ?12, updated_at = ?13, owner = ?14
          WHERE id = ?1",
         params![
             id,
@@ -1068,6 +1100,7 @@ pub fn update(
             s.disabled_reason,
             s.source,
             stamp(now),
+            s.owner.as_str(),
         ],
     )?;
     let s = get(t, id)?;
@@ -1082,7 +1115,8 @@ pub fn update(
             "schedule.update",
             &s.key(),
             s.project.as_deref(),
-            json!({"id": s.id, "changed": changed, "enabled": s.enabled}),
+            json!({"id": s.id, "changed": changed, "enabled": s.enabled,
+                   "owner": s.owner.as_str(), "run_as": s.run_as}),
         )?;
     }
     Ok(s)
@@ -1162,6 +1196,7 @@ pub fn upsert_def(
                 catch_up: def.catch_up,
                 created_by: created_by.to_owned(),
                 source: source.to_owned(),
+                owner: Owner::Actor,
             },
             now,
         ),
@@ -1176,6 +1211,7 @@ pub fn upsert_def(
                 catch_up: Some(def.catch_up),
                 run_as: Some(created_by.to_owned()),
                 source: Some(source.to_owned()),
+                ..Default::default()
             },
             now,
         ),

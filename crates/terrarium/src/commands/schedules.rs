@@ -193,6 +193,16 @@ fn run_row(r: &Value) -> Value {
     r
 }
 
+/// The owner of a monitor or a schedule: `actor (runs as agent:...)`,
+/// `project (the rights of the project)`, or `system`.
+pub fn owner_text(v: &Value) -> String {
+    match v["owner"].as_str().unwrap_or("actor") {
+        "project" => "project (the rights of the project)".to_owned(),
+        "system" => "system (the rights of the operator)".to_owned(),
+        _ => format!("actor (runs as {})", field(v, "run_as")),
+    }
+}
+
 fn print_schedule(ctx: &Ctx, s: &Value) {
     ctx.line(format!("schedule {}  {}", key_of(s), field(s, "id")));
     ctx.line(format!("when:      {}", spec_text(&s["spec"])));
@@ -247,9 +257,9 @@ fn print_schedule(ctx: &Ctx, s: &Value) {
             field(l, "summary")
         ));
     }
+    ctx.line(format!("owner:     {}", owner_text(s)));
     ctx.line(format!(
-        "runs as:   {}  (made by {}, source {})",
-        field(s, "run_as"),
+        "made by:   {}  (source {})",
         field(s, "created_by"),
         field(s, "source")
     ));
@@ -670,7 +680,7 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
             let v = ctx.api.get(&path(schedule), Vec::new()).await?;
             ctx.emit(&v, print_schedule)
         }
-        ScheduleCmd::New { name, args } => {
+        ScheduleCmd::New { name, owner, args } => {
             let spec = spec_of(args)?.ok_or_else(|| {
                 CliError::usage(
                     "give the time: --cron \"<expr>\", --every <dur>, or --at <time>; \
@@ -699,6 +709,9 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
                 }
             };
             let mut b = json!({"name": name, "project": project, "spec": spec, "action": action});
+            if let Some(o) = owner {
+                b["owner"] = json!(o);
+            }
             if let Some(c) = catch_up_of(args)? {
                 b["catch_up"] = c;
             }
@@ -712,6 +725,7 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
             schedule,
             rename,
             enabled,
+            owner,
             args,
         } => {
             if args.global {
@@ -734,6 +748,9 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
             }
             if *enabled {
                 b["enabled"] = json!(true);
+            }
+            if let Some(o) = owner {
+                b["owner"] = json!(o);
             }
             if args.disabled {
                 b["enabled"] = json!(false);
