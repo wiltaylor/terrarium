@@ -224,9 +224,16 @@ describe("mock parity with docs/api.md", () => {
     expect(r.reset).toMatchObject({ kind: "new_session", state: "next_wake", replaced: false });
     expect(r.reset_pending).toMatchObject({ kind: "new_session", by: "operator", then_set: false, recap: false });
     expect(api.world.agents.find((x) => x.id === id)!.status).toBe("stopped");
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
     // A turn wakes the agent: the wake starts the new session.
     await api.agents.send(id, "hello");
-    await waitFor(() => expect(api.world.agents.find((x) => x.id === id)!.status_reason).toBe("new session: requested by operator"), 8000);
+    // `status_reason` holds only while the agent is `starting`: with no step it is gone one timer later,
+    // and a poll can miss it. The status event keeps the reason.
+    const fresh = (e: AgentEvent) => e.kind === "status" && e.agent_id === id && e.data?.status === "starting" && e.data?.reason === "new session: requested by operator";
+    await waitFor(() => expect(frames.some(fresh)).toBe(true), 8000);
+    s.close();
     expect(api.world.agents.find((x) => x.id === id)!.reset_pending).toBeUndefined();
     await waitFor(() => expect(["idle", "working", "waiting"]).toContain(api.world.agents.find((x) => x.id === id)!.status), 8000);
 
