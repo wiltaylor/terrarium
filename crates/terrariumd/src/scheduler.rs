@@ -7,7 +7,8 @@
 //!
 //! The monitor tick (`crate::monitors::tick`) is in the same task, with
 //! its own period ([`crate::monitors::TICK`]), and the pipeline tick
-//! (`crate::pipelines::tick`) runs with it.
+//! (`crate::pipelines::tick`) runs with it. The calendar notice tick
+//! (`crate::calendar::tick`) runs with the schedule tick.
 //!
 //! The trigger engine (PLAN §12c) is in the same task. It reads the event
 //! log from `trigger_cursor`, not only the live hub: a new event on the
@@ -284,6 +285,8 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                 () = tokio::time::sleep_until(next_tick) => {
                     ticks += 1;
                     drop(tick(&state, Utc::now()).await);
+                    // The calendar notices (docs/api.md §33.5) on the same timer.
+                    crate::calendar::tick(&state, Utc::now()).await;
                     next_tick = tokio::time::Instant::now() + TICK;
                     if ticks.is_multiple_of(PRUNE_TICKS) {
                         let pruned = state
@@ -295,6 +298,7 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
                         }
                         crate::monitors::prune(&state).await;
                         crate::webhooks::prune(&state).await;
+                        crate::calendar::prune(&state).await;
                     }
                 }
                 r = rx.recv() => {

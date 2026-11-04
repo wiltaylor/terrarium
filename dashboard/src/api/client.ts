@@ -15,6 +15,7 @@ import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 // Secrets (PLAN §16b): a block of its own.
 import type { Pin } from "./types";
+import type { CalendarEvent, CalendarGrant, CalendarGrantResult, CalendarInput, CalendarRange, CalendarView, CalendarWatcher, CalendarWatchResult } from "./types";
 import type { NewSecret, NewSecretGrant, RevealedSecret, Secret, SecretGenerate, SecretGrant, SecretPut, TargetPatch, TargetTestReport } from "./types";
 import type {
   SessionDetail,
@@ -532,6 +533,35 @@ export interface Api {
     series(id: string, q: MonitorResultsQuery & { bucket: number }): Promise<MonitorPoint[]>;
     dashboard(project: string): Promise<DashboardView>;
     saveDashboard(project: string, layout: DashboardLayout): Promise<DashboardView>;
+  };
+
+  /**
+   * The calendar (docs/api.md §33): the events of a project, the global events, and the combined view. Members read; a
+   * lead (project_admin), a sysadmin, or the operator writes; a worker with the calendar grant adds events and changes its
+   * own. A global event needs a sysadmin or the operator. `scope` is a project name, or null for the global calendar.
+   */
+  calendar: {
+    /** The project's occurrences and the global ones in the window. */
+    project(project: string, range?: CalendarRange): Promise<CalendarView>;
+    /** The combined view: every project for the operator (`range.project` narrows it). */
+    combined(range?: CalendarRange): Promise<CalendarView>;
+    global(range?: CalendarRange): Promise<CalendarView>;
+    get(id: string): Promise<CalendarEvent>;
+    create(scope: string | null, body: CalendarInput): Promise<CalendarEvent>;
+    update(id: string, patch: CalendarInput): Promise<CalendarEvent>;
+    remove(id: string): Promise<void>;
+    /** Skip one occurrence: its start (RFC 3339) or its date. */
+    skip(id: string, occurrence: string): Promise<CalendarEvent>;
+    unskip(id: string, occurrence: string): Promise<CalendarEvent>;
+    assign(id: string, agent: string): Promise<CalendarEvent>;
+    unassign(id: string, agent: string): Promise<CalendarEvent>;
+    watchers(scope: string | null): Promise<CalendarWatcher[]>;
+    /** `watcher`: absent for the caller, `operator` for the Inbox, or an agent. */
+    watch(scope: string | null, watcher?: string): Promise<CalendarWatchResult>;
+    unwatch(scope: string | null, watcher?: string): Promise<CalendarWatchResult>;
+    grants(project: string): Promise<CalendarGrant[]>;
+    grant(project: string, agent: string): Promise<CalendarGrantResult>;
+    revoke(project: string, agent: string): Promise<CalendarGrantResult>;
   };
 
   /**
@@ -1184,6 +1214,31 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       dashboard: (project) => get(`${p(project)}/dashboard`),
       saveDashboard: (project, layout) => put(`${p(project)}/dashboard`, layout),
     },
+
+    calendar: (() => {
+      const scopePath = (scope: string | null) => (scope === null ? "/api/calendar/global" : `${p(scope)}/calendar`);
+      const q = (r?: CalendarRange): Query => (r && typeof r === "object" ? { ...r } : {});
+      const ev = (id: string) => `/api/calendar/events/${seg(id)}`;
+      return {
+        project: (project: string, range?: CalendarRange) => get<CalendarView>(`${p(project)}/calendar`, q(range)),
+        combined: (range?: CalendarRange) => get<CalendarView>("/api/calendar", q(range)),
+        global: (range?: CalendarRange) => get<CalendarView>("/api/calendar/global", q(range)),
+        get: (id: string) => get<CalendarEvent>(ev(id)),
+        create: (scope: string | null, body: CalendarInput) => post<CalendarEvent>(`${scopePath(scope)}/events`, body),
+        update: (id: string, body: CalendarInput) => patch<CalendarEvent>(ev(id), body),
+        remove: (id: string) => del(ev(id)),
+        skip: (id: string, occurrence: string) => post<CalendarEvent>(`${ev(id)}/skip`, { occurrence }),
+        unskip: (id: string, occurrence: string) => post<CalendarEvent>(`${ev(id)}/unskip`, { occurrence }),
+        assign: (id: string, agent: string) => put<CalendarEvent>(`${ev(id)}/assignees/${seg(agent)}`, {}),
+        unassign: (id: string, agent: string) => t.request<CalendarEvent>("DELETE", `${ev(id)}/assignees/${seg(agent)}`, {}),
+        watchers: (scope: string | null) => get<CalendarWatcher[]>(`${scopePath(scope)}/watches`),
+        watch: (scope: string | null, watcher?: string) => post<CalendarWatchResult>(`${scopePath(scope)}/watches`, watcher ? { watcher } : {}),
+        unwatch: (scope: string | null, watcher?: string) => t.request<CalendarWatchResult>("DELETE", `${scopePath(scope)}/watches/${seg(watcher ?? "me")}`, {}),
+        grants: (project: string) => get<CalendarGrant[]>(`${p(project)}/calendar/grants`),
+        grant: (project: string, agent: string) => put<CalendarGrantResult>(`${p(project)}/calendar/grants/${seg(agent)}`, {}),
+        revoke: (project: string, agent: string) => t.request<CalendarGrantResult>("DELETE", `${p(project)}/calendar/grants/${seg(agent)}`, {}),
+      };
+    })(),
 
     pipelines: {
       list: (project) => get(`${p(project)}/pipelines`),

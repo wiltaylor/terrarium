@@ -61,6 +61,67 @@ pub fn sysadmin(actor: &Actor, what: &str) -> ApiResult<()> {
     }
 }
 
+/// How far an actor may write a calendar (docs/api.md §33.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalendarWrite {
+    /// Add, change, and remove any event: the operator, a sysadmin, and a
+    /// project_admin (a lead) of the project.
+    Any,
+    /// Add events, and change and remove the own ones: an agent of the
+    /// project with the calendar grant (`policy.calendar_write`).
+    Own,
+}
+
+/// Read a calendar: a project calendar is a project read; the global
+/// calendar is for every agent and the operator.
+pub fn read_calendar(actor: &Actor, project: Option<&str>) -> ApiResult<()> {
+    match project {
+        Some(p) => read_project(actor, p),
+        None => Ok(()),
+    }
+}
+
+/// Write a calendar (`project` `None`: the global one). A global event
+/// needs a sysadmin or the operator. A project event needs a lead of the
+/// project (project_admin), a sysadmin, the operator, or an agent of the
+/// project with the calendar grant that a lead gives.
+pub fn write_calendar(actor: &Actor, project: Option<&str>) -> ApiResult<CalendarWrite> {
+    let Some(p) = project else {
+        sysadmin(actor, "writing the global calendar")?;
+        return Ok(CalendarWrite::Any);
+    };
+    if is_admin_of(actor, p) {
+        return Ok(CalendarWrite::Any);
+    }
+    match actor {
+        Actor::Agent(a) if a.project == p && a.policy.calendar_write => Ok(CalendarWrite::Own),
+        Actor::Agent(a) if a.project == p => Err(ApiError::forbidden(format!(
+            "writing the calendar of `{p}` needs the calendar grant (`terrarium calendar grant \
+             {}`) from a lead (project_admin), or project_admin; ask your lead to add the \
+             event for you",
+            a.name
+        ))),
+        _ => Err(deny(
+            &format!("writing the calendar of `{p}`"),
+            &format!("project_admin of `{p}`, sysadmin, or the operator"),
+        )),
+    }
+}
+
+/// Change or remove one event of `project` that `created_by` (an actor
+/// label) made: [`write_calendar`], and with the grant only, the own
+/// events.
+pub fn change_event(actor: &Actor, project: Option<&str>, created_by: &str) -> ApiResult<()> {
+    match write_calendar(actor, project)? {
+        CalendarWrite::Any => Ok(()),
+        CalendarWrite::Own if actor.label() == created_by => Ok(()),
+        CalendarWrite::Own => Err(ApiError::forbidden(
+            "with the calendar grant you change and remove only the events that you made; \
+             ask your lead to change this one",
+        )),
+    }
+}
+
 /// Store, list, show, or delete the secrets of a scope (PLAN §16b.5):
 /// `global` needs sysadmin or the operator; a project needs project_admin
 /// of that project, sysadmin, or the operator. The API never returns a
@@ -1036,6 +1097,7 @@ mod tests {
             mail_to: vec!["lead".into()],
             cross_project: vec!["q/triage".into()],
             spawn: None,
+            calendar_write: false,
         };
         let a = agent("p", &[], policy);
         assert!(mail_to(&a, &peer("p", "lead")).is_ok());
@@ -1052,6 +1114,7 @@ mod tests {
             mail_to: vec!["*".into()],
             cross_project: vec!["q/*".into()],
             spawn: None,
+            calendar_write: false,
         };
         let a = agent("p", &[], policy);
         assert!(mail_to(&a, &peer("q", "x")).is_ok());
@@ -1101,6 +1164,7 @@ mod tests {
             mail_to: mail.iter().map(|s| s.to_string()).collect(),
             cross_project: cross.iter().map(|s| s.to_string()).collect(),
             spawn: None,
+            calendar_write: false,
         };
         let in_project = policy(&["p-box"], &["*", "lead", "p/dev"], &[]);
         assert!(set_policy(&admin, "p", None, &in_project, &local).is_ok());

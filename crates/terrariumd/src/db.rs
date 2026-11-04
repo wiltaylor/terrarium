@@ -1769,6 +1769,76 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE repos ADD COLUMN hooks_dir TEXT;
     ALTER TABLE repos ADD COLUMN push_deny TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(push_deny));
     "#,
+    // 59: the calendar (docs/api.md §33, `crate::store::calendar`).
+    // `calendar_events` keeps one row for each event: `project` is NULL
+    // for a global event; `start_at` and `end_at` are the first
+    // occurrence (UTC); `recurrence` is the JSON rule or NULL; `links` a
+    // JSON object; `created_by` and `updated_by` are actor labels.
+    // `calendar_assignees` are the agents that get the start and end
+    // notices. `calendar_exceptions` names each skipped occurrence by its
+    // start. `calendar_watches` are the watchers of a calendar (`agent`
+    // NULL: the operator Inbox; `project` NULL: the global calendar).
+    // `calendar_notices` keeps one row for each occurrence and edge that
+    // the tick handled (`sent`, `late`, `skipped`, `closed`), so a restart
+    // sends nothing twice. `calendar_state` keeps the time of the last
+    // tick (`tick_at`). Self-contained: when another branch takes number
+    // 59, move this entry to the end of the list.
+    r#"
+    CREATE TABLE calendar_events (
+        id          TEXT PRIMARY KEY,          -- ULID
+        project     TEXT REFERENCES projects(name) ON DELETE CASCADE,
+        title       TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        kind        TEXT NOT NULL CHECK (kind IN ('window', 'maintenance', 'freeze', 'deploy',
+                                                  'task', 'other')),
+        start_at    TEXT NOT NULL,
+        end_at      TEXT NOT NULL,
+        all_day     INTEGER NOT NULL DEFAULT 0,
+        tz          TEXT NOT NULL DEFAULT 'UTC',
+        recurrence  TEXT CHECK (recurrence IS NULL OR json_valid(recurrence)),
+        links       TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(links)),
+        created_by  TEXT NOT NULL,
+        updated_by  TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
+    CREATE INDEX calendar_events_project ON calendar_events(project, start_at);
+    CREATE TABLE calendar_assignees (
+        event    TEXT NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+        agent    TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        added_by TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        PRIMARY KEY (event, agent)
+    );
+    CREATE INDEX calendar_assignees_agent ON calendar_assignees(agent);
+    CREATE TABLE calendar_exceptions (
+        event      TEXT NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+        occurrence TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (event, occurrence)
+    );
+    CREATE TABLE calendar_watches (
+        agent      TEXT REFERENCES agents(id) ON DELETE CASCADE,
+        project    TEXT REFERENCES projects(name) ON DELETE CASCADE,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX calendar_watches_key
+        ON calendar_watches(IFNULL(agent, 'operator'), IFNULL(project, ''));
+    CREATE TABLE calendar_notices (
+        event      TEXT NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+        occurrence TEXT NOT NULL,
+        edge       TEXT NOT NULL CHECK (edge IN ('start', 'end')),
+        state      TEXT NOT NULL CHECK (state IN ('sent', 'late', 'skipped', 'closed')),
+        at         TEXT NOT NULL,
+        PRIMARY KEY (event, occurrence, edge)
+    );
+    CREATE TABLE calendar_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -2450,6 +2520,12 @@ mod tests {
             "spawns",
             "monitors",
             "webhook_deliveries",
+            "calendar_events",
+            "calendar_assignees",
+            "calendar_exceptions",
+            "calendar_watches",
+            "calendar_notices",
+            "calendar_state",
         ] {
             let n: i64 = conn
                 .query_row(

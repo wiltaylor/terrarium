@@ -68,7 +68,7 @@ fn agent_id(a: &AgentView) -> AgentId {
     a.agent.id
 }
 
-fn file_managed(a: &AgentView) -> ApiError {
+pub(super) fn file_managed(a: &AgentView) -> ApiError {
     ApiError::new(
         Code::FileManaged,
         format!(

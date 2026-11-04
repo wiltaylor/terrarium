@@ -9,6 +9,7 @@ pub mod agent_rpc;
 pub mod api;
 pub mod assets;
 pub mod backup;
+pub mod calendar;
 pub mod config_repo;
 pub mod db;
 pub mod defaults;

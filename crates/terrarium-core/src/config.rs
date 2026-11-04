@@ -30,6 +30,12 @@ pub struct Policy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Boxed: most agents have none, and an actor carries the policy.
     pub spawn: Option<Box<SpawnPolicy>>,
+    /// The right to add events to the project calendar, and to change and
+    /// remove the events that the agent made (docs/api.md §33). A lead
+    /// (`project_admin`) grants it; absent: the agent reads the calendar
+    /// only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub calendar_write: bool,
 }
 
 /// The default of [`SpawnPolicy::max_concurrent`].
@@ -199,6 +205,7 @@ impl Default for Policy {
             mail_to: default_mail_to(),
             cross_project: Vec::new(),
             spawn: None,
+            calendar_write: false,
         }
     }
 }

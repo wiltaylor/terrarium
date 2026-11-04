@@ -5,6 +5,8 @@ export const PROJECT_ITEMS = [
   { path: "dashboard", label: "Dashboard" },
   // The CI/CD pipelines of the project and their runs (docs/api.md §31).
   { path: "pipelines", label: "Pipelines" },
+  // The calendar of the project with the global events (docs/api.md §33).
+  { path: "calendar", label: "Calendar" },
   { path: "board", label: "Board" },
   // The repos of the project (PLAN §9a). In the tree a node, not a link: open, it shows the repos, each a link to its browser.
   // The page /p/:project/repos stays (other links go to it).
@@ -66,6 +68,8 @@ export const TOP_ITEMS = [
   // The logs screen (LOGS_TABS): mail, events, and audit. Active on every /logs/... tab.
   { href: "/logs", label: "Logs" },
   { href: "/schedules", label: "Schedules" },
+  // The calendars of every project and the global calendar (docs/api.md §33).
+  { href: "/calendar", label: "Calendar" },
 ] as const;
 
 /** The Settings section at the bottom of the sidebar: one link to the tabbed settings screen. */

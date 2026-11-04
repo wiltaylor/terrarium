@@ -8590,3 +8590,283 @@ whose header does not read has `error` and no header fields.
 The zip file (`application/zip`, `Content-Disposition: attachment`,
 `Cache-Control: no-store`). `name` is a file name from the list; any other
 name is `404 not_found`. The audit row is `backup.download`.
+
+## 33. The calendar
+
+The calendar holds the planned work of a project: maintenance windows,
+change freezes, deploy windows, and tasks. Agents put events on it, so
+that a human can see the plan easily. Each project has a calendar. The
+global calendar holds the events of every project (for example a host
+maintenance window): each project view shows them, marked `global`. The
+operator also has a combined view of every project. The code is in
+`crates/terrariumd/src/store/calendar.rs` (the rows, the checks, the
+notices), `crates/terrariumd/src/calendar/` (the recurrence rules and the
+tick), and `crates/terrariumd/src/api/calendar.rs`.
+
+### 33.1 The event
+
+| Field | Meaning |
+|---|---|
+| `id` | The ULID. |
+| `project` | The project; `null` for a global event. `global` is `true` then. |
+| `title` | 1 to 200 characters. |
+| `description` | Markdown, at most 20000 characters. Default empty. |
+| `kind` | `window`, `maintenance`, `freeze`, `deploy`, `task`, or `other` (the default). |
+| `start`, `end` | The first occurrence, as UTC instants (RFC 3339 with milliseconds). |
+| `all_day` | An all-day event: it starts at local midnight in `tz` and lasts whole days. `start_date` and `end_date` are its first and its last local day. |
+| `tz` | The IANA zone of the event (default `UTC`). |
+| `recurrence` | The repeat rule (§33.2), or `null`. `rrule` is the rule as RRULE text and `repeat` in a few words. |
+| `links` | `{card?, target?, repo?, url?}`. The daemon does not check that they exist. `url` is `http://` or `https://`. |
+| `assignees` | `[{id, name, project}]`: the agents that get the start and end notices (§33.5). An event of a project takes the agents of the project; a global event takes any agent. At most 50. |
+| `exceptions` | The starts of the skipped occurrences. |
+| `created_by`, `updated_by` | Actor labels (`operator`, `agent:<ulid>`). `created_by_name` is for display. |
+| `created_at`, `updated_at` | Times. |
+| `can_edit` | In the answers: `true` when the caller may change and remove the event (§33.3). |
+
+The time fields of a create or a patch take three forms:
+
+- an RFC 3339 time with an offset: `2026-11-10T09:00:00Z`;
+- a local time in `tz`: `2026-11-10T09:00` (seconds optional);
+- a date: `2026-11-10`. A date makes an all-day event (unless `all_day`
+  is `false`: then it is `422`). The `end` of an all-day event is its
+  **last day**, not the day after.
+
+Without `end`, a timed event lasts one hour and an all-day event one day.
+The `end` is not before the `start`. An occurrence lasts at most 366
+days. A calendar holds at most 1000 events. A bad field is
+`422 invalid` with `details.field`.
+
+### 33.2 The repeat rule
+
+The rule is a JSON object, or the same rule as RRULE text (RFC 5545,
+a subset). The API stores the object.
+
+| Field | RRULE | Meaning |
+|---|---|---|
+| `freq` | `FREQ` | `daily`, `weekly`, or `monthly`. |
+| `interval` | `INTERVAL` | Every N days, weeks, or months: 1 to 999 (default 1). |
+| `weekdays` | `BYDAY` | A weekly rule only: `["mo", "th"]` (`MO,TH`). Empty: the weekday of the first start. |
+| `month_day` | `BYMONTHDAY` | A monthly rule only: 1 to 31, or -1 for the last day. Absent: the day of the first start. |
+| `until` | `UNTIL` | A local date (`2026-12-31`, that day included; RRULE `20261231`) or an RFC 3339 time (no occurrence starts after it; RRULE `20261231T235959Z`). |
+| `count` | `COUNT` | The number of occurrences: 1 to 10000. Not with `until`. |
+| `tz` | - | The zone whose wall clock repeats. Absent: the zone of the event. |
+
+`WKST=MO` is accepted (weeks start on Monday). Each other RRULE part
+(`FREQ=YEARLY`, `BYSETPOS`, `BYHOUR`, `BYDAY=1MO`, more than one
+`BYMONTHDAY`, ...) is `422 invalid`, with a message that names the part.
+
+The expansion:
+
+- The rule repeats the local time of the first start in its zone. A
+  09:00 event stays at 09:00 local time across a DST change, so its UTC
+  time moves. A local time that the zone skips (the spring gap) moves on
+  by the gap; a local time that comes twice (the autumn overlap) takes
+  the first. A timed occurrence keeps the length of the first one; an
+  all-day occurrence keeps its number of local days.
+- The first start need not match the rule: the first occurrence is the
+  first date on or after it that matches.
+- A monthly rule skips a month that has no such day (31 in April).
+- `count` counts the skipped occurrences too.
+
+A skip (an exception) names one occurrence by its start. A change of the
+rule or of the start drops each skip that names no occurrence any more.
+
+### 33.3 Rights
+
+| Action | Who |
+|---|---|
+| Read a project calendar | The agents of the project, a sysadmin, the operator |
+| Read the global calendar | Every agent, the operator |
+| Add, change, remove, skip, assign in a project calendar | A lead (project_admin of the project), a sysadmin, the operator |
+| Add events to a project calendar; change, remove, skip, and assign the own ones | An agent of the project with the calendar grant |
+| Write the global calendar | A sysadmin, the operator |
+| Grant and revoke the calendar write right | A lead of the project, a sysadmin, the operator |
+
+A worker reads its project calendar only, by default. The grant is the
+field `policy.calendar_write` of the agent's policy (PLAN §10): a lead
+sets it with `PUT /api/projects/{name}/calendar/grants/{agent}`, with
+`agent edit --policy`, or in an agent file. A worker without the grant
+that writes gets `403` with the advice to ask its lead. A global event is
+read-only in a project view (`can_edit` is `false` for a project user).
+
+The audit log has `calendar.create`, `calendar.update` (with `changed`),
+`calendar.delete`, `calendar.skip`, `calendar.unskip`,
+`calendar.assign`, `calendar.unassign`, `calendar.watch`,
+`calendar.unwatch`, `calendar.grant`, and `calendar.revoke`.
+
+### 33.4 Watchers and events
+
+An agent, or the operator Inbox, can watch a calendar (a project or the
+global one). A watcher gets a mail from `system` for each add, change
+(with a short diff of the changed fields: title, kind, when, zone,
+repeat, links, assignees, skips, "description changed"), and removal.
+The actor of a change gets no notice of its own change. Mail to the
+operator opens an Inbox item.
+
+Each write emits an event on the event log, for the triggers (§19.4):
+
+| Kind | When | `data` |
+|---|---|---|
+| `calendar.event_created` | An add | `{project, global, event_id, title, kind, start, end, all_day, rrule, assignees}` |
+| `calendar.event_updated` | A change, a skip, an assignee change | the same, with `changed` (the field names) and `diff` (`{field: "old → new"}`) |
+| `calendar.event_deleted` | A removal | the same as created |
+| `calendar.event_started` | An occurrence starts (§33.5) | the same, with `occurrence`, `start`, `end` of the occurrence, `late`, `reason` |
+| `calendar.event_ended` | An occurrence ends, or an edit, a skip, or a removal ends it early (`reason`) | the same |
+
+A global event emits its events with no `project`.
+
+### 33.5 Start and end notices
+
+The scheduler task runs the notice tick with the schedule tick (every
+10 s). Each assignee of an event gets a mail from `system` when an
+occurrence starts and when it ends: a normal mail (the agent reads it as
+`[Mailbox:system]`), not a turn. The start mail quotes the description.
+The tick also emits `calendar.event_started` and `calendar.event_ended`,
+for every event (also one with no assignee).
+
+The table `calendar_notices` keeps one row for each occurrence and edge
+(`start`, `end`), so each notice goes out exactly once, also across a
+daemon restart. The daemon keeps the time of the last tick. A tick looks
+at each occurrence that started by now and ended after the last tick:
+
+- No start notice yet, and the occurrence has not ended: the start
+  notice. When it started more than 60 s ago (the daemon was down), the
+  notice says that it is late (`late: true`).
+- No start notice yet, and it ended in the last 60 s (a short occurrence
+  between two ticks): the start and the end notice.
+- No start notice yet, and it ended before that: it started and ended
+  while the daemon was down. No mail and no event; both rows are kept
+  with the state `skipped`.
+- A start notice and no end notice, and it ended: the end notice, once.
+
+An occurrence that ended before an event was made gets no notice.
+
+**An edit of an occurrence that started.** When a change (or a skip)
+touches an event with an occurrence whose start notice went out and
+whose end notice did not:
+
+- when the changed event has an occurrence that runs now, the open
+  notice moves to it: no second start notice, and the end notice comes at
+  its new end (a longer or shorter end, a new title);
+- else (the edit moved the occurrence away, or skipped it) the assignees
+  get the end notice at once, with the reason `an edit moved the
+  occurrence`, and `calendar.event_ended` has the same `reason`.
+
+A removal of an event with a running occurrence sends its end notice at
+once, with the reason `the event was removed`. An occurrence that the
+edit puts into the past gets no start notice.
+
+### 33.6 The API
+
+#### `GET /api/projects/{name}/calendar`
+
+The occurrences of the project's events and of the global events in a
+window, by start. Query:
+
+| Field | Meaning |
+|---|---|
+| `from` | An RFC 3339 time or a date (UTC midnight). Default: the start of today (UTC). |
+| `to` | The end of the window (not included). Default: `from` + `days`. |
+| `days` | The days of the window when `to` is absent: 1 to 400 (default 31). |
+
+The window is at most 400 days (`400 bad_request`). The answer:
+
+```json
+{"from": "2026-11-01T00:00:00.000Z", "to": "2026-12-02T00:00:00.000Z",
+ "occurrences": [{"event_id": "01JD…", "start": "2026-11-10T22:00:00.000Z",
+                  "end": "2026-11-10T23:30:00.000Z", "all_day": false,
+                  "title": "Weekly patch window", "kind": "maintenance",
+                  "project": "terra", "global": false, "recurring": true,
+                  "assignees": ["terra/lead"]}],
+ "events": [{"id": "01JD…", "title": "Weekly patch window", "...": "§33.1"}],
+ "truncated": false, "can_write": true}
+```
+
+`events` holds each event with an occurrence in the window. At most 5000
+occurrences; `truncated` is `true` when the list is cut. `can_write`
+says whether the caller may add an event to this calendar.
+
+#### `GET /api/calendar`
+
+The combined view. The operator and a sysadmin get every project and the
+global events; another agent gets its own project and the global events.
+`project=<name>` narrows it to one project (with the global events). The
+query and the answer are those of the project view; `can_write` is for
+`project` (`false` without it).
+
+#### `GET /api/calendar/global`
+
+The global events only. `can_write` is for the global calendar.
+
+#### `POST /api/projects/{name}/calendar/events`, `POST /api/calendar/global/events`
+
+Add an event. The body has the fields of §33.1 that a client writes:
+`title` and `start` are required; `description`, `kind`, `end`,
+`all_day`, `tz`, `recurrence` (an object or RRULE text), `links`, and
+`assignees` (agent IDs, `project/name`, or names in the project) are
+optional. Answers `201` with the event.
+
+#### `GET /api/calendar/events/{id}`
+
+One event, with `can_edit`.
+
+#### `PATCH /api/calendar/events/{id}`
+
+Change an event: a key replaces the field; `null` clears an optional one
+(`recurrence`, `links`, `end`). A new `start` of a timed event with no
+new `end` keeps the length. `all_day` alone turns the times into the
+local days of the instants, or the days into one hour from local
+midnight. `assignees` replaces the list. Answers with the event. The
+rule of §33.5 applies to a running occurrence.
+
+#### `DELETE /api/calendar/events/{id}`
+
+Remove the event with each occurrence. Answers `204`.
+
+#### `POST /api/calendar/events/{id}/skip`, `POST /api/calendar/events/{id}/unskip`
+
+`{"occurrence": "2026-11-17T22:00:00Z"}` or `{"occurrence":
+"2026-11-17"}` (the local date in the event's zone, when one occurrence
+starts on it). Skip one occurrence of a repeating event, or take the
+skip back. An event that does not repeat, or a value that names no
+occurrence, is `422 invalid` (`details.field` `occurrence`). Answers with
+the event.
+
+#### `PUT /api/calendar/events/{id}/assignees/{agent}`, `DELETE ...`
+
+Add or remove one assignee. Answers with the event.
+
+#### `GET /api/calendar/events/{id}/notices`
+
+The notice rows of the event: `[{occurrence, edge, state, at}]`, with
+`state` `sent`, `late`, `skipped`, or `closed` (an early end).
+
+#### `GET /api/projects/{name}/calendar/watches`, `GET /api/calendar/global/watches`
+
+The watchers: `[{watcher, name, project, created_by, created_at}]`.
+`watcher` is the agent ULID or `operator`.
+
+#### `POST /api/projects/{name}/calendar/watches`, `POST /api/calendar/global/watches`
+
+Start to watch. The body is optional: `{"watcher": "..."}`. Without it,
+the caller watches. `operator` (the Inbox) is for the operator only. An
+agent watches for itself with the read right; to make another agent
+watch, the caller is a lead of the project (a sysadmin for the global
+calendar). Answers `{calendar, watcher, watching: true, changed}`.
+
+#### `DELETE /api/projects/{name}/calendar/watches/{watcher}`, `DELETE /api/calendar/global/watches/{watcher}`
+
+Stop. `me` is the caller. Answers `{calendar, watcher, watching: false,
+changed}`.
+
+#### `GET /api/projects/{name}/calendar/grants`
+
+The agents of the project with the calendar grant: `[{id, name,
+project}]`. The read right of the project.
+
+#### `PUT /api/projects/{name}/calendar/grants/{agent}`, `DELETE ...`
+
+Grant or revoke the calendar write right (`policy.calendar_write`) of an
+agent of the project. A lead, a sysadmin, or the operator. An agent from
+an agent file is `409 file_managed`: change the file. Answers `{agent,
+name, project, calendar_write, changed}`.

@@ -602,6 +602,7 @@ pub fn sample_event(kind: &str, project: Option<&str>, at: &str) -> EventDoc {
         match k.as_str() {
             "*" | "monitor.*" => "monitor.status".to_owned(),
             "pipeline.*" => "pipeline.status".to_owned(),
+            "calendar.*" => "calendar.event_started".to_owned(),
             other => other.replace('*', "sample"),
         }
     } else {
@@ -642,6 +643,43 @@ pub fn sample_event(kind: &str, project: Option<&str>, at: &str) -> EventDoc {
             json!({"project": p, "pipeline": "ci", "pipeline_id": "01SAMPLE",
                    "error": "GitHub refused the token (401)"}),
         ),
+        "calendar.event_started" | "calendar.event_ended" => {
+            let verb = if kind.ends_with("started") {
+                "started"
+            } else {
+                "ended"
+            };
+            (
+                format!("calendar {p}: maintenance \"DB upgrade\" {verb}"),
+                json!({"project": p, "global": false, "event_id": "01SAMPLE",
+                       "title": "DB upgrade", "kind": "maintenance",
+                       "occurrence": "2026-11-10T09:00:00.000Z",
+                       "start": "2026-11-10T09:00:00.000Z", "end": "2026-11-10T10:00:00.000Z",
+                       "all_day": false, "rrule": "FREQ=WEEKLY;BYDAY=TU",
+                       "assignees": [format!("{p}/ops")], "late": false, "reason": null}),
+            )
+        }
+        "calendar.event_created" | "calendar.event_updated" | "calendar.event_deleted" => {
+            let verb = match kind.as_str() {
+                "calendar.event_created" => "added",
+                "calendar.event_updated" => "updated",
+                _ => "removed",
+            };
+            let mut data = json!({"project": p, "global": false, "event_id": "01SAMPLE",
+                                  "title": "Change freeze", "kind": "freeze",
+                                  "start": "2026-12-19T14:00:00.000Z",
+                                  "end": "2026-12-24T14:00:00.000Z", "all_day": true,
+                                  "rrule": null, "assignees": []});
+            if verb == "updated" {
+                data["changed"] = json!(["when"]);
+                data["diff"] =
+                    json!({"when": "2026-12-20 (all day) → 2026-12-20 to 2026-12-24 (all day)"});
+            }
+            (
+                format!("calendar {p}: {verb} freeze \"Change freeze\""),
+                data,
+            )
+        }
         k if k.starts_with("ci.") => (
             format!("{k} on main"),
             json!({"repo": "wil/terrarium", "branch": "main", "run_id": 42,

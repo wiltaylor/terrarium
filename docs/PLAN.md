@@ -1226,6 +1226,9 @@ to the audit log with the agent's ID.
 | Answer a question (§12e; never its own; the operator answers all) | no | no | yes |
 | Read schedules (§12b) | own project | own project | all, global too |
 | Create, edit, delete, run schedules (§12b; the action stays inside the project; a global schedule needs sysadmin) | no | in project | anywhere |
+| Read the calendar (§15.8; the global events too) | own project | own project | all |
+| Add calendar events; change and remove any (§15.8; a global event needs sysadmin) | own events, with the policy field `calendar_write` | in project | anywhere |
+| Grant and revoke `calendar_write` (§15.8) | no | in project | anywhere |
 | Create and delete projects | no | no | yes |
 | Define global targets | no | no | yes |
 | List host agents | yes | yes | yes |
@@ -2365,6 +2368,49 @@ Deploy.
 - **Surfaces.** The API (docs/api.md §31), `terrarium pipeline`
   (docs/cli.md), the Pipelines page of a project (the second item of the
   project in the tree), and the packaged skill `terrarium-pipelines`.
+
+### 15.8 The calendar
+
+AI agents put the planned work on a calendar: maintenance windows,
+change freezes, deploy windows, and tasks. A human reviews the plan in
+one view.
+
+- **Model.** An event (migration 59: `calendar_events`,
+  `calendar_assignees`, `calendar_exceptions`, `calendar_watches`,
+  `calendar_notices`, `calendar_state`) has a title, a markdown
+  description, a kind (`window`, `maintenance`, `freeze`, `deploy`,
+  `task`, `other`), a start and an end (UTC instants) or the days of an
+  all-day event, a zone, an optional repeat rule, links (a card, a
+  target, a repo, a URL), and assignees. Each project has a calendar;
+  the global calendar holds the events of every project (a host
+  maintenance window), and each project view shows them, marked global.
+- **Repeats.** A small RRULE subset: daily, weekly (with weekdays), or
+  monthly (with a month day), an interval, an end (`until` or `count`),
+  a zone for the rule, and skips of single occurrences. The rule repeats
+  the local wall clock time, also across a DST change. Another RRULE
+  part is `422` with its name (docs/api.md §33.2).
+- **Rights.** A worker reads the calendar of its project. A lead
+  (project_admin), a sysadmin, and the operator write it. A lead grants
+  a worker the write right with the policy field `calendar_write` (§10):
+  the worker then adds events, and changes and removes its own. A
+  sysadmin or the operator writes the global calendar.
+- **Notices.** The notice tick runs with the schedule tick. Each
+  assignee gets a mail from `system` when an occurrence starts and when
+  it ends, exactly once, kept in `calendar_notices`, so a restart sends
+  nothing twice. After a downtime, a late start notice goes out only for
+  an occurrence that has not ended; an occurrence that started and ended
+  while the daemon was down gets no mail, but a row. An edit that moves
+  a running occurrence moves its open notice, or ends it at once
+  (docs/api.md §33.5).
+- **Watchers and events.** An agent or the operator Inbox watches a
+  calendar, and gets a mail for each add, change (with a short diff),
+  and removal, except for its own changes. The events
+  `calendar.event_created`, `..._updated`, `..._deleted`, `..._started`,
+  and `..._ended` go on the event log, for the triggers (§12c).
+- **Surfaces.** The API (docs/api.md §33), `terrarium calendar`
+  (docs/cli.md), the Calendar item of a project (month, week, and agenda;
+  the agenda first on a phone), the combined Calendar page of the
+  operator, and the packaged skill `terrarium-calendar`.
 
 ---
 

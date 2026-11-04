@@ -5,6 +5,7 @@ pub mod agents;
 pub mod artifacts;
 pub mod auth;
 pub mod board;
+pub mod calendar;
 pub mod config;
 pub mod db;
 pub mod events;
@@ -68,6 +69,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Monitor { command } => monitors::monitor(ctx, command).await,
         Command::Dashboard { command } => monitors::dashboard(ctx, command).await,
         Command::Pipeline { command } => pipelines::pipeline(ctx, command).await,
+        Command::Calendar { command } => calendar::calendar(ctx, command).await,
         Command::Version { command } => artifacts::version(ctx, command).await,
         Command::Usage { command } => system::usage(ctx, command.as_ref()).await,
         Command::Status { command } => agents::status(ctx, command).await,

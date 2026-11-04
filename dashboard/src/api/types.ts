@@ -361,6 +361,8 @@ export interface AgentPolicy {
   cross_project?: string[];
   /** The right to spawn ephemeral agents (docs/api.md §6.10). Absent: no spawn rights. */
   spawn?: SpawnPolicy;
+  /** The calendar grant of a lead (docs/api.md §33.3): add events, change the own ones. Absent: read only. */
+  calendar_write?: boolean;
 }
 
 /** The policy block `spawn` (docs/api.md §6.10): what an agent may spawn. */
@@ -1066,6 +1068,14 @@ export const EVENT_KINDS = [
   "pipeline.run",
   "pipeline.status",
   "pipeline.error",
+  // The calendar (docs/api.md §33): an event added, changed (with `changed` and `diff`), or removed
+  // `{project, global, event_id, title, kind, start, end, all_day, rrule, assignees}`, and an occurrence that started or
+  // ended (also `occurrence`, `late`, `reason`).
+  "calendar.event_created",
+  "calendar.event_updated",
+  "calendar.event_deleted",
+  "calendar.event_started",
+  "calendar.event_ended",
   // A webhook attempt ended (docs/api.md §19.5): `{trigger, name, delivery, status, http_status, attempt, test, event_seq}`.
   "webhook.delivery",
   "dashboard.updated",
@@ -4014,4 +4024,153 @@ export interface PipelineTestReport {
   runs: Omit<PipelineRun, "pipeline" | "first_seen" | "changed_at">[];
   error: string | null;
   output: PipelineOutput | null;
+}
+
+// ------------------------------------------------------------ the calendar (docs/api.md §33)
+
+/** The kinds of a calendar event. */
+export type CalendarKind = "window" | "maintenance" | "freeze" | "deploy" | "task" | "other";
+
+/** A weekday as two letters. */
+export type CalendarDay = "mo" | "tu" | "we" | "th" | "fr" | "sa" | "su";
+
+/** A recurrence rule (an RRULE subset). The API also takes the RRULE text. */
+export interface CalendarRule {
+  freq: "daily" | "weekly" | "monthly";
+  interval?: number;
+  /** A weekly rule. Empty: the weekday of the first start. */
+  weekdays?: CalendarDay[];
+  /** A monthly rule: 1-31, or -1 for the last day. */
+  month_day?: number;
+  /** A local date (that day included) or an RFC 3339 time. */
+  until?: string;
+  count?: number;
+  /** The zone whose wall clock repeats; absent: the event's zone. */
+  tz?: string;
+}
+
+export interface CalendarLinks {
+  card?: string;
+  target?: string;
+  repo?: string;
+  url?: string;
+}
+
+export interface CalendarAssignee {
+  id: string;
+  name: string;
+  project: string;
+}
+
+/** An event as the API shows it. `project` is null for a global event. */
+export interface CalendarEvent {
+  id: string;
+  project: string | null;
+  global: boolean;
+  title: string;
+  description: string;
+  kind: CalendarKind;
+  /** The first start and end (UTC). */
+  start: string;
+  end: string;
+  all_day: boolean;
+  /** The first and the last local day of an all-day event. */
+  start_date?: string;
+  end_date?: string;
+  tz: string;
+  recurrence: CalendarRule | null;
+  rrule: string | null;
+  repeat: string | null;
+  links: CalendarLinks;
+  assignees: CalendarAssignee[];
+  /** The starts of the skipped occurrences. */
+  exceptions: string[];
+  created_by: string;
+  created_by_name: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+  /** The caller may change and remove it. */
+  can_edit?: boolean;
+}
+
+/** One occurrence in a list answer. */
+export interface CalendarOccurrence {
+  event_id: string;
+  start: string;
+  end: string;
+  all_day: boolean;
+  title: string;
+  kind: CalendarKind;
+  project: string | null;
+  global: boolean;
+  recurring: boolean;
+  /** `project/name`. */
+  assignees: string[];
+}
+
+/** `GET /api/projects/{name}/calendar`, `/api/calendar`, `/api/calendar/global`. */
+export interface CalendarView {
+  from: string;
+  to: string;
+  occurrences: CalendarOccurrence[];
+  events: CalendarEvent[];
+  truncated: boolean;
+  /** The caller may add an event to this view's calendar. */
+  can_write: boolean;
+}
+
+/** The body of a create, and of a patch (every field optional; `null` clears). */
+export interface CalendarInput {
+  title?: string;
+  description?: string;
+  kind?: CalendarKind;
+  /** RFC 3339; a local `2026-11-10T09:00` in `tz`; or a date of an all-day event. */
+  start?: string;
+  /** An all-day event: the last day. */
+  end?: string | null;
+  all_day?: boolean;
+  tz?: string;
+  recurrence?: CalendarRule | string | null;
+  links?: CalendarLinks | null;
+  /** Agents: an ID, `project/name`, or a name in the project. A patch replaces the list. */
+  assignees?: string[];
+}
+
+export interface CalendarRange {
+  from?: string;
+  to?: string;
+  days?: number;
+  /** The combined view only. */
+  project?: string;
+}
+
+export interface CalendarWatcher {
+  /** The agent ULID, or `operator`. */
+  watcher: string;
+  name: string;
+  project: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+export interface CalendarWatchResult {
+  calendar: string;
+  watcher: string;
+  watching: boolean;
+  changed: boolean;
+}
+
+export interface CalendarGrant {
+  id: string;
+  name: string;
+  project: string;
+}
+
+export interface CalendarGrantResult {
+  agent: string;
+  name: string;
+  project: string;
+  calendar_write: boolean;
+  changed: boolean;
 }

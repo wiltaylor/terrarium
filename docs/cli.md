@@ -1131,6 +1131,64 @@ and changed runs, or the error with the output of the script.
 write a script. The packaged skill `terrarium-pipelines` tells the
 agents how to use pipelines.
 
+### Calendar
+
+```
+terrarium calendar ls [--from t] [--to t] [--days 31] [--global]
+terrarium calendar show <id>
+terrarium calendar add <title> --start t [--global] [--end t] [--all-day] [--tz zone]
+                       [--kind window|maintenance|freeze|deploy|task|other] [--description d|-]
+                       [--repeat daily|weekly|monthly|<RRULE> [--interval n] [--on mo,tu,...]
+                        [--month-day n] [--until date | --count n]]
+                       [--assign agent]... [--card c] [--target t] [--repo r] [--link-url u]
+terrarium calendar edit <id> [the flags of add] [--title t] [--start t] [--no-repeat] [--clear-links] [--timed]
+terrarium calendar rm <id>
+terrarium calendar skip <id> <occurrence> [--undo]
+terrarium calendar assign <id> <agent>...
+terrarium calendar unassign <id> <agent>...
+terrarium calendar watch [--global] [--watcher agent|operator]
+terrarium calendar unwatch [--global] [--watcher agent|operator]
+terrarium calendar watchers [--global]
+terrarium calendar grant <agent>
+terrarium calendar revoke <agent>
+terrarium calendar grants
+```
+
+The calendar of a project holds its maintenance windows, change freezes,
+deploy windows, and planned work (docs/api.md §33). The project is
+`--project`, or the agent's own. `--global` names the global calendar,
+whose events every project view shows. `calendar ls` prints the
+occurrences of the window, the repeats expanded; the operator with no
+`--project` gets the combined view of every project:
+
+```
+WHEN                          KIND         TITLE                CALENDAR  ASSIGNEES   ID
+2026-11-10 22:00 – 23:30 UTC  maintenance  Weekly patch window  terra     terra/lead  01JD…
+2026-11-13 02:00 – 03:00 UTC  window       Host maintenance     global    -           01JD…
+2026-12-20 (all day)          freeze       Release freeze       terra     -           01JD…
+```
+
+Times are RFC 3339, a local time in `--tz` (`2026-11-10T22:00`), or a
+date for an all-day event (`--end` is then the last day). Without
+`--end`, an event lasts one hour, or one day. `--repeat` takes
+`daily`, `weekly`, or `monthly` with `--interval`, `--on` (weekly),
+`--month-day` (monthly; `-1` is the last day), and `--until` or
+`--count`; or an RRULE text (`FREQ=WEEKLY;BYDAY=MO,TH;COUNT=4`; the
+daemon refuses the parts that it does not support). On `edit`,
+`--assign` replaces the assignees, and a new `--start` of a timed event
+keeps its length. `skip` takes the start of one occurrence (RFC 3339) or
+its local date.
+
+Rights: every agent of the project reads. A lead (project admin), a
+sysadmin, and the operator write. A worker writes only with the grant
+of a lead (`calendar grant <worker>`, the policy field
+`calendar_write`), and then changes and removes only its own events.
+The global calendar needs a sysadmin or the operator. Each assignee gets
+a mail from `system` when an occurrence starts and when it ends; a
+watcher gets a mail for each add, change, and removal by another actor.
+The packaged skill `terrarium-calendar` tells the agents how and when to
+use the calendar.
+
 ### Usage, status, and targets
 
 ```

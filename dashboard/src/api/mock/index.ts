@@ -115,6 +115,7 @@ import { createDbMock } from "./db";
 import { createTestRunMock } from "./testRuns";
 import { createMonitorMock } from "./monitors";
 import { createPipelineMock } from "./pipelines";
+import { createCalendarMock } from "./calendar";
 import { createSpawnMock } from "./spawns";
 import { applyTemplate, compactMaxAgeError, compactOnIdleError, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createSecretMock } from "./secrets";
@@ -800,6 +801,22 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   let pipelineCounter = 0;
   const pipelineMock = createPipelineMock({ reply, fail, emit, audit, project: (name) => project(name), caller: opts.scheduleCaller, ulid: (tag) => fakeUlid(tag, ++pipelineCounter), now });
   if (w.projects.some((x) => x.name === "terrarium")) pipelineMock.seed();
+  // The calendar (docs/api.md §33): ./calendar. The seed gives project `terrarium` a weekly maintenance window, a freeze,
+  // a deploy, and a monthly task, and the global calendar a host window. Watcher mail comes from `system`.
+  let calendarCounter = 0;
+  const calendarMock = createCalendarMock({
+    reply,
+    fail,
+    emit,
+    audit,
+    project: (name) => project(name),
+    agents: () => w.agents,
+    mail: (to, subject, body) => sendMail(to, "system", subject, body),
+    caller: opts.scheduleCaller,
+    ulid: (tag) => fakeUlid(tag, ++calendarCounter),
+    now,
+  });
+  if (w.projects.some((x) => x.name === "terrarium") && w.agents.some((a) => a.name === "lead")) calendarMock.seed();
   const skillMock = createSkillMock({ w, reply, fail, audit, caller: opts.scheduleCaller, available: opts.configRepo });
   // The effective skills of an agent (PLAN §8.6), as the API fills them.
   const withSkills = (a: Agent): Agent => Object.assign(a, { effective_skills: skillMock.effective(a) });
@@ -3961,6 +3978,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     testRuns: testRunMock.api,
     monitors: monitorMock.api,
     pipelines: pipelineMock.api,
+    calendar: calendarMock.api,
 
     // docs/api.md §6.11: operator only; each call answers with the list.
     pins: (() => {

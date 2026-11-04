@@ -45,6 +45,8 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 - `artifact push | ls | url`: files and static sites for the user.
 - `version new | attach | submit | wait`: ask the user to review a result.
 - `test push | ls | show | compare`: prove test results (the `terrarium-tests` skill).
+- `calendar ls | show | add | edit | rm | skip | assign | watch | grant | revoke`: the project
+  calendar of maintenance windows, freezes, and deploys (the `terrarium-calendar` skill).
 - `question ask | bundle | ls | show | update | retract`: ask the operator ("Questions to the operator").
 - `notify`: tell the operator something that needs no decision ("Questions to the operator").
 - `usage`: your subscription and your share of it.

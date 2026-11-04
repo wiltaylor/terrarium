@@ -176,6 +176,14 @@ pub enum Command {
         #[command(subcommand)]
         command: PipelineCmd,
     },
+    /// The calendar: maintenance windows, change freezes, deploy windows,
+    /// and planned work of the project, and the global events
+    /// (docs/api.md §33). Workers read it; a lead writes it or grants the
+    /// write right
+    Calendar {
+        #[command(subcommand)]
+        command: CalendarCmd,
+    },
     /// Subscription usage
     Usage {
         #[command(subcommand)]
@@ -1762,6 +1770,177 @@ pub struct MonitorArgs {
     /// Make it, or turn it, off
     #[arg(long)]
     pub disabled: bool,
+}
+
+/// The kinds of a calendar event.
+pub const CALENDAR_KINDS: [&str; 6] =
+    ["window", "maintenance", "freeze", "deploy", "task", "other"];
+
+#[derive(Debug, Subcommand)]
+pub enum CalendarCmd {
+    /// List the occurrences in a window: the project's events and the
+    /// global ones (the operator with no project: every project)
+    Ls {
+        /// From this time or date (default: the start of today, UTC)
+        #[arg(long)]
+        from: Option<String>,
+        /// Up to this time or date
+        #[arg(long)]
+        to: Option<String>,
+        /// The days of the window when --to is absent (default 31)
+        #[arg(long)]
+        days: Option<i64>,
+        /// Only the global calendar
+        #[arg(long)]
+        global: bool,
+    },
+    /// Show one event (its ID)
+    Show { id: String },
+    /// Add an event to the project calendar (--global: the global one)
+    ///
+    /// Times: RFC 3339 (2026-11-10T09:00:00Z), a local time in --tz
+    /// (2026-11-10T09:00), or a date for an all-day event (2026-11-10;
+    /// --end is the last day). Repeat: --repeat daily|weekly|monthly
+    /// with --interval, --on, --month-day, --until, --count, or an RRULE
+    /// text (FREQ=WEEKLY;BYDAY=MO,TH;COUNT=4).
+    Add {
+        /// The title
+        title: String,
+        /// The start
+        #[arg(long)]
+        start: String,
+        /// Add to the global calendar (sysadmin or the operator)
+        #[arg(long)]
+        global: bool,
+        #[command(flatten)]
+        args: CalendarArgs,
+    },
+    /// Change an event: only the flags given change
+    Edit {
+        id: String,
+        /// A new title
+        #[arg(long)]
+        title: Option<String>,
+        /// A new start (a timed event keeps its length)
+        #[arg(long)]
+        start: Option<String>,
+        /// Stop the repeat
+        #[arg(long, conflicts_with = "repeat")]
+        no_repeat: bool,
+        /// Remove every link
+        #[arg(long)]
+        clear_links: bool,
+        /// A timed event, not an all-day one
+        #[arg(long, conflicts_with = "all_day")]
+        timed: bool,
+        #[command(flatten)]
+        args: CalendarArgs,
+    },
+    /// Remove an event (each occurrence)
+    Rm { id: String },
+    /// Skip one occurrence of a repeating event: its start (RFC 3339) or
+    /// its date
+    Skip {
+        id: String,
+        occurrence: String,
+        /// Take the skip back
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Assign agents: they get a mail when each occurrence starts and ends
+    Assign {
+        id: String,
+        #[arg(required = true)]
+        agents: Vec<String>,
+    },
+    /// Remove assignees
+    Unassign {
+        id: String,
+        #[arg(required = true)]
+        agents: Vec<String>,
+    },
+    /// Watch the calendar: a mail for each add, change, and removal
+    Watch {
+        /// The global calendar
+        #[arg(long)]
+        global: bool,
+        /// Watch for another agent (a lead) or `operator` (the Inbox)
+        #[arg(long)]
+        watcher: Option<String>,
+    },
+    /// Stop watching the calendar
+    Unwatch {
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        watcher: Option<String>,
+    },
+    /// List the watchers of the calendar
+    Watchers {
+        #[arg(long)]
+        global: bool,
+    },
+    /// Give a worker of the project the calendar write right (a lead)
+    Grant { agent: String },
+    /// Take the calendar write right back (a lead)
+    Revoke { agent: String },
+    /// List the agents of the project with the calendar write right
+    Grants,
+}
+
+/// The fields of `calendar add` and `calendar edit`.
+#[derive(Debug, Args)]
+pub struct CalendarArgs {
+    /// The end (an all-day event: the last day). Default: one hour, or
+    /// one day
+    #[arg(long)]
+    pub end: Option<String>,
+    /// An all-day event
+    #[arg(long)]
+    pub all_day: bool,
+    /// The IANA zone of the times and of the repeat (default UTC)
+    #[arg(long)]
+    pub tz: Option<String>,
+    /// The kind
+    #[arg(long, value_parser = CALENDAR_KINDS)]
+    pub kind: Option<String>,
+    /// The description (markdown), or `-` for stdin
+    #[arg(long)]
+    pub description: Option<String>,
+    /// daily, weekly, monthly, or an RRULE text
+    #[arg(long)]
+    pub repeat: Option<String>,
+    /// Repeat every N days, weeks, or months
+    #[arg(long, requires = "repeat")]
+    pub interval: Option<u32>,
+    /// The weekdays of a weekly repeat: mo,tu,we,th,fr,sa,su
+    #[arg(long, value_delimiter = ',', requires = "repeat")]
+    pub on: Vec<String>,
+    /// The day of a monthly repeat (1 to 31, -1 for the last day)
+    #[arg(long, allow_negative_numbers = true, requires = "repeat")]
+    pub month_day: Option<i32>,
+    /// The last date (or time) of the repeat
+    #[arg(long, requires = "repeat", conflicts_with = "count")]
+    pub until: Option<String>,
+    /// The number of occurrences
+    #[arg(long, requires = "repeat")]
+    pub count: Option<u32>,
+    /// Assign an agent (repeat for more); on edit, the list replaces the
+    /// assignees
+    #[arg(long = "assign")]
+    pub assignees: Vec<String>,
+    /// Link a card
+    #[arg(long)]
+    pub card: Option<String>,
+    /// Link a target
+    #[arg(long)]
+    pub target: Option<String>,
+    /// Link a repo
+    #[arg(long)]
+    pub repo: Option<String>,
+    /// Link a URL (http or https)
+    #[arg(long = "link-url")]
+    pub link_url: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

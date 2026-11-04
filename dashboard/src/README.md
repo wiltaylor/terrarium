@@ -940,6 +940,8 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
 | `/p/:project/dashboard`, `/p/:project` | Dashboard: the blocks of the monitors (stat, status, chart, text, table, note), Edit dashboard (add, change, drag or move, remove, save), and the Monitors tab (`?tab=monitors`: state, last and next run, on/off, Run now, the edit dialog with Test run); see "The project dashboard". `/p/:project` redirects here. | `GET`, `PUT .../dashboard`, `GET .../monitors`, `POST .../monitors`, `POST .../monitors/test`, `PATCH`, `DELETE /api/monitors/{id}`, `POST .../run`, `GET .../results?since=&bucket=` |
 | `/p/:project/pipelines` | Pipelines: each CI/CD pipeline with the state of its newest run, the last poll, on/off, Refresh, Edit, Delete; a row opens the recent runs, a run opens its steps; the dialog (GitHub Actions or a script) has a Test poll; see "Pipelines". | `GET`, `POST .../pipelines`, `POST .../pipelines/test`, `PATCH`, `DELETE /api/pipelines/{id}`, `POST .../refresh`, `GET .../runs`, `GET .../runs/{run}` |
+| `/p/:project/calendar` | Calendar: the project's events and the global ones in a month grid, a week, or an agenda; an occurrence opens the event (Edit, Remove, Skip); the dialog makes or changes an event; see "Calendar". | `GET .../calendar`, `POST .../calendar/events`, `GET`, `PATCH`, `DELETE /api/calendar/events/{id}`, `POST .../skip`, `GET`, `POST`, `DELETE .../calendar/watches` |
+| `/calendar` | The combined calendar of every project and the global calendar (the operator). | `GET /api/calendar`, `GET /api/calendar/global`, `POST /api/calendar/global/events` |
 | `/p/:project/board` | Board, Cards tab: drag and drop, New card dialog (the "+" of the backlog column), Edit columns dialog, ETA countdowns, question badges, version chips, the version lanes and the Version modal (`?version=<id>`), "+ Version", the Versions menu, card drawer with its questions and versions (see "The board") | `GET .../board`, `PATCH .../board`, `GET .../versions?archived=all`, `POST .../versions`, `PATCH /api/versions/{id}`, `POST /api/versions/{id}/submit\|approve\|reject\|release\|archive\|unarchive`, `compare`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
 | `/p/:project/versions/:id?`, `/p/:project/board/versions/:id?` | Gone: redirect in one hop to `/p/:project/board`, with `?version=<id>` when the path has an ID (`app/nav.ts` `MOVED_ROUTES`). The Version modal opens. The redirect adds the old query (`withQuery`). The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. | none |
 | `/p/:project/board/tests`, `/p/:project/board/tests/:id` | Board, Tests tab: the test runs (filters, counts bar, links) and one run (counts, compare with the previous run, suites and cases, Failed only, search, output, Download original, link and unlink, delete); see "Test runs" | `GET .../test-runs?card=&version=&name=&status=&cursor=`, `GET /api/test-runs/{id}?status=&q=&cursor=`, `GET .../compare?with=previous`, `GET .../raw`, `PATCH .../links`, `DELETE /api/test-runs/{id}` |
@@ -1058,6 +1060,36 @@ the tree.
 - **Mock.** `api/mock/pipelines.ts`: project `terrarium` has a GitHub
   pipeline, an Octopus Deploy script pipeline, and a pipeline that fails;
   the activity timer polls the due ones, so runs start and end.
+
+## Calendar
+
+`features/calendar/` (docs/api.md §33): the third item of a project in the
+tree (`/p/:project/calendar`), and the Calendar item above the tree for
+the combined view (`/calendar`). `model.ts` has the pure parts (the month
+grid, the week, the agenda, the dialog form and its body); `recur.ts` has
+the repeat rules after the daemon's `calendar/recur.rs`, for the mock and
+the zone helpers.
+
+- **Views.** Month (whole weeks from Monday), Week (seven day columns),
+  and Agenda (31 days by day). A phone (760 px or less) opens the agenda.
+  Times show in the browser's zone. Each kind has its colour; a global
+  event has a dashed edge and the word `global`; a running occurrence has
+  a ring.
+- **Event.** An occurrence opens its event: the occurrence, the zone, the
+  repeat, the skips, the assignees, the links, and the markdown
+  description. Edit, Remove, and Skip this occurrence show only with
+  `can_edit`.
+- **Dialog.** The title, the kind, the calendar (the combined view only),
+  all day or the times in the event's zone, the repeat (daily, weekly
+  with weekdays, monthly with a month day; an end date or a count), the
+  assignees, the links, and the description. `New event` shows only with
+  `can_write`, so a viewer without the write right reads only.
+- **Watch.** The project page watches the calendar for the operator Inbox;
+  the combined page watches the global calendar.
+- **Live.** A `calendar.*` event loads the view again.
+- **Mock.** `api/mock/calendar.ts`: project `terrarium` has a weekly patch
+  window, a release freeze, a deploy, and a monthly task; the global
+  calendar has a host window. The mock has no notice tick.
 
 ## Home: hosts
 

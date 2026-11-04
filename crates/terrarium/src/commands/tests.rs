@@ -8809,3 +8809,285 @@ async fn pipelines_commands() {
     .await;
     assert!(out.starts_with("1 runs in 42 ms"), "{out}");
 }
+
+#[tokio::test]
+async fn calendar_commands() {
+    let e = json!({"id": "01CALCALCALCALCALCALCALCAL", "project": "terra", "global": false,
+                   "title": "DB upgrade", "kind": "maintenance", "description": "Run it.",
+                   "start": "2026-11-10T09:00:00.000Z", "end": "2026-11-10T10:00:00.000Z",
+                   "all_day": false, "tz": "Europe/London",
+                   "recurrence": {"freq": "weekly", "weekdays": ["tu"]},
+                   "rrule": "FREQ=WEEKLY;BYDAY=TU", "repeat": "every week on tu",
+                   "links": {"target": "box"},
+                   "assignees": [{"id": "01W", "name": "worker", "project": "terra"}],
+                   "exceptions": [], "created_by": "operator", "created_by_name": "operator",
+                   "updated_by": "operator", "created_at": "2026-11-04T00:00:00.000Z",
+                   "updated_at": "2026-11-04T00:00:00.000Z"});
+    let occ = json!({"event_id": e["id"], "start": "2026-11-10T09:00:00.000Z",
+                     "end": "2026-11-10T10:00:00.000Z", "all_day": false,
+                     "title": "DB upgrade", "kind": "maintenance", "project": "terra",
+                     "global": false, "recurring": true, "assignees": ["terra/worker"]});
+    let view = json!({"from": "2026-11-04T00:00:00.000Z", "to": "2026-12-05T00:00:00.000Z",
+                      "occurrences": [occ], "events": [e.clone()], "truncated": false});
+    // ls in the agent's own project.
+    let out = ok(
+        true,
+        &["calendar", "ls", "--days", "7"],
+        vec![(200, view.clone())],
+        vec![(
+            Get,
+            "/api/projects/terra/calendar",
+            vec![("days", "7")],
+            None,
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("2026-11-10 09:00 – 10:00 UTC") && out.contains("DB upgrade"),
+        "{out}"
+    );
+    assert!(out.contains("terra/worker"), "{out}");
+    // The operator with no project: the combined view; --global the global one.
+    ok(
+        false,
+        &["calendar", "ls"],
+        vec![(200, view.clone())],
+        vec![req(Get, "/api/calendar")],
+    )
+    .await;
+    ok(
+        false,
+        &["calendar", "ls", "--global", "--from", "2026-11-01"],
+        vec![(200, view.clone())],
+        vec![(
+            Get,
+            "/api/calendar/global",
+            vec![("from", "2026-11-01")],
+            None,
+        )],
+    )
+    .await;
+
+    // add with a repeat rule, assignees, and links.
+    let out = ok(
+        true,
+        &[
+            "calendar",
+            "add",
+            "DB upgrade",
+            "--start",
+            "2026-11-10T09:00",
+            "--end",
+            "2026-11-10T10:00",
+            "--tz",
+            "Europe/London",
+            "--kind",
+            "maintenance",
+            "--repeat",
+            "weekly",
+            "--on",
+            "tu,th",
+            "--count",
+            "4",
+            "--assign",
+            "worker",
+            "--target",
+            "box",
+        ],
+        vec![(201, e.clone())],
+        vec![(
+            Post,
+            "/api/projects/terra/calendar/events",
+            vec![],
+            Some(json!({"title": "DB upgrade", "start": "2026-11-10T09:00",
+                        "end": "2026-11-10T10:00", "tz": "Europe/London",
+                        "kind": "maintenance",
+                        "recurrence": {"freq": "weekly", "weekdays": ["tu", "th"], "count": 4},
+                        "assignees": ["worker"], "links": {"target": "box"}})),
+        )],
+    )
+    .await;
+    assert!(out.starts_with("added maintenance \"DB upgrade\""), "{out}");
+    // An RRULE text goes as it is; a global event goes to the global calendar.
+    let r = exec(
+        false,
+        &[
+            "calendar",
+            "add",
+            "host window",
+            "--global",
+            "--start",
+            "2026-11-10",
+            "--all-day",
+            "--repeat",
+            "FREQ=MONTHLY;BYMONTHDAY=1",
+            "--until",
+            "2027-06-30",
+        ],
+        vec![(201, e.clone())],
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    assert_eq!(r.reqs[0].path, "/api/calendar/global/events");
+    let b = r.reqs[0].body.clone().unwrap();
+    assert_eq!(b["recurrence"], "FREQ=MONTHLY;BYMONTHDAY=1;UNTIL=20270630");
+    assert_eq!(b["all_day"], true);
+    // --on goes only with a word rule.
+    let r = exec(
+        true,
+        &[
+            "calendar",
+            "add",
+            "x",
+            "--start",
+            "2026-11-10",
+            "--repeat",
+            "FREQ=DAILY",
+            "--on",
+            "mo",
+        ],
+        vec![],
+        None,
+    )
+    .await;
+    assert!(r.result.is_err());
+
+    // show, edit, skip, assign, rm.
+    let out = ok(
+        true,
+        &["calendar", "show", "01CALCALCALCALCALCALCALCAL"],
+        vec![(200, e.clone())],
+        vec![req(Get, "/api/calendar/events/01CALCALCALCALCALCALCALCAL")],
+    )
+    .await;
+    assert!(out.contains("repeats: every week on tu"), "{out}");
+    assert!(out.contains("assignees: terra/worker"), "{out}");
+    assert!(out.contains("links: target box"), "{out}");
+    ok(
+        true,
+        &[
+            "calendar",
+            "edit",
+            "01CALCALCALCALCALCALCALCAL",
+            "--title",
+            "v2",
+            "--no-repeat",
+        ],
+        vec![(200, e.clone())],
+        vec![(
+            Patch,
+            "/api/calendar/events/01CALCALCALCALCALCALCALCAL",
+            vec![],
+            Some(json!({"title": "v2", "recurrence": null})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &[
+            "calendar",
+            "skip",
+            "01CALCALCALCALCALCALCALCAL",
+            "2026-11-17",
+            "--undo",
+        ],
+        vec![(200, e.clone())],
+        vec![(
+            Post,
+            "/api/calendar/events/01CALCALCALCALCALCALCALCAL/unskip",
+            vec![],
+            Some(json!({"occurrence": "2026-11-17"})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &[
+            "calendar",
+            "assign",
+            "01CALCALCALCALCALCALCALCAL",
+            "worker",
+            "helper",
+        ],
+        vec![(200, e.clone()), (200, e.clone())],
+        vec![
+            (
+                Put,
+                "/api/calendar/events/01CALCALCALCALCALCALCALCAL/assignees/worker",
+                vec![],
+                Some(json!({})),
+            ),
+            (
+                Put,
+                "/api/calendar/events/01CALCALCALCALCALCALCALCAL/assignees/helper",
+                vec![],
+                Some(json!({})),
+            ),
+        ],
+    )
+    .await;
+    ok(
+        true,
+        &["calendar", "rm", "01CALCALCALCALCALCALCALCAL"],
+        vec![(204, Value::Null)],
+        vec![req(
+            Delete,
+            "/api/calendar/events/01CALCALCALCALCALCALCALCAL",
+        )],
+    )
+    .await;
+
+    // watch, unwatch, grants.
+    let out = ok(
+        true,
+        &["calendar", "watch"],
+        vec![(
+            200,
+            json!({"calendar": "terra", "watcher": "01L", "watching": true,
+                          "changed": true}),
+        )],
+        vec![req(Post, "/api/projects/terra/calendar/watches")],
+    )
+    .await;
+    assert!(out.contains("watches the calendar terra"), "{out}");
+    ok(
+        true,
+        &["calendar", "unwatch", "--global"],
+        vec![(
+            200,
+            json!({"calendar": "global", "watcher": "01L", "watching": false,
+                          "changed": true}),
+        )],
+        vec![req(Delete, "/api/calendar/global/watches/me")],
+    )
+    .await;
+    let out = ok(
+        true,
+        &["calendar", "grant", "worker"],
+        vec![(
+            200,
+            json!({"agent": "01W", "name": "worker", "project": "terra",
+                          "calendar_write": true, "changed": true}),
+        )],
+        vec![(
+            Put,
+            "/api/projects/terra/calendar/grants/worker",
+            vec![],
+            Some(json!({})),
+        )],
+    )
+    .await;
+    assert!(out.contains("terra/worker may write the calendar"), "{out}");
+    ok(
+        true,
+        &["calendar", "revoke", "worker"],
+        vec![(
+            200,
+            json!({"agent": "01W", "name": "worker", "project": "terra",
+                          "calendar_write": false, "changed": true}),
+        )],
+        vec![req(Delete, "/api/projects/terra/calendar/grants/worker")],
+    )
+    .await;
+}

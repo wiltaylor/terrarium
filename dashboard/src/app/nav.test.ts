@@ -59,7 +59,7 @@ describe("navigation", () => {
   it("has no Templates, Secrets, or Settings item under the project: they are tabs of the project settings screen, each with a route", () => {
     const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
     for (const gone of ["templates", "secrets", "settings"]) expect(paths).not.toContain(gone);
-    expect(paths).toEqual(["dashboard", "pipelines", "board", "repos", "logs", "knowledge", "agents"]);
+    expect(paths).toEqual(["dashboard", "pipelines", "calendar", "board", "repos", "logs", "knowledge", "agents"]);
     expect(PROJECT_SETTINGS_TABS).toEqual([
       { path: "general", label: "General" },
       { path: "secrets", label: "Secrets" },
@@ -105,11 +105,14 @@ describe("navigation", () => {
     expect(BOARD_TABS.map((t) => t.path)).toContain("schedules");
   });
 
-  it("has Home, Inbox, Logs, then Schedules above the project tree, with a route, and no Questions item", () => {
-    expect(TOP_ITEMS.map((i) => i.href)).toEqual(["/", "/inbox", "/logs", "/schedules"]);
+  it("has Home, Inbox, Logs, Schedules, then Calendar above the project tree, with a route, and no Questions item", () => {
+    expect(TOP_ITEMS.map((i) => i.href)).toEqual(["/", "/inbox", "/logs", "/schedules", "/calendar"]);
     expect(TOP_ITEMS.find((i) => i.href === "/inbox")?.label).toBe("Inbox");
     expect(TOP_ITEMS.map((i) => i.href)).not.toContain("/questions");
     expect(app).toMatch(/path="\/inbox" component=\{InboxPage\}/);
+    // The combined calendar and the calendar of a project use one page (docs/api.md §33).
+    expect(app).toMatch(/path="\/calendar" component=\{CalendarPage\}/);
+    expect(app).toMatch(/path="\/p\/:project\/calendar" component=\{CalendarPage\}/);
     expect(app).not.toMatch(/path="\/questions" component/);
     expect(Object.keys(import.meta.glob("../features/questions/**"))).toEqual([]);
   });
