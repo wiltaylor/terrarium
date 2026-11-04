@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use common::TestDaemon;
 use serde_json::{Value, json};
-use terrarium_core::AgentId;
+use terrarium_core::{AgentId, HarnessId};
 use terrarium_core::config::{CompactMaxAge, IdleStop};
 use terrariumd::lifecycle::Tuning;
+use terrariumd::reset::RunGuard;
 use terrariumd::supervisor::FakeCompact;
 
 fn state(td: &TestDaemon) -> terrariumd::api::Shared {
@@ -93,19 +94,30 @@ async fn setup() -> (TestDaemon, String, String) {
     (td, lead, w)
 }
 
-/// Start agent `a`, give it one turn, and wait until the turn ended.
+/// Start agent `a`, give it one turn, and wait until the turn ended and
+/// the agent rests.
+///
+/// The fake records the prompt before it sets `working`, and the status
+/// of the API comes from the event pump, which can lag: `idle` right after
+/// the prompt can be the `idle` from before the turn. The pump stores the
+/// events in order (`working`, `turn_end`, `idle`), so after the stored
+/// `turn_end` of this turn, the next `idle` is the end of the turn (as in
+/// `tests/lifecycle.rs`).
 async fn start_with_a_turn(td: &TestDaemon, a: &str) {
     td.post_empty(&format!("/api/agents/{a}/start")).await.ok();
     td.wait_status(a, "idle").await;
-    let before = td.sup.prompts(aid(a)).len();
+    let ends = events(td, a, "turn_end").await.len();
     td.post(&format!("/api/agents/{a}/send"), json!({"text": "work"}))
         .await
         .ok();
-    until("the turn ran", || async {
-        td.sup.prompts(aid(a)).len() > before
+    until("the end of the turn", || async {
+        events(td, a, "turn_end").await.len() > ends
     })
     .await;
-    td.wait_status(a, "idle").await;
+    until("idle after the turn", || async {
+        agent(td, a).await["status"] == "idle"
+    })
+    .await;
 }
 
 /// Wait until a prompt of agent `a` is `want`.
@@ -459,6 +471,106 @@ async fn a_busy_agent_queues_and_a_new_request_replaces_the_pending_one() {
     assert_eq!(td.sup.compactions(aid(&w)), 1);
     let done = events(&td, &w, "agent.compacted").await;
     assert_eq!(done[0]["data"]["ok"], false, "the silent one timed out");
+}
+
+/// A request while a run of the same agent is on the way (the lifecycle's
+/// `run_pending` holds the agent) waits for that run and answers with the
+/// outcome of its own reset: `started`, not a `queued` for a reset that
+/// the lifecycle then takes.
+#[tokio::test]
+async fn a_request_waits_for_a_run_on_the_way() {
+    let (td, lead, w) = setup().await;
+    start_with_a_turn(&td, &w).await;
+    let held = RunGuard::take(&state(&td), aid(&w)).expect("no run holds the agent");
+    let path = format!("/api/agents/{w}/compact");
+    let began = std::time::Instant::now();
+    let ((r, took), ()) = tokio::join!(
+        async {
+            let r = td.post_empty_as(&lead, &path).await;
+            (r, began.elapsed())
+        },
+        async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(held);
+        }
+    );
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(r.body["reset"]["state"], "started", "{}", r.body);
+    // The answer came after the run on the way let the agent go.
+    assert!(took >= Duration::from_millis(300), "{took:?}");
+    until("the compaction", || async {
+        !events(&td, &w, "agent.compacted").await.is_empty()
+    })
+    .await;
+    assert_eq!(td.sup.compactions(aid(&w)), 1);
+    assert!(agent(&td, &w).await.get("reset_pending").is_none());
+}
+
+/// A compaction that the supervisor cannot run for the harness is `409`
+/// before the write, also while a run of the agent is on the way: no
+/// pending reset, no audit row, no `agent.reset`.
+#[tokio::test]
+async fn an_unsupported_compaction_is_refused_before_the_write() {
+    let (td, lead, _) = setup().await;
+    td.sup.refuse_compact(HarnessId::Pi);
+    let w = id(&td.agent("p", "pi1", json!({"harness": "pi"})).await);
+    start_with_a_turn(&td, &w).await;
+    let _held = RunGuard::take(&state(&td), aid(&w)).expect("no run holds the agent");
+    let r = td
+        .post_empty_as(&lead, &format!("/api/agents/{w}/compact"))
+        .await;
+    r.err(409, "conflict");
+    assert_eq!(
+        r.body["error"]["message"],
+        "auto compact not supported for pi"
+    );
+    assert!(agent(&td, &w).await.get("reset_pending").is_none());
+    assert!(audit(&td, "agent.compact").await.is_empty());
+    assert!(events(&td, &w, "agent.reset").await.is_empty());
+    assert_eq!(td.sup.compactions(aid(&w)), 0);
+}
+
+/// A queued compaction that cannot run when its turn comes is dropped
+/// with a trace: a second `agent.reset` with `state` `dropped` and the
+/// reason. Its `then` goes with the note line.
+#[tokio::test]
+async fn a_queued_compaction_that_cannot_run_is_dropped_with_a_trace() {
+    let (td, lead, w) = setup().await;
+    tune(&td, Duration::from_millis(400));
+    start_with_a_turn(&td, &w).await;
+    td.sup.set_compact(aid(&w), FakeCompact::Silent);
+    let path = format!("/api/agents/{w}/compact");
+    let r = td.post_empty(&path).await;
+    assert_eq!(r.body["reset"]["state"], "started", "{}", r.body);
+    let r = td.post_as(&lead, &path, json!({"then": "C"})).await;
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(r.body["reset"]["state"], "queued", "{}", r.body);
+    // When the silent compaction ends, the harness cannot compact any more.
+    td.sup.refuse_compact(HarnessId::Claude);
+    let dropped = || async {
+        events(&td, &w, "agent.reset")
+            .await
+            .into_iter()
+            .filter(|e| e["data"]["state"] == "dropped")
+            .collect::<Vec<_>>()
+    };
+    until("the drop", || async { !dropped().await.is_empty() }).await;
+    let d = dropped().await;
+    assert_eq!(d.len(), 1, "{d:#?}");
+    let data = &d[0]["data"];
+    assert_eq!(data["kind"], "compact", "{data}");
+    assert_eq!(data["by"], "p/lead", "{data}");
+    assert_eq!(data["then_set"], true, "{data}");
+    assert_eq!(data["reason"], "auto compact not supported for claude", "{data}");
+    prompted(
+        &td,
+        &w,
+        "[System:reset requested by p/lead] Note: the compaction did not complete: \
+         auto compact not supported for claude.\nC",
+    )
+    .await;
+    assert_eq!(td.sup.compactions(aid(&w)), 1);
+    assert!(agent(&td, &w).await.get("reset_pending").is_none());
 }
 
 /// A pending reset runs before the other work: a turn that comes while

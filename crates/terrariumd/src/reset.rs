@@ -29,11 +29,19 @@
 //!   turn. It is a normal turn: holds, the pause, and the stream limit
 //!   apply.
 //! - **Events and audit**: `agent.reset` (`{kind, by, then_set, deferred,
-//!   replaced, state}`) for each request; the audit rows `agent.compact`
-//!   and `agent.new_session` only for a request on another agent.
+//!   replaced, state}`) for each request, and again with `state: "dropped"`
+//!   and the `reason` when a queued reset cannot run and is gone; the
+//!   audit rows `agent.compact` and `agent.new_session` only for a request
+//!   on another agent.
+//! - **A request and a run**: a request holds the runs of its agent from
+//!   before its write to the end of its own run, so the lifecycle cannot
+//!   take the new reset in between and the answer is its outcome. A
+//!   refusal that is known before (no compaction for the harness) is a
+//!   `409` before the write.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::json;
@@ -91,20 +99,42 @@ fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Holds the run of one agent; the drop lets the next one go.
-struct RunGuard {
+/// Holds the run of one agent; the drop lets the next one go. Public for
+/// the tests of the race of a request and a run on the way.
+pub struct RunGuard {
     state: Shared,
     agent: AgentId,
 }
 
+/// How long a request waits for a run of the same agent that is on the
+/// way ([`RunGuard::wait`]). The other run only starts a compaction or a
+/// new session; it does not wait for its end.
+const REQUEST_RUN_WAIT: Duration = Duration::from_secs(5);
+
 impl RunGuard {
-    fn take(state: &Shared, agent: AgentId) -> Option<Self> {
+    /// Hold the runs of `agent`, unless a run holds them already.
+    pub fn take(state: &Shared, agent: AgentId) -> Option<Self> {
         guard(&state.lifecycle.resets.0)
             .insert(agent)
             .then(|| Self {
                 state: Arc::clone(state),
                 agent,
             })
+    }
+
+    /// [`RunGuard::take`], and while another run holds the agent, wait
+    /// for its end, at most `limit`.
+    async fn wait(state: &Shared, agent: AgentId, limit: Duration) -> Option<Self> {
+        let until = tokio::time::Instant::now() + limit;
+        loop {
+            if let Some(g) = Self::take(state, agent) {
+                return Some(g);
+            }
+            if tokio::time::Instant::now() >= until {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }
 
@@ -188,7 +218,8 @@ pub async fn request(
     let status = state.supervisor.status(id).await;
     let conflict = |m: String| ApiError::new(Code::Conflict, m);
     if req.kind == ResetKind::Compact {
-        if !a.compact_supported {
+        // Known before the write: the request is refused, never queued.
+        if !a.compact_supported || !state.supervisor.can_compact(a.agent.harness) {
             return Err(conflict(crate::lifecycle::compact_unsupported(
                 a.agent.harness,
             )));
@@ -220,6 +251,11 @@ pub async fn request(
         deferred,
         requested_at: crate::db::now(),
     };
+    // Hold the runs of this agent from before the write to the end of the
+    // run below: the lifecycle's run_pending cannot take the new reset in
+    // between (it gets `Busy`), so the answer is what happened to it. When
+    // another run does not end in time, the reset waits for the next pass.
+    let held = RunGuard::wait(state, id, REQUEST_RUN_WAIT).await;
     let (key, project, p) = (id.to_string(), a.agent.project.clone(), pending.clone());
     let replaced = state
         .db
@@ -241,16 +277,18 @@ pub async fn request(
     state.supervisor.reset_gate(id, true);
     let at_rest = status == Some(AgentStatus::Idle) && !state.lifecycle.compacting(id);
     let run_now = !deferred && at_rest;
+    // Only a run now keeps the runs held; a wake below must not find them
+    // held.
+    let held = held.filter(|_| run_now && live(status));
     let state_word = if live(status) {
-        if !run_now {
-            "queued"
-        } else {
-            match run(state, id, true).await {
+        match held {
+            None => "queued",
+            Some(held) => match run_held(state, id, true, held).await {
                 Ran::Started => "started",
                 // The supervisor cannot compact this agent at all.
                 Ran::Refused(m) => return Err(conflict(m)),
                 _ => "queued",
-            }
+            },
         }
     } else if req.kind == ResetKind::NewSession && req.then.is_some() && !a.paused {
         match crate::lifecycle::wake(state, id, "reset").await {
@@ -338,9 +376,14 @@ pub async fn run_pending(state: &Shared, id: AgentId) -> Ran {
 /// [`run_pending`]. `refuse`: a compaction that cannot run at all is
 /// [`Ran::Refused`] (no `then` turn), not [`Ran::Dropped`].
 async fn run(state: &Shared, id: AgentId, refuse: bool) -> Ran {
-    let Some(_guard) = RunGuard::take(state, id) else {
+    let Some(held) = RunGuard::take(state, id) else {
         return Ran::Busy;
     };
+    run_held(state, id, refuse, held).await
+}
+
+/// [`run`] with the runs of agent `id` held by the caller (`_guard`).
+async fn run_held(state: &Shared, id: AgentId, refuse: bool, _guard: RunGuard) -> Ran {
     let key = id.to_string();
     let read = state
         .db
@@ -435,6 +478,8 @@ async fn run_compaction(state: &Shared, id: AgentId, p: &PendingReset, refuse: b
             if refuse {
                 return Ran::Refused(e.to_string());
             }
+            // Its request answered `queued`: the drop leaves a trace.
+            note_dropped(state, id, p, &e.to_string()).await;
             if let Some(then) = then {
                 let end = CompactEnd {
                     ok: false,
@@ -447,6 +492,42 @@ async fn run_compaction(state: &Shared, id: AgentId, p: &PendingReset, refuse: b
             }
             Ran::Dropped
         }
+    }
+}
+
+/// The event `agent.reset` with `state: "dropped"` and the reason, for
+/// the pending reset `p` of agent `id` that cannot run and is gone. Its
+/// request answered `queued`, so the event says what became of it.
+async fn note_dropped(state: &Shared, id: AgentId, p: &PendingReset, reason: &str) {
+    let (key, kind, by, then_set, reason) = (
+        id.to_string(),
+        p.kind,
+        p.by.clone(),
+        p.then.is_some(),
+        reason.to_owned(),
+    );
+    let written = state
+        .db
+        .write("system", move |t| {
+            let v = agents::get(t, &key)?;
+            let what = match kind {
+                ResetKind::Compact => "compaction",
+                ResetKind::NewSession => "new session",
+            };
+            t.emit(
+                EventDraft::new(
+                    "agent.reset",
+                    format!("{}: {what} requested by {by} dropped: {reason}", v.agent.name),
+                    json!({"kind": kind, "by": by, "then_set": then_set,
+                           "state": "dropped", "reason": reason}),
+                )
+                .agent(key.clone(), v.agent.name.clone())
+                .project(v.agent.project.clone()),
+            )
+        })
+        .await;
+    if let Err(e) = written {
+        warn!(agent = %id, "cannot write the dropped reset: {e}");
     }
 }
 

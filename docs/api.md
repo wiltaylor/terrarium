@@ -2171,7 +2171,17 @@ rights) for another agent, and attach a prompt that goes after the reset:
   current turn (`state` `queued`); a compaction that runs is not
   interrupted. While a reset waits, the supervisor keeps the other work of
   the agent (turns, the recap, push pointers) back, so the reset runs
-  first. A paused agent keeps a reset queued until the unpause.
+  first. A paused agent keeps a reset queued until the unpause. When the
+  daemon is starting a reset of the same agent at that moment, the
+  request waits for it (at most 5 seconds) and then answers with what
+  happened to its own reset; only when that start takes longer does it
+  answer `queued`.
+- **Refused.** A compaction for a harness that the daemon cannot compact
+  is `409 conflict` before anything is written (`compact_supported`
+  `false`, or a supervisor that cannot compact the harness). A queued
+  compaction that later cannot run at all is dropped: its `then` still
+  goes, with the note line, and the event `agent.reset` with `state`
+  `dropped` and the `reason` records the drop.
 - **One at a time.** Each agent has at most one pending reset
   (`reset_pending` on the agent: `{kind, by, then_set, recap, deferred,
   requested_at}`; the `then` text does not show). A new request replaces
@@ -2191,7 +2201,8 @@ rights) for another agent, and attach a prompt that goes after the reset:
 - **The answer** is the agent with `reset`: `{kind, state, replaced,
   deferred, then_set}`. `kind` is `compact` or `new_session`; `state` is
   `started`, `queued`, or `next_wake`.
-- **Events and audit.** Each request writes `agent.reset` (§9). A request
+- **Events and audit.** Each request writes `agent.reset` (§9), and a
+  dropped queued reset writes a second one with `state` `dropped`. A request
   on another agent writes the audit row `agent.compact` or
   `agent.new_session` (`{then_set, deferred, replaced}`); a request of
   the agent itself writes none. `terrarium agent compact` and `terrarium
@@ -3944,7 +3955,7 @@ Kinds:
 | `status` | `{status, from, reason, waits, waiting_on?}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. `waits` is the number of open waits; `waiting_on` is the line of §6.7. |
 | `agent.woken` | `{cause, queued}`: the daemon woke the agent (§6.2). `cause` is `mail`, `turn`, `card`, `nudge`, `start`, `unpause`, `hold_end`, `queued`, `reset`, or `daemon_start`; `queued` is the work that waited. A `status` event follows. An idle stop is a `status` event with `reason: "idle"`. |
 | `agent.paused`, `agent.unpaused` | `{paused, queued}`: a pause or an unpause changed the flag (§6.2). The actor is the caller. |
-| `agent.reset` | `{kind, by, then_set, deferred, replaced, state}`: an actor asked for a compaction or a new session (§6.2, "Compact and new session on request"). `kind` is `compact` or `new_session`; `by` is `self`, `operator`, or `<project>/<agent>`; `state` is `started`, `queued`, or `next_wake`. The actor is the caller. |
+| `agent.reset` | `{kind, by, then_set, deferred, replaced, state}`: an actor asked for a compaction or a new session (§6.2, "Compact and new session on request"). `kind` is `compact` or `new_session`; `by` is `self`, `operator`, or `<project>/<agent>`; `state` is `started`, `queued`, or `next_wake`. The actor is the caller. A queued reset that cannot run and is gone writes it again with `state` `dropped` and `reason` (actor `system`). |
 | `agent.compacted` | `{cause, ok, duration_ms, reason?}`: a compaction that the daemon ran ended (§6.2, "Auto compact"). `cause` is `idle`, `max_age`, or `manual` (also a requested one). `ok` is false for a failure that the harness reports, a stop of the agent, or no end signal in 5 minutes; `reason` says which. |
 | `compact_started`, `compact_finished` | `{trigger?}` and `{ok, trigger?, message?}`: the harness reported the start or the end of a compaction (docs/compat.md, "Compaction"). `trigger` is the harness's word (`manual`, `auto`, `threshold`, ...). A compaction that the harness starts by itself also writes them. |
 | `agent_removed` | `{agent_id, project, name}`. The daemon deleted the agent: `DELETE /api/agents/{id}`, a fleet apply with prune, or a definitions sync that removes a file agent. The delete of a live agent stops it first, so a `status` event with `stopped` comes before this event. Clients remove the agent from their lists. `GET /api/agents` does not show the agent again. |
