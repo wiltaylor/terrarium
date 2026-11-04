@@ -141,6 +141,8 @@ pub struct AppState {
     /// The pipeline polls: which poll now, and the parallel slots
     /// (`crate::pipelines`).
     pub pipelines: Arc<crate::pipelines::Runtime>,
+    /// The git proxy (`crate::git_proxy`): off until its listener binds.
+    pub git_proxy: Arc<crate::git_proxy::Runtime>,
 }
 
 impl AppState {
@@ -911,6 +913,7 @@ mod tests {
             monitors: Arc::default(),
             webhooks: Arc::default(),
             pipelines: Arc::default(),
+            git_proxy: Arc::default(),
         })
     }
 

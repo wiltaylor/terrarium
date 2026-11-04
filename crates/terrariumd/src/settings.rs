@@ -37,6 +37,13 @@ pub struct Settings {
     #[arg(long, env = ENV_ARTIFACT_LISTEN, default_value = DEFAULT_ARTIFACT_LISTEN)]
     pub artifact_listen: String,
 
+    /// The TCP address of the git proxy (issue #11, `crate::git_proxy`):
+    /// the agents' checkouts reach the forge through it, with no token in
+    /// the sandbox. Loopback by default: the sandboxes share the network
+    /// of the daemon. Empty: no proxy, and every repo is `direct`.
+    #[arg(long, env = ENV_GIT_PROXY_LISTEN, default_value = DEFAULT_GIT_PROXY_LISTEN)]
+    pub git_proxy_listen: String,
+
     /// The dashboard URL as the operator opens it, for example
     /// `https://terrarium.example.com`. It goes into mail links and
     /// `Version.url`, the WebSocket `Origin` check of a cookie session, and
@@ -560,6 +567,10 @@ pub const DEFAULT_PUBLIC_URL: &str = "http://localhost:8080";
 pub const ENV_ARTIFACT_LISTEN: &str = "TERRARIUM_ARTIFACT_LISTEN";
 /// The default of [`ENV_ARTIFACT_LISTEN`].
 pub const DEFAULT_ARTIFACT_LISTEN: &str = "0.0.0.0:8081";
+/// `TERRARIUM_GIT_PROXY_LISTEN`, also the `--git-proxy-listen` flag.
+pub const ENV_GIT_PROXY_LISTEN: &str = "TERRARIUM_GIT_PROXY_LISTEN";
+/// The default of [`ENV_GIT_PROXY_LISTEN`].
+pub const DEFAULT_GIT_PROXY_LISTEN: &str = "127.0.0.1:8084";
 /// `TERRARIUM_ARTIFACT_PUBLIC_URL`: the artifact origin as a browser opens
 /// it, for signed artifact URLs and the dashboard CSP.
 pub const ENV_ARTIFACT_PUBLIC_URL: &str = "TERRARIUM_ARTIFACT_PUBLIC_URL";
@@ -629,6 +640,10 @@ pub struct WebConfig {
     pub session_max_age: std::time::Duration,
     /// The host installer.
     pub install: InstallConfig,
+    /// The address of the git proxy ([`ENV_GIT_PROXY_LISTEN`]). `None`:
+    /// no proxy (the default here, so a test daemon has none unless it
+    /// asks).
+    pub git_proxy_listen: Option<String>,
 }
 
 impl Default for WebConfig {
@@ -641,6 +656,7 @@ impl Default for WebConfig {
             cli_session_ttl: std::time::Duration::from_secs(90 * 86_400),
             session_max_age: std::time::Duration::from_secs(90 * 86_400),
             install: InstallConfig::default(),
+            git_proxy_listen: None,
         }
     }
 }
@@ -735,6 +751,8 @@ impl Settings {
             session_ttl: self.session_ttl,
             cli_session_ttl: self.cli_session_ttl,
             session_max_age: self.session_max_age,
+            git_proxy_listen: Some(self.git_proxy_listen.trim().to_owned())
+                .filter(|a| !a.is_empty()),
             install: InstallConfig {
                 dist_dir: self.host_dist_dir.clone(),
                 host_daemon_url: clean_url(self.host_daemon_url.as_deref()),

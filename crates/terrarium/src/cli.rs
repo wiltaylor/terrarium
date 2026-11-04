@@ -434,6 +434,11 @@ pub struct RepoAddArgs {
     /// checkout must not touch. Repeat it for more globs
     #[arg(long = "push-deny", value_name = "GLOB")]
     pub push_deny: Vec<String>,
+    /// How agent checkouts reach the remote: `proxy` (the daemon's git
+    /// proxy adds the token and enforces push_deny) or `direct`. The
+    /// default: the proxy for an https repo with a token and push_deny
+    #[arg(long = "push-via", value_parser = ["proxy", "direct"])]
+    pub push_via: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

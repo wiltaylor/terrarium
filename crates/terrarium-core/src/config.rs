@@ -658,6 +658,90 @@ pub struct RepoDef {
     /// refuses them. See [`check_push_deny`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub push_deny: Vec<String>,
+    /// How an agent checkout reaches the remote: through the daemon's git
+    /// proxy, or straight to the forge. Absent: the proxy for an `https`
+    /// repo with a token and a `push_deny` list (when the proxy is on),
+    /// else direct. See [`PushVia`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_via: Option<PushVia>,
+}
+
+/// The path of an agent checkout to the forge (issue #11, PLAN §9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushVia {
+    /// `origin` is the daemon's git proxy. The proxy adds the forge token
+    /// and refuses each pushed ref that matches `push_deny`; the agent
+    /// never gets the token.
+    Proxy,
+    /// `origin` is the forge. The credential helper gives the token to
+    /// git, and `push_deny` is only a `pre-push` hook.
+    Direct,
+}
+
+impl PushVia {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::Direct => "direct",
+        }
+    }
+
+    /// Parse `proxy` or `direct`.
+    pub fn parse(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "proxy" => Ok(Self::Proxy),
+            "direct" => Ok(Self::Direct),
+            other => Err(format!(
+                "bad `push_via` `{other}`: give `proxy` or `direct`"
+            )),
+        }
+    }
+}
+
+/// Does `branch` (a name without `refs/heads/`) match the `push_deny` glob
+/// `glob`? The rules of a shell `case` pattern, as the `pre-push` hook
+/// uses it: `*` is any text (`/` too), `?` is one character, and each
+/// other character is itself ([`check_push_deny_glob`] allows no other
+/// pattern character).
+pub fn push_deny_matches(glob: &str, branch: &str) -> bool {
+    let g: Vec<char> = glob.chars().collect();
+    let b: Vec<char> = branch.chars().collect();
+    // The classic two-pointer match with one backtrack point for `*`.
+    let (mut gi, mut bi) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None;
+    while bi < b.len() {
+        match g.get(gi) {
+            Some('*') => {
+                star = Some((gi, bi));
+                gi += 1;
+            }
+            Some('?') => {
+                gi += 1;
+                bi += 1;
+            }
+            Some(c) if *c == b[bi] => {
+                gi += 1;
+                bi += 1;
+            }
+            _ => match star {
+                Some((sg, sb)) => {
+                    gi = sg + 1;
+                    bi = sb + 1;
+                    star = Some((sg, sb + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    g[gi..].iter().all(|c| *c == '*')
+}
+
+/// The first glob of `list` that `branch` matches.
+pub fn push_deny_match<'a>(list: &'a [String], branch: &str) -> Option<&'a str> {
+    list.iter()
+        .map(String::as_str)
+        .find(|g| push_deny_matches(g, branch))
 }
 
 /// The most entries in a repo's `push_deny`.
@@ -1347,12 +1431,47 @@ You are a careful reviewer for {{project.name}}.
         }
         assert!(check_push_deny(&vec!["x".to_owned(); PUSH_DENY_MAX]).is_ok());
         assert!(check_push_deny(&vec!["x".to_owned(); PUSH_DENY_MAX + 1]).is_err());
+        for (glob, branch, hit) in [
+            ("op/*", "op/x", true),
+            ("op/*", "op/a/b", true),
+            ("op/*", "op/", true),
+            ("op/*", "op", false),
+            ("op/*", "dev/op/x", false),
+            ("main", "main", true),
+            ("main", "main2", false),
+            ("main", "mai", false),
+            ("rel-?", "rel-1", true),
+            ("rel-?", "rel-10", false),
+            ("*", "anything/at/all", true),
+            ("*-wip", "a-b-wip", true),
+            ("*-wip", "a-b-wipx", false),
+            ("a*b*c", "aXbYbZc", true),
+            ("a*b*c", "aXbYcZ", false),
+            ("**", "", true),
+        ] {
+            assert_eq!(push_deny_matches(glob, branch), hit, "{glob} {branch}");
+        }
+        let list = vec!["main".to_owned(), "op/*".to_owned()];
+        assert_eq!(push_deny_match(&list, "op/1"), Some("op/*"));
+        assert_eq!(push_deny_match(&list, "dev"), None);
+        assert_eq!(PushVia::parse("proxy"), Ok(PushVia::Proxy));
+        assert!(PushVia::parse("ssh").is_err());
         let def: RepoDef = toml::from_str(
             "name = \"app\"\nurl = \"https://x/app\"\nhooks_dir = \".githooks\"\npush_deny = [\"op/*\"]\n",
         )
         .unwrap();
         assert_eq!(def.hooks_dir.as_deref(), Some(".githooks"));
         assert_eq!(def.push_deny, ["op/*"]);
+        assert_eq!(def.push_via, None);
+        let def: RepoDef =
+            toml::from_str("name = \"app\"\nurl = \"https://x/app\"\npush_via = \"direct\"\n")
+                .unwrap();
+        assert_eq!(def.push_via, Some(PushVia::Direct));
+        let back = toml::to_string(&def).unwrap();
+        assert!(back.contains("push_via = \"direct\""), "{back}");
+        assert!(
+            toml::from_str::<RepoDef>("name = \"a\"\nurl = \"u\"\npush_via = \"ssh\"\n").is_err()
+        );
     }
 
     #[test]

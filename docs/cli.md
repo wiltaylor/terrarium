@@ -154,6 +154,7 @@ terrarium project rm <name> --confirm         sysadmin
 terrarium project repos [name]
 terrarium project repo-add <url> [--name n] [--branch b] [--credential key] [--path p]
                           [--hooks-dir .githooks] [--push-deny 'op/*' ...]
+                          [--push-via proxy|direct]
 terrarium repo ls
 terrarium repo add <url> ...                  the same as project repo-add
 terrarium repo checkout <repo> [--target T] [--branch b] [--path p] [--depth n] [--agent a]
@@ -175,7 +176,17 @@ HEAD 3f2c1e0b9a0d... (main)
 helper that the daemon writes into each workspace clone. It reads git's
 `key=value` lines up to a blank line, and asks `POST /api/repos/credential`.
 It prints `username=` and `password=` lines, or nothing when the daemon has
-no credential for the host and path. `store` and `erase` do nothing.
+no credential for the host and path. `store` and `erase` do nothing. For
+the daemon's git proxy it prints the agent's proxy credential. For the
+forge URL of a proxied repo it prints an error and no token: run
+`terrarium repo checkout <repo>` to point `origin` at the proxy.
+
+`--push-via` sets how the agent checkouts reach the remote: `proxy`
+(through the daemon's git proxy, which adds the token and refuses a push
+to a `--push-deny` branch, even with `git push --no-verify`) or `direct`.
+Without it, an `https` repo with a credential and `--push-deny` goes
+through the proxy, and the other repos are direct (`docs/api.md` §5.1,
+"The git proxy"). `repo ls` shows it in the `VIA` column when it is set.
 
 `--credential` names a secret (see "Secrets"). The daemon uses the
 project's secret of that name, else the global one. A global secret
@@ -275,7 +286,9 @@ gives the brokers only: the git credential helper and the ssh-agent. The
 agent cannot see an `ssh_key`. For a `token` or a `github_token`, `use`
 is `read`: git's credential helper hands the token to git, so the agent
 can read it (`terrarium repo credential get`). Grant a token only to an
-agent that may read it. `--level read` also gives env vars and
+agent that may read it. The token of a repo that goes through the git
+proxy is not in this rule: the proxy adds it, and the helper never gives
+it out (but a grant of it does). `--level read` also gives env vars and
 `secret get`. The default is `use` for `token`, `github_token`, and
 `ssh_key`, and `read` for the other kinds. `--env VAR` puts the value
 into that env var at each start. It needs `--level read`. A grant

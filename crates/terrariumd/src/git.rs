@@ -133,6 +133,25 @@ pub struct Checkout {
     pub timeout: Duration,
     /// The hooks that the checkout gets ([`install_hooks`]).
     pub hooks: Hooks,
+    /// The `origin` URL that a workspace checkout gets ([`Origin`]).
+    pub origin: Origin,
+}
+
+/// The `origin` URL of a workspace checkout (issue #11, PLAN §9 "The git
+/// proxy"). The daemon itself always fetches from the stored URL.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// Leave it: the clone URL after a clone, the agent's value after an
+    /// update.
+    #[default]
+    Keep,
+    /// The repo goes through the daemon's git proxy: `origin` (fetch and
+    /// push URL) is this proxy URL.
+    Proxy(String),
+    /// The repo goes straight to the forge: an `origin` that starts with
+    /// this proxy prefix (the repo was proxied before) goes back to the
+    /// stored URL.
+    Direct { proxy_prefix: String },
 }
 
 /// The git hooks of a repo in an agent checkout (PLAN §9, "Git hooks in
@@ -142,11 +161,12 @@ pub struct Checkout {
 /// commands never run them ([`HARDEN`]: `core.hooksPath=/dev/null`).
 ///
 /// A client-side hook is a guard against mistakes, not a hard control: the
-/// agent can push with `--no-verify`, or edit `.git/hooks`. The agent can
-/// also read the repo token (PLAN §16b, "`use` is `read` for tokens"), so
-/// no check in the daemon's credential helper can stop a push either; and
-/// git does not send the pushed refs to a credential helper. A hard rule
-/// is a branch protection rule on the git server.
+/// agent can push with `--no-verify`, or edit `.git/hooks`. The hard rule
+/// is the daemon's git proxy (`crate::git_proxy`, [`Origin::Proxy`]): it
+/// reads the pushed refs, and the agent has no token to push past it.
+/// A `direct` repo (ssh, a local repo, or `push_via = direct`) has only
+/// the hook; there, a hard rule is a branch protection rule on the git
+/// server.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hooks {
     /// A tracked dir of the repo: each regular file in it at `HEAD` goes
@@ -883,6 +903,35 @@ impl Runner {
             .filter(|s| !s.is_empty())
     }
 
+    /// The `origin` of a workspace checkout ([`Origin`]). The agent's
+    /// `pushurl` of origin goes: a push would skip the proxy with it.
+    fn write_origin(&self, c: &Checkout) -> Result<(), GitError> {
+        let dest = &c.dest;
+        let set = |url: &str| -> Result<(), GitError> {
+            self.quiet(dest, &["config", "--local", "remote.origin.url", url])?;
+            // No pushurl is fine: `--unset-all` then exits 5.
+            let _ = self.quiet(
+                dest,
+                &["config", "--local", "--unset-all", "remote.origin.pushurl"],
+            );
+            Ok(())
+        };
+        match &c.origin {
+            Origin::Keep => Ok(()),
+            Origin::Proxy(url) => set(url),
+            Origin::Direct { proxy_prefix } => {
+                let now = self
+                    .quiet(dest, &["config", "--local", "--get", "remote.origin.url"])
+                    .unwrap_or_default();
+                if now.trim().starts_with(proxy_prefix.as_str()) {
+                    set(&c.url)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
     /// The local config that sends pushes from the sandbox to the daemon.
     fn write_local_config(&self, dest: &Path) -> Result<(), GitError> {
         // The empty first value resets helpers from other config files.
@@ -1303,6 +1352,7 @@ impl GitRunner {
             deny_local_under: Vec::new(),
             timeout,
             hooks: Hooks::default(),
+            origin: Origin::default(),
         };
         Runner::new(&c).map(Self)
     }
@@ -1988,6 +2038,7 @@ fn clone(
     args.extend(["--", c.url.as_str(), dest.as_str()]);
     r.git(None, &args, progress)?;
     r.write_local_config(&c.dest)?;
+    r.write_origin(c)?;
     let hooks = install_hooks(c, &r)?;
     Ok(Outcome {
         action: Action::Cloned,
@@ -2028,6 +2079,7 @@ fn update(
     args.extend(["--", c.url.as_str(), refspec.as_str()]);
     r.git(Some(dest), &args, progress)?;
     r.write_local_config(dest)?;
+    r.write_origin(c)?;
     // The agent may have edited the config during the fetch. Check again
     // before the commands that touch the work tree (they can run filters).
     check_config_snapshot(c, &r)?;
@@ -2154,6 +2206,7 @@ mod tests {
             deny_local_under: vec![dir.join("state")],
             timeout: Duration::from_secs(60),
             hooks: Hooks::default(),
+            origin: Origin::default(),
         }
     }
 
@@ -2763,6 +2816,7 @@ mod tests {
             deny_local_under: vec![],
             timeout: Duration::from_secs(5),
             hooks: Hooks::default(),
+            origin: Origin::default(),
         };
         let r = Runner::new(&c).unwrap();
         let helper = r

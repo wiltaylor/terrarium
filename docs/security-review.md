@@ -1175,7 +1175,7 @@ S6, S9, S10, and S13 are in 43a0307. Each fix has a test that reproduces the fin
 |---|---|---|
 | S1 (HIGH) | The final env var names of a `generic` secret (`<ENV>_<FIELD>`) skip the reserved-name check, so a grant can set `LD_PRELOAD`, `GIT_CONFIG_*`, `BASH_ENV`, or `TERRARIUM_*`. The launch env is the env of the `bwrap` process outside the sandbox, so a loader var runs code of the agent as the daemon user. | **Fixed.** (a) One check of each final name just before it goes into the launch env (`grants::launch`), and in the grants API for each final name (`422`). A refused name in an old grant row gives a warning event at the start, not a crash. (b) The name rule is an allowlist shape, `^[A-Z][A-Z0-9_]{0,127}$`, and a larger deny set: the loader and C library, `GIT_*`, the shell, the language runtimes, the proxy and CA vars, the harness and account vars, `XDG_*`, `SSH_*`, `TERRARIUM_*`, and the session vars (docs/api.md §5.2, "The name rule"). `GH_TOKEN` stays allowed. (c) No secret value goes to `bwrap`: the sandbox starts the harness through `terrarium exec-env`, which gets the vars from the daemon inside the sandbox (`POST /api/agent/secrets/env`) and replaces itself with the harness. Tests: `generic_env_names_pass_the_name_rule`, `the_name_rule_is_an_allowlist_shape_and_a_deny_set`, `the_launch_env_comes_from_the_daemon_and_follows_the_name_rule`, `exec_env_wraps_the_program_inside_the_sandbox`, `exec_env_adds_the_granted_vars_and_execs`, `secret_grants_reach_the_launch`. |
 | S2 (HIGH) | A project_admin gets global secrets with no grant: a project repo or target names a global secret, and the credential helper, a checkout, an ssh exec, or a display login uses it. | **Fixed: grant required** (8ca3edd). A project object can name a global secret only when the project holds a grant of it, or when the operator, a sysadmin, or a definition file set the object (`credential_admin` on `repos` and `targets`). The daemon checks at save (`403` with the fix) and at each use (refused, with a `secret.refused` warning event). The rows from before the upgrade count as set by an admin. PLAN §16b.6a, docs/api.md §5.2, `tests/global_secret_rule.rs`. |
-| S3 (MEDIUM) | A `use` grant of a token shows the value: the agent calls the credential helper itself. | **Accepted, documented: `use` is `read` for tokens** (8ca3edd). The credential helper must hand the token to git, and the agent runs git. The docs and the grant form say so; only an `ssh_key` stays hidden under `use`. A test asserts the behaviour. The real fix is an HTTPS proxy in the daemon that adds the token. PLAN §16b.3, docs/api.md §5.2. |
+| S3 (MEDIUM) | A `use` grant of a token shows the value: the agent calls the credential helper itself. | **Accepted, documented: `use` is `read` for tokens** (8ca3edd). The credential helper must hand the token to git, and the agent runs git. The docs and the grant form say so; only an `ssh_key` stays hidden under `use`. A test asserts the behaviour. **Partly fixed by the git proxy (§17, issue #11):** the token of a repo that goes through the proxy is "use only": the proxy adds it, and the helper refuses it (`409`). A grant of a token still gives it, and a `direct` repo is as before. PLAN §16b.3, docs/api.md §5.1, §5.2. |
 | S4 (MEDIUM) | A project_admin can blind the audit, the events, and the mail of all projects through the global redaction matcher. | **Fixed** (9fa4b78). The redaction keeps the JSON keys and the identifier fields, and a put refuses an identifier or a weak value for a machine secret (`token`, `api_key`, `github_token`). |
 | S5 (LOW) | Redaction is a guess oracle, and it shows the names of secrets in other projects. | **Fixed** (9fa4b78). The label of a match follows the view of the writer or the reader. |
 | S6 (LOW) | Plain values stay on disk outside the sealed store: `private/runner.json` holds the env of each `read` grant (also after a revoke, and in the trash), and `credentials/backup/*-credential-*` holds each moved credential forever. | **Fixed.** The env values never go into the launch spec, so `runner.json` holds none (S1 (c)); a restart after a revoke writes a new file with no value. A move to the trash removes `private/runner.json` (a file of an older daemon can hold values). The daemon removes each `*-credential-*` backup after the trash retention (7 days), at the start and at each prune. Decision: delete, not seal; a sealed backup needs the same key as the store (PLAN §16b.7). Tests: `secret_grants_reach_the_launch` (no value in any file of the agent dir), `trash_and_prune`, `old_credential_backups_are_pruned`. |
@@ -1395,4 +1395,118 @@ and gives a switch for a public deployment.
   refused too; use another port.
 - **A blind request.** Even with `deny`, a webhook reaches any public
   address. That is the purpose of the feature.
+
+## 17. The git proxy (2026-11-04, issue #11)
+
+`push_deny` of a repo (PLAN §9) was only a client `pre-push` hook: `git
+push --no-verify` skips it, and the agent could read the repo token (S3)
+and push with no daemon in the path. The git proxy (`crate::git_proxy`,
+docs/api.md §5.1 "The git proxy") makes it a hard rule for the repos that
+go through it. This section is the threat model. It is written by the
+author of the code; an independent review is still to do.
+
+### Assets and actors
+
+- **The forge token** of a repo (a `token` or a `github_token` in the
+  secret manager). With it, anyone can push any ref the forge allows.
+- **The proxy key** (`<state>/git-proxy.key`) and the **proxy
+  credentials** that it makes, one for each agent.
+- **The attacker** is a prompt-injected or careless agent: it controls
+  every file of its workspace, runs any program in its sandbox, has the
+  network of the daemon (loopback too), and can call any API that its
+  runner socket allows. A project_admin sets the repo URL and its
+  credential (as before).
+
+### Controls
+
+- **The token stays in the daemon.** For a proxied repo, `origin` is the
+  proxy URL. The credential helper answers the proxy host with the
+  agent's proxy credential, and answers the forge URL of the repo with
+  `409` (no token). The daemon's own clone and fetch use the one-shot
+  helper outside the sandbox, as before (§14, S9). Test:
+  `the_proxy_enforces_push_deny_and_keeps_the_token` (no file under the
+  test's state and work dirs holds the token, nor `git config --list` of
+  the checkout, the audit rows, or git's stderr).
+- **Agent authentication.** HTTP Basic; the password is
+  `tgp.<agent ULID>.<HMAC-SHA256(key, domain || ULID)>`. The proxy checks
+  the MAC in constant time, then loads the agent: a deleted agent opens
+  nothing. The credential reaches only the agent that owns the runner
+  socket (the helper reads the actor from the socket). The forge token
+  is never accepted as a proxy credential. Tests:
+  `tokens_bind_the_agent_and_the_key`, and the `401` cases of the
+  integration test.
+- **Authorization.** The agent must be in the repo's project (`403`), and
+  the repo must go through the proxy (`404`). The repo's credential goes
+  through `secrets::secret_of`, so the global secret rule (S2) applies.
+- **The push check.** The proxy reads the command list of the
+  `git-receive-pack` body (pkt-lines, at most 4 MiB, 10 000 refs, 120 s)
+  before any byte goes to the forge. A branch (`refs/heads/<b>`, a delete
+  too) that matches a `push_deny` glob (the `case` rules of the hook,
+  `terrarium_core::config::push_deny_matches`) refuses the whole push: no
+  byte goes to the forge, and the answer is a `report-status` that git
+  shows for each ref. The proxy refuses what it cannot check: a signed
+  push (`push-cert`), a ref outside `refs/` or with bytes that git
+  refuses in a ref, a bad pkt-line, capabilities after the first command,
+  and a compressed push body. A push stays on protocol v0 (the proxy does
+  not pass `Git-Protocol` for `receive-pack`), so the forge cannot answer
+  in a form that the check does not read. Tests: `pkt` unit tests, and
+  the integration test (`--no-verify` to `op/x`, a push of `main` with
+  `main:refs/heads/op/y`, a delete of `op/keep`: the forge changes no ref).
+- **Only smart HTTP.** Three routes; the `info/refs` answer must have the
+  content type of the service, so the client never falls back to dumb
+  HTTP; every other path is `404`.
+- **Outbound.** The address rules of the webhooks (§16): one DNS answer for
+  each request, pinned; `TERRARIUM_WEBHOOK_PRIVATE=deny` refuses private
+  addresses and the daemon's own ports (the proxy port too). No proxy from
+  the environment. No redirect (`502`). The repo URL must be `http` or
+  `https` with no user, password, query, or fragment.
+- **Resources.** Bodies stream; nothing holds a whole pack. Caps: a push
+  of 2 GiB, a fetch request of 256 MiB, an answer of 8 GiB. Time: 30 s to
+  connect, 5 min with no bytes from the forge, 1 h for one request, 120 s
+  for the command list. 32 requests at one time.
+- **Redaction.** The token goes to the forge only in the `Authorization`
+  header (marked sensitive). No log line or answer holds a header. An
+  error of the forge is a fixed text with the status; an error text of
+  the HTTP client has the token replaced, and holds no URL user part (the
+  URL has none).
+- **Audit.** Each push with refs writes `repo.push` (`forwarded` or
+  `refused`, with the refs).
+
+### Residuals and open questions
+
+- **A grant of a token for the forge host** gives the agent that token
+  through the helper (PLAN §16b.4), and any token with push rights undoes
+  the hard rule. The proxy cannot see a push that does not go through it.
+  The docs say so; the grants API does not warn yet.
+- **Not covered:** SSH repos and local repos (`/repos`, bound read-write
+  into the sandbox) keep the hook only. Decision: document, not refuse;
+  refusing `push_deny` on them would break the setups from issue #1. A
+  hard rule there is branch protection on the server. Target checkouts
+  are not proxied (the agent has no token on the target). Git LFS is not
+  proxied: set `push_via = direct` for an LFS repo.
+- **Plain HTTP on loopback.** The proxy credential travels in clear text
+  on `127.0.0.1`. Every sandbox shares the daemon's network namespace, so
+  a process of another agent could reach the port, but it needs that
+  agent's credential, which only goes out through that agent's runner
+  socket. A bind to a non-loopback address logs `INSECURE`.
+- **The proxy credential does not expire.** It is valid while the agent
+  exists and the key file stays. An agent can copy it out of its sandbox;
+  outside the daemon host it is useless while the proxy listens on
+  loopback. To change all of them, remove `git-proxy.key` and restart.
+- **Ref names on a case-insensitive forge.** The glob match is case
+  sensitive, as git refs are. A forge that stores refs case-insensitively
+  could let `OP/x` change `op/x`.
+- **Symbolic refs on the forge.** A push to a ref that the forge keeps as
+  a symbolic ref to a denied branch updates the target. A push cannot
+  make such a ref; only one that the forge has already can do this.
+- **Whole-push refusal.** A push with one denied ref changes no ref at
+  all. This is on purpose (a simple, all-or-nothing answer); git shows a
+  reason for each ref.
+- **The default.** `push_via` defaults to `proxy` only for an `https` repo
+  with a credential and `push_deny`, so repos with no `push_deny` keep
+  the old path (and the readable token). A checkout from before the proxy
+  still names the forge: its push fails with the `409` hint until the next
+  `terrarium repo checkout`.
+- **Concurrency.** The 32 slots are shared by all agents: one agent can
+  hold them for up to the request time limit.
 

@@ -19,6 +19,7 @@ pub mod events;
 pub mod executor;
 pub mod fleet;
 pub mod git;
+pub mod git_proxy;
 pub mod harness_auto_update;
 pub mod harness_tools;
 pub mod harness_versions;
@@ -121,6 +122,8 @@ pub struct Daemon {
     pub tcp_addr: Option<std::net::SocketAddr>,
     /// The bound address of the artifact origin, when it listens.
     pub artifact_addr: Option<std::net::SocketAddr>,
+    /// The bound address of the git proxy, when it listens.
+    pub git_proxy_addr: Option<std::net::SocketAddr>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -210,6 +213,7 @@ pub async fn start_with_usage(
         monitors: Arc::default(),
         webhooks: Arc::default(),
         pipelines: Arc::default(),
+        git_proxy: Arc::default(),
     });
     // No webhook may carry the API token (docs/security-review.md).
     state.webhooks.set_own_token(cfg.token.as_deref());
@@ -301,6 +305,14 @@ pub async fn start_with_usage(
         state.webhooks.add_own_port(local.port());
         artifact_addr = Some(local);
     }
+    // The git proxy (issue #11): before the first checkout, so a checkout
+    // of a proxied repo gets its proxy URL.
+    let mut git_proxy_addr = None;
+    if let Some(addr) = cfg.web.git_proxy_listen.as_deref() {
+        let (task, local) = git_proxy::serve(state.clone(), addr).await?;
+        tasks.push(task);
+        git_proxy_addr = Some(local);
+    }
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
@@ -316,6 +328,7 @@ pub async fn start_with_usage(
         socket: cfg.socket,
         tcp_addr,
         artifact_addr,
+        git_proxy_addr,
         tasks,
     })
 }

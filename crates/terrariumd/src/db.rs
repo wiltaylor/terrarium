@@ -1839,6 +1839,14 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     "#,
+    // 60: the git proxy of a repo (issue #11, PLAN §9, `crate::git_proxy`).
+    // `push_via`: `proxy` (agent checkouts reach the forge through the
+    // daemon's git proxy), `direct`, or NULL (the proxy for an https repo
+    // with a token and a `push_deny` list). Self-contained: when another
+    // branch takes this number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE repos ADD COLUMN push_via TEXT CHECK (push_via IN ('proxy', 'direct'));
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

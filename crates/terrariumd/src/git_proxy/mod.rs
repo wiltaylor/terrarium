@@ -1,0 +1,1182 @@
+//! The git proxy (issue #11, PLAN §9 "The git proxy",
+//! docs/security-review.md §17).
+//!
+//! A smart HTTP git server in the daemon, on its own loopback listener
+//! (`TERRARIUM_GIT_PROXY_LISTEN`, default `127.0.0.1:8084`). The
+//! `origin` of an agent checkout of a proxied repo is
+//! `http://127.0.0.1:8084/git/<project>/<repo>.git`. The proxy:
+//!
+//! - authenticates the **agent**, never with the forge token: HTTP Basic
+//!   with a proxy token that is an HMAC of the agent ULID under a key of
+//!   the daemon (`<state>/git-proxy.key`). The agent's git gets it from
+//!   the credential helper (`terrarium repo credential`, through the
+//!   runner socket, so only that agent gets it). A deleted agent's token
+//!   opens nothing.
+//! - checks that the agent is in the repo's project, and that the repo
+//!   goes through the proxy ([`push_via`]).
+//! - for a push (`git-receive-pack`), reads the ref update commands
+//!   ([`pkt`]) and refuses the **whole push** when one ref is a branch
+//!   that matches `push_deny`, with a report that git shows for each ref.
+//!   `--no-verify` skips only the client hook, not this check.
+//! - forwards the rest to the forge with the repo's token from the secret
+//!   manager: the request body and the answer stream through, with size
+//!   caps and time limits, no redirect, and the address rules of the
+//!   webhooks (`TERRARIUM_WEBHOOK_PRIVATE`, one DNS answer, pinned).
+//!
+//! The forge token never enters the sandbox: the credential helper does
+//! not answer it for a proxied repo (the token is "use only" there,
+//! security review S3).
+
+pub mod pkt;
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use anyhow::Context;
+use axum::Router;
+use axum::body::{Body, Bytes};
+use axum::extract::{DefaultBodyLimit, Path as UrlPath, RawQuery, State};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use base64::Engine as _;
+use futures_util::{Stream, StreamExt};
+use hmac::{Hmac, KeyInit, Mac};
+use serde_json::json;
+use sha2::Sha256;
+use terrarium_core::config::{PushVia, push_deny_match};
+use tokio::task::JoinHandle;
+use zeroize::Zeroizing;
+
+use crate::actor::AgentActor;
+use crate::api::Shared;
+use crate::secrets::Secret;
+use crate::store::repos::{self, Repo};
+
+/// The key file in the state dir: 32 random bytes, hex, mode 0600.
+pub const KEY_FILE: &str = "git-proxy.key";
+/// The user name in the proxy credential. The proxy reads only the
+/// password.
+pub const USERNAME: &str = "terrarium";
+/// The URL path prefix of the proxied repos.
+pub const PREFIX: &str = "/git/";
+
+/// The most bytes of a push body (the pack).
+pub const MAX_PUSH: u64 = 2 << 30;
+/// The most bytes of a fetch request body (the wants and haves).
+pub const MAX_FETCH_REQUEST: u64 = 256 << 20;
+/// The most bytes of an answer of the forge (a clone pack).
+pub const MAX_ANSWER: u64 = 8 << 30;
+/// The most bytes of the command list of a push.
+const MAX_COMMANDS: usize = 4 << 20;
+/// The connect time limit to the forge.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest wait for the next bytes of the forge's answer.
+const READ_TIMEOUT: Duration = Duration::from_secs(300);
+/// The longest time of one request to the forge, the body included.
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(3600);
+/// The longest wait for the command list (and the drain of a refused push)
+/// from the agent.
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(120);
+/// The most requests through the proxy at one time.
+const MAX_ACTIVE: usize = 32;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// The listener of a running proxy.
+struct Live {
+    /// `http://127.0.0.1:8084`: the base of each proxy URL.
+    base: String,
+    /// `127.0.0.1:8084`: the host that git sends to the credential helper.
+    host: String,
+    key: Zeroizing<Vec<u8>>,
+}
+
+/// The proxy in the daemon state: off until [`serve`] binds it.
+#[derive(Default)]
+pub struct Runtime {
+    live: RwLock<Option<Live>>,
+    active: Arc<AtomicUsize>,
+}
+
+impl std::fmt::Debug for Runtime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("git_proxy::Runtime")
+            .field("base", &self.base())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Runtime {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Option<Live>> {
+        match self.live.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    fn set(&self, live: Live) {
+        let mut g = match self.live.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *g = Some(live);
+    }
+
+    /// The proxy listens.
+    pub fn is_on(&self) -> bool {
+        self.read().is_some()
+    }
+
+    /// `http://<addr>`, when the proxy listens.
+    pub fn base(&self) -> Option<String> {
+        self.read().as_ref().map(|l| l.base.clone())
+    }
+
+    /// The `origin` URL of a proxied repo.
+    pub fn repo_url(&self, project: &str, repo: &str) -> Option<String> {
+        self.base()
+            .map(|b| format!("{b}{PREFIX}{project}/{repo}.git"))
+    }
+
+    /// The prefix of every proxy URL, `http://<addr>/git/`.
+    pub fn url_prefix(&self) -> Option<String> {
+        self.base().map(|b| format!("{b}{PREFIX}"))
+    }
+
+    /// Is `protocol://host` the proxy, as git names it to a credential
+    /// helper?
+    pub fn is_proxy_host(&self, protocol: &str, host: &str) -> bool {
+        protocol == "http" && self.read().as_ref().is_some_and(|l| l.host == host)
+    }
+
+    /// The proxy token of an agent. `None` when the proxy is off.
+    pub fn token_for(&self, agent: &str) -> Option<Zeroizing<String>> {
+        let g = self.read();
+        let live = g.as_ref()?;
+        Some(Zeroizing::new(format!(
+            "tgp.{agent}.{}",
+            hex(&mac(&live.key, agent))
+        )))
+    }
+
+    /// The agent ULID of a good proxy token.
+    fn agent_of(&self, token: &str) -> Option<String> {
+        let g = self.read();
+        let live = g.as_ref()?;
+        let rest = token.strip_prefix("tgp.")?;
+        let (agent, sig) = rest.rsplit_once('.')?;
+        if agent.is_empty() || agent.len() > 64 || !agent.bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            return None;
+        }
+        let sig = unhex(sig)?;
+        let mut m = HmacSha256::new_from_slice(&live.key).ok()?;
+        m.update(DOMAIN);
+        m.update(agent.as_bytes());
+        // Constant time.
+        m.verify_slice(&sig).ok()?;
+        Some(agent.to_owned())
+    }
+
+    /// Take a request slot, or `None` when [`MAX_ACTIVE`] run.
+    fn slot(&self) -> Option<Slot> {
+        let n = self.active.fetch_add(1, Ordering::SeqCst);
+        let s = Slot(self.active.clone());
+        (n < MAX_ACTIVE).then_some(s)
+    }
+}
+
+/// One request through the proxy; the count goes down on drop.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The domain of the token MAC, so the key signs nothing else.
+const DOMAIN: &[u8] = b"terrarium git proxy token v1\0";
+
+fn mac(key: &[u8], agent: &str) -> Vec<u8> {
+    match HmacSha256::new_from_slice(key) {
+        Ok(mut m) => {
+            m.update(DOMAIN);
+            m.update(agent.as_bytes());
+            m.finalize().into_bytes().to_vec()
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) || s.len() > 128 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// Read the key file, or make it (32 random bytes, mode 0600).
+fn load_or_create_key(state_dir: &Path) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = state_dir.join(KEY_FILE);
+    let read = |p: &Path| -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        let text = Zeroizing::new(std::fs::read_to_string(p)?);
+        let key = unhex(text.trim())
+            .filter(|k| k.len() == 32)
+            .with_context(|| {
+                format!(
+                    "{} is not 64 hex digits; remove it to make a new key",
+                    p.display()
+                )
+            })?;
+        Ok(Zeroizing::new(key))
+    };
+    if path.exists() {
+        return read(&path);
+    }
+    std::fs::create_dir_all(state_dir)?;
+    let mut key = Zeroizing::new(vec![0u8; 32]);
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut key)?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            f.write_all(Zeroizing::new(hex(&key)).as_bytes())?;
+            f.sync_all()?;
+            Ok(key)
+        }
+        // Another start made it first.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read(&path),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Is `url` a URL that the proxy can forward to: `http` or `https`, a
+/// host, no user or password, no query or fragment.
+pub fn check_proxy_url(url: &str) -> Result<(), String> {
+    let u = reqwest::Url::parse(url.trim())
+        .map_err(|e| format!("`push_via = proxy` needs an http or https URL: {e}"))?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return Err(format!(
+            "`push_via = proxy` needs an http or https URL, not `{}`; the proxy does not \
+             cover ssh or local repos",
+            u.scheme()
+        ));
+    }
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(
+            "`push_via = proxy`: the URL has a user or a password; put the token in \
+                    the repo's credential"
+                .into(),
+        );
+    }
+    if u.query().is_some() || u.fragment().is_some() {
+        return Err("`push_via = proxy`: the URL has a query or a fragment".into());
+    }
+    if u.host_str().is_none_or(str::is_empty) {
+        return Err("`push_via = proxy`: the URL has no host".into());
+    }
+    Ok(())
+}
+
+/// How the agent checkouts of `repo` reach the forge. `proxy_on`: the
+/// proxy listens.
+///
+/// - `push_via` set on the repo: that value. `proxy` with the proxy off
+///   stays `proxy`: the checkout and the push fail closed.
+/// - Not set: `proxy` for an `https` repo with a credential and a
+///   `push_deny` list, when the proxy is on. Else `direct`. So a repo
+///   with no `push_deny` keeps its behaviour from before the proxy.
+pub fn push_via(repo: &Repo, proxy_on: bool) -> PushVia {
+    match repo.push_via {
+        Some(v) => v,
+        None => {
+            let https = repo
+                .url
+                .get(..8)
+                .is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+            if proxy_on
+                && https
+                && repo.credential.is_some()
+                && !repo.push_deny.is_empty()
+                && check_proxy_url(&repo.url).is_ok()
+            {
+                PushVia::Proxy
+            } else {
+                PushVia::Direct
+            }
+        }
+    }
+}
+
+/// The base URL for a bound address: an unspecified address is reached
+/// on loopback.
+fn base_of(addr: SocketAddr) -> (String, String) {
+    let ip = match addr.ip() {
+        IpAddr::V4(v) if v.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(v) if v.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    let host = SocketAddr::new(ip, addr.port()).to_string();
+    (format!("http://{host}"), host)
+}
+
+/// Bind the proxy on `addr` and serve it.
+pub async fn serve(state: Shared, addr: &str) -> anyhow::Result<(JoinHandle<()>, SocketAddr)> {
+    let key = load_or_create_key(&state.state_dir)
+        .with_context(|| format!("git proxy key {}", state.state_dir.join(KEY_FILE).display()))?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("cannot bind the git proxy {addr}"))?;
+    let local = listener.local_addr()?;
+    if !local.ip().is_loopback() {
+        tracing::warn!(
+            addr = %local,
+            "INSECURE: the git proxy listens on a non-loopback address over plain HTTP; the \
+             agent proxy tokens can be read on the network. The sandboxes share the daemon's \
+             network, so 127.0.0.1 is enough"
+        );
+    }
+    let (base, host) = base_of(local);
+    state.git_proxy.set(Live { base, host, key });
+    state.webhooks.add_own_port(local.port());
+    tracing::info!(addr = %local, "git proxy listening on TCP");
+    let app = router(state);
+    Ok((
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!("git proxy failed: {e}");
+            }
+        }),
+        local,
+    ))
+}
+
+/// The routes of the proxy listener. Nothing else is served there.
+pub fn router(state: Shared) -> Router {
+    Router::new()
+        .route("/git/{project}/{repo}/info/refs", get(info_refs))
+        .route("/git/{project}/{repo}/git-upload-pack", post(upload_pack))
+        .route("/git/{project}/{repo}/git-receive-pack", post(receive_pack))
+        .fallback(|| async {
+            text(
+                StatusCode::NOT_FOUND,
+                "not a path of the Terrarium git proxy (smart HTTP only)",
+            )
+        })
+        // The caps of this module apply, not the API's body limit.
+        .layer(DefaultBodyLimit::disable())
+        .with_state(state)
+}
+
+/// A `text/plain` answer. git shows the text of an error answer as
+/// `remote: ...` where it can.
+fn text(status: StatusCode, msg: impl Into<String>) -> Response {
+    let mut m: String = msg.into();
+    m.push('\n');
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        m,
+    )
+        .into_response()
+}
+
+fn unauthorized(msg: &str) -> Response {
+    let mut r = text(StatusCode::UNAUTHORIZED, msg);
+    r.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"Terrarium git proxy\""),
+    );
+    r
+}
+
+/// The password of a Basic `Authorization`.
+fn basic_password(h: &HeaderMap) -> Option<Zeroizing<String>> {
+    let v = h.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, b64) = v.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let raw = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .ok()?,
+    );
+    let s = std::str::from_utf8(&raw).ok()?;
+    let (_, pass) = s.split_once(':')?;
+    Some(Zeroizing::new(pass.to_owned()))
+}
+
+/// One request: the agent, the repo, the forge credential, and the
+/// checked forge address.
+struct Ctx {
+    agent: AgentActor,
+    repo: Repo,
+    /// `(secret name, user name, token)`.
+    cred: Option<(String, String, Zeroizing<String>)>,
+    base: reqwest::Url,
+    addr: SocketAddr,
+    _slot: Slot,
+}
+
+impl Ctx {
+    /// Replace the token in a text for the agent or the log.
+    fn scrub(&self, s: &str) -> String {
+        match &self.cred {
+            Some((name, _, t)) if !t.is_empty() => {
+                s.replace(t.as_str(), &format!("[secret:{name}]"))
+            }
+            _ => s.to_owned(),
+        }
+    }
+
+    fn label(&self) -> String {
+        format!("{}/{}", self.repo.project, self.repo.name)
+    }
+}
+
+/// Authenticate the agent and find the repo. An error is the answer.
+async fn open(
+    state: &Shared,
+    headers: &HeaderMap,
+    project: &str,
+    repo: &str,
+) -> Result<Ctx, Response> {
+    let Some(slot) = state.git_proxy.slot() else {
+        return Err(text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("the Terrarium git proxy runs {MAX_ACTIVE} requests now; try again"),
+        ));
+    };
+    let Some(pass) = basic_password(headers) else {
+        return Err(unauthorized(
+            "the Terrarium git proxy needs the agent's proxy credential \
+             (credential.helper = !terrarium repo credential)",
+        ));
+    };
+    let Some(agent_id) = state.git_proxy.agent_of(&pass) else {
+        return Err(unauthorized("the proxy credential is not good"));
+    };
+    let key = agent_id.clone();
+    let agent = match state
+        .db
+        .read(move |c| crate::store::agents::actor_for(c, &key))
+        .await
+    {
+        Ok(Some(a)) if a.id == agent_id => a,
+        Ok(_) => {
+            return Err(unauthorized(
+                "the agent of this proxy credential no longer exists",
+            ));
+        }
+        Err(e) => return Err(text(StatusCode::INTERNAL_SERVER_ERROR, e.message)),
+    };
+    if agent.project != project {
+        tracing::warn!(agent = %agent.id, project, repo, "git proxy: an agent asked for a repo of another project");
+        return Err(text(
+            StatusCode::FORBIDDEN,
+            format!(
+                "agent `{}` is in project `{}`; the git proxy serves only the repos of its project",
+                agent.name, agent.project
+            ),
+        ));
+    }
+    let name = repo.strip_suffix(".git").unwrap_or(repo).to_owned();
+    let p = project.to_owned();
+    let n = name.clone();
+    let found = state
+        .db
+        .read(move |c| repos::find_by_name(c, &p, &n))
+        .await
+        .map_err(|e| text(StatusCode::INTERNAL_SERVER_ERROR, e.message))?;
+    let Some(repo) = found else {
+        return Err(text(
+            StatusCode::NOT_FOUND,
+            format!("project `{project}` has no repo `{name}`"),
+        ));
+    };
+    if push_via(&repo, true) != PushVia::Proxy {
+        return Err(text(
+            StatusCode::NOT_FOUND,
+            format!(
+                "repo `{name}` does not go through the git proxy (push_via is direct); use its URL"
+            ),
+        ));
+    }
+    let base = check_proxy_url(&repo.url)
+        .and_then(|()| reqwest::Url::parse(repo.url.trim()).map_err(|e| e.to_string()))
+        .map_err(|e| text(StatusCode::BAD_GATEWAY, e))?;
+    let cred = match crate::secrets::secret_of(state, repo.owner(), repo.credential.as_deref())
+        .await
+    {
+        Ok(None) => None,
+        Ok(Some((name, Secret::Token { username, token }))) => Some((name, username, token)),
+        Ok(Some((name, other))) => {
+            return Err(text(
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "the credential `{name}` of repo `{}` is a {}; the git proxy needs a token or a \
+                     github_token",
+                    repo.name,
+                    other.kind_label()
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err(text(
+                StatusCode::BAD_GATEWAY,
+                format!("the credential of repo `{}`: {}", repo.name, e.message),
+            ));
+        }
+    };
+    let (mode, ports, resolver) = state.webhooks.net_rules();
+    let addr = crate::webhooks::net::resolve(&base, mode, &ports, resolver)
+        .await
+        .map_err(|e| {
+            text(
+                StatusCode::BAD_GATEWAY,
+                format!("the forge of repo `{}`: {e}", repo.name),
+            )
+        })?;
+    Ok(Ctx {
+        agent,
+        repo,
+        cred,
+        base,
+        addr,
+        _slot: slot,
+    })
+}
+
+/// The URL of `suffix` under the repo URL.
+fn forge_url(base: &reqwest::Url, suffix: &str, query: Option<&str>) -> reqwest::Url {
+    let mut u = base.clone();
+    let path = format!("{}/{suffix}", u.path().trim_end_matches('/'));
+    u.set_path(&path);
+    u.set_query(query);
+    u
+}
+
+/// The request headers that go to the forge as they are.
+const FORWARD_REQUEST: &[HeaderName] = &[
+    header::CONTENT_TYPE,
+    header::ACCEPT,
+    header::ACCEPT_ENCODING,
+    header::CONTENT_LENGTH,
+    header::USER_AGENT,
+];
+
+/// The answer headers that go back to the agent.
+const FORWARD_ANSWER: &[HeaderName] = &[
+    header::CONTENT_TYPE,
+    header::CACHE_CONTROL,
+    header::EXPIRES,
+    header::PRAGMA,
+    header::CONTENT_ENCODING,
+];
+
+/// A stream that fails past `cap` bytes.
+fn capped<S, E>(
+    s: S,
+    cap: u64,
+    what: &'static str,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
+where
+    S: Stream<Item = Result<Bytes, E>> + Send,
+    E: std::fmt::Display,
+{
+    let mut seen = 0u64;
+    s.map(move |r| match r {
+        Ok(b) => {
+            seen += b.len() as u64;
+            if seen > cap {
+                Err(std::io::Error::other(format!(
+                    "{what} is larger than {cap} bytes"
+                )))
+            } else {
+                Ok(b)
+            }
+        }
+        Err(e) => Err(std::io::Error::other(e.to_string())),
+    })
+}
+
+/// Send one request to the forge and stream its answer back. `service`
+/// names the content type that a good answer must have.
+async fn forward(
+    ctx: Ctx,
+    method: reqwest::Method,
+    url: reqwest::Url,
+    headers: &HeaderMap,
+    body: Option<(reqwest::Body, bool)>,
+    want_type: &str,
+) -> Response {
+    let label = ctx.label();
+    let mut b = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .timeout(TOTAL_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if let Some(url::Host::Domain(d)) = url.host() {
+        b = b.resolve(d, SocketAddr::new(ctx.addr.ip(), 0));
+    }
+    let client = match b.build() {
+        Ok(c) => c,
+        Err(e) => {
+            return text(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot make the HTTP client: {e}"),
+            );
+        }
+    };
+    let mut req = client.request(method, url.clone());
+    for name in FORWARD_REQUEST {
+        if let Some(v) = headers.get(name) {
+            req = req.header(name, v);
+        }
+    }
+    // A fetch may use protocol v2. A push stays v0: the proxy reads its
+    // command list in that form, so the forge must not answer in another.
+    if !want_type.contains("receive-pack")
+        && let Some(v) = headers.get("git-protocol")
+    {
+        req = req.header("git-protocol", v);
+    }
+    if let Some((_, user, token)) = &ctx.cred {
+        let raw = Zeroizing::new(format!("{user}:{}", token.as_str()));
+        let enc = Zeroizing::new(format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+        ));
+        match HeaderValue::from_str(&enc) {
+            Ok(mut v) => {
+                v.set_sensitive(true);
+                req = req.header(header::AUTHORIZATION, v);
+            }
+            Err(_) => {
+                return text(
+                    StatusCode::BAD_GATEWAY,
+                    "the repo token is not a valid header value",
+                );
+            }
+        }
+    }
+    if let Some((body, pass_encoding)) = body {
+        if pass_encoding && let Some(v) = headers.get(header::CONTENT_ENCODING) {
+            req = req.header(header::CONTENT_ENCODING, v);
+        }
+        req = req.body(body);
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let why = if e.is_timeout() {
+                "timed out".to_owned()
+            } else {
+                ctx.scrub(&source_text(&e))
+            };
+            tracing::warn!(repo = %label, agent = %ctx.agent.id, "git proxy: the forge request failed: {why}");
+            return text(
+                StatusCode::BAD_GATEWAY,
+                format!("Terrarium git proxy: the forge of `{label}` did not answer: {why}"),
+            );
+        }
+    };
+    let status = resp.status();
+    let ctype = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    if !status.is_success() {
+        let what = if status.is_redirection() {
+            format!(
+                "a redirect ({}); the proxy follows no redirect, so give the repo its final URL",
+                status.as_u16()
+            )
+        } else if matches!(status.as_u16(), 401 | 403) {
+            format!(
+                "HTTP {}: the forge refused the repo's credential",
+                status.as_u16()
+            )
+        } else {
+            format!("HTTP {}", status.as_u16())
+        };
+        tracing::warn!(repo = %label, agent = %ctx.agent.id, url = %crate::webhooks::net::log_url(&url), "git proxy: the forge answered {what}");
+        return text(
+            StatusCode::BAD_GATEWAY,
+            format!("Terrarium git proxy: the forge of `{label}` answered {what}"),
+        );
+    }
+    if !ctype.eq_ignore_ascii_case(want_type) {
+        return text(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "Terrarium git proxy: the forge of `{label}` does not speak smart HTTP (content \
+                 type `{}`)",
+                ctype.escape_default()
+            ),
+        );
+    }
+    let mut out = Response::builder().status(StatusCode::OK);
+    for name in FORWARD_ANSWER {
+        if let Some(v) = resp.headers().get(name) {
+            out = out.header(name, v);
+        }
+    }
+    // The slot lives until the answer is sent.
+    let slot = ctx._slot;
+    let stream = capped(resp.bytes_stream(), MAX_ANSWER, "the answer of the forge").map(move |r| {
+        let _ = &slot;
+        r
+    });
+    out.body(Body::from_stream(stream))
+        .unwrap_or_else(|e| text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// The deepest cause of a reqwest error, with no URL.
+fn source_text(e: &reqwest::Error) -> String {
+    let mut s: &dyn std::error::Error = e;
+    while let Some(next) = s.source() {
+        s = next;
+    }
+    s.to_string()
+}
+
+/// The `service` of an `info/refs` query.
+fn service_of(query: Option<&str>) -> Option<&'static str> {
+    let q = query?;
+    q.split('&').find_map(|kv| match kv {
+        "service=git-upload-pack" => Some("git-upload-pack"),
+        "service=git-receive-pack" => Some("git-receive-pack"),
+        _ => None,
+    })
+}
+
+async fn info_refs(
+    State(state): State<Shared>,
+    UrlPath((project, repo)): UrlPath<(String, String)>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let Some(service) = service_of(query.as_deref()) else {
+        return text(
+            StatusCode::FORBIDDEN,
+            "the Terrarium git proxy speaks only smart HTTP: ?service=git-upload-pack or \
+             git-receive-pack",
+        );
+    };
+    let ctx = match open(&state, &headers, &project, &repo).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let url = forge_url(&ctx.base, "info/refs", Some(&format!("service={service}")));
+    let want = format!("application/x-{service}-advertisement");
+    forward(ctx, reqwest::Method::GET, url, &headers, None, &want).await
+}
+
+async fn upload_pack(
+    State(state): State<Shared>,
+    UrlPath((project, repo)): UrlPath<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let ctx = match open(&state, &headers, &project, &repo).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let url = forge_url(&ctx.base, "git-upload-pack", None);
+    let stream = capped(
+        body.into_data_stream(),
+        MAX_FETCH_REQUEST,
+        "the fetch request",
+    );
+    let body = reqwest::Body::wrap_stream(stream);
+    // A fetch request may be gzip: it goes on as it is, with its
+    // Content-Encoding.
+    forward(
+        ctx,
+        reqwest::Method::POST,
+        url,
+        &headers,
+        Some((body, true)),
+        "application/x-git-upload-pack-result",
+    )
+    .await
+}
+
+/// Read the body until the command list is complete.
+async fn read_commands(
+    stream: &mut (impl Stream<Item = Result<Bytes, axum::Error>> + Unpin),
+) -> Result<(Vec<u8>, pkt::Commands), Response> {
+    let mut buf: Vec<u8> = Vec::new();
+    let read = async {
+        loop {
+            match pkt::parse_commands(&buf) {
+                pkt::Parse::Done(c) => return Ok(c),
+                pkt::Parse::Bad(m) => {
+                    return Err(text(
+                        StatusCode::BAD_REQUEST,
+                        format!("Terrarium git proxy: {m}"),
+                    ));
+                }
+                pkt::Parse::More => {}
+            }
+            if buf.len() > MAX_COMMANDS {
+                return Err(text(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "Terrarium git proxy: the command list of the push is larger than {MAX_COMMANDS} bytes"
+                    ),
+                ));
+            }
+            match stream.next().await {
+                Some(Ok(b)) => buf.extend_from_slice(&b),
+                Some(Err(e)) => {
+                    return Err(text(
+                        StatusCode::BAD_REQUEST,
+                        format!("Terrarium git proxy: reading the push failed: {e}"),
+                    ));
+                }
+                None => {
+                    return Err(text(
+                        StatusCode::BAD_REQUEST,
+                        "Terrarium git proxy: the push request ended early",
+                    ));
+                }
+            }
+        }
+    };
+    match tokio::time::timeout(CLIENT_TIMEOUT, read).await {
+        Ok(Ok(c)) => Ok((buf, c)),
+        Ok(Err(r)) => Err(r),
+        Err(_) => Err(text(
+            StatusCode::REQUEST_TIMEOUT,
+            "Terrarium git proxy: the push request was too slow",
+        )),
+    }
+}
+
+/// Read and drop the rest of a refused push, so git reads the answer and
+/// not a broken connection. At most [`MAX_PUSH`] bytes and
+/// [`CLIENT_TIMEOUT`].
+async fn drain(
+    stream: &mut (impl Stream<Item = Result<Bytes, axum::Error>> + Unpin),
+    mut seen: u64,
+) {
+    let _ = tokio::time::timeout(CLIENT_TIMEOUT, async {
+        while let Some(Ok(b)) = stream.next().await {
+            seen += b.len() as u64;
+            if seen > MAX_PUSH {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
+async fn receive_pack(
+    State(state): State<Shared>,
+    UrlPath((project, repo)): UrlPath<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let ctx = match open(&state, &headers, &project, &repo).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    if headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| !v.eq_ignore_ascii_case("identity"))
+    {
+        return text(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Terrarium git proxy: a compressed push body is not supported",
+        );
+    }
+    let mut stream = body.into_data_stream();
+    let (prefix, cmds) = match read_commands(&mut stream).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let label = ctx.label();
+    let denied: Vec<(usize, &str)> = cmds
+        .commands
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            c.branch()
+                .and_then(|b| push_deny_match(&ctx.repo.push_deny, b))
+                .map(|g| (i, g))
+        })
+        .collect();
+    let refs: Vec<serde_json::Value> = cmds
+        .commands
+        .iter()
+        .map(|c| json!({"ref": c.refname, "old": c.old, "new": c.new}))
+        .collect();
+    if !denied.is_empty() {
+        drain(&mut stream, prefix.len() as u64).await;
+        let reasons: Vec<String> = cmds
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(i, _)| match denied.iter().find(|(j, _)| *j == i) {
+                Some((_, g)) => format!("denied by push_deny `{g}` of repo {}", ctx.repo.name),
+                None => "not pushed: another ref of this push is denied by push_deny".to_owned(),
+            })
+            .collect();
+        let names: Vec<&str> = denied
+            .iter()
+            .map(|(i, _)| cmds.commands[*i].refname.as_str())
+            .collect();
+        let message = format!(
+            "Terrarium: push_deny of repo {} refuses {}; the push changed no ref",
+            ctx.repo.name,
+            names.join(", ")
+        );
+        tracing::info!(repo = %label, agent = %ctx.agent.id, refs = ?names, "git proxy: refused a push (push_deny)");
+        audit(
+            &state,
+            &ctx,
+            json!({
+                "agent": ctx.agent.id, "refs": refs, "result": "refused",
+                "denied": names, "via": "proxy",
+            }),
+        )
+        .await;
+        return match pkt::refusal(&cmds, &reasons, &message) {
+            Some(bytes) => (
+                StatusCode::OK,
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        "application/x-git-receive-pack-result",
+                    ),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                bytes,
+            )
+                .into_response(),
+            None => text(StatusCode::FORBIDDEN, message),
+        };
+    }
+    if !cmds.commands.is_empty() {
+        tracing::info!(repo = %label, agent = %ctx.agent.id, refs = cmds.commands.len(), "git proxy: push");
+        audit(
+            &state,
+            &ctx,
+            json!({
+                "agent": ctx.agent.id, "refs": refs, "result": "forwarded", "via": "proxy",
+            }),
+        )
+        .await;
+    }
+    let first =
+        futures_util::stream::once(async move { Ok::<Bytes, axum::Error>(Bytes::from(prefix)) });
+    let all = capped(first.chain(stream), MAX_PUSH, "the push");
+    let url = forge_url(&ctx.base, "git-receive-pack", None);
+    forward(
+        ctx,
+        reqwest::Method::POST,
+        url,
+        &headers,
+        Some((reqwest::Body::wrap_stream(all), false)),
+        "application/x-git-receive-pack-result",
+    )
+    .await
+}
+
+/// A `repo.push` audit row. Best effort.
+async fn audit(state: &Shared, ctx: &Ctx, detail: serde_json::Value) {
+    let target = ctx.label();
+    let project = ctx.repo.project.clone();
+    let actor = format!("agent:{}", ctx.agent.id);
+    if let Err(e) = state
+        .db
+        .write(actor, move |t| {
+            t.audit("repo.push", &target, Some(&project), detail)
+        })
+        .await
+    {
+        tracing::warn!("cannot write the repo.push audit row: {e}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn repo(url: &str, cred: bool, deny: &[&str], via: Option<PushVia>) -> Repo {
+        Repo {
+            id: "r".into(),
+            project: "p".into(),
+            name: "app".into(),
+            url: url.into(),
+            default_branch: None,
+            credential: cred.then(|| "tok".to_owned()),
+            credential_admin: true,
+            path: "app".into(),
+            hooks_dir: None,
+            push_deny: deny.iter().map(|s| (*s).to_owned()).collect(),
+            push_via: via,
+            source: "api".into(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_default_rule() {
+        let https = "https://git.example.com/a/app.git";
+        assert_eq!(
+            push_via(&repo(https, true, &["op/*"], None), true),
+            PushVia::Proxy
+        );
+        // The proxy off, no token, no push_deny, or not https: direct.
+        assert_eq!(
+            push_via(&repo(https, true, &["op/*"], None), false),
+            PushVia::Direct
+        );
+        assert_eq!(
+            push_via(&repo(https, false, &["op/*"], None), true),
+            PushVia::Direct
+        );
+        assert_eq!(
+            push_via(&repo(https, true, &[], None), true),
+            PushVia::Direct
+        );
+        for url in [
+            "git@github.com:a/app.git",
+            "ssh://git@x/a.git",
+            "file:///repos/a.git",
+            "http://x/a.git",
+        ] {
+            assert_eq!(
+                push_via(&repo(url, true, &["op/*"], None), true),
+                PushVia::Direct,
+                "{url}"
+            );
+        }
+        // An explicit value wins, also with the proxy off.
+        assert_eq!(
+            push_via(&repo(https, true, &["op/*"], Some(PushVia::Direct)), true),
+            PushVia::Direct
+        );
+        assert_eq!(
+            push_via(&repo(https, false, &[], Some(PushVia::Proxy)), false),
+            PushVia::Proxy
+        );
+    }
+
+    #[test]
+    fn proxy_urls() {
+        assert!(check_proxy_url("https://github.com/a/b.git").is_ok());
+        assert!(check_proxy_url("http://10.0.0.5:3000/a/b").is_ok());
+        for bad in [
+            "git@github.com:a/b.git",
+            "ssh://x/y",
+            "file:///repos/a.git",
+            "/repos/a.git",
+            "https://u:p@x/a.git",
+            "https://x/a.git?x=1",
+            "https://x/a.git#f",
+        ] {
+            assert!(check_proxy_url(bad).is_err(), "{bad}");
+        }
+        let base = reqwest::Url::parse("https://x/a/b.git/").unwrap();
+        assert_eq!(
+            forge_url(&base, "info/refs", Some("service=git-upload-pack")).as_str(),
+            "https://x/a/b.git/info/refs?service=git-upload-pack"
+        );
+        assert_eq!(
+            base_of("0.0.0.0:8084".parse().unwrap()).0,
+            "http://127.0.0.1:8084"
+        );
+        assert_eq!(base_of("[::]:1".parse().unwrap()).1, "[::1]:1");
+        assert_eq!(
+            service_of(Some("service=git-receive-pack")),
+            Some("git-receive-pack")
+        );
+        assert_eq!(service_of(Some("service=git-upload-archive")), None);
+        assert_eq!(service_of(None), None);
+    }
+
+    #[test]
+    fn tokens_bind_the_agent_and_the_key() {
+        let rt = Runtime::default();
+        assert!(rt.token_for("01AGENT").is_none());
+        rt.set(Live {
+            base: "http://127.0.0.1:1".into(),
+            host: "127.0.0.1:1".into(),
+            key: Zeroizing::new(vec![7; 32]),
+        });
+        let t = rt.token_for("01AGENT").unwrap();
+        assert_eq!(rt.agent_of(&t), Some("01AGENT".to_owned()));
+        // Another agent's name with this MAC, a cut MAC, junk: refused.
+        let forged = t.replace("01AGENT", "01OTHER");
+        assert_eq!(rt.agent_of(&forged), None);
+        assert_eq!(rt.agent_of(&t[..t.len() - 2]), None);
+        assert_eq!(rt.agent_of("tgp..00"), None);
+        assert_eq!(rt.agent_of("nonsense"), None);
+        // A new key: the old token opens nothing.
+        rt.set(Live {
+            base: "http://127.0.0.1:1".into(),
+            host: "127.0.0.1:1".into(),
+            key: Zeroizing::new(vec![8; 32]),
+        });
+        assert_eq!(rt.agent_of(&t), None);
+        assert!(rt.is_proxy_host("http", "127.0.0.1:1"));
+        assert!(!rt.is_proxy_host("https", "127.0.0.1:1"));
+        assert!(!rt.is_proxy_host("http", "127.0.0.1:2"));
+    }
+
+    #[test]
+    fn the_key_file_is_private_and_stable() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let a = load_or_create_key(d.path()).unwrap();
+        let b = load_or_create_key(d.path()).unwrap();
+        assert_eq!(*a, *b);
+        let mode = std::fs::metadata(d.path().join(KEY_FILE))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        std::fs::write(d.path().join(KEY_FILE), "short").unwrap();
+        assert!(load_or_create_key(d.path()).is_err());
+    }
+
+    #[test]
+    fn basic_auth_reads_the_password() {
+        let mut h = HeaderMap::new();
+        let v = base64::engine::general_purpose::STANDARD.encode("terrarium:tgp.X.ab");
+        h.insert(header::AUTHORIZATION, format!("Basic {v}").parse().unwrap());
+        assert_eq!(basic_password(&h).unwrap().as_str(), "tgp.X.ab");
+        h.insert(header::AUTHORIZATION, "Bearer x".parse().unwrap());
+        assert!(basic_password(&h).is_none());
+    }
+}

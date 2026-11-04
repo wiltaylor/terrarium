@@ -216,8 +216,10 @@ export interface Repo {
   path?: string;
   /** A tracked dir whose files each checkout copies into `.git/hooks` (docs/api.md §5.1, "Git hooks"). */
   hooks_dir?: string;
-  /** Branch globs that the daemon's `pre-push` hook refuses (docs/api.md §5.1, "Git hooks"). */
+  /** Branch globs that a push must not touch: the `pre-push` hook, and the git proxy for a proxied repo (docs/api.md §5.1). */
   push_deny?: string[];
+  /** `proxy` or `direct`; absent: the default rule (docs/api.md §5.1, "The git proxy"). */
+  push_via?: 'proxy' | 'direct';
   source?: Source;
   created_at?: string;
 }

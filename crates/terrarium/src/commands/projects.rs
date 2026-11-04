@@ -28,6 +28,7 @@ const REPO_COLS: &[(&str, &str)] = &[
     ("PATH", "path"),
     ("CREDENTIAL", "credential"),
     ("HOOKS", "hooks_dir"),
+    ("VIA", "push_via"),
 ];
 
 pub const AGENT_COLS: &[(&str, &str)] = &[
@@ -180,6 +181,7 @@ async fn repo_add(ctx: &Ctx, a: &RepoAddArgs) -> anyhow::Result<()> {
     if !a.push_deny.is_empty() {
         body["push_deny"] = json!(a.push_deny);
     }
+    set_opt(&mut body, "push_via", a.push_via.clone());
     let r = ctx
         .api
         .post(&format!("{}/repos", project_path(&name)), Some(body))

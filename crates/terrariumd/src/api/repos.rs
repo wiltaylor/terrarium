@@ -25,6 +25,7 @@ use crate::policy;
 use crate::secrets::{self, RunDirs, Secret};
 use crate::store::agents::{self, AgentView};
 use crate::store::repos::{self, Repo};
+use terrarium_core::config::PushVia;
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -87,6 +88,9 @@ pub struct CheckoutResult {
     /// The directory under the workspace (`$HOME/work/<path>` in the
     /// sandbox).
     pub path: String,
+    /// `proxy` or `direct`: how the checkout reaches the forge (PLAN §9,
+    /// "The git proxy").
+    pub push_via: terrarium_core::config::PushVia,
     #[serde(flatten)]
     pub outcome: Outcome,
 }
@@ -170,6 +174,22 @@ async fn checkout_inner(
 ) -> ApiResult<CheckoutResult> {
     let dir = body.path.clone().unwrap_or_else(|| repo.path.clone());
     check_dir(&dir)?;
+    // The origin of the checkout: the git proxy, or the forge (issue #11).
+    let proxy = &state.git_proxy;
+    let push_via = crate::git_proxy::push_via(repo, proxy.is_on());
+    let origin = match (push_via, proxy.repo_url(&repo.project, &repo.name)) {
+        (PushVia::Proxy, Some(url)) => git::Origin::Proxy(url),
+        (PushVia::Proxy, None) => {
+            return Err(ApiError::conflict(format!(
+                "repo `{}` has push_via = proxy, but the git proxy is off                  (TERRARIUM_GIT_PROXY_LISTEN); turn it on, or set push_via = direct",
+                repo.name
+            )));
+        }
+        (PushVia::Direct, _) => match proxy.url_prefix() {
+            Some(proxy_prefix) => git::Origin::Direct { proxy_prefix },
+            None => git::Origin::Keep,
+        },
+    };
     // The repo's secret: the project's first, then the global one.
     let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
     // The workspace moves to the work root first (an agent made before it).
@@ -193,6 +213,7 @@ async fn checkout_inner(
         deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
         timeout: git::DEFAULT_TIMEOUT,
         hooks: repo.hooks(),
+        origin,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -237,6 +258,7 @@ async fn checkout_inner(
         agent: agent.agent.name.clone(),
         agent_id: agent.agent.id.to_string(),
         path: dir,
+        push_via,
         outcome,
     };
     let draft = checkout_event(
@@ -259,6 +281,7 @@ async fn checkout_inner(
         "head": result.outcome.head,
         "branch": result.outcome.branch,
         "credential": secret.map(|(name, _)| name),
+        "push_via": result.push_via,
     });
     let target = format!("{}/{}", repo.project, repo.name);
     let project = repo.project.clone();
@@ -471,6 +494,17 @@ async fn credential_helper(
     let none = || ApiError::not_found("no credential for this host and path in your project");
     let protocol = q.protocol.to_ascii_lowercase();
     let host = q.host.to_ascii_lowercase();
+    // The daemon's git proxy: the agent's own proxy token, never a forge
+    // token (PLAN §9, "The git proxy"). The proxy checks the repo.
+    if state.git_proxy.is_proxy_host(&protocol, &host) {
+        let Some(token) = state.git_proxy.token_for(&me.id) else {
+            return Err(none());
+        };
+        return Ok(Json(HelperAnswer {
+            username: crate::git_proxy::USERNAME.to_owned(),
+            password: token,
+        }));
+    }
     // First a repo of the project (git sends the path with
     // `credential.useHttpPath`), then a granted `token` or `github_token`
     // for the host (PLAN §16b.4).
@@ -503,6 +537,15 @@ async fn credential_helper(
             password: token,
         }));
     };
+    // A proxied repo: the token is "use only", it stays in the daemon
+    // (security review S3). The checkout's origin is the proxy; an old
+    // checkout still names the forge.
+    if crate::git_proxy::push_via(&repo, state.git_proxy.is_on()) == PushVia::Proxy {
+        return Err(ApiError::conflict(format!(
+            "repo `{}` goes through the Terrarium git proxy, and its token stays in the daemon;              run `terrarium repo checkout {}` to point origin at the proxy",
+            repo.name, repo.name
+        )));
+    }
     let name = repo.credential.clone().unwrap_or_default();
     // A `token` or a `github_token` of the project, else a global one.
     let Ok(Secret::Token { username, token }) = secrets::load(&state, repo.owner(), &name).await

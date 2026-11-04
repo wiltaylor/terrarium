@@ -1130,7 +1130,8 @@ credential = "github-deploy"          # key in /state/credentials, never given t
 name = "copilot-prompt"
 url = "https://github.com/wiltaylor/CopilotCustomSystemPrompt.git"
 hooks_dir = ".githooks"               # tracked hooks, copied into .git/hooks at each checkout
-push_deny = ["op/*"]                  # a pre-push guard: these branches stay local
+push_deny = ["op/*"]                  # these branches stay local (a hard rule through the git proxy)
+# push_via = "proxy"                  # proxy | direct; default: proxy for https + credential + push_deny
 
 [checkout]
 on_agent_create = ["terrarium"]       # cloned into $HOME/work/terrarium when the agent is made
@@ -1157,11 +1158,30 @@ as `op/*`: the daemon writes a `pre-push` hook that refuses a push of a
 matching branch, and runs the repo's own `pre-push` (`pre-push.repo`)
 after it. The daemon's own git still runs with hooks off (`HARDEN`), and
 `core.hooksPath` in the repo config stays refused. A client hook is a
-guard against mistakes, not a hard control: `--no-verify` skips it, and
-the credential helper cannot check refs (git does not send them, and the
-agent can read the token, §16b). A hard rule needs branch protection on
-the git server, or the HTTPS proxy of §16b. Details: docs/api.md §5.1,
-"Git hooks".
+guard against mistakes, not a hard control: `--no-verify` skips it.
+Details: docs/api.md §5.1, "Git hooks".
+
+**The git proxy** (issue #11). The hard rule for `push_deny` is a smart
+HTTP git proxy in the daemon (`crate::git_proxy`), on a loopback listener
+(`TERRARIUM_GIT_PROXY_LISTEN`, default `127.0.0.1:8084`; the sandboxes
+share the daemon's network). A repo goes through it with `push_via =
+"proxy"`, or by default when it has an `https` URL, a credential, and a
+`push_deny` list. Then `origin` of each workspace checkout is
+`http://127.0.0.1:8084/git/<project>/<repo>.git`. The credential helper
+gives git the agent's own proxy credential (an HMAC of the agent ULID),
+never the forge token. The proxy authenticates the agent, checks that the
+repo is in the agent's project, reads the ref commands of a push, and
+refuses the whole push when a pushed branch matches `push_deny` (git
+shows `[remote rejected]` with the reason). It forwards the rest to the
+forge with the token from the secret manager, and streams the bodies with
+size caps and time limits, no redirect, and the address rules of the
+webhooks. So the token of a proxied repo stays in the daemon ("use only",
+§16b.3). The pre-push hook stays as the first, friendly check. Not
+covered: SSH and local repos (the hook only; use branch protection on the
+server), Git LFS (set `push_via = "direct"`), and target checkouts.
+The default picks the proxy only for repos with `push_deny`, so a repo
+without it keeps its behaviour. Details: docs/api.md §5.1, "The git
+proxy"; the threat model: docs/security-review.md §17.
 
 ### 9a. The repo browser
 
@@ -2956,7 +2976,10 @@ read the token. Only an `ssh_key` stays hidden under `use`: the ssh-agent
 signs and never gives the key out. The levels stay as they are. The
 docs and the grant form say this, and a test
 (`tests/global_secret_rule.rs`) asserts it, so that nobody changes it by
-accident. A real fix is an HTTPS proxy in the daemon that adds the token.
+accident. The git proxy of §9 (issue #11) is the fix for the repos that
+go through it: the proxy adds the repo's token, and the helper never
+gives it out, so that token is "use only". A grant of the same token
+still gives it to the agent.
 
 Who can grant:
 

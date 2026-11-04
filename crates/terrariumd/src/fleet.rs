@@ -300,12 +300,21 @@ fn repo_spec(name: &str, url: &str, branch: Option<&str>, cred: Option<&str>, pa
 
 /// [`repo_spec`] with the hook settings (issue #1). A key is there only
 /// when it is set, so the spec of a repo without them stays as before.
-fn with_hooks(mut spec: Value, hooks_dir: Option<&str>, push_deny: &[String]) -> Value {
+/// `push_via` (issue #11) too, only when it is set.
+fn with_hooks(
+    mut spec: Value,
+    hooks_dir: Option<&str>,
+    push_deny: &[String],
+    push_via: Option<terrarium_core::config::PushVia>,
+) -> Value {
     if let Some(d) = hooks_dir {
         spec["hooks_dir"] = json!(d);
     }
     if !push_deny.is_empty() {
         spec["push_deny"] = json!(push_deny);
+    }
+    if let Some(v) = push_via {
+        spec["push_via"] = json!(v.as_str());
     }
     spec
 }
@@ -322,6 +331,7 @@ fn live_repo_spec(r: &repos::Repo) -> Value {
         ),
         r.hooks_dir.as_deref(),
         &r.push_deny,
+        r.push_via,
     )
 }
 
@@ -340,6 +350,7 @@ fn desired_repos(def: &ProjectDef) -> Vec<Value> {
                 ),
                 r.hooks_dir.as_deref(),
                 &r.push_deny,
+                r.push_via,
             )
         })
         .collect();
@@ -1573,6 +1584,7 @@ fn apply_project(t: &mut Tx<'_>, fleet_name: &str, def: &ProjectDef) -> ApiResul
                     path: r.path.clone(),
                     hooks_dir: r.hooks_dir.clone(),
                     push_deny: r.push_deny.clone(),
+                    push_via: r.push_via,
                 },
                 SOURCE_API,
             )?;
@@ -1764,6 +1776,7 @@ pub fn export(
             credential: r.credential,
             hooks_dir: r.hooks_dir,
             push_deny: r.push_deny,
+            push_via: r.push_via,
         })
         .collect();
     let mut agent_views = Vec::new();

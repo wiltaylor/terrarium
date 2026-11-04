@@ -11,6 +11,8 @@ dev_sandbox := env("TERRARIUM_SANDBOX", "none")
 # The config repo of the dev daemon: kept apart from the stack's config/terrarium.
 dev_config_repo := env("TERRARIUM_CONFIG_REPO", justfile_directory() / "target/dev-config-repo")
 dev_artifact_listen := env("TERRARIUM_ARTIFACT_LISTEN", "127.0.0.1:8091")
+# The git proxy of the dev daemon (PLAN §9, "The git proxy"), beside the others.
+dev_git_proxy_listen := env("TERRARIUM_GIT_PROXY_LISTEN", "127.0.0.1:8094")
 dev_home := env("HOME", "")
 dev_harness_home := env("TERRARIUM_HARNESS_HOME", "claude=" + dev_home / ".claude" + ",codex=" + dev_home / ".codex" + ",copilot=" + dev_home / ".copilot" + ",pi=" + dev_home / ".pi/agent")
 # The tools dir: the daemon installs the harness pins here at start and puts
@@ -29,7 +31,7 @@ build: require-cargo
 # Run terrariumd on this machine, outside Docker, with no sandbox and your own harness logins; it installs the harness pins into ./tools first (flag: --no-harness-install)
 [group('daemon')]
 run *flags: require-cargo runner-build
-	TERRARIUM_LISTEN={{dev_listen}} TERRARIUM_STATE_DIR={{quote(dev_state)}} TERRARIUM_CONFIG_DIR={{quote(justfile_directory())}} TERRARIUM_SANDBOX={{dev_sandbox}} TERRARIUM_CONFIG_REPO={{quote(dev_config_repo)}} TERRARIUM_DEFAULTS_DIR={{quote(justfile_directory() / "defaults")}} TERRARIUM_ARTIFACT_LISTEN={{dev_artifact_listen}} TERRARIUM_HARNESS_HOME={{quote(dev_harness_home)}} TERRARIUM_TOOLS_DIR={{quote(dev_tools)}} cargo run -p terrariumd -- {{flags}}
+	TERRARIUM_LISTEN={{dev_listen}} TERRARIUM_STATE_DIR={{quote(dev_state)}} TERRARIUM_CONFIG_DIR={{quote(justfile_directory())}} TERRARIUM_SANDBOX={{dev_sandbox}} TERRARIUM_CONFIG_REPO={{quote(dev_config_repo)}} TERRARIUM_DEFAULTS_DIR={{quote(justfile_directory() / "defaults")}} TERRARIUM_ARTIFACT_LISTEN={{dev_artifact_listen}} TERRARIUM_GIT_PROXY_LISTEN={{dev_git_proxy_listen}} TERRARIUM_HARNESS_HOME={{quote(dev_harness_home)}} TERRARIUM_TOOLS_DIR={{quote(dev_tools)}} cargo run -p terrariumd -- {{flags}}
 
 # Build terrarium-runner next to terrariumd: the daemon runs each agent in one runner process
 [private]

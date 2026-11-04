@@ -115,7 +115,9 @@ for how long. PLAN §11 and §19 give the details.
   serving origin), and versions with review.
 - Repository checkout: a clone on agent create and on
   `terrarium repo checkout`, in the workspace or on a target. The daemon
-  holds the git credentials and answers the credential helper. A local
+  holds the git credentials and answers the credential helper. A repo
+  with `push_deny` goes through the daemon's git proxy, which enforces it
+  and keeps the token out of the sandbox. A local
   bare repo under `./repos` binds into the sandboxes of its project.
 - Subscriptions and usage: file and API definitions, verified quota probes
   for Anthropic, OpenAI Codex, and GitHub Copilot, local accounting from

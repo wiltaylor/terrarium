@@ -9,6 +9,7 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use terrarium_core::config::PushVia;
 
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
@@ -41,6 +42,10 @@ pub struct Repo {
     /// (`crate::git::Hooks`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub push_deny: Vec<String>,
+    /// `proxy`, `direct`, or absent (the default rule,
+    /// `crate::git_proxy::push_via`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_via: Option<PushVia>,
     pub source: String,
     pub created_at: String,
 }
@@ -79,6 +84,9 @@ fn repo_row(r: &Row<'_>) -> rusqlite::Result<Repo> {
         credential_admin: r.get("credential_admin")?,
         hooks_dir: r.get("hooks_dir")?,
         push_deny: serde_json::from_str(&r.get::<_, String>("push_deny")?).unwrap_or_default(),
+        push_via: r
+            .get::<_, Option<String>>("push_via")?
+            .and_then(|v| PushVia::parse(&v).ok()),
         source: r.get("source")?,
         created_at: r.get("created_at")?,
     })
@@ -118,6 +126,9 @@ pub struct NewRepo {
     /// See [`Repo::push_deny`].
     #[serde(default)]
     pub push_deny: Vec<String>,
+    /// See [`Repo::push_via`].
+    #[serde(default)]
+    pub push_via: Option<PushVia>,
 }
 
 fn name_from_url(url: &str) -> String {
@@ -162,6 +173,9 @@ pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> 
         terrarium_core::config::check_hooks_dir(d).map_err(ApiError::invalid)?;
     }
     terrarium_core::config::check_push_deny(&r.push_deny).map_err(ApiError::invalid)?;
+    if r.push_via == Some(PushVia::Proxy) {
+        crate::git_proxy::check_proxy_url(&r.url).map_err(ApiError::invalid)?;
+    }
     let exists: i64 = t.query_row(
         "SELECT count(*) FROM repos WHERE project = ?1 AND name = ?2",
         params![project, name],
@@ -179,8 +193,8 @@ pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> 
     let id = ulid::Ulid::new().to_string();
     t.execute(
         "INSERT INTO repos (id, project, name, url, default_branch, credential, path, source,
-                            created_at, credential_admin, hooks_dir, push_deny)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                            created_at, credential_admin, hooks_dir, push_deny, push_via)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             id,
             project,
@@ -193,7 +207,8 @@ pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> 
             now(),
             admin,
             hooks_dir,
-            serde_json::to_string(&r.push_deny)?
+            serde_json::to_string(&r.push_deny)?,
+            r.push_via.map(PushVia::as_str)
         ],
     )?;
     t.audit(
@@ -201,7 +216,7 @@ pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> 
         &format!("{project}/{name}"),
         Some(project),
         json!({"url": r.url, "source": source, "hooks_dir": hooks_dir,
-               "push_deny": r.push_deny}),
+               "push_deny": r.push_deny, "push_via": r.push_via}),
     )?;
     Ok(t.query_row("SELECT * FROM repos WHERE id = ?1", [&id], repo_row)?)
 }

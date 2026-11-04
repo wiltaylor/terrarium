@@ -868,8 +868,14 @@ part. `push_deny` (optional) is a list of at most 64 branch globs, for
 example `["op/*"]`: letters, digits, `.`, `_`, `-`, `/`, `+`, `@`, `*`
 (any text, `/` too), and `?`, with no `refs/heads/`. A bad value is `422
 invalid`. Both are in the answer only when they are set. See §5.1, "Git
-hooks". There is no edit of a repo: detach it and attach it again, or
-change the project file.
+hooks". `push_via` (optional) is `proxy` or `direct`: how the agent
+checkouts reach the remote (§5.1, "The git proxy"). Without it, the daemon
+picks `proxy` for an `https` repo with a `credential` and a `push_deny`
+list (when the proxy is on), and `direct` for every other repo. `proxy`
+needs an `http` or `https` URL with no user, password, query, or fragment
+(`422 invalid`). Another value is `400 bad_request`. It is in the answer
+only when it is set. There is no edit of a repo: detach it and attach it
+again, or change the project file.
 
 ### 5.1 Repos, checkouts, and credentials
 
@@ -886,7 +892,9 @@ env. After a clone, the daemon writes this into the workspace repo's
 ```
 
 So a `git push` inside the sandbox asks `terrarium repo credential get`, which
-calls `POST /api/repos/credential` through the runner socket.
+calls `POST /api/repos/credential` through the runner socket. For a repo
+that goes through the git proxy (below), `origin` is the proxy, and the
+helper gives the agent's proxy credential, not the forge token.
 
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
@@ -938,6 +946,7 @@ POST /api/repos/01M5PA0T0TH91WNYTGH66DA2SP/checkout
 
 `action` is `cloned`, `updated`, `up_to_date`, or `not_updated`. `head` and
 `branch` are `null` when the repo has no commit or HEAD is detached.
+`push_via` is `proxy` or `direct` (below, "The git proxy").
 `hooks` lists the hooks that the checkout wrote into `.git/hooks` (below).
 It is absent when there are none.
 
@@ -966,10 +975,61 @@ It is absent when there are none.
   defence if a future git command of the daemon forgets the override.
 - A client-side hook is a guard against mistakes, not a hard control. The
   agent can push with `git push --no-verify` or edit `.git/hooks`, and the
-  next checkout by the daemon writes the hooks again. The daemon cannot
-  check the pushed refs itself: git does not send them to a credential
-  helper, and the agent can read the repo token (§5.2, PLAN §16b). For a
-  hard rule, use a branch protection rule on the git server.
+  next checkout by the daemon writes the hooks again. The hard rule is the
+  git proxy (below): for a proxied repo, the proxy refuses the push of a
+  matching branch, and the agent has no token to push past it. The hook
+  stays as the first, friendly check. A `direct` repo has only the hook
+  (an SSH repo, a local repo, or `push_via = direct`); for a hard rule
+  there, use a branch protection rule on the git server.
+
+**The git proxy.** The daemon serves a smart HTTP git proxy on its own
+listener, `TERRARIUM_GIT_PROXY_LISTEN` (default `127.0.0.1:8084`, loopback:
+the sandboxes share the daemon's network; empty turns it off). A repo goes
+through it when its `push_via` is `proxy`, or when `push_via` is not set
+and the repo has an `https` URL, a `credential`, and a `push_deny` list.
+For such a repo:
+
+- A checkout in a workspace sets `origin` (fetch and push) to
+  `http://127.0.0.1:8084/git/<project>/<repo>.git`, and removes a
+  `pushurl` of `origin`. The daemon's own clone and fetch still go to the
+  stored URL with the token, outside the sandbox. A repo that goes back to
+  `direct` gets the stored URL in `origin` again at its next checkout.
+  With `push_via = proxy` and the proxy off, a checkout is `409 conflict`.
+- The credential helper gives the proxy host (`http`, `127.0.0.1:8084`)
+  the agent's own proxy credential: user `terrarium`, and a token that is
+  an HMAC of the agent ULID (key `<state>/git-proxy.key`, made at the first
+  start, mode 0600). It never gives the forge token of a proxied repo: a
+  question for the forge URL of the repo is `409 conflict` with a hint to
+  run `terrarium repo checkout <repo>` (a checkout from before the proxy
+  still names the forge). So the token is "use only".
+- The proxy serves `GET .../info/refs?service=git-upload-pack|git-receive-pack`,
+  `POST .../git-upload-pack`, and `POST .../git-receive-pack`, and nothing
+  else (no dumb HTTP, `404`). No credential or a bad one is `401` with a
+  Basic challenge. An agent of another project is `403`. A repo that is
+  not there, or not proxied, is `404`.
+- A push: the proxy reads the ref commands. When a pushed branch
+  (`refs/heads/<b>`, a delete too) matches `push_deny`, it refuses the
+  whole push and changes no ref: git shows `! [remote rejected] <ref>
+  (denied by push_deny `<glob>` of repo <repo>)` for each denied ref, and
+  `not pushed: another ref of this push is denied` for the others. Else it
+  forwards the push to the forge with the repo's token, and streams the
+  answer back. A signed push (`--signed`), a ref name outside `refs/`, and
+  a compressed push body are refused. Each push with refs writes a
+  `repo.push` audit row (`detail.result`: `forwarded` or `refused`, with
+  the refs).
+- A fetch or a clone is forwarded as it is (protocol v2 too).
+- Limits: a push body of 2 GiB, a fetch request of 256 MiB, an answer of
+  8 GiB; 30 s to connect, 5 min with no bytes from the forge, 1 h for one
+  request; 32 requests at one time (`503`). The proxy follows no
+  redirect. It connects with the address rules of the webhooks
+  (`TERRARIUM_WEBHOOK_PRIVATE`, one DNS answer for each request, pinned).
+  An error of the forge is `502` with a text that git shows; it never
+  holds the token.
+- Not covered: SSH repos and local repos (the hook only), Git LFS (its API
+  is not proxied: set `push_via = direct` for an LFS repo), and the
+  checkouts on targets. A grant of a token for the forge host gives the
+  agent that token through the helper (§5.2), and a token with push rights
+  undoes the hard rule.
 
 Each checkout writes `repo.checkout` events on the agent: `data.phase` is
 `progress` (git progress lines, at most one per phase each second), `done`
@@ -1025,7 +1085,11 @@ answers a minute (`429 rate_limited`).
 
 The answer holds the token in plain text, because git needs it. So an
 agent that can call the helper can read the token, also with a `use`
-grant (§5.2, "Grants": `use` is `read` for tokens).
+grant (§5.2, "Grants": `use` is `read` for tokens). The exceptions are the
+repos that go through the git proxy (§5.1, "The git proxy"): for the host
+of the proxy, the helper answers the agent's proxy credential (not
+audited, in the same rate limit), and for the forge URL of a proxied repo
+it answers `409 conflict`, so their token stays in the daemon.
 
 ```
 POST /api/repos/credential          (agent)
@@ -1259,8 +1323,9 @@ to git in plain text (§5.1). The agent runs git, so it can call the helper
 (`terrarium repo credential get`) and read the token. So give a `token` or
 a `github_token` only to an agent that may read it. Only an `ssh_key`
 stays hidden under `use`: the ssh-agent socket signs and never gives the
-key out. This is intended behaviour (2026-10-29). A real fix is an HTTPS
-proxy in the daemon that adds the token.
+key out. This is intended behaviour (2026-10-29). The token of a repo that
+goes through the git proxy (§5.1) is the exception: the proxy adds it, and
+the helper never gives it out. A grant of the same token still gives it.
 
 | Secret | Grant to | Who |
 |---|---|---|
