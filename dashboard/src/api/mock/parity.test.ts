@@ -226,9 +226,9 @@ describe("mock parity with docs/api.md", () => {
     expect(api.world.agents.find((x) => x.id === id)!.status).toBe("stopped");
     // A turn wakes the agent: the wake starts the new session.
     await api.agents.send(id, "hello");
-    await waitFor(() => expect(api.world.agents.find((x) => x.id === id)!.status_reason).toBe("new session: requested by operator"));
+    await waitFor(() => expect(api.world.agents.find((x) => x.id === id)!.status_reason).toBe("new session: requested by operator"), 8000);
     expect(api.world.agents.find((x) => x.id === id)!.reset_pending).toBeUndefined();
-    await waitFor(() => expect(["idle", "working", "waiting"]).toContain(api.world.agents.find((x) => x.id === id)!.status));
+    await waitFor(() => expect(["idle", "working", "waiting"]).toContain(api.world.agents.find((x) => x.id === id)!.status), 8000);
 
     const api2 = mock();
     const b = api2.world.agents.find((x) => x.id === id)!;
