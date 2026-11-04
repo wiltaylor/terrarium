@@ -34,7 +34,13 @@ pub struct HarnessVersion {
     pub harness: HarnessId,
     /// The npm package (`harnesses.toml`).
     pub package: String,
-    /// The version of the first install (`harnesses.toml`).
+    /// The base version: the version of the first install
+    /// (`harnesses.toml`). It is not a pin: the runtime pin is
+    /// `auto_update.pinned_version`.
+    pub base: String,
+    /// Deprecated: the same value as `base`, for older clients. It is not
+    /// the runtime pin.
+    #[serde(default)]
     pub pinned: String,
     /// The version that the binary reports. `None` when it did not answer.
     pub installed: Option<String>,
@@ -314,7 +320,7 @@ impl LatestCache {
         for (h, r) in report.harnesses.iter_mut().zip(found) {
             match r {
                 Ok(l) => {
-                    let from = h.installed.as_deref().unwrap_or(&h.pinned);
+                    let from = h.installed.as_deref().unwrap_or(&h.base);
                     h.update = Some(Some(update_kind(from, &l.version)));
                     h.latest = Some(Some(l));
                     h.latest_error = None;
@@ -348,6 +354,7 @@ pub fn pins_only() -> HarnessReport {
             .map(|p| HarnessVersion {
                 harness: p.harness,
                 package: p.package.to_owned(),
+                base: p.version.to_owned(),
                 pinned: p.version.to_owned(),
                 installed: None,
                 error: Some("this supervisor does not run harnesses".into()),
@@ -434,6 +441,7 @@ impl VersionCache {
         HarnessVersion {
             harness: id,
             package: pin.package.to_owned(),
+            base: pin.version.to_owned(),
             pinned: pin.version.to_owned(),
             installed,
             error,
@@ -571,12 +579,12 @@ mod tests {
         let cache = LatestCache::new(npm.clone(), base);
         let mut r = pins_only();
         for h in &mut r.harnesses {
-            h.pinned = match h.harness {
+            h.base = match h.harness {
                 HarnessId::Codex => "0.164.0".into(),
-                _ => h.pinned.clone(),
+                _ => h.base.clone(),
             };
         }
-        let claude_pin = r.harnesses[0].pinned.clone();
+        let claude_pin = r.harnesses[0].base.clone();
         cache.fill(&mut r, false).await;
         let row = |id: HarnessId| r.harnesses.iter().find(|h| h.harness == id).expect("row");
 

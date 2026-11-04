@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { HarnessReport, HarnessVersion } from "../../api/types";
 import { createMockApi } from "../../api/mock";
 import { harnessUpdateKind } from "../../lib/harness-update";
-import { canPinCurrent, canUnpin, checkLine, harnessStatus, lastCheckLine, offPin, oldAgentLine, oldAgents, otherVersions, pinLine, policyChip, publishedDay, resultLine, resultNotes, rollbackTarget, scheduleNote, updateCommand, updateFailure, withUpdate } from "./harnesses";
+import { canPinCurrent, canUnpin, checkLine, harnessStatus, lastCheckLine, offBase, oldAgentLine, oldAgents, otherVersions, pinLine, policyChip, publishedDay, resultLine, resultNotes, rollbackTarget, scheduleNote, updateCommand, updateFailure, withUpdate } from "./harnesses";
 import type { HarnessAutoUpdate } from "../../api/types";
 
 const row = (over: Partial<HarnessVersion>): HarnessVersion => ({
   harness: "claude",
   package: "@anthropic-ai/claude-code",
+  base: "2.1.310",
   pinned: "2.1.310",
   installed: "2.1.310",
   checked_at: "2026-10-25T10:00:00Z",
@@ -58,10 +59,12 @@ describe("harness versions table", () => {
     expect(harnessUpdateKind("nightly", "1.0.0")).toBe("minor");
   });
 
-  it("spots a version off the pin", () => {
-    expect(offPin(row({ installed: "2.1.311" }))).toBe(true);
-    expect(offPin(row({}))).toBe(false);
-    expect(offPin(row({ installed: null }))).toBe(false);
+  it("spots a version off the base version (not the runtime pin)", () => {
+    expect(offBase(row({ installed: "2.1.311" }))).toBe(true);
+    expect(offBase(row({}))).toBe(false);
+    expect(offBase(row({ installed: null }))).toBe(false);
+    // The base version decides, not the deprecated `pinned` copy.
+    expect(offBase(row({ installed: "2.1.311", base: "2.1.311", pinned: "2.1.310" }))).toBe(false);
     expect(publishedDay("2026-10-25T09:30:00Z")).toBe("2026-10-25");
     expect(publishedDay(null)).toBeNull();
   });
@@ -90,7 +93,7 @@ describe("harness versions table", () => {
     expect(r).not.toHaveProperty("policy");
     expect(r.harnesses.map((h) => h.harness)).toEqual(["claude", "codex", "copilot", "pi"]);
     for (const h of r.harnesses) {
-      for (const k of Object.keys(h)) expect(["active", "agents", "auto_update", "checked_at", "harness", "installed", "package", "pinned", "versions"]).toContain(k);
+      for (const k of Object.keys(h)) expect(["active", "agents", "base", "auto_update", "checked_at", "harness", "installed", "package", "pinned", "versions"]).toContain(k);
       expect(h.active).toBe(h.installed);
       expect(h.versions).toContain(h.installed);
       expect(Object.keys(h.auto_update!).sort()).toEqual(["changelog", "checked_at", "detail", "latest", "pinned_version", "policy", "previous", "result"]);
@@ -104,11 +107,11 @@ describe("harness versions table", () => {
       const keys = Object.keys(h)
         .filter((k) => !["active", "versions", "agents", "auto_update"].includes(k))
         .sort();
-      if (h.latest === null) expect(keys).toEqual(["checked_at", "harness", "installed", "latest", "latest_error", "package", "pinned", "update"]);
-      else expect(keys).toEqual(["checked_at", "harness", "installed", "latest", "package", "pinned", "update"]);
+      if (h.latest === null) expect(keys).toEqual(["checked_at", "harness", "installed", "latest", "latest_error", "package", "base", "pinned", "update"].sort());
+      else expect(keys).toEqual(["checked_at", "harness", "installed", "latest", "package", "base", "pinned", "update"].sort());
       if (h.latest) {
         expect(Object.keys(h.latest).sort()).toEqual(["published_at", "version"]);
-        expect(h.update).toBe(harnessUpdateKind(h.pinned, h.latest.version));
+        expect(h.update).toBe(harnessUpdateKind(h.base, h.latest.version));
       } else expect(h.update).toBeNull();
     }
     expect(r.harnesses.map((h) => harnessStatus(h).status)).toEqual(["latest", "update available (major)", "update available", "installed"]);

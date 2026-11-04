@@ -63,7 +63,9 @@ export interface SystemVersion {
 export interface HarnessVersion {
   harness: Harness;
   package: string;
-  /** The version of the first install (harnesses.toml). */
+  /** The base version: the version of the first install (harnesses.toml). It is not a pin: the runtime pin is `auto_update.pinned_version`. */
+  base: string;
+  /** Deprecated: the same value as `base`, for older clients. It is not the runtime pin. */
   pinned: string;
   /** What `<binary> --version` reported; null when it did not answer. */
   installed: string | null;
@@ -71,7 +73,7 @@ export interface HarnessVersion {
   checked_at: string | null;
   /** `?latest=true` only: the latest release on npm; null when npm did not answer (`latest_error` says why). */
   latest?: HarnessLatest | null;
-  /** `?latest=true` only: the bump from `installed` (else `pinned`) to `latest` (`scripts/harness.py`); null when `latest` is null. */
+  /** `?latest=true` only: the bump from `installed` (else `base`) to `latest` (`scripts/harness.py`); null when `latest` is null. */
   update?: HarnessUpdateKind | null;
   /** `?latest=true` only, when `latest` is null: why. */
   latest_error?: string;

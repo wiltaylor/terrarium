@@ -650,8 +650,12 @@ The "Harness versions" table of Settings, Subscriptions
 `GET /api/harnesses?latest=true` (docs/api.md §4). The pure logic is in
 `features/subscriptions/harnesses.ts`, with tests.
 
+- **Installed column.** The installed version. Under it, `base <version>`
+  when the installed version is not the base version of `harnesses.toml`
+  (`offBase`, the `base` field). The base version is not a pin: the
+  runtime pin is in the Updates column.
 - **Updates column.** The policy chip (`policyChip`): `auto`, or
-  `pinned <version>`. Under it, the last check (`lastCheckLine`) and the
+  `pinned <version>` (`auto_update.pinned_version`). Under it, the last check (`lastCheckLine`) and the
   changelog link.
 - **Status column.** The chip comes from npm (`harnessStatus`): `latest`,
   `update available`, or `update available (major)`. When npm does not

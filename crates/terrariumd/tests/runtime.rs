@@ -572,7 +572,9 @@ async fn any_harness_version_starts_with_no_warning() {
         .unwrap()
         .clone();
     assert_eq!(claude["installed"], "1.0.0");
-    assert_eq!(claude["pinned"], terrarium_core::harnesses::claude::VERSION);
+    assert_eq!(claude["base"], terrarium_core::harnesses::claude::VERSION);
+    // `pinned` is a deprecated copy of `base`, not the runtime pin.
+    assert_eq!(claude["pinned"], claude["base"]);
     assert!(claude.get("tested").is_none(), "{claude}");
     assert!(claude.get("in_range").is_none(), "{claude}");
     td.post(&format!("/api/agents/{id}/stop"), None).await;

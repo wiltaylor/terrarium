@@ -25,7 +25,7 @@ import {
   checkLine,
   harnessStatus,
   lastCheckLine,
-  offPin,
+  offBase,
   oldAgentLine,
   oldAgents,
   otherVersions,
@@ -135,10 +135,10 @@ export function HarnessVersions() {
                             <strong>{h.harness}</strong>
                             <div class="small muted mono">{h.package}</div>
                           </td>
-                          <td class="mono" title={offPin(h) ? `Not the pinned version (${h.pinned})` : `The pinned version`}>
+                          <td class="mono" title={offBase(h) ? `Not the base version of harnesses.toml (${h.base})` : `The base version of harnesses.toml`}>
                             {h.installed ?? "—"}
-                            <Show when={offPin(h)}>
-                              <div class="small muted">pin {h.pinned}</div>
+                            <Show when={offBase(h)}>
+                              <div class="small muted">base {h.base}</div>
                             </Show>
                             <Show when={otherVersions(h).length}>
                               <div class="small muted" title="Version dirs on disk: kept while an agent runs them">

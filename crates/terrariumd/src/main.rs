@@ -223,7 +223,7 @@ async fn main() -> anyhow::Result<()> {
         for h in report.harnesses {
             match h.installed.as_deref() {
                 Some(installed) => {
-                    info!(harness = %h.harness, installed, pinned = %h.pinned, "harness version")
+                    info!(harness = %h.harness, installed, base = %h.base, "harness version")
                 }
                 None => {
                     warn!(harness = %h.harness, error = h.error.as_deref().unwrap_or(""), "harness version not known")

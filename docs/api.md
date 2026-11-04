@@ -517,21 +517,24 @@ operator, a dashboard session, and an agent.
 
 ### `GET /api/harnesses`
 
-Every caller may read it. For each registered harness: the pin and the
-package from `harnesses.toml`, and the version that `<binary> --version`
-reports. Terrarium keeps no range of supported versions (the harnesses
+Every caller may read it. For each registered harness: the base version
+and the package from `harnesses.toml`, and the version that
+`<binary> --version` reports. Terrarium keeps no range of supported versions (the harnesses
 release about daily), so any installed version can start an agent. The
 daemon caches each version for 10 minutes; `?refresh=true` runs the
 binaries again.
 
 ```json
-{"harnesses":[{"harness":"claude","package":"@anthropic-ai/claude-code","pinned":"2.1.310",
-   "installed":"2.1.310","checked_at":"2026-10-25T10:00:00Z"},
-  {"harness":"pi","package":"@earendil-works/pi-coding-agent","pinned":"0.85.1",
-   "installed":null,
+{"harnesses":[{"harness":"claude","package":"@anthropic-ai/claude-code","base":"2.1.310",
+   "pinned":"2.1.310","installed":"2.1.310","checked_at":"2026-10-25T10:00:00Z"},
+  {"harness":"pi","package":"@earendil-works/pi-coding-agent","base":"0.85.1",
+   "pinned":"0.85.1","installed":null,
    "error":"cannot run pi: No such file or directory","checked_at":"2026-10-25T10:00:00Z"}]}
 ```
 
+`base` is the version of the first install (`harnesses.toml`). It is not
+a pin: the runtime pin is `auto_update.pinned_version` (below). `pinned`
+is deprecated: it has the same value as `base`, for older clients.
 `installed` is `null` when the version is not known, and `error` says why.
 `terrarium admin harness ls` prints this table.
 
@@ -574,7 +577,7 @@ in `time`). The daemon caches each answer for 1 hour, and a failed lookup
 for 5 minutes. `?latest=true&refresh=true` asks npm again.
 
 ```json
-{"harness":"codex","package":"@openai/codex","pinned":"0.164.0",
+{"harness":"codex","package":"@openai/codex","base":"0.164.0","pinned":"0.164.0",
  "installed":"0.164.0","checked_at":"2026-10-26T09:00:00Z",
  "latest":{"version":"0.165.0","published_at":"2026-10-25T09:30:00Z"},
  "update":"major"}
@@ -583,7 +586,7 @@ for 5 minutes. `?latest=true&refresh=true` asks npm again.
 | Field | Meaning |
 |---|---|
 | `latest` | `{version, published_at}`. `published_at` is `null` when the registry gives no time. `latest` is `null` when npm did not answer. |
-| `update` | The bump from `installed` (when it is known, else `pinned`) to `latest`: `none`, `minor` (a patch or a minor), or `major`. `null` when `latest` is `null`. |
+| `update` | The bump from `installed` (when it is known, else `base`) to `latest`: `none`, `minor` (a patch or a minor), or `major`. `null` when `latest` is `null`. |
 | `latest_error` | Only when `latest` is `null`: why. For example `cannot reach npm: ...` or `npm answered 503 for ...`. |
 
 `update` follows `scripts/harness.py` (`just harness::check`). A release

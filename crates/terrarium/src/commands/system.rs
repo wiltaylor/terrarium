@@ -1380,15 +1380,31 @@ fn print_check(ctx: &Ctx, v: &Value) {
     }
 }
 
-/// The update policy of a row: `auto`, or `pinned <version>`.
+/// The runtime pin of a row (`auto_update.pinned_version`), `-` when the
+/// harness has none.
+fn pin_cell(h: &Value) -> String {
+    h["auto_update"]["pinned_version"]
+        .as_str()
+        .unwrap_or("-")
+        .to_owned()
+}
+
+/// The update policy of a row: `auto` or `pinned`. The version of a pin is
+/// in the `PINNED` column.
 fn policy_cell(h: &Value) -> String {
-    match h["auto_update"]["policy"].as_str() {
-        Some("pinned") => format!(
-            "pinned {}",
-            h["auto_update"]["pinned_version"].as_str().unwrap_or("?")
-        ),
-        Some(p) => p.to_owned(),
-        None => "-".to_owned(),
+    h["auto_update"]["policy"]
+        .as_str()
+        .unwrap_or("-")
+        .to_owned()
+}
+
+/// The base version of a row (`harnesses.toml`). An older daemon sends it
+/// as `pinned` only.
+fn base_cell(h: &Value) -> String {
+    if h["base"].is_string() {
+        field(h, "base")
+    } else {
+        field(h, "pinned")
     }
 }
 
@@ -1396,8 +1412,14 @@ fn policy_cell(h: &Value) -> String {
 /// harness with an unknown version or an agent on an older version.
 fn print_harnesses(ctx: &Ctx, v: &Value) {
     let items = v["harnesses"].as_array().cloned().unwrap_or_default();
-    let mut t =
-        crate::output::Table::new(&["HARNESS", "PINNED", "INSTALLED", "UPDATES", "ON DISK"]);
+    let mut t = crate::output::Table::new(&[
+        "HARNESS",
+        "BASE",
+        "PINNED",
+        "INSTALLED",
+        "UPDATES",
+        "ON DISK",
+    ]);
     for h in &items {
         let on_disk: Vec<&str> = h["versions"]
             .as_array()
@@ -1405,7 +1427,8 @@ fn print_harnesses(ctx: &Ctx, v: &Value) {
             .unwrap_or_default();
         t.row(vec![
             field(h, "harness"),
-            field(h, "pinned"),
+            base_cell(h),
+            pin_cell(h),
             field(h, "installed"),
             policy_cell(h),
             if on_disk.is_empty() {

@@ -28,14 +28,14 @@ export function harnessStatus(h: HarnessVersion): { status: HarnessStatus; cls: 
   return { status: "unknown", cls: "warn", title: h.error ?? "The daemon could not read the version." };
 }
 
-/** Does the installed version differ from the pin? */
-export const offPin = (h: HarnessVersion) => h.installed !== null && h.installed !== h.pinned;
+/** Does the installed version differ from the base version (harnesses.toml)? This is not the runtime pin. */
+export const offBase = (h: HarnessVersion) => h.installed !== null && h.installed !== h.base;
 
 /** The harnesses with a newer release on npm. */
 export const withUpdate = (r: HarnessReport | undefined) => (r?.harnesses ?? []).filter((h) => h.update === "minor" || h.update === "major");
 
-/** The version the update kind starts from: the installed one, else the pin (as the daemon does). */
-export const current = (h: HarnessVersion) => h.installed ?? h.pinned;
+/** The version the update kind starts from: the installed one, else the base version (as the daemon does). */
+export const current = (h: HarnessVersion) => h.installed ?? h.base;
 
 /**
  * The fallback line for a row with a newer release: the CLI in a shell in the container. Null when nothing is

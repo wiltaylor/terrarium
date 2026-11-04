@@ -3902,8 +3902,8 @@ async fn agent_rm_keep_workspace() {
 async fn admin_harness_ls_shows_the_versions_and_the_update_policy() {
     let answer = json!({
         "harnesses": [
-            {"harness": "claude", "package": "@anthropic-ai/claude-code", "pinned": "2.1.310",
-             "installed": "2.1.311",
+            {"harness": "claude", "package": "@anthropic-ai/claude-code", "base": "2.1.310",
+             "pinned": "2.1.310", "installed": "2.1.311",
              "checked_at": "2026-10-25T10:00:00Z", "active": "2.1.311",
              "versions": ["2.1.310", "2.1.311"],
              "auto_update": {"policy": "pinned", "pinned_version": "2.1.311"},
@@ -3961,16 +3961,29 @@ async fn admin_harness_ls_shows_the_versions_and_the_update_policy() {
     assert!(!out.contains("terra/b"), "{out}");
     assert!(!out.contains("TERRARIUM_HARNESS_VERSION_POLICY"), "{out}");
     assert!(lines[0].contains("UPDATES"), "{out}");
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("claude") && l.contains(" pinned 2.1.311 ")),
+    // PINNED is the runtime pin; BASE is the harnesses.toml version (an
+    // older daemon sends it as `pinned` only, as for codex here).
+    let head: Vec<&str> = lines[0].split_whitespace().collect();
+    assert_eq!(
+        head,
+        ["HARNESS", "BASE", "PINNED", "INSTALLED", "UPDATES", "ON", "DISK"],
         "{out}"
     );
-    assert!(
-        lines
+    let row = |name: &str| -> Vec<String> {
+        let l = lines
             .iter()
-            .any(|l| l.starts_with("codex") && l.contains(" auto ")),
+            .find(|l| l.split_whitespace().next() == Some(name))
+            .expect("row");
+        l.split_whitespace().map(str::to_owned).collect()
+    };
+    assert_eq!(
+        row("claude")[..5],
+        ["claude", "2.1.310", "2.1.311", "2.1.311", "pinned"],
+        "{out}"
+    );
+    assert_eq!(
+        row("codex")[..5],
+        ["codex", "0.160.0", "-", "0.164.0", "auto"],
         "{out}"
     );
     assert!(

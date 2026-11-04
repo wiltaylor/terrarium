@@ -681,6 +681,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       const base: HarnessVersion = {
         harness: h.harness,
         package: h.package,
+        base: h.pinned,
         pinned: h.pinned,
         installed,
         checked_at: at,
