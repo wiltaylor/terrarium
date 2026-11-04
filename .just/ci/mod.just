@@ -20,10 +20,10 @@ fmt-check: require-cargo
 lint: require-cargo
 	cargo clippy --workspace --all-targets -- -D warnings
 
-# Run the Rust unit and integration tests
+# Run the Rust unit and integration tests; --no-fail-fast runs every test binary, so one failure does not hide the rest
 [group('ci')]
 test: require-cargo
-	cargo test --workspace
+	cargo test --workspace --no-fail-fast
 
 # Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer, the deploy, the CI workflow)
 [group('ci')]

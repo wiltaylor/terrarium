@@ -224,9 +224,16 @@ describe("mock parity with docs/api.md", () => {
     expect(r.reset).toMatchObject({ kind: "new_session", state: "next_wake", replaced: false });
     expect(r.reset_pending).toMatchObject({ kind: "new_session", by: "operator", then_set: false, recap: false });
     expect(api.world.agents.find((x) => x.id === id)!.status).toBe("stopped");
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
     // A turn wakes the agent: the wake starts the new session.
     await api.agents.send(id, "hello");
-    await waitFor(() => expect(api.world.agents.find((x) => x.id === id)!.status_reason).toBe("new session: requested by operator"), 8000);
+    // `status_reason` holds only while the agent is `starting`: with no step it is gone one timer later,
+    // and a poll can miss it. The status event keeps the reason.
+    const fresh = (e: AgentEvent) => e.kind === "status" && e.agent_id === id && e.data?.status === "starting" && e.data?.reason === "new session: requested by operator";
+    await waitFor(() => expect(frames.some(fresh)).toBe(true), 8000);
+    s.close();
     expect(api.world.agents.find((x) => x.id === id)!.reset_pending).toBeUndefined();
     await waitFor(() => expect(["idle", "working", "waiting"]).toContain(api.world.agents.find((x) => x.id === id)!.status), 8000);
 
@@ -241,6 +248,9 @@ describe("mock parity with docs/api.md", () => {
   it("queues a new session of a busy or paused agent, and runs it when the turn ends", async () => {
     const api = slowMock();
     const lead = () => api.world.agents.find((x) => x.name === "lead")!;
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
     await api.agents.send("terrarium/lead", "work on TER-12");
     await waitFor(() => expect(lead().status).toBe("working"));
     const q = await api.agents.newSession("terrarium/lead");
@@ -251,7 +261,11 @@ describe("mock parity with docs/api.md", () => {
     expect(c.reset).toMatchObject({ kind: "compact", state: "queued", replaced: true });
     const n = await api.agents.newSession("terrarium/lead", { recap: false });
     expect(n.reset).toMatchObject({ kind: "new_session", state: "queued", replaced: true });
-    await waitFor(() => expect(lead().status_reason).toBe("new session: requested by operator"), 6000);
+    // `status_reason` holds only while the agent is `starting` (one step), and a poll can miss it.
+    // The status event keeps the reason.
+    const fresh = (e: AgentEvent) => e.kind === "status" && e.agent_id === lead().id && e.data?.status === "starting" && e.data?.reason === "new session: requested by operator";
+    await waitFor(() => expect(frames.some(fresh)).toBe(true), 6000);
+    s.close();
     expect(lead().reset_pending).toBeUndefined();
 
     await api.agents.pause("terrarium/lead");
