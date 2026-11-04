@@ -3,13 +3,12 @@
 // `terrarium template edit` or the dashboard: they write the whole file
 // again, without your comments. The fields: docs/api.md §21.5.
 
-description  = "Cheap Claude Code helper (Haiku) for small, well-defined cards: docs fixes, renames, test updates."
-harness      = "claude"
-subscription = "anthropic-max-20x"
-model        = "haiku"
-persona      = "worker"
-restart      = "on-failure"
-idle_stop    = "5m"
+description = "Cheap Claude Code helper (Haiku) for small, well-defined cards: docs fixes, renames, test updates."
+harness     = "claude"
+model       = "haiku"
+persona     = "worker"
+restart     = "on-failure"
+idle_stop   = "5m"
 
 policy {
   targets = []

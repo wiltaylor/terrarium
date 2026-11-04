@@ -763,7 +763,7 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         const a = webhookOf(s);
         checkWebhook(a, s.project);
         const r = deliver(s, a, { test: true });
-        return structuredClone(r);
+        return structuredClone({ test: true as const, action: "webhook" as const, matched: null, status: r.delivery.status === "ok" ? ("ok" as const) : ("failed" as const), summary: `webhook delivery ${r.delivery.id}: ${r.delivery.status}`, ...r });
       }),
   };
 

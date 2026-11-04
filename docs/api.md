@@ -1988,6 +1988,17 @@ form of `idle_stop`: `off` (or `0`), or a duration such as `24h`. Another
 value is `400 bad_request`. Absent or `null`: the daemon's
 `TERRARIUM_COMPACT_ON_IDLE` and `TERRARIUM_COMPACT_MAX_AGE` (both off).
 
+`subscription` (in `POST` and `PATCH`, also from a template): it must
+exist. A name that is not a subscription is `422 invalid` with
+`details.field = "subscription"`, and the message names the
+subscriptions that the agent's harness can spend: ``subscription: there
+is no subscription `anthropic-max-20x`; the claude subscriptions are:
+anthropic-ultra. Name one of them, or leave it empty for the default
+account of the harness``. An empty `subscription` (or `null`) is the
+default account of the harness (§16.3). A file sync and a fleet apply do
+not run this check: such an agent fails at its start with the
+subscription error.
+
 `subscription_pool` (in `POST` and `PATCH`): each member must exist, the
 agent's harness must be able to spend it, and all members and the current
 subscription must have one provider (`422 invalid`, the message names the
@@ -6511,7 +6522,7 @@ A run:
 | `GET /api/schedules/{id}/runs?limit=&cursor=` | | `200`, the runs, newest first, with `X-Next-Cursor` (§2.4). |
 | `GET /api/schedules/{id}/deliveries?limit=&cursor=` | | `200`, the webhook deliveries, newest first, with `X-Next-Cursor` (§19.5). The read rights of the schedule. |
 | `POST /api/schedules/{id}/deliveries/{delivery}/redeliver` | | `202`, a new `pending` delivery: a copy of `{delivery}` with `redelivery_of`, due now. The rights of a run-now. A `dropped` row is `422`. |
-| `POST /api/schedules/{id}/test` | | `200`, `{delivery, request}`: a sample event of the trigger's first kind (`schedule.tick` for a time schedule), sent now, one attempt, no retry. `request` is `{method, url, headers, body}` with each secret value as `[secret:<name>]`. The rights of a run-now; a secret that the caller or `run_as` may not use is `403`. A schedule with another action is `422`. |
+| `POST /api/schedules/{id}/test` | none, or `{event?: {kind?, summary?, project?, agent?, actor?, data?}}` | `200`, a test run (§19.7): `{test: true, action, matched, reason?, event?, status?, summary?, output?, error?, delivery?, request?}`. Any action kind. The rights of a run-now; for a webhook, a secret that the caller or `run_as` may not use is `403`. A body that is not this shape is `400`; an empty `event.kind` or an `event.data` that is not an object is `422` (`details.field` `event.kind`, `event.data`). |
 
 Errors:
 
@@ -6960,6 +6971,62 @@ When the `run_as` agent of an actor-owned schedule is deleted, the daemon
 disables the schedule with a reason and mails the leads and the operator
 (§30.7). An enable by a project admin then makes it the `run_as`.
 
+### 19.7 Test runs
+
+`POST /api/schedules/{id}/test` (`terrarium schedule test`) runs the
+action of a schedule one time as a test, for any action kind: `mail`,
+`turn`, `agent`, `exec`, `probe`, `card`, and `webhook`.
+
+The sample event: for a trigger, the sample of its first kind (as the
+webhook samples of §19.5). The body can give `event`: each field that it
+has replaces the field of the sample. A `kind` picks the sample of that
+kind. Other keys (`seq`, `id`, `at` of an event from the log) are
+ignored, so an event from `GET /api/events` works as it is. A time
+schedule uses no event, and its action runs as it is.
+
+The match: with an `event` in the body, a trigger checks it against its
+scope (a project trigger sees only its project's events), its `kinds`,
+and each `match` rule. `matched` is `true` when all hold. When one fails,
+nothing runs: `matched` is `false`, and `reason` names the scope, the
+kind, or the first rule that does not hold, for example ``the match rule
+`data.monitor eq m1` does not hold for the event``. Without an `event`
+(the default sample is generic), and for a time schedule, there is no
+check: `matched` is `null`, and the action runs. The loop guard,
+`dedupe`, `escalate`, and `max_per_hour` do not apply to a test.
+
+The run: the action runs as `run_as`, with its templates filled from the
+sample, and the answer has `status` (`ok`, `failed`, or `skipped` when
+the rights refuse it), `summary`, `output`, and `error`. A test is marked:
+
+- A mail subject starts with `[test] `, and the body starts with `This is
+  a test run of <schedule> (terrarium schedule test).`
+- A turn text starts with `[test] `.
+- A card action uses the key `test:<key>` (the label
+  `trigger:test:<key>`) and a title that starts with `[test] `. So a real
+  event never comments on a test card, and a test `close` finds no real
+  card.
+- A webhook delivery has `test: true`, one attempt, and no retry. The
+  answer also has `delivery` and `request` (`{method, url, headers,
+  body}`, each secret value as `[secret:<name>]`).
+- An `exec`, an `agent` verb, and a `probe` run as they are.
+
+A test writes no run (`GET .../runs` and `last_run` do not change), and
+changes no counter: no dedupe or escalation state, no rate limit, no
+failure or skip count. The writes of the action carry the actor
+`schedule:<id>` and `data.cause` `{schedule, event: null, depth: 1,
+test: true}`. Each test writes the audit row `schedule.test`
+(`{action, matched, reason, event_kind, status, summary}`).
+
+```json
+{"test": true, "action": "mail", "matched": true,
+ "event": {"seq": 0, "id": "", "kind": "monitor.status", "at": "2026-11-04T10:00:00.000Z",
+           "project": "terra", "agent": null, "actor": null,
+           "summary": "monitor m1: ok → crit", "data": {"monitor": "m1", "to": "crit"}},
+ "status": "ok", "summary": "mail 01JX... to terra/lead",
+ "output": {"message_id": "01JX...", "thread_id": "01JX...", "to": "terra/lead",
+            "held": false, "held_reason": null}}
+```
+
 ## 20. Event sources and ingest
 
 An event source is one webhook sender: `github`, `forgejo`, or `generic`.
@@ -7192,6 +7259,7 @@ A template:
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. A change of the file by hand adds `1` when the load finds it (also a change of a comment only): one revision is one version of the file. |
 | `source` | `config` (a file of the config repo), or `fleet:<name>` (§18.1; its file is in the config repo too). `api` and `file` are templates from before the files: the first load writes their files and makes them `config`. |
 | `file` | The file in the config repo (§21.5): `templates/<name>.wcl`, or `templates/<project>/<name>.wcl`. `null` until the file is written (a daemon with no config repo). |
+| `subscription_missing` | Only when the spec names a subscription that does not exist (in `GET /api/templates` and `GET /api/templates/{key}`): why, in the words of the `422` of §6.1. An agent create from the template is refused until the subscription exists, or the create gives another `subscription`. A file load accepts such a template; `POST` and a `PATCH` with a `spec` refuse it (`422 invalid`, `details.field = "subscription"`). |
 
 A template key in a path is a ULID, `project/name`, `_/name` or
 `global:name` (a global template), or a name. A name finds the template of
@@ -7211,7 +7279,8 @@ the caller's project first, then the global one. Encode `/` as `%2F`.
 | `GET /api/templates/{key}/wcl` | | `200`, `{path, text, on_disk}`: the WCL file of the template (§21.5), as it is on disk, with its comments. `on_disk: false` (a daemon with no config repo): `text` is the file that a write would make. |
 
 Errors: `422 invalid` (a bad name or spec; a `pi` spec on a plan login,
-§6.2; a secret in the template file, below), `409 conflict` (the name is
+§6.2; a `subscription` that does not exist, §6.1; a secret in the
+template file, below), `409 conflict` (the name is
 in use in the scope), `404 not_found` (no such template or project),
 `403 forbidden` (the rules below).
 
@@ -7444,11 +7513,14 @@ adds `file_hash`, and a row with a file has it.
 `kimi-worker`, and `glm-docs-writer`. The start copies each one into
 `templates/` with the rules of the other defaults (PLAN §8.3: a new
 default of an edited file waits as `<file>.new`). A default that you
-delete stays deleted. Each names a subscription (`anthropic-max-20x`,
-`openai-pro`, `github-copilot`, `moonshot-key`, or `zai-key`): a template
-may name a subscription that does not exist, and an agent create from it
-then fails with the subscription error of §6.1. Make the subscription, or
-give `subscription` in the create.
+delete stays deleted. The Claude Code, Codex, and Copilot templates name
+no subscription: their agents use the default account of the harness
+(§16.3). The pi templates `kimi-worker` and `glm-docs-writer` name
+`moonshot-key` and `zai-key`, because pi has no default account. When
+such a subscription does not exist, `GET /api/templates` flags the
+template (`subscription_missing`), and an agent create from it is
+`422 invalid` (§6.1). Make the subscription, or give `subscription` in
+the create.
 
 **The CLI.** `terrarium template new --from-file <name>.wcl` reads a WCL
 file (the name is the file name; a name argument wins), and `terrarium

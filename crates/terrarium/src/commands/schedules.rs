@@ -850,30 +850,84 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
                 ));
             })
         }
-        ScheduleCmd::Test { schedule } => {
+        ScheduleCmd::Test {
+            schedule,
+            event_json,
+        } => {
+            let body = match event_json {
+                None => None,
+                Some(f) => {
+                    let text = if f == "-" {
+                        ctx.text("-")?
+                    } else {
+                        std::fs::read_to_string(f)
+                            .map_err(|e| CliError::usage(format!("cannot read {f}: {e}")))?
+                    };
+                    let event: Value = serde_json::from_str(&text)
+                        .map_err(|e| CliError::usage(format!("--event-json: not JSON: {e}")))?;
+                    if !event.is_object() {
+                        return Err(CliError::usage(
+                            "--event-json: use a JSON object (an event)",
+                        ));
+                    }
+                    Some(json!({"event": event}))
+                }
+            };
             let r = ctx
                 .api
-                .post(&format!("{}/test", path(schedule)), None)
+                .post(&format!("{}/test", path(schedule)), body)
                 .await?;
-            ctx.emit(&r, |c, r| {
-                let q = &r["request"];
-                c.line(format!("{} {}", field(q, "method"), field(q, "url")));
-                for h in q["headers"].as_array().into_iter().flatten() {
-                    c.line(format!(
-                        "{}: {}",
-                        h[0].as_str().unwrap_or_default(),
-                        h[1].as_str().unwrap_or_default()
-                    ));
-                }
-                c.line("");
-                c.line(field(q, "body"));
-                c.line("");
-                print_delivery(c, &r["delivery"]);
-            })?;
-            if r["delivery"]["status"] != "ok" {
+            ctx.emit(&r, print_test)?;
+            if r["matched"] == false || (r["status"].is_string() && r["status"] != "ok") {
+                return Err(CliError::RemoteExit(1).into());
+            }
+            // An older daemon answers a webhook test with no `status`.
+            if !r["status"].is_string() && r["delivery"]["status"] != "ok" {
                 return Err(CliError::RemoteExit(1).into());
             }
             Ok(())
         }
+    }
+}
+
+/// The answer of a test run: the sample event, the match, then the result
+/// of the action (for a webhook: the request and the delivery).
+fn print_test(c: &Ctx, r: &Value) {
+    if let Some(e) = r.get("event").filter(|e| e.is_object()) {
+        c.line(format!(
+            "test event: {} {}",
+            field(e, "kind"),
+            field(e, "summary")
+        ));
+    }
+    if r["matched"] == false {
+        c.line(format!("no match: {}", field(r, "reason")));
+        c.line("the action did not run");
+        return;
+    }
+    if r["request"].is_object() {
+        let q = &r["request"];
+        c.line(format!("{} {}", field(q, "method"), field(q, "url")));
+        for h in q["headers"].as_array().into_iter().flatten() {
+            c.line(format!(
+                "{}: {}",
+                h[0].as_str().unwrap_or_default(),
+                h[1].as_str().unwrap_or_default()
+            ));
+        }
+        c.line("");
+        c.line(field(q, "body"));
+        c.line("");
+        print_delivery(c, &r["delivery"]);
+        return;
+    }
+    c.line(format!(
+        "test {}: {}: {}",
+        field(r, "action"),
+        field(r, "status"),
+        field(r, "summary")
+    ));
+    if let Some(e) = r["error"].as_str() {
+        c.line(format!("error: {e}"));
     }
 }

@@ -158,6 +158,7 @@ import type {
   ScheduleRun,
   WebhookDelivery,
   WebhookTestResult,
+  TestEvent,
   Session,
   AgentScreen,
   Spawn,
@@ -776,8 +777,8 @@ export interface Api {
     deliveries(id: string, q?: PageQuery): Promise<Page<WebhookDelivery>>;
     /** `POST /api/schedules/{id}/deliveries/{delivery}/redeliver`: a copy, due now (`202`). */
     redeliver(id: string, delivery: string): Promise<WebhookDelivery>;
-    /** `POST /api/schedules/{id}/test`: send a sample event now; the answer has the delivery and the request. */
-    test(id: string): Promise<WebhookTestResult>;
+    /** `POST /api/schedules/{id}/test` (docs/api.md §19.7): one test run of the action for a sample event; `event` is checked against the match rules. A webhook answer has the delivery and the request. */
+    test(id: string, event?: TestEvent): Promise<WebhookTestResult>;
   };
 
   /**
@@ -1404,7 +1405,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       runs: (id, q = {}) => page(`/api/schedules/${seg(id)}/runs`, { ...q }),
       deliveries: (id, q = {}) => page(`/api/schedules/${seg(id)}/deliveries`, { ...q }),
       redeliver: (id, delivery) => post(`/api/schedules/${seg(id)}/deliveries/${seg(delivery)}/redeliver`),
-      test: (id) => post(`/api/schedules/${seg(id)}/test`),
+      test: (id, event) => post(`/api/schedules/${seg(id)}/test`, event ? { event } : undefined),
     },
 
     eventSources: {

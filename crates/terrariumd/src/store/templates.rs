@@ -52,6 +52,11 @@ pub struct Template {
     /// default-on skills of the library and the spec's `skills`, less its
     /// `skills_off`, with the source of each. The API fills it.
     pub effective_skills: Vec<terrarium_core::skills::EffectiveSkill>,
+    /// Set when the spec names a subscription that does not exist (issue
+    /// #14): why an agent of the template would not start. The list of
+    /// `GET /api/templates` fills it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subscription_missing: Option<String>,
 }
 
 impl Template {
@@ -153,6 +158,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<Template> {
         updated_at: r.get("updated_at")?,
         file_hash,
         effective_skills: Vec::new(),
+        subscription_missing: None,
     })
 }
 
@@ -221,6 +227,31 @@ pub fn checked(conn: &Connection, spec: &Spec) -> ApiResult<Spec> {
     )
     .map_err(|e| spec_error(e.message))?;
     Ok(n)
+}
+
+/// The subscription that the spec names exists (issue #14): the check of
+/// `POST /api/templates` and of a `PATCH` with a spec. A file load does not
+/// run it: `GET /api/templates` flags such a template instead
+/// ([`subscription_missing`]).
+pub fn check_subscription(conn: &Connection, spec: &Spec) -> ApiResult<()> {
+    let n = normalize(spec)?;
+    let def = agent_template::to_def(&n, "x", "x").map_err(spec_error)?;
+    crate::store::agents::check_subscription_exists(conn, def.harness, def.subscription.as_deref())
+}
+
+/// Why the subscription of a template's spec is missing; `None` when the
+/// spec names none, names one that exists, or does not parse.
+pub fn subscription_missing(conn: &Connection, spec: &Spec) -> ApiResult<Option<String>> {
+    let Ok(def) = agent_template::to_def(spec, "x", "x") else {
+        return Ok(None);
+    };
+    let Some(name) = def.subscription.as_deref().filter(|n| !n.trim().is_empty()) else {
+        return Ok(None);
+    };
+    if crate::store::subscriptions::find(conn, name)?.is_some() {
+        return Ok(None);
+    }
+    crate::store::agents::missing_subscription(conn, def.harness, name).map(Some)
 }
 
 /// Check a spec and give its normal form.

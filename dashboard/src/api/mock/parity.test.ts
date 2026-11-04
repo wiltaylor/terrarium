@@ -955,7 +955,7 @@ describe("mock parity with docs/api.md", () => {
   it("answers GET /api/harnesses?latest=true and the harness update in the daemon's shapes", async () => {
     const api = mock();
     // The fields of `harness_versions::HarnessVersion` (docs/api.md GET /api/harnesses).
-    const ROW = ["harness", "package", "pinned", "installed", "error", "checked_at", "latest", "update", "latest_error", "active", "versions", "agents", "auto_update"];
+    const ROW = ["harness", "package", "base", "pinned", "installed", "error", "checked_at", "latest", "update", "latest_error", "active", "versions", "agents", "auto_update"];
     const r = await api.harnesses(true, true);
     for (const h of r.harnesses) {
       for (const k of Object.keys(h)) expect(ROW).toContain(k);

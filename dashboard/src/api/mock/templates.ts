@@ -227,6 +227,20 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
     return structuredClone(t);
   };
 
+  /** A copy, with `subscription_missing` when the spec names a subscription that does not exist (docs/api.md §21.1). */
+  const flagged = (t: AgentTemplate): AgentTemplate => {
+    const out = structuredClone(t);
+    delete out.subscription_missing;
+    const name = t.spec.subscription;
+    if (name && !w.subscriptions.some((s) => s.name === name)) {
+      const have = w.subscriptions.filter((s) => s.harnesses.includes(t.spec.harness)).map((s) => s.name);
+      out.subscription_missing = have.length
+        ? `there is no subscription \`${name}\`; the ${t.spec.harness} subscriptions are: ${have.join(", ")}. Name one of them`
+        : `there is no subscription \`${name}\`, and there is no ${t.spec.harness} subscription`;
+    }
+    return out;
+  };
+
   return {
     list: (q = {}) =>
       c.reply(() => {
@@ -238,13 +252,13 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
           .filter((t) => readable(t) && (q.scope === "global" ? t.project === null : !q.project || t.project === null || t.project === q.project))
           .slice()
           .sort((a, b) => (a.project ?? "").localeCompare(b.project ?? "") || a.name.localeCompare(b.name))
-          .map((t) => structuredClone(t));
+          .map(flagged);
       }),
     get: (key) =>
       c.reply(() => {
         const t = find(key);
         mayRead(t.project);
-        return structuredClone(t);
+        return flagged(t);
       }),
     create: (body) =>
       c.reply(() => {

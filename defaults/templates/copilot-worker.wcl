@@ -3,11 +3,10 @@
 // `terrarium template edit` or the dashboard: they write the whole file
 // again, without your comments. The fields: docs/api.md §21.5.
 
-description  = "Board worker on GitHub Copilot CLI."
-harness      = "copilot"
-subscription = "github-copilot"
-persona      = "worker"
-restart      = "on-failure"
+description = "Board worker on GitHub Copilot CLI."
+harness     = "copilot"
+persona     = "worker"
+restart     = "on-failure"
 
 policy {
   targets = []

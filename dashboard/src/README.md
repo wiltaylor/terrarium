@@ -320,6 +320,11 @@ the path and the text of the file (`GET /api/templates/{key}/wcl`), in a
 `<pre>` text node, monospace. There is no WCL editor: edit the file by
 hand, or use the form. The mock writes the same text (`renderWcl` in
 `api/mock/templates.ts`).
+A template whose subscription does not exist (`subscription_missing`,
+docs/api.md §21.1) has a `<name> missing` warn chip in the Harness cell,
+with the reason as its title. An agent from it does not start, so the
+daemon refuses the create. The mock flags it too (`flagged` in
+`api/mock/templates.ts`), but its create does not refuse it.
 
 **System prompts.** An agent and a template have one **System prompt**
 selector (`features/agents/SystemPromptSelect.tsx`) over the two fields

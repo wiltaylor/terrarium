@@ -59,7 +59,7 @@ pub fn routes() -> Router<Shared> {
             "/schedules/{id}/deliveries/{delivery}/redeliver",
             post(redeliver),
         )
-        .route("/schedules/{id}/test", post(test_webhook))
+        .route("/schedules/{id}/test", post(test_run))
 }
 
 /// The bytes of stdout and stderr that an exec run keeps.
@@ -511,7 +511,7 @@ async fn deliveries(
     Ok(paged(rows))
 }
 
-/// The rights of a redeliver or a test send: those of a run-now.
+/// The rights of a redeliver: those of a run-now, on a webhook action.
 async fn may_send(state: &Shared, actor: &Actor, s: &Schedule) -> ApiResult<()> {
     if crate::webhooks::action_of(s).is_none() {
         return Err(ApiError::invalid(format!(
@@ -520,6 +520,11 @@ async fn may_send(state: &Shared, actor: &Actor, s: &Schedule) -> ApiResult<()> 
             s.action.kind()
         )));
     }
+    may_run(state, actor, s).await
+}
+
+/// The rights of a run-now or a test run, for any action.
+async fn may_run(state: &Shared, actor: &Actor, s: &Schedule) -> ApiResult<()> {
     let check = actor.clone();
     let (project, spec, action, owner) =
         (s.project.clone(), s.spec.clone(), s.action.clone(), s.owner);
@@ -556,17 +561,278 @@ async fn redeliver(
     Ok((StatusCode::ACCEPTED, Json(d)))
 }
 
-/// `POST /api/schedules/{id}/test`: send a sample event of the trigger's
-/// first kind now, and answer with the delivery and the request (no
-/// secret value).
-async fn test_webhook(
+/// The mark of a test run at the start of a mail subject, a turn text,
+/// and a card title.
+const TEST_TAG: &str = "[test]";
+
+/// The body of `POST /api/schedules/{id}/test`. All of it is optional.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestBody {
+    /// The sample event. Absent: a sample of the trigger's first kind.
+    #[serde(default)]
+    event: Option<SampleEvent>,
+}
+
+/// A sample event for a test run. Each absent field comes from the sample
+/// of its kind. Other keys (`seq`, `id`, `at` of an event from the log)
+/// are ignored, so an event from `GET /api/events` works as it is.
+#[derive(Debug, Default, Deserialize)]
+struct SampleEvent {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    actor: Option<String>,
+    #[serde(default)]
+    data: Option<Value>,
+}
+
+/// The answer of `POST /api/schedules/{id}/test`.
+#[derive(Debug, serde::Serialize)]
+struct TestAnswer {
+    /// Always `true`: nothing of a test counts as a run.
+    test: bool,
+    /// The action kind: `mail`, `turn`, `webhook`, ...
+    action: &'static str,
+    /// With a given event (a trigger only): the event went through the
+    /// scope, the kinds, and each `match` rule. `false`: nothing ran, and
+    /// `reason` says why. `null`: no check (the default sample, or a time
+    /// schedule).
+    matched: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// The sample event (a trigger only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event: Option<terrarium_core::webhook::EventDoc>,
+    /// The end of the action: `ok`, `failed`, or `skipped` (the rights).
+    /// Absent when nothing ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    /// A webhook: the delivery and the request (no secret value).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery: Option<crate::store::webhooks::Delivery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request: Option<crate::webhooks::Preview>,
+}
+
+/// The sample event of a test: the given fields over the sample of the
+/// kind (the given kind, else the trigger's first kind).
+fn sample_event(
+    s: &Schedule,
+    given: Option<SampleEvent>,
+    now: chrono::DateTime<Utc>,
+) -> ApiResult<terrarium_core::webhook::EventDoc> {
+    let given = given.unwrap_or_default();
+    let mut e = match given.kind.as_deref().map(str::trim) {
+        Some("") => {
+            return Err(crate::store::schedules::field_error(
+                "event.kind",
+                "use an event kind, for example monitor.status",
+            ));
+        }
+        Some(k) => terrarium_core::webhook::sample_event(
+            k,
+            s.project.as_deref(),
+            &crate::store::schedules::stamp(now),
+        ),
+        None => crate::webhooks::sample_for(&s.spec, s.project.as_deref(), now),
+    };
+    if let Some(v) = given.summary {
+        e.summary = v;
+    }
+    if let Some(v) = given.project {
+        e.project = Some(v).filter(|p| !p.is_empty());
+    }
+    if let Some(v) = given.agent {
+        e.agent = Some(v);
+    }
+    if let Some(v) = given.actor {
+        e.actor = Some(v);
+    }
+    if let Some(v) = given.data {
+        if !v.is_object() {
+            return Err(crate::store::schedules::field_error(
+                "event.data",
+                "use a JSON object",
+            ));
+        }
+        e.data = v;
+    }
+    Ok(e)
+}
+
+/// Why a trigger would not run for the sample event: the scope, the
+/// kinds, or the first `match` rule that does not hold. `None`: it
+/// matches. The loop guard, the dedupe, the escalation, and the rate
+/// limit do not apply to a test.
+fn test_mismatch(s: &Schedule, e: &StoredEvent) -> Option<String> {
+    let ScheduleSpec::On { kinds, matches, .. } = &s.spec else {
+        return None;
+    };
+    if let Some(p) = &s.project
+        && e.project.as_deref() != Some(p.as_str())
+    {
+        return Some(format!(
+            "the trigger sees only the events of project {p}; the event's project is {}",
+            e.project.as_deref().unwrap_or("none")
+        ));
+    }
+    if !kinds
+        .iter()
+        .any(|k| terrarium_core::schedule::glob(k, &e.kind))
+    {
+        return Some(format!(
+            "the kind `{}` is not one of the trigger's kinds ({})",
+            e.kind,
+            kinds.join(", ")
+        ));
+    }
+    let view = schedules::event_view(e);
+    matches.iter().find(|m| !m.holds(&view)).map(|m| {
+        let value = match &m.value {
+            Value::String(v) => v.clone(),
+            other => other.to_string(),
+        };
+        format!(
+            "the match rule `{} {} {value}` does not hold for the event",
+            m.path,
+            m.op.as_str()
+        )
+    })
+}
+
+/// The event of the log that a test run renders its templates from.
+fn stored_of(e: &terrarium_core::webhook::EventDoc) -> StoredEvent {
+    StoredEvent {
+        seq: 0,
+        id: String::new(),
+        at: e.at.clone(),
+        kind: e.kind.clone(),
+        actor: e.actor.clone(),
+        agent: e.agent.clone(),
+        agent_id: None,
+        project: e.project.clone(),
+        card: None,
+        session: None,
+        link: Default::default(),
+        summary: e.summary.clone(),
+        data: e.data.clone(),
+    }
+}
+
+/// `POST /api/schedules/{id}/test` (docs/api.md §19.7): run the action once
+/// as a test, for a sample event. With an event in the body, a trigger
+/// checks it against its scope, kinds, and `match` rules first; no match
+/// runs nothing. A test
+/// writes no run, changes no counter (no dedupe, no escalation, no rate
+/// limit, no failure count), and writes the audit row `schedule.test`.
+/// A mail subject and a turn text start with `[test]`; a card action uses
+/// the key `test:<key>`; a webhook delivery has `test: true`.
+async fn test_run(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-) -> ApiResult<Json<crate::webhooks::TestResult>> {
+    body: axum::body::Bytes,
+) -> ApiResult<Json<TestAnswer>> {
+    let b: TestBody = if body.iter().all(u8::is_ascii_whitespace) {
+        TestBody::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
+    };
     let s = load(&state, &actor, id).await?;
-    may_send(&state, &actor, &s).await?;
-    Ok(Json(crate::webhooks::test_send(&state, &s, &actor).await?))
+    may_run(&state, &actor, &s).await?;
+    let is_trigger = s.spec.is_trigger();
+    // The match decides only for an event that the caller gives: the
+    // default sample is generic, and a test of it runs the action.
+    let check = is_trigger && b.event.is_some();
+    let doc = sample_event(&s, b.event, Utc::now())?;
+    let stored = stored_of(&doc);
+    let mut answer = TestAnswer {
+        test: true,
+        action: s.action.kind(),
+        matched: None,
+        reason: None,
+        event: is_trigger.then(|| doc.clone()),
+        status: None,
+        summary: None,
+        output: None,
+        error: None,
+        delivery: None,
+        request: None,
+    };
+    let mismatch = if check {
+        test_mismatch(&s, &stored)
+    } else {
+        None
+    };
+    if check {
+        answer.matched = Some(mismatch.is_none());
+    }
+    if let Some(why) = mismatch {
+        answer.reason = Some(why);
+    } else if crate::webhooks::action_of(&s).is_some() {
+        let r = crate::webhooks::test_send(&state, &s, &actor, &doc).await?;
+        answer.status = Some(if r.delivery.status == "ok" {
+            "ok"
+        } else {
+            "failed"
+        });
+        answer.summary = Some(format!(
+            "webhook delivery {}: {}",
+            r.delivery.id, r.delivery.status
+        ));
+        answer.delivery = Some(r.delivery);
+        answer.request = Some(r.request);
+    } else {
+        let label = schedules::run_label(&s.id);
+        let ctx = RunCtx {
+            label: Some(label),
+            cause: Some(json!({"schedule": s.id, "event": null, "depth": 1, "test": true})),
+            event: is_trigger.then_some(stored),
+            escalate: None,
+            test: true,
+            // `perform` sets `from` and `holder` for a project- or
+            // system-owned schedule.
+            ..Default::default()
+        };
+        let (st, s2) = (state.clone(), s.clone());
+        let o = match tokio::spawn(async move { perform(&st, &s2, &ctx).await }).await {
+            Ok(o) => o,
+            Err(e) => Outcome::failed("failed: the test task ended", e.to_string(), json!({})),
+        };
+        answer.status = Some(o.status);
+        answer.summary = Some(o.summary);
+        answer.output = Some(o.output);
+        answer.error = o.error;
+    }
+    let audit = json!({
+        "action": answer.action,
+        "matched": answer.matched,
+        "reason": answer.reason,
+        "event_kind": is_trigger.then(|| doc.kind.clone()),
+        "status": answer.status,
+        "summary": answer.summary,
+    });
+    let (sid, project) = (s.id.clone(), s.project.clone());
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit("schedule.test", &sid, project.as_deref(), audit)
+        })
+        .await?;
+    Ok(Json(answer))
 }
 
 async fn runs(
@@ -604,6 +870,10 @@ struct RunCtx {
     /// The resource budget of an exec (`<project>/schedules`). `None`: the
     /// actor's.
     holder: Option<String>,
+    /// A test run (`POST /api/schedules/{id}/test`): a mail subject and a
+    /// turn text start with `[test]`, and a card action uses the key
+    /// `test:<key>`.
+    test: bool,
 }
 
 impl RunCtx {
@@ -882,6 +1152,17 @@ async fn execute(
             } else {
                 subject
             };
+            let (subject, body) = if ctx.test {
+                (
+                    format!("{TEST_TAG} {subject}"),
+                    format!(
+                        "This is a test run of {} (`terrarium schedule test`).\n\n{body}",
+                        s.key()
+                    ),
+                )
+            } else {
+                (subject, body)
+            };
             mail(state, actor, to, subject, body, thread, ctx).await
         }
         (
@@ -892,6 +1173,11 @@ async fn execute(
             },
             Reach::Agent { id, name, project },
         ) => {
+            let text = if ctx.test {
+                format!("{TEST_TAG} {text}")
+            } else {
+                text
+            };
             turn(
                 state,
                 actor,
@@ -931,6 +1217,13 @@ async fn execute(
             let title = title
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| format!("{}: {}", s.name, template::quote(&key)));
+            // A test card has its own key, so a real event never comments
+            // on it, and a test close finds no real card.
+            let (key, title) = if ctx.test {
+                (format!("test:{key}"), format!("{TEST_TAG} {title}"))
+            } else {
+                (key, title)
+            };
             let card = CardWork {
                 project,
                 op,

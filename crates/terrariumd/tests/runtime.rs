@@ -1720,7 +1720,10 @@ async fn subscription_gates_the_start_and_injects_its_key() {
         ("carl", "pionly", "cannot spend subscription `pionly`"),
         ("dora", "nosuch", "no such subscription"),
     ] {
-        let id = td.agent("demo", name, json!({"subscription": sub})).await;
+        // The API refuses a missing subscription (#14): set it in the store,
+        // as a file sync can, to test the start.
+        let id = td.agent("demo", name, json!({})).await;
+        set_subscription(&td, &id, sub).await;
         let (s, b) = td
             .req(Method::POST, &format!("/api/agents/{id}/start"), None, None)
             .await;
@@ -2124,13 +2127,9 @@ async fn pi_uses_api_keys_only() {
     refused(s, &b);
     // An agent named a subscription that a plan later took: the start
     // fails with the same words.
-    let late = td
-        .agent(
-            "demo",
-            "p2",
-            json!({"harness": "pi", "subscription": "later"}),
-        )
-        .await;
+    let late = td.agent("demo", "p2", json!({"harness": "pi"})).await;
+    // The API refuses a missing subscription (#14): set it in the store.
+    set_subscription(&td, &late, "later").await;
     td.post(
         "/api/subscriptions",
         Some(
@@ -3443,4 +3442,22 @@ async fn the_then_turn_waits_for_a_free_stream() {
             .is_some_and(|r| r.starts_with("stream_limit"))),
         "{statuses:#?}"
     );
+}
+
+/// Set the subscription of agent `id` in the store, with no check: an
+/// agent that names a subscription that does not exist (yet).
+async fn set_subscription(td: &Td, id: &str, sub: &str) {
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let (id, sub) = (id.to_owned(), sub.to_owned());
+    state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE agents SET subscription = ?2 WHERE id = ?1",
+                [&id, &sub],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
 }

@@ -3008,7 +3008,38 @@ export interface WebhookDelivery {
 }
 
 /** `POST /api/schedules/{id}/test`: the delivery and the request, with each secret value as `[secret:<name>]`. */
-export interface WebhookTestResult {
+/** A sample event for `POST /api/schedules/{id}/test`: each field replaces the field of the sample of the kind. */
+export interface TestEvent {
+  kind?: string;
+  summary?: string;
+  project?: string;
+  agent?: string;
+  actor?: string;
+  data?: Record<string, unknown>;
+}
+
+/** `POST /api/schedules/{id}/test` (docs/api.md §19.7): one test run of any action. */
+export interface ScheduleTestResult {
+  test: true;
+  action: ScheduleAction["type"];
+  /** With a given event: did it match the scope, the kinds, and each rule? `null`: not checked. */
+  matched: boolean | null;
+  /** Why it did not match; nothing ran. */
+  reason?: string;
+  /** The sample event (a trigger only). */
+  event?: { kind: string; summary: string; project: string | null; data: unknown };
+  /** Absent when nothing ran. */
+  status?: RunStatus;
+  summary?: string;
+  output?: unknown;
+  error?: string | null;
+  /** A webhook: the delivery and the request. */
+  delivery?: WebhookDelivery;
+  request?: { method: string; url: string; headers: [string, string][]; body: string };
+}
+
+/** The answer of a webhook test: a {@link ScheduleTestResult} with the delivery and the request. */
+export interface WebhookTestResult extends ScheduleTestResult {
   delivery: WebhookDelivery;
   request: { method: string; url: string; headers: [string, string][]; body: string };
 }
@@ -3208,6 +3239,8 @@ export interface AgentTemplate {
   file?: string | null;
   /** The skills that an agent of the template gets now. */
   effective_skills?: EffectiveSkill[];
+  /** Only when `spec.subscription` names a subscription that does not exist: why (docs/api.md §21.1). An agent create from the template is refused. */
+  subscription_missing?: string;
 }
 
 /** `GET /api/templates/{key}/wcl`: the template's WCL file (docs/api.md §21.5). */

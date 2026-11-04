@@ -110,6 +110,8 @@ describe("a webhook trigger with the mock", () => {
     expect(d.deliveries()).toEqual([]);
     const t = await d.sendTest();
     expect(t?.delivery).toMatchObject({ status: "ok", http_status: 200, test: true, event_kind: "monitor.status" });
+    // The daemon's shape of a test run (docs/api.md §19.7): no event given, so no match check.
+    expect(t).toMatchObject({ test: true, action: "webhook", matched: null, status: "ok" });
     expect(t?.request.headers).toContainEqual(["Authorization", "[secret:github-deploy]"]);
     expect(JSON.stringify(t)).not.toContain("ghp_mock");
     expect(d.deliveries()).toHaveLength(1);

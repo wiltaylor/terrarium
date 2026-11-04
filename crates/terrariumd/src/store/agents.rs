@@ -1061,6 +1061,60 @@ pub fn check_plan_logins(
     Ok(())
 }
 
+/// The subscription `name` exists (issue #14): an agent or a template
+/// that names a missing subscription fails at its first wake, so the API
+/// refuses it at once. `422 invalid` with `details.field = "subscription"`
+/// names the subscriptions of `harness`. `None` (the default account of
+/// the harness) is no error.
+pub fn check_subscription_exists(
+    conn: &Connection,
+    harness: HarnessId,
+    name: Option<&str>,
+) -> ApiResult<()> {
+    let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
+        return Ok(());
+    };
+    if crate::store::subscriptions::find(conn, name)?.is_some() {
+        return Ok(());
+    }
+    Err(crate::store::schedules::field_error(
+        "subscription",
+        missing_subscription(conn, harness, name)?,
+    ))
+}
+
+/// The text for a missing subscription `name` of a `harness` agent: the
+/// subscriptions that the harness can spend, or the hint to leave it
+/// empty.
+pub fn missing_subscription(
+    conn: &Connection,
+    harness: HarnessId,
+    name: &str,
+) -> ApiResult<String> {
+    let names: Vec<String> = crate::store::subscriptions::list(conn)?
+        .into_iter()
+        .filter(|s| s.harnesses.contains(&harness))
+        .map(|s| s.name)
+        .collect();
+    let empty = if harness == HarnessId::Pi {
+        ""
+    } else {
+        ", or leave it empty for the default account of the harness"
+    };
+    Ok(if names.is_empty() {
+        format!(
+            "there is no subscription `{name}`, and there is no {harness} subscription. \
+             Define one (`terrarium admin subscription new`){empty}"
+        )
+    } else {
+        format!(
+            "there is no subscription `{name}`; the {harness} subscriptions are: {}. \
+             Name one of them{empty}",
+            names.join(", ")
+        )
+    })
+}
+
 /// A pool as it is stored: no empty names, no duplicates, in the given
 /// order.
 pub fn clean_pool(pool: &[String]) -> Vec<String> {

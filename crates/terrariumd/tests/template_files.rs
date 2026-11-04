@@ -398,7 +398,12 @@ async fn the_packaged_default_templates_load() {
         .collect();
     assert_eq!(got, names);
     let lead = td.get("/api/templates/global:claude-lead").await;
-    assert_eq!(lead.ok()["spec"]["subscription"], "anthropic-max-20x");
+    // No subscription: the default account of the harness applies (#14).
+    assert!(
+        lead.ok()["spec"].get("subscription").is_none(),
+        "{}",
+        lead.body
+    );
     assert_eq!(lead.body["spec"]["roles"], json!(["project_admin"]));
     // A default that the operator deletes stays deleted at the next seed.
     td.delete("/api/templates/global:kimi-worker").await.ok();

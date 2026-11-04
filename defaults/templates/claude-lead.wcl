@@ -3,12 +3,11 @@
 // `terrarium template edit` or the dashboard: they write the whole file
 // again, without your comments. The fields: docs/api.md §21.5.
 
-description  = "Project lead on Claude Code: plans the work, writes cards, assigns workers, reviews and merges."
-harness      = "claude"
-subscription = "anthropic-max-20x"
-persona      = "leader"
-roles        = ["project_admin"]
-restart      = "on-failure"
+description = "Project lead on Claude Code: plans the work, writes cards, assigns workers, reviews and merges."
+harness     = "claude"
+persona     = "leader"
+roles       = ["project_admin"]
+restart     = "on-failure"
 
 policy {
   targets = []

@@ -710,8 +710,15 @@ hand. `terrarium admin config commit` (or `sync`) commits the files.
   whole spec. `--role`, `--target`, `--mail-to`, and `--cross-project`
   replace their list; the one value `none` makes the list empty. `--from-file` replaces the spec. A change adds 1 to the
   revision; the agents made from the template do not change.
-- `ls` shows the template key, the harness, the prompt, the revision, the
-  source, and the description.
+- `ls` shows the template key, the harness, the subscription (`-` for
+  the default account of the harness; `<name> (missing)` when the
+  subscription does not exist), the prompt, the revision, the source, and
+  the description. Under the table, one line for each template with a
+  missing subscription: `<template>: <why>`. An agent from such a template
+  does not start, so `agent new --template` refuses it.
+- `new` and `edit` refuse a `--subscription` that does not exist (`422`;
+  the message names the subscriptions of the harness). `agent new` and
+  `agent set --subscription` do the same.
 - `show --wcl` prints the WCL file of the template, as it is on disk.
 - `--from-file` reads a WCL template file when its extension is `.wcl`
   (the format of `templates/`; the name defaults to the file name, so
@@ -1644,7 +1651,7 @@ terrarium schedule enable|disable <id>
 terrarium schedule runs <id> [--limit 20]     newest first
 terrarium schedule deliveries <id> [--limit 20]   the webhook deliveries, newest first
 terrarium schedule redeliver <id> <delivery>  send a delivery again (a copy, due now)
-terrarium schedule test <id>                  send a sample event to the webhook now; exit 1 when it failed
+terrarium schedule test <id> [--event-json <file|->]   run the action once as a test for a sample event; exit 1 on no match or a failure
 ```
 
 - `<id>` is the ULID, `project/name`, or a name in your project.
@@ -1706,8 +1713,18 @@ from a secret (a Slack or Discord URL is a credential).
 - `--sign-secret` adds `X-Terrarium-Signature: sha256=<HMAC of the body>`.
 - `--timeout` is the request limit, 10 s by default, 30 s at most. It takes
   seconds or a duration (`15s`); for `--exec` too.
-- `schedule test` prints the request (each secret as `[secret:<name>]`),
-  then the answer. `schedule deliveries` shows the status, the HTTP
+- `schedule test` runs the action one time as a test, for any action
+  kind ([api.md §19.7](api.md)). A trigger gets a sample event of its
+  first kind, and the action runs. `--event-json <file>` (or `-` for
+  stdin) gives the event, as `{"kind", "summary", "project", "actor",
+  "data"}`: then the scope, the kinds, and the `--match` rules are
+  checked first. It prints `test event: <kind> <summary>`, then
+  `no match: <reason>` (and runs nothing), or `test <action>: <status>:
+  <summary>`. For a webhook it prints the request (each secret as
+  `[secret:<name>]`), then the answer. A mail subject and a turn text
+  start with `[test]`; a card uses the key `test:<key>`. A test writes no
+  run and changes no counter, and the audit row is `schedule.test`. The
+  exit code is 1 when the event does not match or the action failed. `schedule deliveries` shows the status, the HTTP
   status, the attempt, the time taken, and the error or the answer of
   each delivery.
 
@@ -1718,6 +1735,15 @@ terrarium -p terra schedule new page-crit --on monitor.status --match 'data.to=c
   --webhook https://ntfy.example/terra-alerts --format ntfy
 terrarium -p terra schedule test page-crit
 terrarium -p terra schedule deliveries page-crit
+```
+
+Example: try a mail trigger for a monitor alert with an event that
+matches its rules.
+
+```sh
+terrarium -p terra schedule new alert --on monitor.status --match data.monitor=m1 \
+  --match data.to=crit --mail lead -s "m1 critical" --body "{{event.summary}}"
+echo '{"data": {"monitor": "m1", "to": "crit"}}' | terrarium -p terra schedule test alert --event-json -
 ```
 
 Example: mail the worker when CI fails on `main`, one time for each repo

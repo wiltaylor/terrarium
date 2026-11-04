@@ -221,6 +221,8 @@ async fn create(
         .write(actor.label(), move |t| {
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
             policy::set_spawn_policy(&who, None, &def.roles, None, &def.policy)?;
+            // A missing subscription fails at the first wake: refuse it now.
+            agents::check_subscription_exists(t, def.harness, def.subscription.as_deref())?;
             def.subscription_pool = agents::check_pool(
                 t,
                 def.harness,
@@ -343,6 +345,14 @@ async fn update(
                 policy::set_spawn_policy(&who, Some(&id), &now.roles, Some(&now.policy), new)?;
             }
             let mut patch = patch;
+            // A missing subscription fails at the next wake: refuse it now.
+            if let Some(Some(name)) = &patch.subscription {
+                let harness = match patch.harness {
+                    Some(h) => h,
+                    None => agents::get(t, &id)?.agent.harness,
+                };
+                agents::check_subscription_exists(t, harness, Some(name))?;
+            }
             // The pool after the patch: each member exists, has the
             // provider, and the harness can spend it (PLAN §16.3).
             if patch.subscription_pool.is_some() || patch.subscription.is_some() {

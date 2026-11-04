@@ -730,6 +730,13 @@ async fn tcp_needs_the_token_and_ignores_the_agent_header() {
 async fn patch_clears_optional_fields_with_null() {
     let td = TestDaemon::start().await;
     td.project("p").await;
+    // An agent may name only a subscription that exists (#14).
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "s1", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
     td.agent(
         "p",
         "w",

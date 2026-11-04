@@ -105,7 +105,16 @@ async fn list(
         },
     };
     template_files::refresh_quiet(&state).await;
-    let mut rows = state.db.read(move |c| templates::list(c, &f)).await?;
+    let mut rows = state
+        .db
+        .read(move |c| {
+            let mut rows = templates::list(c, &f)?;
+            for t in &mut rows {
+                t.subscription_missing = templates::subscription_missing(c, &t.spec)?;
+            }
+            Ok(rows)
+        })
+        .await?;
     fill_skills(&state, &mut rows);
     Ok(Json(rows))
 }
@@ -193,6 +202,7 @@ async fn create(
     let t = state
         .db
         .write(actor.label(), move |t| {
+            templates::check_subscription(t, &new.spec)?;
             templates::create(t, &new, repo.as_deref())
         })
         .await?;
@@ -207,6 +217,11 @@ async fn show(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Template>> {
     let mut t = load(&state, &actor, id).await?;
+    let spec = t.spec.clone();
+    t.subscription_missing = state
+        .db
+        .read(move |c| templates::subscription_missing(c, &spec))
+        .await?;
     fill_skills(&state, std::slice::from_mut(&mut t));
     Ok(Json(t))
 }
@@ -245,6 +260,9 @@ async fn update(
     let v = state
         .db
         .write(actor.label(), move |tx| {
+            if let Some(spec) = &patch.spec {
+                templates::check_subscription(tx, spec)?;
+            }
             templates::update(tx, &t.id, &patch, repo.as_deref())
         })
         .await?;
@@ -418,6 +436,7 @@ async fn from_agent(
     let t = state
         .db
         .write(actor.label(), move |t| {
+            templates::check_subscription(t, &new.spec)?;
             templates::create(t, &new, repo.as_deref())
         })
         .await?;

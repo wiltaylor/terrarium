@@ -746,11 +746,16 @@ pub struct TestResult {
     pub request: Preview,
 }
 
-/// `POST /api/schedules/{id}/test`: send a sample event of the trigger's
-/// kind now, and answer with the delivery. The rights of `run_as` and of
-/// the caller (`actor`) to the secrets are checked first: `403`. A test
-/// send does not retry and does not count toward the disable.
-pub async fn test_send(state: &Shared, s: &Schedule, actor: &Actor) -> ApiResult<TestResult> {
+/// `POST /api/schedules/{id}/test` of a webhook: send the sample event `e`
+/// now, and answer with the delivery. The rights of `run_as` and of the
+/// caller (`actor`) to the secrets are checked first: `403`. A test send
+/// does not retry and does not count toward the disable.
+pub async fn test_send(
+    state: &Shared,
+    s: &Schedule,
+    actor: &Actor,
+    e: &EventDoc,
+) -> ApiResult<TestResult> {
     let Some(a) = action_of(s).cloned() else {
         return Err(ApiError::invalid(format!(
             "schedule `{}` runs a {} action, not a webhook",
@@ -766,8 +771,7 @@ pub async fn test_send(state: &Shared, s: &Schedule, actor: &Actor) -> ApiResult
             check_owner_secrets(c, &s2, &a2)
         })
         .await?;
-    let e = sample_for(&s.spec, s.project.as_deref(), Utc::now());
-    let new = new_delivery(s, &a, &e, None, true).map_err(ApiError::invalid)?;
+    let new = new_delivery(s, &a, e, None, true).map_err(ApiError::invalid)?;
     let label = schedules::run_label(&s.id);
     // Not due: the worker leaves it; this call sends it.
     let d = state

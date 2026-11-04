@@ -3966,7 +3966,15 @@ async fn admin_harness_ls_shows_the_versions_and_the_update_policy() {
     let head: Vec<&str> = lines[0].split_whitespace().collect();
     assert_eq!(
         head,
-        ["HARNESS", "BASE", "PINNED", "INSTALLED", "UPDATES", "ON", "DISK"],
+        [
+            "HARNESS",
+            "BASE",
+            "PINNED",
+            "INSTALLED",
+            "UPDATES",
+            "ON",
+            "DISK"
+        ],
         "{out}"
     );
     let row = |name: &str| -> Vec<String> {
@@ -4847,6 +4855,67 @@ async fn schedule_webhooks() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), 1);
 }
 
+/// `schedule test` of a mail trigger, with `--event-json -` (issue #15):
+/// the event goes in the body, a match prints the result, and no match
+/// exits 1.
+#[tokio::test]
+async fn schedule_test_mail_with_an_event() {
+    let event = r#"{"kind": "monitor.status", "data": {"monitor": "m1", "to": "crit"}}"#;
+    let answer = json!({"test": true, "action": "mail", "matched": true,
+                        "event": {"kind": "monitor.status", "summary": "monitor m1: ok → crit"},
+                        "status": "ok", "summary": "mail 01M to lead",
+                        "output": {"message_id": "01M"}});
+    let out = ok_in(
+        false,
+        &["schedule", "test", "alert", "--event-json", "-"],
+        vec![(200, answer)],
+        Some(event),
+        vec![(
+            Post,
+            "/api/schedules/alert/test",
+            vec![],
+            Some(json!({"event": {"kind": "monitor.status",
+                                  "data": {"monitor": "m1", "to": "crit"}}})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("test event: monitor.status monitor m1: ok → crit"),
+        "{out}"
+    );
+    assert!(out.contains("test mail: ok: mail 01M to lead"), "{out}");
+    // No event: no body.
+    let none = json!({"test": true, "action": "mail", "matched": false,
+                      "event": {"kind": "monitor.status", "summary": "s"},
+                      "reason": "the match rule `data.monitor eq m1` does not hold for the event"});
+    let r = exec(
+        false,
+        &["schedule", "test", "alert"],
+        vec![(200, none)],
+        None,
+    )
+    .await;
+    assert_eq!(r.reqs.len(), 1, "{:?}", r.reqs);
+    assert!(r.reqs[0].body.is_none(), "{:?}", r.reqs);
+    assert!(
+        r.out
+            .contains("no match: the match rule `data.monitor eq m1`"),
+        "{}",
+        r.out
+    );
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), 1);
+    // A JSON value that is not an object is a usage error, with no request.
+    let r = exec(
+        false,
+        &["schedule", "test", "alert", "--event-json", "-"],
+        vec![],
+        Some("[1]"),
+    )
+    .await;
+    assert!(r.result.is_err());
+    assert!(r.reqs.is_empty());
+}
+
 /// `event emit` and `event source` (docs/api.md §20).
 #[tokio::test]
 async fn event_emit_and_sources() {
@@ -5385,6 +5454,33 @@ async fn templates_every_command() {
     .await;
     assert!(
         out.contains("terra/worker") && out.contains("claude"),
+        "{out}"
+    );
+    assert!(
+        out.lines().next().unwrap().contains("SUBSCRIPTION"),
+        "{out}"
+    );
+    // A template whose subscription does not exist is flagged (#14).
+    let bad = json!({"id": "T2", "name": "claude-worker", "project": null, "description": "",
+                     "spec": {"harness": "claude", "subscription": "anthropic-max-20x"},
+                     "revision": 1, "source": "config",
+                     "subscription_missing": "there is no subscription `anthropic-max-20x`; \
+                        the claude subscriptions are: anthropic-ultra. Name one of them"});
+    let out = ok(
+        false,
+        &["template", "ls"],
+        vec![(200, json!([tpl, bad]))],
+        vec![req(Get, "/api/templates")],
+    )
+    .await;
+    assert!(out.contains("anthropic-max-20x (missing)"), "{out}");
+    assert!(
+        out.contains("global:claude-worker: there is no subscription `anthropic-max-20x`"),
+        "{out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("terra/worker") && l.contains(" - ")),
         "{out}"
     );
     ok(

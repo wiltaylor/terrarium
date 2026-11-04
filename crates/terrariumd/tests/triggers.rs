@@ -657,3 +657,153 @@ async fn card_actions_open_comment_and_close() {
     assert_eq!(o[2]["output"]["op"], "open");
     assert_ne!(o[2]["output"]["card"], card_id.as_str());
 }
+
+/// Issue #15: `POST /api/schedules/{id}/test` runs a mail, a card, and a
+/// time-schedule action once as a test, for a sample event that the body
+/// can give; the `match` rules decide; nothing counts as a run.
+#[tokio::test]
+async fn a_test_run_checks_the_match_and_marks_the_action() {
+    let td = TestDaemon::start().await;
+    let (lead, worker) = setup(&td).await;
+    let spec = json!({"kind": "on", "kinds": ["monitor.status"],
+                      "match": [{"path": "data.monitor", "value": "m1"},
+                                {"path": "data.to", "value": "crit"}]});
+    let r = td
+        .post_as(
+            &lead,
+            "/api/schedules",
+            trigger(
+                "alert",
+                Some("terra"),
+                spec,
+                json!({"type": "mail", "to": "worker", "subject": "m1 critical",
+                       "body": "{{event.summary}}"}),
+            ),
+        )
+        .await;
+    let sid = id(r.ok());
+    let path = format!("/api/schedules/{sid}/test");
+
+    // The default sample (monitor disk-usage): no match check, the mail
+    // goes out.
+    let t = td.post_empty(&path).await;
+    let t = t.ok().clone();
+    assert_eq!(t["test"], true);
+    assert_eq!(t["action"], "mail");
+    assert!(t["matched"].is_null(), "{t}");
+    assert_eq!(t["event"]["kind"], "monitor.status");
+    assert_eq!(t["status"], "ok", "{t}");
+
+    // A given event that does not match `data.monitor`: nothing runs.
+    let t = td
+        .post(
+            &path,
+            json!({"event": {"data": {"monitor": "m2", "to": "crit"}}}),
+        )
+        .await;
+    let t = t.ok().clone();
+    assert_eq!(t["matched"], false, "{t}");
+    assert!(
+        t["reason"].as_str().unwrap().contains("data.monitor eq m1"),
+        "{t}"
+    );
+    assert!(t.get("status").is_none(), "{t}");
+
+    // A sample event that matches: the mail goes out, marked as a test.
+    let ev = json!({"event": {"kind": "monitor.status", "summary": "monitor m1: ok → crit",
+                              "data": {"monitor": "m1", "to": "crit"}}});
+    let t = td.post(&path, ev).await;
+    let t = t.ok().clone();
+    assert_eq!(t["matched"], true, "{t}");
+    assert_eq!(t["status"], "ok", "{t}");
+    let mid = t["output"]["message_id"].as_str().unwrap().to_owned();
+    let mail = td.mail_of(&worker).await;
+    let m = mail.iter().find(|m| m["id"] == mid.as_str()).unwrap();
+    assert_eq!(m["subject"], "[test] m1 critical");
+    let body = m["body"].as_str().unwrap();
+    assert!(
+        body.starts_with("This is a test run of terra/alert"),
+        "{body}"
+    );
+    assert!(body.contains("`monitor m1: ok → crit`"), "{body}");
+
+    // Another project in the event: the scope refuses it.
+    let t = td
+        .post(
+            &path,
+            json!({"event": {"project": "ops", "data": {"monitor": "m1", "to": "crit"}}}),
+        )
+        .await;
+    assert_eq!(t.ok()["matched"], false);
+    assert!(t.body["reason"].as_str().unwrap().contains("project terra"));
+    // A bad body is 400; a bad event field is 422.
+    td.post(&path, json!({"nope": 1}))
+        .await
+        .err(400, "bad_request");
+    td.post(&path, json!({"event": {"data": [1]}}))
+        .await
+        .err(422, "invalid");
+
+    // No run row, and the audit row `schedule.test`.
+    assert!(runs(&td, &sid).await.is_empty());
+    let audit = td.get("/api/audit?action=schedule.test").await;
+    let rows = audit.ok().as_array().unwrap().clone();
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    // A member may not test the lead's trigger.
+    td.post_empty_as(&worker, &path).await.err(403, "forbidden");
+
+    // A card action: the test card has its own key.
+    let c = td
+        .post_as(
+            &lead,
+            "/api/schedules",
+            trigger(
+                "ci-card",
+                Some("terra"),
+                json!({"kind": "on", "kinds": ["ci.run.failed"]}),
+                json!({"type": "card", "op": "open", "key": "ci:{{event.data.repo}}",
+                       "title": "CI failed on {{event.data.repo}}"}),
+            ),
+        )
+        .await;
+    let cid = id(c.ok());
+    let t = td
+        .post(
+            &format!("/api/schedules/{cid}/test"),
+            json!({"event": {"data": ci("wil/terrarium", "main")}}),
+        )
+        .await;
+    let t = t.ok().clone();
+    assert_eq!(t["status"], "ok", "{t}");
+    let card_id = t["output"]["card"].as_str().unwrap();
+    let card = td.get(&format!("/api/cards/{card_id}")).await;
+    assert_eq!(
+        card.ok()["labels"],
+        json!(["trigger:test:ci:wil/terrarium"])
+    );
+    assert!(
+        card.body["title"].as_str().unwrap().starts_with("[test] "),
+        "{}",
+        card.body
+    );
+    assert!(runs(&td, &cid).await.is_empty());
+
+    // A time schedule: the action runs once, with no event.
+    let tm = td
+        .post_as(
+            &lead,
+            "/api/schedules",
+            json!({"name": "daily", "project": "terra",
+                   "spec": {"kind": "cron", "expr": "0 9 * * *"},
+                   "action": {"type": "mail", "to": "worker", "subject": "standup",
+                              "body": "Post your update."}}),
+        )
+        .await;
+    let tid = id(tm.ok());
+    let t = td.post_empty(&format!("/api/schedules/{tid}/test")).await;
+    assert!(t.ok()["matched"].is_null(), "{}", t.body);
+    assert_eq!(t.body["status"], "ok");
+    assert!(t.body.get("event").is_none(), "{}", t.body);
+    let s = td.get(&format!("/api/schedules/{tid}")).await;
+    assert!(s.ok()["last_run"].is_null(), "{}", s.body);
+}

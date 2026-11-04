@@ -23,12 +23,12 @@
     "skills/terrarium-tests/SKILL.md": "487c0539dda2ea87505381452dfcb33d58d9dfb92d7713b40c5b52079770b8af",
     "system-prompts/leader.md": "2da535035d495d643c862256b58d40e11ac994f61ed6657ef653059f7cd09197",
     "system-prompts/worker.md": "4826798f1b84ad1032e0561a387c32cddda145e74e0d09aa904fc9a5fc36d97c",
-    "templates/claude-haiku-helper.wcl": "c903543200e150331b1029cfda8ea94d3df481f4af8eab6816fe36394be0a4b6",
-    "templates/claude-lead.wcl": "1c5ac745c7f0a84c588ee82802b45ad182d5c24a15927bb6bc52c839a9f4951c",
-    "templates/claude-worker.wcl": "764edac808c17df0da5a718df454c0f8c8f961e015d707a6bf5a9d183cd871b4",
-    "templates/codex-reviewer.wcl": "19c70ca37e90cf54e32db5dc7cbaf1245d7e5101f27dd14a3621e453e779c3bd",
-    "templates/codex-worker.wcl": "dfecdb9bdffd3ba90a6850a1ace4233d5358f9d6387ccc45a9b848727e6fb3a2",
-    "templates/copilot-worker.wcl": "d37b7d75f2baa82a109d59ae41596a3f21015d7a9272f0a6088d9e9cfad451fe",
+    "templates/claude-haiku-helper.wcl": "922321e5105b26cfb3db72b18d821e466ef1e8be835f7514d34e53bc9b11d754",
+    "templates/claude-lead.wcl": "bcc23391429e6cb549443d54adcc4aaa95852477a71c83571ed009ea67d6aac5",
+    "templates/claude-worker.wcl": "6af7b5bb48cd13a1cba6165ae316c3de27a40f8bf4cca21accbe96df7e316f2b",
+    "templates/codex-reviewer.wcl": "8355489fb1b0a85ca2b2d518ed58ede9f20ac8c70b74b4a569fa29898958b785",
+    "templates/codex-worker.wcl": "a76088cd2b6e4529662fe2da2e957ed9606ba4e1f1c69a7c82aaa46e3d80beb6",
+    "templates/copilot-worker.wcl": "07a81e2799a906d8225ba1451da3a51ca5e8e34fb27463252f821c643404a7d2",
     "templates/glm-docs-writer.wcl": "d480823a9a3138cbf8b8194e0c6cce77ea73049fbe0390e672b6c60e93675641",
     "templates/kimi-worker.wcl": "455770f1b957202804032857bd032ccaa74f90320e3e1eac1107f3d32c141596"
   }

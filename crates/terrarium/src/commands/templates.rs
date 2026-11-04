@@ -277,13 +277,29 @@ fn spec_of(
     Ok((agent_template::merge(&base, &flags), description))
 }
 
+/// The SUBSCRIPTION cell: the name, `-` for the default account of the
+/// harness, and `(missing)` when the subscription does not exist.
+fn subscription_cell(t: &Value) -> String {
+    let name = t["spec"]["subscription"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("-");
+    if t["subscription_missing"].is_string() {
+        format!("{name} (missing)")
+    } else {
+        name.to_owned()
+    }
+}
+
 fn print_list(ctx: &Ctx, v: &Value) {
-    let rows: Vec<Value> = as_items(v)
+    let items = as_items(v);
+    let rows: Vec<Value> = items
         .iter()
         .map(|t| {
             json!({
                 "key": key_of(t),
                 "harness": t["spec"]["harness"],
+                "subscription": subscription_cell(t),
                 "prompt": t["spec"]["prompt"],
                 "revision": t["revision"],
                 "source": t["source"],
@@ -297,6 +313,7 @@ fn print_list(ctx: &Ctx, v: &Value) {
         &[
             ("TEMPLATE", "key"),
             ("HARNESS", "harness"),
+            ("SUBSCRIPTION", "subscription"),
             ("PROMPT", "prompt"),
             ("REV", "revision"),
             ("SOURCE", "source"),
@@ -304,6 +321,13 @@ fn print_list(ctx: &Ctx, v: &Value) {
         ],
         "no templates",
     );
+    // A template whose subscription does not exist makes agents that do
+    // not start (issue #14): say why under the table.
+    for t in items {
+        if let Some(why) = t["subscription_missing"].as_str() {
+            ctx.line(format!("{}: {why}", key_of(t)));
+        }
+    }
 }
 
 fn print_one(ctx: &Ctx, v: &Value) {

@@ -254,10 +254,14 @@ is the contract.
   `defaults/templates/` (`claude-lead`, `claude-worker`,
   `claude-haiku-helper`, `codex-reviewer`, `codex-worker`,
   `copilot-worker`, `kimi-worker`, `glm-docs-writer`), with the rules of
-  the other defaults (§8.3: `.new` for an edited file). Each names its
-  subscription (`anthropic-max-20x`, `openai-pro`, `github-copilot`,
-  `moonshot-key`, `zai-key`); a template may name a subscription that does
-  not exist, and an agent create from it then fails on the subscription.
+  the other defaults (§8.3: `.new` for an edited file). The Claude Code,
+  Codex, and Copilot templates name no subscription, so the default
+  account of the harness applies. The pi templates name `moonshot-key` and
+  `zai-key` (pi has no default account). A template may name a
+  subscription that does not exist: the template list flags it, and an
+  agent create from it is `422 invalid` (it names the subscriptions of the
+  harness). `POST` and `PATCH` of an agent or a template refuse a missing
+  subscription too.
   A default template that the operator deletes stays deleted.
 - **Storage.** Migration 22: `agent_templates` (`UNIQUE (scope, name)`;
   `scope` is `''` for a global template) and `agents.template`. Deleting a

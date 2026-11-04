@@ -183,3 +183,18 @@ describe("template model", () => {
     expect(formToTemplatePatch(t, { ...tf, agent: { ...tf.agent, default_skills: true } }).spec).not.toHaveProperty("default_skills");
   });
 });
+
+describe("templates with a missing subscription (issue #14)", () => {
+  it("the mock flags a template whose subscription does not exist", async () => {
+    const { createMockApi } = await import("../../api/mock");
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
+    const t = await api.templates.create({ name: "gone-sub", project: null, spec: { harness: "claude", subscription: "no-such-sub" } });
+    expect(t.name).toBe("gone-sub");
+    const list = await api.templates.list({ scope: "global" });
+    const row = list.find((x) => x.name === "gone-sub");
+    expect(row?.subscription_missing).toContain("no-such-sub");
+    const plain = list.find((x) => x.name !== "gone-sub" && !x.spec.subscription);
+    if (plain) expect(plain.subscription_missing).toBeUndefined();
+    expect((await api.templates.get("global:gone-sub")).subscription_missing).toContain("no-such-sub");
+  });
+});

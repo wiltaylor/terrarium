@@ -365,7 +365,7 @@ async fn formats_templates_and_the_test_send() {
             );
         }
     }
-    // A test send of a schedule that is not a webhook: 422.
+    // A test of a schedule that is not a webhook runs its action (#15).
     let m = td
         .post(
             "/api/schedules",
@@ -375,9 +375,12 @@ async fn formats_templates_and_the_test_send() {
             ),
         )
         .await;
-    td.post_empty(&format!("/api/schedules/{}/test", id(&m.body)))
-        .await
-        .err(422, "invalid");
+    let t = td
+        .post_empty(&format!("/api/schedules/{}/test", id(&m.body)))
+        .await;
+    assert_eq!(t.ok()["action"], "mail", "{}", t.body);
+    assert_eq!(t.body["status"], "ok", "{}", t.body);
+    assert!(t.body.get("delivery").is_none(), "{}", t.body);
 }
 
 #[tokio::test]

@@ -812,3 +812,149 @@ async fn fleets_carry_the_system_prompt() {
         v.body
     );
 }
+
+/// Issue #14: `POST /api/agents`, `PATCH /api/agents/{id}`, and the
+/// template writes refuse a subscription that does not exist, with the
+/// subscriptions of the harness in the message; the list flags a template
+/// whose subscription went away.
+#[tokio::test]
+async fn a_missing_subscription_is_refused_and_flagged() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "anthropic-ultra", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "spare", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    let missing = |r: &common::Resp| {
+        r.err(422, "invalid");
+        assert_eq!(
+            r.body["error"]["details"]["field"], "subscription",
+            "{}",
+            r.body
+        );
+        let m = r.body["error"]["message"].as_str().unwrap();
+        assert!(m.contains("`anthropic-max-20x`"), "{m}");
+        assert!(m.contains("anthropic-ultra"), "{m}");
+        assert!(m.contains("default account"), "{m}");
+    };
+
+    // agent new
+    let r = td
+        .post(
+            "/api/agents",
+            json!({"name": "w1", "project": "p", "harness": "claude",
+                   "subscription": "anthropic-max-20x"}),
+        )
+        .await;
+    missing(&r);
+
+    // template new
+    let r = td
+        .post(
+            "/api/templates",
+            tpl(
+                "cw",
+                Value::Null,
+                json!({"harness": "claude", "subscription": "anthropic-max-20x"}),
+            ),
+        )
+        .await;
+    missing(&r);
+    let t = td
+        .post(
+            "/api/templates",
+            tpl(
+                "cw",
+                Value::Null,
+                json!({"harness": "claude", "subscription": "spare"}),
+            ),
+        )
+        .await;
+    t.ok();
+    // template edit
+    let r = td
+        .patch(
+            "/api/templates/global:cw",
+            json!({"spec": {"harness": "claude", "subscription": "anthropic-max-20x"}}),
+        )
+        .await;
+    missing(&r);
+
+    // agent set
+    let w = td.agent("p", "w2", json!({})).await;
+    let w = id(&w);
+    let r = td
+        .patch(
+            &format!("/api/agents/{w}"),
+            json!({"subscription": "anthropic-max-20x"}),
+        )
+        .await;
+    missing(&r);
+    let r = td
+        .patch(
+            &format!("/api/agents/{w}"),
+            json!({"subscription": "anthropic-ultra"}),
+        )
+        .await;
+    assert_eq!(r.ok()["subscription"], "anthropic-ultra");
+    td.patch(&format!("/api/agents/{w}"), json!({"subscription": null}))
+        .await
+        .ok();
+
+    // The subscription of the template goes away: template ls flags it,
+    // and an agent create from it is refused.
+    td.delete("/api/subscriptions/spare").await.ok();
+    let list = td.get("/api/templates?scope=global").await;
+    let row = list
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "cw")
+        .unwrap()
+        .clone();
+    let why = row["subscription_missing"].as_str().unwrap();
+    assert!(
+        why.contains("`spare`") && why.contains("anthropic-ultra"),
+        "{why}"
+    );
+    let show = td.get("/api/templates/global:cw").await;
+    assert!(
+        show.ok()["subscription_missing"].is_string(),
+        "{}",
+        show.body
+    );
+    let r = td
+        .post(
+            "/api/agents",
+            json!({"name": "w3", "project": "p", "template": "global:cw"}),
+        )
+        .await;
+    r.err(422, "invalid");
+    assert_eq!(
+        r.body["error"]["details"]["field"], "subscription",
+        "{}",
+        r.body
+    );
+    // A template with a subscription that exists has no flag.
+    td.patch(
+        "/api/templates/global:cw",
+        json!({"spec": {"harness": "claude"}}),
+    )
+    .await
+    .ok();
+    let show = td.get("/api/templates/global:cw").await;
+    assert!(
+        show.ok().get("subscription_missing").is_none(),
+        "{}",
+        show.body
+    );
+}

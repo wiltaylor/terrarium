@@ -3345,9 +3345,19 @@ pub enum ScheduleCmd {
     },
     /// Send a webhook delivery again (a new delivery, due now)
     Redeliver { schedule: String, delivery: String },
-    /// Send a sample event of the trigger's kind to its webhook now and
-    /// print the request and the answer; exit 1 when it failed
-    Test { schedule: String },
+    /// Run the action once as a test, for a sample event of the trigger's
+    /// kind (a mail subject starts with [test]). With --event-json, the
+    /// scope, the kinds, and the --match rules are checked first. No run
+    /// row and no counter changes. Exit 1 when the event does not match or
+    /// the action failed
+    Test {
+        schedule: String,
+        /// The sample event as JSON, from a file or `-` (stdin):
+        /// `{"kind", "summary", "project", "actor", "data"}`. Each absent
+        /// field comes from the sample of the kind
+        #[arg(long, value_name = "FILE|-")]
+        event_json: Option<String>,
+    },
 }
 
 /// The time spec and the action of `schedule new` and `schedule set`.

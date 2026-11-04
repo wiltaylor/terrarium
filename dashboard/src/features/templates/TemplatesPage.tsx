@@ -133,7 +133,18 @@ export default function TemplatesPage() {
                         </span>
                       </Show>
                     </td>
-                    <td>{t.spec.harness}</td>
+                    <td>
+                      {t.spec.harness}
+                      <Show when={t.subscription_missing}>
+                        {(why) => (
+                          <div>
+                            <span class="chip warn" title={why()} data-testid="subscription-missing">
+                              {t.spec.subscription} missing
+                            </span>
+                          </div>
+                        )}
+                      </Show>
+                    </td>
                     <td class="mono small">{t.spec.model ?? <span class="muted">default</span>}</td>
                     <td>{t.spec.prompt ?? <span class="muted">default</span>}</td>
                     <td>{(t.spec.roles ?? []).join(", ") || <span class="muted">member</span>}</td>
