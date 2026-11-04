@@ -507,41 +507,40 @@ async fn a_busy_agent_queues_and_a_new_request_replaces_the_pending_one() {
 }
 
 /// A pending reset runs before the other work: a turn that comes while
-/// it waits goes out after the `then` turn.
+/// it waits goes out after the `then` turn. The agent is busy (an open
+/// turn) while the request and the turn come, so neither the lifecycle
+/// tick nor a rest event can run the reset early: the reset runs only for
+/// an idle agent. The end of the turn (an interrupt: `idle`,
+/// `interrupted`) runs it on the lifecycle's rest path.
 #[tokio::test]
 async fn the_then_turn_goes_before_other_waiting_work() {
     let (td, _, w) = setup().await;
-    // No tick: only the end of a turn runs the reset. The tick that
-    // sleeps now ends first.
-    state(&td).lifecycle.set_tuning(Tuning {
-        idle_stop: IdleStop::Off,
-        tick: Duration::from_secs(3600),
-        compact_on_idle: false,
-        compact_max_age: CompactMaxAge::Off,
-        compact_wait: Duration::from_secs(5),
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
     td.post_empty(&format!("/api/agents/{w}/start")).await.ok();
     td.wait_status(&w, "idle").await;
     td.sup.set_compact(aid(&w), FakeCompact::Ok);
+    td.sup.open_turn(aid(&w));
     let r = td
         .post(
             &format!("/api/agents/{w}/compact"),
-            json!({"then": "First.", "defer": true}),
+            json!({"then": "First."}),
         )
         .await;
     assert_eq!(r.body["reset"]["state"], "queued", "{}", r.body);
     assert!(td.sup.gated(aid(&w)));
+    // A send to a live agent reaches the supervisor before it answers.
     td.post(&format!("/api/agents/{w}/send"), json!({"text": "later"}))
         .await
         .ok();
     // The turn waits behind the gate.
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(td.sup.prompts(aid(&w)).is_empty());
     assert_eq!(td.sup.early_turns(aid(&w)), vec!["[User] later".to_owned()]);
-    // The end of a turn: here the status event of an idle agent again.
-    terrariumd::reset::run_pending(&state(&td), aid(&w)).await;
+    assert_eq!(td.sup.compactions(aid(&w)), 0, "not while the turn runs");
+    // The end of the turn.
+    td.post_empty(&format!("/api/agents/{w}/interrupt"))
+        .await
+        .ok();
     prompted(&td, &w, "[User] later").await;
+    assert_eq!(td.sup.compactions(aid(&w)), 1);
     let prompts = td.sup.prompts(aid(&w));
     assert_eq!(
         prompts,
