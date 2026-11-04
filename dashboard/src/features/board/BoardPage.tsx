@@ -16,6 +16,7 @@ import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkab
 import { emptyNewCardForm, type NewCardErrors, type NewCardForm, newCardBody, newCardColumn, nextNewCardForm } from "./newCard";
 import { columnTitle, isBlockedColumn } from "./columns";
 import { ColumnsEditor } from "./ColumnsEditor";
+import { editCardForm, editCardPatch, type EditCardForm } from "./editCard";
 import { LanesBoard } from "./LanesBoard";
 import { buildLanes, columnIndex, findVersion, laneCells, type LaneMove, laneMove, laneMovePatches, laneStateKey, menuVersions, readLaneState, takesCards, toggleCollapsed } from "./lanes";
 import { NewVersionModal, VersionModal } from "./VersionModal";
@@ -869,8 +870,8 @@ function CardDrawer(props: {
   const [comment, setComment] = createSignal("");
   const [error, setError] = createSignal<unknown>(null);
   const [editing, setEditing] = createSignal(false);
-  const [title, setTitle] = createSignal("");
-  const [body, setBody] = createSignal("");
+  const [edit, setEdit] = createSignal<EditCardForm>(editCardForm(props.card));
+  const editField = (k: keyof EditCardForm) => (e: { currentTarget: { value: string } }) => setEdit({ ...edit(), [k]: e.currentTarget.value });
   const [eta, setEta] = createSignal("");
   const etaCheck = () => (eta().trim() ? resolveEta(eta(), props.now) : null);
   const etaError = () => {
@@ -934,8 +935,7 @@ function CardDrawer(props: {
               <button
                 class="small"
                 onClick={() => {
-                  setTitle(props.card.title);
-                  setBody(props.card.body);
+                  setEdit(editCardForm(props.card));
                   setEditing(true);
                 }}
               >
@@ -947,14 +947,28 @@ function CardDrawer(props: {
       >
         <label>
           Title
-          <input value={title()} onInput={(e) => setTitle(e.currentTarget.value)} />
+          <input value={edit().title} onInput={editField("title")} />
         </label>
         <label>
           Body
-          <textarea value={body()} onInput={(e) => setBody(e.currentTarget.value)} />
+          <textarea value={edit().body} onInput={editField("body")} />
+        </label>
+        <label>
+          Labels
+          <input value={edit().labels} onInput={editField("labels")} placeholder="bug, ui" />
+        </label>
+        <label>
+          Depends on
+          <input value={edit().dependsOn} onInput={editField("dependsOn")} placeholder="TER-1, TER-2 (empty: no dependencies)" />
         </label>
         <div class="row">
-          <button class="primary" onClick={async () => (await save({ title: title(), body: body() })) && setEditing(false)}>
+          <button
+            class="primary"
+            onClick={async () => {
+              const patch = editCardPatch(props.card, edit());
+              if (!Object.keys(patch).length || (await save(patch))) setEditing(false);
+            }}
+          >
             Save
           </button>
           <button onClick={() => setEditing(false)}>Cancel</button>

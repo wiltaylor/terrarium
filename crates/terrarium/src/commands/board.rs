@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
-use super::{delimited, event_line, print_table, set_list, set_opt};
+use super::{delimited, event_line, print_table, set_opt, set_replace_list};
 use crate::api::{CliError, query};
 use crate::cli::{BoardCmd, CardCmd, CardEditArgs, CardNewArgs, ColumnCmd};
 use crate::commands::projects::project_path;
@@ -549,8 +549,8 @@ async fn new(ctx: &Ctx, a: &CardNewArgs) -> anyhow::Result<()> {
     set_opt(&mut b, "title", a.title.clone());
     set_opt(&mut b, "body", ctx.opt_text(a.body.as_deref())?);
     set_opt(&mut b, "column", a.column.clone());
-    set_list(&mut b, "labels", &a.labels);
-    set_list(&mut b, "depends_on", &a.depends_on);
+    set_replace_list(&mut b, "labels", "--label", &a.labels)?;
+    set_replace_list(&mut b, "depends_on", "--depends-on", &a.depends_on)?;
     set_opt(&mut b, "assignee", a.assignee.clone());
     set_opt(&mut b, "repo", a.repo.clone());
     set_opt(&mut b, "branch", a.branch.clone());
@@ -575,8 +575,8 @@ async fn edit(ctx: &Ctx, a: &CardEditArgs) -> anyhow::Result<()> {
     let mut b = json!({});
     set_opt(&mut b, "title", a.title.clone());
     set_opt(&mut b, "body", ctx.opt_text(a.body.as_deref())?);
-    set_list(&mut b, "labels", &a.labels);
-    set_list(&mut b, "depends_on", &a.depends_on);
+    set_replace_list(&mut b, "labels", "--label", &a.labels)?;
+    set_replace_list(&mut b, "depends_on", "--depends-on", &a.depends_on)?;
     for (key, v) in [("repo", &a.repo), ("branch", &a.branch)] {
         if let Some(v) = v {
             b[key] = if v == "none" {

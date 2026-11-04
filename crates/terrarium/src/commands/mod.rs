@@ -347,3 +347,32 @@ pub fn set_list(obj: &mut Value, key: &str, list: &[String]) {
         obj[key] = list.iter().cloned().map(Value::String).collect();
     }
 }
+
+/// The JSON value of a repeated flag that replaces a list: `None` when
+/// the flag is not given, `[]` for the one value `none` (the rule of
+/// `--repo none`), else the values. `none` with other values is a usage
+/// error: `flag` names the flag in the message.
+pub fn replace_list(flag: &str, list: &[String]) -> anyhow::Result<Option<Value>> {
+    match list {
+        [] => Ok(None),
+        [one] if one == "none" => Ok(Some(Value::Array(Vec::new()))),
+        _ if list.iter().any(|v| v == "none") => Err(crate::api::CliError::usage(format!(
+            "{flag} none clears the list; do not give other values with it"
+        ))),
+        _ => Ok(Some(list.iter().cloned().map(Value::String).collect())),
+    }
+}
+
+/// Put the value of a replace-list flag (see `replace_list`) in
+/// `obj[key]` when the flag is given.
+pub fn set_replace_list(
+    obj: &mut Value,
+    key: &str,
+    flag: &str,
+    list: &[String],
+) -> anyhow::Result<()> {
+    if let Some(v) = replace_list(flag, list)? {
+        obj[key] = v;
+    }
+    Ok(())
+}

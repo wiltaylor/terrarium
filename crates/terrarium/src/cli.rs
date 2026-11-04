@@ -1213,8 +1213,10 @@ pub struct CardNewArgs {
     pub body: Option<String>,
     #[arg(long, short = 'c')]
     pub column: Option<String>,
+    /// A label; repeat for more
     #[arg(long = "label")]
     pub labels: Vec<String>,
+    /// A card that this card depends on; repeat for more
     #[arg(long = "depends-on")]
     pub depends_on: Vec<String>,
     #[arg(long)]
@@ -1242,14 +1244,18 @@ pub struct CardEditArgs {
     /// The body, or `-` for stdin
     #[arg(long, short = 'b', allow_hyphen_values = true)]
     pub body: Option<String>,
-    /// Replace the labels; repeat for more
+    /// Replace the labels; repeat for more. `--label none` removes
+    /// every label
     #[arg(long = "label")]
     pub labels: Vec<String>,
-    /// Replace the dependencies; repeat for more
+    /// Replace the dependencies; repeat for more. `--depends-on none`
+    /// removes every dependency
     #[arg(long = "depends-on")]
     pub depends_on: Vec<String>,
+    /// The repo, or `none` to remove it
     #[arg(long)]
     pub repo: Option<String>,
+    /// The branch, or `none` to remove it
     #[arg(long)]
     pub branch: Option<String>,
 }
@@ -1296,7 +1302,8 @@ pub enum MemCmd {
         body: Option<String>,
         #[arg(long)]
         title: Option<String>,
-        /// Replace the tags; repeat for more
+        /// Replace the tags; repeat for more. `--tag none` removes every
+        /// tag
         #[arg(long = "tag")]
         tags: Vec<String>,
     },
@@ -1936,7 +1943,7 @@ pub struct CalendarArgs {
     #[arg(long, requires = "repeat")]
     pub count: Option<u32>,
     /// Assign an agent (repeat for more); on edit, the list replaces the
-    /// assignees
+    /// assignees, and `--assign none` removes every assignee
     #[arg(long = "assign")]
     pub assignees: Vec<String>,
     /// Link a card
@@ -3045,16 +3052,20 @@ pub struct TemplateSpecArgs {
     pub prompt: Option<String>,
     #[command(flatten)]
     pub system_prompt: SystemPromptArgs,
-    /// `project_admin` or `sysadmin`; repeat for more
+    /// `project_admin` or `sysadmin`; repeat for more. The flag replaces
+    /// the list; `--role none` is no roles
     #[arg(long = "role")]
     pub roles: Vec<String>,
-    /// A target the agent may use; repeat for more
+    /// A target the agent may use; repeat for more. The flag replaces the
+    /// list; `--target none` is no targets
     #[arg(long = "target")]
     pub targets: Vec<String>,
-    /// A mail recipient; `*` is every agent of the project; repeat for more
+    /// A mail recipient; `*` is every agent of the project; repeat for
+    /// more. The flag replaces the list; `--mail-to none` is no recipients
     #[arg(long = "mail-to")]
     pub mail_to: Vec<String>,
-    /// A `project/agent` outside the project; repeat for more
+    /// A `project/agent` outside the project; repeat for more. The flag
+    /// replaces the list; `--cross-project none` is none
     #[arg(long = "cross-project")]
     pub cross_project: Vec<String>,
     /// `always`, `on-failure`, or `never`

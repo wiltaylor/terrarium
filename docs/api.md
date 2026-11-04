@@ -3672,6 +3672,9 @@ supply:
 `position`, `assignee`, `comment`, `eta_at`.
 
 - `repo`, `branch`, `assignee`, and `eta_at` take `null` to clear.
+- `labels` and `depends_on` replace the whole list. `[]` removes every
+  label or dependency, and `blocked_by` follows. An absent key keeps the
+  list. The change is one `edited` event that names the fields.
 - `eta_at` comes last, after the move and the assignment.
 - `column` or `position` moves the card, with `comment` as the move comment.
   `comment` alone adds a comment.

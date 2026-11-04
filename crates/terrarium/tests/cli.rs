@@ -111,7 +111,17 @@ fn stub() -> axum::Router {
         .route("/api/skills", post(skill_create))
         .route("/api/skills/{name}", axum::routing::put(skill_update))
         .route("/api/agents/{id}/interrupt", post(interrupt))
+        .route("/api/cards/{id}", axum::routing::patch(card_patch))
         .fallback(missing)
+}
+
+/// `PATCH /api/cards/{id}` of the stub: the card with the patch in
+/// `sent`, so that a test sees the body the CLI sent.
+async fn card_patch(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(b): Json<Value>,
+) -> Json<Value> {
+    Json(json!({"id": id, "title": "B", "column": "backlog", "sent": b}))
 }
 
 /// `POST /api/agents/{id}/interrupt` of the stub: `busy` runs a turn,
@@ -263,6 +273,61 @@ fn operator_mode_over_the_unix_socket() {
     let out = text(&o.stdout);
     assert!(out.contains("lead: starting -> idle"), "{out}");
     assert!(out.contains("mail to lead"), "{out}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Issue #13: `card edit --depends-on none` (and `--label none`) sends
+/// an empty list; `none` with other values is a usage error (exit 2) and
+/// sends nothing.
+#[test]
+fn card_edit_none_clears_the_lists() {
+    let dir = temp_dir("card-none");
+    let socket = serve_unix(&dir);
+
+    let o = run(
+        &socket,
+        &[
+            "--json",
+            "card",
+            "edit",
+            "TER-2",
+            "--depends-on",
+            "none",
+            "--label",
+            "none",
+        ],
+    );
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["sent"], json!({"depends_on": [], "labels": []}));
+
+    let o = run(
+        &socket,
+        &["--json", "card", "edit", "TER-2", "--depends-on", "TER-1"],
+    );
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["sent"], json!({"depends_on": ["TER-1"]}));
+
+    let o = run(
+        &socket,
+        &[
+            "card",
+            "edit",
+            "TER-2",
+            "--depends-on",
+            "none",
+            "--depends-on",
+            "TER-1",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        text(&o.stderr).contains("--depends-on none clears the list"),
+        "{}",
+        text(&o.stderr)
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -705,7 +705,8 @@ hand. `terrarium admin config commit` (or `sync`) commits the files.
   `new`, and `from-agent` uses the project of the agent. `--global` makes
   a global template (sysadmin).
 - `edit` reads the template, puts the flags over its spec, and sends the
-  whole spec. `--from-file` replaces the spec. A change adds 1 to the
+  whole spec. `--role`, `--target`, `--mail-to`, and `--cross-project`
+  replace their list; the one value `none` makes the list empty. `--from-file` replaces the spec. A change adds 1 to the
   revision; the agents made from the template do not change.
 - `ls` shows the template key, the harness, the prompt, the revision, the
   source, and the description.
@@ -843,7 +844,8 @@ terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
                    [--assignee a] [--repo r] [--branch b] [-m comment] [--eta 2h30m]
 terrarium card new --from-mail <message id> [...]
-terrarium card edit <id> [--title t] [-b body] [--label l]... [--depends-on id]... [--repo r|none] [--branch b|none]
+terrarium card edit <id> [--title t] [-b body] [--label l|none]... [--depends-on id|none]...
+                    [--repo r|none] [--branch b|none]
 terrarium card claim <id> [--eta 2h30m]
 terrarium card move <id> <column> [--position n] [-m comment] [--eta 2h30m]
 terrarium card eta <id> (<duration | time> | --clear)
@@ -857,6 +859,16 @@ terrarium card wait [--mine] [--timeout 300]
 
 `card comment` takes the text as the last argument, with `-b`/`--body`, or
 with `-m`, as `card move` does. Give only one of them.
+
+In `card edit`, `--label` and `--depends-on` replace the whole list. Repeat
+the flag for more values. A command without the flag keeps the list. The
+one value `none` removes every label or dependency: `card edit TER-2
+--depends-on none` sends `"depends_on": []`. `none` with other values is a
+usage error. `--repo none` and `--branch none` remove the repo and the
+branch in the same way. The other commands with a list flag that replaces
+the list use the same rule: `mem edit --tag none`, `calendar edit --assign
+none`, and `template edit --role none`, `--target none`, `--mail-to none`,
+or `--cross-project none`.
 
 A move to the `blocked` column needs `-m`. A card with unmet dependencies
 cannot enter the `working` column; the error lists the blocking cards. In
@@ -904,7 +916,7 @@ terrarium mem new <title> [-b body | -] [--tag t]... [--source card:TER-42|threa
                   [--link <id>:<relation>]...
 terrarium mem link <a> <b> <relation> [--note text]
 terrarium mem unlink <a> <b> <relation>
-terrarium mem edit <id> [-b body] [--title t] [--tag t]...
+terrarium mem edit <id> [-b body] [--title t] [--tag t|none]...
 terrarium mem supersede <old> <new>
 terrarium mem neighbors <id> [--relation r]
 terrarium mem ls [--tag t] [--mine] [--recent 20]
@@ -1207,8 +1219,8 @@ date for an all-day event (`--end` is then the last day). Without
 `--month-day` (monthly; `-1` is the last day), and `--until` or
 `--count`; or an RRULE text (`FREQ=WEEKLY;BYDAY=MO,TH;COUNT=4`; the
 daemon refuses the parts that it does not support). On `edit`,
-`--assign` replaces the assignees, and a new `--start` of a timed event
-keeps its length. `skip` takes the start of one occurrence (RFC 3339) or
+`--assign` replaces the assignees (`--assign none` removes them all), and
+a new `--start` of a timed event keeps its length. `skip` takes the start of one occurrence (RFC 3339) or
 its local date.
 
 Rights: every agent of the project reads. A lead (project admin), a

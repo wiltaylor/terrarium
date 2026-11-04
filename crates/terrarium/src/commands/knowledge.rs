@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use super::{delimited, print_generic, print_table, set_list, set_opt};
+use super::{delimited, print_generic, print_table, set_opt, set_replace_list};
 use crate::api::{CliError, ServerError, query};
 use crate::cli::{MemCmd, MemNewArgs, WikiCmd};
 use crate::commands::projects::project_path;
@@ -176,7 +176,7 @@ pub async fn mem(ctx: &Ctx, cmd: &MemCmd) -> anyhow::Result<()> {
             let mut b = json!({});
             set_opt(&mut b, "body", ctx.opt_text(body.as_deref())?);
             set_opt(&mut b, "title", title.clone());
-            set_list(&mut b, "tags", tags);
+            set_replace_list(&mut b, "tags", "--tag", tags)?;
             if b.as_object().is_some_and(serde_json::Map::is_empty) {
                 return Err(CliError::usage("give --body, --title, or --tag"));
             }
@@ -258,7 +258,7 @@ async fn new(ctx: &Ctx, a: &MemNewArgs) -> anyhow::Result<()> {
     }
     let mut b = json!({"title": a.title});
     set_opt(&mut b, "body", ctx.opt_text(a.body.as_deref())?);
-    set_list(&mut b, "tags", &a.tags);
+    set_replace_list(&mut b, "tags", "--tag", &a.tags)?;
     if !sources.is_empty() {
         b["sources"] = Value::Array(sources);
     }

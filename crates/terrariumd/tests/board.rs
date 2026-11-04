@@ -264,6 +264,72 @@ async fn dependencies_block_in_progress() {
     assert_eq!(ok.ok()["column"], "in_progress");
 }
 
+/// Issue #13: a patch with `"depends_on": []` removes every dependency
+/// (and `"labels": []` every label). `blocked_by` follows, the edit is an
+/// `edited` event, and the card can be claimed.
+#[tokio::test]
+async fn an_empty_list_clears_dependencies_and_labels() {
+    let td = setup().await;
+    let a = card(&td, "proj/w1", json!({"title": "A"})).await;
+    let b = card(&td, "proj/w1", json!({"title": "B"})).await;
+    let id = card(
+        &td,
+        "proj/w2",
+        json!({"title": "C", "depends_on": [a, b], "labels": ["x", "y"]}),
+    )
+    .await;
+    let c = td.get(&format!("/api/cards/{id}")).await;
+    assert_eq!(c.ok()["blocked_by"], json!([a, b]));
+    // A patch with no `depends_on` keeps them.
+    let kept = td
+        .patch_as(
+            "proj/w2",
+            &format!("/api/cards/{id}"),
+            json!({"title": "C2"}),
+        )
+        .await;
+    assert_eq!(kept.ok()["depends_on"], json!([a, b]));
+    // A shorter list replaces them.
+    let one = td
+        .patch_as(
+            "proj/w2",
+            &format!("/api/cards/{id}"),
+            json!({"depends_on": [b]}),
+        )
+        .await;
+    assert_eq!(one.ok()["depends_on"], json!([b]));
+    assert_eq!(one.body["blocked_by"], json!([b]));
+    // The empty list removes them all.
+    let cleared = td
+        .patch_as(
+            "proj/w2",
+            &format!("/api/cards/{id}"),
+            json!({"depends_on": [], "labels": []}),
+        )
+        .await;
+    let cleared = cleared.ok();
+    assert_eq!(cleared["depends_on"], json!([]));
+    assert_eq!(cleared["blocked_by"], json!([]));
+    assert_eq!(cleared["labels"], json!([]));
+    let again = td.get(&format!("/api/cards/{id}")).await;
+    assert_eq!(again.ok()["depends_on"], json!([]));
+    let ev = td.get(&format!("/api/cards/{id}/events")).await;
+    let last_edit = ev
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["data"]["change"] == "edited")
+        .cloned()
+        .unwrap();
+    assert_eq!(last_edit["data"]["fields"], json!(["labels", "depends_on"]));
+    // No open dependency: the claim works.
+    let ok = td
+        .post_empty_as("proj/w2", &format!("/api/cards/{id}/claim"))
+        .await;
+    assert_eq!(ok.ok()["column"], "in_progress");
+}
+
 #[tokio::test]
 async fn wip_limits_and_columns() {
     let td = setup().await;

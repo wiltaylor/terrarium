@@ -1227,6 +1227,72 @@ async fn board_and_cards() {
         )],
     )
     .await;
+    // `none` clears a list (#13): the patch sends `[]`.
+    ok(
+        false,
+        &["card", "edit", "TER-2", "--depends-on", "none"],
+        vec![(200, json!({}))],
+        vec![(
+            Patch,
+            "/api/cards/TER-2",
+            vec![],
+            Some(json!({"depends_on": []})),
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &[
+            "card",
+            "edit",
+            "TER-2",
+            "--label",
+            "none",
+            "--depends-on",
+            "TER-1",
+            "--depends-on",
+            "TER-3",
+        ],
+        vec![(200, json!({}))],
+        vec![(
+            Patch,
+            "/api/cards/TER-2",
+            vec![],
+            Some(json!({"labels": [], "depends_on": ["TER-1", "TER-3"]})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["card", "new", "T", "--depends-on", "none"],
+        vec![(201, json!({}))],
+        vec![(
+            Post,
+            "/api/projects/terra/cards",
+            vec![],
+            Some(json!({"title": "T", "depends_on": []})),
+        )],
+    )
+    .await;
+    // `none` with other values is a usage error, and nothing is sent.
+    for args in [
+        &[
+            "card",
+            "edit",
+            "TER-2",
+            "--depends-on",
+            "none",
+            "--depends-on",
+            "TER-1",
+        ][..],
+        &["card", "edit", "TER-2", "--label", "a", "--label", "none"][..],
+    ] {
+        let r = exec(false, args, vec![], None).await;
+        let e = r.result.unwrap_err();
+        assert_eq!(exit_code_of(&e), exit::USAGE, "{args:?}");
+        assert!(e.to_string().contains("none clears the list"), "{e}");
+        assert!(r.reqs.is_empty(), "{args:?}");
+    }
     ok(
         false,
         &["card", "claim", "TER-1"],
@@ -1538,6 +1604,18 @@ async fn memory() {
             "/api/memories/MEM-1",
             vec![],
             Some(json!({"tags": ["x"]})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["mem", "edit", "MEM-1", "--tag", "none"],
+        vec![(200, json!({}))],
+        vec![(
+            Patch,
+            "/api/memories/MEM-1",
+            vec![],
+            Some(json!({"tags": []})),
         )],
     )
     .await;
@@ -5426,6 +5504,51 @@ async fn templates_every_command() {
         )],
     )
     .await;
+    // `none` clears a list of the spec.
+    ok(
+        false,
+        &[
+            "template",
+            "edit",
+            "terra/worker",
+            "--role",
+            "none",
+            "--target",
+            "none",
+            "--mail-to",
+            "lead",
+        ],
+        vec![(200, tpl.clone()), (200, tpl.clone())],
+        vec![
+            req(Get, "/api/templates/terra%2Fworker"),
+            (
+                Patch,
+                "/api/templates/terra%2Fworker",
+                vec![],
+                Some(
+                    json!({"spec": {"harness": "claude", "prompt": "worker", "roles": [],
+                                     "policy": {"targets": [], "mail_to": ["lead"]}}}),
+                ),
+            ),
+        ],
+    )
+    .await;
+    let r = exec(
+        false,
+        &[
+            "template",
+            "edit",
+            "terra/worker",
+            "--role",
+            "none",
+            "--role",
+            "sysadmin",
+        ],
+        vec![(200, tpl.clone())],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     ok(
         false,
         &["template", "rm", "worker"],
@@ -8980,6 +9103,24 @@ async fn calendar_commands() {
             "/api/calendar/events/01CALCALCALCALCALCALCALCAL",
             vec![],
             Some(json!({"title": "v2", "recurrence": null})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &[
+            "calendar",
+            "edit",
+            "01CALCALCALCALCALCALCALCAL",
+            "--assign",
+            "none",
+        ],
+        vec![(200, e.clone())],
+        vec![(
+            Patch,
+            "/api/calendar/events/01CALCALCALCALCALCALCALCAL",
+            vec![],
+            Some(json!({"assignees": []})),
         )],
     )
     .await;

@@ -101,8 +101,8 @@ pub fn calendar_body(ctx: &Ctx, a: &CalendarArgs) -> anyhow::Result<Map<String, 
     if let Some(r) = rule_of(a)? {
         b.insert("recurrence".into(), r);
     }
-    if !a.assignees.is_empty() {
-        b.insert("assignees".into(), json!(a.assignees));
+    if let Some(v) = super::replace_list("--assign", &a.assignees)? {
+        b.insert("assignees".into(), v);
     }
     let mut links = Map::new();
     for (k, v) in [

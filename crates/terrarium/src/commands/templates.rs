@@ -240,8 +240,8 @@ fn spec_of(
     if let Some(v) = persona_value(&a.system_prompt) {
         flags.insert("persona".into(), v);
     }
-    if !a.roles.is_empty() {
-        flags.insert("roles".into(), json!(a.roles));
+    if let Some(v) = super::replace_list("--role", &a.roles)? {
+        flags.insert("roles".into(), v);
     }
     if a.no_skills {
         // `null` removes the key: no skills.
@@ -262,13 +262,13 @@ fn spec_of(
         flags.insert("default_skills".into(), Value::Null);
     }
     let mut policy = Map::new();
-    for (k, v) in [
-        ("targets", &a.targets),
-        ("mail_to", &a.mail_to),
-        ("cross_project", &a.cross_project),
+    for (k, flag, v) in [
+        ("targets", "--target", &a.targets),
+        ("mail_to", "--mail-to", &a.mail_to),
+        ("cross_project", "--cross-project", &a.cross_project),
     ] {
-        if !v.is_empty() {
-            policy.insert(k.into(), json!(v));
+        if let Some(v) = super::replace_list(flag, v)? {
+            policy.insert(k.into(), v);
         }
     }
     if !policy.is_empty() {
