@@ -806,14 +806,16 @@ async fn a_compaction_without_an_end_times_out_and_the_turns_wait() {
         IdleStop::Off,
         false,
         CompactMaxAge::Off,
-        Duration::from_millis(600),
+        // Long enough that the compaction still runs when the test sends
+        // the turn and checks that it waits, also on a slow runner.
+        Duration::from_secs(3),
     );
     td.sup.set_compact(aid(&w), FakeCompact::Silent);
     td.post_empty(&format!("/api/agents/{w}/compact"))
         .await
         .ok();
-    // The status event, not two reads of the agent: on a slow runner the
-    // 600 ms limit can end the compaction between the two reads.
+    // The status event, not two reads of the agent: the compaction can
+    // end between two reads.
     until("the compacting status", || async {
         events(&td, &w, "status")
             .await
