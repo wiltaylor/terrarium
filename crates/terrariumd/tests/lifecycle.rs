@@ -648,7 +648,13 @@ async fn max_age_compacts_at_the_next_rest() {
         compactions(&td, &w).await.len() == 2
     })
     .await;
-    assert_eq!(agent(&td, &w).await["status"], "idle");
+    // The agent goes on. `agent.compacted` is written by the compaction
+    // task, and the `idle` after it comes through the event pump, so the
+    // API can show `working` (compacting) for a moment after the event.
+    until("idle after the second compaction", || async {
+        agent(&td, &w).await["status"] == "idle"
+    })
+    .await;
     // `null` goes back to the global default (off).
     let r = td
         .patch(
@@ -806,8 +812,15 @@ async fn a_compaction_without_an_end_times_out_and_the_turns_wait() {
     td.post_empty(&format!("/api/agents/{w}/compact"))
         .await
         .ok();
-    td.wait_status(&w, "working").await;
-    assert_eq!(agent(&td, &w).await["status_reason"], "compacting");
+    // The status event, not two reads of the agent: on a slow runner the
+    // 600 ms limit can end the compaction between the two reads.
+    until("the compacting status", || async {
+        events(&td, &w, "status")
+            .await
+            .iter()
+            .any(|e| e["data"]["status"] == "working" && e["data"]["reason"] == "compacting")
+    })
+    .await;
     let r = td
         .post(&format!("/api/agents/{w}/send"), json!({"text": "after"}))
         .await;
