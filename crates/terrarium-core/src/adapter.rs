@@ -149,6 +149,17 @@ pub trait Adapter: Send + Sync {
         vec![CTRL_U]
     }
 
+    /// Keystrokes that interrupt the running turn of the harness, as the
+    /// operator's Stop does (`POST /api/agents/{id}/interrupt`). Each item
+    /// is one write; the caller waits [`INTERRUPT_GAP`] between two writes,
+    /// so the harness does not read two Esc keys as one Alt chord. The keys
+    /// must stop the turn and keep the harness running: never a key that
+    /// can exit it (a second Ctrl-C quits most harnesses). Empty (the
+    /// default) means "no known keys": the harness cannot be interrupted.
+    fn interrupt_keys(&self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+
     /// Keystrokes that make an idle harness exit cleanly, for a graceful
     /// stop before a kill. Empty (the default) means "no known keys": the
     /// caller kills the process.
@@ -212,6 +223,15 @@ pub fn exit_key_writes(keys: &[u8], pause: Duration) -> Vec<Vec<u8>> {
 
 /// Ctrl-U: kill the line before the cursor.
 pub const CTRL_U: u8 = 0x15;
+
+/// Esc, the interrupt key of the harness TUIs.
+pub const ESC: u8 = 0x1b;
+
+/// The pause between two writes of [`Adapter::interrupt_keys`]. A TUI reads
+/// an Esc that comes right before another key as Alt with that key; 150 ms
+/// is longer than that wait, and still short enough for a double Esc
+/// (Copilot CLI, "esc esc interrupt").
+pub const INTERRUPT_GAP: Duration = Duration::from_millis(150);
 
 /// The character that [`escape_turn`] puts in front of a turn: U+00A0
 /// NO-BREAK SPACE. Verified live on 2026-10-28: with it, `/help ...` was a

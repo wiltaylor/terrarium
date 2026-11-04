@@ -67,6 +67,13 @@ pub const CLEAR_INPUT: &[u8] = &[0x03];
 /// Ctrl-C does not exit.
 pub const EXIT: &[u8] = b"/quit\r";
 
+/// The keys that interrupt a running turn: one Esc. pi stops a run on
+/// Esc, not on Ctrl-C ([`CLEAR_INPUT`]), and Terrarium sets
+/// `doubleEscapeAction: "none"`, so a second Esc does nothing.
+pub fn interrupt() -> Vec<Vec<u8>> {
+    vec![ESC.to_vec()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +115,12 @@ mod tests {
             b"\x1b[200~New mail\x1b[201~\r".to_vec()
         );
         assert_eq!(escape("a /b"), "a /b");
+    }
+
+    #[test]
+    fn interrupt_is_esc_and_never_ctrl_c() {
+        let writes = interrupt();
+        assert_eq!(writes.len(), 1);
+        assert!(writes.iter().all(|w| w == b"\x1b"));
     }
 }

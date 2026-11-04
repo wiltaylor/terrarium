@@ -77,6 +77,14 @@ pub fn exit() -> Vec<u8> {
     b"/exit\r".to_vec()
 }
 
+/// The keys that interrupt a running turn: Esc, then Esc again after
+/// [`terrarium_core::adapter::INTERRUPT_GAP`]. The footer of a busy turn
+/// says "esc esc interrupt" (`crate::screen::BUSY_MARKER`). Ctrl-C is not
+/// used: it arms "ctrl+c again to exit".
+pub fn interrupt() -> Vec<Vec<u8>> {
+    vec![ESC.to_vec(), ESC.to_vec()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +145,12 @@ mod tests {
         assert_eq!(escape("a /b"), "a /b");
         assert_eq!(escape("$"), "\u{00A0}$");
         assert_eq!(escape("$x"), "$x");
+    }
+
+    #[test]
+    fn interrupt_is_esc_and_never_ctrl_c() {
+        let writes = interrupt();
+        assert_eq!(writes.len(), 2);
+        assert!(writes.iter().all(|w| w == b"\x1b"));
     }
 }

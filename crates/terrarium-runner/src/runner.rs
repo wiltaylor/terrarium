@@ -32,6 +32,13 @@ use crate::socket;
 /// `RunnerConfig::output_capacity`.
 const CHANNEL_CAPACITY: usize = 1024;
 
+/// How long [`Runner::interrupt`] watches for the screen to settle. After
+/// it, the status follows the hooks and the stall timeout again.
+pub const INTERRUPT_WAIT: Duration = Duration::from_secs(30);
+/// After an interrupt, a screen that the adapter reads as `NotReady` (text
+/// left in the input box) ends the turn once it is quiet this long.
+pub const INTERRUPT_SETTLE: Duration = Duration::from_secs(1);
+
 /// After the harness exits, how long an attach stream waits for the reader
 /// thread to pass on the last PTY bytes. A background process that keeps the
 /// PTY open delays the end of the output.
@@ -191,6 +198,11 @@ struct State {
     startup_done: bool,
     /// The spawn time, for the startup hook timeout.
     spawned: Instant,
+    /// [`Runner::interrupt`] sent the interrupt keys: until this deadline,
+    /// a screen that settles (not busy, no question) ends the turn, also
+    /// when the harness sends no stop hook (Claude Code sends none on
+    /// Esc).
+    interrupt: Option<Instant>,
 }
 
 pub(crate) struct Inner {
@@ -311,6 +323,7 @@ impl Runner {
                 in_flight: None,
                 startup_done,
                 spawned: now,
+                interrupt: None,
             }),
             status_tx: watch::Sender::new(AgentStatus::Starting),
             exit_tx: watch::Sender::new(None),
@@ -513,6 +526,48 @@ impl Runner {
         self.write(&bytes).await?;
         self.inner.unblock("answered");
         Ok(())
+    }
+
+    /// Interrupt the running turn: type the adapter's interrupt keys
+    /// ([`Adapter::interrupt_keys`]), with
+    /// [`INTERRUPT_GAP`](terrarium_core::adapter::INTERRUPT_GAP) between
+    /// the writes. The harness keeps running. When the screen then settles
+    /// (the prompt is ready, or the screen is quiet and not busy for
+    /// [`INTERRUPT_SETTLE`]), the agent goes `idle` with the reason
+    /// `interrupted`, also with no stop hook. A turn that waits in the
+    /// queue goes out after that.
+    ///
+    /// False: no turn runs (the status is not `working` or `blocked`), and
+    /// no key went out. An error when the adapter has no interrupt keys.
+    pub async fn interrupt(&self) -> Result<bool> {
+        let writes = self.inner.adapter.interrupt_keys();
+        if writes.is_empty() {
+            return Err(RunnerError::Other(format!(
+                "the {} adapter has no interrupt keys",
+                self.inner.adapter.id()
+            )));
+        }
+        {
+            let mut state = lock(&self.inner.state);
+            if state.exited {
+                return Err(RunnerError::Exited);
+            }
+            if !matches!(state.status, AgentStatus::Working | AgentStatus::Blocked) {
+                return Ok(false);
+            }
+            state.interrupt = Some(Instant::now() + INTERRUPT_WAIT);
+        }
+        for (i, w) in writes.into_iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(terrarium_core::adapter::INTERRUPT_GAP).await;
+            }
+            self.inner.write_bytes(w).await?;
+        }
+        self.inner.emit(Event::System {
+            message: "interrupt: the interrupt keys went to the harness; the turn stops".into(),
+        });
+        self.inner.wake.notify_one();
+        Ok(true)
     }
 
     /// Stop the harness on purpose. The status becomes `stopped` when the
@@ -832,6 +887,7 @@ impl Inner {
                 Event::TurnStart { .. } => {
                     state.turn_open = true;
                     state.block = None;
+                    state.interrupt = None;
                     if let Some(f) = state.in_flight.take() {
                         let _ = f.turn.tx.send(Ok(()));
                     }
@@ -840,6 +896,7 @@ impl Inner {
                 Event::TurnEnd => {
                     state.turn_open = false;
                     state.block = None;
+                    state.interrupt = None;
                     self.transition(&mut state, AgentStatus::Idle, "turn ended");
                 }
                 Event::Notification {
@@ -968,6 +1025,29 @@ impl Inner {
                          the prompt-ready screen counts alone"
                     ),
                 });
+            }
+            // After an interrupt: a settled screen ends the turn.
+            if let Some(deadline) = state.interrupt {
+                let turn = matches!(state.status, AgentStatus::Working | AgentStatus::Blocked);
+                let settled = match hint {
+                    ScreenHint::PromptReady => true,
+                    ScreenHint::NotReady => quiet_for >= INTERRUPT_SETTLE,
+                    ScreenHint::Unknown => ready,
+                    ScreenHint::Busy | ScreenHint::Question => false,
+                };
+                if !turn || now >= deadline {
+                    state.interrupt = None;
+                } else if settled && state.in_flight.is_none() {
+                    state.interrupt = None;
+                    state.turn_open = false;
+                    state.block = None;
+                    // Some harnesses put the stopped prompt back in the
+                    // input box. Empty it, or the next turn never types.
+                    if hint == ScreenHint::NotReady {
+                        clear = Some(self.adapter.clear_input_keys());
+                    }
+                    self.transition(&mut state, AgentStatus::Idle, "interrupted");
+                }
             }
             match state.status {
                 // A harness that sends a startup hook can draw a ready

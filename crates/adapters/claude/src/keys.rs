@@ -62,6 +62,14 @@ pub fn exit() -> Vec<u8> {
     b"/exit\r".to_vec()
 }
 
+/// The keys that interrupt a running turn: one Esc. The footer of a busy
+/// turn says "esc to interrupt" (`crate::screen::BUSY_MARKER`). One Esc
+/// only: a second Esc on an idle prompt opens the rewind menu. Ctrl-C is
+/// not used: a second Ctrl-C exits Claude Code.
+pub fn interrupt() -> Vec<Vec<u8>> {
+    vec![ESC.to_vec()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +116,12 @@ mod tests {
             b"\x1b[200~New mail\x1b[201~\r".to_vec()
         );
         assert_eq!(escape("a /b"), "a /b");
+    }
+
+    #[test]
+    fn interrupt_is_esc_and_never_ctrl_c() {
+        let writes = interrupt();
+        assert_eq!(writes.len(), 1);
+        assert!(writes.iter().all(|w| w == b"\x1b"));
     }
 }

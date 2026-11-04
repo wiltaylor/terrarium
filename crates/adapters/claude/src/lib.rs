@@ -294,6 +294,10 @@ impl Adapter for ClaudeAdapter {
         keys::exit()
     }
 
+    fn interrupt_keys(&self) -> Vec<Vec<u8>> {
+        keys::interrupt()
+    }
+
     fn clear_input_keys(&self) -> Vec<u8> {
         keys::CLEAR_INPUT.to_vec()
     }

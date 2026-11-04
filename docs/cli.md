@@ -335,6 +335,7 @@ terrarium agent new-session [<agent> | --self] [--then "<prompt>" | --then-file 
 terrarium agent send <agent> <text | -> [--raw]  --raw: project_admin, sysadmin, or the operator
 terrarium agent send <agent> [text | -] --image <file>...  attach images to the turn
 terrarium agent keys <agent> <key>...         project_admin, sysadmin, or the operator
+terrarium agent interrupt <agent>             stop the running turn; the rights of agent send
 terrarium agent answer <agent> [--request-id id] (--choice N | --allow | --deny | --text T)
 terrarium agent logs <agent> [--since seq] [--kind k] [--limit n] [--follow]
 terrarium agent attach <agent>                operator mode only; Ctrl-] detaches
@@ -627,6 +628,20 @@ terrarium agent screen terra/w1          # a dialog: "Approaching rate limits ..
 terrarium agent keys terra/w1 esc        # close it
 terrarium agent screen terra/w1          # the prompt is back
 terrarium agent send terra/w1 --raw "/compact"
+```
+
+`agent interrupt <agent>` stops the running turn of the agent, as the
+Stop button of the dashboard does. The daemon types the interrupt key of
+the harness: Esc, or Esc Esc for Copilot, never Ctrl-C. The harness keeps
+running and keeps its session, and the agent goes `idle` with the reason
+`interrupted`. The rights are the rights of `agent send`. The CLI prints
+`interrupted the turn of <agent>`. An agent that runs no turn gives exit
+code 1 and `[conflict]`; no key goes out. See
+[api.md §6.5](api.md#65-pty-get-apiagentsidpty-websocket), "Interrupt".
+
+```
+terrarium agent interrupt terra/w1       # the turn goes the wrong way: stop it
+terrarium agent send terra/w1 "Stop. Only fix the test, do not change the API."
 ```
 
 `agent new --template <t>` copies the settings of an agent template

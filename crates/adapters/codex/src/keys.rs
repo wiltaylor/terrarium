@@ -80,6 +80,14 @@ pub fn exit() -> Vec<u8> {
 /// (`spikes/codex/*/run.py`).
 pub const EXIT_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// The keys that interrupt a running turn: one Esc. The busy line says
+/// "esc to interrupt" (`docs/compat.md`, "Codex"). One Esc only: Esc twice
+/// on an idle composer goes back to edit an older message. Ctrl-C is not
+/// used: a second Ctrl-C exits Codex.
+pub fn interrupt() -> Vec<Vec<u8>> {
+    vec![ESC.to_vec()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +132,12 @@ mod tests {
             b"\x1b[200~New mail\x1b[201~\r".to_vec()
         );
         assert_eq!(escape("a /b"), "a /b");
+    }
+
+    #[test]
+    fn interrupt_is_esc_and_never_ctrl_c() {
+        let writes = interrupt();
+        assert_eq!(writes.len(), 1);
+        assert!(writes.iter().all(|w| w == b"\x1b"));
     }
 }

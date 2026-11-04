@@ -901,6 +901,15 @@ impl RunnerHandle for RemoteRunner {
         })
     }
 
+    /// A runner process from before the `interrupt` call answers
+    /// `method_not_found` (`RunnerError::Control`).
+    fn interrupt(&self) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move {
+            let v = self.inner.shared.call("interrupt", json!({})).await?;
+            Ok(v.get("sent").and_then(Value::as_bool).unwrap_or(false))
+        })
+    }
+
     fn kill(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.call_unit("kill", json!({})))
     }

@@ -7,6 +7,7 @@
 // - `loadNewest` / `loadEarlier`: the window of the newest 500 blocks, and
 //   pages before it.
 // - `composerState`: when the operator may type a turn.
+// - `canInterrupt` / `interruptNote`: the Stop button and its note.
 // - `tailOnScroll` / `tailOnAppend`: auto-scroll that pauses when the
 //   operator scrolls up.
 // - `sessionGone`: the open session is not there (any more), so the view
@@ -252,6 +253,17 @@ export function composerState(o: { agentStatus: AgentStatus | undefined; session
   if (st !== "idle" && st !== "waiting") return { enabled: true, note: `queued — the agent is ${st}` };
   return { enabled: true };
 }
+
+/**
+ * The Stop button (issue #12): only while a turn runs (`working`, or `blocked` on a question or a
+ * stall) in the active session. The daemon answers `409 conflict` when no turn runs.
+ */
+export const canInterrupt = (o: { agentStatus: AgentStatus | undefined; sessionActive: boolean }): boolean =>
+  o.sessionActive && (o.agentStatus === "working" || o.agentStatus === "blocked");
+
+/** The note under the composer after a Stop: the turn ended with the reason `interrupted`. */
+export const interruptNote = (o: { agentStatus: AgentStatus | undefined; reason?: string | null }): string | null =>
+  o.reason === "interrupted" && (o.agentStatus === "idle" || o.agentStatus === "waiting") ? "Interrupted: the turn stopped, and the agent is idle." : null;
 
 /** Enter sends; Shift+Enter (and Enter while an IME composes) does not. */
 export const isSendKey = (e: { key: string; shiftKey: boolean; isComposing?: boolean; altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean }): boolean =>

@@ -190,6 +190,7 @@ Error codes:
 | `blocked` (stall) | New PTY output while the turn is open. | `working` |
 | `blocked` | A `ToolUse` or `ToolFinished` event. | `working` |
 | `blocked` | `Runner::answer` or `Runner::answer_keys`. | `working` when a turn is open, else `idle` |
+| `working`, `blocked` | After `Runner::interrupt`, within 30 s: the screen settles. The prompt is ready, or the adapter reads `NotReady` and the PTY is quiet for 1 s (the runner then types `clear_input_keys`). A busy screen or a question does not settle. | `idle` (reason `interrupted`) |
 | any | The child exits after `Runner::kill`. | `stopped` |
 | any | The child exits with code 0 and no signal, and no one asked. | `stopped` (reason `exited`) |
 | any | The child exits with another code or a signal, and no one asked. | `error` |
@@ -298,6 +299,7 @@ methods:
 | `clear_input_keys` | The keystrokes that empty the input line before a retry. The runner sends them only when no prompt-submit hook and no busy screen came. |
 | `is_system_prompt` | True for a prompt-submit hook of a prompt that the harness made itself. Such a hook does not confirm a delivery and is not a `TurnStart` (see "Typing a turn"). The default is false. Copilot implements it. |
 | `exit_keys` | The keystrokes that make an idle harness exit, for `Runner::stop`. |
+| `interrupt_keys` | The writes that stop a running turn, for `Runner::interrupt`, with `INTERRUPT_GAP` (150 ms) between them. Never a key that can exit the harness. Claude Code, Codex, and pi: one Esc. Copilot: Esc, Esc ("esc esc interrupt"). The default is none: the runner refuses the interrupt. |
 | `waits_for_startup_hook`, `is_startup_hook` | Keep the agent `starting` until the startup hook comes (see "Typing a turn"). The default is false. pi implements them with `session_start`. |
 | `exit_key_pause` | The pause before the final CR of `exit_keys`. With a pause, `Runner::stop` and the daemon's stop type the keys without the CR, wait, then type the CR (`terrarium_core::adapter::exit_key_writes`). The default is zero (one write). Codex sets 300 ms. |
 
@@ -468,7 +470,7 @@ The runner sends five kinds of frame:
 - A stream call gets `stream` frames, then one `end` frame. An `end` with
   an `error` tells why the stream stopped early.
 - The runner handles `write`, `resize`, `type_turn`, `answer`,
-  `answer_keys`, and `kill` in the order they arrive, so keystrokes stay in
+  `answer_keys`, `interrupt`, and `kill` in the order they arrive, so keystrokes stay in
   order. Stream calls and `wait` run in parallel with the other calls.
 - A line that does not parse gets a `reply` with `id` 0 and the code
   `parse_error`.
@@ -496,6 +498,7 @@ first connection get the error `unavailable`.
 | `type_turn` | `text` | `reply`: `{"delivery":<id>}`. Later, one `delivery` frame with the same id gives the outcome (below). |
 | `answer` | `request_id`, `answer` (`{"kind":"allow"}`, `{"kind":"deny"}`, `{"kind":"choice","value":2}`) | `reply`: `null`. As `Runner::answer`. |
 | `answer_keys` | `keys` | `reply`: `null`. As `Runner::answer_keys`. |
+| `interrupt` | none | `reply`: `{"sent":true}` when the interrupt keys went out, `{"sent":false}` when no turn runs (the status is not `working` or `blocked`). As `Runner::interrupt`. A runner from before this call answers `method_not_found`. |
 | `kill` | none | `reply`: `null`. As `Runner::kill`. The status becomes `stopped` when the harness exits, and then the runner process exits. |
 | `set_stopped_by` | `stopped_by` (`"container"`, `"operator"`, `"policy"`) | `reply`: `null`. The value goes into `runner-exit.json` at the harness exit (see "The exit record"). The daemon sends it before a `kill` or the exit keys. `RunnerHandle::set_stopped_by`; an in-process `Runner` writes no exit file and ignores it. |
 | `wait` | none | `reply` when the harness exits: `{"code":0}` or `{"code":1,"signal":"Killed"}`. |
@@ -578,7 +581,7 @@ hold an `Arc<dyn RunnerHandle>`.
 | `subscribe_events` | New events. | New events. The first call also gets the replay of `ConnectOptions::events_since`. |
 | `screen`, `attach` | Local, no wait. | One call, or one stream. |
 | `attach` lag | A new local attach and `Resynced`. | A new `attach` stream and `Resynced`, when the runner ends the stream with `lagged`, or when the local reader falls `ConnectOptions::attach_capacity` items behind (default 1024). |
-| `write`, `resize`, `answer`, `answer_keys`, `kill` | Local. | One call each. |
+| `write`, `resize`, `answer`, `answer_keys`, `interrupt`, `kill` | Local. | One call each. |
 | `type_turn` | A `Delivery` with the runner id. | A `Delivery` with a local id. The `delivery` frame resolves it. |
 | `wait` | The exit status. | The `wait` reply. When the connection closes first: `runner-exit.json`, else code 1 with the signal `RUNNER_LOST`. |
 

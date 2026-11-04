@@ -21,6 +21,9 @@
 //!   block carries `model`; only the last block of a message carries
 //!   `usage`, so a new part of the message moves it (an update of the
 //!   block before).
+//! - A user text `[Request interrupted by user]` (or `... for tool use]`),
+//!   which Claude Code writes on Esc: a `system` block with the text and
+//!   `raw_type` `user:interrupted`.
 //! - `attachment` `queued_command`: a user `text` block (a prompt typed
 //!   while busy; a `<task-notification>` has origin `system`).
 //! - `system` `compact_boundary`, `away_summary`, `informational`,
@@ -262,9 +265,27 @@ fn user_origin(v: &Value, text: &str) -> Origin {
     if made { Origin::System } else { Origin::User }
 }
 
+/// The text that Claude Code writes as a user message when the user
+/// interrupts a turn (Esc): `[Request interrupted by user]`, or
+/// `[Request interrupted by user for tool use]`.
+const INTERRUPTED: &str = "[Request interrupted by user";
+
+/// A user text that marks an interrupt: a `system` block, not a typed
+/// turn.
+fn interrupted(text: &str) -> bool {
+    text.trim_start().starts_with(INTERRUPTED)
+}
+
 fn user(v: &Value, id: &str, no: u64, at: Option<String>) -> Vec<Block> {
     let content = v.get("message").and_then(|m| m.get("content"));
     match content {
+        Some(Value::String(text)) if interrupted(text) => vec![system_text(
+            format!("{id}:0"),
+            no,
+            at,
+            text.trim(),
+            "user:interrupted",
+        )],
         Some(Value::String(text)) => vec![
             Block::new(
                 format!("{id}:0"),
@@ -283,6 +304,13 @@ fn user(v: &Value, id: &str, no: u64, at: Option<String>) -> Vec<Block> {
             .map(|(i, p)| {
                 let bid = format!("{id}:{i}");
                 match p.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "text" if s(p, "text").is_some_and(|t| interrupted(&t)) => system_text(
+                        bid,
+                        no,
+                        at.clone(),
+                        s(p, "text").unwrap_or_default().trim(),
+                        "user:interrupted",
+                    ),
                     "text" => {
                         let text = s(p, "text").unwrap_or_default();
                         let origin = user_origin(v, &text);
@@ -512,5 +540,33 @@ mod tests {
             log.apply(p.parse_lines(chunk));
         }
         assert_eq!(log.blocks(), whole.blocks());
+    }
+
+    /// Claude Code writes `[Request interrupted by user]` on Esc (issue
+    /// #12): it shows as a system block, not as a typed turn.
+    #[test]
+    fn an_interrupt_is_a_system_block() {
+        let lines = concat!(
+            r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u3","message":{"role":"user","content":"Please go on."}}"#,
+            "\n",
+        );
+        let log = parse_all(&mut ClaudeTranscript::new(), lines.as_bytes());
+        let b = log.blocks();
+        assert_eq!(b.len(), 3, "{b:#?}");
+        for blk in &b[..2] {
+            assert_eq!(blk.kind, BlockKind::System, "{blk:#?}");
+            assert_eq!(blk.raw_type.as_deref(), Some("user:interrupted"));
+            assert!(
+                blk.text
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("[Request interrupted")
+            );
+        }
+        assert!(b[2].is_user_text());
     }
 }

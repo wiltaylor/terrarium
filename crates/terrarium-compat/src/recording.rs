@@ -138,6 +138,10 @@ impl Adapter for RecordingAdapter {
         self.inner.clear_input_keys()
     }
 
+    fn interrupt_keys(&self) -> Vec<Vec<u8>> {
+        self.inner.interrupt_keys()
+    }
+
     fn exit_keys(&self) -> Vec<u8> {
         self.inner.exit_keys()
     }

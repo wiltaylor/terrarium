@@ -110,7 +110,28 @@ fn stub() -> axum::Router {
         .route("/api/events", get(events))
         .route("/api/skills", post(skill_create))
         .route("/api/skills/{name}", axum::routing::put(skill_update))
+        .route("/api/agents/{id}/interrupt", post(interrupt))
         .fallback(missing)
+}
+
+/// `POST /api/agents/{id}/interrupt` of the stub: `busy` runs a turn,
+/// any other agent runs none.
+async fn interrupt(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    if id == "busy" {
+        (
+            StatusCode::ACCEPTED,
+            Json(json!({"accepted": true, "interrupted": true})),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"code": "conflict", "message": "the agent runs no turn: there is nothing to interrupt"}})),
+        )
+            .into_response()
+    }
 }
 
 /// `POST /api/skills` of the stub: `taken` exists, `bad` fails the
@@ -223,6 +244,18 @@ fn operator_mode_over_the_unix_socket() {
     assert_eq!(o.status.code(), Some(2));
     let o = run(&socket, &["card", "frobnicate"]);
     assert_eq!(o.status.code(), Some(2));
+
+    // Issue #12: `agent interrupt` posts to the interrupt route.
+    let o = run(&socket, &["agent", "interrupt", "busy"]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert_eq!(text(&o.stdout), "interrupted the turn of busy\n");
+    let o = run(&socket, &["agent", "interrupt", "lead"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        text(&o.stderr).contains("nothing to interrupt [conflict]"),
+        "{}",
+        text(&o.stderr)
+    );
 
     // SSE follow: each event as it comes; the command ends with the stream.
     let o = run(&socket, &["events", "--follow"]);

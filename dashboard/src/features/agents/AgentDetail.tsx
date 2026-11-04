@@ -349,7 +349,12 @@ export default function AgentDetail() {
                 <Conversation agent={a()} onOpenTerminal={() => setTab("terminal")} />
               </Match>
               <Match when={tab() === "terminal"}>
-                <Terminal connect={() => api.agents.pty(a().id)} available={running()} title={`${a().name} · ${a().harness}`} />
+                <Terminal
+                  connect={() => api.agents.pty(a().id)}
+                  available={running()}
+                  title={`${a().name} · ${a().harness}`}
+                  keys={(keys) => api.agents.keys(a().id, keys)}
+                />
               </Match>
               <Match when={tab() === "screen"}>
                 <ScreenPanel agentId={a().id} running={running()} />

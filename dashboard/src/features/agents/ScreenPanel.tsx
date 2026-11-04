@@ -1,9 +1,10 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { AgentScreen } from "../../api/types";
 import { ErrorBanner, useNow } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { api } from "../../stores";
-import { AFTER_INPUT_MS, KEY_BAR, rawText, SCREEN_REFRESH_MS, screenText, screenTitle, shouldAutoRefresh } from "./screen";
+import { AFTER_INPUT_MS, rawText, SCREEN_REFRESH_MS, screenText, screenTitle, shouldAutoRefresh } from "./screen";
+import { createKeyPadState, KeyPad } from "../../components/KeyPad";
 
 /**
  * A text snapshot of the agent's harness screen (docs/api.md §6.5). It does
@@ -56,17 +57,11 @@ export function ScreenPanel(props: { agentId: string; running: boolean }) {
 
   const afterInput = () => setTimeout(() => void load(), AFTER_INPUT_MS);
 
-  const sendKey = async (key: string) => {
-    setSending(true);
-    try {
-      await api.agents.keys(props.agentId, [key]);
-      setInputError(null);
-      afterInput();
-    } catch (e) {
-      setInputError(e);
-    } finally {
-      setSending(false);
-    }
+  // The on-screen keys (issue #12): the same pad as the terminal. The pad shows a refused key itself.
+  const pad = createKeyPadState();
+  const sendKeys = async (keys: string[]) => {
+    await api.agents.keys(props.agentId, keys);
+    afterInput();
   };
 
   const sendRaw = async (e: SubmitEvent) => {
@@ -112,16 +107,7 @@ export function ScreenPanel(props: { agentId: string; running: boolean }) {
         {(s) => <pre class="mono screen-snapshot">{screenText(s())}</pre>}
       </Show>
       <Show when={props.running}>
-        <div class="row" style={{ gap: "4px", "align-items": "center", "flex-wrap": "wrap" }} aria-label="Keys">
-          <span class="muted small">Keys:</span>
-          <For each={KEY_BAR}>
-            {(k) => (
-              <button type="button" class="small" title={k.title} disabled={sending()} onClick={() => void sendKey(k.key)}>
-                {k.label}
-              </button>
-            )}
-          </For>
-        </div>
+        <KeyPad send={sendKeys} enabled={!sending()} mods={pad.mods()} onToggle={pad.toggle} onUsed={pad.clear} rate={pad.rate} />
         <form class="row" style={{ gap: "8px", "align-items": "center", "flex-wrap": "wrap" }} onSubmit={(e) => void sendRaw(e)}>
           <input
             class="mono"

@@ -315,6 +315,13 @@ export interface Api {
     sendRaw(id: string, text: string): Promise<{ accepted: boolean; raw: boolean }>;
     /** `POST /api/agents/{id}/keys` (docs/api.md §6.5): key presses (`esc`, `down`, `enter`, `ctrl-c`, `text:<text>`), at most 20 a second. */
     keys(id: string, keys: string[]): Promise<{ accepted: boolean; keys: string[] }>;
+    /**
+     * `POST /api/agents/{id}/interrupt` (docs/api.md §6.5): stop the running turn with the
+     * interrupt key of the harness (Esc; Esc Esc for Copilot; never Ctrl-C). The harness keeps
+     * running, and the agent goes `idle` with the reason `interrupted`. The rights of a send.
+     * `409 conflict`: no turn runs.
+     */
+    interrupt(id: string): Promise<{ accepted: boolean; interrupted: boolean }>;
     answer(id: string, body: { request_id: string; answer: unknown } | { text: string }): Promise<{ accepted: boolean }>;
     events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
     sessions(id: string, q?: PageQuery): Promise<Page<Session>>;
@@ -1044,6 +1051,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       attach: (id, file) => t.request("POST", `${a(id)}/attachments`, { raw: { data: file, type: file.type || "application/octet-stream" } }),
       sendRaw: (id, text) => post(`${a(id)}/send`, { text, raw: true }),
       keys: (id, keys) => post(`${a(id)}/keys`, { keys }),
+      interrupt: (id) => post(`${a(id)}/interrupt`),
       answer: (id, body) => post(`${a(id)}/answer`, body),
       events: (id, q = {}) => page(`${a(id)}/events`, { ...q }),
       sessions: (id, q = {}) => page(`${a(id)}/sessions`, { ...q }),

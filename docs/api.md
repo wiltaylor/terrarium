@@ -784,7 +784,7 @@ actor's session at `at`, when the reader may read that session (§9,
 `agent.update`, `agent.delete`, `agent.roles`, `agent.start`, `agent.stop`,
 `agent.restart`, `agent.send`, `agent.send_raw` (`bytes`, `first_word`;
 never the text), `agent.keys` (`keys`: the key names; a text key as
-`text(<length>)`), `agent.answer`, `agent.attach`,
+`text(<length>)`), `agent.interrupt` (`harness`), `agent.answer`, `agent.attach`,
 `repo.checkout`, `repo.credential` (each answer of the credential helper),
 `secret.put`, `secret.delete`, `secret.reveal`, `secret.grant`,
 `secret.revoke`, `secret.get`, `secret.env`, `secret.use`, `secret.migrated` (actor
@@ -1917,6 +1917,7 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/new-session` | none, or `{"then"?: "<prompt>", "recap"?: true, "defer"?: false}` | `202` agent with `reset` (below). A new harness session, not a resume. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run) |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
+| `POST /api/agents/{id}/interrupt` | none | `202 {"accepted": true, "interrupted": true}`. Stops the running turn; the harness keeps running (§6.5, "Interrupt"). |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/subscription` | `{"subscription": "anthropic-max-20x-2"}` | `200 {"agent", "from"?, "to", "applied"}` (below) |
@@ -2420,6 +2421,47 @@ More than 20 keys and raw sends to one agent in one second give
 `429 rate_limited`. A stopped agent gives `409 not_running`. The status
 does not change: an agent that is `blocked` on a dialog goes back to
 `working` with its next tool call or turn.
+
+**Interrupt.** `POST /api/agents/{id}/interrupt` (no body) stops the
+running turn of the agent, as Esc does in the harness. It is the Stop
+button of the dashboard's Conversation view and `terrarium agent
+interrupt`. The harness keeps running and keeps its session. The rights
+are the rights of a send: the project_admin of the agent's project, a
+sysadmin, or the operator. A member, and the lead of another project, get
+`403 forbidden`.
+
+The daemon types the interrupt keys of the harness
+(`Adapter::interrupt_keys`), 150 ms apart:
+
+| Harness | Keys | Why |
+|---|---|---|
+| Claude Code | Esc | The busy footer says "esc to interrupt". A second Esc on an idle prompt opens the rewind menu. |
+| Codex | Esc | The busy line says "esc to interrupt". |
+| Copilot CLI | Esc, Esc | The busy footer says "esc esc interrupt". |
+| pi | Esc | pi stops a run on Esc, not on Ctrl-C. Terrarium sets `doubleEscapeAction: "none"`. |
+
+No harness gets Ctrl-C: a second Ctrl-C quits most harnesses. The keys
+count against the key rate limit above.
+
+Claude Code sends no stop hook for an interrupt. So the runner watches
+the screen for 30 s after the keys: when the prompt is ready, or the
+screen is quiet for 1 s and not busy, the turn ends. The agent goes
+`idle` with `status_reason` `interrupted`, and the turns that wait go
+out. When the harness leaves the stopped prompt in its input box, the
+runner empties the box first (`clear_input_keys`). The events of the
+agent get a `system` event "interrupt: the interrupt keys went to the
+harness; the turn stops". The transcript shows the interrupt as the
+harness writes it: a `system` block `[Request interrupted by user]`
+(Claude Code), "Turn aborted: interrupted" (Codex), "Aborted: user
+initiated" (Copilot), or the error of the aborted call (pi). The audit
+row `agent.interrupt` has the `harness`.
+
+Refusals: a stopped agent gives `409 not_running`. An agent that runs no
+turn (it is not `working` or `blocked`), or that compacts its session,
+gives `409 conflict`, and no key goes out: an Esc on an idle prompt can
+open a menu. A harness with no interrupt keys gives `409 conflict`.
+A runner from before the `interrupt` call gets the keys as plain writes;
+its status then follows the hooks only.
 
 ### 6.6 Transcript
 

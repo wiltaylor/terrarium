@@ -31,6 +31,7 @@ pub fn routes() -> Router<Shared> {
         .route("/agents/{id}/new-session", post(new_session))
         .route("/agents/{id}/send", post(send))
         .route("/agents/{id}/keys", post(keys))
+        .route("/agents/{id}/interrupt", post(interrupt))
         .route("/agents/{id}/answer", post(answer))
         .route("/agents/{id}/events", get(streams::agent_events))
         .route("/agents/{id}/pty", get(streams::pty))
@@ -1212,6 +1213,60 @@ async fn keys(
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"accepted": true, "keys": names})),
+    ))
+}
+
+/// `POST /api/agents/{id}/interrupt` (issue #12, the Stop of the
+/// dashboard): stop the running turn of the agent with the interrupt keys
+/// of its harness (`Adapter::interrupt_keys`: Esc, or Esc Esc for
+/// Copilot; never Ctrl-C), and keep the harness running. The agent goes
+/// `idle` with the reason `interrupted`. The rights of a send: the
+/// project_admin of the agent's project, sysadmin, or the operator. The
+/// keys count against the key rate limit. `409 conflict`: no turn runs, a
+/// compaction runs, or the harness has no interrupt keys.
+async fn interrupt(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let a = load(&state, &actor, id).await?;
+    policy::admin_project(&actor, &a.agent.project, "interrupting an agent's turn")?;
+    let live = state.supervisor.status(agent_id(&a)).await;
+    if !matches!(live, Some(AgentStatus::Working | AgentStatus::Blocked)) {
+        if live.is_none_or(|s| !s.is_live()) {
+            return Err(supervisor_error(SupervisorError::NotRunning(agent_id(&a))));
+        }
+        return Err(ApiError::new(Code::Conflict, crate::supervisor::NO_TURN));
+    }
+    let n = u32::try_from(crate::supervisor::interrupt_keys(a.agent.harness).len()).unwrap_or(1);
+    if !KEY_LIMITER.check(&a.agent.id.to_string(), n.max(1)) {
+        return Err(key_limit_error());
+    }
+    state
+        .supervisor
+        .interrupt(agent_id(&a))
+        .await
+        .map_err(|e| match e {
+            SupervisorError::NotReady(m) => ApiError::new(Code::Conflict, m),
+            e => supervisor_error(e),
+        })?;
+    let id = a.agent.id.to_string();
+    let project = a.agent.project.clone();
+    let harness = a.agent.harness.to_string();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit(
+                "agent.interrupt",
+                &id,
+                Some(&project),
+                json!({"harness": harness}),
+            )
+        })
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"accepted": true, "interrupted": true})),
     ))
 }
 

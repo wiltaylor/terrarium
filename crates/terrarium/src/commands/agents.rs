@@ -174,6 +174,15 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
                 c.line(format!("sent {} to {agent}", names.join(" ")))
             })
         }
+        AgentCmd::Interrupt { agent } => {
+            let r = ctx
+                .api
+                .post(&format!("{}/interrupt", agent_path(agent)), None)
+                .await?;
+            ctx.emit(&r, |c, _| {
+                c.line(format!("interrupted the turn of {agent}"))
+            })
+        }
         AgentCmd::Answer(a) => answer(ctx, a).await,
         AgentCmd::Logs {
             agent,

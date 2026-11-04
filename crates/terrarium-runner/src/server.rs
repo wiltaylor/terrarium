@@ -435,6 +435,11 @@ impl Conn {
                     .map_err(runner_err),
                 Err(e) => Err(e),
             },
+            "interrupt" => runner
+                .interrupt()
+                .await
+                .map(|sent| json!({ "sent": sent }))
+                .map_err(runner_err),
             "kill" => runner.kill().map(|()| Value::Null).map_err(runner_err),
             "set_stopped_by" => match params::<StoppedByParams>(p) {
                 Ok(b) => {

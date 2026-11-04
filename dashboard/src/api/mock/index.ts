@@ -905,6 +905,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
    * and streams a reply. `system` is a daemon turn (`[System:<kind>] ...`)
    * in place of an operator turn.
    */
+  /** The turn of each agent: an interrupt bumps it, and the steps of the old turn stop. */
+  const turnGen: Record<string, number> = {};
   const deliverTurn = (a: Agent, text: string, system?: { kind: string; detail?: string }) => {
     const s = currentSession(a);
     const model = mockModel(a);
@@ -922,6 +924,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         agentEvent(a, "turn_start", `Turn typed by operator: ${text.slice(0, 60)}`, { text }, "operator");
       }
       setStatus(a, "working");
+      const gen = (turnGen[a.id] = (turnGen[a.id] ?? 0) + 1);
       const steps: (() => void)[] = [
         () => void writeBlock(a, r.thinking),
         () => void writeBlock(a, r.call),
@@ -936,7 +939,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         },
       ];
       const run = (i: number) => {
-        if (i >= steps.length || currentSession(a) !== s) return;
+        if (i >= steps.length || currentSession(a) !== s || turnGen[a.id] !== gen) return;
         steps[i]!();
         later(() => run(i + 1), i === 3 ? pace * 2 : pace);
       };
@@ -2694,6 +2697,19 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (!LIVE.includes(a.status)) fail(409, "not_running", `agent ${a.id} is not running`);
           audit("agent.keys", a.id, a.project, { keys: names });
           return { accepted: true, keys: names };
+        }),
+      interrupt: (id) =>
+        reply(() => {
+          const a = agent(id);
+          if (!LIVE.includes(a.status)) fail(409, "not_running", `agent ${a.id} is not running`);
+          if (a.status !== "working" && a.status !== "blocked") fail(409, "conflict", "the agent runs no turn: there is nothing to interrupt");
+          // The steps of the turn stop; the harness writes its own interrupt note (Claude Code: a system block).
+          turnGen[a.id] = (turnGen[a.id] ?? 0) + 1;
+          writeBlock(a, { role: "system", kind: "system", text: "[Request interrupted by user]" });
+          agentEvent(a, "system", `${a.name}: interrupt: the interrupt keys went to the harness; the turn stops`, { message: "interrupt: the interrupt keys went to the harness; the turn stops" });
+          audit("agent.interrupt", a.id, a.project, { harness: a.harness });
+          setStatus(a, "idle", "interrupted");
+          return { accepted: true, interrupted: true };
         }),
       screen: (id) =>
         reply((): AgentScreen => {

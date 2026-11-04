@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentScreen } from "../../api/types";
 import { createMockApi } from "../../api/mock";
-import { KEY_BAR, rawText, screenText, screenTitle, shouldAutoRefresh } from "./screen";
+import { rawText, screenText, screenTitle, shouldAutoRefresh } from "./screen";
 
 const snap = (p: Partial<AgentScreen> = {}): AgentScreen => ({
   agent: "p/w",
@@ -44,11 +44,6 @@ describe("screen panel model", () => {
     expect(screenText(s)).toBe(s.text);
     const stopped = agents.find((a) => a.status === "stopped")!;
     await expect(api.agents.screen(stopped.id)).rejects.toMatchObject({ code: "not_running", status: 409 });
-  });
-
-  it("the key bar uses the daemon's key names", () => {
-    expect(KEY_BAR.map((k) => k.key)).toEqual(["esc", "up", "down", "enter", "tab", "ctrl-c"]);
-    expect(KEY_BAR.map((k) => k.label)).toEqual(["Esc", "↑", "↓", "Enter", "Tab", "Ctrl-C"]);
   });
 
   it("a raw text goes as typed; only an empty one is refused", () => {

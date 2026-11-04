@@ -13,7 +13,7 @@ import { api } from "../../../stores";
 import { currentSession } from "../sessions";
 import { bytes } from "../../../lib/format";
 import { canSend, imageProblem, imagesFromFiles, imagesFromItems, submitTurn, thumbnailOf, type DraftImage } from "./attachments";
-import { composerState, isSendKey, sessionGone } from "./model";
+import { canInterrupt, composerState, interruptNote, isSendKey, sessionGone } from "./model";
 import { createTranscriptView, StreamChip, TranscriptLog } from "./TranscriptLog";
 
 const LIVE = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
@@ -96,7 +96,8 @@ export function Conversation(props: { agent: Agent; onOpenTerminal: () => void }
   );
 }
 
-function Composer(props: { agent: Agent; sessionActive: boolean }) {
+/** The composer under the transcript: the turn text, images, Send, and Stop while a turn runs. */
+export function Composer(props: { agent: Agent; sessionActive: boolean }) {
   const [text, setText] = createSignal("");
   const [images, setImages] = createSignal<DraftImage[]>([]);
   const [busy, setBusy] = createSignal(false);
@@ -108,6 +109,28 @@ function Composer(props: { agent: Agent; sessionActive: boolean }) {
   let nextId = 0;
   onCleanup(() => clearTimeout(timer));
   const state = () => composerState({ agentStatus: props.agent.status, sessionActive: props.sessionActive, paused: props.agent.paused });
+
+  // ----- Stop: interrupt the running turn (issue #12) -----
+  const [stopping, setStopping] = createSignal(false);
+  const [stopSent, setStopSent] = createSignal(false);
+  const showStop = () => canInterrupt({ agentStatus: props.agent.status, sessionActive: props.sessionActive });
+  // A new turn clears the note of the last Stop.
+  createEffect(on(() => props.agent.status, (st) => st === "working" && !stopping() && setStopSent(false), { defer: true }));
+  const stop = async () => {
+    if (stopping() || !showStop()) return;
+    setStopping(true);
+    try {
+      await api.agents.interrupt(props.agent.id);
+      setError(null);
+      setStopSent(true);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setStopping(false);
+    }
+  };
+  const stopNote = () =>
+    interruptNote({ agentStatus: props.agent.status, reason: props.agent.status_reason }) ?? (stopSent() && showStop() ? "Stop sent. The turn stops…" : null);
 
   const patchImage = (id: string, patch: Partial<DraftImage>) =>
     setImages((cur) => cur.map((i) => (i.id === id ? { ...i, ...patch } : i)));
@@ -226,10 +249,26 @@ function Composer(props: { agent: Agent; sessionActive: boolean }) {
         <button type="button" disabled={!state().enabled || busy()} title="Attach image" onClick={() => fileInput?.click()}>
           Attach image
         </button>
+        <Show when={showStop()}>
+          <button
+            type="button"
+            class="danger convo-stop"
+            disabled={stopping()}
+            title="Stop the running turn (the harness's interrupt key). The agent keeps running."
+            onClick={() => void stop()}
+          >
+            {stopping() ? "Stopping…" : "Stop"}
+          </button>
+        </Show>
         <button class="primary" type="submit" disabled={!state().enabled || busy() || !canSend(text(), images())}>
           {busy() ? "Sending…" : "Send"}
         </button>
       </div>
+      <Show when={stopNote()}>
+        <p class="small convo-compose-note convo-stop-note" role="status">
+          {stopNote()}
+        </p>
+      </Show>
       <Show when={!state().enabled} fallback={
         <Show when={state().note || sent()}>
           <p class="small muted convo-compose-note">

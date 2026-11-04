@@ -583,6 +583,11 @@ pub enum AgentCmd {
         #[arg(required = true, num_args = 1..)]
         keys: Vec<String>,
     },
+    /// Stop the agent's running turn, as the Stop button of the dashboard:
+    /// the interrupt key of its harness (Esc; Esc Esc for Copilot, never
+    /// Ctrl-C). The harness keeps running, and the agent goes idle. The
+    /// rights of a send
+    Interrupt { agent: String },
     /// Answer the agent's open question
     Answer(AnswerArgs),
     /// The agent's events

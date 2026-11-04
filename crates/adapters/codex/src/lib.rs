@@ -276,6 +276,10 @@ impl Adapter for CodexAdapter {
         keys::EXIT_PAUSE
     }
 
+    fn interrupt_keys(&self) -> Vec<Vec<u8>> {
+        keys::interrupt()
+    }
+
     fn clear_input_keys(&self) -> Vec<u8> {
         keys::clear_input()
     }

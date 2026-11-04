@@ -171,6 +171,26 @@ describe("mock parity with docs/api.md", () => {
     s.close();
   }, 15000);
 
+  it("interrupts a running turn: the turn stops, a system block shows it, and the agent is idle (issue #12)", async () => {
+    const api = slowMock();
+    const lead = () => api.world.agents.find((x) => x.name === "lead")!;
+    await expect(api.agents.interrupt("terrarium/lead")).rejects.toMatchObject({ status: 409, code: "conflict" });
+    await api.agents.send("terrarium/lead", "work on TER-12");
+    await waitFor(() => expect(lead().status).toBe("working"));
+    expect(await api.agents.interrupt("terrarium/lead")).toEqual({ accepted: true, interrupted: true });
+    expect(lead()).toMatchObject({ status: "idle", status_reason: "interrupted" });
+    const session = (await api.agents.sessions("terrarium/lead")).items.find((x) => x.current)!;
+    const blocks = async () => (await api.agents.transcript("terrarium/lead", session.id, { limit: 500 })).blocks;
+    const after = (await blocks()).length;
+    expect((await blocks()).at(-1)).toMatchObject({ role: "system", kind: "system", text: "[Request interrupted by user]" });
+    // The steps of the stopped turn do not come.
+    await wait(300);
+    expect((await blocks()).length).toBe(after);
+    expect(lead().status).toBe("idle");
+    const audit = (await api.audit({ limit: 500 })).items.find((x) => x.action === "agent.interrupt");
+    expect(audit).toMatchObject({ target: lead().id, project: "terrarium" });
+  });
+
   it("starts a new session for an agent at rest, with a recap and the then prompt", async () => {
     const api = mock();
     const frames: AgentEvent[] = [];

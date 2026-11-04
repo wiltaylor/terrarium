@@ -2,6 +2,8 @@
 // Output arrives through @xterm/addon-attach. Input and resize go out as JSON
 // control frames (see src/api/sockets.ts). Read-only by default. On a drop it
 // reconnects with backoff, and the daemon's first frame redraws the screen.
+// With `keys`, the on-screen keys (./KeyPad) show under the bar; a typed
+// character while a modifier is armed goes to `keys` as a chord.
 
 import { AttachAddon } from "@xterm/addon-attach";
 import { FitAddon } from "@xterm/addon-fit";
@@ -9,6 +11,8 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { createEffect, createSignal, on, onCleanup, onMount, Show } from "solid-js";
 import { backoffDelay, ptyInput, ptyResize, type PtySocket } from "../api/sockets";
+import { createKeyPadState, KeyPad, keyError } from "./KeyPad";
+import { typedKeys } from "./terminalKeys";
 
 export interface TerminalProps {
   /** Open a socket. Called on mount and on every reconnect. */
@@ -26,6 +30,11 @@ export interface TerminalProps {
   available?: boolean;
   /** Retry after a drop. Default true. */
   reconnect?: boolean;
+  /**
+   * Send key names (`POST /api/agents/{id}/keys`). With it, the on-screen
+   * keys show: Esc, Tab, Ctrl, Alt, Shift, the arrows, and more.
+   */
+  keys?: (keys: string[]) => Promise<unknown>;
 }
 
 const OPEN = 1;
@@ -44,6 +53,25 @@ export function Terminal(props: TerminalProps) {
   let disposed = false;
 
   const available = () => props.available ?? true;
+
+  // ----- the on-screen keys: sticky modifiers and the rate limit -----
+  const pad = createKeyPadState();
+  const [typedError, setTypedError] = createSignal<string | null>(null);
+  /** A typed text while a modifier is armed: true when it went as keys. */
+  const typedChord = (data: string): boolean => {
+    const send = props.keys;
+    if (!send) return false;
+    const keys = typedKeys(data, pad.mods());
+    if (!keys) return false;
+    pad.clear();
+    if (!pad.rate.take(keys.length)) {
+      setTypedError("Too many keys in one second. Wait a moment.");
+      return true;
+    }
+    setTypedError(null);
+    send(keys).catch((e: unknown) => setTypedError(keyError(e)));
+    return true;
+  };
 
   const sendResize = () => {
     if (term && socket?.readyState === OPEN) socket.send(ptyResize(term.cols, term.rows));
@@ -132,7 +160,9 @@ export function Terminal(props: TerminalProps) {
     }
 
     term.onData((data) => {
-      if (!readOnly() && socket?.readyState === OPEN) socket.send(ptyInput(data));
+      if (readOnly()) return;
+      if (typedChord(data)) return;
+      if (socket?.readyState === OPEN) socket.send(ptyInput(data));
     });
     term.onResize(({ cols, rows }) => {
       setSize({ cols, rows });
@@ -209,6 +239,21 @@ export function Terminal(props: TerminalProps) {
           </label>
         </Show>
       </div>
+      <Show when={props.keys}>
+        {(send) => (
+          <>
+            <KeyPad send={send()} enabled={!readOnly() && state() === "open"} mods={pad.mods()} onToggle={pad.toggle} onUsed={pad.clear} rate={pad.rate} />
+            <Show when={readOnly()}>
+              <p class="small muted keypad-hint">Turn input on to use the keys.</p>
+            </Show>
+            <Show when={typedError()}>
+              <p class="small keypad-note" role="status">
+                {typedError()}
+              </p>
+            </Show>
+          </>
+        )}
+      </Show>
       <div class={`terminal-host${props.short ? " short" : ""}`} ref={host} />
     </div>
   );

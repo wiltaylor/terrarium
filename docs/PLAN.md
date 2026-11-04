@@ -768,14 +768,23 @@ mode) and runs harness commands on purpose:
 - `POST /api/agents/{id}/keys` (`terrarium agent keys`): key presses by
   the chord names of the display keys (§19b), mapped to xterm sequences,
   and `text:<text>`. At most 20 a second for each agent.
+- `POST /api/agents/{id}/interrupt` (`terrarium agent interrupt`, the
+  Stop button of the Conversation view): stop the running turn with the
+  interrupt key of the harness (`Adapter::interrupt_keys`: Esc; Esc Esc
+  for Copilot; never Ctrl-C, which can quit a harness). The harness keeps
+  running. The runner ends the turn when the screen settles, also with no
+  stop hook (Claude Code sends none on Esc): `idle`, reason
+  `interrupted`. The rights are the rights of a send; the audit row is
+  `agent.interrupt` (docs/api.md §6.5, "Interrupt").
 
 The rights are the rights of the PTY attach: the project_admin of the
 agent's project, a sysadmin, or the operator. The audit rows
 `agent.send_raw` and `agent.keys` never hold a text: a raw send has its
 length and first word, a text key its length. The lead prompts teach the
 loop `agent screen`, then `agent keys` or `agent send --raw`, then
-`agent screen` again. The dashboard has a key bar and a raw field under
-the screen of the agent page.
+`agent screen` again. The dashboard has the on-screen keys and a raw field
+under the screen of the agent page, and the same keys under the terminal
+(below, the Terminal view).
 
 **The question guard.** The settings remove the ask-user tools, but a
 model can still end a turn with a question in plain text. The runner then
@@ -3358,7 +3367,20 @@ Dashboard (SolidJS, built with Vite, embedded in `terrariumd` with
 - **Memory** view per project: force-layout graph, node detail panel, search,
   filters by tag, author, and relation, recent-writes timeline.
 - **Terminal** view: xterm.js attached to `/pty`. Read-only by default, a
-  toggle for input. Resize follows the browser.
+  toggle for input. Resize follows the browser. Under the bar of an agent
+  terminal, the on-screen keys (issue #12) send the keys that a phone
+  keyboard has not: Esc, Tab, the arrows, Home, End, PgUp, PgDn, Enter,
+  Ctrl-C, and the sticky modifiers Ctrl, Alt, and Shift. A modifier
+  applies to the next key, or to the next typed character (Ctrl, then
+  `c`, sends `ctrl-c`). The keys go through `POST /api/agents/{id}/keys`
+  and keep to its rate limit (20 a second). The buttons do not take the
+  focus, so the phone keyboard stays open, and they are large on a touch
+  screen. They work only while input is on.
+- **Stop** in the Conversation view (also in the pinned side bar): while a
+  turn runs (`working` or `blocked`), a Stop button next to Send calls
+  `POST /api/agents/{id}/interrupt`. It shows "Stopping…", then the note
+  "Interrupted" when the agent is `idle` with the reason `interrupted`.
+  The transcript shows the interrupt record of the harness.
 - **Mail** view: threads across agents, compose as operator.
 - **Targets** view: state, up/down, snapshot.
 - **Event log**: filterable firehose.

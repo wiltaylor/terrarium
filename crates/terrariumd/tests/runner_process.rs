@@ -118,6 +118,12 @@ impl Adapter for FakeLaunch {
     fn exit_keys(&self) -> Vec<u8> {
         b"/quit\r".to_vec()
     }
+    /// The keys of the runner's fake adapter: Esc, then a CR. The daemon
+    /// checks that the harness has interrupt keys; the runner types its
+    /// own.
+    fn interrupt_keys(&self) -> Vec<Vec<u8>> {
+        vec![b"\x1b".to_vec(), b"\r".to_vec()]
+    }
 }
 
 /// Make the harness command `bin` a wrapper that runs the fake TUI:
@@ -617,6 +623,47 @@ async fn lifecycle_through_the_api() {
     td.post(&format!("/api/agents/{id}/start"), None).await;
     td.wait_status(&id, "idle").await;
     assert!(td.runner_pid(&id).is_some());
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+}
+
+/// Issue #12: the Stop of the dashboard through a runner process. The
+/// fake TUI stops `/hold` on Esc with no Stop hook (as Claude Code), and
+/// the settled screen ends the turn: `idle` with the reason `interrupted`.
+/// The harness keeps running and takes the next turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_stops_the_turn_and_keeps_the_harness() {
+    let td = Td::start().await;
+    let id = td.agent("bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let pid = td.runner_pid(&id);
+    let url = format!("/api/agents/{id}/interrupt");
+    let (s, b) = td.req(Method::POST, &url, None).await;
+    assert_eq!(s, 409, "{b}");
+    assert_eq!(b["error"]["code"], "conflict", "{b}");
+
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/hold"})),
+    )
+    .await;
+    td.wait_status(&id, "working").await;
+    let r = td.post(&url, None).await;
+    assert_eq!(r["interrupted"], true, "{r}");
+    td.wait_status(&id, "idle").await;
+    let a = td.get(&format!("/api/agents/{id}")).await;
+    assert_eq!(a["status_reason"], "interrupted", "{a}");
+    assert!(td.events(&id, "turn_end").await.is_empty());
+    let notices = td.events(&id, "system").await;
+    assert!(
+        notices.iter().any(|e| e["data"]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("interrupt"))),
+        "{notices:#?}"
+    );
+    assert_eq!(td.runner_pid(&id), pid, "the same runner, no restart");
+    td.turn(&id, "after").await;
     td.post(&format!("/api/agents/{id}/stop"), None).await;
     td.wait_status(&id, "stopped").await;
 }

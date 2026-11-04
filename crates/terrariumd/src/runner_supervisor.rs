@@ -4189,6 +4189,61 @@ impl Supervisor for RunnerSupervisor {
         })
     }
 
+    fn interrupt(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        Box::pin(async move {
+            let (runner, harness) = {
+                let slots = lock(&self.inner.slots);
+                let slot = slots
+                    .get(&agent)
+                    .ok_or(SupervisorError::NotRunning(agent))?;
+                if slot.compacting.is_some() {
+                    return Err(SupervisorError::NotReady(
+                        crate::supervisor::INTERRUPT_COMPACTING.into(),
+                    ));
+                }
+                (
+                    slot.runner
+                        .clone()
+                        .ok_or(SupervisorError::NotRunning(agent))?,
+                    slot.agent.harness,
+                )
+            };
+            let adapter = self.entry(harness)?.adapter;
+            let writes = adapter.interrupt_keys();
+            if writes.is_empty() {
+                return Err(SupervisorError::Unsupported(format!(
+                    "the {harness} adapter has no interrupt keys"
+                )));
+            }
+            let gone = |e: terrarium_runner::RunnerError| match e {
+                terrarium_runner::RunnerError::Exited
+                | terrarium_runner::RunnerError::Disconnected => SupervisorError::NotRunning(agent),
+                e => other(e),
+            };
+            match runner.interrupt().await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(SupervisorError::NotReady(crate::supervisor::NO_TURN.into())),
+                // A runner from before the `interrupt` call: type the keys.
+                // The status then follows the hooks (and the stall timeout).
+                Err(terrarium_runner::RunnerError::Control(rpc))
+                    if rpc.code == terrarium_runner::control::codes::METHOD_NOT_FOUND =>
+                {
+                    if !matches!(runner.status(), AgentStatus::Working | AgentStatus::Blocked) {
+                        return Err(SupervisorError::NotReady(crate::supervisor::NO_TURN.into()));
+                    }
+                    for (i, w) in writes.iter().enumerate() {
+                        if i > 0 {
+                            tokio::time::sleep(terrarium_core::adapter::INTERRUPT_GAP).await;
+                        }
+                        runner.write(w).await.map_err(gone)?;
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(gone(e)),
+            }
+        })
+    }
+
     fn answer(
         &self,
         agent: AgentId,

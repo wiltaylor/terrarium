@@ -1,7 +1,7 @@
 //! The one place that picks the adapter of a runner process. The daemon
 //! builds the launch spec, so the runner needs the adapter only for
-//! `hook_event`, `screen_hint`, `type_turn`, `clear_input_keys`, and
-//! `answer`. The options set here are the ones that those methods read.
+//! `hook_event`, `screen_hint`, `type_turn`, `clear_input_keys`,
+//! `interrupt_keys`, and `answer`. The options set here are the ones that those methods read.
 
 use std::sync::Arc;
 
@@ -124,6 +124,11 @@ impl Adapter for FakeAdapter {
             && hook
                 .str_field("prompt")
                 .is_some_and(|p| p.trim_start().starts_with("<system_notification>"))
+    }
+    /// Esc, then a CR: the line-mode fake TUI stops `/hold` on a line
+    /// that starts with Esc, with no Stop hook.
+    fn interrupt_keys(&self) -> Vec<Vec<u8>> {
+        vec![b"\x1b".to_vec(), b"\r".to_vec()]
     }
     /// The fake TUI exits 0 on `/quit`.
     fn exit_keys(&self) -> Vec<u8> {

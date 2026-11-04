@@ -14,7 +14,9 @@ Commands:
   /exit N     exit with code N, with no hooks
   /stall      submit, then stay silent for FAKE_TUI_STALL_MS before Stop
   /hold       submit, print `holding...`, then wait (silent) for one line
-              before Stop: a stall that ends when the test says so
+              before Stop: a stall that ends when the test says so. A line
+              that starts with Esc interrupts: print `interrupted` and the
+              prompt, with no Stop hook (as Claude Code)
   /question   submit, send a Notification hook, wait for one answer line
   /flood N    submit, print N numbered lines of 64 bytes, then Stop
   /abort      die of SIGABRT, with no hooks
@@ -266,7 +268,11 @@ def main():
             time.sleep(STALL)
         elif text == "/hold":
             out("holding...\n")
-            read_line()
+            if read_line().startswith("\x1b"):
+                # As Claude Code on Esc: the turn stops, and no Stop hook
+                # fires.
+                out("interrupted\n")
+                continue
         elif text.startswith("/flood "):
             for i in range(int(text.split()[1])):
                 out(f"flood {i:06d} " + "x" * 50 + "\n")

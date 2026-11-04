@@ -40,6 +40,9 @@ pub trait RunnerHandle: Send + Sync + 'static {
     fn type_turn(&self, text: String) -> Delivery;
     fn answer<'a>(&'a self, request_id: &'a str, answer: &'a Answer) -> BoxFuture<'a, Result<()>>;
     fn answer_keys<'a>(&'a self, keys: &'a str) -> BoxFuture<'a, Result<()>>;
+    /// Interrupt the running turn with the adapter's interrupt keys
+    /// ([`Runner::interrupt`]). False: no turn runs, and no key went out.
+    fn interrupt(&self) -> BoxFuture<'_, Result<bool>>;
     /// Stop the harness on purpose.
     fn kill(&self) -> BoxFuture<'_, Result<()>>;
     /// Record who stops the harness, before a `kill` or the exit keys. A
@@ -94,6 +97,9 @@ impl RunnerHandle for Runner {
     }
     fn answer_keys<'a>(&'a self, keys: &'a str) -> BoxFuture<'a, Result<()>> {
         Box::pin(Runner::answer_keys(self, keys))
+    }
+    fn interrupt(&self) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(Runner::interrupt(self))
     }
     fn kill(&self) -> BoxFuture<'_, Result<()>> {
         let r = Runner::kill(self);

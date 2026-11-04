@@ -86,6 +86,11 @@ impl Adapter for FakeAdapter {
     fn exit_key_pause(&self) -> Duration {
         self.exit_pause
     }
+    /// Esc, then a CR in its own write, so the line-mode fake TUI reads a
+    /// line that starts with Esc (`/hold` then stops with no Stop hook).
+    fn interrupt_keys(&self) -> Vec<Vec<u8>> {
+        vec![b"\x1b".to_vec(), b"\r".to_vec()]
+    }
     /// Visible keys, so a test can see that the retry path sends them.
     fn clear_input_keys(&self) -> Vec<u8> {
         b"cleared\r".to_vec()
@@ -357,6 +362,64 @@ async fn stall_blocks_then_stop_unblocks() {
     h.runner.write(b"\r").await.expect("release");
     until_status(&mut h.events, AgentStatus::Idle).await;
     until_screen(&h, "done: /hold").await;
+    h.runner.kill().expect("kill");
+}
+
+/// The Stop of the dashboard (issue #12): the interrupt keys go out, the
+/// harness sends no Stop hook (as Claude Code on Esc), and the settled
+/// screen ends the turn with the reason `interrupted`. The next turn goes
+/// out as usual.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_ends_a_turn_with_no_stop_hook() {
+    let mut h = start(Opts::default()).await;
+    until_idle(&mut h).await;
+    // No turn runs: nothing goes out.
+    assert!(!h.runner.interrupt().await.expect("idle interrupt"));
+    let d = h.runner.type_turn("/hold");
+    timeout(wait(), d.wait())
+        .await
+        .expect("time")
+        .expect("delivered");
+    until_screen(&h, "holding...").await;
+    assert_eq!(h.runner.status(), AgentStatus::Working);
+    assert!(h.runner.interrupt().await.expect("interrupt"));
+    let seen = until_status(&mut h.events, AgentStatus::Idle).await;
+    assert!(
+        seen.iter().any(|e| matches!(e,
+        Event::StatusChanged { to: AgentStatus::Idle, reason: Some(r), .. } if r == "interrupted"))
+    );
+    assert!(seen.iter().any(|e| matches!(e,
+        Event::System { message } if message.starts_with("interrupt"))));
+    assert!(!seen.contains(&Event::TurnEnd));
+    until_screen(&h, "interrupted").await;
+    assert!(!h.runner.screen().text().contains("done: /hold"));
+    // The harness took no Ctrl-C and still runs: a new turn works.
+    let d = h.runner.type_turn("again");
+    timeout(wait(), d.wait())
+        .await
+        .expect("time")
+        .expect("delivered");
+    until_screen(&h, "done: again").await;
+    h.runner.kill().expect("kill");
+}
+
+/// A stalled turn (`blocked`) can be interrupted too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_ends_a_stalled_turn() {
+    let mut h = start(Opts {
+        stall: Duration::from_millis(400),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    h.runner.type_turn("/hold");
+    until_status(&mut h.events, AgentStatus::Blocked).await;
+    assert!(h.runner.interrupt().await.expect("interrupt"));
+    let seen = until_status(&mut h.events, AgentStatus::Idle).await;
+    assert!(
+        seen.iter().any(|e| matches!(e,
+        Event::StatusChanged { to: AgentStatus::Idle, reason: Some(r), .. } if r == "interrupted"))
+    );
     h.runner.kill().expect("kill");
 }
 

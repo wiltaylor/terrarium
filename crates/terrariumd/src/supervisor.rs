@@ -45,6 +45,12 @@ pub enum SupervisorError {
 /// The message for a runner that has no `screen` control call.
 pub const OLD_RUNNER: &str = "runner too old; restart the agent";
 
+/// The `NotReady` message of [`Supervisor::interrupt`] when no turn runs.
+pub const NO_TURN: &str = "the agent runs no turn: there is nothing to interrupt";
+/// The `NotReady` message of [`Supervisor::interrupt`] during a compaction.
+pub const INTERRUPT_COMPACTING: &str =
+    "the agent compacts its session; wait for the end of the compaction";
+
 /// Input for a PTY.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PtyInput {
@@ -194,6 +200,17 @@ pub struct HarnessRun {
     pub version: Option<String>,
 }
 
+/// The interrupt keys of each harness, from its adapter crate
+/// (`Adapter::interrupt_keys`), for a supervisor with no adapter registry.
+pub fn interrupt_keys(harness: HarnessId) -> Vec<Vec<u8>> {
+    match harness {
+        HarnessId::Claude => terrarium_adapter_claude::keys::interrupt(),
+        HarnessId::Codex => terrarium_adapter_codex::keys::interrupt(),
+        HarnessId::Copilot => terrarium_adapter_copilot::keys::interrupt(),
+        HarnessId::Pi => terrarium_adapter_pi::keys::interrupt(),
+    }
+}
+
 /// Does `policy` start a harness again after an exit? `clean`: the exit
 /// code was 0, with no signal.
 pub fn wants_restart(policy: RestartPolicy, clean: bool) -> bool {
@@ -295,6 +312,22 @@ pub trait Supervisor: Send + Sync + 'static {
         Box::pin(async {
             Err(SupervisorError::Unsupported(
                 "this supervisor cannot send keys".into(),
+            ))
+        })
+    }
+    /// Interrupt the running turn of the agent (the dashboard's Stop,
+    /// `POST /api/agents/{id}/interrupt`): type the interrupt keys of its
+    /// harness (`Adapter::interrupt_keys`). The harness keeps running, and
+    /// the agent goes `idle` with the reason `interrupted` when the screen
+    /// settles (`terrarium_runner::Runner::interrupt`). `NotReady` with
+    /// [`NO_TURN`]: the agent is not `working` or `blocked` in a turn;
+    /// with [`INTERRUPT_COMPACTING`]: a compaction runs. `Unsupported`: the
+    /// harness has no interrupt keys. The default cannot.
+    fn interrupt(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        let _ = agent;
+        Box::pin(async {
+            Err(SupervisorError::Unsupported(
+                "this supervisor cannot interrupt a turn".into(),
             ))
         })
     }
@@ -499,9 +532,9 @@ mod fake {
     use tokio::sync::{broadcast, mpsc, oneshot};
 
     use super::{
-        AnswerInput, BoxFuture, CompactEnd, CompactThen, CompactWait, NewSessionPlan, OLD_RUNNER,
-        PtyAttachment, PtyInput, REASON_COMPACTING, Supervisor, SupervisorError, SupervisorEvent,
-        SupervisorEventKind, TurnHold,
+        AnswerInput, BoxFuture, CompactEnd, CompactThen, CompactWait, INTERRUPT_COMPACTING,
+        NO_TURN, NewSessionPlan, OLD_RUNNER, PtyAttachment, PtyInput, REASON_COMPACTING,
+        Supervisor, SupervisorError, SupervisorEvent, SupervisorEventKind, TurnHold,
     };
 
     /// How the fake harness answers a compact command. For tests.
@@ -858,6 +891,16 @@ mod fake {
             }
         }
 
+        /// Open a turn that does not end by itself: `turn_start`, then
+        /// `working` (a long turn, for the interrupt). For tests.
+        pub fn open_turn(&self, agent: AgentId) {
+            self.emit(
+                agent,
+                SupervisorEventKind::Harness(Event::TurnStart { prompt: None }),
+            );
+            self.set_status(agent, AgentStatus::Working, None);
+        }
+
         /// Make `screen` answer as a runner without the `screen` call. For
         /// tests.
         pub fn set_old_runner(&self, agent: AgentId) {
@@ -1193,6 +1236,45 @@ mod fake {
             bytes: Vec<u8>,
         ) -> BoxFuture<'_, Result<(), SupervisorError>> {
             Box::pin(async move { self.type_bytes(agent, &bytes) })
+        }
+
+        /// The interrupt keys of the agent's harness go to `typed`, then
+        /// the turn ends at once with the reason `interrupted` (no
+        /// `turn_end`, as Claude Code on Esc).
+        fn interrupt(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            Box::pin(async move {
+                let harness = {
+                    let mut inner = self.lock();
+                    let a = match inner.agents.get_mut(&agent) {
+                        Some(a) if a.status.is_live() => a,
+                        _ => return Err(SupervisorError::NotRunning(agent)),
+                    };
+                    if a.compacting.is_some() {
+                        return Err(SupervisorError::NotReady(INTERRUPT_COMPACTING.into()));
+                    }
+                    if !matches!(a.status, AgentStatus::Working | AgentStatus::Blocked)
+                        || a.held.is_some()
+                    {
+                        return Err(SupervisorError::NotReady(NO_TURN.into()));
+                    }
+                    // The pending `turn_end` of the turn does not come.
+                    a.epoch += 1;
+                    a.harness.unwrap_or(HarnessId::Claude)
+                };
+                let keys: Vec<u8> = super::interrupt_keys(harness).concat();
+                self.type_bytes(agent, &keys)?;
+                self.emit(
+                    agent,
+                    SupervisorEventKind::Harness(Event::System {
+                        message: "interrupt: the interrupt keys went to the harness; \
+                                  the turn stops"
+                            .into(),
+                    }),
+                );
+                self.set_status(agent, AgentStatus::Idle, Some("interrupted"));
+                self.next_early(agent);
+                Ok(())
+            })
         }
 
         fn answer(
