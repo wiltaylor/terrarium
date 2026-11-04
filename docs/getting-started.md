@@ -617,7 +617,9 @@ on x86_64, `sudo`, `curl` (or `wget`), and systemd for the service.
 
 3. The script does these steps:
    - It downloads `terrarium-host` from the daemon, checks its SHA-256, and
-     installs it as `/usr/local/bin/terrarium-host`.
+     installs it as `/var/lib/terrarium-host/bin/terrarium-host` (owned by
+     the service user, so the agent can update itself when the daemon has
+     a new build), with a symlink at `/usr/local/bin/terrarium-host`.
    - It writes `/etc/terrarium-host/config.toml` with `daemon_url`, the
      name, and the certificate pin, and writes the enrol token to
      `/etc/terrarium-host/token`.

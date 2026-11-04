@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: each job reads the repo only, unless it says more.
+# Every action is pinned to a full commit SHA; the comment names the version.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # A debug build of the workspace and its test binaries fills the runner's
@@ -21,7 +26,7 @@ jobs:
     name: fmt + lint + test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The runner's preinstalled SDKs take most of its disk.
       - name: Free disk space
         run: |
@@ -34,15 +39,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends bubblewrap git
       # Pinned to the Dockerfile's RUST_IMAGE (rust:1.97): a newer clippy
       # adds lints that the local gate does not have.
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (2026-11)
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
-      - uses: taiki-e/install-action@just
-      - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v7
+      - uses: taiki-e/install-action@0b43677d266e02f8bd34a2096b57e23a01a92aff # just
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       # harnesses.toml [node] pins the image's Node; the dashboard needs 22.19+.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
       - run: just ci::fmt-check
@@ -69,7 +74,7 @@ jobs:
       prerelease: ${{ steps.calc.outputs.prerelease }}
       do_release: ${{ steps.calc.outputs.do_release }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: calc
@@ -143,74 +148,178 @@ jobs:
           | **Previous tag** | \`${LAST_TAG:-none}\` |
           SUMMARY
 
-  # ── Host agent ────────────────────────────────────────────────────────────
-  # The static musl `terrarium-host` from the Dockerfile's host-export stage
-  # (the same build as `just host::build`), attached to the release: it runs
-  # on the machines that hold the targets, not in the image.
-  host:
-    name: Build terrarium-host
+  # ── Image ─────────────────────────────────────────────────────────────────
+  # The release image ghcr.io/<owner>/terrarium:<version>, plus `:latest`
+  # (stable) or `:pre` (pre-release): the runtime stage of docker/Dockerfile,
+  # with the OCI labels, a BuildKit SBOM and provenance, and a GitHub build
+  # provenance attestation (Sigstore, keyless) for the image digest.
+  #
+  # The host agent asset of the release comes OUT of the pushed image
+  # (/opt/terrarium/dist), so the release binary and the binary that the
+  # daemon serves to host agents (GET /install/terrarium-host, self-update)
+  # are the same bytes. SHA256SUMS covers it, and it is attested too.
+  # docs/release.md says how to verify both.
+  image:
+    name: Build and push the image
     needs: [version, check]
     if: needs.version.outputs.do_release == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+      id-token: write # the Sigstore certificate of the attestations
+      attestations: write # store the attestations on GitHub
+    outputs:
+      image: ${{ steps.names.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The runner's preinstalled SDKs take most of its disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (2026-11)
         with:
           toolchain: 1.97.1
       - name: Stamp version
-        run: ./.github/stamp-version.sh "${{ needs.version.outputs.version }}"
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
+        run: ./.github/stamp-version.sh "$VERSION"
+      - name: Image name and tags
+        id: names
+        run: |
+          # GHCR names are lower case.
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if [[ "$PRERELEASE" == "true" ]]; then channel=pre; else channel=latest; fi
+          {
+            echo "image=$image"
+            echo "tags<<EOF"
+            echo "$image:$VERSION"
+            echo "$image:$channel"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
           file: docker/Dockerfile
-          target: host-export
-          outputs: type=local,dest=out
-          # `terrarium-host --version`: <version>+<commit> (crates/terrarium-version).
+          target: runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.names.outputs.tags }}
+          # `--version` of every binary: <version>+<commit> (crates/terrarium-version).
           # The commit, not scripts/build-ref.sh: the stamp step leaves a dirty tree.
-          build-args: TERRARIUM_GIT_REF=${{ github.sha }}
-          cache-from: type=gha,scope=host
-          cache-to: type=gha,scope=host,mode=max
-      - name: Stage asset
-        run: cp out/terrarium-host "terrarium-host-${{ needs.version.outputs.version }}-linux-x86_64"
-      - uses: actions/upload-artifact@v7
+          build-args: |
+            TERRARIUM_GIT_REF=${{ github.sha }}
+            TERRARIUM_VERSION=${{ needs.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=image
+          cache-to: type=gha,scope=image,mode=max
+      - name: Attest the image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.names.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Take the host agent out of the image
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="$IMAGE@$DIGEST"
+          docker pull --platform linux/amd64 "$ref"
+          cid=$(docker create --platform linux/amd64 "$ref")
+          docker cp "$cid:/opt/terrarium/dist/terrarium-host-x86_64-linux" host.bin
+          docker cp "$cid:/opt/terrarium/dist/terrarium-host-x86_64-linux.sha256" host.sha256
+          docker rm "$cid"
+          # The hash that the daemon in the image serves must be the hash of the asset.
+          want=$(cut -d' ' -f1 host.sha256)
+          got=$(sha256sum host.bin | cut -d' ' -f1)
+          [[ "$want" == "$got" ]] || { echo "::error::the image's terrarium-host is $got, its .sha256 says $want"; exit 1; }
+          asset="terrarium-host-$VERSION-linux-x86_64"
+          mv host.bin "$asset"
+          chmod 0755 "$asset"
+          sha256sum "$asset" > SHA256SUMS
+          cat SHA256SUMS
+          # The binary in the image reports the release version.
+          "./$asset" --version | tee /dev/stderr | grep -q "^terrarium-host $VERSION+"
+      - name: Attest the host agent
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: terrarium-host-*-linux-x86_64
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bin-host
-          path: terrarium-host-*-linux-x86_64
+          path: |
+            terrarium-host-*-linux-x86_64
+            SHA256SUMS
           retention-days: 1
 
   # ── Release ───────────────────────────────────────────────────────────────
-  # Tag the commit and cut a GitHub (pre-)release with the host agent.
-  # No container image goes to a registry: the repo is private, so a server
-  # builds its own image from the source (`just deploy::server`, PLAN §23.6).
+  # Tag the commit and cut a GitHub (pre-)release with the host agent and
+  # SHA256SUMS. The notes name the image and its digest.
   release:
     name: Create GitHub release
-    needs: [version, host]
+    needs: [version, image]
     if: needs.version.outputs.do_release == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # the tag and the release
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      IMAGE: ${{ needs.image.outputs.image }}
+      DIGEST: ${{ needs.image.outputs.digest }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           pattern: bin-*
+          merge-multiple: true
       - name: Tag
         run: |
-          V="${{ needs.version.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v$V"
-          git push origin "v$V"
-      - uses: softprops/action-gh-release@v3
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+      - name: Release notes
+        run: |
+          cat > notes.md <<NOTES
+          ## Image
+
+          \`$IMAGE:$VERSION\` (digest \`$DIGEST\`)
+
+          Verify it (docs/release.md):
+
+          \`\`\`sh
+          gh attestation verify oci://$IMAGE:$VERSION --repo $GITHUB_REPOSITORY
+          gh attestation verify terrarium-host-$VERSION-linux-x86_64 --repo $GITHUB_REPOSITORY
+          sha256sum -c SHA256SUMS
+          \`\`\`
+          NOTES
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: v${{ needs.version.outputs.version }}
           name: v${{ needs.version.outputs.version }}
           prerelease: ${{ needs.version.outputs.prerelease }}
+          body_path: notes.md
           generate_release_notes: true
-          files: dist/**/*
+          files: dist/*

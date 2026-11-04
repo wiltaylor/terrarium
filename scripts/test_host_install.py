@@ -109,7 +109,7 @@ class Files(unittest.TestCase):
         unit = hi.render_unit((hi.REPO / "crates/terrarium-host/terrarium-host.service").read_text(), "wil")
         self.assertIn("\nUser=wil\n", unit)
         self.assertIn("\nGroup=wil\n", unit)
-        self.assertIn("ExecStart=/usr/local/bin/terrarium-host --config /etc/terrarium-host/config.toml run", unit)
+        self.assertIn("ExecStart=/var/lib/terrarium-host/bin/terrarium-host --config /etc/terrarium-host/config.toml run", unit)
 
 
 class Commands(unittest.TestCase):
@@ -146,7 +146,14 @@ class Commands(unittest.TestCase):
     def test_setup_new_host(self):
         script = remote(hi.setup_cmd(settings(), hi.RemoteState(), True))[-1]
         self.assertIn("useradd --system --user-group", script)
-        self.assertIn("install -m 0755 -o root -g root .terrarium-host.bin.new /usr/local/bin/terrarium-host", script)
+        # The service user owns the binary, so the agent can update itself.
+        self.assertIn("install -d -m 0755 -o terrarium -g terrarium /var/lib/terrarium-host/bin", script)
+        self.assertIn(
+            "install -m 0755 -o terrarium -g terrarium .terrarium-host.bin.new /var/lib/terrarium-host/bin/terrarium-host",
+            script,
+        )
+        self.assertIn("ln -sfn /var/lib/terrarium-host/bin/terrarium-host /usr/local/bin/terrarium-host", script)
+        self.assertIn("rm -f /var/lib/terrarium-host/bin/terrarium-host.pending", script)
         self.assertIn("install -m 0644 -o root -g root .terrarium-host.service.new /etc/systemd/system/terrarium-host.service", script)
         self.assertIn("install -d -m 0700 -o terrarium -g terrarium /etc/terrarium-host", script)
         self.assertIn(".terrarium-host.config.toml.new /etc/terrarium-host/config.toml", script)
@@ -158,7 +165,7 @@ class Commands(unittest.TestCase):
         self.assertNotIn("useradd", script)
         self.assertNotIn("/etc/terrarium-host/config.toml", script)
         # The binary and the unit are always replaced.
-        self.assertIn("/usr/local/bin/terrarium-host", script)
+        self.assertIn("/var/lib/terrarium-host/bin/terrarium-host", script)
 
     def test_token_commands(self):
         s = settings()
@@ -166,7 +173,7 @@ class Commands(unittest.TestCase):
         self.assertEqual(hi.token_cmd(s, True), ["terrarium", "--json", "admin", "host", "rotate", "lab1", "--enrol"])
         self.assertEqual(
             remote(hi.write_token_cmd(s)),
-            ["sudo", "-n", "-u", "terrarium", "/usr/local/bin/terrarium-host", "token-file", "/etc/terrarium-host/token"],
+            ["sudo", "-n", "-u", "terrarium", "/var/lib/terrarium-host/bin/terrarium-host", "token-file", "/etc/terrarium-host/token"],
         )
 
     def test_start_and_check(self):
@@ -174,7 +181,7 @@ class Commands(unittest.TestCase):
         self.assertEqual(remote(hi.start_cmd(s))[-1], "systemctl enable terrarium-host && systemctl restart terrarium-host")
         self.assertEqual(
             remote(hi.check_cmd(s))[-5:],
-            ["/usr/local/bin/terrarium-host", "--config", "/etc/terrarium-host/config.toml", "check", "--probe"],
+            ["/var/lib/terrarium-host/bin/terrarium-host", "--config", "/etc/terrarium-host/config.toml", "check", "--probe"],
         )
 
 

@@ -4489,12 +4489,16 @@ variable.
 
 ### 23.6 Install and release
 
-The repo is private, so there is no image in a registry. CI makes a
-release only from a trailer on the HEAD of `main` (`release: true` or
-`pre-release: true`): a tag, a GitHub release with generated notes, and the
-static `terrarium-host` binary as an asset. It pushes no container image.
+CI makes a release only from a trailer on the HEAD of `main`
+(`release: true` or `pre-release: true`): the image
+`ghcr.io/wiltaylor/terrarium:<version>` (and `:latest` or `:pre`) with an
+SBOM and a build provenance attestation, a tag, and a GitHub release with
+generated notes, the static `terrarium-host` binary (taken out of the
+image), and `SHA256SUMS`. [release.md](release.md) says how to make a
+release and how to verify it. Host agents follow the daemon's build by
+themselves ([host-protocol.md, "Self-update"](host-protocol.md#self-update)).
 
-A server builds its own image from the source. `just deploy::server
+For development, a server builds its own image from the source. `just deploy::server
 user@host` (`scripts/deploy.py`) does these steps:
 
 1. Pack the source with `git archive <ref>` (default `HEAD`). A tree with

@@ -180,8 +180,13 @@ The host agent sends `hello` as its first frame:
 - `host` is the name that target definitions use (`host = "lab1"`).
 - `version` is the build version of the host agent: `<crate version>+<git
   ref>` ([CONVENTIONS.md](CONVENTIONS.md), "Build version"). The daemon
-  marks a host agent of another build `stale` in `GET /api/hosts` and logs
-  a warning. An older host agent sends only `0.1.0`: it is stale too.
+  marks a host agent of another build `stale` in `GET /api/hosts`. It
+  offers it its own build in `welcome.update` (see
+  [Self-update](#self-update)), or logs a warning when it has no binary
+  for the arch. An older host agent sends only `0.1.0`: it is stale too.
+- `update_failed` is present only when a self-update did not start, and
+  the host agent went back to its previous binary. It holds the version
+  that failed. An older host agent does not send it.
 - `capabilities` is `terrarium_core::protocol::HostCapabilities`. Docker is
   `present` when `docker version --format json` gets an answer from the
   Docker server. vmlab is `present` when `vmlab --version` succeeds.
@@ -235,6 +240,22 @@ sends `welcome`:
 - `metrics: true` asks for [`metrics`](#metrics) frames. An older daemon
   does not send it. Then the host agent sends no `metrics` frames, because
   the older daemon does not know the frame.
+- `update` is present only for a host agent of another build (`stale`),
+  when the daemon has a `terrarium-host` binary for its `arch`:
+
+  ```json
+  "update": {
+    "version": "0.3.0+6e31754",
+    "path": "/install/terrarium-host?arch=x86_64",
+    "sha256": "9f2c...",
+    "release_sha256": "9f2c..."
+  }
+  ```
+
+  `version` is the daemon's build. `path` is on the host listener.
+  `sha256` is the hash of the binary in the dist dir. `release_sha256` is
+  present only when the dist dir has the release `SHA256SUMS`. See
+  [Self-update](#self-update). An older host agent ignores the field.
 
 The host agent waits 15 seconds for `welcome`. If it gets no `welcome`, it
 closes the connection and retries.
@@ -1000,6 +1021,107 @@ keeps its output and terminal frames for the next `hello`.
 When the daemon restarts, it loses its exec sessions. The host agent kills
 them at the next `welcome`. Targets (containers, VMs) are not affected.
 
+## Self-update
+
+A host agent follows the daemon's build. When the daemon gets a new build
+(for example a new release image), each host agent replaces itself at its
+next connect. The code is `crates/terrarium-host/src/selfupdate.rs` (the
+host agent) and `crates/terrariumd/src/api/install.rs` (the offer).
+
+**The offer.** The daemon compares `hello.version` with its own build
+(`terrarium_version::is_stale`). For a stale host agent, it puts
+`update` in `welcome` (see [Handshake](#handshake)). The offer names the
+binary of the dist dir (`TERRARIUM_HOST_DIST_DIR`; in the image
+`/opt/terrarium/dist`, built from the same commit as the daemon). When
+the daemon's own ref is unknown (`+unknown`), nothing is stale, so it
+offers nothing. When the dist dir has the release `SHA256SUMS` and the
+binary does not match it, the daemon offers nothing and logs a warning.
+
+**The download.** The host listener serves
+`GET /install/terrarium-host?arch=<arch>` and
+`GET /install/terrarium-host.sha256?arch=<arch>`, as the dashboard port
+does ([api.md §17.9](api.md#179-the-host-installer)). The host agent
+fetches `path` from the scheme and the host of its `daemon_url` (`wss`
+becomes `https`, `ws` becomes `http`), with the same TLS settings as the
+link: the pin, `ca_file`, or the system roots. The offer cannot name
+another host. A TLS proxy in front of the host listener must pass
+`/install/terrarium-host` as well as `/hosts/connect`.
+
+**The steps of the host agent.**
+
+1. It checks that it may update. It does not update when:
+   - `auto_update = false` is in its config;
+   - it does not run under systemd (no `INVOCATION_ID`), because then
+     nothing starts the new binary after the exit;
+   - the offered version is in `<binary>.failed` (see below);
+   - this process refused or failed that version already.
+
+   It logs the reason as a warning.
+2. It checks that it can write the directory of its binary. The binary of
+   an install from before self-update is in `/usr/local/bin`, which is
+   root's: run `install-host.sh --upgrade` one time (see [Install](#install)).
+3. It downloads the binary (at most 256 MiB, in 5 minutes) and checks its
+   SHA-256 against `sha256` and, when present, `release_sha256`. A
+   mismatch stops the update and changes no file.
+4. It writes the binary as `<binary>.new` (mode 0755) and runs
+   `<binary>.new --version`. The new binary must exit 0 in 10 seconds and
+   print the offered version (`-dirty` does not count). Else it removes
+   `.new` and stops.
+5. It waits until it holds no session (it looks every 10 seconds). An
+   update does not kill the sessions of agents.
+6. It keeps the running binary as `<binary>.prev` (a hard link), writes the
+   new version to `<binary>.pending`, and renames `.new` over the binary.
+   The rename is atomic: the binary is always the old one or the new one.
+7. It exits with status 0. systemd (`Restart=always`) starts the new
+   binary after `RestartSec=5`.
+8. At its first `welcome`, the new binary removes `<binary>.pending`.
+   `.prev` stays, for a roll back by hand.
+
+When the update fails before step 6, the host agent logs an error, keeps
+its binary, and keeps its link to the daemon.
+
+**The roll back.** The unit has an `ExecStartPre=` guard (a `/bin/sh -c`
+line, so it works when the new binary does not run at all). When
+`<binary>.pending` exists, the guard adds a line to it at each start.
+After three starts that did not reach a `welcome`, the guard does these
+steps:
+
+1. It moves `<binary>.prev` back over the binary.
+2. It renames `.pending` to `<binary>.failed`.
+3. It prints `restored the previous binary` to the journal.
+
+The old binary then starts. It does not take the failed version again. It
+sends that version in `hello.update_failed`. The daemon logs a warning
+and records the event `host.update_failed` and the audit entry
+`host.update_failed`, one time for each version while the daemon runs.
+A failure that the guard cannot see (the new binary connects, then fails
+later) does not roll back: put `.prev` back by hand.
+
+To install a version by hand after a roll back, run
+`install-host.sh --upgrade`: it removes `.pending` and `.failed`.
+
+**The record.** When a host agent that was stale connects with the
+daemon's build, the daemon writes the event `host.updated` (`from`,
+`to`) and the audit entry `host.update`. A reinstall by hand to the
+daemon's build records the same.
+
+**The file ownership (security).** The service user owns
+`/var/lib/terrarium-host/bin/` and the binary in it, so the host agent
+can replace itself without root. This has a cost. Each command that the
+daemon runs on the host runs as the service user, so a session can also
+replace the binary. Before, it could not. But the binary runs only as that
+same user, so a session gets no rights that it did not have. The risk is
+root: when root runs that file, root runs code that the service user
+wrote. The installers run it only as the service user (`runuser`,
+`sudo -u`). `/usr/local/bin/terrarium-host` is a symlink to it, for the
+command line. Do not run `terrarium-host` as root, and do not use the
+service user `root`. The `ExecStartPre=` guard runs as the service user
+too.
+
+To turn self-update off on a host, add `auto_update = false` to its
+config and restart it. An older host agent refuses that key (the config
+refuses unknown keys), so add it after the upgrade.
+
 ## Error codes
 
 The terminal `error` frame:
@@ -1121,6 +1243,7 @@ allowed_cwd_roots = ["/home/alice/labs", "/srv/build"]   # optional; absent mean
 # instances_dir = "/var/lib/terrarium-host/instances"   # lab instances; default $XDG_DATA_HOME/terrarium-host/instances
 # repos_dir = "/srv/terrarium/repos"        # the host path of TERRARIUM_REPOS_DIR, for a local lab_repo; default ./repos
 # max_running_targets = 4                   # docker and vmlab targets that may run at one time
+# auto_update = true                        # take the daemon's build (see "Self-update")
 
 # [display]                                 # target displays (see "display"); all optional
 # enabled = false                           # open THIS machine's desktop to `desktop` targets
@@ -1167,10 +1290,13 @@ Logs go to stderr through `tracing`. `RUST_LOG` sets the level (default
 ## Install
 
 The systemd unit is `crates/terrarium-host/terrarium-host.service`. It runs
-`/usr/local/bin/terrarium-host --config /etc/terrarium-host/config.toml run`
+`/var/lib/terrarium-host/bin/terrarium-host --config /etc/terrarium-host/config.toml run`
 as the user `terrarium`, reads optional overrides from
 `/etc/terrarium-host/env`, adds `~/.local/bin` to `PATH` (for a per-user
-vmlab), and restarts on failure. `just host::install` sets `User=` and
+vmlab), and restarts always (`Restart=always`: a self-update exits 0). Its
+`ExecStartPre=` line is the self-update guard (see [Self-update](#self-update)).
+The service user owns `/var/lib/terrarium-host/bin/` and the binary, and
+`/usr/local/bin/terrarium-host` is a symlink to the binary. `just host::install` sets `User=` and
 `Group=` from `--user`. Edit `SupplementaryGroups=` to match the host.
 
 There are two installers. Both make the same config and the same unit
@@ -1199,7 +1325,7 @@ flags:
 | `--user USER` | The service user. Default: `SUDO_USER` (or `DOAS_USER`), else `terrarium` (a new system user). |
 | `--enable-display` | A new config gets `[display]` with `enabled = true`, so `desktop` targets can use the screen of this machine. Default: off. The script prints the risk. It does not change an existing config: it tells you to add the table by hand. |
 | `--dry-run` | Print the plan and change nothing. |
-| `--upgrade` | Replace the binary, keep the config and the token, restart. |
+| `--upgrade` | Replace the binary and the unit, keep the config and the token, restart. It keeps the `User=` of the installed unit. It moves the binary of an install from before self-update out of `/usr/local/bin`, and it removes `.pending` and `.failed` of a self-update. |
 | `--uninstall [--purge]` | Stop, disable, and remove the unit and the binary. `--purge` also removes `/etc/terrarium-host`. |
 
 The script does these steps:
@@ -1215,8 +1341,11 @@ The script does these steps:
    `docker`; with vmlab, to `kvm`. systemd gives the unit the
    supplementary groups of its `User=`.
 4. It downloads the binary and its SHA-256 for `uname -m`, checks the
-   hash, and installs the binary as `/usr/local/bin/terrarium-host`. A
-   wrong hash stops the script before it changes anything else.
+   hash, and installs the binary as
+   `/var/lib/terrarium-host/bin/terrarium-host` (mode 0755; the directory
+   and the file are the service user's). It makes
+   `/usr/local/bin/terrarium-host` a symlink to it. A wrong hash stops the
+   script before it changes anything else.
 5. It makes `/etc/terrarium-host` (mode 0700, owned by the service user)
    and, when it does not exist, `config.toml` (mode 0640, `root` and the
    group of the service user) with `daemon_url`, `token_file`, `name`, and
@@ -1273,8 +1402,11 @@ The script does these steps:
    `Group=` set), and a new config to the home directory of the ssh user
    with `scp`. It does not copy the config when one exists.
 5. As root on the host, it makes the service user if it does not exist
-   (`useradd --system`), installs the binary in `/usr/local/bin/`, the
-   unit in `/etc/systemd/system/`, and runs `systemctl daemon-reload`. It
+   (`useradd --system`), installs the binary as
+   `/var/lib/terrarium-host/bin/terrarium-host` (owned by the service
+   user, for the [self-update](#self-update)) with a symlink in
+   `/usr/local/bin/`, installs the unit in `/etc/systemd/system/`, and
+   runs `systemctl daemon-reload`. It
    makes `/etc/terrarium-host` with mode 0700, owned by the service user,
    because the host agent writes the new token through a temporary file
    and a rename. A new config gets mode 0640 (`root`, the service group),

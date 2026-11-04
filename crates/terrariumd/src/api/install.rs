@@ -41,8 +41,98 @@ const VERSION: &str = terrarium_version::FULL;
 pub fn routes() -> Router<Shared> {
     Router::new()
         .route(SCRIPT_PATH, get(script))
+        .merge(binary_routes())
+}
+
+/// The binary and its SHA-256 only. The host listener serves these too:
+/// a host agent downloads its self-update from there, with the TLS
+/// settings of its link (docs/host-protocol.md, "Self-update").
+pub fn binary_routes() -> Router<Shared> {
+    Router::new()
         .route(BINARY_PATH, get(binary))
         .route(CHECKSUM_PATH, get(checksum))
+}
+
+/// The file of the release checksums in the dist dir. The image does not
+/// carry it (the binary of the image is the release binary; CI checks
+/// that). For a daemon outside the image, put the `SHA256SUMS` of the
+/// release here, and host agents check it too.
+pub const RELEASE_SUMS: &str = "SHA256SUMS";
+
+fn hex64(s: &str) -> Option<String> {
+    let s = s.trim().to_ascii_lowercase();
+    (s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())).then_some(s)
+}
+
+/// The SHA-256 of the binary at `path`: the `.sha256` file next to it,
+/// else the hash of the binary now.
+async fn binary_sha256(path: &Path) -> std::io::Result<String> {
+    let mut side = path.to_owned().into_os_string();
+    side.push(".sha256");
+    let stored = tokio::fs::read_to_string(&side)
+        .await
+        .ok()
+        .and_then(|s| s.split_whitespace().next().and_then(hex64));
+    if let Some(h) = stored {
+        return Ok(h);
+    }
+    let d = tokio::fs::read(path).await?;
+    Ok(sha2::Sha256::digest(&d)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// The hash of the `arch` binary in a release `SHA256SUMS`: the line of
+/// `terrarium-host-<version>-linux-<arch>`.
+pub fn release_sum(sums: &str, arch: &str) -> Option<String> {
+    let suffix = format!("-linux-{arch}");
+    sums.lines().find_map(|l| {
+        let (hash, file) = l.trim().split_once(char::is_whitespace)?;
+        let file = file.trim().trim_start_matches('*');
+        (file.starts_with("terrarium-host-") && file.ends_with(&suffix))
+            .then(|| hex64(hash))
+            .flatten()
+    })
+}
+
+/// The self-update offer for a host agent of `arch`: this daemon's
+/// version and the binary of the dist dir. `None` when the dist dir has
+/// no binary for the arch.
+pub async fn update_offer(
+    dist: &Path,
+    arch: &str,
+) -> Option<terrarium_host::protocol::UpdateOffer> {
+    if !ARCHES.contains(&arch) {
+        return None;
+    }
+    let path = binary_path(dist, arch)?;
+    let sha256 = match binary_sha256(&path).await {
+        Ok(h) => h,
+        Err(e) => {
+            warn!(path = %path.display(), "no self-update offer: cannot read the host agent binary: {e}");
+            return None;
+        }
+    };
+    let release_sha256 = tokio::fs::read_to_string(dist.join(RELEASE_SUMS))
+        .await
+        .ok()
+        .and_then(|s| release_sum(&s, arch));
+    if let Some(r) = &release_sha256
+        && *r != sha256
+    {
+        warn!(
+            dist = %dist.display(),
+            "no self-update offer: the host agent binary does not match the release {RELEASE_SUMS}"
+        );
+        return None;
+    }
+    Some(terrarium_host::protocol::UpdateOffer {
+        version: VERSION.to_owned(),
+        path: format!("{BINARY_PATH}?arch={arch}"),
+        sha256,
+        release_sha256,
+    })
 }
 
 /// The defaults that the daemon writes into the script. `None`: the
@@ -273,28 +363,15 @@ async fn checksum(State(state): State<Shared>, Query(q): Query<ArchQuery>) -> Re
         Ok(p) => p,
         Err(r) => return *r,
     };
-    let mut side = path.clone().into_os_string();
-    side.push(".sha256");
-    let stored = tokio::fs::read_to_string(&side)
-        .await
-        .ok()
-        .and_then(|s| s.split_whitespace().next().map(str::to_ascii_lowercase))
-        .filter(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()));
-    let hex = match stored {
-        Some(h) => h,
-        None => match tokio::fs::read(&path).await {
-            Ok(d) => sha2::Sha256::digest(&d)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect(),
-            Err(e) => {
-                warn!(path = %path.display(), "cannot read the host agent binary: {e}");
-                return text(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "cannot read the terrarium-host binary\n".into(),
-                );
-            }
-        },
+    let hex = match binary_sha256(&path).await {
+        Ok(h) => h,
+        Err(e) => {
+            warn!(path = %path.display(), "cannot read the host agent binary: {e}");
+            return text(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read the terrarium-host binary\n".into(),
+            );
+        }
     };
     text(
         StatusCode::OK,
@@ -410,7 +487,7 @@ mod tests {
         assert!(s.contains("DEFAULT_PIN='AA:BB'\n"));
         assert!(s.contains(&format!("SERVED_VERSION='{VERSION}'\n")));
         assert!(s.contains(
-            "ExecStart=/usr/local/bin/terrarium-host --config /etc/terrarium-host/config.toml run"
+            "ExecStart=/var/lib/terrarium-host/bin/terrarium-host --config /etc/terrarium-host/config.toml run"
         ));
         assert!(!s.contains("@TERRARIUM_"));
         // An unsafe value is left out, not quoted.
@@ -447,6 +524,52 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn release_sums_pick_the_arch() {
+        let a = "a".repeat(64);
+        let b = "B".repeat(64);
+        let sums = format!(
+            "{a}  terrarium-host-0.3.0-linux-x86_64\n{b} *terrarium-host-0.3.0-linux-aarch64\n"
+        );
+        assert_eq!(release_sum(&sums, "x86_64"), Some(a));
+        assert_eq!(release_sum(&sums, "aarch64"), Some("b".repeat(64)));
+        assert_eq!(release_sum(&sums, "riscv64"), None);
+        assert_eq!(
+            release_sum("zz  terrarium-host-0.3.0-linux-x86_64", "x86_64"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn the_offer_is_the_dist_binary_of_the_arch() {
+        let dist = tempfile::tempdir().unwrap();
+        assert!(update_offer(dist.path(), "x86_64").await.is_none());
+        let bin = dist.path().join("terrarium-host-x86_64-linux");
+        std::fs::write(&bin, b"the binary").unwrap();
+        let sha: String = sha2::Sha256::digest(b"the binary")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let o = update_offer(dist.path(), "x86_64").await.unwrap();
+        assert_eq!(o.version, VERSION);
+        assert_eq!(o.path, "/install/terrarium-host?arch=x86_64");
+        assert_eq!(o.sha256, sha);
+        assert_eq!(o.release_sha256, None);
+        assert!(update_offer(dist.path(), "aarch64").await.is_none());
+        // With the release sums: they go into the offer, and a binary that
+        // does not match them is not offered.
+        let sums = dist.path().join(RELEASE_SUMS);
+        std::fs::write(&sums, format!("{sha}  terrarium-host-0.3.0-linux-x86_64\n")).unwrap();
+        let o = update_offer(dist.path(), "x86_64").await.unwrap();
+        assert_eq!(o.release_sha256.as_deref(), Some(sha.as_str()));
+        std::fs::write(
+            &sums,
+            format!("{}  terrarium-host-0.3.0-linux-x86_64\n", "0".repeat(64)),
+        )
+        .unwrap();
+        assert!(update_offer(dist.path(), "x86_64").await.is_none());
     }
 
     #[test]

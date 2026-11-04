@@ -5,6 +5,11 @@
 # Commands from the daemon run as the User below. Set it to the account that
 # owns the labs and can use Docker (the `docker` group) and vmlab (`kvm`).
 # Do not run the agent as root unless the targets need root.
+#
+# The binary is /var/lib/terrarium-host/bin/terrarium-host, in a directory of
+# the service user, so the agent can replace itself when the daemon has
+# another build (docs/host-protocol.md, "Self-update"). Do not run that file
+# as root: the service user can write it.
 [Unit]
 Description=Terrarium host agent
 Documentation=https://github.com/wiltaylor/terrarium/blob/main/docs/host-protocol.md
@@ -19,11 +24,16 @@ Group=terrarium
 # SupplementaryGroups=docker kvm
 # Optional overrides: TERRARIUM_DAEMON_URL, TERRARIUM_HOST_NAME, RUST_LOG.
 EnvironmentFile=-/etc/terrarium-host/env
-ExecStart=/usr/local/bin/terrarium-host --config /etc/terrarium-host/config.toml run
+# The self-update guard. A new binary marks itself in `<binary>.pending`; this
+# counts its starts there. After three starts that did not reach the daemon,
+# it puts `<binary>.prev` back and keeps the failed version in `<binary>.failed`.
+ExecStartPre=-/bin/sh -c 'b=$$1; [ -f "$$b.pending" ] || exit 0; if [ "$$(wc -l < "$$b.pending")" -gt 3 ] && [ -f "$$b.prev" ]; then mv -f "$$b.prev" "$$b" && mv -f "$$b.pending" "$$b.failed" && echo "terrarium-host: the new binary did not start 3 times; restored the previous binary" >&2; else echo start >> "$$b.pending"; fi' guard /var/lib/terrarium-host/bin/terrarium-host
+ExecStart=/var/lib/terrarium-host/bin/terrarium-host --config /etc/terrarium-host/config.toml run
 # vmlab is often a per-user install in ~/.local/bin or ~/.cargo/bin. In a
 # system unit `%h` is root's home, not the home of `User=`: both installers
 # write the service user's home in place of `%h`.
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin:%h/.cargo/bin
+# `always`: after a self-update the agent exits 0, and systemd starts the new binary.
 Restart=always
 RestartSec=5
 # Sessions are process groups; stop them with the agent.

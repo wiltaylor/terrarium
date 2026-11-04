@@ -770,36 +770,5 @@ class Layout(unittest.TestCase):
         self.assertEqual(set(m.group(1).split()), set(dp.DATA_DIRS))
 
 
-class Workflow(unittest.TestCase):
-    """The CI workflow after the registry image job went away."""
-
-    text = (dp.REPO / ".github/workflows/ci.yml").read_text()
-
-    def test_no_registry(self):
-        self.assertNotIn("ghcr.io", self.text)
-        self.assertNotIn("packages: write", self.text)
-        self.assertNotIn("docker/login-action", self.text)
-        self.assertNotRegex(self.text, r"(?m)^  image:")
-
-    def test_release_needs(self):
-        self.assertRegex(self.text, r"(?m)^    needs: \[version, host\]$")
-        self.assertIn("files: dist/**/*", self.text)
-        self.assertIn("generate_release_notes: true", self.text)
-
-    def test_yaml_parses(self):
-        try:
-            import yaml  # type: ignore
-        except ImportError:
-            self.skipTest("PyYAML is not installed (uv run --with pyyaml ...)")
-        doc = yaml.safe_load(self.text)
-        jobs = doc["jobs"]
-        self.assertEqual(set(jobs), {"check", "version", "host", "release"})
-        for name, job in jobs.items():
-            for need in job.get("needs", []):
-                self.assertIn(need, jobs, f"{name} needs {need}")
-        self.assertEqual(jobs["release"]["needs"], ["version", "host"])
-        self.assertEqual(jobs["release"]["permissions"], {"contents": "write"})
-
-
 if __name__ == "__main__":
     unittest.main()

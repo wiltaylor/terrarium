@@ -22,7 +22,10 @@
 #                runtime's /opt/terrarium/dist (GET /install/terrarium-host)
 #   host-export  scratch stage that holds only the host binary, for `--output`
 #   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3, ripgrep, uv (no harness),
-#                and the static terrarium-host with its SHA-256 for the host installer
+#                and the static terrarium-host with its SHA-256 for the host installer and
+#                the host agent self-update. The release image of CI
+#                (ghcr.io/wiltaylor/terrarium, docs/release.md): CI takes the release's
+#                terrarium-host asset out of this stage.
 
 ARG RUST_IMAGE=rust:1.97-trixie
 # The git ref of the build (crates/terrarium-version): `<commit>` or
@@ -179,3 +182,15 @@ EXPOSE 8080 8081 8082 8083
 # stops terrariumd and then the runners in order (docker/README.md).
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/terrarium-entrypoint"]
 CMD ["terrariumd"]
+
+# OCI labels (docs/release.md). Last, so a new ref or version does not
+# rebuild a layer. CI sets the same version, revision, and source labels.
+ARG TERRARIUM_GIT_REF
+# The release version (CI); empty for a local build.
+ARG TERRARIUM_VERSION=
+LABEL org.opencontainers.image.title="terrarium" \
+      org.opencontainers.image.description="Terrarium: the daemon, the CLI, the dashboard, and the host agent binary for /install" \
+      org.opencontainers.image.source="https://github.com/wiltaylor/terrarium" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${TERRARIUM_GIT_REF}" \
+      org.opencontainers.image.version="${TERRARIUM_VERSION}"

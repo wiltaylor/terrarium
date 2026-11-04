@@ -26,6 +26,9 @@
 //!   `systemd-run --user` and a slice for each holder.
 //! - [`metrics`]: CPU, memory, network, disk IO, and disk space samples for
 //!   the `metrics` frame.
+//! - [`selfupdate`]: the host agent replaces itself with the daemon's
+//!   build, and goes back to the previous binary when the new one does
+//!   not start.
 //! - [`tls`]: the transport check, fingerprint pinning, the probe, and
 //!   self-signed certificates.
 
@@ -40,6 +43,7 @@ pub mod metrics;
 pub mod outbox;
 pub mod prepare;
 pub mod protocol;
+pub mod selfupdate;
 pub mod session;
 pub mod tls;
 pub mod transfer;
@@ -47,5 +51,5 @@ pub mod verb;
 pub mod vmlab;
 pub mod workspace;
 
-pub use client::{Client, ClientOptions};
+pub use client::{Client, ClientOptions, SelfUpdateOptions};
 pub use config::{Config, HostPaths};

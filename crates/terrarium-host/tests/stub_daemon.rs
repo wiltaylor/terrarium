@@ -127,6 +127,7 @@ impl Conn {
             resume,
             token: None,
             metrics: false,
+            update: None,
         }))
         .await;
     }

@@ -12,7 +12,10 @@
 # unit are the same:
 #
 #  1. Download terrarium-host for this arch from the daemon, check its
-#     SHA-256, and install it as /usr/local/bin/terrarium-host.
+#     SHA-256, and install it as /var/lib/terrarium-host/bin/terrarium-host,
+#     owned by the service user, so the agent can update itself
+#     (docs/host-protocol.md, "Self-update"). /usr/local/bin/terrarium-host
+#     is a symlink to it.
 #  2. Make /etc/terrarium-host (mode 0700, owned by the service user) and,
 #     when it does not exist, config.toml (daemon_url, token_file, name, and
 #     the certificate pin of the daemon's host listener).
@@ -22,7 +25,8 @@
 #  4. Install, enable, and restart the systemd unit terrarium-host, then run
 #     `terrarium-host check --probe`.
 #
-# --upgrade replaces the binary only. --uninstall removes the unit and the
+# --upgrade replaces the binary and the unit; it moves the binary of an older
+# install out of /usr/local/bin. --uninstall removes the unit and the
 # binary (--purge also removes /etc/terrarium-host). --dry-run prints the
 # plan and changes nothing. A second run is safe: it keeps the config, and
 # keeps the token file unless you give --token.
@@ -56,7 +60,12 @@ ROOT=${TERRARIUM_INSTALL_ROOT:-}
 CONFIG_DIR=/etc/terrarium-host
 CONFIG_PATH=$CONFIG_DIR/config.toml
 TOKEN_PATH=$CONFIG_DIR/token
-BIN_PATH=/usr/local/bin/terrarium-host
+# The binary is the service user's, so the agent can replace itself. The
+# command on PATH is a symlink to it. An older install had the binary at
+# LINK_PATH, owned by root; --upgrade moves it.
+BIN_DIR=/var/lib/terrarium-host/bin
+BIN_PATH=$BIN_DIR/terrarium-host
+LINK_PATH=/usr/local/bin/terrarium-host
 UNIT_PATH=/etc/systemd/system/terrarium-host.service
 UNIT_NAME=terrarium-host
 HOST_PORT=8082
@@ -89,7 +98,7 @@ usage: install-host.sh --token <enrol token> [options]
   --enable-display   a new config gets [display] enabled = true: desktop targets may
                      see this machine's screen and use its mouse and keyboard (default: off)
   --dry-run          print the plan; change nothing
-  --upgrade          replace the binary; keep the config and the token; restart
+  --upgrade          replace the binary and the unit; keep the config and the token; restart
   --uninstall        stop and remove the unit and the binary; keep the config
   --purge            with --uninstall: remove /etc/terrarium-host too
   -h, --help         show this help
@@ -318,7 +327,9 @@ install_binary() {
 		say "+ curl -fsSL $base?arch=$a -o terrarium-host"
 		say "+ curl -fsSL $base.sha256?arch=$a -o terrarium-host.sha256"
 		note "check the SHA-256 of the download"
-		say "+ install -m 0755 -o root -g root terrarium-host $BIN_PATH"
+		say "+ install -d -m 0755 -o $SERVICE_USER -g $SERVICE_GROUP $BIN_DIR"
+		say "+ install -m 0755 -o $SERVICE_USER -g $SERVICE_GROUP terrarium-host $BIN_PATH"
+		say "+ ln -sfn $BIN_PATH $LINK_PATH"
 		return
 	fi
 	tmp=$(mktemp -d)
@@ -332,11 +343,33 @@ install_binary() {
 	matches "$want" '^[0-9a-f]{64}$' || die "the daemon sent no SHA-256 for terrarium-host"
 	[ "$want" = "$got" ] || die "the SHA-256 of the download is $got, the daemon says $want: not installed"
 	note "SHA-256 $got: ok"
-	mkdir -p "$ROOT${BIN_PATH%/*}"
+	# The service user owns the directory and the binary: the agent writes
+	# <binary>.new, .prev, and .pending there when it updates itself.
+	mkdir -p "$ROOT$BIN_DIR"
+	chmod 0755 "$ROOT$BIN_DIR"
+	chown "$SERVICE_USER:$SERVICE_GROUP" "$ROOT$BIN_DIR"
 	cp "$tmp/terrarium-host" "$ROOT$BIN_PATH.new"
 	chmod 0755 "$ROOT$BIN_PATH.new"
-	chown root:root "$ROOT$BIN_PATH.new"
+	chown "$SERVICE_USER:$SERVICE_GROUP" "$ROOT$BIN_PATH.new"
 	mv -f "$ROOT$BIN_PATH.new" "$ROOT$BIN_PATH"
+	# A binary installed by hand ends a self-update that waits for its
+	# first start, and lets a version that failed before be offered again.
+	rm -f "$ROOT$BIN_PATH.pending" "$ROOT$BIN_PATH.failed"
+	# The command on PATH. An older install has the binary itself here.
+	mkdir -p "$ROOT${LINK_PATH%/*}"
+	rm -f "$ROOT$LINK_PATH"
+	ln -s "$BIN_PATH" "$ROOT$LINK_PATH"
+}
+
+# The group and the home of the service user.
+service_ids() {
+	if user_exists "$SERVICE_USER"; then
+		SERVICE_GROUP=$(id -gn "$SERVICE_USER")
+		SERVICE_HOME=$(user_home "$SERVICE_USER")
+	else
+		SERVICE_GROUP=$SERVICE_USER
+		SERVICE_HOME=/var/lib/$UNIT_NAME
+	fi
 }
 
 ensure_user() {
@@ -381,6 +414,7 @@ start_service() {
 	if [ "$SYSTEMD" = no ]; then
 		note "no systemd: start the host agent yourself, as $SERVICE_USER, for example:"
 		say "  runuser -u $SERVICE_USER -- $BIN_PATH --config $CONFIG_PATH run"
+		note "self-update needs systemd: without it, run --upgrade after each daemon update"
 		return
 	fi
 	# `restart`, not `enable --now`: a running agent must pick up the new
@@ -413,6 +447,7 @@ summary() {
 	say "  name     $NAME"
 	say "  daemon   $HOST_URL"
 	say "  user     $SERVICE_USER"
+	say "  binary   $BIN_PATH (it follows the daemon's build; auto_update = false in the config stops that)"
 	say "  docker   $DOCKER"
 	say "  vmlab    $VMLAB"
 	if [ "$SYSTEMD" = yes ]; then
@@ -433,7 +468,11 @@ fi
 
 # The service user. vmlab runs as the user who owns the labs, and the
 # host agent runs its commands as the service user. So the default is the
-# user who ran sudo, not root and not a new system user.
+# user who ran sudo, not root and not a new system user. --upgrade and
+# --uninstall keep the user of the installed unit.
+if [ -z "$SERVICE_USER" ] && [ "$MODE" != install ] && [ -f "$ROOT$UNIT_PATH" ]; then
+	SERVICE_USER=$(sed -n 's/^User=\(.*\)$/\1/p' "$ROOT$UNIT_PATH" | head -n 1)
+fi
 if [ -z "$SERVICE_USER" ]; then
 	invoker=${SUDO_USER:-${DOAS_USER:-}}
 	if [ -n "$invoker" ] && [ "$invoker" != root ]; then
@@ -455,7 +494,11 @@ if [ "$MODE" = uninstall ]; then
 		run rm -f "$ROOT$UNIT_PATH"
 		run systemctl daemon-reload
 	fi
-	run rm -f "$ROOT$BIN_PATH"
+	run rm -f "$ROOT$BIN_PATH" "$ROOT$BIN_PATH.new" "$ROOT$BIN_PATH.prev" \
+		"$ROOT$BIN_PATH.pending" "$ROOT$BIN_PATH.failed" "$ROOT$LINK_PATH"
+	if [ -d "$ROOT$BIN_DIR" ]; then
+		run rmdir "$ROOT$BIN_DIR" || warn "$BIN_DIR is not empty: it stays"
+	fi
 	old=$(config_name)
 	if [ "$PURGE" = 1 ]; then
 		run rm -rf "$ROOT$CONFIG_DIR"
@@ -471,11 +514,16 @@ URL=${URL:-$DEFAULT_URL}
 check_url "daemon URL" "$URL"
 
 if [ "$MODE" = upgrade ]; then
-	[ -e "$ROOT$BIN_PATH" ] || [ -e "$ROOT$CONFIG_PATH" ] ||
+	[ -e "$ROOT$BIN_PATH" ] || [ -e "$ROOT$LINK_PATH" ] || [ -e "$ROOT$CONFIG_PATH" ] ||
 		die "terrarium-host is not installed here: run without --upgrade"
-	note "upgrade terrarium-host (served version $SERVED_VERSION); keep the config and the token"
+	service_ids
+	note "upgrade terrarium-host (served version $SERVED_VERSION) for $SERVICE_USER; keep the config and the token"
 	install_binary
 	if [ "$SYSTEMD" = yes ] && [ -e "$ROOT$UNIT_PATH" ]; then
+		# The unit of an older install runs /usr/local/bin/terrarium-host
+		# and has no self-update guard: write the current one.
+		render_unit | write_file "$UNIT_PATH" 0644 root root
+		run systemctl daemon-reload
 		run systemctl restart $UNIT_NAME
 	else
 		note "restart the host agent to use the new binary"
@@ -530,13 +578,7 @@ else
 	HOST_URL=$(sed -n 's/^daemon_url = "\(.*\)"$/\1/p' "$ROOT$CONFIG_PATH" | head -n 1)
 fi
 
-if user_exists "$SERVICE_USER"; then
-	SERVICE_GROUP=$(id -gn "$SERVICE_USER")
-	SERVICE_HOME=$(user_home "$SERVICE_USER")
-else
-	SERVICE_GROUP=$SERVICE_USER
-	SERVICE_HOME=/var/lib/$UNIT_NAME
-fi
+service_ids
 
 DOCKER=no
 on_service_path docker && DOCKER=yes

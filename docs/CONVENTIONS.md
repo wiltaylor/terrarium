@@ -123,10 +123,15 @@ it needs real logins.
 
 ## Install and release
 
-The repo is private, so CI pushes no image to a registry. A release (a
-`release: true` or `pre-release: true` trailer on `main`) makes a tag, a
-GitHub release, and the `terrarium-host` asset only. A server builds its
-own image from the source: the `deploy` module (`.just/deploy/mod.just`,
+A release (a `release: true` or `pre-release: true` trailer on `main`)
+pushes the image `ghcr.io/wiltaylor/terrarium:<version>` (and `:latest`
+or `:pre`) with a build provenance attestation, and makes a tag and a
+GitHub release with the `terrarium-host` asset and `SHA256SUMS`
+([release.md](release.md)). The asset comes out of the image, so it is
+the binary that the daemon serves for the host agent self-update. Pin
+each action in `.github/workflows/` to a full commit SHA with a version
+comment, and give each job the least `permissions:`. For development, a
+server builds its own image from the source: the `deploy` module (`.just/deploy/mod.just`,
 `scripts/deploy.py`, tests in `scripts/test_deploy.py`) sends the source
 with `git archive` over ssh, builds the image on the target, and swaps the
 code dirs only after a good build (PLAN §23.6,

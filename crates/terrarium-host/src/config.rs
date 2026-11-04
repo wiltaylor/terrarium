@@ -84,6 +84,10 @@ pub struct Config {
     /// time. The daemon enforces it (`429 rate_limited`).
     #[serde(default = "default_max_running_targets")]
     pub max_running_targets: u32,
+    /// Replace this binary with the daemon's build when the daemon offers
+    /// it (docs/host-protocol.md, "Self-update"). Default: true.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
     /// Target displays (`[display]`): the opt-in for `desktop` targets.
     #[serde(default)]
     pub display: DisplayConfig,
@@ -160,6 +164,9 @@ pub const DEFAULT_MAX_RUNNING_TARGETS: u32 = 4;
 
 fn default_max_running_targets() -> u32 {
     DEFAULT_MAX_RUNNING_TARGETS
+}
+fn default_true() -> bool {
+    true
 }
 fn default_git() -> String {
     "git".into()
@@ -255,6 +262,7 @@ impl Default for Config {
             instances_dir: None,
             repos_dir: None,
             max_running_targets: default_max_running_targets(),
+            auto_update: true,
             display: DisplayConfig::default(),
         }
     }
@@ -509,6 +517,9 @@ allowed_cwd_roots = ["/home/alice/labs", "/srv/build"]
         assert_eq!(c.buffer_limit_bytes, DEFAULT_BUFFER_LIMIT);
         assert_eq!(c.docker_bin, "docker");
         assert_eq!(c.allowed_cwd_roots.as_ref().map(Vec::len), Some(2));
+        assert!(c.auto_update, "self-update is on by default");
+        let off = Config::parse("auto_update = false", Path::new("x")).unwrap();
+        assert!(!off.auto_update);
         let back = Config::parse(&toml::to_string(&c).unwrap(), Path::new("x")).unwrap();
         assert_eq!(back, c);
     }

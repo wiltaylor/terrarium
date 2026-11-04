@@ -37,7 +37,12 @@ REPO = Path(__file__).resolve().parent.parent
 CONFIG_DIR = "/etc/terrarium-host"
 CONFIG_PATH = f"{CONFIG_DIR}/config.toml"
 TOKEN_PATH = f"{CONFIG_DIR}/token"
-BIN_PATH = "/usr/local/bin/terrarium-host"
+# The binary is the service user's, so the agent can replace itself
+# (docs/host-protocol.md, "Self-update"). The command on PATH is a symlink
+# to it; an older install had a root binary there, and a new run replaces it.
+BIN_DIR = "/var/lib/terrarium-host/bin"
+BIN_PATH = f"{BIN_DIR}/terrarium-host"
+LINK_PATH = "/usr/local/bin/terrarium-host"
 UNIT_PATH = "/etc/systemd/system/terrarium-host.service"
 UNIT_NAME = "terrarium-host"
 HOST_PORT = 8082
@@ -287,7 +292,14 @@ def setup_cmd(s: Settings, state: RemoteState, write_config: bool) -> list[str]:
             f"--create-home --shell /usr/sbin/nologin {u}"
         )
     steps += [
-        f"install -m 0755 -o root -g root {STAGE_BIN} {BIN_PATH}",
+        # The service user owns the binary and its directory: the agent
+        # writes <binary>.new, .prev, and .pending there when it updates.
+        f"mkdir -p {BIN_DIR.rsplit('/', 1)[0]}",
+        f"install -d -m 0755 -o {u} -g {u} {BIN_DIR}",
+        f"install -m 0755 -o {u} -g {u} {STAGE_BIN} {BIN_PATH}",
+        # A binary installed by hand ends a self-update in flight.
+        f"rm -f {BIN_PATH}.pending {BIN_PATH}.failed",
+        f"ln -sfn {BIN_PATH} {LINK_PATH}",
         f"install -m 0644 -o root -g root {STAGE_UNIT} {UNIT_PATH}",
         # `%h` in a system unit is root's home: write the service user's.
         f'h=$(getent passwd {u} | cut -d: -f6) && sed -i "/^Environment=PATH=/s|%h|$h|g" {UNIT_PATH}',

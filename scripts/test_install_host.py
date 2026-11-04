@@ -14,6 +14,7 @@ Run: uv run python -m unittest discover -s scripts -p 'test_*.py'
 from __future__ import annotations
 
 import hashlib
+import os
 import importlib.util
 import shutil
 import stat
@@ -34,6 +35,8 @@ hi = importlib.util.module_from_spec(_spec)
 sys.modules["host_install"] = hi
 _spec.loader.exec_module(hi)
 
+BIN = "/var/lib/terrarium-host/bin/terrarium-host"
+LINK = "/usr/local/bin/terrarium-host"
 TOKEN = "the_" + "ab" * 32
 PIN = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
 
@@ -168,7 +171,11 @@ class Harness:
     def calls(self) -> list[str]:
         return [l for l in self.log.read_text().splitlines() if l]
 
-    def file(self, rel: str) -> Path:
+    def file(self, rel: str, follow: bool = True) -> Path:
+        """A path under the root. The symlink LINK points at the host path
+        BIN, so `follow` reads it as the root's BIN."""
+        if follow and rel == LINK and os.path.islink(self.root / rel.lstrip("/")):
+            rel = os.readlink(self.root / rel.lstrip("/"))
         return self.root / rel.lstrip("/")
 
 
@@ -321,7 +328,11 @@ class InstallHostScript(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNoToken(r)
         # The binary is the download, checked.
-        self.assertEqual(self.h.file("/usr/local/bin/terrarium-host").read_text(), FAKE_HOST)
+        # The binary is the service user's; the command on PATH links to it.
+        self.assertEqual(self.h.file(BIN).read_text(), FAKE_HOST)
+        self.assertEqual(os.readlink(self.h.file(LINK, follow=False)), BIN)
+        self.assertIn("chown wil:wil " + str(self.h.file(BIN + ".new")), self.h.calls())
+        self.assertIn("chown wil:wil " + str(self.h.file("/var/lib/terrarium-host/bin")), self.h.calls())
         self.assertIn("SHA-256", r.stdout)
         # The config and the token.
         config = self.h.file("/etc/terrarium-host/config.toml").read_text()
@@ -371,7 +382,8 @@ class InstallHostScript(unittest.TestCase):
         r = self.h.run("--token", TOKEN)
         self.assertEqual(r.returncode, 2)
         self.assertIn("not installed", r.stderr)
-        self.assertFalse(self.h.file("/usr/local/bin/terrarium-host").exists())
+        self.assertFalse(self.h.file(BIN).exists())
+        self.assertFalse(self.h.file(LINK, follow=False).exists())
         self.assertFalse(self.h.file("/etc/terrarium-host/token").exists())
 
     def test_unknown_arch_shows_the_daemon_message(self):
@@ -385,7 +397,7 @@ class InstallHostScript(unittest.TestCase):
         r = self.h.run("--token", TOKEN)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("no systemd", r.stdout)
-        self.assertIn("runuser -u wil -- /usr/local/bin/terrarium-host --config /etc/terrarium-host/config.toml run", r.stdout)
+        self.assertIn("runuser -u wil -- /var/lib/terrarium-host/bin/terrarium-host --config /etc/terrarium-host/config.toml run", r.stdout)
         self.assertFalse([c for c in self.h.calls() if c.startswith("systemctl")])
         self.assertFalse(self.h.file("/etc/systemd/system/terrarium-host.service").exists())
 
@@ -413,28 +425,63 @@ class InstallHostScript(unittest.TestCase):
 
     # -- upgrade and uninstall
 
-    def test_upgrade_replaces_the_binary_only(self):
+    def test_upgrade_replaces_the_binary_and_the_unit(self):
         self.assertEqual(self.h.run("--upgrade").returncode, 2)  # not installed
         self.assertEqual(self.h.run("--token", TOKEN).returncode, 0)
         newer = FAKE_HOST + "# v2\n"
         self.h.publish(newer.encode())
         cfg = self.h.file("/etc/terrarium-host/config.toml").read_text()
+        # A self-update that waits, and one that failed: a hand upgrade ends both.
+        self.h.file(BIN + ".pending").write_text("0.9.0+aaaaaaa\n")
+        self.h.file(BIN + ".failed").write_text("0.8.0+bbbbbbb\n")
         self.h.log.write_text("")
-        r = self.h.run("--upgrade")
+        r = self.h.run("--upgrade", env={"SUDO_USER": "root"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.h.file("/usr/local/bin/terrarium-host").read_text(), newer)
+        # The user of the unit, not the caller.
+        self.assertIn("for wil;", r.stdout)
+        self.assertEqual(self.h.file(BIN).read_text(), newer)
+        self.assertFalse(self.h.file(BIN + ".pending").exists())
+        self.assertFalse(self.h.file(BIN + ".failed").exists())
         self.assertEqual(self.h.file("/etc/terrarium-host/config.toml").read_text(), cfg)
         self.assertEqual(self.h.file("/etc/terrarium-host/token").read_text(), TOKEN + "\n")
-        self.assertEqual([c for c in self.h.calls() if c.startswith("systemctl")], ["systemctl restart terrarium-host"])
+        self.assertEqual(
+            [c for c in self.h.calls() if c.startswith("systemctl")],
+            ["systemctl daemon-reload", "systemctl restart terrarium-host"],
+        )
+
+    def test_upgrade_moves_an_older_install(self):
+        """An install from before self-update: a root binary in /usr/local/bin
+        and a unit that runs it. --upgrade moves both to the new layout."""
+        old_unit = UNIT.read_text().replace(BIN, LINK)
+        old_unit = "\n".join(l for l in old_unit.splitlines() if not l.startswith("ExecStartPre=")) + "\n"
+        old_unit = old_unit.replace("User=terrarium", "User=wil").replace("Group=terrarium", "Group=wil")
+        unit = self.h.file("/etc/systemd/system/terrarium-host.service")
+        unit.parent.mkdir(parents=True)
+        unit.write_text(old_unit)
+        link = self.h.file(LINK)
+        link.parent.mkdir(parents=True)
+        link.write_text("old binary")
+        r = self.h.run("--upgrade", env={"SUDO_USER": ""})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.readlink(link), BIN)
+        self.assertEqual(self.h.file(BIN).read_text(), FAKE_HOST)
+        new_unit = unit.read_text()
+        self.assertIn(f"\nExecStart={BIN} --config", new_unit)
+        self.assertIn("\nExecStartPre=-/bin/sh -c ", new_unit)
+        self.assertIn("\nUser=wil\n", new_unit)
 
     def test_uninstall_keeps_config_unless_purge(self):
         self.assertEqual(self.h.run("--token", TOKEN).returncode, 0)
         r = self.h.run("--uninstall", "--dry-run")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(self.h.file("/usr/local/bin/terrarium-host").exists())
+        self.assertTrue(self.h.file(BIN).exists())
+        self.h.file(BIN + ".prev").write_text("previous")
         r = self.h.run("--uninstall")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(self.h.file("/usr/local/bin/terrarium-host").exists())
+        self.assertFalse(self.h.file(BIN).exists())
+        self.assertFalse(self.h.file(BIN + ".prev").exists())
+        self.assertFalse(self.h.file("/var/lib/terrarium-host/bin").exists())
+        self.assertFalse(os.path.lexists(self.h.file(LINK)))
         self.assertFalse(self.h.file("/etc/systemd/system/terrarium-host.service").exists())
         self.assertTrue(self.h.file("/etc/terrarium-host/config.toml").exists())
         self.assertIn("terrarium admin host rm lab1", r.stdout)

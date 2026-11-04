@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use terrarium_host::config::{self, Config, DEFAULT_CONFIG_PATH};
-use terrarium_host::{Client, ClientOptions, capabilities, tls};
+use terrarium_host::{Client, ClientOptions, SelfUpdateOptions, capabilities, tls};
 
 /// The Terrarium host agent.
 #[derive(Debug, Parser)]
@@ -221,6 +221,8 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
         "instances_dir": paths.instances_dir,
         "repos_dir": paths.repos_dir,
         "max_running_targets": cfg.max_running_targets,
+        "auto_update": cfg.auto_update,
+        "binary": std::env::current_exe().ok(),
         "rdp_known_hosts": cfg.display.rdp_known_hosts_path(),
         "capabilities": caps,
         "tls": tls_mode,
@@ -302,6 +304,18 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
             mark(&paths.repos_dir)
         )?;
         writeln!(out, "max running targets: {}", cfg.max_running_targets)?;
+        let update = match std::env::current_exe() {
+            Ok(_) if !cfg.auto_update => "off (auto_update = false)".to_owned(),
+            Ok(bin) => match terrarium_host::selfupdate::check_writable(&bin) {
+                Ok(()) => format!("on ({})", bin.display()),
+                Err(_) => format!(
+                    "off: {} is not writable for this user (reinstall with --upgrade)",
+                    bin.parent().unwrap_or(&bin).display()
+                ),
+            },
+            Err(e) => format!("off: {e}"),
+        };
+        writeln!(out, "self-update: {update}")?;
         writeln!(
             out,
             "rdp pins:   {}",
@@ -392,6 +406,19 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     opts.allow_insecure = transport.mode == tls::TlsMode::PlainInsecure;
     opts.token_file = cfg.token_file.clone();
     opts.display = cfg.display.clone();
+    match std::env::current_exe() {
+        Ok(binary) => {
+            let supervised = std::env::var_os("INVOCATION_ID").is_some();
+            tracing::info!(binary = %binary.display(), auto_update = cfg.auto_update, systemd = supervised, "self-update settings");
+            opts.self_update = Some(SelfUpdateOptions {
+                binary,
+                enabled: cfg.auto_update,
+                supervised,
+                idle_poll: Duration::from_secs(10),
+            });
+        }
+        Err(e) => tracing::warn!(error = %e, "self-update is off: cannot find the running binary"),
+    }
     let client = Client::new(opts);
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("install the SIGTERM handler")?;

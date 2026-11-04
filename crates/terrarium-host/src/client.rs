@@ -80,6 +80,8 @@ pub struct ClientOptions {
     /// The version in `hello`: the build version
     /// ([`terrarium_version::FULL`]). Only the tests change it.
     pub version: String,
+    /// Self-update ([`crate::selfupdate`]). `None`: off.
+    pub self_update: Option<SelfUpdateOptions>,
 }
 
 impl ClientOptions {
@@ -107,6 +109,7 @@ impl ClientOptions {
             display: crate::config::DisplayConfig::default(),
             metrics_interval: Duration::from_secs(METRICS_INTERVAL_SECS),
             version: terrarium_version::FULL.to_owned(),
+            self_update: None,
         }
     }
 }
@@ -237,6 +240,29 @@ struct Shared {
     bearer: Mutex<String>,
     /// The kept VNC and RDP connections of `display` frames.
     remotes: Arc<crate::display::remote::Remotes>,
+    /// A self-update runs (only one at a time).
+    updating: std::sync::atomic::AtomicBool,
+    /// The last offered version that this process refused or failed to
+    /// install: it does not try that version again.
+    update_refused: Mutex<Option<String>>,
+    /// A self-update is in place: [`Client::run`] returns, so the process
+    /// exits and systemd starts the new binary.
+    restart: tokio::sync::Notify,
+}
+
+/// Self-update settings ([`crate::selfupdate`]). `main` sets them; a
+/// client without them never replaces a binary.
+#[derive(Debug, Clone)]
+pub struct SelfUpdateOptions {
+    /// The running binary (`current_exe`).
+    pub binary: PathBuf,
+    /// `auto_update` of the config.
+    pub enabled: bool,
+    /// systemd runs this process (`INVOCATION_ID` is set), so it starts
+    /// the new binary after the exit.
+    pub supervised: bool,
+    /// How often to look for a moment with no session.
+    pub idle_poll: Duration,
 }
 
 /// The host agent's client. Cheap to clone.
@@ -253,6 +279,9 @@ impl Client {
             resume_token: Mutex::new(None),
             bearer: Mutex::new(opts.token.clone()),
             remotes: crate::display::remote::Remotes::new(opts.display.rdp_known_hosts_path()),
+            updating: std::sync::atomic::AtomicBool::new(false),
+            update_refused: Mutex::new(None),
+            restart: tokio::sync::Notify::new(),
         };
         Self {
             opts: Arc::new(opts),
@@ -324,16 +353,28 @@ impl Client {
         self.sessions().len()
     }
 
-    /// Dial, serve, and redial for ever.
+    /// Dial, serve, and redial for ever. Returns when the transport is
+    /// refused, or when a self-update put a new binary in place (then the
+    /// caller exits, and systemd starts the new binary).
     pub async fn run(self) {
         ensure_crypto_provider();
         let gc = tokio::spawn(self.clone().reap_detached());
+        let shared = self.shared.clone();
+        tokio::select! {
+            () = self.dial_loop() => {}
+            () = shared.restart.notified() => {
+                tracing::info!("self-update: the new binary is in place; exiting so that systemd starts it");
+            }
+        }
+        gc.abort();
+    }
+
+    async fn dial_loop(self) {
         let mut backoff = Backoff::new(self.opts.backoff_min, self.opts.backoff_max);
         loop {
             match self.connect_once().await {
                 Err(ClientError::Insecure(e)) => {
                     tracing::error!(error = %e, "not connecting");
-                    gc.abort();
                     return;
                 }
                 Ok(()) => {
@@ -345,9 +386,6 @@ impl Client {
             let delay = backoff.next_delay();
             tracing::info!(?delay, "reconnecting");
             tokio::time::sleep(delay).await;
-            if gc.is_finished() {
-                tracing::error!("session reaper stopped");
-            }
         }
     }
 
@@ -376,7 +414,121 @@ impl Client {
             max_sessions: self.opts.max_sessions,
             max_running_targets: Some(self.opts.max_running_targets),
             resume,
+            update_failed: self
+                .opts
+                .self_update
+                .as_ref()
+                .and_then(|s| crate::selfupdate::failed_version(&s.binary)),
         }
+    }
+
+    /// After a `welcome`: confirm a pending self-update, and take a new
+    /// offer.
+    fn after_welcome(&self, welcome: &Welcome) {
+        let Some(su) = &self.opts.self_update else {
+            return;
+        };
+        if let Some(v) = crate::selfupdate::confirm(&su.binary) {
+            tracing::info!(
+                version = %v,
+                binary = %su.binary.display(),
+                "self-update: the new binary reached the daemon; the previous one stays as .prev"
+            );
+        }
+        let Some(offer) = welcome.update.clone() else {
+            return;
+        };
+        let refused = self
+            .shared
+            .update_refused
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if refused.as_deref() == Some(offer.version.as_str()) {
+            return;
+        }
+        let failed = crate::selfupdate::failed_version(&su.binary);
+        if let Err(why) = crate::selfupdate::decide(
+            &offer,
+            &self.opts.version,
+            su.enabled,
+            su.supervised,
+            failed.as_deref(),
+        ) {
+            tracing::warn!(offered = %offer.version, own = %self.opts.version, "self-update: not updating: {why}");
+            self.refuse_update(&offer.version);
+            return;
+        }
+        if self
+            .shared
+            .updating
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let client = self.clone();
+        let su = su.clone();
+        tokio::spawn(async move {
+            let version = offer.version.clone();
+            match client.self_update(&su, &offer).await {
+                Ok(()) => client.shared.restart.notify_one(),
+                Err(e) => {
+                    tracing::error!(offered = %version, error = %e, "self-update failed; this binary keeps running");
+                    client.refuse_update(&version);
+                    client
+                        .shared
+                        .updating
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+    }
+
+    fn refuse_update(&self, version: &str) {
+        *self
+            .shared
+            .update_refused
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(version.to_owned());
+    }
+
+    /// Download, check, and stage the offered binary; wait for a moment
+    /// with no session; then swap it in.
+    async fn self_update(
+        &self,
+        su: &SelfUpdateOptions,
+        offer: &crate::protocol::UpdateOffer,
+    ) -> Result<(), crate::selfupdate::UpdateError> {
+        use crate::selfupdate as u;
+        u::check_writable(&su.binary)?;
+        let url = u::http_url(&self.opts.url, &offer.path)?;
+        tracing::info!(offered = %offer.version, own = %self.opts.version, %url, "self-update: downloading the daemon's build");
+        let data = tokio::time::timeout(
+            u::DOWNLOAD_TIMEOUT,
+            u::download(&url, self.opts.tls.clone(), u::MAX_BINARY_BYTES),
+        )
+        .await
+        .map_err(|_| u::UpdateError::Download {
+            url: url.clone(),
+            message: format!("timed out after {:?}", u::DOWNLOAD_TIMEOUT),
+        })??;
+        let sha = u::verify(&data, offer)?;
+        u::stage(&su.binary, &data, &offer.version).await?;
+        tracing::info!(sha256 = %sha, bytes = data.len(), "self-update: the new binary checks out");
+        let mut said = false;
+        while self.session_count() > 0 {
+            if !said {
+                tracing::info!(
+                    sessions = self.session_count(),
+                    "self-update: waiting until no session runs"
+                );
+                said = true;
+            }
+            tokio::time::sleep(su.idle_poll).await;
+        }
+        u::swap(&su.binary, &offer.version)?;
+        tracing::info!(version = %offer.version, binary = %su.binary.display(), "self-update: installed");
+        Ok(())
     }
 
     /// One connection, from dial to drop. `Ok` means the daemon welcomed us.
@@ -442,6 +594,7 @@ impl Client {
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
         self.apply_welcome(&welcome, &tx);
+        self.after_welcome(&welcome);
         // Metrics go on their own queue of one. The writer takes them only
         // when the other queue is empty, so a sample never delays a frame
         // of a session; a sample that finds the queue full is dropped.

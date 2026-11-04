@@ -21,9 +21,9 @@ On your machine, in this repository, build the image and start the stack:
 just up
 ```
 
-On a server, over ssh. The repository is private, so no image is in a
-registry: the recipe sends the source (`git archive`) and builds the image
-on the server. The server needs Docker with the compose plugin, and no
+On a server, over ssh. The recipe sends the source (`git archive`) and
+builds the image on the server. (A release also pushes an image to
+`ghcr.io/wiltaylor/terrarium`: see [docs/release.md](docs/release.md).) The server needs Docker with the compose plugin, and no
 access to the repository:
 
 ```sh

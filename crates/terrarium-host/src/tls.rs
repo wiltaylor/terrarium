@@ -170,7 +170,7 @@ pub fn url_host(url: &str) -> Option<String> {
 
 /// The port of a URL: the explicit one, else 80 for `ws`/`http` and 443
 /// for `wss`/`https`.
-fn url_port(url: &str) -> Option<u16> {
+pub fn url_port(url: &str) -> Option<u16> {
     let (scheme, rest) = url.split_once("://")?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);

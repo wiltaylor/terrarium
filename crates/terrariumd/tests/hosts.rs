@@ -310,6 +310,213 @@ async fn a_host_agent_of_another_ref_is_stale() {
     assert_eq!(v.ok()["version"], terrarium_version::FULL);
 }
 
+/// A fake host agent binary: a script that prints its version.
+fn fake_host_binary(version: &str) -> String {
+    format!("#!/bin/sh\necho 'terrarium-host {version}'\n")
+}
+
+fn write_exec(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Self-update (docs/host-protocol.md, "Self-update"): a stale host agent
+/// gets the daemon's binary in `welcome.update`, downloads it from the
+/// host listener, checks it, swaps it in, and stops; the new build then
+/// connects, and the daemon records `host.updated` and the audit
+/// `host.update`. A failed update that a host agent reports is recorded
+/// once.
+#[tokio::test]
+async fn a_stale_host_agent_updates_itself_from_the_host_listener() {
+    if terrarium_version::this().git_ref.is_none() {
+        return; // no git: nothing is stale, so nothing is offered
+    }
+    let dist = tempfile::tempdir().unwrap();
+    let served = fake_host_binary(terrarium_version::FULL);
+    write_exec(
+        &dist
+            .path()
+            .join(format!("terrarium-host-{}-linux", std::env::consts::ARCH)),
+        &served,
+    );
+    let mut td = TestDaemon::start().await;
+    td.web.install.dist_dir = dist.path().to_owned();
+    td.boot(None, None).await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
+        .await
+        .unwrap();
+
+    // The host listener serves the binary and its SHA-256.
+    let raw = {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(
+            format!(
+                "GET /install/terrarium-host.sha256?arch={} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+                std::env::consts::ARCH
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut b = Vec::new();
+        s.read_to_end(&mut b).await.unwrap();
+        b
+    };
+    let body = terrarium_host::selfupdate::parse_response(&raw).unwrap();
+    assert!(
+        String::from_utf8(body)
+            .unwrap()
+            .starts_with(&sha(served.as_bytes()))
+    );
+
+    let r = td.post("/api/hosts", json!({"name": "upd"})).await;
+    let token = r.body["token"].as_str().unwrap().to_owned();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let bin = bin_dir.path().join("terrarium-host");
+    let old = fake_host_binary("0.0.9+0000000");
+    write_exec(&bin, &old);
+    let options = |version: &str| {
+        let mut o = ClientOptions::new(format!("ws://{addr}/hosts/connect"), &token, "upd");
+        o.version = version.into();
+        o.backoff_min = Duration::from_millis(50);
+        o.backoff_max = Duration::from_millis(200);
+        o.self_update = Some(terrarium_host::SelfUpdateOptions {
+            binary: bin.clone(),
+            enabled: true,
+            supervised: true,
+            idle_poll: Duration::from_millis(20),
+        });
+        o
+    };
+    // The old build updates itself, and its run ends.
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        Client::new(options("0.0.9+0000000")).run(),
+    )
+    .await
+    .expect("the host agent stops after the update");
+    use terrarium_host::selfupdate::{PENDING, PREV, sidecar};
+    assert_eq!(std::fs::read_to_string(&bin).unwrap(), served);
+    assert_eq!(std::fs::read_to_string(sidecar(&bin, PREV)).unwrap(), old);
+    assert_eq!(
+        std::fs::read_to_string(sidecar(&bin, PENDING)).unwrap(),
+        format!("{}\n", terrarium_version::FULL)
+    );
+
+    // "systemd" starts the new build: it confirms the update, and the
+    // daemon records it.
+    let task = tokio::spawn(Client::new(options(terrarium_version::FULL)).run());
+    let mut found = Vec::new();
+    for _ in 0..300 {
+        found = events(&td, "host.updated").await;
+        if !found.is_empty() && !sidecar(&bin, PENDING).exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["data"]["from"], "0.0.9+0000000");
+    assert_eq!(found[0]["data"]["to"], terrarium_version::FULL);
+    assert!(!sidecar(&bin, PENDING).exists());
+    let a = last_audit(&td, "host.update").await;
+    assert_eq!(a["detail"]["to"], terrarium_version::FULL);
+    let h = td.get("/api/hosts/upd").await;
+    assert_eq!(h.ok()["stale"], false);
+    task.abort();
+
+    // A host agent that went back to its old binary says so in `hello`.
+    std::fs::write(
+        sidecar(&bin, terrarium_host::selfupdate::FAILED),
+        "0.9.9+fffffff\n",
+    )
+    .unwrap();
+    // Two links: the daemon records the failure after the first `hello`
+    // only. It writes the records before `host.connected`.
+    for _ in 0..2 {
+        let before = events(&td, "host.connected").await.len();
+        let mut o = options(terrarium_version::FULL);
+        o.self_update.as_mut().unwrap().enabled = false;
+        let task = tokio::spawn(Client::new(o).run());
+        for _ in 0..300 {
+            if events(&td, "host.connected").await.len() > before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        task.abort();
+        let _ = task.await;
+    }
+    let failed = events(&td, "host.update_failed").await;
+    assert_eq!(failed.len(), 1, "recorded once: {failed:?}");
+    assert_eq!(failed[0]["data"]["failed"], "0.9.9+fffffff");
+    let a = last_audit(&td, "host.update_failed").await;
+    assert_eq!(a["detail"]["failed"], "0.9.9+fffffff");
+}
+
+/// A host agent with a bad download (the daemon's binary does not match
+/// its own SHA-256) keeps its binary and keeps running.
+#[tokio::test]
+async fn a_self_update_with_a_wrong_checksum_changes_nothing() {
+    if terrarium_version::this().git_ref.is_none() {
+        return;
+    }
+    let dist = tempfile::tempdir().unwrap();
+    let name = format!("terrarium-host-{}-linux", std::env::consts::ARCH);
+    write_exec(
+        &dist.path().join(&name),
+        &fake_host_binary(terrarium_version::FULL),
+    );
+    std::fs::write(
+        dist.path().join(format!("{name}.sha256")),
+        format!("{}  {name}\n", "0".repeat(64)),
+    )
+    .unwrap();
+    let mut td = TestDaemon::start().await;
+    td.web.install.dist_dir = dist.path().to_owned();
+    td.boot(None, None).await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
+        .await
+        .unwrap();
+    let r = td.post("/api/hosts", json!({"name": "bad"})).await;
+    let token = r.body["token"].as_str().unwrap().to_owned();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let bin = bin_dir.path().join("terrarium-host");
+    let old = fake_host_binary("0.0.9+0000000");
+    write_exec(&bin, &old);
+    let mut o = ClientOptions::new(format!("ws://{addr}/hosts/connect"), &token, "bad");
+    o.version = "0.0.9+0000000".into();
+    o.self_update = Some(terrarium_host::SelfUpdateOptions {
+        binary: bin.clone(),
+        enabled: true,
+        supervised: true,
+        idle_poll: Duration::from_millis(20),
+    });
+    let run = tokio::spawn(Client::new(o).run());
+    // The agent stays online and its binary stays.
+    for _ in 0..300 {
+        let h = td.get("/api/hosts/bad").await;
+        if h.body["online"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !run.is_finished(),
+        "a failed update must not stop the agent"
+    );
+    assert_eq!(std::fs::read_to_string(&bin).unwrap(), old);
+    use terrarium_host::selfupdate::{NEW, PENDING, PREV, sidecar};
+    for s in [NEW, PENDING, PREV] {
+        assert!(!sidecar(&bin, s).exists(), "{s}");
+    }
+    run.abort();
+}
+
 #[tokio::test]
 async fn metrics_reach_the_host_list_and_the_history() {
     let lab = Lab::start().await;

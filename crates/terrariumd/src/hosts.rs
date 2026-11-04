@@ -202,6 +202,9 @@ struct Entry {
     /// The last thing that ended or refused a link, since the daemon
     /// started. A new link clears it.
     last_error: Option<LinkError>,
+    /// The `hello.update_failed` that this daemon recorded already, so a
+    /// reconnect does not record it again.
+    update_failed_seen: Option<String>,
 }
 
 /// Why the last link of a host failed or ended, and when.
@@ -306,6 +309,18 @@ impl HostRegistry {
             at: crate::db::now(),
             message: message.into(),
         });
+    }
+
+    /// True the first time this daemon sees `version` as the failed
+    /// self-update of `host`.
+    fn first_update_failure(&self, host: &str, version: &str) -> bool {
+        let mut g = self.lock();
+        let e = g.entry(host.to_owned()).or_default();
+        if e.update_failed_seen.as_deref() == Some(version) {
+            return false;
+        }
+        e.update_failed_seen = Some(version.to_owned());
+        true
     }
 
     /// The last link error of `host` since the daemon started.
@@ -475,6 +490,7 @@ impl HostRegistry {
                 resume,
                 token: None,
                 metrics: true,
+                update: None,
             },
             old,
             n,
@@ -970,13 +986,16 @@ impl HostListen {
     }
 }
 
-/// The router of the dial-in listener: only `/hosts/connect`.
+/// The router of the dial-in listener: `/hosts/connect`, and the host
+/// agent binary with its SHA-256 (`/install/terrarium-host[.sha256]`) for
+/// the self-update (docs/host-protocol.md, "Self-update").
 pub fn router(state: Shared) -> axum::Router {
     axum::Router::new()
         .route(
             terrarium_host::protocol::CONNECT_PATH,
             axum::routing::get(connect),
         )
+        .merge(crate::api::install::binary_routes())
         .with_state(state)
 }
 
@@ -1042,6 +1061,81 @@ async fn record(
         .await;
     if let Err(e) = r {
         warn!("cannot record a host event: {e}");
+    }
+}
+
+/// The audit and the events of a self-update (docs/host-protocol.md,
+/// "Self-update"): `host.updated` and the audit `host.update` when a host
+/// agent of another build comes back with the daemon's build;
+/// `host.update_failed` (event and audit) when it reports a new binary
+/// that did not start.
+async fn host_update_records(state: &Shared, row: &Host, hello: &Hello) {
+    let daemon = terrarium_version::FULL;
+    if let Some(old) = row.version.as_deref()
+        && old != hello.version
+        && terrarium_version::is_stale(old, daemon)
+        && !terrarium_version::is_stale(&hello.version, daemon)
+    {
+        info!(host = %row.name, from = %old, to = %hello.version, "the host agent updated to the daemon's build");
+        let (name, id, from, to) = (
+            row.name.clone(),
+            row.id.clone(),
+            old.to_owned(),
+            hello.version.clone(),
+        );
+        record(
+            state,
+            EventDraft::new(
+                "host.updated",
+                format!("host {} updated to {}", row.name, hello.version),
+                json!({"host": row.name, "host_id": row.id, "from": old, "to": hello.version}),
+            ),
+            move |t| {
+                t.audit(
+                    "host.update",
+                    &name,
+                    None,
+                    json!({"host_id": id, "from": from, "to": to}),
+                )
+            },
+        )
+        .await;
+    }
+    if let Some(failed) = hello.update_failed.as_deref()
+        && state.executor.hosts.first_update_failure(&row.name, failed)
+    {
+        warn!(
+            host = %row.name,
+            failed,
+            running = %hello.version,
+            "the new host agent binary did not start; the host went back to the previous binary"
+        );
+        let (name, id, failed2, running) = (
+            row.name.clone(),
+            row.id.clone(),
+            failed.to_owned(),
+            hello.version.clone(),
+        );
+        record(
+            state,
+            EventDraft::new(
+                "host.update_failed",
+                format!(
+                    "host {}: the update to {failed} did not start; it runs {} again",
+                    row.name, hello.version
+                ),
+                json!({"host": row.name, "host_id": row.id, "failed": failed, "running": hello.version}),
+            ),
+            move |t| {
+                t.audit(
+                    "host.update_failed",
+                    &name,
+                    None,
+                    json!({"host_id": id, "failed": failed2, "running": running}),
+                )
+            },
+        )
+        .await;
     }
 }
 
@@ -1162,6 +1256,14 @@ async fn serve_link(
         }
     };
     let enrolled = new_token.is_some();
+    // A host agent of another build gets this daemon's binary
+    // (docs/host-protocol.md, "Self-update").
+    let stale = terrarium_version::is_stale(&hello.version, terrarium_version::FULL);
+    let offer = if stale {
+        crate::api::install::update_offer(&state.web.install.dist_dir, &hello.arch).await
+    } else {
+        None
+    };
     let conn_id = reg
         .next_conn
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1181,6 +1283,7 @@ async fn serve_link(
         ))));
     }
     welcome.token = new_token;
+    welcome.update = offer;
     match encode_control(&DaemonFrame::Welcome(welcome.clone())) {
         Ok(t) => {
             if socket.send(WsMessage::Text(t.into())).await.is_err() {
@@ -1194,14 +1297,25 @@ async fn serve_link(
         }
     }
     info!(host = %row.name, resumed, enrolled, peer = peer.as_deref().unwrap_or("-"), "host agent connected");
-    if terrarium_version::is_stale(&hello.version, terrarium_version::FULL) {
-        warn!(
-            host = %row.name,
-            version = %hello.version,
-            daemon = terrarium_version::FULL,
-            "the host agent is built from another ref than the daemon: reinstall it"
-        );
+    if stale {
+        match &welcome.update {
+            Some(o) => info!(
+                host = %row.name,
+                version = %hello.version,
+                daemon = terrarium_version::FULL,
+                sha256 = %o.sha256,
+                "the host agent is built from another ref than the daemon: offered it the daemon's build"
+            ),
+            None => warn!(
+                host = %row.name,
+                version = %hello.version,
+                daemon = terrarium_version::FULL,
+                "the host agent is built from another ref than the daemon, and this daemon has no \
+                 terrarium-host binary for its arch to offer: reinstall it"
+            ),
+        }
     }
+    host_update_records(&state, &row, &hello).await;
     let caps = serde_json::to_value(&hello.capabilities).unwrap_or(Value::Null);
     let summary = hello.capabilities.summary(&hello.os, &hello.arch);
     {

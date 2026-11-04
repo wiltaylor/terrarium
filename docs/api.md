@@ -3964,6 +3964,8 @@ Kinds:
 | `schedule` | `{change, schedule, name, project, run?, status?, trigger?}`. `change` is `created`, `updated`, `deleted`, `enabled`, `disabled`, `run_started`, or `run_finished`. `schedule` is the schedule ULID. A run event has `run`, `status`, and `trigger` (§19). |
 | `harness` | `{change, harness, package, from, to, forced}`. `change` is `updated`: an update in the tools dir (§4, `POST /api/harnesses/{name}/update`); `auto_updated`: an install of the auto-update check; `pinned` or `unpinned`: a pin or an unpin (§4, "Auto-update and pins"; `unpinned` has `was` in place of `from` and `to`). |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
+| `host.updated` | `{host, host_id, from, to}`: a host agent that was stale connected with the daemon's build (a self-update or a reinstall). The audit entry is `host.update`. |
+| `host.update_failed` | `{host, host_id, failed, running}`: the self-update to `failed` did not start, and the host agent runs `running` again. One time for each version while the daemon runs. The audit entry is `host.update_failed`. |
 | `event_source` | `{change, source, name, key, kind, enabled}` after a change of an event source (§20). |
 | `system_prompt` | `{change, name, path}` after a write through the API of the system prompt library (§28). `change` is `created`, `updated`, or `deleted`. An edit of a file by hand gives no event. |
 | `test_run` | `{change, project, id, name, counts, cards, versions}` after a change of a test run (§29). `change` is `created`, `linked`, `unlinked`, or `deleted`. `cards` are card IDs and `versions` are version names. |
@@ -5223,9 +5225,14 @@ Rules:
   (`0.1.0+6e31754`, §4 `GET /api/system/version`). `stale` is `true` when
   that build is from another commit or crate version than the daemon's
   (the `-dirty` mark does not count), or when the host agent sends no ref
-  (an older build). Reinstall a stale host agent (§17.9). `stale` is `false`
-  when the daemon does not know its own ref, or before the first `hello`.
-  The daemon also logs a warning when a stale host agent connects.
+  (an older build). `stale` is `false` when the daemon does not know its
+  own ref, or before the first `hello`. The daemon offers a stale host
+  agent its own build, and the host agent replaces itself
+  ([host-protocol.md, "Self-update"](host-protocol.md#self-update)). The
+  event `host.updated` and the audit entry `host.update` record the
+  update; `host.update_failed` (event and audit) records a new binary that
+  did not start. An agent from before self-update, or one with
+  `auto_update = false`, stays stale: reinstall it (§17.9).
 - `first_used_at` is the first connect with the current token (a rotate
   clears it). `last_used_at` and `last_used_from` are the last connect and
   its TCP peer as the daemon sees it (a reverse proxy shows as itself).
@@ -6003,7 +6010,10 @@ The daemon serves the installer of the host agent on the dashboard port
 (`TERRARIUM_LISTEN`) and on the Unix socket. The routes are outside `/api`,
 so they need no token, as the dashboard assets need none. They hold no
 secret. The enrol token comes only from `POST /api/hosts` (§17.1). The host
-listener and the ingest listener do not serve these routes.
+listener serves the binary and its SHA-256 (not the script), for the
+self-update of host agents
+([host-protocol.md, "Self-update"](host-protocol.md#self-update)). The
+ingest listener does not serve these routes.
 
 | Endpoint | Answer |
 |---|---|
@@ -6024,6 +6034,10 @@ Rules:
   `terrarium-host` when the arch is the daemon's own (the output of
   `just host::build`). No binary gets `404`. The SHA-256 comes from the
   `.sha256` file next to the binary, else the daemon hashes the binary.
+  In the release image the binary is the release asset (docs/release.md).
+  An optional `SHA256SUMS` in the dist dir (the file of a release) adds
+  `release_sha256` to the self-update offer, and the daemon offers no
+  binary that does not match it.
 - The script gets these defaults. A value with a character outside
   letters, digits, and `:/._-[]%~` is left out:
   - The daemon URL for the downloads: `TERRARIUM_PUBLIC_URL`, unless it

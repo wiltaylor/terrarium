@@ -180,6 +180,12 @@ pub struct Hello {
     /// Present when the host agent reconnects and has a resume token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<Resume>,
+    /// The version of a self-update that did not start, so the host agent
+    /// went back to the previous binary (docs/host-protocol.md, "Self-update").
+    /// The host agent does not take that version again. Absent from an older
+    /// host agent, and when no update failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_failed: Option<String>,
 }
 
 /// The resume offer in `hello`.
@@ -226,6 +232,29 @@ pub struct Welcome {
     /// that the daemon does not know.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub metrics: bool,
+    /// A new binary for a host agent of another build (`stale`): the host
+    /// agent downloads it, checks it, and replaces itself
+    /// (docs/host-protocol.md, "Self-update"). An older host agent ignores
+    /// the field. An older daemon does not send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateOffer>,
+}
+
+/// The update offer in `welcome`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateOffer {
+    /// The build version of the offered binary: the daemon's own.
+    pub version: String,
+    /// The path of the binary on the host listener, for example
+    /// `/install/terrarium-host?arch=x86_64`. The host agent fetches it
+    /// from the host of its `daemon_url`, with the same TLS settings.
+    pub path: String,
+    /// The SHA-256 of the binary, lower-case hex.
+    pub sha256: String,
+    /// The SHA-256 of the binary in the `SHA256SUMS` of the release, when
+    /// the daemon has that file. The host agent checks it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1309,6 +1338,7 @@ mod tests {
                     finished: false,
                 }],
             }),
+            update_failed: Some("0.2.0+abc1234".into()),
         }));
         for f in [
             hello,
@@ -1423,13 +1453,45 @@ mod tests {
             resume: vec![],
             token: None,
             metrics: true,
+            update: None,
         });
         let v: serde_json::Value = serde_json::from_str(&encode_control(&on).unwrap()).unwrap();
         assert_eq!(v["metrics"], true);
+        assert!(v.get("update").is_none());
         // An older host agent sends no `metrics` capability.
         let caps: HostCapabilities =
             serde_json::from_str(r#"{"docker":{"present":true}}"#).unwrap();
         assert!(!caps.metrics);
+    }
+
+    #[test]
+    fn welcome_update_offer_round_trips() {
+        let w = DaemonFrame::Welcome(Welcome {
+            host_id: "h".into(),
+            heartbeat_secs: 15,
+            resume_token: "r".into(),
+            resume: vec![],
+            token: None,
+            metrics: false,
+            update: Some(UpdateOffer {
+                version: "0.3.0+abc1234".into(),
+                path: "/install/terrarium-host?arch=x86_64".into(),
+                sha256: "ab".repeat(32),
+                release_sha256: None,
+            }),
+        });
+        let t = encode_control(&w).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+        assert_eq!(v["update"]["version"], "0.3.0+abc1234");
+        assert!(v["update"].get("release_sha256").is_none());
+        assert_eq!(decode_control::<DaemonFrame>(&t).unwrap(), w);
+        // An older host agent's hello has no `update_failed`.
+        let h: HostFrame = decode_control(
+            r#"{"type":"hello","protocol":1,"host":"a","version":"0.1.0","os":"linux",
+                "arch":"x86_64","capabilities":{},"max_sessions":4}"#,
+        )
+        .unwrap();
+        assert!(matches!(&h, HostFrame::Hello(h) if h.update_failed.is_none()));
     }
 
     #[test]
