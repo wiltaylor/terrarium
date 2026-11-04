@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use common::TestDaemon;
 use serde_json::{Value, json};
-use terrarium_core::{AgentId, HarnessId};
 use terrarium_core::config::{CompactMaxAge, IdleStop};
+use terrarium_core::{AgentId, HarnessId};
 use terrariumd::lifecycle::Tuning;
 use terrariumd::reset::RunGuard;
 use terrariumd::supervisor::FakeCompact;
@@ -561,7 +561,10 @@ async fn a_queued_compaction_that_cannot_run_is_dropped_with_a_trace() {
     assert_eq!(data["kind"], "compact", "{data}");
     assert_eq!(data["by"], "p/lead", "{data}");
     assert_eq!(data["then_set"], true, "{data}");
-    assert_eq!(data["reason"], "auto compact not supported for claude", "{data}");
+    assert_eq!(
+        data["reason"], "auto compact not supported for claude",
+        "{data}"
+    );
     prompted(
         &td,
         &w,

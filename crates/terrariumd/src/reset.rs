@@ -517,7 +517,10 @@ async fn note_dropped(state: &Shared, id: AgentId, p: &PendingReset, reason: &st
             t.emit(
                 EventDraft::new(
                     "agent.reset",
-                    format!("{}: {what} requested by {by} dropped: {reason}", v.agent.name),
+                    format!(
+                        "{}: {what} requested by {by} dropped: {reason}",
+                        v.agent.name
+                    ),
                     json!({"kind": kind, "by": by, "then_set": then_set,
                            "state": "dropped", "reason": reason}),
                 )
