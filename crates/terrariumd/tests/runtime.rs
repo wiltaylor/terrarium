@@ -34,8 +34,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const WAIT: Duration = Duration::from_secs(15);
-/// The lead nudge rate limit in these tests.
-const LEAD_NUDGE: Duration = Duration::from_secs(2);
+/// The lead nudge rate limit in these tests. Long enough that the requests
+/// a test makes inside one interval fit in it on a loaded machine.
+const LEAD_NUDGE: Duration = Duration::from_secs(4);
 
 fn fake_tui() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../terrarium-runner/tests/fake_tui/fake_tui.py")
@@ -1105,18 +1106,13 @@ async fn board_changes_nudge_the_project_leads() {
         )
         .await;
     let c1 = c1["id"].as_str().unwrap().to_owned();
-    let starts = td.wait_events(&lead, "turn_start", |e| !e.is_empty()).await;
-    assert_eq!(
-        starts[0]["data"]["prompt"],
-        format!(
-            "[System:nudge] New card {c1} in ready: Ship it…. Run `terrarium card ls --unassigned --column ready`."
-        )
-        .as_str()
-    );
 
     // Inside the rate limit: bob moves his card to review, and the
     // operator blocks another card. One pointer carries both, at the end
-    // of the interval.
+    // of the interval. The moves come at once, before the wait for the
+    // first pointer: on a loaded machine that wait alone can last most of
+    // an interval. The daemon handles the card events in order, so the
+    // first flush always comes before these two.
     as_bob(format!("/api/cards/{cb}/move"), json!({"column": "review"})).await;
     td.post(
         &format!("/api/cards/{c2}/move"),
@@ -1124,6 +1120,13 @@ async fn board_changes_nudge_the_project_leads() {
     )
     .await;
     let starts = td.wait_events(&lead, "turn_start", |e| e.len() >= 2).await;
+    assert_eq!(
+        starts[0]["data"]["prompt"],
+        format!(
+            "[System:nudge] New card {c1} in ready: Ship it…. Run `terrarium card ls --unassigned --column ready`."
+        )
+        .as_str()
+    );
     // The batch goes out one full interval after the first flush at the
     // earliest, and that flush came after `first`. Slow requests cannot make
     // this fail; a batch that does not wait fails it on a normal machine.
