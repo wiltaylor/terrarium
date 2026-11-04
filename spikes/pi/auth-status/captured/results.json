@@ -42,9 +42,9 @@
       "stdout": "{\"status\":\"ready\",\"provider\":\"vllm\",\"authType\":\"api_key\"}",
       "stderr": ""
     },
-    "qwen38-helios": {
+    "qwen38-lan": {
       "rc": 0,
-      "stdout": "{\"status\":\"ready\",\"provider\":\"qwen38-helios\",\"authType\":\"api_key\"}",
+      "stdout": "{\"status\":\"ready\",\"provider\":\"qwen38-lan\",\"authType\":\"api_key\"}",
       "stderr": ""
     }
   },
@@ -89,9 +89,9 @@
       "stdout": "{\"status\":\"not_ready\",\"provider\":\"vllm\",\"reason\":\"provider_not_found\"}",
       "stderr": ""
     },
-    "qwen38-helios": {
+    "qwen38-lan": {
       "rc": 1,
-      "stdout": "{\"status\":\"not_ready\",\"provider\":\"qwen38-helios\",\"reason\":\"provider_not_found\"}",
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"qwen38-lan\",\"reason\":\"provider_not_found\"}",
       "stderr": ""
     }
   },

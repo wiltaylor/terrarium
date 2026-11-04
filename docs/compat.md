@@ -1132,7 +1132,7 @@ it connects, and never blocks pi. `TERRARIUM_EVENT_LOG` adds a file copy.
 | Provider | Result | Status |
 |---|---|---|
 | `~/.pi/agent/auth.json` | `{}`: no OAuth or API-key entries | verified |
-| LAN providers (`glm53-exl3`, `vllm`, `qwen38-helios`) | `auth check` says `ready` (`api_key` from `models.json`). `vllm` and `qwen38-helios` refused connections. `glm53-exl3` answered one `/v1/models` probe (it serves `DeepSeek-V4.1-Flash-1017`, not the configured `GLM-5.3-Flash-EXL3`) and then went down before the first turn. | verified |
+| LAN providers (`glm53-exl3`, `vllm`, `qwen38-lan`) | `auth check` says `ready` (`api_key` from `models.json`). `vllm` and `qwen38-lan` refused connections. `glm53-exl3` answered one `/v1/models` probe (it serves `DeepSeek-V4.1-Flash-1017`, not the configured `GLM-5.3-Flash-EXL3`) and then went down before the first turn. | verified |
 | `anthropic` with `ANTHROPIC_OAUTH_TOKEN` = Claude Code's access token | `auth check` says `ready` (`api_key`). The API **refused** the call: `400 … "You're out of extra usage."` pi's docs say third-party harness use of Claude Pro/Max draws from extra usage, not the plan limits. | verified (1 request) |
 | `openai-codex` with a copy of `~/.codex/auth.json` | Works. The `auth.json` entry is `{"type": "oauth", "access": <access_token>, "refresh": "", "expires": <JWT exp ms>, "accountId": <chatgpt_account_id>}`. The refresh token is left empty, so pi can never rotate the host's Codex refresh token; the entry fails when the access token expires (73 h left at the test). | verified |
 | `github-copilot`, `google`, `xai`, `openrouter` | `not_ready`, `credentials_not_configured` | verified |
@@ -2108,7 +2108,7 @@ give the subscription to those harnesses. These server facts are from
 the servers' docs, not verified here.
 
 The operator's LAN providers from the pi spike (§ "pi 0.85.1", "Auth and
-token reuse": `glm53-exl3`, `vllm`, `qwen38-helios`) are the obvious
+token reuse": `glm53-exl3`, `vllm`, `qwen38-lan`) are the obvious
 first live check: one OpenAI-style subscription per server, a pi agent
 with one short turn, and `terrarium admin subscription fetch-models
 --subscription <name>`.

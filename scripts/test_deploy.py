@@ -67,8 +67,8 @@ def fake_git(dirty: bool = False, commits: dict[str, str] | None = None, files: 
 
 def probe_out(**kw) -> str:
     base = {
-        "dir": "/home/wil/terrarium", "user": "wil", "uid": "1000", "gid": "1000",
-        "groups": "wil docker", "arch": "x86_64", "docker": "/usr/bin/docker",
+        "dir": "/home/alice/terrarium", "user": "alice", "uid": "1000", "gid": "1000",
+        "groups": "alice docker", "arch": "x86_64", "docker": "/usr/bin/docker",
         "docker_access": "yes", "compose": "2.29.1", "git": "/usr/bin/git",
         "curl": "/usr/bin/curl", "free_kb": str(50 * 1024 * 1024),
     }
@@ -291,8 +291,8 @@ class Preflight(unittest.TestCase):
         self.assertTrue(any("get.docker.com" in t for t in r["error"]), r)
 
     def test_not_in_the_docker_group(self):
-        r = self.levels(docker_access="no", groups="wil")
-        self.assertTrue(any("sudo usermod -aG docker wil" in t for t in r["error"]), r)
+        r = self.levels(docker_access="no", groups="alice")
+        self.assertTrue(any("sudo usermod -aG docker alice" in t for t in r["error"]), r)
 
     def test_docker_daemon_down(self):
         r = self.levels(docker_access="no")
@@ -325,17 +325,17 @@ class Preflight(unittest.TestCase):
         self.assertTrue(any("root" in t for t in self.levels(uid="0")["error"]))
 
     def test_parse_probe(self):
-        p = dp.parse_probe(probe_out(extra=EXISTING + ["project=terrarium /home/wil/dev/terrarium"]))
+        p = dp.parse_probe(probe_out(extra=EXISTING + ["project=terrarium /home/alice/dev/terrarium"]))
         self.assertEqual(p.has, {"src", "src.prev", ".env"})
         self.assertEqual(p.env_port, "9090")
         self.assertEqual(p.refs["src.prev.ref"], "d" * 40)
         self.assertEqual(p.refs["src.image"], "terrarium-deploy:eeeeeeeeeeee")
-        self.assertEqual(p.projects, [("terrarium", "/home/wil/dev/terrarium")])
+        self.assertEqual(p.projects, [("terrarium", "/home/alice/dev/terrarium")])
 
 
 class Names(unittest.TestCase):
     def test_project_name(self):
-        self.assertEqual(dp.project_name("/home/wil/terrarium"), "terrarium-deploy")
+        self.assertEqual(dp.project_name("/home/alice/terrarium"), "terrarium-deploy")
         self.assertEqual(dp.project_name("/tmp/tt-deploy"), "terrarium-tt-deploy")
         self.assertEqual(dp.project_name("/srv/terrarium-prod"), "terrarium-prod")
         self.assertEqual(dp.project_name("/srv/My App"), "terrarium-my-app")
@@ -343,9 +343,9 @@ class Names(unittest.TestCase):
     def test_project_of_another_dir_is_refused(self):
         p = dp.parse_probe(probe_out(extra=["project=terrarium-deploy /other/src"]))
         with self.assertRaisesRegex(dp.DeployError, "belongs to /other/src"):
-            dp.check_project(p, "terrarium-deploy", "/home/wil/terrarium")
-        p = dp.parse_probe(probe_out(extra=["project=terrarium-deploy /home/wil/terrarium/src"]))
-        dp.check_project(p, "terrarium-deploy", "/home/wil/terrarium")
+            dp.check_project(p, "terrarium-deploy", "/home/alice/terrarium")
+        p = dp.parse_probe(probe_out(extra=["project=terrarium-deploy /home/alice/terrarium/src"]))
+        dp.check_project(p, "terrarium-deploy", "/home/alice/terrarium")
 
     def test_refuse_the_dev_repo(self):
         for d in (str(dp.REPO), str(dp.REPO / "deploy"), str(dp.REPO) + "/"):
@@ -355,10 +355,10 @@ class Names(unittest.TestCase):
         dp.refuse_dev_dir(str(dp.REPO) + "-deploy", dp.REPO)  # a sibling, not the repo
 
     def test_ssh_argv(self):
-        t = dp.Target("wil@t.lan", ["-p", "2222"])
-        argv = t.argv(dp.SWAP, "/home/wil/my dir")
-        self.assertEqual(argv[:4], ["ssh", "-p", "2222", "wil@t.lan"])
-        self.assertEqual(shlex.split(argv[-1]), ["sh", "-ec", dp.SWAP, "deploy", "/home/wil/my dir"])
+        t = dp.Target("alice@t.lan", ["-p", "2222"])
+        argv = t.argv(dp.SWAP, "/home/alice/my dir")
+        self.assertEqual(argv[:4], ["ssh", "-p", "2222", "alice@t.lan"])
+        self.assertEqual(shlex.split(argv[-1]), ["sh", "-ec", dp.SWAP, "deploy", "/home/alice/my dir"])
         self.assertEqual(dp.Target("local").argv(dp.SWAP, "/d"), ["sh", "-ec", dp.SWAP, "deploy", "/d"])
         self.assertEqual(t.host, "t.lan")
         self.assertEqual(dp.Target("local").host, "localhost")
@@ -375,8 +375,8 @@ class Flows(unittest.TestCase):
     STEPS = ["probe", "layout", "receive", "env", "build", "swap", "up", "health", "prune"]
 
     def test_first_install(self):
-        r = FakeRunner(False, probe_out(extra=["project=terrarium /home/wil/dev/terrarium"]))
-        code, out, err = run_main(["server", "wil@t.lan", "--public-url", "http://t.lan:8080"], r)
+        r = FakeRunner(False, probe_out(extra=["project=terrarium /home/alice/dev/terrarium"]))
+        code, out, err = run_main(["server", "alice@t.lan", "--public-url", "http://t.lan:8080"], r)
         self.assertEqual(code, 0, err)
         # The build comes before the swap; the swap before `up`.
         self.assertEqual(r.ran, self.STEPS)
@@ -392,7 +392,7 @@ class Flows(unittest.TestCase):
         self.assertIn("/install/host.sh", out)
         # The source lands in src.new with its .deployed-ref.
         _, args = script_of(r.argv["receive"])
-        self.assertEqual(args[0], "/home/wil/terrarium")
+        self.assertEqual(args[0], "/home/alice/terrarium")
         self.assertIn(f"ref={COMMIT}", args)
         self.assertIn(f"image=terrarium-deploy:{COMMIT[:12]}", args)
         self.assertEqual(r.argv["producer"][-3:], ["archive", "--format=tar", COMMIT])
@@ -403,7 +403,7 @@ class Flows(unittest.TestCase):
 
     def test_default_public_url_and_port(self):
         r = FakeRunner(False, probe_out())
-        code, out, _ = run_main(["server", "wil@t.lan", "--port", "18090"], r)
+        code, out, _ = run_main(["server", "alice@t.lan", "--port", "18090"], r)
         self.assertEqual(code, 0)
         self.assertIn("TERRARIUM_PUBLIC_URL=http://t.lan:18090\n", r.stdin["env"])
         self.assertIn("TERRARIUM_INGEST_PORT=18093\n", r.stdin["env"])
@@ -412,15 +412,15 @@ class Flows(unittest.TestCase):
         self.assertIn("pass --public-url", out)
         # The no-TLS warning: as the step runs, and again in the summary.
         self.assertEqual(out.count("only a host agent on this machine can connect"), 2, out)
-        self.assertEqual(script_of(r.argv["health"])[1], ["/home/wil/terrarium", "18090"])
+        self.assertEqual(script_of(r.argv["health"])[1], ["/home/alice/terrarium", "18090"])
 
     def test_reinstall_keeps_the_env(self):
         r = FakeRunner(False, probe_out(extra=EXISTING))
-        code, out, err = run_main(["server", "wil@t.lan", "--yes", "--port", "8080"], r)
+        code, out, err = run_main(["server", "alice@t.lan", "--yes", "--port", "8080"], r)
         self.assertEqual(code, 0, err)
         self.assertNotIn("env", r.ran)
         self.assertNotIn(TOKEN, out)
-        self.assertIn("keep the existing /home/wil/terrarium/.env", out)
+        self.assertIn("keep the existing /home/alice/terrarium/.env", out)
         self.assertIn(".env has no line for: TERRARIUM_ARTIFACT_PORT", out)
         self.assertIn("--port 8080 applies only to a new .env", out)
         self.assertIn("no host agent can connect", out)
@@ -430,65 +430,65 @@ class Flows(unittest.TestCase):
 
     def test_reinstall_asks_first(self):
         r = FakeRunner(False, probe_out(extra=EXISTING))
-        code, _, err = run_main(["server", "wil@t.lan"], r)
+        code, _, err = run_main(["server", "alice@t.lan"], r)
         self.assertEqual(code, 2)
         self.assertIn("Pass --yes", err)
         self.assertEqual(r.ran, ["probe"])
         r = FakeRunner(False, probe_out(extra=EXISTING))
         with unittest.mock.patch("builtins.input", return_value="n"):
-            code, _, _ = run_main(["server", "wil@t.lan"], r, isatty=True)
+            code, _, _ = run_main(["server", "alice@t.lan"], r, isatty=True)
         self.assertEqual((code, r.ran), (1, ["probe"]))
 
     def test_build_failure_keeps_src_and_the_stack(self):
         r = FakeRunner(False, probe_out(extra=EXISTING), fail={"build": 1})
-        code, _, err = run_main(["update", "wil@t.lan"], r)
+        code, _, err = run_main(["update", "alice@t.lan"], r)
         self.assertEqual(code, 2)
         self.assertEqual(r.ran, ["probe", "layout", "receive", "build"])
         self.assertIn("did not change", err)
 
     def test_update(self):
         r = FakeRunner(False, probe_out(extra=EXISTING))
-        code, _, err = run_main(["update", "wil@t.lan", "--ref", "v0.1.0"], r)
+        code, _, err = run_main(["update", "alice@t.lan", "--ref", "v0.1.0"], r)
         self.assertEqual(code, 0, err)
         self.assertEqual(r.ran, ["probe", "layout", "receive", "build", "swap", "up", "health", "prune"])
         self.assertEqual(r.argv["producer"][-1], "f" * 40)
 
     def test_update_needs_an_install(self):
         r = FakeRunner(False, probe_out())
-        code, _, err = run_main(["update", "wil@t.lan"], r)
+        code, _, err = run_main(["update", "alice@t.lan"], r)
         self.assertEqual((code, r.ran), (2, ["probe"]))
-        self.assertIn("just deploy::server wil@t.lan", err)
+        self.assertIn("just deploy::server alice@t.lan", err)
 
     def test_dirty_tree_stops_before_the_target(self):
         r = FakeRunner(False, probe_out())
-        code, _, err = run_main(["server", "wil@t.lan"], r, git=fake_git(dirty=True))
+        code, _, err = run_main(["server", "alice@t.lan"], r, git=fake_git(dirty=True))
         self.assertEqual((code, r.ran), (2, []))
         self.assertIn("--allow-dirty", err)
 
     def test_preflight_error_changes_nothing(self):
-        r = FakeRunner(False, probe_out(docker_access="no", groups="wil"))
-        code, out, err = run_main(["server", "wil@t.lan"], r)
+        r = FakeRunner(False, probe_out(docker_access="no", groups="alice"))
+        code, out, err = run_main(["server", "alice@t.lan"], r)
         self.assertEqual((code, r.ran), (2, ["probe"]))
-        self.assertIn("sudo usermod -aG docker wil", out)
+        self.assertIn("sudo usermod -aG docker alice", out)
         self.assertIn("Nothing changed", err)
 
     def test_dry_run_changes_nothing(self):
         r = FakeRunner(True, probe_out(extra=EXISTING))
-        code, out, err = run_main(["server", "wil@t.lan", "--dry-run", "--dir", "/srv/t"], r)
+        code, out, err = run_main(["server", "alice@t.lan", "--dry-run", "--dir", "/srv/t"], r)
         self.assertEqual(code, 0, err)
         self.assertEqual(r.ran, ["probe"])  # read-only
         self.assertIn("# would ask:", out)
         self.assertIn("nothing changed", out)
         printed = [l for l in out.splitlines() if l.startswith("+ ")]
         self.assertEqual(len(printed), 8)  # probe, layout, receive, build, swap, up, health, prune
-        self.assertIn(" | ssh wil@t.lan ", printed[2])
+        self.assertIn(" | ssh alice@t.lan ", printed[2])
 
     def test_dry_run_new_install_hides_the_token(self):
         r = FakeRunner(True, probe_out())
         token_calls = []
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = dp.main(["server", "wil@t.lan", "--dry-run"], runner=r, run_git=fake_git(),
+            code = dp.main(["server", "alice@t.lan", "--dry-run"], runner=r, run_git=fake_git(),
                            token_fn=lambda: token_calls.append(1) or TOKEN, now=NOW)
         self.assertEqual(code, 0, err.getvalue())
         self.assertEqual(token_calls, [])
@@ -513,48 +513,48 @@ class Flows(unittest.TestCase):
 
     def test_project_clash_stops(self):
         r = FakeRunner(False, probe_out(extra=["project=terrarium-deploy /somewhere/else"]))
-        code, _, err = run_main(["server", "wil@t.lan"], r)
+        code, _, err = run_main(["server", "alice@t.lan"], r)
         self.assertEqual((code, r.ran), (2, ["probe"]))
         self.assertIn("belongs to /somewhere/else", err)
 
     def test_rollback(self):
         r = FakeRunner(False, probe_out(extra=EXISTING))
-        code, out, err = run_main(["rollback", "wil@t.lan"], r)
+        code, out, err = run_main(["rollback", "alice@t.lan"], r)
         self.assertEqual(code, 0, err)
         self.assertEqual(r.ran, ["probe", "rollback-swap", "up", "health"])
         self.assertIn(f"now at {'d' * 40}", out)
 
     def test_rollback_needs_a_previous_deploy(self):
         r = FakeRunner(False, probe_out(extra=["has=src", "has=.env"]))
-        code, _, err = run_main(["rollback", "wil@t.lan"], r)
+        code, _, err = run_main(["rollback", "alice@t.lan"], r)
         self.assertEqual((code, r.ran), (2, ["probe"]))
         self.assertIn("no deploy to go back to", err)
 
     def test_rollback_dry_run(self):
         r = FakeRunner(True, probe_out(extra=EXISTING))
-        code, out, _ = run_main(["rollback", "wil@t.lan", "--dry-run"], r)
+        code, out, _ = run_main(["rollback", "alice@t.lan", "--dry-run"], r)
         self.assertEqual((code, r.ran), (0, ["probe"]))
         self.assertIn("nothing changed", out)
 
     def test_status_is_read_only(self):
         r = FakeRunner(False, probe_out(extra=EXISTING))
-        code, _, _ = run_main(["status", "wil@t.lan"], r)
+        code, _, _ = run_main(["status", "alice@t.lan"], r)
         self.assertEqual((code, r.ran), (0, ["probe", "status"]))
-        self.assertEqual(script_of(r.argv["status"])[1], ["/home/wil/terrarium", "9090"])
+        self.assertEqual(script_of(r.argv["status"])[1], ["/home/alice/terrarium", "9090"])
 
     def test_ssh_options(self):
         r = FakeRunner(False, probe_out())
-        run_main(["server", "wil@t.lan", "--ssh-option=-p 2222", "--ssh-option=-i", "--ssh-option=key"], r)
-        self.assertEqual(r.argv["probe"][:6], ["ssh", "-p", "2222", "-i", "key", "wil@t.lan"])
+        run_main(["server", "alice@t.lan", "--ssh-option=-p 2222", "--ssh-option=-i", "--ssh-option=key"], r)
+        self.assertEqual(r.argv["probe"][:6], ["ssh", "-p", "2222", "-i", "key", "alice@t.lan"])
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             dp.parse_args(["server", "local", "--ssh-option=-p"])
 
     def test_sudo_user_argv(self):
-        t = dp.Target("meta@t.lan", ["-p", "2222"], "wil")
+        t = dp.Target("ops@t.lan", ["-p", "2222"], "alice")
         argv = t.argv(dp.SWAP, "~/my dir")
-        self.assertEqual(argv[:4], ["ssh", "-p", "2222", "meta@t.lan"])
+        self.assertEqual(argv[:4], ["ssh", "-p", "2222", "ops@t.lan"])
         words = shlex.split(argv[-1])
-        self.assertEqual(words[:5], ["sudo", "-n", "-H", "-u", "wil"])
+        self.assertEqual(words[:5], ["sudo", "-n", "-H", "-u", "alice"])
         self.assertEqual(sudo_inner(words), ["sh", "-ec", dp.SWAP, "deploy", "~/my dir"])
 
     def test_sudo_user_runs_in_home_and_keeps_stdin(self):
@@ -567,35 +567,35 @@ class Flows(unittest.TestCase):
             stub = bin_ / "sudo"
             stub.write_text(f'#!/bin/sh\nshift 5\nHOME={shlex.quote(str(home))} exec "$@"\n')
             stub.chmod(0o755)
-            argv = dp.Target("meta@t.lan", [], "wil").argv('pwd; cat; echo " $1"', "x")
+            argv = dp.Target("ops@t.lan", [], "alice").argv('pwd; cat; echo " $1"', "x")
             env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}"}
             r = subprocess.run(["sh", "-c", argv[-1]], input="in", capture_output=True, text=True,
                                cwd="/", env=env, check=False)
         self.assertEqual((r.returncode, r.stdout), (0, f"{home}\nin x\n"), r.stderr)
 
     def test_sudo_user_shell_hint(self):
-        t = dp.Target("meta@t.lan", [], "wil")
-        hint = t.shell_hint("/home/wil/t/terrarium-compose logs")
-        self.assertEqual(hint, """ssh -t meta@t.lan "sudo -H -u wil sh -c 'cd ~ && /home/wil/t/terrarium-compose logs'\"""")
+        t = dp.Target("ops@t.lan", [], "alice")
+        hint = t.shell_hint("/home/alice/t/terrarium-compose logs")
+        self.assertEqual(hint, """ssh -t ops@t.lan "sudo -H -u alice sh -c 'cd ~ && /home/alice/t/terrarium-compose logs'\"""")
         words = shlex.split(hint)
-        self.assertEqual(shlex.split(words[-1]), ["sudo", "-H", "-u", "wil", "sh", "-c",
-                                                  "cd ~ && /home/wil/t/terrarium-compose logs"])
+        self.assertEqual(shlex.split(words[-1]), ["sudo", "-H", "-u", "alice", "sh", "-c",
+                                                  "cd ~ && /home/alice/t/terrarium-compose logs"])
         odd = t.shell_hint('echo "$HOME"')  # no plain double quotes here: a second shlex quote
         self.assertEqual(shlex.split(shlex.split(odd)[-1])[-1], 'cd ~ && echo "$HOME"')
-        self.assertEqual(dp.Target("meta@t.lan").shell_hint("ls"), "ssh -t meta@t.lan ls")
+        self.assertEqual(dp.Target("ops@t.lan").shell_hint("ls"), "ssh -t ops@t.lan ls")
 
     def test_sudo_user_flag(self):
         r = FakeRunner(False, probe_out(extra=EXISTING))
-        code, out, err = run_main(["rollback", "meta@t.lan", "--sudo-user", "wil", "--dir", "~/T"], r)
+        code, out, err = run_main(["rollback", "ops@t.lan", "--sudo-user", "alice", "--dir", "~/T"], r)
         self.assertEqual(code, 0, err)
-        self.assertEqual(shlex.split(r.argv["probe"][-1])[:5], ["sudo", "-n", "-H", "-u", "wil"])
-        self.assertIn("just deploy::rollback meta@t.lan '--dir=~/T' --sudo-user=wil again", out)
+        self.assertEqual(shlex.split(r.argv["probe"][-1])[:5], ["sudo", "-n", "-H", "-u", "alice"])
+        self.assertIn("just deploy::rollback ops@t.lan '--dir=~/T' --sudo-user=alice again", out)
         r = FakeRunner(False, probe_out())
-        code, out, err = run_main(["server", "meta@t.lan", "--sudo-user=wil"], r)
+        code, out, err = run_main(["server", "ops@t.lan", "--sudo-user=alice"], r)
         self.assertEqual(code, 0, err)
-        self.assertIn("just deploy::update meta@t.lan --sudo-user=wil", out)
-        for bad in (["status", "local", "--sudo-user=wil"], ["status", "meta@t.lan", "--sudo-user=wil;id"],
-                    ["status", "meta@t.lan", "--sudo-user=-u"], ["status", "meta@t.lan", "--sudo-user=Wil"]):
+        self.assertIn("just deploy::update ops@t.lan --sudo-user=alice", out)
+        for bad in (["status", "local", "--sudo-user=alice"], ["status", "ops@t.lan", "--sudo-user=alice;id"],
+                    ["status", "ops@t.lan", "--sudo-user=-u"], ["status", "ops@t.lan", "--sudo-user=Wil"]):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 dp.parse_args(bad)
 

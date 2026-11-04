@@ -93,8 +93,8 @@ mod tests {
     #[test]
     fn default_dir_matches_pi() {
         assert_eq!(
-            default_session_dir(Path::new("/a"), Path::new("/home/wil/dev/pi")),
-            Path::new("/a/sessions/--home-wil-dev-pi--")
+            default_session_dir(Path::new("/a"), Path::new("/home/alice/dev/pi")),
+            Path::new("/a/sessions/--home-alice-dev-pi--")
         );
         assert_eq!(
             default_session_dir(Path::new("/a"), Path::new("/tmp/claude-1000/x.y")),

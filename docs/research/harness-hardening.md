@@ -160,10 +160,10 @@ Each harness section below has its own open questions.
 
 Sources and conventions for this section:
 
-- **Bundle** = `/home/wil/dev/terrarium/tools/versions/claude/2.1.310/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe`
+- **Bundle** = `/home/alice/dev/terrarium/tools/versions/claude/2.1.310/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe`
   (a Bun single-file binary, 291 MB). The JS source is embedded as plain text. A marker string in
   backticks can be found with `strings -n 6 <Bundle> | grep -F '<marker>'`.
-- **SDK types** = `/home/wil/dev/terrarium/tools/versions/claude/2.1.310/lib/node_modules/@anthropic-ai/claude-code/sdk-tools.d.ts`
+- **SDK types** = `/home/alice/dev/terrarium/tools/versions/claude/2.1.310/lib/node_modules/@anthropic-ai/claude-code/sdk-tools.d.ts`
   (the `ToolInputSchemas` union lists every built-in tool input).
 - **Help** = output of `bin/claude --help` (version `2.1.310 (Claude Code)`).
 - **Docs** = pages fetched on 2026-10-28: [settings](https://code.claude.com/docs/en/settings),

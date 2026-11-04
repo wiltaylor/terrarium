@@ -22,7 +22,7 @@ from pilib import *
 
 CAP = Path(__file__).parent / "captured"; CAP.mkdir(exist_ok=True)
 PROVIDERS = ["anthropic", "openai-codex", "github-copilot", "google", "xai", "openrouter",
-             "glm53-exl3", "vllm", "qwen38-helios"]
+             "glm53-exl3", "vllm", "qwen38-lan"]
 real = json.loads((REAL_DIR / "auth.json").read_text())
 out = {"real_auth_json_providers": sorted(real),
        "real_auth_json_oauth_providers": sorted(k for k, v in real.items() if isinstance(v, dict) and v.get("type") == "oauth")}

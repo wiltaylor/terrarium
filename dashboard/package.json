@@ -2,6 +2,7 @@
   "name": "terrarium-dashboard",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "description": "Terrarium operator dashboard (SolidJS + Vite). The daemon embeds dist/.",
   "scripts": {

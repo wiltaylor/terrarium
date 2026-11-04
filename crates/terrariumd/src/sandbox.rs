@@ -844,8 +844,8 @@ mod tests {
         let l = layout();
         let host_env = |k: &str| match k {
             "LANG" => Some("en_US.UTF-8".to_owned()),
-            "HOME" => Some("/home/wil".to_owned()),
-            "PATH" => Some("/home/wil/bin:/usr/bin".to_owned()),
+            "HOME" => Some("/home/alice".to_owned()),
+            "PATH" => Some("/home/alice/bin:/usr/bin".to_owned()),
             "CLAUDE_CODE_OAUTH_TOKEN" | "ANTHROPIC_API_KEY" | "GH_TOKEN" => Some("secret".into()),
             _ => None,
         };
@@ -1295,7 +1295,7 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         let l = layout();
         let host = |k: &str| match k {
             "PATH" => Some("/usr/bin".to_owned()),
-            "HOME" => Some("/home/wil".to_owned()),
+            "HOME" => Some("/home/alice".to_owned()),
             "ANTHROPIC_API_KEY" | "OPENAI_API_KEY" | "COPILOT_X" | "PI_KEY" => Some("x".into()),
             _ => None,
         };
@@ -1303,7 +1303,7 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         spec_env.insert("ANTHROPIC_MODEL".to_owned(), "set-by-spec".to_owned());
         let env = cfg.child_env(&l, &spec_env, &host);
         assert_eq!(env["PATH"], "/opt/t/bin:/usr/bin");
-        assert_eq!(env["HOME"], "/home/wil");
+        assert_eq!(env["HOME"], "/home/alice");
         assert_eq!(env["CLAUDE_CONFIG_DIR"], "/auth/claude");
         assert_eq!(env["TERRARIUM_SOCKET"], l.socket.display().to_string());
         assert_eq!(env["ANTHROPIC_MODEL"], "set-by-spec");

@@ -7,7 +7,7 @@
 //! token_file = "/etc/terrarium-host/token"
 //! name = "lab1"
 //! max_sessions = 32
-//! allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]
+//! allowed_cwd_roots = ["/home/alice/labs", "/srv/build"]
 //! # server_fingerprint_sha256 = "AB:CD:..."   # pin a self-signed daemon
 //! # allow_insecure = false                    # ws:// to a remote host
 //! ```
@@ -107,7 +107,7 @@ pub struct DisplayConfig {
     /// (X11) or `wayland-0` (Wayland).
     #[serde(default)]
     pub default_display: Option<String>,
-    /// `XAUTHORITY` for the X tools, for example `/home/wil/.Xauthority`.
+    /// `XAUTHORITY` for the X tools, for example `/home/alice/.Xauthority`.
     /// A systemd service does not have the desktop session's environment.
     #[serde(default)]
     pub xauthority: Option<PathBuf>,
@@ -501,7 +501,7 @@ daemon_url = "wss://terrarium.lan:8082"
 token_file = "/etc/terrarium-host/token"
 name = "lab1"
 max_sessions = 16
-allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]
+allowed_cwd_roots = ["/home/alice/labs", "/srv/build"]
 "#;
         let c = Config::parse(text, Path::new("config.toml")).unwrap();
         assert_eq!(c.name.as_deref(), Some("lab1"));

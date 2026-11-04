@@ -1179,7 +1179,7 @@ on_agent_create = ["terrarium"]       # cloned into $HOME/work/terrarium when th
 # targets/lab-win11.toml
 kind = "vmlab"
 host = "lab1"                 # host agent name
-lab  = "/home/wil/labs/win11.wcl"
+lab  = "/home/alice/labs/win11.wcl"
 machine = "win11"
 ephemeral = true
 snapshot_before_task = true

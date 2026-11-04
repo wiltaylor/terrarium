@@ -438,8 +438,8 @@ machines by their bare names.
 
 The `lab` field is the lab directory, or the path of its `vmlab.wcl`. A path
 to a `.wcl` file with another name is refused (`bad_request`), because vmlab
-cannot find it. Note: the PLAN §19 example `lab = "/home/wil/labs/win11.wcl"`
-must become `lab = "/home/wil/labs/win11"` (a directory that holds
+cannot find it. Note: the PLAN §19 example `lab = "/home/alice/labs/win11.wcl"`
+must become `lab = "/home/alice/labs/win11"` (a directory that holds
 `vmlab.wcl`).
 
 | Frame | Fields | Command (in the lab directory) |
@@ -551,10 +551,10 @@ The steps:
 `result`:
 
 ```json
-{"lab": "/home/wil/.local/share/terrarium-host/instances/terra-vbox/lab",
+{"lab": "/home/alice/.local/share/terrarium-host/instances/terra-vbox/lab",
  "instance": "terra-vbox", "lab_name": "alpine-box",
  "source": ".../instances/terra-vbox/src/alpine-box", "attached": ["terra/w1"],
- "dev": {"machine": "box", "workspace": "/home/wil/dev/terrarium/work/terra/w1",
+ "dev": {"machine": "box", "workspace": "/home/alice/dev/terrarium/work/terra/w1",
          "guest": "/work/terra/w1", "own": false},
  "changed": true, "head": "3f2c1e0b9a..."}
 ```
@@ -612,7 +612,7 @@ screen of one target. It runs in the host agent as a task (no `pid`).
 
 ```json
 {"type": "display", "session": 31,
- "target": {"backend": "vmlab", "lab": "/home/wil/labs/win", "machine": "win11"},
+ "target": {"backend": "vmlab", "lab": "/home/alice/labs/win", "machine": "win11"},
  "request": {"op": "click", "x": 10, "y": 20, "button": "right"},
  "timeout_secs": 60}
 ```
@@ -1104,7 +1104,7 @@ daemon_url = "wss://terrarium.lan:8082"     # ws, wss, http, or https; path defa
 token_file = "/etc/terrarium-host/token"    # or: token = "..."
 name = "lab1"                               # default: the hostname
 max_sessions = 32
-allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]   # optional; absent means any absolute path
+allowed_cwd_roots = ["/home/alice/labs", "/srv/build"]   # optional; absent means any absolute path
 # ca_file = "/etc/terrarium-host/ca.pem"    # trust this CA for wss:// in place of the system roots
 # server_fingerprint_sha256 = "A1:2F:..."   # pin the daemon's certificate (just host::cert prints it)
 # allow_insecure = false                    # allow ws:// to a host that is not loopback
@@ -1122,7 +1122,7 @@ allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]   # optional; absent means 
 # enabled = false                           # open THIS machine's desktop to `desktop` targets
 # allowed_displays = [":0"]                 # the displays a desktop target may use; empty: any
 # default_display = ":0"                    # for a desktop target that names none
-# xauthority = "/home/wil/.Xauthority"      # XAUTHORITY for the X tools
+# xauthority = "/home/alice/.Xauthority"      # XAUTHORITY for the X tools
 # runtime_dir = "/run/user/1000"            # XDG_RUNTIME_DIR for the Wayland tools
 # tesseract_bin = "tesseract"               # OCR for the backends that have none
 # rdp_known_hosts = "/var/lib/terrarium-host/rdp-known-hosts"  # RDP certificate pins; default $XDG_DATA_HOME/terrarium-host/rdp-known-hosts
@@ -1528,14 +1528,14 @@ mode1-vbox]`) got `terrarium repo checkout labs`, then started:
 
 | Check | Result |
 |---|---|
-| The start | `mode1-dk` and `mode1-vbox` `running`. `docker inspect`: one bind, `/home/wil/dev/terrarium/work/mode1/w1` to `/work/mode1/w1`, user `1000:1000`. |
+| The start | `mode1-dk` and `mode1-vbox` `running`. `docker inspect`: one bind, `/home/alice/dev/terrarium/work/mode1/w1` to `/work/mode1/w1`, user `1000:1000`. |
 | A file made on the host in `work/mode1/w1`, then `terrarium exec mode1-dk -- sh -c 'ls -la /work/mode1/w1; cat ...'` | The file and its text, exit 0, 0.15 s. |
 | The vmlab instance | `instances/mode1-vbox/src` is a detached worktree at `3230d5a` (`git worktree list` of `labs.git`), and `instances/mode1-vbox/lab/vmlab.wcl` has `@dev(workspace = ".../work/mode1/w1", workspace_guest = "/work/mode1/w1")` on `box`. `vmlab status -v` shows the `DEV` row. |
 | `terrarium exec mode1-vbox -- sh -c 'hostname; ls -la /work/mode1/w1; cat ...'` | `box`, the file and its text, exit 0, 0.13 s. |
 | A file written in the guest, and one in the container | On the host after about 400 ms (the syncer), and at once (the bind). |
 | `admin target grant mode1-vws w1` | The agent's own instance `mode1-vws.<ULID>` from `work/mode1/w1/labs/vmlab.wcl` (lab `labs-dev`), `running`. `git status` of the checkout: clean. |
 | `exec mode1-vws --agent mode1/w1`; the same without `--agent`; a grant with `--exclusive` | The output from `box`; `422 ... name the holder with agent`; `422 ... an exclusive lease does not apply`. |
-| A lab in the workspace with `@dev(workspace = "/home/wil/.ssh")` and a `provision` | `vmlab.prepare failed: ... refused:` with both lines named, `details.code` `refused`. Nothing ran. |
+| A lab in the workspace with `@dev(workspace = "/home/alice/.ssh")` and a `provision` | `vmlab.prepare failed: ... refused:` with both lines named, `details.code` `refused`. Nothing ran. |
 | One haiku turn: write `loop.txt` with the file tool, then `terrarium exec mode1-dk -- sh -c 'cd /work/mode1/w1 && cat loop.txt && id -u && sha256sum loop.txt'` | The tool wrote `/work/mode1/w1/loop.txt` (the second path in the sandbox). The target printed `edited in the sandbox`, `1000`, and the SHA-256. The audit row `target.exec` has the actor `agent:<ULID>`. The lease grant before had typed one pointer turn, so 2 turns in all. |
 | `admin agent stop w1` | All three targets `absent`, `runtime` `{}`. The container is gone, both instance dirs are gone, and `labs.git` has no worktree left. `vmlab lab list` shows no lab of the test. |
 

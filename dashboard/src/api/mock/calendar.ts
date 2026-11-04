@@ -480,7 +480,7 @@ export function createCalendarMock(ctx: CalendarMockContext) {
       tz: "Australia/Brisbane",
     });
     create("terrarium", {
-      title: "Deploy v0.2.0 to helios",
+      title: "Deploy v0.2.0 to buildhost",
       kind: "deploy",
       start: `${day(13)}T09:00`,
       end: `${day(13)}T10:00`,
@@ -498,7 +498,7 @@ export function createCalendarMock(ctx: CalendarMockContext) {
       assignees: ["reviewer"],
     });
     create(null, {
-      title: "Host maintenance: helios",
+      title: "Host maintenance: buildhost",
       kind: "window",
       description: "The host reboots for a kernel update. Every agent stops for about 20 minutes.",
       start: `${day(5)}T02:00:00Z`,

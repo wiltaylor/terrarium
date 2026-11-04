@@ -916,7 +916,7 @@ lab "alpine-box" {
     #[test]
     fn dev_workspace_paths_stay_in_the_lab_dir() {
         for (p, want) in [
-            ("/home/wil", "relative"),
+            ("/home/alice", "relative"),
             ("../../etc", ".."),
             ("~/x", "relative"),
         ] {

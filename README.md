@@ -27,10 +27,10 @@ on the server. The server needs Docker with the compose plugin, and no
 access to the repository:
 
 ```sh
-just deploy::server wil@terrarium.lan --public-url http://terrarium.lan:8080 --dry-run
-just deploy::server wil@terrarium.lan --public-url http://terrarium.lan:8080
-just deploy::update wil@terrarium.lan      # a new commit; the data stays
-just deploy::rollback wil@terrarium.lan    # back to the previous deploy
+just deploy::server alice@terrarium.lan --public-url http://terrarium.lan:8080 --dry-run
+just deploy::server alice@terrarium.lan --public-url http://terrarium.lan:8080
+just deploy::update alice@terrarium.lan      # a new commit; the data stays
+just deploy::rollback alice@terrarium.lan    # back to the previous deploy
 ```
 
 The recipe shows the new `TERRARIUM_TOKEN` one time, and the commands to
@@ -281,8 +281,8 @@ recipes of a module.
 | Task | Command |
 |---|---|
 | Build the image and start the stack | `just up` |
-| Install or re-install on a server over ssh (builds the image there; [getting-started §2.14](docs/getting-started.md#214-install-on-a-server)) | `just deploy::server wil@terrarium.lan` |
-| Update a server, roll it back, or show its deployed ref and health | `just deploy::update wil@terrarium.lan`, `just deploy::rollback ...`, `just deploy::status ...` |
+| Install or re-install on a server over ssh (builds the image there; [getting-started §2.14](docs/getting-started.md#214-install-on-a-server)) | `just deploy::server alice@terrarium.lan` |
+| Update a server, roll it back, or show its deployed ref and health | `just deploy::update alice@terrarium.lan`, `just deploy::rollback ...`, `just deploy::status ...` |
 | Install in another dir on this machine (not this repo) | `just deploy::local --dir /tmp/tt-deploy --port 18090` |
 | Stop the stack | `just down` |
 | Follow the container logs | `just docker::logs` |
@@ -369,4 +369,4 @@ seccomp profile).
 
 ## License
 
-MIT (see `Cargo.toml`).
+Terrarium is under the MIT license. See [`LICENSE`](LICENSE).

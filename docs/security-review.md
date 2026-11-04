@@ -1,7 +1,7 @@
 # Terrarium security review
 
 Read-only review before Terrarium runs with real subscriptions. Date: 2026-10-24.
-Reviewer: pre-flight security pass (ai@wiltaylor.dev).
+Reviewer: pre-flight security pass.
 
 Scope: the daemon (`terrariumd`), the runner, the agent CLI, the host agent, the
 adapters, the Docker image, and the dashboard. The review did not start agents and

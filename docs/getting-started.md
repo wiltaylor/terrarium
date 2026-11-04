@@ -1645,18 +1645,18 @@ server (a key is best), uv, and just.
 1. Do a dry run first:
 
    ```sh
-   just deploy::server wil@terrarium.lan --public-url http://terrarium.lan:8080 --dry-run
+   just deploy::server alice@terrarium.lan --public-url http://terrarium.lan:8080 --dry-run
    ```
 
    The dry run runs only the read-only checks on the server (the
    preflight), and prints all other commands. It changes nothing. When a
    check fails, the preflight gives the command that fixes it, for example
-   `sudo usermod -aG docker wil`.
+   `sudo usermod -aG docker alice`.
 
 2. Install:
 
    ```sh
-   just deploy::server wil@terrarium.lan --public-url http://terrarium.lan:8080
+   just deploy::server alice@terrarium.lan --public-url http://terrarium.lan:8080
    ```
 
    The recipe does these steps:
@@ -1691,7 +1691,7 @@ server (a key is best), uv, and just.
 4. Set the operator password (section 2.3). The recipe prints the command:
 
    ```sh
-   ssh -t wil@terrarium.lan '~/terrarium/terrarium-compose exec -it terrarium terrariumd password set'
+   ssh -t alice@terrarium.lan '~/terrarium/terrarium-compose exec -it terrarium terrariumd password set'
    ```
 
    Then open the public URL and log in with the password, or with the
@@ -1701,7 +1701,7 @@ server (a key is best), uv, and just.
    (section 2.7). It uses `GET /install/host.sh` of the daemon:
 
    ```sh
-   ssh wil@terrarium.lan '~/terrarium/terrarium-compose exec terrarium terrarium admin host new lab1 --enrol'
+   ssh alice@terrarium.lan '~/terrarium/terrarium-compose exec terrarium terrarium admin host new lab1 --enrol'
    ```
 
 When an install exists in the directory, `just deploy::server` asks
@@ -1752,9 +1752,9 @@ change a setting, edit `.env` on the server, and run
 #### Update, roll back, and status
 
 ```sh
-just deploy::update wil@terrarium.lan
-just deploy::status wil@terrarium.lan
-just deploy::rollback wil@terrarium.lan
+just deploy::update alice@terrarium.lan
+just deploy::status alice@terrarium.lan
+just deploy::rollback alice@terrarium.lan
 ```
 
 `deploy::update` sends a new source and builds the image from `src.new`.
