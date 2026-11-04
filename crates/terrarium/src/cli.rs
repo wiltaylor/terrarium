@@ -1193,6 +1193,25 @@ pub enum CardCmd {
     },
     /// Archive a card
     Rm { id: String },
+    /// Attach files to a card (md, txt, json, yaml, csv, png, jpg, gif,
+    /// webp, svg, pdf)
+    Attach {
+        id: String,
+        /// The files to attach
+        #[arg(required = true)]
+        paths: Vec<std::path::PathBuf>,
+        /// Add a new version of a file the card has already
+        #[arg(long)]
+        replace: bool,
+        /// The name on the card (one path only); default: the file name
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// The files of a card
+    Files {
+        #[command(subcommand)]
+        command: CardFilesCmd,
+    },
     /// The card's history
     Events { id: String },
     /// Block until a card is assigned to me or moves
@@ -1202,6 +1221,35 @@ pub enum CardCmd {
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CardFilesCmd {
+    /// List the files of a card (the latest version of each)
+    Ls { id: String },
+    /// Download a file of a card, or all of its files
+    Get {
+        id: String,
+        /// The file; none: every file of the card
+        name: Option<String>,
+        /// A version of the file (with a name); default: the latest
+        #[arg(long, requires = "name")]
+        version: Option<u64>,
+        /// Write to this path, or `-` for stdout (with a name); default:
+        /// the file name in the current dir
+        #[arg(long, short = 'o', requires = "name", conflicts_with = "dir")]
+        output: Option<std::path::PathBuf>,
+        /// The dir for the files (without a name); default: `./<card>`
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        /// Overwrite a file that is there
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove a file from a card (all its versions)
+    Rm { id: String, name: String },
+    /// The versions of a file, newest first
+    Versions { id: String, name: String },
 }
 
 #[derive(Debug, Args)]

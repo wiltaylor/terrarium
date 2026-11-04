@@ -8,6 +8,7 @@ pub mod attachments;
 pub mod backups;
 mod board;
 mod calendar;
+pub mod card_files;
 mod config;
 mod event_sources;
 mod fleet;
@@ -278,6 +279,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(screen::routes())
         .merge(mail::routes())
         .merge(board::routes())
+        .merge(card_files::routes())
         .merge(memory::routes())
         .merge(wiki::routes())
         .merge(records::routes())

@@ -791,7 +791,7 @@ never the text), `agent.keys` (`keys`: the key names; a text key as
 `system`), and `secret.rotate_key` (actor `system`) (§5.2),
 `mail.read` (the first read of a message; `detail` has `thread`, `from`,
 `to`, and `via`: `read` or `reply`), `board.columns`, `card.reassign`, `card.reopen`, `card.archive` (by an admin
-on a card that is not its own), `definitions.sync`, `memory.edit` and
+on a card that is not its own), `card.file_add`, `card.file_replace`, `card.file_remove` (§8.4), `definitions.sync`, `memory.edit` and
 `memory.delete` (§10), `wiki.delete`, `wiki.move`, `wiki.undelete` (§11),
 `artifact.delete`, `artifact.prune_warning`, `artifact.prune` (§12),
 `version.approve`, `version.reject`, `version.release` (§13),
@@ -3695,6 +3695,142 @@ POST /api/cards/TER-2/claim               (X-Terrarium-Agent: terrarium/worker)
 An admin may archive any card. An archived card leaves the board and refuses
 changes (`409 conflict`). `GET /api/cards/{id}` still shows it, and
 `?archived=true` lists it.
+
+### 8.4 Card files
+
+A card has files: markdown documents, text, data files, images, and PDFs
+(PLAN §13). The operator and the agents attach them; the assignee gets
+read-only copies in its workspace.
+
+A file (the latest version of one name):
+
+```json
+{"card":"TER-1","name":"spec.md","version":2,"size":1204,"sha256":"9f2c…","media_type":"text/markdown; charset=utf-8",
+ "created_by":"operator","created_by_name":"operator","created_at":"2026-11-04T08:00:00.000Z","versions":2}
+```
+
+A version has the same fields without `card` and `versions`.
+
+| Endpoint | Body | Answer |
+|---|---|---|
+| `GET /api/cards/{id}/files` | | `200` the live files, the latest version of each, by name |
+| `POST /api/cards/{id}/files?name=&replace=` | multipart, JSON, or raw bytes | `201` the file with `outcome: added \| replaced`; `200` with `outcome: unchanged` |
+| `GET /api/cards/{id}/files/{name}?version=&format=` | | `200` the bytes; `format=json`: the version with `card` and `data_base64` |
+| `GET /api/cards/{id}/files/{name}/versions` | | `200` the live versions, newest first |
+| `DELETE /api/cards/{id}/files/{name}` | | `204`; every version of the name is removed |
+
+**The upload.** Three forms:
+
+- `multipart/form-data`: a `file` part, and optional `name` (else the file
+  name of the part) and `replace` (`true`) parts.
+- `application/json`: `{"name", "data_base64", "replace"?}`. The CLI sends
+  this form: every transport, the runner tunnel too, carries JSON.
+- Any other `Content-Type`: the raw bytes, with `?name=`.
+
+`?replace=true` works with each form.
+
+**Names.** One path segment: ASCII letters, digits, `.`, `_`, `-`, `+`, and
+spaces inside the name, at most 128 bytes. No leading `.` (a hidden name),
+no leading or trailing space, no trailing `.`. `index.md` is not allowed:
+it is the name of the index in the card dir of an agent. A name is unique
+on a card with no regard to case; the API finds a file by its name in any
+case. A bad name is `422 invalid`.
+
+**Types.** The extension picks the type from an allowlist, and the bytes
+must agree:
+
+| Extension | `media_type` | Check |
+|---|---|---|
+| `md`, `markdown` | `text/markdown; charset=utf-8` | UTF-8, no NUL |
+| `txt` | `text/plain; charset=utf-8` | UTF-8, no NUL |
+| `json` | `application/json` | UTF-8, no NUL, a JSON value (else `422 invalid`) |
+| `yaml`, `yml` | `application/yaml` | UTF-8, no NUL |
+| `csv` | `text/csv; charset=utf-8` | UTF-8, no NUL |
+| `png`, `jpg`, `jpeg`, `gif`, `webp` | `image/png`, `image/jpeg`, `image/gif`, `image/webp` | the magic bytes |
+| `svg` | `image/svg+xml` | UTF-8, no NUL, an `<svg` root element |
+| `pdf` | `application/pdf` | starts with `%PDF-` |
+
+Another extension, or bytes that do not agree, is `415
+unsupported_media_type`. An empty file is `422 invalid`. The daemon
+redacts the text types on the way in (PLAN §16b.6), as it redacts artifacts.
+
+**Caps.** A file has at most `TERRARIUM_CARD_FILE_MAX_BYTES` (default
+10 MiB). All the live versions of all the files of a card have at most
+`TERRARIUM_CARD_FILES_MAX_BYTES` (default 50 MiB). Over a cap: `413
+too_large`, with `details` (`size`, `max_file_bytes`; or `used`, `size`,
+`max_card_bytes`).
+
+**Versions.** A file of a name that the card has already is `409 conflict`
+(`details: {"name", "version"}`), unless `replace` is set. A replace adds a
+version and keeps the old ones. A replace with the same bytes as the latest
+version adds nothing (`200`, `outcome: unchanged`). A replace of a name that
+the card does not have adds the file. The version number is one more than
+the highest version that the name had, removed versions too.
+
+**Remove.** `DELETE` is a soft delete: every version of the name gets
+`deleted_at`, and the file leaves the list. The rows and the bytes stay for
+`TERRARIUM_TRASH_DAYS` (default 7); then the prune timer deletes the rows,
+and the blobs that no row uses. The name is free again at once.
+
+**The bytes.** The daemon keeps each blob once, in
+`<state>/card-files/<sha256>`. The state dir is in each backup (§32). A
+download has `Content-Disposition: attachment`, `X-Content-Type-Options:
+nosniff`, `Content-Security-Policy: sandbox; default-src 'none'; …`,
+`ETag` (the SHA-256), and `X-Terrarium-File-Version`. So no file renders as
+a page of the daemon origin: an SVG opened in a tab runs no script. The
+dashboard shows the raster images inline from blob URLs with a fixed image
+type, renders markdown with its safe renderer, and shows SVG and PDF files
+as downloads only.
+
+**Rights.** A change (an upload, a replace, a remove) has the rights of a
+card edit (§8.2): the card's own member (its assignee, or the creator of an
+unassigned card), a project admin, or the operator. A done card takes
+changes from an admin or the operator only. An archived card refuses all
+changes (`409 conflict`). A read has the read right of the project: each
+member of the project, a sysadmin, and the operator.
+
+**Events and audit.** An add emits `card.file_added`, a replace
+`card.file_replaced`, a remove `card.file_removed`. Each has the top-level
+`card`, the project, the assignee as its agent, and `data: {change, name,
+version, size, sha256, media_type, title, column, …}` (a remove: `{name,
+version, versions}`). Each writes the audit row `card.file_add`,
+`card.file_replace`, or `card.file_remove`. The card's `updated_at`
+changes.
+
+**Delivery to the assignee.** The files of each card that is assigned to an
+agent, is not archived, and is not in `done` go into the agent's workspace:
+
+```
+<workspace>/.terrarium/cards/<card-id>/<name>    the latest version, mode 0444
+<workspace>/.terrarium/cards/<card-id>/index.md  the title, the links, the file list
+```
+
+- At each start of the agent, before the harness starts.
+- While the agent is live: at once on a file event of the card, and on an
+  assign, a claim, a move, or an archive of a card. The agent gets a mail
+  from `system` (a `[Mailbox:system]` item) for an added, replaced, or
+  removed file, and for a new assignment of a card that has files. Its own
+  change mails it nothing.
+- The daemon removes a card dir of a card that the agent does not have any
+  more, and each entry in a card dir that is not a file of the card. An
+  edit of a delivered file is put back at the next delivery.
+- The writes are fd-relative and follow no symlink: a symlink or a file at
+  `.terrarium` or `.terrarium/cards` stops the delivery (a warning in the
+  log); a symlink in the place of a card dir or a file is removed, never
+  followed. `/.terrarium/` goes into `.git/info/exclude` of a workspace
+  that is a git repo, so the agent does not commit the files.
+- An agent reads the files of any card of its project on demand: `terrarium
+  card files get <card> [name]`.
+
+```
+POST /api/cards/TER-1/files            (X-Terrarium-Agent: terrarium/worker)
+{"name":"notes.md","data_base64":"IyBOb3Rlcw==","replace":true}
+
+201
+{"card":"TER-1","name":"notes.md","version":3,"size":7,"sha256":"…","media_type":"text/markdown; charset=utf-8",
+ "created_by":"01M5PA0T0Z0K16V6G88P3SE78W","created_by_name":"terrarium/worker","created_at":"…","versions":3,
+ "outcome":"replaced"}
+```
 
 ## 9. Events
 

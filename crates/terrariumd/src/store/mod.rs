@@ -7,6 +7,7 @@ pub mod artifacts;
 pub mod audit;
 pub mod board;
 pub mod calendar;
+pub mod card_files;
 pub mod event_sources;
 pub mod harness_updates;
 pub mod hosts;

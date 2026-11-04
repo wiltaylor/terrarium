@@ -11,6 +11,7 @@ import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "..
 import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { CardQuestions } from "./CardQuestions";
+import { CardFiles } from "./CardFiles";
 import { CardTestsChip, LinkedRuns } from "../tests/parts";
 import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkable } from "./questions";
 import { emptyNewCardForm, type NewCardErrors, type NewCardForm, newCardBody, newCardColumn, nextNewCardForm } from "./newCard";
@@ -1084,6 +1085,8 @@ function CardDrawer(props: {
           </dd>
         </Show>
       </dl>
+
+      <CardFiles card={props.card} />
 
       <CardQuestions card={props.card} linkable={props.linkable} onChanged={() => props.onQuestionsChanged()} />
 

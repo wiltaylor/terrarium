@@ -25,6 +25,9 @@ fn fixture() -> Fixture {
     )
     .unwrap();
     fs::write(state.join("agents/A1/private/events.jsonl"), "{}\n").unwrap();
+    // A card file blob (docs/api.md §8.4): the state root has the store.
+    fs::create_dir_all(state.join("card-files")).unwrap();
+    fs::write(state.join("card-files").join("a".repeat(64)), "# brief").unwrap();
     fs::write(state.join("secrets.key"), [7u8; 32]).unwrap();
     fs::set_permissions(state.join("secrets.key"), fs::Permissions::from_mode(0o600)).unwrap();
     fs::create_dir_all(state.join("credentials/accounts/claude/a")).unwrap();
@@ -132,6 +135,7 @@ fn a_full_backup_round_trips() {
     assert!(n.contains(&"README.txt".to_owned()));
     assert!(n.contains(&"files/state/terrarium.db".to_owned()));
     assert!(n.contains(&"files/state/secrets.key".to_owned()));
+    assert!(n.contains(&format!("files/state/card-files/{}", "a".repeat(64))));
     assert!(n.contains(&"files/work/p/a/main.rs".to_owned()));
     // No live DB files, no caches, no build output, no backups in it.
     assert!(!n.iter().any(|x| x.contains("-wal") || x.contains("-shm")));

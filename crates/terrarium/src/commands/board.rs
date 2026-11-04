@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::{delimited, event_line, print_table, set_opt, set_replace_list};
 use crate::api::{CliError, query};
-use crate::cli::{BoardCmd, CardCmd, CardEditArgs, CardNewArgs, ColumnCmd};
+use crate::cli::{BoardCmd, CardCmd, CardEditArgs, CardFilesCmd, CardNewArgs, ColumnCmd};
 use crate::commands::projects::project_path;
 use crate::commands::system::as_items;
 use crate::ctx::{Ctx, Waiter};
@@ -527,6 +527,13 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                 c.line(format!("archived {id}"));
             })
         }
+        CardCmd::Attach {
+            id,
+            paths,
+            replace,
+            name,
+        } => attach(ctx, id, paths, *replace, name.as_deref()).await,
+        CardCmd::Files { command } => files(ctx, command).await,
         CardCmd::Events { id } => {
             let v = Value::Array(
                 ctx.api
@@ -668,6 +675,185 @@ async fn wait(ctx: &Ctx, mine: bool, timeout: u64) -> anyhow::Result<()> {
     ctx.emit(&json!([]), |c, _| {
         c.line(format!("no card changes after {timeout}s"));
     })
+}
+
+// ---- card files (docs/api.md §8.4) ----
+
+const FILE_COLS: &[(&str, &str)] = &[
+    ("NAME", "name"),
+    ("VERSION", "version"),
+    ("BYTES", "size"),
+    ("TYPE", "media_type"),
+    ("BY", "created_by_name"),
+    ("AT", "created_at"),
+];
+
+const VERSION_COLS: &[(&str, &str)] = &[
+    ("VERSION", "version"),
+    ("BYTES", "size"),
+    ("SHA256", "sha256"),
+    ("BY", "created_by_name"),
+    ("AT", "created_at"),
+];
+
+fn files_path(id: &str) -> String {
+    format!("{}/files", card_path(id))
+}
+
+fn file_path(id: &str, name: &str) -> String {
+    format!("{}/{}", files_path(id), encode(name))
+}
+
+/// Upload each file in order (the JSON form: every transport carries it).
+/// The first failure stops the rest.
+async fn attach(
+    ctx: &Ctx,
+    id: &str,
+    paths: &[std::path::PathBuf],
+    replace: bool,
+    name: Option<&str>,
+) -> anyhow::Result<()> {
+    if name.is_some() && paths.len() > 1 {
+        return Err(CliError::usage("`--name` takes one path only"));
+    }
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let data = std::fs::read(path)
+            .map_err(|e| CliError::usage(format!("cannot read {}: {e}", path.display())))?;
+        let n = match name {
+            Some(n) => n.to_owned(),
+            None => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .ok_or_else(|| CliError::usage(format!("{} has no file name", path.display())))?,
+        };
+        let mut body = json!({
+            "name": n,
+            "data_base64": super::artifacts::base64(&data),
+        });
+        if replace {
+            body["replace"] = json!(true);
+        }
+        out.push(ctx.api.post(&files_path(id), Some(body)).await?);
+    }
+    let v = Value::Array(out);
+    ctx.emit(&v, |c, v| {
+        for f in as_items(v) {
+            c.line(format!(
+                "{} {} v{} ({} bytes) on {id}",
+                field(f, "outcome"),
+                field(f, "name"),
+                field(f, "version"),
+                field(f, "size")
+            ));
+        }
+    })
+}
+
+async fn files(ctx: &Ctx, cmd: &CardFilesCmd) -> anyhow::Result<()> {
+    match cmd {
+        CardFilesCmd::Ls { id } => {
+            let v = ctx.api.get(&files_path(id), vec![]).await?;
+            ctx.emit(&v, |c, v| {
+                print_table(c, as_items(v), FILE_COLS, "no files")
+            })
+        }
+        CardFilesCmd::Versions { id, name } => {
+            let v = ctx
+                .api
+                .get(&format!("{}/versions", file_path(id, name)), vec![])
+                .await?;
+            ctx.emit(&v, |c, v| {
+                print_table(c, as_items(v), VERSION_COLS, "no versions")
+            })
+        }
+        CardFilesCmd::Rm { id, name } => {
+            ctx.api.delete(&file_path(id, name), vec![]).await?;
+            ctx.emit(&json!({"card": id, "removed": name}), |c, _| {
+                c.line(format!("removed {name} from {id}"));
+            })
+        }
+        CardFilesCmd::Get {
+            id,
+            name,
+            version,
+            output,
+            dir,
+            force,
+        } => {
+            let names: Vec<String> = match name {
+                Some(n) => vec![n.clone()],
+                None => as_items(&ctx.api.get(&files_path(id), vec![]).await?)
+                    .iter()
+                    .filter_map(|f| f["name"].as_str().map(str::to_owned))
+                    .collect(),
+            };
+            let dir = match (name, dir) {
+                (_, Some(d)) => d.clone(),
+                (Some(_), None) => std::path::PathBuf::from("."),
+                (None, None) => std::path::PathBuf::from(id),
+            };
+            let mut got = Vec::new();
+            for n in &names {
+                let q = query([
+                    ("format", Some("json".to_owned())),
+                    ("version", version.map(|v| v.to_string())),
+                ]);
+                let f = ctx.api.get(&file_path(id, n), q).await?;
+                let data = {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(f["data_base64"].as_str().unwrap_or(""))
+                        .map_err(|e| {
+                            anyhow::anyhow!("the daemon answered bad base64 for {n}: {e}")
+                        })?
+                };
+                // The daemon checks the names; check again before a write.
+                let safe = f["name"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && !s.contains('/') && !s.starts_with('.'))
+                    .ok_or_else(|| anyhow::anyhow!("the daemon answered a bad name for {n}"))?;
+                let to = output.clone().unwrap_or_else(|| dir.join(safe));
+                if to.as_os_str() == "-" {
+                    use std::io::Write as _;
+                    let mut so = std::io::stdout().lock();
+                    so.write_all(&data)?;
+                    so.flush()?;
+                    return Ok(());
+                }
+                if to.exists() && !force {
+                    return Err(CliError::usage(format!(
+                        "{} is there already; add --force to overwrite it",
+                        to.display()
+                    )));
+                }
+                if let Some(parent) = to.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| anyhow::anyhow!("cannot make {}: {e}", parent.display()))?;
+                }
+                std::fs::write(&to, &data)
+                    .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", to.display()))?;
+                got.push(json!({
+                    "name": safe, "version": f["version"], "size": data.len(),
+                    "path": to.display().to_string(),
+                }));
+            }
+            let v = Value::Array(got);
+            ctx.emit(&v, |c, v| {
+                if as_items(v).is_empty() {
+                    c.line(format!("{id} has no files"));
+                }
+                for f in as_items(v) {
+                    c.line(format!(
+                        "{} v{} -> {}",
+                        field(f, "name"),
+                        field(f, "version"),
+                        field(f, "path")
+                    ));
+                }
+            })
+        }
+    }
 }
 
 #[cfg(test)]

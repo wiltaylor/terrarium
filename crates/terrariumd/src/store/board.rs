@@ -595,7 +595,19 @@ pub fn list_cards(
 
 // ---- events and notices ----
 
-fn card_event(t: &mut Tx<'_>, card: &CardRow, change: &str, mut extra: Value) -> ApiResult<()> {
+fn card_event(t: &mut Tx<'_>, card: &CardRow, change: &str, extra: Value) -> ApiResult<()> {
+    card_event_as(t, card, "card", change, None, extra)
+}
+
+/// A card event of kind `kind`. `summary` replaces the default summary.
+fn card_event_as(
+    t: &mut Tx<'_>,
+    card: &CardRow,
+    kind: &str,
+    change: &str,
+    summary_override: Option<String>,
+    mut extra: Value,
+) -> ApiResult<()> {
     let actor_name = actor_display(t)?;
     let summary = match change {
         "moved" => format!(
@@ -610,6 +622,10 @@ fn card_event(t: &mut Tx<'_>, card: &CardRow, change: &str, mut extra: Value) ->
         },
         _ => format!("{} {change} by {actor_name}: {}", card.id, card.title),
     };
+    let summary = match summary_override {
+        Some(s) => format!("{s} by {actor_name}"),
+        None => summary,
+    };
     if let Value::Object(map) = &mut extra {
         map.insert("change".into(), json!(change));
         map.insert("title".into(), json!(card.title));
@@ -621,7 +637,7 @@ fn card_event(t: &mut Tx<'_>, card: &CardRow, change: &str, mut extra: Value) ->
             map.insert("actor_session".into(), json!(sid));
         }
     }
-    let mut draft = EventDraft::new("card", summary, extra)
+    let mut draft = EventDraft::new(kind, summary, extra)
         .project(card.project.clone())
         .card(card.id.clone());
     // The event belongs to the assignee's stream, so the runner can push it.
@@ -842,6 +858,65 @@ pub fn check_test_link(
     not_archived(&card)?;
     may_edit(actor, &card)?;
     Ok(card.id)
+}
+
+/// What the card file routes (`crate::store::card_files`) need of a card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardRef {
+    pub id: String,
+    pub project: String,
+    pub title: String,
+    /// `operator` or an agent ULID.
+    pub assignee: Option<String>,
+    pub archived: bool,
+}
+
+fn card_ref_of(card: &CardRow) -> CardRef {
+    CardRef {
+        id: card.id.clone(),
+        project: card.project.clone(),
+        title: card.title.clone(),
+        assignee: card.assignee.clone(),
+        archived: card.archived,
+    }
+}
+
+/// The card `id`, for a read of its files. The caller checks the read
+/// right of the project.
+pub fn card_ref(conn: &Connection, id: &str) -> ApiResult<CardRef> {
+    Ok(card_ref_of(&find_row(conn, id)?))
+}
+
+/// Check that `actor` may change the files of card `id`: the rights of an
+/// edit (PLAN §13). The card must not be archived.
+pub fn check_file_edit(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<CardRef> {
+    let card = find_row(conn, id)?;
+    policy::read_project(actor, &card.project)?;
+    not_archived(&card)?;
+    may_edit(actor, &card)?;
+    Ok(card_ref_of(&card))
+}
+
+/// Emit `card.<change>` for a file of card `id` (`file_added`,
+/// `file_replaced`, `file_removed`), and touch the card. The event belongs
+/// to the assignee's stream, as each card event does.
+pub fn file_event(
+    t: &mut Tx<'_>,
+    id: &str,
+    change: &str,
+    summary: String,
+    extra: Value,
+) -> ApiResult<()> {
+    let card = find_row(t, id)?;
+    touch(t, &card.id)?;
+    card_event_as(
+        t,
+        &card,
+        &format!("card.{change}"),
+        change,
+        Some(summary),
+        extra,
+    )
 }
 
 fn not_archived(card: &CardRow) -> ApiResult<()> {

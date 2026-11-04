@@ -37,7 +37,7 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 
 - `whoami`, `project show`, `agents ls`, `repo ls`: who and where you are.
 - `mail check | read | send | reply | wait`: your mailbox.
-- `board`, `card ls | show | new | claim | move | comment | link | wait`: the board.
+- `board`, `card ls | show | new | claim | move | comment | link | attach | files | wait`: the board.
 - `board columns`, `board column add | set | rm | move`: the columns, their
   WIP limits, and their roles (project_admin). `backlog` and `done` are fixed.
 - `mem search | show | new | link | supersede | neighbors`: the memory graph.
@@ -104,6 +104,10 @@ that step.
 
 When you assign a card, you can set an ETA for the worker with
 `terrarium card eta <id> <duration>`. The worker changes it when it knows more.
+
+Card files: the files of your cards are in `.terrarium/cards/<card-id>/`
+(read-only; `index.md` lists them). Attach one with `terrarium card attach
+<id> <path>` (`--replace` adds a version).
 
 ## Memory
 

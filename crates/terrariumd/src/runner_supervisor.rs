@@ -2896,6 +2896,8 @@ impl RunnerSupervisor {
         let Some(state) = self.state() else { return };
         // The workspace moves to the work root before a target binds it.
         crate::workspace::ensure(&state.state_dir, &state.work_dir, agent, true);
+        // The files of the agent's cards, before the harness starts (§8.4).
+        crate::card_delivery::deliver_at_start(&state, agent).await;
         let id = agent.id.to_string();
         for (t, e) in crate::executor::on_agent_start(&state, &id, &agent.policy.targets).await {
             self.emit(

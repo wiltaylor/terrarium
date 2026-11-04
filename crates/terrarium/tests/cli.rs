@@ -793,6 +793,71 @@ fn agent_mode_tunnels_every_call_over_the_runner_socket() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `card attach` and `card files get` over the runner tunnel (docs/api.md
+/// §8.4): the upload is JSON with base64, the download asks
+/// `format=json`, and the file lands in the dir.
+#[test]
+fn card_files_over_the_runner_tunnel() {
+    let dir = temp_dir("card-files");
+    let (socket, seen) = fake_runner(&dir, |p| match (p["method"].as_str(), p["path"].as_str()) {
+        (Some("POST"), Some("/api/cards/TER-1/files")) => json!({
+                "status": 201, "headers": {},
+                "body": {"card": "TER-1", "name": p["body"]["name"], "version": 1, "size": 5,
+                         "outcome": "added"}}),
+        (Some("GET"), Some("/api/cards/TER-1/files/notes.txt")) => json!({
+                "status": 200, "headers": {},
+                "body": {"card": "TER-1", "name": "notes.txt", "version": 2,
+                         "data_base64": "aGVsbG8="}}),
+        _ => json!({"status": 404, "headers": {},
+                "body": {"error": {"code": "not_found", "message": "no such API route"}}}),
+    });
+    let agent = |args: &[&str]| {
+        bin()
+            .env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .current_dir(&dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    std::fs::write(dir.join("notes.txt"), b"hello").unwrap();
+    let o = agent(&["card", "attach", "TER-1", "notes.txt"]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert!(
+        text(&o.stdout).contains("added notes.txt v1"),
+        "{}",
+        text(&o.stdout)
+    );
+    {
+        let seen = seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        assert_eq!(
+            last["params"],
+            json!({"method": "POST", "path": "/api/cards/TER-1/files",
+                   "body": {"name": "notes.txt", "data_base64": "aGVsbG8="}})
+        );
+    }
+    let o = agent(&[
+        "card",
+        "files",
+        "get",
+        "TER-1",
+        "notes.txt",
+        "-o",
+        "got.txt",
+    ]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert_eq!(std::fs::read(dir.join("got.txt")).unwrap(), b"hello");
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.last().unwrap()["params"]["query"],
+            json!({"format": "json"})
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// PLAN §16b.4, secret manager review S1 and S6: the harness gets the env
 /// vars of its secret grants from `terrarium exec-env` inside the sandbox,
 /// not from the launch spec. A var that the env holds already wins.

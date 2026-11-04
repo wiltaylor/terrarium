@@ -1847,6 +1847,33 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE repos ADD COLUMN push_via TEXT CHECK (push_via IN ('proxy', 'direct'));
     "#,
+    // 61: the files of a card (docs/api.md §11.6, `crate::store::card_files`).
+    // One row for each version of a file. `name_key` is the name in lower
+    // case: a name is unique per card with no regard to case. The bytes are
+    // in the blob store `<state>/card-files/<sha256>`. `deleted_at` marks a
+    // removed file (all its versions); the prune timer deletes such rows
+    // after `TERRARIUM_TRASH_DAYS`, then the blobs that no row uses.
+    // `created_by` and `deleted_by` are addresses (`operator`, an agent
+    // ULID). Self-contained: when another branch takes this number, move
+    // this entry to the end of the list.
+    r#"
+    CREATE TABLE card_files (
+        id         TEXT PRIMARY KEY,            -- ULID
+        card       TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+        name       TEXT NOT NULL,
+        name_key   TEXT NOT NULL,
+        version    INTEGER NOT NULL CHECK (version >= 1),
+        size       INTEGER NOT NULL CHECK (size >= 0),
+        sha256     TEXT NOT NULL,
+        media_type TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        deleted_at TEXT,
+        deleted_by TEXT,
+        UNIQUE (card, name_key, version)
+    );
+    CREATE INDEX card_files_sha ON card_files(sha256);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

@@ -2057,6 +2057,35 @@ or archived: "1h 12m left", or "overdue 12m" in the danger colour, with a
 thin bar of the time used. One shared timer ticks each second while a
 countdown is under an hour, and each 30 s otherwise (api.md §8.2).
 
+Card files: a card has files, such as a markdown brief, a spec, data
+files, images, and PDFs (api.md §8.4; migration 61). The bytes are in a
+blob store of the daemon, `<state>/card-files/<sha256>`, so the backups
+have them (§23.7); one row of `card_files` names each version. A name is
+one path segment of safe characters, unique per card with no regard to
+case. The extension picks the type from an allowlist (md, txt, json,
+yaml, csv, png, jpg, gif, webp, svg, pdf), and the bytes must agree. The
+caps are 10 MiB a file and 50 MiB a card (all the versions),
+`TERRARIUM_CARD_FILE_MAX_BYTES` and `TERRARIUM_CARD_FILES_MAX_BYTES`. A
+replace keeps the old versions; a remove is a soft delete, and the prune
+timer deletes the rows and the unused blobs after the trash days. The
+rights are those of a card edit; a read needs the read right of the
+project. Each change writes an audit row and emits `card.file_added`,
+`card.file_replaced`, or `card.file_removed`. A download is an attachment
+in a `sandbox` CSP with `nosniff`, so no file (an SVG too) renders as a
+page of the daemon origin.
+
+The assignee gets the files: at each start, and at once while it runs
+(on a file event, an assign, a claim, a move, an archive), the daemon
+writes the latest version of each file of each assigned card that is not
+done to `<workspace>/.terrarium/cards/<card>/<name>` (mode 0444), with an
+`index.md` per card, and removes the dirs and files that are stale. A
+running agent gets a `system` mail for each file change and for a new
+assignment of a card with files. The writes are fd-relative and follow no
+symlink (the agent owns the workspace), and `/.terrarium/` is in
+`.git/info/exclude`. `terrarium card attach` and `terrarium card files
+ls | get | versions | rm` are the CLI; the dashboard card drawer has a
+Files section (drop, paste, upload, preview, versions, download, remove).
+
 ---
 
 ## 14. Memory graph

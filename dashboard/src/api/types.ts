@@ -1044,6 +1044,10 @@ export const EVENT_KINDS = [
   "compact_finished",
   "mail",
   "card",
+  // A file of a card (docs/api.md §8.4): `{change, name, version, size?, sha256?, media_type?, versions?}`.
+  "card.file_added",
+  "card.file_replaced",
+  "card.file_removed",
   "board",
   "memory.created",
   "memory.updated",
@@ -1409,6 +1413,40 @@ export interface CardLink {
   ref: string;
   created_by?: string;
   created_at?: string;
+}
+
+/** A file of a card (docs/api.md §8.4): the latest version of one name. */
+export interface CardFile {
+  card: string;
+  name: string;
+  version: number;
+  size: number;
+  sha256: string;
+  /** For example `text/markdown; charset=utf-8`, `image/png`. */
+  media_type: string;
+  /** `operator` or an agent ULID: who stored this version. */
+  created_by: string;
+  created_by_name: string;
+  created_at: string;
+  /** The stored versions of the name. */
+  versions: number;
+}
+
+/** One version of a card file (`GET /api/cards/{id}/files/{name}/versions`). */
+export interface CardFileVersion {
+  name: string;
+  version: number;
+  size: number;
+  sha256: string;
+  media_type: string;
+  created_by: string;
+  created_by_name: string;
+  created_at: string;
+}
+
+/** The answer of an upload: the file, and what the upload did. */
+export interface CardFileUploaded extends CardFile {
+  outcome: "added" | "replaced" | "unchanged";
 }
 
 export interface Card {

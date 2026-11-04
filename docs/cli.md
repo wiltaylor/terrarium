@@ -855,6 +855,11 @@ terrarium card link <id> (--thread T | --branch b | --card id | --link-url u)
 terrarium card rm <id>                        archives the card
 terrarium card events <id>
 terrarium card wait [--mine] [--timeout 300]
+terrarium card attach <id> <path>... [--replace] [--name n]
+terrarium card files ls <id>
+terrarium card files get <id> [name] [--version n] [-o path | -] [--dir d] [--force]
+terrarium card files versions <id> <name>
+terrarium card files rm <id> <name>
 ```
 
 `card comment` takes the text as the last argument, with `-b`/`--body`, or
@@ -901,6 +906,23 @@ clock. `--clear` removes the ETA. `--eta` on `card new`, `card claim`, and
 `PATCH`, and `card claim --eta` sends the claim, then a `PATCH`. `card
 show` prints the ETA, the time left (or `overdue`), and who set it. The
 dashboard board shows a countdown on each card with an ETA.
+
+`card attach` uploads each path to the card, in order (docs/api.md §8.4):
+the JSON form with base64, so it works in agent mode over the runner
+tunnel too. The name on the card is the file name, or `--name` (one path
+only). A card takes md, txt, json, yaml, yml, csv, png, jpg, jpeg, gif,
+webp, svg, and pdf files, at most 10 MiB each and 50 MiB for the card. A
+name that the card has already fails with `409`, unless `--replace` adds a
+new version. The first failure stops the rest. `card files ls` lists the
+latest version of each file; `card files versions` lists the versions of
+one, newest first. `card files rm` removes a file with all its versions.
+`card files get <id> <name>` writes the file to `./<name>`, to `-o <path>`,
+or to stdout with `-o -`; `--version` picks an old version. With no name,
+it writes every file of the card into `--dir` (default `./<card id>`). It
+does not overwrite a file unless `--force`. The rights of a change are
+those of a card edit; any member of the project reads the files. An agent
+finds the files of its own cards in `.terrarium/cards/<card id>/` of its
+workspace: the daemon delivers them.
 
 `card wait --mine`: when no card is assigned to me, the CLI long-polls the
 card list with `assignee=me&wait=`. It returns when a card is assigned.

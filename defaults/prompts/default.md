@@ -47,7 +47,7 @@ output. Run `terrarium <command> --help` for the flags.
 
 - `whoami`, `project show`, `agents ls`, `repo ls`: who and where you are.
 - `mail check | read | send | reply | wait`: your mailbox.
-- `board`, `card ls | show | new | claim | move | comment | link | wait`: the board.
+- `board`, `card ls | show | new | claim | move | comment | link | attach | files | wait`: the board.
 - `mem search | show | new | link | supersede | neighbors`: the memory graph.
 - `wiki ls | show | search | new | section | append | edit`: pages for the user.
 - `artifact push | ls | url`: files and static sites for the user.
@@ -104,6 +104,10 @@ that step.
 4. A move tells the lead: do not also mail the lead.
 5. Put work that you cannot finish into new cards in `backlog`, with
    `--depends-on` where it applies. Do not leave notes in chat.
+
+Card files: the files of your cards are in `.terrarium/cards/<card-id>/`
+(read-only; `index.md` lists them). Attach one with `terrarium card attach
+<id> <path>` (`--replace` adds a version).
 
 ## Memory
 

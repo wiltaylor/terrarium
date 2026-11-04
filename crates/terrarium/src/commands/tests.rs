@@ -9232,3 +9232,201 @@ async fn calendar_commands() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn card_file_commands() {
+    let t = tempfile::tempdir().unwrap();
+    let spec = t.path().join("spec.md");
+    std::fs::write(&spec, b"# Spec").unwrap();
+    let shot = t.path().join("shot.png");
+    std::fs::write(&shot, b"\x89PNG\r\n\x1a\n").unwrap();
+    let file = |name: &str, v: u64, outcome: &str| {
+        json!({"card": "TER-1", "name": name, "version": v, "size": 6, "sha256": "ab",
+               "media_type": "text/markdown; charset=utf-8", "created_by": "operator",
+               "created_by_name": "operator", "created_at": "2026-11-04T00:00:00.000Z",
+               "versions": v, "outcome": outcome})
+    };
+    // attach: one JSON upload per path, in order, over any transport.
+    let out = ok(
+        true,
+        &[
+            "card",
+            "attach",
+            "TER-1",
+            spec.to_str().unwrap(),
+            shot.to_str().unwrap(),
+        ],
+        vec![
+            (201, file("spec.md", 1, "added")),
+            (201, file("shot.png", 1, "added")),
+        ],
+        vec![
+            (
+                Post,
+                "/api/cards/TER-1/files",
+                vec![],
+                Some(json!({"name": "spec.md", "data_base64": "IyBTcGVj"})),
+            ),
+            (
+                Post,
+                "/api/cards/TER-1/files",
+                vec![],
+                Some(json!({"name": "shot.png", "data_base64": "iVBORw0KGgo="})),
+            ),
+        ],
+    )
+    .await;
+    assert!(out.contains("added spec.md v1 (6 bytes) on TER-1"), "{out}");
+    // --replace and --name.
+    let out = ok(
+        false,
+        &[
+            "card",
+            "attach",
+            "TER-1",
+            spec.to_str().unwrap(),
+            "--replace",
+            "--name",
+            "brief.md",
+        ],
+        vec![(201, file("brief.md", 2, "replaced"))],
+        vec![(
+            Post,
+            "/api/cards/TER-1/files",
+            vec![],
+            Some(json!({"name": "brief.md", "data_base64": "IyBTcGVj", "replace": true})),
+        )],
+    )
+    .await;
+    assert!(out.contains("replaced brief.md v2"), "{out}");
+    // --name takes one path only; a missing file is a usage error.
+    let r = exec(
+        false,
+        &["card", "attach", "TER-1", "a.md", "b.md", "--name", "x.md"],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    assert!(r.reqs.is_empty());
+    let r = exec(
+        false,
+        &["card", "attach", "TER-1", "/nonexistent/x.md"],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+
+    // ls, versions, rm.
+    let out = ok(
+        false,
+        &["card", "files", "ls", "TER-1"],
+        vec![(200, json!([file("spec.md", 2, "added")]))],
+        vec![req(Get, "/api/cards/TER-1/files")],
+    )
+    .await;
+    assert!(out.contains("NAME") && out.contains("spec.md"), "{out}");
+    ok(
+        false,
+        &["card", "files", "versions", "TER-1", "my spec.md"],
+        vec![(
+            200,
+            json!([file("my spec.md", 2, ""), file("my spec.md", 1, "")]),
+        )],
+        vec![req(Get, "/api/cards/TER-1/files/my%20spec.md/versions")],
+    )
+    .await;
+    let out = ok(
+        false,
+        &["card", "files", "rm", "TER-1", "spec.md"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/cards/TER-1/files/spec.md")],
+    )
+    .await;
+    assert_eq!(out, "removed spec.md from TER-1\n");
+
+    // get one version to a path; get all into a dir; no overwrite without --force.
+    let dl = |name: &str, v: u64, b64: &str| {
+        json!({"card": "TER-1", "name": name, "version": v, "size": 1, "sha256": "ab",
+               "media_type": "text/plain; charset=utf-8", "created_by": "operator",
+               "created_by_name": "operator", "created_at": "x", "data_base64": b64})
+    };
+    let to = t.path().join("out.md");
+    ok(
+        true,
+        &[
+            "card",
+            "files",
+            "get",
+            "TER-1",
+            "spec.md",
+            "--version",
+            "1",
+            "-o",
+            to.to_str().unwrap(),
+        ],
+        vec![(200, dl("spec.md", 1, "djE="))],
+        vec![(
+            Get,
+            "/api/cards/TER-1/files/spec.md",
+            vec![("format", "json"), ("version", "1")],
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(std::fs::read(&to).unwrap(), b"v1");
+    let r = exec(
+        false,
+        &[
+            "card",
+            "files",
+            "get",
+            "TER-1",
+            "spec.md",
+            "-o",
+            to.to_str().unwrap(),
+        ],
+        vec![(200, dl("spec.md", 2, "djI="))],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    assert_eq!(std::fs::read(&to).unwrap(), b"v1");
+    let dir = t.path().join("all");
+    let out = ok(
+        false,
+        &[
+            "card",
+            "files",
+            "get",
+            "TER-1",
+            "--dir",
+            dir.to_str().unwrap(),
+        ],
+        vec![
+            (200, json!([file("a.txt", 1, ""), file("b.txt", 3, "")])),
+            (200, dl("a.txt", 1, "YQ==")),
+            (200, dl("b.txt", 3, "Yg==")),
+        ],
+        vec![
+            req(Get, "/api/cards/TER-1/files"),
+            (
+                Get,
+                "/api/cards/TER-1/files/a.txt",
+                vec![("format", "json")],
+                None,
+            ),
+            (
+                Get,
+                "/api/cards/TER-1/files/b.txt",
+                vec![("format", "json")],
+                None,
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"a");
+    assert_eq!(std::fs::read(dir.join("b.txt")).unwrap(), b"b");
+    assert!(out.contains("b.txt v3 ->"), "{out}");
+}

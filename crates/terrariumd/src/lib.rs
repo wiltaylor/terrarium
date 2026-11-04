@@ -10,6 +10,7 @@ pub mod api;
 pub mod assets;
 pub mod backup;
 pub mod calendar;
+pub mod card_delivery;
 pub mod config_repo;
 pub mod db;
 pub mod defaults;
@@ -323,6 +324,8 @@ pub async fn start_with_usage(
     tasks.extend(waits::spawn(&state));
     // After the reconcile: the agents with queued work wake.
     tasks.extend(lifecycle::spawn(&state));
+    // The card files of each assigned card, in the workspace (§8.4).
+    tasks.push(card_delivery::spawn(&state));
     tasks.extend(start_usage(&state).await);
     Ok(Daemon {
         state,
@@ -494,8 +497,9 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
 /// after the same days ([`secrets::migrate::prune_backups`]), the session archive of deleted agents
 /// ([`session_archive::prune_archive`]), the revoked sessions past their `exp`, and the
 /// schedule runs past the newest 500 of each schedule, and the webhook
-/// delivery IDs older than 7 days, and the turn attachments older than 7
-/// days ([`api::attachments::prune`]).
+/// delivery IDs older than 7 days, the turn attachments older than 7
+/// days ([`api::attachments::prune`]), and the removed card files past
+/// the trash days with their blobs ([`api::card_files::prune`]).
 fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = std::time::Duration::from_secs(3600);
@@ -535,6 +539,13 @@ fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
                 Ok(n) if n > 0 => info!(files = n, "attachment prune done"),
                 Ok(_) => {}
                 Err(e) => warn!("attachment prune task failed: {e}"),
+            }
+            match api::card_files::prune(&state, std::time::SystemTime::now()).await {
+                Ok((rows, blobs)) if rows + blobs > 0 => {
+                    info!(rows, blobs, "card file prune done");
+                }
+                Ok(_) => {}
+                Err(e) => warn!("card file prune failed: {e}"),
             }
             let dir = state.state_dir.clone();
             let max_age = std::time::Duration::from_secs(session_archive::archive_days() * 86_400);

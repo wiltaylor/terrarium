@@ -78,6 +78,9 @@ import type {
   AuditQuery,
   Board,
   Card,
+  CardFile,
+  CardFileUploaded,
+  CardFileVersion,
   CardLinkKind,
   CardPatch,
   CardQuery,
@@ -407,6 +410,20 @@ export interface Api {
     events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
     /** `GET /api/cards/{id}/sessions` (docs/api.md §8): the sessions of the card's comments and card events, oldest first. */
     sessions(id: string): Promise<SessionRef[]>;
+  };
+
+  /** The files of a card (docs/api.md §8.4). The rights of a change are those of a card edit. */
+  cardFiles: {
+    /** `GET /api/cards/{id}/files`: the latest version of each file, by name. */
+    list(card: string): Promise<CardFile[]>;
+    /** `POST /api/cards/{id}/files` (multipart). `replace`: a new version of a file of the same name. */
+    upload(card: string, file: Blob, name: string, replace?: boolean): Promise<CardFileUploaded>;
+    /** `GET /api/cards/{id}/files/{name}/versions`: newest first. */
+    versions(card: string, name: string): Promise<CardFileVersion[]>;
+    /** `GET /api/cards/{id}/files/{name}?version=`: the bytes, the file name, and the version. */
+    get(card: string, name: string, version?: number): Promise<{ blob: Blob; fileName: string; version: number }>;
+    /** `DELETE /api/cards/{id}/files/{name}`: all the versions go (a soft delete). */
+    remove(card: string, name: string): Promise<void>;
   };
 
   /** Agent sessions by their own ID (docs/api.md §6.6); they work after `agent rm`. Read-only. */
@@ -1121,6 +1138,24 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       link: (id, kind, ref) => post(`${c(id)}/links`, { kind, ref }),
       events: (id, q = {}) => page(`${c(id)}/events`, { ...q }),
       sessions: (id) => get(`${c(id)}/sessions`),
+    },
+
+    cardFiles: {
+      list: (card) => get(`${c(card)}/files`),
+      upload: (card, file, name, replace = false) => {
+        const form = new FormData();
+        form.append("name", name);
+        if (replace) form.append("replace", "true");
+        // A Blob always (the verb table calls each method with strings).
+        form.append("file", file instanceof Blob ? file : new Blob([String(file)]), name);
+        return t.request("POST", `${c(card)}/files`, { form });
+      },
+      versions: (card, name) => get(`${c(card)}/files/${seg(name)}/versions`),
+      get: async (card, name, version) => {
+        const { blob, headers } = await t.bytes(`${c(card)}/files/${seg(name)}`, { version });
+        return { blob, fileName: dispositionName(headers.get("Content-Disposition")) ?? name, version: Number(headers.get("X-Terrarium-File-Version") ?? version ?? 0) };
+      },
+      remove: (card, name) => del(`${c(card)}/files/${seg(name)}`),
     },
 
     sessions: {

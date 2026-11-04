@@ -3993,3 +3993,14 @@ pre.spawn-text {
   .cal-agenda-item { grid-template-columns: 1fr; }
   .cal-agenda-item .muted { grid-column: 1; }
 }
+
+/* The Files section of the card drawer (docs/api.md §8.4). */
+.card-files { border-radius: 8px; outline: none; }
+.card-files.card-files-drop { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.card-file { border-top: 1px solid var(--border); padding-top: 6px; min-width: 0; }
+.card-file .mono { overflow-wrap: anywhere; text-align: left; }
+.card-file-versions { margin: 4px 0 0; padding-left: 18px; }
+.card-file-preview { margin-top: 6px; max-height: 60vh; overflow: auto; }
+.card-file-image { max-width: 100%; height: auto; display: block; }
+.card-file-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font-size: 12px; }
+p.warn { color: var(--warn); margin: 0; }

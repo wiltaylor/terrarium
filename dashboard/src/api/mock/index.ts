@@ -116,6 +116,7 @@ import { createTestRunMock } from "./testRuns";
 import { createMonitorMock } from "./monitors";
 import { createPipelineMock } from "./pipelines";
 import { createCalendarMock } from "./calendar";
+import { createCardFileMock } from "./cardFiles";
 import { createSpawnMock } from "./spawns";
 import { applyTemplate, compactMaxAgeError, compactOnIdleError, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createSecretMock } from "./secrets";
@@ -791,6 +792,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     now: now(),
   });
   if (w.projects.some((x) => x.name === "terrarium") && w.cards.some((c) => c.id === "TER-12")) testRunMock.seed();
+  // The files of the cards (docs/api.md §8.4): ./cardFiles. The seed gives one assigned card a brief (two versions), a JSON file, and an image.
+  const cardFileMock = createCardFileMock({ iso, reply, fail, emit, audit, card: (id) => cardById(id) });
+  cardFileMock.seed(w.cards);
   // Monitors and the project dashboard (docs/api.md §30): ./monitors. The seed gives project `terrarium` a monitor of
   // each kind with a week of history; the activity timer runs the due ones. Its own counter, as the DB mock.
   let monitorCounter = 0;
@@ -2897,6 +2901,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           return eventsAfter({ ...q, order: undefined }, (e) => e.card === c.id);
         }),
     },
+
+    cardFiles: cardFileMock.api,
 
     sessions: {
       get: (id) =>
