@@ -918,7 +918,10 @@ mod label_tests {
     #[tokio::test]
     async fn edit_adds_and_removes_labels() {
         let mock = MockTransport::new();
-        mock.reply(200, json!({"id": "TER-1", "labels": ["bug", "version:0.1.0"]}));
+        mock.reply(
+            200,
+            json!({"id": "TER-1", "labels": ["bug", "version:0.1.0"]}),
+        );
         let c = Ctx::for_test(std::sync::Arc::new(mock.clone()), None);
         edit(&c, &args(&["version:0.1.0"], &["version:vnext"], &[]))
             .await
