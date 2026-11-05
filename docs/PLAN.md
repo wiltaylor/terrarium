@@ -1924,15 +1924,19 @@ The agent needs no new command or right. `docs/api.md` §6.9 is the
 contract. In the dashboard: **Ask an agent** on the Inbox page (an agent
 picker and the question), **Forward** with a watch icon on each open
 question, bundle, and notice card (an agent picker and an optional note),
-the **Asked** tab with the watch items ("Waiting for p/y: <subject>", with
-Cancel), and on the agent's reply the line "answer to your forward of
+the **Asked** status tab next to Done with the waiting asks ("Waiting for
+p/y: <subject>", with Cancel; TER-42: Open never shows a waiting ask, the
+agent's reply shows on Open as a mail item, and an answered or cancelled
+ask is under Done; `?tab=watch` opens Asked), and on the agent's reply the line "answer to your forward of
 <question>", which opens the question, with **Use as answer**, which fills
 the answer box of the question with the reply.
 
 **The dashboard.** The global **Inbox** page (`/inbox`; `/questions`
-redirects) has the tabs All, Questions, Notices, Mail to you, System, and
-Asked,
-an Open and Done switch, and a project filter. Critical items come first,
+redirects) has the kind tabs All, Questions, Notices, Mail to you, and
+System, the status tabs Open, Done, and Asked (the waiting asks; the kind
+tabs hide there), and a project filter. `GET /api/inbox?status=open` also
+returns the open watches; the page filters them out of Open and asks for
+`kind=watch` under Asked. Critical items come first,
 then urgent items, then the newest. A question card shows the agent, the project, the card,
 the text (as plain text), the context (Markdown through the DOMPurify sink
 only), the choice buttons, a free-text answer, and Retract. Each card with a linked board card has a

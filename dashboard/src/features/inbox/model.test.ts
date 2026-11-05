@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { InboxItem, InboxWatch } from "../../api/types";
-import { answerLine, ASK_TEXT_MAX, askBody, badge, canForward, countItems, EMPTY_COUNTS, emptyText, INBOX_TABS, inboxQuery, isCritical, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, systemMailLink, watchState, watchTitle } from "./model";
+import { answerLine, ASK_TEXT_MAX, askBody, badge, canForward, countItems, EMPTY_COUNTS, emptyText, INBOX_TABS, inboxQuery, isCritical, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, statusTabOf, systemMailLink, watchState, watchTitle } from "./model";
 
 const item = (id: string, over: Partial<InboxItem> = {}): InboxItem => ({
   id,
@@ -115,13 +115,35 @@ describe("ask and forward (GitHub #24)", () => {
   const watch = (over: Partial<InboxWatch> = {}): InboxWatch => ({ thread_id: "T1", agent: "A1", agent_name: "demo/w1", message_id: "M1", subject: "Question from the operator: why?", created_at: "2026-11-05T10:00:00Z", waiting: true, replies: 0, ...over });
   const watchItem = (over: Partial<InboxItem> = {}): InboxItem => ({ id: "watch:T1", kind: "watch", open: true, urgent: false, critical: false, project: "demo", at: "2026-11-05T10:00:00Z", watch: watch(), ...over });
 
-  it("has an Asked tab that lists the watches", () => {
-    expect(INBOX_TABS.map((t) => t.id)).toContain("watch");
-    expect(INBOX_TABS.find((t) => t.id === "watch")!.label).toBe("Asked");
-    expect(inboxQuery("watch", "open", "")).toEqual({ status: "open", kind: "watch" });
-    expect(matchesTabs(watchItem(), "watch", "open")).toBe(true);
-    expect(matchesTabs(watchItem({ open: false }), "watch", "done")).toBe(true);
-    expect(emptyText("watch", "open")).toContain("Ask an agent");
+  it("has an Asked status tab next to Done that lists only the waiting asks (TER-42)", () => {
+    expect(STATUS_TABS.map((t) => t.id)).toEqual(["open", "done", "asked"]);
+    expect(STATUS_TABS.find((t) => t.id === "asked")!.label).toBe("Asked");
+    expect(INBOX_TABS.map((t) => t.id as string)).not.toContain("watch");
+    // The query: the open watches, whatever the kind tab.
+    expect(inboxQuery("all", "asked", "")).toEqual({ status: "open", kind: "watch" });
+    expect(inboxQuery("question", "asked", "demo")).toEqual({ status: "open", kind: "watch", project: "demo" });
+    const mail = item("mail:M", { kind: "mail" });
+    // Asked: a waiting ask, never another item, whatever the kind tab.
+    expect(matchesTabs(watchItem(), "all", "asked")).toBe(true);
+    expect(matchesTabs(watchItem(), "question", "asked")).toBe(true);
+    expect(matchesTabs(watchItem({ open: false }), "all", "asked")).toBe(false);
+    expect(matchesTabs(mail, "all", "asked")).toBe(false);
+    // Open: never a waiting ask; the reply (a mail) shows there.
+    expect(matchesTabs(watchItem(), "all", "open")).toBe(false);
+    expect(matchesTabs(mail, "all", "open")).toBe(true);
+    // Done: an answered or cancelled ask.
+    expect(matchesTabs(watchItem({ open: false }), "all", "done")).toBe(true);
+    expect(matchesTabs(watchItem(), "all", "done")).toBe(false);
+    expect(emptyText("all", "asked")).toContain("Ask an agent");
+  });
+
+  it("opens Asked for an old ?tab=watch link", () => {
+    expect(statusTabOf(undefined, undefined)).toBe("open");
+    expect(statusTabOf("done", undefined)).toBe("done");
+    expect(statusTabOf("asked", undefined)).toBe("asked");
+    expect(statusTabOf(undefined, "watch")).toBe("asked");
+    expect(statusTabOf("done", "watch")).toBe("done");
+    expect(statusTabOf("bogus", "question")).toBe("open");
   });
 
   it("does not count an open watch in the badge", () => {
