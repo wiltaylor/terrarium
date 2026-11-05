@@ -380,6 +380,14 @@ pub trait Supervisor: Send + Sync + 'static {
             ))
         })
     }
+    /// True when [`Supervisor::compact`] can compact agents of `harness`
+    /// at all, so that a compaction request is refused before it is
+    /// written (`crate::reset::request`). A `false` here is the
+    /// `Unsupported` of `compact`. The default cannot compact.
+    fn can_compact(&self, harness: HarnessId) -> bool {
+        let _ = harness;
+        false
+    }
     /// Close (`on`) or open the reset gate of `agent` (`crate::reset`):
     /// while it is closed, the supervisor types no turn, recap, or push
     /// pointer into the agent; they wait. So a pending compaction or new
@@ -1370,6 +1378,12 @@ mod fake {
             _at: Option<chrono::DateTime<chrono::Utc>>,
         ) {
             self.lock().signals.push((agent, event));
+        }
+
+        /// A harness with a compact command, unless
+        /// [`InMemorySupervisor::refuse_compact`] refused it.
+        fn can_compact(&self, harness: HarnessId) -> bool {
+            harness.compact_command().is_some() && !self.lock().no_compact.contains(&harness)
         }
 
         /// The compact command of the harness, as raw text. The end

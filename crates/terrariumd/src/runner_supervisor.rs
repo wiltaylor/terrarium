@@ -4404,6 +4404,12 @@ impl Supervisor for RunnerSupervisor {
         }
     }
 
+    /// Each harness with a compact command (the `Unsupported` of
+    /// [`Self::compact`]).
+    fn can_compact(&self, harness: HarnessId) -> bool {
+        harness.compact_command().is_some()
+    }
+
     fn compact(
         &self,
         agent: AgentId,
