@@ -626,6 +626,7 @@ fn role_str(r: Role) -> &'static str {
         Role::Member => "member",
         Role::ProjectAdmin => "project_admin",
         Role::Sysadmin => "sysadmin",
+        Role::Architect => "architect",
     }
 }
 

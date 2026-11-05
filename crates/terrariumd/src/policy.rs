@@ -517,8 +517,9 @@ pub fn change_role(actor: &Actor, target: &str, target_project: &str, role: Role
     }
     match role {
         Role::Member => Ok(()),
-        Role::Sysadmin if actor.is_operator() => Ok(()),
+        Role::Sysadmin | Role::Architect if actor.is_operator() => Ok(()),
         Role::Sysadmin => Err(deny("granting or revoking sysadmin", "the operator")),
+        Role::Architect => Err(deny("granting or revoking architect", "the operator")),
         Role::ProjectAdmin => {
             admin_project(actor, target_project, "granting or revoking project_admin")
         }
