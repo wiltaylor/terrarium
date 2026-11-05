@@ -5248,9 +5248,15 @@ mod tests {
         // skill, once; a start of a new session does not.
         let sid = HarnessSessionId("s1".into());
         let view = sup.store_view(&with).await;
-        let resumed = sup.build_spec(&with, Some(&sid), &view, None).await.unwrap();
+        let resumed = sup
+            .build_spec(&with, Some(&sid), &view, None)
+            .await
+            .unwrap();
         assert_eq!(resumed.skills_changed, ["fern-check"]);
-        let again = sup.build_spec(&with, Some(&sid), &view, None).await.unwrap();
+        let again = sup
+            .build_spec(&with, Some(&sid), &view, None)
+            .await
+            .unwrap();
         assert!(again.skills_changed.is_empty());
         std::fs::write(
             lib.join("fern-check/SKILL.md"),

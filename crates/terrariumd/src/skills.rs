@@ -662,13 +662,21 @@ mod tests {
             one.subject,
             "skill changed since your session loaded it: fern-check"
         );
-        assert!(one.body.starts_with("The skill `fern-check` changed"), "{}", one.body);
+        assert!(
+            one.body.starts_with("The skill `fern-check` changed"),
+            "{}",
+            one.body
+        );
         assert!(one.body.contains("Load the skill again"), "{}", one.body);
         let two = two.unwrap();
         assert_eq!(
             two.subject,
             "skills changed since your session loaded them: a, b"
         );
-        assert!(two.body.starts_with("The skills `a`, `b` changed"), "{}", two.body);
+        assert!(
+            two.body.starts_with("The skills `a`, `b` changed"),
+            "{}",
+            two.body
+        );
     }
 }
