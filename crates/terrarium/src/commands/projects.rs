@@ -339,7 +339,10 @@ fn checkout_place(r: &Value) -> String {
     let remote = r["remote_path"].as_str().filter(|p| !p.is_empty());
     if path.starts_with('/') || path.is_empty() {
         let at = remote.unwrap_or(path);
-        return format!("{verb} {repo} on {target} at {}", if at.is_empty() { "-" } else { at });
+        return format!(
+            "{verb} {repo} on {target} at {}",
+            if at.is_empty() { "-" } else { at }
+        );
     }
     match remote {
         Some(abs) => format!("{verb} {repo} on {target} in work/{path} ({abs})"),
@@ -418,7 +421,9 @@ mod tests {
     #[test]
     fn the_checkout_line_names_the_target_and_the_path() {
         assert_eq!(
-            checkout_place(&json!({"repo": "app", "path": "app", "agent": "terra/w1", "action": "cloned"})),
+            checkout_place(
+                &json!({"repo": "app", "path": "app", "agent": "terra/w1", "action": "cloned"})
+            ),
             "cloned app in work/app of terra/w1"
         );
         // An absolute --path on an ssh target (the vmlab report).
