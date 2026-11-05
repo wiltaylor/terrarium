@@ -401,7 +401,11 @@ mod tests {
         assert_eq!(n["tools"], json!(["deploy", "tracker-read"]));
         let def = to_def(&s, "w", "p").unwrap();
         assert!(!spec_of(&def).contains_key("tools"));
-        assert!(!normalize(&spec(json!({"harness": "claude", "tools": []}))).unwrap().contains_key("tools"));
+        assert!(
+            !normalize(&spec(json!({"harness": "claude", "tools": []})))
+                .unwrap()
+                .contains_key("tools")
+        );
         for bad in [
             json!({"harness": "claude", "tools": "deploy"}),
             json!({"harness": "claude", "tools": [1]}),

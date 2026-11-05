@@ -450,14 +450,20 @@ pub fn granted_to(conn: &Connection, id: &str, project: &str) -> ApiResult<Vec<T
 /// The tools that a template of `project` (`None`: a global template) may
 /// name (design Q4, TER-35): each exists, and a project tool belongs to
 /// the template's project. A global template names global tools only.
-pub fn check_template_tools(conn: &Connection, project: Option<&str>, tools: &[String]) -> ApiResult<()> {
+pub fn check_template_tools(
+    conn: &Connection,
+    project: Option<&str>,
+    tools: &[String],
+) -> ApiResult<()> {
     for name in tools {
         let r = find(conn, name)?
             .ok_or_else(|| ApiError::invalid(format!("tools: no tool `{name}`")))?;
         if let Some(p) = r.def.project.as_deref()
             && Some(p) != project
         {
-            let whose = project.map_or("a global template".to_owned(), |t| format!("a template of project `{t}`"));
+            let whose = project.map_or("a global template".to_owned(), |t| {
+                format!("a template of project `{t}`")
+            });
             return Err(ApiError::invalid(format!(
                 "tools: `{name}` is a tool of project `{p}`, and this is {whose}"
             )));

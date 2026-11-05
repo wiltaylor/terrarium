@@ -481,7 +481,11 @@ async fn template_tools_need_a_sysadmin_and_grant_at_the_create() {
         )
         .await;
     r.err(422, "invalid");
-    assert!(r.body.to_string().contains("tool of project `p`"), "{}", r.body);
+    assert!(
+        r.body.to_string().contains("tool of project `p`"),
+        "{}",
+        r.body
+    );
     // A sysadmin sets them: the normal form keeps them sorted.
     let t = td
         .post_as(

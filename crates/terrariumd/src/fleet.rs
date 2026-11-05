@@ -1188,7 +1188,11 @@ pub fn authorize(actor: &Actor, plan: &Plan, prune: bool) -> ApiResult<()> {
                     policy::manage_templates(actor, e.project.as_deref(), "from a fleet")?;
                     // The tools of a template grant tools at each create: only
                     // a sysadmin or the operator sets or changes them (TER-35).
-                    if !removal && e.changes.iter().any(|c| c.field == agent_template::TOOLS_KEY) {
+                    if !removal
+                        && e.changes
+                            .iter()
+                            .any(|c| c.field == agent_template::TOOLS_KEY)
+                    {
                         policy::sysadmin(actor, "setting the tools of a template")?;
                     }
                     Ok(())
