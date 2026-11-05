@@ -312,8 +312,14 @@ pub async fn repo(ctx: &Ctx, cmd: &RepoCmd) -> anyhow::Result<()> {
     }
 }
 
-/// The text answer of `repo checkout`.
-fn checkout_lines(c: &Ctx, r: &Value) {
+/// The first line of the answer of `repo checkout` (TER-37):
+///
+/// - in an agent workspace: `cloned <repo> in work/<path> of <agent>`;
+/// - on a target with an absolute path: `cloned <repo> on <target> at
+///   <path>`;
+/// - on a target with a path under `$HOME/work/`: `cloned <repo> on
+///   <target> in work/<path> (<absolute path>)`.
+fn checkout_place(r: &Value) -> String {
     let verb = match r["action"].as_str() {
         Some("cloned") => "cloned",
         Some("updated") => "updated",
@@ -321,12 +327,32 @@ fn checkout_lines(c: &Ctx, r: &Value) {
         Some("not_updated") => "fetched, not updated:",
         _ => "checked out",
     };
-    c.line(format!(
-        "{verb} {} in work/{} of {}",
-        field(r, "repo"),
-        field(r, "path"),
-        field(r, "agent")
-    ));
+    let repo = field(r, "repo");
+    let Some(target) = r["target"].as_str().filter(|t| !t.is_empty()) else {
+        return format!(
+            "{verb} {repo} in work/{} of {}",
+            field(r, "path"),
+            field(r, "agent")
+        );
+    };
+    let path = r["path"].as_str().unwrap_or_default();
+    let remote = r["remote_path"].as_str().filter(|p| !p.is_empty());
+    if path.starts_with('/') || path.is_empty() {
+        let at = remote.unwrap_or(path);
+        return format!(
+            "{verb} {repo} on {target} at {}",
+            if at.is_empty() { "-" } else { at }
+        );
+    }
+    match remote {
+        Some(abs) => format!("{verb} {repo} on {target} in work/{path} ({abs})"),
+        None => format!("{verb} {repo} on {target} in work/{path}"),
+    }
+}
+
+/// The text answer of `repo checkout`.
+fn checkout_lines(c: &Ctx, r: &Value) {
+    c.line(checkout_place(r));
     c.line(format!(
         "HEAD {} ({})",
         field(r, "head"),
@@ -380,5 +406,54 @@ async fn credential(ctx: &Ctx, operation: &str) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::checkout_place;
+
+    /// TER-37: an agent workspace keeps its line; a target names the target
+    /// and the absolute path, also for a relative path under work/, for
+    /// each target kind (the answer is the same for docker and ssh).
+    #[test]
+    fn the_checkout_line_names_the_target_and_the_path() {
+        assert_eq!(
+            checkout_place(
+                &json!({"repo": "app", "path": "app", "agent": "terra/w1", "action": "cloned"})
+            ),
+            "cloned app in work/app of terra/w1"
+        );
+        // An absolute --path on an ssh target (the vmlab report).
+        assert_eq!(
+            checkout_place(&json!({"repo": "vmlab", "target": "vmlab-helios-vmlab",
+                "path": "/home/vmlab/src/lead/vmlab",
+                "remote_path": "/home/vmlab/src/lead/vmlab", "action": "cloned"})),
+            "cloned vmlab on vmlab-helios-vmlab at /home/vmlab/src/lead/vmlab"
+        );
+        // A relative path on a docker target: under work/, with the
+        // absolute path that the target gave.
+        assert_eq!(
+            checkout_place(&json!({"repo": "app", "target": "box", "path": "app",
+                "remote_path": "/home/build/work/app", "action": "updated"})),
+            "updated app on box in work/app (/home/build/work/app)"
+        );
+        // No remote_path (an older daemon): the relative form alone.
+        assert_eq!(
+            checkout_place(&json!({"repo": "app", "target": "box", "path": "src/app",
+                "action": "up_to_date"})),
+            "up to date: app on box in work/src/app"
+        );
+        assert_eq!(
+            checkout_place(&json!({"repo": "app", "target": "box", "path": "/srv/app",
+                "action": "not_updated"})),
+            "fetched, not updated: app on box at /srv/app"
+        );
+        // Never the workspace prefix with an absolute path, never `of -`.
+        let line = checkout_place(&json!({"repo": "r", "target": "t", "path": "/abs",
+            "remote_path": "/abs", "action": "cloned"}));
+        assert!(!line.contains("work//") && !line.contains(" of "), "{line}");
     }
 }
