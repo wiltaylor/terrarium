@@ -57,7 +57,7 @@ impl Rates {
             .unwrap_or(SWEEP_EVERY)
     }
 
-    /// Tests: a shorter sweep interval. It applies after the current one.
+    /// Tests: a shorter sweep interval. It applies within a second.
     pub fn set_sweep_every(&self, d: Duration) {
         *self.sweep.lock().unwrap_or_else(|e| e.into_inner()) = Some(d);
     }
@@ -479,12 +479,18 @@ pub fn spawn_sweep(state: Shared) -> tokio::task::JoinHandle<()> {
     let weak = Arc::downgrade(&state);
     drop(state);
     tokio::spawn(async move {
+        // It wakes at least each second, so a new interval applies soon.
+        let mut last = Instant::now();
         loop {
             let every = match weak.upgrade() {
                 Some(s) => s.tool_rates.sweep_every(),
                 None => return,
             };
-            tokio::time::sleep(every).await;
+            tokio::time::sleep(every.min(Duration::from_secs(1))).await;
+            if last.elapsed() < every {
+                continue;
+            }
+            last = Instant::now();
             let Some(state) = weak.upgrade() else { return };
             sweep(&state).await;
         }
