@@ -26,7 +26,9 @@
 //! The matcher has no state between calls. A secret that is split across two
 //! calls (for example, a log line split across two reads) is not found.
 //! Callers redact whole records: a full log line, a full transcript entry, a
-//! full mail body.
+//! full mail body. A byte stream that leaves in chunks (the output of a
+//! tool run) goes through a [`StreamRedactor`], which holds back the end of
+//! each chunk that could still start a secret.
 //!
 //! Redaction is a guard against accidents. It does not find a value that is
 //! changed (base64, reversed, split with spaces).
@@ -263,6 +265,8 @@ pub struct Redactor {
     matcher: Option<AhoCorasick>,
     /// The replacement of each pattern, by pattern index.
     replacements: Vec<Replacement>,
+    /// The length in bytes of the longest pattern. 0 with no pattern.
+    max_len: usize,
 }
 
 impl Redactor {
@@ -318,6 +322,7 @@ impl Redactor {
         if patterns.is_empty() {
             return Ok(Self::empty());
         }
+        let max_len = patterns.iter().map(Vec::len).max().unwrap_or(0);
         let matcher = AhoCorasick::builder()
             .match_kind(MatchKind::LeftmostLongest)
             .build(&patterns)
@@ -325,6 +330,7 @@ impl Redactor {
         Ok(Self {
             matcher: Some(matcher),
             replacements,
+            max_len,
         })
     }
 
@@ -334,6 +340,7 @@ impl Redactor {
         Self {
             matcher: None,
             replacements: Vec::new(),
+            max_len: 0,
         }
     }
 
@@ -345,6 +352,11 @@ impl Redactor {
     /// The number of patterns (values, escaped forms, and lines).
     pub fn pattern_count(&self) -> usize {
         self.replacements.len()
+    }
+
+    /// The length in bytes of the longest pattern. 0 with no pattern.
+    pub fn max_pattern_len(&self) -> usize {
+        self.max_len
     }
 
     /// The replacement of pattern `i` for `view`.
@@ -445,6 +457,98 @@ impl Redactor {
             (Cow::Borrowed(_), _) => (s, 0),
             (Cow::Owned(r), n) => (r, n),
         }
+    }
+}
+
+/// Redacts a byte stream that arrives in chunks (the output of a tool run),
+/// so that a secret split across two chunks is found too.
+///
+/// [`Self::push`] returns the bytes that are safe to send: each byte before
+/// the last `max - 1` bytes of what it has (`max` is the longest pattern),
+/// with each match in that part replaced. A match that starts there fits in
+/// the buffer whole, so the leftmost-longest choice is the same as on the
+/// whole stream. The rest waits for the next chunk; [`Self::finish`] gives
+/// it at the end. The held part never grows past `max - 1 + 3` bytes: the
+/// cut moves back to the start of a UTF-8 character, so each part of a
+/// valid UTF-8 stream stays valid. With no pattern, nothing is held.
+pub struct StreamRedactor {
+    redactor: Arc<Redactor>,
+    view: View,
+    held: Vec<u8>,
+}
+
+/// The most bytes that a cut moves back to the start of a UTF-8
+/// character.
+const UTF8_BACK: usize = 3;
+
+impl StreamRedactor {
+    pub fn new(redactor: Arc<Redactor>, view: View) -> Self {
+        Self {
+            redactor,
+            view,
+            held: Vec::new(),
+        }
+    }
+
+    /// The most bytes that the redactor holds back between two calls.
+    pub fn hold_limit(&self) -> usize {
+        match self.redactor.max_pattern_len() {
+            0 => 0,
+            n => n - 1 + UTF8_BACK,
+        }
+    }
+
+    /// The bytes that it holds back now.
+    pub fn held(&self) -> usize {
+        self.held.len()
+    }
+
+    /// Take the next chunk; return the redacted bytes that are safe to
+    /// send now.
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        let Some(matcher) = &self.redactor.matcher else {
+            // No pattern: a held part is left only by a matcher swap,
+            // which does not happen here.
+            let mut out = std::mem::take(&mut self.held);
+            out.extend_from_slice(chunk);
+            return out;
+        };
+        let mut buf = std::mem::take(&mut self.held);
+        buf.extend_from_slice(chunk);
+        let keep = self.redactor.max_len - 1;
+        let mut safe = buf.len().saturating_sub(keep);
+        let mut out = Vec::with_capacity(buf.len());
+        let mut last = 0;
+        for m in matcher.find_iter(&buf) {
+            if m.start() >= safe {
+                break;
+            }
+            out.extend_from_slice(&buf[last..m.start()]);
+            out.extend_from_slice(
+                self.redactor
+                    .replacement(m.pattern().as_usize(), &self.view)
+                    .as_bytes(),
+            );
+            last = m.end();
+        }
+        // The cut: not inside a match that went out, and at the start of a
+        // UTF-8 character (a continuation byte is 0b10xx_xxxx).
+        safe = safe.max(last);
+        let floor = safe.saturating_sub(UTF8_BACK).max(last);
+        while safe > floor && safe < buf.len() && buf[safe] & 0xC0 == 0x80 {
+            safe -= 1;
+        }
+        out.extend_from_slice(&buf[last..safe]);
+        self.held = buf.split_off(safe);
+        out
+    }
+
+    /// The end of the stream: the held part, redacted.
+    pub fn finish(&mut self) -> Vec<u8> {
+        let rest = std::mem::take(&mut self.held);
+        self.redactor
+            .redact_bytes_as(&rest, &self.view)
+            .into_owned()
     }
 }
 
@@ -846,5 +950,167 @@ Bw==\n\
         // A TOTP seed (base32, 32 characters) is not a ULID.
         assert!(ok("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"));
         assert!(entropy_bits("") < 1.0);
+    }
+
+    /// Push `chunks` through a stream redactor; return each emitted part
+    /// (the last one from `finish`), and check the held limit after each
+    /// push.
+    fn stream(red: &Arc<Redactor>, view: View, chunks: &[&[u8]]) -> Vec<Vec<u8>> {
+        let mut s = StreamRedactor::new(red.clone(), view);
+        let mut parts = Vec::new();
+        for c in chunks {
+            parts.push(s.push(c));
+            assert!(
+                s.held() <= s.hold_limit(),
+                "held {} > limit {}",
+                s.held(),
+                s.hold_limit()
+            );
+        }
+        parts.push(s.finish());
+        assert_eq!(s.held(), 0);
+        parts
+    }
+
+    /// TER-29 (GitHub #21, L2): a token split at every byte offset of the
+    /// stream is redacted, and the result is the same as on the whole text.
+    #[test]
+    fn a_stream_finds_a_token_split_at_each_offset() {
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let red = Arc::new(r(&[("gh", token)]));
+        let text = format!("export GITHUB_TOKEN={token}\nok done\n");
+        let whole = red.redact_bytes(text.as_bytes()).into_owned();
+        assert!(!String::from_utf8_lossy(&whole).contains(token));
+        let b = text.as_bytes();
+        for i in 0..=b.len() {
+            let got: Vec<u8> = stream(&red, View::All, &[&b[..i], &b[i..]]).concat();
+            assert_eq!(got, whole, "split at {i}");
+        }
+        // Three parts: every pair of offsets.
+        for i in 0..=b.len() {
+            for j in i..=b.len() {
+                let got: Vec<u8> =
+                    stream(&red, View::All, &[&b[..i], &b[i..j], &b[j..]]).concat();
+                assert_eq!(got, whole, "split at {i} and {j}");
+            }
+        }
+        // One byte at a time.
+        let bytes: Vec<&[u8]> = b.chunks(1).collect();
+        assert_eq!(stream(&red, View::All, &bytes).concat(), whole);
+    }
+
+    /// Two secrets back to back, a secret that is the start of a longer
+    /// one, and a secret at the very end of the stream.
+    #[test]
+    fn a_stream_handles_adjacent_overlapping_and_final_secrets() {
+        let red = Arc::new(r(&[
+            ("a", "alpha-secret-1"),
+            ("b", "bravo-secret-2"),
+            ("short", "charlie-key"),
+            ("long", "charlie-key-extended"),
+        ]));
+        for text in [
+            "alpha-secret-1bravo-secret-2",
+            "x charlie-key-extended y charlie-key z",
+            "the end is alpha-secret-1",
+            "charlie-key",
+        ] {
+            let b = text.as_bytes();
+            let whole = red.redact_bytes(b).into_owned();
+            for i in 0..=b.len() {
+                let got = stream(&red, View::All, &[&b[..i], &b[i..]]).concat();
+                assert_eq!(got, whole, "{text:?} split at {i}");
+            }
+        }
+        assert_eq!(
+            stream(&red, View::All, &[&b"alpha-secret-1bravo-"[..], &b"secret-2"[..]]).concat(),
+            b"[secret:a][secret:b]"
+        );
+        assert_eq!(
+            stream(&red, View::All, &[&b"x charlie-key"[..], &b"-extended"[..]]).concat(),
+            b"x [secret:long]"
+        );
+        // The last part comes only from `finish`.
+        let parts = stream(&red, View::All, &[&b"the end is alpha-secret-1"[..]]);
+        assert_eq!(parts.concat(), b"the end is [secret:a]");
+        assert!(!parts[0].ends_with(b"alpha-secret-1"));
+    }
+
+    /// Each part of a valid UTF-8 stream is valid UTF-8: the cut does not
+    /// fall inside a character.
+    #[test]
+    fn a_stream_cuts_on_utf8_boundaries() {
+        let token = "s3cr3t-T0KEN-value";
+        let red = Arc::new(r(&[("t", token)]));
+        let text = format!("é漢字🙂 {token} ünïcödé 🙂🙂🙂 end");
+        let b = text.as_bytes();
+        let whole = red.redact_bytes(b).into_owned();
+        for i in 0..=b.len() {
+            for j in i..=b.len() {
+                let parts = stream(&red, View::All, &[&b[..i], &b[i..j], &b[j..]]);
+                assert_eq!(parts.concat(), whole, "split at {i} and {j}");
+                // The input parts may cut a character; the output parts
+                // that follow a whole character do not.
+                if text.is_char_boundary(i) && text.is_char_boundary(j) {
+                    for p in &parts {
+                        assert!(std::str::from_utf8(p).is_ok(), "part {p:?} at {i}/{j}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The held part stays under the limit also for long chunks with no
+    /// secret, and a matcher with no pattern holds nothing.
+    #[test]
+    fn a_stream_holds_at_most_the_limit() {
+        let red = Arc::new(r(&[("t", "0123456789abcdef0123")]));
+        assert_eq!(red.max_pattern_len(), 20);
+        let mut s = StreamRedactor::new(red.clone(), View::All);
+        assert_eq!(s.hold_limit(), 19 + 3);
+        let big = vec![b'x'; 100_000];
+        let out = s.push(&big);
+        assert_eq!(out.len() + s.held(), big.len());
+        assert!(s.held() <= 19, "{}", s.held());
+        for _ in 0..1000 {
+            s.push(b"y");
+            assert!(s.held() <= s.hold_limit());
+        }
+        // Multi-byte characters only: the cut moves back at most 3 bytes.
+        let wide = "🙂".repeat(1000);
+        s.push(wide.as_bytes());
+        assert!(s.held() <= s.hold_limit(), "{}", s.held());
+
+        let none = Arc::new(Redactor::empty());
+        let mut s = StreamRedactor::new(none, View::All);
+        assert_eq!(s.hold_limit(), 0);
+        assert_eq!(s.push(b"abc"), b"abc");
+        assert_eq!(s.held(), 0);
+        assert!(s.finish().is_empty());
+    }
+
+    /// The view of the stream: a scoped label is hidden from another view.
+    #[test]
+    fn a_stream_uses_its_view() {
+        let red = Arc::new(
+            Redactor::build(
+                [Entry {
+                    label: "p/deploy".to_owned(),
+                    scope: Some("p".to_owned()),
+                    value: "deploy-token-abcdef123",
+                }],
+                |_| true,
+            )
+            .unwrap(),
+        );
+        let input: [&[u8]; 2] = [b"t=deploy-tok", b"en-abcdef123."];
+        assert_eq!(
+            stream(&red, View::Scope("p".into()), &input).concat(),
+            b"t=[secret:p/deploy]."
+        );
+        assert_eq!(
+            stream(&red, View::Scope("q".into()), &input).concat(),
+            b"t=[secret]."
+        );
     }
 }
