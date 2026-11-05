@@ -291,13 +291,20 @@ impl Drop for RunDir {
 #[derive(Debug, Clone)]
 pub struct RunDirs {
     dir: PathBuf,
+    state_dir: PathBuf,
 }
 
 impl RunDirs {
     pub fn new(state_dir: &Path) -> Self {
         Self {
             dir: credentials_dir(state_dir),
+            state_dir: state_dir.to_path_buf(),
         }
+    }
+
+    /// The state dir that the run dirs are in.
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 
     /// A fresh 0700 dir for the one-shot files of one run.

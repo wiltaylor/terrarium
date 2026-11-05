@@ -1509,6 +1509,10 @@ its grants. A new agent with the name of a removed agent gets no grant.
   `signs` (the good signs in that minute) and `limited` (the signs over
   the limit). The socket stops when the agent stops. The harness runs as
   the daemon's user, so the 0600 socket is open to it.
+- *ssh host keys.* The daemon's git over ssh records each new repo host
+  key (trust on first use) in `<state>/ssh/sandbox/ssh_known_hosts`. The
+  sandbox binds that dir read-only at `/etc/ssh`, so ssh in the sandbox
+  reads the file as its global known hosts file and trusts the same hosts.
 
 **The agent's grants.** `GET /api/agent/secrets` lists the secrets that
 are granted to the calling agent: its own grants and its project's, one
