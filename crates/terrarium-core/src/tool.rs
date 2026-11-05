@@ -288,8 +288,9 @@ pub fn check_name(name: &str) -> Result<(), String> {
             "bad tool name `{name}`: use 1-{NAME_MAX} of a-z, 0-9, and `-`, starting with a letter"
         ));
     }
-    if name == "terrarium" {
-        return Err("a tool may not be named `terrarium`".into());
+    // `terrarium-*` stays the CLI's: the tool link dispatch skips it.
+    if name == "terrarium" || name.starts_with("terrarium-") {
+        return Err(format!("a tool may not be named `{name}`: terrarium and terrarium-* are the CLI's"));
     }
     Ok(())
 }
@@ -457,6 +458,7 @@ mod tests {
             "a/b",
             &"a".repeat(NAME_MAX + 1),
             "terrarium",
+            "terrarium-x",
         ] {
             assert!(check_name(bad).is_err(), "{bad}");
         }

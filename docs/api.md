@@ -6411,6 +6411,20 @@ fails one is left out with an error line of the reload:
 | `POST /api/tools/{name}/grants` | `{"grantee"}`: `agent:<project>/<name>`, `agent:<id>`, or `project:<name>` | `201` the grant. A grant that exists is `409`; a project tool to another project is `422` | the operator and sysadmins |
 | `DELETE /api/tools/{name}/grants` | `?grantee=` | `204`. No such grant is `404` | the operator and sysadmins |
 
+**In the sandbox** (design D3). Each agent has a dir
+`<runtime>/agent-tools/<agent id>/` with one symlink `<tool> -> terrarium`
+for each tool granted to the agent or to its project. The sandbox binds
+the dir read-only at `/opt/terrarium/agent-tools/bin` and puts it last on
+`PATH`, so a tool never shadows a program. The daemon writes the dir at
+each start, and again at each grant, revoke, change, or removal of a tool
+and at a reload; the dir is bound, not the links, so a running agent sees
+the change. The CLI runs a link as `terrarium tool run <tool> -- <args>`:
+it posts the run, streams stdout and stderr, sends stdin to a tool with
+`stdin = true` when stdin is not a terminal, stops the run on Ctrl-C (exit
+130), and exits with the remote exit code (128 plus the signal, or 1 on an
+error end such as `truncated`). A tool name may not be `terrarium` or start
+with `terrarium-`: those stay the CLI.
+
 A grant does not put the target in the agent's policy and makes no lease.
 A project grant covers each agent of the project, also the later ones.
 Removing an agent or a project removes the grants to it; removing a
