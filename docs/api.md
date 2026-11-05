@@ -1873,7 +1873,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `skills_off` | The skills that the agent does not get: a default-on skill, or a skill of `skills`. `[]`: none. `*` is not valid. |
 | `default_skills` | `false`: the agent gets no default-on skill, only its `skills`. Default `true`. |
 | `effective_skills` | The skills that the agent gets at its next start, sorted by name: `[{"name","source"}]`, with `source` `default` (the skill is default on) or `explicit` (`skills` names it, or has `*`). The rule: (the default-on skills, when `default_skills`) + `skills` - `skills_off`. `[]` when the daemon has no config repo. |
-| `skills_restart` | `true` when the live agent runs with other skills than its `effective_skills` now (its settings, a skill, or the default-on marker of a skill changed after its start). A restart, a wake, or a new session applies them; the daemon does not restart the agent for it. Absent when false. |
+| `skills_restart` | `true` when the live agent runs with other skills than its `effective_skills` now (its settings, a skill, or the default-on marker of a skill changed after its start). A restart, a wake, or a new session applies them; the daemon does not restart the agent for it. A restart and a wake resume the harness session, which can hold the old text of a skill: when a skill that the agent had changed, the resumed start sends the agent a system mail that names it and says to load it again (PLAN §8.6). A new session loads the skills as they are. Absent when false. |
 | `roles` | Roles above `member`: `project_admin`, `sysadmin`. |
 | `status` | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. `waiting`: the turn ended, and the agent has one or more open waits (§6.7). `idle`: the turn ended, and the agent has no open wait. |
 | `status_reason` | The reason of the last status change: `idle` after an idle stop, `paused` after the stop of a pause, `subscription_disabled` (the subscription is disabled, §16.2), `stream_limit: waiting for a free stream on `<sub>`` (the work waits for a stream of a self-hosted subscription, §16.2), `stopped`, an exit, or an error text. Absent when not known. |
@@ -2052,7 +2052,7 @@ lists the leases that the agent holds.
 |---|---|---|
 | `POST /api/agents/{id}/start` | none | `202` agent. A wake now. A paused agent gets `409 conflict`. |
 | `POST /api/agents/{id}/stop` | none | `202` agent. Also on an agent in `error`: it becomes `stopped`. |
-| `POST /api/agents/{id}/restart` | none | `202` agent. Also on an agent in `error`: a new launch. A paused agent gets `409 conflict`. |
+| `POST /api/agents/{id}/restart` | none | `202` agent. Also on an agent in `error`: a new launch. A paused agent gets `409 conflict`. The restart resumes the harness session, so the context keeps what the agent read before: a changed prompt or skill reaches its context only by a new session (`.../new-session`) or a message (a changed skill sends a system mail, PLAN §8.6). |
 | `POST /api/agents/{id}/pause` | none | `202` agent, `paused: true`. A running agent stops (reason `paused`). |
 | `POST /api/agents/{id}/unpause` | none | `202` agent, `paused: false`. It wakes when work waits. |
 | `POST /api/agents/{id}/compact` | none, or `{"then"?: "<prompt>", "defer"?: false}` | `202` agent with `reset` (below). At rest: `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused or held. `409 not_running`: the agent does not run. |

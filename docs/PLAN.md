@@ -1020,6 +1020,17 @@ mechanism.
 differs from the hash of its last delivery (a changed list, a changed or
 deleted skill). The dashboard shows "restart to apply".
 
+**A start that resumes keeps the old text in the context.** A restart or
+a wake resumes the harness session, and an agent that read a skill in
+that session keeps its old text. So the delivery records the hash of each
+skill too. When a start resumes the session and a skill that the last
+start delivered now has other files, the agent gets one system mail:
+"skill changed since your session loaded it: `<name>`", which tells it to
+load the skill again with its skill tool. It goes out at the first idle
+after the start. A start of a new session sends none, nor does an added
+or removed skill (the harness lists the skills at its start). For a clean
+context, use a new session (`terrarium agent new-session`).
+
 **The harness sections** of the prompt (`prompts/harness/<harness>.md`)
 tell the model to load a listed skill that fits the task, with the skill
 tool of its harness.

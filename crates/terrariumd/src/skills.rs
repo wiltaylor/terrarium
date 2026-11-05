@@ -396,6 +396,58 @@ pub fn restart_needed(lib: &Path, private_dir: &Path, sel: core::Selection<'_>) 
     delivered(private_dir).is_some_and(|d| d.hash != current_hash(lib, sel))
 }
 
+/// The system mail to agent `agent` (its ID) after a start that resumed its
+/// session with the changed skills `names` (GitHub #23): the session may
+/// hold the old text of a skill in its context, and the harness does not
+/// load a skill again on its own.
+pub fn mail_changed(
+    t: &mut crate::db::Tx<'_>,
+    agent: &str,
+    names: &[String],
+) -> ApiResult<Option<crate::store::mail::Message>> {
+    use crate::store::mail;
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let to = mail::resolve(t, agent, None)?;
+    let list = names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (subject, what) = if names.len() == 1 {
+        (
+            format!("skill changed since your session loaded it: {}", names[0]),
+            format!("The skill {list} changed"),
+        )
+    } else {
+        (
+            format!(
+                "skills changed since your session loaded them: {}",
+                names.join(", ")
+            ),
+            format!("The skills {list} changed"),
+        )
+    };
+    let body = format!(
+        "{what} in the skill library after your session began. This start resumed \
+         the session, so a skill text in your context can be old. Load the skill again \
+         with the skill tool of your harness before you use it.\n"
+    );
+    mail::send(
+        t,
+        mail::Outgoing {
+            from: &mail::Address::System,
+            to: &to,
+            subject: &subject,
+            body: &body,
+            thread: None,
+            in_reply_to: None,
+        },
+    )
+    .map(Some)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -574,5 +626,49 @@ mod tests {
                 .iter()
                 .any(|s| s.name == "platform" && s.default_on)
         );
+    }
+
+    /// GitHub #23: the agent of a resumed session with a changed skill gets
+    /// one system mail that names the skills and says to load them again.
+    #[tokio::test]
+    async fn a_changed_skill_mails_the_agent_from_system() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        let id = terrarium_core::AgentId::new().to_string();
+        conn.execute(
+            "INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+               VALUES (?1, 'a', 'p', 'claude', '/w', 't', 't')",
+            [&id],
+        )
+        .unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        let key = id.clone();
+        let (none, one, two) = db
+            .write("system", move |t| {
+                Ok((
+                    mail_changed(t, &key, &[])?,
+                    mail_changed(t, &key, &["fern-check".to_owned()])?,
+                    mail_changed(t, &key, &["a".to_owned(), "b".to_owned()])?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert!(none.is_none());
+        let one = one.unwrap();
+        assert_eq!(one.from_kind, "system");
+        assert_eq!(one.to, id);
+        assert_eq!(one.state, "queued");
+        assert_eq!(
+            one.subject,
+            "skill changed since your session loaded it: fern-check"
+        );
+        assert!(one.body.starts_with("The skill `fern-check` changed"), "{}", one.body);
+        assert!(one.body.contains("Load the skill again"), "{}", one.body);
+        let two = two.unwrap();
+        assert_eq!(
+            two.subject,
+            "skills changed since your session loaded them: a, b"
+        );
+        assert!(two.body.starts_with("The skills `a`, `b` changed"), "{}", two.body);
     }
 }

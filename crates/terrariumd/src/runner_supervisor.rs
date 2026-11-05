@@ -405,6 +405,9 @@ struct Built {
     account_warning: Option<String>,
     /// The skills that the launch could not deliver (PLAN §8.6).
     skill_warnings: Vec<String>,
+    /// The launch resumes a session, and these skills changed since the
+    /// previous start (GitHub #23): the agent gets a system mail.
+    skills_changed: Vec<String>,
     /// The env vars of the secret grants (PLAN §16b.4): the start log
     /// hides their values.
     secret_vars: Vec<String>,
@@ -1563,8 +1566,16 @@ impl RunnerSupervisor {
             host: home.clone(),
         });
         let sandboxed = cfg.sandbox.mode == SandboxMode::Bwrap;
-        let (overlays, credentials, fresh_for_prompt, prompt_updated, repos, accounts, delivery) =
-            tokio::task::spawn_blocking(move || {
+        let (
+            overlays,
+            credentials,
+            fresh_for_prompt,
+            prompt_updated,
+            repos,
+            accounts,
+            delivery,
+            skills_changed,
+        ) = tokio::task::spawn_blocking(move || {
                 migrate_dir(&dirs.0);
                 // An agent made before the work root: its files move from
                 // `<agent dir>/workspace` once.
@@ -1608,8 +1619,18 @@ impl RunnerSupervisor {
                 let no_library = dirs.1.join(".no-skill-library");
                 let library = skill_library.as_deref().unwrap_or(&no_library);
                 let assigned = a.skill_selection().assigned_in(library);
-                let delivery = terrarium_core::skills::deliver(library, &assigned, &skills_dir)?;
                 let record = dirs.2.join(crate::skills::DELIVERED_FILE);
+                // The record of the previous start, before this one
+                // replaces it: the skills that changed since then
+                // (GitHub #23).
+                let earlier: Option<terrarium_core::skills::Delivery> =
+                    safefs::read_to_string(&record)
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok());
+                let delivery = terrarium_core::skills::deliver(library, &assigned, &skills_dir)?;
+                let skills_changed = earlier
+                    .map(|e| delivery.changed_since(&e))
+                    .unwrap_or_default();
                 let json = serde_json::to_vec(&delivery).map_err(|e| e.to_string())?;
                 safefs::write_private(&record, &json).map_err(|e| {
                     format!("cannot write {}: {}", record.display(), launch_fs_error(&e))
@@ -1668,6 +1689,7 @@ impl RunnerSupervisor {
                     repos,
                     accounts,
                     delivery,
+                    skills_changed,
                 ))
             })
             .await
@@ -1730,6 +1752,12 @@ impl RunnerSupervisor {
             None
         } else {
             resume
+        };
+        // A new session loads the skills as they are now.
+        let skills_changed = if resume.is_some() {
+            skills_changed
+        } else {
+            Vec::new()
         };
         agent.delivered_skills = delivery.names.clone();
         let mut spec = entry.adapter.launch_for(&agent, resume, def.as_ref());
@@ -1811,6 +1839,7 @@ impl RunnerSupervisor {
             accounts: LaunchedAccounts { account, bound },
             account_warning,
             skill_warnings: delivery.warnings(),
+            skills_changed,
             secret_vars,
             secret_warnings,
             ssh_agent: layout.ssh_agent.is_some(),
@@ -1951,6 +1980,7 @@ impl RunnerSupervisor {
             accounts,
             account_warning,
             skill_warnings,
+            skills_changed,
             secret_vars,
             mut secret_warnings,
             ssh_agent,
@@ -2107,6 +2137,9 @@ impl RunnerSupervisor {
             warn!(agent = %id, "{message}");
             self.emit(id, SupervisorEventKind::Harness(Event::Warning { message }));
         }
+        if !skills_changed.is_empty() && resume.is_some() {
+            self.mail_changed_skills(id, skills_changed).await;
+        }
         if prompt_updated && resume.is_some() {
             info!(agent = %id, "{PROMPT_UPDATED}");
             self.emit(
@@ -2209,6 +2242,22 @@ impl RunnerSupervisor {
         Arc::new(AgentRpc::new(
             self.inner.state.get().cloned().unwrap_or_default(),
         ))
+    }
+
+    /// The system mail of [`crate::skills::mail_changed`] to `id`.
+    async fn mail_changed_skills(&self, id: AgentId, names: Vec<String>) {
+        let Some(state) = self.state() else { return };
+        info!(agent = %id, skills = ?names, "the skills changed since the resumed session began");
+        let key = id.to_string();
+        let result = state
+            .db
+            .write("system", move |t| {
+                crate::skills::mail_changed(t, &key, &names)
+            })
+            .await;
+        if let Err(e) = result {
+            warn!(agent = %id, "cannot mail the changed skills: {e}");
+        }
     }
 
     /// Lower the stored runner seq of `id` to `seq` (see
@@ -5203,6 +5252,21 @@ mod tests {
             &private,
             with.skill_selection()
         ));
+        // GitHub #23: a start that resumes the session names the changed
+        // skill, once; a start of a new session does not.
+        let sid = HarnessSessionId("s1".into());
+        let view = sup.store_view(&with).await;
+        let resumed = sup.build_spec(&with, Some(&sid), &view, None).await.unwrap();
+        assert_eq!(resumed.skills_changed, ["fern-check"]);
+        let again = sup.build_spec(&with, Some(&sid), &view, None).await.unwrap();
+        assert!(again.skills_changed.is_empty());
+        std::fs::write(
+            lib.join("fern-check/SKILL.md"),
+            "---\nname: fern-check\ndescription: newer\n---\n",
+        )
+        .unwrap();
+        let fresh = sup.build_spec(&with, None, &view, None).await.unwrap();
+        assert!(fresh.skills_changed.is_empty());
 
         // The default-on skill comes with no `skills` list; `skills_off`
         // takes it out again.

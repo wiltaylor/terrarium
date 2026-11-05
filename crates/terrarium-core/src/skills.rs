@@ -877,9 +877,24 @@ pub struct Delivery {
     /// The skills that fail [`check`], with the first problem.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invalid: Vec<String>,
+    /// [`hash`] of each delivered skill alone, by name. Empty in a record
+    /// from before this field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hashes: BTreeMap<String, String>,
 }
 
 impl Delivery {
+    /// The skills of `self` that `earlier` delivered too, with other files
+    /// (sorted). An added or removed skill does not count. Empty when
+    /// `earlier` has no per-skill hashes (an older record).
+    pub fn changed_since(&self, earlier: &Delivery) -> Vec<String> {
+        self.hashes
+            .iter()
+            .filter(|(name, h)| earlier.hashes.get(*name).is_some_and(|old| old != *h))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// One warning line for each skill that is not delivered.
     pub fn warnings(&self) -> Vec<String> {
         let mut out: Vec<String> = self
@@ -922,6 +937,10 @@ pub fn collect(library: &Path, assigned: &[String]) -> (Vec<(String, Files)>, De
     }
     d.names = ok.iter().map(|(n, _)| n.clone()).collect();
     d.hash = hash(ok.iter().map(|(n, f)| (n.as_str(), f)));
+    d.hashes = ok
+        .iter()
+        .map(|(n, f)| (n.clone(), hash([(n.as_str(), f)])))
+        .collect();
     (ok, d)
 }
 
@@ -1396,5 +1415,38 @@ mod tests {
         std::fs::write(lib.join("fern-check/references/r.md"), b"changed").expect("write");
         let (_, now) = collect(&lib, &["fern-check".into()]);
         assert_ne!(now.hash, one.hash);
+    }
+
+    /// GitHub #23: the skills that changed between two deliveries. Only a
+    /// skill that both have counts; an older record gives none.
+    #[test]
+    fn changed_since_names_the_changed_skills() {
+        let d = tempfile::tempdir().expect("tmp");
+        let lib = d.path().join("lib");
+        for n in ["fern-check", "other", "late"] {
+            write_files(&lib.join(n), &files(&[(SKILL_FILE, &md(n, "d"))])).expect("write");
+        }
+        let both = ["fern-check".to_owned(), "other".to_owned()];
+        let (_, before) = collect(&lib, &both);
+        assert_eq!(before.hashes.len(), 2);
+        let (_, same) = collect(&lib, &both);
+        assert!(same.changed_since(&before).is_empty());
+
+        // A changed file of one skill; another skill added, and one gone.
+        std::fs::write(lib.join("fern-check/SKILL.md"), md("fern-check", "new step")).expect("write");
+        let (_, after) = collect(&lib, &["fern-check".to_owned(), "late".to_owned()]);
+        assert_eq!(after.changed_since(&before), ["fern-check"]);
+
+        // An extra file counts as a change too.
+        let (_, one) = collect(&lib, &["other".to_owned()]);
+        std::fs::write(lib.join("other/extra.md"), b"x").expect("write");
+        let (_, more) = collect(&lib, &["other".to_owned()]);
+        assert_eq!(more.changed_since(&one), ["other"]);
+
+        // A record from before the per-skill hashes: no change is known.
+        let old: Delivery =
+            serde_json::from_str(r#"{"names":["fern-check"],"hash":"x"}"#).expect("old");
+        assert!(old.hashes.is_empty());
+        assert!(after.changed_since(&old).is_empty());
     }
 }
