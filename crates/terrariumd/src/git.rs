@@ -1566,19 +1566,33 @@ fn jail_args(env: &[(String, String)]) -> Vec<String> {
 /// does not stop the agent trees until a restart.
 const JAIL_RETRY: Duration = Duration::from_secs(30);
 
+/// After a failed probe, the pause before the one more probe that comes
+/// before the failure is kept: a failure for a moment under load does not
+/// close the agent trees for [`JAIL_RETRY`].
+const JAIL_REPROBE: Duration = Duration::from_millis(250);
+
 /// The last probe of the read sandbox and its time.
 type JailCache = std::sync::Mutex<Option<(Jail, Instant)>>;
 
 /// The read sandbox of this machine: `bwrap` on `PATH`, and a sandbox
-/// with [`jail_args`] that runs `git --version`. A good probe is kept; a
-/// failed probe is kept for [`JAIL_RETRY`], then the next call probes
-/// again.
+/// with [`jail_args`] that runs `git --version`. A good probe is kept. A
+/// failed probe is tried once more after [`JAIL_REPROBE`]; a second
+/// failure is kept for [`JAIL_RETRY`], then the next call probes again.
 fn read_jail() -> Jail {
     static JAIL: JailCache = std::sync::Mutex::new(None);
-    cached_jail(&JAIL, Instant::now(), probe_jail)
+    cached_jail(&JAIL, Instant::now(), probe_jail, || {
+        std::thread::sleep(JAIL_REPROBE);
+    })
 }
 
-fn cached_jail(cache: &JailCache, now: Instant, probe: impl FnOnce() -> Jail) -> Jail {
+/// [`read_jail`] with the cache, the time, the probe, and the pause before
+/// the second probe given.
+fn cached_jail(
+    cache: &JailCache,
+    now: Instant,
+    mut probe: impl FnMut() -> Jail,
+    pause: impl FnOnce(),
+) -> Jail {
     let mut c = match cache.lock() {
         Ok(c) => c,
         Err(p) => p.into_inner(),
@@ -1588,7 +1602,11 @@ fn cached_jail(cache: &JailCache, now: Instant, probe: impl FnOnce() -> Jail) ->
         Some((j, at)) if now.saturating_duration_since(*at) < JAIL_RETRY => return j.clone(),
         _ => {}
     }
-    let j = probe();
+    let mut j = probe();
+    if matches!(j, Jail::Missing(_)) {
+        pause();
+        j = probe();
+    }
     if let Jail::Missing(why) = &j {
         tracing::warn!("the repo browser cannot read agent trees: {why}");
     }
@@ -2661,12 +2679,15 @@ mod tests {
     }
 
     /// M2 (docs/security-review.md §15): a good probe of the read sandbox
-    /// is kept; a failed probe is kept for [`JAIL_RETRY`] only.
+    /// is kept; a failed probe (failed twice: the probe and the one more
+    /// try) is kept for [`JAIL_RETRY`] only.
     #[test]
     fn a_failed_sandbox_probe_is_tried_again() {
         let cache: JailCache = std::sync::Mutex::new(None);
         let t0 = Instant::now();
         let probes = std::cell::Cell::new(0);
+        let pauses = std::cell::Cell::new(0);
+        let pause = || pauses.set(pauses.get() + 1);
         let fail = || {
             probes.set(probes.get() + 1);
             Jail::Missing("no userns now".into())
@@ -2675,21 +2696,66 @@ mod tests {
             probes.set(probes.get() + 1);
             Jail::Bwrap(PathBuf::from("/usr/bin/bwrap"))
         };
-        assert!(matches!(cached_jail(&cache, t0, fail), Jail::Missing(_)));
+        assert!(matches!(
+            cached_jail(&cache, t0, fail, pause),
+            Jail::Missing(_)
+        ));
+        assert_eq!((probes.get(), pauses.get()), (2, 1));
         // Within the retry time: no new probe.
         let soon = t0 + JAIL_RETRY / 2;
-        assert!(matches!(cached_jail(&cache, soon, good), Jail::Missing(_)));
-        assert_eq!(probes.get(), 1);
-        // After it: a new probe, and a good one is kept.
-        let later = t0 + JAIL_RETRY;
-        assert!(matches!(cached_jail(&cache, later, good), Jail::Bwrap(_)));
-        assert_eq!(probes.get(), 2);
-        let much_later = later + JAIL_RETRY * 10;
         assert!(matches!(
-            cached_jail(&cache, much_later, fail),
-            Jail::Bwrap(_)
+            cached_jail(&cache, soon, good, pause),
+            Jail::Missing(_)
         ));
         assert_eq!(probes.get(), 2);
+        // After it: a new probe, and a good one is kept.
+        let later = t0 + JAIL_RETRY;
+        assert!(matches!(
+            cached_jail(&cache, later, good, pause),
+            Jail::Bwrap(_)
+        ));
+        assert_eq!((probes.get(), pauses.get()), (3, 1));
+        let much_later = later + JAIL_RETRY * 10;
+        assert!(matches!(
+            cached_jail(&cache, much_later, fail, pause),
+            Jail::Bwrap(_)
+        ));
+        assert_eq!(probes.get(), 3);
+    }
+
+    /// A probe that fails for a moment (under load: no free user namespace
+    /// or PID) is tried once more after a pause. The good second probe is
+    /// the answer, and it is kept: no 30 s of `503` for the agent trees.
+    #[test]
+    fn a_probe_that_fails_once_is_not_kept() {
+        let cache: JailCache = std::sync::Mutex::new(None);
+        let t0 = Instant::now();
+        let probes = std::cell::Cell::new(0);
+        let pauses = std::cell::Cell::new(0);
+        let once = || {
+            probes.set(probes.get() + 1);
+            if probes.get() == 1 {
+                Jail::Missing("no free user namespace".into())
+            } else {
+                Jail::Bwrap(PathBuf::from("/usr/bin/bwrap"))
+            }
+        };
+        let j = cached_jail(&cache, t0, once, || {
+            // The pause comes after the first probe, before the second.
+            assert_eq!(probes.get(), 1);
+            pauses.set(pauses.get() + 1);
+        });
+        assert!(matches!(j, Jail::Bwrap(_)), "{j:?}");
+        assert_eq!((probes.get(), pauses.get()), (2, 1));
+        // The good answer is kept: a later call does not probe.
+        let soon = t0 + JAIL_RETRY / 2;
+        let j = cached_jail(
+            &cache,
+            soon,
+            || panic!("no probe while a good one is kept"),
+            || panic!("no pause"),
+        );
+        assert!(matches!(j, Jail::Bwrap(_)));
     }
 
     #[test]
