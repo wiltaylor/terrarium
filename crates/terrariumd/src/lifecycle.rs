@@ -256,14 +256,16 @@ impl Lifecycle {
     }
 }
 
-/// Holds the wake of one agent; the drop lets the next wake go.
-struct WakeGuard {
+/// Holds the wake of one agent; the drop lets the next wake go. Public
+/// for the tests that hold a wake on the way.
+pub struct WakeGuard {
     lifecycle: Arc<Lifecycle>,
     agent: AgentId,
 }
 
 impl WakeGuard {
-    fn take(lifecycle: &Arc<Lifecycle>, agent: AgentId) -> Option<Self> {
+    /// The guard of `agent`, or `None` while a wake of it runs.
+    pub fn take(lifecycle: &Arc<Lifecycle>, agent: AgentId) -> Option<Self> {
         guard(&lifecycle.waking).insert(agent).then(|| Self {
             lifecycle: lifecycle.clone(),
             agent,

@@ -116,6 +116,46 @@ async fn mail_wakes_a_stopped_agent() {
     .await;
 }
 
+/// TER-25: a turn that waits in the store because a wake was on the way
+/// stays ahead of a later turn. The wake had read the empty queue before
+/// the first send stored its turn, so the second send finds the agent
+/// live; it must not go past the stored turn.
+#[tokio::test]
+async fn a_queued_turn_stays_ahead_of_a_later_direct_turn() {
+    let (td, w) = setup().await;
+    let path = format!("/api/agents/{w}/send");
+    let st = state(&td);
+    // The wake on the way: it holds the guard and has read the queue.
+    let held = terrariumd::lifecycle::WakeGuard::take(&st.lifecycle, aid(&w)).unwrap();
+    let a = td.post(&path, json!({"text": "one"})).await;
+    assert_eq!(a.status, 202, "{}", a.body);
+    assert_eq!(a.body["queued"], true, "{}", a.body);
+    // The wake starts the agent and ends.
+    let view = td.get(&format!("/api/agents/{w}")).await.ok().clone();
+    let agent: terrarium_core::Agent = st
+        .db
+        .read(move |c| {
+            terrariumd::store::agents::get(c, view["id"].as_str().unwrap()).map(|v| v.agent)
+        })
+        .await
+        .unwrap();
+    st.supervisor.start(agent, None).await.unwrap();
+    drop(held);
+    let b = td.post(&path, json!({"text": "two"})).await;
+    assert_eq!(b.status, 202, "{}", b.body);
+    until("both turns ran", || async {
+        td.sup.prompts(aid(&w)).len() == 2
+    })
+    .await;
+    let sent: Vec<String> = td
+        .sup
+        .prompts(aid(&w))
+        .iter()
+        .map(|p| p.trim_start_matches("[User] ").to_owned())
+        .collect();
+    assert_eq!(sent, ["one", "two"]);
+}
+
 /// Turns to a stopped agent wait in the store and wake it: one wake, and
 /// the turns go out in order after the start.
 #[tokio::test]
