@@ -930,3 +930,63 @@ async fn health_names_the_auto_compact_defaults() {
         json!(["claude", "codex", "copilot", "pi"])
     );
 }
+
+/// TER-45: a pause just before a daemon restart can leave a live status in
+/// the store (the stop of the pause writes `stopped` later). At the next
+/// start the agent is not launched again: it stays paused and stopped,
+/// `GET /api/agents` and the agent agree, its queued work waits, and an
+/// unpause then starts it.
+#[tokio::test]
+async fn a_paused_agent_stays_paused_across_a_daemon_restart() {
+    let (mut td, w) = setup().await;
+    td.post_empty(&format!("/api/agents/{w}/start")).await.ok();
+    td.wait_status(&w, "idle").await;
+    // The restart window: the flag is set and a turn waits in the store,
+    // but the status is still `idle` when the daemon goes down.
+    let key = w.clone();
+    state(&td)
+        .db
+        .write("system", move |t| {
+            t.execute("UPDATE agents SET paused = 1 WHERE id = ?1", [&key])?;
+            terrariumd::store::agents::queue_turn(t, &key, "[User] later")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(agent(&td, &w).await["status"], "idle");
+    td.sup.lose_runner(aid(&w));
+    td.boot(None, None).await;
+
+    let mut seen = Value::Null;
+    for _ in 0..100 {
+        seen = agent(&td, &w).await;
+        if seen["status"] == "stopped" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(seen["status"], "stopped", "{seen:#}");
+    assert_eq!(seen["paused"], true);
+    assert_eq!(seen["status_reason"], "paused");
+    // Nothing starts it a little later either.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let a = agent(&td, &w).await;
+    assert_eq!((a["status"].as_str(), a["paused"].as_bool()), (Some("stopped"), Some(true)));
+    assert!(td.sup.prompts(aid(&w)).is_empty());
+    let list = td.get("/api/agents").await.ok().clone();
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == w.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!((row["status"].as_str(), row["paused"].as_bool()), (Some("stopped"), Some(true)));
+    // The unpause starts it, and the waiting turn goes out.
+    td.post_empty(&format!("/api/agents/{w}/unpause")).await.ok();
+    td.wait_status(&w, "idle").await;
+    until("the turn ran", || async {
+        td.sup.prompts(aid(&w)) == ["[User] later"]
+    })
+    .await;
+}

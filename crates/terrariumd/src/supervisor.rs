@@ -909,6 +909,13 @@ mod fake {
             self.set_status(agent, AgentStatus::Working, None);
         }
 
+        /// Forget `agent`, as a daemon restart does when its runner process
+        /// is gone: the supervisor no longer runs it. The store keeps the
+        /// status it had. For tests (TER-45).
+        pub fn lose_runner(&self, agent: AgentId) {
+            self.lock().agents.remove(&agent);
+        }
+
         /// Make `screen` answer as a runner without the `screen` call. For
         /// tests.
         pub fn set_old_runner(&self, agent: AgentId) {
