@@ -641,6 +641,7 @@ async fn a_detached_tool_run_ends_in_a_process_wait() {
         .ok()
         .clone();
     assert!(!log.to_string().contains(TOKEN), "{log}");
+}
 
 /// TER-31 (design D5): a tool with `approval = true` answers an agent's run
 /// with `202 pending` and a `tool_run` question in the Inbox. Only the
