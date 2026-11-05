@@ -587,3 +587,131 @@ async fn archive_hides_a_version_and_keeps_its_history() {
         .await;
     assert_eq!(ev.ok().as_array().unwrap().len(), 1);
 }
+
+/// TER-36: the open version flow. A lead makes `vnext`, adds cards to it
+/// over time, renames it to its number at the cut (the cards stay), makes a
+/// new `vnext`, and submits the numbered version; the operator approves it.
+#[tokio::test]
+async fn vnext_takes_cards_over_time_and_is_renamed_at_the_cut() {
+    let td = setup().await;
+    let a = card(&td, "Parser").await;
+    let b = card(&td, "Lexer").await;
+    let c = card(&td, "Docs").await;
+    let v = td
+        .post_as(
+            "proj/lead",
+            "/api/projects/proj/versions",
+            json!({"name": "vnext", "cards": [a]}),
+        )
+        .await;
+    assert_eq!(v.status, 201, "{}", v.body);
+    let id = v.body["id"].as_str().unwrap().to_owned();
+    let ids = |v: &Value| -> Vec<String> {
+        v["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    // Cards come later, and one goes again.
+    let r = td
+        .patch_as(
+            "proj/lead",
+            "/api/versions/proj%2Fvnext",
+            json!({"add_cards": [b, c]}),
+        )
+        .await;
+    assert_eq!(ids(r.ok()), [a.clone(), b.clone(), c.clone()]);
+    let r = td
+        .patch_as(
+            "proj/lead",
+            "/api/versions/proj%2Fvnext",
+            json!({"remove_cards": [c]}),
+        )
+        .await;
+    assert_eq!(ids(r.ok()), [a.clone(), b.clone()]);
+    // The cut: rename to the number; the ID and the cards stay.
+    let r = td
+        .patch_as(
+            "proj/lead",
+            "/api/versions/proj%2Fvnext",
+            json!({"name": "0.1.0"}),
+        )
+        .await;
+    assert_eq!(r.ok()["name"], "0.1.0");
+    assert_eq!(r.body["id"], id.as_str());
+    assert_eq!(ids(&r.body), [a.clone(), b.clone()]);
+    td.get("/api/versions/proj%2Fvnext")
+        .await
+        .err(404, "not_found");
+    // A new vnext starts empty; the old name cannot take an existing name.
+    let n = td
+        .post_as(
+            "proj/lead",
+            "/api/projects/proj/versions",
+            json!({"name": "vnext"}),
+        )
+        .await;
+    assert_eq!(n.status, 201, "{}", n.body);
+    assert!(ids(&n.body).is_empty());
+    td.patch_as(
+        "proj/lead",
+        "/api/versions/proj%2Fvnext",
+        json!({"name": "0.1.0"}),
+    )
+    .await
+    .err(409, "conflict");
+    // Submit the numbered version; it takes no rename while in review.
+    let r = td
+        .post_as("proj/lead", "/api/versions/proj%2F0.1.0/submit", json!({}))
+        .await;
+    assert_eq!(r.ok()["status"], "in_review");
+    td.patch_as(
+        "proj/lead",
+        "/api/versions/proj%2F0.1.0",
+        json!({"name": "0.1.1"}),
+    )
+    .await
+    .err(409, "conflict");
+    let r = td
+        .post("/api/versions/proj%2F0.1.0/approve", json!({}))
+        .await;
+    assert_eq!(r.ok()["status"], "approved");
+    assert_eq!(ids(&r.body), [a, b]);
+}
+
+/// TER-36: `add_labels` and `remove_labels` change the labels of a card and
+/// keep the others; with `labels` they are refused.
+#[tokio::test]
+async fn card_labels_can_be_added_and_removed() {
+    let td = setup().await;
+    let k = card(&td, "Parser").await;
+    let url = format!("/api/cards/{k}");
+    td.patch_as("proj/w1", &url, json!({"labels": ["bug", "ci"]}))
+        .await
+        .ok();
+    let r = td
+        .patch_as(
+            "proj/w1",
+            &url,
+            json!({"add_labels": ["version:vnext", "bug"], "remove_labels": ["ci", "nope"]}),
+        )
+        .await;
+    assert_eq!(r.ok()["labels"], json!(["bug", "version:vnext"]));
+    let r = td
+        .patch_as(
+            "proj/w1",
+            &url,
+            json!({"remove_labels": ["version:vnext"], "add_labels": ["version:0.1.0"]}),
+        )
+        .await;
+    assert_eq!(r.ok()["labels"], json!(["bug", "version:0.1.0"]));
+    td.patch_as(
+        "proj/w1",
+        &url,
+        json!({"labels": ["x"], "add_labels": ["y"]}),
+    )
+    .await
+    .err(422, "invalid");
+}

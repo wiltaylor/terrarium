@@ -1327,8 +1327,14 @@ pub struct CardEditArgs {
     pub body: Option<String>,
     /// Replace the labels; repeat for more. `--label none` removes
     /// every label
-    #[arg(long = "label")]
+    #[arg(long = "label", conflicts_with_all = ["add_labels", "rm_labels"])]
     pub labels: Vec<String>,
+    /// Add a label and keep the others; repeat for more
+    #[arg(long = "add-label")]
+    pub add_labels: Vec<String>,
+    /// Remove a label and keep the others; repeat for more
+    #[arg(long = "rm-label")]
+    pub rm_labels: Vec<String>,
     /// Replace the dependencies; repeat for more. `--depends-on none`
     /// removes every dependency
     #[arg(long = "depends-on")]
@@ -2190,6 +2196,21 @@ pub enum VersionCmd {
     },
     /// Show a version
     Show { name: String },
+    /// Rename a version (draft or rejected): its cards, reviews, and
+    /// artifacts stay with it. At the cut, `vnext` becomes `X.Y.Z`
+    Rename { name: String, new_name: String },
+    /// Add cards to a version (draft or rejected)
+    AddCard {
+        name: String,
+        #[arg(required = true)]
+        cards: Vec<String>,
+    },
+    /// Remove cards from a version (draft or rejected)
+    RmCard {
+        name: String,
+        #[arg(required = true)]
+        cards: Vec<String>,
+    },
     /// Archive a version: it leaves the board rows and the default list;
     /// its status and reviews stay (its creator, a project admin, or the
     /// operator)

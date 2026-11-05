@@ -1439,6 +1439,12 @@ pub struct CardPatch {
     pub body: Option<String>,
     #[serde(default)]
     pub labels: Option<Vec<String>>,
+    /// Labels to add to the card's labels (TER-36). Not with `labels`.
+    #[serde(default)]
+    pub add_labels: Vec<String>,
+    /// Labels to take away from the card's labels. Not with `labels`.
+    #[serde(default)]
+    pub remove_labels: Vec<String>,
     #[serde(default, deserialize_with = "double_option")]
     pub repo: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
@@ -1461,6 +1467,25 @@ pub struct CardPatch {
 pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> ApiResult<Card> {
     let card = find_row(t, id)?;
     policy::read_project(actor, &card.project)?;
+    let mut p = p;
+    // `add_labels` and `remove_labels` change the current labels in this
+    // write, so two changes at once do not lose each other's labels.
+    if !p.add_labels.is_empty() || !p.remove_labels.is_empty() {
+        if p.labels.is_some() {
+            return Err(ApiError::invalid(
+                "give `labels` (replace them all) or `add_labels`/`remove_labels`, not both",
+            ));
+        }
+        let mut labels: Vec<String> = json_col(&card.labels);
+        labels.retain(|l| !p.remove_labels.contains(l));
+        for l in std::mem::take(&mut p.add_labels) {
+            if !labels.contains(&l) {
+                labels.push(l);
+            }
+        }
+        p.remove_labels.clear();
+        p.labels = Some(labels);
+    }
     let edits = p.title.is_some()
         || p.body.is_some()
         || p.labels.is_some()
