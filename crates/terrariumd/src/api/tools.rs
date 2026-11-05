@@ -169,16 +169,20 @@ async fn run(
     match crate::tool_run::run(&state, &actor, &name, b.argv, b.approval).await? {
         crate::tool_run::Outcome::Started(started) => Ok((
             StatusCode::CREATED,
-            Json(json!({"session_id": started.session.id, "tool": started.tool,
-                        "target": started.target})),
+            Json(
+                json!({"session_id": started.session.id, "tool": started.tool,
+                        "target": started.target}),
+            ),
         )),
         crate::tool_run::Outcome::Pending {
             question,
             expires_at,
         } => Ok((
             StatusCode::ACCEPTED,
-            Json(json!({"pending": true, "question": question, "expires_at": expires_at,
-                        "tool": name})),
+            Json(
+                json!({"pending": true, "question": question, "expires_at": expires_at,
+                        "tool": name}),
+            ),
         )),
     }
 }

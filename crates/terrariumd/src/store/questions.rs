@@ -1567,13 +1567,12 @@ pub fn ask_tool_run(
         let mut st = t.prepare(
             "SELECT * FROM questions WHERE agent = ?1 AND status = 'open' AND kind = 'tool_run'",
         )?;
-        st.query_map([agent], row)?
-            .collect::<Result<Vec<_>, _>>()?
+        st.query_map([agent], row)?.collect::<Result<Vec<_>, _>>()?
     };
     if let Some(q) = open.into_iter().find(|q| {
-        q.tool_run.as_ref().is_some_and(|r| {
-            r["tool"] == tool && r["argv"] == json!(argv) && r["target"] == target
-        })
+        q.tool_run
+            .as_ref()
+            .is_some_and(|r| r["tool"] == tool && r["argv"] == json!(argv) && r["target"] == target)
     }) {
         return Ok(named(t, q));
     }
@@ -1640,9 +1639,14 @@ pub fn use_tool_run(
     tool: &str,
     argv: &[String],
 ) -> ApiResult<Question> {
-    let refused = |why: &str| ApiError::conflict(format!("approval {id} does not allow this run: {why}"));
+    let refused =
+        |why: &str| ApiError::conflict(format!("approval {id} does not allow this run: {why}"));
     let q = get(t, id).map_err(|_| refused("there is no such approval"))?;
-    let Some(run) = q.tool_run.clone().filter(|_| q.kind == QuestionKind::ToolRun) else {
+    let Some(run) = q
+        .tool_run
+        .clone()
+        .filter(|_| q.kind == QuestionKind::ToolRun)
+    else {
         return Err(refused("it is not a tool run approval"));
     };
     if q.agent != agent {

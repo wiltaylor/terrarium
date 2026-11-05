@@ -121,7 +121,9 @@ async fn wait_approval(
 ) -> anyhow::Result<()> {
     eprintln!(
         "terrarium: tool {name} waits for the operator's approval (question {q}{})",
-        expires_at.map(|e| format!(", until {e}")).unwrap_or_default()
+        expires_at
+            .map(|e| format!(", until {e}"))
+            .unwrap_or_default()
     );
     let qpath = format!("/api/questions/{}", encode(q));
     let wait = async {
@@ -205,7 +207,10 @@ async fn run(ctx: &Ctx, name: &str, args: &[String]) -> anyhow::Result<()> {
             .await
         {
             Ok(v) => v,
-            Err(e) if e.downcast_ref::<ServerError>().is_some_and(|s| s.status == 409) => {
+            Err(e)
+                if e.downcast_ref::<ServerError>()
+                    .is_some_and(|s| s.status == 409) =>
+            {
                 eprintln!("terrarium: tool {name} was not run: {e}");
                 return Err(CliError::RemoteExit(EXIT_REFUSED).into());
             }
@@ -306,16 +311,25 @@ mod tests {
     async fn an_approved_run_posts_again_with_the_approval() {
         let mock = MockTransport::new();
         tool_reply(&mock);
-        mock.reply(202, json!({"pending": true, "question": "Q1", "expires_at": "x"}))
-            .reply(200, json!({"id": "Q1", "status": "open"}))
-            .reply(200, json!({"id": "Q1", "status": "answered", "answer_option": 0}))
-            .reply(201, json!({"session_id": "S1", "tool": "t", "target": "box"}))
-            .reply(
-                200,
-                json!({"since": 0, "next": 3, "done": true,
+        mock.reply(
+            202,
+            json!({"pending": true, "question": "Q1", "expires_at": "x"}),
+        )
+        .reply(200, json!({"id": "Q1", "status": "open"}))
+        .reply(
+            200,
+            json!({"id": "Q1", "status": "answered", "answer_option": 0}),
+        )
+        .reply(
+            201,
+            json!({"session_id": "S1", "tool": "t", "target": "box"}),
+        )
+        .reply(
+            200,
+            json!({"since": 0, "next": 3, "done": true,
                        "chunks": [{"stream": "stdout", "data": "b2sK"}],
                        "end": {"type": "exit", "code": 0, "reason": "exited"}}),
-            );
+        );
         let c = ctx(&mock);
         run(&c, "t", &["show".into(), "T-1".into()]).await.unwrap();
         let reqs = mock.requests();
@@ -345,7 +359,10 @@ mod tests {
             let e = run(&ctx(&mock), "t", &[]).await.unwrap_err();
             assert_eq!(exit_code_of(&e), 77, "{last}");
             assert_eq!(
-                mock.requests().iter().filter(|r| r.path.ends_with("/run")).count(),
+                mock.requests()
+                    .iter()
+                    .filter(|r| r.path.ends_with("/run"))
+                    .count(),
                 1,
                 "{last}"
             );

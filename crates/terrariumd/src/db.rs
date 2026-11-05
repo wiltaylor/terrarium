@@ -3380,7 +3380,9 @@ mod tests {
         .unwrap();
         migrate(&mut conn).unwrap();
         let kind: String = conn
-            .query_row("SELECT kind FROM questions WHERE id = 'Q1'", [], |r| r.get(0))
+            .query_row("SELECT kind FROM questions WHERE id = 'Q1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(kind, "bundle");
         conn.execute(

@@ -119,7 +119,10 @@ pub enum Outcome {
     Started(Started),
     /// The tool asks the operator first (design D5): the approval question
     /// and when it times out.
-    Pending { question: String, expires_at: String },
+    Pending {
+        question: String,
+        expires_at: String,
+    },
 }
 
 /// Run tool `name` for `actor` with the agent arguments `argv`. `approval`
@@ -281,8 +284,8 @@ pub async fn run(
             }
             tokio::spawn(async move {
                 record_end(
-                    &st, label, tool, target, project, agent_id, agent_name, audit_argv,
-                    approved, started_at, e,
+                    &st, label, tool, target, project, agent_id, agent_name, audit_argv, approved,
+                    started_at, e,
                 )
                 .await;
             });

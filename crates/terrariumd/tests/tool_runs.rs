@@ -600,14 +600,23 @@ async fn an_approved_run_starts_once() {
     let again = lab.run_as(&lab.w1, "tt-approve", &["show", "T-1"]).await;
     assert_eq!(again.body["question"], q.as_str());
 
-    let question = lab.td.get(&format!("/api/questions/{q}")).await.ok().clone();
+    let question = lab
+        .td
+        .get(&format!("/api/questions/{q}"))
+        .await
+        .ok()
+        .clone();
     assert_eq!(question["kind"], "tool_run");
     assert_eq!(question["options"], json!(["Run", "Refuse"]));
     assert_eq!(question["tool_run"]["argv"], json!(["show", "T-1"]));
     assert!(question["context"].as_str().unwrap().contains("\"T-1\""));
     let inbox = lab.td.get("/api/inbox?kind=question").await.ok().clone();
     assert!(
-        inbox.as_array().unwrap().iter().any(|i| i["id"] == format!("tool_run:{q}")),
+        inbox
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == format!("tool_run:{q}")),
         "{inbox:#?}"
     );
     // The agent's own list leaves it out; the agent may still read it.
@@ -616,7 +625,13 @@ async fn an_approved_run_starts_once() {
         .get_as(&lab.w1, &format!("/api/agents/{}/questions", lab.w1))
         .await;
     if own.status == 200 {
-        assert!(own.body.as_array().unwrap().iter().all(|x| x["id"] != q.as_str()));
+        assert!(
+            own.body
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| x["id"] != q.as_str())
+        );
     }
     lab.td
         .get_as(&lab.w1, &format!("/api/questions/{q}"))
@@ -635,7 +650,11 @@ async fn an_approved_run_starts_once() {
     early.err(409, "conflict");
     // A sysadmin agent cannot approve another agent's run.
     lab.td
-        .post_as(&sys, &format!("/api/questions/{q}/answer"), json!({"option": 0}))
+        .post_as(
+            &sys,
+            &format!("/api/questions/{q}/answer"),
+            json!({"option": 0}),
+        )
         .await
         .err(403, "forbidden");
     lab.td
@@ -671,7 +690,12 @@ async fn an_approved_run_starts_once() {
         )
         .await;
     reuse.err(409, "conflict");
-    assert!(reuse.body["error"]["message"].as_str().unwrap().contains("used already"));
+    assert!(
+        reuse.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("used already")
+    );
     // The audit row names the approval and who gave it.
     let mut rows = Vec::new();
     for _ in 0..100 {
@@ -719,12 +743,18 @@ async fn approval_first_and_refuse() {
     )
     .await;
     let r = lab.run_as(&lab.w1, "tt-first", &["show", "T-1"]).await;
-    assert_eq!(drain(&lab.td, &lab.w1, &sid(&r)).await.stdout, "ran:show T-1\n");
+    assert_eq!(
+        drain(&lab.td, &lab.w1, &sid(&r)).await.stdout,
+        "ran:show T-1\n"
+    );
     let p = lab.run_as(&lab.w1, "tt-first", &["close", "T-1"]).await;
     assert_eq!(p.status, 202, "{}", p.body);
     let q = p.body["question"].as_str().unwrap().to_owned();
     lab.td
-        .post(&format!("/api/questions/{q}/answer"), json!({"option": "Refuse"}))
+        .post(
+            &format!("/api/questions/{q}/answer"),
+            json!({"option": "Refuse"}),
+        )
         .await
         .ok();
     let r = lab
@@ -736,7 +766,12 @@ async fn approval_first_and_refuse() {
         )
         .await;
     r.err(409, "conflict");
-    assert!(r.body["error"]["message"].as_str().unwrap().contains("refused"));
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("refused")
+    );
     // A new pending run; the member agent gives it up itself.
     let p = lab.run_as(&lab.w1, "tt-first", &["close", "T-9"]).await;
     let q = p.body["question"].as_str().unwrap().to_owned();
@@ -769,7 +804,12 @@ async fn an_approval_times_out() {
     let q = p.body["question"].as_str().unwrap().to_owned();
     let mut status = Value::Null;
     for _ in 0..200 {
-        let v = lab.td.get(&format!("/api/questions/{q}")).await.ok().clone();
+        let v = lab
+            .td
+            .get(&format!("/api/questions/{q}"))
+            .await
+            .ok()
+            .clone();
         status = v["status"].clone();
         if status == "retracted" {
             assert_eq!(v["retract_reason"], "the approval timed out");
