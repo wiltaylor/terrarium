@@ -237,7 +237,9 @@ async fn the_agent_idle_stop_wins_over_the_global_one() {
     // stops after its 1 s. No wall-clock race between two agents: a
     // loaded runner can take longer than 1 s for the 200 ms stop.
     fast(&td, IdleStop::After(Duration::from_secs(600)));
-    td.post_empty(&format!("/api/agents/{short}/start")).await.ok();
+    td.post_empty(&format!("/api/agents/{short}/start"))
+        .await
+        .ok();
     td.wait_status(&short, "idle").await;
     until("short stops after its 1 s", || async {
         agent(&td, &short).await["status"] == "stopped"
