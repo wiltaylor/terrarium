@@ -749,7 +749,7 @@ pub struct NewPage {
 
 pub fn create(t: &mut Tx<'_>, actor: &Actor, project: &str, p: NewPage) -> ApiResult<WikiPage> {
     projects::get(t, project)?;
-    policy::read_project(actor, project)?;
+    policy::write_project(actor, project)?;
     ensure_index(t, project)?;
     let path = check_path(&p.path)?;
     if by_path(t, project, &path)?.is_some() {
@@ -813,6 +813,8 @@ pub struct Save {
 /// Save a whole new body. A stale base is refused with the diff since it.
 pub fn save(t: &mut Tx<'_>, actor: &Actor, key: &str, s: Save) -> ApiResult<WikiPage> {
     let row = find(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     live(&row)?;
     if s.base != row.current_rev {
         if s.base < 1 || s.base > row.current_rev {
@@ -862,6 +864,8 @@ pub struct SectionEdit {
 /// Replace one section by its heading, or add it at the end.
 pub fn section(t: &mut Tx<'_>, actor: &Actor, key: &str, e: SectionEdit) -> ApiResult<WikiPage> {
     let row = find(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     live(&row)?;
     if heading_key(&e.heading).is_empty() {
         return Err(ApiError::invalid("the section edit needs a heading"));
@@ -909,6 +913,8 @@ pub struct Append {
 /// Add text at the end of the page. It never conflicts.
 pub fn append(t: &mut Tx<'_>, actor: &Actor, key: &str, a: Append) -> ApiResult<WikiPage> {
     let row = find(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     live(&row)?;
     if a.body.trim().is_empty() {
         return Err(ApiError::invalid("nothing to append"));
@@ -923,6 +929,8 @@ pub fn append(t: &mut Tx<'_>, actor: &Actor, key: &str, a: Append) -> ApiResult<
 /// it, which needs an admin.
 pub fn restore(t: &mut Tx<'_>, actor: &Actor, key: &str, rev: i64) -> ApiResult<WikiPage> {
     let row = find(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     let body = body_at(t, &row.id, rev)?;
     let mut row = row;
     if row.deleted_at.is_some() {
@@ -960,6 +968,8 @@ pub fn restore(t: &mut Tx<'_>, actor: &Actor, key: &str, rev: i64) -> ApiResult<
 /// Delete a page. Its history stays.
 pub fn delete(t: &mut Tx<'_>, actor: &Actor, key: &str) -> ApiResult<()> {
     let row = find(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     policy::admin_wiki(actor, &row.project, "deleting a page")?;
     live(&row)?;
     t.execute(
@@ -980,6 +990,8 @@ pub fn delete(t: &mut Tx<'_>, actor: &Actor, key: &str) -> ApiResult<()> {
 /// Move a page to a new path.
 pub fn move_page(t: &mut Tx<'_>, actor: &Actor, key: &str, path: &str) -> ApiResult<WikiPage> {
     let row = find(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     policy::admin_wiki(actor, &row.project, "moving a page")?;
     live(&row)?;
     let path = check_path(path)?;
@@ -1021,6 +1033,8 @@ pub struct Review {
 /// Review a page and mail the author of its current revision.
 pub fn review(t: &mut Tx<'_>, actor: &Actor, key: &str, r: Review) -> ApiResult<WikiPage> {
     let row = find(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     live(&row)?;
     policy::review_page(actor, &row.project, row.reviewer.as_deref())?;
     let comment = r

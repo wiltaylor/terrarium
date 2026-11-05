@@ -52,6 +52,19 @@ pub fn admin_project(actor: &Actor, project: &str, what: &str) -> ApiResult<()> 
     }
 }
 
+/// The project gate of a write (TER-47): the own project, a sysadmin, or
+/// the operator. It is what [`read_project`] was before the architect: an
+/// architect reads every project but writes only in its own, as a member.
+pub fn write_project(actor: &Actor, project: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.project == project || a.is_sysadmin() => Ok(()),
+        Actor::Agent(_) => Err(ApiError::forbidden(format!(
+            "project `{project}` is not your project; writing in it needs sysadmin"
+        ))),
+    }
+}
+
 /// A read of the whole system that a `sysadmin` and an `architect` may do
 /// (TER-47): the global event sources, the users of a skill, the state of
 /// the self-update.
@@ -199,7 +212,7 @@ pub fn checkout_into(
             "the repo is in project `{repo_project}`; the agent is in `{agent_project}`"
         )));
     }
-    read_project(actor, repo_project)?;
+    write_project(actor, repo_project)?;
     match actor {
         Actor::Agent(a) if a.id == agent_id => Ok(()),
         _ => admin_project(
@@ -886,7 +899,7 @@ pub fn read_db(actor: &Actor, project: &str) -> ApiResult<()> {
 /// delete a type with no records or a record. Every member writes, so an
 /// agent can make its own types.
 pub fn write_db(actor: &Actor, project: &str) -> ApiResult<()> {
-    read_project(actor, project).map_err(|_| {
+    write_project(actor, project).map_err(|_| {
         ApiError::forbidden(format!(
             "project `{project}` is not your project; writing its DB needs sysadmin"
         ))
@@ -937,7 +950,7 @@ pub fn delete_artifact(actor: &Actor, project: &str, author: &str) -> ApiResult<
 
 /// Upload a test run: every member of the project (its agents too).
 pub fn write_test_runs(actor: &Actor, project: &str) -> ApiResult<()> {
-    read_project(actor, project).map_err(|_| {
+    write_project(actor, project).map_err(|_| {
         ApiError::forbidden(format!(
             "project `{project}` is not your project; uploading its test runs needs sysadmin"
         ))
