@@ -7,12 +7,22 @@ import type { Session } from "../../api/types";
 export const AGENT_TABS = [
   { id: "conversation", label: "Conversation" },
   { id: "terminal", label: "Terminal" },
-  { id: "screen", label: "Screen" },
   { id: "events", label: "Events" },
   { id: "sessions", label: "Sessions" },
+  { id: "waits", label: "Waits & leases" },
+  { id: "details", label: "Details" },
   { id: "spawned", label: "Spawned" },
 ] as const;
 export type AgentTab = (typeof AGENT_TABS)[number]["id"];
+
+/** Old tab names that open another tab: the Screen tab went (issue #22); the Terminal tab shows the same screen. */
+const TAB_ALIASES: Record<string, AgentTab> = { screen: "terminal" };
+
+/** The label of the Waits & leases tab: the open waits and the active leases in brackets, so they show from the other tabs. */
+export const waitsTabLabel = (openWaits: number | undefined, leases: number): string => {
+  const n = (openWaits ?? 0) + leases;
+  return n > 0 ? `Waits & leases (${n})` : "Waits & leases";
+};
 
 /** The view of the agent page, from `?tab=&session=`. A session opens only on the Sessions tab. */
 export interface AgentView {
@@ -22,7 +32,7 @@ export interface AgentView {
 }
 
 export function parseAgentView(q: { tab?: string; session?: string }): AgentView {
-  const tab = (AGENT_TABS.find((t) => t.id === q.tab)?.id ?? "conversation") as AgentTab;
+  const tab = (AGENT_TABS.find((t) => t.id === q.tab)?.id ?? (q.tab ? TAB_ALIASES[q.tab] : undefined) ?? "conversation") as AgentTab;
   const session = tab === "sessions" && q.session ? q.session : null;
   return { tab, session };
 }
