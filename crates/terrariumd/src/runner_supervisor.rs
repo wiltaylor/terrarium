@@ -1566,16 +1566,8 @@ impl RunnerSupervisor {
             host: home.clone(),
         });
         let sandboxed = cfg.sandbox.mode == SandboxMode::Bwrap;
-        let (
-            overlays,
-            credentials,
-            fresh_for_prompt,
-            prompt_updated,
-            repos,
-            accounts,
-            delivery,
-            skills_changed,
-        ) = tokio::task::spawn_blocking(move || {
+        let (overlays, credentials, fresh_for_prompt, prompt_updated, repos, accounts, skills) =
+            tokio::task::spawn_blocking(move || {
                 migrate_dir(&dirs.0);
                 // An agent made before the work root: its files move from
                 // `<agent dir>/workspace` once.
@@ -1688,13 +1680,13 @@ impl RunnerSupervisor {
                     prompt_updated,
                     repos,
                     accounts,
-                    delivery,
-                    skills_changed,
+                    (delivery, skills_changed),
                 ))
             })
             .await
             .map_err(other)?
             .map_err(SupervisorError::NotReady)?;
+        let (delivery, skills_changed) = skills;
 
         // An overlay of a path over itself (a writable part of `harness/`)
         // changes nothing without a sandbox.

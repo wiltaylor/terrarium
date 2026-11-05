@@ -1433,7 +1433,11 @@ mod tests {
         assert!(same.changed_since(&before).is_empty());
 
         // A changed file of one skill; another skill added, and one gone.
-        std::fs::write(lib.join("fern-check/SKILL.md"), md("fern-check", "new step")).expect("write");
+        std::fs::write(
+            lib.join("fern-check/SKILL.md"),
+            md("fern-check", "new step"),
+        )
+        .expect("write");
         let (_, after) = collect(&lib, &["fern-check".to_owned(), "late".to_owned()]);
         assert_eq!(after.changed_since(&before), ["fern-check"]);
 
