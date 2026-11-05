@@ -4017,6 +4017,24 @@ daemon routes each call to the right host agent or SSH connection. `terrarium
 exec`, `shell`, and `cp` are thin clients of it. `shell` forwards the agent's
 PTY, so a harness can drive an interactive remote session.
 
+### 19.x Tool proxies
+
+Asked for in GitHub #21. The design, with the operator's decisions, is
+the wiki page `design/tool-proxies`; the API is `docs/api.md` §17.11.
+An agent should get one command on a target, not a shell on it: a host
+target is the user's whole machine. A tool is a named command that the
+operator defines (`tools/<name>.toml` or `POST /api/tools`, decision Q1):
+a fixed argv on a target, the agent's arguments appended, never a shell.
+The definition checks refuse a name that would shadow a program of the
+sandbox `PATH`, a `shell` field, a target of another project for a project
+tool, a secret of another scope, and an interpreter with no fixed script,
+with inline code, or with no `args.allow` (decision Q3). Grants
+(`tool_grants`, migration 66) give a tool to an agent or a project, as
+secret grants do; only the operator and sysadmins grant in phase 1
+(decision Q2). Phases: P1a definitions and grants (done), P1b the stream
+redactor, P1c the run path, the shim, the argument rules, and the audit,
+P2 approval, P3 detach, the dashboard, and template tools.
+
 ## 19b. Target displays (computer use)
 
 Some work has only a screen: a Windows installer, a desktop application,

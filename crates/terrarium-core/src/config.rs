@@ -1000,7 +1000,7 @@ macro_rules! named {
         }
     )*};
 }
-named!(TargetDef, SubscriptionDef);
+named!(TargetDef, SubscriptionDef, crate::tool::ToolDef);
 
 impl Named for AgentDef {
     fn name_mut(&mut self) -> &mut String {
@@ -1104,6 +1104,8 @@ pub struct Definitions {
     pub agents: Vec<AgentDef>,
     pub targets: Vec<TargetDef>,
     pub subscriptions: Vec<SubscriptionDef>,
+    /// `tools/<name>.toml`: the tool proxies (`crate::tool`).
+    pub tools: Vec<crate::tool::ToolDef>,
 }
 
 impl Definitions {
@@ -1116,6 +1118,7 @@ impl Definitions {
             agents: load_kind(&dir.join("agents"), &mut errors),
             targets: load_kind(&dir.join("targets"), &mut errors),
             subscriptions: load_kind(&dir.join("subscriptions"), &mut errors),
+            tools: load_kind(&dir.join("tools"), &mut errors),
         };
         (defs, errors)
     }

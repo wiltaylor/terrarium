@@ -656,6 +656,21 @@ pub async fn apply_definitions(
         })
         .await?;
     report.errors.extend(target_errors);
+    // The tool files, after the targets and the secrets that they name.
+    let tool_defs = defs.tools.clone();
+    let tool_dirs: Vec<std::path::PathBuf> = state
+        .harness_tools
+        .config()
+        .map(|c| vec![c.bin_dir()])
+        .unwrap_or_default();
+    let (_, tool_errors) = state
+        .db
+        .write("system", move |t| {
+            let refs: Vec<&std::path::Path> = tool_dirs.iter().map(std::path::PathBuf::as_path).collect();
+            store::tools::sync_files(t, &tool_defs, &refs)
+        })
+        .await?;
+    report.errors.extend(tool_errors);
     // Schedules of the project files, after the agents and targets that
     // they name (docs/api.md §19), and the templates (§21).
     // The `[[templates]]` of a project file are an import into the

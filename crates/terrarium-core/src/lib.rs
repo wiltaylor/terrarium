@@ -36,6 +36,7 @@ pub mod tail;
 pub mod template;
 #[cfg(feature = "wcl")]
 pub mod template_file;
+pub mod tool;
 pub mod transcript;
 pub mod turn_tag;
 pub mod webhook;

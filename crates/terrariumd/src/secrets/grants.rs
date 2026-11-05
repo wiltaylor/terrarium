@@ -151,7 +151,7 @@ pub fn parse_grantee(conn: &Connection, s: &str) -> ApiResult<Grantee> {
 
 /// The label of a stored grantee key, for the answers: `agent:<ulid>`
 /// becomes `agent:<project>/<name>` while the agent exists.
-fn label_of(conn: &Connection, key: &str) -> ApiResult<String> {
+pub(crate) fn label_of(conn: &Connection, key: &str) -> ApiResult<String> {
     if let Some(id) = key.strip_prefix("agent:") {
         let found: Option<(String, String)> = conn
             .query_row(

@@ -32,6 +32,7 @@ pub mod target_grants;
 pub mod targets;
 pub mod templates;
 pub mod test_runs;
+pub mod tools;
 pub mod transcripts;
 pub mod usage;
 pub mod versions;
