@@ -22,9 +22,9 @@ fn deny(what: &str, need: &str) -> ApiError {
 pub fn read_project(actor: &Actor, project: &str) -> ApiResult<()> {
     match actor {
         Actor::Operator => Ok(()),
-        Actor::Agent(a) if a.project == project || a.is_sysadmin() => Ok(()),
+        Actor::Agent(a) if a.project == project || a.reads_all() => Ok(()),
         Actor::Agent(_) => Err(ApiError::forbidden(format!(
-            "project `{project}` is not your project; reading it needs sysadmin"
+            "project `{project}` is not your project; reading it needs sysadmin or architect"
         ))),
     }
 }
@@ -49,6 +49,17 @@ pub fn admin_project(actor: &Actor, project: &str, what: &str) -> ApiResult<()> 
             what,
             &format!("project_admin of `{project}`, sysadmin, or the operator"),
         ))
+    }
+}
+
+/// A read of the whole system that a `sysadmin` and an `architect` may do
+/// (TER-47): the global event sources, the users of a skill, the state of
+/// the self-update.
+pub fn read_system(actor: &Actor, what: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.reads_all() => Ok(()),
+        Actor::Agent(_) => Err(deny(what, "sysadmin, architect, or the operator")),
     }
 }
 
@@ -221,7 +232,7 @@ pub fn attach_local_repo(roles: &[Role]) -> ApiResult<()> {
 pub fn read_subscriptions(actor: &Actor) -> ApiResult<()> {
     match actor {
         Actor::Operator => Ok(()),
-        Actor::Agent(a) if a.is_sysadmin() || a.roles.contains(&Role::ProjectAdmin) => Ok(()),
+        Actor::Agent(a) if a.reads_all() || a.roles.contains(&Role::ProjectAdmin) => Ok(()),
         Actor::Agent(_) => Err(deny(
             "reading all subscriptions",
             "project_admin, sysadmin, or the operator",
@@ -234,7 +245,7 @@ pub fn read_subscriptions(actor: &Actor) -> ApiResult<()> {
 pub fn read_subscription_models(actor: &Actor, projects: &[String]) -> ApiResult<()> {
     match actor {
         Actor::Operator => Ok(()),
-        Actor::Agent(a) if a.is_sysadmin() || projects.iter().any(|p| a.is_admin_of(p)) => Ok(()),
+        Actor::Agent(a) if a.reads_all() || projects.iter().any(|p| a.is_admin_of(p)) => Ok(()),
         Actor::Agent(_) => Err(deny(
             "reading the models of a subscription",
             "project_admin of a project that uses it, sysadmin, or the operator",
@@ -508,6 +519,15 @@ pub fn read_inbox(actor: &Actor, project: &str) -> ApiResult<()> {
     admin_project(actor, project, "reading the project inbox")
 }
 
+/// View a project inbox (list and show, never mark read or reply): its
+/// admin, or a sysadmin or architect (TER-47).
+pub fn view_inbox(actor: &Actor, project: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Agent(a) if a.reads_all() => Ok(()),
+        _ => read_inbox(actor, project),
+    }
+}
+
 /// Grant or revoke `role` on the agent `target` of `target_project`.
 pub fn change_role(actor: &Actor, target: &str, target_project: &str, role: Role) -> ApiResult<()> {
     if let Actor::Agent(a) = actor
@@ -639,7 +659,7 @@ pub fn link_question(actor: &Actor, owner: &str, project: &str) -> ApiResult<boo
 pub fn read_questions(actor: &Actor, owner: &str, project: &str) -> ApiResult<()> {
     match actor {
         Actor::Operator => Ok(()),
-        Actor::Agent(a) if a.id == owner || a.is_admin_of(project) => Ok(()),
+        Actor::Agent(a) if a.id == owner || a.is_admin_of(project) || a.reads_all() => Ok(()),
         Actor::Agent(_) => Err(deny(
             "reading questions",
             &format!("the agent itself, project_admin of `{project}`, sysadmin, or the operator"),
@@ -674,7 +694,7 @@ pub fn retract_question(actor: &Actor, owner: &str, project: &str) -> ApiResult<
 /// `cross_project` entry (`project/name` or `project/*`), as mail does. A
 /// sysadmin reaches every agent.
 pub fn reach_agent(waiter: &AgentActor, name: &str, project: &str) -> ApiResult<()> {
-    if waiter.is_sysadmin() || waiter.project == project {
+    if waiter.reads_all() || waiter.project == project {
         return Ok(());
     }
     let full = format!("{project}/{name}");

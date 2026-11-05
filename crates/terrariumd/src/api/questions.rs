@@ -134,7 +134,7 @@ async fn list_all(
 ) -> ApiResult<Response> {
     let project = match &actor {
         Actor::Operator => q.project.clone().filter(|p| !p.is_empty()),
-        Actor::Agent(a) if a.is_sysadmin() => q.project.clone().filter(|p| !p.is_empty()),
+        Actor::Agent(a) if a.reads_all() => q.project.clone().filter(|p| !p.is_empty()),
         Actor::Agent(a) if a.is_admin_of(&a.project) => {
             if let Some(p) = q.project.as_deref().filter(|p| !p.is_empty()) {
                 policy::admin_project(&actor, p, "listing questions")?;
@@ -171,7 +171,7 @@ async fn list_all(
                 .await?;
             // A project_admin sees only the cards of its project.
             let all =
-                matches!(actor, Actor::Operator) || actor.agent().is_some_and(|a| a.is_sysadmin());
+                matches!(actor, Actor::Operator) || actor.agent().is_some_and(|a| a.reads_all());
             if let Some(p) = project.as_deref().filter(|p| !all && *p != c.project) {
                 return Err(ApiError::not_found(format!(
                     "no card `{}` in project `{p}`",

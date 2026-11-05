@@ -222,7 +222,7 @@ pub async fn firehose(
         });
     }
     if let Actor::Agent(a) = &actor
-        && !a.is_sysadmin()
+        && !a.reads_all()
     {
         filter.visible_to = Some((a.project.clone(), a.id.clone()));
     }

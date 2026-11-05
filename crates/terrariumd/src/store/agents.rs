@@ -632,6 +632,13 @@ fn role_str(r: Role) -> &'static str {
 
 /// Replace the roles of an agent. `member` is implicit and is dropped.
 pub fn set_roles(t: &mut Tx<'_>, id: &str, project: &str, wanted: &[Role]) -> ApiResult<Vec<Role>> {
+    // A sysadmin reads and writes everything: `architect` (read only) with
+    // it means nothing, and would hide which one applies (TER-47).
+    if wanted.contains(&Role::Architect) && wanted.contains(&Role::Sysadmin) {
+        return Err(ApiError::invalid(
+            "an agent has sysadmin or architect, not both: sysadmin already reads everything",
+        ));
+    }
     let before = roles(t, id)?;
     t.execute("DELETE FROM roles WHERE agent_id = ?1", [id])?;
     let at = now();

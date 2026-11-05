@@ -126,7 +126,7 @@ where
 fn read_scope(actor: &Actor, project: Option<&str>) -> ApiResult<()> {
     match project {
         Some(p) => policy::read_project(actor, p),
-        None => policy::sysadmin(actor, "reading the global event sources"),
+        None => policy::read_system(actor, "reading the global event sources"),
     }
 }
 

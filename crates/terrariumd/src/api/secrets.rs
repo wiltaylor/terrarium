@@ -84,7 +84,7 @@ pub struct RevealBody {
 fn visible_scope(actor: &Actor) -> ApiResult<Option<String>> {
     match actor {
         Actor::Operator => Ok(None),
-        Actor::Agent(a) if a.is_sysadmin() => Ok(None),
+        Actor::Agent(a) if a.reads_all() => Ok(None),
         // A project named `global` from before the reserved name (S7):
         // its scope is the global scope, which needs sysadmin.
         Actor::Agent(a) if a.project == GLOBAL => Err(ApiError::forbidden(
