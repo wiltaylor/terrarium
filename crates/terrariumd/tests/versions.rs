@@ -618,7 +618,7 @@ async fn vnext_takes_cards_over_time_and_is_renamed_at_the_cut() {
     let r = td
         .patch_as(
             "proj/lead",
-            "/api/versions/proj/vnext",
+            "/api/versions/proj%2Fvnext",
             json!({"add_cards": [b, c]}),
         )
         .await;
@@ -626,7 +626,7 @@ async fn vnext_takes_cards_over_time_and_is_renamed_at_the_cut() {
     let r = td
         .patch_as(
             "proj/lead",
-            "/api/versions/proj/vnext",
+            "/api/versions/proj%2Fvnext",
             json!({"remove_cards": [c]}),
         )
         .await;
@@ -635,14 +635,14 @@ async fn vnext_takes_cards_over_time_and_is_renamed_at_the_cut() {
     let r = td
         .patch_as(
             "proj/lead",
-            "/api/versions/proj/vnext",
+            "/api/versions/proj%2Fvnext",
             json!({"name": "0.1.0"}),
         )
         .await;
     assert_eq!(r.ok()["name"], "0.1.0");
     assert_eq!(r.body["id"], id.as_str());
     assert_eq!(ids(&r.body), [a.clone(), b.clone()]);
-    td.get("/api/versions/proj/vnext").await.err(404, "not_found");
+    td.get("/api/versions/proj%2Fvnext").await.err(404, "not_found");
     // A new vnext starts empty; the old name cannot take an existing name.
     let n = td
         .post_as(
@@ -655,7 +655,7 @@ async fn vnext_takes_cards_over_time_and_is_renamed_at_the_cut() {
     assert!(ids(&n.body).is_empty());
     td.patch_as(
         "proj/lead",
-        "/api/versions/proj/vnext",
+        "/api/versions/proj%2Fvnext",
         json!({"name": "0.1.0"}),
     )
     .await
@@ -664,20 +664,20 @@ async fn vnext_takes_cards_over_time_and_is_renamed_at_the_cut() {
     let r = td
         .post_as(
             "proj/lead",
-            "/api/versions/proj/0.1.0/submit",
+            "/api/versions/proj%2F0.1.0/submit",
             json!({}),
         )
         .await;
     assert_eq!(r.ok()["status"], "in_review");
     td.patch_as(
         "proj/lead",
-        "/api/versions/proj/0.1.0",
+        "/api/versions/proj%2F0.1.0",
         json!({"name": "0.1.1"}),
     )
     .await
     .err(409, "conflict");
     let r = td
-        .post("/api/versions/proj/0.1.0/approve", json!({}))
+        .post("/api/versions/proj%2F0.1.0/approve", json!({}))
         .await;
     assert_eq!(r.ok()["status"], "approved");
     assert_eq!(ids(&r.body), [a, b]);
