@@ -126,6 +126,14 @@ async fn run(ctx: &Ctx, name: &str, args: &[String]) -> anyhow::Result<()> {
         .api
         .post(&format!("{}/run", path(name)), Some(json!({"argv": args})))
         .await?;
+    // A tool that asks the operator first answers 202 {pending, question}
+    // (design D5, TER-31 adds the wait).
+    if r["pending"] == true {
+        anyhow::bail!(
+            "tool {name} needs the operator's approval (question {}); this CLI cannot wait for it yet",
+            r["question"].as_str().unwrap_or("?")
+        );
+    }
     let sid = r["session_id"]
         .as_str()
         .context("the daemon answered without `session_id`")?
