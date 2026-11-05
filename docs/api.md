@@ -3811,13 +3811,18 @@ supply:
   assignment.
 
 **Card patch.** Every field is optional:
-`title`, `body`, `labels`, `repo`, `branch`, `depends_on`, `column`,
-`position`, `assignee`, `comment`, `eta_at`.
+`title`, `body`, `labels`, `add_labels`, `remove_labels`, `repo`, `branch`,
+`depends_on`, `column`, `position`, `assignee`, `comment`, `eta_at`.
 
 - `repo`, `branch`, `assignee`, and `eta_at` take `null` to clear.
 - `labels` and `depends_on` replace the whole list. `[]` removes every
   label or dependency, and `blocked_by` follows. An absent key keeps the
   list. The change is one `edited` event that names the fields.
+- `add_labels` adds labels and keeps the others (a label the card has
+  stays once); `remove_labels` takes labels away (an absent one is no
+  error). Both apply to the labels of the card at the write, so two changes
+  at the same time do not lose each other's labels. With `labels` too:
+  `422 invalid`. The `edited` event names `labels`.
 - `eta_at` comes last, after the move and the assignment.
 - `column` or `position` moves the card, with `comment` as the move comment.
   `comment` alone adds a comment.
@@ -4577,7 +4582,14 @@ Release points that the user reviews (PLAN §15.3). The code is in
 - The patch: `name`, `notes`, `repo`, `git_ref` (an empty string clears
   it), `cards` or `artifacts` (replace the set), `add_cards`,
   `remove_cards`, `add_artifacts`, `remove_artifacts`. Cards and artifacts
-  must be in the version's project.
+  must be in the version's project. A version takes a patch while it is
+  `draft` or `rejected` (else `409 conflict`).
+- A new `name` renames the version (a name that the project has is `409`).
+  The cards, artifacts, reviews, and review thread stay with it: they belong
+  to its ID. So one open version (`vnext`) can take cards over time
+  (`add_cards`), be renamed to its number at the cut, and be submitted,
+  and a new `vnext` can start (CLI: `terrarium version rename`, `version
+  add-card`, `version rm-card`).
 
 Compare:
 

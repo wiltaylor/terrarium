@@ -397,6 +397,31 @@ pub async fn version(ctx: &Ctx, cmd: &VersionCmd) -> anyhow::Result<()> {
             let v = ctx.api.get(&version_path(&p, name), vec![]).await?;
             ctx.emit(&v, print_version)
         }
+        VersionCmd::Rename { name, new_name } => {
+            let v = ctx
+                .api
+                .patch(&version_path(&p, name), json!({"name": new_name}))
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!("renamed version {name} to {}", field(v, "name")));
+            })
+        }
+        VersionCmd::AddCard { name, cards } | VersionCmd::RmCard { name, cards } => {
+            let add = matches!(cmd, VersionCmd::AddCard { .. });
+            let key = if add { "add_cards" } else { "remove_cards" };
+            let v = ctx
+                .api
+                .patch(&version_path(&p, name), json!({ key: cards }))
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "{} {} {name}; cards: {}",
+                    if add { "added to" } else { "removed from" },
+                    cards.join(", "),
+                    field(v, "cards")
+                ));
+            })
+        }
         VersionCmd::Attach { name, artifact } => {
             let r = ctx
                 .api

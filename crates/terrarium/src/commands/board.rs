@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
-use super::{delimited, event_line, print_table, set_opt, set_replace_list};
+use super::{delimited, event_line, print_table, set_list, set_opt, set_replace_list};
 use crate::api::{CliError, query};
 use crate::cli::{BoardCmd, CardCmd, CardEditArgs, CardFilesCmd, CardNewArgs, ColumnCmd};
 use crate::commands::projects::project_path;
@@ -583,6 +583,8 @@ async fn edit(ctx: &Ctx, a: &CardEditArgs) -> anyhow::Result<()> {
     set_opt(&mut b, "title", a.title.clone());
     set_opt(&mut b, "body", ctx.opt_text(a.body.as_deref())?);
     set_replace_list(&mut b, "labels", "--label", &a.labels)?;
+    set_list(&mut b, "add_labels", &a.add_labels);
+    set_list(&mut b, "remove_labels", &a.rm_labels);
     set_replace_list(&mut b, "depends_on", "--depends-on", &a.depends_on)?;
     for (key, v) in [("repo", &a.repo), ("branch", &a.branch)] {
         if let Some(v) = v {

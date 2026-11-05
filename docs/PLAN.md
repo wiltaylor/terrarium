@@ -1088,6 +1088,8 @@ terrarium artifact url <id>                  stable preview URL to paste into ma
 terrarium artifact rm <id>                   own and unattached only
 terrarium version new <name> [--notes -] [--repo r --ref sha] [--card id]...
 terrarium version ls | show <name>
+terrarium version rename <name> <new-name>   draft or rejected; cards, reviews, artifacts stay
+terrarium version add-card | rm-card <name> <card>...   draft or rejected
 terrarium version attach <name> <artifact-id>
 terrarium version submit <name>              draft -> in_review; mails the operator with the link
 terrarium version wait <name> [--timeout 3600]   block until approved or rejected
