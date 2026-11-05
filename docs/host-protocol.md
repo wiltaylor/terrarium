@@ -940,6 +940,17 @@ real `work_dir`, so a symbolic link cannot lead out. A missing workspace is
 A target sees the workspace at `/work/<project>/<agent>`, the same path as
 the sandbox, so a path in a compiler message is the same on both sides.
 
+**A host agent with no workspaces** (TER-41). A remote host agent has no
+copy of the daemon's work root, so its `work_dir` is not a directory there.
+It then sends `"no_workspaces": true` in `capabilities` (an older host agent
+sends none: false), and logs a warning at its start. The daemon sends no
+`workspaces` to it: `up` of a docker target runs the container with no
+`/work` mount, records no attached workspace, and the answer has a
+`workspace_note` that says so. A lease or a start of another holder
+attaches nothing and gives no `attach_error`. Commands on such a target see
+no agent workspace: check a branch out on it (`terrarium repo checkout
+--target`).
+
 | Kind | How | Limits |
 |---|---|---|
 | `docker` | `docker.run` with `workspaces`: a bind mount for each. With no `user` in the frame, the container runs as the owner of the first workspace (`-u <uid>:<gid>`, `HOME=/tmp`), so the files that a build writes stay the agent's (the sandbox runs as the same user). A command that needs root in the image does not work then. | A running container cannot get a new bind mount. The daemon runs a new container (`docker rm`, then `docker run`) when the target is ephemeral and no exec session is live on it. Else the answer says "attach needs a restart of the target". A target with `container` (a container that Terrarium did not make) gets no workspace. |
