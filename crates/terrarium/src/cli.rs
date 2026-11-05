@@ -99,6 +99,14 @@ pub enum Command {
         #[command(subcommand)]
         command: SkillCmd,
     },
+    /// Tool proxies (GitHub #21): one command on a target that a granted
+    /// agent runs as a CLI, without the target. Defined in tools/<name>.toml
+    /// or with POST /api/tools; grants need sysadmin; an agent lists its own
+    #[command(visible_alias = "tools")]
+    Tool {
+        #[command(subcommand)]
+        command: ToolCmd,
+    },
     /// System prompts: the library in the config repo (PLAN §8.1). An
     /// agent or a template selects one with `--persona <name>`
     #[command(visible_alias = "system-prompts")]
@@ -3243,6 +3251,22 @@ pub enum SystemPromptCmd {
 }
 
 /// `terrarium skill ...` (docs/api.md §26).
+#[derive(Debug, Subcommand)]
+pub enum ToolCmd {
+    /// List the tools: all with their grants for the operator and a
+    /// sysadmin, else the ones granted to the caller
+    Ls,
+    /// Show a tool: its definition (secret names, never values), and its
+    /// grants for the operator and a sysadmin
+    Show { name: String },
+    /// Give a tool to an agent (`<project>/<name>` or `agent:<id>`) or a
+    /// project (`project:<name>`). A project tool goes only to its own
+    /// project (sysadmin)
+    Grant { name: String, grantee: String },
+    /// Take a tool back (sysadmin)
+    Revoke { name: String, grantee: String },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum SkillCmd {
     /// List the skills: all for the operator and a sysadmin, else the

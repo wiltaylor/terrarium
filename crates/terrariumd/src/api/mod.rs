@@ -43,6 +43,7 @@ mod system_update;
 mod targets;
 mod templates;
 mod test_runs;
+mod tools;
 mod transcripts;
 mod usage;
 mod versions;
@@ -266,6 +267,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .route("/harnesses/{name}/unpin", post(system::harness_unpin))
         .merge(hosts::routes())
         .merge(targets::routes())
+        .merge(tools::routes())
         .route("/reload", post(system::reload))
         .route("/audit", get(system::audit))
         .merge(backups::routes())

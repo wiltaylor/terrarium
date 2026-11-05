@@ -6343,6 +6343,82 @@ and sends it only to the target's host agent in that frame. No answer to
 an agent or to the dashboard holds it, and the audit rows do not. The host
 agent does not log it, and its error texts do not hold it.
 
+### 17.11 Tool proxies
+
+GitHub #21; the design is the wiki page `design/tool-proxies`. A tool is a
+named command on a target that the operator defines. A granted agent runs
+it as a CLI in its sandbox, and the daemon runs it on the target, so the
+agent gets one tool and not the target. Phase P1a (this section) has the
+definitions and the grants; the run path, the sandbox shim, and the audit
+of a run come later.
+
+**Definition.** `tools/<name>.toml` in the config repo (source `file`;
+`POST /api/reload` picks up a change), or `POST /api/tools` (source
+`api`):
+
+```toml
+name        = "tracker-read"                 # the file stem fills in a missing name
+description = "Read tickets of the tracker"
+target      = "wsl"
+command     = ["/home/u/.local/bin/uv", "run", "/home/u/scripts/tracker.py"]
+cwd         = "/home/u/scripts"
+timeout     = "120s"
+env_secrets = { TRACKER_TOKEN = "tracker-token" }
+args        = { allow = ["show", "search"], deny_flags = ["--config"], max = 16, max_len = 4096 }
+approval    = false                          # true, or { first = ["comment"] }
+stdin       = false
+max_output  = "1MiB"
+rate        = "30/m"
+project     = "demo"                         # optional: a project tool
+```
+
+The checks; a definition that fails one is `422 invalid`, and a file that
+fails one is left out with an error line of the reload:
+
+- `name`: 1-32 of `a-z`, `0-9`, `-`, starting with a letter; not
+  `terrarium`, not a reserved name (`git`, `ssh`, `sh`, `python`, the
+  harness CLIs, and others), and not a program of the sandbox `PATH`
+  (`/usr/local/bin`, `/usr/bin`, `/bin`, the sbin dirs, the tools dir).
+- `command`: a non-empty argv. There is no `shell` field (an unknown field
+  is refused). The agent's arguments will be appended as more argv
+  entries; no shell parses any of it.
+- The interpreter rule: a command whose program is an interpreter (`sh`,
+  `bash`, `pwsh`, `python*`, `node`, `ruby`, `perl`, `deno`, `bun`, and
+  others), or a runner of one or of a script or package (`env`, `uv run`,
+  `uvx`, `pipx run`, `poetry run`, `npx`), needs a fixed script and a
+  non-empty `args.allow`. Inline code (`-c`, `-e`, `--eval`, `-Command`, `-`)
+  is refused. This is a guard against a shell in disguise, not a proof: a
+  tool is only as narrow as the script it runs.
+- `target` must exist. A project tool may only name a target of its own
+  project.
+- `env_secrets`: env names of `A-Z`, `0-9`, `_`, not `PATH`, `LD_*`,
+  `DYLD_*`, or `TERRARIUM_*`; each value names a secret of the same scope
+  (a global secret for a global tool, a secret of the project for a project
+  tool). The values never reach the agent.
+- `timeout` up to 24h, `max_output` up to 64MiB, `rate` as `<n>/s`,
+  `<n>/m`, or `<n>/h`, `args.max` up to 256, `args.max_len` 1 to 65536,
+  `args.deny_flags` entries start with `-`, and `approval.first` is not
+  empty.
+
+| Endpoint | Body or query | Answer | Who |
+|---|---|---|---|
+| `GET /api/tools` | | `200` the tools: each definition with `scope` (`global` or `project`), `source`, `created_at`, `updated_at`, and for the operator and a sysadmin `grants` | all: the operator and a sysadmin see every tool; an agent sees the tools granted to it or to its project |
+| `GET /api/tools/{name}` | | `200` the tool | as above; a tool that an agent may not see is `404` |
+| `POST /api/tools` | the definition as JSON | `201` the tool. A name that exists is `409 conflict` | the operator and sysadmins |
+| `PATCH /api/tools/{name}` | a JSON merge patch; `null` removes a field | `200` the tool. The name and the project do not change (`422`). A `file` tool is `409 file_managed` | the operator and sysadmins |
+| `DELETE /api/tools/{name}` | | `204`; the grants go too. A `file` tool is `409 file_managed` | the operator and sysadmins |
+| `GET /api/tools/{name}/grants` | | `200` `[{tool, grantee, grantee_label, created_by, created_at}]` | the operator and sysadmins |
+| `POST /api/tools/{name}/grants` | `{"grantee"}`: `agent:<project>/<name>`, `agent:<id>`, or `project:<name>` | `201` the grant. A grant that exists is `409`; a project tool to another project is `422` | the operator and sysadmins |
+| `DELETE /api/tools/{name}/grants` | `?grantee=` | `204`. No such grant is `404` | the operator and sysadmins |
+
+A grant does not put the target in the agent's policy and makes no lease.
+A project grant covers each agent of the project, also the later ones.
+Removing an agent or a project removes the grants to it; removing a
+project removes its tools. Audit rows: `tool.create`, `tool.update`,
+`tool.delete`, `tool.grant`, and `tool.revoke`. CLI: `terrarium tool ls`,
+`tool show <name>`, `tool grant <name> <grantee>`, `tool revoke <name>
+<grantee>`.
+
 ## 18. Fleet
 
 A fleet file declares projects, their repos, agents, and targets, global

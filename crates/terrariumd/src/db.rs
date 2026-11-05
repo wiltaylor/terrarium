@@ -1937,6 +1937,33 @@ const MIGRATIONS: &[&str] = &[
         cancelled_at TEXT
     );
     "#,
+    // 66: tool proxies (GitHub #21, the wiki page design/tool-proxies,
+    // `crate::store::tools`). `tools` keeps each definition as JSON
+    // (`ToolDef`) from a `tools/<name>.toml` file (source `file`) or the
+    // API (source `api`). `tool_grants` gives a tool to an agent
+    // (`agent:<ulid>`) or a project (`project:<name>`), as
+    // `secret_grants` does for a secret. Removing a tool removes its
+    // grants. Self-contained: when another branch takes this number, move
+    // this entry to the end of the list.
+    r#"
+    CREATE TABLE tools (
+        name       TEXT PRIMARY KEY,
+        project    TEXT,                              -- NULL: a global tool
+        def        TEXT NOT NULL,                     -- JSON ToolDef
+        source     TEXT NOT NULL DEFAULT 'api' CHECK (source IN ('file', 'api')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX tools_project ON tools(project);
+    CREATE TABLE tool_grants (
+        tool       TEXT NOT NULL REFERENCES tools(name) ON DELETE CASCADE ON UPDATE CASCADE,
+        grantee    TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (tool, grantee)
+    );
+    CREATE INDEX tool_grants_grantee ON tool_grants(grantee);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

@@ -793,6 +793,25 @@ terrarium skill usage <name>                       the agents and templates that
   `default_skills = false`. The packaged skills are default on; a skill
   that you make is opt-in unless you add the marker.
 
+### Tools
+
+`tool` has the alias `tools`. A tool proxy is a named command on a target
+that a granted agent will run as a CLI, without the target (GitHub #21,
+[api.md §17.11](api.md#1711-tool-proxies)). The operator defines tools in
+`tools/<name>.toml` of the config repo or with `POST /api/tools`. The
+operator and a sysadmin grant them; an agent sees its own.
+
+```
+terrarium tool ls                          the tools: NAME, TARGET, OWNER, SOURCE, GRANTED, COMMAND
+terrarium tool show <name>                 the definition (secret names, never values) and the grants
+terrarium tool grant <name> <grantee>      <project>/<agent>, agent:<id>, or project:<name>
+terrarium tool revoke <name> <grantee>
+```
+
+- A project tool goes only to its own project.
+- A grant does not give the agent the target: no policy entry and no lease.
+- The run path (the shim on the agent's `PATH`) comes in a later phase.
+
 ### System prompts
 
 `system-prompt` has the alias `system-prompts`. The library is

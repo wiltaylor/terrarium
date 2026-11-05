@@ -27,6 +27,7 @@ pub mod ssh_keys;
 pub mod system;
 pub mod system_prompts;
 pub mod templates;
+pub mod tools;
 pub mod test_runs;
 pub mod update;
 pub mod waits;
@@ -57,6 +58,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Agent { command } => agents::agent(ctx, command).await,
         Command::Template { command } => templates::template(ctx, command).await,
         Command::Skill { command } => skills::skill(ctx, command).await,
+        Command::Tool { command } => tools::tool(ctx, command).await,
         Command::SystemPrompt { command } => system_prompts::system_prompt(ctx, command).await,
         Command::Mail { command } => mail::mail(ctx, command).await,
         Command::Inbox { command } => mail::inbox(ctx, command).await,

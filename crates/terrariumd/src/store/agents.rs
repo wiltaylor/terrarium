@@ -1186,6 +1186,8 @@ pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     // Its secret grants (PLAN §16b.3): a new agent with the same name
     // gets none of them.
     crate::secrets::grants::on_agent_deleted(t, id)?;
+    // Its tool grants (`crate::store::tools`).
+    crate::store::tools::on_agent_deleted(t, id)?;
     // The sessions stay for the card links (migration 37); the session
     // files go to the archive after the commit (`crate::session_archive`).
     crate::store::session_refs::on_agent_deleted(t, id, a.agent.harness.as_str())?;
