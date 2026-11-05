@@ -41,10 +41,10 @@ export function granteeOptions(t: Pick<Tool, "project" | "grants">, projects: Pi
 export const toolsOf = (tools: Tool[], agent: Pick<Agent, "id" | "project">): { tool: Tool; via: "agent" | "project" }[] =>
   tools
     .filter((t) => !t.project || t.project === agent.project)
-    .flatMap((t) => {
+    .flatMap((t): { tool: Tool; via: "agent" | "project" }[] => {
       const g = t.grants ?? [];
-      if (g.some((x) => x.grantee === `agent:${agent.id}`)) return [{ tool: t, via: "agent" as const }];
-      if (g.some((x) => x.grantee === `project:${agent.project}`)) return [{ tool: t, via: "project" as const }];
+      if (g.some((x) => x.grantee === `agent:${agent.id}`)) return [{ tool: t, via: "agent" }];
+      if (g.some((x) => x.grantee === `project:${agent.project}`)) return [{ tool: t, via: "project" }];
       return [];
     });
 
