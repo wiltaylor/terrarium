@@ -125,7 +125,9 @@ async fn wait_approval(
     );
     let qpath = format!("/api/questions/{}", encode(q));
     let wait = async {
-        let mut pause = std::time::Duration::from_millis(500);
+        // The first poll after `poll_floor` (2 s; 0 in the tests), then up
+        // to 5 s between polls.
+        let mut pause = ctx.poll_floor.min(std::time::Duration::from_millis(500));
         loop {
             let v = ctx.api.get(&qpath, vec![]).await?;
             match v["status"].as_str().unwrap_or("") {
@@ -141,7 +143,9 @@ async fn wait_approval(
                     return Ok(false);
                 }
             }
-            tokio::time::sleep(pause).await;
+            if !pause.is_zero() {
+                tokio::time::sleep(pause).await;
+            }
             pause = (pause * 2).min(std::time::Duration::from_secs(5));
         }
     };
@@ -270,4 +274,91 @@ async fn run(ctx: &Ctx, name: &str, args: &[String]) -> anyhow::Result<()> {
         }))?);
     }
     remote::exit_of(&end)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::api::exit_code_of;
+    use crate::transport::mock::MockTransport;
+
+    fn ctx(mock: &MockTransport) -> Ctx {
+        Ctx::for_test(Arc::new(mock.clone()), None)
+    }
+
+    /// `run` reads the tool (for its `stdin`) only when stdin is not a
+    /// terminal: queue that answer only then.
+    fn tool_reply(mock: &MockTransport) {
+        use std::io::IsTerminal as _;
+        if !std::io::stdin().is_terminal() {
+            mock.reply(200, json!({"name": "t", "stdin": false}));
+        }
+    }
+
+    /// TER-31: an approved run polls the question, posts again with the
+    /// approval and the same argv, then reads the session as before.
+    #[tokio::test]
+    async fn an_approved_run_posts_again_with_the_approval() {
+        let mock = MockTransport::new();
+        tool_reply(&mock);
+        mock.reply(202, json!({"pending": true, "question": "Q1", "expires_at": "x"}))
+            .reply(200, json!({"id": "Q1", "status": "open"}))
+            .reply(200, json!({"id": "Q1", "status": "answered", "answer_option": 0}))
+            .reply(201, json!({"session_id": "S1", "tool": "t", "target": "box"}))
+            .reply(
+                200,
+                json!({"since": 0, "next": 3, "done": true,
+                       "chunks": [{"stream": "stdout", "data": "b2sK"}],
+                       "end": {"type": "exit", "code": 0, "reason": "exited"}}),
+            );
+        let c = ctx(&mock);
+        run(&c, "t", &["show".into(), "T-1".into()]).await.unwrap();
+        let reqs = mock.requests();
+        let posts: Vec<_> = reqs
+            .iter()
+            .filter(|r| r.path.ends_with("/run"))
+            .map(|r| r.body.clone().unwrap())
+            .collect();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0], json!({"argv": ["show", "T-1"]}));
+        assert_eq!(posts[1], json!({"argv": ["show", "T-1"], "approval": "Q1"}));
+        assert!(reqs.iter().any(|r| r.path == "/api/questions/Q1"));
+    }
+
+    /// A refuse, a retract (the timeout), or a 409 on the second post exits
+    /// 77, and nothing runs.
+    #[tokio::test]
+    async fn a_refused_or_expired_run_exits_77() {
+        for last in [
+            json!({"id": "Q1", "status": "answered", "answer_option": 1}),
+            json!({"id": "Q1", "status": "retracted", "retract_reason": "the approval timed out"}),
+        ] {
+            let mock = MockTransport::new();
+            tool_reply(&mock);
+            mock.reply(202, json!({"pending": true, "question": "Q1"}))
+                .reply(200, last.clone());
+            let e = run(&ctx(&mock), "t", &[]).await.unwrap_err();
+            assert_eq!(exit_code_of(&e), 77, "{last}");
+            assert_eq!(
+                mock.requests().iter().filter(|r| r.path.ends_with("/run")).count(),
+                1,
+                "{last}"
+            );
+        }
+        let mock = MockTransport::new();
+        tool_reply(&mock);
+        mock.reply(202, json!({"pending": true, "question": "Q1"}))
+            .reply(200, json!({"id": "Q1", "status": "answered", "answer_option": 0}))
+            .reply(
+                409,
+                json!({"error": {"code": "conflict", "message": "approval Q1 does not allow this run: it was used already"}}),
+            );
+        let e = run(&ctx(&mock), "t", &[]).await.unwrap_err();
+        assert_eq!(exit_code_of(&e), 77);
+    }
 }
