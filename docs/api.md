@@ -2057,7 +2057,7 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/unpause` | none | `202` agent, `paused: false`. It wakes when work waits. |
 | `POST /api/agents/{id}/compact` | none, or `{"then"?: "<prompt>", "defer"?: false}` | `202` agent with `reset` (below). At rest: `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused or held. `409 not_running`: the agent does not run. |
 | `POST /api/agents/{id}/new-session` | none, or `{"then"?: "<prompt>", "recap"?: true, "defer"?: false}` | `202` agent with `reset` (below). A new harness session, not a resume. |
-| `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run) |
+| `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run, or an earlier turn still waits in the store) |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/interrupt` | none | `202 {"accepted": true, "interrupted": true}`. Stops the running turn; the harness keeps running (§6.5, "Interrupt"). |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
@@ -2257,8 +2257,11 @@ rights) for another agent, and attach a prompt that goes after the reset:
   `idle` and the prompt is ready. To an agent that does not run (also a
   paused agent, or one in `error`), the turn waits in the store, and the
   answer is `202 {"accepted": true, "queued": true}`. The agent wakes,
-  unless it may not (above). A `raw` send and `keys` need a running
-  agent: `409 not_running`.
+  unless it may not (above). A turn to a running agent that still has a
+  turn in the store (one that came while a wake was on the way) waits
+  behind it, with the same answer, so the turns go out in the order of
+  the sends. A `raw` send and `keys` need a running agent:
+  `409 not_running`.
 - `start` of an agent whose harness adapter is not registered, or whose
   prompt template or harness home is missing, gets `422 invalid` with the
   reason.

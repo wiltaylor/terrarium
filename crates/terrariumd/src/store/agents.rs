@@ -392,6 +392,15 @@ pub fn queue_turn(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<()> {
 }
 
 /// The queued turns of agent `id`, oldest first.
+/// True when agent `id` has a turn that waits in the store.
+pub fn has_queued_turns(conn: &Connection, id: &str) -> ApiResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM queued_turns WHERE agent = ?1)",
+        [id],
+        |r| r.get(0),
+    )?)
+}
+
 pub fn queued_turns(conn: &Connection, id: &str) -> ApiResult<Vec<QueuedTurn>> {
     let mut stmt =
         conn.prepare("SELECT id, text FROM queued_turns WHERE agent = ?1 ORDER BY id")?;
