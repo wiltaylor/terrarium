@@ -3939,7 +3939,11 @@ async fn a_host_exec_runs_in_the_slice_of_its_holder() {
 async fn a_docker_target_on_a_host_without_workspaces_starts_without_mounts() {
     let lab = Lab::start().await;
     let token = lab.register("remote1").await;
-    let mut o = ClientOptions::new(format!("ws://{}/hosts/connect", lab.addr), &token, "remote1");
+    let mut o = ClientOptions::new(
+        format!("ws://{}/hosts/connect", lab.addr),
+        &token,
+        "remote1",
+    );
     o.capabilities = HostCapabilities {
         docker: ToolCapability {
             present: true,
@@ -3964,34 +3968,54 @@ async fn a_docker_target_on_a_host_without_workspaces_starts_without_mounts() {
     lab.td.project("terra").await;
     let owner = id_of(
         &lab.td
-            .agent("terra", "owner", json!({"policy": {"targets": ["terra-rbox"]}}))
+            .agent(
+                "terra",
+                "owner",
+                json!({"policy": {"targets": ["terra-rbox"]}}),
+            )
             .await,
     );
     let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
-    lab.target(json!({"name": "terra-rbox", "kind": "docker", "host": "remote1", "project": "terra",
-                      "image": "alpine:3", "ephemeral": true}))
-        .await;
+    lab.target(
+        json!({"name": "terra-rbox", "kind": "docker", "host": "remote1", "project": "terra",
+                      "image": "alpine:3", "ephemeral": true}),
+    )
+    .await;
     for a in [&owner, &w] {
-        lab.td.post_empty(&format!("/api/agents/{a}/start")).await.ok();
+        lab.td
+            .post_empty(&format!("/api/agents/{a}/start"))
+            .await
+            .ok();
         lab.td.wait_status(a, "idle").await;
     }
     let r = lab.td.post_empty("/api/targets/terra-rbox/up").await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.body["state"], "running", "{}", r.body);
     let note = r.body["workspace_note"].as_str().unwrap_or_default();
-    assert!(note.contains("no agent workspaces") && note.contains("remote1"), "{}", r.body);
+    assert!(
+        note.contains("no agent workspaces") && note.contains("remote1"),
+        "{}",
+        r.body
+    );
     assert!(r.body.get("attach_error").is_none(), "{}", r.body);
     let t = lab.td.get("/api/targets/terra-rbox").await.ok().clone();
     let attached = t["runtime"].get("attached").cloned().unwrap_or(json!([]));
     assert_eq!(attached, json!([]), "{t}");
     let log = lab.log();
-    let run = log.lines().rfind(|l| l.starts_with("docker run")).unwrap_or_default().to_owned();
+    let run = log
+        .lines()
+        .rfind(|l| l.starts_with("docker run"))
+        .unwrap_or_default()
+        .to_owned();
     assert!(!run.is_empty(), "{log}");
     assert!(!run.contains(":/work/"), "{run}");
     // A lease to another running agent: nothing to attach, no error.
     let r = lab
         .td
-        .post("/api/targets/terra-rbox/leases", json!({"agent": "terra/worker"}))
+        .post(
+            "/api/targets/terra-rbox/leases",
+            json!({"agent": "terra/worker"}),
+        )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert!(r.body.get("lifecycle_error").is_none(), "{}", r.body);
