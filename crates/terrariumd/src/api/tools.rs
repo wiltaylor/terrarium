@@ -94,18 +94,12 @@ async fn session_input(
     use crate::executor::Control;
     use base64::Engine as _;
     let s = state.executor.tool_session(&actor, &id)?;
-    match state.tool_rates.takes_stdin(&s.id) {
-        Some(false) => {
-            return Err(ApiError::invalid(
-                "this tool takes no stdin (stdin = false in its definition)",
-            ));
-        }
-        None => {
-            return Err(ApiError::conflict(
-                "the session has ended; read its output for the end",
-            ));
-        }
-        Some(true) => {}
+    // The tool's rule first: a tool without stdin is 422 also after its
+    // run ended (it may end before the first input arrives).
+    if !s.takes_stdin.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(ApiError::invalid(
+            "this tool takes no stdin (stdin = false in its definition)",
+        ));
     }
     let mut accepted = true;
     if let Some(d) = &b.data {

@@ -744,6 +744,10 @@ pub struct ExecSession {
     control: mpsc::UnboundedSender<Control>,
     touched: Mutex<Instant>,
     limit: usize,
+    /// A `tool` session: does the tool take stdin? `true` for every other
+    /// kind. Kept on the session, so the answer does not change when the
+    /// run ends.
+    pub takes_stdin: std::sync::atomic::AtomicBool,
 }
 
 /// One answer of `GET .../output`.
@@ -806,6 +810,7 @@ impl ExecSession {
                 control: tx,
                 touched: Mutex::new(Instant::now()),
                 limit: limit.max(1),
+                takes_stdin: std::sync::atomic::AtomicBool::new(true),
             }),
             rx,
         )
@@ -1632,6 +1637,7 @@ pub async fn start_tool_exec(
         "tool",
         state.executor.buffer_limit,
     );
+    sess.takes_stdin.store(run.stdin, Ordering::SeqCst);
     let daemon = state.db.redactor().get();
     tokio::spawn(attach_tool(running, sess.clone(), ctl, run, daemon));
     state.executor.insert(sess.clone());

@@ -31,13 +31,11 @@ use crate::events::EventDraft;
 use crate::executor::{self, ExecSession, RemoteCmd, ToolEnd, ToolRun};
 use crate::store::tools::{self as store, ToolRow};
 
-/// The rate buckets of the (agent, tool) pairs, and the stdin rule of the
-/// live tool sessions.
+/// The rate buckets of the (agent, tool) pairs, and the interval of the
+/// approval sweep.
 #[derive(Default)]
 pub struct Rates {
     buckets: Mutex<HashMap<(String, String), Bucket>>,
-    /// Session ID to `stdin` of its tool, while the run is live.
-    stdin: Mutex<HashMap<String, bool>>,
     /// The interval of the approval sweep; `None`: [`SWEEP_EVERY`].
     sweep: Mutex<Option<Duration>>,
 }
@@ -60,27 +58,6 @@ impl Rates {
     /// Tests: a shorter sweep interval. It applies within a second.
     pub fn set_sweep_every(&self, d: Duration) {
         *self.sweep.lock().unwrap_or_else(|e| e.into_inner()) = Some(d);
-    }
-
-    /// Does tool session `id` take stdin? `None`: not a live tool run.
-    pub fn takes_stdin(&self, id: &str) -> Option<bool> {
-        self.stdin
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(id)
-            .copied()
-    }
-
-    fn set_stdin(&self, id: &str, on: Option<bool>) {
-        let mut m = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
-        match on {
-            Some(v) => {
-                m.insert(id.to_owned(), v);
-            }
-            None => {
-                m.remove(id);
-            }
-        }
     }
 
     /// Take one run of `tool` for `caller` at the rate `(n, per)`. `Err`
@@ -272,16 +249,11 @@ pub async fn run(
         .clone()
         .or_else(|| actor.agent().map(|a| a.project.clone()));
     let label = caller.clone();
-    let sid_cell: Arc<Mutex<Option<String>>> = Arc::default();
     let ended = {
-        let sid_cell = sid_cell.clone();
         let (tool, target, project) = (tool.clone(), target.clone(), project.clone());
         let (agent_id, agent_name) = (agent_id.clone(), agent_name.clone());
         let approved = approved.clone();
         Box::new(move |e: ToolEnd| {
-            if let Some(id) = sid_cell.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                st.tool_rates.set_stdin(&id, None);
-            }
             tokio::spawn(async move {
                 record_end(
                     &st, label, tool, target, project, agent_id, agent_name, audit_argv, approved,
@@ -308,11 +280,6 @@ pub async fn run(
         },
     )
     .await?;
-    state.tool_rates.set_stdin(&session.id, Some(def.stdin));
-    *sid_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.id.clone());
-    if session.is_done() {
-        state.tool_rates.set_stdin(&session.id, None);
-    }
     let (sid, t, tg, p) = (
         session.id.clone(),
         tool.clone(),
