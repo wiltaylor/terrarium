@@ -89,7 +89,9 @@ impl SystemKind {
             SystemKind::Recap => {
                 "a new session started: the last activity, the open questions, and the answers"
             }
-            SystemKind::Card => "a card was assigned to you, or your card is unblocked",
+            SystemKind::Card => {
+                "a card was assigned to you, your card is unblocked, or you went idle with cards in progress"
+            }
             SystemKind::Lease => "your access to a target started or ended",
             SystemKind::Nudge => {
                 "a lead's board change: a new card in ready, a card in review or blocked"

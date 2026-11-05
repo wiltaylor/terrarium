@@ -356,7 +356,10 @@ fn find_row(conn: &Connection, id: &str) -> ApiResult<CardRow> {
 /// The cards of `agent` in the working column of their board (the column
 /// with the role [`WORKING`]), not archived: `(id, eta_at)`, in card
 /// order. For the card reminder (`crate::card_reminder`).
-pub fn working_cards_of(conn: &Connection, agent: &str) -> ApiResult<Vec<(String, Option<String>)>> {
+pub fn working_cards_of(
+    conn: &Connection,
+    agent: &str,
+) -> ApiResult<Vec<(String, Option<String>)>> {
     let mut stmt = conn.prepare(&format!(
         "{CARD_SELECT} WHERE c.assignee = ?1 AND k.role = ?2 AND c.archived = 0
          ORDER BY c.project, c.number"
