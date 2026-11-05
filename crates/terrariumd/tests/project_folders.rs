@@ -221,10 +221,7 @@ async fn folders_nest_move_and_delete_up() {
         .ok();
     let tree = td.get("/api/project-folders").await;
     assert_eq!(folders(tree.ok()), ["Personal()@1", "Sub()@0"]);
-    assert_eq!(
-        places(tree.ok()),
-        ["alpha@-:2", "beta@-:1", "gamma@-:0"]
-    );
+    assert_eq!(places(tree.ok()), ["alpha@-:2", "beta@-:1", "gamma@-:0"]);
     td.delete(&format!("/api/project-folders/{work}"))
         .await
         .err(404, "not_found");
@@ -302,9 +299,7 @@ async fn only_the_operator_and_a_sysadmin_see_folders() {
     let td = TestDaemon::start().await;
     td.project("ops").await;
     let dev = id(&td.agent("ops", "dev", json!({})).await);
-    let sys = id(&td
-        .agent("ops", "sys", json!({"roles": ["sysadmin"]}))
-        .await);
+    let sys = id(&td.agent("ops", "sys", json!({"roles": ["sysadmin"]})).await);
 
     td.get_as(&dev, "/api/project-folders")
         .await
@@ -320,9 +315,13 @@ async fn only_the_operator_and_a_sysadmin_see_folders() {
         .post_as(&sys, "/api/project-folders", json!({"name": "Ops"}))
         .await
         .ok());
-    td.patch_as(&dev, &format!("/api/project-folders/{f}"), json!({"name": "y"}))
-        .await
-        .err(403, "forbidden");
+    td.patch_as(
+        &dev,
+        &format!("/api/project-folders/{f}"),
+        json!({"name": "y"}),
+    )
+    .await
+    .err(403, "forbidden");
     td.put_as(&sys, "/api/projects/ops/folder", json!({"folder_id": f}))
         .await
         .ok();

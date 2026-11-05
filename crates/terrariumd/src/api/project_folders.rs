@@ -13,9 +13,7 @@ use super::{ApiJson, Shared};
 use crate::actor::Actor;
 use crate::error::ApiResult;
 use crate::policy;
-use crate::store::project_folders::{
-    self, Folder, FolderPatch, NewFolder, Place, Placement, Tree,
-};
+use crate::store::project_folders::{self, Folder, FolderPatch, NewFolder, Place, Placement, Tree};
 
 const WHAT: &str = "project folders";
 
@@ -56,7 +54,9 @@ async fn update(
     policy::sysadmin(&actor, WHAT)?;
     let f = state
         .db
-        .write(actor.label(), move |t| project_folders::update(t, &id, &body))
+        .write(actor.label(), move |t| {
+            project_folders::update(t, &id, &body)
+        })
         .await?;
     Ok(Json(f))
 }
