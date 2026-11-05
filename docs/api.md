@@ -1513,6 +1513,9 @@ its grants. A new agent with the name of a removed agent gets no grant.
   key (trust on first use) in `<state>/ssh/sandbox/ssh_known_hosts`. The
   sandbox binds that dir read-only at `/etc/ssh`, so ssh in the sandbox
   reads the file as its global known hosts file and trusts the same hosts.
+  When the daemon makes the file, it copies the lines of its user's
+  `~/.ssh/known_hosts` (the file that its git used before) into it once,
+  so an upgrade keeps the trusted hosts.
 
 **The agent's grants.** `GET /api/agent/secrets` lists the secrets that
 are granted to the calling agent: its own grants and its project's, one
