@@ -105,6 +105,64 @@ pub async fn tool(ctx: &Ctx, cmd: &ToolCmd) -> anyhow::Result<()> {
     }
 }
 
+/// The exit code of a run that the operator refused, or whose approval was
+/// retracted or timed out (design Q5).
+const EXIT_REFUSED: u8 = 77;
+
+/// Wait until the operator answers the approval question `q` of a run of
+/// tool `name`. `Ok` when it is approved. A refuse, a retract, or a timeout
+/// prints the reason and exits [`EXIT_REFUSED`]. Ctrl-C retracts the
+/// question and exits 130.
+async fn wait_approval(
+    ctx: &Ctx,
+    name: &str,
+    q: &str,
+    expires_at: Option<&str>,
+) -> anyhow::Result<()> {
+    eprintln!(
+        "terrarium: tool {name} waits for the operator's approval (question {q}{})",
+        expires_at.map(|e| format!(", until {e}")).unwrap_or_default()
+    );
+    let qpath = format!("/api/questions/{}", encode(q));
+    let wait = async {
+        let mut pause = std::time::Duration::from_millis(500);
+        loop {
+            let v = ctx.api.get(&qpath, vec![]).await?;
+            match v["status"].as_str().unwrap_or("") {
+                "open" => {}
+                "answered" if v["answer_option"] == 0 => return Ok::<_, anyhow::Error>(true),
+                "answered" => {
+                    eprintln!("terrarium: the operator refused this run of tool {name}");
+                    return Ok(false);
+                }
+                _ => {
+                    let why = v["retract_reason"].as_str().unwrap_or("it was retracted");
+                    eprintln!("terrarium: the approval of tool {name} ended: {why}");
+                    return Ok(false);
+                }
+            }
+            tokio::time::sleep(pause).await;
+            pause = (pause * 2).min(std::time::Duration::from_secs(5));
+        }
+    };
+    let ok = tokio::select! {
+        r = wait => r?,
+        _ = tokio::signal::ctrl_c() => {
+            let _ = ctx
+                .api
+                .post(&format!("{qpath}/retract"), Some(json!({"reason": "the agent stopped waiting"})))
+                .await;
+            eprintln!("terrarium: stopped waiting; the approval question {q} is retracted");
+            return Err(CliError::RemoteExit(130).into());
+        }
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(CliError::RemoteExit(EXIT_REFUSED).into())
+    }
+}
+
 /// A 409 (the run ended) or a 422 (the tool takes no stdin) on an input
 /// call: stop sending, and read the end from the output.
 fn input_refused(e: &anyhow::Error) -> bool {
@@ -122,17 +180,33 @@ async fn run(ctx: &Ctx, name: &str, args: &[String]) -> anyhow::Result<()> {
     use std::io::IsTerminal as _;
     let wants_stdin =
         !std::io::stdin().is_terminal() && ctx.api.get(&path(name), vec![]).await?["stdin"] == true;
-    let r = ctx
+    let mut r = ctx
         .api
         .post(&format!("{}/run", path(name)), Some(json!({"argv": args})))
         .await?;
     // A tool that asks the operator first answers 202 {pending, question}
-    // (design D5, TER-31 adds the wait).
+    // (design D5): wait for the answer, then run with the approval.
     if r["pending"] == true {
-        anyhow::bail!(
-            "tool {name} needs the operator's approval (question {}); this CLI cannot wait for it yet",
-            r["question"].as_str().unwrap_or("?")
-        );
+        let q = r["question"]
+            .as_str()
+            .context("the daemon answered `pending` without `question`")?
+            .to_owned();
+        wait_approval(ctx, name, &q, r["expires_at"].as_str()).await?;
+        r = match ctx
+            .api
+            .post(
+                &format!("{}/run", path(name)),
+                Some(json!({"argv": args, "approval": q})),
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) if e.downcast_ref::<ServerError>().is_some_and(|s| s.status == 409) => {
+                eprintln!("terrarium: tool {name} was not run: {e}");
+                return Err(CliError::RemoteExit(EXIT_REFUSED).into());
+            }
+            Err(e) => return Err(e),
+        };
     }
     let sid = r["session_id"]
         .as_str()

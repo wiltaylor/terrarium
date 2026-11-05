@@ -253,6 +253,7 @@ pub async fn start_with_usage(
     let mut tasks = Vec::new();
     tasks.push(spawn_pump(state.clone()));
     tasks.push(usage_collector::spawn(state.clone()));
+    tasks.push(tool_run::spawn_sweep(state.clone()));
     tasks.extend(question_guard::spawn(state.clone()));
     state.supervisor.bind(&state);
 

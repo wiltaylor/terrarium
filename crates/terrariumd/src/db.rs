@@ -1964,6 +1964,27 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX tool_grants_grantee ON tool_grants(grantee);
     "#,
+    // 67: the approval of a tool run (GitHub #21, design D5, TER-31). A
+    // question of the kind `tool_run` asks the operator to run one tool
+    // with one argv for one agent. `tool_run` holds `{tool, target, argv,
+    // expires_at}` (JSON); `used_at` is set when the approved run starts,
+    // so an approval runs once. The kind column is made again with the new
+    // CHECK, as migration 39 did; its indexes go first. Self-contained:
+    // when another branch takes this number, move this entry to the end of
+    // the list. The test finds it by the name `kind_tool_run`.
+    r#"
+    DROP INDEX questions_agent;
+    DROP INDEX questions_status;
+    ALTER TABLE questions ADD COLUMN kind_tool_run TEXT NOT NULL DEFAULT 'question'
+        CHECK (kind_tool_run IN ('question', 'notice', 'bundle', 'tool_run'));
+    UPDATE questions SET kind_tool_run = kind;
+    ALTER TABLE questions DROP COLUMN kind;
+    ALTER TABLE questions RENAME COLUMN kind_tool_run TO kind;
+    ALTER TABLE questions ADD COLUMN tool_run TEXT;
+    ALTER TABLE questions ADD COLUMN used_at TEXT;
+    CREATE INDEX questions_agent ON questions(agent, status);
+    CREATE INDEX questions_status ON questions(status, project);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -3331,6 +3352,46 @@ mod tests {
             [],
         )
         .unwrap();
+        assert!(
+            conn.execute("UPDATE questions SET kind = 'bogus' WHERE id = 'Q1'", [])
+                .is_err()
+        );
+    }
+
+    /// Migration 67 keeps each question and its kind, and takes the kind
+    /// `tool_run` with its columns. Found by its content.
+    #[test]
+    fn migration_67_keeps_questions_and_takes_tool_runs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("kind_tool_run"))
+            .unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO questions (id, agent, project, text, kind, items, thread_id, created_at,
+                                    updated_at)
+               VALUES ('Q1', 'A1', 'p', 'Plan', 'bundle', '[]', 'T0', 't', 't')",
+            [],
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let kind: String = conn
+            .query_row("SELECT kind FROM questions WHERE id = 'Q1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "bundle");
+        conn.execute(
+            "INSERT INTO questions (id, agent, project, text, kind, tool_run, thread_id,
+                                    created_at, updated_at)
+               VALUES ('Q2', 'A1', 'p', 'Run?', 'tool_run', '{}', 'T1', 't', 't')",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE questions SET used_at = 't2' WHERE id = 'Q2'", [])
+            .unwrap();
         assert!(
             conn.execute("UPDATE questions SET kind = 'bogus' WHERE id = 'Q1'", [])
                 .is_err()

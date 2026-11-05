@@ -152,6 +152,9 @@ async fn session_close(
 struct RunBody {
     #[serde(default)]
     argv: Vec<String>,
+    /// The operator's approval of exactly this run (design D5).
+    #[serde(default)]
+    approval: Option<String>,
 }
 
 /// `POST /api/tools/{name}/run`: start a run (design D4). `201`
@@ -163,14 +166,21 @@ async fn run(
     Path(name): Path<String>,
     ApiJson(b): ApiJson<RunBody>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    let started = crate::tool_run::run(&state, &actor, &name, b.argv).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            json!({"session_id": started.session.id, "tool": started.tool,
-                    "target": started.target}),
-        ),
-    ))
+    match crate::tool_run::run(&state, &actor, &name, b.argv, b.approval).await? {
+        crate::tool_run::Outcome::Started(started) => Ok((
+            StatusCode::CREATED,
+            Json(json!({"session_id": started.session.id, "tool": started.tool,
+                        "target": started.target})),
+        )),
+        crate::tool_run::Outcome::Pending {
+            question,
+            expires_at,
+        } => Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({"pending": true, "question": question, "expires_at": expires_at,
+                        "tool": name})),
+        )),
+    }
 }
 
 /// A tool as the API shows it. `grants` only for the operator and sysadmins.
