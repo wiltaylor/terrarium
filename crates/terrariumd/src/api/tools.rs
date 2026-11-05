@@ -64,7 +64,8 @@ async fn session_output(
     ApiQuery(q): ApiQuery<OutputQuery>,
 ) -> ApiResult<Json<crate::executor::Output>> {
     let s = state.executor.tool_session(&actor, &id)?;
-    let wait = std::time::Duration::from_secs(q.wait.unwrap_or(0).min(crate::executor::MAX_WAIT_SECS));
+    let wait =
+        std::time::Duration::from_secs(q.wait.unwrap_or(0).min(crate::executor::MAX_WAIT_SECS));
     Ok(Json(
         s.read(q.since, wait, q.max.unwrap_or(crate::executor::MAX_READ))
             .await?,
@@ -90,8 +91,8 @@ async fn session_input(
     Path(id): Path<String>,
     ApiJson(b): ApiJson<InputBody>,
 ) -> ApiResult<Json<Value>> {
-    use base64::Engine as _;
     use crate::executor::Control;
+    use base64::Engine as _;
     let s = state.executor.tool_session(&actor, &id)?;
     match state.tool_rates.takes_stdin(&s.id) {
         Some(false) => {
@@ -165,8 +166,10 @@ async fn run(
     let started = crate::tool_run::run(&state, &actor, &name, b.argv).await?;
     Ok((
         StatusCode::CREATED,
-        Json(json!({"session_id": started.session.id, "tool": started.tool,
-                    "target": started.target})),
+        Json(
+            json!({"session_id": started.session.id, "tool": started.tool,
+                    "target": started.target}),
+        ),
     ))
 }
 

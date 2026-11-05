@@ -125,7 +125,11 @@ impl Lab {
 
     async fn run_as(&self, agent: &str, name: &str, argv: &[&str]) -> common::Resp {
         self.td
-            .post_as(agent, &format!("/api/tools/{name}/run"), json!({"argv": argv}))
+            .post_as(
+                agent,
+                &format!("/api/tools/{name}/run"),
+                json!({"argv": argv}),
+            )
             .await
     }
 }
@@ -179,7 +183,11 @@ async fn the_arguments_go_as_argv_with_no_shell_and_the_run_is_audited() {
     lab.tool("tracker-read", &s, json!({"args": {"allow": ["show"]}}))
         .await;
     let r = lab
-        .run_as(&lab.w1, "tracker-read", &["show", "$(id)", "a;b", "x y", "`ls`"])
+        .run_as(
+            &lab.w1,
+            "tracker-read",
+            &["show", "$(id)", "a;b", "x y", "`ls`"],
+        )
         .await;
     assert_eq!(r.body["tool"], "tracker-read");
     assert_eq!(r.body["target"], "box");
@@ -191,7 +199,14 @@ async fn the_arguments_go_as_argv_with_no_shell_and_the_run_is_audited() {
 
     let mut rows = Vec::new();
     for _ in 0..100 {
-        rows = lab.td.get("/api/audit?action=tool.run").await.ok().as_array().unwrap().clone();
+        rows = lab
+            .td
+            .get("/api/audit?action=tool.run")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .clone();
         if !rows.is_empty() {
             break;
         }
@@ -205,14 +220,22 @@ async fn the_arguments_go_as_argv_with_no_shell_and_the_run_is_audited() {
     assert_eq!(detail["argv"][1], "$(id)");
     assert_eq!(detail["exit"], 0);
     assert_eq!(detail["truncated"], false);
-    let ev = lab.td.get("/api/events?kind=tool.run&limit=10").await.ok().clone();
+    let ev = lab
+        .td
+        .get("/api/events?kind=tool.run&limit=10")
+        .await
+        .ok()
+        .clone();
     let changes: Vec<&str> = ev
         .as_array()
         .unwrap()
         .iter()
         .map(|e| e["data"]["change"].as_str().unwrap())
         .collect();
-    assert!(changes.contains(&"started") && changes.contains(&"ended"), "{ev:#?}");
+    assert!(
+        changes.contains(&"started") && changes.contains(&"ended"),
+        "{ev:#?}"
+    );
 }
 
 /// The body carries the arguments only; each argument rule refuses.
@@ -240,7 +263,12 @@ async fn the_body_and_the_argument_rules_refuse() {
             .td
             .post_as(&lab.w1, "/api/tools/tracker-read/run", body.clone())
             .await;
-        assert!(r.status == 400 || r.status == 422, "{body}: {} {}", r.status, r.body);
+        assert!(
+            r.status == 400 || r.status == 422,
+            "{body}: {} {}",
+            r.status,
+            r.body
+        );
     }
     for argv in [
         vec!["delete"],
@@ -270,7 +298,10 @@ printf 'err %s\n' "$TRACKER_TOKEN" >&2"#,
         .await;
     let r = lab.run_as(&lab.w1, "leaky", &[]).await;
     let d = drain(&lab.td, &lab.w1, &sid(&r)).await;
-    assert!(!d.stdout.contains(TOKEN) && !d.stderr.contains(TOKEN), "{d:?}");
+    assert!(
+        !d.stdout.contains(TOKEN) && !d.stderr.contains(TOKEN),
+        "{d:?}"
+    );
     assert!(!d.stdout.contains(&TOKEN[..9]), "{d:?}");
     assert_eq!(d.stdout, "token=[secret:tool/tt]\n", "{d:?}");
     assert_eq!(d.stderr, "err [secret:tool/tt]\n", "{d:?}");
@@ -280,7 +311,10 @@ printf 'err %s\n' "$TRACKER_TOKEN" >&2"#,
 #[tokio::test]
 async fn the_output_cap_kills_the_run() {
     let lab = lab().await;
-    let s = lab.script("flood.sh", "while :; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done");
+    let s = lab.script(
+        "flood.sh",
+        "while :; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done",
+    );
     lab.tool("flood", &s, json!({"max_output": "2K", "timeout": "30s"}))
         .await;
     let r = lab.run_as(&lab.w1, "flood", &[]).await;
@@ -326,11 +360,17 @@ async fn a_grant_decides_and_a_revoke_applies_at_once() {
     // The target session routes do not show a tool session, also not to
     // its own agent.
     let target_path = format!("/api/targets/box/sessions/{session}/output?since=0");
-    let r = lab.td.req(hyper::Method::GET, &target_path, None, Some(&lab.w1)).await;
+    let r = lab
+        .td
+        .req(hyper::Method::GET, &target_path, None, Some(&lab.w1))
+        .await;
     r.err(404, "not_found");
     assert_eq!(drain(&lab.td, &lab.w1, &session).await.stdout, "ok\n");
     // The operator may run it (a test run).
-    let r = lab.td.post("/api/tools/quick/run", json!({"argv": []})).await;
+    let r = lab
+        .td
+        .post("/api/tools/quick/run", json!({"argv": []}))
+        .await;
     assert_eq!(r.status, 201, "{}", r.body);
     // A project grant covers w2 too.
     lab.td
@@ -348,7 +388,9 @@ async fn a_grant_decides_and_a_revoke_applies_at_once() {
         .delete("/api/tools/quick/grants?grantee=project:p")
         .await
         .ok();
-    lab.run_as(&lab.w1, "quick", &[]).await.err(404, "not_found");
+    lab.run_as(&lab.w1, "quick", &[])
+        .await
+        .err(404, "not_found");
     lab.run_as(&w2, "quick", &[]).await.err(404, "not_found");
 }
 
@@ -359,14 +401,19 @@ async fn stdin_reaches_only_a_tool_that_allows_it() {
     let lab = lab().await;
     let s = lab.script("read.sh", r#"x=; read -r x; echo "got:$x""#);
     lab.tool("closed", &s, json!({"timeout": "5s"})).await;
-    lab.tool("open", &s, json!({"stdin": true, "timeout": "5s"})).await;
+    lab.tool("open", &s, json!({"stdin": true, "timeout": "5s"}))
+        .await;
     for (tool, want) in [("closed", "got:\n"), ("open", "got:hello\n")] {
         let r = lab.run_as(&lab.w1, tool, &[]).await;
         let session = sid(&r);
         let input = format!("/api/tools/sessions/{session}/input");
         let r = lab
             .td
-            .post_as(&lab.w1, &input, json!({"data": B64.encode("hello\n"), "eof": true}))
+            .post_as(
+                &lab.w1,
+                &input,
+                json!({"data": B64.encode("hello\n"), "eof": true}),
+            )
             .await;
         if tool == "closed" {
             r.err(422, "invalid");
@@ -403,9 +450,15 @@ async fn a_delete_kills_the_run() {
     let r = lab.run_as(&lab.w1, "slow", &[]).await;
     let session = sid(&r);
     let path = format!("/api/tools/sessions/{session}");
-    let other = lab.td.req(hyper::Method::DELETE, &path, None, Some(&lab.w2)).await;
+    let other = lab
+        .td
+        .req(hyper::Method::DELETE, &path, None, Some(&lab.w2))
+        .await;
     other.err(404, "not_found");
-    let r = lab.td.req(hyper::Method::DELETE, &path, None, Some(&lab.w1)).await;
+    let r = lab
+        .td
+        .req(hyper::Method::DELETE, &path, None, Some(&lab.w1))
+        .await;
     assert_eq!(r.status, 204, "{}", r.body);
     let out = format!("/api/tools/sessions/{session}/output?since=0");
     lab.td

@@ -342,7 +342,9 @@ pub fn check_args(args: &ToolArgs, argv: &[String]) -> Result<(), String> {
     for a in argv {
         for flag in &args.deny_flags {
             if denied(flag, a) {
-                return Err(format!("`{a}` is refused: this tool denies the flag {flag}"));
+                return Err(format!(
+                    "`{a}` is refused: this tool denies the flag {flag}"
+                ));
             }
         }
     }
@@ -359,9 +361,7 @@ fn denied(flag: &str, a: &str) -> bool {
     if short {
         // One dash, not two, and the letter anywhere after it: a glued
         // value or a bundle.
-        return a.starts_with('-')
-            && !a.starts_with("--")
-            && a[1..].contains(name);
+        return a.starts_with('-') && !a.starts_with("--") && a[1..].contains(name);
     }
     if let Some(rest) = a.strip_prefix("--") {
         // `--name`, `--name=...`, or an abbreviation `--na`.
@@ -667,10 +667,26 @@ mod tests {
         assert!(check_args(&a, &v(&["show", "T-1"])).is_ok());
         assert!(check_args(&a, &v(&["search", "--limit", "5", "x y; rm -rf /"])).is_ok());
         // allow: the first argument, and no empty run.
-        assert!(check_args(&a, &v(&["delete", "T-1"])).unwrap_err().contains("not allowed"));
-        assert!(check_args(&a, &[]).unwrap_err().contains("needs a first argument"));
+        assert!(
+            check_args(&a, &v(&["delete", "T-1"]))
+                .unwrap_err()
+                .contains("not allowed")
+        );
+        assert!(
+            check_args(&a, &[])
+                .unwrap_err()
+                .contains("needs a first argument")
+        );
         // A long deny flag: exact, with a value, abbreviated, single dash.
-        for bad in ["--config", "--config=/etc/x", "--conf", "--c", "--co=x", "-config", "-config=x"] {
+        for bad in [
+            "--config",
+            "--config=/etc/x",
+            "--conf",
+            "--c",
+            "--co=x",
+            "-config",
+            "-config=x",
+        ] {
             let e = check_args(&a, &v(&["show", bad])).unwrap_err();
             assert!(e.contains("--config"), "{bad}: {e}");
         }

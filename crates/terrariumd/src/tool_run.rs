@@ -100,7 +100,12 @@ pub struct Started {
 }
 
 /// Run tool `name` for `actor` with the agent arguments `argv`.
-pub async fn run(state: &Shared, actor: &Actor, name: &str, argv: Vec<String>) -> ApiResult<Started> {
+pub async fn run(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+    argv: Vec<String>,
+) -> ApiResult<Started> {
     let key = name.to_owned();
     let agent = actor.agent().map(|a| (a.id.clone(), a.project.clone()));
     let (row, granted) = state
@@ -153,7 +158,12 @@ pub async fn run(state: &Shared, actor: &Actor, name: &str, argv: Vec<String>) -
         .map(|(env, _, v)| (env.clone(), v.to_string()))
         .collect();
     let cmd = RemoteCmd {
-        argv: def.command.iter().cloned().chain(argv.iter().cloned()).collect(),
+        argv: def
+            .command
+            .iter()
+            .cloned()
+            .chain(argv.iter().cloned())
+            .collect(),
         cwd: def.cwd.clone(),
         env,
         pty: None,
@@ -176,10 +186,16 @@ pub async fn run(state: &Shared, actor: &Actor, name: &str, argv: Vec<String>) -
     let (tool, target) = (def.name.clone(), def.target.clone());
     let audit_argv = argv.clone();
     let (agent_id, agent_name) = match actor {
-        Actor::Agent(a) => (Some(a.id.clone()), Some(format!("{}/{}", a.project, a.name))),
+        Actor::Agent(a) => (
+            Some(a.id.clone()),
+            Some(format!("{}/{}", a.project, a.name)),
+        ),
         Actor::Operator => (None, None),
     };
-    let project = def.project.clone().or_else(|| actor.agent().map(|a| a.project.clone()));
+    let project = def
+        .project
+        .clone()
+        .or_else(|| actor.agent().map(|a| a.project.clone()));
     let label = caller.clone();
     let sid_cell: Arc<Mutex<Option<String>>> = Arc::default();
     let ended = {
@@ -221,7 +237,12 @@ pub async fn run(state: &Shared, actor: &Actor, name: &str, argv: Vec<String>) -
     if session.is_done() {
         state.tool_rates.set_stdin(&session.id, None);
     }
-    let (sid, t, tg, p) = (session.id.clone(), tool.clone(), target.clone(), project.clone());
+    let (sid, t, tg, p) = (
+        session.id.clone(),
+        tool.clone(),
+        target.clone(),
+        project.clone(),
+    );
     let (aid, aname) = (agent_id, agent_name);
     let argv_n = argv.len();
     state
