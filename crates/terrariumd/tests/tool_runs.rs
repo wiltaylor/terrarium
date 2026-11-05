@@ -400,10 +400,10 @@ async fn a_grant_decides_and_a_revoke_applies_at_once() {
 async fn stdin_reaches_only_a_tool_that_allows_it() {
     let lab = lab().await;
     let s = lab.script("read.sh", r#"x=; read -r x; echo "got:$x""#);
-    lab.tool("closed", &s, json!({"timeout": "5s"})).await;
-    lab.tool("open", &s, json!({"stdin": true, "timeout": "5s"}))
+    lab.tool("tt-no-stdin", &s, json!({"timeout": "5s"})).await;
+    lab.tool("tt-with-stdin", &s, json!({"stdin": true, "timeout": "5s"}))
         .await;
-    for (tool, want) in [("closed", "got:\n"), ("open", "got:hello\n")] {
+    for (tool, want) in [("tt-no-stdin", "got:\n"), ("tt-with-stdin", "got:hello\n")] {
         let r = lab.run_as(&lab.w1, tool, &[]).await;
         let session = sid(&r);
         let input = format!("/api/tools/sessions/{session}/input");
@@ -415,7 +415,7 @@ async fn stdin_reaches_only_a_tool_that_allows_it() {
                 json!({"data": B64.encode("hello\n"), "eof": true}),
             )
             .await;
-        if tool == "closed" {
+        if tool == "tt-no-stdin" {
             r.err(422, "invalid");
         } else {
             assert_eq!(r.status, 200, "{}", r.body);
