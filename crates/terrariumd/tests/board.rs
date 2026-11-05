@@ -1247,9 +1247,12 @@ async fn active_cards_across_projects_follow_the_rights() {
     )
     .await
     .ok();
-    td.post(&format!("/api/cards/{k2}/assign"), json!({"assignee": "proj/w2"}))
-        .await
-        .ok();
+    td.post(
+        &format!("/api/cards/{k2}/assign"),
+        json!({"assignee": "proj/w2"}),
+    )
+    .await
+    .ok();
     let k3 = card(&td, "proj/w1", json!({"title": "Later"})).await;
     let k4 = card(&td, "proj/w2", json!({"title": "Gone"})).await;
     td.post_empty_as("proj/w2", &format!("/api/cards/{k4}/claim"))
@@ -1257,7 +1260,11 @@ async fn active_cards_across_projects_follow_the_rights() {
         .ok();
     td.delete(&format!("/api/cards/{k4}")).await;
     let x = td
-        .post_as("other/x", "/api/projects/other/cards", json!({"title": "Other"}))
+        .post_as(
+            "other/x",
+            "/api/projects/other/cards",
+            json!({"title": "Other"}),
+        )
         .await
         .ok()["id"]
         .as_str()
@@ -1279,7 +1286,14 @@ async fn active_cards_across_projects_follow_the_rights() {
     let all = td.get("/api/cards").await.ok().clone();
     assert_eq!(ids(&all), [x.clone(), k2.clone(), k1.clone()], "{all:#?}");
     assert!(!ids(&all).contains(&k3) && !ids(&all).contains(&k4));
-    let one = |id: &str| all.as_array().unwrap().iter().find(|c| c["id"] == id).unwrap().clone();
+    let one = |id: &str| {
+        all.as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()
+            .clone()
+    };
     assert_eq!(one(&k1)["column_kind"], "working");
     assert_eq!(one(&k1)["column"], "in_progress");
     assert_eq!(one(&k1)["project"], "proj");
