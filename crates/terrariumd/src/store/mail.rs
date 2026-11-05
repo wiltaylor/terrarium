@@ -571,6 +571,7 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
     if *m.to == Address::Operator && !is_pause_notice(m.from, m.subject) {
         crate::store::inbox::emit(t, &format!("mail:{id}"), "mail", "opened", m.from.project())?;
     }
+    crate::store::inbox::on_thread_mail(t, &thread, m.from, m.to)?;
     if held {
         pause_notice(t, &thread)?;
         crate::store::inbox::emit(

@@ -865,3 +865,160 @@ async fn the_recap_lists_open_and_acknowledged_notices() {
     );
     assert!(text.contains("reply from operator: Good."), "{text}");
 }
+
+/// GitHub #24: the operator asks an agent a question from the Inbox. The
+/// mail goes to the agent on a new thread, and the Inbox watches it: the
+/// watch waits while the operator spoke last, closes with the agent's
+/// answer (a mail item that names the watch), and opens again with the
+/// operator's reply. The badge does not count a watch.
+#[tokio::test]
+async fn the_operator_asks_an_agent_and_the_inbox_watches_the_answer() {
+    let World { td, w1, .. } = setup().await;
+    let (_, before) = inbox(&td, "").await;
+    let r = td
+        .post(
+            "/api/inbox/asks",
+            json!({"to": "p/w1", "text": "Is the deploy done?\nSay when."}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let m = r.body["message"].clone();
+    let thread = r.body["watch"]["thread_id"].as_str().unwrap().to_owned();
+    assert_eq!(m["from_kind"], "operator");
+    assert_eq!(m["to"], w1.as_str());
+    assert_eq!(m["subject"], "Question from the operator: Is the deploy done?");
+    assert!(m["body"].as_str().unwrap().contains("terrarium mail reply"));
+    assert_eq!(r.body["watch"]["agent_name"], "p/w1");
+    assert_eq!(r.body["watch"]["waiting"], true);
+
+    let (rows, counts) = inbox(&td, "?kind=watch").await;
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["id"], format!("watch:{thread}"));
+    assert_eq!(rows[0]["open"], true);
+    assert_eq!(rows[0]["project"], "p");
+    assert_eq!(counts["watch"], 1);
+    assert_eq!(counts["open"], before["open"], "a watch is not in the badge");
+
+    // The agent answers: the watch closes, and the answer is a mail item
+    // that names the watch.
+    let mid = id(&m);
+    let a = td
+        .post_as(&w1, &format!("/api/mail/{mid}/reply"), json!({"body": "Yes, at 10:00."}))
+        .await;
+    assert_eq!(a.status, 201, "{}", a.body);
+    let (rows, counts) = inbox(&td, "?kind=watch").await;
+    assert!(rows.is_empty(), "{rows:#?}");
+    assert_eq!(counts["watch"], 0);
+    let (done, _) = inbox(&td, "?kind=watch&status=done").await;
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0]["watch"]["replies"], 1);
+    let (mails, _) = inbox(&td, "?kind=mail").await;
+    let answer = mails
+        .iter()
+        .find(|i| i["message"]["thread_id"] == thread.as_str())
+        .expect("the answer is a mail item");
+    assert_eq!(answer["watch"]["thread_id"], thread.as_str());
+    assert_eq!(answer["message"]["body"], "Yes, at 10:00.");
+
+    // Another response: the operator's reply opens the watch again.
+    let aid = answer["message"]["id"].as_str().unwrap().to_owned();
+    td.post(
+        &format!("/api/inbox/mail/{aid}/ack"),
+        json!({"reply": "And the smoke test?"}),
+    )
+    .await
+    .ok();
+    let (rows, _) = inbox(&td, "?kind=watch").await;
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+
+    // Cancel: the watch closes; a second cancel is 409.
+    td.delete(&format!("/api/inbox/watches/{thread}")).await.ok();
+    let (rows, counts) = inbox(&td, "?kind=watch").await;
+    assert!(rows.is_empty());
+    assert_eq!(counts["watch"], 0);
+    td.delete(&format!("/api/inbox/watches/{thread}"))
+        .await
+        .err(409, "conflict");
+    td.delete("/api/inbox/watches/nope").await.err(404, "not_found");
+}
+
+/// GitHub #24: the operator forwards a question of a lead to another
+/// agent. The mail quotes the question with its choices and context; the
+/// question stays open for the operator's answer.
+#[tokio::test]
+async fn a_forward_quotes_the_question_and_keeps_it_open() {
+    let World {
+        td, lead, w2, ..
+    } = setup().await;
+    let q = td
+        .post_as(
+            &lead,
+            &format!("/api/agents/{lead}/questions"),
+            json!({"text": "Which database?", "options": ["sqlite", "postgres"],
+                   "context": "We have 3 users."}),
+        )
+        .await;
+    assert_eq!(q.status, 201, "{}", q.body);
+    let qid = id(&q.body);
+    let r = td
+        .post(
+            "/api/inbox/asks",
+            json!({"to": w2, "question": qid, "text": "You know the load best."}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let body = r.body["message"]["body"].as_str().unwrap();
+    assert!(body.starts_with("You know the load best."), "{body}");
+    assert!(body.contains("question of p/lead"), "{body}");
+    assert!(body.contains("> Which database?"), "{body}");
+    assert!(body.contains("> 2. postgres"), "{body}");
+    assert!(body.contains("> We have 3 users."), "{body}");
+    assert_eq!(
+        r.body["message"]["subject"],
+        "Forwarded question from p/lead: Which database?"
+    );
+    assert_eq!(r.body["watch"]["question_id"], qid.as_str());
+    assert_eq!(
+        td.get(&format!("/api/questions/{qid}")).await.ok()["status"],
+        "open"
+    );
+    let (rows, _) = inbox(&td, "?kind=watch").await;
+    assert_eq!(rows[0]["watch"]["question_id"], qid.as_str());
+}
+
+/// GitHub #24: only the operator asks and cancels; a bad target or an
+/// empty question is refused.
+#[tokio::test]
+async fn only_the_operator_asks_and_a_bad_ask_is_refused() {
+    let World { td, lead, .. } = setup().await;
+    let r = td
+        .post_as(&lead, "/api/inbox/asks", json!({"to": "p/w1", "text": "x"}))
+        .await;
+    r.err(403, "forbidden");
+    td.post("/api/inbox/asks", json!({"to": "p/w1", "text": "  "}))
+        .await
+        .err(422, "invalid");
+    td.post("/api/inbox/asks", json!({"to": "operator", "text": "x"}))
+        .await
+        .err(422, "invalid");
+    td.post("/api/inbox/asks", json!({"to": "p/nobody", "text": "x"}))
+        .await
+        .err(404, "not_found");
+    td.post(
+        "/api/inbox/asks",
+        json!({"to": "p/w1", "question": "01JQ0000000000000000000000"}),
+    )
+    .await
+    .err(404, "not_found");
+    let (rows, _) = inbox(&td, "?kind=watch&status=all").await;
+    assert!(rows.is_empty(), "{rows:#?}");
+    let r = td
+        .req(
+            hyper::Method::DELETE,
+            "/api/inbox/watches/x",
+            None,
+            Some(&lead),
+        )
+        .await;
+    r.err(403, "forbidden");
+}

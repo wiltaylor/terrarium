@@ -1914,6 +1914,22 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     "#,
+    // 64: the watched threads of the Inbox (GitHub #24, docs/api.md §6.9,
+    // `crate::store::inbox`): a question that the operator asked an agent,
+    // or a question of the Inbox that the operator forwarded to one. The
+    // watch waits while the newest message of its thread is the
+    // operator's. Self-contained: when another branch takes this number,
+    // move this entry to the end of the list.
+    r#"
+    CREATE TABLE inbox_watches (
+        thread_id    TEXT PRIMARY KEY,
+        agent        TEXT NOT NULL,
+        question_id  TEXT,
+        message_id   TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        cancelled_at TEXT
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

@@ -9,17 +9,24 @@
 //!   a reply on its thread marks it replied ([`mail`]);
 //! - `system`: the threads of the loop guard: a thread that is paused, or
 //!   that has a held message that the operator did not release
-//!   ([`mail::guard_threads`]).
+//!   ([`mail::guard_threads`]);
+//! - `watch`: a question that the operator asked an agent, or a question
+//!   of the Inbox that the operator forwarded to one ([`ask`], the table
+//!   `inbox_watches`). It is open while the newest message of its thread
+//!   is the operator's: it waits for the agent, not for the operator, so
+//!   the badge does not count it. The agent's answer is a `mail` item.
 //!
 //! No mail body is copied: an item holds the question or the message as
 //! the stores give it. Each change of an item emits one `inbox` event
 //! ([`emit`]), so the dashboard badge follows it.
 
-use rusqlite::Connection;
+use std::collections::HashMap;
+
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::db::Tx;
+use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
 use crate::store::mail::{self, Message};
@@ -33,6 +40,7 @@ pub enum InboxKind {
     Notice,
     Mail,
     System,
+    Watch,
 }
 
 impl InboxKind {
@@ -42,8 +50,9 @@ impl InboxKind {
             "notice" => Ok(Self::Notice),
             "mail" => Ok(Self::Mail),
             "system" => Ok(Self::System),
+            "watch" => Ok(Self::Watch),
             other => Err(ApiError::invalid(format!(
-                "bad kind `{other}`: use question, notice, mail, or system"
+                "bad kind `{other}`: use question, notice, mail, system, or watch"
             ))),
         }
     }
@@ -98,11 +107,46 @@ pub struct SystemItem {
     pub held: Vec<Message>,
 }
 
+/// A watched thread: a question that the operator asked an agent, or
+/// forwarded to one.
+#[derive(Debug, Clone, Serialize)]
+pub struct Watch {
+    pub thread_id: String,
+    /// The agent that answers: its ULID.
+    pub agent: String,
+    /// `project/name`.
+    pub agent_name: String,
+    /// The forwarded question, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_id: Option<String>,
+    /// The first message: the ask.
+    pub message_id: String,
+    pub subject: String,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancelled_at: Option<String>,
+    /// The newest message of the thread is the operator's: the watch waits
+    /// for the agent.
+    pub waiting: bool,
+    /// The messages of the agent on the thread.
+    pub replies: usize,
+}
+
+impl Watch {
+    pub fn open(&self) -> bool {
+        self.waiting && self.cancelled_at.is_none()
+    }
+
+    fn project(&self) -> Option<String> {
+        self.agent_name.split_once('/').map(|(p, _)| p.to_owned())
+    }
+}
+
 /// One item of the Inbox.
 #[derive(Debug, Clone, Serialize)]
 pub struct InboxItem {
     /// `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`,
-    /// or `thread:<thread id>`.
+    /// `thread:<thread id>`, or `watch:<thread id>`.
     pub id: String,
     pub kind: InboxKind,
     pub open: bool,
@@ -119,6 +163,10 @@ pub struct InboxItem {
     pub message: Option<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<SystemItem>,
+    /// A `watch` item: the watch. A `mail` item on a watched thread: the
+    /// watch that the mail answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watch: Option<Watch>,
 }
 
 /// The filters of the Inbox.
@@ -162,6 +210,7 @@ fn question_item(q: Question) -> InboxItem {
         question: Some(q),
         message: None,
         system: None,
+        watch: None,
     }
 }
 
@@ -177,6 +226,7 @@ fn mail_item(m: Message, open: bool) -> InboxItem {
         question: None,
         message: Some(m),
         system: None,
+        watch: None,
     }
 }
 
@@ -227,7 +277,255 @@ fn system_item(conn: &Connection, thread: &str) -> ApiResult<InboxItem> {
             participants: participants.iter().map(mail::Address::display).collect(),
             held,
         }),
+        watch: None,
     })
+}
+
+fn watch_item(w: Watch) -> InboxItem {
+    InboxItem {
+        id: format!("watch:{}", w.thread_id),
+        kind: InboxKind::Watch,
+        open: w.open(),
+        urgent: false,
+        critical: false,
+        project: w.project(),
+        at: w.created_at.clone(),
+        question: None,
+        message: None,
+        system: None,
+        watch: Some(w),
+    }
+}
+
+const WATCH_SELECT: &str = "SELECT w.thread_id, w.agent, w.question_id, w.message_id, w.created_at,
+        w.cancelled_at,
+        coalesce((SELECT subject FROM messages WHERE id = w.message_id), ''),
+        (SELECT from_kind FROM messages WHERE thread_id = w.thread_id ORDER BY id DESC LIMIT 1),
+        (SELECT count(*) FROM messages WHERE thread_id = w.thread_id AND from_agent = w.agent),
+        coalesce((SELECT project || '/' || name FROM agents WHERE id = w.agent),
+                 (SELECT project || '/' || name FROM agents_removed WHERE id = w.agent), w.agent)
+     FROM inbox_watches w";
+
+fn watch_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Watch> {
+    let last: Option<String> = r.get(7)?;
+    Ok(Watch {
+        thread_id: r.get(0)?,
+        agent: r.get(1)?,
+        question_id: r.get(2)?,
+        message_id: r.get(3)?,
+        created_at: r.get(4)?,
+        cancelled_at: r.get(5)?,
+        subject: r.get(6)?,
+        waiting: last.as_deref() == Some("operator"),
+        replies: r.get::<_, i64>(8)? as usize,
+        agent_name: r.get(9)?,
+    })
+}
+
+/// Every watch, newest first.
+pub fn watches(conn: &Connection) -> ApiResult<Vec<Watch>> {
+    let mut st = conn.prepare(&format!(
+        "{WATCH_SELECT} ORDER BY w.created_at DESC, w.thread_id DESC LIMIT {}",
+        KIND_MAX * 5
+    ))?;
+    let rows = st.query_map([], watch_row)?.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The watch of `thread`, if it is watched.
+pub fn watch_of(conn: &Connection, thread: &str) -> ApiResult<Option<Watch>> {
+    Ok(conn
+        .query_row(
+            &format!("{WATCH_SELECT} WHERE w.thread_id = ?1"),
+            [thread],
+            watch_row,
+        )
+        .optional()?)
+}
+
+/// The most bytes of a forwarded context in the mail.
+const FORWARD_CONTEXT_MAX: usize = 4096;
+
+/// Cut `s` at `max` bytes, on a char boundary, with a note.
+fn cut(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[cut at {max} bytes]", &s[..end])
+}
+
+/// The subject and the body of the mail of an ask: `text`, and the quoted
+/// question `q` of a forward.
+fn ask_mail(text: &str, q: Option<&Question>) -> (String, String) {
+    let first = |s: &str| -> String {
+        let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+        if line.chars().count() > 80 {
+            line.chars().take(79).collect::<String>() + "…"
+        } else {
+            line.to_owned()
+        }
+    };
+    let mut body = String::new();
+    let subject = match q {
+        None => {
+            body.push_str(text.trim());
+            body.push_str("\n\n");
+            format!("Question from the operator: {}", first(text))
+        }
+        Some(q) => {
+            if !text.trim().is_empty() {
+                body.push_str(text.trim());
+                body.push_str("\n\n");
+            }
+            let what = match q.kind {
+                QuestionKind::Notice => "notice",
+                QuestionKind::Bundle => "bundle of questions",
+                QuestionKind::Question => "question",
+            };
+            body.push_str(&format!(
+                "The operator forwards this {what} of {} to you",
+                q.agent_name
+            ));
+            if let Some(c) = &q.card {
+                body.push_str(&format!(" (card {c})"));
+            }
+            body.push_str(":\n\n");
+            for l in q.text.lines() {
+                body.push_str(&format!("> {l}\n"));
+            }
+            for (i, o) in q.options.iter().enumerate() {
+                body.push_str(&format!("> {}. {o}\n", i + 1));
+            }
+            for (i, it) in q.items.iter().enumerate() {
+                body.push_str(&format!("> Item {}: {}\n", i + 1, it.text));
+                for (j, o) in it.options.iter().enumerate() {
+                    body.push_str(&format!(">   {}. {o}\n", j + 1));
+                }
+            }
+            if let Some(c) = q.context.as_deref().filter(|c| !c.trim().is_empty()) {
+                body.push_str(">\n> Context:\n");
+                for l in cut(c, FORWARD_CONTEXT_MAX).lines() {
+                    body.push_str(&format!("> {l}\n"));
+                }
+            }
+            body.push('\n');
+            format!("Forwarded {what} from {}: {}", q.agent_name, first(&q.text))
+        }
+    };
+    body.push_str(
+        "Answer the operator with `terrarium mail reply <this message>`: an \
+         acknowledgement, the answer, or your questions.\n",
+    );
+    (subject, body)
+}
+
+/// Ask agent `to` (a key that `mail::resolve` takes) a question as the
+/// operator, or forward question `question` to it, and watch the thread.
+/// `text` is the question, or the operator's note on the forward. The
+/// mail is a new thread from `operator`.
+pub fn ask(
+    t: &mut Tx<'_>,
+    to: &str,
+    text: &str,
+    question: Option<&str>,
+) -> ApiResult<(Message, Watch)> {
+    let addr = mail::resolve(t, to, None)?;
+    let mail::Address::Agent { id: agent, .. } = &addr else {
+        return Err(ApiError::invalid(format!(
+            "`{to}` is not an agent: ask an agent"
+        )));
+    };
+    let agent = agent.clone();
+    let q = question.map(|id| questions::get(t, id)).transpose()?;
+    if q.is_none() && text.trim().is_empty() {
+        return Err(ApiError::invalid("the question text is empty"));
+    }
+    let (subject, body) = ask_mail(text, q.as_ref());
+    let m = mail::send(
+        t,
+        mail::Outgoing {
+            from: &mail::Address::Operator,
+            to: &addr,
+            subject: &subject,
+            body: &body,
+            thread: None,
+            in_reply_to: None,
+        },
+    )?;
+    t.execute(
+        "INSERT INTO inbox_watches (thread_id, agent, question_id, message_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![m.thread_id, agent, q.as_ref().map(|q| q.id.clone()), m.id, now()],
+    )?;
+    let w = watch_of(t, &m.thread_id)?
+        .ok_or_else(|| ApiError::internal("the new watch is not in the store"))?;
+    emit(
+        t,
+        &format!("watch:{}", w.thread_id),
+        "watch",
+        "opened",
+        w.project().as_deref(),
+    )?;
+    Ok((m, w))
+}
+
+/// Stop the watch of `thread`. An unknown thread is `404`; a cancelled
+/// one `409`.
+pub fn cancel_watch(t: &mut Tx<'_>, thread: &str) -> ApiResult<Watch> {
+    let w = watch_of(t, thread)?
+        .ok_or_else(|| ApiError::not_found(format!("no watch of thread `{thread}`")))?;
+    if w.cancelled_at.is_some() {
+        return Err(ApiError::conflict(format!(
+            "the watch of thread {thread} is cancelled already"
+        )));
+    }
+    t.execute(
+        "UPDATE inbox_watches SET cancelled_at = ?2 WHERE thread_id = ?1",
+        params![thread, now()],
+    )?;
+    if w.open() {
+        emit(
+            t,
+            &format!("watch:{thread}"),
+            "watch",
+            "closed",
+            w.project().as_deref(),
+        )?;
+    }
+    watch_of(t, thread)?.ok_or_else(|| ApiError::internal("the watch is gone"))
+}
+
+/// A message on `thread` from `from` to `to` was stored: a watch of the
+/// thread closes with the answer of its agent and opens again with the
+/// operator's next message. `mail::send` calls it.
+pub fn on_thread_mail(
+    t: &mut Tx<'_>,
+    thread: &str,
+    from: &mail::Address,
+    to: &mail::Address,
+) -> ApiResult<()> {
+    let Some(w) = watch_of(t, thread)? else {
+        return Ok(());
+    };
+    if w.cancelled_at.is_some() {
+        return Ok(());
+    }
+    let change = match (from, to) {
+        (mail::Address::Operator, mail::Address::Agent { id, .. }) if *id == w.agent => "opened",
+        (mail::Address::Agent { id, .. }, mail::Address::Operator) if *id == w.agent => "closed",
+        _ => return Ok(()),
+    };
+    emit(
+        t,
+        &format!("watch:{thread}"),
+        "watch",
+        change,
+        w.project().as_deref(),
+    )
 }
 
 fn wants(f: &Filter, kind: InboxKind) -> bool {
@@ -303,6 +601,28 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
                 .take(KIND_MAX * 2),
         );
     }
+    if wants(f, InboxKind::Watch) {
+        for w in watches(conn)? {
+            let item = watch_item(w);
+            if ((item.open && f.status.open()) || (!item.open && f.status.done()))
+                && in_project(f, &item)
+            {
+                items.push(item);
+            }
+        }
+    }
+    // A mail on a watched thread names the watch that it answers.
+    if items.iter().any(|i| i.kind == InboxKind::Mail) {
+        let by_thread: HashMap<String, Watch> = watches(conn)?
+            .into_iter()
+            .map(|w| (w.thread_id.clone(), w))
+            .collect();
+        for i in items.iter_mut().filter(|i| i.kind == InboxKind::Mail) {
+            if let Some(m) = &i.message {
+                i.watch = by_thread.get(&m.thread_id).cloned();
+            }
+        }
+    }
     if wants(f, InboxKind::System) && f.status.open() {
         for thread in mail::guard_threads(conn)? {
             let item = system_item(conn, &thread)?;
@@ -334,6 +654,9 @@ pub struct Counts {
     pub notice: usize,
     pub mail: usize,
     pub system: usize,
+    /// The open watches: they wait for an agent, so `open` does not count
+    /// them.
+    pub watch: usize,
 }
 
 /// The counts of the open items, of every project or of one.
@@ -359,6 +682,11 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
             system += 1;
         }
     }
+    let watch = watches(conn)?
+        .into_iter()
+        .map(watch_item)
+        .filter(|i| i.open && in_project(&f, i))
+        .count();
     Ok(Counts {
         open: question + notice + mail + system,
         urgent: q.urgent + b.urgent + n.urgent,
@@ -367,6 +695,7 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
         notice,
         mail,
         system,
+        watch,
     })
 }
 
