@@ -1263,7 +1263,8 @@ impl Executor {
             Actor::Operator => true,
             Actor::Agent(a) => s.owner.as_deref() == Some(a.id.as_str()),
         };
-        if !mine || s.target != target {
+        // A tool run has its own routes (`/api/tools/sessions/...`).
+        if !mine || s.target != target || s.kind == "tool" {
             return Err(ApiError::not_found(format!(
                 "no exec session `{id}` on target `{target}`"
             )));
@@ -1278,6 +1279,29 @@ impl Executor {
     }
 
     /// Close a session: kill its run and forget it.
+    /// The tool run `id` for `actor`: the agent that started it, or the
+    /// operator. Anyone else gets `404`, as for an unknown session.
+    pub fn tool_session(&self, actor: &Actor, id: &str) -> ApiResult<Arc<ExecSession>> {
+        let missing = || ApiError::not_found(format!("no tool session `{id}`"));
+        let s = self.table().get(id).cloned().ok_or_else(missing)?;
+        let mine = match actor {
+            Actor::Operator => true,
+            Actor::Agent(a) => s.owner.as_deref() == Some(a.id.as_str()),
+        };
+        if !mine || s.kind != "tool" {
+            return Err(missing());
+        }
+        Ok(s)
+    }
+
+    /// Kill tool run `id` and forget it ([`Self::tool_session`]).
+    pub fn close_tool(&self, actor: &Actor, id: &str) -> ApiResult<()> {
+        let s = self.tool_session(actor, id)?;
+        s.kill();
+        self.table().remove(&s.id);
+        Ok(())
+    }
+
     pub fn close(&self, actor: &Actor, target: &str, id: &str) -> ApiResult<()> {
         let s = self.session(actor, target, id)?;
         s.kill();
@@ -1614,6 +1638,11 @@ pub async fn start_tool_exec(
     Ok(sess)
 }
 
+/// The shortest value of a tool run's own secrets that its output
+/// redaction matches. Shorter values (1 to 3 bytes) would hide most of the
+/// output; a definition should not use such a secret.
+pub const TOOL_SECRET_MIN: usize = 4;
+
 /// The redactors of one output stream: the run's own secrets, then the
 /// daemon matcher.
 struct ToolRedact {
@@ -1645,11 +1674,19 @@ async fn attach_tool(
     daemon: Arc<terrarium_core::redact::Redactor>,
 ) {
     use terrarium_core::redact::{Redactor, StreamRedactor, View};
+    // The run's own values go also when they are short or weak: the
+    // shortest pattern is TOOL_SECRET_MIN, not MIN_LEN.
     let own = Arc::new(
-        Redactor::new(
+        Redactor::build_min(
             tool.secrets
                 .iter()
-                .map(|(label, v)| (label.clone(), v.as_bytes().to_vec())),
+                .map(|(label, v)| terrarium_core::redact::Entry {
+                    label: label.clone(),
+                    scope: None,
+                    value: v.as_bytes().to_vec(),
+                }),
+            |_| true,
+            TOOL_SECRET_MIN,
         )
         .unwrap_or_else(|_| Redactor::empty()),
     );

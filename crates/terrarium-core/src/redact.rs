@@ -230,14 +230,19 @@ pub fn judge(pattern: &[u8]) -> Judgment {
 /// or more that is not a PEM armor line. A value shorter than [`MIN_LEN`]
 /// bytes gives no pattern of its own.
 pub fn raw_patterns(value: &[u8]) -> Vec<&[u8]> {
+    raw_patterns_min(value, MIN_LEN)
+}
+
+/// [`raw_patterns`] with the shortest pattern `min`.
+fn raw_patterns_min(value: &[u8], min: usize) -> Vec<&[u8]> {
     let mut out = Vec::new();
-    if value.len() >= MIN_LEN {
+    if value.len() >= min {
         out.push(value);
     }
     if value.contains(&b'\n') {
         for line in value.split(|&b| b == b'\n') {
             let line = line.trim_ascii();
-            if line.len() >= MIN_LEN && !is_armor(line) {
+            if line.len() >= min && !is_armor(line) {
                 out.push(line);
             }
         }
@@ -295,6 +300,18 @@ impl Redactor {
         entries: impl IntoIterator<Item = Entry<V>>,
         keep: impl Fn(&[u8]) -> bool,
     ) -> Result<Self, RedactorError> {
+        Self::build_min(entries, keep, MIN_LEN)
+    }
+
+    /// [`Self::build`] with the shortest pattern `min` bytes (at least 1)
+    /// in place of [`MIN_LEN`]: for a matcher of a few known values that
+    /// must go also when they are short, as the secrets of one tool run.
+    pub fn build_min<V: AsRef<[u8]>>(
+        entries: impl IntoIterator<Item = Entry<V>>,
+        keep: impl Fn(&[u8]) -> bool,
+        min: usize,
+    ) -> Result<Self, RedactorError> {
+        let min = min.max(1);
         let mut patterns: Vec<Vec<u8>> = Vec::new();
         let mut replacements: Vec<Replacement> = Vec::new();
         let mut seen: HashSet<Vec<u8>> = HashSet::new();
@@ -305,13 +322,13 @@ impl Redactor {
                 full: Arc::from(format!("[secret:{}]", entry.label)),
                 scope: entry.scope.map(Arc::from),
             };
-            for raw in raw_patterns(value) {
+            for raw in raw_patterns_min(value, min) {
                 if !keep(raw) {
                     continue;
                 }
                 let escaped = json_escaped(raw);
                 for pattern in std::iter::once(raw.to_vec()).chain(escaped) {
-                    if pattern.len() >= MIN_LEN && seen.insert(pattern.clone()) {
+                    if pattern.len() >= min && seen.insert(pattern.clone()) {
                         patterns.push(pattern);
                         replacements.push(replacement.clone());
                     }

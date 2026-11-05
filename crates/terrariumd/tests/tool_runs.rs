@@ -17,6 +17,8 @@ use terrarium_host::{Client, ClientOptions};
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 /// The value of the global secret `tt`, set as `TRACKER_TOKEN`.
 const TOKEN: &str = "gV7q2LmZ9xTr4KwB8nPdQs5Hy";
+/// The value of the global generic secret `pin`: shorter than 8 bytes.
+const PIN: &str = "q7Z2p9K";
 
 struct Lab {
     td: TestDaemon,
@@ -77,6 +79,14 @@ async fn lab() -> Lab {
     )
     .await
     .ok();
+    // A short value that the daemon matcher leaves out (under 8 bytes).
+    td.post(
+        "/api/secrets",
+        json!({"name": "pin", "kind": "generic", "fields": {"pin": PIN},
+               "secret_fields": ["pin"]}),
+    )
+    .await
+    .ok();
     Lab {
         td,
         scripts,
@@ -133,7 +143,7 @@ async fn drain(td: &TestDaemon, agent: &str, sid: &str) -> Drained {
     let mut d = Drained::default();
     let mut since = 0u64;
     for _ in 0..300 {
-        let path = format!("/api/targets/box/sessions/{sid}/output?since={since}&wait=5");
+        let path = format!("/api/tools/sessions/{sid}/output?since={since}&wait=5");
         let r = td.req(hyper::Method::GET, &path, None, Some(agent)).await;
         let o = r.ok().clone();
         for c in o["chunks"].as_array().unwrap() {
@@ -310,9 +320,14 @@ async fn a_grant_decides_and_a_revoke_applies_at_once() {
     let r = lab.run_as(&lab.w1, "quick", &[]).await;
     let session = sid(&r);
     // Another agent cannot read the session.
-    let path = format!("/api/targets/box/sessions/{session}/output?since=0");
+    let path = format!("/api/tools/sessions/{session}/output?since=0");
     let other = lab.td.req(hyper::Method::GET, &path, None, Some(&w2)).await;
     other.err(404, "not_found");
+    // The target session routes do not show a tool session, also not to
+    // its own agent.
+    let target_path = format!("/api/targets/box/sessions/{session}/output?since=0");
+    let r = lab.td.req(hyper::Method::GET, &target_path, None, Some(&lab.w1)).await;
+    r.err(404, "not_found");
     assert_eq!(drain(&lab.td, &lab.w1, &session).await.stdout, "ok\n");
     // The operator may run it (a test run).
     let r = lab.td.post("/api/tools/quick/run", json!({"argv": []})).await;
@@ -348,13 +363,53 @@ async fn stdin_reaches_only_a_tool_that_allows_it() {
     for (tool, want) in [("closed", "got:\n"), ("open", "got:hello\n")] {
         let r = lab.run_as(&lab.w1, tool, &[]).await;
         let session = sid(&r);
-        let input = format!("/api/targets/box/sessions/{session}/input");
-        lab.td
+        let input = format!("/api/tools/sessions/{session}/input");
+        let r = lab
+            .td
             .post_as(&lab.w1, &input, json!({"data": B64.encode("hello\n"), "eof": true}))
             .await;
+        if tool == "closed" {
+            r.err(422, "invalid");
+        } else {
+            assert_eq!(r.status, 200, "{}", r.body);
+        }
         let d = drain(&lab.td, &lab.w1, &session).await;
         // The closed tool: stdin is closed at the start, so its read
         // ends at once with nothing.
         assert_eq!(d.stdout, want, "{tool}: {d:?}");
     }
+}
+
+/// The run's own secret goes also when it is shorter than 8 bytes, which
+/// the daemon matcher leaves out (lead's F3).
+#[tokio::test]
+async fn a_short_env_secret_is_redacted_too() {
+    let lab = lab().await;
+    let s = lab.script("pin.sh", r#"printf 'pin=%s\n' "$DOOR_PIN""#);
+    lab.tool("door", &s, json!({"env_secrets": {"DOOR_PIN": "pin"}}))
+        .await;
+    let r = lab.run_as(&lab.w1, "door", &[]).await;
+    let d = drain(&lab.td, &lab.w1, &sid(&r)).await;
+    assert!(!d.stdout.contains(PIN), "{d:?}");
+    assert_eq!(d.stdout, "pin=[secret:tool/pin]\n", "{d:?}");
+}
+
+/// DELETE kills the run; then the session is gone.
+#[tokio::test]
+async fn a_delete_kills_the_run() {
+    let lab = lab().await;
+    let s = lab.script("slow.sh", "echo start; sleep 30; echo late");
+    lab.tool("slow", &s, json!({"timeout": "60s"})).await;
+    let r = lab.run_as(&lab.w1, "slow", &[]).await;
+    let session = sid(&r);
+    let path = format!("/api/tools/sessions/{session}");
+    let other = lab.td.req(hyper::Method::DELETE, &path, None, Some(&lab.w2)).await;
+    other.err(404, "not_found");
+    let r = lab.td.req(hyper::Method::DELETE, &path, None, Some(&lab.w1)).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    let out = format!("/api/tools/sessions/{session}/output?since=0");
+    lab.td
+        .req(hyper::Method::GET, &out, None, Some(&lab.w1))
+        .await
+        .err(404, "not_found");
 }
