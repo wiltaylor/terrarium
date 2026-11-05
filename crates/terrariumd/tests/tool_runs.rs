@@ -595,19 +595,35 @@ async fn a_detached_tool_run_ends_in_a_process_wait() {
     let session = sid(&r);
     let waits = format!("/api/agents/{}/waits", lab.w1);
     lab.td
-        .post_as(&lab.w2, &format!("/api/agents/{}/waits", lab.w2), json!({"kind": "process", "session": session}))
+        .post_as(
+            &lab.w2,
+            &format!("/api/agents/{}/waits", lab.w2),
+            json!({"kind": "process", "session": session}),
+        )
         .await
         .err(404, "not_found");
     let w = lab
         .td
-        .post_as(&lab.w1, &waits, json!({"kind": "process", "session": session, "reason": "tool tt-detached"}))
+        .post_as(
+            &lab.w1,
+            &waits,
+            json!({"kind": "process", "session": session, "reason": "tool tt-detached"}),
+        )
         .await;
     assert_eq!(w.status, 201, "{}", w.body);
     let summary = w.body["summary"].as_str().unwrap().to_owned();
-    assert!(summary.starts_with("tool run ") && summary.ends_with(" on box"), "{summary}");
+    assert!(
+        summary.starts_with("tool run ") && summary.ends_with(" on box"),
+        "{summary}"
+    );
     let wid = w.body["id"].as_str().unwrap().to_owned();
     let done = loop {
-        let v = lab.td.get_as(&lab.w1, &format!("/api/waits/{wid}")).await.ok().clone();
+        let v = lab
+            .td
+            .get_as(&lab.w1, &format!("/api/waits/{wid}"))
+            .await
+            .ok()
+            .clone();
         if v["state"] == "resolved" {
             break v;
         }
@@ -618,7 +634,11 @@ async fn a_detached_tool_run_ends_in_a_process_wait() {
     assert!(!tail.contains(TOKEN), "{tail}");
     assert!(tail.starts_with("token=[secret:"), "{tail}");
     assert_eq!(done["result"]["stderr_tail"], "on stderr\n");
-    let log = lab.td.get_as(&lab.w1, &format!("/api/waits/{wid}/log")).await.ok().clone();
+    let log = lab
+        .td
+        .get_as(&lab.w1, &format!("/api/waits/{wid}/log"))
+        .await
+        .ok()
+        .clone();
     assert!(!log.to_string().contains(TOKEN), "{log}");
 }
-
