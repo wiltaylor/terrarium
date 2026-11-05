@@ -438,3 +438,124 @@ async fn a_grant_and_a_revoke_change_the_agent_tool_links() {
     assert_eq!(td.delete("/api/tools/deploy").await.status, 204);
     assert!(links(&w1).is_empty());
 }
+
+/// Tools on templates (design Q4, TER-35): only a sysadmin or the operator
+/// sets or changes `tools` on a template; a project tool on a template must
+/// be of the template's project (a global template names global tools
+/// only); a create from the template grants the tools to the new agent,
+/// with a `tool.grant` audit row that names the template; a create body
+/// takes no `tools`.
+#[tokio::test]
+async fn template_tools_need_a_sysadmin_and_grant_at_the_create() {
+    let td = setup().await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    td.post("/api/tools", tool("tracker-read")).await.ok();
+    td.post(
+        "/api/tools",
+        json!({"name": "deploy", "project": "p", "target": "p-box", "command": ["/opt/deploy"]}),
+    )
+    .await
+    .ok();
+    let spec = |tools: Value| json!({"harness": "claude", "tools": tools});
+    // A project_admin may not set tools, also on its own project's template.
+    td.post_as(
+        "p/lead",
+        "/api/templates",
+        json!({"name": "worker", "project": "p", "spec": spec(json!(["deploy"]))}),
+    )
+    .await
+    .err(403, "forbidden");
+    // Out of scope: a tool that does not exist, and a project tool on a
+    // global template.
+    td.post(
+        "/api/templates",
+        json!({"name": "worker", "project": "p", "spec": spec(json!(["nope"]))}),
+    )
+    .await
+    .err(422, "invalid");
+    let r = td
+        .post(
+            "/api/templates",
+            json!({"name": "g", "project": null, "spec": spec(json!(["deploy"]))}),
+        )
+        .await;
+    r.err(422, "invalid");
+    assert!(r.body.to_string().contains("tool of project `p`"), "{}", r.body);
+    // A sysadmin sets them: the normal form keeps them sorted.
+    let t = td
+        .post_as(
+            "ops/root",
+            "/api/templates",
+            json!({"name": "worker", "project": "p", "spec": spec(json!(["tracker-read", "deploy"]))}),
+        )
+        .await;
+    assert_eq!(t.status, 201, "{}", t.body);
+    assert_eq!(t.body["spec"]["tools"], json!(["deploy", "tracker-read"]));
+    let tid = t.body["id"].as_str().unwrap().to_owned();
+    // The project_admin may change other fields, not the tools.
+    td.patch_as(
+        "p/lead",
+        &format!("/api/templates/{tid}"),
+        json!({"spec": spec(json!(["deploy"]))}),
+    )
+    .await
+    .err(403, "forbidden");
+    let r = td
+        .patch_as(
+            "p/lead",
+            &format!("/api/templates/{tid}"),
+            json!({"description": "a worker", "spec": {"harness": "claude", "model": "m1",
+                   "tools": ["deploy", "tracker-read"]}}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // A create body takes no tools.
+    td.post_as(
+        "p/lead",
+        "/api/agents",
+        json!({"name": "w9", "project": "p", "harness": "claude", "tools": ["deploy"]}),
+    )
+    .await
+    .err(422, "invalid");
+    // The project_admin creates from the template: the agent gets the tools.
+    let a = td
+        .post_as(
+            "p/lead",
+            "/api/agents",
+            json!({"name": "w3", "project": "p", "template": "worker"}),
+        )
+        .await;
+    assert_eq!(a.status, 201, "{}", a.body);
+    let names = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        names(td.get_as("p/w3", "/api/tools").await.ok()),
+        ["deploy", "tracker-read"]
+    );
+    let g = td.get("/api/tools/deploy/grants").await.ok().clone();
+    let row = g
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["grantee_label"] == "agent:p/w3")
+        .unwrap()
+        .clone();
+    assert_eq!(row["created_by"], "template:p/worker", "{row}");
+    let audit = td.get("/api/audit?action=tool.grant").await.ok().clone();
+    assert!(
+        audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["detail"]["via"] == "template" && x["detail"]["template_name"] == "worker"),
+        "{audit}"
+    );
+    // Another agent of the project without the template gets none.
+    assert!(names(td.get_as("p/w2", "/api/tools").await.ok()).is_empty());
+}

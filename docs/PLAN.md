@@ -4034,8 +4034,10 @@ secret grants do; only the operator and sysadmins grant in phase 1
 (decision Q2). Phases: P1a definitions and grants (done), P1b the stream
 redactor, P1c the run path, the shim, the argument rules, and the audit,
 P2 approval, P3 detach and the dashboard (Settings > Tools, the Tools
-section of the agent Details tab), and tools on templates (TER-35,
-version 0.2.0: only a sysadmin or the operator sets them).
+section of the agent Details tab), and tools on templates (TER-35: a template's
+`tools` are granted to each agent made from it; only a sysadmin or the
+operator sets them, and a project tool goes only on a template of its
+project).
 
 ## 19b. Target displays (computer use)
 

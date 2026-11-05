@@ -6432,6 +6432,18 @@ operator's approval refuses `--detach` (exit 2) before anything is asked:
 run it without `--detach`, which waits for the answer. A tool name may not be `terrarium` or start
 with `terrarium-`: those stay the CLI.
 
+**Tools on templates** (design Q4). A template spec may have `tools`: a
+list of tool names. A create from the template (the API, a fleet, or a
+spawn) grants each to the new agent, as the delegation of the sysadmin who
+set them: `created_by` of the grant is `template:<project/name>`, and the
+`tool.grant` audit row has `via: "template"` and the template. Only a
+sysadmin or the operator sets or changes `tools` on a template (`403`
+otherwise, also on a project template; a fleet that sets or changes them
+needs a sysadmin too). Each tool must exist, and a project tool may be on a
+template of its own project only (a global template names global tools
+only); else `422`. A create body takes no `tools` (`422`). The agent keeps
+its grants when the template changes later.
+
 **Dashboard.** Settings > Tools lists the tools with the definition
 (secret names, never values), the grants with Revoke and a new grant (a
 project tool offers only its project and that project's agents), Delete
