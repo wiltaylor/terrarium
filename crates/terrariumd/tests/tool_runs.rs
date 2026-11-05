@@ -466,3 +466,91 @@ async fn a_delete_kills_the_run() {
         .await
         .err(404, "not_found");
 }
+
+/// The `terrarium` CLI binary next to the test binaries. A missing one is
+/// built once (as tests/runner_process.rs does).
+fn cli_bin() -> std::path::PathBuf {
+    static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let exe = std::env::current_exe().unwrap();
+        let dir = exe.parent().and_then(std::path::Path::parent).unwrap();
+        let bin = dir.join("terrarium");
+        if !bin.is_file() {
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+            let status = std::process::Command::new(cargo)
+                .args(["build", "-q", "-p", "terrarium", "--bin", "terrarium"])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .status()
+                .unwrap();
+            assert!(status.success(), "cargo build -p terrarium failed");
+        }
+        assert!(bin.is_file(), "no CLI binary at {}", bin.display());
+        bin
+    })
+    .clone()
+}
+
+/// Run the tool link `link` (a symlink to the CLI named as the tool) as
+/// the operator over the daemon's socket, with `args` and `stdin`. The
+/// stdout, the stderr, and the exit code.
+async fn run_link(td: &TestDaemon, link: &std::path::Path, args: &[&str], stdin: &str) -> (String, String, i32) {
+    use tokio::io::AsyncWriteExt;
+    let mut c = tokio::process::Command::new(link);
+    c.args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env(terrarium_core::paths::ENV_SOCKET, &td.socket)
+        .env("XDG_CONFIG_HOME", link.parent().unwrap().join("xdg"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(stdin.as_bytes()).await.unwrap();
+    drop(input);
+    let out = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .expect("the tool link did not end")
+        .unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// End to end through a tool link (design D3, TER-34): a symlink named as
+/// the tool runs `terrarium tool run <tool> -- <args>`. The arguments
+/// arrive as they are, stdout and stderr come back apart, and the CLI exits
+/// with the tool's exit code. Stdin reaches only a tool with `stdin`.
+#[tokio::test]
+async fn a_tool_link_runs_the_tool_and_exits_with_its_code() {
+    let lab = lab().await;
+    let echo = lab.script("echo-args.sh", r#"echo "args:$*"; echo "to stderr" >&2; exit 3"#);
+    lab.tool("tt-link-echo", &echo, json!({"timeout": "10s"})).await;
+    let read = lab.script("read-link.sh", r#"x=; read -r x; echo "got:$x""#);
+    lab.tool("tt-link-closed", &read, json!({"timeout": "10s"})).await;
+    lab.tool("tt-link-open", &read, json!({"stdin": true, "timeout": "10s"}))
+        .await;
+    let links = tempfile::tempdir().unwrap();
+    let link = |name: &str| {
+        let p = links.path().join(name);
+        std::os::unix::fs::symlink(cli_bin(), &p).unwrap();
+        p
+    };
+    let (out, err, code) = run_link(&lab.td, &link("tt-link-echo"), &["show", "$(id)", "a b"], "").await;
+    assert_eq!(out, "args:show $(id) a b\n", "{err}");
+    assert!(err.contains("to stderr"), "{err}");
+    assert_eq!(code, 3, "{out} {err}");
+    // A tool without stdin: the CLI sends none, and the tool reads nothing.
+    let (out, err, code) = run_link(&lab.td, &link("tt-link-closed"), &[], "hello\n").await;
+    assert_eq!((out.as_str(), code), ("got:\n", 0), "{err}");
+    // With stdin: the line arrives.
+    let (out, err, code) = run_link(&lab.td, &link("tt-link-open"), &[], "hello\n").await;
+    assert_eq!((out.as_str(), code), ("got:hello\n", 0), "{err}");
+    // An unknown tool: the daemon's message, exit 1.
+    let (_, err, code) = run_link(&lab.td, &link("tt-link-none"), &[], "").await;
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("not_found"), "{err}");
+}
+
