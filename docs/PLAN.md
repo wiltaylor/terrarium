@@ -3599,6 +3599,36 @@ wake.
 pause) stay for the API and the CLI. The dashboard shows Pause or Resume,
 and Restart.
 
+**Card reminder.** Asked for in GitHub issue #20: agents forget to update
+a card before they go idle, and it sits in progress until a person sees
+it on the board.
+
+- **When.** The lifecycle listener sees `idle` from an agent that was
+  `working` since its last start or idle, and the agent is the assignee
+  of cards in the working column (not archived). Not for `waiting` (an
+  open wait with a card in progress is the normal end of a turn),
+  `blocked`, `stopped`, `error`, a paused agent, an agent that compacts
+  or has a pending reset, and an agent that only woke. The check runs at
+  the change to `idle`, and the idle stop waits for it, so an agent with
+  a short idle stop gets the reminder first.
+- **The turn.** One `[System:card]` turn for all the due cards: they are
+  in progress and assigned to the agent, and it should comment, move them
+  to `review` or `blocked`, or set a new ETA, or register a wait. A card
+  whose ETA has passed is named with its ETA.
+- **Limits.** A card is due again only after 1 hour, or when its ETA
+  passed after its last reminder. A change of the card by the agent does
+  not make it due: that is the answer, and a re-send on it would loop.
+  The reminder turn itself ends in `idle`, which finds no due card. The
+  times are in memory (`card_reminder::Reminders`); a daemon restart
+  forgets them, so at most one more reminder of each card follows a
+  restart.
+- **Setting.** `card_reminder` (`true` or `false`) on an agent, a
+  template, an agent file, and a fleet entry. Absent: the global
+  `TERRARIUM_CARD_REMINDER` (default on). Migration 64 adds the column.
+- **History.** Each reminder writes a `card` event with the change
+  `reminded` on each card, so the card history shows it. It wakes no
+  agent, types no pointer, and nudges no lead.
+
 **Auto compact.** Asked for on 2026-10-31: the context of a long session
 fills up, and a compaction at rest keeps it small. Each compaction is one
 model call, so all of it is off by default.
@@ -4184,7 +4214,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | Wiki goes stale and misleads | Review status on pages. Backlinks show what depends on a page. The lead template includes a periodic wiki review. |
 | Memory bloat and near-duplicates | `mem new` shows top hits before writing. Supersede instead of delete. Dashboard dedupe hints. Operator can prune. |
 | A wrong memory misleads every later agent | Attribution on every node and link. `contradicts` and `supersedes` surface first. The protocol asks for a cited source. |
-| Board drifts from reality | The protocol asks for comments at checkpoints and a `review` or `blocked` move before idle. The dashboard flags `in_progress` cards whose assignee has been idle for too long. |
+| Board drifts from reality | The protocol asks for comments at checkpoints and a `review` or `blocked` move before idle. An agent that goes idle with cards in progress gets a `[System:card]` reminder (§18, "Card reminder"). The dashboard flags `in_progress` cards whose assignee has been idle for too long. |
 | Git credentials reach an agent | Clones and fetches run outside the sandbox, by the daemon or a host agent. Pushes use a credential helper that the daemon answers per project. Tokens never enter the sandbox filesystem. |
 | Host agent token leaks or a host is compromised | One token per host, stored as a hash, revocable from the dashboard. Rotation (`admin host rotate`) and one-time enrol tokens (`--enrol`, 10 minutes). `first_used_at` and `last_used_from` show a strange use. TLS on the link (F2 below). The host agent only accepts calls for targets defined on it. |
 | Host agent connection drops mid-exec | Exec sessions have IDs. The host agent keeps output buffered until acknowledged. Reconnect resumes or reports the exit code. |

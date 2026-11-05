@@ -222,7 +222,10 @@ async fn remind(state: &Shared, agent: AgentId) {
         }
     };
     let reminders = &state.lifecycle.reminders;
-    let on = view.agent.card_reminder.unwrap_or_else(|| reminders.default_on());
+    let on = view
+        .agent
+        .card_reminder
+        .unwrap_or_else(|| reminders.default_on());
     if !on || view.paused || reset || cards.is_empty() {
         return;
     }
@@ -242,7 +245,10 @@ async fn remind(state: &Shared, agent: AgentId) {
     let listed: Vec<(String, Option<String>, bool)> = due
         .iter()
         .map(|(id, p)| {
-            let eta = cards.iter().find(|(c, _)| c == id).and_then(|(_, e)| e.clone());
+            let eta = cards
+                .iter()
+                .find(|(c, _)| c == id)
+                .and_then(|(_, e)| e.clone());
             (id.clone(), eta, *p)
         })
         .collect();
@@ -328,7 +334,10 @@ mod tests {
             ("P-1".into(), Some("2026-01-01T00:00:00.000Z".into()), true),
             ("P-2".into(), None, false),
         ]);
-        assert!(two.starts_with("Cards P-1, P-2 are still in progress"), "{two}");
+        assert!(
+            two.starts_with("Cards P-1, P-2 are still in progress"),
+            "{two}"
+        );
         assert!(
             two.ends_with("The ETA has passed: P-1 (ETA 2026-01-01T00:00:00.000Z)."),
             "{two}"

@@ -277,5 +277,9 @@ async fn the_reminder_comes_before_the_idle_stop() {
     let prompts = td.sup.prompts(aid(&w));
     assert_eq!(prompts.len(), 2, "{prompts:#?}");
     assert_eq!(prompts[0], "[User] work");
-    assert!(prompts[1].starts_with("[System:card] Card "), "{}", prompts[1]);
+    assert!(
+        prompts[1].starts_with("[System:card] Card "),
+        "{}",
+        prompts[1]
+    );
 }
