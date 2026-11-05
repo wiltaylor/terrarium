@@ -1016,7 +1016,18 @@ pub(super) async fn send_as(
         .status(agent_id(&a))
         .await
         .is_some_and(|s| s.is_live() || s == AgentStatus::Restarting);
-    let queued = if runs {
+    // A turn that already waits in the store goes first: a turn that came
+    // while a wake was on the way can wait there after the wake read the
+    // queue (TER-25). This turn then waits behind it, and the wake below
+    // gives both to the supervisor in order.
+    let waiting = runs && {
+        let key = a.agent.id.to_string();
+        state
+            .db
+            .read(move |c| agents::has_queued_turns(c, &key))
+            .await?
+    };
+    let queued = if runs && !waiting {
         match state.supervisor.send_turn(agent_id(&a), text.clone()).await {
             Ok(()) => false,
             // It stopped meanwhile.
