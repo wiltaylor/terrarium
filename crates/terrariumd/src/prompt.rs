@@ -875,6 +875,7 @@ mod tests {
             idle_stop: None,
             compact_on_idle: None,
             compact_max_age: None,
+            card_reminder: None,
             skills: vec![],
             skills_off: vec![],
             default_skills: true,

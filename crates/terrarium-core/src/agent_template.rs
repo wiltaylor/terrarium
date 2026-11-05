@@ -41,6 +41,7 @@ pub const SPEC_KEYS: &[&str] = &[
     "idle_stop",
     "compact_on_idle",
     "compact_max_age",
+    "card_reminder",
     "skills",
     "skills_off",
     "default_skills",
@@ -234,6 +235,7 @@ fn full(def: &AgentDef) -> Spec {
     m.insert("idle_stop".into(), to(&def.idle_stop));
     m.insert("compact_on_idle".into(), to(&def.compact_on_idle));
     m.insert("compact_max_age".into(), to(&def.compact_max_age));
+    m.insert("card_reminder".into(), to(&def.card_reminder));
     m.insert("skills".into(), to(&def.skills));
     m.insert("skills_off".into(), to(&def.skills_off));
     m.insert("default_skills".into(), Value::Bool(def.default_skills));

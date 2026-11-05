@@ -353,6 +353,37 @@ fn find_row(conn: &Connection, id: &str) -> ApiResult<CardRow> {
         .ok_or_else(|| ApiError::not_found(format!("no card `{id}`")))
 }
 
+/// The cards of `agent` in the working column of their board (the column
+/// with the role [`WORKING`]), not archived: `(id, eta_at)`, in card
+/// order. For the card reminder (`crate::card_reminder`).
+pub fn working_cards_of(conn: &Connection, agent: &str) -> ApiResult<Vec<(String, Option<String>)>> {
+    let mut stmt = conn.prepare(&format!(
+        "{CARD_SELECT} WHERE c.assignee = ?1 AND k.role = ?2 AND c.archived = 0
+         ORDER BY c.project, c.number"
+    ))?;
+    let rows = stmt
+        .query_map(params![agent, WORKING], card_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows.into_iter().map(|c| (c.id, c.eta_at)).collect())
+}
+
+/// Record that the daemon reminded the assignee of card `id` to update it
+/// (PLAN §18, "Card reminder"): a `card` event with the change
+/// `reminded`, so the card history shows it. It wakes no agent and types
+/// no pointer.
+pub fn note_reminder(t: &mut Tx<'_>, id: &str, eta_passed: bool) -> ApiResult<()> {
+    let card = find_row(t, id)?;
+    let summary = format!("{} reminder to update it sent to the assignee", card.id);
+    card_event_as(
+        t,
+        &card,
+        "card",
+        "reminded",
+        Some(summary),
+        json!({"eta_passed": eta_passed}),
+    )
+}
+
 /// The project of a card, for permission checks before a write.
 pub fn project_of(conn: &Connection, id: &str) -> ApiResult<String> {
     Ok(find_row(conn, id)?.project)

@@ -166,6 +166,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             compact_max_age: r
                 .get::<_, Option<String>>("compact_max_age")?
                 .and_then(|s| s.parse::<CompactMaxAge>().ok()),
+            card_reminder: r.get("card_reminder")?,
             status: status_from(&r.get::<_, String>("status")?),
             session: None,
             new_session_on_prompt_change: r.get("new_session_on_prompt_change")?,
@@ -774,9 +775,10 @@ pub fn create_from(
                              restart, status, workspace, source, created_at, updated_at,
                              new_session_on_prompt_change, template, system_prompt,
                              subscription_pool, persona, skills, idle_stop,
-                             compact_on_idle, compact_max_age, skills_off, default_skills)
+                             compact_on_idle, compact_max_age, skills_off, default_skills,
+                             card_reminder)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13, ?14,
-                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             id,
             agent.name,
@@ -800,7 +802,8 @@ pub fn create_from(
             agent.compact_on_idle,
             agent.compact_max_age.map(CompactMaxAge::as_text),
             serde_json::to_string(&agent.skills_off)?,
-            agent.default_skills
+            agent.default_skills,
+            agent.card_reminder
         ],
     )?;
     set_roles(t, &id, &def.project, &def.roles)?;
@@ -861,6 +864,11 @@ pub struct AgentPatch {
     /// `null` goes back to the global default.
     #[serde(default, deserialize_with = "nullable")]
     pub compact_max_age: Option<Option<CompactMaxAge>>,
+    /// Remind the agent of its cards in the working column when it goes
+    /// idle (PLAN §18, "Card reminder"). `null` goes back to the global
+    /// default.
+    #[serde(default, deserialize_with = "nullable")]
+    pub card_reminder: Option<Option<bool>>,
     #[serde(default)]
     pub new_session_on_prompt_change: Option<bool>,
     /// The skills (PLAN §8.6): names of the skill library, or `*`. `[]`
@@ -908,6 +916,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             idle_stop: None,
             compact_on_idle: None,
             compact_max_age: None,
+            card_reminder: None,
             new_session_on_prompt_change: true,
         })?;
     }
@@ -943,6 +952,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             compact_max_age = CASE WHEN ?23 THEN ?24 ELSE compact_max_age END,
             skills_off = coalesce(?25, skills_off),
             default_skills = coalesce(?26, default_skills),
+            card_reminder = CASE WHEN ?27 THEN ?28 ELSE card_reminder END,
             updated_at = ?8
          WHERE id = ?1",
         params![
@@ -975,6 +985,8 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             p.compact_max_age.flatten().map(CompactMaxAge::as_text),
             skills_off.as_ref().map(serde_json::to_string).transpose()?,
             p.default_skills,
+            p.card_reminder.is_some(),
+            p.card_reminder.flatten(),
         ],
     )?;
     if p.harness.is_some() || p.subscription.is_some() || p.subscription_pool.is_some() {
@@ -1524,7 +1536,8 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
         || before.agent.restart != def.restart
         || before.agent.idle_stop != def.idle_stop
         || before.agent.compact_on_idle != def.compact_on_idle
-        || before.agent.compact_max_age != def.compact_max_age;
+        || before.agent.compact_max_age != def.compact_max_age
+        || before.agent.card_reminder != def.card_reminder;
     if changed {
         t.execute(
             "UPDATE agents SET harness = ?2, subscription = ?3, model = ?4, prompt = ?5,
@@ -1532,7 +1545,7 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
                     new_session_on_prompt_change = ?9, system_prompt = ?10,
                     subscription_pool = ?11, persona = ?12, skills = ?13, idle_stop = ?14,
                     compact_on_idle = ?15, compact_max_age = ?16, skills_off = ?17,
-                    default_skills = ?18
+                    default_skills = ?18, card_reminder = ?19
              WHERE id = ?1",
             params![
                 id,
@@ -1552,7 +1565,8 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
                 def.compact_on_idle,
                 def.compact_max_age.map(CompactMaxAge::as_text),
                 serde_json::to_string(&skills_off)?,
-                def.default_skills
+                def.default_skills,
+                def.card_reminder
             ],
         )?;
     }

@@ -11,6 +11,7 @@ pub mod assets;
 pub mod backup;
 pub mod calendar;
 pub mod card_delivery;
+pub mod card_reminder;
 pub mod config_repo;
 pub mod db;
 pub mod defaults;
