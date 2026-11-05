@@ -387,10 +387,12 @@ async fn a_grant_and_a_revoke_change_the_agent_tool_links() {
     let tmp = tempfile::tempdir().unwrap();
     let link = std::path::PathBuf::from("/opt/terrarium/bin/terrarium");
     let state = td.daemon.as_ref().unwrap().state.clone();
-    state.agent_tools.configure(terrariumd::agent_tools::Config {
-        root: tmp.path().to_owned(),
-        link: link.clone(),
-    });
+    state
+        .agent_tools
+        .configure(terrariumd::agent_tools::Config {
+            root: tmp.path().to_owned(),
+            link: link.clone(),
+        });
     td.post("/api/tools", tool("tracker-read")).await.ok();
     td.post(
         "/api/tools",
@@ -426,7 +428,9 @@ async fn a_grant_and_a_revoke_change_the_agent_tool_links() {
     );
     // Revoke the agent grant: only the project tool stays.
     let r = td
-        .delete(&format!("/api/tools/tracker-read/grants?grantee=agent:{w1}"))
+        .delete(&format!(
+            "/api/tools/tracker-read/grants?grantee=agent:{w1}"
+        ))
         .await;
     assert_eq!(r.status, 204, "{}", r.body);
     assert_eq!(links(&w1), ["deploy"]);
@@ -434,4 +438,3 @@ async fn a_grant_and_a_revoke_change_the_agent_tool_links() {
     assert_eq!(td.delete("/api/tools/deploy").await.status, 204);
     assert!(links(&w1).is_empty());
 }
-

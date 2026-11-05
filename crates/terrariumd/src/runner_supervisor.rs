@@ -4885,9 +4885,9 @@ impl Supervisor for RunnerSupervisor {
         if self.inner.state.set(Arc::downgrade(state)).is_ok() {
             // The tool links point at the CLI as the agent sees it.
             let link = match self.inner.cfg.sandbox.mode {
-                SandboxMode::Bwrap => Some(
-                    std::path::Path::new(crate::sandbox::SANDBOX_BIN_DIR).join("terrarium"),
-                ),
+                SandboxMode::Bwrap => {
+                    Some(std::path::Path::new(crate::sandbox::SANDBOX_BIN_DIR).join("terrarium"))
+                }
                 SandboxMode::None => self.inner.cfg.sandbox.cli.clone(),
             };
             if let Some(link) = link {

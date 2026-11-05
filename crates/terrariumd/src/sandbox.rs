@@ -974,7 +974,9 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         assert!(!env["PATH"].contains("agent-tools"), "{}", env["PATH"]);
         let none = cfg.wrap_with(spec(), &l, env, &|_| None, &resolve);
         assert!(!none.args.iter().any(|a| a.contains("agent-tools")));
-        l.agent_tools = Some(PathBuf::from("/run/t/agent-tools/01K8AGENT0000000000000000A"));
+        l.agent_tools = Some(PathBuf::from(
+            "/run/t/agent-tools/01K8AGENT0000000000000000A",
+        ));
         let env = cfg.child_env(&l, &BTreeMap::new(), &|_| None);
         assert!(
             env["PATH"].ends_with(":/opt/terrarium/agent-tools/bin"),
@@ -992,7 +994,9 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
             mode: SandboxMode::None,
             ..config()
         };
-        let env = plain.child_env(&l, &BTreeMap::new(), &|k| (k == "PATH").then(|| "/usr/bin".to_owned()));
+        let env = plain.child_env(&l, &BTreeMap::new(), &|k| {
+            (k == "PATH").then(|| "/usr/bin".to_owned())
+        });
         assert!(
             env["PATH"].ends_with(":/run/t/agent-tools/01K8AGENT0000000000000000A"),
             "{}",

@@ -114,7 +114,11 @@ pub async fn refresh_agent(state: &Shared, id: &str, project: &str) -> Option<Pa
     };
     let d = dir(&cfg.root, id);
     if let Err(e) = write(&d, &names, &cfg.link) {
-        warn!(agent = id, "cannot write the agent tools dir {}: {e}", d.display());
+        warn!(
+            agent = id,
+            "cannot write the agent tools dir {}: {e}",
+            d.display()
+        );
     }
     Some(d)
 }
@@ -154,7 +158,10 @@ pub async fn refresh(state: &Shared) {
                 && e.file_type().is_ok_and(|t| t.is_dir())
                 && let Err(err) = std::fs::remove_dir_all(e.path())
             {
-                warn!("cannot remove the agent tools dir {}: {err}", e.path().display());
+                warn!(
+                    "cannot remove the agent tools dir {}: {err}",
+                    e.path().display()
+                );
             }
         }
     }
@@ -182,11 +189,19 @@ mod tests {
         let d = dir(tmp.path(), "01K8AGENT0000000000000000A");
         let link = Path::new("/opt/terrarium/bin/terrarium");
         let list = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        write(&d, &list(&["tracker-read", "deploy", "../evil", "Bad"]), link).unwrap();
+        write(
+            &d,
+            &list(&["tracker-read", "deploy", "../evil", "Bad"]),
+            link,
+        )
+        .unwrap();
         assert_eq!(names(&d), ["deploy", "tracker-read"]);
         assert_eq!(std::fs::read_link(d.join("deploy")).unwrap(), link);
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(
+            std::fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
         // A revoke, and a link to something else is put right.
         std::fs::remove_file(d.join("deploy")).unwrap();
         std::os::unix::fs::symlink("/bin/sh", d.join("deploy")).unwrap();
