@@ -3265,6 +3265,46 @@ pub enum ToolCmd {
     Grant { name: String, grantee: String },
     /// Take a tool back (sysadmin)
     Revoke { name: String, grantee: String },
+    /// Run a tool granted to you: the daemon runs it on its target, and the
+    /// output and the exit code come back. In the sandbox each granted tool
+    /// is also a command of its own (`<name> args...`)
+    Run {
+        name: String,
+        /// Do not wait: start the run, register a `process` wait on it, and
+        /// return. The daemon mails the exit code and the output tail when
+        /// it ends (as `terrarium run`). An agent only
+        #[arg(long)]
+        detach: bool,
+        /// The arguments, after `--`
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+}
+
+/// The args of a run through a tool link (design D3): a program name that
+/// is not `terrarium` (nor `terrarium-*`, such as a test binary) is a tool,
+/// and `<tool> a b` becomes `terrarium tool run <tool> -- a b`. Other args
+/// stay as they are.
+pub fn shim_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = args.into_iter().collect();
+    let Some(first) = args.first() else {
+        return args;
+    };
+    let name = std::path::Path::new(first)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("terrarium")
+        .to_owned();
+    if name.starts_with("terrarium") || terrarium_core::tool::check_name(&name).is_err() {
+        return args;
+    }
+    let rest = args.split_off(1);
+    let mut out: Vec<std::ffi::OsString> = ["terrarium", "tool", "run", name.as_str(), "--"]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    out.extend(rest);
+    out
 }
 
 #[derive(Debug, Subcommand)]
@@ -4245,6 +4285,55 @@ mod tests {
             walk(s, &globals, s.get_name(), &mut bad);
         }
         assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    /// Design D3: a tool link runs `tool run <name> -- args`; the CLI and
+    /// its test binaries (`terrarium-<hash>`) stay the CLI.
+    #[test]
+    fn a_tool_link_runs_the_tool() {
+        let os = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            shim_args(os(&[
+                "/opt/terrarium/agent-tools/bin/tracker-read",
+                "show",
+                "--json",
+                "ABC-1"
+            ])),
+            os(&[
+                "terrarium",
+                "tool",
+                "run",
+                "tracker-read",
+                "--",
+                "show",
+                "--json",
+                "ABC-1"
+            ])
+        );
+        assert_eq!(
+            shim_args(os(&["deploy"])),
+            os(&["terrarium", "tool", "run", "deploy", "--"])
+        );
+        for same in [
+            os(&["terrarium", "tool", "ls"]),
+            os(&["/opt/terrarium/bin/terrarium", "whoami"]),
+            os(&["/target/debug/deps/terrarium-0a1b2c", "--test-threads", "1"]),
+            os(&["Bad_Name", "x"]),
+            os(&[]),
+        ] {
+            assert_eq!(shim_args(same.clone()), same);
+        }
+        let cli = Cli::try_parse_from(shim_args(os(&["tracker-read", "show", "-x"]))).unwrap();
+        let Command::Tool {
+            command: ToolCmd::Run { name, args, .. },
+        } = cli.command
+        else {
+            panic!("tool run");
+        };
+        assert_eq!(
+            (name.as_str(), args),
+            ("tracker-read", vec!["show".to_owned(), "-x".to_owned()])
+        );
     }
 
     /// PLAN §8.6: the skill commands and the `--skill` flags.

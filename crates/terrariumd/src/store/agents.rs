@@ -823,6 +823,13 @@ pub fn create_from(
         json!({"name": def.name, "harness": def.harness, "source": source,
                "template": template}),
     )?;
+    // The tools of the template (design Q4, TER-35): granted to the new
+    // agent, as the delegation of the sysadmin who set them.
+    if let Some(tref) = template {
+        let spec = crate::store::templates::get(t, &tref.id)?.spec;
+        let tools = terrarium_core::agent_template::tools_of(&spec).map_err(ApiError::invalid)?;
+        crate::store::tools::grant_from_template(t, &id, &def.project, tref, &tools)?;
+    }
     get(t, &id)
 }
 

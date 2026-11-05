@@ -46,7 +46,36 @@ pub const SPEC_KEYS: &[&str] = &[
     "skills_off",
     "default_skills",
     "new_session_on_prompt_change",
+    TOOLS_KEY,
 ];
+
+/// A key of a template spec only, not of an agent definition: the tool
+/// proxies that an agent made from the template gets (GitHub #21, design
+/// Q4). Only a sysadmin or the operator sets it; the daemon grants the
+/// tools at the create.
+pub const TOOLS_KEY: &str = "tools";
+
+/// The tools of a spec: a sorted list of tool names with no copy. A value
+/// that is not a list of valid tool names is an error.
+pub fn tools_of(spec: &Spec) -> Result<Vec<String>, String> {
+    let Some(v) = spec.get(TOOLS_KEY) else {
+        return Ok(Vec::new());
+    };
+    let Value::Array(list) = v else {
+        return Err("`tools` must be a list of tool names".into());
+    };
+    let mut out = Vec::new();
+    for x in list {
+        let n = x
+            .as_str()
+            .ok_or_else(|| "`tools` must be a list of tool names".to_owned())?;
+        crate::tool::check_name(n).map_err(|e| format!("tools: {e}"))?;
+        out.push(n.to_owned());
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
 
 /// The keys of `policy`.
 pub const POLICY_KEYS: &[&str] = &["targets", "mail_to", "cross_project"];
@@ -119,7 +148,10 @@ pub fn check_keys(spec: &Spec) -> Result<(), String> {
 /// example a missing `harness`.
 pub fn to_def(spec: &Spec, name: &str, project: &str) -> Result<AgentDef, String> {
     check_keys(spec)?;
+    tools_of(spec)?;
     let mut m = spec.clone();
+    // A template key, not an agent field.
+    m.remove(TOOLS_KEY);
     m.insert("name".into(), Value::String(name.to_owned()));
     m.insert("project".into(), Value::String(project.to_owned()));
     let mut def: AgentDef = serde_json::from_value(Value::Object(m)).map_err(|e| e.to_string())?;
@@ -151,7 +183,12 @@ pub fn spec_of(def: &AgentDef) -> Spec {
 /// no empty optional field. Two specs that make the same agent have the
 /// same normal form.
 pub fn normalize(spec: &Spec) -> Result<Spec, String> {
-    Ok(spec_of(&to_def(spec, "x", "x")?))
+    let mut n = spec_of(&to_def(spec, "x", "x")?);
+    let tools = tools_of(spec)?;
+    if !tools.is_empty() {
+        n.insert(TOOLS_KEY.into(), Value::from(tools));
+    }
+    Ok(n)
 }
 
 /// Read a TOML agent definition (an `agents/<name>.toml`, or a template
@@ -351,6 +388,31 @@ mod tests {
         assert!(!n.contains_key("default_skills") && !n.contains_key("skills_off"));
         let e = normalize(&spec(json!({"harness": "claude", "skills_off": ["*"]}))).unwrap_err();
         assert!(e.contains("default_skills"), "{e}");
+    }
+
+    /// `tools` is a key of the template, not of the agent: it stays in the
+    /// normal form, sorted and with no copy, and never reaches the agent
+    /// definition. A bad list is refused.
+    #[test]
+    fn tools_stay_on_the_template() {
+        let s = spec(json!({"harness": "claude", "tools": ["tracker-read", "deploy", "deploy"]}));
+        assert_eq!(tools_of(&s).unwrap(), ["deploy", "tracker-read"]);
+        let n = normalize(&s).unwrap();
+        assert_eq!(n["tools"], json!(["deploy", "tracker-read"]));
+        let def = to_def(&s, "w", "p").unwrap();
+        assert!(!spec_of(&def).contains_key("tools"));
+        assert!(
+            !normalize(&spec(json!({"harness": "claude", "tools": []})))
+                .unwrap()
+                .contains_key("tools")
+        );
+        for bad in [
+            json!({"harness": "claude", "tools": "deploy"}),
+            json!({"harness": "claude", "tools": [1]}),
+            json!({"harness": "claude", "tools": ["Bad_Name"]}),
+        ] {
+            assert!(to_def(&spec(bad.clone()), "w", "p").is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -806,11 +806,15 @@ terrarium tool ls                          the tools: NAME, TARGET, OWNER, SOURC
 terrarium tool show <name>                 the definition (secret names, never values) and the grants
 terrarium tool grant <name> <grantee>      <project>/<agent>, agent:<id>, or project:<name>
 terrarium tool revoke <name> <grantee>
+terrarium tool run <name> -- <args>        run a granted tool on its target; the exit code is the tool's
+<name> <args>                              the same, through the tool's link on PATH in the sandbox
+terrarium tool run --detach <name> -- <args>  start it and return: a process wait mails the exit code and the output tail (refused, exit 2, for a run that needs approval)
 ```
 
 - A project tool goes only to its own project.
 - A grant does not give the agent the target: no policy entry and no lease.
-- The run path (the shim on the agent's `PATH`) comes in a later phase.
+- In the sandbox each granted tool is a link in `/opt/terrarium/agent-tools/bin`, last on `PATH`: `tracker-read show ABC-12` runs `terrarium tool run tracker-read -- show ABC-12`.
+- `tool run` streams stdout and stderr, sends stdin only to a tool with `stdin = true` (and only when stdin is not a terminal), stops the run on Ctrl-C (exit 130), and exits with the tool's exit code. A refused run (no grant: `404`, a rule: `422`, the rate: `429`) prints the daemon's message and exits 1.
 
 ### System prompts
 

@@ -21,7 +21,7 @@ use crate::api::{CliError, ServerError, query};
 use crate::ctx::Ctx;
 use crate::transport::encode;
 
-const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+pub(crate) const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 /// The bytes of one input request, before base64.
 pub const CHUNK: usize = 256 * 1024;
 /// Seconds that one output poll waits.
@@ -53,8 +53,14 @@ async fn open(ctx: &Ctx, target: &str, what: &str, body: Value) -> anyhow::Resul
 }
 
 async fn send(ctx: &Ctx, target: &str, sid: &str, body: Value) -> anyhow::Result<()> {
+    send_at(ctx, &session_path(target, sid), body).await
+}
+
+/// `POST <session>/input`. `session` is the path of a session: a target
+/// session, or a tool session (`/api/tools/sessions/{id}`).
+pub(crate) async fn send_at(ctx: &Ctx, session: &str, body: Value) -> anyhow::Result<()> {
     ctx.api
-        .post(&format!("{}/input", session_path(target, sid)), Some(body))
+        .post(&format!("{session}/input"), Some(body))
         .await?;
     Ok(())
 }
@@ -78,21 +84,24 @@ async fn send_stdin(ctx: &Ctx, target: &str, sid: &str, bytes: &[u8]) -> anyhow:
 
 /// One output poll: the chunks as `(stream, bytes)`, the next offset, and
 /// the end once the session is done.
-struct Poll {
-    chunks: Vec<(String, Vec<u8>)>,
-    next: u64,
-    end: Option<Value>,
+pub(crate) struct Poll {
+    pub chunks: Vec<(String, Vec<u8>)>,
+    pub next: u64,
+    pub end: Option<Value>,
 }
 
 async fn poll(ctx: &Ctx, target: &str, sid: &str, since: u64) -> anyhow::Result<Poll> {
+    poll_at(ctx, &session_path(target, sid), since).await
+}
+
+/// `GET <session>/output?since=&wait=`: a long poll of the output of a
+/// target session or a tool session.
+pub(crate) async fn poll_at(ctx: &Ctx, session: &str, since: u64) -> anyhow::Result<Poll> {
     let q = query([
         ("since", Some(since.to_string())),
         ("wait", Some(POLL_WAIT.to_owned())),
     ]);
-    let o = ctx
-        .api
-        .get(&format!("{}/output", session_path(target, sid)), q)
-        .await?;
+    let o = ctx.api.get(&format!("{session}/output"), q).await?;
     let mut chunks = Vec::new();
     for c in o["chunks"].as_array().into_iter().flatten() {
         let data = B64
@@ -108,7 +117,7 @@ async fn poll(ctx: &Ctx, target: &str, sid: &str, since: u64) -> anyhow::Result<
 }
 
 /// The exit code of the CLI for the end of a remote command.
-fn exit_of(end: &Value) -> anyhow::Result<()> {
+pub(crate) fn exit_of(end: &Value) -> anyhow::Result<()> {
     match end["type"].as_str() {
         Some("exit") => {
             let code = match (end["code"].as_i64(), end["signal"].as_i64()) {

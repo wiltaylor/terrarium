@@ -114,6 +114,7 @@ import { createQuestionMock } from "./questions";
 import { createInboxMock, isPauseNotice } from "./inbox";
 import { createConfigMock } from "./config";
 import { createSkillMock, skillsError } from "./skills";
+import { createToolMock } from "./tools";
 import { createSystemPromptMock } from "./systemPrompts";
 import { createDbMock } from "./db";
 import { createTestRunMock } from "./testRuns";
@@ -898,6 +899,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   });
   if (w.projects.some((x) => x.name === "terrarium") && w.agents.some((a) => a.name === "lead")) calendarMock.seed();
   const skillMock = createSkillMock({ w, reply, fail, audit, caller: opts.scheduleCaller, available: opts.configRepo });
+  const toolMock = createToolMock({ w, iso, reply, fail, audit });
   // The effective skills of an agent (PLAN §8.6), as the API fills them.
   const withSkills = (a: Agent): Agent => Object.assign(a, { effective_skills: skillMock.effective(a) });
   const systemPromptMock = createSystemPromptMock({ w, iso, reply, fail, audit, emit, caller: opts.scheduleCaller, available: opts.configRepo });
@@ -4104,6 +4106,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     config: createConfigMock({ iso, reply, fail, audit, available: opts.configRepo, caller: opts.scheduleCaller }),
 
     // Terrarium-managed skills, in the config repo (./skills).
+    tools: toolMock.api,
     skills: skillMock.api,
 
     // The system prompt library, in the config repo (./systemPrompts).

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use terrarium_core::agent_template::TemplateDef;
+use terrarium_core::agent_template::{self, TemplateDef};
 use terrarium_core::config::{AgentDef, ProjectDef, RepoDef, SubscriptionDef, TargetDef};
 use terrarium_core::fleet::{self, Fleet, Issue, Kind};
 use terrarium_core::{HarnessId, Role};
@@ -1185,7 +1185,17 @@ pub fn authorize(actor: &Actor, plan: &Plan, prune: bool) -> ApiResult<()> {
                     "managing schedules from a fleet",
                 ),
                 Kind::Template => {
-                    policy::manage_templates(actor, e.project.as_deref(), "from a fleet")
+                    policy::manage_templates(actor, e.project.as_deref(), "from a fleet")?;
+                    // The tools of a template grant tools at each create: only
+                    // a sysadmin or the operator sets or changes them (TER-35).
+                    if !removal
+                        && e.changes
+                            .iter()
+                            .any(|c| c.field == agent_template::TOOLS_KEY)
+                    {
+                        policy::sysadmin(actor, "setting the tools of a template")?;
+                    }
+                    Ok(())
                 }
                 Kind::Agent => {
                     let project = e.project.as_deref().unwrap_or_default();

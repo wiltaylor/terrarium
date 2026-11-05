@@ -31,13 +31,13 @@ use crate::events::EventDraft;
 use crate::executor::{self, ExecSession, RemoteCmd, ToolEnd, ToolRun};
 use crate::store::tools::{self as store, ToolRow};
 
-/// The rate buckets of the (agent, tool) pairs, and the stdin rule of the
-/// live tool sessions.
+/// The rate buckets of the (agent, tool) pairs, and the interval of the
+/// approval sweep.
 #[derive(Default)]
 pub struct Rates {
     buckets: Mutex<HashMap<(String, String), Bucket>>,
-    /// Session ID to `stdin` of its tool, while the run is live.
-    stdin: Mutex<HashMap<String, bool>>,
+    /// The interval of the approval sweep; `None`: [`SWEEP_EVERY`].
+    sweep: Mutex<Option<Duration>>,
 }
 
 /// A token bucket: `n` runs at once, then `n` each `per`.
@@ -47,25 +47,17 @@ struct Bucket {
 }
 
 impl Rates {
-    /// Does tool session `id` take stdin? `None`: not a live tool run.
-    pub fn takes_stdin(&self, id: &str) -> Option<bool> {
-        self.stdin
+    /// The interval of the approval sweep.
+    pub fn sweep_every(&self) -> Duration {
+        self.sweep
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(id)
-            .copied()
+            .unwrap_or(SWEEP_EVERY)
     }
 
-    fn set_stdin(&self, id: &str, on: Option<bool>) {
-        let mut m = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
-        match on {
-            Some(v) => {
-                m.insert(id.to_owned(), v);
-            }
-            None => {
-                m.remove(id);
-            }
-        }
+    /// Tests: a shorter sweep interval. It applies within a second.
+    pub fn set_sweep_every(&self, d: Duration) {
+        *self.sweep.lock().unwrap_or_else(|e| e.into_inner()) = Some(d);
     }
 
     /// Take one run of `tool` for `caller` at the rate `(n, per)`. `Err`
@@ -99,13 +91,26 @@ pub struct Started {
     pub target: String,
 }
 
-/// Run tool `name` for `actor` with the agent arguments `argv`.
+/// What a run request did: started the run, or asked the operator first.
+pub enum Outcome {
+    Started(Started),
+    /// The tool asks the operator first (design D5): the approval question
+    /// and when it times out.
+    Pending {
+        question: String,
+        expires_at: String,
+    },
+}
+
+/// Run tool `name` for `actor` with the agent arguments `argv`. `approval`
+/// is the ID of the operator's approval of exactly this run (design D5).
 pub async fn run(
     state: &Shared,
     actor: &Actor,
     name: &str,
     argv: Vec<String>,
-) -> ApiResult<Started> {
+    approval: Option<String>,
+) -> ApiResult<Outcome> {
     let key = name.to_owned();
     let agent = actor.agent().map(|a| (a.id.clone(), a.project.clone()));
     let (row, granted) = state
@@ -135,11 +140,30 @@ pub async fn run(
     let def = row.def;
     core_tool::check_args(&def.args, &argv).map_err(ApiError::invalid)?;
     let caller = actor.label();
+    // Approval (design D5): an agent's run that the rule matches asks the
+    // operator first; the operator's own test run never does. A run with a
+    // valid approval takes it (once) and skips the rate: the operator
+    // allowed exactly this run.
+    let asks = actor.agent().is_some() && def.approval.asks(&argv);
+    let mut approved: Option<(String, Option<String>)> = None;
+    if asks && let Some(id) = approval {
+        let agent = actor.agent().map(|a| a.id.clone()).unwrap_or_default();
+        let (tool, a) = (def.name.clone(), argv.clone());
+        let q = state
+            .db
+            .write(caller.clone(), move |t| {
+                crate::store::questions::use_tool_run(t, &id, &agent, &tool, &a)
+            })
+            .await?;
+        approved = Some((q.id, q.answered_by));
+    }
     let rate = match &def.rate {
         Some(r) => core_tool::parse_rate(r).map_err(ApiError::invalid)?,
         None => core_tool::DEFAULT_RATE,
     };
-    if let Err(wait) = state.tool_rates.take(&caller, &def.name, rate) {
+    if approved.is_some() {
+        // Taken by the approval.
+    } else if let Err(wait) = state.tool_rates.take(&caller, &def.name, rate) {
         return Err(ApiError::new(
             Code::RateLimited,
             format!(
@@ -151,6 +175,34 @@ pub async fn run(
             ),
         )
         .with_details(json!({"retry_after": wait.as_secs().max(1)})));
+    }
+    if asks && approved.is_none() {
+        let agent = actor.agent().map(|a| a.id.clone()).unwrap_or_default();
+        let expires_at = chrono::Utc::now()
+            + chrono::Duration::from_std(def.approval_wait())
+                .unwrap_or_else(|_| chrono::Duration::hours(1));
+        let expires_at = expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let (tool, target, a, exp) = (
+            def.name.clone(),
+            def.target.clone(),
+            argv.clone(),
+            expires_at.clone(),
+        );
+        let q = state
+            .db
+            .write(caller.clone(), move |t| {
+                crate::store::questions::ask_tool_run(t, &agent, &tool, &target, &a, &exp)
+            })
+            .await?;
+        let expires_at = q
+            .tool_run
+            .as_ref()
+            .and_then(|r| r["expires_at"].as_str().map(str::to_owned))
+            .unwrap_or(expires_at);
+        return Ok(Outcome::Pending {
+            question: q.id,
+            expires_at,
+        });
     }
     let secrets = open_secrets(state, &def).await?;
     let env: BTreeMap<String, String> = secrets
@@ -197,18 +249,14 @@ pub async fn run(
         .clone()
         .or_else(|| actor.agent().map(|a| a.project.clone()));
     let label = caller.clone();
-    let sid_cell: Arc<Mutex<Option<String>>> = Arc::default();
     let ended = {
-        let sid_cell = sid_cell.clone();
         let (tool, target, project) = (tool.clone(), target.clone(), project.clone());
         let (agent_id, agent_name) = (agent_id.clone(), agent_name.clone());
+        let approved = approved.clone();
         Box::new(move |e: ToolEnd| {
-            if let Some(id) = sid_cell.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                st.tool_rates.set_stdin(&id, None);
-            }
             tokio::spawn(async move {
                 record_end(
-                    &st, label, tool, target, project, agent_id, agent_name, audit_argv,
+                    &st, label, tool, target, project, agent_id, agent_name, audit_argv, approved,
                     started_at, e,
                 )
                 .await;
@@ -232,11 +280,6 @@ pub async fn run(
         },
     )
     .await?;
-    state.tool_rates.set_stdin(&session.id, Some(def.stdin));
-    *sid_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.id.clone());
-    if session.is_done() {
-        state.tool_rates.set_stdin(&session.id, None);
-    }
     let (sid, t, tg, p) = (
         session.id.clone(),
         tool.clone(),
@@ -245,6 +288,7 @@ pub async fn run(
     );
     let (aid, aname) = (agent_id, agent_name);
     let argv_n = argv.len();
+    let approval_id = approved.as_ref().map(|(q, _)| q.clone());
     state
         .db
         .write(caller, move |t_| {
@@ -252,7 +296,7 @@ pub async fn run(
                 "tool.run",
                 format!("tool {t} started on {tg}"),
                 json!({"change": "started", "tool": t, "target": tg, "session": sid,
-                       "args": argv_n}),
+                       "args": argv_n, "approval": approval_id}),
             );
             if let (Some(id), Some(n)) = (aid, aname) {
                 ev = ev.agent(id, n);
@@ -264,11 +308,11 @@ pub async fn run(
             Ok(())
         })
         .await?;
-    Ok(Started {
+    Ok(Outcome::Started(Started {
         session,
         tool,
         target,
-    })
+    }))
 }
 
 /// The `timeout` of a tool in seconds, if it has one.
@@ -325,6 +369,7 @@ async fn record_end(
     agent_id: Option<String>,
     agent_name: Option<String>,
     argv: Vec<String>,
+    approved: Option<(String, Option<String>)>,
     started_at: Instant,
     e: ToolEnd,
 ) {
@@ -337,9 +382,13 @@ async fn record_end(
         .db
         .write(label, move |t| {
             let argv: Vec<String> = argv.into_iter().map(|a| t.redact_string(a)).collect();
-            let detail = json!({"tool": tool, "target": target, "agent": agent_name,
+            let mut detail = json!({"tool": tool, "target": target, "agent": agent_name,
                 "argv": argv, "exit": exit, "end": e.end, "duration_ms": duration_ms,
                 "bytes": e.bytes, "truncated": e.truncated});
+            if let Some((q, by)) = approved {
+                detail["approval"] = json!(q);
+                detail["approved_by"] = json!(by);
+            }
             t.audit("tool.run", &tool, project.as_deref(), detail.clone())?;
             let mut ev = EventDraft::new(
                 "tool.run",
@@ -361,4 +410,59 @@ async fn record_end(
     if let Err(err) = r {
         tracing::warn!("cannot record the end of a tool run: {err}");
     }
+}
+
+/// How often the sweep retracts the tool run approvals that timed out.
+pub const SWEEP_EVERY: Duration = Duration::from_secs(30);
+
+/// Retract each open tool run approval whose time ran out (design D5): the
+/// Inbox loses it, and the waiting CLI sees `retracted` and exits 77.
+pub async fn sweep(state: &Shared) {
+    let at = crate::db::now();
+    let ids = match state
+        .db
+        .read(move |c| crate::store::questions::expired_tool_runs(c, &at))
+        .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("cannot read the expired tool run approvals: {e}");
+            return;
+        }
+    };
+    for id in ids {
+        let r = state
+            .db
+            .write("system", move |t| {
+                crate::store::questions::retract(t, &id, false, Some("the approval timed out"))
+            })
+            .await;
+        if let Err(e) = r {
+            tracing::debug!("cannot retract an expired tool run approval: {e}");
+        }
+    }
+}
+
+/// The sweep task: [`sweep`] each `state.tool_rates` interval
+/// ([`SWEEP_EVERY`] unless a test sets another).
+pub fn spawn_sweep(state: Shared) -> tokio::task::JoinHandle<()> {
+    let weak = Arc::downgrade(&state);
+    drop(state);
+    tokio::spawn(async move {
+        // It wakes at least each second, so a new interval applies soon.
+        let mut last = Instant::now();
+        loop {
+            let every = match weak.upgrade() {
+                Some(s) => s.tool_rates.sweep_every(),
+                None => return,
+            };
+            tokio::time::sleep(every.min(Duration::from_secs(1))).await;
+            if last.elapsed() < every {
+                continue;
+            }
+            last = Instant::now();
+            let Some(state) = weak.upgrade() else { return };
+            sweep(&state).await;
+        }
+    })
 }

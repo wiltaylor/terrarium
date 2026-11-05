@@ -189,6 +189,12 @@ async fn create(
     policy::manage_templates(&actor, project.as_deref(), "")?;
     let spec = spec_of(b.spec)?;
     check_skills(&state, &spec)?;
+    // Tools on a template grant tools at each create: a sysadmin or the
+    // operator only (TER-35, the operator's Q2).
+    let tools = agent_template::tools_of(&spec).map_err(ApiError::invalid)?;
+    if !tools.is_empty() {
+        policy::sysadmin(&actor, "setting the tools of a template")?;
+    }
     let new = NewTemplate {
         name: b.name,
         project,
@@ -203,6 +209,7 @@ async fn create(
         .db
         .write(actor.label(), move |t| {
             templates::check_subscription(t, &new.spec)?;
+            crate::store::tools::check_template_tools(t, new.project.as_deref(), &tools)?;
             templates::create(t, &new, repo.as_deref())
         })
         .await?;
@@ -250,6 +257,19 @@ async fn update(
     if let Some(spec) = &spec {
         check_skills(&state, spec)?;
     }
+    // A change of the tools needs a sysadmin or the operator (TER-35).
+    let tools = match &spec {
+        Some(spec) => {
+            let new = agent_template::tools_of(spec).map_err(ApiError::invalid)?;
+            let old = agent_template::tools_of(&t.spec).unwrap_or_default();
+            if new != old {
+                policy::sysadmin(&actor, "changing the tools of a template")?;
+            }
+            Some(new)
+        }
+        None => None,
+    };
+    let project = t.project.clone();
     let patch = TemplatePatch {
         name: b.name,
         description: b.description,
@@ -262,6 +282,9 @@ async fn update(
         .write(actor.label(), move |tx| {
             if let Some(spec) = &patch.spec {
                 templates::check_subscription(tx, spec)?;
+            }
+            if let Some(tools) = &tools {
+                crate::store::tools::check_template_tools(tx, project.as_deref(), tools)?;
             }
             templates::update(tx, &t.id, &patch, repo.as_deref())
         })
@@ -458,6 +481,13 @@ pub async fn create_body(
     let Value::Object(mut body) = body else {
         return Err(ApiError::bad_request("the body is not a JSON object"));
     };
+    // The tools of an agent come from the tools of its template (set by a
+    // sysadmin) or from a grant, never from the create body (TER-35).
+    if body.contains_key(agent_template::TOOLS_KEY) {
+        return Err(ApiError::invalid(
+            "an agent create takes no `tools`: grant a tool with `terrarium tool grant`, or use a template whose tools a sysadmin set",
+        ));
+    }
     let key = match body.remove("template") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if s.trim().is_empty() => None,

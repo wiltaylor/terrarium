@@ -2,11 +2,14 @@
 //! show, grant, and revoke. A definition comes from `tools/<name>.toml` or
 //! `POST /api/tools`; the run path comes later.
 
+use anyhow::Context as _;
+use base64::Engine as _;
 use serde_json::{Value, json};
 
+use super::remote::{self, B64};
 use super::secrets::grantee;
 use super::{print_object, print_table};
-use crate::api::query;
+use crate::api::{CliError, ServerError, query};
 use crate::cli::ToolCmd;
 use crate::ctx::Ctx;
 use crate::transport::encode;
@@ -98,5 +101,418 @@ pub async fn tool(ctx: &Ctx, cmd: &ToolCmd) -> anyhow::Result<()> {
                 c.line(format!("revoked tool {name} from {g}"));
             })
         }
+        ToolCmd::Run { name, detach, args } => run(ctx, name, *detach, args).await,
+    }
+}
+
+/// The exit code of a run that the operator refused, or whose approval was
+/// retracted or timed out (design Q5).
+const EXIT_REFUSED: u8 = 77;
+
+/// Wait until the operator answers the approval question `q` of a run of
+/// tool `name`. `Ok` when it is approved. A refuse, a retract, or a timeout
+/// prints the reason and exits [`EXIT_REFUSED`]. Ctrl-C retracts the
+/// question and exits 130.
+async fn wait_approval(
+    ctx: &Ctx,
+    name: &str,
+    q: &str,
+    expires_at: Option<&str>,
+) -> anyhow::Result<()> {
+    eprintln!(
+        "terrarium: tool {name} waits for the operator's approval (question {q}{})",
+        expires_at
+            .map(|e| format!(", until {e}"))
+            .unwrap_or_default()
+    );
+    let qpath = format!("/api/questions/{}", encode(q));
+    let wait = async {
+        // The first poll after `poll_floor` (2 s; 0 in the tests), then up
+        // to 5 s between polls.
+        let mut pause = ctx.poll_floor.min(std::time::Duration::from_millis(500));
+        loop {
+            let v = ctx.api.get(&qpath, vec![]).await?;
+            match v["status"].as_str().unwrap_or("") {
+                "open" => {}
+                "answered" if v["answer_option"] == 0 => return Ok::<_, anyhow::Error>(true),
+                "answered" => {
+                    eprintln!("terrarium: the operator refused this run of tool {name}");
+                    return Ok(false);
+                }
+                _ => {
+                    let why = v["retract_reason"].as_str().unwrap_or("it was retracted");
+                    eprintln!("terrarium: the approval of tool {name} ended: {why}");
+                    return Ok(false);
+                }
+            }
+            if !pause.is_zero() {
+                tokio::time::sleep(pause).await;
+            }
+            pause = (pause * 2).min(std::time::Duration::from_secs(5));
+        }
+    };
+    let ok = tokio::select! {
+        r = wait => r?,
+        _ = tokio::signal::ctrl_c() => {
+            let _ = ctx
+                .api
+                .post(&format!("{qpath}/retract"), Some(json!({"reason": "the agent stopped waiting"})))
+                .await;
+            eprintln!("terrarium: stopped waiting; the approval question {q} is retracted");
+            return Err(CliError::RemoteExit(130).into());
+        }
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(CliError::RemoteExit(EXIT_REFUSED).into())
+    }
+}
+
+/// Does this run of a tool with `approval` (`true`, or `{first: [...]}`)
+/// ask the operator first? As the daemon's rule (design D5).
+fn needs_approval(approval: &Value, args: &[String]) -> bool {
+    match approval {
+        Value::Bool(b) => *b,
+        Value::Object(o) => o.get("first").and_then(Value::as_array).is_some_and(|f| {
+            args.first()
+                .is_some_and(|a| f.iter().any(|x| x.as_str() == Some(a.as_str())))
+        }),
+        _ => false,
+    }
+}
+
+/// A 409 (the run ended) or a 422 (the tool takes no stdin) on an input
+/// call: stop sending, and read the end from the output.
+fn input_refused(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<ServerError>()
+        .is_some_and(|s| s.status == 409 || s.status == 422)
+}
+
+/// `terrarium tool run <name> -- <args>` (and a tool link, design D3): the
+/// daemon runs the tool on its target (`POST /api/tools/{name}/run`), the
+/// output streams to stdout and stderr (`/api/tools/sessions/{id}/output`),
+/// and the CLI exits with the remote exit code. Stdin goes to a tool that
+/// takes it (`stdin = true`), when stdin is not a terminal. Ctrl-C ends the
+/// run (`DELETE /api/tools/sessions/{id}`) and exits 130.
+async fn run(ctx: &Ctx, name: &str, detach: bool, args: &[String]) -> anyhow::Result<()> {
+    use std::io::IsTerminal as _;
+    if detach && !ctx.is_agent() {
+        return Err(CliError::usage(
+            "--detach is for an agent: the wait that gets the result is the agent's",
+        ));
+    }
+    // A run that needs the operator's approval waits for the answer (up to
+    // the approval timeout) before it starts. --detach must not block the
+    // turn, so it refuses such a run before anything is asked.
+    let tool = if detach || !std::io::stdin().is_terminal() {
+        Some(ctx.api.get(&path(name), vec![]).await?)
+    } else {
+        None
+    };
+    if detach
+        && tool
+            .as_ref()
+            .is_some_and(|t| needs_approval(&t["approval"], args))
+    {
+        return Err(CliError::usage(format!(
+            "tool {name} needs the operator's approval for this run, and --detach does not wait for it: \
+             run it without --detach (the run waits for the answer)"
+        )));
+    }
+    let wants_stdin = !detach && tool.as_ref().is_some_and(|t| t["stdin"] == true);
+    let mut r = ctx
+        .api
+        .post(&format!("{}/run", path(name)), Some(json!({"argv": args})))
+        .await?;
+    // A tool that asks the operator first answers 202 {pending, question}
+    // (design D5): wait for the answer, then run with the approval.
+    if r["pending"] == true {
+        let q = r["question"]
+            .as_str()
+            .context("the daemon answered `pending` without `question`")?
+            .to_owned();
+        if detach {
+            // The tool changed since the check above: take the question back.
+            let _ = ctx
+                .api
+                .post(
+                    &format!("/api/questions/{}/retract", encode(&q)),
+                    Some(json!({"reason": "the run was started with --detach"})),
+                )
+                .await;
+            return Err(CliError::usage(format!(
+                "tool {name} needs the operator's approval for this run, and --detach does not wait for it: \
+                 run it without --detach"
+            )));
+        }
+        wait_approval(ctx, name, &q, r["expires_at"].as_str()).await?;
+        r = match ctx
+            .api
+            .post(
+                &format!("{}/run", path(name)),
+                Some(json!({"argv": args, "approval": q})),
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e)
+                if e.downcast_ref::<ServerError>()
+                    .is_some_and(|s| s.status == 409) =>
+            {
+                eprintln!("terrarium: tool {name} was not run: {e}");
+                return Err(CliError::RemoteExit(EXIT_REFUSED).into());
+            }
+            Err(e) => return Err(e),
+        };
+    }
+    let sid = r["session_id"]
+        .as_str()
+        .context("the daemon answered without `session_id`")?
+        .to_owned();
+    let session = format!("/api/tools/sessions/{}", encode(&sid));
+    if detach {
+        // The run goes on with no reader; a `process` wait gets its end.
+        let me = ctx.me().await?;
+        let w = ctx
+            .api
+            .post(
+                &format!("/api/agents/{}/waits", encode(&me)),
+                Some(json!({"kind": "process", "session": sid, "reason": format!("tool {name}")})),
+            )
+            .await?;
+        let wid = w["id"].as_str().unwrap_or("?").to_owned();
+        return ctx.emit(&json!({"session_id": sid, "tool": name, "wait": w}), |c, _| {
+            c.line(format!(
+                "tool {name} runs detached (wait {wid}, session {sid}). End your turn: the daemon mails the exit code and the output tail."
+            ));
+            c.line(format!("`terrarium run log {wid}` shows the output so far."));
+        });
+    }
+    if wants_stdin {
+        let input = ctx.text("-")?;
+        let mut open = true;
+        for chunk in input.as_bytes().chunks(remote::CHUNK) {
+            match remote::send_at(ctx, &session, json!({"data": B64.encode(chunk)})).await {
+                Ok(()) => {}
+                Err(e) if input_refused(&e) => {
+                    open = false;
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if open {
+            match remote::send_at(ctx, &session, json!({"eof": true})).await {
+                Err(e) if !input_refused(&e) => return Err(e),
+                _ => {}
+            }
+        }
+    }
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let output = async {
+        let mut since = 0;
+        loop {
+            let p = remote::poll_at(ctx, &session, since).await?;
+            for (stream, bytes) in &p.chunks {
+                let is_err = stream == "stderr";
+                if ctx.json {
+                    if is_err { &mut err } else { &mut out }.extend_from_slice(bytes);
+                } else {
+                    ctx.out.write_bytes(is_err, bytes);
+                }
+            }
+            since = p.next;
+            if let Some(end) = p.end {
+                return Ok::<_, anyhow::Error>(end);
+            }
+        }
+    };
+    let end = tokio::select! {
+        r = output => r?,
+        _ = tokio::signal::ctrl_c() => {
+            let _ = ctx.api.delete(&session, vec![]).await;
+            eprintln!("terrarium: the run of tool {name} was stopped");
+            return Err(CliError::RemoteExit(130).into());
+        }
+    };
+    if ctx.json {
+        ctx.line(serde_json::to_string_pretty(&json!({
+            "session_id": sid,
+            "tool": name,
+            "stdout": String::from_utf8_lossy(&out),
+            "stderr": String::from_utf8_lossy(&err),
+            "end": end,
+        }))?);
+    }
+    remote::exit_of(&end)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::api::exit_code_of;
+    use crate::transport::mock::MockTransport;
+
+    fn ctx(mock: &MockTransport) -> Ctx {
+        Ctx::for_test(Arc::new(mock.clone()), None)
+    }
+
+    /// `run` reads the tool (for its `stdin`) only when stdin is not a
+    /// terminal: queue that answer only then.
+    fn tool_reply(mock: &MockTransport) {
+        use std::io::IsTerminal as _;
+        if !std::io::stdin().is_terminal() {
+            mock.reply(200, json!({"name": "t", "stdin": false}));
+        }
+    }
+
+    /// TER-31: an approved run polls the question, posts again with the
+    /// approval and the same argv, then reads the session as before.
+    #[tokio::test]
+    async fn an_approved_run_posts_again_with_the_approval() {
+        let mock = MockTransport::new();
+        tool_reply(&mock);
+        mock.reply(
+            202,
+            json!({"pending": true, "question": "Q1", "expires_at": "x"}),
+        )
+        .reply(200, json!({"id": "Q1", "status": "open"}))
+        .reply(
+            200,
+            json!({"id": "Q1", "status": "answered", "answer_option": 0}),
+        )
+        .reply(
+            201,
+            json!({"session_id": "S1", "tool": "t", "target": "box"}),
+        )
+        .reply(
+            200,
+            json!({"since": 0, "next": 3, "done": true,
+                       "chunks": [{"stream": "stdout", "data": "b2sK"}],
+                       "end": {"type": "exit", "code": 0, "reason": "exited"}}),
+        );
+        let c = ctx(&mock);
+        run(&c, "t", false, &["show".into(), "T-1".into()])
+            .await
+            .unwrap();
+        let reqs = mock.requests();
+        let posts: Vec<_> = reqs
+            .iter()
+            .filter(|r| r.path.ends_with("/run"))
+            .map(|r| r.body.clone().unwrap())
+            .collect();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0], json!({"argv": ["show", "T-1"]}));
+        assert_eq!(posts[1], json!({"argv": ["show", "T-1"], "approval": "Q1"}));
+        assert!(reqs.iter().any(|r| r.path == "/api/questions/Q1"));
+    }
+
+    /// A refuse, a retract (the timeout), or a 409 on the second post exits
+    /// 77, and nothing runs.
+    #[tokio::test]
+    async fn a_refused_or_expired_run_exits_77() {
+        for last in [
+            json!({"id": "Q1", "status": "answered", "answer_option": 1}),
+            json!({"id": "Q1", "status": "retracted", "retract_reason": "the approval timed out"}),
+        ] {
+            let mock = MockTransport::new();
+            tool_reply(&mock);
+            mock.reply(202, json!({"pending": true, "question": "Q1"}))
+                .reply(200, last.clone());
+            let e = run(&ctx(&mock), "t", false, &[]).await.unwrap_err();
+            assert_eq!(exit_code_of(&e), 77, "{last}");
+            assert_eq!(
+                mock.requests()
+                    .iter()
+                    .filter(|r| r.path.ends_with("/run"))
+                    .count(),
+                1,
+                "{last}"
+            );
+        }
+        let mock = MockTransport::new();
+        tool_reply(&mock);
+        mock.reply(202, json!({"pending": true, "question": "Q1"}))
+            .reply(200, json!({"id": "Q1", "status": "answered", "answer_option": 0}))
+            .reply(
+                409,
+                json!({"error": {"code": "conflict", "message": "approval Q1 does not allow this run: it was used already"}}),
+            );
+        let e = run(&ctx(&mock), "t", false, &[]).await.unwrap_err();
+        assert_eq!(exit_code_of(&e), 77);
+    }
+
+    fn agent_ctx(mock: &MockTransport) -> Ctx {
+        Ctx::for_test(
+            Arc::new(mock.clone()),
+            Some(crate::ctx::AgentEnv {
+                agent: "01K8AGENT0000000000000000A".into(),
+                socket: "/nonexistent".into(),
+            }),
+        )
+    }
+
+    /// The approval rule of the daemon, for --detach.
+    #[test]
+    fn a_run_needs_approval_as_the_daemon_says() {
+        let a = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(needs_approval(&json!(true), &a(&[])));
+        assert!(!needs_approval(&json!(false), &a(&["x"])));
+        assert!(!needs_approval(&Value::Null, &a(&["x"])));
+        let first = json!({"first": ["comment", "transition"]});
+        assert!(needs_approval(&first, &a(&["comment", "T-1"])));
+        assert!(!needs_approval(&first, &a(&["show", "comment"])));
+        assert!(!needs_approval(&first, &a(&[])));
+    }
+
+    /// TER-32 with TER-31: --detach refuses a run that needs approval
+    /// before anything is posted (exit 2), and takes the question back
+    /// when the daemon asks anyway (the tool changed in between).
+    #[tokio::test]
+    async fn detach_refuses_a_run_that_needs_approval() {
+        let mock = MockTransport::new();
+        mock.reply(
+            200,
+            json!({"name": "t", "approval": {"first": ["comment"]}}),
+        );
+        let e = run(
+            &agent_ctx(&mock),
+            "t",
+            true,
+            &["comment".into(), "T-1".into()],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(exit_code_of(&e), 2, "{e:#}");
+        assert!(format!("{e:#}").contains("without --detach"), "{e:#}");
+        assert!(!mock.requests().iter().any(|r| r.path.ends_with("/run")));
+
+        let mock = MockTransport::new();
+        mock.reply(200, json!({"name": "t", "approval": false}))
+            .reply(202, json!({"pending": true, "question": "Q7"}))
+            .reply(200, json!({"id": "Q7", "status": "retracted"}));
+        let e = run(&agent_ctx(&mock), "t", true, &[]).await.unwrap_err();
+        assert_eq!(exit_code_of(&e), 2, "{e:#}");
+        let reqs = mock.requests();
+        assert!(
+            reqs.iter().any(|r| r.path == "/api/questions/Q7/retract"),
+            "{reqs:?}"
+        );
+        assert!(!reqs.iter().any(|r| r.path.contains("/waits")));
+    }
+
+    /// --detach is for an agent.
+    #[tokio::test]
+    async fn detach_is_for_an_agent() {
+        let mock = MockTransport::new();
+        let e = run(&ctx(&mock), "t", true, &[]).await.unwrap_err();
+        assert_eq!(exit_code_of(&e), 2);
+        assert!(mock.requests().is_empty());
     }
 }

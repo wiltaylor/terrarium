@@ -42,6 +42,7 @@ const AccountPage = lazy(() => import("../features/settings/AccountPage"));
 const SoftwarePage = lazy(() => import("../features/settings/SoftwarePage"));
 const ConfigPage = lazy(() => import("../features/config/ConfigPage"));
 const SkillsPage = lazy(() => import("../features/skills/SkillsPage"));
+const ToolsPage = lazy(() => import("../features/tools/ToolsPage"));
 const SessionPage = lazy(() => import("../features/sessions/SessionPage"));
 const SecretsPage = lazy(() => import("../features/secrets/SecretsPage"));
 // Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
@@ -97,6 +98,7 @@ export function App() {
           <Route path="/templates" component={TemplatesPage} />
           <Route path="/system-prompts" component={SystemPromptsPage} />
           <Route path="/skills/:name?" component={SkillsPage} />
+          <Route path="/tools" component={ToolsPage} />
           <Route path="/targets" component={TargetsPage} />
           <Route path="/harness" component={ConfigPage} />
           <Route path="/hosts" component={HostsPage} />

@@ -105,6 +105,9 @@ pub enum QuestionKind {
     Question,
     Notice,
     Bundle,
+    /// The approval of one tool run (GitHub #21, design D5, TER-31): the
+    /// daemon asks it for an agent; only the operator answers it.
+    ToolRun,
 }
 
 impl QuestionKind {
@@ -113,6 +116,7 @@ impl QuestionKind {
             Self::Question => "question",
             Self::Notice => "notice",
             Self::Bundle => "bundle",
+            Self::ToolRun => "tool_run",
         }
     }
 
@@ -121,6 +125,7 @@ impl QuestionKind {
             "question" => Ok(Self::Question),
             "notice" => Ok(Self::Notice),
             "bundle" => Ok(Self::Bundle),
+            "tool_run" => Ok(Self::ToolRun),
             other => Err(ApiError::invalid(format!(
                 "bad kind `{other}`: use question, notice, or bundle"
             ))),
@@ -239,6 +244,12 @@ pub struct Question {
     /// The actor label of the retract: `operator` or `agent:<ulid>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retracted_by: Option<String>,
+    /// A `tool_run` question: `{tool, target, argv, expires_at}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_run: Option<serde_json::Value>,
+    /// A `tool_run` question: when its approved run started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_at: Option<String>,
     /// The mail thread of the question: the answer goes on it.
     pub thread_id: String,
     pub created_at: String,
@@ -274,6 +285,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Question> {
     let option: Option<i64> = r.get("answer_option")?;
     let kind: String = r.get("kind")?;
     let items: Option<String> = r.get("items")?;
+    let tool_run: Option<String> = r.get("tool_run")?;
     Ok(Question {
         id: r.get("id")?,
         kind: QuestionKind::parse(&kind).unwrap_or_default(),
@@ -296,6 +308,8 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Question> {
         answered_at: r.get("answered_at")?,
         retract_reason: r.get("retract_reason")?,
         retracted_by: r.get("retracted_by")?,
+        tool_run: tool_run.and_then(|v| serde_json::from_str(&v).ok()),
+        used_at: r.get("used_at")?,
         thread_id: r.get("thread_id")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
@@ -364,9 +378,14 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
         sql.push_str(" AND card = ?");
         args.push(c.clone());
     }
-    if let Some(k) = f.kind {
-        sql.push_str(" AND kind = ?");
-        args.push(k.as_str().to_owned());
+    match f.kind {
+        Some(k) => {
+            sql.push_str(" AND kind = ?");
+            args.push(k.as_str().to_owned());
+        }
+        // A tool run approval is the operator's, not the agent's: a list of
+        // every kind leaves it out (the recap, `question ls`).
+        None => sql.push_str(" AND kind <> 'tool_run'"),
     }
     match (f.status, f.recent) {
         (Some(s), _) => {
@@ -671,7 +690,7 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
         .find(|q| q.kind == n.kind && same_text(&q.text, &text))
     {
         let wait_for = match n.kind {
-            QuestionKind::Question => "the answer",
+            QuestionKind::Question | QuestionKind::ToolRun => "the answer",
             QuestionKind::Notice => "the acknowledgement",
             QuestionKind::Bundle => "the answers",
         };
@@ -755,6 +774,11 @@ fn wrong_kind(q: &Question, what: &str, hint: &str) -> ApiError {
 /// Change an open question and add 1 to its revision. A question that is
 /// not open is `409`.
 pub fn update(t: &mut Tx<'_>, id: &str, p: QuestionPatch) -> ApiResult<Question> {
+    if get(t, id)?.kind == QuestionKind::ToolRun {
+        return Err(ApiError::conflict(
+            "a tool run approval does not change; retract it and run the tool again",
+        ));
+    }
     let q = get(t, id)?;
     if q.status != QuestionStatus::Open {
         return Err(not_open(&q, "an update"));
@@ -1149,6 +1173,11 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
     if q.status != QuestionStatus::Open {
         return Err(not_open(&q, "an answer"));
     }
+    if q.kind == QuestionKind::ToolRun && *by != mail::Address::Operator {
+        return Err(ApiError::forbidden(
+            "only the operator approves a tool run; no agent answers this question",
+        ));
+    }
     if let Some(r) = a.revision.filter(|r| *r != q.revision) {
         return Err(ApiError::conflict(format!(
             "{} {} changed: it is at revision {}, and the answer is for revision {r}. Read it \
@@ -1199,7 +1228,10 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
     )?;
     let q = get(t, &q.id)?;
     let ended = end_waits(t, &q, "answered")?;
-    if let Ok(to) = mail::resolve(t, &q.agent, None) {
+    // A tool run approval: the agent's CLI waits on the question, no mail.
+    if q.kind != QuestionKind::ToolRun
+        && let Ok(to) = mail::resolve(t, &q.agent, None)
+    {
         let who = by.display();
         let mut body = format!(
             "{who} answered your question {} (revision {}).\n\nYour question:\n{}\n",
@@ -1321,10 +1353,13 @@ pub fn retract(
     )?;
     let q = get(t, &q.id)?;
     let ended = end_waits(t, &q, "retracted")?;
-    if !by_owner && let Ok(to) = mail::resolve(t, &q.agent, None) {
+    if !by_owner
+        && q.kind != QuestionKind::ToolRun
+        && let Ok(to) = mail::resolve(t, &q.agent, None)
+    {
         let noun = q.noun();
         let need = match q.kind {
-            QuestionKind::Question => "you need no answer to it",
+            QuestionKind::Question | QuestionKind::ToolRun => "you need no answer to it",
             QuestionKind::Notice => "it needs no acknowledgement",
             QuestionKind::Bundle => "you need no answers to it",
         };
@@ -1503,10 +1538,156 @@ fn emit_change(
     // A bundle is an item of the Inbox kind `question`.
     let inbox_kind = match q.kind {
         QuestionKind::Notice => "notice",
-        QuestionKind::Question | QuestionKind::Bundle => "question",
+        QuestionKind::Question | QuestionKind::Bundle | QuestionKind::ToolRun => "question",
     };
     crate::store::inbox::emit(t, &q.item_id(), inbox_kind, inbox_change, Some(&q.project))?;
     Ok(())
+}
+
+// ------------------------------------------------------------ tool runs
+
+/// The labels of a tool run approval: option 0 runs, option 1 refuses.
+pub const TOOL_RUN_OPTIONS: [&str; 2] = ["Run", "Refuse"];
+
+/// Ask the operator to approve one run of `tool` on `target` with `argv`
+/// for agent `agent` (design D5). An open approval of the same agent, tool,
+/// and argv comes back as it is. It counts toward the open questions of the
+/// agent ([`MAX_OPEN`]).
+pub fn ask_tool_run(
+    t: &mut Tx<'_>,
+    agent: &str,
+    tool: &str,
+    target: &str,
+    argv: &[String],
+    expires_at: &str,
+) -> ApiResult<Question> {
+    let a = agents::get(t, agent)?;
+    let argv: Vec<String> = argv.iter().map(|x| t.redact_string(x.clone())).collect();
+    let open: Vec<Question> = {
+        let mut st = t.prepare(
+            "SELECT * FROM questions WHERE agent = ?1 AND status = 'open' AND kind = 'tool_run'",
+        )?;
+        st.query_map([agent], row)?.collect::<Result<Vec<_>, _>>()?
+    };
+    if let Some(q) = open.into_iter().find(|q| {
+        q.tool_run
+            .as_ref()
+            .is_some_and(|r| r["tool"] == tool && r["argv"] == json!(argv) && r["target"] == target)
+    }) {
+        return Ok(named(t, q));
+    }
+    let n = open_count(t, agent)?;
+    if n >= MAX_OPEN {
+        return Err(ApiError::new(
+            Code::RateLimited,
+            format!(
+                "{} has {n} open questions and approvals; an agent may have {MAX_OPEN}. Wait                  for the operator",
+                a.agent.name
+            ),
+        ));
+    }
+    let name = format!("{}/{}", a.agent.project, a.agent.name);
+    let text = format!("Run tool {tool} on {target} for {name}?");
+    let mut context = String::from("The exact arguments, one per line:\n\n```\n");
+    if argv.is_empty() {
+        context.push_str("(none)\n");
+    }
+    for x in &argv {
+        context.push_str(&format!("{x:?}\n"));
+    }
+    context.push_str("```\n");
+    let run = json!({"tool": tool, "target": target, "argv": argv, "expires_at": expires_at});
+    let id = ulid::Ulid::new().to_string();
+    let thread = ulid::Ulid::new().to_string();
+    let at = now();
+    t.execute(
+        "INSERT INTO questions (id, agent, project, text, options, context, priority, status,
+                                thread_id, created_at, updated_at, revision, kind, tool_run)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'normal', 'open', ?7, ?8, ?8, 1, 'tool_run', ?9)",
+        params![
+            id,
+            agent,
+            a.agent.project,
+            text,
+            json!(TOOL_RUN_OPTIONS).to_string(),
+            context,
+            thread,
+            at,
+            run.to_string()
+        ],
+    )?;
+    let q = get(t, &id)?;
+    t.audit(
+        "question.ask",
+        &id,
+        Some(&q.project),
+        json!({"agent": q.agent, "kind": q.kind, "tool": tool, "target": target,
+               "argv": argv}),
+    )?;
+    emit(t, &q, "asked")?;
+    Ok(q)
+}
+
+/// Take the approval `id` for one run of `tool` with `argv` by `agent`:
+/// a `tool_run` question of that agent and tool, with the same argv,
+/// answered `Run`, not used, and not expired. Marks it used, in the same
+/// write, so it runs once. `409` with the reason otherwise.
+pub fn use_tool_run(
+    t: &mut Tx<'_>,
+    id: &str,
+    agent: &str,
+    tool: &str,
+    argv: &[String],
+) -> ApiResult<Question> {
+    let refused =
+        |why: &str| ApiError::conflict(format!("approval {id} does not allow this run: {why}"));
+    let q = get(t, id).map_err(|_| refused("there is no such approval"))?;
+    let Some(run) = q
+        .tool_run
+        .clone()
+        .filter(|_| q.kind == QuestionKind::ToolRun)
+    else {
+        return Err(refused("it is not a tool run approval"));
+    };
+    if q.agent != agent {
+        return Err(refused("it is the approval of another agent"));
+    }
+    if run["tool"] != tool {
+        return Err(refused("it is for another tool"));
+    }
+    let argv: Vec<String> = argv.iter().map(|x| t.redact_string(x.clone())).collect();
+    if run["argv"] != json!(argv) {
+        return Err(refused("the arguments differ from the approved ones"));
+    }
+    match q.status {
+        QuestionStatus::Answered if q.answer_option == Some(0) => {}
+        QuestionStatus::Answered => return Err(refused("the operator refused it")),
+        QuestionStatus::Open => return Err(refused("the operator has not answered yet")),
+        _ => return Err(refused("it was retracted")),
+    }
+    if q.used_at.is_some() {
+        return Err(refused("it was used already; an approval runs once"));
+    }
+    let n = t.execute(
+        "UPDATE questions SET used_at = ?2 WHERE id = ?1 AND used_at IS NULL",
+        params![q.id, now()],
+    )?;
+    if n == 0 {
+        return Err(refused("it was used already; an approval runs once"));
+    }
+    get(t, &q.id)
+}
+
+/// The open tool run approvals whose time ran out at `now` (RFC 3339).
+pub fn expired_tool_runs(conn: &Connection, now: &str) -> ApiResult<Vec<String>> {
+    let mut st = conn.prepare(
+        "SELECT id FROM questions WHERE kind = 'tool_run' AND status = 'open'
+           AND json_extract(tool_run, '$.expires_at') <= ?1",
+    )?;
+    let rows = st
+        .query_map([now], |r| r.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(rows)
 }
 
 // ----------------------------------------------------------------- recap
@@ -1741,6 +1922,8 @@ mod tests {
             answered_at: None,
             retract_reason: None,
             retracted_by: None,
+            tool_run: None,
+            used_at: None,
             thread_id: "T1".into(),
             created_at: "t".into(),
             updated_at: "t".into(),

@@ -34,6 +34,7 @@ import { compactButton, lastCompactedText, lifecycleActions, newSessionButton, r
 import { ResetDialog } from "./ResetDialog";
 import { EphemeralLine, SpawnedPanel } from "./Spawned";
 import { spawnedTabLabel, spawnRightsText } from "./spawn";
+import { AgentTools } from "../tools/AgentTools";
 
 /** The API call of a lifecycle button. Resume clears the pause (`unpause`). */
 const lifecycleCall = (kind: LifecycleAction["kind"], id: string) =>
@@ -289,6 +290,7 @@ export default function AgentDetail() {
                 <div class="stack">
                   <DetailsPanel agent={a()} running={running()} onError={setError} globalIdleStop={globalIdleStop()} compactDefaults={compactDefaults()} />
                   <RolesPanel agent={a()} onError={setError} />
+                  <AgentTools agent={a()} />
                 </div>
               </Match>
               <Match when={tab() === "events"}>
