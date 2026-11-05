@@ -35,8 +35,11 @@ async fn world() -> World {
     let arch = id(&td.agent("p", "arch", json!({"roles": ["architect"]})).await);
     td.agent("p", "pw", json!({})).await;
     let qw = id(&td.agent("q", "w", json!({})).await);
-    let qlead = id(&td.agent("q", "lead", json!({"roles": ["project_admin"]})).await);
-    td.agent("ops", "root", json!({"roles": ["sysadmin"]})).await;
+    let qlead = id(&td
+        .agent("q", "lead", json!({"roles": ["project_admin"]}))
+        .await);
+    td.agent("ops", "root", json!({"roles": ["sysadmin"]}))
+        .await;
     let qcard = td
         .post_as(&qw, "/api/projects/q/cards", json!({"title": "Q work"}))
         .await
@@ -45,15 +48,23 @@ async fn world() -> World {
         .unwrap()
         .to_owned();
     let qmail = td
-        .post_as(&qw, "/api/mail", json!({"to": "q/lead", "subject": "s", "body": "inside q"}))
+        .post_as(
+            &qw,
+            "/api/mail",
+            json!({"to": "q/lead", "subject": "s", "body": "inside q"}),
+        )
         .await
         .ok()["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    td.post_as(&qw, "/api/mail", json!({"to": "project:q", "subject": "i", "body": "to the q inbox"}))
-        .await
-        .ok();
+    td.post_as(
+        &qw,
+        "/api/mail",
+        json!({"to": "project:q", "subject": "i", "body": "to the q inbox"}),
+    )
+    .await
+    .ok();
     td.post(
         "/api/secrets",
         json!({"name": "gh", "kind": "token", "fields": {"value": "ghp_R4nd0mT0k3nV4lu3Xy9Qz7Lm2Pd"}}),
@@ -80,29 +91,53 @@ async fn world() -> World {
 #[tokio::test]
 async fn only_the_operator_grants_architect_and_not_with_sysadmin() {
     let w = world().await;
-    let a = w.td.get(&format!("/api/agents/{}", w.arch)).await.ok().clone();
+    let a =
+        w.td.get(&format!("/api/agents/{}", w.arch))
+            .await
+            .ok()
+            .clone();
     assert_eq!(a["roles"], json!(["architect"]));
-    let pw = w.td.get("/api/agents/p%2Fpw").await.ok()["id"].as_str().unwrap().to_owned();
+    let pw = w.td.get("/api/agents/p%2Fpw").await.ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     // A sysadmin agent and a project_admin cannot grant it; the operator can.
-    w.td.put_as("ops/root", &format!("/api/agents/{pw}/roles"), json!({"roles": ["architect"]}))
-        .await
-        .err(403, "forbidden");
-    w.td.put_as(&w.qlead, &format!("/api/agents/{}/roles", w.qw), json!({"roles": ["architect"]}))
-        .await
-        .err(403, "forbidden");
-    let r = w
-        .td
-        .put(&format!("/api/agents/{pw}/roles"), json!({"roles": ["architect", "project_admin"]}))
+    w.td.put_as(
+        "ops/root",
+        &format!("/api/agents/{pw}/roles"),
+        json!({"roles": ["architect"]}),
+    )
+    .await
+    .err(403, "forbidden");
+    w.td.put_as(
+        &w.qlead,
+        &format!("/api/agents/{}/roles", w.qw),
+        json!({"roles": ["architect"]}),
+    )
+    .await
+    .err(403, "forbidden");
+    let r =
+        w.td.put(
+            &format!("/api/agents/{pw}/roles"),
+            json!({"roles": ["architect", "project_admin"]}),
+        )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     // An architect cannot grant roles either, nor revoke its own.
-    w.td.put_as(&w.arch, &format!("/api/agents/{pw}/roles"), json!({"roles": []}))
-        .await
-        .err(403, "forbidden");
+    w.td.put_as(
+        &w.arch,
+        &format!("/api/agents/{pw}/roles"),
+        json!({"roles": []}),
+    )
+    .await
+    .err(403, "forbidden");
     // Not with sysadmin.
-    w.td.put(&format!("/api/agents/{pw}/roles"), json!({"roles": ["architect", "sysadmin"]}))
-        .await
-        .err(422, "invalid");
+    w.td.put(
+        &format!("/api/agents/{pw}/roles"),
+        json!({"roles": ["architect", "sysadmin"]}),
+    )
+    .await
+    .err(422, "invalid");
 }
 
 /// Reads in another project and of the whole system: 200.
@@ -163,46 +198,111 @@ async fn an_architect_writes_nothing_in_another_project() {
             r.body
         );
     };
-    refused(&td.post_as(a, "/api/projects/q/cards", json!({"title": "x"})).await, "card create");
-    refused(&td.post_as(a, &format!("{card}/move"), json!({"column": "ready"})).await, "card move");
-    refused(&td.patch_as(a, &card, json!({"title": "y"})).await, "card edit");
-    refused(&td.post_as(a, &format!("{card}/comments"), json!({"body": "z"})).await, "comment");
-    refused(&td.post_empty_as(a, &format!("{card}/claim")).await, "claim");
-    refused(&td.post_as(a, &format!("{card}/assign"), json!({"assignee": "me"})).await, "assign");
     refused(
-        &td.post_as(a, "/api/projects/q/memories", json!({"title": "A claim", "body": "b"})).await,
+        &td.post_as(a, "/api/projects/q/cards", json!({"title": "x"}))
+            .await,
+        "card create",
+    );
+    refused(
+        &td.post_as(a, &format!("{card}/move"), json!({"column": "ready"}))
+            .await,
+        "card move",
+    );
+    refused(
+        &td.patch_as(a, &card, json!({"title": "y"})).await,
+        "card edit",
+    );
+    refused(
+        &td.post_as(a, &format!("{card}/comments"), json!({"body": "z"}))
+            .await,
+        "comment",
+    );
+    refused(
+        &td.post_empty_as(a, &format!("{card}/claim")).await,
+        "claim",
+    );
+    refused(
+        &td.post_as(a, &format!("{card}/assign"), json!({"assignee": "me"}))
+            .await,
+        "assign",
+    );
+    refused(
+        &td.post_as(
+            a,
+            "/api/projects/q/memories",
+            json!({"title": "A claim", "body": "b"}),
+        )
+        .await,
         "memory",
     );
     refused(
-        &td.post_as(a, "/api/projects/q/wiki", json!({"path": "plan", "body": "x", "summary": "s"})).await,
+        &td.post_as(
+            a,
+            "/api/projects/q/wiki",
+            json!({"path": "plan", "body": "x", "summary": "s"}),
+        )
+        .await,
         "wiki page",
     );
     refused(
-        &td.post_as(a, &format!("/api/mail/{}/reply", w.qmail), json!({"body": "r"})).await,
+        &td.post_as(
+            a,
+            &format!("/api/mail/{}/reply", w.qmail),
+            json!({"body": "r"}),
+        )
+        .await,
         "reply in a q thread",
     );
     refused(
-        &td.post_as(a, "/api/mail", json!({"to": "q/w", "subject": "s", "body": "b"})).await,
+        &td.post_as(
+            a,
+            "/api/mail",
+            json!({"to": "q/w", "subject": "s", "body": "b"}),
+        )
+        .await,
         "mail to q/w",
     );
-    refused(&td.post_empty_as(a, &format!("/api/agents/{}/start", w.qw)).await, "agent start");
     refused(
-        &td.post_as(a, &format!("/api/agents/{}/send", w.qw), json!({"text": "do it"})).await,
+        &td.post_empty_as(a, &format!("/api/agents/{}/start", w.qw))
+            .await,
+        "agent start",
+    );
+    refused(
+        &td.post_as(
+            a,
+            &format!("/api/agents/{}/send", w.qw),
+            json!({"text": "do it"}),
+        )
+        .await,
         "agent send",
     );
     refused(
-        &td.post_as(a, &format!("/api/agents/{}/keys", w.qw), json!({"keys": ["Escape"]})).await,
+        &td.post_as(
+            a,
+            &format!("/api/agents/{}/keys", w.qw),
+            json!({"keys": ["Escape"]}),
+        )
+        .await,
         "agent keys",
     );
-    refused(&td.post_as(a, "/api/targets/box/leases", json!({"agent": "q/w"})).await, "lease");
     refused(
-        &td.post_as(a, "/api/targets/box/exec", json!({"cmd": ["true"]})).await,
+        &td.post_as(a, "/api/targets/box/leases", json!({"agent": "q/w"}))
+            .await,
+        "lease",
+    );
+    refused(
+        &td.post_as(a, "/api/targets/box/exec", json!({"cmd": ["true"]}))
+            .await,
         "exec on a target",
     );
-    refused(&td.post_as(a, "/api/projects", json!({"name": "new"})).await, "project create");
+    refused(
+        &td.post_as(a, "/api/projects", json!({"name": "new"})).await,
+        "project create",
+    );
     refused(&td.post_empty_as(a, "/api/reload").await, "reload");
     refused(
-        &td.post_as(a, "/api/secrets/global/gh/reveal", json!({"password": "x"})).await,
+        &td.post_as(a, "/api/secrets/global/gh/reveal", json!({"password": "x"}))
+            .await,
         "secret value",
     );
     // The terminal attach takes input: refused also as a view.
@@ -228,27 +328,52 @@ async fn an_architect_writes_as_a_member_in_its_own_project() {
     let td = &w.td;
     let a = &w.arch;
     let k = td
-        .post_as(a, "/api/projects/p/cards", json!({"title": "Plan the split"}))
+        .post_as(
+            a,
+            "/api/projects/p/cards",
+            json!({"title": "Plan the split"}),
+        )
         .await;
     assert_eq!(k.status, 201, "{}", k.body);
     let kid = k.body["id"].as_str().unwrap().to_owned();
-    td.post_as(a, &format!("/api/cards/{kid}/comments"), json!({"body": "Step one"}))
-        .await
-        .ok();
+    td.post_as(
+        a,
+        &format!("/api/cards/{kid}/comments"),
+        json!({"body": "Step one"}),
+    )
+    .await
+    .ok();
     let m = td
-        .post_as(a, "/api/projects/p/memories", json!({"title": "The split needs two crates", "body": "b"}))
+        .post_as(
+            a,
+            "/api/projects/p/memories",
+            json!({"title": "The split needs two crates", "body": "b"}),
+        )
         .await;
     assert!(m.status == 200 || m.status == 201, "{}", m.body);
     let p = td
-        .post_as(a, "/api/projects/p/wiki", json!({"path": "plans/split", "body": "# Split", "summary": "first"}))
+        .post_as(
+            a,
+            "/api/projects/p/wiki",
+            json!({"path": "plans/split", "body": "# Split", "summary": "first"}),
+        )
         .await;
     assert!(p.status == 200 || p.status == 201, "{}", p.body);
     let mail = td
-        .post_as(a, "/api/mail", json!({"to": "operator", "subject": "plan", "body": "ready"}))
+        .post_as(
+            a,
+            "/api/mail",
+            json!({"to": "operator", "subject": "plan", "body": "ready"}),
+        )
         .await;
     assert!(mail.status == 200 || mail.status == 201, "{}", mail.body);
     // As a member: no agent control in the own project either.
-    let pw = td.get("/api/agents/p%2Fpw").await.ok()["id"].as_str().unwrap().to_owned();
-    let r = td.post_empty_as(a, &format!("/api/agents/{pw}/start")).await;
+    let pw = td.get("/api/agents/p%2Fpw").await.ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let r = td
+        .post_empty_as(a, &format!("/api/agents/{pw}/start"))
+        .await;
     assert_eq!(r.status, 403, "{}", r.body);
 }

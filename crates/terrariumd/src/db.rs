@@ -3474,7 +3474,8 @@ mod tests {
             .is_err()
         );
         // The cascade from agents still works.
-        conn.execute("DELETE FROM agents WHERE id = 'A1'", []).unwrap();
+        conn.execute("DELETE FROM agents WHERE id = 'A1'", [])
+            .unwrap();
         let left: i64 = conn
             .query_row("SELECT count(*) FROM roles", [], |r| r.get(0))
             .unwrap();
