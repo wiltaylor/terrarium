@@ -9,7 +9,7 @@ import { useNow } from "../../components/ui";
 import { timeUntil } from "../../lib/format";
 import { api, events, quota } from "../../stores";
 import { describeCause } from "../../stores/quota";
-import { quotaLine } from "./quotaLine";
+import { quotaLine } from "./quotaText";
 
 export function QuotaLine(props: { agent: Agent }) {
   const now = useNow(30_000);
