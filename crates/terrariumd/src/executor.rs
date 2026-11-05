@@ -1551,6 +1551,180 @@ pub async fn start_exec_as(
     Ok(sess)
 }
 
+/// What a tool run adds to its command (TER-30, design D4): the output
+/// cap, the stdin rule, and the redaction of the output.
+pub struct ToolRun {
+    /// `stdin = true` in the tool: the caller's stdin goes to the command,
+    /// at most `max_output` bytes. Else each stdin control is dropped.
+    pub stdin: bool,
+    /// The cap of stdout and stderr together, in raw bytes. Past it the
+    /// process is killed and the session ends `truncated`.
+    pub max_output: usize,
+    /// The run's own secret values (`env_secrets`): `(label, value)`. They
+    /// are redacted first, also a value that the daemon matcher leaves out
+    /// as weak.
+    pub secrets: Vec<(String, zeroize::Zeroizing<String>)>,
+    /// The view of the daemon matcher for the output (the project of the
+    /// caller).
+    pub view: terrarium_core::redact::View,
+    /// Called once at the end, with how the run ended.
+    pub on_end: Box<dyn FnOnce(ToolEnd) + Send>,
+}
+
+/// The end of a tool run, for its audit row and event.
+#[derive(Debug, Clone)]
+pub struct ToolEnd {
+    pub end: End,
+    /// The raw output bytes that the command printed, up to the cap.
+    pub bytes: u64,
+    pub truncated: bool,
+}
+
+/// Start a tool run (TER-30, design D4): `cmd` on target `name` for
+/// `actor`, which has a grant on the tool, not the target. So there is no
+/// target policy check here; each other check of [`start_exec_as`] stays:
+/// the session cap of the agent, the instance of the target, the resource
+/// budget (`holder`), and the host session. The output goes through
+/// [`attach_tool`].
+pub async fn start_tool_exec(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+    cmd: RemoteCmd,
+    run: ToolRun,
+) -> ApiResult<Arc<ExecSession>> {
+    let n = name.to_owned();
+    let row = state.db.read(move |c| targets::get(c, &n)).await?;
+    check_cap(state, actor)?;
+    let def = resolved_def(state, &row, Some(actor), None).await?;
+    let mut cmd = cmd;
+    cmd.shell = false;
+    cmd.pty = None;
+    cmd.holder = holder_of(actor);
+    let running = start_cmd(state, &def, &cmd)?;
+    let (sess, ctl) = ExecSession::new(
+        name,
+        actor.agent().map(|a| a.id.clone()),
+        "tool",
+        state.executor.buffer_limit,
+    );
+    let daemon = state.db.redactor().get();
+    tokio::spawn(attach_tool(running, sess.clone(), ctl, run, daemon));
+    state.executor.insert(sess.clone());
+    Ok(sess)
+}
+
+/// The redactors of one output stream: the run's own secrets, then the
+/// daemon matcher.
+struct ToolRedact {
+    own: terrarium_core::redact::StreamRedactor,
+    daemon: terrarium_core::redact::StreamRedactor,
+}
+
+impl ToolRedact {
+    fn push(&mut self, b: &[u8]) -> Vec<u8> {
+        let mid = self.own.push(b);
+        self.daemon.push(&mid)
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        let mid = self.own.finish();
+        let mut out = self.daemon.push(&mid);
+        out.extend(self.daemon.finish());
+        out
+    }
+}
+
+/// Forward a tool run into its session: the cap, the redaction of each
+/// stream, and the stdin rule ([`ToolRun`]).
+async fn attach_tool(
+    mut run: Running,
+    sess: Arc<ExecSession>,
+    mut ctl: mpsc::UnboundedReceiver<Control>,
+    tool: ToolRun,
+    daemon: Arc<terrarium_core::redact::Redactor>,
+) {
+    use terrarium_core::redact::{Redactor, StreamRedactor, View};
+    let own = Arc::new(
+        Redactor::new(
+            tool.secrets
+                .iter()
+                .map(|(label, v)| (label.clone(), v.as_bytes().to_vec())),
+        )
+        .unwrap_or_else(|_| Redactor::empty()),
+    );
+    let redact = |own: &Arc<Redactor>| ToolRedact {
+        own: StreamRedactor::new(own.clone(), View::All),
+        daemon: StreamRedactor::new(daemon.clone(), tool.view.clone()),
+    };
+    let mut out = redact(&own);
+    let mut err = redact(&own);
+    let cap = tool.max_output;
+    let (mut bytes, mut truncated, mut stdin_bytes) = (0u64, false, 0usize);
+    let mut ctl_open = true;
+    let end = loop {
+        tokio::select! {
+            ev = run.events.recv() => match ev {
+                None => break End::error("lost", "the run ended without an end"),
+                Some(Ev::Started) => {}
+                Some(Ev::Data(s, b)) => {
+                    if truncated {
+                        continue;
+                    }
+                    let room = cap.saturating_sub(bytes as usize);
+                    let take = b.len().min(room);
+                    bytes += take as u64;
+                    let r = if s == Stream::Stderr { &mut err } else { &mut out };
+                    let safe = r.push(&b[..take]);
+                    sess.push(s, safe).await;
+                    if take < b.len() {
+                        truncated = true;
+                        let _ = run.ctl.send(Control::Kill);
+                    }
+                }
+                Some(Ev::Result(v)) => sess.set_result(v),
+                Some(Ev::End(e)) => break e,
+            },
+            c = ctl.recv(), if ctl_open => match c {
+                None => ctl_open = false,
+                Some(Control::Kill) => {
+                    let _ = run.ctl.send(Control::Kill);
+                    break End::error("killed", "the session was closed");
+                }
+                Some(Control::Stdin(b)) if tool.stdin => {
+                    if stdin_bytes + b.len() <= cap {
+                        stdin_bytes += b.len();
+                        let _ = run.ctl.send(Control::Stdin(b));
+                    }
+                }
+                Some(Control::Eof) if tool.stdin => { let _ = run.ctl.send(Control::Eof); }
+                Some(c @ Control::Signal(_)) => { let _ = run.ctl.send(c); }
+                // No stdin for this tool, no pty, no copy: dropped.
+                Some(_) => {}
+            },
+        }
+    };
+    for (s, r) in [(Stream::Stdout, &mut out), (Stream::Stderr, &mut err)] {
+        let rest = r.finish();
+        sess.push(s, rest).await;
+    }
+    let end = if truncated {
+        End::error(
+            "truncated",
+            format!("the output reached max_output ({cap} bytes); the run was killed"),
+        )
+    } else {
+        end
+    };
+    sess.set_result(json!({"bytes": bytes, "truncated": truncated}));
+    sess.finish(end.clone());
+    (tool.on_end)(ToolEnd {
+        end,
+        bytes,
+        truncated,
+    });
+}
+
 /// The body of `POST /api/targets/{name}/cp`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

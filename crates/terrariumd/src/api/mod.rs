@@ -138,6 +138,8 @@ pub struct AppState {
     /// Wake on demand, the idle stop, and the stop reasons (PLAN §18,
     /// `crate::lifecycle`).
     pub lifecycle: Arc<crate::lifecycle::Lifecycle>,
+    /// The rate buckets of the tool runs (`crate::tool_run`).
+    pub tool_rates: Arc<crate::tool_run::Rates>,
     /// The monitor runs: which run now, and the parallel slots
     /// (`crate::monitors`).
     pub monitors: Arc<crate::monitors::Runtime>,
@@ -921,6 +923,7 @@ mod tests {
             waits: Arc::default(),
             config_repo: Arc::default(),
             lifecycle: Arc::default(),
+            tool_rates: Arc::default(),
             monitors: Arc::default(),
             webhooks: Arc::default(),
             pipelines: Arc::default(),
