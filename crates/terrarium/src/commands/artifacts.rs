@@ -502,6 +502,57 @@ async fn decide(
 mod tests {
     use super::*;
 
+    /// TER-36: `version rename`, `add-card`, and `rm-card` send the version
+    /// patch to the version path.
+    #[tokio::test]
+    async fn version_rename_and_cards_send_the_patch() {
+        use crate::transport::Method;
+        use crate::transport::mock::MockTransport;
+        let mock = MockTransport::new();
+        let mut c = Ctx::for_test(std::sync::Arc::new(mock.clone()), None);
+        c.project = Some("proj".into());
+        mock.reply(200, json!({"name": "0.1.0"}))
+            .reply(200, json!({"name": "vnext", "cards": []}))
+            .reply(200, json!({"name": "vnext", "cards": []}));
+        version(
+            &c,
+            &VersionCmd::Rename {
+                name: "vnext".into(),
+                new_name: "0.1.0".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let cards = vec!["TER-1".to_owned(), "TER-2".to_owned()];
+        version(
+            &c,
+            &VersionCmd::AddCard {
+                name: "vnext".into(),
+                cards: cards.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        version(
+            &c,
+            &VersionCmd::RmCard {
+                name: "vnext".into(),
+                cards,
+            },
+        )
+        .await
+        .unwrap();
+        let r = mock.requests();
+        assert_eq!(r.len(), 3);
+        for q in &r {
+            assert_eq!(q.method, Method::Patch);
+            assert_eq!(q.path, "/api/versions/proj%2Fvnext");
+        }
+        assert_eq!(r[0].body, Some(json!({"name": "0.1.0"})));
+        assert_eq!(r[1].body, Some(json!({"add_cards": ["TER-1", "TER-2"]})));
+        assert_eq!(r[2].body, Some(json!({"remove_cards": ["TER-1", "TER-2"]})));
+    }
+
     #[test]
     fn base64_encodes() {
         assert_eq!(base64(b""), "");
