@@ -3120,18 +3120,31 @@ mod tests {
         assert_eq!(got.lines().count(), PUBLISHED_HOST_KEYS.len());
         // The ed25519 key with another host pattern, a comment, and an old key.
         let ed = PUBLISHED_HOST_KEYS[0].trim_start_matches("github.com ");
-        let mine = format!("# notes\ngithub.com,140.82.112.3 {ed}\ngithub.com ssh-ed25519 OLDKEY no newline");
+        let mine = format!(
+            "# notes\ngithub.com,140.82.112.3 {ed}\ngithub.com ssh-ed25519 OLDKEY no newline"
+        );
         std::fs::write(&file, &mine).unwrap();
         ensure_known_hosts_dir_from(&state, None).unwrap();
         let got = std::fs::read_to_string(&file).unwrap();
         assert!(got.starts_with(&format!("{mine}\n")), "{got}");
-        assert!(!got.contains(PUBLISHED_HOST_KEYS[0]), "the ed25519 key is there already: {got}");
-        assert!(got.contains(PUBLISHED_HOST_KEYS[1]) && got.contains(PUBLISHED_HOST_KEYS[2]), "{got}");
+        assert!(
+            !got.contains(PUBLISHED_HOST_KEYS[0]),
+            "the ed25519 key is there already: {got}"
+        );
+        assert!(
+            got.contains(PUBLISHED_HOST_KEYS[1]) && got.contains(PUBLISHED_HOST_KEYS[2]),
+            "{got}"
+        );
         // Every published line parses as an OpenSSH known_hosts entry.
         for k in PUBLISHED_HOST_KEYS {
             let mut w = k.split_whitespace();
             assert_eq!(w.next(), Some("github.com"));
-            ssh_key::PublicKey::from_openssh(&format!("{} {}", w.next().unwrap(), w.next().unwrap())).unwrap();
+            ssh_key::PublicKey::from_openssh(&format!(
+                "{} {}",
+                w.next().unwrap(),
+                w.next().unwrap()
+            ))
+            .unwrap();
         }
     }
 
