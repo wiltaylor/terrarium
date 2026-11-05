@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { UsageMe, UsageTotals } from "../../api/types";
-import { quotaLine, shortWindow } from "./quotaLine";
+import { quotaLine, shortWindow } from "./quotaText";
 
 const NOW = Date.parse("2026-11-05T10:00:00Z");
 const totals = (over: Partial<UsageTotals> = {}): UsageTotals => ({ input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0, messages: 0, turns: 0, ...over }) as UsageTotals;
