@@ -1247,7 +1247,7 @@ async fn active_cards_across_projects_follow_the_rights() {
     )
     .await
     .ok();
-    td.post(&format!("/api/cards/{k2}/assign"), json!({"agent": "proj/w2"}))
+    td.post(&format!("/api/cards/{k2}/assign"), json!({"assignee": "proj/w2"}))
         .await
         .ok();
     let k3 = card(&td, "proj/w1", json!({"title": "Later"})).await;
