@@ -544,9 +544,21 @@ async fn the_browser_reads_main_and_agent_trees() {
     // With no read sandbox (the host dev mode with no bubblewrap), an
     // agent tree is `503 unavailable`; the tests below need the sandbox.
     if !terrariumd::git::read_sandbox_ready() {
-        td.get(&format!("{base}/{tree}/files"))
-            .await
-            .err(503, "unavailable");
+        // Every read of the agent tree, also the file list that runs no
+        // git; `main` still works.
+        for route in ["files", "file?path=a.txt", "diff", "commits"] {
+            td.get(&format!("{base}/{tree}/{route}"))
+                .await
+                .err(503, "unavailable");
+        }
+        let t = td.get(&base).await;
+        let trees = t.ok()["trees"].as_array().unwrap().clone();
+        assert!(trees[0]["error"].is_null(), "{trees:#?}");
+        assert!(
+            trees[1]["error"].as_str().unwrap().contains("bwrap"),
+            "{trees:#?}"
+        );
+        td.get(&format!("{base}/main/files")).await.ok();
         eprintln!("skipped the agent tree reads: no read sandbox here");
         return;
     }

@@ -1739,6 +1739,12 @@ impl ReadGit {
         }
     }
 
+    /// True when this runner can read an agent checkout: it has the read
+    /// sandbox (or, in tests, runs on the host).
+    pub fn reads_checkouts(&self) -> bool {
+        !matches!(self.jail, Jail::Missing(_))
+    }
+
     /// `git --no-pager <args>` in `repo`, at most `cap` bytes of stdout.
     ///
     /// git gets the git dir and the work tree on the command line (no
