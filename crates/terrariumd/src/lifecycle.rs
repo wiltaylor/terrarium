@@ -160,6 +160,9 @@ impl Default for Tuning {
 #[derive(Default)]
 pub struct Lifecycle {
     tuning: Mutex<Tuning>,
+    /// Wakes the timer when the tuning changes, so a new tick applies at
+    /// once, not after the sleep of the old one ([`spawn`]).
+    retuned: tokio::sync::Notify,
     /// The agents with a wake on the way.
     waking: Mutex<HashSet<AgentId>>,
     /// Since when each agent rests (`idle` or `waiting`).
@@ -189,6 +192,7 @@ impl Lifecycle {
     /// Change the times. For tests.
     pub fn set_tuning(&self, t: Tuning) {
         *guard(&self.tuning) = t;
+        self.retuned.notify_one();
     }
 
     /// The agent did something that is not a turn (a target display
@@ -943,18 +947,26 @@ pub fn spawn(state: &Shared) -> Vec<JoinHandle<()>> {
         }
     });
     let weak: Weak<AppState> = Arc::downgrade(state);
+    // Not the state: the timer must not keep it alive while it sleeps.
+    let lifecycle = state.lifecycle.clone();
     let timer = tokio::spawn(async move {
         if let Some(state) = weak.upgrade() {
             crate::reset::close_gates(&state).await;
             wake_with_work(&state, None, "daemon_start").await;
         }
         loop {
-            let tick = match weak.upgrade() {
-                Some(state) => state.lifecycle.tuning().tick,
-                None => return,
+            let tick = lifecycle.tuning().tick;
+            // A new tuning ends the sleep: its tick applies from now. (A
+            // test sets a short tick after the start, while this sleep of
+            // the default 15 s may already run.)
+            let retuned = tokio::select! {
+                () = tokio::time::sleep(tick) => false,
+                () = lifecycle.retuned.notified() => true,
             };
-            tokio::time::sleep(tick).await;
             let Some(state) = weak.upgrade() else { return };
+            if retuned {
+                continue;
+            }
             idle_pass(&state).await;
             // The lifetime and the owner of each ephemeral agent.
             crate::spawn::pass(&state).await;
