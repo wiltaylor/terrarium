@@ -189,6 +189,7 @@ async fn create(
         None => Some(tuning.default_timeout),
     };
     let mut poll_session = None;
+    let mut read_session = None;
     let mut new = match b.kind {
         WaitKind::Question => {
             // The check that the question is open runs in the write.
@@ -264,7 +265,15 @@ async fn create(
             if !mine {
                 return Err(ApiError::not_found(format!("no exec session `{sid}`")));
             }
-            poll_session = Some(sid.clone());
+            // A detached tool run (`terrarium tool run --detach`): nobody else
+            // reads the session, so the daemon reads it to the end, as for
+            // `terrarium run`: the result gets the (redacted) output tails, and
+            // the reaper of unread sessions leaves it alone.
+            if sess.kind == "tool" {
+                read_session = Some(sess.clone());
+            } else {
+                poll_session = Some(sid.clone());
+            }
             NewWait {
                 agent: waiter_id.clone(),
                 kind: WaitKind::Process,
@@ -328,6 +337,9 @@ async fn create(
         .await?;
     if let Some(sid) = poll_session {
         rt::spawn_session_poller(&state, w.id.clone(), sid);
+    }
+    if let Some(sess) = read_session {
+        rt::spawn_run_reader(&state, w.id.clone(), waiter_id.clone(), sess);
     }
     Ok((StatusCode::CREATED, Json(w)).into_response())
 }
