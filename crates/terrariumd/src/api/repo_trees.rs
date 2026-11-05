@@ -276,6 +276,19 @@ fn checkout_dir(repo: &Repo, a: &agents::AgentView) -> PathBuf {
     a.agent.workspace.join(&repo.path)
 }
 
+/// An agent tree needs the read sandbox: with none, every read of it is
+/// `503 unavailable` (docs/api.md §5.3, security review N1), also the
+/// reads that run no git.
+fn need_read_sandbox(g: &ReadGit) -> Result<(), BrowseError> {
+    if g.reads_checkouts() {
+        Ok(())
+    } else {
+        Err(BrowseError::Git(GitError::Unavailable(
+            git::NO_READ_SANDBOX.into(),
+        )))
+    }
+}
+
 /// Open the checkout of `repo` for `a` and check it, on the blocking pool.
 fn open_checkout(
     g: &ReadGit,
@@ -283,6 +296,7 @@ fn open_checkout(
     a: &agents::AgentView,
     store: &RunDirs,
 ) -> Result<CheckoutDir, BrowseError> {
+    need_read_sandbox(g)?;
     let c = CheckoutDir::open(
         &a.agent.workspace,
         &repo.path,
@@ -293,6 +307,7 @@ fn open_checkout(
 }
 
 async fn agent_tree(state: &Shared, repo: &Repo, ulid: &str) -> ApiResult<Opened> {
+    blocking(need_read_sandbox).await?;
     let missing = || ApiError::not_found(format!("no tree `agent:{ulid}` for this repo"));
     if ulid.parse::<terrarium_core::AgentId>().is_err() {
         return Err(missing());
@@ -642,5 +657,16 @@ mod tests {
         assert_eq!(a.code, Code::Unavailable);
         assert_eq!(a.code.status().as_u16(), 503);
         assert!(a.message.contains("bwrap"));
+    }
+
+    /// N1: with no read sandbox, an agent tree is `503 unavailable`, also
+    /// for the reads that run no git (the file list of the work tree).
+    #[test]
+    fn an_agent_tree_needs_the_read_sandbox() {
+        let none = ReadGit::without_sandbox(browse::CMD_TIMEOUT);
+        let a = browse_error(need_read_sandbox(&none).unwrap_err());
+        assert_eq!(a.code.status().as_u16(), 503);
+        assert_eq!(a.message, git::NO_READ_SANDBOX);
+        assert!(need_read_sandbox(&ReadGit::on_host(browse::CMD_TIMEOUT)).is_ok());
     }
 }
