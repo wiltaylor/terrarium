@@ -810,6 +810,52 @@ where
     })
 }
 
+/// The longest part of a forge's error body in the message.
+const REASON_MAX: usize = 300;
+
+/// The step of a forge request, from the content type that it wants.
+fn step_of(want_type: &str) -> &'static str {
+    match want_type {
+        RECEIVE_PACK_AD => "on the push advertisement (info/refs?service=git-receive-pack)",
+        "application/x-git-receive-pack-result" => "on the push (git-receive-pack)",
+        "application/x-git-upload-pack-result" => "on the fetch (git-upload-pack)",
+        _ => "on the fetch advertisement (info/refs)",
+    }
+}
+
+/// `; the forge said: <text>` with the start of the error body of `resp`:
+/// at most [`REASON_MAX`] characters of one line each, control characters
+/// out, the token scrubbed. Empty when the body is empty or does not come
+/// within a short time.
+async fn forge_reason(ctx: &Ctx, resp: reqwest::Response) -> String {
+    let mut raw = Vec::new();
+    let mut stream = resp.bytes_stream();
+    let read = async {
+        while let Some(Ok(b)) = stream.next().await {
+            raw.extend_from_slice(&b);
+            if raw.len() >= 4096 {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(2), read).await;
+    let text = String::from_utf8_lossy(&raw);
+    let one: String = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(REASON_MAX)
+        .collect();
+    let one = ctx.scrub(one.trim());
+    if one.is_empty() {
+        String::new()
+    } else {
+        format!("; the forge said: {one}")
+    }
+}
+
 /// Send one request to the forge and stream its answer back. `service`
 /// names the content type that a good answer must have.
 async fn forward(
@@ -911,14 +957,22 @@ async fn forward(
                 "a redirect ({}); the proxy follows no redirect, so give the repo its final URL",
                 status.as_u16()
             )
-        } else if matches!(status.as_u16(), 401 | 403) {
-            format!(
-                "HTTP {}: the forge refused the repo's credential",
-                status.as_u16()
-            )
+        } else if status.as_u16() == 401 {
+            "HTTP 401: the forge did not accept the repo's credential (a wrong or expired \
+             token, or none)"
+                .to_owned()
+        } else if status.as_u16() == 403 {
+            "HTTP 403: the forge accepted the repo's credential but refused this step (the \
+             token has no right for it, for example no write access to the repo)"
+                .to_owned()
         } else {
             format!("HTTP {}", status.as_u16())
         };
+        // The forge says why in its body (GitHub: `Permission to o/r.git
+        // denied to u.`, `Write access to repository not granted.`): a
+        // short, scrubbed part of it goes along (TER-39).
+        let said = forge_reason(&ctx, resp).await;
+        let what = format!("{what} {}{said}", step_of(want_type));
         tracing::warn!(repo = %label, agent = %ctx.agent.id, url = %crate::webhooks::net::log_url(&url), "git proxy: the forge answered {what}");
         return text(
             StatusCode::BAD_GATEWAY,

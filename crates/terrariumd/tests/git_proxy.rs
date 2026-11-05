@@ -35,6 +35,11 @@ struct Seen {
 struct Forge {
     root: PathBuf,
     seen: Arc<Mutex<Seen>>,
+    /// The user of the Basic credential that the forge wants.
+    user: String,
+    /// Refuse each `git-receive-pack` request with a 403 and this body, as
+    /// GitHub does for a token with no write access (TER-39).
+    refuse_push: Option<String>,
 }
 
 /// `git http-backend` as a CGI program. The request needs the repo token
@@ -43,7 +48,7 @@ async fn forge(State(f): State<Forge>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let want = format!(
         "Basic {}",
-        base64::engine::general_purpose::STANDARD.encode(format!("bot:{FORGE_TOKEN}"))
+        base64::engine::general_purpose::STANDARD.encode(format!("{}:{FORGE_TOKEN}", f.user))
     );
     let ok = parts
         .headers
@@ -60,12 +65,20 @@ async fn forge(State(f): State<Forge>, req: Request) -> Response {
             .map(|q| format!("?{q}"))
             .unwrap_or_default()
     );
+    let push = line.contains("git-receive-pack");
     f.seen.lock().unwrap().requests.push((line, ok));
     if !ok {
         return Response::builder()
             .status(401)
             .header("www-authenticate", "Basic realm=\"forge\"")
             .body(Body::from("no"))
+            .unwrap();
+    }
+    if let Some(reason) = f.refuse_push.as_ref().filter(|_| push) {
+        return Response::builder()
+            .status(403)
+            .header("content-type", "text/plain")
+            .body(Body::from(reason.clone()))
             .unwrap();
     }
     let body = body.collect().await.unwrap().to_bytes();
@@ -132,10 +145,22 @@ async fn forge(State(f): State<Forge>, req: Request) -> Response {
 }
 
 async fn start_forge(root: &Path) -> (SocketAddr, Arc<Mutex<Seen>>) {
+    start_forge_with(root, "bot", None).await
+}
+
+/// [`start_forge`] that wants the Basic user `user`, and refuses each push
+/// with `refuse_push` when it is set.
+async fn start_forge_with(
+    root: &Path,
+    user: &str,
+    refuse_push: Option<&str>,
+) -> (SocketAddr, Arc<Mutex<Seen>>) {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let app = axum::Router::new().fallback(forge).with_state(Forge {
         root: root.to_owned(),
         seen: seen.clone(),
+        user: user.to_owned(),
+        refuse_push: refuse_push.map(str::to_owned),
     });
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
@@ -1055,4 +1080,131 @@ async fn review_p6_one_agent_cannot_take_every_slot() {
     for h in held {
         h.abort();
     }
+}
+
+/// A bare repo `app.git` under `root` with one commit on main, open for a
+/// push over HTTP.
+fn forge_repo(root: &Path) {
+    let seed = root.join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    git_ok(root, &["init", "-q", "--bare", "-b", "main", "app.git"]);
+    git_ok(
+        &root.join("app.git"),
+        &["config", "http.receivepack", "true"],
+    );
+    git_ok(&seed, &["init", "-q", "-b", "main"]);
+    std::fs::write(seed.join("a.txt"), "one\n").unwrap();
+    git_ok(&seed, &["add", "a.txt"]);
+    git_ok(&seed, &["commit", "-q", "-m", "one"]);
+    git_ok(&seed, &["push", "-q", "../app.git", "main"]);
+}
+
+/// A daemon with the proxy, the github_token secret `gh` (no user name, so
+/// the proxy sends `x-access-token`), and the repo `app` of project `p` at
+/// `repo_url` through the proxy, checked out for agent `p/w`. The
+/// workspace and the agent's credential helper.
+async fn github_setup(repo_url: &str, helper_dir: &Path) -> (TestDaemon, PathBuf, PathBuf) {
+    let mut td = TestDaemon::start().await;
+    td.web.git_proxy_listen = Some("127.0.0.1:0".into());
+    td.boot(None, None).await;
+    let proxy_addr = td.daemon.as_ref().unwrap().git_proxy_addr.unwrap();
+    td.post(
+        "/api/credentials",
+        json!({"name": "gh", "kind": "github_token", "value": FORGE_TOKEN}),
+    )
+    .await
+    .ok();
+    td.project("p").await;
+    td.post(
+        "/api/projects/p/repos",
+        json!({"name": "app", "url": repo_url, "credential": "gh", "push_via": "proxy"}),
+    )
+    .await
+    .ok();
+    let agent = td.agent("p", "w", json!({})).await;
+    let r = td
+        .post_as("p/w", "/api/repos/app/checkout", json!({}))
+        .await;
+    assert_eq!(r.ok()["action"], "cloned", "{:?}", r.body);
+    let ws = PathBuf::from(agent["workspace"].as_str().unwrap()).join("app");
+    let token = td
+        .post_as(
+            "p/w",
+            "/api/repos/credential",
+            json!({"protocol": "http", "host": proxy_addr.to_string(), "path": "git/p/app.git"}),
+        )
+        .await
+        .ok()["password"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let helper = helper_script(helper_dir, "helper.sh", &token);
+    (td, ws, helper)
+}
+
+/// TER-39: a github_token goes to the forge as Basic `x-access-token:<token>`
+/// on every step of a fetch and of a push, so a forge that wants Basic auth
+/// on `git-receive-pack` takes the push.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_github_token_fetches_and_pushes_with_basic_auth() {
+    let forge_dir = tempfile::tempdir().unwrap();
+    let root = forge_dir.path();
+    forge_repo(root);
+    let (forge_addr, seen) = start_forge_with(root, "x-access-token", None).await;
+    let helpers = tempfile::tempdir().unwrap();
+    let (_td, ws, helper) =
+        github_setup(&format!("http://{forge_addr}/app.git"), helpers.path()).await;
+
+    let o = agent_git(&ws, &helper, &["fetch", "-q", "origin"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    git_ok(&ws, &["checkout", "-q", "-b", "card-1"]);
+    std::fs::write(ws.join("b.txt"), "two\n").unwrap();
+    git_ok(&ws, &["add", "b.txt"]);
+    git_ok(&ws, &["commit", "-q", "-m", "two"]);
+    let o = agent_git(&ws, &helper, &["push", "-q", "origin", "HEAD:refs/heads/card-1"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        forge_head(root, "card-1"),
+        Some(git_ok(&ws, &["rev-parse", "HEAD"]))
+    );
+    // Both push steps reached the forge with the right credential.
+    let seen = seen.lock().unwrap();
+    for step in ["GET /app.git/info/refs?service=git-receive-pack", "POST /app.git/git-receive-pack"] {
+        let hits: Vec<_> = seen.requests.iter().filter(|(l, _)| l == step).collect();
+        assert!(!hits.is_empty(), "{step}: {:?}", seen.requests);
+        assert!(hits.iter().all(|(_, ok)| *ok), "{step}: {:?}", seen.requests);
+    }
+}
+
+/// TER-39: a forge that refuses the push with a 403 (a token with no write
+/// access): the agent sees the step and the forge's own reason, with no
+/// token in it, and the fetch still works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_push_shows_the_forge_reason() {
+    let forge_dir = tempfile::tempdir().unwrap();
+    let root = forge_dir.path();
+    forge_repo(root);
+    let reason = format!("Permission to o/app.git denied to bot (token {FORGE_TOKEN}).\n");
+    let (forge_addr, _seen) = start_forge_with(root, "x-access-token", Some(&reason)).await;
+    let helpers = tempfile::tempdir().unwrap();
+    let (_td, ws, helper) =
+        github_setup(&format!("http://{forge_addr}/app.git"), helpers.path()).await;
+    let o = agent_git(&ws, &helper, &["fetch", "-q", "origin"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let o = agent_git(
+        &ws,
+        &helper,
+        &["push", "--dry-run", "origin", "HEAD:refs/heads/probe"],
+    );
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("HTTP 403"), "{err}");
+    assert!(err.contains("accepted the repo's credential"), "{err}");
+    assert!(err.contains("push advertisement"), "{err}");
+    assert!(
+        err.contains("the forge said: Permission to o/app.git denied to bot"),
+        "{err}"
+    );
+    assert!(!err.contains(FORGE_TOKEN), "{err}");
+    assert!(err.contains("[secret:gh]"), "{err}");
 }
