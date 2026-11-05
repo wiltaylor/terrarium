@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use terrarium_core::redact::{Redactor, RedactorHandle, View};
 
 use crate::error::{ApiError, ApiResult};
@@ -1995,7 +1995,14 @@ impl Db {
             // The snapshot comes after the lock: a write that changed a
             // secret swapped its matcher in before it let the lock go.
             let redactor = handle.get();
-            let tx = guard.transaction()?;
+            // IMMEDIATE: the write lock comes at the start, so a write of
+            // another connection to the same file (a second daemon on the
+            // same state dir, for example a test that starts the daemon
+            // again) makes this one wait up to the busy timeout. A DEFERRED
+            // transaction that reads first gets `database is locked` at
+            // once when the other connection commits between its read and
+            // its first write; SQLite does not wait in that case.
+            let tx = guard.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let mut t = Tx {
                 tx,
                 actor,
@@ -3668,5 +3675,43 @@ mod tests {
             .query_row("SELECT name FROM spawns WHERE id = 'E1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "lead-w-1");
+    }
+
+    /// TER-16: a write holds the write lock from its start. Another
+    /// connection to the same file cannot commit between the read and the
+    /// write of a transaction (with a DEFERRED transaction it could, and
+    /// the write then failed at once with `database is locked`).
+    #[tokio::test]
+    async fn a_write_holds_the_lock_against_another_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let db = Db::new(open(&path).unwrap(), EventHub::default());
+        let other = open(&path).unwrap();
+        other.execute_batch("CREATE TABLE x (v INTEGER)").unwrap();
+        other
+            .busy_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        let n = db
+            .write("system", move |t| {
+                let n: i64 = t.tx.query_row("SELECT count(*) FROM x", [], |r| r.get(0))?;
+                // The other connection tries to commit between the read
+                // and the write, and cannot.
+                let e = other.execute("INSERT INTO x VALUES (1)", []).unwrap_err();
+                assert!(e.to_string().contains("locked"), "{e}");
+                t.tx.execute("INSERT INTO x VALUES (2)", [])?;
+                Ok(n)
+            })
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        let rows: Vec<i64> = open(&path)
+            .unwrap()
+            .prepare("SELECT v FROM x")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, vec![2]);
     }
 }
