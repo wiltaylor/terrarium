@@ -161,8 +161,14 @@ async fn exec_output_is_redacted_across_chunks_for_the_caller() {
     );
     let sid = lab.exec(Some(&lab.w1), json!({"cmd": [s]})).await;
     let (out, err) = drain(&lab.td, Some(&lab.w1), &sid).await;
-    assert!(!out.contains(PROJECT) && !err.contains(PROJECT), "{out} {err}");
-    assert!(!out.contains(GLOBAL) && !err.contains(GLOBAL), "{out} {err}");
+    assert!(
+        !out.contains(PROJECT) && !err.contains(PROJECT),
+        "{out} {err}"
+    );
+    assert!(
+        !out.contains(GLOBAL) && !err.contains(GLOBAL),
+        "{out} {err}"
+    );
     assert!(!out.contains(&PROJECT[..10]), "{out}");
     assert_eq!(out, "deploy=[secret:p/deploy]\ngh=[secret]\n", "{out}");
     assert_eq!(err, "err [secret:p/deploy]\nerr [secret]\n", "{err}");
@@ -220,7 +226,9 @@ async fn held_output_shows_while_the_command_runs() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|c| String::from_utf8_lossy(&B64.decode(c["data"].as_str().unwrap()).unwrap()).into_owned())
+        .map(|c| {
+            String::from_utf8_lossy(&B64.decode(c["data"].as_str().unwrap()).unwrap()).into_owned()
+        })
         .collect();
     assert_eq!(text, "Password: ", "{o}");
     let (rest, _) = drain(&lab.td, None, &sid).await;

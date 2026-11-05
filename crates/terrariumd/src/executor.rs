@@ -1799,10 +1799,13 @@ fn redact_run(
         let mut out = StreamRedactor::new(redactor.clone(), view.clone());
         let mut err = StreamRedactor::new(redactor, view);
         let flush = |out: &mut StreamRedactor, err: &mut StreamRedactor| {
-            [(Stream::Stdout, out.finish()), (Stream::Stderr, err.finish())]
-                .into_iter()
-                .filter(|(_, b)| !b.is_empty())
-                .collect::<Vec<_>>()
+            [
+                (Stream::Stdout, out.finish()),
+                (Stream::Stderr, err.finish()),
+            ]
+            .into_iter()
+            .filter(|(_, b)| !b.is_empty())
+            .collect::<Vec<_>>()
         };
         loop {
             let waiting = out.held() > 0 || err.held() > 0;
