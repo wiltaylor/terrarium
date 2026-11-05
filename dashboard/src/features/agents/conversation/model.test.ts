@@ -286,12 +286,12 @@ describe("sessionGone", () => {
 
 describe("the Stop button (issue #12)", () => {
   it("shows only while a turn runs in the active session", () => {
-    expect(canInterrupt({ agentStatus: "working", current: true })).toBe(true);
-    expect(canInterrupt({ agentStatus: "blocked", current: true })).toBe(true);
+    expect(canInterrupt({ agentStatus: "working", sessionActive: true })).toBe(true);
+    expect(canInterrupt({ agentStatus: "blocked", sessionActive: true })).toBe(true);
     for (const st of ["idle", "waiting", "starting", "stopped", "error", "restarting", undefined] as const) {
-      expect(canInterrupt({ agentStatus: st, current: true })).toBe(false);
+      expect(canInterrupt({ agentStatus: st, sessionActive: true })).toBe(false);
     }
-    expect(canInterrupt({ agentStatus: "working", current: false })).toBe(false);
+    expect(canInterrupt({ agentStatus: "working", sessionActive: false })).toBe(false);
   });
 
   it("says that the turn was interrupted when the agent rests with that reason", () => {
