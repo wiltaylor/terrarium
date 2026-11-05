@@ -76,7 +76,10 @@ async fn list(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Vec<T
                     .into_iter()
                     .map(|row| {
                         let grants = tools::grants_of(c, &row.def.name)?;
-                        Ok(ToolView { row, grants: Some(grants) })
+                        Ok(ToolView {
+                            row,
+                            grants: Some(grants),
+                        })
                     })
                     .collect()
             } else if let Some((id, project)) = agent {
@@ -105,11 +108,15 @@ async fn show(
             if admin {
                 let row = tools::get(c, &name)?;
                 let grants = tools::grants_of(c, &name)?;
-                return Ok(ToolView { row, grants: Some(grants) });
+                return Ok(ToolView {
+                    row,
+                    grants: Some(grants),
+                });
             }
             // An agent sees only a tool granted to it: another one is 404,
             // so the list of tools does not leak.
-            let (id, project) = agent.ok_or_else(|| ApiError::not_found(format!("no tool `{name}`")))?;
+            let (id, project) =
+                agent.ok_or_else(|| ApiError::not_found(format!("no tool `{name}`")))?;
             tools::granted_to(c, &id, &project)?
                 .into_iter()
                 .find(|r| r.def.name == name)
@@ -141,7 +148,14 @@ async fn create(
             Ok(row)
         })
         .await?;
-    Ok((StatusCode::CREATED, Json(ToolView { row, grants: Some(Vec::new()) })).into_response())
+    Ok((
+        StatusCode::CREATED,
+        Json(ToolView {
+            row,
+            grants: Some(Vec::new()),
+        }),
+    )
+        .into_response())
 }
 
 async fn update(
@@ -159,7 +173,10 @@ async fn update(
             let row = tools::update(t, &name, &patch, &refs)?;
             t.audit("tool.update", &name, row.def.project.as_deref(), patch)?;
             let grants = tools::grants_of(t, &name)?;
-            Ok(ToolView { row, grants: Some(grants) })
+            Ok(ToolView {
+                row,
+                grants: Some(grants),
+            })
         })
         .await?;
     Ok(Json(v))
@@ -187,7 +204,9 @@ async fn grants_list(
     Path(name): Path<String>,
 ) -> ApiResult<Json<Vec<ToolGrant>>> {
     manage(&actor, "reading the grants of a tool")?;
-    Ok(Json(state.db.read(move |c| tools::grants_of(c, &name)).await?))
+    Ok(Json(
+        state.db.read(move |c| tools::grants_of(c, &name)).await?,
+    ))
 }
 
 /// The body of `POST /api/tools/{name}/grants`.

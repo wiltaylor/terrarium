@@ -62,7 +62,11 @@ fn row(r: &Row<'_>) -> rusqlite::Result<ToolRow> {
     })?;
     def.name = name;
     Ok(ToolRow {
-        scope: if def.project.is_some() { "project" } else { "global" },
+        scope: if def.project.is_some() {
+            "project"
+        } else {
+            "global"
+        },
         def,
         source: r.get(2)?,
         created_at: r.get(3)?,
@@ -72,14 +76,46 @@ fn row(r: &Row<'_>) -> rusqlite::Result<ToolRow> {
 
 /// The directories of the sandbox `PATH` that come from the host
 /// (`crate::sandbox::SANDBOX_PATH`).
-const PATH_DIRS: &[&str] = &["/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"];
+const PATH_DIRS: &[&str] = &[
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/local/sbin",
+    "/usr/sbin",
+    "/sbin",
+];
 
 /// Names that a tool may never take, also on a host that does not have
 /// them: the tools that the agents and the prompts use, and the harnesses.
 const RESERVED: &[&str] = &[
-    "terrarium", "git", "ssh", "scp", "sh", "bash", "env", "sudo", "python", "python3", "node",
-    "npm", "npx", "uv", "uvx", "pip", "cargo", "rustc", "make", "gh", "curl", "wget", "rg",
-    "claude", "codex", "copilot", "pi", "bwrap",
+    "terrarium",
+    "git",
+    "ssh",
+    "scp",
+    "sh",
+    "bash",
+    "env",
+    "sudo",
+    "python",
+    "python3",
+    "node",
+    "npm",
+    "npx",
+    "uv",
+    "uvx",
+    "pip",
+    "cargo",
+    "rustc",
+    "make",
+    "gh",
+    "curl",
+    "wget",
+    "rg",
+    "claude",
+    "codex",
+    "copilot",
+    "pi",
+    "bwrap",
 ];
 
 /// Would a tool named `name` shadow a program of the sandbox `PATH`? The
@@ -107,8 +143,9 @@ pub fn validate(conn: &Connection, def: &ToolDef, extra_dirs: &[&Path]) -> ApiRe
     if let Some(p) = &def.project {
         crate::store::projects::get(conn, p)?;
     }
-    let target = crate::store::targets::find(conn, &def.target)?
-        .ok_or_else(|| ApiError::invalid(format!("tool `{}`: no target `{}`", def.name, def.target)))?;
+    let target = crate::store::targets::find(conn, &def.target)?.ok_or_else(|| {
+        ApiError::invalid(format!("tool `{}`: no target `{}`", def.name, def.target))
+    })?;
     if let Some(p) = &def.project
         && target.def.project.as_deref() != Some(p.as_str())
     {
@@ -120,7 +157,10 @@ pub fn validate(conn: &Connection, def: &ToolDef, extra_dirs: &[&Path]) -> ApiRe
     let scope = def.project.as_deref().unwrap_or(GLOBAL);
     for (env, secret) in &def.env_secrets {
         if crate::secrets::get(conn, scope, secret)?.is_none() {
-            let whose = def.project.as_deref().map_or("global".to_owned(), |p| format!("project `{p}`"));
+            let whose = def
+                .project
+                .as_deref()
+                .map_or("global".to_owned(), |p| format!("project `{p}`"));
             return Err(ApiError::invalid(format!(
                 "tool `{}`: env_secrets `{env}` names `{secret}`, which is not a {whose} secret",
                 def.name
@@ -147,7 +187,11 @@ pub fn list(conn: &Connection) -> ApiResult<Vec<ToolRow>> {
 
 pub fn find(conn: &Connection, name: &str) -> ApiResult<Option<ToolRow>> {
     Ok(conn
-        .query_row(&format!("SELECT {COLS} FROM tools WHERE name = ?1"), [name], row)
+        .query_row(
+            &format!("SELECT {COLS} FROM tools WHERE name = ?1"),
+            [name],
+            row,
+        )
         .optional()?)
 }
 
@@ -191,7 +235,12 @@ fn refuse_file(r: &ToolRow) -> ApiResult<()> {
 /// `PATCH /api/tools/{name}`: a JSON merge patch of the definition. A
 /// `null` removes a field. The name and the project do not change: a
 /// change of the project would move the grants out of their scope.
-pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value, extra_dirs: &[&Path]) -> ApiResult<ToolRow> {
+pub fn update(
+    t: &mut Tx<'_>,
+    name: &str,
+    patch: &Value,
+    extra_dirs: &[&Path],
+) -> ApiResult<ToolRow> {
     let current = get(t, name)?;
     refuse_file(&current)?;
     let Some(p) = patch.as_object() else {
@@ -240,7 +289,11 @@ pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<ToolRow> {
 /// A file that fails a check is left out, with an error line; its row (if
 /// any) goes, as the file is not a valid tool now. A tool of the API with
 /// the name of a file becomes the file's.
-pub fn sync_files(t: &mut Tx<'_>, defs: &[ToolDef], extra_dirs: &[&Path]) -> ApiResult<(Changes, Vec<String>)> {
+pub fn sync_files(
+    t: &mut Tx<'_>,
+    defs: &[ToolDef],
+    extra_dirs: &[&Path],
+) -> ApiResult<(Changes, Vec<String>)> {
     let mut changes = Changes::default();
     let mut errors = Vec::new();
     let mut kept = Vec::new();
@@ -291,7 +344,10 @@ fn grant_row(r: &Row<'_>) -> rusqlite::Result<GrantCols> {
     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
 }
 
-fn to_grant(conn: &Connection, (tool, grantee, created_by, created_at): GrantCols) -> ApiResult<ToolGrant> {
+fn to_grant(
+    conn: &Connection,
+    (tool, grantee, created_by, created_at): GrantCols,
+) -> ApiResult<ToolGrant> {
     Ok(ToolGrant {
         grantee_label: crate::secrets::grants::label_of(conn, &grantee)?,
         tool,
@@ -317,7 +373,12 @@ pub fn grants_of(conn: &Connection, tool: &str) -> ApiResult<Vec<ToolGrant>> {
 /// Give `tool` to `grantee` (`agent:<project>/<name>`, `agent:<ulid>`, or
 /// `project:<name>`). A project tool goes only to its own project. A grant
 /// that exists is `409`.
-pub fn grant(t: &mut Tx<'_>, tool: &str, grantee: &str, by: &str) -> ApiResult<(ToolGrant, Grantee)> {
+pub fn grant(
+    t: &mut Tx<'_>,
+    tool: &str,
+    grantee: &str,
+    by: &str,
+) -> ApiResult<(ToolGrant, Grantee)> {
     let r = get(t, tool)?;
     let g = parse_grantee(t, grantee)?;
     if let Some(p) = &r.def.project
@@ -335,7 +396,10 @@ pub fn grant(t: &mut Tx<'_>, tool: &str, grantee: &str, by: &str) -> ApiResult<(
         params![tool, key, by, now()],
     )?;
     if n == 0 {
-        return Err(ApiError::conflict(format!("{} has tool `{tool}` already", g.label())));
+        return Err(ApiError::conflict(format!(
+            "{} has tool `{tool}` already",
+            g.label()
+        )));
     }
     let row = t.query_row(
         "SELECT tool, grantee, created_by, created_at FROM tool_grants WHERE tool = ?1 AND grantee = ?2",
@@ -354,7 +418,10 @@ pub fn revoke(t: &mut Tx<'_>, tool: &str, grantee: &str) -> ApiResult<Grantee> {
         params![tool, g.key()],
     )?;
     if n == 0 {
-        return Err(ApiError::not_found(format!("{} has no grant of tool `{tool}`", g.label())));
+        return Err(ApiError::not_found(format!(
+            "{} has no grant of tool `{tool}`",
+            g.label()
+        )));
     }
     Ok(g)
 }
@@ -368,7 +435,10 @@ pub fn granted_to(conn: &Connection, id: &str, project: &str) -> ApiResult<Vec<T
          ORDER BY name"
     ))?;
     let rows = stmt
-        .query_map(params![format!("agent:{id}"), format!("project:{project}")], row)?
+        .query_map(
+            params![format!("agent:{id}"), format!("project:{project}")],
+            row,
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     // A project tool only ever reaches its own project; the rows say so too.
     Ok(rows
@@ -379,7 +449,10 @@ pub fn granted_to(conn: &Connection, id: &str, project: &str) -> ApiResult<Vec<T
 
 /// The agent was removed: the grants to it go.
 pub fn on_agent_deleted(conn: &Connection, id: &str) -> ApiResult<usize> {
-    Ok(conn.execute("DELETE FROM tool_grants WHERE grantee = ?1", [format!("agent:{id}")])?)
+    Ok(conn.execute(
+        "DELETE FROM tool_grants WHERE grantee = ?1",
+        [format!("agent:{id}")],
+    )?)
 }
 
 /// The project was removed: the grants to it go, and its tools.

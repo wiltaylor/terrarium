@@ -114,10 +114,40 @@ impl Approval {
 /// Programs that run code that their arguments give: a tool on one of them
 /// needs a fixed script and `args.allow` (design D1).
 const INTERPRETERS: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "csh", "tcsh", "pwsh", "powershell",
-    "cmd", "python", "python2", "python3", "pypy", "pypy3", "node", "nodejs", "deno", "bun",
-    "ruby", "perl", "php", "lua", "luajit", "tclsh", "wish", "rscript", "julia", "osascript",
-    "awk", "gawk", "busybox",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "mksh",
+    "fish",
+    "csh",
+    "tcsh",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "python",
+    "python2",
+    "python3",
+    "pypy",
+    "pypy3",
+    "node",
+    "nodejs",
+    "deno",
+    "bun",
+    "ruby",
+    "perl",
+    "php",
+    "lua",
+    "luajit",
+    "tclsh",
+    "wish",
+    "rscript",
+    "julia",
+    "osascript",
+    "awk",
+    "gawk",
+    "busybox",
 ];
 
 /// Programs that start another program or a package: the next word is what
@@ -134,12 +164,25 @@ const RUNNERS: &[(&str, Option<&str>)] = &[
 ];
 
 /// Flags of an interpreter that run code from the argv itself.
-const INLINE_CODE: &[&str] = &["-c", "-e", "--eval", "-r", "-Command", "-command", "-EncodedCommand", "-"];
+const INLINE_CODE: &[&str] = &[
+    "-c",
+    "-e",
+    "--eval",
+    "-r",
+    "-Command",
+    "-command",
+    "-EncodedCommand",
+    "-",
+];
 
 /// The lower-case program name of a path, without a version suffix
 /// (`/usr/bin/python3.12` gives `python3`).
 fn base(word: &str) -> String {
-    let name = word.rsplit(['/', '\\']).next().unwrap_or(word).to_ascii_lowercase();
+    let name = word
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(word)
+        .to_ascii_lowercase();
     let name = name.strip_suffix(".exe").unwrap_or(&name).to_owned();
     // python3.12 -> python3, node22 stays node22 (not in the list).
     match name.split_once('.') {
@@ -237,7 +280,9 @@ pub fn parse_rate(s: &str) -> Result<(u32, Duration), String> {
 pub fn check_name(name: &str) -> Result<(), String> {
     let ok = name.len() <= NAME_MAX
         && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
     if !ok {
         return Err(format!(
             "bad tool name `{name}`: use 1-{NAME_MAX} of a-z, 0-9, and `-`, starting with a letter"
@@ -252,12 +297,23 @@ pub fn check_name(name: &str) -> Result<(), String> {
 /// A valid env var name for `env_secrets`, not one that changes how the
 /// command is found or loaded.
 fn check_env(name: &str) -> Result<(), String> {
-    let ok = name.chars().next().is_some_and(|c| c.is_ascii_uppercase() || c == '_')
-        && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    let ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
     if !ok {
-        return Err(format!("bad env name `{name}` in env_secrets: use A-Z, 0-9, and `_`"));
+        return Err(format!(
+            "bad env name `{name}` in env_secrets: use A-Z, 0-9, and `_`"
+        ));
     }
-    if name == "PATH" || name.starts_with("LD_") || name.starts_with("DYLD_") || name.starts_with("TERRARIUM_") {
+    if name == "PATH"
+        || name.starts_with("LD_")
+        || name.starts_with("DYLD_")
+        || name.starts_with("TERRARIUM_")
+    {
         return Err(format!("env_secrets may not set `{name}`"));
     }
     Ok(())
@@ -313,12 +369,16 @@ impl ToolDef {
             return Err("args.allow and args.deny_flags may not have an empty entry".into());
         }
         if let Some(f) = a.deny_flags.iter().find(|f| !f.starts_with('-')) {
-            return Err(format!("args.deny_flags entry `{f}` is not a flag (it must start with `-`)"));
+            return Err(format!(
+                "args.deny_flags entry `{f}` is not a flag (it must start with `-`)"
+            ));
         }
         if let Approval::First { first } = &self.approval
             && first.is_empty()
         {
-            return Err("approval.first is empty: use approval = true or a list of first arguments".into());
+            return Err(
+                "approval.first is empty: use approval = true or a list of first arguments".into(),
+            );
         }
         Ok(())
     }
@@ -357,14 +417,26 @@ mod tests {
              approval = { first = [\"comment\"] }\nmax_output = \"1MiB\"\nrate = \"30/m\"\n",
         );
         d.check().unwrap();
-        assert_eq!(d.approval, Approval::First { first: vec!["comment".into()] });
+        assert_eq!(
+            d.approval,
+            Approval::First {
+                first: vec!["comment".into()]
+            }
+        );
         assert_eq!(tool(BASE).approval, Approval::Always(false));
-        assert_eq!(tool(&format!("{BASE}approval = true\n")).approval, Approval::Always(true));
+        assert_eq!(
+            tool(&format!("{BASE}approval = true\n")).approval,
+            Approval::Always(true)
+        );
     }
 
     #[test]
     fn there_is_no_shell_field_and_no_unknown_field() {
-        for extra in ["shell = true\n", "sheel = 1\n", "args = { allow = [\"a\"], extra = 1 }\n"] {
+        for extra in [
+            "shell = true\n",
+            "sheel = 1\n",
+            "args = { allow = [\"a\"], extra = 1 }\n",
+        ] {
             let r: Result<ToolDef, _> = toml::from_str(&format!("{BASE}{extra}"));
             assert!(r.is_err(), "{extra}");
         }
@@ -375,7 +447,17 @@ mod tests {
         for good in ["t", "tracker-read", "a1-b2", &"a".repeat(NAME_MAX)] {
             check_name(good).unwrap();
         }
-        for bad in ["", "Tracker", "1tool", "-x", "a_b", "a.b", "a/b", &"a".repeat(NAME_MAX + 1), "terrarium"] {
+        for bad in [
+            "",
+            "Tracker",
+            "1tool",
+            "-x",
+            "a_b",
+            "a.b",
+            "a/b",
+            &"a".repeat(NAME_MAX + 1),
+            "terrarium",
+        ] {
             assert!(check_name(bad).is_err(), "{bad}");
         }
     }
@@ -399,7 +481,11 @@ mod tests {
             (argv(&["bash"]), allow.clone(), "no script"),
             (argv(&["/bin/sh", "-c", "tracker"]), allow.clone(), "-c"),
             (argv(&["python3", "-c", "print(1)"]), allow.clone(), "-c"),
-            (argv(&["/usr/bin/python3.12", "/s/t.py"]), vec![], "args.allow"),
+            (
+                argv(&["/usr/bin/python3.12", "/s/t.py"]),
+                vec![],
+                "args.allow",
+            ),
             (argv(&["node", "-e", "x"]), allow.clone(), "-e"),
             (argv(&["pwsh", "-Command", "x"]), allow.clone(), "-Command"),
             (argv(&["env", "FOO=1", "bash"]), allow.clone(), "no script"),
@@ -417,8 +503,14 @@ mod tests {
             (argv(&["/home/u/bin/tracker"]), vec![]),
             (argv(&["python3", "/s/t.py"]), allow.clone()),
             (argv(&["python3", "-u", "/s/t.py"]), allow.clone()),
-            (argv(&["/home/u/.local/bin/uv", "run", "/s/t.py"]), allow.clone()),
-            (argv(&["uv", "run", "--quiet", "python", "/s/t.py"]), allow.clone()),
+            (
+                argv(&["/home/u/.local/bin/uv", "run", "/s/t.py"]),
+                allow.clone(),
+            ),
+            (
+                argv(&["uv", "run", "--quiet", "python", "/s/t.py"]),
+                allow.clone(),
+            ),
             (argv(&["env", "LANG=C", "/usr/bin/jq"]), vec![]),
             (argv(&["/usr/bin/gh"]), vec![]),
         ] {

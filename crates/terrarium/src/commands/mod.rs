@@ -27,8 +27,8 @@ pub mod ssh_keys;
 pub mod system;
 pub mod system_prompts;
 pub mod templates;
-pub mod tools;
 pub mod test_runs;
+pub mod tools;
 pub mod update;
 pub mod waits;
 
