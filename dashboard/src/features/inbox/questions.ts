@@ -66,3 +66,6 @@ export function shortQuestion(text: string, max = 80): string {
 
 /** The board with the drawer of `card` open (`?card=`). */
 export const cardHref = (project: string, card: string): string => `/p/${encodeURIComponent(project)}/board?card=${encodeURIComponent(card)}`;
+
+/** The Inbox item ID of a question, bundle, or notice: `<kind>:<id>` (docs/api.md §6.9). */
+export const questionItemId = (q: Pick<Question, "id" | "kind">): string => `${q.kind}:${q.id}`;

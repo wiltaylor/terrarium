@@ -1421,6 +1421,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const threadId = thread ?? ulid("th");
     const held = f.kind === "agent" && t.kind === "agent" && agentRun(threadId) >= LOOP_LIMIT;
     const threadWas = inboxMock.threadOpen(threadId);
+    // A watch of the thread closes with its agent's answer and opens again with the operator's next message.
+    const watchWas = inboxMock.watchOpen(threadId);
     const m: Message = {
       id: ulid("msg"),
       thread_id: threadId,
@@ -1445,6 +1447,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       inboxEvent({ item: item.id, kind: "mail", change: "opened", ...(item.project ? { project: item.project } : {}) });
     }
     inboxMock.threadEvent(threadId, threadWas);
+    inboxMock.watchEvent(threadId, watchWas);
     if (held) {
       // One notice for each pause (store/mail.rs pause_notice).
       const reset = w.mail.filter((x) => x.thread_id === threadId && (x.from_kind === "operator" || x.from_kind === "project" || x.to_kind === "project")).sort(byId).at(-1)?.id ?? "";
@@ -1481,6 +1484,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     sendMail: (to, from, subject, body, thread) => sendMail(to, from, subject, body, thread),
     mailEvent: (m, data) => mailEvent(m, data),
     inboxEvent: (d) => inboxEvent(d),
+    agent: (key) => agent(key),
+    audit: (action, target, proj, detail) => audit(action, target, proj, detail),
   });
   /** The first read sets `read_by` (docs/api.md §7). */
   const readBy = (m: Message, reader: string) => {

@@ -5,11 +5,13 @@
 
 import { useSearchParams } from "@solidjs/router";
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
-import type { InboxItem, Message, Question } from "../../api/types";
+import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
 import { api, events, inbox, projects } from "../../stores";
-import { MailItemCard, PausedThreadCard } from "./cards";
-import { emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, type InboxStatusTab, type InboxTab } from "./model";
+import { MailItemCard, PausedThreadCard, WatchCard } from "./cards";
+import { AskDialog } from "./AskDialog";
+import { canForward, emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, type InboxStatusTab, type InboxTab } from "./model";
+import { questionItemId } from "./questions";
 import { inboxItemDomId } from "./critical";
 import { BundleCard } from "./BundleCard";
 import { QuestionCard } from "./QuestionCard";
@@ -73,6 +75,34 @@ export default function InboxPage() {
   };
   const mailAcked = (item: InboxItem, m: Message) => changed({ ...item, message: m, open: false, urgent: false, critical: false });
   const systemChanged = () => (void reload(), void inbox.refresh());
+  const watchChanged = (item: InboxItem, w: InboxWatch) => changed({ ...item, watch: w, open: w.waiting && !w.cancelled_at });
+
+  // ----- ask and forward (GitHub #24) -----
+  /** The open dialog: an ask (no question), or a forward of a question. */
+  const [asking, setAsking] = createSignal<{ question?: Question } | null>(null);
+  const [notice, setNotice] = createSignal<string | null>(null);
+  const asked = (agent: string, forward: boolean) => {
+    setAsking(null);
+    setNotice(`${forward ? "Forwarded" : "Asked"}. The Asked tab shows the thread until ${agent} answers.`);
+    setTimeout(() => setNotice(null), 6000);
+    void reload();
+    void inbox.refresh();
+  };
+  /** Text for the answer box of a question ("Use as answer"), by question ID. */
+  const [prefill, setPrefill] = createSignal<Record<string, { text: string }>>({});
+  /** Show the question of a forward: the All tab, its status, and `?item=` scrolls to it. */
+  const openQuestion = async (id: string) => {
+    try {
+      const q = await api.questions.get(id);
+      setParams({ tab: undefined, status: q.status === "open" ? undefined : "done", item: questionItemId(q) });
+    } catch (e) {
+      setError(e);
+    }
+  };
+  const useAsAnswer = (id: string, text: string) => {
+    setPrefill((p) => ({ ...p, [id]: { text } }));
+    void openQuestion(id);
+  };
 
   return (
     <div class="stack">
@@ -88,14 +118,23 @@ export default function InboxPage() {
           </For>
         </select>
         <button onClick={() => void reload()}>Refresh</button>
+        <button class="primary" onClick={() => setAsking({})}>
+          Ask an agent
+        </button>
       </PageHead>
       <p class="muted small" style={{ margin: 0 }}>
         Everything that waits for you. Leader agents ask questions and send notices with <code>terrarium question</code>. Agents and the daemon send you
-        mail. The loop guard pauses a thread when agents write too many messages to each other. The text of each item is the sender's own words.
+        mail. The loop guard pauses a thread when agents write too many messages to each other. Ask an agent, or forward a question to one: the Asked tab
+        waits for its answer. The text of each item is the sender's own words.
       </p>
       <Tabs tabs={INBOX_TABS} active={tab()} onChange={(t) => setParams({ tab: t === "all" ? undefined : t })} />
       <Tabs tabs={STATUS_TABS} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s })} />
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <Show when={notice()}>
+        <p class="notice small" role="status" style={{ margin: 0 }}>
+          {notice()}
+        </p>
+      </Show>
       <Show when={list().length} fallback={<Empty>{loading() ? "Loading…" : emptyText(tab(), status())}</Empty>}>
         <div class="stack">
           <For each={list()}>
@@ -103,20 +142,48 @@ export default function InboxPage() {
               <div id={inboxItemDomId(item.id)} classList={{ "inbox-target": params.item === item.id }}>
                 <Switch>
                   <Match when={item.question}>
-                    {(q) => (
-                      <Show when={q().kind === "bundle"} fallback={<QuestionCard question={q()} now={now()} showAgent showKind onChange={(next) => questionChanged(item, next)} />}>
-                        <BundleCard question={q()} now={now()} showAgent showKind onChange={(next) => questionChanged(item, next)} />
-                      </Show>
-                    )}
+                    {(q) => {
+                      const forward = () => (
+                        <Show when={canForward(q())}>
+                          <button type="button" class="small" onClick={() => setAsking({ question: q() })} title="Forward to an agent, and watch for its answer">
+                            <EyeIcon /> Forward
+                          </button>
+                        </Show>
+                      );
+                      return (
+                        <Show
+                          when={q().kind === "bundle"}
+                          fallback={<QuestionCard question={q()} now={now()} showAgent showKind actions={forward()} prefill={prefill()[q().id]} onChange={(next) => questionChanged(item, next)} />}
+                        >
+                          <BundleCard question={q()} now={now()} showAgent showKind actions={forward()} onChange={(next) => questionChanged(item, next)} />
+                        </Show>
+                      );
+                    }}
                   </Match>
-                  <Match when={item.message}>{(m) => <MailItemCard message={m()} open={item.open} now={now()} onAck={(next) => mailAcked(item, next)} />}</Match>
+                  <Match when={item.message}>
+                    {(m) => <MailItemCard message={m()} open={item.open} now={now()} watch={item.watch} onOpenQuestion={(id) => void openQuestion(id)} onUseAsAnswer={useAsAnswer} onAck={(next) => mailAcked(item, next)} />}
+                  </Match>
                   <Match when={item.system}>{(s) => <PausedThreadCard system={s()} onChange={systemChanged} />}</Match>
+                  <Match when={item.kind === "watch" && item.watch}>{(w) => <WatchCard watch={w()} now={now()} onChange={(next) => watchChanged(item, next)} />}</Match>
                 </Switch>
               </div>
             )}
           </For>
         </div>
       </Show>
+      <Show when={asking()}>
+        {(a) => <AskDialog question={a().question} onClose={() => setAsking(null)} onAsked={(r) => asked(r.watch.agent_name, !!a().question)} />}
+      </Show>
     </div>
+  );
+}
+
+/** The watch icon of Forward: an eye. */
+function EyeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style={{ "vertical-align": "-2px" }}>
+      <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
   );
 }

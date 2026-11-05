@@ -100,7 +100,10 @@ import type {
   SelfUpdateReport,
   Host,
   HostMetricsHistory,
+  InboxAsk,
+  InboxAskBody,
   InboxCounts,
+  InboxWatch,
   InboxItem,
   InboxQuery,
   MailAck,
@@ -717,6 +720,10 @@ export interface Api {
     counts(project?: string): Promise<InboxCounts>;
     /** `POST /api/inbox/mail/{id}/ack`: acknowledge a mail to the operator. A reply goes out as `operator` on the thread. */
     ackMail(id: string, reply?: string): Promise<MailAck>;
+    /** `POST /api/inbox/asks`: ask an agent, or forward a question of the Inbox to one. The Inbox watches the thread. */
+    ask(body: InboxAskBody): Promise<InboxAsk>;
+    /** `DELETE /api/inbox/watches/{thread}`: stop waiting for the agent. The mail stays. */
+    cancelWatch(thread: string): Promise<InboxWatch>;
   };
 
   /** The inbox of a project: the address `project:<name>`. */
@@ -1378,6 +1385,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       list: (q = {}) => get("/api/inbox", Object.keys(q).length ? { ...q } : undefined),
       counts: (project) => get("/api/inbox/counts", project ? { project } : undefined),
       ackMail: (id, reply) => post(`/api/inbox/mail/${seg(id)}/ack`, reply ? { reply } : {}),
+      ask: (body) => post("/api/inbox/asks", body),
+      cancelWatch: (thread) => t.request<InboxWatch>("DELETE", `/api/inbox/watches/${seg(thread)}`, {}),
     },
 
     projectInbox: {

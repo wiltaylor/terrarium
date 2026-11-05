@@ -1,15 +1,16 @@
 // The cards of the Inbox page that are not questions: mail to the operator,
-// and a thread that the loop guard paused. A mail body and a subject are the
+// a thread that the loop guard paused, and a watch (an ask or a forward
+// that waits for an agent). A mail body and a subject are the
 // sender's words: they go into the page as text nodes only.
 
 import { A } from "@solidjs/router";
 import { createSignal, For, Show } from "solid-js";
-import type { Message, PausedThread } from "../../api/types";
-import { ErrorBanner } from "../../components/ui";
+import type { InboxWatch, Message, PausedThread } from "../../api/types";
+import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { api } from "../../stores";
 import { MessageView } from "../mail/parts";
-import { systemMailLink } from "./model";
+import { answerLine, systemMailLink, watchState, watchTitle } from "./model";
 
 /** Run one call with a busy flag, and keep its error for the banner. */
 function useAction() {
@@ -34,8 +35,21 @@ function useAction() {
 /** The Mail tab of the logs, filtered to the thread, with the thread open. */
 const threadHref = (thread: string) => `/logs/mail?thread=${encodeURIComponent(thread)}&open=${encodeURIComponent(thread)}`;
 
-/** A mail to `operator`: Acknowledge, with an optional reply on the thread. */
-export function MailItemCard(props: { message: Message; open: boolean; now: number; onAck: (m: Message) => void }) {
+/**
+ * A mail to `operator`: Acknowledge, with an optional reply on the thread.
+ * On a watched thread (`watch`) it says what it answers. The answer to a
+ * forward links the question (`onOpenQuestion`) and has "Use as answer"
+ * (`onUseAsAnswer`: it fills the answer box of the question).
+ */
+export function MailItemCard(props: {
+  message: Message;
+  open: boolean;
+  now: number;
+  onAck: (m: Message) => void;
+  watch?: InboxWatch;
+  onOpenQuestion?: (questionId: string) => void;
+  onUseAsAnswer?: (questionId: string, text: string) => void;
+}) {
   const m = () => props.message;
   const [reply, setReply] = createSignal("");
   const a = useAction();
@@ -76,6 +90,25 @@ export function MailItemCard(props: { message: Message; open: boolean; now: numb
           )}
         </Show>
       </div>
+      <Show when={props.watch && m().from_kind === "agent" ? props.watch : undefined}>
+        {(w) => (
+          <div class="row small" style={{ "flex-wrap": "wrap", gap: "6px" }} data-testid="watch-answer">
+            <span class="chip info">answer</span>
+            <Show when={w().question_id} fallback={<span>{answerLine(w())}</span>}>
+              {(qid) => (
+                <>
+                  <button type="button" class="link small" onClick={() => props.onOpenQuestion?.(qid())} title="Open the forwarded question">
+                    {answerLine(w())}
+                  </button>
+                  <button type="button" class="small" onClick={() => props.onUseAsAnswer?.(qid(), m().body)} title="Fill the answer box of the question with this reply">
+                    Use as answer
+                  </button>
+                </>
+              )}
+            </Show>
+          </div>
+        )}
+      </Show>
       <pre class="mail-body">{m().body}</pre>
       <Show when={props.open}>
         <form class="stack" style={{ gap: "6px" }} onSubmit={ack} aria-label="Acknowledge">
@@ -160,6 +193,51 @@ export function PausedThreadCard(props: { system: PausedThread; onChange: () => 
           </button>
         </div>
       </form>
+    </article>
+  );
+}
+
+/**
+ * A watch (docs/api.md §6.9): a question that the operator asked an agent,
+ * or forwarded to one. "Waiting for p/y: <subject>" while the operator spoke
+ * last; Cancel stops waiting (the mail stays).
+ */
+export function WatchCard(props: { watch: InboxWatch; now: number; onChange: (w: InboxWatch) => void }) {
+  const w = () => props.watch;
+  const a = useAction();
+  const st = () => watchState(w());
+  const cancel = async () => {
+    let next: InboxWatch | undefined;
+    if (await a.run(async () => (next = await api.inbox.cancelWatch(w().thread_id))) && next) props.onChange(next);
+  };
+  return (
+    <article class="card-box stack" style={{ gap: "8px" }} aria-label={`Watch ${w().thread_id}`}>
+      <div class="row small" style={{ "flex-wrap": "wrap", gap: "6px" }}>
+        <span class="chip">{w().question_id ? "forwarded" : "asked"}</span>
+        <span class={`chip ${st().chip}`}>{st().label}</span>
+        <A href={`/agents/${encodeURIComponent(w().agent)}`}>{w().agent_name}</A>
+        <span class="muted" title={w().created_at}>
+          asked {ago(w().created_at, props.now)}
+        </span>
+        <Show when={w().replies}>
+          <span class="muted">
+            {w().replies} {w().replies === 1 ? "reply" : "replies"}
+          </span>
+        </Show>
+        <A href={threadHref(w().thread_id)} class="muted">
+          open the thread
+        </A>
+      </div>
+      <p style={{ margin: 0, "font-weight": 600 }}>{watchTitle(w())}</p>
+      <Show when={w().question_id}>
+        {(q) => <span class="small muted">The forwarded question {q()} stays open in the Inbox.</span>}
+      </Show>
+      <ErrorBanner error={a.error()} onDismiss={() => a.setError(null)} />
+      <Show when={!w().cancelled_at}>
+        <div>
+          <ConfirmButton class="small" label="Cancel" confirmLabel="Yes, stop waiting" disabled={a.busy()} onConfirm={() => void cancel()} />
+        </div>
+      </Show>
     </article>
   );
 }

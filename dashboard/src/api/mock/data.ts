@@ -77,6 +77,8 @@ export interface MockWorld {
   heldMail?: string[];
   /** A resume of a paused thread: the agent run counts only the messages after this ID. */
   mailResets?: Record<string, string>;
+  /** The watched threads of the Inbox (./inbox.ts, docs/api.md §6.9 "Ask and forward"). */
+  inboxWatches?: { thread_id: string; agent: string; question_id?: string; message_id: string; created_at: string; cancelled_at?: string }[];
   targets: Target[];
   /**
    * The snapshots on the host (docs/api.md §17.3), by instance: the target

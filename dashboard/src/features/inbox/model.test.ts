@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { InboxItem } from "../../api/types";
-import { badge, countItems, EMPTY_COUNTS, emptyText, inboxQuery, isCritical, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, systemMailLink } from "./model";
+import type { InboxItem, InboxWatch } from "../../api/types";
+import { answerLine, ASK_TEXT_MAX, askBody, badge, canForward, countItems, EMPTY_COUNTS, emptyText, INBOX_TABS, inboxQuery, isCritical, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, systemMailLink, watchState, watchTitle } from "./model";
 
 const item = (id: string, over: Partial<InboxItem> = {}): InboxItem => ({
   id,
@@ -83,7 +83,7 @@ describe("inbox model", () => {
       item("s", { kind: "system" }),
       item("done", { open: false, kind: "mail" }),
     ]);
-    expect(c).toEqual({ open: 5, urgent: 1, critical: 0, question: 2, notice: 1, mail: 1, system: 1 });
+    expect(c).toEqual({ open: 5, urgent: 1, critical: 0, question: 2, notice: 1, mail: 1, system: 1, watch: 0 });
     expect(badge(c)).toEqual({ n: 5, cls: "nav-count", title: "Waiting for you: 2 question, 1 notice, 1 mail, 1 paused thread. 1 urgent" });
     expect(badge({ ...c, urgent: 0 })!.cls).toBe("nav-count info");
     expect(badge(EMPTY_COUNTS)).toBeNull();
@@ -108,5 +108,49 @@ describe("inbox model", () => {
     expect(systemMailLink({ ...quota, body: "Open: javascript:alert(1)" })).toBeNull();
     expect(systemMailLink({ ...quota, body: "Open: //evil.example/x" })).toBeNull();
     expect(systemMailLink({ ...quota, body: "no link" })).toBeNull();
+  });
+});
+
+describe("ask and forward (GitHub #24)", () => {
+  const watch = (over: Partial<InboxWatch> = {}): InboxWatch => ({ thread_id: "T1", agent: "A1", agent_name: "demo/w1", message_id: "M1", subject: "Question from the operator: why?", created_at: "2026-11-05T10:00:00Z", waiting: true, replies: 0, ...over });
+  const watchItem = (over: Partial<InboxItem> = {}): InboxItem => ({ id: "watch:T1", kind: "watch", open: true, urgent: false, critical: false, project: "demo", at: "2026-11-05T10:00:00Z", watch: watch(), ...over });
+
+  it("has an Asked tab that lists the watches", () => {
+    expect(INBOX_TABS.map((t) => t.id)).toContain("watch");
+    expect(INBOX_TABS.find((t) => t.id === "watch")!.label).toBe("Asked");
+    expect(inboxQuery("watch", "open", "")).toEqual({ status: "open", kind: "watch" });
+    expect(matchesTabs(watchItem(), "watch", "open")).toBe(true);
+    expect(matchesTabs(watchItem({ open: false }), "watch", "done")).toBe(true);
+    expect(emptyText("watch", "open")).toContain("Ask an agent");
+  });
+
+  it("does not count an open watch in the badge", () => {
+    const c = countItems([watchItem(), item("mail:M", { kind: "mail" })]);
+    expect(c).toMatchObject({ open: 1, mail: 1, watch: 1 });
+    expect(badge(c)!.n).toBe(1);
+    expect(badge(countItems([watchItem()]))).toBeNull();
+  });
+
+  it("checks the body of an ask and a forward", () => {
+    expect(askBody("", "why?")).toEqual({ error: "Pick an agent." });
+    expect(askBody("demo/w1", "  ")).toEqual({ error: "Write the question." });
+    expect(askBody("demo/w1", " why? ")).toEqual({ body: { to: "demo/w1", text: "why?" } });
+    expect(askBody("demo/w1", "", "Q1")).toEqual({ body: { to: "demo/w1", question: "Q1" } });
+    expect(askBody("demo/w1", "a note", "Q1")).toEqual({ body: { to: "demo/w1", text: "a note", question: "Q1" } });
+    expect("error" in askBody("demo/w1", "x".repeat(ASK_TEXT_MAX + 1))).toBe(true);
+  });
+
+  it("names the state of a watch and the answer of a mail", () => {
+    expect(watchTitle(watch())).toBe("Waiting for demo/w1: Question from the operator: why?");
+    expect(watchTitle(watch({ waiting: false, replies: 1 }))).toBe("Answered by demo/w1: Question from the operator: why?");
+    expect(watchTitle(watch({ cancelled_at: "x" }))).toBe("No longer waiting for demo/w1: Question from the operator: why?");
+    expect(watchState(watch())).toEqual({ label: "waiting", chip: "info" });
+    expect(watchState(watch({ replies: 1 }))).toEqual({ label: "waiting again", chip: "info" });
+    expect(watchState(watch({ waiting: false, replies: 1 }))).toEqual({ label: "answered", chip: "ok" });
+    expect(watchState(watch({ cancelled_at: "x" })).label).toBe("cancelled");
+    expect(answerLine(watch({ question_id: "Q9" }))).toBe("answer to your forward of Q9");
+    expect(answerLine(watch())).toBe('answer to your question "Question from the operator: why?"');
+    expect(canForward({ status: "open" })).toBe(true);
+    expect(canForward({ status: "answered" })).toBe(false);
   });
 });

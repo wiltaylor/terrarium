@@ -62,8 +62,8 @@ describe("the inbox in the mock", () => {
   it("counts the open items by kind, for a project too", async () => {
     const api = mock();
     // The bundle counts once, as a question.
-    expect(await api.inbox.counts()).toEqual({ open: 8, urgent: 1, critical: 0, question: 3, notice: 1, mail: 3, system: 1 });
-    expect(await api.inbox.counts("webshop")).toEqual({ open: 1, urgent: 0, critical: 0, question: 1, notice: 0, mail: 0, system: 0 });
+    expect(await api.inbox.counts()).toEqual({ open: 8, urgent: 1, critical: 0, question: 3, notice: 1, mail: 3, system: 1, watch: 0 });
+    expect(await api.inbox.counts("webshop")).toEqual({ open: 1, urgent: 0, critical: 0, question: 1, notice: 0, mail: 0, system: 0, watch: 0 });
   });
 
   it("acknowledges mail to the operator, with an optional reply on the thread", async () => {
@@ -177,5 +177,62 @@ describe("the inbox in the mock", () => {
     await api.questions.ack(notice.id);
     await waitFor(() => expect(store.counts()).toMatchObject({ critical: 0 }));
     expect(criticalBanner(store.open())).toBeNull();
+  });
+
+  it("asks an agent: one mail on a new thread, an open watch that the badge does not count, and the answer closes it", async () => {
+    const api = mock();
+    const { frames, close } = await listen(api);
+    const before = await api.inbox.counts();
+    const r = await api.inbox.ask({ to: "terrarium/lead", text: "Why did the runner fail?\nMore lines." });
+    expect(r.message).toMatchObject({ from: "operator", to_name: "terrarium/lead", subject: "Question from the operator: Why did the runner fail?" });
+    expect(r.message.body).toContain("Answer the operator with `terrarium mail reply <this message>`");
+    expect(r.watch).toMatchObject({ thread_id: r.message.thread_id, agent_name: "terrarium/lead", message_id: r.message.id, waiting: true, replies: 0 });
+    expect(r.watch.question_id).toBeUndefined();
+    const c = await api.inbox.counts();
+    expect(c).toMatchObject({ open: before.open, watch: 1 });
+    const watches = await api.inbox.list({ kind: "watch" });
+    expect(watches.map((i) => i.id)).toEqual([`watch:${r.message.thread_id}`]);
+    expect(watches[0]).toMatchObject({ open: true, project: "terrarium", urgent: false });
+    // The agent answers: a mail item with the watch, and the watch closes.
+    const answer = await api.mail.send({ from: "terrarium/lead", to: "operator", thread_id: r.message.thread_id, body: "A flaky test." });
+    expect(await api.inbox.list({ kind: "watch" })).toEqual([]);
+    const done = (await api.inbox.list({ kind: "watch", status: "done" }))[0]!;
+    expect(done.watch).toMatchObject({ waiting: false, replies: 1 });
+    const mailItem = (await api.inbox.list({ kind: "mail" })).find((i) => i.id === `mail:${answer.id}`)!;
+    expect(mailItem.watch).toMatchObject({ thread_id: r.message.thread_id, waiting: false });
+    expect((await api.inbox.counts()).watch).toBe(0);
+    // The operator's reply opens it again.
+    await api.inbox.ackMail(answer.id, "And the fix?");
+    expect((await api.inbox.list({ kind: "watch" }))[0]!.watch).toMatchObject({ waiting: true, replies: 1 });
+    await wait();
+    const changes = frames.filter((f) => f.kind === "inbox" && f.data.item === `watch:${r.message.thread_id}`).map((f) => f.data.change);
+    expect(changes).toEqual(["opened", "closed", "opened"]);
+    expect(api.world.audit.some((x) => x.action === "inbox.ask" && x.target === r.message.thread_id)).toBe(true);
+    close();
+  });
+
+  it("forwards a question: the mail quotes it, the question stays open, and a cancel ends the watch", async () => {
+    const api = mock();
+    const q = api.world.questions!.find((x) => x.kind === "question" && x.status === "open" && x.options.length)!;
+    const r = await api.inbox.ask({ to: "terrarium/runner-dev", question: q.id, text: "Can you take this?" });
+    expect(r.message.subject).toBe(`Forwarded question from ${q.agent_name}: ${q.text.split("\n")[0]!.slice(0, 80)}`);
+    expect(r.message.body.startsWith("Can you take this?\n\nThe operator forwards this question of ")).toBe(true);
+    expect(r.message.body).toContain(`> 1. ${q.options[0]}`);
+    expect(r.watch.question_id).toBe(q.id);
+    expect((await api.questions.get(q.id)).status).toBe("open");
+    const w = await api.inbox.cancelWatch(r.message.thread_id);
+    expect(w.cancelled_at).toBeTruthy();
+    expect(await api.inbox.list({ kind: "watch" })).toEqual([]);
+    await expect(api.inbox.cancelWatch(r.message.thread_id)).rejects.toMatchObject({ status: 409 });
+    await expect(api.inbox.cancelWatch("01JBTH0000000000000000NONE")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("refuses a bad ask as the daemon", async () => {
+    const api = mock();
+    await expect(api.inbox.ask({ to: "terrarium/lead", text: "  " })).rejects.toMatchObject({ status: 422 });
+    await expect(api.inbox.ask({ to: "terrarium/nobody", text: "hi" })).rejects.toMatchObject({ status: 404 });
+    await expect(api.inbox.ask({ to: "terrarium/lead", question: "01JBQUES0000000000000NONE0" })).rejects.toMatchObject({ status: 404 });
+    await expect(api.inbox.ask({ to: "terrarium/lead", text: "x".repeat(4001) })).rejects.toMatchObject({ status: 422 });
+    await expect(api.inbox.list({ kind: "bogus" as never })).rejects.toMatchObject({ status: 422 });
   });
 });

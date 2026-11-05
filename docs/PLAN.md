@@ -1918,12 +1918,18 @@ waits while the operator spoke last: the agent's answer is a mail item
 (Acknowledge, or reply), which closes the watch, and the operator's reply
 opens it again. The badge does not count a watch, because it waits for an
 agent. The forwarded question stays open until the operator answers it.
-The agent needs no new command or right. The dashboard part (a Forward
-button with a watch icon on each question card, Ask an agent, the watch
-items) is TER-26. `docs/api.md` §6.9 is the contract.
+The agent needs no new command or right. `docs/api.md` §6.9 is the
+contract. In the dashboard: **Ask an agent** on the Inbox page (an agent
+picker and the question), **Forward** with a watch icon on each open
+question, bundle, and notice card (an agent picker and an optional note),
+the **Asked** tab with the watch items ("Waiting for p/y: <subject>", with
+Cancel), and on the agent's reply the line "answer to your forward of
+<question>", which opens the question, with **Use as answer**, which fills
+the answer box of the question with the reply.
 
 **The dashboard.** The global **Inbox** page (`/inbox`; `/questions`
-redirects) has the tabs All, Questions, Notices, Mail to you, and System,
+redirects) has the tabs All, Questions, Notices, Mail to you, System, and
+Asked,
 an Open and Done switch, and a project filter. Critical items come first,
 then urgent items, then the newest. A question card shows the agent, the project, the card,
 the text (as plain text), the context (Markdown through the DOMPurify sink

@@ -5,7 +5,7 @@
 // (SafeHtml) only.
 
 import { A } from "@solidjs/router";
-import { createSignal, For, type JSX, Show } from "solid-js";
+import { createEffect, createSignal, For, type JSX, on, Show } from "solid-js";
 import type { Question } from "../../api/types";
 import { SafeHtml } from "../../components/SafeHtml";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
@@ -14,7 +14,12 @@ import { renderMarkdown } from "../../lib/markdown";
 import { api } from "../../stores";
 import { ackText, answerBody, cardHref, chosenLabel, statusChip } from "./questions";
 
-export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; actions?: JSX.Element; onChange: (q: Question) => void }) {
+/**
+ * `prefill`: text for the answer box (the reply of an agent that the
+ * operator forwarded the question to, "Use as answer"). A new object fills
+ * it again.
+ */
+export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; actions?: JSX.Element; prefill?: { text: string }; onChange: (q: Question) => void }) {
   const q = () => props.question;
   const notice = () => q().kind === "notice";
   const [option, setOption] = createSignal<number | null>(null);
@@ -22,6 +27,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
   const [reason, setReason] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
+  createEffect(on(() => props.prefill, (p) => p && setText(p.text)));
 
   const run = async (call: () => Promise<Question>) => {
     setBusy(true);

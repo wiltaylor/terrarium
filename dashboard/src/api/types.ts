@@ -1359,7 +1359,7 @@ export interface ProjectInboxQuery {
 
 // ----- The operator's inbox: what waits for the operator -----
 
-export type InboxKind = "question" | "notice" | "mail" | "system";
+export type InboxKind = "question" | "notice" | "mail" | "system" | "watch";
 export type InboxStatus = "open" | "done" | "all";
 
 /** A thread that the loop guard paused, with the messages that it held. */
@@ -1380,8 +1380,46 @@ export interface PausedThread {
 }
 
 /**
+ * A watched thread (docs/api.md §6.9, "Ask and forward"): a question that the
+ * operator asked an agent, or a question of the Inbox that the operator
+ * forwarded to one. It waits for the agent while `waiting` is true.
+ */
+export interface InboxWatch {
+  thread_id: string;
+  /** The agent's ULID. */
+  agent: string;
+  /** `project/name`. */
+  agent_name: string;
+  /** The forwarded question, bundle, or notice. Absent on an ask. */
+  question_id?: string;
+  /** The ask: the first message of the thread. */
+  message_id: string;
+  subject: string;
+  created_at: string;
+  cancelled_at?: string;
+  /** The newest message of the thread is the operator's. */
+  waiting: boolean;
+  /** The messages of the agent on the thread. */
+  replies: number;
+}
+
+/** `POST /api/inbox/asks`: `to` is the agent; `text` the question, or a note on a forward of `question`. */
+export interface InboxAskBody {
+  to: string;
+  text?: string;
+  question?: string;
+}
+
+/** The answer of `POST /api/inbox/asks`: the mail and the new watch. */
+export interface InboxAsk {
+  message: Message;
+  watch: InboxWatch;
+}
+
+/**
  * One thing that waits for the operator (`GET /api/inbox`). `id` is
- * `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, or `thread:<thread id>`.
+ * `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, `thread:<thread id>`, or `watch:<thread id>`.
+ * A `watch` item waits for an agent, not for the operator.
  * A bundle is an item of the kind `question`.
  * A system item shows only while it is open.
  */
@@ -1402,6 +1440,8 @@ export interface InboxItem {
   message?: Message;
   /** Kind `system`. */
   system?: PausedThread;
+  /** Kind `watch`: the watch. Kind `mail` on a watched thread: the watch that the mail answers. */
+  watch?: InboxWatch;
 }
 
 export interface InboxQuery {
@@ -1420,6 +1460,8 @@ export interface InboxCounts {
   notice: number;
   mail: number;
   system: number;
+  /** The open watches. Not in `open`: a watch waits for an agent. Absent on an older daemon. */
+  watch?: number;
 }
 
 /** `POST /api/inbox/mail/{id}/ack`: the acknowledged message, and the replies (one for each participant). */

@@ -4,7 +4,7 @@
 // keep a list in the same order after a local change, and give the tabs and
 // the badge.
 
-import type { AgentEvent, InboxCounts, InboxItem, InboxKind, InboxStatus, Message, Question, QuestionPriority } from "../../api/types";
+import type { AgentEvent, InboxCounts, InboxItem, InboxKind, InboxStatus, InboxWatch, Message, Question, QuestionPriority } from "../../api/types";
 
 /** The kind tabs of the Inbox page. `all` sends no `kind`. */
 export const INBOX_TABS = [
@@ -13,6 +13,7 @@ export const INBOX_TABS = [
   { id: "notice", label: "Notices" },
   { id: "mail", label: "Mail to you" },
   { id: "system", label: "System" },
+  { id: "watch", label: "Asked" },
 ] as const;
 export type InboxTab = (typeof INBOX_TABS)[number]["id"];
 
@@ -23,7 +24,7 @@ export const STATUS_TABS = [
 ] as const;
 export type InboxStatusTab = (typeof STATUS_TABS)[number]["id"];
 
-export const EMPTY_COUNTS: InboxCounts = { open: 0, urgent: 0, critical: 0, question: 0, notice: 0, mail: 0, system: 0 };
+export const EMPTY_COUNTS: InboxCounts = { open: 0, urgent: 0, critical: 0, question: 0, notice: 0, mail: 0, system: 0, watch: 0 };
 
 /** The query of a tab pair, for `GET /api/inbox`. */
 export function inboxQuery(tab: InboxTab, status: InboxStatusTab, project: string): { status: InboxStatus; kind?: InboxKind; project?: string } {
@@ -64,10 +65,11 @@ export function putItem(list: InboxItem[], item: InboxItem, keep: (i: InboxItem)
   return sortItems(keep(item) ? [item, ...rest] : rest);
 }
 
-/** The counts of a list of items, as `GET /api/inbox/counts` gives them for the open items. */
+/** The counts of a list of items, as `GET /api/inbox/counts` gives them for the open items. `open` leaves out the watches: they wait for an agent. */
 export function countItems(items: InboxItem[]): InboxCounts {
-  const open = items.filter((i) => i.open);
-  const n = (k: InboxKind) => open.filter((i) => i.kind === k).length;
+  const all = items.filter((i) => i.open);
+  const open = all.filter((i) => i.kind !== "watch");
+  const n = (k: InboxKind) => all.filter((i) => i.kind === k).length;
   return {
     open: open.length,
     urgent: open.filter((i) => i.urgent).length,
@@ -76,6 +78,7 @@ export function countItems(items: InboxItem[]): InboxCounts {
     notice: n("notice"),
     mail: n("mail"),
     system: n("system"),
+    watch: n("watch"),
   };
 }
 
@@ -90,7 +93,7 @@ export function badge(c: InboxCounts): { n: number; cls: string; title: string }
   };
 }
 
-export const KIND_LABELS: Record<InboxKind, string> = { question: "question", notice: "notice", mail: "mail", system: "paused thread" };
+export const KIND_LABELS: Record<InboxKind, string> = { question: "question", notice: "notice", mail: "mail", system: "paused thread", watch: "asked" };
 
 /** Events that change the inbox: an `inbox` event, or a `question` event (an older daemon sends no `inbox` event). */
 export const isInboxEvent = (e: Pick<AgentEvent, "kind">): boolean => e.kind === "inbox" || e.kind === "question";
@@ -98,6 +101,7 @@ export const isInboxEvent = (e: Pick<AgentEvent, "kind">): boolean => e.kind ===
 /** The text of the empty list. */
 export function emptyText(tab: InboxTab, status: InboxStatusTab): string {
   if (status === "done" && tab === "system") return "A system item shows only while it is open.";
+  if (tab === "watch") return status === "open" ? "You wait for no agent. Ask an agent, or forward a question to one." : "No answered or cancelled asks yet.";
   if (status === "open") return tab === "all" ? "Nothing waits for you." : `No open ${KIND_LABELS[tab]} items.`;
   return "Nothing is done here yet.";
 }
@@ -134,3 +138,40 @@ export function systemMailLink(m: Pick<Message, "from_kind" | "body">): { href: 
   const label = SUBSCRIPTIONS_PATHS.test(href) ? "Subscriptions" : href.startsWith("/p/") ? "Project" : "Open";
   return { href, label };
 }
+
+// ----- Ask and forward (GitHub #24, docs/api.md §6.9) -----
+
+/** The most characters of the text of an ask, as the daemon. */
+export const ASK_TEXT_MAX = 4000;
+
+/** The body of `POST /api/inbox/asks`, or what is wrong. A forward (`question`) may have no text: the text is a note. */
+export function askBody(to: string, text: string, question?: string): { body: { to: string; text?: string; question?: string } } | { error: string } {
+  const agent = to.trim();
+  const t = text.trim();
+  if (!agent) return { error: "Pick an agent." };
+  if (!question && !t) return { error: "Write the question." };
+  if (t.length > ASK_TEXT_MAX) return { error: `The text has ${t.length} characters; at most ${ASK_TEXT_MAX}.` };
+  return { body: { to: agent, ...(t ? { text: t } : {}), ...(question ? { question } : {}) } };
+}
+
+/** The state of a watch: waiting for the agent, answered, or cancelled. */
+export function watchState(w: Pick<InboxWatch, "waiting" | "cancelled_at" | "replies">): { label: string; chip: string } {
+  if (w.cancelled_at) return { label: "cancelled", chip: "" };
+  if (w.waiting) return { label: w.replies ? "waiting again" : "waiting", chip: "info" };
+  return { label: "answered", chip: "ok" };
+}
+
+/** The title line of a watch item: `Waiting for p/y: <subject>` while it waits. */
+export function watchTitle(w: Pick<InboxWatch, "waiting" | "cancelled_at" | "agent_name" | "subject">): string {
+  const subject = w.subject || "(no subject)";
+  if (w.cancelled_at) return `No longer waiting for ${w.agent_name}: ${subject}`;
+  return w.waiting ? `Waiting for ${w.agent_name}: ${subject}` : `Answered by ${w.agent_name}: ${subject}`;
+}
+
+/** The line on a mail that answers a watch: a forward links its question; an ask names its subject. */
+export function answerLine(w: Pick<InboxWatch, "question_id" | "subject">): string {
+  return w.question_id ? `answer to your forward of ${w.question_id}` : `answer to your question "${w.subject}"`;
+}
+
+/** Can the operator forward this question? Only an open question, bundle, or notice. */
+export const canForward = (q: Pick<Question, "status">): boolean => q.status === "open";
