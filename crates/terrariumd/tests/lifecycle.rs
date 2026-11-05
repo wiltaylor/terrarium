@@ -222,22 +222,29 @@ async fn the_agent_idle_stop_wins_over_the_global_one() {
     let short = id(&td.agent("p", "short", json!({"idle_stop": "1s"})).await);
     assert_eq!(agent(&td, &off).await["idle_stop"], "off");
     assert_eq!(agent(&td, &short).await["idle_stop"], "1s");
-    for a in [&w, &off, &short] {
+    for a in [&w, &off] {
         td.post_empty(&format!("/api/agents/{a}/start")).await.ok();
         td.wait_status(a, "idle").await;
     }
-    // The global 200 ms stops w1 first; `short` is still up.
+    // The global 200 ms stops w1; `off` stays up.
     until("w1 stops", || async {
         agent(&td, &w).await["status"] == "stopped"
     })
     .await;
-    assert_eq!(agent(&td, &short).await["status"], "idle");
-    until("short stops after 1 s", || async {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(agent(&td, &off).await["status"], "idle");
+    // A shorter own idle stop wins too: with a global 600 s, `short`
+    // stops after its 1 s. No wall-clock race between two agents: a
+    // loaded runner can take longer than 1 s for the 200 ms stop.
+    fast(&td, IdleStop::After(Duration::from_secs(600)));
+    td.post_empty(&format!("/api/agents/{short}/start")).await.ok();
+    td.wait_status(&short, "idle").await;
+    until("short stops after its 1 s", || async {
         agent(&td, &short).await["status"] == "stopped"
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(agent(&td, &off).await["status"], "idle");
+    assert_eq!(agent(&td, &short).await["status_reason"], "idle");
+    fast(&td, IdleStop::After(Duration::from_millis(200)));
     // `null` goes back to the global default.
     let r = td
         .patch(&format!("/api/agents/{off}"), json!({"idle_stop": null}))
