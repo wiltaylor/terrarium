@@ -275,6 +275,107 @@ pub fn parse_rate(s: &str) -> Result<(u32, Duration), String> {
     Ok((n, per))
 }
 
+/// The most agent arguments of a run when the tool sets no `args.max`.
+pub const DEFAULT_ARGS_MAX: u32 = 64;
+/// The longest agent argument when the tool sets no `args.max_len`.
+pub const DEFAULT_ARG_LEN_MAX: u32 = 4096;
+/// The output cap of a run when the tool sets no `max_output`.
+pub const DEFAULT_OUTPUT_MAX: usize = 1024 * 1024;
+/// The rate of a tool with no `rate`: runs per agent.
+pub const DEFAULT_RATE: (u32, Duration) = (60, Duration::from_secs(60));
+
+/// Check the agent's arguments of a run against `args` (design D4 and lead
+/// review L1). Each argument is passed as its own argv entry with no
+/// shell, so the rules only guard the flags that the script would read:
+///
+/// - at most `max` arguments (default [`DEFAULT_ARGS_MAX`]), each at most
+///   `max_len` bytes (default [`DEFAULT_ARG_LEN_MAX`]), no NUL;
+/// - with `allow`, the first argument is one of it (a run with no argument
+///   is refused too);
+/// - a deny flag `--name` refuses `--name`, `--name=...`, and each prefix
+///   `--n`, `--na`, ... of it, because `getopt_long` takes an unambiguous
+///   abbreviation; a single-dash form `-name` and `-name=...` too (the Go
+///   style);
+/// - a short deny flag `-o` refuses each argument that starts with one dash
+///   and has `o` after it: `-o`, `-oVALUE`, and a bundle such as `-xo`.
+///
+/// Each argument is checked, also after a literal `--`. The error names the
+/// argument and the rule.
+pub fn check_args(args: &ToolArgs, argv: &[String]) -> Result<(), String> {
+    let max = args.max.unwrap_or(DEFAULT_ARGS_MAX) as usize;
+    let max_len = args.max_len.unwrap_or(DEFAULT_ARG_LEN_MAX) as usize;
+    if argv.len() > max {
+        return Err(format!(
+            "{} arguments; this tool takes at most {max}",
+            argv.len()
+        ));
+    }
+    for (i, a) in argv.iter().enumerate() {
+        if a.len() > max_len {
+            return Err(format!(
+                "argument {} has {} bytes; this tool takes at most {max_len}",
+                i + 1,
+                a.len()
+            ));
+        }
+        if a.contains('\0') {
+            return Err(format!("argument {} has a NUL byte", i + 1));
+        }
+    }
+    if !args.allow.is_empty() {
+        match argv.first() {
+            None => {
+                return Err(format!(
+                    "this tool needs a first argument: one of {}",
+                    args.allow.join(", ")
+                ));
+            }
+            Some(first) if !args.allow.contains(first) => {
+                return Err(format!(
+                    "`{first}` is not allowed as the first argument: use one of {}",
+                    args.allow.join(", ")
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    for a in argv {
+        for flag in &args.deny_flags {
+            if denied(flag, a) {
+                return Err(format!("`{a}` is refused: this tool denies the flag {flag}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Does deny flag `flag` refuse argument `a` ([`check_args`])?
+fn denied(flag: &str, a: &str) -> bool {
+    let name = flag.trim_start_matches('-');
+    if name.is_empty() {
+        return false;
+    }
+    let short = !flag.starts_with("--") && name.chars().count() == 1;
+    if short {
+        // One dash, not two, and the letter anywhere after it: a glued
+        // value or a bundle.
+        return a.starts_with('-')
+            && !a.starts_with("--")
+            && a[1..].contains(name);
+    }
+    if let Some(rest) = a.strip_prefix("--") {
+        // `--name`, `--name=...`, or an abbreviation `--na`.
+        let given = rest.split_once('=').map_or(rest, |(n, _)| n);
+        return !given.is_empty() && name.starts_with(given);
+    }
+    if let Some(rest) = a.strip_prefix('-') {
+        // The single-dash long form: `-name` or `-name=...`.
+        let given = rest.split_once('=').map_or(rest, |(n, _)| n);
+        return given == name;
+    }
+    false
+}
+
 /// A valid tool name: 1-32 of `a-z`, `0-9`, `-`, starting with a letter,
 /// and not `terrarium`.
 pub fn check_name(name: &str) -> Result<(), String> {
@@ -544,5 +645,65 @@ mod tests {
             assert!(e.contains(says), "{extra}: {e}");
         }
         assert_eq!(parse_rate("30/m").unwrap(), (30, Duration::from_secs(60)));
+    }
+
+    fn targs(allow: &[&str], deny: &[&str]) -> ToolArgs {
+        ToolArgs {
+            allow: allow.iter().map(|s| (*s).to_owned()).collect(),
+            deny_flags: deny.iter().map(|s| (*s).to_owned()).collect(),
+            max: None,
+            max_len: None,
+        }
+    }
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// TER-30 (design D4, lead review L1): the argument rules of a run.
+    #[test]
+    fn the_argument_rules_refuse_deny_flags_in_each_form() {
+        let a = targs(&["show", "search"], &["--config", "-o"]);
+        assert!(check_args(&a, &v(&["show", "T-1"])).is_ok());
+        assert!(check_args(&a, &v(&["search", "--limit", "5", "x y; rm -rf /"])).is_ok());
+        // allow: the first argument, and no empty run.
+        assert!(check_args(&a, &v(&["delete", "T-1"])).unwrap_err().contains("not allowed"));
+        assert!(check_args(&a, &[]).unwrap_err().contains("needs a first argument"));
+        // A long deny flag: exact, with a value, abbreviated, single dash.
+        for bad in ["--config", "--config=/etc/x", "--conf", "--c", "--co=x", "-config", "-config=x"] {
+            let e = check_args(&a, &v(&["show", bad])).unwrap_err();
+            assert!(e.contains("--config"), "{bad}: {e}");
+        }
+        // Not a prefix of the deny flag: allowed.
+        for ok in ["--configure", "--count", "--", "-c", "--limit=2"] {
+            assert!(check_args(&a, &v(&["show", ok])).is_ok(), "{ok}");
+        }
+        // A short deny flag: alone, glued, in a bundle; not in a long flag.
+        for bad in ["-o", "-o/etc/passwd", "-xo", "-vxo", "-ofile"] {
+            assert!(check_args(&a, &v(&["show", bad])).is_err(), "{bad}");
+        }
+        for ok in ["-x", "--output-format", "foo", "-v"] {
+            assert!(check_args(&a, &v(&["show", ok])).is_ok(), "{ok}");
+        }
+        // A literal `--` does not end the checks.
+        assert!(check_args(&a, &v(&["show", "--", "--config=x"])).is_err());
+        assert!(check_args(&a, &v(&["show", "--", "-o"])).is_err());
+    }
+
+    #[test]
+    fn the_argument_limits_have_defaults() {
+        let a = targs(&[], &[]);
+        assert!(check_args(&a, &[]).is_ok());
+        let many = vec!["x".to_owned(); DEFAULT_ARGS_MAX as usize + 1];
+        assert!(check_args(&a, &many).unwrap_err().contains("at most 64"));
+        let long = vec!["x".repeat(DEFAULT_ARG_LEN_MAX as usize + 1)];
+        assert!(check_args(&a, &long).unwrap_err().contains("at most 4096"));
+        assert!(check_args(&a, &v(&["a\0b"])).unwrap_err().contains("NUL"));
+        let mut b = targs(&[], &[]);
+        b.max = Some(2);
+        b.max_len = Some(3);
+        assert!(check_args(&b, &v(&["abc", "de"])).is_ok());
+        assert!(check_args(&b, &v(&["a", "b", "c"])).is_err());
+        assert!(check_args(&b, &v(&["abcd"])).is_err());
     }
 }
