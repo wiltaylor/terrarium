@@ -989,8 +989,7 @@ Bw==\n\
         // Three parts: every pair of offsets.
         for i in 0..=b.len() {
             for j in i..=b.len() {
-                let got: Vec<u8> =
-                    stream(&red, View::All, &[&b[..i], &b[i..j], &b[j..]]).concat();
+                let got: Vec<u8> = stream(&red, View::All, &[&b[..i], &b[i..j], &b[j..]]).concat();
                 assert_eq!(got, whole, "split at {i} and {j}");
             }
         }
@@ -1023,7 +1022,12 @@ Bw==\n\
             }
         }
         assert_eq!(
-            stream(&red, View::All, &[&b"alpha-secret-1bravo-"[..], &b"secret-2"[..]]).concat(),
+            stream(
+                &red,
+                View::All,
+                &[&b"alpha-secret-1bravo-"[..], &b"secret-2"[..]]
+            )
+            .concat(),
             b"[secret:a][secret:b]"
         );
         assert_eq!(
