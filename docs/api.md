@@ -1518,7 +1518,11 @@ its grants. A new agent with the name of a removed agent gets no grant.
   reads the file as its global known hosts file and trusts the same hosts.
   When the daemon makes the file, it copies the lines of its user's
   `~/.ssh/known_hosts` (the file that its git used before) into it once,
-  so an upgrade keeps the trusted hosts.
+  so an upgrade keeps the trusted hosts. GitHub's published host keys (ed25519, ECDSA, RSA, from
+  `https://api.github.com/meta`, built into the daemon) are added to the
+  file at each start and git run when it lacks them, so git over ssh to
+  github.com works in a new sandbox at once. A line that the file has is
+  never changed or removed.
 
 **The agent's grants.** `GET /api/agent/secrets` lists the secrets that
 are granted to the calling agent: its own grants and its project's, one
