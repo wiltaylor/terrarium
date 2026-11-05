@@ -110,6 +110,7 @@ async fn live_transcripts() {
         executor: Arc::default(),
         harness_latest: Arc::default(),
         harness_tools: Arc::default(),
+        agent_tools: Arc::default(),
         harness_auto_update: Arc::default(),
         self_update: Arc::default(),
         web: Default::default(),
