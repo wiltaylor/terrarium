@@ -1661,6 +1661,10 @@ async fn attach_tool(
     let mut err = redact(&own);
     let cap = tool.max_output;
     let (mut bytes, mut truncated, mut stdin_bytes) = (0u64, false, 0usize);
+    // `stdin = false` closes stdin at the start (design D4, step 7).
+    if !tool.stdin {
+        let _ = run.ctl.send(Control::Eof);
+    }
     let mut ctl_open = true;
     let end = loop {
         tokio::select! {
