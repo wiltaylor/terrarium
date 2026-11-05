@@ -18,8 +18,9 @@ export function shortWindow(window: string): string {
  */
 export function quotaLine(me: UsageMe | null | undefined, plan: string, now: number): string {
   const sub = me?.subscription;
-  const parts = [sub ? subscriptionTitle(sub) : plan];
-  if (!me) return parts[0];
+  const title = sub ? subscriptionTitle(sub) : plan;
+  if (!me) return title;
+  const parts = [title];
   for (const w of orderWindows(sub?.windows ?? [])) {
     parts.push(`${shortWindow(w.window)} ${windowValue(w)}${w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now)})` : ""}`);
   }
