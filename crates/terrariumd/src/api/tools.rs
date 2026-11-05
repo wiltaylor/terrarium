@@ -179,6 +179,7 @@ async fn update(
             })
         })
         .await?;
+    crate::agent_tools::refresh(&state).await;
     Ok(Json(v))
 }
 
@@ -195,6 +196,7 @@ async fn remove(
             t.audit("tool.delete", &name, row.def.project.as_deref(), json!({}))
         })
         .await?;
+    crate::agent_tools::refresh(&state).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -239,6 +241,7 @@ async fn grant(
             Ok(g)
         })
         .await?;
+    crate::agent_tools::refresh(&state).await;
     Ok((StatusCode::CREATED, Json(g)).into_response())
 }
 
@@ -269,5 +272,6 @@ async fn revoke(
             )
         })
         .await?;
+    crate::agent_tools::refresh(&state).await;
     Ok(StatusCode::NO_CONTENT)
 }

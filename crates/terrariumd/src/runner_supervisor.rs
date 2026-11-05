@@ -1316,6 +1316,7 @@ impl RunnerSupervisor {
             accounts: Vec::new(),
             cred_alias: None,
             ssh_agent: None,
+            agent_tools: None,
             harness_bin: None,
             exec_env: false,
             exec_env_credentials: false,
@@ -1732,6 +1733,13 @@ impl RunnerSupervisor {
                 &cfg.runtime_dir,
                 &agent.id.to_string(),
             ));
+        }
+        // The links of the granted tools, written now; a grant or a revoke
+        // rewrites them while the agent runs (`crate::agent_tools`).
+        if let Some(state) = self.state() {
+            layout.agent_tools =
+                crate::agent_tools::refresh_agent(&state, &agent.id.to_string(), &agent.project)
+                    .await;
         }
 
         let resume = if fresh_for_prompt {
@@ -4875,6 +4883,19 @@ impl Supervisor for RunnerSupervisor {
 
     fn bind(&self, state: &Shared) {
         if self.inner.state.set(Arc::downgrade(state)).is_ok() {
+            // The tool links point at the CLI as the agent sees it.
+            let link = match self.inner.cfg.sandbox.mode {
+                SandboxMode::Bwrap => Some(
+                    std::path::Path::new(crate::sandbox::SANDBOX_BIN_DIR).join("terrarium"),
+                ),
+                SandboxMode::None => self.inner.cfg.sandbox.cli.clone(),
+            };
+            if let Some(link) = link {
+                state.agent_tools.configure(crate::agent_tools::Config {
+                    root: self.inner.cfg.runtime_dir.join("agent-tools"),
+                    link,
+                });
+            }
             // Once per daemon start, before `recover` reads the exit
             // records: the layout split of `docs/security-review.md` F1.
             migrate_all(&self.inner.cfg.state_dir);

@@ -6,6 +6,7 @@ pub mod account_swap;
 pub mod accounts;
 pub mod actor;
 pub mod agent_rpc;
+pub mod agent_tools;
 pub mod api;
 pub mod assets;
 pub mod backup;
@@ -201,6 +202,7 @@ pub async fn start_with_usage(
         executor: Arc::default(),
         harness_latest: Arc::default(),
         harness_tools: Arc::default(),
+        agent_tools: Arc::default(),
         harness_auto_update: Arc::default(),
         self_update: Arc::default(),
         web: cfg.web.clone(),
@@ -672,6 +674,7 @@ pub async fn apply_definitions(
         })
         .await?;
     report.errors.extend(tool_errors);
+    agent_tools::refresh(state).await;
     // Schedules of the project files, after the agents and targets that
     // they name (docs/api.md §19), and the templates (§21).
     // The `[[templates]]` of a project file are an import into the
