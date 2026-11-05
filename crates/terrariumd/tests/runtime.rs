@@ -1055,6 +1055,14 @@ async fn prompts(td: &Td, id: &str) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn board_changes_nudge_the_project_leads() {
     let td = Td::start().await;
+    // Not about the card reminder: it would add a turn after the idle.
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .lifecycle
+        .reminders
+        .set_default(false);
     let lead = td
         .agent("demo", "lead", json!({"roles": ["project_admin"]}))
         .await;
@@ -2465,6 +2473,14 @@ async fn a_parked_pointer_survives_a_daemon_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_assign_pointer_skips_a_card_that_the_assignee_took_up() {
     let td = Td::start().await;
+    // Not about the card reminder: it would add a turn after the idle.
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .lifecycle
+        .reminders
+        .set_default(false);
     let id = td.agent("demo", "bob", json!({})).await;
     td.agent("demo", "eve", json!({})).await;
     let mk = |title: &'static str| {
