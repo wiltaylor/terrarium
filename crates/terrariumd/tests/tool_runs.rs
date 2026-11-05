@@ -573,3 +573,52 @@ async fn a_tool_link_runs_the_tool_and_exits_with_its_code() {
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("not_found"), "{err}");
 }
+
+/// A detached run (`terrarium tool run --detach`, TER-32): the agent puts a
+/// `process` wait on its tool session. The wait resolves with the tool's
+/// exit code and the redacted output tail, and the run log is redacted
+/// too. Another agent cannot wait on the session.
+#[tokio::test]
+async fn a_detached_tool_run_ends_in_a_process_wait() {
+    let lab = lab().await;
+    let s = lab.script(
+        "detached.sh",
+        r#"echo "token=$TRACKER_TOKEN"; echo "on stderr" >&2; exit 4"#,
+    );
+    lab.tool(
+        "tt-detached",
+        &s,
+        json!({"env_secrets": {"TRACKER_TOKEN": "tt"}, "timeout": "10s"}),
+    )
+    .await;
+    let r = lab.run_as(&lab.w1, "tt-detached", &[]).await;
+    let session = sid(&r);
+    let waits = format!("/api/agents/{}/waits", lab.w1);
+    lab.td
+        .post_as(&lab.w2, &format!("/api/agents/{}/waits", lab.w2), json!({"kind": "process", "session": session}))
+        .await
+        .err(404, "not_found");
+    let w = lab
+        .td
+        .post_as(&lab.w1, &waits, json!({"kind": "process", "session": session, "reason": "tool tt-detached"}))
+        .await;
+    assert_eq!(w.status, 201, "{}", w.body);
+    let summary = w.body["summary"].as_str().unwrap().to_owned();
+    assert!(summary.starts_with("tool run ") && summary.ends_with(" on box"), "{summary}");
+    let wid = w.body["id"].as_str().unwrap().to_owned();
+    let done = loop {
+        let v = lab.td.get_as(&lab.w1, &format!("/api/waits/{wid}")).await.ok().clone();
+        if v["state"] == "resolved" {
+            break v;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(done["result"]["exit_code"], 4, "{done}");
+    let tail = done["result"]["stdout_tail"].as_str().unwrap();
+    assert!(!tail.contains(TOKEN), "{tail}");
+    assert!(tail.starts_with("token=[secret:"), "{tail}");
+    assert_eq!(done["result"]["stderr_tail"], "on stderr\n");
+    let log = lab.td.get_as(&lab.w1, &format!("/api/waits/{wid}/log")).await.ok().clone();
+    assert!(!log.to_string().contains(TOKEN), "{log}");
+}
+

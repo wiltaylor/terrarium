@@ -3270,6 +3270,11 @@ pub enum ToolCmd {
     /// is also a command of its own (`<name> args...`)
     Run {
         name: String,
+        /// Do not wait: start the run, register a `process` wait on it, and
+        /// return. The daemon mails the exit code and the output tail when
+        /// it ends (as `terrarium run`). An agent only
+        #[arg(long)]
+        detach: bool,
         /// The arguments, after `--`
         #[arg(last = true)]
         args: Vec<String>,
@@ -4320,7 +4325,7 @@ mod tests {
         }
         let cli = Cli::try_parse_from(shim_args(os(&["tracker-read", "show", "-x"]))).unwrap();
         let Command::Tool {
-            command: ToolCmd::Run { name, args },
+            command: ToolCmd::Run { name, args, .. },
         } = cli.command
         else {
             panic!("tool run");

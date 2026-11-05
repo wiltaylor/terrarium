@@ -269,7 +269,12 @@ async fn create(
                 agent: waiter_id.clone(),
                 kind: WaitKind::Process,
                 spec: json!({"target": sess.target, "session": sid, "run": false}),
-                summary: format!("process {} on {}", short(&sid), sess.target),
+                // A detached tool run (`terrarium tool run --detach`).
+                summary: if sess.kind == "tool" {
+                    format!("tool run {} on {}", short(&sid), sess.target)
+                } else {
+                    format!("process {} on {}", short(&sid), sess.target)
+                },
                 target_agent: None,
                 reason,
                 timeout_at: None,

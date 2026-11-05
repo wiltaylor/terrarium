@@ -101,7 +101,7 @@ pub async fn tool(ctx: &Ctx, cmd: &ToolCmd) -> anyhow::Result<()> {
                 c.line(format!("revoked tool {name} from {g}"));
             })
         }
-        ToolCmd::Run { name, args } => run(ctx, name, args).await,
+        ToolCmd::Run { name, detach, args } => run(ctx, name, *detach, args).await,
     }
 }
 
@@ -118,10 +118,16 @@ fn input_refused(e: &anyhow::Error) -> bool {
 /// and the CLI exits with the remote exit code. Stdin goes to a tool that
 /// takes it (`stdin = true`), when stdin is not a terminal. Ctrl-C ends the
 /// run (`DELETE /api/tools/sessions/{id}`) and exits 130.
-async fn run(ctx: &Ctx, name: &str, args: &[String]) -> anyhow::Result<()> {
+async fn run(ctx: &Ctx, name: &str, detach: bool, args: &[String]) -> anyhow::Result<()> {
     use std::io::IsTerminal as _;
-    let wants_stdin =
-        !std::io::stdin().is_terminal() && ctx.api.get(&path(name), vec![]).await?["stdin"] == true;
+    if detach && !ctx.is_agent() {
+        return Err(CliError::usage(
+            "--detach is for an agent: the wait that gets the result is the agent's",
+        ));
+    }
+    let wants_stdin = !detach
+        && !std::io::stdin().is_terminal()
+        && ctx.api.get(&path(name), vec![]).await?["stdin"] == true;
     let r = ctx
         .api
         .post(&format!("{}/run", path(name)), Some(json!({"argv": args})))
@@ -139,6 +145,24 @@ async fn run(ctx: &Ctx, name: &str, args: &[String]) -> anyhow::Result<()> {
         .context("the daemon answered without `session_id`")?
         .to_owned();
     let session = format!("/api/tools/sessions/{}", encode(&sid));
+    if detach {
+        // The run goes on with no reader; a `process` wait gets its end.
+        let me = ctx.me().await?;
+        let w = ctx
+            .api
+            .post(
+                &format!("/api/agents/{}/waits", encode(&me)),
+                Some(json!({"kind": "process", "session": sid, "reason": format!("tool {name}")})),
+            )
+            .await?;
+        let wid = w["id"].as_str().unwrap_or("?").to_owned();
+        return ctx.emit(&json!({"session_id": sid, "tool": name, "wait": w}), |c, _| {
+            c.line(format!(
+                "tool {name} runs detached (wait {wid}, session {sid}). End your turn: the daemon mails the exit code and the output tail."
+            ));
+            c.line(format!("`terrarium run log {wid}` shows the output so far."));
+        });
+    }
     if wants_stdin {
         let input = ctx.text("-")?;
         let mut open = true;

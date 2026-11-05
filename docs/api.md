@@ -6423,7 +6423,11 @@ the change. The CLI runs a link as `terrarium tool run <tool> -- <args>`:
 it posts the run, streams stdout and stderr, sends stdin to a tool with
 `stdin = true` when stdin is not a terminal, stops the run on Ctrl-C (exit
 130), and exits with the remote exit code (128 plus the signal, or 1 on an
-error end such as `truncated`). A tool name may not be `terrarium` or start
+error end such as `truncated`). `terrarium tool run --detach` (an agent only)
+starts the run and puts a `process` wait (§6.7) on its tool session, as
+`terrarium run` does for a command: the wait's summary is `tool run <id> on
+<target>`, the wake mail has the exit code and the redacted output tail,
+and `terrarium run log` shows the redacted output. A tool name may not be `terrarium` or start
 with `terrarium-`: those stay the CLI.
 
 A grant does not put the target in the agent's policy and makes no lease.
