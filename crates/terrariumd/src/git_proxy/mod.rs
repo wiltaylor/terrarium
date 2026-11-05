@@ -624,6 +624,9 @@ struct Ctx {
     repo: Repo,
     /// `(secret name, user name, token)`.
     cred: Option<(String, String, Zeroizing<String>)>,
+    /// The scope of the secret that `cred` came from (`global` or the
+    /// project), for the message of a refusal (TER-39).
+    cred_scope: Option<String>,
     base: reqwest::Url,
     addr: SocketAddr,
     _slot: Slot,
@@ -738,6 +741,21 @@ async fn open(
             ));
         }
     };
+    // Which secret the credential is: the project's of that name, else the
+    // global one (the order of `crate::secrets::load`).
+    let cred_scope = match &cred {
+        Some(_) => {
+            let r = repo.clone();
+            state
+                .db
+                .read(move |c| secret_of_repo(c, &r))
+                .await
+                .ok()
+                .flatten()
+                .map(|(scope, _)| scope)
+        }
+        None => None,
+    };
     let (mode, ports, resolver) = state.webhooks.net_rules();
     let addr = crate::webhooks::net::resolve(&base, mode, &ports, resolver)
         .await
@@ -751,6 +769,7 @@ async fn open(
         agent,
         repo,
         cred,
+        cred_scope,
         base,
         addr,
         _slot: slot,
@@ -808,6 +827,17 @@ where
         }
         Err(e) => Err(std::io::Error::other(e.to_string())),
     })
+}
+
+/// A hint of a token for the log: its length and its last 4 characters
+/// (none for a token of 12 characters or fewer). Never the token.
+fn token_hint(token: &str) -> String {
+    let n = token.chars().count();
+    if n <= 12 {
+        return format!("{n} chars");
+    }
+    let tail: String = token.chars().skip(n - 4).collect();
+    format!("{n} chars, ends with {tail}")
 }
 
 /// The longest part of a forge's error body in the message.
@@ -972,8 +1002,29 @@ async fn forward(
         // denied to u.`, `Write access to repository not granted.`): a
         // short, scrubbed part of it goes along (TER-39).
         let said = forge_reason(&ctx, resp).await;
-        let what = format!("{what} {}{said}", step_of(want_type));
-        tracing::warn!(repo = %label, agent = %ctx.agent.id, url = %crate::webhooks::net::log_url(&url), "git proxy: the forge answered {what}");
+        let mut what = format!("{what} {}{said}", step_of(want_type));
+        if matches!(status.as_u16(), 401 | 403) {
+            // What went out, so that the next refusal can be checked
+            // against the token that works: the secret and the user for
+            // the agent; the URL and a hint of the token (its length and
+            // last 4 characters, never the token) only in the log.
+            let (sent, hint) = match &ctx.cred {
+                Some((name, user, token)) => (
+                    format!(
+                        "the credential {}/{name} as user `{user}`",
+                        ctx.cred_scope.as_deref().unwrap_or("?")
+                    ),
+                    token_hint(token),
+                ),
+                None => ("no credential".to_owned(), String::new()),
+            };
+            what.push_str(&format!(" (the proxy sent {sent})"));
+            tracing::warn!(repo = %label, agent = %ctx.agent.id,
+                url = %crate::webhooks::net::log_url(&url), token = %hint,
+                "git proxy: the forge refused a request: {what}");
+        } else {
+            tracing::warn!(repo = %label, agent = %ctx.agent.id, url = %crate::webhooks::net::log_url(&url), "git proxy: the forge answered {what}");
+        }
         return text(
             StatusCode::BAD_GATEWAY,
             format!("Terrarium git proxy: the forge of `{label}` answered {what}"),
@@ -1387,6 +1438,18 @@ async fn audit(state: &Shared, ctx: &Ctx, detail: serde_json::Value) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// TER-39: the log hint of a token never holds more than its last 4
+    /// characters.
+    #[test]
+    fn a_token_hint_shows_only_the_length_and_the_end() {
+        let t = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let h = token_hint(t);
+        assert_eq!(h, "40 chars, ends with 6789");
+        assert!(!h.contains("ghp_"));
+        assert_eq!(token_hint("short-token"), "11 chars");
+        assert_eq!(token_hint(""), "0 chars");
+    }
 
     fn repo(url: &str, cred: bool, deny: &[&str], via: Option<PushVia>) -> Repo {
         Repo {

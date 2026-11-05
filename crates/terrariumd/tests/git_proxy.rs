@@ -1218,4 +1218,11 @@ async fn a_refused_push_shows_the_forge_reason() {
     );
     assert!(!err.contains(FORGE_TOKEN), "{err}");
     assert!(err.contains("[secret:gh]"), "{err}");
+    // What went out: the secret (global, no project secret of that name)
+    // and the user; no part of the token.
+    assert!(
+        err.contains("the proxy sent the credential global/gh as user `x-access-token`"),
+        "{err}"
+    );
+    assert!(!err.contains(&FORGE_TOKEN[FORGE_TOKEN.len() - 4..]), "{err}");
 }
