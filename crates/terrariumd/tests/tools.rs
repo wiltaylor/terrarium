@@ -26,10 +26,10 @@ async fn setup() -> TestDaemon {
         td.post("/api/targets", t).await.ok();
     }
     let token = |v: &str| json!({"kind": "token", "fields": {"value": v}});
-    td.put("/api/secrets/global/tt", token("global-value"))
+    td.put("/api/secrets/global/tt", token("gV7q2LmZ9xTr4KwB8nPd"))
         .await
         .ok();
-    td.put("/api/secrets/p/pt", token("project-value"))
+    td.put("/api/secrets/p/pt", token("pX3k9QaW7vRt2YmL5cJh"))
         .await
         .ok();
     td
@@ -81,7 +81,7 @@ async fn a_definition_follows_the_rules() {
     assert_eq!(r.body["grants"], json!([]));
     assert_eq!(r.body["env_secrets"]["TRACKER_TOKEN"], "tt");
     // No secret value anywhere in the answer.
-    assert!(!r.body.to_string().contains("global-value"));
+    assert!(!r.body.to_string().contains("gV7q2LmZ9xTr4KwB8nPd"));
     td.post("/api/tools", tool("tracker-read"))
         .await
         .err(409, "conflict");
