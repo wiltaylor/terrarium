@@ -513,7 +513,10 @@ fn ensure_known_hosts_dir_from(state_dir: &Path, seed: Option<&Path>) -> std::io
         .open(&file)
     {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(dir),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            add_published_keys(&file)?;
+            return Ok(dir);
+        }
         Err(e) => return Err(e),
     };
     let lines = match seed.map(std::fs::read) {
@@ -531,7 +534,64 @@ fn ensure_known_hosts_dir_from(state_dir: &Path, seed: Option<&Path>) -> std::io
             new.write_all(b"\n")?;
         }
     }
+    drop(new);
+    add_published_keys(&file)?;
     Ok(dir)
+}
+
+/// GitHub's published SSH host keys (TER-38), so git over ssh to
+/// github.com works in a sandbox from the first start, before the daemon's
+/// own git has met the host. Source: `ssh_keys` of
+/// https://api.github.com/meta, read on 2026-11-05; the fingerprints
+/// (SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU ED25519,
+/// SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM ECDSA,
+/// SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s RSA) match
+/// `ssh_key_fingerprints` there and a key scan of github.com. Update them
+/// here if GitHub rotates a key.
+pub const PUBLISHED_HOST_KEYS: &[&str] = &[
+    "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+    "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
+    "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=",
+];
+
+/// Add each line of [`PUBLISHED_HOST_KEYS`] whose key is not in `file` yet
+/// (the same key type and key, on any line). A recorded line is never
+/// changed or removed: a host keeps every key the file has.
+fn add_published_keys(file: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let have = std::fs::read_to_string(file)?;
+    let key_of = |line: &str| -> Option<(String, String)> {
+        let mut w = line.split_whitespace();
+        let first = w.next()?;
+        // A line may start with a marker such as `@cert-authority`.
+        let (kind, key) = if first.starts_with('@') {
+            (w.nth(1)?, w.next()?)
+        } else {
+            (w.next()?, w.next()?)
+        };
+        Some((kind.to_owned(), key.to_owned()))
+    };
+    let known: std::collections::HashSet<(String, String)> = have
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter_map(key_of)
+        .collect();
+    let missing: Vec<&str> = PUBLISHED_HOST_KEYS
+        .iter()
+        .copied()
+        .filter(|l| key_of(l).is_some_and(|k| !known.contains(&k)))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut f = std::fs::OpenOptions::new().append(true).open(file)?;
+    if !have.is_empty() && !have.ends_with('\n') {
+        f.write_all(b"\n")?;
+    }
+    for l in missing {
+        writeln!(f, "{l}")?;
+    }
+    Ok(())
 }
 
 /// Quote for `sh`.
@@ -2998,12 +3058,14 @@ mod tests {
         assert_eq!(mode(&state.join("ssh")), 0o700);
         assert_eq!(mode(&known_hosts_dir(&state)), 0o700);
         assert_eq!(mode(&file), 0o600);
-        // A second run keeps the recorded keys.
+        // A second run keeps the recorded keys (and adds the published
+        // keys that the file lacks after them).
         std::fs::write(&file, "github.com ssh-ed25519 AAAA\n").unwrap();
         Runner::new(&c).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&file).unwrap(),
-            "github.com ssh-ed25519 AAAA\n"
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .starts_with("github.com ssh-ed25519 AAAA\n")
         );
     }
 
@@ -3021,20 +3083,56 @@ mod tests {
         let state = tmp.path().join("state");
         let file = known_hosts_dir(&state).join(KNOWN_HOSTS_FILE);
         ensure_known_hosts_dir_from(&state, Some(&seed)).unwrap();
-        let want = format!("{lines}\n");
+        // The seed, then the published keys (TER-38).
+        let want = format!("{lines}\n{}\n", PUBLISHED_HOST_KEYS.join("\n"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), want);
         ensure_known_hosts_dir_from(&state, Some(&seed)).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), want);
         std::fs::write(&file, "recorded ssh-ed25519 CCCC\n").unwrap();
         ensure_known_hosts_dir_from(&state, Some(&seed)).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&file).unwrap(),
-            "recorded ssh-ed25519 CCCC\n"
-        );
+        let got = std::fs::read_to_string(&file).unwrap();
+        assert!(got.starts_with("recorded ssh-ed25519 CCCC\n"), "{got}");
+        assert!(!got.contains("BBBB"), "the seed goes in once: {got}");
         let bare = tmp.path().join("bare");
         ensure_known_hosts_dir_from(&bare, Some(&tmp.path().join("none"))).unwrap();
-        let empty = known_hosts_dir(&bare).join(KNOWN_HOSTS_FILE);
-        assert_eq!(std::fs::read_to_string(empty).unwrap(), "");
+        let fresh = known_hosts_dir(&bare).join(KNOWN_HOSTS_FILE);
+        assert_eq!(
+            std::fs::read_to_string(fresh).unwrap(),
+            format!("{}\n", PUBLISHED_HOST_KEYS.join("\n"))
+        );
+    }
+
+    /// TER-38: a fresh state dir's file holds GitHub's published keys, a
+    /// second start adds no copy, a key that the file has already (from the
+    /// seed or recorded by ssh) is not added again, and a recorded line of
+    /// github.com with another key stays.
+    #[test]
+    fn the_published_github_keys_are_in_the_file_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let file = known_hosts_dir(&state).join(KNOWN_HOSTS_FILE);
+        ensure_known_hosts_dir_from(&state, None).unwrap();
+        ensure_known_hosts_dir_from(&state, None).unwrap();
+        let got = std::fs::read_to_string(&file).unwrap();
+        for k in PUBLISHED_HOST_KEYS {
+            assert_eq!(got.matches(k).count(), 1, "{k}: {got}");
+        }
+        assert_eq!(got.lines().count(), PUBLISHED_HOST_KEYS.len());
+        // The ed25519 key with another host pattern, a comment, and an old key.
+        let ed = PUBLISHED_HOST_KEYS[0].trim_start_matches("github.com ");
+        let mine = format!("# notes\ngithub.com,140.82.112.3 {ed}\ngithub.com ssh-ed25519 OLDKEY no newline");
+        std::fs::write(&file, &mine).unwrap();
+        ensure_known_hosts_dir_from(&state, None).unwrap();
+        let got = std::fs::read_to_string(&file).unwrap();
+        assert!(got.starts_with(&format!("{mine}\n")), "{got}");
+        assert!(!got.contains(PUBLISHED_HOST_KEYS[0]), "the ed25519 key is there already: {got}");
+        assert!(got.contains(PUBLISHED_HOST_KEYS[1]) && got.contains(PUBLISHED_HOST_KEYS[2]), "{got}");
+        // Every published line parses as an OpenSSH known_hosts entry.
+        for k in PUBLISHED_HOST_KEYS {
+            let mut w = k.split_whitespace();
+            assert_eq!(w.next(), Some("github.com"));
+            ssh_key::PublicKey::from_openssh(&format!("{} {}", w.next().unwrap(), w.next().unwrap())).unwrap();
+        }
     }
 
     #[test]
