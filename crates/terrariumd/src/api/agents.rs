@@ -399,6 +399,7 @@ async fn update(
                     "idle_stop": patch.idle_stop,
                     "compact_on_idle": patch.compact_on_idle,
                     "compact_max_age": patch.compact_max_age,
+                    "card_reminder": patch.card_reminder,
                 }),
             )?;
             agents::get(t, &id)

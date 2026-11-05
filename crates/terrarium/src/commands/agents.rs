@@ -307,6 +307,9 @@ pub async fn definition(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<Value> {
         def["compact_on_idle"] = switch(v, "--compact-on-idle")?.into();
     }
     set_opt(&mut def, "compact_max_age", a.compact_max_age.clone());
+    if let Some(v) = &a.card_reminder {
+        def["card_reminder"] = switch(v, "--card-reminder")?.into();
+    }
     set_opt(&mut def, "template", a.template.clone());
     if !a.roles.is_empty() {
         def["roles"] = json!(a.roles);
@@ -413,6 +416,11 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
     match a.compact_max_age.as_deref() {
         Some("default") => body["compact_max_age"] = Value::Null,
         Some(v) => body["compact_max_age"] = v.into(),
+        None => {}
+    }
+    match a.card_reminder.as_deref() {
+        Some("default") => body["card_reminder"] = Value::Null,
+        Some(v) => body["card_reminder"] = switch(v, "--card-reminder")?.into(),
         None => {}
     }
     let policy = match &a.policy {

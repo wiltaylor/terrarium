@@ -1914,6 +1914,13 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     "#,
+    // 64: the card reminder of an agent (PLAN §18, "Card reminder"):
+    // `card_reminder` 0 or 1, NULL for the global default
+    // (`TERRARIUM_CARD_REMINDER`, on). Self-contained: when another branch
+    // takes this number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE agents ADD COLUMN card_reminder INTEGER;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
