@@ -1626,6 +1626,14 @@ export interface Card {
   tests?: CardTests;
 }
 
+/** A card of `GET /api/cards` (docs/api.md §8, TER-43): a card in the working or research column of a board, with its column kind and the status of its assignee agent. */
+export interface ActiveCard extends Card {
+  /** `working` (the column with that role), `research`, or another column that the query named. */
+  column_kind: string;
+  /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
+  assignee_status?: string;
+}
+
 export interface Board {
   project: string;
   card_prefix?: string;

@@ -627,6 +627,76 @@ pub fn list_cards(
     })
 }
 
+/// A card of [`active_cards`]: the card, the kind of its column, and the
+/// stored status of its assignee agent.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ActiveCard {
+    #[serde(flatten)]
+    pub card: Card,
+    /// `working` (the column with that role), `research`, or another
+    /// column that the query named.
+    pub column_kind: String,
+    /// The status of the assignee agent (`working`, `idle`, `waiting`,
+    /// `blocked`, `stopped`, ...). Absent for the operator, no assignee, or
+    /// a removed agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee_status: Option<String>,
+}
+
+/// The most cards of [`active_cards`].
+pub const ACTIVE_MAX: usize = 500;
+
+/// The cards that are not archived in the columns `wanted`, in each
+/// project of `projects` (`None`: every project), by project, then column,
+/// then position (TER-43). Each wanted value is a role (`working`,
+/// `blocked`) or a column name (`research`); a column matches when its
+/// role or its name is one of them, so one call finds the working column
+/// and the research column of each board.
+pub fn active_cards(
+    conn: &Connection,
+    projects: Option<&[String]>,
+    wanted: &[String],
+) -> ApiResult<Vec<ActiveCard>> {
+    if wanted.is_empty() || projects.is_some_and(<[String]>::is_empty) {
+        return Ok(Vec::new());
+    }
+    let wanted_json = serde_json::to_string(wanted)?;
+    let projects_json = projects.map(serde_json::to_string).transpose()?;
+    let mut stmt = conn.prepare(&format!(
+        "{CARD_SELECT} WHERE c.archived = 0
+           AND (k.role IN (SELECT value FROM json_each(?1))
+                OR lower(k.name) IN (SELECT lower(value) FROM json_each(?1)))
+           AND (?2 IS NULL OR c.project IN (SELECT value FROM json_each(?2)))
+         ORDER BY c.project, k.position, c.position, c.number
+         LIMIT {ACTIVE_MAX}"
+    ))?;
+    let rows = stmt
+        .query_map(params![wanted_json, projects_json], card_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let kind = match row.column_role.as_deref() {
+            Some(WORKING) => WORKING.to_owned(),
+            _ => row.column.to_lowercase(),
+        };
+        let card = render(conn, row)?;
+        let status = match card.assignee.as_deref() {
+            Some(a) if a != "operator" => conn
+                .query_row("SELECT status FROM agents WHERE id = ?1", [a], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?,
+            _ => None,
+        };
+        out.push(ActiveCard {
+            card,
+            column_kind: kind,
+            assignee_status: status,
+        });
+    }
+    Ok(out)
+}
+
 // ---- events and notices ----
 
 fn card_event(t: &mut Tx<'_>, card: &CardRow, change: &str, extra: Value) -> ApiResult<()> {

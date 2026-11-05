@@ -8,6 +8,7 @@ import { api, events, projects, subscriptions } from "../../stores";
 import { usageLabel } from "./labels";
 import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
 import { HostCards } from "./HostCards";
+import { ActiveCards } from "./ActiveCards";
 
 const HOUR = 3_600_000;
 
@@ -75,6 +76,8 @@ export function Home() {
           </For>
         </div>
       </section>
+
+      <ActiveCards now={now()} />
 
       <HostCards now={now()} />
 

@@ -77,6 +77,7 @@ import type {
   AuditEntry,
   AuditQuery,
   Board,
+  ActiveCard,
   Card,
   CardFile,
   CardFileUploaded,
@@ -434,6 +435,8 @@ export interface Api {
     events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
     /** `GET /api/cards/{id}/sessions` (docs/api.md §8): the sessions of the card's comments and card events, oldest first. */
     sessions(id: string): Promise<SessionRef[]>;
+    /** `GET /api/cards?columns=working,research` (docs/api.md §8, TER-43): the cards in those columns of every board the caller may read, by project. */
+    active(q?: { columns?: string[] }): Promise<ActiveCard[]>;
   };
 
   /** The files of a card (docs/api.md §8.4). The rights of a change are those of a card edit. */
@@ -1187,6 +1190,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       link: (id, kind, ref) => post(`${c(id)}/links`, { kind, ref }),
       events: (id, q = {}) => page(`${c(id)}/events`, { ...q }),
       sessions: (id) => get(`${c(id)}/sessions`),
+      active: (q = {}) => get("/api/cards", q.columns ? { columns: q.columns.join(",") } : undefined),
     },
 
     cardFiles: {
