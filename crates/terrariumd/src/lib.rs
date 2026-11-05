@@ -62,6 +62,7 @@ pub mod target_test;
 pub mod template_files;
 pub mod test_results;
 pub mod time_param;
+pub mod tool_run;
 pub mod transcripts;
 pub mod trash;
 pub mod usage_collector;
@@ -217,6 +218,7 @@ pub async fn start_with_usage(
         waits: Arc::default(),
         config_repo: Arc::default(),
         lifecycle: Arc::default(),
+        tool_rates: Arc::default(),
         monitors: Arc::default(),
         webhooks: Arc::default(),
         pipelines: Arc::default(),

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -36,6 +36,141 @@ pub fn routes() -> Router<Shared> {
             "/tools/{name}/grants",
             get(grants_list).post(grant).delete(revoke),
         )
+        .route("/tools/{name}/run", post(run))
+        .route("/tools/sessions/{id}", axum::routing::delete(session_close))
+        .route("/tools/sessions/{id}/output", get(session_output))
+        .route("/tools/sessions/{id}/input", post(session_input))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OutputQuery {
+    #[serde(default)]
+    since: u64,
+    /// Seconds to wait for output; at most 60.
+    #[serde(default)]
+    wait: Option<u64>,
+    /// The most bytes to return; at most 1 MiB.
+    #[serde(default)]
+    max: Option<usize>,
+}
+
+/// `GET /api/tools/sessions/{id}/output`: as the output of a target exec
+/// session (docs/api.md §17.4), for the agent that started the run or the
+/// operator.
+async fn session_output(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiQuery(q): ApiQuery<OutputQuery>,
+) -> ApiResult<Json<crate::executor::Output>> {
+    let s = state.executor.tool_session(&actor, &id)?;
+    let wait =
+        std::time::Duration::from_secs(q.wait.unwrap_or(0).min(crate::executor::MAX_WAIT_SECS));
+    Ok(Json(
+        s.read(q.since, wait, q.max.unwrap_or(crate::executor::MAX_READ))
+            .await?,
+    ))
+}
+
+/// The body of `POST /api/tools/sessions/{id}/input`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputBody {
+    /// Bytes for stdin, base64.
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default)]
+    eof: bool,
+}
+
+/// `POST /api/tools/sessions/{id}/input`: stdin of a tool with
+/// `stdin = true`; `422` for any other tool.
+async fn session_input(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(b): ApiJson<InputBody>,
+) -> ApiResult<Json<Value>> {
+    use crate::executor::Control;
+    use base64::Engine as _;
+    let s = state.executor.tool_session(&actor, &id)?;
+    match state.tool_rates.takes_stdin(&s.id) {
+        Some(false) => {
+            return Err(ApiError::invalid(
+                "this tool takes no stdin (stdin = false in its definition)",
+            ));
+        }
+        None => {
+            return Err(ApiError::conflict(
+                "the session has ended; read its output for the end",
+            ));
+        }
+        Some(true) => {}
+    }
+    let mut accepted = true;
+    if let Some(d) = &b.data {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(d)
+            .map_err(|e| ApiError::bad_request(format!("`data` is not base64: {e}")))?;
+        if bytes.len() > crate::executor::MAX_INPUT {
+            return Err(ApiError::new(
+                crate::error::Code::TooLarge,
+                format!(
+                    "one input carries at most {} bytes; send {} in chunks",
+                    crate::executor::MAX_INPUT,
+                    bytes.len()
+                ),
+            ));
+        }
+        if !s.control(Control::Stdin(bytes)) {
+            return Err(ApiError::conflict(
+                "the session has ended; read its output for the end",
+            ));
+        }
+    }
+    if b.eof && !s.control(Control::Eof) {
+        accepted = false;
+    }
+    Ok(Json(json!({"session_id": s.id, "accepted": accepted})))
+}
+
+/// `DELETE /api/tools/sessions/{id}`: kill the run.
+async fn session_close(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state.executor.close_tool(&actor, &id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The body of `POST /api/tools/{name}/run`: the agent's arguments only.
+/// The command, `cwd`, the env, the target, a shell, a pty, and the limits
+/// come from the definition; any other field is `400`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunBody {
+    #[serde(default)]
+    argv: Vec<String>,
+}
+
+/// `POST /api/tools/{name}/run`: start a run (design D4). `201`
+/// `{session_id, tool, target}`; the caller reads the output from
+/// `GET /api/targets/{target}/sessions/{session_id}/output` as for an exec.
+async fn run(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(b): ApiJson<RunBody>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let started = crate::tool_run::run(&state, &actor, &name, b.argv).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            json!({"session_id": started.session.id, "tool": started.tool,
+                    "target": started.target}),
+        ),
+    ))
 }
 
 /// A tool as the API shows it. `grants` only for the operator and sysadmins.
