@@ -493,7 +493,12 @@ fn cli_bin() -> std::path::PathBuf {
 /// Run the tool link `link` (a symlink to the CLI named as the tool) as
 /// the operator over the daemon's socket, with `args` and `stdin`. The
 /// stdout, the stderr, and the exit code.
-async fn run_link(td: &TestDaemon, link: &std::path::Path, args: &[&str], stdin: &str) -> (String, String, i32) {
+async fn run_link(
+    td: &TestDaemon,
+    link: &std::path::Path,
+    args: &[&str],
+    stdin: &str,
+) -> (String, String, i32) {
     use tokio::io::AsyncWriteExt;
     let mut c = tokio::process::Command::new(link);
     c.args(args)
@@ -526,19 +531,34 @@ async fn run_link(td: &TestDaemon, link: &std::path::Path, args: &[&str], stdin:
 #[tokio::test]
 async fn a_tool_link_runs_the_tool_and_exits_with_its_code() {
     let lab = lab().await;
-    let echo = lab.script("echo-args.sh", r#"echo "args:$*"; echo "to stderr" >&2; exit 3"#);
-    lab.tool("tt-link-echo", &echo, json!({"timeout": "10s"})).await;
-    let read = lab.script("read-link.sh", r#"x=; read -r x; echo "got:$x""#);
-    lab.tool("tt-link-closed", &read, json!({"timeout": "10s"})).await;
-    lab.tool("tt-link-open", &read, json!({"stdin": true, "timeout": "10s"}))
+    let echo = lab.script(
+        "echo-args.sh",
+        r#"echo "args:$*"; echo "to stderr" >&2; exit 3"#,
+    );
+    lab.tool("tt-link-echo", &echo, json!({"timeout": "10s"}))
         .await;
+    let read = lab.script("read-link.sh", r#"x=; read -r x; echo "got:$x""#);
+    lab.tool("tt-link-closed", &read, json!({"timeout": "10s"}))
+        .await;
+    lab.tool(
+        "tt-link-open",
+        &read,
+        json!({"stdin": true, "timeout": "10s"}),
+    )
+    .await;
     let links = tempfile::tempdir().unwrap();
     let link = |name: &str| {
         let p = links.path().join(name);
         std::os::unix::fs::symlink(cli_bin(), &p).unwrap();
         p
     };
-    let (out, err, code) = run_link(&lab.td, &link("tt-link-echo"), &["show", "$(id)", "a b"], "").await;
+    let (out, err, code) = run_link(
+        &lab.td,
+        &link("tt-link-echo"),
+        &["show", "$(id)", "a b"],
+        "",
+    )
+    .await;
     assert_eq!(out, "args:show $(id) a b\n", "{err}");
     assert!(err.contains("to stderr"), "{err}");
     assert_eq!(code, 3, "{out} {err}");
@@ -553,4 +573,3 @@ async fn a_tool_link_runs_the_tool_and_exits_with_its_code() {
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("not_found"), "{err}");
 }
-
