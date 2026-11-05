@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Session } from "../../api/types";
-import { agentViewQuery, currentSession, findGroup, groupChip, groupSessions, parseAgentView, sessionLabel } from "./sessions";
+import { AGENT_TABS, agentViewQuery, currentSession, findGroup, groupChip, groupSessions, parseAgentView, sessionLabel, waitsTabLabel } from "./sessions";
 
 const s = (id: string, over: Partial<Session> = {}): Session => ({
   id,
@@ -18,6 +18,10 @@ describe("the agent page view in the URL", () => {
     expect(parseAgentView({ tab: "sessions", session: "01S" })).toEqual({ tab: "sessions", session: "01S" });
     expect(parseAgentView({ tab: "events", session: "01S" })).toEqual({ tab: "events", session: null });
     expect(parseAgentView({ tab: "sessions", session: "" })).toEqual({ tab: "sessions", session: null });
+    // Issue #22: the Screen tab went; an old link opens the Terminal tab. The new tabs parse.
+    expect(parseAgentView({ tab: "screen" })).toEqual({ tab: "terminal", session: null });
+    expect(parseAgentView({ tab: "waits" })).toEqual({ tab: "waits", session: null });
+    expect(parseAgentView({ tab: "details" })).toEqual({ tab: "details", session: null });
   });
 
   it("writes the query with the defaults left out, so a reload keeps the open session", () => {
@@ -92,5 +96,21 @@ describe("the rows of the Sessions tab", () => {
     expect(groupChip(current!)).toEqual({ label: "current", tone: "info" });
     expect(groupChip(ended!)).toEqual({ label: "stopped", tone: "" });
     expect(groupChip(bare!)).toBeNull();
+  });
+});
+
+describe("the agent tabs (issue #22)", () => {
+  it("has no Screen tab, and has Waits & leases and Details", () => {
+    const ids = AGENT_TABS.map((t) => t.id as string);
+    expect(ids).not.toContain("screen");
+    expect(ids).toContain("waits");
+    expect(ids).toContain("details");
+    expect(ids[0]).toBe("conversation");
+  });
+  it("counts the open waits and the active leases in the Waits & leases label", () => {
+    expect(waitsTabLabel(undefined, 0)).toBe("Waits & leases");
+    expect(waitsTabLabel(0, 0)).toBe("Waits & leases");
+    expect(waitsTabLabel(1, 0)).toBe("Waits & leases (1)");
+    expect(waitsTabLabel(1, 1)).toBe("Waits & leases (2)");
   });
 });

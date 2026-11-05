@@ -6,20 +6,19 @@ import { SelfReport } from "../../components/SelfReport";
 import { EventHistory } from "../../components/EventHistory";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Terminal } from "../../components/Terminal";
-import { ConfirmButton, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
+import { ConfirmButton, ErrorBanner, PageHead, Tabs } from "../../components/ui";
 import { GRANTABLE_ROLES, type Agent, type AgentStatus, type ResetKind, type ResetResult, type Role } from "../../api/types";
-import { ago, compact, orderWindows, subscriptionTitle, timeUntil, windowLabel, windowValue } from "../../lib/format";
+import { ago } from "../../lib/format";
 import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
-import { describeCause } from "../../stores/quota";
 import { eventAgentId } from "../../stores/agents";
 import { ApiError } from "../../api/http";
 import { AgentForm } from "./AgentForm";
 import { SaveAsTemplateDialog } from "../templates/TemplateDialog";
 import { Conversation } from "./conversation/Conversation";
 import { PinButton } from "../../app/PinnedBar";
-import { ScreenPanel } from "./ScreenPanel";
+import { QuotaLine } from "./QuotaLine";
 import { SessionsPanel } from "./SessionsPanel";
-import { AGENT_TABS, agentViewQuery, parseAgentView, type AgentTab } from "./sessions";
+import { AGENT_TABS, agentViewQuery, parseAgentView, waitsTabLabel, type AgentTab } from "./sessions";
 import { RoleBadges } from "./AgentsPage";
 import { appliedText, changeSubscription, loginText, noSubscriptionAccount, noSubscriptionAccountText, normalizePool, samePool, swapTargets } from "./subscription";
 import { PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
@@ -88,6 +87,16 @@ export default function AgentDetail() {
     return e instanceof ApiError && e.status === 404 && !agent();
   };
   const removed = () => removedKey() === id() || notFound();
+  // The lease chips in the header and the count of the Waits & leases tab: seed the
+  // active leases once, as the Leases panel did when it was on the page.
+  createResource(
+    () => agent()?.id,
+    async (aid) => {
+      const rows = await api.agents.leases(aid, { all: false }).catch(() => null);
+      if (rows) holds.seedAgent(aid, rows);
+      return null;
+    },
+  );
   onMount(() => {
     const off = events.on((e) => {
       const gone = e.kind === "agent_removed" ? eventAgentId(e) : undefined;
@@ -158,6 +167,13 @@ export default function AgentDetail() {
             title={
               <span class="row">
                 {a().name} <StatusBadge agent={a()} /> <HoldBadge agentId={a().id} long /> <LeaseChips agentId={a().id} />
+                <Show when={a().current_card}>
+                  {(c) => (
+                    <A class="chip" href={`/p/${a().project}/board?card=${c()}`} title="The card the agent has in progress">
+                      {c()}
+                    </A>
+                  )}
+                </Show>
                 <Show when={resetChip(a(), ago)}>
                   {(chip) => (
                     <span class="chip warn" title={chip().title} aria-label={`${chip().label}. ${chip().title}`}>
@@ -214,109 +230,8 @@ export default function AgentDetail() {
             </p>
           </Show>
 
-          <div class="card-box">
-            <dl class="kv">
-              <dt>Project</dt>
-              <dd>{a().project}</dd>
-              <dt>Harness</dt>
-              <dd>
-                {a().harness}
-                {a().model ? ` · ${a().model}` : ""}
-              </dd>
-              <dt>Says</dt>
-              <dd>
-                <Show when={a().self_report} fallback={<span class="muted">no self-report</span>}>
-                  <SelfReport report={a().self_report} />
-                </Show>
-              </dd>
-              <dt>Subscription</dt>
-              <dd>
-                <SubscriptionCell agent={a()} running={running()} onError={setError} />
-              </dd>
-              <dt>Pool</dt>
-              <dd>
-                <PoolCell agent={a()} onError={setError} />
-              </dd>
-              <dt>Prompt</dt>
-              <dd>{a().prompt ?? <span class="muted">default</span>}</dd>
-              <dt>System prompt</dt>
-              <dd>
-                <SystemPromptCell agent={a()} running={running()} onError={setError} />
-              </dd>
-              <dt>Skills</dt>
-              <dd>
-                <SkillsCell agent={a()} running={running()} onError={setError} />
-              </dd>
-              <dt>Restart</dt>
-              <dd>{a().restart ?? "on-failure"}</dd>
-              <dt>Spawn rights</dt>
-              <dd>
-                <span classList={{ muted: !a().policy?.spawn }}>{spawnRightsText(a().policy?.spawn)}</span>
-              </dd>
-              <dt>Idle stop</dt>
-              <dd>
-                {idleStopText(a().idle_stop, globalIdleStop())}
-                <Show when={a().status_reason && a().status === "stopped"}>
-                  <span class="muted small"> · last stop: {a().status_reason}</span>
-                </Show>
-              </dd>
-              <dt>Auto compact</dt>
-              <dd>
-                <span classList={{ muted: a().compact_supported === false }}>{autoCompactText(a(), compactDefaults())}</span>
-                <Show when={lastCompactedText(a(), (t) => ago(t))}>
-                  {(t) => (
-                    <span class="muted small" style={a().last_compact_ok === false ? { color: "var(--warn)" } : undefined}>
-                      {" "}
-                      · {t()}
-                    </span>
-                  )}
-                </Show>
-              </dd>
-              <Show when={a().template}>
-                {(t) => (
-                  <>
-                    <dt>Template</dt>
-                    <dd>
-                      <A href={t().project ? `/p/${encodeURIComponent(t().project!)}/settings/templates` : "/settings/templates"}>{t().name}</A> <span class="chip">{t().project ?? "global"}</span> <span class="muted small">revision {t().revision} at the create; a copy, not a live link</span>
-                    </dd>
-                  </>
-                )}
-              </Show>
-              <dt>Policy</dt>
-              <dd class="small">
-                targets: {a().policy?.targets.join(", ") || "none"} · mail to: {a().policy?.mail_to.join(", ") || "none"} · cross-project:{" "}
-                {(a().policy?.cross_project ?? []).join(", ") || "none"}
-              </dd>
-              <dt>Card</dt>
-              <dd>
-                <Show when={a().current_card} fallback={<span class="muted">none</span>}>
-                  {(c) => <A href={`/p/${a().project}/board?card=${c()}`}>{c()}</A>}
-                </Show>
-              </dd>
-              <dt>Session</dt>
-              <dd class="mono small">{a().session ?? "—"}</dd>
-              <dt>Workspace</dt>
-              <dd class="mono small">{a().workspace}</dd>
-              <dt>ID</dt>
-              <dd class="mono small">
-                {a().id} <Show when={a().source === "file"}><span class="chip">file</span></Show>
-              </dd>
-            </dl>
-          </div>
-
-          <Show when={a().subscription}>
-            <QuotaPanel agent={a()} />
-          </Show>
-
-          <RolesPanel agent={a()} onError={setError} />
-
-          <LeasesPanel agent={a()} onNotice={(n) => setNotice(n)} />
-
+          {/* An open question needs action: it stays on the page. */}
           <QuestionsPanel agent={a()} />
-
-          <WaitsPanel agent={a()} />
-
-          <WatchesPanel agent={a()} />
 
           {/* The Conversation tab has its own composer. */}
           <Show when={tab() !== "conversation"}>
@@ -340,13 +255,20 @@ export default function AgentDetail() {
                 Send turn
               </button>
             </form>
+            <QuotaLine agent={a()} />
           </Show>
 
           <div>
-            <Tabs tabs={AGENT_TABS.map((t) => (t.id === "spawned" ? { ...t, label: spawnedTabLabel(a().spawned_running) } : t))} active={tab()} onChange={setTab} />
+            <Tabs
+              tabs={AGENT_TABS.map((t) =>
+                t.id === "spawned" ? { ...t, label: spawnedTabLabel(a().spawned_running) } : t.id === "waits" ? { ...t, label: waitsTabLabel(a().waits, holds.holdsFor(a().id).length) } : t,
+              )}
+              active={tab()}
+              onChange={setTab}
+            />
             <Switch>
               <Match when={tab() === "conversation"}>
-                <Conversation agent={a()} onOpenTerminal={() => setTab("terminal")} />
+                <Conversation agent={a()} footer={<QuotaLine agent={a()} />} />
               </Match>
               <Match when={tab() === "terminal"}>
                 <Terminal
@@ -356,8 +278,18 @@ export default function AgentDetail() {
                   keys={(keys) => api.agents.keys(a().id, keys)}
                 />
               </Match>
-              <Match when={tab() === "screen"}>
-                <ScreenPanel agentId={a().id} running={running()} />
+              <Match when={tab() === "waits"}>
+                <div class="stack">
+                  <WaitsPanel agent={a()} />
+                  <LeasesPanel agent={a()} onNotice={(n) => setNotice(n)} />
+                  <WatchesPanel agent={a()} />
+                </div>
+              </Match>
+              <Match when={tab() === "details"}>
+                <div class="stack">
+                  <DetailsPanel agent={a()} running={running()} onError={setError} globalIdleStop={globalIdleStop()} compactDefaults={compactDefaults()} />
+                  <RolesPanel agent={a()} onError={setError} />
+                </div>
               </Match>
               <Match when={tab() === "events"}>
                 <EventHistory filterKey={a().id} fetch={(q) => api.agents.events(a().id, q)} match={(e) => e.agent_id === a().id || e.data?.agent_id === a().id} />
@@ -965,77 +897,103 @@ function RolesPanel(props: { agent: Agent; onError: (e: unknown) => void }) {
   );
 }
 
-/** The agent's subscription, its share today, and any hold (`GET /api/usage/me?agent=`, docs/api.md §16.3). */
-function QuotaPanel(props: { agent: Agent }) {
-  const now = useNow(30_000);
-  const [tick, setTick] = createSignal(0);
-  const [me] = createResource(
-    () => [props.agent.id, tick()] as const,
-    async ([id]) => {
-      const m = await api.usage.me(id).catch(() => null);
-      // Holds older than the event backlog come from here.
-      if (m) quota.seedHolds(id, m.holds, props.agent.name);
-      return m;
-    },
-  );
-  onMount(() => {
-    let t: ReturnType<typeof setTimeout> | undefined;
-    const off = events.on((e) => {
-      const mine = e.agent_id === props.agent.id || e.data?.agent_id === props.agent.id;
-      if (!(mine && (e.kind.startsWith("quota.") || e.kind === "usage.sample")) && e.kind !== "quota.sample") return;
-      clearTimeout(t);
-      t = setTimeout(() => setTick((n) => n + 1), 2000);
-    });
-    onCleanup(() => {
-      off();
-      clearTimeout(t);
-    });
-  });
-  const holds = () => quota.holdsFor(props.agent.id, now());
+/** The Details tab: the properties of the agent (issue #22: they were above the tabs). */
+function DetailsPanel(props: {
+  agent: Agent;
+  running: boolean;
+  onError: (e: unknown) => void;
+  globalIdleStop: string | undefined;
+  compactDefaults: { on_idle?: boolean; max_age?: string; harnesses?: string[] };
+}) {
   return (
-    <section class="card-box">
-      <div class="spread">
-        <h3 style={{ margin: 0 }}>Quota</h3>
-        <span class="muted small">{props.agent.subscription}</span>
-      </div>
-      <For each={holds()}>
-        {(h) => (
-          <div class="error-banner" role="status">
-            <span>
-              <strong>Blocked by quota until {h.until ? `${new Date(h.until).toLocaleString()} (in ${timeUntil(h.until, now())})` : "further notice"}.</strong> {describeCause(h.cause)}: {h.reason}
-              {h.enforced ? "" : " The supervisor does not hold turns yet, so this is advice only."}
-            </span>
-          </div>
-        )}
-      </For>
-      <Show when={me()} fallback={<p class="muted small">{me.loading ? "Loading…" : "No usage numbers from the daemon."}</p>}>
-        {(m) => (
-          <dl class="kv">
-            <dt>Plan</dt>
-            <dd>
-              {m().subscription ? subscriptionTitle(m().subscription!) : props.agent.subscription}
-              <Show when={m().subscription?.display_name}>
+    <div class="card-box">
+      <dl class="kv">
+        <dt>Project</dt>
+        <dd>{props.agent.project}</dd>
+        <dt>Harness</dt>
+        <dd>
+          {props.agent.harness}
+          {props.agent.model ? ` · ${props.agent.model}` : ""}
+        </dd>
+        <dt>Says</dt>
+        <dd>
+          <Show when={props.agent.self_report} fallback={<span class="muted">no self-report</span>}>
+            <SelfReport report={props.agent.self_report} />
+          </Show>
+        </dd>
+        <dt>Subscription</dt>
+        <dd>
+          <SubscriptionCell agent={props.agent} running={props.running} onError={props.onError} />
+        </dd>
+        <dt>Pool</dt>
+        <dd>
+          <PoolCell agent={props.agent} onError={props.onError} />
+        </dd>
+        <dt>Prompt</dt>
+        <dd>{props.agent.prompt ?? <span class="muted">default</span>}</dd>
+        <dt>System prompt</dt>
+        <dd>
+          <SystemPromptCell agent={props.agent} running={props.running} onError={props.onError} />
+        </dd>
+        <dt>Skills</dt>
+        <dd>
+          <SkillsCell agent={props.agent} running={props.running} onError={props.onError} />
+        </dd>
+        <dt>Restart</dt>
+        <dd>{props.agent.restart ?? "on-failure"}</dd>
+        <dt>Spawn rights</dt>
+        <dd>
+          <span classList={{ muted: !props.agent.policy?.spawn }}>{spawnRightsText(props.agent.policy?.spawn)}</span>
+        </dd>
+        <dt>Idle stop</dt>
+        <dd>
+          {idleStopText(props.agent.idle_stop, props.globalIdleStop)}
+          <Show when={props.agent.status_reason && props.agent.status === "stopped"}>
+            <span class="muted small"> · last stop: {props.agent.status_reason}</span>
+          </Show>
+        </dd>
+        <dt>Auto compact</dt>
+        <dd>
+          <span classList={{ muted: props.agent.compact_supported === false }}>{autoCompactText(props.agent, props.compactDefaults)}</span>
+          <Show when={lastCompactedText(props.agent, (t) => ago(t))}>
+            {(t) => (
+              <span class="muted small" style={props.agent.last_compact_ok === false ? { color: "var(--warn)" } : undefined}>
                 {" "}
-                <span class="muted small mono">{m().subscription?.name}</span>
-              </Show>
-              <Show when={m().subscription?.local_estimate_only}> · local estimate only</Show>
-            </dd>
-            <dt>Windows</dt>
-            <dd class="small">
-              <Show when={m().subscription?.windows.length} fallback={<span class="muted">no samples</span>}>
-                {orderWindows(m().subscription!.windows)
-                  .map((w) => `${windowLabel(w.window)} ${windowValue(w)}${w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`)
-                  .join(" · ")}
-              </Show>
-            </dd>
-            <dt>Today</dt>
-            <dd class="small">
-              {compact(m().today.mine.input_tokens + m().today.mine.output_tokens)} tokens, {m().today.mine.turns} turns
-              <Show when={m().today.share_pct !== undefined}> · {m().today.share_pct}% of the subscription today</Show>
-            </dd>
-          </dl>
-        )}
-      </Show>
-    </section>
+                · {t()}
+              </span>
+            )}
+          </Show>
+        </dd>
+        <Show when={props.agent.template}>
+          {(t) => (
+            <>
+              <dt>Template</dt>
+              <dd>
+                <A href={t().project ? `/p/${encodeURIComponent(t().project!)}/settings/templates` : "/settings/templates"}>{t().name}</A> <span class="chip">{t().project ?? "global"}</span> <span class="muted small">revision {t().revision} at the create; a copy, not a live link</span>
+              </dd>
+            </>
+          )}
+        </Show>
+        <dt>Policy</dt>
+        <dd class="small">
+          targets: {props.agent.policy?.targets.join(", ") || "none"} · mail to: {props.agent.policy?.mail_to.join(", ") || "none"} · cross-project:{" "}
+          {(props.agent.policy?.cross_project ?? []).join(", ") || "none"}
+        </dd>
+        <dt>Card</dt>
+        <dd>
+          <Show when={props.agent.current_card} fallback={<span class="muted">none</span>}>
+            {(c) => <A href={`/p/${props.agent.project}/board?card=${c()}`}>{c()}</A>}
+          </Show>
+        </dd>
+        <dt>Session</dt>
+        <dd class="mono small">{props.agent.session ?? "—"}</dd>
+        <dt>Workspace</dt>
+        <dd class="mono small">{props.agent.workspace}</dd>
+        <dt>ID</dt>
+        <dd class="mono small">
+          {props.agent.id} <Show when={props.agent.source === "file"}><span class="chip">file</span></Show>
+        </dd>
+      </dl>
+    </div>
   );
 }

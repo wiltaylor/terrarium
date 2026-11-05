@@ -786,9 +786,10 @@ agent's project, a sysadmin, or the operator. The audit rows
 `agent.send_raw` and `agent.keys` never hold a text: a raw send has its
 length and first word, a text key its length. The lead prompts teach the
 loop `agent screen`, then `agent keys` or `agent send --raw`, then
-`agent screen` again. The dashboard has the on-screen keys and a raw field
-under the screen of the agent page, and the same keys under the terminal
-(below, the Terminal view).
+`agent screen` again. The dashboard has the on-screen keys under the
+terminal of the agent page (below, the Terminal view). The agent page had
+a Screen tab with the same snapshot; it went (issue #22), as the Terminal
+tab shows the same screen, and `?tab=screen` opens the Terminal tab.
 
 **The question guard.** The settings remove the ask-user tools, but a
 model can still end a turn with a question in plain text. The runner then
@@ -3442,6 +3443,13 @@ Dashboard (SolidJS, built with Vite, embedded in `terrariumd` with
 
 - **Projects** sidebar: pick a project; every other view filters to it.
 - **Agents** grid: name, harness, status badge, current turn age, last event.
+- **Agent** page (issue #22): the header (status, holds, leases, the card in
+  progress), the open questions, the turn box with one muted quota line
+  under it (plan, windows, today's use) and the quota hold banner, then the
+  tabs: Conversation (the default, with its own composer and the same
+  quota line), Terminal, Events, Sessions, Waits & leases (the open waits
+  and active leases counted in the label; waits, leases, watches), Details
+  (the properties and the roles), and Spawned.
 - **Repos** panel per project: attach, set branch, check out onto a target.
 - **Board** view per project: columns, drag-and-drop cards, inline edit,
   assign to an agent, comment, filter by label or assignee. Cards show the
