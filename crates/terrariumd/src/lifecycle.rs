@@ -178,6 +178,8 @@ pub struct Lifecycle {
     /// The agents with a run of a pending reset on the way
     /// (`crate::reset::run_pending`).
     pub resets: crate::reset::Runs,
+    /// The card reminder (`crate::card_reminder`).
+    pub reminders: crate::card_reminder::Reminders,
 }
 
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -557,6 +559,7 @@ async fn keeps_running(state: &Shared, id: AgentId) -> bool {
     // Work that waits for a stream of its subscription counts as queued
     // work (`crate::stream_limit`).
     if state.lifecycle.waking(id)
+        || state.lifecycle.reminders.checking(id)
         || state.executor.live_of(&key) > 0
         || state.usage.streams.is_waiting(id)
     {
@@ -886,6 +889,14 @@ fn on_event(state: &Shared, ev: &crate::events::StoredEvent) {
             let Some(status) = status else { return };
             let was_resting = guard(&state.lifecycle.resting).contains_key(&agent);
             state.lifecycle.note_status(agent, status);
+            // Idle after a turn, with cards in the working column: the
+            // card reminder, before any idle stop.
+            if state.lifecycle.reminders.note_status(agent, status) {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    crate::card_reminder::check(&state, agent).await;
+                });
+            }
             let reason = ev.data.get("reason").and_then(Value::as_str);
             let state = state.clone();
             if status == AgentStatus::Stopped && reason == Some(REASON_IDLE) {

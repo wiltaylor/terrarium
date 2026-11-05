@@ -5,7 +5,7 @@
 //
 // Agent-written text is untrusted: see ./TranscriptLog.
 
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
 import type { Agent, Session } from "../../../api/types";
 import { StatusBadge } from "../../../components/StatusBadge";
 import { ErrorBanner } from "../../../components/ui";
@@ -21,7 +21,13 @@ const LIVE = ["starting", "idle", "waiting", "working", "blocked", "restarting"]
 /** The newest session rows: enough to find the current one. */
 const NEWEST = 5;
 
-export function Conversation(props: { agent: Agent; onOpenTerminal: () => void }) {
+/**
+ * `onOpenTerminal`: a link in the header that opens the terminal. The pinned
+ * bar passes it (its only way to the terminal); the agent page does not, as
+ * its Terminal tab sits next to this one (issue #22). `footer`: shown under
+ * the composer (the agent page's quota line).
+ */
+export function Conversation(props: { agent: Agent; onOpenTerminal?: () => void; footer?: JSX.Element }) {
   // ----- the current session -----
   const [session, setSession] = createSignal<Session | undefined>(undefined);
   const [loaded, setLoaded] = createSignal(false);
@@ -81,9 +87,13 @@ export function Conversation(props: { agent: Agent; onOpenTerminal: () => void }
             <StreamChip state={t.streamState()} ended={!t.active()} />
           </Show>
         </span>
-        <button type="button" class="link small" onClick={() => props.onOpenTerminal()}>
-          Open terminal
-        </button>
+        <Show when={props.onOpenTerminal}>
+          {(open) => (
+            <button type="button" class="link small" onClick={() => open()()}>
+              Open terminal
+            </button>
+          )}
+        </Show>
       </div>
       <ErrorBanner error={listError()} />
       <TranscriptLog
@@ -92,6 +102,7 @@ export function Conversation(props: { agent: Agent; onOpenTerminal: () => void }
         empty={<p class="muted convo-note">{loaded() ? "No session yet. Send a turn: the agent wakes to run it." : "Loading…"}</p>}
       />
       <Composer agent={props.agent} sessionActive={isActive()} />
+      {props.footer}
     </section>
   );
 }

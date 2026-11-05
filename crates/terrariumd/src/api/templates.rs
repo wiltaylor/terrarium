@@ -416,6 +416,7 @@ async fn from_agent(
         idle_stop: a.agent.idle_stop,
         compact_on_idle: a.agent.compact_on_idle,
         compact_max_age: a.agent.compact_max_age,
+        card_reminder: a.agent.card_reminder,
         skills: a.agent.skills.clone(),
         skills_off: a.agent.skills_off.clone(),
         default_skills: a.agent.default_skills,

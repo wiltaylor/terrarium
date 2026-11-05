@@ -288,6 +288,7 @@ gives them to the routers and the mail code.
 | `TERRARIUM_IDLE_STOP` | none | `10m` | The idle stop of an agent that sets no `idle_stop` (§6.2, PLAN §18): a duration (`30m`, `1h30m`), or `off` (also `0`). The daemon reads it once. |
 | `TERRARIUM_COMPACT_ON_IDLE` | none | `off` | The `compact_on_idle` of an agent that sets none (§6.2, "Auto compact"): `on` or `off` (also `1`, `true`, `yes`, and `0`, `false`, `no`). The daemon reads it once. |
 | `TERRARIUM_COMPACT_MAX_AGE` | none | `off` | The `compact_max_age` of an agent that sets none (§6.2, "Auto compact"): a duration (`24h`, `12h30m`), or `off` (also `0`). The daemon reads it once. |
+| `TERRARIUM_CARD_REMINDER` | none | `on` | The `card_reminder` of an agent that sets none (§6.2, "Card reminder"): `on` or `off` (also `1`, `true`, `yes`, and `0`, `false`, `no`). Empty or not valid: on. The daemon reads it once. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
@@ -480,7 +481,7 @@ Limits that always hold:
 ```json
 {"status":"ok","version":"0.1.0+6e31754","uptime":1,"started_at":"2026-10-24T06:36:53.143044982Z",
  "definitions":{"projects":1,"agents":1,"targets":0,"subscriptions":0},"idle_stop":"10m",
- "compact_on_idle":false,"compact_max_age":"off",
+ "compact_on_idle":false,"compact_max_age":"off","card_reminder":true,
  "compact_harnesses":["claude","codex","copilot","pi"]}
 ```
 
@@ -490,8 +491,10 @@ start or reload. `idle_stop` is the idle stop of an agent that sets none
 (`TERRARIUM_IDLE_STOP`, §6.2): `off`, or a duration such as `10m`.
 `compact_on_idle` and `compact_max_age` are the auto compact settings of
 an agent that sets none (`TERRARIUM_COMPACT_ON_IDLE`,
-`TERRARIUM_COMPACT_MAX_AGE`, §6.2). `compact_harnesses` lists the
-harnesses whose agents the daemon can compact.
+`TERRARIUM_COMPACT_MAX_AGE`, §6.2). `card_reminder` is the card
+reminder of an agent that sets none (`TERRARIUM_CARD_REMINDER`, §6.2).
+`compact_harnesses` lists the harnesses whose agents the daemon can
+compact.
 
 ### `GET /api/system/version`
 
@@ -1882,6 +1885,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `idle_stop` | The idle stop of the agent (§6.2): `off`, or a duration such as `30m`. Absent: the daemon's `TERRARIUM_IDLE_STOP`. |
 | `compact_on_idle` | `true` or `false`: the agent compacts its session at its idle stop (§6.2, "Auto compact"). Absent: the daemon's `TERRARIUM_COMPACT_ON_IDLE`. |
 | `compact_max_age` | The maximum age of the session context (§6.2, "Auto compact"): `off`, or a duration such as `24h`. Absent: the daemon's `TERRARIUM_COMPACT_MAX_AGE`. |
+| `card_reminder` | `true` or `false`: the agent gets a `[System:card]` turn when it goes idle with cards in progress (§6.2, "Card reminder"). Absent: the daemon's `TERRARIUM_CARD_REMINDER` (on). |
 | `compact_supported` | `false` when the daemon cannot compact agents of the harness: it ignores `compact_on_idle` and `compact_max_age`, and `POST /api/agents/{id}/compact` is `409`. Always present. |
 | `reset_pending` | A compaction or a new session that waits (§6.2, "Compact and new session on request"): `{kind, by, then_set, recap, deferred, requested_at}`. Absent when none. |
 | `last_compact_at`, `last_compact_ok` | The end of the last compaction that the daemon ran (RFC 3339, also a failed one) and its result. Absent when none. |
@@ -1902,7 +1906,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
 | `POST /api/agents` | an agent definition, or `template` and the fields that differ (§21.3) | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
-| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "skills"?, "skills_off"?, "default_skills"?, "policy"?, "restart"?, "idle_stop"?, "compact_on_idle"?, "compact_max_age"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
+| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "skills"?, "skills_off"?, "default_skills"?, "policy"?, "restart"?, "idle_stop"?, "compact_on_idle"?, "compact_max_age"?, "card_reminder"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204`; emits `agent_removed` (§9) | project_admin |
 
 `DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
@@ -1982,7 +1986,7 @@ secret and no quota numbers (those are in `GET /api/usage/me`).
 
 `PATCH` changes only the fields in the body. Send `null` for
 `subscription`, `model`, `prompt`, `system_prompt`, `idle_stop`,
-`compact_on_idle`, or `compact_max_age` to clear it
+`compact_on_idle`, `compact_max_age`, or `card_reminder` to clear it
 (`{"subscription": null}`). An empty `system_prompt` also clears it.
 `null` for the other fields changes nothing.
 
@@ -1999,6 +2003,11 @@ spec, an agent file, and a fleet entry): the auto compact settings
 form of `idle_stop`: `off` (or `0`), or a duration such as `24h`. Another
 value is `400 bad_request`. Absent or `null`: the daemon's
 `TERRARIUM_COMPACT_ON_IDLE` and `TERRARIUM_COMPACT_MAX_AGE` (both off).
+
+`card_reminder` (in `POST`, `PATCH`, a template spec, an agent file, and
+a fleet entry): `true` or `false`, the card reminder of the agent (§6.2,
+"Card reminder"). Absent or `null`: the daemon's
+`TERRARIUM_CARD_REMINDER` (on).
 
 `subscription` (in `POST` and `PATCH`, also from a template): it must
 exist. A name that is not a subscription is `422 invalid` with
@@ -2121,6 +2130,29 @@ need `start` and `stop`:
   Each change writes an audit row (`agent.pause`, `agent.unpause`, with
   `queued`) and an event (`agent.paused`, `agent.unpaused`). The rights
   are those of `stop`.
+
+**Card reminder (PLAN §18).** An agent that goes `idle` after a turn
+while it is the assignee of cards in the working column (the column with
+the role `working`) gets one turn from the daemon, for example:
+
+```text
+[System:card] Cards TER-9, TER-12 are still in progress and assigned to you, and you are idle. Update them before you go idle: comment, move to review or blocked, or set a new ETA. If you wait on something, register a wait. The ETA has passed: TER-9 (ETA 2026-11-05T10:00:00.000Z).
+```
+
+- **When.** At the change to `idle`, so before the idle stop: the idle
+  stop waits for the check. Not for `waiting` (an open wait is the normal
+  way to end a turn with a card in progress), `blocked`, `stopped`, a
+  paused agent, an agent that compacts or has a pending reset, and an
+  agent that went idle after a start with no turn.
+- **Once for each card.** One turn lists all the due cards. A card is
+  due again only after 1 hour, or when its ETA passed after its last
+  reminder. The agent's own update of the card does not make it due, so
+  the reminder cannot loop. The times are in memory: a daemon restart
+  forgets them.
+- **History.** Each reminded card gets a `card` event with the change
+  `reminded` (§9). It wakes no agent and nudges no lead.
+- **Setting.** `card_reminder` of the agent (§6.1); absent: the daemon's
+  `TERRARIUM_CARD_REMINDER` (on).
 
 **Auto compact (PLAN §18).** The daemon can compact the session of an
 agent at rest. Each compaction is one model call, so all of it is off by
@@ -4016,7 +4048,7 @@ Kinds:
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning`, `usage_limit` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). A `usage_limit` (`{message, resets_at?}`) is the provider's refusal of a turn for a usage limit or a rate limit (§16.6). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
 | `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true`, `held_reason`, and `thread_state: "paused"`. A release (§7.4) emits the event again with `released: true`. |
-| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), or `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
+| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared), or `reminded` (`eta_passed`: the daemon reminded the idle assignee to update the card, §6.2 "Card reminder"). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `question_guard` | `{question, mailed}`: a member ended its turn with a question in plain text and reported nothing, so the daemon set `blocked` (reason "asked a question in plain text: ...") and mailed `mailed` (the leads, or `operator`). `question` is the first 200 characters. The actor is `system`. PLAN §8.4. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |
@@ -7334,7 +7366,7 @@ A template:
 |---|---|
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
-| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `skills`, `skills_off`, `default_skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` and no `default_skills` when it is `true`, no empty `skills_off`. A template in an answer also has `effective_skills`: the skills that an agent of the template gets now, as on an agent (§6.1). A `system_prompt` over the limit (`TERRARIUM_SYSTEM_PROMPT_MAX`, default 32 KiB) is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `card_reminder`, `skills`, `skills_off`, `default_skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` and no `default_skills` when it is `true`, no empty `skills_off`. A template in an answer also has `effective_skills`: the skills that an agent of the template gets now, as on an agent (§6.1). A `system_prompt` over the limit (`TERRARIUM_SYSTEM_PROMPT_MAX`, default 32 KiB) is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. A change of the file by hand adds `1` when the load finds it (also a change of a comment only): one revision is one version of the file. |
 | `source` | `config` (a file of the config repo), or `fleet:<name>` (§18.1; its file is in the config repo too). `api` and `file` are templates from before the files: the first load writes their files and makes them `config`. |
 | `file` | The file in the config repo (§21.5): `templates/<name>.wcl`, or `templates/<project>/<name>.wcl`. `null` until the file is written (a daemon with no config repo). |
@@ -7530,6 +7562,7 @@ type AgentTemplate {
   idle_stop: utf8?
   compact_on_idle: bool?
   compact_max_age: utf8?
+  card_reminder: bool?
   skills: list<utf8>?
   skills_off: list<utf8>?
   default_skills: bool?

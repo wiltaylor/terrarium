@@ -190,6 +190,7 @@ fn has_spec_flags(a: &TemplateSpecArgs) -> bool {
         || a.idle_stop.is_some()
         || a.compact_on_idle.is_some()
         || a.compact_max_age.is_some()
+        || a.card_reminder.is_some()
         || !a.roles.is_empty()
         || !a.targets.is_empty()
         || !a.mail_to.is_empty()
@@ -232,6 +233,12 @@ fn spec_of(
         flags.insert(
             "compact_on_idle".into(),
             super::agents::switch(v, "--compact-on-idle")?.into(),
+        );
+    }
+    if let Some(v) = &a.card_reminder {
+        flags.insert(
+            "card_reminder".into(),
+            super::agents::switch(v, "--card-reminder")?.into(),
         );
     }
     if let Some(v) = system_prompt_value(ctx, &a.system_prompt)? {

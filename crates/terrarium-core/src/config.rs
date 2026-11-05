@@ -442,6 +442,11 @@ pub struct AgentDef {
     /// the global default (`TERRARIUM_COMPACT_MAX_AGE`, off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_max_age: Option<CompactMaxAge>,
+    /// Remind the agent of its cards in the working column when it goes
+    /// idle after a turn (PLAN §18, "Card reminder"). `None`: the global
+    /// default (`TERRARIUM_CARD_REMINDER`, on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_reminder: Option<bool>,
     /// The skills of the agent from the skill library (PLAN §8.6): skill
     /// names, or `*` for every skill of the library. Default none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

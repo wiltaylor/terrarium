@@ -57,6 +57,9 @@ pub struct Agent {
     /// See [`AgentDef::compact_max_age`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_max_age: Option<CompactMaxAge>,
+    /// See [`AgentDef::card_reminder`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_reminder: Option<bool>,
     #[serde(default)]
     pub status: AgentStatus,
     /// The current harness session, if one has started.
@@ -139,6 +142,7 @@ impl Agent {
             idle_stop: def.idle_stop,
             compact_on_idle: def.compact_on_idle,
             compact_max_age: def.compact_max_age,
+            card_reminder: def.card_reminder,
             status: AgentStatus::Stopped,
             session: None,
             new_session_on_prompt_change: def.new_session_on_prompt_change,

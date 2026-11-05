@@ -768,6 +768,10 @@ pub struct AgentNewArgs {
     /// `TERRARIUM_COMPACT_MAX_AGE`
     #[arg(long)]
     pub compact_max_age: Option<String>,
+    /// Remind the agent of its cards in progress when it goes idle: `on`
+    /// or `off`. Default: the daemon's `TERRARIUM_CARD_REMINDER` (on)
+    #[arg(long)]
+    pub card_reminder: Option<String>,
     /// A skill of the skill library; `*` is every skill; repeat for more.
     /// The agent also gets the default-on skills of the library
     #[arg(long = "skill")]
@@ -836,6 +840,10 @@ pub struct AgentSetArgs {
     /// `TERRARIUM_COMPACT_MAX_AGE`)
     #[arg(long)]
     pub compact_max_age: Option<String>,
+    /// Remind the agent of its cards in progress when it goes idle: `on`,
+    /// `off`, or `default` (the daemon's `TERRARIUM_CARD_REMINDER`)
+    #[arg(long)]
+    pub card_reminder: Option<String>,
     /// The whole policy as JSON, for example `{"targets":[],"mail_to":["*"]}`
     #[arg(long)]
     pub policy: Option<String>,
@@ -3165,6 +3173,10 @@ pub struct TemplateSpecArgs {
     /// such as `24h`, or `off`
     #[arg(long)]
     pub compact_max_age: Option<String>,
+    /// Remind the agent of its cards in progress when it goes idle: `on`
+    /// or `off`
+    #[arg(long)]
+    pub card_reminder: Option<String>,
     /// A skill of the skill library; `*` is every skill; repeat for more
     #[arg(long = "skill", conflicts_with = "no_skills")]
     pub skills: Vec<String>,

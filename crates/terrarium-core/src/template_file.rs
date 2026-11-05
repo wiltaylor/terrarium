@@ -62,6 +62,7 @@ const FIELDS: &[(&str, Kind)] = &[
     ("idle_stop", Kind::Text),
     ("compact_on_idle", Kind::Bool),
     ("compact_max_age", Kind::Text),
+    ("card_reminder", Kind::Bool),
     ("skills", Kind::List),
     ("skills_off", Kind::List),
     ("default_skills", Kind::Bool),

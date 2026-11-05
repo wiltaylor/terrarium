@@ -416,6 +416,12 @@ than 24 hours, at the next rest. An automatic compaction runs only after
 a new turn. `default` (in `agent set`) goes back to the daemon's
 `TERRARIUM_COMPACT_ON_IDLE` and `TERRARIUM_COMPACT_MAX_AGE`.
 
+An agent that goes idle after a turn with cards in progress gets one
+`[System:card]` turn that asks it to update them (PLAN §18, "Card
+reminder"). `--card-reminder off` turns it off for the agent; `default`
+(in `agent set`) goes back to the daemon's `TERRARIUM_CARD_REMINDER`
+(on).
+
 `agent compact` and `agent new-session` reset the session of an agent on
 request (PLAN §18, "Compact and new session on request"):
 
