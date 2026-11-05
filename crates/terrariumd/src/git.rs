@@ -496,10 +496,7 @@ pub fn ensure_known_hosts_dir(state_dir: &Path) -> std::io::Result<PathBuf> {
 /// makes the file copies `seed` (as it is: hashed lines stay hashed); a
 /// later run leaves the file alone. A missing or unreadable seed leaves
 /// the new file empty.
-fn ensure_known_hosts_dir_from(
-    state_dir: &Path,
-    seed: Option<&Path>,
-) -> std::io::Result<PathBuf> {
+fn ensure_known_hosts_dir_from(state_dir: &Path, seed: Option<&Path>) -> std::io::Result<PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let ssh = state_dir.join("ssh");
