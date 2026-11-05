@@ -6,6 +6,7 @@
 //! |---|---|---|
 //! | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin` | the same paths (a symlink stays a symlink) | ro |
 //! | `/etc/{resolv.conf, hosts, ssl, passwd, group, localtime, alternatives, ...}` | the same paths, when they exist | ro |
+//! | `/etc/ssh` | `<state>/ssh/sandbox`: the repo host keys in `ssh_known_hosts` (`crate::git::known_hosts_dir`), when it exists | ro |
 //! | the tools dir (`TERRARIUM_TOOLS_DIR`, `/opt/terrarium/tools`): the harnesses, their `bin/` on `PATH`. The harness runs from the `bin/` of the version dir that was active at the launch (`AgentLayout::harness_bin`), and that dir comes first on `PATH`, so a later switch does not change a running agent | the same path | ro |
 //! | the harness install directory, when it is outside `/usr` and the tools dir | the same path | ro |
 //! | `/proc`, `/dev`, `/tmp` | new, private | |
@@ -45,6 +46,10 @@ pub const SANDBOX_SOCKET: &str = "/run/terrarium/agent.sock";
 pub const SANDBOX_BIN_DIR: &str = "/opt/terrarium/bin";
 /// `$HOME` inside the sandbox.
 pub const SANDBOX_HOME: &str = "/home/agent";
+/// Where the sandbox shows [`SandboxConfig::known_hosts_dir`]: ssh's
+/// global config dir, so its default `GlobalKnownHostsFile`
+/// (`/etc/ssh/ssh_known_hosts`) is the daemon's file.
+pub const SANDBOX_SSH_DIR: &str = "/etc/ssh";
 /// The default of `TERRARIUM_REPOS_DIR`: the local repos that the sandbox
 /// binds read-write into the agents of their project ([`local_repo_binds`]).
 pub const DEFAULT_REPOS_DIR: &str = "/repos";
@@ -150,6 +155,12 @@ pub struct SandboxConfig {
     /// of that project, so `git push` works with no credential. Nothing
     /// outside this dir is bound this way.
     pub repos_dir: PathBuf,
+    /// The repo host keys (`<state>/ssh/sandbox`,
+    /// `crate::git::known_hosts_dir`): bound read-only at [`SANDBOX_SSH_DIR`],
+    /// so ssh reads `ssh_known_hosts` there as its global known hosts file,
+    /// and git over ssh in the sandbox trusts the hosts that the daemon's
+    /// git trusts. `None`: no bind.
+    pub known_hosts_dir: Option<PathBuf>,
 }
 
 impl Default for SandboxConfig {
@@ -163,6 +174,7 @@ impl Default for SandboxConfig {
             tools_dir: None,
             new_session: false,
             repos_dir: PathBuf::from(DEFAULT_REPOS_DIR),
+            known_hosts_dir: None,
         }
     }
 }
@@ -452,6 +464,9 @@ impl SandboxConfig {
             args.push("--new-session".into());
         }
         args.extend(system_args(symlink));
+        if let Some(dir) = &self.known_hosts_dir {
+            push3(&mut args, "--ro-bind-try", dir, Path::new(SANDBOX_SSH_DIR));
+        }
         let mut ro: Vec<&Path> = self.ro_paths.iter().map(PathBuf::as_path).collect();
         if let Some(dir) = self.tools_dir.as_deref() {
             ro.push(dir);
@@ -893,6 +908,35 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
     /// F1 of `docs/security-review.md`: the runner's records stay out of
     /// the sandbox. No bind of any kind names `private/` or a directory
     /// above it, so the agent can neither read nor change them.
+    /// The repo host keys bind read-only at `/etc/ssh`, after the `/etc`
+    /// entries, so ssh in the sandbox reads `/etc/ssh/ssh_known_hosts`.
+    /// With no dir, nothing binds there.
+    #[test]
+    fn the_repo_host_keys_bind_at_etc_ssh() {
+        let l = layout();
+        let resolve = |p: &str| (p == "claude").then(|| PathBuf::from("/usr/bin/claude"));
+        let none = config().wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve);
+        assert!(!none.args.iter().any(|a| a.starts_with("/etc/ssh")));
+        let cfg = SandboxConfig {
+            known_hosts_dir: Some(PathBuf::from("/state/ssh/sandbox")),
+            ..config()
+        };
+        let line = command_line(&cfg.wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve));
+        assert!(
+            line.contains(
+                "--ro-bind-try /etc/ld.so.conf.d /etc/ld.so.conf.d \
+                 --ro-bind-try /state/ssh/sandbox /etc/ssh "
+            ),
+            "{line}"
+        );
+        let plain = SandboxConfig {
+            mode: SandboxMode::None,
+            ..cfg
+        };
+        let line = command_line(&plain.wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve));
+        assert!(!line.contains("/etc/ssh"), "{line}");
+    }
+
     /// PLAN §16b.4: the ssh-agent dir binds at `/run/terrarium/ssh-agent`,
     /// and `SSH_AUTH_SOCK` names the symlink to its socket.
     #[test]

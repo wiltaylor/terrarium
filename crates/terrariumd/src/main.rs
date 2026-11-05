@@ -53,12 +53,22 @@ async fn main() -> anyhow::Result<()> {
     // first on PATH: the adapters and the runners find the harnesses there.
     initial_password(&settings)?;
     restart_clean(tools.as_ref().map(ToolsConfig::bin_dir).as_deref());
+    // The repo host keys that the sandboxes show at /etc/ssh. Without the
+    // dir the agents start, but git over ssh in them knows no host.
+    let known_hosts_dir = match terrariumd::git::ensure_known_hosts_dir(&settings.state_dir) {
+        Ok(dir) => Some(dir),
+        Err(e) => {
+            error!("cannot make the repo known hosts dir: {e}");
+            None
+        }
+    };
     let mut sandbox = SandboxConfig {
         mode: settings.sandbox,
         cli: settings.cli_path(),
         new_session: settings.sandbox_new_session,
         repos_dir: settings.repos_dir.clone(),
         tools_dir: tools.as_ref().map(|t| t.dir.clone()),
+        known_hosts_dir,
         ..SandboxConfig::default()
     };
     let homes: HashMap<_, _> = settings.harness_homes.iter().cloned().collect();

@@ -10,6 +10,10 @@
 //!   the repo's `.git/config`.
 //! - An SSH key goes to `ssh -i` through `GIT_SSH_COMMAND`, as a 0600 copy in
 //!   the same run dir.
+//! - ssh records the host keys (trust on first use) in
+//!   `<state>/ssh/sandbox/ssh_known_hosts` ([`known_hosts_dir`]). Each
+//!   sandbox shows that dir read-only at `/etc/ssh`, so git over ssh in the
+//!   sandbox trusts the same keys.
 //! - After a clone, the daemon writes `credential.helper = !terrarium repo
 //!   credential` and `credential.useHttpPath = true` into the local
 //!   `.git/config`, so a push from inside the sandbox asks the daemon
@@ -463,6 +467,39 @@ pub fn http_location(url: &str) -> Option<HttpLocation> {
     })
 }
 
+/// The file name of the repo host keys in [`known_hosts_dir`]: the name of
+/// ssh's global known hosts file, so ssh in a sandbox reads it with no
+/// config.
+pub const KNOWN_HOSTS_FILE: &str = "ssh_known_hosts";
+
+/// `<state>/ssh/sandbox`: the dir of the repo host keys. The daemon's git
+/// over ssh records each new host key there (trust on first use, as
+/// before), and each `bwrap` sandbox binds the dir read-only at
+/// `/etc/ssh`, so `git fetch` and `git push` over ssh in the sandbox trust
+/// the same keys as the daemon. The dir, not the file, is bound: a file
+/// that is written again (a new inode) still shows in a running sandbox.
+pub fn known_hosts_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("ssh").join("sandbox")
+}
+
+/// Make [`known_hosts_dir`] (0700, in the 0700 `<state>/ssh`) and an empty
+/// [`KNOWN_HOSTS_FILE`] in it when it has none. Returns the dir.
+pub fn ensure_known_hosts_dir(state_dir: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let ssh = state_dir.join("ssh");
+    let dir = known_hosts_dir(state_dir);
+    std::fs::create_dir_all(&dir)?;
+    for d in [&ssh, &dir] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+    }
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(dir.join(KNOWN_HOSTS_FILE))?;
+    Ok(dir)
+}
+
 /// Quote for `sh`.
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -628,6 +665,19 @@ impl Runner {
     fn new(c: &Checkout) -> Result<Self, GitError> {
         let mut config: Vec<String> = HARDEN.iter().map(|s| (*s).to_owned()).collect();
         let mut ssh = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new".to_owned();
+        // The host keys go to the file that the sandboxes read
+        // ([`known_hosts_dir`]). When the dir cannot be made, ssh still
+        // runs: it only cannot record a new key.
+        let state = c.store.state_dir();
+        if let Err(e) = ensure_known_hosts_dir(state) {
+            let dir = known_hosts_dir(state);
+            tracing::warn!(dir = %dir.display(), "cannot make the repo known hosts dir: {e}");
+        }
+        let known = known_hosts_dir(state).join(KNOWN_HOSTS_FILE);
+        ssh.push_str(&format!(
+            " -o {}",
+            sh_quote(&format!("UserKnownHostsFile={}", known.display()))
+        ));
         let mut run = None;
         match &c.secret {
             Some(Secret::Token { username, token }) => {
@@ -2821,6 +2871,40 @@ mod tests {
         ));
         assert!(!config_allowed("include.path", "x"));
         assert!(!config_allowed("http.proxy", "x"));
+    }
+
+    /// git over ssh records the host keys in the file that the sandboxes
+    /// show at `/etc/ssh/ssh_known_hosts`, and the run makes that file.
+    #[test]
+    fn ssh_records_host_keys_where_the_sandboxes_read_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let c = checkout(tmp.path(), Path::new("/nowhere.git"), &tmp.path().join("d"));
+        let r = Runner::new(&c).unwrap();
+        let ssh = r
+            .env
+            .iter()
+            .find_map(|(k, v)| (k == "GIT_SSH_COMMAND").then_some(v))
+            .unwrap();
+        let file = state.join("ssh/sandbox/ssh_known_hosts");
+        assert!(
+            ssh.contains(&format!("'UserKnownHostsFile={}'", file.display())),
+            "{ssh}"
+        );
+        assert!(ssh.contains("StrictHostKeyChecking=accept-new"), "{ssh}");
+        assert!(file.is_file());
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&state.join("ssh")), 0o700);
+        assert_eq!(mode(&known_hosts_dir(&state)), 0o700);
+        assert_eq!(mode(&file), 0o600);
+        // A second run keeps the recorded keys.
+        std::fs::write(&file, "github.com ssh-ed25519 AAAA\n").unwrap();
+        Runner::new(&c).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "github.com ssh-ed25519 AAAA\n"
+        );
     }
 
     #[test]
