@@ -112,27 +112,30 @@ describe("origin chips", () => {
 
 describe("composer rules", () => {
   it("is on for idle; on with a queued note for working and blocked", () => {
-    expect(composerState({ agentStatus: "idle", sessionActive: true })).toEqual({ enabled: true });
+    expect(composerState({ agentStatus: "idle", current: true })).toEqual({ enabled: true });
     // Waiting is idle with open waits: the turn goes at once.
-    expect(composerState({ agentStatus: "waiting", sessionActive: true })).toEqual({ enabled: true });
-    expect(composerState({ agentStatus: "working", sessionActive: true })).toEqual({ enabled: true, note: "queued — the agent is working" });
-    expect(composerState({ agentStatus: "blocked", sessionActive: true })).toMatchObject({ enabled: true, note: "queued — the agent is blocked" });
+    expect(composerState({ agentStatus: "waiting", current: true })).toEqual({ enabled: true });
+    expect(composerState({ agentStatus: "working", current: true })).toEqual({ enabled: true, note: "queued — the agent is working" });
+    expect(composerState({ agentStatus: "blocked", current: true })).toMatchObject({ enabled: true, note: "queued — the agent is blocked" });
   });
 
   it("is on, with a queued note, for an agent that does not run: the daemon wakes it", () => {
-    expect(composerState({ agentStatus: "stopped", sessionActive: false })).toMatchObject({ enabled: true, note: expect.stringContaining("wakes") });
-    expect(composerState({ agentStatus: "error", sessionActive: true })).toMatchObject({ enabled: true, note: expect.stringContaining("error") });
-    expect(composerState({ agentStatus: "starting", sessionActive: false })).toMatchObject({ enabled: true, note: "queued — the agent is starting" });
-    expect(composerState({ agentStatus: "restarting", sessionActive: true }).enabled).toBe(true);
+    expect(composerState({ agentStatus: "stopped", current: true })).toMatchObject({ enabled: true, note: expect.stringContaining("wakes") });
+    expect(composerState({ agentStatus: "error", current: true })).toMatchObject({ enabled: true, note: expect.stringContaining("error") });
+    expect(composerState({ agentStatus: "starting", current: true })).toMatchObject({ enabled: true, note: "queued — the agent is starting" });
+    expect(composerState({ agentStatus: "restarting", current: true }).enabled).toBe(true);
   });
 
   it("is on for a paused agent, and says that the turn waits for a resume", () => {
-    expect(composerState({ agentStatus: "stopped", sessionActive: false, paused: true })).toMatchObject({ enabled: true, note: expect.stringContaining("paused") });
+    expect(composerState({ agentStatus: "stopped", current: true, paused: true })).toMatchObject({ enabled: true, note: expect.stringContaining("paused") });
   });
 
   it("is off, with the reason, for a session that is not active or an agent that is not known", () => {
-    expect(composerState({ agentStatus: "idle", sessionActive: false })).toMatchObject({ enabled: false, reason: expect.stringContaining("not the active session") });
-    expect(composerState({ agentStatus: undefined, sessionActive: true }).enabled).toBe(false);
+    expect(composerState({ agentStatus: "idle", current: false })).toMatchObject({ enabled: false, reason: expect.stringContaining("older session") });
+    // TER-44: an older session is off whatever the agent does; the current one is on also when it is not live.
+    expect(composerState({ agentStatus: "stopped", current: false }).enabled).toBe(false);
+    expect(composerState({ agentStatus: "working", current: false }).enabled).toBe(false);
+    expect(composerState({ agentStatus: undefined, current: true }).enabled).toBe(false);
   });
 
   it("sends on Enter, not on Shift+Enter or while an IME composes", () => {
