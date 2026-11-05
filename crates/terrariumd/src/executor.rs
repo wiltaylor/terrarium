@@ -1554,6 +1554,12 @@ pub async fn start_exec_as(
     let mut cmd = cmd;
     cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
     let run = start_cmd(state, &def, &cmd)?;
+    // The output is redacted for the caller (PLAN §16b.6, TER-33).
+    let view = match actor {
+        Actor::Agent(a) => terrarium_core::redact::View::Scope(a.project.clone()),
+        Actor::Operator => terrarium_core::redact::View::All,
+    };
+    let run = redact_run(run, state.db.redactor().get(), view);
     let kind = if cmd.shell { "shell" } else { "exec" };
     let (sess, ctl) = ExecSession::new(
         name,
@@ -1770,6 +1776,94 @@ async fn attach_tool(
         bytes,
         truncated,
     });
+}
+
+/// How long the redaction of an exec stream holds back the end of its
+/// output with no new output (TER-33): then the held bytes go out,
+/// redacted. A shell prompt or a progress line shows after this delay, not
+/// only with the next output. A secret split across two writes further
+/// apart than this is not found whole (PLAN §16b.6).
+pub const REDACT_FLUSH_IDLE: Duration = Duration::from_millis(200);
+
+/// Redact the stdout and stderr of `run` as streams ([`StreamRedactor`]),
+/// for `view`, so that a secret split across two output chunks is found
+/// (TER-33). With no secret in the matcher, `run` is returned as it is.
+///
+/// [`StreamRedactor`]: terrarium_core::redact::StreamRedactor
+fn redact_run(
+    run: Running,
+    redactor: Arc<terrarium_core::redact::Redactor>,
+    view: terrarium_core::redact::View,
+) -> Running {
+    use terrarium_core::redact::StreamRedactor;
+    if redactor.is_empty() {
+        return run;
+    }
+    let Running { mut events, ctl } = run;
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        let mut out = StreamRedactor::new(redactor.clone(), view.clone());
+        let mut err = StreamRedactor::new(redactor, view);
+        let flush = |out: &mut StreamRedactor, err: &mut StreamRedactor| {
+            [
+                (Stream::Stdout, out.finish()),
+                (Stream::Stderr, err.finish()),
+            ]
+            .into_iter()
+            .filter(|(_, b)| !b.is_empty())
+            .collect::<Vec<_>>()
+        };
+        loop {
+            let waiting = out.held() > 0 || err.held() > 0;
+            let ev = if waiting {
+                match tokio::time::timeout(REDACT_FLUSH_IDLE, events.recv()).await {
+                    Ok(ev) => ev,
+                    Err(_) => {
+                        for (s, b) in flush(&mut out, &mut err) {
+                            if tx.send(Ev::Data(s, b)).await.is_err() {
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                events.recv().await
+            };
+            let send = match ev {
+                Some(Ev::Data(Stream::Stdout, b)) => vec![Ev::Data(Stream::Stdout, out.push(&b))],
+                Some(Ev::Data(Stream::Stderr, b)) => vec![Ev::Data(Stream::Stderr, err.push(&b))],
+                Some(Ev::End(e)) => {
+                    let mut v: Vec<Ev> = flush(&mut out, &mut err)
+                        .into_iter()
+                        .map(|(s, b)| Ev::Data(s, b))
+                        .collect();
+                    v.push(Ev::End(e));
+                    v
+                }
+                None => {
+                    for (s, b) in flush(&mut out, &mut err) {
+                        let _ = tx.send(Ev::Data(s, b)).await;
+                    }
+                    return;
+                }
+                Some(other) => vec![other],
+            };
+            let end = send.iter().any(|e| matches!(e, Ev::End(_)));
+            for e in send {
+                if matches!(&e, Ev::Data(_, b) if b.is_empty()) {
+                    continue;
+                }
+                if tx.send(e).await.is_err() {
+                    return;
+                }
+            }
+            if end {
+                return;
+            }
+        }
+    });
+    Running { events: rx, ctl }
 }
 
 /// The body of `POST /api/targets/{name}/cp`.
