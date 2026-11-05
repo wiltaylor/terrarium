@@ -1109,8 +1109,8 @@ async fn github_setup(repo_url: &str, helper_dir: &Path) -> (TestDaemon, PathBuf
     td.boot(None, None).await;
     let proxy_addr = td.daemon.as_ref().unwrap().git_proxy_addr.unwrap();
     td.post(
-        "/api/credentials",
-        json!({"name": "gh", "kind": "github_token", "value": FORGE_TOKEN}),
+        "/api/secrets",
+        json!({"name": "gh", "kind": "github_token", "fields": {"value": FORGE_TOKEN}}),
     )
     .await
     .ok();
