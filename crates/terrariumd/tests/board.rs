@@ -1284,7 +1284,7 @@ async fn active_cards_across_projects_follow_the_rights() {
     assert_eq!(one(&k1)["column"], "in_progress");
     assert_eq!(one(&k1)["project"], "proj");
     assert_eq!(one(&k1)["assignee_name"], "proj/w1");
-    let w1 = td.get("/api/agents/proj/w1").await.ok().clone();
+    let w1 = td.get("/api/agents/proj%2Fw1").await.ok().clone();
     assert_eq!(one(&k1)["assignee_status"], w1["status"]);
     assert_eq!(one(&k2)["column_kind"], "research");
     assert_eq!(one(&k2)["assignee_name"], "proj/w2");
