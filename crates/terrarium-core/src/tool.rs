@@ -281,7 +281,7 @@ impl ToolDef {
         }
         if let Some(t) = &self.timeout {
             let d = crate::eta::parse_duration(t).map_err(|e| format!("timeout: {e}"))?;
-            if d > TIMEOUT_MAX {
+            if u64::try_from(d.num_seconds()).unwrap_or(u64::MAX) > TIMEOUT_MAX.as_secs() {
                 return Err(format!("timeout `{t}` is over 24h"));
             }
         }
