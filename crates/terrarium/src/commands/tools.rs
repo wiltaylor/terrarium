@@ -6,9 +6,9 @@ use anyhow::Context as _;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
+use super::remote::{self, B64};
 use super::secrets::grantee;
 use super::{print_object, print_table};
-use super::remote::{self, B64};
 use crate::api::{CliError, ServerError, query};
 use crate::cli::ToolCmd;
 use crate::ctx::Ctx;
@@ -120,8 +120,8 @@ fn input_refused(e: &anyhow::Error) -> bool {
 /// run (`DELETE /api/tools/sessions/{id}`) and exits 130.
 async fn run(ctx: &Ctx, name: &str, args: &[String]) -> anyhow::Result<()> {
     use std::io::IsTerminal as _;
-    let wants_stdin = !std::io::stdin().is_terminal()
-        && ctx.api.get(&path(name), vec![]).await?["stdin"] == true;
+    let wants_stdin =
+        !std::io::stdin().is_terminal() && ctx.api.get(&path(name), vec![]).await?["stdin"] == true;
     let r = ctx
         .api
         .post(&format!("{}/run", path(name)), Some(json!({"argv": args})))
@@ -189,4 +189,3 @@ async fn run(ctx: &Ctx, name: &str, args: &[String]) -> anyhow::Result<()> {
     }
     remote::exit_of(&end)
 }
-

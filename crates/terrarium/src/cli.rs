@@ -4288,10 +4288,27 @@ mod tests {
     fn a_tool_link_runs_the_tool() {
         let os = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
         assert_eq!(
-            shim_args(os(&["/opt/terrarium/agent-tools/bin/tracker-read", "show", "--json", "ABC-1"])),
-            os(&["terrarium", "tool", "run", "tracker-read", "--", "show", "--json", "ABC-1"])
+            shim_args(os(&[
+                "/opt/terrarium/agent-tools/bin/tracker-read",
+                "show",
+                "--json",
+                "ABC-1"
+            ])),
+            os(&[
+                "terrarium",
+                "tool",
+                "run",
+                "tracker-read",
+                "--",
+                "show",
+                "--json",
+                "ABC-1"
+            ])
         );
-        assert_eq!(shim_args(os(&["deploy"])), os(&["terrarium", "tool", "run", "deploy", "--"]));
+        assert_eq!(
+            shim_args(os(&["deploy"])),
+            os(&["terrarium", "tool", "run", "deploy", "--"])
+        );
         for same in [
             os(&["terrarium", "tool", "ls"]),
             os(&["/opt/terrarium/bin/terrarium", "whoami"]),
@@ -4308,7 +4325,10 @@ mod tests {
         else {
             panic!("tool run");
         };
-        assert_eq!((name.as_str(), args), ("tracker-read", vec!["show".to_owned(), "-x".to_owned()]));
+        assert_eq!(
+            (name.as_str(), args),
+            ("tracker-read", vec!["show".to_owned(), "-x".to_owned()])
+        );
     }
 
     /// PLAN §8.6: the skill commands and the `--skill` flags.

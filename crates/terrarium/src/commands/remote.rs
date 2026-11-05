@@ -59,7 +59,9 @@ async fn send(ctx: &Ctx, target: &str, sid: &str, body: Value) -> anyhow::Result
 /// `POST <session>/input`. `session` is the path of a session: a target
 /// session, or a tool session (`/api/tools/sessions/{id}`).
 pub(crate) async fn send_at(ctx: &Ctx, session: &str, body: Value) -> anyhow::Result<()> {
-    ctx.api.post(&format!("{session}/input"), Some(body)).await?;
+    ctx.api
+        .post(&format!("{session}/input"), Some(body))
+        .await?;
     Ok(())
 }
 

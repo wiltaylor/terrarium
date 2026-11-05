@@ -290,7 +290,9 @@ pub fn check_name(name: &str) -> Result<(), String> {
     }
     // `terrarium-*` stays the CLI's: the tool link dispatch skips it.
     if name == "terrarium" || name.starts_with("terrarium-") {
-        return Err(format!("a tool may not be named `{name}`: terrarium and terrarium-* are the CLI's"));
+        return Err(format!(
+            "a tool may not be named `{name}`: terrarium and terrarium-* are the CLI's"
+        ));
     }
     Ok(())
 }
