@@ -1161,7 +1161,11 @@ async fn a_github_token_fetches_and_pushes_with_basic_auth() {
     std::fs::write(ws.join("b.txt"), "two\n").unwrap();
     git_ok(&ws, &["add", "b.txt"]);
     git_ok(&ws, &["commit", "-q", "-m", "two"]);
-    let o = agent_git(&ws, &helper, &["push", "-q", "origin", "HEAD:refs/heads/card-1"]);
+    let o = agent_git(
+        &ws,
+        &helper,
+        &["push", "-q", "origin", "HEAD:refs/heads/card-1"],
+    );
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(
         forge_head(root, "card-1"),
@@ -1169,10 +1173,17 @@ async fn a_github_token_fetches_and_pushes_with_basic_auth() {
     );
     // Both push steps reached the forge with the right credential.
     let seen = seen.lock().unwrap();
-    for step in ["GET /app.git/info/refs?service=git-receive-pack", "POST /app.git/git-receive-pack"] {
+    for step in [
+        "GET /app.git/info/refs?service=git-receive-pack",
+        "POST /app.git/git-receive-pack",
+    ] {
         let hits: Vec<_> = seen.requests.iter().filter(|(l, _)| l == step).collect();
         assert!(!hits.is_empty(), "{step}: {:?}", seen.requests);
-        assert!(hits.iter().all(|(_, ok)| *ok), "{step}: {:?}", seen.requests);
+        assert!(
+            hits.iter().all(|(_, ok)| *ok),
+            "{step}: {:?}",
+            seen.requests
+        );
     }
 }
 
