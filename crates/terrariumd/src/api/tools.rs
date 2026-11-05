@@ -94,18 +94,12 @@ async fn session_input(
     use crate::executor::Control;
     use base64::Engine as _;
     let s = state.executor.tool_session(&actor, &id)?;
-    match state.tool_rates.takes_stdin(&s.id) {
-        Some(false) => {
-            return Err(ApiError::invalid(
-                "this tool takes no stdin (stdin = false in its definition)",
-            ));
-        }
-        None => {
-            return Err(ApiError::conflict(
-                "the session has ended; read its output for the end",
-            ));
-        }
-        Some(true) => {}
+    // The tool's rule first: a tool without stdin is 422 also after its
+    // run ended (it may end before the first input arrives).
+    if !s.takes_stdin.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(ApiError::invalid(
+            "this tool takes no stdin (stdin = false in its definition)",
+        ));
     }
     let mut accepted = true;
     if let Some(d) = &b.data {
@@ -152,6 +146,9 @@ async fn session_close(
 struct RunBody {
     #[serde(default)]
     argv: Vec<String>,
+    /// The operator's approval of exactly this run (design D5).
+    #[serde(default)]
+    approval: Option<String>,
 }
 
 /// `POST /api/tools/{name}/run`: start a run (design D4). `201`
@@ -163,14 +160,25 @@ async fn run(
     Path(name): Path<String>,
     ApiJson(b): ApiJson<RunBody>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    let started = crate::tool_run::run(&state, &actor, &name, b.argv).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            json!({"session_id": started.session.id, "tool": started.tool,
-                    "target": started.target}),
-        ),
-    ))
+    match crate::tool_run::run(&state, &actor, &name, b.argv, b.approval).await? {
+        crate::tool_run::Outcome::Started(started) => Ok((
+            StatusCode::CREATED,
+            Json(
+                json!({"session_id": started.session.id, "tool": started.tool,
+                        "target": started.target}),
+            ),
+        )),
+        crate::tool_run::Outcome::Pending {
+            question,
+            expires_at,
+        } => Ok((
+            StatusCode::ACCEPTED,
+            Json(
+                json!({"pending": true, "question": question, "expires_at": expires_at,
+                        "tool": name}),
+            ),
+        )),
+    }
 }
 
 /// A tool as the API shows it. `grants` only for the operator and sysadmins.

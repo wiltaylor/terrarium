@@ -808,7 +808,7 @@ terrarium tool grant <name> <grantee>      <project>/<agent>, agent:<id>, or pro
 terrarium tool revoke <name> <grantee>
 terrarium tool run <name> -- <args>        run a granted tool on its target; the exit code is the tool's
 <name> <args>                              the same, through the tool's link on PATH in the sandbox
-terrarium tool run --detach <name> -- <args>  start it and return: a process wait mails the exit code and the output tail
+terrarium tool run --detach <name> -- <args>  start it and return: a process wait mails the exit code and the output tail (refused, exit 2, for a run that needs approval)
 ```
 
 - A project tool goes only to its own project.

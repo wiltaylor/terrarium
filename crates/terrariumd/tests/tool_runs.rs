@@ -641,4 +641,249 @@ async fn a_detached_tool_run_ends_in_a_process_wait() {
         .ok()
         .clone();
     assert!(!log.to_string().contains(TOKEN), "{log}");
+
+/// TER-31 (design D5): a tool with `approval = true` answers an agent's run
+/// with `202 pending` and a `tool_run` question in the Inbox. Only the
+/// operator answers it; the agent gets no mail. The run with the approval
+/// starts once; another argv or a second use is `409`.
+#[tokio::test]
+async fn an_approved_run_starts_once() {
+    let lab = lab().await;
+    lab.td.project("ops").await;
+    let sys = lab
+        .td
+        .agent("ops", "root", json!({"roles": ["sysadmin"]}))
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let s = lab.script("ok.sh", r#"echo "ran:$*""#);
+    lab.tool("tt-approve", &s, json!({"approval": true})).await;
+    let r = lab.run_as(&lab.w1, "tt-approve", &["show", "T-1"]).await;
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(r.body["pending"], true);
+    assert!(r.body["expires_at"].is_string());
+    let q = r.body["question"].as_str().unwrap().to_owned();
+    // The same run again: the same question, not a second one.
+    let again = lab.run_as(&lab.w1, "tt-approve", &["show", "T-1"]).await;
+    assert_eq!(again.body["question"], q.as_str());
+
+    let question = lab
+        .td
+        .get(&format!("/api/questions/{q}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(question["kind"], "tool_run");
+    assert_eq!(question["options"], json!(["Run", "Refuse"]));
+    assert_eq!(question["tool_run"]["argv"], json!(["show", "T-1"]));
+    assert!(question["context"].as_str().unwrap().contains("\"T-1\""));
+    let inbox = lab.td.get("/api/inbox?kind=question").await.ok().clone();
+    assert!(
+        inbox
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == format!("tool_run:{q}")),
+        "{inbox:#?}"
+    );
+    // The agent's own list leaves it out; the agent may still read it.
+    let own = lab
+        .td
+        .get_as(&lab.w1, &format!("/api/agents/{}/questions", lab.w1))
+        .await;
+    if own.status == 200 {
+        assert!(
+            own.body
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| x["id"] != q.as_str())
+        );
+    }
+    lab.td
+        .get_as(&lab.w1, &format!("/api/questions/{q}"))
+        .await
+        .ok();
+
+    // Not answered yet: the approval does not run.
+    let early = lab
+        .td
+        .post_as(
+            &lab.w1,
+            "/api/tools/tt-approve/run",
+            json!({"argv": ["show", "T-1"], "approval": q}),
+        )
+        .await;
+    early.err(409, "conflict");
+    // A sysadmin agent cannot approve another agent's run.
+    lab.td
+        .post_as(
+            &sys,
+            &format!("/api/questions/{q}/answer"),
+            json!({"option": 0}),
+        )
+        .await
+        .err(403, "forbidden");
+    lab.td
+        .post(&format!("/api/questions/{q}/answer"), json!({"option": 0}))
+        .await
+        .ok();
+    // Another argv with the approval: refused.
+    lab.td
+        .post_as(
+            &lab.w1,
+            "/api/tools/tt-approve/run",
+            json!({"argv": ["show", "T-2"], "approval": q}),
+        )
+        .await
+        .err(409, "conflict");
+    let ok = lab
+        .td
+        .post_as(
+            &lab.w1,
+            "/api/tools/tt-approve/run",
+            json!({"argv": ["show", "T-1"], "approval": q}),
+        )
+        .await;
+    let d = drain(&lab.td, &lab.w1, &sid(&ok)).await;
+    assert_eq!(d.stdout, "ran:show T-1\n");
+    // A second use: refused.
+    let reuse = lab
+        .td
+        .post_as(
+            &lab.w1,
+            "/api/tools/tt-approve/run",
+            json!({"argv": ["show", "T-1"], "approval": q}),
+        )
+        .await;
+    reuse.err(409, "conflict");
+    assert!(
+        reuse.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("used already")
+    );
+    // The audit row names the approval and who gave it.
+    let mut rows = Vec::new();
+    for _ in 0..100 {
+        rows = lab
+            .td
+            .get("/api/audit?action=tool.run")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .clone();
+        if !rows.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(rows[0]["detail"]["approval"], q.as_str());
+    assert_eq!(rows[0]["detail"]["approved_by"], "operator");
+    // No mail to the agent: its CLI waits on the question.
+    let mail = lab
+        .td
+        .get(&format!("/api/mail?to={}", lab.w1))
+        .await
+        .ok()
+        .clone();
+    assert!(mail.as_array().unwrap().is_empty(), "{mail:#?}");
+    // The operator's own test run needs no approval.
+    let r = lab
+        .td
+        .post("/api/tools/tt-approve/run", json!({"argv": ["x"]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+}
+
+/// `approval.first`: only a listed first argument asks. A refuse makes the
+/// approval useless; the agent may retract its own approval question.
+#[tokio::test]
+async fn approval_first_and_refuse() {
+    let lab = lab().await;
+    let s = lab.script("ok.sh", r#"echo "ran:$*""#);
+    lab.tool(
+        "tt-first",
+        &s,
+        json!({"approval": {"first": ["close"]}, "args": {"allow": ["show", "close"]}}),
+    )
+    .await;
+    let r = lab.run_as(&lab.w1, "tt-first", &["show", "T-1"]).await;
+    assert_eq!(
+        drain(&lab.td, &lab.w1, &sid(&r)).await.stdout,
+        "ran:show T-1\n"
+    );
+    let p = lab.run_as(&lab.w1, "tt-first", &["close", "T-1"]).await;
+    assert_eq!(p.status, 202, "{}", p.body);
+    let q = p.body["question"].as_str().unwrap().to_owned();
+    lab.td
+        .post(
+            &format!("/api/questions/{q}/answer"),
+            json!({"option": "Refuse"}),
+        )
+        .await
+        .ok();
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            "/api/tools/tt-first/run",
+            json!({"argv": ["close", "T-1"], "approval": q}),
+        )
+        .await;
+    r.err(409, "conflict");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("refused")
+    );
+    // A new pending run; the member agent gives it up itself.
+    let p = lab.run_as(&lab.w1, "tt-first", &["close", "T-9"]).await;
+    let q = p.body["question"].as_str().unwrap().to_owned();
+    let r = lab
+        .td
+        .post_as(&lab.w1, &format!("/api/questions/{q}/retract"), json!({}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// The approval timeout: the sweep retracts the question.
+#[tokio::test]
+async fn an_approval_times_out() {
+    let lab = lab().await;
+    lab.td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .tool_rates
+        .set_sweep_every(Duration::from_millis(100));
+    let s = lab.script("ok.sh", "echo ran");
+    lab.tool(
+        "tt-timeout",
+        &s,
+        json!({"approval": true, "approval_timeout": "1s"}),
+    )
+    .await;
+    let p = lab.run_as(&lab.w1, "tt-timeout", &[]).await;
+    let q = p.body["question"].as_str().unwrap().to_owned();
+    let mut status = Value::Null;
+    for _ in 0..200 {
+        let v = lab
+            .td
+            .get(&format!("/api/questions/{q}"))
+            .await
+            .ok()
+            .clone();
+        status = v["status"].clone();
+        if status == "retracted" {
+            assert_eq!(v["retract_reason"], "the approval timed out");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(status, "retracted");
 }

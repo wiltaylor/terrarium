@@ -3040,7 +3040,7 @@ except for the differences in "Bundles" below.
 
 | Field | Meaning |
 |---|---|
-| `kind` | `question`, `notice`, or `bundle`. Set at the ask; it does not change. |
+| `kind` | `question`, `notice`, `bundle`, or `tool_run`. Set at the ask; it does not change. A `tool_run` question is the approval of one tool run (§17.11, "Approval"): only the daemon asks it, and it has `tool_run` and `used_at`. |
 | `text` | The question (the summary of a bundle), at most 2000 characters. The agent's own words: untrusted data. |
 | `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice and a bundle have none: options on a notice or a bundle are `422 invalid`. |
 | `items` | A bundle only: the questions, 2 to 20, each `{text, options, context?, answer?, answer_option?}`. Absent for a question and a notice. See "Bundles". |
@@ -4045,7 +4045,7 @@ Kinds:
 | `agent_removed` | `{agent_id, project, name}`. The daemon deleted the agent: `DELETE /api/agents/{id}`, a fleet apply with prune, or a definitions sync that removes a file agent. The delete of a live agent stops it first, so a `status` event with `stopped` comes before this event. Clients remove the agent from their lists. `GET /api/agents` does not show the agent again. |
 | `wait` | `{wait_id, change, kind, summary, state, result?}`. `change` is `opened`, `resolved`, `timed_out`, `cancelled`, or `failed`. The `agent` is the waiter (§6.7). |
 | `watch` | `{watch_id, change, watcher, watcher_name, on, status?}`. `change` is `created`, `fired` (with `status`), or `removed`. The `agent` is the watched agent (§6.7). |
-| `question` | `{question_id, kind, change, status, priority, text, revision, agent_id, card_id?}`. `kind` is `question`, `notice`, or `bundle`. `change` is `asked`, `updated`, `answered`, `acknowledged`, or `retracted`. The `agent` is the asking agent (§6.8). |
+| `question` | `{question_id, kind, change, status, priority, text, revision, agent_id, card_id?}`. `kind` is `question`, `notice`, `bundle`, or `tool_run`. `change` is `asked`, `updated`, `answered`, `acknowledged`, or `retracted`. The `agent` is the asking agent (§6.8). |
 | `inbox` | `{item, kind, change, project?}`: an item of the Inbox (§6.9) was `opened`, `updated`, or `closed`. `kind` is `question`, `notice`, `mail`, or `system`. |
 | `session_started` | `{harness_session, transcript_path?, source?}` |
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning`, `usage_limit` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). A `usage_limit` (`{message, resets_at?}`) is the provider's refusal of a turn for a usage limit or a rate limit (§16.6). |
@@ -6350,8 +6350,8 @@ named command on a target that the operator defines. A granted agent runs
 it as a CLI in its sandbox, and the daemon runs it on the target, so the
 agent gets one tool and not the target. This section has the
 definitions and the grants (P1a) and the run path (P1c, "Runs" below).
-The sandbox shim (`/opt/terrarium/agent-tools/bin`) is TER-34; approval
-comes later.
+The sandbox shim (`/opt/terrarium/agent-tools/bin`) is TER-34, and the
+approval of a run (P2) is "Approval" below.
 
 **Definition.** `tools/<name>.toml` in the config repo (source `file`;
 `POST /api/reload` picks up a change), or `POST /api/tools` (source
@@ -6427,7 +6427,9 @@ error end such as `truncated`). `terrarium tool run --detach` (an agent only)
 starts the run and puts a `process` wait (§6.7) on its tool session, as
 `terrarium run` does for a command: the wait's summary is `tool run <id> on
 <target>`, the wake mail has the exit code and the redacted output tail,
-and `terrarium run log` shows the redacted output. A tool name may not be `terrarium` or start
+and `terrarium run log` shows the redacted output. A run that needs the
+operator's approval refuses `--detach` (exit 2) before anything is asked:
+run it without `--detach`, which waits for the answer. A tool name may not be `terrarium` or start
 with `terrarium-`: those stay the CLI.
 
 **Dashboard.** Settings > Tools lists the tools with the definition
@@ -6505,6 +6507,45 @@ also not to the agent that started it.
   "started", "tool", "target", "session", "args"}` and `{"change":
   "ended", "tool", "target", "exit", "duration_ms", "bytes",
   "truncated"}`.
+
+**Approval** (design D5 and Q5, TER-31). `approval = true` asks the
+operator before each run of an agent; `approval = { first = [...] }` asks
+when the first argument is in the list. The operator's own run never
+asks. `approval_timeout` (1s to 24h, default `1h`) is how long a run
+waits.
+
+- `POST /api/tools/{name}/run` checks the grant, the arguments, and the
+  rate first. Then a run that asks answers `202` `{"pending": true,
+  "question", "expires_at", "tool"}`: the daemon writes a question of the
+  kind `tool_run` on the agent (§6.8), with the text `Run tool <tool> on
+  <target> for <project/agent>?`, the exact argv in `context` (one quoted
+  entry per line, redacted), the options `Run` and `Refuse`, and
+  `tool_run` `{tool, target, argv, expires_at}`. The same run again (the
+  same agent, tool, target, and argv) while it is open gives the same
+  question. It counts toward the 50 open questions of the agent (`429`
+  past them).
+- Only the operator answers it (`POST /api/questions/{id}/answer` with
+  `option` `0`/`"Run"` or `1`/`"Refuse"`); an agent, also a sysadmin, gets
+  `403`. The agent gets no mail on the answer or a retract: its CLI waits
+  on the question (`GET /api/questions/{id}`, which the agent may read).
+  The agent may retract its own `tool_run` question, whatever its role.
+  It cannot be updated (`409`). The Inbox shows it as a `question` item
+  (ID `tool_run:<id>`) and counts it. A list of every kind (the recap,
+  `question ls`) leaves it out.
+- The run with `{"argv", "approval": "<question id>"}` starts when the
+  question is a `tool_run` question of the same agent and tool, with the
+  same argv, answered `Run`, and not used. The daemon marks it used
+  (`used_at`) in the same write, so an approval runs once. Otherwise
+  `409 conflict`, and the message says why (not answered yet, refused,
+  retracted, another argv, used already). An approved run takes no token
+  of the rate. Its `tool.run` audit row and `started` event have
+  `approval` (the question), and the audit row `approved_by`.
+- At `expires_at` the daemon retracts an open approval with the reason
+  `the approval timed out` (a sweep each 30 s).
+- The CLI (`terrarium tool run`, a tool link) prints that it waits, polls
+  the question, and then runs with the approval. A refuse, a retract, a
+  timeout, or a `409` on the run ends it with exit code 77; Ctrl-C
+  retracts the question and exits 130.
 
 ## 18. Fleet
 

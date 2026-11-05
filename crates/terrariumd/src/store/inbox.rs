@@ -196,7 +196,9 @@ fn sender_project(m: &Message) -> Option<String> {
 
 fn question_item(q: Question) -> InboxItem {
     let kind = match q.kind {
-        QuestionKind::Question | QuestionKind::Bundle => InboxKind::Question,
+        QuestionKind::Question | QuestionKind::Bundle | QuestionKind::ToolRun => {
+            InboxKind::Question
+        }
         QuestionKind::Notice => InboxKind::Notice,
     };
     InboxItem {
@@ -391,6 +393,7 @@ fn ask_mail(text: &str, q: Option<&Question>) -> (String, String) {
                 QuestionKind::Notice => "notice",
                 QuestionKind::Bundle => "bundle of questions",
                 QuestionKind::Question => "question",
+                QuestionKind::ToolRun => "tool run approval",
             };
             body.push_str(&format!(
                 "The operator forwards this {what} of {} to you",
@@ -570,7 +573,9 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
     }
     if f.status.done() {
         let done = match kind {
-            QuestionKind::Question | QuestionKind::Bundle => QuestionStatus::Answered,
+            QuestionKind::Question | QuestionKind::Bundle | QuestionKind::ToolRun => {
+                QuestionStatus::Answered
+            }
             QuestionKind::Notice => QuestionStatus::Acknowledged,
         };
         out.extend(take(Some(done))?);
@@ -586,6 +591,7 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
     if wants(f, InboxKind::Question) {
         items.extend(question_items(conn, f, QuestionKind::Question)?);
         items.extend(question_items(conn, f, QuestionKind::Bundle)?);
+        items.extend(question_items(conn, f, QuestionKind::ToolRun)?);
     }
     if wants(f, InboxKind::Notice) {
         items.extend(question_items(conn, f, QuestionKind::Notice)?);
@@ -675,9 +681,10 @@ pub struct Counts {
 pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
     let q = questions::open_total(conn, project, Some(QuestionKind::Question))?;
     let b = questions::open_total(conn, project, Some(QuestionKind::Bundle))?;
+    let r = questions::open_total(conn, project, Some(QuestionKind::ToolRun))?;
     let n = questions::open_total(conn, project, Some(QuestionKind::Notice))?;
-    // A bundle counts once, as a question.
-    let (question, notice) = (q.open + b.open, n.open);
+    // A bundle counts once, as a question; so does a tool run approval.
+    let (question, notice) = (q.open + b.open + r.open, n.open);
     let f = Filter {
         status: Status::Open,
         kind: None,
@@ -701,8 +708,8 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
         .count();
     Ok(Counts {
         open: question + notice + mail + system,
-        urgent: q.urgent + b.urgent + n.urgent,
-        critical: q.critical + b.critical + n.critical,
+        urgent: q.urgent + b.urgent + r.urgent + n.urgent,
+        critical: q.critical + b.critical + r.critical + n.critical,
         question,
         notice,
         mail,
