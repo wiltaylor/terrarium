@@ -10,7 +10,7 @@
 import { A } from "@solidjs/router";
 import { createEffect, createResource, createSignal, For, on, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
-import type { Agent, AgentTemplate } from "../../api/types";
+import { roleLabel, type Agent, type AgentTemplate } from "../../api/types";
 import { agents, api } from "../../stores";
 import { emptyAgentForm, validateAgentForm, type AgentFormValues } from "./form";
 import { AgentFields } from "./AgentFields";
@@ -158,7 +158,7 @@ export function NewAgentDialog(props: { project: string; onClose: () => void; on
                   </span>
                   <Show when={s.roles.length}>
                     <span class="row">
-                      <For each={s.roles}>{(r) => <span class={`chip ${r === "sysadmin" ? "bad" : "info"}`}>{r}</span>}</For>
+                      <For each={s.roles}>{(r) => <span class={`chip ${r === "sysadmin" ? "bad" : "info"}`}>{roleLabel(r)}</span>}</For>
                     </span>
                   </Show>
                   <Show when={s.line}>

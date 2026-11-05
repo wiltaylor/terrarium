@@ -17,8 +17,10 @@ export const AGENT_STATUSES = [
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
 /** Roles above `member`. The daemon drops `member`; it is implicit. */
-export type Role = "sysadmin" | "project_admin" | "member";
-export const GRANTABLE_ROLES = ["project_admin", "sysadmin"] as const;
+export type Role = "sysadmin" | "project_admin" | "member" | "architect";
+export const GRANTABLE_ROLES = ["project_admin", "sysadmin", "architect"] as const;
+/** The label of a role in the dashboard: `architect` is the system architect (TER-47). */
+export const roleLabel = (r: string): string => (r === "architect" ? "system architect" : r);
 
 export type RestartPolicy = "always" | "on-failure" | "never";
 export const RESTART_POLICIES: RestartPolicy[] = ["on-failure", "always", "never"];
