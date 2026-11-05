@@ -19,7 +19,12 @@ fn path(name: &str) -> String {
 fn ls_row(mut t: Value) -> Value {
     let cmd = t["command"]
         .as_array()
-        .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "))
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
         .unwrap_or_default();
     t["cmd"] = cmd.into();
     t["owner"] = t["project"].as_str().unwrap_or("global").into();
@@ -39,7 +44,13 @@ pub async fn tool(ctx: &Ctx, cmd: &ToolCmd) -> anyhow::Result<()> {
         ToolCmd::Ls => {
             let v = ctx.api.get("/api/tools", vec![]).await?;
             ctx.emit(&v, |c, v| {
-                let rows: Vec<Value> = v.as_array().cloned().unwrap_or_default().into_iter().map(ls_row).collect();
+                let rows: Vec<Value> = v
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(ls_row)
+                    .collect();
                 print_table(
                     c,
                     &rows,
@@ -63,7 +74,10 @@ pub async fn tool(ctx: &Ctx, cmd: &ToolCmd) -> anyhow::Result<()> {
             let g = grantee(who);
             let v = ctx
                 .api
-                .post(&format!("{}/grants", path(name)), Some(json!({"grantee": g})))
+                .post(
+                    &format!("{}/grants", path(name)),
+                    Some(json!({"grantee": g})),
+                )
                 .await?;
             ctx.emit(&v, |c, v| {
                 c.line(format!(
@@ -75,7 +89,10 @@ pub async fn tool(ctx: &Ctx, cmd: &ToolCmd) -> anyhow::Result<()> {
         ToolCmd::Revoke { name, grantee: who } => {
             let g = grantee(who);
             ctx.api
-                .delete(&format!("{}/grants", path(name)), query([("grantee", Some(g.clone()))]))
+                .delete(
+                    &format!("{}/grants", path(name)),
+                    query([("grantee", Some(g.clone()))]),
+                )
                 .await?;
             ctx.emit(&json!({"revoked": name, "grantee": g}), |c, _| {
                 c.line(format!("revoked tool {name} from {g}"));

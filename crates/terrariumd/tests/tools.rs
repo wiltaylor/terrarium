@@ -17,7 +17,8 @@ async fn setup() -> TestDaemon {
     td.agent("p", "w1", json!({})).await;
     td.agent("p", "w2", json!({})).await;
     td.agent("q", "x1", json!({})).await;
-    td.agent("ops", "root", json!({"roles": ["sysadmin"]})).await;
+    td.agent("ops", "root", json!({"roles": ["sysadmin"]}))
+        .await;
     for t in [
         json!({"name": "box", "kind": "ssh", "address": "u@h"}),
         json!({"name": "box", "kind": "ssh", "project": "p", "address": "u@h"}),
@@ -25,8 +26,12 @@ async fn setup() -> TestDaemon {
         td.post("/api/targets", t).await.ok();
     }
     let token = |v: &str| json!({"kind": "token", "fields": {"value": v}});
-    td.put("/api/secrets/global/tt", token("global-value")).await.ok();
-    td.put("/api/secrets/p/pt", token("project-value")).await.ok();
+    td.put("/api/secrets/global/tt", token("global-value"))
+        .await
+        .ok();
+    td.put("/api/secrets/p/pt", token("project-value"))
+        .await
+        .ok();
     td
 }
 
@@ -77,7 +82,9 @@ async fn a_definition_follows_the_rules() {
     assert_eq!(r.body["env_secrets"]["TRACKER_TOKEN"], "tt");
     // No secret value anywhere in the answer.
     assert!(!r.body.to_string().contains("global-value"));
-    td.post("/api/tools", tool("tracker-read")).await.err(409, "conflict");
+    td.post("/api/tools", tool("tracker-read"))
+        .await
+        .err(409, "conflict");
 
     // A project tool on its own project's target, with its own secret.
     let r = td
@@ -97,17 +104,38 @@ async fn a_definition_follows_the_rules() {
         (tool("ls"), "sandbox PATH"),
         (with(tool("t1"), json!({"command": []})), "non-empty argv"),
         (with(tool("t2"), json!({"command": ["bash"]})), "no script"),
-        (with(tool("t3"), json!({"command": ["/bin/sh", "-c", "x"]})), "-c"),
-        (with(tool("t4"), json!({"command": ["uv", "run", "/s/t.py"]})), "args.allow"),
-        (with(tool("t5"), json!({"target": "nowhere"})), "no target `nowhere`"),
-        (with(tool("t6"), json!({"project": "p"})), "not a target of project `p`"),
-        (with(tool("t7"), json!({"project": "q", "target": "p-box"})), "not a target of project `q`"),
-        (with(tool("t8"), json!({"env_secrets": {"T": "pt"}})), "not a global secret"),
+        (
+            with(tool("t3"), json!({"command": ["/bin/sh", "-c", "x"]})),
+            "-c",
+        ),
+        (
+            with(tool("t4"), json!({"command": ["uv", "run", "/s/t.py"]})),
+            "args.allow",
+        ),
+        (
+            with(tool("t5"), json!({"target": "nowhere"})),
+            "no target `nowhere`",
+        ),
+        (
+            with(tool("t6"), json!({"project": "p"})),
+            "not a target of project `p`",
+        ),
+        (
+            with(tool("t7"), json!({"project": "q", "target": "p-box"})),
+            "not a target of project `q`",
+        ),
+        (
+            with(tool("t8"), json!({"env_secrets": {"T": "pt"}})),
+            "not a global secret",
+        ),
         (
             json!({"name": "t9", "project": "p", "target": "p-box", "command": ["/x"], "env_secrets": {"T": "tt"}}),
             "not a project `p` secret",
         ),
-        (with(tool("t10"), json!({"env_secrets": {"LD_PRELOAD": "tt"}})), "may not set"),
+        (
+            with(tool("t10"), json!({"env_secrets": {"LD_PRELOAD": "tt"}})),
+            "may not set",
+        ),
         (with(tool("t11"), json!({"timeout": "2d"})), "over 24h"),
         (with(tool("t12"), json!({"rate": "lots"})), "bad rate"),
     ] {
@@ -116,13 +144,18 @@ async fn a_definition_follows_the_rules() {
         assert!(r.body.to_string().contains(says), "{body}: {}", r.body);
     }
     // There is no `shell` field: an unknown field is refused.
-    let r = td.post("/api/tools", with(tool("t13"), json!({"shell": true}))).await;
+    let r = td
+        .post("/api/tools", with(tool("t13"), json!({"shell": true})))
+        .await;
     assert!(r.status == 400 || r.status == 422, "{}", r.body);
     assert!(r.body.to_string().contains("shell"), "{}", r.body);
 
     // PATCH: a merge patch, checked again; no rename and no project move.
     let r = td
-        .patch("/api/tools/tracker-read", json!({"description": "Tickets", "timeout": null}))
+        .patch(
+            "/api/tools/tracker-read",
+            json!({"description": "Tickets", "timeout": null}),
+        )
         .await;
     assert_eq!(r.ok()["description"], "Tickets");
     assert!(r.body.get("timeout").is_none(), "{}", r.body);
@@ -136,7 +169,9 @@ async fn a_definition_follows_the_rules() {
         .await
         .err(422, "invalid");
     assert_eq!(td.delete("/api/tools/tracker-read").await.status, 204);
-    td.get("/api/tools/tracker-read").await.err(404, "not_found");
+    td.get("/api/tools/tracker-read")
+        .await
+        .err(404, "not_found");
     let audit = td.get("/api/audit?action=tool.create").await.ok().clone();
     assert_eq!(audit.as_array().unwrap().len(), 2, "{audit}");
 }
@@ -149,22 +184,38 @@ async fn only_the_operator_and_sysadmins_define_and_grant() {
     td.post_as("p/w1", "/api/tools", tool("tracker-read"))
         .await
         .err(403, "forbidden");
-    let r = td.post_as("ops/root", "/api/tools", tool("tracker-read")).await;
+    let r = td
+        .post_as("ops/root", "/api/tools", tool("tracker-read"))
+        .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    td.post_as("p/w1", "/api/tools/tracker-read/grants", json!({"grantee": "agent:p/w1"}))
-        .await
-        .err(403, "forbidden");
-    td.patch_as("p/w1", "/api/tools/tracker-read", json!({"description": "x"}))
-        .await
-        .err(403, "forbidden");
+    td.post_as(
+        "p/w1",
+        "/api/tools/tracker-read/grants",
+        json!({"grantee": "agent:p/w1"}),
+    )
+    .await
+    .err(403, "forbidden");
+    td.patch_as(
+        "p/w1",
+        "/api/tools/tracker-read",
+        json!({"description": "x"}),
+    )
+    .await
+    .err(403, "forbidden");
     td.get_as("p/w1", "/api/tools/tracker-read/grants")
         .await
         .err(403, "forbidden");
     // Not granted: an empty list, and a 404 for the tool.
     assert_eq!(td.get_as("p/w1", "/api/tools").await.ok(), &json!([]));
-    td.get_as("p/w1", "/api/tools/tracker-read").await.err(404, "not_found");
+    td.get_as("p/w1", "/api/tools/tracker-read")
+        .await
+        .err(404, "not_found");
     let r = td
-        .post_as("ops/root", "/api/tools/tracker-read/grants", json!({"grantee": "agent:p/w1"}))
+        .post_as(
+            "ops/root",
+            "/api/tools/tracker-read/grants",
+            json!({"grantee": "agent:p/w1"}),
+        )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let mine = td.get_as("p/w1", "/api/tools").await.ok().clone();
@@ -172,7 +223,10 @@ async fn only_the_operator_and_sysadmins_define_and_grant() {
     assert_eq!(mine[0]["name"], "tracker-read");
     // An agent does not see the grants.
     assert!(mine[0].get("grants").is_none(), "{mine}");
-    assert_eq!(td.get_as("p/w1", "/api/tools/tracker-read").await.ok()["target"], "box");
+    assert_eq!(
+        td.get_as("p/w1", "/api/tools/tracker-read").await.ok()["target"],
+        "box"
+    );
     assert_eq!(td.get_as("p/w2", "/api/tools").await.ok(), &json!([]));
     assert_eq!(td.delete("/api/tools/tracker-read").await.status, 204);
 }
@@ -201,9 +255,17 @@ async fn grants_go_to_agents_and_projects_inside_the_scope() {
     assert_eq!(r.body["grantee"], "project:q");
     let r = grant("tracker-read", "agent:p/w1").await;
     assert_eq!(r.body["grantee_label"], "agent:p/w1", "{}", r.body);
-    assert!(r.body["grantee"].as_str().unwrap().starts_with("agent:01"), "{}", r.body);
-    grant("tracker-read", "agent:p/w1").await.err(409, "conflict");
-    grant("tracker-read", "agent:p/nobody").await.err(404, "not_found");
+    assert!(
+        r.body["grantee"].as_str().unwrap().starts_with("agent:01"),
+        "{}",
+        r.body
+    );
+    grant("tracker-read", "agent:p/w1")
+        .await
+        .err(409, "conflict");
+    grant("tracker-read", "agent:p/nobody")
+        .await
+        .err(404, "not_found");
     grant("tracker-read", "bogus").await.err(422, "invalid");
     // A project tool stays in its project.
     grant("deploy", "agent:q/x1").await.err(422, "invalid");
@@ -211,13 +273,31 @@ async fn grants_go_to_agents_and_projects_inside_the_scope() {
     assert_eq!(grant("deploy", "project:p").await.status, 201);
     // Effective: own grants and the project's.
     let names = |v: &Value| -> Vec<String> {
-        v.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect()
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect()
     };
-    assert_eq!(names(td.get_as("p/w1", "/api/tools").await.ok()), ["deploy", "tracker-read"]);
-    assert_eq!(names(td.get_as("p/w2", "/api/tools").await.ok()), ["deploy"]);
-    assert_eq!(names(td.get_as("q/x1", "/api/tools").await.ok()), ["tracker-read"]);
+    assert_eq!(
+        names(td.get_as("p/w1", "/api/tools").await.ok()),
+        ["deploy", "tracker-read"]
+    );
+    assert_eq!(
+        names(td.get_as("p/w2", "/api/tools").await.ok()),
+        ["deploy"]
+    );
+    assert_eq!(
+        names(td.get_as("q/x1", "/api/tools").await.ok()),
+        ["tracker-read"]
+    );
     let all = td.get("/api/tools").await.ok().clone();
-    let tr = all.as_array().unwrap().iter().find(|t| t["name"] == "tracker-read").unwrap();
+    let tr = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "tracker-read")
+        .unwrap();
     assert_eq!(tr["grants"].as_array().unwrap().len(), 2, "{tr}");
     // Revoke.
     let r = td
@@ -229,7 +309,11 @@ async fn grants_go_to_agents_and_projects_inside_the_scope() {
         .err(404, "not_found");
     assert_eq!(td.get_as("q/x1", "/api/tools").await.ok(), &json!([]));
     for action in ["tool.grant", "tool.revoke"] {
-        let a = td.get(&format!("/api/audit?action={action}")).await.ok().clone();
+        let a = td
+            .get(&format!("/api/audit?action={action}"))
+            .await
+            .ok()
+            .clone();
         assert!(!a.as_array().unwrap().is_empty(), "{action}: {a}");
     }
     // The agent goes: its grants go.
@@ -239,7 +323,9 @@ async fn grants_go_to_agents_and_projects_inside_the_scope() {
     assert_eq!(g, json!([]), "{g}");
     // The tool goes: its grants go.
     assert_eq!(td.delete("/api/tools/deploy").await.status, 204);
-    td.get("/api/tools/deploy/grants").await.err(404, "not_found");
+    td.get("/api/tools/deploy/grants")
+        .await
+        .err(404, "not_found");
 }
 
 /// `tools/<name>.toml`: a reload adds the good files, reports the bad
@@ -255,8 +341,16 @@ async fn tool_files_load_on_reload() {
         "target = \"box\"\ncommand = [\"/opt/scripts/tracker-read\"]\nargs = { allow = [\"show\"] }\n",
     )
     .unwrap();
-    std::fs::write(dir.join("bad.toml"), "target = \"box\"\ncommand = [\"bash\"]\n").unwrap();
-    std::fs::write(dir.join("shelly.toml"), "target = \"box\"\ncommand = [\"/x\"]\nshell = true\n").unwrap();
+    std::fs::write(
+        dir.join("bad.toml"),
+        "target = \"box\"\ncommand = [\"bash\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shelly.toml"),
+        "target = \"box\"\ncommand = [\"/x\"]\nshell = true\n",
+    )
+    .unwrap();
     let r = td.post_empty("/api/reload").await;
     let errors = r.ok()["errors"].to_string();
     assert!(errors.contains("tools/bad.toml"), "{errors}");
@@ -264,14 +358,21 @@ async fn tool_files_load_on_reload() {
     let t = td.get("/api/tools/tracker-read").await.ok().clone();
     assert_eq!(t["source"], "file", "{t}");
     td.get("/api/tools/bad").await.err(404, "not_found");
-    let r = td.patch("/api/tools/tracker-read", json!({"description": "x"})).await;
+    let r = td
+        .patch("/api/tools/tracker-read", json!({"description": "x"}))
+        .await;
     assert_eq!(r.status, 409, "{}", r.body);
     assert_eq!(td.delete("/api/tools/tracker-read").await.status, 409);
     // A grant of a file tool works as any other.
-    td.post("/api/tools/tracker-read/grants", json!({"grantee": "project:p"}))
-        .await
-        .ok();
+    td.post(
+        "/api/tools/tracker-read/grants",
+        json!({"grantee": "project:p"}),
+    )
+    .await
+    .ok();
     std::fs::remove_file(dir.join("tracker-read.toml")).unwrap();
     td.post_empty("/api/reload").await.ok();
-    td.get("/api/tools/tracker-read").await.err(404, "not_found");
+    td.get("/api/tools/tracker-read")
+        .await
+        .err(404, "not_found");
 }

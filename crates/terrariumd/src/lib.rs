@@ -666,7 +666,8 @@ pub async fn apply_definitions(
     let (_, tool_errors) = state
         .db
         .write("system", move |t| {
-            let refs: Vec<&std::path::Path> = tool_dirs.iter().map(std::path::PathBuf::as_path).collect();
+            let refs: Vec<&std::path::Path> =
+                tool_dirs.iter().map(std::path::PathBuf::as_path).collect();
             store::tools::sync_files(t, &tool_defs, &refs)
         })
         .await?;
