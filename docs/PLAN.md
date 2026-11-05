@@ -1902,7 +1902,24 @@ not a table, and it copies no mail body:
   in here, with normal priority;
 - the threads of the loop guard (§12) as system items: a paused thread, or
   a held message that the operator did not release. The operator releases
-  a held message or resumes the thread there.
+  a held message or resumes the thread there;
+- the watches: a question that the operator asked an agent, or a question
+  of the Inbox that the operator forwarded to one (below).
+
+**Ask and forward.** Asked for on 2026-11-05 (GitHub #24): the operator
+must be able to give a question of the Inbox to another agent to answer,
+and to ask an agent a question, and see the answer come back to the
+Inbox. `POST /api/inbox/asks` sends one mail from `operator` to the
+agent on a new thread: the question, or the forwarded question quoted
+with its options, items, and context, and how to answer (`terrarium mail
+reply`). The thread is watched (migration 64, `inbox_watches`). The watch
+waits while the operator spoke last: the agent's answer is a mail item
+(Acknowledge, or reply), which closes the watch, and the operator's reply
+opens it again. The badge does not count a watch, because it waits for an
+agent. The forwarded question stays open until the operator answers it.
+The agent needs no new command or right. The dashboard part (a Forward
+button with a watch icon on each question card, Ask an agent, the watch
+items) is TER-26. `docs/api.md` §6.9 is the contract.
 
 **The dashboard.** The global **Inbox** page (`/inbox`; `/questions`
 redirects) has the tabs All, Questions, Notices, Mail to you, and System,
@@ -1937,7 +1954,9 @@ the table `thread_resumes` for a resume with no mail. Migration 32: the
 priority `critical` in the CHECK of `questions.priority`. Migration 39:
 the kind `bundle` in the CHECK of `questions.kind`, and the column
 `questions.items` (a JSON array of the items with their answers; NULL for
-a question and a notice).
+a question and a notice). Migration 64: the table `inbox_watches` (the
+thread, the agent, the forwarded question, the first message, and the
+time of a cancel).
 
 **Critical items.** Asked for on 2026-10-28. A leader uses
 `--critical` (`priority: "critical"`) only when the operator must act

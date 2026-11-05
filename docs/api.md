@@ -3149,7 +3149,7 @@ PLAN §12e gives the design. The code is in
 `crates/terrariumd/src/api/inbox.rs`.
 
 The Inbox is the list of the things that wait for the operator. It is a
-view, not a table: it copies no mail body. Each item has one of four
+view, not a table: it copies no mail body. Each item has one of five
 kinds:
 
 | Kind | What | Open while | The operator's verbs |
@@ -3158,6 +3158,7 @@ kinds:
 | `notice` | A notice (§6.8). | `status` is `open`. | `POST /api/questions/{id}/ack`, `.../retract` |
 | `mail` | A message to `operator` (§7). | Its `state` is `queued` or `delivered`: not acknowledged. | `POST /api/inbox/mail/{id}/ack` |
 | `system` | A thread of the loop guard (§7.4): it is paused now, or it has a held message that is not released. | The thread is paused, or a held message is not released. | `POST /api/mail/{id}/release`, `POST /api/mail/threads/{thread}/resume` |
+| `watch` | A question that the operator asked an agent, or a question of the Inbox that the operator forwarded to one (below, "Ask and forward"). It waits for the agent, not for the operator. | The newest message of its thread is the operator's, and it is not cancelled. | `DELETE /api/inbox/watches/{thread}` |
 
 The notice of a pause (`Thread T needs a human`, from `system`) is not a
 `mail` item: the `system` item of the thread shows it.
@@ -3176,19 +3177,60 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 
 | Field | Meaning |
 |---|---|
-| `id` | `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, or `thread:<thread id>`. |
+| `id` | `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, `thread:<thread id>`, or `watch:<thread id>`. |
 | `open` | The item waits for the operator. |
 | `urgent` | An open question or notice with `priority: urgent` or `critical`. Mail and system items are not urgent. |
 | `critical` | An open question or notice with `priority: critical`. The dashboard shows the newest one in a banner on each page, with a link to `/inbox?item=<id>`, and flashes its browser tab while the page is hidden or has no focus. |
-| `project` | The project of the asking agent, of the sender of the mail, or of the first agent on the thread. `null` for mail from `system` or from the operator. |
-| `at` | When the item came in: the ask, the send, or the first held message that is not released. |
+| `project` | The project of the asking agent, of the sender of the mail, of the first agent on the thread, or of the watched agent. `null` for mail from `system` or from the operator. |
+| `at` | When the item came in: the ask, the send, the first held message that is not released, or the ask of a watch. |
 | `question`, `message`, `system` | The question or notice, the message, or the thread. A system item has `paused`, `agent_run` (the agent-to-agent messages since the last reset), `limit` (`TERRARIUM_MAIL_LOOP_LIMIT`), `participants`, and `held` (the held messages that are not released). |
+| `watch` | On a `watch` item: the watch (below). On a `mail` item whose thread is watched: the watch that the mail answers, so the dashboard can show "answer to your question" and link the forwarded question. Absent otherwise. |
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
-| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. The dashboard badge shows `open`, red when `urgent` is not 0. |
+| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system\|watch`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
+| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system", "watch"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. `open` does not count `watch`: a watch waits for an agent. The dashboard badge shows `open`, red when `urgent` is not 0. |
 | `POST /api/inbox/mail/{id}/ack` | `{"reply"?}`, or no body | `200` `{"message", "replies"}`. The mail becomes `read`. With `reply`, the reply goes as `operator` on the thread of the mail to its other participants (§7.2), and the mail becomes `replied`. A message that is not to the operator is `404`. One that is acknowledged already is `409 conflict`. A reply to a system mail that has nobody to answer is `422 invalid`. |
+
+| `POST /api/inbox/asks` | `{"to", "text"?, "question"?}` | `201` `{"message", "watch"}`: the mail (§7) and the new watch. Below. |
+| `DELETE /api/inbox/watches/{thread}` | | `200` the watch, with `cancelled_at`. An unknown thread is `404 not_found`; a cancelled watch `409 conflict`. The mail stays. |
+
+**Ask and forward** (GitHub #24). The operator asks an agent a question
+from the Inbox, or forwards a question, a bundle, or a notice of the Inbox
+to an agent, and the Inbox watches the thread until the agent answers.
+
+- `POST /api/inbox/asks` with `to` (the agent: a ULID, `project/name`, or
+  a name) and `text` (at most 4000 characters) asks a question. With
+  `question` (the ID of a question, a bundle, or a notice) it forwards that
+  one, and `text` is an optional note. A `to` that is not an agent, or an
+  ask with an empty `text` and no `question`, is `422 invalid`. An unknown
+  agent or question is `404 not_found`.
+- The daemon sends one mail from `operator` to the agent, on a new thread.
+  An ask has the subject `Question from the operator: <first line of
+  text>` (cut at 80 characters) and the text as its body. A forward has the
+  subject `Forwarded <question|bundle of questions|notice> from
+  <project/agent>: <first line>`, and a body with the note, then the
+  question quoted with `> `: the text, the numbered options, each item of
+  a bundle with its options, and the context (cut at 4 KiB). Each body
+  ends with how to answer: `terrarium mail reply <this message>`. The
+  agent gets the mail as all mail (§12, push). The forwarded question stays
+  `open`; the operator still answers it with its own verbs.
+- The watch: `{"thread_id", "agent", "agent_name", "question_id"?,
+  "message_id", "subject", "created_at", "cancelled_at"?, "waiting",
+  "replies"}`. `agent` is the ULID and `agent_name` is `project/name`.
+  `message_id` and `subject` are those of the ask. `waiting` is true while
+  the newest message of the thread is the operator's. `replies` counts the
+  messages of the agent on the thread. The `watch` item is open while
+  `waiting` is true and `cancelled_at` is absent.
+- The agent's answer (`terrarium mail reply`) is a mail to `operator`: a
+  `mail` item with Acknowledge and the optional reply, and a `watch` field.
+  It closes the watch. A reply of the operator on the thread (the
+  acknowledgement with a reply) opens it again, so a follow-up question
+  of the agent and the operator's next response go round the same way.
+- Events: `inbox` with `kind: "watch"`, `change: "opened"` at the ask
+  and at each reply of the operator, and `"closed"` at the agent's answer
+  and at a cancel of an open watch. Audit rows: `inbox.ask` (the thread,
+  with `to`, `question`, and `message`) and `inbox.watch_cancel`.
 
 Only the operator reads the Inbox and acts on it. An agent gets `403`,
 with a message that sends it to `terrarium question ls`.
