@@ -971,7 +971,10 @@ async fn a_paused_agent_stays_paused_across_a_daemon_restart() {
     // Nothing starts it a little later either.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let a = agent(&td, &w).await;
-    assert_eq!((a["status"].as_str(), a["paused"].as_bool()), (Some("stopped"), Some(true)));
+    assert_eq!(
+        (a["status"].as_str(), a["paused"].as_bool()),
+        (Some("stopped"), Some(true))
+    );
     assert!(td.sup.prompts(aid(&w)).is_empty());
     let list = td.get("/api/agents").await.ok().clone();
     let row = list
@@ -981,9 +984,14 @@ async fn a_paused_agent_stays_paused_across_a_daemon_restart() {
         .find(|x| x["id"] == w.as_str())
         .unwrap()
         .clone();
-    assert_eq!((row["status"].as_str(), row["paused"].as_bool()), (Some("stopped"), Some(true)));
+    assert_eq!(
+        (row["status"].as_str(), row["paused"].as_bool()),
+        (Some("stopped"), Some(true))
+    );
     // The unpause starts it, and the waiting turn goes out.
-    td.post_empty(&format!("/api/agents/{w}/unpause")).await.ok();
+    td.post_empty(&format!("/api/agents/{w}/unpause"))
+        .await
+        .ok();
     td.wait_status(&w, "idle").await;
     until("the turn ran", || async {
         td.sup.prompts(aid(&w)) == ["[User] later"]

@@ -754,16 +754,22 @@ mod pause_tests {
     /// that did not end as asked says so.
     #[test]
     fn the_pause_line_names_the_action() {
-        let a = |paused: bool, status: &str| {
-            json!({"project": "p", "name": "w", "paused": paused, "status": status, "queued": 1})
-        };
-        assert_eq!(pause_line("pause", &a(true, "stopped")), "paused p/w (stopped, 1 queued)");
+        let a = |paused: bool, status: &str| json!({"project": "p", "name": "w", "paused": paused, "status": status, "queued": 1});
+        assert_eq!(
+            pause_line("pause", &a(true, "stopped")),
+            "paused p/w (stopped, 1 queued)"
+        );
         assert_eq!(
             pause_line("unpause", &a(false, "starting")),
             "unpaused p/w (starting, 1 queued)"
         );
-        assert_eq!(pause_line("unpause", &a(true, "stopped")), "p/w is still paused (stopped, 1 queued)");
-        assert_eq!(pause_line("pause", &a(false, "idle")), "p/w is not paused (idle, 1 queued)");
+        assert_eq!(
+            pause_line("unpause", &a(true, "stopped")),
+            "p/w is still paused (stopped, 1 queued)"
+        );
+        assert_eq!(
+            pause_line("pause", &a(false, "idle")),
+            "p/w is not paused (idle, 1 queued)"
+        );
     }
 }
-
