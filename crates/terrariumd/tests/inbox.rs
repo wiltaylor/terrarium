@@ -445,7 +445,7 @@ async fn the_inbox_mixes_the_kinds_with_the_counts() {
     assert!(ids.contains(&format!("thread:{thread}").as_str()));
     assert_eq!(
         counts,
-        json!({"open": 4, "urgent": 1, "critical": 0, "question": 1, "notice": 1, "mail": 1, "system": 1})
+        json!({"open": 4, "urgent": 1, "critical": 0, "question": 1, "notice": 1, "mail": 1, "system": 1, "watch": 0})
     );
     // The pause notice to the operator is the system item, not a mail item.
     let sys = rows.iter().find(|r| r["kind"] == "system").unwrap();
@@ -886,7 +886,10 @@ async fn the_operator_asks_an_agent_and_the_inbox_watches_the_answer() {
     let thread = r.body["watch"]["thread_id"].as_str().unwrap().to_owned();
     assert_eq!(m["from_kind"], "operator");
     assert_eq!(m["to"], w1.as_str());
-    assert_eq!(m["subject"], "Question from the operator: Is the deploy done?");
+    assert_eq!(
+        m["subject"],
+        "Question from the operator: Is the deploy done?"
+    );
     assert!(m["body"].as_str().unwrap().contains("terrarium mail reply"));
     assert_eq!(r.body["watch"]["agent_name"], "p/w1");
     assert_eq!(r.body["watch"]["waiting"], true);
@@ -897,13 +900,20 @@ async fn the_operator_asks_an_agent_and_the_inbox_watches_the_answer() {
     assert_eq!(rows[0]["open"], true);
     assert_eq!(rows[0]["project"], "p");
     assert_eq!(counts["watch"], 1);
-    assert_eq!(counts["open"], before["open"], "a watch is not in the badge");
+    assert_eq!(
+        counts["open"], before["open"],
+        "a watch is not in the badge"
+    );
 
     // The agent answers: the watch closes, and the answer is a mail item
     // that names the watch.
     let mid = id(&m);
     let a = td
-        .post_as(&w1, &format!("/api/mail/{mid}/reply"), json!({"body": "Yes, at 10:00."}))
+        .post_as(
+            &w1,
+            &format!("/api/mail/{mid}/reply"),
+            json!({"body": "Yes, at 10:00."}),
+        )
         .await;
     assert_eq!(a.status, 201, "{}", a.body);
     let (rows, counts) = inbox(&td, "?kind=watch").await;
@@ -932,14 +942,18 @@ async fn the_operator_asks_an_agent_and_the_inbox_watches_the_answer() {
     assert_eq!(rows.len(), 1, "{rows:#?}");
 
     // Cancel: the watch closes; a second cancel is 409.
-    td.delete(&format!("/api/inbox/watches/{thread}")).await.ok();
+    td.delete(&format!("/api/inbox/watches/{thread}"))
+        .await
+        .ok();
     let (rows, counts) = inbox(&td, "?kind=watch").await;
     assert!(rows.is_empty());
     assert_eq!(counts["watch"], 0);
     td.delete(&format!("/api/inbox/watches/{thread}"))
         .await
         .err(409, "conflict");
-    td.delete("/api/inbox/watches/nope").await.err(404, "not_found");
+    td.delete("/api/inbox/watches/nope")
+        .await
+        .err(404, "not_found");
 }
 
 /// GitHub #24: the operator forwards a question of a lead to another
@@ -947,9 +961,7 @@ async fn the_operator_asks_an_agent_and_the_inbox_watches_the_answer() {
 /// question stays open for the operator's answer.
 #[tokio::test]
 async fn a_forward_quotes_the_question_and_keeps_it_open() {
-    let World {
-        td, lead, w2, ..
-    } = setup().await;
+    let World { td, lead, w2, .. } = setup().await;
     let q = td
         .post_as(
             &lead,

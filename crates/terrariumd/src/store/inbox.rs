@@ -328,7 +328,9 @@ pub fn watches(conn: &Connection) -> ApiResult<Vec<Watch>> {
         "{WATCH_SELECT} ORDER BY w.created_at DESC, w.thread_id DESC LIMIT {}",
         KIND_MAX * 5
     ))?;
-    let rows = st.query_map([], watch_row)?.collect::<Result<Vec<_>, _>>()?;
+    let rows = st
+        .query_map([], watch_row)?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
@@ -362,7 +364,11 @@ fn cut(s: &str, max: usize) -> String {
 /// question `q` of a forward.
 fn ask_mail(text: &str, q: Option<&Question>) -> (String, String) {
     let first = |s: &str| -> String {
-        let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+        let line = s
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
         if line.chars().count() > 80 {
             line.chars().take(79).collect::<String>() + "…"
         } else {
@@ -459,7 +465,13 @@ pub fn ask(
     t.execute(
         "INSERT INTO inbox_watches (thread_id, agent, question_id, message_id, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![m.thread_id, agent, q.as_ref().map(|q| q.id.clone()), m.id, now()],
+        params![
+            m.thread_id,
+            agent,
+            q.as_ref().map(|q| q.id.clone()),
+            m.id,
+            now()
+        ],
     )?;
     let w = watch_of(t, &m.thread_id)?
         .ok_or_else(|| ApiError::internal("the new watch is not in the store"))?;

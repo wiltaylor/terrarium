@@ -240,7 +240,10 @@ async fn ask(
             "the text has more than {ASK_MAX} characters"
         )));
     }
-    let question = b.question.map(|q| q.trim().to_owned()).filter(|q| !q.is_empty());
+    let question = b
+        .question
+        .map(|q| q.trim().to_owned())
+        .filter(|q| !q.is_empty());
     let out = state
         .db
         .write(actor.label(), move |t| {
