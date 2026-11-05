@@ -3218,9 +3218,18 @@ shows:
   snapshots;
 - mail, notices, questions, board cards, memory nodes, wiki pages, text
   artifacts, and version notes;
-- events, trigger payloads, and the audit details.
+- events, trigger payloads, and the audit details;
+- the output of an exec session on a target (`terrarium exec`, `GET
+  .../sessions/{id}/output`, and its WebSocket) and of a tool run, as a
+  stream (TER-33, TER-30): a secret split across two output chunks is
+  found. The view is the caller's (an agent: its project; the operator:
+  every label). The end of the output is held back until more output
+  comes, or for at most 200 ms when none comes, so that a prompt or a
+  progress line still shows; a secret split across two writes further
+  apart than that is not found whole. A file copy (`cp`) is not changed.
 
-The live terminal stream goes to the operator only and is not redacted.
+The live terminal stream of an agent's harness goes to the operator only
+and is not redacted.
 Redaction is a guard against accidents. It does not stop an agent with a
 `read` grant from sending a value out in a changed form (for example,
 base64).

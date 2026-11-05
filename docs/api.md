@@ -5836,6 +5836,15 @@ that has ended is `409 conflict`, except `eof` alone: it is a no-op with
 stdin. `terrarium exec -i` and `shell` treat a `409` for `data` in the
 same way: they stop the input, and the exit code comes from the output.
 
+The stdout and stderr of an `exec` or `shell` session are redacted as
+streams (PLAN §16b.6, TER-33), for the caller: an agent sees the names of
+its project's secrets and `[secret]` for the others; the operator sees each
+name. A secret split across two chunks is found. The last bytes of the
+output (up to the longest secret value less one) wait for the next output,
+or go out after 200 ms with no new output; so a secret written in two
+parts more than 200 ms apart is not found whole. The `/output` reads and the
+WebSocket show the same redacted bytes. A `cp` session is not changed.
+
 The output answer:
 
 ```json
