@@ -602,12 +602,7 @@ pub async fn close(
     let Some(_held) = CloseGuard::take(state, id) else {
         // Another close of it runs: wait for its end (with the closes of
         // its own ephemeral agents), so that the caller sees it done.
-        for _ in 0..800 {
-            if !state.lifecycle.spawns.closing(id) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        wait_closed(state, id).await;
         return Ok(None);
     };
     let key = id.to_owned();
@@ -727,10 +722,22 @@ pub async fn close(
     Ok(Some(closed))
 }
 
+/// Wait until no close of `id` runs (at most 20 s).
+async fn wait_closed(state: &Shared, id: &str) {
+    for _ in 0..800 {
+        if !state.lifecycle.spawns.closing(id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// The agent `owner` is removed (`agent rm`, a reload, a fleet prune, or
 /// the close of an ephemeral agent): close each ephemeral agent that it
 /// owns (`owner_gone`, no mail), and delete the `spawns` rows that it
-/// owns. Each close goes down one level more.
+/// owns. Each close goes down one level more. A close that the spawn
+/// timer began runs to its end first: its spawn row is finished already,
+/// but the closes of its own ephemeral agents can still run (TER-27).
 pub async fn owner_removed(state: &Shared, owner: &str) {
     if owner == OPERATOR {
         return;
@@ -750,6 +757,15 @@ pub async fn owner_removed(state: &Shared, owner: &str) {
         if let Err(e) = close(state, &s.id, spawns::OWNER_GONE, None, false).await {
             warn!(agent = %s.id, "cannot close the ephemeral agent of a removed owner: {e}");
         }
+    }
+    let key = owner.to_owned();
+    let all = state
+        .db
+        .read(move |c| spawns::ids_of(c, &key))
+        .await
+        .unwrap_or_default();
+    for id in all {
+        wait_closed(state, &id).await;
     }
     let key = owner.to_owned();
     if let Err(e) = state

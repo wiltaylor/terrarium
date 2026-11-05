@@ -296,6 +296,15 @@ pub fn open(conn: &Connection) -> ApiResult<Vec<Spawn>> {
     Ok(rows)
 }
 
+/// The IDs of every spawn of `owner`, open or finished.
+pub fn ids_of(conn: &Connection, owner: &str) -> ApiResult<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM spawns WHERE owner = ?1 ORDER BY id")?;
+    let rows = stmt
+        .query_map([owner], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// The open spawns of `owner`.
 pub fn open_of(conn: &Connection, owner: &str) -> ApiResult<Vec<Spawn>> {
     let mut stmt = conn.prepare(&format!(
