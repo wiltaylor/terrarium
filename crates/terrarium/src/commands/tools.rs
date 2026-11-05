@@ -174,10 +174,10 @@ async fn wait_approval(
 fn needs_approval(approval: &Value, args: &[String]) -> bool {
     match approval {
         Value::Bool(b) => *b,
-        Value::Object(o) => o
-            .get("first")
-            .and_then(Value::as_array)
-            .is_some_and(|f| args.first().is_some_and(|a| f.iter().any(|x| x.as_str() == Some(a.as_str())))),
+        Value::Object(o) => o.get("first").and_then(Value::as_array).is_some_and(|f| {
+            args.first()
+                .is_some_and(|a| f.iter().any(|x| x.as_str() == Some(a.as_str())))
+        }),
         _ => false,
     }
 }
@@ -210,7 +210,11 @@ async fn run(ctx: &Ctx, name: &str, detach: bool, args: &[String]) -> anyhow::Re
     } else {
         None
     };
-    if detach && tool.as_ref().is_some_and(|t| needs_approval(&t["approval"], args)) {
+    if detach
+        && tool
+            .as_ref()
+            .is_some_and(|t| needs_approval(&t["approval"], args))
+    {
         return Err(CliError::usage(format!(
             "tool {name} needs the operator's approval for this run, and --detach does not wait for it: \
              run it without --detach (the run waits for the answer)"
@@ -232,7 +236,10 @@ async fn run(ctx: &Ctx, name: &str, detach: bool, args: &[String]) -> anyhow::Re
             // The tool changed since the check above: take the question back.
             let _ = ctx
                 .api
-                .post(&format!("/api/questions/{}/retract", encode(&q)), Some(json!({"reason": "the run was started with --detach"})))
+                .post(
+                    &format!("/api/questions/{}/retract", encode(&q)),
+                    Some(json!({"reason": "the run was started with --detach"})),
+                )
                 .await;
             return Err(CliError::usage(format!(
                 "tool {name} needs the operator's approval for this run, and --detach does not wait for it: \
@@ -391,7 +398,9 @@ mod tests {
                        "end": {"type": "exit", "code": 0, "reason": "exited"}}),
         );
         let c = ctx(&mock);
-        run(&c, "t", false, &["show".into(), "T-1".into()]).await.unwrap();
+        run(&c, "t", false, &["show".into(), "T-1".into()])
+            .await
+            .unwrap();
         let reqs = mock.requests();
         let posts: Vec<_> = reqs
             .iter()
@@ -468,10 +477,18 @@ mod tests {
     #[tokio::test]
     async fn detach_refuses_a_run_that_needs_approval() {
         let mock = MockTransport::new();
-        mock.reply(200, json!({"name": "t", "approval": {"first": ["comment"]}}));
-        let e = run(&agent_ctx(&mock), "t", true, &["comment".into(), "T-1".into()])
-            .await
-            .unwrap_err();
+        mock.reply(
+            200,
+            json!({"name": "t", "approval": {"first": ["comment"]}}),
+        );
+        let e = run(
+            &agent_ctx(&mock),
+            "t",
+            true,
+            &["comment".into(), "T-1".into()],
+        )
+        .await
+        .unwrap_err();
         assert_eq!(exit_code_of(&e), 2, "{e:#}");
         assert!(format!("{e:#}").contains("without --detach"), "{e:#}");
         assert!(!mock.requests().iter().any(|r| r.path.ends_with("/run")));
@@ -483,7 +500,10 @@ mod tests {
         let e = run(&agent_ctx(&mock), "t", true, &[]).await.unwrap_err();
         assert_eq!(exit_code_of(&e), 2, "{e:#}");
         let reqs = mock.requests();
-        assert!(reqs.iter().any(|r| r.path == "/api/questions/Q7/retract"), "{reqs:?}");
+        assert!(
+            reqs.iter().any(|r| r.path == "/api/questions/Q7/retract"),
+            "{reqs:?}"
+        );
         assert!(!reqs.iter().any(|r| r.path.contains("/waits")));
     }
 
@@ -496,4 +516,3 @@ mod tests {
         assert!(mock.requests().is_empty());
     }
 }
-
