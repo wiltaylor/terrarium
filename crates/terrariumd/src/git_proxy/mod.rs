@@ -624,6 +624,9 @@ struct Ctx {
     repo: Repo,
     /// `(secret name, user name, token)`.
     cred: Option<(String, String, Zeroizing<String>)>,
+    /// The scope of the secret that `cred` came from (`global` or the
+    /// project), for the message of a refusal (TER-39).
+    cred_scope: Option<String>,
     base: reqwest::Url,
     addr: SocketAddr,
     _slot: Slot,
@@ -738,6 +741,21 @@ async fn open(
             ));
         }
     };
+    // Which secret the credential is: the project's of that name, else the
+    // global one (the order of `crate::secrets::load`).
+    let cred_scope = match &cred {
+        Some(_) => {
+            let r = repo.clone();
+            state
+                .db
+                .read(move |c| secret_of_repo(c, &r))
+                .await
+                .ok()
+                .flatten()
+                .map(|(scope, _)| scope)
+        }
+        None => None,
+    };
     let (mode, ports, resolver) = state.webhooks.net_rules();
     let addr = crate::webhooks::net::resolve(&base, mode, &ports, resolver)
         .await
@@ -751,6 +769,7 @@ async fn open(
         agent,
         repo,
         cred,
+        cred_scope,
         base,
         addr,
         _slot: slot,
@@ -808,6 +827,63 @@ where
         }
         Err(e) => Err(std::io::Error::other(e.to_string())),
     })
+}
+
+/// A hint of a token for the log: its length and its last 4 characters
+/// (none for a token of 12 characters or fewer). Never the token.
+fn token_hint(token: &str) -> String {
+    let n = token.chars().count();
+    if n <= 12 {
+        return format!("{n} chars");
+    }
+    let tail: String = token.chars().skip(n - 4).collect();
+    format!("{n} chars, ends with {tail}")
+}
+
+/// The longest part of a forge's error body in the message.
+const REASON_MAX: usize = 300;
+
+/// The step of a forge request, from the content type that it wants.
+fn step_of(want_type: &str) -> &'static str {
+    match want_type {
+        RECEIVE_PACK_AD => "on the push advertisement (info/refs?service=git-receive-pack)",
+        "application/x-git-receive-pack-result" => "on the push (git-receive-pack)",
+        "application/x-git-upload-pack-result" => "on the fetch (git-upload-pack)",
+        _ => "on the fetch advertisement (info/refs)",
+    }
+}
+
+/// `; the forge said: <text>` with the start of the error body of `resp`:
+/// at most [`REASON_MAX`] characters of one line each, control characters
+/// out, the token scrubbed. Empty when the body is empty or does not come
+/// within a short time.
+async fn forge_reason(ctx: &Ctx, resp: reqwest::Response) -> String {
+    let mut raw = Vec::new();
+    let mut stream = resp.bytes_stream();
+    let read = async {
+        while let Some(Ok(b)) = stream.next().await {
+            raw.extend_from_slice(&b);
+            if raw.len() >= 4096 {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(2), read).await;
+    let text = String::from_utf8_lossy(&raw);
+    let one: String = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(REASON_MAX)
+        .collect();
+    let one = ctx.scrub(one.trim());
+    if one.is_empty() {
+        String::new()
+    } else {
+        format!("; the forge said: {one}")
+    }
 }
 
 /// Send one request to the forge and stream its answer back. `service`
@@ -911,15 +987,44 @@ async fn forward(
                 "a redirect ({}); the proxy follows no redirect, so give the repo its final URL",
                 status.as_u16()
             )
-        } else if matches!(status.as_u16(), 401 | 403) {
-            format!(
-                "HTTP {}: the forge refused the repo's credential",
-                status.as_u16()
-            )
+        } else if status.as_u16() == 401 {
+            "HTTP 401: the forge did not accept the repo's credential (a wrong or expired \
+             token, or none)"
+                .to_owned()
+        } else if status.as_u16() == 403 {
+            "HTTP 403: the forge accepted the repo's credential but refused this step (the \
+             token has no right for it, for example no write access to the repo)"
+                .to_owned()
         } else {
             format!("HTTP {}", status.as_u16())
         };
-        tracing::warn!(repo = %label, agent = %ctx.agent.id, url = %crate::webhooks::net::log_url(&url), "git proxy: the forge answered {what}");
+        // The forge says why in its body (GitHub: `Permission to o/r.git
+        // denied to u.`, `Write access to repository not granted.`): a
+        // short, scrubbed part of it goes along (TER-39).
+        let said = forge_reason(&ctx, resp).await;
+        let mut what = format!("{what} {}{said}", step_of(want_type));
+        if matches!(status.as_u16(), 401 | 403) {
+            // What went out, so that the next refusal can be checked
+            // against the token that works: the secret and the user for
+            // the agent; the URL and a hint of the token (its length and
+            // last 4 characters, never the token) only in the log.
+            let (sent, hint) = match &ctx.cred {
+                Some((name, user, token)) => (
+                    format!(
+                        "the credential {}/{name} as user `{user}`",
+                        ctx.cred_scope.as_deref().unwrap_or("?")
+                    ),
+                    token_hint(token),
+                ),
+                None => ("no credential".to_owned(), String::new()),
+            };
+            what.push_str(&format!(" (the proxy sent {sent})"));
+            tracing::warn!(repo = %label, agent = %ctx.agent.id,
+                url = %crate::webhooks::net::log_url(&url), token = %hint,
+                "git proxy: the forge refused a request: {what}");
+        } else {
+            tracing::warn!(repo = %label, agent = %ctx.agent.id, url = %crate::webhooks::net::log_url(&url), "git proxy: the forge answered {what}");
+        }
         return text(
             StatusCode::BAD_GATEWAY,
             format!("Terrarium git proxy: the forge of `{label}` answered {what}"),
@@ -1333,6 +1438,18 @@ async fn audit(state: &Shared, ctx: &Ctx, detail: serde_json::Value) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// TER-39: the log hint of a token never holds more than its last 4
+    /// characters.
+    #[test]
+    fn a_token_hint_shows_only_the_length_and_the_end() {
+        let t = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let h = token_hint(t);
+        assert_eq!(h, "40 chars, ends with 6789");
+        assert!(!h.contains("ghp_"));
+        assert_eq!(token_hint("short-token"), "11 chars");
+        assert_eq!(token_hint(""), "0 chars");
+    }
 
     fn repo(url: &str, cred: bool, deny: &[&str], via: Option<PushVia>) -> Repo {
         Repo {
