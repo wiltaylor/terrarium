@@ -482,9 +482,25 @@ pub fn known_hosts_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("ssh").join("sandbox")
 }
 
-/// Make [`known_hosts_dir`] (0700, in the 0700 `<state>/ssh`) and an empty
-/// [`KNOWN_HOSTS_FILE`] in it when it has none. Returns the dir.
+/// Make [`known_hosts_dir`] (0700, in the 0700 `<state>/ssh`) and a
+/// [`KNOWN_HOSTS_FILE`] in it when it has none. The new file gets the
+/// lines of the daemon user's `$HOME/.ssh/known_hosts`, the file that the
+/// daemon's git used before, so an upgrade keeps the hosts that the daemon
+/// trusts. Returns the dir.
 pub fn ensure_known_hosts_dir(state_dir: &Path) -> std::io::Result<PathBuf> {
+    let seed = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".ssh/known_hosts"));
+    ensure_known_hosts_dir_from(state_dir, seed.as_deref())
+}
+
+/// [`ensure_known_hosts_dir`] with the seed file given. Only a run that
+/// makes the file copies `seed` (as it is: hashed lines stay hashed); a
+/// later run leaves the file alone. A missing or unreadable seed leaves
+/// the new file empty.
+fn ensure_known_hosts_dir_from(
+    state_dir: &Path,
+    seed: Option<&Path>,
+) -> std::io::Result<PathBuf> {
+    use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let ssh = state_dir.join("ssh");
     let dir = known_hosts_dir(state_dir);
@@ -492,11 +508,32 @@ pub fn ensure_known_hosts_dir(state_dir: &Path) -> std::io::Result<PathBuf> {
     for d in [&ssh, &dir] {
         std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
     }
-    std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
+    let file = dir.join(KNOWN_HOSTS_FILE);
+    let mut new = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
         .mode(0o600)
-        .open(dir.join(KNOWN_HOSTS_FILE))?;
+        .open(&file)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(dir),
+        Err(e) => return Err(e),
+    };
+    let lines = match seed.map(std::fs::read) {
+        Some(Ok(b)) => b,
+        Some(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => {
+            let f = file.display();
+            tracing::warn!("cannot read the daemon's known hosts to seed {f}: {e}");
+            Vec::new()
+        }
+        _ => Vec::new(),
+    };
+    if !lines.is_empty() {
+        new.write_all(&lines)?;
+        if !lines.ends_with(b"\n") {
+            new.write_all(b"\n")?;
+        }
+    }
     Ok(dir)
 }
 
@@ -2899,6 +2936,36 @@ mod tests {
             std::fs::read_to_string(&file).unwrap(),
             "github.com ssh-ed25519 AAAA\n"
         );
+    }
+
+    /// The new file gets the lines of the daemon user's known hosts once:
+    /// a later run does not append them again, and keeps the keys that ssh
+    /// recorded. A missing seed makes an empty file.
+    #[test]
+    fn the_known_hosts_file_is_seeded_once_from_the_daemon_user() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        let seed = home.join(".ssh/known_hosts");
+        let lines = "github.com ssh-ed25519 AAAA\n|1|aGFzaA==|c2FsdA== ssh-ed25519 BBBB";
+        std::fs::write(&seed, lines).unwrap();
+        let state = tmp.path().join("state");
+        let file = known_hosts_dir(&state).join(KNOWN_HOSTS_FILE);
+        ensure_known_hosts_dir_from(&state, Some(&seed)).unwrap();
+        let want = format!("{lines}\n");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), want);
+        ensure_known_hosts_dir_from(&state, Some(&seed)).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), want);
+        std::fs::write(&file, "recorded ssh-ed25519 CCCC\n").unwrap();
+        ensure_known_hosts_dir_from(&state, Some(&seed)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "recorded ssh-ed25519 CCCC\n"
+        );
+        let bare = tmp.path().join("bare");
+        ensure_known_hosts_dir_from(&bare, Some(&tmp.path().join("none"))).unwrap();
+        let empty = known_hosts_dir(&bare).join(KNOWN_HOSTS_FILE);
+        assert_eq!(std::fs::read_to_string(empty).unwrap(), "");
     }
 
     #[test]
