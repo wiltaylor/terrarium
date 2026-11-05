@@ -4417,3 +4417,50 @@ export interface CalendarGrantResult {
   calendar_write: boolean;
   changed: boolean;
 }
+
+// ----- Tool proxies (GitHub #21, docs/api.md §17.11) -----
+
+/** The rules for the agent's arguments of a tool. */
+export interface ToolArgs {
+  allow?: string[];
+  deny_flags?: string[];
+  max?: number;
+  max_len?: number;
+}
+
+/** One grant of a tool: to an agent (`agent:<ulid>`) or a project (`project:<name>`). */
+export interface ToolGrant {
+  tool: string;
+  grantee: string;
+  /** `agent:<project>/<name>` or `project:<name>`. */
+  grantee_label: string;
+  created_by: string;
+  created_at: string;
+}
+
+/**
+ * A tool (`GET /api/tools`): a named command on a target that a granted
+ * agent runs as a CLI, without the target. `env_secrets` holds secret
+ * names, never values. `grants` only for the operator and sysadmins.
+ */
+export interface Tool {
+  name: string;
+  description?: string;
+  target: string;
+  command: string[];
+  cwd?: string;
+  timeout?: string;
+  env_secrets?: Record<string, string>;
+  args?: ToolArgs;
+  approval?: boolean | { first: string[] };
+  stdin?: boolean;
+  max_output?: string;
+  rate?: string;
+  project?: string;
+  scope: "global" | "project";
+  source: "file" | "api";
+  created_at: string;
+  updated_at: string;
+  grants?: ToolGrant[];
+}
+

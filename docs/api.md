@@ -6430,6 +6430,13 @@ starts the run and puts a `process` wait (§6.7) on its tool session, as
 and `terrarium run log` shows the redacted output. A tool name may not be `terrarium` or start
 with `terrarium-`: those stay the CLI.
 
+**Dashboard.** Settings > Tools lists the tools with the definition
+(secret names, never values), the grants with Revoke and a new grant (a
+project tool offers only its project and that project's agents), Delete
+for an API tool, and the recent runs (the `tool.run` audit rows). The
+agent page's Details tab has a Tools section: the tools that the agent may
+run, its own grants and its project's.
+
 A grant does not put the target in the agent's policy and makes no lease.
 A project grant covers each agent of the project, also the later ones.
 Removing an agent or a project removes the grants to it; removing a

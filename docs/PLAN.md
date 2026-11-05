@@ -4033,7 +4033,9 @@ with inline code, or with no `args.allow` (decision Q3). Grants
 secret grants do; only the operator and sysadmins grant in phase 1
 (decision Q2). Phases: P1a definitions and grants (done), P1b the stream
 redactor, P1c the run path, the shim, the argument rules, and the audit,
-P2 approval, P3 detach, the dashboard, and template tools.
+P2 approval, P3 detach and the dashboard (Settings > Tools, the Tools
+section of the agent Details tab), and tools on templates (TER-35,
+version 0.2.0: only a sysadmin or the operator sets them).
 
 ## 19b. Target displays (computer use)
 
