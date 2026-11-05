@@ -54,14 +54,17 @@ async fn agent(td: &TestDaemon, path: &str) -> Value {
     td.get(&format!("/api/agents/{path}")).await.ok().clone()
 }
 
+/// Wait until `f` holds. A deadline ([`common::WAIT`]), not a count of
+/// tries: each try is a request, and it is slow on a loaded machine.
 async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
-    for _ in 0..400 {
-        if f().await {
-            return;
-        }
+    let start = std::time::Instant::now();
+    while !f().await {
+        assert!(
+            start.elapsed() < common::WAIT,
+            "timed out waiting for {what}"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("timed out waiting for {what}");
 }
 
 async fn events(td: &TestDaemon, agent: &str, kind: &str) -> Vec<Value> {
@@ -124,10 +127,21 @@ async fn turns_to_a_stopped_agent_queue_and_wake_it_once() {
         td.post(&path, json!({"text": "two"})),
         td.post(&path, json!({"text": "three"})),
     );
+    // The first send to arrive queues its turn and wakes the agent. A send
+    // that the server takes up after that wake started the agent gives the
+    // turn to the agent at once (no `queued`): on a loaded machine the
+    // three requests do not all arrive before the wake.
     for r in [&a, &b, &c] {
         assert_eq!(r.status, 202, "{}", r.body);
-        assert_eq!(r.body["queued"], true, "{}", r.body);
+        assert_eq!(r.body["accepted"], true, "{}", r.body);
     }
+    assert!(
+        [&a, &b, &c].iter().any(|r| r.body["queued"] == true),
+        "{} {} {}",
+        a.body,
+        b.body,
+        c.body
+    );
     until("all three turns ran", || async {
         td.sup.prompts(aid(&w)).len() == 3
     })
