@@ -53,6 +53,10 @@ pub struct ToolDef {
     /// `{ first = [...] }` (a run whose first argument is in the list asks).
     #[serde(default, skip_serializing_if = "Approval::is_off")]
     pub approval: Approval,
+    /// How long a run waits for the operator's approval, such as `1h`
+    /// (default [`DEFAULT_APPROVAL_TIMEOUT`], at most 24h).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_timeout: Option<String>,
     /// Pass the shim's stdin to the command.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stdin: bool,
@@ -109,7 +113,19 @@ impl Approval {
     pub fn is_off(&self) -> bool {
         self == &Self::Always(false)
     }
+
+    /// Does a run with the agent arguments `argv` ask the operator first?
+    pub fn asks(&self, argv: &[String]) -> bool {
+        match self {
+            Self::Always(on) => *on,
+            Self::First { first } => argv.first().is_some_and(|a| first.contains(a)),
+        }
+    }
 }
+
+/// How long a run waits for the operator's approval when the tool sets no
+/// `approval_timeout` (design Q5).
+pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Programs that run code that their arguments give: a tool on one of them
 /// needs a fixed script and `args.allow` (design D1).
@@ -389,8 +405,11 @@ pub fn check_name(name: &str) -> Result<(), String> {
             "bad tool name `{name}`: use 1-{NAME_MAX} of a-z, 0-9, and `-`, starting with a letter"
         ));
     }
-    if name == "terrarium" {
-        return Err("a tool may not be named `terrarium`".into());
+    // `terrarium-*` stays the CLI's: the tool link dispatch skips it.
+    if name == "terrarium" || name.starts_with("terrarium-") {
+        return Err(format!(
+            "a tool may not be named `{name}`: terrarium and terrarium-* are the CLI's"
+        ));
     }
     Ok(())
 }
@@ -442,6 +461,14 @@ impl ToolDef {
                 return Err(format!("timeout `{t}` is over 24h"));
             }
         }
+        if let Some(t) = &self.approval_timeout {
+            let d = crate::eta::parse_duration(t).map_err(|e| format!("approval_timeout: {e}"))?;
+            if d.num_seconds() < 1
+                || u64::try_from(d.num_seconds()).unwrap_or(u64::MAX) > TIMEOUT_MAX.as_secs()
+            {
+                return Err(format!("approval_timeout `{t}` must be 1s to 24h"));
+            }
+        }
         if let Some(m) = &self.max_output {
             let n = crate::skills::parse_size(m)
                 .filter(|n| *n > 0)
@@ -487,6 +514,16 @@ impl ToolDef {
     /// `None` when the tool is global.
     pub fn project(&self) -> Option<&str> {
         self.project.as_deref()
+    }
+
+    /// The approval timeout of a run ([`DEFAULT_APPROVAL_TIMEOUT`] when the
+    /// tool sets none; [`Self::check`] has checked the value).
+    pub fn approval_wait(&self) -> Duration {
+        self.approval_timeout
+            .as_deref()
+            .and_then(|t| crate::eta::parse_duration(t).ok())
+            .and_then(|d| u64::try_from(d.num_seconds()).ok())
+            .map_or(DEFAULT_APPROVAL_TIMEOUT, Duration::from_secs)
     }
 }
 
@@ -558,6 +595,7 @@ mod tests {
             "a/b",
             &"a".repeat(NAME_MAX + 1),
             "terrarium",
+            "terrarium-x",
         ] {
             assert!(check_name(bad).is_err(), "{bad}");
         }
@@ -721,5 +759,27 @@ mod tests {
         assert!(check_args(&b, &v(&["abc", "de"])).is_ok());
         assert!(check_args(&b, &v(&["a", "b", "c"])).is_err());
         assert!(check_args(&b, &v(&["abcd"])).is_err());
+    }
+
+    /// TER-31: when a run asks the operator, and the approval timeout.
+    #[test]
+    fn approval_rules_and_timeout() {
+        assert!(!Approval::Always(false).asks(&v(&["show"])));
+        assert!(Approval::Always(true).asks(&[]));
+        let first = Approval::First {
+            first: v(&["comment", "close"]),
+        };
+        assert!(first.asks(&v(&["comment", "T-1"])));
+        assert!(!first.asks(&v(&["show", "comment"])));
+        assert!(!first.asks(&[]));
+        let mut t = tool("name = \"x\"\ntarget = \"box\"\ncommand = [\"/bin/x\"]\n");
+        assert_eq!(t.approval_wait(), DEFAULT_APPROVAL_TIMEOUT);
+        t.approval_timeout = Some("90s".into());
+        assert!(t.check().is_ok());
+        assert_eq!(t.approval_wait(), Duration::from_secs(90));
+        for bad in ["0s", "25h", "soon"] {
+            t.approval_timeout = Some(bad.into());
+            assert!(t.check().is_err(), "{bad}");
+        }
     }
 }

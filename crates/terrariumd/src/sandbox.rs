@@ -230,6 +230,10 @@ pub struct AgentLayout {
     /// at `/run/terrarium/ssh-agent`, with `SSH_AUTH_SOCK` on its socket.
     /// `None`: the agent has no `ssh_key` grant.
     pub ssh_agent: Option<PathBuf>,
+    /// The agent's tool links (`<runtime>/agent-tools/<ulid>`,
+    /// `crate::agent_tools`): bound read-only at
+    /// [`crate::agent_tools::SANDBOX_DIR`], last on `PATH`. `None`: no bind.
+    pub agent_tools: Option<PathBuf>,
     /// Start the program through `terrarium exec-env` (the CLI that the
     /// sandbox binds): it gets the env vars of the secret grants from the
     /// daemon inside the sandbox, so no value is in the launch spec or in
@@ -544,6 +548,16 @@ impl SandboxConfig {
                 &Path::new(SANDBOX_BIN_DIR).join("terrarium"),
             );
         }
+        if let Some(dir) = &layout.agent_tools {
+            // The dir, not the links: a grant or a revoke shows in a
+            // running agent. Read-only: the agent cannot add a link.
+            push3(
+                &mut args,
+                "--ro-bind",
+                dir,
+                Path::new(crate::agent_tools::SANDBOX_DIR),
+            );
+        }
         push2(&mut args, "--chdir", &spec.cwd);
         args.push("--".into());
         if self.cli.is_some() && layout.exec_env {
@@ -598,6 +612,10 @@ impl SandboxConfig {
                         .map(|t| t.join("bin").display().to_string()),
                 );
                 parts.push(SANDBOX_PATH.to_owned());
+                // Last: a tool never shadows a program.
+                if layout.agent_tools.is_some() {
+                    parts.push(crate::agent_tools::SANDBOX_DIR.to_owned());
+                }
                 env.insert("PATH".into(), parts.join(":"));
                 env.insert(ENV_AGENT_SOCKET.into(), SANDBOX_SOCKET.into());
             }
@@ -611,6 +629,9 @@ impl SandboxConfig {
                 }
                 if let Some(dir) = self.cli.as_deref().and_then(Path::parent) {
                     path = format!("{}:{path}", dir.display());
+                }
+                if let Some(d) = &layout.agent_tools {
+                    path = format!("{path}:{}", d.display());
                 }
                 env.insert("PATH".into(), path);
                 env.insert(ENV_AGENT_SOCKET.into(), layout.socket.display().to_string());
@@ -823,6 +844,7 @@ mod tests {
             accounts: Vec::new(),
             cred_alias: None,
             ssh_agent: None,
+            agent_tools: None,
             exec_env: false,
             exec_env_credentials: false,
             harness_bin: None,
@@ -939,6 +961,49 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
 
     /// PLAN §16b.4: the ssh-agent dir binds at `/run/terrarium/ssh-agent`,
     /// and `SSH_AUTH_SOCK` names the symlink to its socket.
+    /// The agent's tool links (design D3, TER-34): the dir binds read-only
+    /// at /opt/terrarium/agent-tools/bin, and that dir is the last entry of
+    /// PATH, so a tool never shadows a program. With no sandbox the host
+    /// dir is last on PATH. No dir: no bind, no PATH entry.
+    #[test]
+    fn the_agent_tools_dir_binds_read_only_and_is_last_on_path() {
+        let cfg = config();
+        let mut l = layout();
+        let resolve = |p: &str| (p == "claude").then(|| PathBuf::from("/usr/bin/claude"));
+        let env = cfg.child_env(&l, &BTreeMap::new(), &|_| None);
+        assert!(!env["PATH"].contains("agent-tools"), "{}", env["PATH"]);
+        let none = cfg.wrap_with(spec(), &l, env, &|_| None, &resolve);
+        assert!(!none.args.iter().any(|a| a.contains("agent-tools")));
+        l.agent_tools = Some(PathBuf::from(
+            "/run/t/agent-tools/01K8AGENT0000000000000000A",
+        ));
+        let env = cfg.child_env(&l, &BTreeMap::new(), &|_| None);
+        assert!(
+            env["PATH"].ends_with(":/opt/terrarium/agent-tools/bin"),
+            "{}",
+            env["PATH"]
+        );
+        let line = command_line(&cfg.wrap_with(spec(), &l, env, &|_| None, &resolve));
+        assert!(
+            line.contains(
+                "--ro-bind /run/t/agent-tools/01K8AGENT0000000000000000A /opt/terrarium/agent-tools/bin"
+            ),
+            "{line}"
+        );
+        let plain = SandboxConfig {
+            mode: SandboxMode::None,
+            ..config()
+        };
+        let env = plain.child_env(&l, &BTreeMap::new(), &|k| {
+            (k == "PATH").then(|| "/usr/bin".to_owned())
+        });
+        assert!(
+            env["PATH"].ends_with(":/run/t/agent-tools/01K8AGENT0000000000000000A"),
+            "{}",
+            env["PATH"]
+        );
+    }
+
     #[test]
     fn the_ssh_agent_dir_binds_with_its_socket_var() {
         let cfg = config();
@@ -1172,6 +1237,7 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
             accounts: vec![root.join("max-a/store"), root.join("max-b/store")],
             cred_alias: Some(harness_dir.join("cred")),
             ssh_agent: None,
+            agent_tools: None,
             exec_env: false,
             exec_env_credentials: false,
             harness_bin: None,

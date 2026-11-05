@@ -104,6 +104,8 @@ import type {
   InboxAskBody,
   InboxCounts,
   InboxWatch,
+  Tool,
+  ToolGrant,
   InboxItem,
   InboxQuery,
   MailAck,
@@ -878,6 +880,19 @@ export interface Api {
    * config repo answers `501 not_available`. A failed check is `422 invalid`
    * with `details.problems`.
    */
+  /** Tool proxies (docs/api.md §17.11). Writes and grants: the operator and sysadmins; an agent sees its granted tools. */
+  tools: {
+    /** `GET /api/tools`: every tool with its grants for the operator; an agent's granted tools. */
+    list(): Promise<Tool[]>;
+    get(name: string): Promise<Tool>;
+    /** `DELETE /api/tools/{name}`: an API tool; a file tool is `409 file_managed`. */
+    remove(name: string): Promise<void>;
+    grants(name: string): Promise<ToolGrant[]>;
+    /** `POST /api/tools/{name}/grants`: `agent:<project>/<name>`, `agent:<id>`, or `project:<name>`. */
+    grant(name: string, grantee: string): Promise<ToolGrant>;
+    revoke(name: string, grantee: string): Promise<void>;
+  };
+
   skills: {
     list(): Promise<SkillSummary[]>;
     get(name: string): Promise<SkillDetail>;
@@ -1471,6 +1486,14 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       keepDefault: (path) => post("/api/config/defaults/keep", { path }),
     },
 
+    tools: {
+      list: () => get("/api/tools"),
+      get: (name) => get(`/api/tools/${seg(name)}`),
+      remove: (name) => del(`/api/tools/${seg(name)}`),
+      grants: (name) => get(`/api/tools/${seg(name)}/grants`),
+      grant: (name, grantee) => post(`/api/tools/${seg(name)}/grants`, { grantee }),
+      revoke: (name, grantee) => del(`/api/tools/${seg(name)}/grants`, { grantee }),
+    },
     skills: {
       list: () => get("/api/skills"),
       get: (name) => get(`/api/skills/${seg(name)}`),

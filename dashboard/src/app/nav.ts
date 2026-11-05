@@ -92,6 +92,8 @@ export const SETTINGS_TABS = [
   { path: "system-prompts", label: "System prompts" },
   // The skill library in the config repo. The rest of the path is the skill name.
   { path: "skills", label: "Skills" },
+  // The tool proxies (GitHub #21): definitions, grants, and recent runs.
+  { path: "tools", label: "Tools" },
   { path: "targets", label: "Targets" },
   // The config repo: for the operator or a sysadmin.
   { path: "harness", label: "Harness config" },

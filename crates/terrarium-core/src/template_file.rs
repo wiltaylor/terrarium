@@ -67,6 +67,8 @@ const FIELDS: &[(&str, Kind)] = &[
     ("skills_off", Kind::List),
     ("default_skills", Kind::Bool),
     ("new_session_on_prompt_change", Kind::Bool),
+    // A template key only: the tools an agent of it gets (sysadmin).
+    ("tools", Kind::List),
     ("system_prompt", Kind::Text),
 ];
 

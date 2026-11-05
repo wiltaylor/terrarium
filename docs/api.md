@@ -3040,7 +3040,7 @@ except for the differences in "Bundles" below.
 
 | Field | Meaning |
 |---|---|
-| `kind` | `question`, `notice`, or `bundle`. Set at the ask; it does not change. |
+| `kind` | `question`, `notice`, `bundle`, or `tool_run`. Set at the ask; it does not change. A `tool_run` question is the approval of one tool run (§17.11, "Approval"): only the daemon asks it, and it has `tool_run` and `used_at`. |
 | `text` | The question (the summary of a bundle), at most 2000 characters. The agent's own words: untrusted data. |
 | `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice and a bundle have none: options on a notice or a bundle are `422 invalid`. |
 | `items` | A bundle only: the questions, 2 to 20, each `{text, options, context?, answer?, answer_option?}`. Absent for a question and a notice. See "Bundles". |
@@ -3811,13 +3811,18 @@ supply:
   assignment.
 
 **Card patch.** Every field is optional:
-`title`, `body`, `labels`, `repo`, `branch`, `depends_on`, `column`,
-`position`, `assignee`, `comment`, `eta_at`.
+`title`, `body`, `labels`, `add_labels`, `remove_labels`, `repo`, `branch`,
+`depends_on`, `column`, `position`, `assignee`, `comment`, `eta_at`.
 
 - `repo`, `branch`, `assignee`, and `eta_at` take `null` to clear.
 - `labels` and `depends_on` replace the whole list. `[]` removes every
   label or dependency, and `blocked_by` follows. An absent key keeps the
   list. The change is one `edited` event that names the fields.
+- `add_labels` adds labels and keeps the others (a label the card has
+  stays once); `remove_labels` takes labels away (an absent one is no
+  error). Both apply to the labels of the card at the write, so two changes
+  at the same time do not lose each other's labels. With `labels` too:
+  `422 invalid`. The `edited` event names `labels`.
 - `eta_at` comes last, after the move and the assignment.
 - `column` or `position` moves the card, with `comment` as the move comment.
   `comment` alone adds a comment.
@@ -4045,7 +4050,7 @@ Kinds:
 | `agent_removed` | `{agent_id, project, name}`. The daemon deleted the agent: `DELETE /api/agents/{id}`, a fleet apply with prune, or a definitions sync that removes a file agent. The delete of a live agent stops it first, so a `status` event with `stopped` comes before this event. Clients remove the agent from their lists. `GET /api/agents` does not show the agent again. |
 | `wait` | `{wait_id, change, kind, summary, state, result?}`. `change` is `opened`, `resolved`, `timed_out`, `cancelled`, or `failed`. The `agent` is the waiter (§6.7). |
 | `watch` | `{watch_id, change, watcher, watcher_name, on, status?}`. `change` is `created`, `fired` (with `status`), or `removed`. The `agent` is the watched agent (§6.7). |
-| `question` | `{question_id, kind, change, status, priority, text, revision, agent_id, card_id?}`. `kind` is `question`, `notice`, or `bundle`. `change` is `asked`, `updated`, `answered`, `acknowledged`, or `retracted`. The `agent` is the asking agent (§6.8). |
+| `question` | `{question_id, kind, change, status, priority, text, revision, agent_id, card_id?}`. `kind` is `question`, `notice`, `bundle`, or `tool_run`. `change` is `asked`, `updated`, `answered`, `acknowledged`, or `retracted`. The `agent` is the asking agent (§6.8). |
 | `inbox` | `{item, kind, change, project?}`: an item of the Inbox (§6.9) was `opened`, `updated`, or `closed`. `kind` is `question`, `notice`, `mail`, or `system`. |
 | `session_started` | `{harness_session, transcript_path?, source?}` |
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning`, `usage_limit` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). A `usage_limit` (`{message, resets_at?}`) is the provider's refusal of a turn for a usage limit or a rate limit (§16.6). |
@@ -4577,7 +4582,14 @@ Release points that the user reviews (PLAN §15.3). The code is in
 - The patch: `name`, `notes`, `repo`, `git_ref` (an empty string clears
   it), `cards` or `artifacts` (replace the set), `add_cards`,
   `remove_cards`, `add_artifacts`, `remove_artifacts`. Cards and artifacts
-  must be in the version's project.
+  must be in the version's project. A version takes a patch while it is
+  `draft` or `rejected` (else `409 conflict`).
+- A new `name` renames the version (a name that the project has is `409`).
+  The cards, artifacts, reviews, and review thread stay with it: they belong
+  to its ID. So one open version (`vnext`) can take cards over time
+  (`add_cards`), be renamed to its number at the cut, and be submitted,
+  and a new `vnext` can start (CLI: `terrarium version rename`, `version
+  add-card`, `version rm-card`).
 
 Compare:
 
@@ -5836,6 +5848,15 @@ that has ended is `409 conflict`, except `eof` alone: it is a no-op with
 stdin. `terrarium exec -i` and `shell` treat a `409` for `data` in the
 same way: they stop the input, and the exit code comes from the output.
 
+The stdout and stderr of an `exec` or `shell` session are redacted as
+streams (PLAN §16b.6, TER-33), for the caller: an agent sees the names of
+its project's secrets and `[secret]` for the others; the operator sees each
+name. A secret split across two chunks is found. The last bytes of the
+output (up to the longest secret value less one) wait for the next output,
+or go out after 200 ms with no new output; so a secret written in two
+parts more than 200 ms apart is not found whole. The `/output` reads and the
+WebSocket show the same redacted bytes. A `cp` session is not changed.
+
 The output answer:
 
 ```json
@@ -6350,8 +6371,8 @@ named command on a target that the operator defines. A granted agent runs
 it as a CLI in its sandbox, and the daemon runs it on the target, so the
 agent gets one tool and not the target. This section has the
 definitions and the grants (P1a) and the run path (P1c, "Runs" below).
-The sandbox shim (`/opt/terrarium/agent-tools/bin`) is TER-34; approval
-comes later.
+The sandbox shim (`/opt/terrarium/agent-tools/bin`) is TER-34, and the
+approval of a run (P2) is "Approval" below.
 
 **Definition.** `tools/<name>.toml` in the config repo (source `file`;
 `POST /api/reload` picks up a change), or `POST /api/tools` (source
@@ -6411,6 +6432,45 @@ fails one is left out with an error line of the reload:
 | `GET /api/tools/{name}/grants` | | `200` `[{tool, grantee, grantee_label, created_by, created_at}]` | the operator and sysadmins |
 | `POST /api/tools/{name}/grants` | `{"grantee"}`: `agent:<project>/<name>`, `agent:<id>`, or `project:<name>` | `201` the grant. A grant that exists is `409`; a project tool to another project is `422` | the operator and sysadmins |
 | `DELETE /api/tools/{name}/grants` | `?grantee=` | `204`. No such grant is `404` | the operator and sysadmins |
+
+**In the sandbox** (design D3). Each agent has a dir
+`<runtime>/agent-tools/<agent id>/` with one symlink `<tool> -> terrarium`
+for each tool granted to the agent or to its project. The sandbox binds
+the dir read-only at `/opt/terrarium/agent-tools/bin` and puts it last on
+`PATH`, so a tool never shadows a program. The daemon writes the dir at
+each start, and again at each grant, revoke, change, or removal of a tool
+and at a reload; the dir is bound, not the links, so a running agent sees
+the change. The CLI runs a link as `terrarium tool run <tool> -- <args>`:
+it posts the run, streams stdout and stderr, sends stdin to a tool with
+`stdin = true` when stdin is not a terminal, stops the run on Ctrl-C (exit
+130), and exits with the remote exit code (128 plus the signal, or 1 on an
+error end such as `truncated`). `terrarium tool run --detach` (an agent only)
+starts the run and puts a `process` wait (§6.7) on its tool session, as
+`terrarium run` does for a command: the wait's summary is `tool run <id> on
+<target>`, the wake mail has the exit code and the redacted output tail,
+and `terrarium run log` shows the redacted output. A run that needs the
+operator's approval refuses `--detach` (exit 2) before anything is asked:
+run it without `--detach`, which waits for the answer. A tool name may not be `terrarium` or start
+with `terrarium-`: those stay the CLI.
+
+**Tools on templates** (design Q4). A template spec may have `tools`: a
+list of tool names. A create from the template (the API, a fleet, or a
+spawn) grants each to the new agent, as the delegation of the sysadmin who
+set them: `created_by` of the grant is `template:<project/name>`, and the
+`tool.grant` audit row has `via: "template"` and the template. Only a
+sysadmin or the operator sets or changes `tools` on a template (`403`
+otherwise, also on a project template; a fleet that sets or changes them
+needs a sysadmin too). Each tool must exist, and a project tool may be on a
+template of its own project only (a global template names global tools
+only); else `422`. A create body takes no `tools` (`422`). The agent keeps
+its grants when the template changes later.
+
+**Dashboard.** Settings > Tools lists the tools with the definition
+(secret names, never values), the grants with Revoke and a new grant (a
+project tool offers only its project and that project's agents), Delete
+for an API tool, and the recent runs (the `tool.run` audit rows). The
+agent page's Details tab has a Tools section: the tools that the agent may
+run, its own grants and its project's.
 
 A grant does not put the target in the agent's policy and makes no lease.
 A project grant covers each agent of the project, also the later ones.
@@ -6480,6 +6540,45 @@ also not to the agent that started it.
   "started", "tool", "target", "session", "args"}` and `{"change":
   "ended", "tool", "target", "exit", "duration_ms", "bytes",
   "truncated"}`.
+
+**Approval** (design D5 and Q5, TER-31). `approval = true` asks the
+operator before each run of an agent; `approval = { first = [...] }` asks
+when the first argument is in the list. The operator's own run never
+asks. `approval_timeout` (1s to 24h, default `1h`) is how long a run
+waits.
+
+- `POST /api/tools/{name}/run` checks the grant, the arguments, and the
+  rate first. Then a run that asks answers `202` `{"pending": true,
+  "question", "expires_at", "tool"}`: the daemon writes a question of the
+  kind `tool_run` on the agent (§6.8), with the text `Run tool <tool> on
+  <target> for <project/agent>?`, the exact argv in `context` (one quoted
+  entry per line, redacted), the options `Run` and `Refuse`, and
+  `tool_run` `{tool, target, argv, expires_at}`. The same run again (the
+  same agent, tool, target, and argv) while it is open gives the same
+  question. It counts toward the 50 open questions of the agent (`429`
+  past them).
+- Only the operator answers it (`POST /api/questions/{id}/answer` with
+  `option` `0`/`"Run"` or `1`/`"Refuse"`); an agent, also a sysadmin, gets
+  `403`. The agent gets no mail on the answer or a retract: its CLI waits
+  on the question (`GET /api/questions/{id}`, which the agent may read).
+  The agent may retract its own `tool_run` question, whatever its role.
+  It cannot be updated (`409`). The Inbox shows it as a `question` item
+  (ID `tool_run:<id>`) and counts it. A list of every kind (the recap,
+  `question ls`) leaves it out.
+- The run with `{"argv", "approval": "<question id>"}` starts when the
+  question is a `tool_run` question of the same agent and tool, with the
+  same argv, answered `Run`, and not used. The daemon marks it used
+  (`used_at`) in the same write, so an approval runs once. Otherwise
+  `409 conflict`, and the message says why (not answered yet, refused,
+  retracted, another argv, used already). An approved run takes no token
+  of the rate. Its `tool.run` audit row and `started` event have
+  `approval` (the question), and the audit row `approved_by`.
+- At `expires_at` the daemon retracts an open approval with the reason
+  `the approval timed out` (a sweep each 30 s).
+- The CLI (`terrarium tool run`, a tool link) prints that it waits, polls
+  the question, and then runs with the approval. A refuse, a retract, a
+  timeout, or a `409` on the run ends it with exit code 77; Ctrl-C
+  retracts the question and exits 130.
 
 ## 18. Fleet
 

@@ -447,6 +447,77 @@ pub fn granted_to(conn: &Connection, id: &str, project: &str) -> ApiResult<Vec<T
         .collect())
 }
 
+/// The tools that a template of `project` (`None`: a global template) may
+/// name (design Q4, TER-35): each exists, and a project tool belongs to
+/// the template's project. A global template names global tools only.
+pub fn check_template_tools(
+    conn: &Connection,
+    project: Option<&str>,
+    tools: &[String],
+) -> ApiResult<()> {
+    for name in tools {
+        let r = find(conn, name)?
+            .ok_or_else(|| ApiError::invalid(format!("tools: no tool `{name}`")))?;
+        if let Some(p) = r.def.project.as_deref()
+            && Some(p) != project
+        {
+            let whose = project.map_or("a global template".to_owned(), |t| {
+                format!("a template of project `{t}`")
+            });
+            return Err(ApiError::invalid(format!(
+                "tools: `{name}` is a tool of project `{p}`, and this is {whose}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Grant the tools of template `template` (its `tools`) to the new agent
+/// `agent` of `project` (design Q4, TER-35): the delegation of the
+/// sysadmin who set them. A tool that is gone, or a project tool of
+/// another project, refuses the create. Each grant writes `tool.grant`
+/// with the template named. `created_by` is `template:<project/name>`.
+pub fn grant_from_template(
+    t: &mut Tx<'_>,
+    agent: &str,
+    project: &str,
+    template: &crate::store::templates::TemplateRef,
+    tools: &[String],
+) -> ApiResult<()> {
+    let label = format!(
+        "template:{}",
+        terrarium_core::fleet::template_key(template.project.as_deref(), &template.name)
+    );
+    for name in tools {
+        let r = find(t, name)?.ok_or_else(|| {
+            ApiError::invalid(format!(
+                "template `{}` names tool `{name}`, which does not exist",
+                template.name
+            ))
+        })?;
+        if r.def.project.as_deref().is_some_and(|p| p != project) {
+            return Err(ApiError::invalid(format!(
+                "template `{}` names tool `{name}` of another project than `{project}`",
+                template.name
+            )));
+        }
+        let key = format!("agent:{agent}");
+        t.execute(
+            "INSERT OR IGNORE INTO tool_grants (tool, grantee, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![name, key, label, now()],
+        )?;
+        t.audit(
+            "tool.grant",
+            name,
+            Some(project),
+            serde_json::json!({"grantee": key, "via": "template", "template": template.id,
+                               "template_name": template.name, "template_revision": template.revision}),
+        )?;
+    }
+    Ok(())
+}
+
 /// The agent was removed: the grants to it go.
 pub fn on_agent_deleted(conn: &Connection, id: &str) -> ApiResult<usize> {
     Ok(conn.execute(

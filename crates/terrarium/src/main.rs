@@ -97,7 +97,9 @@ fn report(err: &anyhow::Error, json: bool, source: credentials::TokenSource) {
 
 fn main() -> ExitCode {
     let agent = AgentEnv::from_env();
-    let matches = cli::hide_for_mode(Cli::command(), agent.is_some()).get_matches();
+    // A tool link (`/opt/terrarium/agent-tools/bin/<tool>`) runs the tool.
+    let matches = cli::hide_for_mode(Cli::command(), agent.is_some())
+        .get_matches_from(cli::shim_args(std::env::args_os()));
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(c) => c,
         Err(e) => e.exit(),

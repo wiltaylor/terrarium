@@ -344,6 +344,11 @@ async fn ask(
     let what = match b.kind {
         QuestionKind::Question | QuestionKind::Bundle => "asking the operator",
         QuestionKind::Notice => "sending a notice to the operator",
+        QuestionKind::ToolRun => {
+            return Err(ApiError::invalid(
+                "a tool_run question comes only from a tool run (`terrarium tool run`)",
+            ));
+        }
     };
     policy::ask_question(&actor, &key, &a.agent.project, what)?;
     let tuning = state.waits.tuning();
@@ -565,8 +570,12 @@ async fn retract(
     // The body is optional: no body is no reason.
     let b: RetractBody = optional_body(&body)?;
     let q = find(&state, &actor, id).await?;
-    policy::retract_question(&actor, &q.agent, &q.project)?;
     let by_owner = actor.agent().is_some_and(|a| a.id == q.agent);
+    // The agent that waits for a tool run approval may give it up (its
+    // CLI does on Ctrl-C), whatever its role.
+    if !(q.kind == QuestionKind::ToolRun && by_owner) {
+        policy::retract_question(&actor, &q.agent, &q.project)?;
+    }
     let qid = q.id.clone();
     Ok(Json(
         state

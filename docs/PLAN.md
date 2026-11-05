@@ -1088,6 +1088,8 @@ terrarium artifact url <id>                  stable preview URL to paste into ma
 terrarium artifact rm <id>                   own and unattached only
 terrarium version new <name> [--notes -] [--repo r --ref sha] [--card id]...
 terrarium version ls | show <name>
+terrarium version rename <name> <new-name>   draft or rejected; cards, reviews, artifacts stay
+terrarium version add-card | rm-card <name> <card>...   draft or rejected
 terrarium version attach <name> <artifact-id>
 terrarium version submit <name>              draft -> in_review; mails the operator with the link
 terrarium version wait <name> [--timeout 3600]   block until approved or rejected
@@ -3218,9 +3220,18 @@ shows:
   snapshots;
 - mail, notices, questions, board cards, memory nodes, wiki pages, text
   artifacts, and version notes;
-- events, trigger payloads, and the audit details.
+- events, trigger payloads, and the audit details;
+- the output of an exec session on a target (`terrarium exec`, `GET
+  .../sessions/{id}/output`, and its WebSocket) and of a tool run, as a
+  stream (TER-33, TER-30): a secret split across two output chunks is
+  found. The view is the caller's (an agent: its project; the operator:
+  every label). The end of the output is held back until more output
+  comes, or for at most 200 ms when none comes, so that a prompt or a
+  progress line still shows; a secret split across two writes further
+  apart than that is not found whole. A file copy (`cp`) is not changed.
 
-The live terminal stream goes to the operator only and is not redacted.
+The live terminal stream of an agent's harness goes to the operator only
+and is not redacted.
 Redaction is a guard against accidents. It does not stop an agent with a
 `read` grant from sending a value out in a changed form (for example,
 base64).
@@ -4033,7 +4044,11 @@ with inline code, or with no `args.allow` (decision Q3). Grants
 secret grants do; only the operator and sysadmins grant in phase 1
 (decision Q2). Phases: P1a definitions and grants (done), P1b the stream
 redactor, P1c the run path, the shim, the argument rules, and the audit,
-P2 approval, P3 detach, the dashboard, and template tools.
+P2 approval, P3 detach and the dashboard (Settings > Tools, the Tools
+section of the agent Details tab), and tools on templates (TER-35: a template's
+`tools` are granted to each agent made from it; only a sysadmin or the
+operator sets them, and a project tool goes only on a template of its
+project).
 
 ## 19b. Target displays (computer use)
 

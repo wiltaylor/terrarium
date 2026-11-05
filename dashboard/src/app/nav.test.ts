@@ -158,7 +158,7 @@ describe("navigation", () => {
 
   it("has one Settings item, and the settings screen has its tabs in order, each with a route", () => {
     expect(SETTINGS_ITEMS).toEqual([{ href: "/settings", label: "Settings" }]);
-    expect(SETTINGS_TABS.map((t) => t.label)).toEqual(["Account", "Subscriptions", "Secrets", "Templates", "System prompts", "Skills", "Targets", "Harness config", "Hosts", "Software"]);
+    expect(SETTINGS_TABS.map((t) => t.label)).toEqual(["Account", "Subscriptions", "Secrets", "Templates", "System prompts", "Skills", "Tools", "Targets", "Harness config", "Hosts", "Software"]);
     const hrefs = TOP_ITEMS.map((i) => i.href) as string[];
     for (const gone of ["/subscriptions", "/hosts", "/config", "/settings"]) expect(hrefs).not.toContain(gone);
     expect(app).toMatch(/<Route path="\/settings" component=\{SettingsPage\}>/);

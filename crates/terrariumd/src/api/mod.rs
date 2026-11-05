@@ -113,6 +113,9 @@ pub struct AppState {
     /// The tools dir of the harnesses (`POST /api/harnesses/{name}/update`).
     /// Not configured: the update answers `501 not_available`.
     pub harness_tools: Arc<crate::harness_tools::HarnessTools>,
+    /// The per-agent dirs of the granted tools (`crate::agent_tools`).
+    /// Not configured (the in-memory supervisor): none is written.
+    pub agent_tools: Arc<crate::agent_tools::Runtime>,
     /// The harness auto-update: the schedule, the next check, and the
     /// lock of a running check (`crate::harness_auto_update`).
     pub harness_auto_update: Arc<crate::harness_auto_update::Runtime>,
@@ -912,6 +915,7 @@ mod tests {
             executor: Arc::default(),
             harness_latest: Arc::default(),
             harness_tools: Arc::default(),
+            agent_tools: Arc::default(),
             harness_auto_update: Arc::default(),
             self_update: Arc::default(),
             web,
