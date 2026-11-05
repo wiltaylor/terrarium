@@ -10,7 +10,7 @@ import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui"
 import { api, events, inbox, projects } from "../../stores";
 import { MailItemCard, PausedThreadCard, WatchCard } from "./cards";
 import { AskDialog } from "./AskDialog";
-import { canForward, emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, type InboxStatusTab, type InboxTab } from "./model";
+import { canForward, emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, statusTabOf, type InboxStatusTab, type InboxTab } from "./model";
 import { questionItemId } from "./questions";
 import { inboxItemDomId } from "./critical";
 import { BundleCard } from "./BundleCard";
@@ -21,8 +21,9 @@ const TAB_IDS = INBOX_TABS.map((t) => t.id) as string[];
 export default function InboxPage() {
   const now = useNow(30_000);
   const [params, setParams] = useSearchParams<{ tab?: string; status?: string; project?: string; item?: string }>();
-  const tab = (): InboxTab => (TAB_IDS.includes(params.tab ?? "") ? (params.tab as InboxTab) : "all");
-  const status = (): InboxStatusTab => (params.status === "done" ? "done" : "open");
+  // `?tab=watch` (the Asked kind tab of 0.1.0) opens the Asked status tab, or Done with the asks.
+  const status = (): InboxStatusTab => statusTabOf(params.status, params.tab);
+  const tab = (): InboxTab => (TAB_IDS.includes(params.tab ?? "") ? (params.tab as InboxTab) : params.tab === "watch" && status() === "done" ? "watch" : "all");
   const project = () => params.project ?? "";
   const keep = (i: InboxItem) => matchesTabs(i, tab(), status(), project());
 
@@ -36,7 +37,8 @@ export default function InboxPage() {
     try {
       const rows = await api.inbox.list(inboxQuery(tab(), status(), project()));
       if (mine !== gen) return;
-      setList(sortItems(rows));
+      // The daemon's `open` has the waiting asks too: they show under Asked only.
+      setList(sortItems(rows.filter(keep)));
       setError(null);
     } catch (e) {
       if (mine === gen) setError(e);
@@ -127,8 +129,10 @@ export default function InboxPage() {
         mail. The loop guard pauses a thread when agents write too many messages to each other. Ask an agent, or forward a question to one: the Asked tab
         waits for its answer. The text of each item is the sender's own words.
       </p>
-      <Tabs tabs={INBOX_TABS} active={tab()} onChange={(t) => setParams({ tab: t === "all" ? undefined : t })} />
-      <Tabs tabs={STATUS_TABS} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s })} />
+      <Show when={status() !== "asked"}>
+        <Tabs tabs={INBOX_TABS} active={tab()} onChange={(t) => setParams({ tab: t === "all" ? undefined : t })} />
+      </Show>
+      <Tabs tabs={STATUS_TABS} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s, tab: params.tab === "watch" ? undefined : params.tab })} />
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
       <Show when={notice()}>
         <p class="notice small" role="status" style={{ margin: 0 }}>
