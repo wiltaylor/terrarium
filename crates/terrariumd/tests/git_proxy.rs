@@ -1224,5 +1224,8 @@ async fn a_refused_push_shows_the_forge_reason() {
         err.contains("the proxy sent the credential global/gh as user `x-access-token`"),
         "{err}"
     );
-    assert!(!err.contains(&FORGE_TOKEN[FORGE_TOKEN.len() - 4..]), "{err}");
+    assert!(
+        !err.contains(&FORGE_TOKEN[FORGE_TOKEN.len() - 4..]),
+        "{err}"
+    );
 }
