@@ -6348,9 +6348,10 @@ agent does not log it, and its error texts do not hold it.
 GitHub #21; the design is the wiki page `design/tool-proxies`. A tool is a
 named command on a target that the operator defines. A granted agent runs
 it as a CLI in its sandbox, and the daemon runs it on the target, so the
-agent gets one tool and not the target. Phase P1a (this section) has the
-definitions and the grants; the run path, the sandbox shim, and the audit
-of a run come later.
+agent gets one tool and not the target. This section has the
+definitions and the grants (P1a) and the run path (P1c, "Runs" below).
+The sandbox shim (`/opt/terrarium/agent-tools/bin`) is TER-34; approval
+comes later.
 
 **Definition.** `tools/<name>.toml` in the config repo (source `file`;
 `POST /api/reload` picks up a change), or `POST /api/tools` (source
@@ -6418,6 +6419,67 @@ project removes its tools. Audit rows: `tool.create`, `tool.update`,
 `tool.delete`, `tool.grant`, and `tool.revoke`. CLI: `terrarium tool ls`,
 `tool show <name>`, `tool grant <name> <grantee>`, `tool revoke <name>
 <grantee>`.
+
+**Runs** (design D4 and D6, TER-30). A run is an exec session of the
+kind `tool` on the tool's target, with its own routes:
+
+| Endpoint | Body or query | Answer | Who |
+|---|---|---|---|
+| `POST /api/tools/{name}/run` | `{"argv": ["show", "T-1"]}`; any other field is refused (`400`) | `201` `{"session_id", "tool", "target"}` | an agent with a grant on the tool (its own or its project's), and the operator for a test |
+| `GET /api/tools/sessions/{id}/output` | `?since=&wait=&max=` as §17.4 | `200` as the output of an exec session (§17.4): `since`, `next`, `chunks` (`stream` `stdout` or `stderr`, base64 `data`), `done`, `end`, `result` | the agent that started the run, or the operator; anyone else gets `404` |
+| `POST /api/tools/sessions/{id}/input` | `{"data"?: <base64>, "eof"?: true}` | `200` `{"session_id", "accepted"}`. `422` when the tool has `stdin = false`; `409` when the run has ended | as above |
+| `DELETE /api/tools/sessions/{id}` | | `204`: the run is killed and the session goes | as above |
+
+The target session routes (§17.4) do not show a tool session (`404`),
+also not to the agent that started it.
+
+- **Who.** An agent with no grant on the tool, or a tool that does not
+  exist, is `404 not_found`, the same answer (a tool that an agent may not
+  see is not found, as in `GET /api/tools/{name}`). A revoke applies to
+  the next run; a run in progress goes on to its end.
+- **The command.** The daemon builds it from the definition: `command`
+  with the agent's `argv` appended as more argv entries, the tool's `cwd`,
+  `timeout`, and `env_secrets` (the values opened by the daemon, set in
+  the process env on the target), no shell, and no pty. The agent sets
+  none of these. There is no target policy check: the grant is the right.
+  The other checks of an exec stay: the host agent is online, the open
+  sessions of the agent (§17.4), and the resource limits of a `host`
+  target with the agent as the holder.
+- **The argument rules** (design D4, lead review L1). A run that breaks
+  one is `422 invalid`, and the message names the argument and the rule:
+  at most `args.max` arguments (default 64), each at most `args.max_len`
+  bytes (default 4096), no NUL; with `args.allow`, the first argument is
+  in it (a run with no argument is refused too). A deny flag `--name`
+  refuses `--name`, `--name=...`, each abbreviation `--n`, `--na`, ...
+  (`getopt_long` takes an unambiguous prefix), and the single-dash forms
+  `-name` and `-name=...`. A short deny flag `-o` refuses each argument
+  that starts with one dash and has `o` after it: `-o`, `-oVALUE`, and a
+  bundle such as `-xo`. A literal `--` does not end the checks. Tool
+  authors should accept only exact long flags; `args.allow` with
+  subcommands is the main guard.
+- **The rate.** A token bucket for each caller and tool: `rate` runs at
+  once, then `rate` per period. A tool without `rate` gets `60/m`. Past
+  it: `429 rate_limited`, with `error.details.retry_after` in seconds.
+- **The output.** stdout and stderr together are capped at `max_output`
+  (default 1 MiB) of raw bytes. Past the cap the process is killed, and
+  the session ends with `end` `{"type": "error", "code": "truncated",
+  "message"}` and `result` `{"bytes", "truncated": true}`; a run that
+  ends under the cap has `result` `{"bytes", "truncated": false}`. Each
+  stream is redacted as a stream, so a secret split across two chunks is
+  found: first the values of the tool's own `env_secrets` (from 4 bytes
+  up, also a value that the daemon matcher leaves out as weak, label
+  `[secret:tool/<secret>]`), then the daemon matcher (PLAN §16b.6) with
+  the view of the caller's project.
+- **stdin.** With `stdin = false` (the default) the command's stdin is
+  closed at the start, and input is `422`. With `stdin = true` the input
+  goes to the command, at most `max_output` bytes in all.
+- **Audit and events.** One `tool.run` audit row at the end of each run:
+  `tool`, `target`, `agent` (`project/name`), `argv` (redacted), `exit`,
+  `end`, `duration_ms`, `bytes`, and `truncated`. The output is not in the
+  audit. Two `tool.run` events on the agent's stream: `{"change":
+  "started", "tool", "target", "session", "args"}` and `{"change":
+  "ended", "tool", "target", "exit", "duration_ms", "bytes",
+  "truncated"}`.
 
 ## 18. Fleet
 
