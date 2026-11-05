@@ -1217,3 +1217,101 @@ async fn columns_rights_audit_and_event() {
     let audit = td.get("/api/audit?action=board.columns").await;
     assert_eq!(audit.ok().as_array().unwrap().len(), 1);
 }
+
+/// TER-43: `GET /api/cards` lists the cards in the working column and in
+/// the `research` column of every board that the caller may read, with the
+/// column kind and the assignee's status; backlog and archived cards stay
+/// out.
+#[tokio::test]
+async fn active_cards_across_projects_follow_the_rights() {
+    let td = setup().await;
+    td.project("ops").await;
+    td.agent("ops", "root", json!({"roles": ["sysadmin"]}))
+        .await;
+    td.patch(
+        "/api/projects/proj/board",
+        json!({"columns": [{"name": "backlog"}, {"name": "ready"}, {"name": "research"},
+                           {"name": "in_progress"}, {"name": "review"}, {"name": "blocked"},
+                           {"name": "done"}]}),
+    )
+    .await
+    .ok();
+    let k1 = card(&td, "proj/w1", json!({"title": "Parser"})).await;
+    td.post_empty_as("proj/w1", &format!("/api/cards/{k1}/claim"))
+        .await
+        .ok();
+    let k2 = card(&td, "proj/w2", json!({"title": "Spike"})).await;
+    td.post(
+        &format!("/api/cards/{k2}/move"),
+        json!({"column": "research"}),
+    )
+    .await
+    .ok();
+    td.post(
+        &format!("/api/cards/{k2}/assign"),
+        json!({"assignee": "proj/w2"}),
+    )
+    .await
+    .ok();
+    let k3 = card(&td, "proj/w1", json!({"title": "Later"})).await;
+    let k4 = card(&td, "proj/w2", json!({"title": "Gone"})).await;
+    td.post_empty_as("proj/w2", &format!("/api/cards/{k4}/claim"))
+        .await
+        .ok();
+    td.delete(&format!("/api/cards/{k4}")).await;
+    let x = td
+        .post_as(
+            "other/x",
+            "/api/projects/other/cards",
+            json!({"title": "Other"}),
+        )
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    td.post_empty_as("other/x", &format!("/api/cards/{x}/claim"))
+        .await
+        .ok();
+
+    let ids = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // The operator: every project, by project; the backlog card and the
+    // archived one stay out.
+    let all = td.get("/api/cards").await.ok().clone();
+    assert_eq!(ids(&all), [x.clone(), k2.clone(), k1.clone()], "{all:#?}");
+    assert!(!ids(&all).contains(&k3) && !ids(&all).contains(&k4));
+    let one = |id: &str| {
+        all.as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(one(&k1)["column_kind"], "working");
+    assert_eq!(one(&k1)["column"], "in_progress");
+    assert_eq!(one(&k1)["project"], "proj");
+    assert_eq!(one(&k1)["assignee_name"], "proj/w1");
+    let w1 = td.get("/api/agents/proj%2Fw1").await.ok().clone();
+    assert_eq!(one(&k1)["assignee_status"], w1["status"]);
+    assert_eq!(one(&k2)["column_kind"], "research");
+    assert_eq!(one(&k2)["assignee_name"], "proj/w2");
+    // A sysadmin agent reads all; another agent only its own project.
+    let sys = td.get_as("ops/root", "/api/cards").await.ok().clone();
+    assert_eq!(ids(&sys), ids(&all));
+    let mine = td.get_as("proj/w1", "/api/cards").await.ok().clone();
+    assert_eq!(ids(&mine), [k2.clone(), k1.clone()]);
+    let theirs = td.get_as("other/x", "/api/cards").await.ok().clone();
+    assert_eq!(ids(&theirs), [x]);
+    // Other columns on request.
+    let r = td.get("/api/cards?columns=working").await.ok().clone();
+    assert_eq!(ids(&r).len(), 2, "{r:#?}");
+    let r = td.get("/api/cards?columns=backlog").await.ok().clone();
+    assert_eq!(ids(&r), [k3]);
+}

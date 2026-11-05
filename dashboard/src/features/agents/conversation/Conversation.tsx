@@ -67,6 +67,19 @@ export function Conversation(props: { agent: Agent; onOpenTerminal?: () => void;
     ),
   );
 
+  // The agent runs again in the same session (a wake resumes it): the
+  // transcript that went inactive at the stop reads its session again, so
+  // `active` and the stream come back (TER-44).
+  createEffect(
+    on(
+      live,
+      (on, was) => {
+        if (on && was === false && session() && !t.active()) t.reopen();
+      },
+      { defer: true },
+    ),
+  );
+
   // The transcript's own `active` (its page, then `status` frames). When it cannot load, the list's word.
   const isActive = () => {
     if (!t.error()) return t.active();
@@ -101,14 +114,20 @@ export function Conversation(props: { agent: Agent; onOpenTerminal?: () => void;
         label="Conversation"
         empty={<p class="muted convo-note">{loaded() ? "No session yet. Send a turn: the agent wakes to run it." : "Loading…"}</p>}
       />
-      <Composer agent={props.agent} sessionActive={isActive()} />
+      {/* The view always shows the agent's current session (`currentSession`): a turn may go. */}
+      <Composer agent={props.agent} sessionActive={isActive()} current />
       {props.footer}
     </section>
   );
 }
 
 /** The composer under the transcript: the turn text, images, Send, and Stop while a turn runs. */
-export function Composer(props: { agent: Agent; sessionActive: boolean }) {
+/**
+ * `sessionActive`: a turn runs in the shown session now (the Stop button).
+ * `current`: the view shows the agent's current session; only then may a
+ * turn go (TER-44: a turn wakes a stopped agent, so liveness does not matter).
+ */
+export function Composer(props: { agent: Agent; sessionActive: boolean; current: boolean }) {
   const [text, setText] = createSignal("");
   const [images, setImages] = createSignal<DraftImage[]>([]);
   const [busy, setBusy] = createSignal(false);
@@ -119,7 +138,7 @@ export function Composer(props: { agent: Agent; sessionActive: boolean }) {
   let fileInput: HTMLInputElement | undefined;
   let nextId = 0;
   onCleanup(() => clearTimeout(timer));
-  const state = () => composerState({ agentStatus: props.agent.status, sessionActive: props.sessionActive, paused: props.agent.paused });
+  const state = () => composerState({ agentStatus: props.agent.status, current: props.current, paused: props.agent.paused });
 
   // ----- Stop: interrupt the running turn (issue #12) -----
   const [stopping, setStopping] = createSignal(false);

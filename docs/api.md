@@ -3747,6 +3747,7 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards by number, cursor: number |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
+| `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |
 | `GET /api/cards/{id}` | | `200` card |
 | `PATCH /api/cards/{id}` | card patch | `200` card |
 | `DELETE /api/cards/{id}` | | `204`; the card is archived |
@@ -3809,6 +3810,21 @@ supply:
 - `assignee` follows the assign rules.
 - `eta_at` follows the ETA rule (§8.2). The daemon sets it last, after the
   assignment.
+
+**Active cards** (`GET /api/cards`, TER-43, for the dashboard home). The
+cards that are not archived in the columns `columns` (a comma list,
+default `working,research`) of each board that the caller may read: every
+project for the operator and a sysadmin, the own project for another agent.
+A column matches when its role or its name (any case) is one of the values,
+so `working` finds the column with that role and `research` the column
+named `research` (it has no role). By project, then column position, then
+card position; at most 500. Each card is a card with two more fields:
+
+- `column_kind`: `working` for the column with that role, else the column
+  name in lower case (`research`).
+- `assignee_status`: the stored status of the assignee agent (`working`,
+  `idle`, `waiting`, `blocked`, `stopped`, ...). Absent for the operator,
+  no assignee, or a removed agent.
 
 **Card patch.** Every field is optional:
 `title`, `body`, `labels`, `add_labels`, `remove_labels`, `repo`, `branch`,

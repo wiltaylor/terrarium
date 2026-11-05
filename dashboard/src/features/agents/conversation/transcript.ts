@@ -67,7 +67,9 @@ export function createTranscript(src: TranscriptSource) {
         if (gen !== generation) return;
         if (f.type === "status") {
           setLastStatus(f.status);
-          if (isEndStatus(f.status)) setActive(false);
+          // The daemon says `ended` while the agent does not run, and the
+          // agent's status once it runs again (the same current session, TER-44).
+          setActive(!isEndStatus(f.status));
           return;
         }
         if (f.block.seq <= floor()) return; // before the window
@@ -80,6 +82,17 @@ export function createTranscript(src: TranscriptSource) {
     } finally {
       if (gen === generation) setLoading(false);
     }
+  };
+
+  /** Read the session again from the start: a new page, a new stream. */
+  const reopen = () => {
+    const gen = ++generation;
+    closeStream();
+    setStreamState("idle");
+    setStreamError(null);
+    const a = src.agentId();
+    const s = src.session();
+    if (a && s) void open(gen, a, s);
   };
 
   createEffect(
@@ -133,5 +146,6 @@ export function createTranscript(src: TranscriptSource) {
     lastStatus,
     hasEarlier: () => floor() > 0,
     loadEarlier: earlier,
+    reopen,
   };
 }

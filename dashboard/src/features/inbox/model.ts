@@ -13,22 +13,39 @@ export const INBOX_TABS = [
   { id: "notice", label: "Notices" },
   { id: "mail", label: "Mail to you" },
   { id: "system", label: "System" },
-  { id: "watch", label: "Asked" },
 ] as const;
-export type InboxTab = (typeof INBOX_TABS)[number]["id"];
+/** A kind tab. `watch` is no tab (the Asked status tab lists the waiting asks), but an older link may name it. */
+export type InboxTab = (typeof INBOX_TABS)[number]["id"] | "watch";
 
-/** The status tabs. System items show only while they are open. */
+/**
+ * The status tabs. System items show only while they are open. Asked
+ * (TER-42) lists the asks and forwards that wait for an agent (the open
+ * watches); Open never shows them: the agent's reply shows on Open, as a
+ * mail item. An answered or cancelled ask is under Done.
+ */
 export const STATUS_TABS = [
   { id: "open", label: "Open" },
   { id: "done", label: "Done" },
+  { id: "asked", label: "Asked" },
 ] as const;
 export type InboxStatusTab = (typeof STATUS_TABS)[number]["id"];
+
+/** The status tab of `?status=`, and of an older `?tab=watch` link (the Asked kind tab of 0.1.0). */
+export function statusTabOf(status: string | undefined, tab: string | undefined): InboxStatusTab {
+  if (status === "done") return "done";
+  if (status === "asked" || tab === "watch") return "asked";
+  return "open";
+}
 
 export const EMPTY_COUNTS: InboxCounts = { open: 0, urgent: 0, critical: 0, question: 0, notice: 0, mail: 0, system: 0, watch: 0 };
 
 /** The query of a tab pair, for `GET /api/inbox`. */
 export function inboxQuery(tab: InboxTab, status: InboxStatusTab, project: string): { status: InboxStatus; kind?: InboxKind; project?: string } {
-  return { status, ...(tab === "all" ? {} : { kind: tab }), ...(project ? { project } : {}) };
+  const p = project ? { project } : {};
+  // Asked: the open watches, whatever the kind tab. The daemon's `open`
+  // includes them; Open filters them out (`matchesTabs`).
+  if (status === "asked") return { status: "open", kind: "watch", ...p };
+  return { status, ...(tab === "all" ? {} : { kind: tab }), ...p };
 }
 
 /** The rank of a priority: critical 2, urgent 1, normal 0. */
@@ -51,9 +68,12 @@ export const sortItems = (items: InboxItem[]): InboxItem[] => items.slice().sort
 
 /** Does the item show under the tabs? */
 export function matchesTabs(i: InboxItem, tab: InboxTab, status: InboxStatusTab, project = ""): boolean {
-  if (tab !== "all" && i.kind !== tab) return false;
   if (project && i.project !== project) return false;
-  return status === "open" ? i.open : !i.open && i.kind !== "system";
+  // Asked lists the waiting asks whatever the kind tab.
+  if (status === "asked") return i.kind === "watch" && i.open;
+  if (tab !== "all" && i.kind !== tab) return false;
+  if (status === "open") return i.open && i.kind !== "watch";
+  return !i.open && i.kind !== "system";
 }
 
 /**
@@ -101,7 +121,8 @@ export const isInboxEvent = (e: Pick<AgentEvent, "kind">): boolean => e.kind ===
 /** The text of the empty list. */
 export function emptyText(tab: InboxTab, status: InboxStatusTab): string {
   if (status === "done" && tab === "system") return "A system item shows only while it is open.";
-  if (tab === "watch") return status === "open" ? "You wait for no agent. Ask an agent, or forward a question to one." : "No answered or cancelled asks yet.";
+  if (status === "asked") return "You wait for no agent. Ask an agent, or forward a question to one.";
+  if (tab === "watch") return "No answered or cancelled asks yet.";
   if (status === "open") return tab === "all" ? "Nothing waits for you." : `No open ${KIND_LABELS[tab]} items.`;
   return "Nothing is done here yet.";
 }

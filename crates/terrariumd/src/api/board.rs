@@ -20,6 +20,7 @@ pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/projects/{name}/board", get(show_board).patch(patch_board))
         .route("/projects/{name}/cards", get(list_cards).post(create_card))
+        .route("/cards", get(active_cards))
         .route("/cards/{id}", get(show).patch(update).delete(archive))
         .route("/cards/{id}/move", post(move_card))
         .route("/cards/{id}/assign", post(assign))
@@ -84,6 +85,43 @@ async fn list_cards(
     })
     .await?;
     Ok(paged(rows))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ActiveQuery {
+    /// Comma-separated roles or column names. Default `working,research`.
+    #[serde(default)]
+    columns: Option<String>,
+}
+
+/// `GET /api/cards?columns=working,research` (TER-43): the cards that are
+/// not archived in those columns of every board that the caller may read:
+/// each project for the operator and a sysadmin, the caller's own project
+/// for another agent. Each card has `column_kind` and `assignee_status`.
+async fn active_cards(
+    State(state): State<Shared>,
+    actor: Actor,
+    ApiQuery(q): ApiQuery<ActiveQuery>,
+) -> ApiResult<Json<Vec<board::ActiveCard>>> {
+    let wanted: Vec<String> = q
+        .columns
+        .as_deref()
+        .unwrap_or("working,research")
+        .split(',')
+        .map(|c| c.trim().to_owned())
+        .filter(|c| !c.is_empty())
+        .collect();
+    let projects: Option<Vec<String>> = match &actor {
+        Actor::Operator => None,
+        Actor::Agent(a) if a.is_sysadmin() => None,
+        Actor::Agent(a) => Some(vec![a.project.clone()]),
+    };
+    Ok(Json(
+        state
+            .db
+            .read(move |c| board::active_cards(c, projects.as_deref(), &wanted))
+            .await?,
+    ))
 }
 
 async fn create_card(

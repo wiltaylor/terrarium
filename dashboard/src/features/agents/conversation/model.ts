@@ -237,19 +237,22 @@ export interface ComposerState {
 }
 
 /**
- * When the operator may type a turn. A turn to an agent that does not run
- * waits in the queue: the daemon wakes the agent and then types it. A
- * paused agent keeps the turn until the operator resumes it.
+ * When the operator may type a turn. A turn goes to the agent, not to a
+ * session (TER-44): a turn to an agent that does not run waits in the
+ * queue, and the daemon wakes the agent and then types it. So the composer
+ * is on whenever the view shows the agent's current session (`current`),
+ * also when that session is not live; it is off only on an older session.
+ * A paused agent keeps the turn until the operator resumes it.
  */
-export function composerState(o: { agentStatus: AgentStatus | undefined; sessionActive: boolean; paused?: boolean }): ComposerState {
+export function composerState(o: { agentStatus: AgentStatus | undefined; current: boolean; paused?: boolean }): ComposerState {
   const st = o.agentStatus;
   if (!st) return { enabled: false, reason: "The agent is not known yet." };
+  if (!o.current) return { enabled: false, reason: "This is an older session of the agent. Open its current session (the Conversation tab) to send a turn." };
   if (o.paused) return { enabled: true, note: "queued — the agent is paused. It runs the turn after you resume it." };
   if (st === "stopped") return { enabled: true, note: "queued — the agent is stopped. It wakes to run the turn." };
   // An agent in error does not wake: the turn waits until a restart clears the error.
   if (st === "error") return { enabled: true, note: "queued — the agent is in error. It runs the turn after a restart." };
   if (st === "starting" || st === "restarting") return { enabled: true, note: `queued — the agent is ${st}` };
-  if (!o.sessionActive) return { enabled: false, reason: "This is not the active session. Pick the active session to send a turn." };
   if (st !== "idle" && st !== "waiting") return { enabled: true, note: `queued — the agent is ${st}` };
   return { enabled: true };
 }

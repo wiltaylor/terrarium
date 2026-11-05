@@ -58,6 +58,7 @@ import type {
   TerrariumRelease,
   UpdateRun,
   UpdaterImage,
+  ActiveCard,
   Card,
   CardComment,
   Column,
@@ -3010,6 +3011,26 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           return view(c);
         }),
       sessions: (id) => reply(() => cardSessions(cardById(id))),
+      // store/board.rs active_cards: the operator reads every project; a
+      // column matches when its role or its name is one of `columns`.
+      active: (q = {}) =>
+        reply(() => {
+          const wanted = (q.columns ?? ["working", "research"]).map((x) => x.toLowerCase());
+          const colIndex = (proj: string, name: string) => (w.columns[proj] ?? []).findIndex((x) => x.name === name);
+          const rows: ActiveCard[] = w.cards
+            .filter((c) => !c.archived)
+            .filter((c) => {
+              const role = roleOf(c.project, c.column);
+              return (role !== undefined && wanted.includes(role)) || wanted.includes(c.column.toLowerCase());
+            })
+            .sort((a, b) => a.project.localeCompare(b.project) || colIndex(a.project, a.column) - colIndex(b.project, b.column) || a.position - b.position)
+            .map((c) => {
+              const as = c.assignee ? w.agents.find((a) => a.id === c.assignee) : undefined;
+              const kind = roleOf(c.project, c.column) === "working" ? "working" : c.column.toLowerCase();
+              return { ...view(c), column_kind: kind, ...(as ? { assignee_status: as.status } : {}) };
+            });
+          return rows.slice(0, 500);
+        }),
       events: (id, q = {}) =>
         reply(() => {
           const c = cardById(id);

@@ -32,6 +32,7 @@ function mount(initial: Agent) {
           return a();
         },
         sessionActive: true,
+        current: true,
       }),
     el,
   );
