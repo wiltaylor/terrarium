@@ -1005,7 +1005,7 @@ fn fake_docker(dir: &Path) -> PathBuf {
         &docker,
         r#"#!/bin/sh
 case "$1" in
-  inspect) echo '[{"Id":"abc","Name":"/terrarium-dbox","State":{"Status":"running"}}]' ;;
+  inspect) echo '[{"Id":"abc","Name":"/terrarium-p-dbox","State":{"Status":"running"}}]' ;;
   run) echo abc ;;
   exec) shift
     while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;; *) break ;; esac; done
@@ -1020,7 +1020,7 @@ esac
     docker
 }
 
-/// A lab whose queue runs on the docker target `dbox` (fake docker), with
+/// A lab whose queue runs on the docker target `p-dbox` (fake docker), with
 /// a recipe that starts a child, ignores `TERM` (the child too), and
 /// appends the child's PID to the returned file.
 async fn docker_lab(slots: u32, timeout_secs: u64) -> (Lab, tempfile::TempDir, PathBuf) {
@@ -1031,7 +1031,7 @@ async fn docker_lab(slots: u32, timeout_secs: u64) -> (Lab, tempfile::TempDir, P
         .td
         .post(
             "/api/targets",
-            json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3",
+            json!({"name": "p-dbox", "kind": "docker", "host": "lab1", "image": "alpine:3",
                    "project": "p"}),
         )
         .await;
@@ -1046,7 +1046,7 @@ async fn docker_lab(slots: u32, timeout_secs: u64) -> (Lab, tempfile::TempDir, P
         .td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "dbox", "recipe": recipe, "slots": slots,
+            json!({"target": "p-dbox", "recipe": recipe, "slots": slots,
                    "timeout_secs": timeout_secs,
                    "work_dir": work_dir.display().to_string()}),
         )
