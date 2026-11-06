@@ -4103,3 +4103,38 @@ p.warn { color: var(--warn); margin: 0; }
   margin: 0;
   font-size: 0.95rem;
 }
+/* Home, Blocked (TER-51): one table for every project group, with fixed column widths, so the columns line up. The
+   title and the reason end with an ellipsis; the full text is the tooltip. */
+.blocked-table {
+  table-layout: fixed;
+  min-width: 720px;
+}
+.blocked-table .col-id {
+  width: 7.5em;
+}
+.blocked-table .col-title {
+  width: 30%;
+}
+.blocked-table .col-agent {
+  width: 15em;
+}
+.blocked-table .col-since {
+  width: 7em;
+}
+.blocked-table td {
+  vertical-align: middle;
+}
+.blocked-table td.blocked-title,
+.blocked-table td.blocked-reason,
+.blocked-table td.blocked-agent {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blocked-table .blocked-group th {
+  padding: 14px 10px 4px;
+}
+.blocked-table .blocked-group h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}

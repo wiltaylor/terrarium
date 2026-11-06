@@ -9,6 +9,7 @@ import { usageLabel } from "./labels";
 import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
 import { HostCards } from "./HostCards";
 import { ActiveCards } from "./ActiveCards";
+import { BlockedCards } from "./BlockedCards";
 
 const HOUR = 3_600_000;
 
@@ -76,6 +77,8 @@ export function Home() {
           </For>
         </div>
       </section>
+
+      <BlockedCards now={now()} />
 
       <ActiveCards now={now()} />
 

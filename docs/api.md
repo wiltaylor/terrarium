@@ -3875,13 +3875,18 @@ project for the operator and a sysadmin, the own project for another agent.
 A column matches when its role or its name (any case) is one of the values,
 so `working` finds the column with that role and `research` the column
 named `research` (it has no role). By project, then column position, then
-card position; at most 500. Each card is a card with two more fields:
+card position; at most 500. Each card is a card with more fields:
 
-- `column_kind`: `working` for the column with that role, else the column
-  name in lower case (`research`).
+- `column_kind`: `working` or `blocked` for the column with that role,
+  else the column name in lower case (`research`).
 - `assignee_status`: the stored status of the assignee agent (`working`,
   `idle`, `waiting`, `blocked`, `stopped`, ...). Absent for the operator,
   no assignee, or a removed agent.
+- `blocked_since` and `blocked_reason` (TER-51), only for a card in the
+  blocked column: when the card moved there and the comment of that move
+  (what is needed), from the last `moved` event to the blocked column.
+  Without that event, `updated_at` and the newest comment. The dashboard
+  home lists them with `?columns=blocked`.
 
 **Card patch.** Every field is optional:
 `title`, `body`, `labels`, `add_labels`, `remove_labels`, `repo`, `branch`,

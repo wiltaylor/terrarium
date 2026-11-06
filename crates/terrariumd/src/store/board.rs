@@ -641,6 +641,37 @@ pub struct ActiveCard {
     /// a removed agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee_status: Option<String>,
+    /// A card in the blocked column (TER-51): when it moved there (the
+    /// last move event; the card's `updated_at` without one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_since: Option<String>,
+    /// A card in the blocked column: the comment of that move (what is
+    /// needed), or the newest comment without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
+/// When a card in the blocked column moved there, and the comment of that
+/// move. The move event has both; without one (a card from before the
+/// event log), `updated_at` and the newest comment.
+fn blocked_info(conn: &Connection, card: &Card) -> ApiResult<(String, Option<String>)> {
+    let ev: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT at, json_extract(payload, '$.comment') FROM events
+              WHERE card = ?1 AND kind = 'card'
+                AND json_extract(payload, '$.change') = 'moved'
+                AND json_extract(payload, '$.to_role') = ?2
+              ORDER BY seq DESC LIMIT 1",
+            params![card.id, BLOCKED],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let newest = || card.comments.last().map(|c| c.body.clone());
+    Ok(match ev {
+        Some((at, Some(c))) if !c.trim().is_empty() => (at, Some(c)),
+        Some((at, _)) => (at, newest()),
+        None => (card.updated_at.clone(), newest()),
+    })
 }
 
 /// The most cards of [`active_cards`].
@@ -677,6 +708,7 @@ pub fn active_cards(
     for row in rows {
         let kind = match row.column_role.as_deref() {
             Some(WORKING) => WORKING.to_owned(),
+            Some(BLOCKED) => BLOCKED.to_owned(),
             _ => row.column.to_lowercase(),
         };
         let card = render(conn, row)?;
@@ -688,10 +720,18 @@ pub fn active_cards(
                 .optional()?,
             _ => None,
         };
+        let (blocked_since, blocked_reason) = if kind == BLOCKED {
+            let (since, reason) = blocked_info(conn, &card)?;
+            (Some(since), reason)
+        } else {
+            (None, None)
+        };
         out.push(ActiveCard {
             card,
             column_kind: kind,
             assignee_status: status,
+            blocked_since,
+            blocked_reason,
         });
     }
     Ok(out)

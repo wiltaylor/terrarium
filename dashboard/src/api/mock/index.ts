@@ -3039,8 +3039,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             .sort((a, b) => a.project.localeCompare(b.project) || colIndex(a.project, a.column) - colIndex(b.project, b.column) || a.position - b.position)
             .map((c) => {
               const as = c.assignee ? w.agents.find((a) => a.id === c.assignee) : undefined;
-              const kind = roleOf(c.project, c.column) === "working" ? "working" : c.column.toLowerCase();
-              return { ...view(c), column_kind: kind, ...(as ? { assignee_status: as.status } : {}) };
+              const role = roleOf(c.project, c.column);
+              const kind = role === "working" || role === "blocked" ? role : c.column.toLowerCase();
+              const row: ActiveCard = { ...view(c), column_kind: kind, ...(as ? { assignee_status: as.status } : {}) };
+              if (kind === "blocked") {
+                // The daemon's `blocked_info`: the last move to the blocked column, else updated_at and the newest comment.
+                const ev = w.events.filter((e) => e.card === c.id && e.kind === "card" && e.data.change === "moved" && e.data.to_role === "blocked").at(-1);
+                const note = typeof ev?.data.comment === "string" && ev.data.comment.trim() ? ev.data.comment : row.comments.at(-1)?.body;
+                row.blocked_since = ev?.at ?? c.updated_at;
+                if (note) row.blocked_reason = note;
+              }
+              return row;
             });
           return rows.slice(0, 500);
         }),

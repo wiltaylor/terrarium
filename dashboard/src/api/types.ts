@@ -1634,6 +1634,10 @@ export interface ActiveCard extends Card {
   column_kind: string;
   /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
   assignee_status?: string;
+  /** A card in the blocked column (TER-51): when it moved there. */
+  blocked_since?: string;
+  /** A card in the blocked column: the comment of that move, or the newest comment without one. */
+  blocked_reason?: string;
 }
 
 export interface Board {
