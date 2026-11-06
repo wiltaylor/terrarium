@@ -198,7 +198,12 @@ fn other_worker(conn: &rusqlite::Connection, sp: &spawns::Spawn) -> ApiResult<Op
 
 /// Refuse the unpark of the parked `sp` whose object has the worker
 /// `other`: drop its queued unpark, write `agent.unpark_refused`.
-fn refuse(t: &mut crate::db::Tx<'_>, sp: &spawns::Spawn, other: &str, cause: &str) -> ApiResult<()> {
+fn refuse(
+    t: &mut crate::db::Tx<'_>,
+    sp: &spawns::Spawn,
+    other: &str,
+    cause: &str,
+) -> ApiResult<()> {
     spawns::unqueue_unpark(t, &sp.id)?;
     let who = crate::store::agents::display_name(t, other)?.unwrap_or_else(|| other.to_owned());
     t.emit(

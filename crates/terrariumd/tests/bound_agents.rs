@@ -591,7 +591,8 @@ async fn reconcile_repairs_a_missed_park_and_unpark() {
     assert_eq!(spawn_row(&td, &ea).await["park_reason"], "card in review");
     // In line now: a second reconcile does nothing.
     assert_eq!(terrariumd::bound::reconcile(&s).await, 0);
-    td.post(&format!("/api/agents/{ea}/cancel"), json!({})).await;
+    td.post(&format!("/api/agents/{ea}/cancel"), json!({}))
+        .await;
 
     // A missed unpark: parked, and the card is back in in_progress.
     let b = card(&td, "p", "in_progress").await;
@@ -662,7 +663,9 @@ async fn an_unpark_is_refused_when_another_agent_has_the_card() {
     })
     .await;
     let ev = td
-        .get(&format!("/api/agents/{ea}/events?kind=agent.unpark_refused"))
+        .get(&format!(
+            "/api/agents/{ea}/events?kind=agent.unpark_refused"
+        ))
         .await
         .ok()
         .clone();
