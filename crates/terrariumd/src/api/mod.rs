@@ -14,6 +14,7 @@ mod event_sources;
 mod fleet;
 mod hosts;
 mod inbox;
+mod jobs;
 pub mod install;
 mod longpoll;
 mod mail;
@@ -312,6 +313,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(waits::routes())
         .merge(questions::routes())
         .merge(inbox::routes())
+        .merge(jobs::routes())
         .merge(config::routes())
         .merge(skills::routes())
         .merge(system_prompts::routes())

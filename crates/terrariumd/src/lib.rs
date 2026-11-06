@@ -28,6 +28,7 @@ pub mod harness_tools;
 pub mod harness_versions;
 pub mod hosts;
 pub mod ingest;
+pub mod jobs;
 pub mod leases;
 pub mod lifecycle;
 pub mod login_session;
@@ -331,6 +332,8 @@ pub async fn start_with_usage(
     // old daemon are due again.
     tasks.push(webhooks::spawn(state.clone()));
     tasks.extend(waits::spawn(&state));
+    // The job queue (TER-71): fails the runs that the last daemon lost.
+    tasks.push(jobs::spawn(&state));
     // After the reconcile: the agents with queued work wake.
     tasks.extend(lifecycle::spawn(&state));
     // The card files of each assigned card, in the workspace (§8.4).
