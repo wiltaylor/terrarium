@@ -10302,7 +10302,10 @@ daemon checks it before the slots of the project. The host of a job is
 the stable ID of the delivery target's host agent (`host`), else the
 resolved IP of its SSH `address` (sorted first address when there are
 several, lowercase hostname when resolution fails), else the target name.
-DNS is resolved outside the database lock on first use. The first result,
+DNS is resolved outside the database lock when an API target is set or
+its address changes, and at daemon startup for existing targets. Targets
+from file or fleet changes and legacy cap rows are backfilled before use.
+The first result,
 including a failed lookup, is persisted by hostname and reused across
 ticks and daemon restarts, so a changing DNS answer cannot split a cap.
 SSH usernames and ports do not affect the key. An SSH target and a host

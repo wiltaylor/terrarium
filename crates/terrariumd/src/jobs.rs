@@ -123,6 +123,9 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         if let Some(state) = weak.upgrade() {
+            if let Err(e) = prepare_hosts(&state.db, None).await {
+                warn!("cannot initialize stored job host keys: {e}");
+            }
             match state.db.write("system", jobs::fail_lost).await {
                 Ok(lost) => {
                     for j in lost {
