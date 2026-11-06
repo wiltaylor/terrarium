@@ -1,8 +1,8 @@
 //! The card reminder (PLAN §18, "Card reminder"; GitHub issue #20), with
 //! the fake supervisor: an agent that goes idle after a turn with cards
 //! in the working column gets one `[System:card]` turn, and each card a
-//! `reminded` event. `waiting` has no fake here; the unit tests of
-//! `terrariumd::card_reminder` cover it.
+//! `reminded` event. A time wait gives `waiting` (TER-50); the unit tests
+//! of `terrariumd::card_reminder` cover the status rules.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -282,4 +282,69 @@ async fn the_reminder_comes_before_the_idle_stop() {
         "{}",
         prompts[1]
     );
+}
+
+/// TER-50: an agent with a card in progress ends a turn with an open time
+/// wait (`waiting`). The wait ends: `idle` after the turn, but its wake
+/// mail comes after the debounce. No reminder before that mail: the first
+/// turn after the end is the mail. The idle after the mail's turn then
+/// reminds once (the card is still in progress).
+#[tokio::test]
+async fn no_reminder_before_the_wake_mail_of_a_wait_that_ended() {
+    let (td, w) = setup().await;
+    let st = state(&td);
+    st.waits.set_tuning(terrariumd::waits::Tuning {
+        tick: Duration::from_millis(20),
+        wake_debounce: Duration::from_millis(400),
+        ..terrariumd::waits::Tuning::default()
+    });
+    td.sup.set_mail_push(true);
+    let c = claimed(&td, "Build").await;
+    let at = (chrono::Utc::now() + chrono::Duration::milliseconds(1500))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let wait = td
+        .post_as(
+            &w,
+            &format!("/api/agents/{w}/waits"),
+            json!({"kind": "time", "at": at}),
+        )
+        .await;
+    assert_eq!(wait.status, 201, "{}", wait.body);
+    let wid = wait.body["id"].as_str().unwrap().to_owned();
+    // The turn ends with the wait open: `waiting`, no reminder.
+    td.post(&format!("/api/agents/{w}/send"), json!({"text": "work"}))
+        .await
+        .ok();
+    until("the turn", || async {
+        td.sup.prompts(aid(&w)).contains(&"[User] work".to_owned())
+    })
+    .await;
+    until("waiting after the turn", || async {
+        agent(&td, &w).await["status"] == "waiting"
+    })
+    .await;
+    let before = td.sup.prompts(aid(&w)).len();
+    assert!(reminders(&td, &w).is_empty());
+    until("the wait ends", || async {
+        td.get(&format!("/api/waits/{wid}")).await.body["state"] == "resolved"
+    })
+    .await;
+    until("the wake turn and the reminder after it", || async {
+        !reminders(&td, &w).is_empty()
+    })
+    .await;
+    let after: Vec<String> = td.sup.prompts(aid(&w))[before..].to_vec();
+    assert!(after[0].starts_with("New mail"), "{after:#?}");
+    let r: Vec<&String> = after
+        .iter()
+        .filter(|p| p.starts_with("[System:card]"))
+        .collect();
+    assert_eq!(r.len(), 1, "{after:#?}");
+    assert!(r[0].contains(&c), "{after:#?}");
+    let mail = td
+        .get(&format!("/api/mail?to={w}&from=system"))
+        .await
+        .ok()
+        .clone();
+    assert!(mail.to_string().contains("wait resolved"), "{mail}");
 }

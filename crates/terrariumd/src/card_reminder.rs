@@ -9,7 +9,10 @@
 //!   started (a wake with no turn yet) get nothing. A paused agent, an
 //!   agent that compacts, and an agent with a pending reset get nothing.
 //!   The check runs at the change to `idle`, so it comes before the idle
-//!   stop, which needs a full rest.
+//!   stop, which needs a full rest. An agent with queued work (a mail, a
+//!   pointer, a turn, the `--then` of a reset) or a wait that ended in the
+//!   last [`JUST_ENDED`] (its wake mail comes next) gets nothing: that turn
+//!   wakes it anyway, and the idle after it checks again (TER-50).
 //! - **Limits.** Once for each card: a card is due again only after
 //!   [`REMIND_AGAIN`], or when its ETA passed after the last reminder. The
 //!   agent's own answer (a comment, an ETA) does not make the card due
@@ -31,10 +34,14 @@ use terrarium_core::{AgentId, AgentStatus};
 use tracing::{debug, info, warn};
 
 use crate::api::Shared;
-use crate::store::{agents, board};
+use crate::store::{agents, board, waits};
 
 /// The global default of `card_reminder` (`on` or `off`). Unset: on.
 pub const ENV_CARD_REMINDER: &str = "TERRARIUM_CARD_REMINDER";
+
+/// A wait that ended this recently has its wake mail on the way or just
+/// typed: no reminder before it (TER-50).
+pub const JUST_ENDED: Duration = Duration::from_secs(10);
 
 /// After a reminder, the time until the same card is due again.
 pub const REMIND_AGAIN: Duration = Duration::from_secs(60 * 60);
@@ -205,16 +212,22 @@ async fn remind(state: &Shared, agent: AgentId) {
         return;
     }
     let key = agent.to_string();
+    let since = (chrono::Utc::now() - chrono::Duration::from_std(JUST_ENDED).unwrap_or_default())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let read = state
         .db
         .read(move |c| {
             let v = agents::get(c, &key)?;
             let reset = agents::pending_reset(c, &key)?.is_some();
             let cards = board::working_cards_of(c, &key)?;
-            Ok((v, reset, cards))
+            // Work that wakes the agent anyway: its turn comes first, and
+            // the idle after it checks the cards again (TER-50).
+            let queued = agents::queued_count(c, &key)? > 0
+                || waits::ended_recently(c, &key, &since)?;
+            Ok((v, reset || queued, cards))
         })
         .await;
-    let (view, reset, cards) = match read {
+    let (view, skip, cards) = match read {
         Ok(r) => r,
         Err(e) => {
             debug!(agent = %agent, "the card reminder cannot read the agent: {e}");
@@ -226,7 +239,7 @@ async fn remind(state: &Shared, agent: AgentId) {
         .agent
         .card_reminder
         .unwrap_or_else(|| reminders.default_on());
-    if !on || view.paused || reset || cards.is_empty() {
+    if !on || view.paused || skip || cards.is_empty() {
         return;
     }
     if state.supervisor.status(agent).await != Some(AgentStatus::Idle) {

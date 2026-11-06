@@ -297,6 +297,22 @@ pub fn open_count(conn: &Connection, agent: &str) -> ApiResult<usize> {
     Ok(usize::try_from(n).unwrap_or(0))
 }
 
+/// True when a wait of `agent` ended and its wake mail has still to go
+/// out, or went out for a wait that ended at `since` or later (a stored
+/// time): the wake mail is on its way or was just typed (TER-50). A wait
+/// that the waiter cancelled itself has no wake mail (`notified_at` is
+/// its end) and does not count.
+pub fn ended_recently(conn: &Connection, agent: &str, since: &str) -> ApiResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM waits WHERE agent = ?1 AND state <> 'open'
+           AND (notified_at IS NULL
+                OR (resolved_at >= ?2 AND notified_at > resolved_at))",
+        params![agent, since],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// What `agent` waits on, in one short line: the summaries of the open
 /// waits, the oldest first, at most 3 and a count of the others.
 pub fn waiting_on(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
