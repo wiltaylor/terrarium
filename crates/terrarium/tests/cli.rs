@@ -785,7 +785,10 @@ fn agent_mode_tunnels_every_call_over_the_runner_socket() {
     assert!(o.status.success(), "{}", text(&o.stderr));
     let me: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(me["project"], "terra");
-    assert_eq!(me["roles"], json!(["sysadmin", "architect", "project_admin"]));
+    assert_eq!(
+        me["roles"],
+        json!(["sysadmin", "architect", "project_admin"])
+    );
     let o = agent(&["whoami"]);
     assert!(o.status.success(), "{}", text(&o.stderr));
     assert!(
