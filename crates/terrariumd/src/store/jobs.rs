@@ -411,7 +411,10 @@ pub fn set_host_aliases(
     let mut keys = Vec::new();
     for a in aliases {
         let a = a.trim();
-        if a.len() > 253 || a.chars().any(|c| c.is_control() || c == '/' || c.is_whitespace()) {
+        if a.len() > 253
+            || a.chars()
+                .any(|c| c.is_control() || c == '/' || c.is_whitespace())
+        {
             return Err(ApiError::invalid(format!("bad alias `{a}`")));
         }
         let key = address_key(a);
@@ -444,7 +447,10 @@ pub fn set_host_aliases(
     keys.sort();
     keys.dedup();
     let old = host_aliases(t)?.remove(&agent.id).unwrap_or_default();
-    t.execute("DELETE FROM job_host_aliases WHERE host_id = ?1", [&agent.id])?;
+    t.execute(
+        "DELETE FROM job_host_aliases WHERE host_id = ?1",
+        [&agent.id],
+    )?;
     let at = now();
     for key in &keys {
         t.execute(
@@ -1394,7 +1400,10 @@ mod tests {
             assert_eq!(canonical_key(&conn, key).unwrap(), want, "{key}");
         }
         let unresolved = unresolved_hosts(&conn, None).unwrap();
-        assert!(unresolved.contains(&"gone.lan".to_owned()), "{unresolved:?}");
+        assert!(
+            unresolved.contains(&"gone.lan".to_owned()),
+            "{unresolved:?}"
+        );
         assert!(!unresolved.contains(&"helios.lan".to_owned()));
     }
 

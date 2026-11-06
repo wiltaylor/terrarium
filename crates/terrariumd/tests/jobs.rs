@@ -174,17 +174,20 @@ async fn host_counts_respect_the_readers_project() {
 async fn an_ssh_alias_of_a_host_agent_is_one_host() {
     use terrariumd::store::jobs::{self, JobKind, NewJob};
     let td = TestDaemon::start().await;
-    let id = td
-        .post("/api/hosts", json!({"name": "helios"}))
-        .await
-        .ok()["id"]
+    let id = td.post("/api/hosts", json!({"name": "helios"})).await.ok()["id"]
         .as_str()
         .unwrap()
         .to_owned();
     td.post("/api/hosts", json!({"name": "other"})).await.ok();
     for (project, target) in [
-        ("p", json!({"name": "build", "kind": "host", "host": "helios", "project": "p"})),
-        ("q", json!({"name": "vm", "kind": "ssh", "address": "ci@10.3.0.2:22", "project": "q"})),
+        (
+            "p",
+            json!({"name": "p-build", "kind": "host", "host": "helios", "project": "p"}),
+        ),
+        (
+            "q",
+            json!({"name": "q-vm", "kind": "ssh", "address": "ci@10.3.0.2:22", "project": "q"}),
+        ),
     ] {
         td.project(project).await;
         td.post("/api/targets", target.clone()).await.ok();
@@ -255,12 +258,18 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
     )
     .await
     .err(403, "forbidden");
-    td.put("/api/job-hosts/nope/aliases", json!({"aliases": ["10.3.0.2"]}))
-        .await
-        .err(404, "not_found");
-    td.put("/api/job-hosts/helios/aliases", json!({"aliases": ["other"]}))
-        .await
-        .err(422, "invalid");
+    td.put(
+        "/api/job-hosts/nope/aliases",
+        json!({"aliases": ["10.3.0.2"]}),
+    )
+    .await
+    .err(404, "not_found");
+    td.put(
+        "/api/job-hosts/helios/aliases",
+        json!({"aliases": ["other"]}),
+    )
+    .await
+    .err(422, "invalid");
 
     let v = td
         .put(
@@ -282,18 +291,17 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
     // fills helios, so the p job waits.
     assert_eq!(startable(db.clone()).await, 0);
     // A worker sees the name, not the aliases.
-    let v = td
-        .get_as("q/worker", "/api/job-hosts")
-        .await
-        .ok()
-        .clone();
+    let v = td.get_as("q/worker", "/api/job-hosts").await.ok().clone();
     assert_eq!(v["hosts"][0]["name"], "helios");
     assert!(v["hosts"][0].get("aliases").is_none());
 
     // One host agent per alias.
-    td.put("/api/job-hosts/other/aliases", json!({"aliases": ["10.3.0.2"]}))
-        .await
-        .err(409, "conflict");
+    td.put(
+        "/api/job-hosts/other/aliases",
+        json!({"aliases": ["10.3.0.2"]}),
+    )
+    .await
+    .err(409, "conflict");
     // A cap set by the alias lands on the host agent.
     let v = td
         .put("/api/job-hosts/10.3.0.2", json!({"heavy_jobs": 2}))
@@ -313,9 +321,12 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
         .await
         .ok();
     assert_eq!(startable(db.clone()).await, 1);
-    td.put("/api/job-hosts/helios/aliases", json!({"aliases": ["10.3.0.2"]}))
-        .await
-        .ok();
+    td.put(
+        "/api/job-hosts/helios/aliases",
+        json!({"aliases": ["10.3.0.2"]}),
+    )
+    .await
+    .ok();
     assert_eq!(startable(db.clone()).await, 0);
     td.delete("/api/hosts/helios").await.ok();
     let left: i64 = db
