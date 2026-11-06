@@ -986,7 +986,11 @@ async fn pids(file: &Path, n: usize) -> Vec<u32> {
         if p.len() >= n {
             return p;
         }
-        assert!(start.elapsed() < DEADLINE, "no {n} pids in {}", file.display());
+        assert!(
+            start.elapsed() < DEADLINE,
+            "no {n} pids in {}",
+            file.display()
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
