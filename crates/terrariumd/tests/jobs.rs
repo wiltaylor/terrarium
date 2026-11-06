@@ -660,7 +660,7 @@ async fn the_host_cap_holds_across_projects_in_order() {
     let lab = lab(2).await;
     let wd = lab._dirs.path().join("jobs").display().to_string();
     let recipe = "test -f OK && test \"$(nice)\" = 19 \
-                  && { ! command -v ionice >/dev/null || ionice -p $$ | grep -q idle; } \
+                  && { ! ionice -c3 true 2>/dev/null || ionice -p $$ | grep -q idle; } \
                   && sleep 1";
     lab.td
         .put(
@@ -669,6 +669,18 @@ async fn the_host_cap_holds_across_projects_in_order() {
         )
         .await
         .ok();
+    let r = lab
+        .td
+        .patch(
+            "/api/projects/q/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"}, {"name": "validating"},
+                {"name": "review"}, {"name": "accepted"},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
     let r = lab
         .td
         .post(

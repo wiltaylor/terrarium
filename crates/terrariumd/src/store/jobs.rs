@@ -356,7 +356,7 @@ pub fn startable(conn: &Connection) -> ApiResult<Vec<(Job, String, DeliveryDef)>
         );
         defs.insert(p.to_owned(), def);
     }
-    let caps = host_caps(conn)?
+    let caps: HashMap<String, usize> = host_caps(conn)?
         .into_iter()
         .map(|c| (c.host, c.heavy_jobs as usize))
         .collect();
