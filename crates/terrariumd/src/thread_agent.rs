@@ -315,9 +315,9 @@ async fn spawn_for(
         None
     } else {
         let opener = th.opened_by.clone();
-        Some(Box::new(move |c: &rusqlite::Connection, def: &mut AgentDef| {
-            check_a1(c, &opener, def)
-        }))
+        Some(Box::new(
+            move |c: &rusqlite::Connection, def: &mut AgentDef| check_a1(c, &opener, def),
+        ))
     };
     let tid = th.id.clone();
     let attach: crate::spawn::AfterCreate = Box::new(move |t, agent| {

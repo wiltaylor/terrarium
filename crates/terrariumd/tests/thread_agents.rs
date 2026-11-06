@@ -216,7 +216,10 @@ async fn round_trip(harness: &str) {
         first.contains("You are the agent of Inbox thread"),
         "{first}"
     );
-    assert!(first.contains("The operator's topic: Cache layer"), "{first}");
+    assert!(
+        first.contains("The operator's topic: Cache layer"),
+        "{first}"
+    );
     assert!(first.contains("Should we cache the board?"), "{first}");
     lab.td.wait_status(&eph, "idle").await;
     let before = lab.sessions(&eph).await;
@@ -421,7 +424,8 @@ async fn the_agent_lives_as_long_as_its_thread() {
         )
         .await
         .ok();
-    lab.prompt(&eph, &format!("[Thread:{tid}] Two regions.")).await;
+    lab.prompt(&eph, &format!("[Thread:{tid}] Two regions."))
+        .await;
     lab.td.wait_status(&eph, "idle").await;
     assert_eq!(lab.sessions(&eph).await[0]["resumes"], 1);
     // The agent proposes the close itself: it ends.
@@ -598,10 +602,7 @@ async fn the_timer_starts_unstarted_threads_with_a1() {
     terrariumd::thread_agent::retry_missed(&s).await;
     let th = lab.thread(&tid).await;
     let eph = th["agent"].as_str().expect("an agent").to_owned();
-    assert_eq!(
-        lab.spawn_row(&eph).await["bound"],
-        format!("thread:{tid}")
-    );
+    assert_eq!(lab.spawn_row(&eph).await["bound"], format!("thread:{tid}"));
     lab.prompt(&eph, &format!("[Thread:{tid}]")).await;
     // A second pass starts nothing more.
     terrariumd::thread_agent::retry_missed(&s).await;
@@ -684,7 +685,11 @@ async fn the_agent_keeps_thread_open_only_with_the_opener() {
         .ok();
     let r = lab
         .td
-        .post_as(&lab.w, "/api/threads", json!({"topic": "T", "template": "consult"}))
+        .post_as(
+            &lab.w,
+            "/api/threads",
+            json!({"topic": "T", "template": "consult"}),
+        )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let eph = r.body["agent"].as_str().unwrap().to_owned();
