@@ -885,6 +885,7 @@ terrarium card ls [-c column] [--mine | --assignee a] [--unassigned] [--label l]
 terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
                    [--assignee a] [--repo r] [--branch b] [-m comment] [--eta 2h30m]
+                   [--github-author login]   the issue author of a GitHub card (api.md §8.3)
 terrarium card new --from-mail <message id> [...]
 terrarium card edit <id> [--title t] [-b body] [--label l|none]... [--depends-on id|none]...
                     [--repo r|none] [--branch b|none]

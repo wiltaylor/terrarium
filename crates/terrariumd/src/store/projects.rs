@@ -37,6 +37,10 @@ pub struct Project {
     /// ([`crate::idle_alert::DEFAULT`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_alert: Option<String>,
+    /// The GitHub author gate (TER-85, `crate::store::github_gate`): the
+    /// GitHub logins whose issues count as work. Empty: no gate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub github_authors: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -50,6 +54,10 @@ fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
         card_prefix: r.get("prefix")?,
         source: r.get("source")?,
         idle_alert: r.get("idle_alert")?,
+        github_authors: r
+            .get::<_, Option<String>>("github_authors")?
+            .map(|g| crate::store::json_col(&g))
+            .unwrap_or_default(),
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -224,6 +232,10 @@ pub struct ProjectPatch {
     /// for the default.
     #[serde(default, deserialize_with = "crate::store::board::double_option")]
     pub idle_alert: Option<Option<String>>,
+    /// The GitHub author gate (TER-85): the allow list, all of it. `[]`
+    /// ends the gate. Only the operator sets it; the API layer checks.
+    #[serde(default)]
+    pub github_authors: Option<Vec<String>>,
 }
 
 /// Change a project. The card prefix may change only while the project has
@@ -268,6 +280,9 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
             params![name, alert],
         )?;
     }
+    if let Some(list) = &patch.github_authors {
+        set_github_authors(t, name, list)?;
+    }
     t.execute(
         "UPDATE projects SET updated_at = ?2 WHERE name = ?1",
         params![name, now()],
@@ -277,9 +292,20 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
         name,
         Some(name),
         json!({"description": patch.description, "card_prefix": patch.card_prefix,
-               "idle_alert": patch.idle_alert}),
+               "idle_alert": patch.idle_alert, "github_authors": patch.github_authors}),
     )?;
     get(t, name)
+}
+
+/// Set the GitHub author allow list of a project (TER-85). The caller
+/// checks the rights: the operator, or the project file.
+pub fn set_github_authors(t: &mut Tx<'_>, name: &str, list: &[String]) -> ApiResult<()> {
+    let list = crate::store::github_gate::normalise_authors(list)?;
+    t.execute(
+        "UPDATE projects SET github_authors = ?2 WHERE name = ?1",
+        params![name, crate::store::github_gate::authors_col(&list)],
+    )?;
+    Ok(())
 }
 
 /// Delete a project with its board and repos. The caller checks that no

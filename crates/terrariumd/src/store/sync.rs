@@ -88,6 +88,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
                             description: None,
                             card_prefix: def.prefix.clone(),
                             idle_alert: None,
+                            github_authors: None,
                         };
                         if let Err(e) = projects::update(t, &def.name, &patch) {
                             report
@@ -98,6 +99,22 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
                     report.projects.updated.push(def.name.clone());
                 }
             }
+        }
+        // The GitHub author gate (TER-85): the file holds the allow list.
+        let live = projects::get(t, &def.name)?.github_authors;
+        match crate::store::github_gate::normalise_authors(&def.github_authors) {
+            Ok(list) if list != live => {
+                projects::set_github_authors(t, &def.name, &list)?;
+                if !report.projects.added.contains(&def.name)
+                    && !report.projects.updated.contains(&def.name)
+                {
+                    report.projects.updated.push(def.name.clone());
+                }
+            }
+            Ok(_) => {}
+            Err(e) => report
+                .errors
+                .push(format!("projects/{}.toml: {}", def.name, e.message)),
         }
         // Repos: the file list replaces the file repos, and takes over API
         // repos with the same name.

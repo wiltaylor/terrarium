@@ -1565,6 +1565,7 @@ fn apply_project(t: &mut Tx<'_>, fleet_name: &str, def: &ProjectDef) -> ApiResul
                         description: Some(description),
                         card_prefix: prefix,
                         idle_alert: None,
+                        github_authors: None,
                     },
                 )?;
             }
@@ -1864,6 +1865,7 @@ pub fn export(
                 },
                 schedules: project_schedules,
                 templates: project_templates,
+                github_authors: Vec::new(),
             },
             agents,
             targets,

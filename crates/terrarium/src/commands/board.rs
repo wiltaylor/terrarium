@@ -607,6 +607,7 @@ async fn new(ctx: &Ctx, a: &CardNewArgs) -> anyhow::Result<()> {
     set_opt(&mut b, "repo", a.repo.clone());
     set_opt(&mut b, "branch", a.branch.clone());
     set_opt(&mut b, "from_mail", a.from_mail.clone());
+    set_opt(&mut b, "github_author", a.github_author.clone());
     set_opt(&mut b, "comment", ctx.opt_text(a.comment.as_deref())?);
     set_opt(
         &mut b,

@@ -880,7 +880,7 @@ three letters and digits in upper case, then longer, then with a number
 | `GET /api/projects` | | `200` projects by name | an agent sees its own project |
 | `POST /api/projects` | `{"name", "description"?, "card_prefix"?}` | `201` project | sysadmin |
 | `GET /api/projects/{name}` | | `200` project | read |
-| `PATCH /api/projects/{name}` | `{"description"?, "card_prefix"?, "idle_alert"?}` | `200` project | project_admin |
+| `PATCH /api/projects/{name}` | `{"description"?, "card_prefix"?, "idle_alert"?, "github_authors"?}` | `200` project | project_admin; `github_authors`: the operator |
 | `DELETE /api/projects/{name}?confirm=true` | | `204` | sysadmin |
 | `GET /api/projects/{name}/agents` | | `200` agents by ID | read |
 | `GET /api/projects/{name}/targets` | | `200` targets, the project's and the global ones | read |
@@ -898,6 +898,18 @@ letter. The prefix cannot change after the first card (`conflict`).
 duration (`15m`, `1h`), or `off` (also `0`). `null` sets the default
 (15m), and the project then shows no `idle_alert`. Another value is
 `invalid`. A file project cannot set it yet.
+
+`github_authors` is the allow list of the GitHub author gate (§8.3,
+"GitHub author gate"): the GitHub logins whose issues count as work. The
+`PATCH` replaces the whole list; `[]` ends the gate. Only the operator
+sets it (`403` for every agent, a sysadmin too). A login is 1 to 39 of
+`a-z`, `A-Z`, `0-9`, `-`, and does not start with `-`; a leading `@` is
+dropped, and a copy in another case is dropped. Another value is
+`invalid`. A file project sets it with the key `github_authors` in
+`projects/<name>.toml`, and its `PATCH` is `file_managed` as for every
+other field. A fleet file cannot set it: the key in `[[projects]]` is an
+error. The project shows the list, and no `github_authors` when it is
+empty.
 
 `DELETE` refuses a project that has agents (`conflict`), and a file project
 (`file_managed`). It deletes the board and the repos.
@@ -4232,7 +4244,7 @@ supply:
 ```json
 {"title":"Ship the parser","body":"","column":"backlog","assignee":"worker","labels":["parser"],
  "repo":"terrarium","branch":"feat/parser","depends_on":["TER-1"],"from_mail":null,"comment":null,
- "eta_at":"2h30m"}
+ "eta_at":"2h30m","github_author":null}
 ```
 
 - `column` defaults to `backlog`. Another column follows the move rules, so
@@ -4244,6 +4256,58 @@ supply:
 - `assignee` follows the assign rules.
 - `eta_at` follows the ETA rule (§8.2). The daemon sets it last, after the
   assignment.
+- `github_author` is the GitHub login of the issue author of a GitHub card,
+  for the GitHub author gate (below).
+
+**GitHub author gate** (TER-85). It applies when the project has a
+`github_authors` list (§5). Without a list there is no gate. A GitHub card
+is a card with the label `github` (any case), or a title that starts with
+`GitHub #<n>:` (any case). A held card is a GitHub card with the label
+`hold`.
+
+- **Create.** An agent makes a GitHub card, and its `github_author` is
+  missing or not on the list (the case does not matter, and a leading `@`
+  is dropped). The card is held. It goes to the blocked column with the
+  labels `github` and `hold` and a move comment that says why, whatever
+  `column` the request asks for. That is the column with the role
+  `blocked`. When no column has the role, the create is `422` and no card
+  is made. The request's `comment` becomes a plain
+  comment. `assignee` and `eta_at` do not apply. In the same write, the
+  daemon opens a question to the operator for the creating agent (§6.8):
+  the card is linked, `hold_card` is the card ID, and the options are
+  `Release to backlog` and `Keep held`. The question counts toward the
+  agent's open questions. When the agent has 50 open, the create is `429`
+  and no card is made. A GitHub card from an author on the list, and any
+  card that the operator makes, follows the normal rules.
+- **Lock.** Only the operator moves a held card, from any column. The
+  lock does not depend on the role of the column, so a board change that
+  moves or drops the role `blocked` does not open it. A move, a claim, or
+  an assign (not an unassign) by an agent, a project admin or a sysadmin
+  included, is `403`. No one queues a validate or a merge job for a held
+  card, the operator included (`403`, §35.4): a job moves its card as
+  the operator. The operator releases the card first. An agent's edit that leaves the card no longer held
+  (it takes off `hold`, or takes off `github` and the `GitHub #<n>:` title)
+  is `403`. Other edits are allowed. Only the operator answers or retracts
+  the hold question, and no one changes it (`403`).
+- **No late label.** While the project has a list, an agent's edit that
+  turns a card that is not a GitHub card into one (it adds `github` or a
+  `GitHub #<n>:` title) is `403`. GitHub work starts with `card new`, so
+  it meets the gate.
+- **Answer.** The operator answers the hold question with `Release to
+  backlog`: the daemon takes off `hold` and moves the card to the backlog
+  from any column, in the same write. Any other answer leaves the
+  card held. The operator can also edit or move the card directly.
+
+The gap: `github_author` is what the creating agent says. The daemon does
+not read the issue, so an agent that gives a false author, or that makes
+the card with neither the label nor the title, gets past the gate. The
+gate enforces the rule against mistakes, not against a hostile agent.
+A card that a schedule `card` action (§19) opens as the operator is not
+gated. The action never finds a held card: `close` does not move it and
+`open` does not comment on it, whatever its `trigger:<key>` label.
+A daemon-side issue sync that takes the author from the signed GitHub
+webhook closes the gap (TER-124). The ingest listener (§20) must then be
+reachable from GitHub.
 
 **Active cards** (`GET /api/cards`, TER-43, for the dashboard home). The
 cards that are not archived in the columns `columns` (a comma list,
@@ -10673,6 +10737,9 @@ start with `Job queue:`.
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
 | `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels. A batch merge: the creator or a project admin only, as it holds the cards of several workers; every card of the batch loses the job labels |
+
+A held card (the GitHub author gate, §8.3) gets no validate or merge
+job, from any caller (`403`).
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.

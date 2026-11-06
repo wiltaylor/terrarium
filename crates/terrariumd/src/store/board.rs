@@ -29,7 +29,7 @@ use crate::events::EventDraft;
 use crate::policy;
 use crate::store::mail::{self, Address, Outgoing};
 use crate::store::session_refs::{self, SessionRef};
-use crate::store::{Page, Paged, agents, json_col};
+use crate::store::{Page, Paged, agents, github_gate, json_col, questions};
 
 /// The columns of a new board, in order, with their roles.
 pub const DEFAULT_COLUMNS: [(&str, Option<&str>); 6] = [
@@ -321,6 +321,18 @@ fn column(conn: &Connection, project: &str, name: &str) -> ApiResult<ColumnRow> 
     )))
 }
 
+/// The column with the role `role` on the board of `project`, never a
+/// column that only has the name (422 when no column has the role).
+fn role_column(conn: &Connection, project: &str, role: &str) -> ApiResult<ColumnRow> {
+    let cols = column_rows(conn, project)?;
+    let names = names_of(&cols);
+    cols.into_iter().find(|c| c.is(role)).ok_or_else(|| {
+        ApiError::invalid(format!(
+            "the board of `{project}` has no column with the role `{role}`; columns: {names}"
+        ))
+    })
+}
+
 /// The name of the column that `name` means on the board of `project`: a
 /// column name, or a role alias (`working`, `blocked`). 422 when there is
 /// no such column.
@@ -407,21 +419,39 @@ pub fn trigger_label(key: &str) -> String {
 
 /// The newest card of `project` with the label `label` that is not in
 /// `done` and not archived.
+/// The newest open card with `label`. Cards that the GitHub author gate
+/// holds (TER-85) are skipped, so a schedule `card` action never finds,
+/// moves or closes one.
 pub fn find_open_by_label(
     conn: &Connection,
     project: &str,
     label: &str,
 ) -> ApiResult<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT c.id FROM cards c JOIN board_columns col ON col.id = c.column_id
-             WHERE c.project = ?1 AND c.archived = 0 AND col.name <> ?3
-               AND EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?2)
-             ORDER BY c.number DESC LIMIT 1",
-            params![project, label, DONE],
-            |r| r.get(0),
-        )
-        .optional()?)
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.title, c.labels FROM cards c JOIN board_columns col ON col.id = c.column_id
+         WHERE c.project = ?1 AND c.archived = 0 AND col.name <> ?3
+           AND EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?2)
+         ORDER BY c.number DESC",
+    )?;
+    let rows = stmt.query_map(params![project, label, DONE], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, title, labels) = row?;
+        if !github_gate::is_held(&title, &json_col::<Vec<String>>(&labels)) {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the GitHub author gate holds the card `id` (TER-85).
+pub fn is_held(conn: &Connection, id: &str) -> ApiResult<bool> {
+    Ok(card_is_held(&find_row(conn, id)?))
 }
 
 fn deps(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
@@ -1097,6 +1127,12 @@ pub fn file_event(
     )
 }
 
+/// Whether the GitHub author gate holds `card` (TER-85): a GitHub card
+/// with the label `hold`.
+fn card_is_held(card: &CardRow) -> bool {
+    github_gate::is_held(&card.title, &json_col::<Vec<String>>(&card.labels))
+}
+
 fn not_archived(card: &CardRow) -> ApiResult<()> {
     if card.archived {
         Err(ApiError::conflict(format!("{} is archived", card.id)))
@@ -1115,6 +1151,15 @@ fn check_move(
     comment: Option<&str>,
 ) -> ApiResult<()> {
     not_archived(card)?;
+    // The GitHub author gate (TER-85): only the operator moves a held
+    // card, whatever the role of its column. The role of a column can
+    // change (`set_columns`), so the lock does not depend on it.
+    if to.id != card.column_id && !matches!(actor, Actor::Operator) && card_is_held(card) {
+        return Err(ApiError::forbidden(format!(
+            "{} is held by the GitHub author gate; only the operator moves it out of `{}`",
+            card.id, card.column
+        )));
+    }
     let admin = policy::is_admin_of(actor, &card.project);
     if !admin && !owns(actor, card) {
         let whose = match &card.assignee {
@@ -1302,6 +1347,14 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
     let to = who
         .map(|w| resolve_assignee(t, &card.project, w, actor))
         .transpose()?;
+    // The GitHub author gate (TER-85): only the operator assigns a held
+    // card. Unassigning stays open: it gives no one the card.
+    if to.is_some() && !matches!(actor, Actor::Operator) && card_is_held(&card) {
+        return Err(ApiError::forbidden(format!(
+            "{} is held by the GitHub author gate; only the operator assigns it",
+            card.id
+        )));
+    }
     let me = actor.address();
     let admin = policy::is_admin_of(actor, &card.project);
     if !admin {
@@ -1407,6 +1460,11 @@ pub struct NewCard {
     /// The ETA: an RFC 3339 time or a duration from now (`2h30m`).
     #[serde(default)]
     pub eta_at: Option<String>,
+    /// The GitHub login of the issue author, for a GitHub card (TER-85,
+    /// [`github_gate`]). The caller says it; the daemon does not check it
+    /// against GitHub.
+    #[serde(default)]
+    pub github_author: Option<String>,
 }
 
 fn set_deps(t: &mut Tx<'_>, card: &str, wanted: &[String]) -> ApiResult<()> {
@@ -1491,6 +1549,21 @@ pub fn create_card(
     }
     let title = new.title.clone().unwrap_or_default();
     check_title(&title)?;
+    // The GitHub author gate (TER-85): an agent's GitHub card from an
+    // author off the project's list is held.
+    let held_for = match actor {
+        Actor::Agent(a) => {
+            let list = github_gate::authors(t, project)?;
+            (!list.is_empty()
+                && github_gate::is_github(&title, &new.labels)
+                && !github_gate::allowed(&list, new.github_author.as_deref()))
+            .then(|| a.clone())
+        }
+        Actor::Operator => None,
+    };
+    if held_for.is_some() {
+        github_gate::hold_labels(&mut new.labels);
+    }
     let backlog = column(t, project, BACKLOG)?;
     t.execute(
         "UPDATE projects SET card_seq = card_seq + 1 WHERE name = ?1",
@@ -1538,6 +1611,13 @@ pub fn create_card(
         "created",
         json!({"from_mail": new.from_mail, "thread_id": thread}),
     )?;
+    if let Some(agent) = &held_for {
+        hold(t, actor, agent, &row, new.github_author.as_deref())?;
+        if let Some(c) = new.comment.as_deref().filter(|c| !c.trim().is_empty()) {
+            insert_comment(t, &id, &actor.address(), c.trim())?;
+        }
+        return get_card(t, &id);
+    }
     // A role alias (`working`, `blocked`) names the column with that role.
     let to = new
         .column
@@ -1563,6 +1643,85 @@ pub fn create_card(
         set_eta(t, actor, &id, Some(eta))?;
     }
     get_card(t, &id)
+}
+
+/// Hold a new GitHub card (TER-85, [`github_gate`]): move it to the
+/// blocked column, whatever column it asked for, and open the hold
+/// question to the operator for the creating agent. The card's
+/// assignee, column, and ETA of the request do not apply.
+fn hold(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    agent: &crate::actor::AgentActor,
+    row: &CardRow,
+    author: Option<&str>,
+) -> ApiResult<()> {
+    let blocked = role_column(t, &row.project, BLOCKED)?;
+    let comment = github_gate::hold_comment(&row.project, author);
+    apply_move(t, actor, row, &blocked, None, Some(&comment))?;
+    let context = format!(
+        "Title: {}\nGitHub author given: {}\nThe author is what the agent said; the daemon \
+         does not read the issue.",
+        row.title,
+        author
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .unwrap_or("(none)")
+    );
+    questions::ask(
+        t,
+        questions::NewQuestion {
+            agent: agent.id.clone(),
+            kind: questions::QuestionKind::Question,
+            text: github_gate::question_text(&row.id, &row.project, author),
+            options: vec![
+                github_gate::RELEASE.to_owned(),
+                github_gate::KEEP.to_owned(),
+            ],
+            context: Some(context),
+            // The question lives in the agent's project; link the card
+            // when it is there too.
+            card: (agent.project == row.project).then(|| row.id.clone()),
+            hold_card: Some(row.id.clone()),
+            ..questions::NewQuestion::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// The operator released a held card with the answer of its hold
+/// question (TER-85): take `hold` off, and move the card from the
+/// blocked column to the backlog. A card that is gone or archived stays
+/// as it is.
+pub(crate) fn release_hold(t: &mut Tx<'_>, id: &str, question: &str) -> ApiResult<()> {
+    let Ok(card) = find_row(t, id) else {
+        return Ok(());
+    };
+    if card.archived {
+        return Ok(());
+    }
+    let held = card_is_held(&card);
+    let labels: Vec<String> = json_col(&card.labels);
+    let kept = github_gate::without_hold(&labels);
+    if kept != labels {
+        t.execute(
+            "UPDATE cards SET labels = ?2, updated_at = ?3 WHERE id = ?1",
+            params![card.id, serde_json::to_string(&kept)?, now()],
+        )?;
+        let row = find_row(t, &card.id)?;
+        card_event(t, &row, "edited", json!({"fields": ["labels"]}))?;
+    }
+    let row = find_row(t, &card.id)?;
+    // The lock does not depend on the column role, so neither does the
+    // release: a held card goes to the backlog from any column.
+    if held && row.column != BACKLOG {
+        let backlog = column(t, &row.project, BACKLOG)?;
+        let comment = format!(
+            "Released by the operator (the answer to hold question {question}): the card is work."
+        );
+        apply_move(t, &Actor::Operator, &row, &backlog, None, Some(&comment))?;
+    }
+    Ok(())
 }
 
 /// A field that tells `null` from absent: absent is `None`, `null` is
@@ -1646,6 +1805,9 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
         if let Some(title) = &p.title {
             check_title(title)?;
         }
+        if !matches!(actor, Actor::Operator) {
+            gate_edit(t, &card, p.title.as_deref(), p.labels.as_deref())?;
+        }
         t.execute(
             "UPDATE cards SET
                 title = coalesce(?2, title),
@@ -1706,6 +1868,38 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
         set_eta(t, actor, &card.id, eta.as_deref())?;
     }
     get_card(t, &card.id)
+}
+
+/// The GitHub author gate (TER-85) on an agent's edit: a held card stays
+/// held, and a card that is no GitHub card does not become one while the
+/// project has an allow list (GitHub work starts with `card new`).
+fn gate_edit(
+    t: &Tx<'_>,
+    card: &CardRow,
+    title: Option<&str>,
+    labels: Option<&[String]>,
+) -> ApiResult<()> {
+    let have: Vec<String> = json_col(&card.labels);
+    let new_title = title.unwrap_or(&card.title);
+    let new_labels = labels.unwrap_or(&have);
+    if github_gate::is_held(&card.title, &have) && !github_gate::is_held(new_title, new_labels) {
+        return Err(ApiError::forbidden(format!(
+            "{} is held by the GitHub author gate; only the operator takes off `hold` or \
+             `github`",
+            card.id
+        )));
+    }
+    if !github_gate::is_github(&card.title, &have)
+        && github_gate::is_github(new_title, new_labels)
+        && !github_gate::authors(t, &card.project)?.is_empty()
+    {
+        return Err(ApiError::forbidden(format!(
+            "{} is no GitHub card; make GitHub work with `card new --github-author <login>`, \
+             so the GitHub author gate sees it",
+            card.id
+        )));
+    }
+    Ok(())
 }
 
 /// Set the ETA of a card, or clear it with `None` (PLAN §13). The value is

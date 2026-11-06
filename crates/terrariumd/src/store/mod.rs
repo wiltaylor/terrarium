@@ -9,6 +9,7 @@ pub mod board;
 pub mod calendar;
 pub mod card_files;
 pub mod event_sources;
+pub mod github_gate;
 pub mod harness_updates;
 pub mod hosts;
 pub mod inbox;
