@@ -1337,12 +1337,25 @@ impl Executor {
     }
 }
 
-/// The daemon's known hosts, for the git steps on a target
+/// The repo host keys, for the git steps on a target
 /// (`TERRARIUM_GIT_KNOWN_HOSTS`): ssh there reads no `~/.ssh/known_hosts`,
-/// which a recipe or an agent could seed. `None` when the daemon has none.
+/// which a recipe or an agent could seed. These are the keys that the
+/// daemon's own git trusts (`crate::git::known_hosts_dir`: GitHub's
+/// published keys and the recorded ones), not the host keys of the
+/// targets. `None` when there are none.
 pub fn git_known_hosts(state: &Shared) -> Option<String> {
-    let path = known_hosts(&state.state_dir).ok()?;
-    let text = std::fs::read_to_string(path).ok()?;
+    repo_known_hosts(&state.state_dir)
+}
+
+fn repo_known_hosts(state_dir: &Path) -> Option<String> {
+    let dir = match crate::git::ensure_known_hosts_dir(state_dir) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("cannot read the repo host keys: {e}");
+            return None;
+        }
+    };
+    let text = std::fs::read_to_string(dir.join(crate::git::KNOWN_HOSTS_FILE)).ok()?;
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
 }
@@ -4510,6 +4523,24 @@ mod tests {
             ..RemoteCmd::default()
         };
         assert!(ssh_plan("ssh", &ssh_def(), None, Path::new("/kh"), &c).is_err());
+    }
+
+    /// TER-71 review round 2, F1: the git steps on a target get the repo
+    /// host keys (with GitHub's published keys), not the target host keys.
+    #[test]
+    fn git_steps_get_the_repo_host_keys() {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(state.path().join("ssh")).unwrap();
+        std::fs::write(
+            known_hosts(state.path()).unwrap(),
+            "target-box ssh-ed25519 AAAAtargetonly\n",
+        )
+        .unwrap();
+        let text = repo_known_hosts(state.path()).unwrap();
+        for k in crate::git::PUBLISHED_HOST_KEYS {
+            assert!(text.lines().any(|l| l == *k), "{k} missing in {text}");
+        }
+        assert!(!text.contains("AAAAtargetonly"), "{text}");
     }
 
     #[test]

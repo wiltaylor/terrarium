@@ -10203,7 +10203,7 @@ recipe:
 ssh in the git runs reads no config file (`-F /dev/null`), so a planted
 `~/.ssh/config` cannot send the push to another host or run a
 `ProxyCommand`. Its known hosts are a file of the job, seeded from the
-daemon's known hosts, not `~/.ssh/known_hosts`. The key file is in a 0700
+repo host keys (below), not `~/.ssh/known_hosts`. The key file is in a 0700
 dir of the job (`<clone>.ssh`), not in `/tmp`. The cleanup removes the
 clone, the push repo, and that dir.
 
@@ -10217,9 +10217,17 @@ job's push repo or read its key file. Any worker can start such a recipe
 with `card validate` on its own branch, so the exposure is any worker at
 the next merge, not only the merging card. A merge job runs alone in its
 project to shrink this, but a validate job still fetches with the
-credential while other recipes of the project run. The full fix (each
-recipe as its own user, or the credential runs on a host that runs no
-recipe) is TER-103.
+credential while other recipes of the project run. Two more paths of the
+same kind: the recipes of another project on a shared global target (the
+merge-alone rule keeps apart only the jobs of one project), and an agent
+with exec on the delivery target, which can reach `<clone>.ssh/key` or
+the push repo with no recipe at all. The full fix (each recipe as its own
+user, or the credential runs on a host that runs no recipe) is TER-103.
+
+The known hosts of the git runs are the repo host keys that the daemon's
+own git trusts (GitHub's published keys and the recorded ones), not the
+host keys of the targets. A forge whose key the daemon has not recorded
+is accepted on first use in each run (`accept-new`).
 
 ### 35.3 Results
 
