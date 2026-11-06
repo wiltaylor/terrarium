@@ -283,10 +283,7 @@ pub async fn spawn(
     // A bind is a right of the owner's spawn policy (`spawn.bound`); the
     // operator is not bound to it. The cap is the owner's
     // `spawn.max_bound_lifetime`.
-    if bound.is_some()
-        && !actor.is_operator()
-        && rules.as_ref().is_some_and(|sp| !sp.bound)
-    {
+    if bound.is_some() && !actor.is_operator() && rules.as_ref().is_some_and(|sp| !sp.bound) {
         return Err(ApiError::forbidden(format!(
             "`{}` may not bind an ephemeral agent: its spawn policy has no `bound`; ask \
              sysadmin or the operator (`terrarium agent set {} --spawn-bound on`)",

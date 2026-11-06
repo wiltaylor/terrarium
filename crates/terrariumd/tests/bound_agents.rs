@@ -42,8 +42,11 @@ fn id(v: &Value) -> String {
     v["id"].as_str().unwrap().to_owned()
 }
 
+/// Poll `f` until it is true. A deadline, not a count of tries: on a
+/// loaded build host each GET is slow.
 async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
-    for _ in 0..500 {
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(60) {
         if f().await {
             return;
         }
