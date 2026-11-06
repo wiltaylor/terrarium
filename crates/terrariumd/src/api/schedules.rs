@@ -42,7 +42,7 @@ use crate::store::mail::Address;
 use crate::store::projects::SOURCE_FILE;
 use crate::store::schedules::{
     self, Begin, Decision, ListFilter, NewSchedule, Outcome, Reach, Run, Schedule, SchedulePatch,
-    field_error,
+    SpecGroup, field_error,
 };
 use crate::store::{Page, board};
 
@@ -71,7 +71,7 @@ const READY_WAIT: Duration = Duration::from_secs(120);
 struct ListQuery {
     project: Option<String>,
     enabled: Option<bool>,
-    /// `time` (cron, interval, at) or `trigger` (on).
+    /// `time` (cron, interval, at), `trigger` (on), or `action` (manual).
     kind: Option<String>,
 }
 
@@ -81,13 +81,14 @@ async fn list(
     ApiQuery(q): ApiQuery<ListQuery>,
 ) -> ApiResult<Json<Vec<Schedule>>> {
     let global = policy::read_schedules(&actor, None).is_ok();
-    let trigger = match q.kind.as_deref().filter(|k| !k.is_empty()) {
+    let group = match q.kind.as_deref().filter(|k| !k.is_empty()) {
         None => None,
-        Some("time") => Some(false),
-        Some("trigger") => Some(true),
+        Some("time") => Some(SpecGroup::Time),
+        Some("trigger") => Some(SpecGroup::Trigger),
+        Some("action") => Some(SpecGroup::Action),
         Some(other) => {
             return Err(ApiError::bad_request(format!(
-                "bad `kind` `{other}`: use time or trigger"
+                "bad `kind` `{other}`: use time, trigger, or action"
             )));
         }
     };
@@ -99,7 +100,7 @@ async fn list(
                 global,
                 projects: None,
                 enabled: q.enabled,
-                trigger,
+                group,
             }
         }
         // The operator and a sysadmin see all; an agent sees its project.
@@ -108,14 +109,14 @@ async fn list(
             global: true,
             projects: None,
             enabled: q.enabled,
-            trigger,
+            group,
         },
         None => ListFilter {
             project: actor.project().map(str::to_owned),
             global: false,
             projects: None,
             enabled: q.enabled,
-            trigger,
+            group,
         },
     };
     Ok(Json(state.db.read(move |c| schedules::list(c, &f)).await?))
@@ -482,6 +483,15 @@ async fn run_now(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Run>> {
     let s = load(&state, &actor, id).await?;
+    // A disabled project action does not run: its button is off. A
+    // disabled time schedule still runs now, as before.
+    if s.spec.is_manual() && !s.enabled {
+        return Err(ApiError::conflict(format!(
+            "action `{}` is disabled; enable it first (terrarium schedule enable {})",
+            s.key(),
+            s.key()
+        )));
+    }
     let check = actor.clone();
     let (project, spec, action, owner) =
         (s.project.clone(), s.spec.clone(), s.action.clone(), s.owner);
