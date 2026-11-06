@@ -3237,7 +3237,7 @@ PLAN §12e gives the design. The code is in
 `crates/terrariumd/src/api/inbox.rs`.
 
 The Inbox is the list of the things that wait for the operator. It is a
-view, not a table: it copies no mail body. Each item has one of five
+view, not a table: it copies no mail body. Each item has one of six
 kinds:
 
 | Kind | What | Open while | The operator's verbs |
@@ -3247,6 +3247,7 @@ kinds:
 | `mail` | A message to `operator` (§7). | Its `state` is `queued` or `delivered`: not acknowledged. | `POST /api/inbox/mail/{id}/ack` |
 | `system` | A thread of the loop guard (§7.4): it is paused now, or it has a held message that is not released. | The thread is paused, or a held message is not released. | `POST /api/mail/{id}/release`, `POST /api/mail/threads/{thread}/resume` |
 | `watch` | A question that the operator asked an agent, or a question of the Inbox that the operator forwarded to one (below, "Ask and forward"). It waits for the agent, not for the operator. | The newest message of its thread is the operator's, and it is not cancelled. | `DELETE /api/inbox/watches/{thread}` |
+| `thread` | An Inbox thread (§6.13), with its questions inside. A question asked in a thread is not an item of its own. | The thread is `waiting_operator`. | `POST /api/threads/{id}/messages`, `.../respond`, `.../close`, and the question verbs |
 
 The notice of a pause (`Thread T needs a human`, from `system`) is not a
 `mail` item: the `system` item of the thread shows it.
@@ -3265,19 +3266,20 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 
 | Field | Meaning |
 |---|---|
-| `id` | `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, `thread:<thread id>`, or `watch:<thread id>`. |
+| `id` | `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, `thread:<thread id>`, `watch:<thread id>`, or `inbox-thread:<id>`. |
 | `open` | The item waits for the operator. |
-| `urgent` | An open question or notice with `priority: urgent` or `critical`. Mail and system items are not urgent. |
+| `urgent` | An open question or notice with `priority: urgent` or `critical`, or an open thread with such an open question. Mail and system items are not urgent. |
 | `critical` | An open question or notice with `priority: critical`. The dashboard shows the newest one in a banner on each page, with a link to `/inbox?item=<id>`, and flashes its browser tab while the page is hidden or has no focus. |
 | `project` | The project of the asking agent, of the sender of the mail, of the first agent on the thread, or of the watched agent. `null` for mail from `system` or from the operator. |
 | `at` | When the item came in: the ask, the send, the first held message that is not released, or the ask of a watch. |
 | `question`, `message`, `system` | The question or notice, the message, or the thread. A system item has `paused`, `agent_run` (the agent-to-agent messages since the last reset), `limit` (`TERRARIUM_MAIL_LOOP_LIMIT`), `participants`, and `held` (the held messages that are not released). |
 | `watch` | On a `watch` item: the watch (below). On a `mail` item whose thread is watched: the watch that the mail answers, so the dashboard can show "answer to your question" and link the forwarded question. Absent otherwise. |
+| `thread` | On a `thread` item: the thread as `GET /api/threads` lists it (§6.13), with `message_count`, `open_questions`, and `last_at`. |
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system\|watch`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
-| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system", "watch"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. `open` does not count `watch`: a watch waits for an agent. The dashboard badge shows `open`, red when `urgent` is not 0. |
+| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system\|watch\|thread`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
+| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system", "watch", "thread"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. `open` does not count `watch`: a watch waits for an agent. The dashboard badge shows `open`, red when `urgent` is not 0. |
 | `POST /api/inbox/mail/{id}/ack` | `{"reply"?}`, or no body | `200` `{"message", "replies"}`. The mail becomes `read`. With `reply`, the reply goes as `operator` on the thread of the mail to its other participants (§7.2), and the mail becomes `replied`. A message that is not to the operator is `404`. One that is acknowledged already is `409 conflict`. A reply to a system mail that has nobody to answer is `422 invalid`. |
 
 | `POST /api/inbox/asks` | `{"to", "text"?, "question"?}` | `201` `{"message", "watch"}`: the mail (§7) and the new watch. Below. |
