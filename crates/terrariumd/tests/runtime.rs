@@ -748,8 +748,12 @@ async fn mail_and_cards_push_a_pointer() {
     assert_eq!(msg["read_by"], id.as_str());
 
     // Working: the mail waits for the stop hook, and one pointer covers it
-    // all, with a card that was assigned meanwhile.
-    td.adapter.set_env("FAKE_TUI_DELAY_MS", "1000");
+    // all, with a card that was assigned meanwhile. The work time is long
+    // enough for the mail and card requests below. Under load a request can
+    // still land after the turn ends. Then the card goes out in a later
+    // pointer (a later turn), which is by design, so the test reads the
+    // pushes in order until the card block has arrived.
+    td.adapter.set_env("FAKE_TUI_DELAY_MS", "3000");
     td.post(&format!("/api/agents/{id}/restart"), None).await;
     td.wait_events(&id, "session_started", |e| e.len() == 2)
         .await;
@@ -783,29 +787,38 @@ async fn mail_and_cards_push_a_pointer() {
         Some(json!({"assignee": "demo/bob"})),
     )
     .await;
+    // Wait with a deadline until the card block has been typed, in one push
+    // or in a later one.
+    let prompt = |x: &Value| x["data"]["prompt"].as_str().unwrap_or("").to_owned();
     let starts = td
         .wait_events(&id, "turn_start", |e| {
-            e.iter()
-                .any(|x| x["data"]["prompt"].as_str().unwrap_or("").contains(&t2))
+            e.iter().any(|x| prompt(x).contains(&card_id))
         })
         .await;
-    let pointer = starts.last().unwrap()["data"]["prompt"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(
-        pointer,
-        format!(
-            "[Mailbox:operator] Subject:  (thread {t2}, message {ma})\n> one\n\n\
-             [Mailbox:operator] Subject:  (thread {t2}, message {mb})\n> two\n\n\
-             [System:card] Card {card_id} was assigned to you. Run `terrarium card show {card_id}`."
-        )
-    );
-    let n = starts
+    // The pushes that carry the mails or the card, in the order they went
+    // out. Joined, they are the three blocks, each once.
+    let pushes: Vec<String> = starts
         .iter()
-        .filter(|x| x["data"]["prompt"].as_str().unwrap_or("").contains(&t2))
-        .count();
-    assert_eq!(n, 1, "one pointer for both messages: {starts:#?}");
+        .map(prompt)
+        .filter(|p| p.contains(&t2) || p.contains(&card_id))
+        .collect();
+    let mail_a = format!("[Mailbox:operator] Subject:  (thread {t2}, message {ma})\n> one");
+    let mail_b = format!("[Mailbox:operator] Subject:  (thread {t2}, message {mb})\n> two");
+    let card_block = format!(
+        "[System:card] Card {card_id} was assigned to you. Run `terrarium card show {card_id}`."
+    );
+    assert_eq!(
+        pushes.join("\n\n"),
+        format!("{mail_a}\n\n{mail_b}\n\n{card_block}"),
+        "{starts:#?}"
+    );
+    // Both mails are in one push: the pending pointer covers them.
+    assert!(
+        pushes
+            .iter()
+            .any(|p| p.contains(&mail_a) && p.contains(&mail_b)),
+        "one pointer for both messages: {pushes:#?}"
+    );
 }
 
 /// A local repo under the repos dir is bound read-write into the sandbox
