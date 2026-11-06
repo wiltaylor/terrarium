@@ -294,12 +294,17 @@ pub fn info(conn: &Connection, id: &str) -> ApiResult<Option<SpawnInfo>> {
         .optional()?)
 }
 
-/// The ephemeral agents of `owner` that have not finished and are not
-/// parked (TER-74: a parked agent holds no place).
+/// The ephemeral agents of `owner` that have not finished and hold a
+/// place: not parked, or parked while their harness still runs (TER-111:
+/// a parked agent runs until the idle pass stops it at rest, and holds
+/// its place until then). A parked agent that is `stopped` or in `error`
+/// holds no place (TER-74).
 pub fn running_count(conn: &Connection, owner: &str) -> ApiResult<usize> {
     let n: i64 = conn.query_row(
-        "SELECT count(*) FROM spawns
-         WHERE owner = ?1 AND finished_at IS NULL AND parked_at IS NULL",
+        "SELECT count(*) FROM spawns s LEFT JOIN agents a ON a.id = s.id
+         WHERE s.owner = ?1 AND s.finished_at IS NULL
+           AND (s.parked_at IS NULL
+                OR (a.status IS NOT NULL AND a.status NOT IN ('stopped', 'error')))",
         [owner],
         |r| r.get(0),
     )?;
@@ -414,6 +419,15 @@ pub fn queue_unpark(t: &mut Tx<'_>, id: &str) -> ApiResult<bool> {
         "UPDATE spawns SET unpark_at = ?2
          WHERE id = ?1 AND finished_at IS NULL AND parked_at IS NOT NULL AND unpark_at IS NULL",
         params![id, now()],
+    )?;
+    Ok(n > 0)
+}
+
+/// Drop the queued unpark of the spawn `id`. False when none waits.
+pub fn unqueue_unpark(t: &mut Tx<'_>, id: &str) -> ApiResult<bool> {
+    let n = t.execute(
+        "UPDATE spawns SET unpark_at = NULL WHERE id = ?1 AND unpark_at IS NOT NULL",
+        [id],
     )?;
     Ok(n > 0)
 }

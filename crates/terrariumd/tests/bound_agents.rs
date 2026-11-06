@@ -557,3 +557,245 @@ async fn a_move_between_other_columns_does_not_park() {
     assert!(spawn_row(&td, &eph).await["parked_at"].is_null());
     assert_eq!(agent(&td, &eph).await["status"], "idle");
 }
+
+/// Agent `name` of project `p` for the tests of TER-111, as a worker.
+async fn worker(td: &TestDaemon, name: &str) -> String {
+    id(&td.agent("p", name, json!({})).await)
+}
+
+/// The prompts of `eph` that are the return turn of `card`.
+fn return_turns(td: &TestDaemon, eph: &str, card: &str) -> Vec<String> {
+    let aid: AgentId = eph.parse().unwrap();
+    td.sup
+        .prompts(aid)
+        .into_iter()
+        .filter(|p| p.starts_with(&format!("[System:card {card}]")))
+        .collect()
+}
+
+/// TER-111 (A1): an event that the driver missed is repaired by the
+/// reconcile (it runs at the driver's start and after a lag). A running
+/// agent whose card waits parks; a parked agent whose card is back
+/// unparks in its own session, with a return turn.
+#[tokio::test]
+async fn reconcile_repairs_a_missed_park_and_unpark() {
+    let (td, lead) = setup().await;
+    let s = state(&td);
+    // A missed park: the card is in review, and no move reached the driver.
+    let a = card(&td, "p", "review").await;
+    let ea = id(&spawn_bound(&td, &lead, "w-claude", &a).await.body);
+    td.wait_status(&ea, "idle").await;
+    assert!(spawn_row(&td, &ea).await["parked_at"].is_null());
+    assert_eq!(terrariumd::bound::reconcile(&s).await, 1);
+    parked(&td, &ea).await;
+    assert_eq!(spawn_row(&td, &ea).await["park_reason"], "card in review");
+    // In line now: a second reconcile does nothing.
+    assert_eq!(terrariumd::bound::reconcile(&s).await, 0);
+    td.post(&format!("/api/agents/{ea}/cancel"), json!({})).await;
+
+    // A missed unpark: parked, and the card is back in in_progress.
+    let b = card(&td, "p", "in_progress").await;
+    let key = ea.clone();
+    until("the place of A is free", || async {
+        spawn_row(&td, &key).await["finished_at"].is_string()
+    })
+    .await;
+    let eb = id(&spawn_bound(&td, &lead, "w-codex", &b).await.body);
+    td.wait_status(&eb, "idle").await;
+    assert!(
+        terrariumd::bound::park(&s, &eb, "card in review")
+            .await
+            .unwrap()
+    );
+    parked(&td, &eb).await;
+    assert_eq!(terrariumd::bound::reconcile(&s).await, 1);
+    let key = eb.clone();
+    until("the unpark", || async {
+        spawn_row(&td, &key).await["parked_at"].is_null()
+    })
+    .await;
+    until("the return turn", || async {
+        !return_turns(&td, &eb, &b).is_empty()
+    })
+    .await;
+    let turn = return_turns(&td, &eb, &b).remove(0);
+    assert!(turn.contains("it is in in_progress now"), "{turn}");
+    assert!(turn.contains("BEGIN CARD BODY"), "{turn}");
+    td.wait_status(&eb, "idle").await;
+    let after = sessions(&td, &eb).await;
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0]["resumes"], 1, "{after:?}");
+    assert_eq!(terrariumd::bound::reconcile(&s).await, 0);
+}
+
+/// TER-111 (A2): the bound agent does not unpark when another agent
+/// works its card, so two agents never work one card. The unpark that
+/// waited for a place is dropped too.
+#[tokio::test]
+async fn an_unpark_is_refused_when_another_agent_has_the_card() {
+    let (td, lead) = setup().await;
+    let w = worker(&td, "w").await;
+    let a = card(&td, "p", "in_progress").await;
+    let b = card(&td, "p", "in_progress").await;
+    let ea = id(&spawn_bound(&td, &lead, "w-claude", &a).await.body);
+    td.wait_status(&ea, "idle").await;
+    mv(&td, &a, "review", None).await;
+    parked(&td, &ea).await;
+    // B takes the lead's one place.
+    let eb = id(&spawn_bound(&td, &lead, "w-claude", &b).await.body);
+    td.wait_status(&eb, "idle").await;
+    // A's card comes back: the unpark waits for a place.
+    mv(&td, &a, "ready", Some("Review: changes.")).await;
+    let key = ea.clone();
+    until("the queued unpark", || async {
+        spawn_row(&td, &key).await["unpark_queued_at"].is_string()
+    })
+    .await;
+    // The worker claims A's card meanwhile.
+    let r = td
+        .post_as(&w, &format!("/api/cards/{a}/claim"), json!({}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let key = ea.clone();
+    until("the refused unpark", || async {
+        spawn_row(&td, &key).await["unpark_queued_at"].is_null()
+    })
+    .await;
+    let ev = td
+        .get(&format!("/api/agents/{ea}/events?kind=agent.unpark_refused"))
+        .await
+        .ok()
+        .clone();
+    assert!(!ev.as_array().unwrap().is_empty(), "{ev}");
+    // B parks: a place frees, but A stays parked, with no turn.
+    mv(&td, &b, "validating", None).await;
+    parked(&td, &eb).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(spawn_row(&td, &ea).await["parked_at"].is_string());
+    assert_eq!(agent(&td, &ea).await["status"], "stopped");
+    assert!(return_turns(&td, &ea, &a).is_empty());
+    // The reconcile keeps it parked too.
+    assert_eq!(terrariumd::bound::reconcile(&state(&td)).await, 0);
+    assert!(spawn_row(&td, &ea).await["parked_at"].is_string());
+
+    // A direct move with another assignee: review -> in_progress by a claim.
+    let w2 = worker(&td, "w2").await;
+    mv(&td, &b, "review", None).await;
+    let r = td
+        .post_as(&w2, &format!("/api/cards/{b}/claim"), json!({}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(spawn_row(&td, &eb).await["parked_at"].is_string());
+    assert!(return_turns(&td, &eb, &b).is_empty());
+}
+
+/// TER-111 (R2-1): the park stop checks the park again. An agent that
+/// was unparked after the idle pass read the parked agents runs on.
+#[tokio::test]
+async fn a_park_stop_spares_an_unparked_agent() {
+    let (td, lead) = setup().await;
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    // The idle pass saw it parked; the unpark landed before the stop.
+    terrariumd::lifecycle::park_stop(&state(&td), eph.parse().unwrap()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let a = agent(&td, &eph).await;
+    assert_eq!(a["status"], "idle", "{a}");
+}
+
+/// TER-111 (R2-2): a parked agent whose harness still runs holds its
+/// owner's place until it is stopped.
+#[tokio::test]
+async fn a_parked_agent_holds_its_place_until_it_stops() {
+    let (td, lead) = setup().await;
+    let s = state(&td);
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    // A wake on the way keeps the parked agent running.
+    let hold = terrariumd::lifecycle::WakeGuard::take(&s.lifecycle, eph.parse().unwrap()).unwrap();
+    mv(&td, &c, "review", None).await;
+    let key = eph.clone();
+    until("the park", || async {
+        spawn_row(&td, &key).await["parked_at"].is_string()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(agent(&td, &eph).await["status"], "idle");
+    let plain = json!({"template": "w-claude", "task": "other"});
+    td.post_as(&lead, &format!("/api/agents/{lead}/spawn"), plain.clone())
+        .await
+        .err(409, "conflict");
+    // Stopped: the place is free.
+    drop(hold);
+    parked(&td, &eph).await;
+    let r = td
+        .post_as(&lead, &format!("/api/agents/{lead}/spawn"), plain)
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+}
+
+/// TER-111 (R2-3): an unpark that queues behind an older one runs the
+/// queue at once when the owner has room, not at the next spawn tick.
+#[tokio::test]
+async fn a_queued_unpark_runs_at_once_when_the_owner_has_room() {
+    let (td, lead) = setup().await;
+    let s = state(&td);
+    let (a, d, b) = (
+        card(&td, "p", "in_progress").await,
+        card(&td, "p", "in_progress").await,
+        card(&td, "p", "in_progress").await,
+    );
+    let mut parked_ids = Vec::new();
+    for c in [&a, &d] {
+        let e = id(&spawn_bound(&td, &lead, "w-claude", c).await.body);
+        td.wait_status(&e, "idle").await;
+        mv(&td, c, "review", None).await;
+        parked(&td, &e).await;
+        parked_ids.push(e);
+    }
+    let (ea, ed) = (parked_ids[0].clone(), parked_ids[1].clone());
+    let eb = id(&spawn_bound(&td, &lead, "w-claude", &b).await.body);
+    td.wait_status(&eb, "idle").await;
+    // A comes back while B holds the one place: queued.
+    mv(&td, &a, "ready", None).await;
+    let key = ea.clone();
+    until("the queued unpark of A", || async {
+        spawn_row(&td, &key).await["unpark_queued_at"].is_string()
+    })
+    .await;
+    // No spawn tick from now on: only an unpark runs the queue.
+    s.lifecycle.set_tuning(terrariumd::lifecycle::Tuning {
+        idle_stop: IdleStop::Off,
+        tick: Duration::from_secs(3600),
+        compact_on_idle: false,
+        compact_max_age: CompactMaxAge::Off,
+        compact_wait: Duration::from_secs(5),
+    });
+    // The operator gives the lead room; that alone runs no queue.
+    td.patch(
+        &format!("/api/agents/{lead}"),
+        json!({"policy": {"spawn": {"templates": ["project:*"], "max_concurrent": 3,
+                                    "max_lifetime": "1s", "bound": true}}}),
+    )
+    .await
+    .ok();
+    // D comes back: it queues behind A, and the queue runs at once.
+    mv(&td, &d, "ready", None).await;
+    let start = std::time::Instant::now();
+    loop {
+        let (ra, rd) = (spawn_row(&td, &ea).await, spawn_row(&td, &ed).await);
+        if ra["parked_at"].is_null() && rd["parked_at"].is_null() {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the queue did not run: {ra} {rd}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    td.wait_status(&ea, "idle").await;
+    td.wait_status(&ed, "idle").await;
+}
