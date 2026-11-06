@@ -2116,11 +2116,51 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX spawns_bound_open ON spawns(bound_kind, bound_id)
         WHERE finished_at IS NULL AND bound_kind IS NOT NULL;
     "#,
-    // 75: batch merges (TER-112, `crate::jobs`). The list is by position:
-    // this entry goes after TER-91's 74; until TER-91 is on `next` it is
-    // the 74th. `jobs.batch` is the JSON list of the cards of a merge job
-    // that merges several cards in order ([{card, branch, by_agent,
-    // outcome?, note?}]); `null` for a job of one card. `jobs.parent` is the job that a split of a red batch came
+    // 74: Inbox threads (TER-91, `crate::store::threads`): a conversation
+    // of the operator with one agent on one topic. `report_to` is the lead
+    // of the scope (D34), set at the open. `status` is `waiting_operator`,
+    // `waiting_agent`, or `closed`. `response` is the newest overall
+    // response of the operator (JSON `{text, by, at}`); `handoff` is set
+    // at the close (JSON). `thread_messages` holds the conversation; the
+    // questions of a thread have `questions.thread`. Self-contained: when
+    // another branch takes this number, move this entry to the end.
+    r#"
+    CREATE TABLE threads (
+        id         TEXT PRIMARY KEY,
+        topic      TEXT NOT NULL,
+        scope      TEXT NOT NULL,
+        template   TEXT,
+        opened_by  TEXT NOT NULL,
+        agent      TEXT,
+        report_to  TEXT,
+        status     TEXT NOT NULL
+            CHECK (status IN ('waiting_operator', 'waiting_agent', 'closed')),
+        response   TEXT,
+        handoff    TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        closed_at  TEXT,
+        closed_by  TEXT
+    );
+    CREATE INDEX threads_status ON threads(status, updated_at);
+    CREATE INDEX threads_agent ON threads(agent);
+    CREATE INDEX threads_report_to ON threads(report_to);
+    CREATE TABLE thread_messages (
+        id      TEXT PRIMARY KEY,
+        thread  TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        author  TEXT NOT NULL,
+        kind    TEXT NOT NULL CHECK (kind IN ('message', 'response')),
+        text    TEXT NOT NULL,
+        at      TEXT NOT NULL
+    );
+    CREATE INDEX thread_messages_thread ON thread_messages(thread, at);
+    ALTER TABLE questions ADD COLUMN thread TEXT;
+    CREATE INDEX questions_thread ON questions(thread);
+    "#,
+    // 75: batch merges (TER-112, `crate::jobs`). `jobs.batch` is the JSON
+    // list of the cards of a merge job that merges several cards in order
+    // ([{card, branch, by_agent, outcome?, note?}]); `null` for a job of
+    // one card. `jobs.parent` is the job that a split of a red batch came
     // from. `jobs.split_path` orders the halves of the splits of one root
     // batch (`0` left, `1` right, per level; empty for no split).
     // Self-contained: when another branch takes this number, move this
