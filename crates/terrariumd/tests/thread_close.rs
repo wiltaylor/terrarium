@@ -593,7 +593,11 @@ async fn an_answer_to_the_last_question_declines_the_proposal() {
     let q1 = id(&r.body);
     let r = lab
         .td
-        .post_as(&eph, &asks, json!({"text": "Note this.", "kind": "notice", "thread": tid}))
+        .post_as(
+            &eph,
+            &asks,
+            json!({"text": "Note this.", "kind": "notice", "thread": tid}),
+        )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let q2 = id(&r.body);
@@ -602,7 +606,10 @@ async fn an_answer_to_the_last_question_declines_the_proposal() {
     // An answer that leaves a question open keeps the proposal: the
     // thread still waits on the operator.
     lab.td
-        .post(&format!("/api/questions/{q1}/answer"), json!({"option": "yes"}))
+        .post(
+            &format!("/api/questions/{q1}/answer"),
+            json!({"option": "yes"}),
+        )
         .await
         .ok();
     let th = lab.thread(&tid).await;
