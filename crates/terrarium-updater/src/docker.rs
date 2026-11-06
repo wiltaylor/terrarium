@@ -718,12 +718,18 @@ mod tests {
             "com.docker.compose.version": "2.29.7",
             LABEL_VERSION: "0.1.0"
         });
-        assert!(found_by_compose(&s["container"]["Config"]["Labels"], "terrarium-deploy"));
+        assert!(found_by_compose(
+            &s["container"]["Config"]["Labels"],
+            "terrarium-deploy"
+        ));
 
         // Update 1: to a release image, which has no compose labels.
         let release1 = json!({"Labels": {LABEL_VERSION: "0.1.1"}});
         let b1 = create_body(&s, "ghcr.io/x/t@sha256:1");
-        assert_eq!(b1["Labels"], compose, "every compose label stays, the old version goes");
+        assert_eq!(
+            b1["Labels"], compose,
+            "every compose label stays, the old version goes"
+        );
         let after1 = merged_labels(&release1, &b1);
         assert_eq!(after1[LABEL_VERSION], "0.1.1");
         assert!(found_by_compose(&after1, "terrarium-deploy"));
