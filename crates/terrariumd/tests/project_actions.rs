@@ -295,9 +295,12 @@ fn a_manual_spec_has_no_time() {
 async fn a_project_owned_card_action_keeps_the_github_gate() {
     let td = TestDaemon::start().await;
     let (lead, worker, _) = setup(&td).await;
-    td.patch("/api/projects/terra", json!({"github_authors": ["wiltaylor"]}))
-        .await
-        .ok();
+    td.patch(
+        "/api/projects/terra",
+        json!({"github_authors": ["wiltaylor"]}),
+    )
+    .await
+    .ok();
     let cards = "/api/projects/terra/cards";
     let held = td
         .post_as(
