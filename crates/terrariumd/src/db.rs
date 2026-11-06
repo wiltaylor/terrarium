@@ -2033,6 +2033,7 @@ const MIGRATIONS: &[&str] = &[
         SELECT agent_id, role, project, granted_by, granted_at FROM roles;
     DROP TABLE roles;
     ALTER TABLE roles_architect RENAME TO roles;
+    "#,
     // 70: the job queue of a project (TER-71, `crate::jobs`). A job
     // validates a card commit, or merges a card branch onto `next` and
     // validates the result. Jobs start first in, first out, at most the
