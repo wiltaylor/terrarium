@@ -198,7 +198,12 @@ where
 
 /// Forward `inner`. A `Kill` (or the drop of the returned run) runs
 /// `killer` on the target first, then kills `inner`.
-fn guard<F>(inner: Running, start: F, killer: RemoteCmd, report: watch::Sender<Option<Value>>) -> Running
+fn guard<F>(
+    inner: Running,
+    start: F,
+    killer: RemoteCmd,
+    report: watch::Sender<Option<Value>>,
+) -> Running
 where
     F: Fn(RemoteCmd) -> ApiResult<Running> + Send + Sync + 'static,
 {
@@ -308,10 +313,16 @@ mod tests {
         };
         let w = wrap(&cmd, "/tmp/terrarium-run-X.pid");
         assert_eq!(w.argv[..2], ["sh", "-c"]);
-        assert_eq!(w.argv[3..], ["terrarium-run", "/tmp/terrarium-run-X.pid", "cargo", "test"]);
+        assert_eq!(
+            w.argv[3..],
+            ["terrarium-run", "/tmp/terrarium-run-X.pid", "cargo", "test"]
+        );
         assert_eq!(w.cwd.as_deref(), Some("/src"));
         let k = kill_cmd(&cmd, "/tmp/terrarium-run-X.pid", 5);
-        assert_eq!(k.argv[3..], ["terrarium-kill", "/tmp/terrarium-run-X.pid", "5"]);
+        assert_eq!(
+            k.argv[3..],
+            ["terrarium-kill", "/tmp/terrarium-run-X.pid", "5"]
+        );
         assert_eq!(k.cwd, None);
         assert_eq!(k.agent.as_deref(), Some("a"));
         assert_eq!(k.holder.as_deref(), Some("p/a"));
@@ -321,15 +332,17 @@ mod tests {
     #[test]
     fn the_report_parses() {
         let r = parse("pid 10\nterm 10 11 12\nkill 12\nleft\n");
-        assert_eq!(r, json!({"pid": 10, "term": [10, 11, 12], "kill": [12], "left": []}));
+        assert_eq!(
+            r,
+            json!({"pid": 10, "term": [10, 11, 12], "kill": [12], "left": []})
+        );
         assert_eq!(parse("none\n")["pid"], Value::Null);
     }
 
     #[test]
     fn only_runs_with_an_argv_on_host_docker_and_ssh_wrap() {
-        let def = |kind: &str| -> TargetDef {
-            toml::from_str(&format!("kind = \"{kind}\"\n")).unwrap()
-        };
+        let def =
+            |kind: &str| -> TargetDef { toml::from_str(&format!("kind = \"{kind}\"\n")).unwrap() };
         let cmd = RemoteCmd {
             argv: vec!["true".into()],
             ..RemoteCmd::default()
@@ -379,7 +392,8 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
         let known = dir.path().join("known_hosts");
-        let mut def: TargetDef = toml::from_str("kind = \"ssh\"\naddress = \"build@box\"\n").unwrap();
+        let mut def: TargetDef =
+            toml::from_str("kind = \"ssh\"\naddress = \"build@box\"\n").unwrap();
         def.name = "remote".into();
         let ssh_bin = ssh.display().to_string();
         let starter = move |c: RemoteCmd| {

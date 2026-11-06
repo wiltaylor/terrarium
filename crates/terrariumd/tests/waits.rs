@@ -1109,7 +1109,10 @@ async fn kill_ends_the_child(td: &TestDaemon, agent: &str, target: &str, dir: &s
         "{k}"
     );
     assert_eq!(report["left"], json!([]), "{k}");
-    assert!(!alive(child), "the child {child} still runs on {target}: {k}");
+    assert!(
+        !alive(child),
+        "the child {child} still runs on {target}: {k}"
+    );
 }
 
 /// TER-99: a kill of a run on a host target ends the children of the
