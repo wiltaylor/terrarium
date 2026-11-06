@@ -280,8 +280,22 @@ pub async fn spawn(
         }
         None => None,
     };
+    // A bind is a right of the owner's spawn policy (`spawn.bound`); the
+    // operator is not bound to it. The cap is the owner's
+    // `spawn.max_bound_lifetime`.
+    if bound.is_some()
+        && !actor.is_operator()
+        && rules.as_ref().is_some_and(|sp| !sp.bound)
+    {
+        return Err(ApiError::forbidden(format!(
+            "`{}` may not bind an ephemeral agent: its spawn policy has no `bound`; ask \
+             sysadmin or the operator (`terrarium agent set {} --spawn-bound on`)",
+            owner.name, owner.name
+        )));
+    }
     let lifetime = match (&bound, &rules) {
-        (Some(_), _) => crate::bound::BOUND_MAX_LIFETIME,
+        (Some(_), Some(sp)) => sp.bound_lifetime().map_err(ApiError::invalid)?,
+        (Some(_), None) => terrarium_core::config::SPAWN_MAX_BOUND_LIFETIME,
         (None, Some(sp)) => sp.lifetime().map_err(ApiError::invalid)?,
         (None, None) => terrarium_core::config::SPAWN_DEFAULT_LIFETIME,
     };
@@ -787,6 +801,8 @@ pub async fn close(
     }
     drop(deleting);
     info!(agent = %id, name = %closed.name, %outcome, "closed an ephemeral agent");
+    // The close frees a place of the owner: a queued unpark may run.
+    crate::bound::retry_owner(state, &closed.owner).await;
     // The closed agent is a removed owner: its own ephemeral agents go.
     Box::pin(owner_removed(state, id)).await;
     Ok(Some(closed))
@@ -945,6 +961,8 @@ pub async fn pass(state: &Shared) {
     {
         warn!("cannot delete the spawn rows of removed owners: {e}");
     }
+    // A queued unpark whose owner got room another way (a policy change).
+    crate::bound::retry_all(state).await;
 }
 
 /// The facts of the ephemeral part of the prompt ([`prompt_info`]).
@@ -1094,6 +1112,7 @@ mod tests {
             bound: None,
             parked_at: None,
             park_reason: None,
+            unpark_queued_at: None,
         };
         let (subject, body) = finish_mail(&sp);
         assert_eq!(subject, "Spawned lead-worker-1 finished: done");

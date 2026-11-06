@@ -76,6 +76,10 @@ pub struct Spawn {
     pub parked_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub park_reason: Option<String>,
+    /// When an unpark began to wait for a place of the owner (TER-74).
+    /// Absent when none waits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unpark_queued_at: Option<String>,
 }
 
 impl Spawn {
@@ -210,6 +214,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Spawn> {
         bound: bound_text(r.get("bound_kind")?, r.get("bound_id")?),
         parked_at: r.get("parked_at")?,
         park_reason: r.get("park_reason")?,
+        unpark_queued_at: r.get("unpark_at")?,
     })
 }
 
@@ -395,11 +400,48 @@ pub fn set_parked(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<bool> {
 /// Clear the park of the open spawn `id`. False when it was not parked.
 pub fn clear_parked(t: &mut Tx<'_>, id: &str) -> ApiResult<bool> {
     let n = t.execute(
-        "UPDATE spawns SET parked_at = NULL, park_reason = NULL
+        "UPDATE spawns SET parked_at = NULL, park_reason = NULL, unpark_at = NULL
          WHERE id = ?1 AND finished_at IS NULL AND parked_at IS NOT NULL",
         [id],
     )?;
     Ok(n > 0)
+}
+
+/// Queue an unpark of the parked spawn `id`: it keeps its first place.
+/// False when one waits already.
+pub fn queue_unpark(t: &mut Tx<'_>, id: &str) -> ApiResult<bool> {
+    let n = t.execute(
+        "UPDATE spawns SET unpark_at = ?2
+         WHERE id = ?1 AND finished_at IS NULL AND parked_at IS NOT NULL AND unpark_at IS NULL",
+        params![id, now()],
+    )?;
+    Ok(n > 0)
+}
+
+/// The spawns of `owner` with a queued unpark, first in, first out.
+pub fn queued_unparks(conn: &Connection, owner: &str) -> ApiResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM spawns
+         WHERE owner = ?1 AND finished_at IS NULL AND parked_at IS NOT NULL
+           AND unpark_at IS NOT NULL
+         ORDER BY unpark_at, id",
+    )?;
+    let rows = stmt
+        .query_map([owner], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The owners with a queued unpark.
+pub fn owners_with_queued_unparks(conn: &Connection) -> ApiResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT owner FROM spawns
+         WHERE finished_at IS NULL AND parked_at IS NOT NULL AND unpark_at IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 /// True when the agent `id` is a parked ephemeral agent.

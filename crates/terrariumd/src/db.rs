@@ -2103,6 +2103,8 @@ const MIGRATIONS: &[&str] = &[
     // example `card`, `TER-74`); NULL: a plain spawn. At most one open
     // spawn per object. `parked_at` and `park_reason`: the agent is parked
     // (stopped, no wake) while its object waits; NULL: not parked.
+    // `unpark_at`: an unpark waits for a place of the owner (first in,
+    // first out); NULL: none.
     // Self-contained: when another branch takes this number, move this
     // entry to the end of the list.
     r#"
@@ -2110,6 +2112,7 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE spawns ADD COLUMN bound_id TEXT;
     ALTER TABLE spawns ADD COLUMN parked_at TEXT;
     ALTER TABLE spawns ADD COLUMN park_reason TEXT;
+    ALTER TABLE spawns ADD COLUMN unpark_at TEXT;
     CREATE UNIQUE INDEX spawns_bound_open ON spawns(bound_kind, bound_id)
         WHERE finished_at IS NULL AND bound_kind IS NOT NULL;
     "#,

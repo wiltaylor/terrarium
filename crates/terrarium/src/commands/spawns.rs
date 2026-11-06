@@ -82,10 +82,20 @@ pub struct SpawnRightsArgs {
     /// The ephemeral agents may spawn too (sysadmin or the operator)
     #[arg(long, value_name = "on|off")]
     pub spawn_children: Option<String>,
+    /// The agent may bind an ephemeral agent to a card (`agent spawn
+    /// --card`), which then lives until the card is finished (sysadmin or
+    /// the operator)
+    #[arg(long, value_name = "on|off")]
+    pub spawn_bound: Option<String>,
+    /// The cap of the life of a bound ephemeral agent (default and at most
+    /// 30d)
+    #[arg(long, value_name = "DURATION")]
+    pub spawn_max_bound_lifetime: Option<String>,
     /// Remove the spawn rights
     #[arg(long, conflicts_with_all = [
         "spawn_templates", "spawn_max_concurrent", "spawn_max_per_day",
-        "spawn_max_lifetime", "spawn_children"
+        "spawn_max_lifetime", "spawn_children", "spawn_bound",
+        "spawn_max_bound_lifetime"
     ])]
     pub no_spawn: bool,
 }
@@ -98,6 +108,8 @@ impl SpawnRightsArgs {
             || self.spawn_max_per_day.is_some()
             || self.spawn_max_lifetime.is_some()
             || self.spawn_children.is_some()
+            || self.spawn_bound.is_some()
+            || self.spawn_max_bound_lifetime.is_some()
     }
 }
 
@@ -150,6 +162,12 @@ pub async fn policy_with_spawn(
     }
     if let Some(v) = &a.spawn_children {
         sp["may_spawn_children"] = json!(super::agents::switch(v, "--spawn-children")?);
+    }
+    if let Some(v) = &a.spawn_bound {
+        sp["bound"] = json!(super::agents::switch(v, "--spawn-bound")?);
+    }
+    if let Some(d) = &a.spawn_max_bound_lifetime {
+        sp["max_bound_lifetime"] = json!(d);
     }
     policy["spawn"] = sp;
     Ok(Some(policy))
