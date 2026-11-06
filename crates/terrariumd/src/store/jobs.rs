@@ -284,7 +284,10 @@ fn address_key(a: &str) -> String {
 
 /// Accept both host-agent names and stable keys, including old stored keys.
 fn canonical_key(conn: &Connection, key: &str) -> ApiResult<String> {
-    if let Some(host) = hosts::list(conn)?.into_iter().find(|h| h.name == key || h.id == key) {
+    if let Some(host) = hosts::list(conn)?
+        .into_iter()
+        .find(|h| h.name == key || h.id == key)
+    {
         return Ok(host.id);
     }
     Ok(address_key(key))
@@ -473,7 +476,10 @@ pub fn host_caps(conn: &Connection) -> ApiResult<Vec<HostCap>> {
         cap.host = canonical_key(conn, &cap.host)?;
         // Old aliases may each have a cap. Keep the stricter one until
         // the operator explicitly replaces it through set_host_cap.
-        if caps.get(&cap.host).is_none_or(|old| cap.heavy_jobs < old.heavy_jobs) {
+        if caps
+            .get(&cap.host)
+            .is_none_or(|old| cap.heavy_jobs < old.heavy_jobs)
+        {
             caps.insert(cap.host.clone(), cap);
         }
     }

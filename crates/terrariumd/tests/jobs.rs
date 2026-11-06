@@ -21,18 +21,38 @@ const DEADLINE: Duration = Duration::from_secs(90);
 #[tokio::test]
 async fn host_caps_accept_names_ids_and_ssh_aliases() {
     let td = TestDaemon::start().await;
-    let h = td.post("/api/hosts", json!({"name": "machine"})).await.ok().clone();
+    let h = td
+        .post("/api/hosts", json!({"name": "machine"}))
+        .await
+        .ok()
+        .clone();
     let id = h["id"].as_str().unwrap();
-    let cap = td.put("/api/job-hosts/machine", json!({"heavy_jobs": 2})).await.ok().clone();
+    let cap = td
+        .put("/api/job-hosts/machine", json!({"heavy_jobs": 2}))
+        .await
+        .ok()
+        .clone();
     assert_eq!(cap["hosts"][0]["host"], id);
-    let cap = td.put(&format!("/api/job-hosts/{id}"), json!({"heavy_jobs": 1})).await.ok().clone();
+    let cap = td
+        .put(&format!("/api/job-hosts/{id}"), json!({"heavy_jobs": 1}))
+        .await
+        .ok()
+        .clone();
     assert_eq!(cap["hosts"].as_array().unwrap().len(), 1);
     assert_eq!(cap["hosts"][0]["heavy_jobs"], 1);
     td.delete(&format!("/api/job-hosts/{id}")).await.ok();
-    let cap = td.put("/api/job-hosts/localhost", json!({"heavy_jobs": 2})).await.ok().clone();
+    let cap = td
+        .put("/api/job-hosts/localhost", json!({"heavy_jobs": 2}))
+        .await
+        .ok()
+        .clone();
     let key = cap["hosts"][0]["host"].as_str().unwrap();
     assert!(key.parse::<std::net::IpAddr>().is_ok());
-    let cap = td.put(&format!("/api/job-hosts/{key}"), json!({"heavy_jobs": 1})).await.ok().clone();
+    let cap = td
+        .put(&format!("/api/job-hosts/{key}"), json!({"heavy_jobs": 1}))
+        .await
+        .ok()
+        .clone();
     assert_eq!(cap["hosts"].as_array().unwrap().len(), 1);
     assert_eq!(cap["hosts"][0]["host"], key);
     assert_eq!(cap["hosts"][0]["heavy_jobs"], 1);
@@ -104,7 +124,11 @@ async fn host_counts_respect_the_readers_project() {
     assert!(v["hosts"][0].get("updated_by").is_some());
     td.project("empty").await;
     td.agent("empty", "worker", json!({})).await;
-    let v = td.get_as("empty/worker", "/api/job-hosts").await.ok().clone();
+    let v = td
+        .get_as("empty/worker", "/api/job-hosts")
+        .await
+        .ok()
+        .clone();
     assert_eq!(v["hosts"][0]["projects"], json!({"empty": 0}));
 }
 

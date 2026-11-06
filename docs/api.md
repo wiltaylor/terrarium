@@ -10257,7 +10257,7 @@ they do not get the low priority.
 
 | method and path                 | who                           | what |
 |---------------------------------|-------------------------------|------|
-| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, heavy_jobs, running, updated_by, updated_at}]}`: each host with a cap or a running job. `heavy_jobs` is `null` without a cap |
+| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, heavy_jobs, running, projects, updated_by?, updated_at?}]}`: each host with a cap or a running job. `heavy_jobs` is `null` without a cap. Visibility is scoped as described below |
 | `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
 | `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
 
@@ -10271,6 +10271,10 @@ The operator, sysadmin and architect see all project counts and cap audit
 fields. Other agents see the total `running` count and only their own
 project's count (including zero). Their response omits `updated_by` and
 `updated_at`. No job records are returned.
+
+Previously stored host names and address aliases are normalized when
+counting running jobs and reading caps. If several old caps resolve to
+one key, the strictest applies until a cap write replaces them.
 
 ### 35.3 Results
 
