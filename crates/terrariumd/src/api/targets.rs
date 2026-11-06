@@ -191,7 +191,7 @@ async fn with_credential(state: &Shared, v: TargetView) -> ApiResult<TargetView>
 fn visible(actor: &Actor, def: &TargetDef) -> bool {
     match (actor, &def.project) {
         (Actor::Operator, _) | (_, None) => true,
-        (Actor::Agent(a), Some(p)) => a.is_sysadmin() || a.project == *p,
+        (Actor::Agent(a), Some(p)) => a.reads_all() || a.project == *p,
     }
 }
 

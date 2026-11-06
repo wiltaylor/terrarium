@@ -3,7 +3,7 @@
 // project: the agent form and the template form add those.
 
 import { createResource, createSignal, For, Show } from "solid-js";
-import { GRANTABLE_ROLES, HARNESSES, RESTART_POLICIES, type Harness, type RestartPolicy, type Role } from "../../api/types";
+import { GRANTABLE_ROLES, HARNESSES, roleLabel, RESTART_POLICIES, type Harness, type RestartPolicy, type Role } from "../../api/types";
 import { api, subscriptions } from "../../stores";
 import { compactMaxAgeProblem, idleStopProblem, type AgentFormValues, type CompactSwitch } from "./form";
 import { SystemPromptSelect } from "./SystemPromptSelect";
@@ -201,7 +201,7 @@ export function AgentFields(props: {
           <For each={GRANTABLE_ROLES}>
             {(r) => (
               <label class="row small">
-                <input type="checkbox" checked={v().roles.includes(r)} onChange={(e) => set("roles", toggle<Role>(v().roles, r, e.currentTarget.checked))} /> {r}
+                <input type="checkbox" checked={v().roles.includes(r)} onChange={(e) => set("roles", toggle<Role>(v().roles, r, e.currentTarget.checked))} /> {roleLabel(r)}
               </label>
             )}
           </For>

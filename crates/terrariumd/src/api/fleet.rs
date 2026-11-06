@@ -412,7 +412,7 @@ async fn start_agent(state: &Shared, actor: &Actor, project: &str, name: &str) -
 fn visible(actor: &Actor, row: &store::FleetRow) -> bool {
     match actor {
         Actor::Operator => true,
-        Actor::Agent(a) => a.is_sysadmin() || row.projects.contains(&a.project),
+        Actor::Agent(a) => a.reads_all() || row.projects.contains(&a.project),
     }
 }
 

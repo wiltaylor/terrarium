@@ -7,7 +7,7 @@ import { EventHistory } from "../../components/EventHistory";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Terminal } from "../../components/Terminal";
 import { ConfirmButton, ErrorBanner, PageHead, Tabs } from "../../components/ui";
-import { GRANTABLE_ROLES, type Agent, type AgentStatus, type ResetKind, type ResetResult, type Role } from "../../api/types";
+import { GRANTABLE_ROLES, roleLabel, type Agent, type AgentStatus, type ResetKind, type ResetResult, type Role } from "../../api/types";
 import { ago } from "../../lib/format";
 import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
 import { eventAgentId } from "../../stores/agents";
@@ -881,7 +881,7 @@ function RolesPanel(props: { agent: Agent; onError: (e: unknown) => void }) {
                 checked={current().includes(r)}
                 onChange={(e) => setDraft(e.currentTarget.checked ? [...new Set([...current(), r])] : current().filter((x) => x !== r))}
               />
-              {r}
+              {roleLabel(r)}
               <span class="muted">{r === "project_admin" ? `(of ${props.agent.project})` : "(all projects)"}</span>
             </label>
           )}

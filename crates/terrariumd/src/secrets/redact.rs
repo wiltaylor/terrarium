@@ -289,7 +289,7 @@ pub async fn rebuild(state: &AppState) {
 pub fn view_of(actor: &Actor) -> View {
     match actor {
         Actor::Operator => View::All,
-        Actor::Agent(a) if a.is_sysadmin() => View::All,
+        Actor::Agent(a) if a.reads_all() => View::All,
         Actor::Agent(a) => View::Scope(a.project.clone()),
     }
 }

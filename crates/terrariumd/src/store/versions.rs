@@ -458,7 +458,7 @@ pub struct NewVersion {
 
 pub fn create(t: &mut Tx<'_>, actor: &Actor, project: &str, v: NewVersion) -> ApiResult<Version> {
     projects::get(t, project)?;
-    policy::read_project(actor, project)?;
+    policy::write_project(actor, project)?;
     let name = check_name(&v.name)?;
     if by_name(t, project, &name)?.is_some() {
         return Err(ApiError::conflict(format!(
@@ -519,6 +519,8 @@ pub struct VersionPatch {
 
 pub fn update(t: &mut Tx<'_>, actor: &Actor, key: &str, p: VersionPatch) -> ApiResult<Version> {
     let row = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     editable(&row)?;
     policy::edit_version(actor, &row.project, &row.created_by, &row.name)?;
     let mut fields = Vec::new();
@@ -652,7 +654,7 @@ pub fn check_test_link(
     project: &str,
 ) -> ApiResult<String> {
     let row = find(conn, key, Some(project))?;
-    policy::read_project(actor, &row.project)?;
+    policy::write_project(actor, &row.project)?;
     if row.project != project {
         return Err(ApiError::invalid(
             "a test run links to a version of its project",
@@ -715,6 +717,8 @@ pub fn submit(
     link_base: &str,
 ) -> ApiResult<Version> {
     let row = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     editable(&row)?;
     policy::edit_version(actor, &row.project, &row.created_by, &row.name)?;
     let comment = clean(comment);
@@ -790,6 +794,8 @@ pub fn decide(
     comment: Option<&str>,
 ) -> ApiResult<Version> {
     let row = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     immutable(&row)?;
     policy::decide_version(actor)?;
     if row.status != "in_review" {
@@ -875,6 +881,8 @@ pub fn set_archived(
     archived: bool,
 ) -> ApiResult<Version> {
     let row = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     policy::edit_version(actor, &row.project, &row.created_by, &row.name)?;
     if row.archived_at.is_some() == archived {
         return render(t, row);
@@ -913,6 +921,8 @@ pub fn release(
     comment: Option<&str>,
 ) -> ApiResult<Version> {
     let row = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     immutable(&row)?;
     policy::release_version(actor, &row.project)?;
     if row.status != "approved" {

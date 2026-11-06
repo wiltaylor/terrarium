@@ -440,34 +440,49 @@ refused it. Do not parse the message; use `code`.
 The daemon checks the actor on every call (PLAN §10). The operator may do
 everything. Every privileged action writes an audit row (§9).
 
-| Capability | member | project_admin | sysadmin |
-|---|---|---|---|
-| Read own project: project, agents, repos, targets, board, cards | yes | yes | all projects |
-| Browse a repo (§5.3): its trees, files, changes, commits | own project | own project | all projects |
-| Mail (§7.1 scope rules) | own project | own project | any agent |
-| Read and reply from the project inbox | no | own project | any project |
-| Create, change, start, stop, restart, delete agents; send turns; answer; attach the PTY | no | own project | any |
-| Read agent templates (§21) | own project and global | own project and global | all |
-| Create, change, delete agent templates (§21) | no | own project | any, global too |
-| Assign, reassign, reopen any card; edit columns and WIP limits; archive any card | no | own project | any |
-| Attach repos; change the project | no | own project | any |
-| Grant, extend, or revoke a target lease (§17.7) | no | a target of own project, to an agent of own project | any |
-| Check out a repo into its own workspace; ask the credential helper (§5.1) | own project | own project | own project |
-| Check out a repo into another agent's workspace | no | own project | any |
-| Store, list, show, or delete secrets (§5.2); never a value | no | own project | any, global too |
-| Reveal the value of a secret (§5.2) | no | no | no (operator only) |
-| Create and delete projects; `POST /api/reload` | no | no | yes |
-| Read the self-update state, check for a release, update, roll back (§34) | no | no | yes |
-| Drain the daemon for an update (§34.5) | no | no | no (operator only) |
-| Grant or revoke `project_admin` | no | own project | any |
-| Grant or revoke `sysadmin` | no | no | no (operator only) |
-| Read the audit log | no | own project's rows | all |
-| Read memories, pages, artifacts, versions; write memories, links, tags, pages, uploads, versions | own project | own project | any |
-| Read and write the DB (§27): types, records, queries | own project | own project | any |
-| Delete a DB type with its records (§27) | no | own project | any |
-| Edit or delete any memory; move, delete, or undelete a page; delete any artifact; release a version | no | own project | any |
-| Approve or reject a version | no | no | no (operator only) |
-| Prune artifacts | no | no | yes |
+| Capability | member | project_admin | sysadmin | system architect |
+|---|---|---|---| --- |
+| Read own project: project, agents, repos, targets, board, cards | yes | yes | all projects | all projects |
+| Browse a repo (§5.3): its trees, files, changes, commits | own project | own project | all projects | all projects |
+| Mail (§7.1 scope rules) | own project | own project | any agent | own project (as a member); reads every thread |
+| Read and reply from the project inbox | no | own project | any project | read any project, reply no |
+| Create, change, start, stop, restart, delete agents; send turns; answer; attach the PTY | no | own project | any | no (reads agents, sessions, transcripts, the screen) |
+| Read agent templates (§21) | own project and global | own project and global | all | all |
+| Create, change, delete agent templates (§21) | no | own project | any, global too | no |
+| Assign, reassign, reopen any card; edit columns and WIP limits; archive any card | no | own project | any | no |
+| Attach repos; change the project | no | own project | any | no |
+| Grant, extend, or revoke a target lease (§17.7) | no | a target of own project, to an agent of own project | any | no |
+| Check out a repo into its own workspace; ask the credential helper (§5.1) | own project | own project | own project | own project |
+| Check out a repo into another agent's workspace | no | own project | any | no |
+| Store, list, show, or delete secrets (§5.2); never a value | no | own project | any, global too | list and show any (metadata); store and delete no |
+| Reveal the value of a secret (§5.2) | no | no | no (operator only) | no (operator only) |
+| Create and delete projects; `POST /api/reload` | no | no | yes | no |
+| Read the self-update state, check for a release, update, roll back (§34) | no | no | yes | read only |
+| Drain the daemon for an update (§34.5) | no | no | no (operator only) | no (operator only) |
+| Grant or revoke `project_admin` | no | own project | any | no |
+| Grant or revoke `sysadmin` | no | no | no (operator only) | no (operator only) |
+| Read the audit log | no | own project's rows | all | all |
+| Read memories, pages, artifacts, versions; write memories, links, tags, pages, uploads, versions | own project | own project | any | read any; write own project |
+| Read and write the DB (§27): types, records, queries | own project | own project | any | read any; write own project |
+| Delete a DB type with its records (§27) | no | own project | any | no |
+| Edit or delete any memory; move, delete, or undelete a page; delete any artifact; release a version | no | own project | any | no |
+| Approve or reject a version | no | no | no (operator only) | no (operator only) |
+| Prune artifacts | no | no | yes | no |
+| Grant or revoke `architect` | no | no | no (operator only) | no |
+| Run a command, a shell, a copy, or keys on a target or an agent | per the target rules (§17.4) | per the target rules (§17.4) | any | no |
+
+The `system architect` (role `architect`, TER-47) plans large changes: it
+reads what a sysadmin reads, in every project (the lists, boards, cards,
+agents and their sessions, transcripts, and screens, mail threads and
+project inboxes, the audit log, the event stream, secret metadata, the
+self-update state), and writes only what a member of its own project may
+write: its own cards, comments, memories, pages, uploads, and mail. In
+another project it changes nothing, and it never runs a command, opens a
+terminal, controls an agent, grants, or leases. Only the operator grants
+or revokes it. An agent has `architect` alone or with `project_admin` of
+its own project; with `sysadmin` it is `422 invalid` (sysadmin already
+reads everything). An architect gets the worker persona unless it is also
+a project_admin.
 
 Limits that always hold:
 

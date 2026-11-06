@@ -2012,6 +2012,28 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX project_placements_folder ON project_placements(folder_id, position);
     "#,
+    // 69: the role `architect` (TER-47) in the CHECK of `roles.role`. It
+    // comes after 68 of TER-48 (project folders): when both branches are
+    // merged, this entry is the last. The column is part of the primary
+    // key, so the table is made again. No table refers to `roles` (it
+    // refers to `agents`), so the drop deletes no other row.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list. The test finds it by the name
+    // `roles_architect`.
+    r#"
+    CREATE TABLE roles_architect (
+        agent_id   TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        role       TEXT NOT NULL CHECK (role IN ('project_admin', 'sysadmin', 'architect')),
+        project    TEXT,
+        granted_by TEXT NOT NULL,
+        granted_at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, role)
+    );
+    INSERT INTO roles_architect (agent_id, role, project, granted_by, granted_at)
+        SELECT agent_id, role, project, granted_by, granted_at FROM roles;
+    DROP TABLE roles;
+    ALTER TABLE roles_architect RENAME TO roles;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -3425,6 +3447,68 @@ mod tests {
             conn.execute("UPDATE questions SET kind = 'bogus' WHERE id = 'Q1'", [])
                 .is_err()
         );
+    }
+
+    /// Migration 69 keeps each role and takes `architect`. Found by its
+    /// content.
+    #[test]
+    fn migration_69_keeps_roles_and_takes_architect() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("roles_architect"))
+            .unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 't', 't');
+             INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+               VALUES ('A1', 'a', 'p', 'claude', '/w', 't', 't');
+             INSERT INTO roles (agent_id, role, project, granted_by, granted_at)
+               VALUES ('A1', 'sysadmin', NULL, 'operator', 't');",
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO roles (agent_id, role, granted_by, granted_at)
+                 VALUES ('A1', 'architect', 'operator', 't')",
+                [],
+            )
+            .is_err()
+        );
+        migrate(&mut conn).unwrap();
+        let roles: Vec<String> = conn
+            .prepare("SELECT role FROM roles WHERE agent_id = 'A1'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(roles, ["sysadmin"]);
+        conn.execute(
+            "INSERT INTO roles (agent_id, role, granted_by, granted_at)
+             VALUES ('A1', 'architect', 'operator', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO roles (agent_id, role, granted_by, granted_at)
+                 VALUES ('A1', 'bogus', 'operator', 't')",
+                [],
+            )
+            .is_err()
+        );
+        // The cascade from agents still works.
+        conn.execute("DELETE FROM agents WHERE id = 'A1'", [])
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM roles", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]
