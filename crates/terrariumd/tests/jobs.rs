@@ -121,6 +121,7 @@ async fn host_counts_respect_the_readers_project() {
                         project,
                         card,
                         kind: JobKind::Validate,
+                        batch: None,
                         repo: "app".into(),
                         branch: "next".into(),
                         commit: None,
