@@ -265,7 +265,7 @@ async fn the_rights_of_an_action() {
 
 #[test]
 fn a_manual_spec_has_no_time() {
-    let spec = terrarium_core::schedule::ScheduleSpec::Manual;
+    let spec = terrarium_core::schedule::ScheduleSpec::Manual {};
     assert!(
         terrariumd::store::schedules::next_after(&spec, Utc::now(), Utc::now())
             .unwrap()

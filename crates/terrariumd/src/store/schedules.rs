@@ -257,7 +257,7 @@ pub fn validate_spec(spec: &ScheduleSpec, now: DateTime<Utc>) -> ApiResult<()> {
             *max_per_hour,
         )?,
         // A project action: nothing to check.
-        ScheduleSpec::Manual => {}
+        ScheduleSpec::Manual {} => {}
     }
     Ok(())
 }
@@ -430,7 +430,7 @@ pub fn next_after_min(
         // A trigger has no time: an event starts its runs.
         ScheduleSpec::On { .. } => Ok(None),
         // A project action has no time: a person starts each run.
-        ScheduleSpec::Manual => Ok(None),
+        ScheduleSpec::Manual {} => Ok(None),
     }
 }
 
@@ -651,7 +651,7 @@ impl SpecGroup {
     pub fn of(spec: &ScheduleSpec) -> Self {
         match spec {
             ScheduleSpec::On { .. } => Self::Trigger,
-            ScheduleSpec::Manual => Self::Action,
+            ScheduleSpec::Manual {} => Self::Action,
             _ => Self::Time,
         }
     }

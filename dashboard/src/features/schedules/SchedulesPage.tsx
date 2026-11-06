@@ -35,6 +35,7 @@ export default function SchedulesPage() {
   const project = () => params.project ?? null;
   const kind = (): ScheduleKind => tabOf(search.tab);
   const triggers = () => kind() === "trigger";
+  const actions = () => kind() === "action";
   const setTab = (k: ScheduleKind) => setSearch({ tab: tabParam(k), open: undefined }, { replace: true });
   const view = () => ({ project: project(), kind: kind() });
   const filter = (): ScopeFilter => (search.scope === "project" || search.scope === "global" ? search.scope : "all");
@@ -151,11 +152,12 @@ export default function SchedulesPage() {
     return groupSchedules(list);
   };
   const count = () => groups().reduce((n, g) => n + g.items.length, 0);
-  const noun = () => (triggers() ? "triggers" : "schedules");
+  const noun = () => (triggers() ? "triggers" : actions() ? "actions" : "schedules");
   const empty = () => {
     if (loading()) return "Loading…";
     if (project() && filter() === "project") return `Project ${project()} has no ${noun()} of its own.`;
     if (project() && filter() === "global") return `No global ${noun()}.`;
+    if (actions()) return "No actions. Make one with New action: it runs only when you press its button on the project dashboard or on Home.";
     return triggers() ? "No triggers. Make one with New trigger, or start from the preset CI failure → mail an agent." : "No schedules. Make one with New schedule.";
   };
 
@@ -164,7 +166,7 @@ export default function SchedulesPage() {
       {/* In a project it is a tab of the board screen, under the screen title. */}
       <PageHead title={project() ? "Schedules" : "Schedules · all"} level={project() ? 2 : 1}>
         <button class="primary" onClick={() => setDialog({})}>
-          {triggers() ? "New trigger" : "New schedule"}
+          {triggers() ? "New trigger" : actions() ? "New action" : "New schedule"}
         </button>
         <button onClick={() => void load()}>Refresh</button>
       </PageHead>
@@ -197,7 +199,7 @@ export default function SchedulesPage() {
       </Show>
       <section class="card-box" style={{ "margin-bottom": "16px" }}>
         <div class="table-wrap">
-          <table aria-label={triggers() ? "Triggers" : "Schedules"}>
+          <table aria-label={triggers() ? "Triggers" : actions() ? "Actions" : "Schedules"}>
             <thead>
               <tr>
                 <th>Name</th>
@@ -347,6 +349,7 @@ export default function SchedulesPage() {
             project={project()}
             schedule={d().schedule}
             trigger={triggers()}
+            action={actions()}
             onClose={() => setDialog(null)}
             onSaved={(s) => {
               // Read the dialog before it closes: its accessor goes stale after.

@@ -50,8 +50,9 @@ pub enum ScheduleSpec {
         max_per_hour: u32,
     },
     /// A project action (TER-53): no time and no event. It runs only when a
-    /// person presses its button (`POST /api/schedules/{id}/run`).
-    Manual,
+    /// person presses its button (`POST /api/schedules/{id}/run`). An empty
+    /// struct, so an unknown field is an error, as for the other kinds.
+    Manual {},
 }
 
 /// The default `max_per_hour` of a trigger.
@@ -73,13 +74,13 @@ impl ScheduleSpec {
             Self::Interval { .. } => "interval",
             Self::At { .. } => "at",
             Self::On { .. } => "on",
-            Self::Manual => "manual",
+            Self::Manual {} => "manual",
         }
     }
 
     /// Is it a project action (`manual`): run only on demand?
     pub fn is_manual(&self) -> bool {
-        matches!(self, Self::Manual)
+        matches!(self, Self::Manual {})
     }
 
     /// Is it a trigger (`on`)?
@@ -499,7 +500,7 @@ action = { type = "mail", to = "lead", subject = "standup", body = "post your st
     #[test]
     fn a_manual_spec_is_a_bare_kind() {
         let s: ScheduleSpec = serde_json::from_value(serde_json::json!({"kind": "manual"})).unwrap();
-        assert_eq!(s, ScheduleSpec::Manual);
+        assert_eq!(s, ScheduleSpec::Manual {});
         assert!(s.is_manual() && !s.is_trigger());
         assert_eq!(s.kind(), "manual");
         assert_eq!(

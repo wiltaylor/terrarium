@@ -282,6 +282,7 @@ function buildSpec(f: ScheduleForm): Built<ScheduleSpec> {
     if (parseEvery(f.every) === null) return { error: "The interval is a duration such as 15m, 1h, or 1h30m.", field: "every" };
     return { value: { kind: "interval", every: f.every.trim() } };
   }
+  if (f.specKind === "manual") return { value: { kind: "manual" } };
   const at = new Date(f.at);
   if (!f.at || Number.isNaN(at.getTime())) return { error: "Choose the date and time.", field: "at" };
   return { value: { kind: "at", at: at.toISOString() } };

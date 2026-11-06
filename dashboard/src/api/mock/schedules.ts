@@ -59,7 +59,7 @@ export interface ScheduleMockContext {
 export function computeNext(s: Pick<Schedule, "enabled" | "spec" | "last_run">, from: number): string | null {
   if (!s.enabled) return null;
   const spec = s.spec;
-  if (spec.kind === "on") return null;
+  if (spec.kind === "on" || spec.kind === "manual") return null;
   if (spec.kind === "at") {
     const at = Date.parse(spec.at);
     return s.last_run || Number.isNaN(at) ? null : new Date(at).toISOString();
@@ -77,7 +77,7 @@ export function computeNext(s: Pick<Schedule, "enabled" | "spec" | "last_run">, 
   return n === undefined ? null : new Date(n).toISOString();
 }
 
-/** The seed: two schedules of terrarium, one of webshop, one global; runs for each. */
+/** The seed: two schedules of terrarium, one of webshop, one global, two triggers, and a project action in each project; runs for each. */
 export function seedSchedules(now: number, agents: Agent[]): { schedules: Schedule[]; runs: ScheduleRun[]; deliveries: WebhookDelivery[] } {
   const ago = (min: number) => new Date(now - min * 60_000).toISOString();
   const id = (tag: string, n: number) => `01JB${tag.toUpperCase().padEnd(6, "0").slice(0, 6)}${String(n).padStart(16, "0")}`;
@@ -213,7 +213,12 @@ export function seedSchedules(now: number, agents: Agent[]): { schedules: Schedu
   pageRun(12, 95, delivery(3, 12, 95, "pending", 503, 2, { error: "status 503", response: "busy", next_attempt_at: new Date(now + 4 * 60_000).toISOString() }));
   delivery(4, 5, null, "dropped", null, 0, { dropped: 3, error: "rate limit: 3 events dropped in this minute", request: "", request_bytes: 0 });
 
-  const schedules = [standup, tests, nudge, probe, ci, page];
+  // Project actions (TER-53, spec `manual`): a button on the project dashboard and on Home runs them.
+  const deploy = base(7, "deploy-staging", "terrarium", { kind: "manual" }, { type: "exec", target: "build-box", cmd: ["./deploy.sh", "staging"], cwd: "/srv/terrarium", timeout_secs: 900 });
+  run(deploy.id, 60 * 5, "ok", "exec on build-box: exit 0", { target: "build-box", cmd: "./deploy.sh staging", exit_code: 0, end: { kind: "exit", code: 0 }, stdout: "deployed staging\n", stderr: "" }, null, "manual");
+  const notify = base(8, "notify-shop", "webshop", { kind: "manual" }, { type: "mail", to: `webshop/${shop?.name ?? "shop-lead"}`, subject: "Release check", body: "Check the release notes before the deploy." });
+
+  const schedules = [standup, tests, nudge, probe, ci, page, deploy, notify];
   for (const s of schedules) {
     const mine = runs.filter((r) => r.schedule === s.id);
     s.runs_count = mine.length;
@@ -298,7 +303,8 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
       return { kind: "at", at: new Date(at).toISOString() };
     }
     if (spec.kind === "on") return checkOn(spec);
-    return invalid("spec.kind", `\`${String((spec as { kind?: unknown }).kind)}\` is not cron, interval, at, or on`);
+    if (spec.kind === "manual") return { kind: "manual" };
+    return invalid("spec.kind", `\`${String((spec as { kind?: unknown }).kind)}\` is not cron, interval, at, on, or manual`);
   };
 
   /** The daemon's `validate_on`, with its field names. */
@@ -604,9 +610,10 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         }
         const enabled = q.enabled === undefined ? undefined : String(q.enabled) === "true";
         const kind = q.kind as string | undefined;
-        if (kind !== undefined && kind !== "time" && kind !== "trigger") fail(400, "bad_request", `kind: \`${kind}\` is not time or trigger`);
+        if (kind !== undefined && kind !== "time" && kind !== "trigger" && kind !== "action") fail(400, "bad_request", `kind: \`${kind}\` is not time, trigger, or action`);
+        const group = (sp: ScheduleSpec) => (sp.kind === "on" ? "trigger" : sp.kind === "manual" ? "action" : "time");
         return w.schedules
-          .filter((s) => readable(s) && (!q.project || s.project === null || s.project === q.project) && (enabled === undefined || s.enabled === enabled) && (!kind || (s.spec.kind === "on") === (kind === "trigger")))
+          .filter((s) => readable(s) && (!q.project || s.project === null || s.project === q.project) && (enabled === undefined || s.enabled === enabled) && (!kind || group(s.spec) === kind))
           .slice()
           .sort((a, b) => a.name.localeCompare(b.name))
           .map(view);
@@ -695,6 +702,8 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         .reply(() => {
           const s = schedule(id);
           mayRead(s.project);
+          // A disabled project action does not run (docs/api.md §19.8).
+          if (s.spec.kind === "manual" && !s.enabled) fail(409, "conflict", `action \`${key(s)}\` is disabled; enable it first (terrarium schedule enable ${key(s)})`);
           mayWrite(s.project);
           mayReach(s.project, s.action);
           const r: ScheduleRun = { id: c.ulid("run"), schedule: s.id, started_at: c.iso(), finished_at: null, status: "running", trigger: "manual", summary: "running", output: {}, error: null, actor: "operator", event_seq: null };
