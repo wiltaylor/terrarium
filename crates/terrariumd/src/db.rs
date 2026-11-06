@@ -2170,6 +2170,16 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE jobs ADD COLUMN parent TEXT;
     ALTER TABLE jobs ADD COLUMN split_path TEXT NOT NULL DEFAULT '';
     "#,
+    // 76: the GitHub author gate (TER-85, `crate::store::github_gate`).
+    // `projects.github_authors` is the JSON list of the GitHub logins
+    // whose issues count as work; NULL: no gate. `questions.hold_card` is
+    // the held card of a hold question that the daemon opened; NULL for
+    // other questions. Self-contained: when another branch takes this
+    // number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE projects ADD COLUMN github_authors TEXT;
+    ALTER TABLE questions ADD COLUMN hold_card TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

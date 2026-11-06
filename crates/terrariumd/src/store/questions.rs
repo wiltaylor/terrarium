@@ -250,6 +250,10 @@ pub struct Question {
     /// A `tool_run` question: when its approved run started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_at: Option<String>,
+    /// A hold question (TER-85, `crate::store::github_gate`): the held
+    /// card. The daemon opens it; only the operator answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_card: Option<String>,
     /// The mail thread of the question: the answer goes on it.
     pub thread_id: String,
     /// The Inbox thread the question was asked in (TER-91), if any.
@@ -313,6 +317,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Question> {
         retracted_by: r.get("retracted_by")?,
         tool_run: tool_run.and_then(|v| serde_json::from_str(&v).ok()),
         used_at: r.get("used_at")?,
+        hold_card: r.get("hold_card")?,
         thread_id: r.get("thread_id")?,
         thread: r.get("thread")?,
         created_at: r.get("created_at")?,
@@ -678,6 +683,9 @@ pub struct NewQuestion {
     /// The Inbox thread to ask in (TER-91): the asking agent must be its
     /// attached agent, and the thread open.
     pub thread: Option<String>,
+    /// A hold question (TER-85): the held card. Only the daemon sets it
+    /// ([`crate::store::github_gate`]); the API never does.
+    pub hold_card: Option<String>,
 }
 
 /// Write a new question: check the limits, refuse a copy of an open
@@ -738,8 +746,8 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     t.execute(
         "INSERT INTO questions (id, agent, project, text, options, context, card, priority,
                                 status, thread_id, created_at, updated_at, revision, kind, items,
-                                thread)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9, ?10, ?10, 1, ?11, ?12, ?13)",
+                                thread, hold_card)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9, ?10, ?10, 1, ?11, ?12, ?13, ?14)",
         params![
             id,
             n.agent,
@@ -753,7 +761,8 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
             at,
             n.kind.as_str(),
             items_json(n.kind, &items),
-            in_thread
+            in_thread,
+            n.hold_card
         ],
     )?;
     let q = get(t, &id)?;
@@ -761,6 +770,9 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
                             "priority": q.priority, "options": q.options.len()});
     if let Some(th) = &q.thread {
         detail["thread"] = json!(th);
+    }
+    if let Some(c) = &q.hold_card {
+        detail["hold_card"] = json!(c);
     }
     if q.kind == QuestionKind::Bundle {
         detail["items"] = json!(q.items.len());
@@ -813,6 +825,11 @@ pub fn update(t: &mut Tx<'_>, id: &str, p: QuestionPatch) -> ApiResult<Question>
     if get(t, id)?.kind == QuestionKind::ToolRun {
         return Err(ApiError::conflict(
             "a tool run approval does not change; retract it and run the tool again",
+        ));
+    }
+    if get(t, id)?.hold_card.is_some() {
+        return Err(ApiError::forbidden(
+            "a hold question of the GitHub author gate does not change; the operator answers it",
         ));
     }
     let q = get(t, id)?;
@@ -1214,6 +1231,11 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
             "only the operator approves a tool run; no agent answers this question",
         ));
     }
+    if q.hold_card.is_some() && *by != mail::Address::Operator {
+        return Err(ApiError::forbidden(
+            "only the operator answers a hold question of the GitHub author gate",
+        ));
+    }
     if let Some(r) = a.revision.filter(|r| *r != q.revision) {
         return Err(ApiError::conflict(format!(
             "{} {} changed: it is at revision {}, and the answer is for revision {r}. Read it \
@@ -1263,6 +1285,13 @@ pub fn answer(t: &mut Tx<'_>, id: &str, by: &mail::Address, a: &Answer) -> ApiRe
         ],
     )?;
     let q = get(t, &q.id)?;
+    // A hold question answered with the release option: the card goes to
+    // the backlog as work (TER-85).
+    if let Some(card) = &q.hold_card
+        && q.chosen() == Some(crate::store::github_gate::RELEASE)
+    {
+        crate::store::board::release_hold(t, card, &q.id)?;
+    }
     let ended = end_waits(t, &q, "answered")?;
     // A tool run approval: the agent's CLI waits on the question, no mail.
     if q.kind != QuestionKind::ToolRun
@@ -1373,6 +1402,11 @@ pub fn retract(
     let q = get(t, id)?;
     if q.status != QuestionStatus::Open {
         return Err(not_open(&q, "a retract"));
+    }
+    if q.hold_card.is_some() && t.actor != "operator" {
+        return Err(ApiError::forbidden(
+            "only the operator retracts a hold question of the GitHub author gate",
+        ));
     }
     let reason = reason.map(str::trim).filter(|s| !s.is_empty());
     if reason.is_some_and(|r| r.chars().count() > MAX_REASON) {

@@ -391,6 +391,7 @@ async fn ask(
         card: b.card,
         priority: b.priority.unwrap_or_default(),
         thread,
+        hold_card: None,
     };
     let wait = b.wait;
     let (question, wait) = state

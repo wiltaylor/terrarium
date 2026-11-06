@@ -948,6 +948,12 @@ pub struct ProjectDef {
     /// project file, `[[projects.templates]]` in a fleet file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<crate::agent_template::TemplateDef>,
+    /// The GitHub author gate (TER-85): the GitHub logins whose issues
+    /// count as work. A GitHub card from another author is held for the
+    /// operator. Empty: no gate. Only a project file sets it, not a fleet
+    /// file, so an agent cannot change it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub github_authors: Vec<String>,
 }
 
 /// The kind of a target. See PLAN §19.
