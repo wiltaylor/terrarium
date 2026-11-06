@@ -4537,8 +4537,14 @@ mod tests {
         )
         .unwrap();
         let text = repo_known_hosts(state.path()).unwrap();
+        // Each published key, by type and key: the file may hold it on a
+        // line with a hashed host name (copied from ~/.ssh/known_hosts).
+        let key = |l: &str| l.split_whitespace().skip(1).take(2).collect::<Vec<_>>();
         for k in crate::git::PUBLISHED_HOST_KEYS {
-            assert!(text.lines().any(|l| l == *k), "{k} missing in {text}");
+            assert!(
+                text.lines().any(|l| key(l) == key(k)),
+                "{k} missing in {text}"
+            );
         }
         assert!(!text.contains("AAAAtargetonly"), "{text}");
     }
