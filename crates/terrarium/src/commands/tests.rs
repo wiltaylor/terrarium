@@ -181,8 +181,14 @@ async fn daemon_and_system() {
     let out = ok(
         true,
         &["whoami"],
-        vec![(200, json!({"id": ME, "roles": ["sysadmin", "project_admin"]}))],
-        vec![req(Get, concat!("/api/agents/", "01AGENTAGENTAGENTAGENTAGEN"))],
+        vec![(
+            200,
+            json!({"id": ME, "roles": ["sysadmin", "project_admin"]}),
+        )],
+        vec![req(
+            Get,
+            concat!("/api/agents/", "01AGENTAGENTAGENTAGENTAGEN"),
+        )],
     )
     .await;
     assert!(
