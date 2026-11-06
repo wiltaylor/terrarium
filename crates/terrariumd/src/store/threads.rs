@@ -22,9 +22,11 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::actor::Actor;
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
+use crate::policy;
 use crate::store::questions::{self, Question, QuestionStatus};
 use crate::store::{agents, board, projects, spawns};
 
@@ -860,25 +862,38 @@ fn close_as(
         ],
     )?;
     let th = get(t, &th.id)?;
-    let cards = link_cards(t, &th)?;
+    let (cards, skipped) = link_cards(t, &th)?;
     t.audit(
         "thread.close",
         &th.id,
         th.project(),
         json!({"by": by, "reason": reason.as_str(),
                "links": th.handoff.as_ref().map_or(0, |h| h.links.len()),
-               "retracted": open, "session": th.session_id, "cards": cards}),
+               "retracted": open, "session": th.session_id, "cards": cards,
+               "skipped_cards": skipped}),
     )?;
     emit(t, &th, "closed")?;
     Ok(th)
 }
 
 /// Comment on each card of the handoff of the closed thread `th`, with a
-/// link to the archived session of its agent (the comment's session). A
-/// card that does not resolve is skipped. The cards commented on.
-fn link_cards(t: &mut Tx<'_>, th: &Thread) -> ApiResult<Vec<String>> {
+/// link to the archived session of its agent (the comment's session). Only
+/// a card that the reader of the handoff may read gets the comment: the
+/// agent that wrote the handoff, else (an operator or a stale close) the
+/// report-to lead of the thread. A card that does not resolve or that the
+/// reader may not read is skipped, with the reason. `(commented, skipped)`.
+fn link_cards(t: &mut Tx<'_>, th: &Thread) -> ApiResult<(Vec<String>, Vec<Value>)> {
     let Some(h) = &th.handoff else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let reader_key = if h.by != "operator" && h.by != "system" {
+        Some(h.by.as_str())
+    } else {
+        th.report_to.as_deref()
+    };
+    let reader = match reader_key {
+        Some(k) => agents::actor_for(t, k)?,
+        None => None,
     };
     let mut body = format!(
         "Inbox thread {} was closed ({}).",
@@ -893,15 +908,26 @@ fn link_cards(t: &mut Tx<'_>, th: &Thread) -> ApiResult<Vec<String>> {
         None => body.push_str(" Its agent has no archived session."),
     }
     let mut out = Vec::new();
+    let mut skipped = Vec::new();
     for l in h.links.iter().filter(|l| l.kind == "card") {
-        match board::system_comment(t, &l.reference, &body, th.session_id.as_deref()) {
+        let res = match &reader {
+            None => Err(ApiError::forbidden(
+                "the handoff has no reader whose rights can be checked",
+            )),
+            Some(a) => board::card_project(t, &l.reference).and_then(|p| {
+                policy::read_project(&Actor::Agent(a.clone()), &p)?;
+                board::system_comment(t, &l.reference, &body, th.session_id.as_deref())
+            }),
+        };
+        match res {
             Ok(card) => out.push(card),
             Err(e) => {
                 tracing::warn!(thread = %th.id, card = %l.reference, "no session link on a handoff card: {}", e.message);
+                skipped.push(json!({"card": l.reference, "reason": e.message}));
             }
         }
     }
-    Ok(out)
+    Ok((out, skipped))
 }
 
 /// Check that `agent` may ask a question in thread `id`: it is the
@@ -943,7 +969,20 @@ pub fn on_question(t: &mut Tx<'_>, id: &str, q: &Question, change: &str) -> ApiR
         None
     };
     match status {
-        Some(s) => set_status(t, &th.id, s, &at)?,
+        Some(s) => {
+            set_status(t, &th.id, s, &at)?;
+            // The operator answers the last open question: it writes on,
+            // so a close proposal of the agent is declined, as in [`post`]
+            // and [`respond`] (TER-95).
+            if s == ThreadStatus::WaitingAgent
+                && matches!(
+                    q.status,
+                    QuestionStatus::Answered | QuestionStatus::Acknowledged
+                )
+            {
+                clear_proposal(t, &th.id)?;
+            }
+        }
         None => {
             t.execute(
                 "UPDATE threads SET updated_at = ?2 WHERE id = ?1",

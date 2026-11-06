@@ -1803,9 +1803,16 @@ pub fn add_comment(t: &mut Tx<'_>, actor: &Actor, id: &str, body: &str) -> ApiRe
     get_card(t, &card.id)
 }
 
+/// The project of card `id`, for a rights check of a caller that holds
+/// no [`Actor`] yet (the handoff cards of a thread, TER-95).
+pub fn card_project(conn: &Connection, id: &str) -> ApiResult<String> {
+    Ok(find_row(conn, id)?.project)
+}
+
 /// A comment of `system` on card `id` that links to `session` (the
 /// archived session of a thread agent, TER-95), so that the card's
-/// sessions list it. No rights check: the daemon writes it. The card ID.
+/// sessions list it. No rights check here: the caller checks that the
+/// reader of the handoff may read the card. The card ID.
 pub fn system_comment(
     t: &mut Tx<'_>,
     id: &str,

@@ -575,3 +575,139 @@ async fn activity_after_a_reminder_allows_a_new_one_and_off_sends_none() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(count().await, 2);
 }
+
+#[tokio::test]
+async fn an_answer_to_the_last_question_declines_the_proposal() {
+    let lab = lab().await;
+    let (tid, eph, _sid) = lab.started("Retention").await;
+    let asks = format!("/api/agents/{eph}/questions");
+    let r = lab
+        .td
+        .post_as(
+            &eph,
+            &asks,
+            json!({"text": "Keep 30 days?", "options": ["yes", "no"], "thread": tid}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let q1 = id(&r.body);
+    let r = lab
+        .td
+        .post_as(&eph, &asks, json!({"text": "Note this.", "kind": "notice", "thread": tid}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let q2 = id(&r.body);
+    let th = lab.propose(&eph, &tid, json!({"summary": "Done."})).await;
+    assert_eq!(th["close_proposal"]["summary"], "Done.");
+    // An answer that leaves a question open keeps the proposal: the
+    // thread still waits on the operator.
+    lab.td
+        .post(&format!("/api/questions/{q1}/answer"), json!({"option": "yes"}))
+        .await
+        .ok();
+    let th = lab.thread(&tid).await;
+    assert_eq!(th["status"], "waiting_operator", "{th:#}");
+    assert_eq!(th["close_proposal"]["summary"], "Done.");
+    // The last one settles: the operator wrote on, the proposal is
+    // declined, and there is nothing to confirm.
+    let r = lab
+        .td
+        .post(&format!("/api/questions/{q2}/ack"), json!({}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let th = lab.thread(&tid).await;
+    assert_eq!(th["status"], "waiting_agent", "{th:#}");
+    assert!(th["close_proposal"].is_null(), "{th:#}");
+    lab.td
+        .post(
+            &format!("/api/threads/{tid}/close"),
+            json!({"confirm": true}),
+        )
+        .await
+        .err(409, "conflict");
+}
+
+/// The `skipped_cards` of the `thread.close` audit row of `tid`.
+async fn skipped_cards(lab: &Lab, tid: &str) -> Vec<String> {
+    let rows = lab
+        .td
+        .get("/api/audit?action=thread.close")
+        .await
+        .ok()
+        .clone();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["target"] == tid)
+        .cloned()
+        .unwrap_or_else(|| panic!("no thread.close row for {tid}: {rows:#}"));
+    row["detail"]["skipped_cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["card"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// True when card `card` has a comment of `system`.
+async fn has_system_comment(lab: &Lab, card: &str) -> bool {
+    let c = lab.td.get(&format!("/api/cards/{card}")).await.ok().clone();
+    c["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["author"] == "system")
+}
+
+#[tokio::test]
+async fn handoff_cards_get_the_link_only_when_the_reader_may_read_them() {
+    let lab = lab().await;
+    let own = lab.card("Own work").await;
+    let other = id(lab
+        .td
+        .post("/api/projects/meta/cards", json!({"title": "Not yours"}))
+        .await
+        .ok());
+
+    // A confirmed close: the reader is the agent of `p` that wrote the
+    // handoff. The card of `meta` is skipped.
+    let (tid, eph, sid) = lab.started("Mixed links").await;
+    lab.propose(
+        &eph,
+        &tid,
+        json!({"summary": "Two links.",
+               "links": [{"kind": "card", "ref": own}, {"kind": "card", "ref": other}]}),
+    )
+    .await;
+    let th = lab
+        .td
+        .post(
+            &format!("/api/threads/{tid}/close"),
+            json!({"confirm": true}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(th["status"], "closed", "{th:#}");
+    archived_and_linked(&lab, &tid, &eph, &sid, &[&own]).await;
+    assert!(!has_system_comment(&lab, &other).await);
+    assert_eq!(skipped_cards(&lab, &tid).await, vec![other.clone()]);
+
+    // An operator close: the reader is the report-to lead `p/lead`, which
+    // does not read `meta` either.
+    let (tid2, _eph2, _sid2) = lab.started("Operator links").await;
+    let th = lab
+        .td
+        .post(
+            &format!("/api/threads/{tid2}/close"),
+            json!({"summary": "Mine.", "links": [{"kind": "card", "ref": other}]}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(th["status"], "closed", "{th:#}");
+    assert_eq!(th["report_to"], lab.lead.as_str());
+    assert!(!has_system_comment(&lab, &other).await);
+    assert_eq!(skipped_cards(&lab, &tid2).await, vec![other]);
+}
