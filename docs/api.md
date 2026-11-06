@@ -10520,8 +10520,18 @@ is accepted on first use in each run (`accept-new`).
 The projects of one host share its disk and its CPUs. The host cap is the
 most jobs of all projects that run on one host at the same time. The
 daemon checks it before the slots of the project. The host of a job is
-the host agent of the delivery target (`host`), else the host part of its
-`address`, else the target name. A host without a cap has no limit. The
+the stable ID of the delivery target's host agent (`host`), else the
+resolved IP of its SSH `address` (sorted first address when there are
+several, lowercase hostname when resolution fails), else the target name.
+DNS is resolved outside the database lock when an API target is set or
+its address changes, and at daemon startup for existing targets. Targets
+from file or fleet changes and legacy cap rows are backfilled before use.
+The first result,
+including a failed lookup, is persisted by hostname and reused across
+ticks and daemon restarts, so a changing DNS answer cannot split a cap.
+SSH usernames and ports do not affect the key. An SSH target and a host
+agent on the same machine count as two hosts. Cross-transport machine
+identity is not inferred. A host without a cap has no limit. The
 default is no cap.
 
 Builds and tests that agents start by hand (`terrarium exec`, `terrarium
@@ -10530,12 +10540,24 @@ they do not get the low priority.
 
 | method and path                 | who                           | what |
 |---------------------------------|-------------------------------|------|
-| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, heavy_jobs, running, updated_by, updated_at}]}`: each host with a cap or a running job. `heavy_jobs` is `null` without a cap |
+| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, heavy_jobs, running, projects, updated_by?, updated_at?}]}`: each host with a cap or a running job. `heavy_jobs` is `null` without a cap. Visibility is scoped as described below |
 | `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
 | `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
 
 The audit row `job.host_cap` keeps the old and the new cap. A job keeps
 the host it started on (`host` in the job).
+
+Host-cap writes accept a host-agent name or a resolved key. SSH names
+are resolved in the same way as target addresses. `GET /api/job-hosts`
+also includes `projects`, a map of project names to running counts.
+The operator, sysadmin and architect see all project counts and cap audit
+fields. Other agents see the total `running` count and only their own
+project's count (including zero). Their response omits `updated_by` and
+`updated_at`. No job records are returned.
+
+Previously stored host names and address aliases are normalized when
+counting running jobs and reading caps. If several old caps resolve to
+one key, the strictest applies until a cap write replaces them.
 
 ### 35.3 Results
 

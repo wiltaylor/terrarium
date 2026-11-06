@@ -2170,7 +2170,16 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE jobs ADD COLUMN parent TEXT;
     ALTER TABLE jobs ADD COLUMN split_path TEXT NOT NULL DEFAULT '';
     "#,
-    // 76: the GitHub author gate (TER-85, `crate::store::github_gate`).
+    // 76: pin job-host DNS identities across queue ticks and restarts.
+    // Follows 74 (TER-91) and 75 (TER-112). Keep this entry self-contained
+    // and renumber at merge if the integration order changes.
+    r#"
+    CREATE TABLE job_host_keys (
+        hostname TEXT PRIMARY KEY,
+        host_key TEXT NOT NULL
+    );
+    "#,
+    // 77: the GitHub author gate (TER-85, `crate::store::github_gate`).
     // `projects.github_authors` is the JSON list of the GitHub logins
     // whose issues count as work; NULL: no gate. `questions.hold_card` is
     // the held card of a hold question that the daemon opened; NULL for
