@@ -3666,9 +3666,9 @@ There is no register of threads and no conflict check between threads
 | `id` | The thread ID (a ULID). |
 | `topic` | One line, at most 200 characters. Set at the open; it does not change. |
 | `scope` | `global`, or the name of a project. |
-| `template` | The agent template of the attached agent (TER-92 spawns the agent from it). Optional for the operator, and not checked. An agent must name it, and its rights are checked (A1, below). |
+| `template` | The agent template of the attached agent: with no named `agent`, the daemon spawns the agent from it at the open (the thread agent, below). Optional for the operator. An agent must name it, and its rights are checked (A1, below), at the open and again at the spawn. |
 | `opened_by`, `opened_by_name` | `operator`, or the ULID and `project/name` of the agent that opened it. |
-| `agent`, `agent_name` | The attached agent: one per thread, or `null` while it has none. Until TER-92 spawns it from the template, the opener names an existing agent: of the scope project, or any agent for `global`. |
+| `agent`, `agent_name` | The attached agent: one per thread, or `null` while it has none. The agent that the daemon spawned from `template` (the thread agent, below), or an existing agent that the opener names: of the scope project, or any agent for `global`. |
 | `report_to`, `report_to_name` | The lead that the thread reports to (D34): for `global`, the lead of project `meta`; else the lead of the scope project. The lead of a project is its project_admin agent named `lead`, else its first project_admin by name. Set at the open; it does not change. A scope without a lead is `409 conflict` at the open. |
 | `status` | `waiting_operator`, `waiting_agent`, or `closed` (below). |
 | `messages` | The conversation, in the order of the writes (two writes in the same millisecond keep their order): `{id, author, author_name, kind, text, at}`. `author` is `operator` or an agent ULID. `kind` is `message`, or `response` for the operator's overall response. `text` is Markdown, at most 32 KiB: untrusted data for every reader. |
@@ -3722,6 +3722,46 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | `200` the thread, `closed`, with `handoff`; its open questions are `retracted` |
+
+**The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
+A thread opened with a `template` and no `agent` gets its agent at the
+open: an ephemeral agent (§6.10) spawned from the template, owned by the
+operator, in the project of the thread (`meta` for `global`), with its
+own session and workspace, and bound to `thread:<id>` (the bound agents of
+TER-74). It is named `thread-<template>-<n>`. Its memory store is the one
+of that project (A2). Only the daemon binds to a thread: a spawn with
+`bind: "thread:<id>"` is `422 invalid`.
+
+- **Turns.** Its first turn is `[Thread:<id>]` with the topic, the opener,
+  the report-to lead, and the first message (an agent opener's message is
+  quoted with `> `). Each operator message and each overall response is a
+  `[Thread:<id>] <text>` turn. Its replies are `POST .../messages`, not
+  turn text.
+- **Park.** A message or a question of the agent that leaves the thread
+  `waiting_operator` parks the agent (`park_reason` `thread waits on the
+  operator`): the idle pass stops it when it is at rest, and mail does not
+  wake it.
+- **Restart.** An operator message or response, or the settling of the
+  last open question (`waiting_agent`), unparks it: it starts again in the
+  same session row and harness session (`resumes` + 1) on every harness.
+  The spawn timer unparks an agent whose thread waits on it for more than
+  a minute with no unpark (an event missed over a daemon restart), with a
+  turn that points to `terrarium thread show <id>`.
+- **Lifetime.** The thread's: a bound agent has no lifetime timeout, only
+  the 30-day cap of §6.10. The operator has no `spawn.max_concurrent`, so
+  an unpark never waits (D35).
+- **End.** The close of the thread closes the agent (`done`, result `the
+  thread was closed`), with no mail to the owner.
+- **Failed start.** When the spawn is refused or the agent does not start,
+  the thread is closed with `The thread agent did not start: <reason>` as
+  the handoff summary, and the open answers that error, with `thread <id>
+  is closed: its agent did not start: ...` as the message.
+- **A1 at the spawn.** For an agent-opened thread, the daemon checks A1
+  again in the transaction that makes the agent: the rights of the agent
+  that the template makes at that moment against the opener's rights at
+  that moment. The template can change after the check of the open. A
+  right above the opener's, or an opener that is gone, is `403 forbidden`
+  (a failed start).
 
 **The right `thread:open`** (TER-93). The policy field `thread_open`
 (§6.1, `policy`) lets an agent open threads (`terrarium thread new`). It

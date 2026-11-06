@@ -1085,7 +1085,9 @@ export type TurnPart =
   | { source: "agent"; sender: string; body: string }
   | { source: "mailbox"; sender: string; subject: string; thread: string; message?: string; body: string }
   /** `kind`: recap, card, lease, nudge, or schedule (`detail` is the schedule name). */
-  | { source: "system"; kind: string; detail?: string; body: string };
+  | { source: "system"; kind: string; detail?: string; body: string }
+  /** `thread`: the Inbox thread whose operator message this is (TER-92). */
+  | { source: "thread"; thread: string; body: string };
 
 export interface BlockUsage {
   input: number;
