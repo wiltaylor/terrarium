@@ -232,7 +232,11 @@ async fn three_waits_that_end_apart_send_three_mails() {
             .expect("a status event after waiting");
     assert_eq!(ev[idle]["data"]["status"], "idle", "{ev:#?}");
     let idle_at = ev[idle]["at"].as_str().unwrap();
-    assert!(idle_at >= ends[2].as_str(), "idle at {idle_at}, last end {}", ends[2]);
+    assert!(
+        idle_at >= ends[2].as_str(),
+        "idle at {idle_at}, last end {}",
+        ends[2]
+    );
     assert!(idle_at >= ends[1].as_str());
     let bodies: Vec<String> = system_mail(&td, &lead)
         .await
