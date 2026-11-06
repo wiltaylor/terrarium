@@ -10,6 +10,19 @@ main:
 [group('ci')]
 check: fmt-check lint test scripts-test dashboard-check
 
+# The validation gate for a card: every part GitHub CI runs (ci.yml check job), in CI's order, with CI's toolchain and cargo env. Run it on a clean checkout of the pushed commit (AGENTS.md)
+[group('ci')]
+validate:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	export RUSTUP_TOOLCHAIN=1.97.1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+	just ci::fmt-check
+	just ci::lint
+	just ci::test
+	just ci::scripts-test
+	just ci::dashboard-check
+	npm --prefix dashboard test
+
 # Check Rust formatting without changing files
 [group('ci')]
 fmt-check: require-cargo
