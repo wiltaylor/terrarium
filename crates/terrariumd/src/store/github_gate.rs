@@ -51,6 +51,7 @@ pub fn github_title(title: &str) -> bool {
     let Some(rest) = t[6..].trim_start().strip_prefix('#') else {
         return false;
     };
+    let rest = rest.trim_start();
     let digits = rest.chars().take_while(char::is_ascii_digit).count();
     digits > 0 && rest[digits..].trim_start().starts_with(':')
 }
