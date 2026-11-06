@@ -155,23 +155,32 @@ async fn a_remove_during_a_wake_is_exact() {
     );
     let lock = state(&td).lifecycle.turn_lock(aid(&w));
     let held = lock.clone().lock_owned().await;
-    td.post(&format!("/api/agents/{w}/unpause"), json!({}))
-        .await
-        .ok();
-    // The wake starts the agent and waits for the lock at the first turn.
-    td.wait_status(&w, "idle").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(td.sup.prompts(aid(&w)).is_empty());
-    // The remove queues behind the wake on the fair lock: the wake hands
-    // over the first turn, then the remove runs before the second.
-    let td2 = &td;
-    let path = format!("/api/agents/{w}/queued/{second}");
-    let remove = async { td2.delete(&path).await };
-    let release = async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        drop(held);
+    // The unpause answers after its wake handed the turns over, so it runs
+    // beside the rest.
+    let unpause = async {
+        td.post(&format!("/api/agents/{w}/unpause"), json!({}))
+            .await
+            .ok();
     };
-    let (r, ()) = tokio::join!(remove, release);
+    let path = format!("/api/agents/{w}/queued/{second}");
+    let rest = async {
+        // The wake starts the agent and waits for the lock at the first
+        // turn.
+        td.wait_status(&w, "idle").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(td.sup.prompts(aid(&w)).is_empty());
+        // The remove queues behind the wake on the fair lock: the wake
+        // hands over the first turn, then the remove runs before the
+        // second.
+        let remove = td.delete(&path);
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(held);
+        };
+        let (r, ()) = tokio::join!(remove, release);
+        r
+    };
+    let ((), r) = tokio::join!(unpause, rest);
     assert_eq!(r.status, 204, "{}", r.body);
     until("the turns ran", || async {
         td.sup.prompts(aid(&w)).len() >= 2
