@@ -45,6 +45,15 @@ pub struct SpawnArgs {
     /// ephemeral agent: `operator` with `--project`
     #[arg(long = "for", value_name = "AGENT")]
     pub owner: Option<String>,
+    /// Give the ephemeral agent a target that the owner may use (its
+    /// policy or an active lease). Repeat for more
+    #[arg(long = "target", value_name = "TARGET")]
+    pub targets: Vec<String>,
+    /// Give the ephemeral agent a secret that the owner holds, at most at
+    /// the owner's level: `<name>`, `<scope>/<name>`, with `:use` or
+    /// `:read`. Repeat for more
+    #[arg(long = "grant", value_name = "SECRET[:LEVEL]")]
+    pub grants: Vec<String>,
 }
 
 /// The spawn rights flags of `agent set` (the policy block `spawn`).
@@ -203,6 +212,12 @@ pub async fn spawn(ctx: &Ctx, a: &SpawnArgs) -> anyhow::Result<()> {
     let mut body = json!({"template": a.template, "task": task});
     if let Some(n) = &a.name {
         body["name"] = json!(n);
+    }
+    if !a.targets.is_empty() {
+        body["targets"] = json!(a.targets);
+    }
+    if !a.grants.is_empty() {
+        body["grants"] = json!(a.grants);
     }
     if who == "operator" {
         match &ctx.project {
