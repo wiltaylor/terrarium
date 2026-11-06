@@ -1153,6 +1153,11 @@ push_deny = ["op/*"]                  # these branches stay local (a hard rule t
 
 [checkout]
 on_agent_create = ["terrarium"]       # cloned into $HOME/work/terrarium when the agent is made
+
+# The GitHub author gate (TER-85, docs/api.md §8.3): only issues by these
+# GitHub logins count as work. An agent's GitHub card from another author
+# is held for the operator. Absent or []: no gate. Not in a fleet file.
+github_authors = ["wiltaylor", "wiltaylor-daf"]
 ```
 
 A local repo (a URL under `TERRARIUM_REPOS_DIR`, default `/repos`, for
