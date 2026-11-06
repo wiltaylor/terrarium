@@ -184,8 +184,9 @@ fn lifetime_text(d: Duration) -> String {
 /// A rights check of the daemon on the agent definition that a spawn
 /// makes, in the transaction that creates the agent (TER-92: the A1 check
 /// of an agent-opened thread against the template as it is then).
-pub type DefCheck =
-    Box<dyn FnOnce(&rusqlite::Connection, &terrarium_core::config::AgentDef) -> ApiResult<()> + Send>;
+pub type DefCheck = Box<
+    dyn FnOnce(&rusqlite::Connection, &terrarium_core::config::AgentDef) -> ApiResult<()> + Send,
+>;
 
 /// What a spawn of the daemon itself adds to a [`SpawnBody`] (TER-92, the
 /// agent of an Inbox thread). Not in the API.

@@ -114,11 +114,19 @@ impl Lab {
     }
 
     async fn spawn_row(&self, eph: &str) -> Value {
-        self.td.get(&format!("/api/spawns/{eph}")).await.ok().clone()
+        self.td
+            .get(&format!("/api/spawns/{eph}"))
+            .await
+            .ok()
+            .clone()
     }
 
     async fn agent(&self, eph: &str) -> Value {
-        self.td.get(&format!("/api/agents/{eph}")).await.ok().clone()
+        self.td
+            .get(&format!("/api/agents/{eph}"))
+            .await
+            .ok()
+            .clone()
     }
 
     async fn parked(&self, eph: &str) {
@@ -155,7 +163,11 @@ impl Lab {
     async fn prompt(&self, eph: &str, start: &str) -> String {
         let aid: AgentId = eph.parse().unwrap();
         until(&format!("a turn `{start}`"), || async {
-            self.td.sup.prompts(aid).iter().any(|p| p.starts_with(start))
+            self.td
+                .sup
+                .prompts(aid)
+                .iter()
+                .any(|p| p.starts_with(start))
         })
         .await;
         self.td
@@ -178,8 +190,10 @@ impl Lab {
 async fn round_trip(harness: &str) {
     let lab = lab().await;
     let th = lab
-        .open(json!({"topic": "Cache layer", "scope": "p", "template": format!("t-{harness}"),
-                     "text": "Should we cache the board?"}))
+        .open(
+            json!({"topic": "Cache layer", "scope": "p", "template": format!("t-{harness}"),
+                     "text": "Should we cache the board?"}),
+        )
         .await;
     let tid = id(&th);
     // The agent is spawned at the open and attached.
@@ -190,10 +204,18 @@ async fn round_trip(harness: &str) {
     assert_eq!(sp["owner"], "operator", "{sp}");
     assert_eq!(sp["project"], "p", "{sp}");
     assert_eq!(sp["harness"], harness, "{sp}");
-    assert!(th["agent_name"].as_str().unwrap().starts_with("p/thread-t-"));
+    assert!(
+        th["agent_name"]
+            .as_str()
+            .unwrap()
+            .starts_with("p/thread-t-")
+    );
     // The first turn: the thread, and the operator's first message.
     let first = lab.prompt(&eph, &format!("[Thread:{tid}]")).await;
-    assert!(first.contains("You are the agent of Inbox thread"), "{first}");
+    assert!(
+        first.contains("You are the agent of Inbox thread"),
+        "{first}"
+    );
     assert!(first.contains("Topic: Cache layer."), "{first}");
     assert!(first.contains("Should we cache the board?"), "{first}");
     lab.td.wait_status(&eph, "idle").await;
@@ -271,7 +293,8 @@ async fn round_trip(harness: &str) {
     assert_eq!(lab.sessions(&eph).await[0]["resumes"], 2);
 
     // The overall response comes as a turn too.
-    lab.post_as(&eph, &tid, "Plan: cache board and cards.").await;
+    lab.post_as(&eph, &tid, "Plan: cache board and cards.")
+        .await;
     lab.parked(&eph).await;
     lab.td
         .post(
@@ -281,7 +304,10 @@ async fn round_trip(harness: &str) {
         .await
         .ok();
     let turn = lab
-        .prompt(&eph, &format!("[Thread:{tid}] The operator's overall response"))
+        .prompt(
+            &eph,
+            &format!("[Thread:{tid}] The operator's overall response"),
+        )
         .await;
     assert!(turn.ends_with("\nApproved."), "{turn}");
     lab.td.wait_status(&eph, "idle").await;
@@ -463,9 +489,7 @@ async fn a1_is_checked_again_at_the_spawn() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let eph = r.body["agent"].as_str().unwrap().to_owned();
-    let first = lab
-        .prompt(&eph, &format!("[Thread:{}]", id(&r.body)))
-        .await;
+    let first = lab.prompt(&eph, &format!("[Thread:{}]", id(&r.body))).await;
     // The opener's message is quoted: an agent's text, not the operator's.
     assert!(first.contains("\n> Ask the operator."), "{first}");
 
