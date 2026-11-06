@@ -67,6 +67,7 @@ fn print_thread(c: &Ctx, v: &Value) {
     let questions = take("questions");
     let response = take("response");
     let handoff = take("handoff");
+    let proposal = take("close_proposal");
     print_object(c, &head);
     let messages = messages.as_ref().map(as_items).unwrap_or_default();
     for (i, m) in messages.iter().enumerate() {
@@ -111,6 +112,23 @@ fn print_thread(c: &Ctx, v: &Value) {
         ));
         delimited(c, "HANDOFF", h["summary"].as_str().unwrap_or_default());
         for l in as_items(&h["links"]) {
+            c.line(format!("link {}: {}", field(l, "kind"), field(l, "ref")));
+        }
+    }
+    if let Some(p) = proposal.as_ref().filter(|p| p.is_object()) {
+        c.line(format!(
+            "close proposed by {} at {} (the operator confirms with `terrarium thread close {} \
+             --confirm`):",
+            field(p, "by"),
+            field(p, "at"),
+            field(v, "id")
+        ));
+        delimited(
+            c,
+            "PROPOSED HANDOFF",
+            p["summary"].as_str().unwrap_or_default(),
+        );
+        for l in as_items(&p["links"]) {
             c.line(format!("link {}: {}", field(l, "kind"), field(l, "ref")));
         }
     }
@@ -232,8 +250,16 @@ pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
                 ));
             })
         }
-        ThreadCmd::Close { id, handoff, links } => {
+        ThreadCmd::Close {
+            id,
+            confirm,
+            handoff,
+            links,
+        } => {
             let mut body = json!({});
+            if *confirm {
+                body["confirm"] = json!(true);
+            }
             if let Some(h) = handoff {
                 body["summary"] = json!(ctx.text(h)?);
             }

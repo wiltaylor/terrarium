@@ -10,7 +10,9 @@
 //! - `GET /api/threads/{id}`: the thread with its messages and questions.
 //! - `POST /api/threads/{id}/messages` (the operator, the attached agent).
 //! - `POST /api/threads/{id}/respond` (the operator): the overall response.
-//! - `POST /api/threads/{id}/close` (the operator, the attached agent).
+//! - `POST /api/threads/{id}/close`: the operator closes (or, with
+//!   `confirm`, confirms the agent's proposal); the attached agent
+//!   proposes the close (TER-95).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -290,6 +292,9 @@ struct CloseBody {
     summary: Option<String>,
     #[serde(default)]
     links: Vec<Link>,
+    /// The operator confirms the agent's close proposal (TER-95).
+    #[serde(default)]
+    confirm: bool,
 }
 
 async fn close(
@@ -311,15 +316,40 @@ async fn close(
             .db
             .write(label, move |t| {
                 let th = readable(&actor, threads::get_bare(t, &id)?)?;
-                if let Actor::Agent(a) = &actor
-                    && th.agent.as_deref() != Some(a.id.as_str())
-                {
-                    return Err(ApiError::forbidden(format!(
-                        "closing thread {}: only its attached agent and the operator close it",
+                match &actor {
+                    Actor::Agent(a) if th.agent.as_deref() != Some(a.id.as_str()) => {
+                        Err(ApiError::forbidden(format!(
+                            "closing thread {}: only its attached agent and the operator close it",
+                            th.id
+                        )))
+                    }
+                    // The agent's close is a proposal that the operator
+                    // confirms (TER-95).
+                    Actor::Agent(_) if b.confirm => Err(ApiError::forbidden(format!(
+                        "confirming the close of thread {}: the operator confirms",
                         th.id
-                    )));
+                    ))),
+                    Actor::Agent(_) => {
+                        threads::propose_close(t, &th.id, &by, b.summary.as_deref(), b.links)
+                    }
+                    Actor::Operator if b.confirm => {
+                        if b.summary.is_some() || !b.links.is_empty() {
+                            return Err(ApiError::invalid(
+                                "`confirm` closes with the proposed handoff: send no `summary` \
+                                 or `links` with it",
+                            ));
+                        }
+                        threads::confirm_close(t, &th.id)
+                    }
+                    Actor::Operator => threads::close(
+                        t,
+                        &th.id,
+                        &by,
+                        threads::CloseReason::Operator,
+                        b.summary.as_deref(),
+                        b.links,
+                    ),
                 }
-                threads::close(t, &th.id, &by, b.summary.as_deref(), b.links)
             })
             .await?,
     ))

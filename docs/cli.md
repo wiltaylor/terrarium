@@ -1153,6 +1153,7 @@ terrarium job show <id>
 terrarium job cancel <id>
 terrarium job hosts
 terrarium job host-cap <host> <n> | --clear                sysadmin
+terrarium job host-alias <host-agent> <address>... | --clear  sysadmin
 terrarium project delivery show
 terrarium project delivery set [--target t] [--recipe cmd] [--slots n]
                                [--next-repo r]... [--work-dir d] [--timeout secs]
@@ -1180,7 +1181,11 @@ top of `ready`. The other cards merge. `--branch` takes one card only.
 `job host-cap` sets the most jobs of all projects that run on one host at
 the same time (docs/api.md §35.2, "The host cap"). The host is the host
 agent of the target, else the host of its address, else the target name.
-`job hosts` shows the caps and the running jobs per host. Jobs run at low
+`job host-alias` lists the SSH addresses of a host agent's machine (for
+example `job host-alias helios 10.3.0.2`). An SSH target on one of them
+then counts on the host agent, so both share one cap. It replaces the
+list. `job hosts` shows the caps, the running jobs, the host-agent name,
+and the aliases per host. Jobs run at low
 IO and CPU priority (`ionice -c3 nice -n19`). Builds that you start with
 `terrarium exec` or `terrarium run` are outside the queue.
 
@@ -1677,6 +1682,7 @@ terrarium thread ask <id> "<question>" [-o <choice>]... [--context <text|-> | --
 terrarium thread ask <id> "<summary>" --bundle (--item "<text>"... | --items-file <path|->) [--context ...]
 terrarium thread respond <id> -m <text|->
 terrarium thread close <id> [--handoff <text|->] [--link <kind>:<ref>]...
+terrarium thread close <id> --confirm
 terrarium thread ls [--status waiting_operator|waiting_agent|closed|open|all] [--scope global|<project>]
 terrarium thread show <id>
 ```
@@ -1697,8 +1703,14 @@ terrarium thread show <id>
   in its thread too. The operator does not ask (exit 2).
 - `respond` sends the operator's overall response.
 - `close` closes the thread with a handoff summary and links (`card`,
-  `mail`, `wiki`, `memory`, `url`, `other`). For an agent the close is a
-  proposal that the operator confirms (TER-95); until then it closes.
+  `mail`, `wiki`, `memory`, `url`, `other`). For the attached agent the
+  close is a proposal: it prints `thread <id> close proposed
+  (waiting_operator).`, and `show` prints the proposed handoff. The
+  operator confirms it with `--confirm` (the proposed handoff, no
+  `--handoff` or `--link`), declines it by writing on (`post`, `respond`),
+  or closes at any time with a handoff of its own. At the close the agent
+  ends, its session is archived, and the thread (`session_id`) and each
+  handoff card (a comment) link to it.
 - `ls` lists the threads (an agent: the ones it opened, is attached to,
   or reports from; a sysadmin or an architect: all): `ID`, `STATUS`, `SCOPE`, `AGENT`, `MSGS`, `OPEN_Q`,
   `LAST`, `TOPIC`. `show` prints the fields, then each message, the

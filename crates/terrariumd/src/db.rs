@@ -2179,6 +2179,35 @@ const MIGRATIONS: &[&str] = &[
         host_key TEXT NOT NULL
     );
     "#,
+    // 77: the addresses of a host agent (TER-105, `crate::store::jobs`).
+    // An SSH target whose address is an alias of a host agent counts on
+    // that host agent's key for the host cap. `alias` is the address key
+    // (no user, no port, lowercase). One host agent per alias. Self-
+    // contained: when another branch takes this number, move this entry
+    // to the end of the list.
+    r#"
+    CREATE TABLE job_host_aliases (
+        alias      TEXT PRIMARY KEY,
+        host_id    TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX job_host_aliases_host ON job_host_aliases(host_id);
+    "#,
+    // 78: the close of an Inbox thread (TER-95, `crate::thread_close`).
+    // `close_proposal` is the agent's proposed handoff (JSON `{summary,
+    // links, by, at}`) that the operator confirms; NULL: none.
+    // `close_reason` is `operator`, `confirmed`, `stale`, or `failed_start`
+    // on a closed thread. `session_id` is the session of the thread agent,
+    // archived when the agent ends. `reminded_at` is the time of the last
+    // Inbox reminder of an untouched thread. Self-contained: when another
+    // branch takes this number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE threads ADD COLUMN close_proposal TEXT;
+    ALTER TABLE threads ADD COLUMN close_reason TEXT;
+    ALTER TABLE threads ADD COLUMN session_id TEXT;
+    ALTER TABLE threads ADD COLUMN reminded_at TEXT;
+    "#,
     // 79: the GitHub author gate (TER-85, `crate::store::github_gate`).
     // `projects.github_authors` is the JSON list of the GitHub logins
     // whose issues count as work; NULL: no gate. `questions.hold_card` is
