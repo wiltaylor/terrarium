@@ -127,6 +127,25 @@ fn live() -> MutexGuard<'static, Live> {
     }
 }
 
+/// A job in [`Live::runs`] while this lives: a run that ends in any way,
+/// a panic too, frees its place.
+struct LiveRun(String);
+
+impl LiveRun {
+    fn new(job: &str) -> Self {
+        live().runs.insert(job.to_owned());
+        Self(job.to_owned())
+    }
+}
+
+impl Drop for LiveRun {
+    fn drop(&mut self) {
+        let mut l = live();
+        l.runs.remove(&self.0);
+        l.killed.remove(&self.0);
+    }
+}
+
 /// True when the job got a [`kill`]: its next steps do not start.
 fn killed(job: &str) -> bool {
     live().killed.contains(job)
@@ -138,12 +157,9 @@ fn killed(job: &str) -> bool {
 /// kill ends the processes of the step on the target, and the job keeps
 /// its place until they are gone.
 pub fn kill(job: &str) {
-    {
-        let mut l = live();
-        if l.runs.contains(job) {
-            l.killed.insert(job.to_owned());
-        }
-    }
+    // Marked whether the run is there yet or not, so a run that starts
+    // after the cancel starts no step. [`LiveRun`] clears the mark.
+    live().killed.insert(job.to_owned());
     let m = match controls().lock() {
         Ok(m) => m,
         Err(p) => p.into_inner(),
@@ -195,23 +211,25 @@ pub fn kick(state: &Shared) {
 /// across projects) and in its project (the slots). One write for all
 /// projects, so the host counts hold.
 pub async fn tick(state: &Shared) -> ApiResult<()> {
-    let draining: Vec<String> = live().runs.iter().cloned().collect();
+    // The live runs are read and added in the write, so two ticks and a
+    // cancel (all writes) see them in order.
     let started = state
         .db
         .write("system", move |t| {
+            let draining: Vec<String> = live().runs.iter().cloned().collect();
             let mut out = Vec::new();
             for (j, host, def) in jobs::startable(t, &draining)? {
                 if jobs::start(t, &j.id, &host)? {
+                    let run = LiveRun::new(&j.id);
                     set_labels(t, &j.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
-                    out.push((jobs::get(t, &j.id)?, def));
+                    out.push((jobs::get(t, &j.id)?, def, run));
                 }
             }
             Ok(out)
         })
         .await?;
-    for (job, def) in started {
+    for (job, def, live_run) in started {
         let state = state.clone();
-        live().runs.insert(job.id.clone());
         tokio::spawn(async move {
             let end = run(&state, &job, &def).await;
             set_control(&job.id, None);
@@ -229,11 +247,7 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
                 Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
                 Err(e) => warn!(job = %job.id, "cannot end a job: {e}"),
             }
-            {
-                let mut l = live();
-                l.runs.remove(&job.id);
-                l.killed.remove(&job.id);
-            }
+            drop(live_run);
             kick(&state);
         });
     }

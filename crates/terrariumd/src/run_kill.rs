@@ -460,6 +460,61 @@ mod tests {
         assert!(!alive(r["pid"].as_u64().unwrap() as u32), "{r}");
     }
 
+    /// TER-115: a run over ssh that hits its own timeout, with no `Kill`:
+    /// the client dies, the session on the target runs on, and the guard
+    /// runs the kill command before the end goes out.
+    #[tokio::test]
+    async fn a_timeout_over_ssh_ends_the_children_on_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join("ssh");
+        std::fs::write(
+            &ssh,
+            "#!/bin/sh\nfor a; do last=$a; done\n( exec setsid sh -c \"$last\" ) &\nwait $!\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let known = dir.path().join("known_hosts");
+        let mut def: TargetDef =
+            toml::from_str("kind = \"ssh\"\naddress = \"build@box\"\n").unwrap();
+        def.name = "remote".into();
+        let ssh_bin = ssh.display().to_string();
+        let starter = move |c: RemoteCmd| {
+            let plan = ssh_plan(&ssh_bin, &def, None, &known, &c)?;
+            let mut p = tokio::process::Command::new(&plan.program);
+            p.args(&plan.args);
+            let t = c.timeout_secs.map(Duration::from_secs);
+            Ok(pump_process(p, plan.stdin_prefix, t, None))
+        };
+        let child_file = dir.path().join("child");
+        let cmd = RemoteCmd {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "trap '' TERM; sleep 300 & echo $! > \"$1\"; wait".into(),
+                "run".into(),
+                child_file.display().to_string(),
+            ],
+            timeout_secs: Some(2),
+            ..RemoteCmd::default()
+        };
+        let (run, report) = start_with(starter, &cmd, 1).unwrap();
+        let child = read_pid(&child_file).await;
+        assert!(alive(child));
+        let c = run.collect(1024).await;
+        assert!(
+            matches!(&c.end, Some(End::Exit { reason, .. }) if reason == "timeout"),
+            "{:?}",
+            c.end
+        );
+        // The end came after the kill: the report is there, nothing is left.
+        let report = report.unwrap();
+        assert!(report.borrow().is_some(), "the end came before the kill");
+        let r = super::report(report).await.expect("a kill report");
+        assert!(r["term"].as_array().unwrap().contains(&json!(child)), "{r}");
+        assert_eq!(r["left"], json!([]), "{r}");
+        assert!(!alive(child), "the child {child} still runs: {r}");
+    }
+
     /// A run that ends by itself reports no kill.
     #[tokio::test]
     async fn a_run_that_ends_reports_no_kill() {

@@ -1145,3 +1145,49 @@ async fn a_cancel_ends_every_process_before_the_next_job_starts() {
         }
     }
 }
+
+/// TER-115 review: a merge job cancelled while its recipe runs does not
+/// push `next`, even when the recipe ends with exit 0 on the `TERM` of
+/// the kill. The test waits until the job's clone is gone (the clean-up
+/// runs last), then checks `next`.
+#[tokio::test]
+async fn a_cancelled_merge_job_does_not_push() {
+    let lab = lab(1).await;
+    let before = git(&lab.origin, &["rev-parse", "next"]);
+    let started = lab._dirs.path().join("started");
+    let work_dir = lab._dirs.path().join("jobs");
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "next_repos": ["app"],
+                   "recipe": format!("trap 'exit 0' TERM; echo $$ > '{}'; sleep 300 & wait",
+                                     started.display()),
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await
+        .ok();
+    lab.branch("ter-mc", "next", &[("OK", "yes\n")]);
+    let card = lab.card("mc", "ter-mc").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job = r.body["job"]["id"].as_str().unwrap().to_owned();
+    pids(&started, 1).await;
+    let r = lab.td.delete(&format!("/api/jobs/{job}")).await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    let clone = work_dir.join("p").join(&job);
+    let start = Instant::now();
+    while clone.exists() {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the clone {} stays",
+            clone.display()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), before);
+    let j = lab.td.get(&format!("/api/jobs/{job}")).await.ok().clone();
+    assert_eq!(j["state"], "cancelled", "{j}");
+}
