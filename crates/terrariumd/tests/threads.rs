@@ -1,5 +1,6 @@
 //! Inbox threads (TER-91, docs/api.md §6.13): the thread item and its API,
-//! the report-to rule (D34), and questions linked to a thread.
+//! the report-to rule (D34), and questions linked to a thread; the right
+//! `thread:open` and the rights check of agent-opened threads (TER-93, A1).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -168,8 +169,8 @@ async fn a_thread_opens_talks_responds_and_closes() {
         .await
         .ok();
 
-    // Rights: an agent does not open (TER-93 brings `thread:open`), the
-    // report-to lead reads but does not post, only the operator responds.
+    // Rights: an agent without `thread:open` does not open, the report-to
+    // lead reads but does not post, only the operator responds.
     lab.td
         .post_as(
             &lab.p_lead,
@@ -425,4 +426,261 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
     ask(json!({"text": "One more?", "thread": tid}))
         .await
         .err(409, "conflict");
+}
+
+/// The templates of the rights tests: `consult` (project `p`, a member),
+/// `p-admin` (project `p`, project_admin), and the global `helper` (a
+/// member), `admin` (project_admin), and `architect` (architect).
+async fn templates(td: &common::TestDaemon) {
+    for (name, project, roles) in [
+        ("consult", Some("p"), json!([])),
+        ("p-admin", Some("p"), json!(["project_admin"])),
+        ("helper", None, json!([])),
+        ("admin", None, json!(["project_admin"])),
+        ("architect", None, json!(["architect"])),
+    ] {
+        let mut body = json!({"name": name, "spec": {"harness": "claude", "roles": roles}});
+        if let Some(p) = project {
+            body["project"] = json!(p);
+        }
+        td.post("/api/templates", body).await.ok();
+    }
+}
+
+/// Give `agent` the right `thread:open`, as `by` (`None`: the operator).
+async fn grant(td: &common::TestDaemon, by: Option<&str>, agent: &str) -> common::Resp {
+    let path = format!("/api/agents/{agent}");
+    let body = json!({"policy": {"thread_open": true}});
+    match by {
+        Some(b) => td.patch_as(b, &path, body).await,
+        None => td.patch(&path, body).await,
+    }
+}
+
+#[tokio::test]
+async fn an_agent_with_thread_open_opens_within_its_rights() {
+    let lab = lab().await;
+    templates(&lab.td).await;
+    let open_as = |who: &str, body: Value| {
+        let td = &lab.td;
+        let who = who.to_owned();
+        async move { td.post_as(&who, "/api/threads", body).await }
+    };
+    // No right: 403, with the way to get it.
+    let r = open_as(&lab.w, json!({"topic": "x", "template": "consult"})).await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("thread:open"),
+        "{}",
+        r.body
+    );
+    // The lead grants it to a member, not to itself; the operator grants
+    // it to the lead.
+    let g = grant(&lab.td, Some(&lab.p_lead), &lab.w).await;
+    assert_eq!(g.ok()["policy"]["thread_open"], true);
+    grant(&lab.td, Some(&lab.p_lead), &lab.p_lead)
+        .await
+        .err(403, "forbidden");
+    grant(&lab.td, Some(&lab.w), &lab.arch)
+        .await
+        .err(403, "forbidden");
+    grant(&lab.td, None, &lab.p_lead).await.ok();
+
+    // The member opens with a member template: the scope is its project,
+    // it reports to the project's lead, and the opener reads it.
+    let r = open_as(
+        &lab.w,
+        json!({"topic": "Board columns", "template": "consult", "text": "Four?"}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["scope"], "p");
+    assert_eq!(r.body["opened_by"], lab.w.as_str());
+    assert_eq!(r.body["opened_by_name"], "p/w");
+    assert_eq!(r.body["report_to"], lab.p_lead.as_str());
+    assert_eq!(r.body["status"], "waiting_operator");
+    assert_eq!(r.body["messages"][0]["author"], lab.w.as_str());
+    let tid = r.body["id"].as_str().unwrap().to_owned();
+    lab.td
+        .get_as(&lab.w, &format!("/api/threads/{tid}"))
+        .await
+        .ok();
+    let mine = lab.td.get_as(&lab.w, "/api/threads").await.ok().clone();
+    assert_eq!(mine.as_array().unwrap().len(), 1);
+    // A global thread with a global member template is fine too (D35: no
+    // limits on agent-opened threads).
+    let r = open_as(
+        &lab.w,
+        json!({"topic": "Global", "scope": "global", "template": "helper"}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["report_to"], lab.meta_lead.as_str());
+
+    // An agent names a template; an unknown one is 404.
+    open_as(&lab.w, json!({"topic": "x"}))
+        .await
+        .err(422, "invalid");
+    open_as(&lab.w, json!({"topic": "x", "template": "nope"}))
+        .await
+        .err(404, "not_found");
+    // A1: a template above the opener's rights is refused, and the
+    // message names the right.
+    let r = open_as(&lab.w, json!({"topic": "x", "template": "p-admin"})).await;
+    r.err(403, "forbidden");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("project_admin of `p`"), "{msg}");
+    assert!(msg.contains("A1"), "{msg}");
+    open_as(
+        &lab.w,
+        json!({"topic": "x", "scope": "global", "template": "architect"}),
+    )
+    .await
+    .err(403, "forbidden");
+    // Another project's scope is a write outside the own project.
+    open_as(&lab.w, json!({"topic": "x", "scope": "q", "template": "helper"}))
+        .await
+        .err(403, "forbidden");
+    // A named agent may not exceed the opener's rights either.
+    let r = open_as(
+        &lab.w,
+        json!({"topic": "x", "template": "consult", "agent": "p/admin2"}),
+    )
+    .await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("agent p/admin2"),
+        "{}",
+        r.body
+    );
+    let r = open_as(
+        &lab.w,
+        json!({"topic": "Mine", "template": "consult", "agent": "p/arch"}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+
+    // The lead of `p` uses the admin template of its project ...
+    let r = open_as(&lab.p_lead, json!({"topic": "Lead", "template": "p-admin"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    // ... but not a global admin template: that is project_admin of
+    // `meta` (the reason for A1), and not the architect template.
+    let r = open_as(
+        &lab.p_lead,
+        json!({"topic": "x", "scope": "global", "template": "admin"}),
+    )
+    .await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("project_admin of `meta`"),
+        "{}",
+        r.body
+    );
+    open_as(
+        &lab.p_lead,
+        json!({"topic": "x", "scope": "global", "template": "architect"}),
+    )
+    .await
+    .err(403, "forbidden");
+    // The operator opens any thread with any template.
+    lab.open(json!({"topic": "Op", "template": "architect"}))
+        .await;
+}
+
+/// The architect role (TER-47) gets the thread rights (TER-96 decision):
+/// it posts and asks in its thread as a member writes in its own project,
+/// the rights check covers its opens, and it still writes nowhere else.
+#[tokio::test]
+async fn an_architect_posts_in_its_thread_and_writes_nowhere_else() {
+    let lab = lab().await;
+    templates(&lab.td).await;
+    let arch = lab
+        .td
+        .agent("meta", "architect", json!({"roles": ["architect"]}))
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let g = lab
+        .open(json!({"topic": "Shard it?", "agent": "meta/architect", "text": "How?"}))
+        .await;
+    let gid = g["id"].as_str().unwrap().to_owned();
+    // It posts and asks in its own thread.
+    let r = lab
+        .td
+        .post_as(
+            &arch,
+            &format!("/api/threads/{gid}/messages"),
+            json!({"text": "By project."}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["status"], "waiting_operator");
+    let r = lab
+        .td
+        .post_as(
+            &arch,
+            &format!("/api/agents/{arch}/questions"),
+            json!({"text": "Keep the old store?", "options": ["yes", "no"], "thread": gid}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["thread"], gid.as_str());
+
+    // It reads every project, but a thread of `p` is not its own: no post.
+    let t = lab
+        .open(json!({"topic": "Columns", "scope": "p", "agent": "p/arch"}))
+        .await;
+    let tid = t["id"].as_str().unwrap();
+    lab.td
+        .post_as(
+            &arch,
+            &format!("/api/threads/{tid}/messages"),
+            json!({"text": "Mine now."}),
+        )
+        .await
+        .err(404, "not_found");
+    // It still writes nothing in another project: no card in `p`.
+    lab.td
+        .post_as(&arch, "/api/projects/p/cards", json!({"title": "From the architect"}))
+        .await
+        .err(403, "forbidden");
+
+    // With thread:open it opens in its own project and global scope, with
+    // a template within its rights, and not in another project.
+    grant(&lab.td, None, &arch).await.ok();
+    let r = lab
+        .td
+        .post_as(
+            &arch,
+            "/api/threads",
+            json!({"topic": "Next", "scope": "global", "template": "architect"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    lab.td
+        .post_as(
+            &arch,
+            "/api/threads",
+            json!({"topic": "x", "scope": "global", "template": "admin"}),
+        )
+        .await
+        .err(403, "forbidden");
+    lab.td
+        .post_as(
+            &arch,
+            "/api/threads",
+            json!({"topic": "x", "scope": "p", "template": "consult"}),
+        )
+        .await
+        .err(403, "forbidden");
 }

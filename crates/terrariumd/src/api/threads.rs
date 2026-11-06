@@ -1,7 +1,8 @@
 //! Inbox threads (TER-91, docs/api.md §6.13, [`crate::store::threads`]):
 //!
-//! - `POST /api/threads` (the operator; agents with `thread:open` come
-//!   with TER-93): open a thread.
+//! - `POST /api/threads`: open a thread. The operator, or an agent with
+//!   the right `thread:open` (TER-93) with a template that does not exceed
+//!   its own rights (A1).
 //! - `GET /api/threads[?status=&scope=]`: the operator sees all; an agent
 //!   sees the threads it is attached to or reports from.
 //! - `GET /api/threads/{id}`: the thread with its messages and questions.
@@ -17,9 +18,13 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use super::{ApiJson, ApiQuery, Shared};
-use crate::actor::Actor;
+use terrarium_core::agent_template;
+use terrarium_core::model::Agent;
+
+use crate::actor::{Actor, AgentActor};
 use crate::error::{ApiError, ApiResult};
-use crate::store::agents;
+use crate::policy;
+use crate::store::{agents, templates};
 use crate::store::threads::{self, Filter, Link, NewThread, Thread, ThreadStatus};
 
 pub fn routes() -> Router<Shared> {
@@ -61,38 +66,108 @@ async fn open(
     actor: Actor,
     ApiJson(b): ApiJson<OpenBody>,
 ) -> ApiResult<Response> {
-    if !actor.is_operator() {
-        return Err(ApiError::forbidden(
-            "opening a thread: the operator opens threads; agents get the right `thread:open` \
-             with TER-93",
-        ));
+    // The scope: `global` by default for the operator, the own project
+    // for an agent.
+    let scope = match b.scope.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => match actor.project() {
+            Some(p) => p.to_owned(),
+            None => threads::GLOBAL.to_owned(),
+        },
+    };
+    policy::open_thread(&actor, &scope)?;
+    let opener = actor.agent().cloned();
+    if opener.is_some() {
+        crate::template_files::refresh_quiet(&state).await;
     }
     let th = state
         .db
         .write(actor.label(), move |t| {
-            let scope = b.scope.unwrap_or_default();
+            let project = (scope != threads::GLOBAL).then_some(scope.as_str());
             let agent = match b.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
-                Some(key) => {
-                    let context =
-                        (scope != threads::GLOBAL && !scope.is_empty()).then_some(scope.as_str());
-                    Some(agents::find(t, key, context)?.agent.id.to_string())
-                }
+                Some(key) => Some(agents::find(t, key, project)?.agent),
                 None => None,
             };
+            if let Some(a) = &opener {
+                check_rights(t, a, &scope, b.template.as_deref(), agent.as_ref())?;
+            }
             threads::open(
                 t,
                 NewThread {
                     topic: b.topic,
                     scope,
                     template: b.template,
-                    opened_by: "operator".into(),
-                    agent,
+                    opened_by: opener.map_or_else(|| "operator".into(), |a| a.id),
+                    agent: agent.map(|a| a.id.to_string()),
                     text: b.text,
                 },
             )
         })
         .await?;
     Ok((StatusCode::CREATED, Json(th)).into_response())
+}
+
+/// The rights check of an agent-opened thread (A1, [`policy::thread_rights`]):
+/// the template is required, and neither it nor a named attached agent
+/// may hold a right that the opener does not hold. The template resolves
+/// in the project of the thread's agent: the scope project, or `meta` for
+/// `global`.
+fn check_rights(
+    conn: &rusqlite::Connection,
+    opener: &AgentActor,
+    scope: &str,
+    template: Option<&str>,
+    agent: Option<&Agent>,
+) -> ApiResult<()> {
+    let Some(key) = template.map(str::trim).filter(|k| !k.is_empty()) else {
+        return Err(ApiError::invalid(
+            "`template` is empty: an agent names the template of the thread it opens              (`terrarium thread new --template <t>`)",
+        ));
+    };
+    let project = if scope == threads::GLOBAL {
+        threads::GLOBAL_LEAD_PROJECT
+    } else {
+        scope
+    };
+    let tp = templates::resolve(conn, project, key)?;
+    let def = agent_template::to_def(&tp.spec, &tp.name, project)
+        .map_err(|e| ApiError::invalid(format!("template `{}`: {e}", tp.use_key())))?;
+    let refuse = |what: String, excess: Vec<String>| -> ApiResult<()> {
+        if excess.is_empty() {
+            return Ok(());
+        }
+        Err(ApiError::forbidden(format!(
+            "opening a thread: {what} has {}, which you do not hold. The template of a thread              that an agent opens may not exceed the opener's rights (A1); the operator opens              it from the Inbox",
+            excess.join(", ")
+        )))
+    };
+    refuse(
+        format!("template `{}`", tp.use_key()),
+        policy::thread_rights(
+            opener,
+            policy::ThreadAgentRights {
+                project,
+                roles: &def.roles,
+                policy: &def.policy,
+            },
+            &|n: &str| agents::project_target(conn, project, n),
+        ),
+    )?;
+    if let Some(a) = agent {
+        refuse(
+            format!("agent {}/{}", a.project, a.name),
+            policy::thread_rights(
+                opener,
+                policy::ThreadAgentRights {
+                    project: &a.project,
+                    roles: &a.roles,
+                    policy: &a.policy,
+                },
+                &|n: &str| agents::project_target(conn, &a.project, n),
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Deserialize)]

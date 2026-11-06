@@ -483,6 +483,169 @@ pub fn set_spawn_policy(
     Ok(())
 }
 
+/// Write `policy.thread_open` of an agent: the right `thread:open` to open
+/// Inbox threads (docs/api.md §6.13, TER-93). The rules are those of the
+/// spawn rights ([`set_spawn_policy`]): the operator and a sysadmin set it
+/// on any agent; a project_admin (the caller checked it) sets it on a
+/// member of its project, not on itself and not on an admin. No change: no
+/// check.
+pub fn set_thread_open(
+    actor: &Actor,
+    target: Option<&str>,
+    target_roles: &[Role],
+    old: Option<&Policy>,
+    new: &Policy,
+) -> ApiResult<()> {
+    if old.is_some_and(|o| o.thread_open) == new.thread_open {
+        return Ok(());
+    }
+    let Actor::Agent(a) = actor else {
+        return Ok(());
+    };
+    if a.is_sysadmin() {
+        return Ok(());
+    }
+    if target.is_some_and(|t| t == a.id) {
+        return Err(deny(
+            "changing your own right thread:open",
+            "sysadmin or the operator",
+        ));
+    }
+    if target_roles
+        .iter()
+        .any(|r| matches!(r, Role::ProjectAdmin | Role::Sysadmin))
+    {
+        return Err(deny(
+            "setting thread:open on a project_admin or sysadmin",
+            "sysadmin or the operator",
+        ));
+    }
+    Ok(())
+}
+
+/// Open an Inbox thread in `scope` (`global` or a project; docs/api.md
+/// §6.13). The operator opens any thread. An agent needs the right
+/// `thread:open` (`policy.thread_open`), and opens a thread of its own
+/// project or a `global` one; another project needs sysadmin, as each
+/// write does (TER-47: an architect writes only in its own project). The
+/// template check (A1) is [`thread_rights`].
+pub fn open_thread(actor: &Actor, scope: &str) -> ApiResult<()> {
+    let Actor::Agent(a) = actor else {
+        return Ok(());
+    };
+    if !a.policy.thread_open {
+        return Err(ApiError::forbidden(
+            "opening a thread needs the right thread:open (policy.thread_open); a lead grants \
+             it with `terrarium agent set <agent> --thread-open on`",
+        ));
+    }
+    if scope == crate::store::threads::GLOBAL {
+        return Ok(());
+    }
+    write_project(actor, scope)
+        .map_err(|e| ApiError::forbidden(format!("opening a `{scope}` thread: {}", e.message)))
+}
+
+/// The rights of the attached agent of a thread: from its template, or of
+/// the agent that the opener names.
+#[derive(Debug, Clone, Copy)]
+pub struct ThreadAgentRights<'a> {
+    /// The project that the agent is (or will be) in.
+    pub project: &'a str,
+    pub roles: &'a [Role],
+    pub policy: &'a Policy,
+}
+
+/// The rights of `r` that the opening agent `a` does not hold (A1 of the
+/// plan `inbox-threads`, the rule of TER-65 for spawned agents): an
+/// agent-opened thread may only use a template whose rights do not exceed
+/// the opener's. Empty: the open may go on. A sysadmin holds every right.
+///
+/// - A role: `project_admin` of `r.project` needs the opener to be its
+///   project_admin; `architect` needs the opener to hold `architect`;
+///   `sysadmin` needs a sysadmin.
+/// - A target: in the opener's `policy.targets`, or a target of
+///   `r.project` when the opener administers that project.
+/// - A `cross_project` entry: in the opener's `cross_project`. A `mail_to`
+///   entry of another project than `r.project`: in the opener's `mail_to`,
+///   covered by its `cross_project`, or of the opener's own project.
+/// - A `spawn` block: the opener administers `r.project` and `r` is a
+///   member there with no `may_spawn_children` (what a lead may grant), or
+///   the opener's own spawn block has each template entry (or `*`), and
+///   `may_spawn_children` when `r` has it.
+/// - `calendar_write`: the opener has it, or administers `r.project`.
+pub fn thread_rights(
+    a: &AgentActor,
+    r: ThreadAgentRights<'_>,
+    project_target: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    if a.is_sysadmin() {
+        return Vec::new();
+    }
+    let admin = a.is_admin_of(r.project);
+    let mut out = Vec::new();
+    for role in r.roles {
+        let held = match role {
+            Role::Member => true,
+            Role::ProjectAdmin => admin,
+            Role::Architect => a.roles.contains(&Role::Architect),
+            Role::Sysadmin => false,
+        };
+        if !held {
+            let role = match role {
+                Role::ProjectAdmin => format!("role project_admin of `{}`", r.project),
+                Role::Architect => "role architect".to_owned(),
+                _ => "role sysadmin".to_owned(),
+            };
+            out.push(role);
+        }
+    }
+    let mine = &a.policy;
+    for t in &r.policy.targets {
+        if !mine.targets.contains(t) && !(admin && project_target(t)) {
+            out.push(format!("target `{t}`"));
+        }
+    }
+    for c in &r.policy.cross_project {
+        if !mine.cross_project.contains(c) {
+            out.push(format!("cross_project `{c}`"));
+        }
+    }
+    for m in &r.policy.mail_to {
+        let Some((p, _)) = m.split_once('/') else {
+            continue;
+        };
+        let covered = p == r.project
+            || p == a.project
+            || mine.mail_to.contains(m)
+            || mine.cross_project.contains(m)
+            || mine.cross_project.contains(&format!("{p}/*"));
+        if !covered {
+            out.push(format!("mail_to `{m}`"));
+        }
+    }
+    if let Some(sp) = &r.policy.spawn {
+        let member = !r
+            .roles
+            .iter()
+            .any(|x| matches!(x, Role::ProjectAdmin | Role::Sysadmin));
+        let lead_grant = admin && member && !sp.may_spawn_children;
+        let own = mine.spawn.as_ref().is_some_and(|o| {
+            sp.templates
+                .iter()
+                .all(|e| o.templates.iter().any(|m| m == e || m == "*"))
+                && (!sp.may_spawn_children || o.may_spawn_children)
+        });
+        if !lead_grant && !own {
+            out.push("spawn rights".to_owned());
+        }
+    }
+    if r.policy.calendar_write && !mine.calendar_write && !admin {
+        out.push("calendar_write".to_owned());
+    }
+    out
+}
+
 /// Spawn an ephemeral agent for `owner` of `project` (PLAN §18,
 /// "Ephemeral agents"): the owner itself, a `project_admin` of the
 /// project, a sysadmin, or the operator. The owner's `spawn` policy
@@ -1155,6 +1318,7 @@ mod tests {
             cross_project: vec!["q/triage".into()],
             spawn: None,
             calendar_write: false,
+            thread_open: false,
         };
         let a = agent("p", &[], policy);
         assert!(mail_to(&a, &peer("p", "lead")).is_ok());
@@ -1172,6 +1336,7 @@ mod tests {
             cross_project: vec!["q/*".into()],
             spawn: None,
             calendar_write: false,
+            thread_open: false,
         };
         let a = agent("p", &[], policy);
         assert!(mail_to(&a, &peer("q", "x")).is_ok());
@@ -1222,6 +1387,7 @@ mod tests {
             cross_project: cross.iter().map(|s| s.to_string()).collect(),
             spawn: None,
             calendar_write: false,
+            thread_open: false,
         };
         let in_project = policy(&["p-box"], &["*", "lead", "p/dev"], &[]);
         assert!(set_policy(&admin, "p", None, &in_project, &local).is_ok());
@@ -1446,5 +1612,162 @@ mod tests {
         assert!(cancel_spawn(&member, "p-id", "p").is_ok());
         assert!(cancel_spawn(&member, "other", "p").is_err());
         assert!(cancel_spawn(&Actor::Operator, "other", "p").is_ok());
+    }
+
+    /// TER-93: the grant of thread:open follows the spawn rights.
+    #[test]
+    fn thread_open_is_granted_like_the_spawn_rights() {
+        let lead = Actor::Agent(agent("p", &[Role::ProjectAdmin], Policy::default()));
+        let sys = Actor::Agent(agent("q", &[Role::Sysadmin], Policy::default()));
+        let off = Policy::default();
+        let on = Policy {
+            thread_open: true,
+            ..Policy::default()
+        };
+        assert!(set_thread_open(&lead, Some("w"), &[], Some(&off), &on).is_ok());
+        assert!(set_thread_open(&lead, None, &[], None, &on).is_ok());
+        assert!(set_thread_open(&lead, Some("w"), &[], Some(&on), &off).is_ok());
+        // Not on itself, not on an admin; a sysadmin and the operator may.
+        assert!(set_thread_open(&lead, Some("p-id"), &[], Some(&off), &on).is_err());
+        let admin = [Role::ProjectAdmin];
+        assert!(set_thread_open(&lead, Some("l2"), &admin, Some(&off), &on).is_err());
+        assert!(set_thread_open(&sys, Some("l2"), &admin, Some(&off), &on).is_ok());
+        assert!(set_thread_open(&Actor::Operator, Some("l2"), &admin, None, &on).is_ok());
+        // No change: no check.
+        assert!(set_thread_open(&lead, Some("p-id"), &[], Some(&on), &on).is_ok());
+    }
+
+    /// TER-93: who opens a thread, and in which scope.
+    #[test]
+    fn open_thread_needs_the_right_and_the_own_project() {
+        let on = Policy {
+            thread_open: true,
+            ..Policy::default()
+        };
+        let none = Actor::Agent(agent("p", &[Role::ProjectAdmin], Policy::default()));
+        let e = open_thread(&none, "p").unwrap_err();
+        assert!(e.message.contains("thread:open"), "{}", e.message);
+        let w = Actor::Agent(agent("p", &[], on.clone()));
+        assert!(open_thread(&w, "p").is_ok());
+        assert!(open_thread(&w, "global").is_ok());
+        assert!(open_thread(&w, "q").is_err());
+        // An architect writes only in its own project (TER-47).
+        let arch = Actor::Agent(agent("meta", &[Role::Architect], on.clone()));
+        assert!(open_thread(&arch, "meta").is_ok());
+        assert!(open_thread(&arch, "p").is_err());
+        let sys = Actor::Agent(agent("meta", &[Role::Sysadmin], on));
+        assert!(open_thread(&sys, "p").is_ok());
+        assert!(open_thread(&Actor::Operator, "p").is_ok());
+    }
+
+    /// TER-93, A1: the template of an agent-opened thread may not exceed
+    /// the opener's rights.
+    #[test]
+    fn thread_rights_lists_what_the_opener_does_not_hold() {
+        let local = |n: &str| n == "p-box";
+        let w = agent(
+            "p",
+            &[],
+            Policy {
+                targets: vec!["w-box".into()],
+                cross_project: vec!["q/*".into()],
+                ..Policy::default()
+            },
+        );
+        let lead = agent("p", &[Role::ProjectAdmin], Policy::default());
+        let arch = agent("meta", &[Role::Architect], Policy::default());
+        let sys = agent("ops", &[Role::Sysadmin], Policy::default());
+        let check = |a: &AgentActor, project: &str, roles: &[Role], pol: &Policy| {
+            thread_rights(
+                a,
+                ThreadAgentRights {
+                    project,
+                    roles,
+                    policy: pol,
+                },
+                &local,
+            )
+        };
+        let plain = Policy::default();
+        assert!(check(&w, "p", &[], &plain).is_empty());
+        assert!(check(&w, "meta", &[Role::Member], &plain).is_empty());
+        // Roles.
+        let pa = [Role::ProjectAdmin];
+        assert_eq!(
+            check(&w, "p", &pa, &plain),
+            vec!["role project_admin of `p`"]
+        );
+        assert!(check(&lead, "p", &pa, &plain).is_empty());
+        // A lead of `p` opening a global thread: project_admin of `meta`.
+        assert_eq!(
+            check(&lead, "meta", &pa, &plain),
+            vec!["role project_admin of `meta`"]
+        );
+        let ar = [Role::Architect];
+        assert_eq!(check(&lead, "meta", &ar, &plain), vec!["role architect"]);
+        assert!(check(&arch, "meta", &ar, &plain).is_empty());
+        assert_eq!(
+            check(&arch, "meta", &[Role::Sysadmin], &plain),
+            vec!["role sysadmin"]
+        );
+        assert!(check(&sys, "meta", &[Role::Sysadmin], &plain).is_empty());
+        // Targets: held, or a project target for its admin.
+        let boxes = |t: &[&str]| Policy {
+            targets: t.iter().map(|s| s.to_string()).collect(),
+            ..Policy::default()
+        };
+        assert!(check(&w, "p", &[], &boxes(&["w-box"])).is_empty());
+        assert_eq!(
+            check(&w, "p", &[], &boxes(&["p-box", "big"])),
+            vec!["target `p-box`", "target `big`"]
+        );
+        assert!(check(&lead, "p", &[], &boxes(&["p-box"])).is_empty());
+        assert_eq!(
+            check(&lead, "p", &[], &boxes(&["big"])),
+            vec!["target `big`"]
+        );
+        // cross_project and mail_to outside the project.
+        let reach = Policy {
+            cross_project: vec!["q/*".into(), "r/x".into()],
+            mail_to: vec!["*".into(), "p/dev".into(), "q/dev".into(), "s/dev".into()],
+            ..Policy::default()
+        };
+        assert_eq!(
+            check(&w, "p", &[], &reach),
+            vec!["cross_project `r/x`", "mail_to `s/dev`"]
+        );
+        // Spawn rights: what a lead may grant, or held by the opener.
+        let spawner = |t: &[&str], children: bool| Policy {
+            spawn: Some(Box::new(terrarium_core::config::SpawnPolicy {
+                templates: t.iter().map(|s| s.to_string()).collect(),
+                may_spawn_children: children,
+                ..Default::default()
+            })),
+            ..Policy::default()
+        };
+        assert!(check(&lead, "p", &[], &spawner(&["worker"], false)).is_empty());
+        assert_eq!(
+            check(&lead, "p", &[], &spawner(&["worker"], true)),
+            vec!["spawn rights"]
+        );
+        assert_eq!(
+            check(&w, "p", &[], &spawner(&["worker"], false)),
+            vec!["spawn rights"]
+        );
+        let ws = agent("p", &[], spawner(&["worker", "helper"], false));
+        assert!(check(&ws, "p", &[], &spawner(&["worker"], false)).is_empty());
+        assert_eq!(
+            check(&ws, "p", &[], &spawner(&["other"], false)),
+            vec!["spawn rights"]
+        );
+        // calendar_write: held, or the admin of the project.
+        let cal = Policy {
+            calendar_write: true,
+            ..Policy::default()
+        };
+        assert_eq!(check(&w, "p", &[], &cal), vec!["calendar_write"]);
+        assert!(check(&lead, "p", &[], &cal).is_empty());
+        // A sysadmin holds every right.
+        assert!(check(&sys, "p", &pa, &reach).is_empty());
     }
 }

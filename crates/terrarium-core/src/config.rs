@@ -36,6 +36,12 @@ pub struct Policy {
     /// only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub calendar_write: bool,
+    /// The right `thread:open` (docs/api.md §6.13): the agent opens Inbox
+    /// threads (`terrarium thread new`). Granted like the spawn rights. The
+    /// template of a thread that the agent opens may not exceed the
+    /// agent's own rights. Absent: the agent opens no thread.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub thread_open: bool,
 }
 
 /// The default of [`SpawnPolicy::max_concurrent`].
@@ -206,6 +212,7 @@ impl Default for Policy {
             cross_project: Vec::new(),
             spawn: None,
             calendar_write: false,
+            thread_open: false,
         }
     }
 }

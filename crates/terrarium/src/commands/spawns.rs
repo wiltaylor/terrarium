@@ -81,10 +81,14 @@ pub struct SpawnRightsArgs {
         "spawn_max_lifetime", "spawn_children"
     ])]
     pub no_spawn: bool,
+    /// The right thread:open: the agent opens Inbox threads (`terrarium
+    /// thread new`), with templates that do not exceed its rights
+    #[arg(long, value_name = "on|off")]
+    pub thread_open: Option<String>,
 }
 
 impl SpawnRightsArgs {
-    fn given(&self) -> bool {
+    fn spawn_given(&self) -> bool {
         self.no_spawn
             || !self.spawn_templates.is_empty()
             || self.spawn_max_concurrent.is_some()
@@ -92,11 +96,16 @@ impl SpawnRightsArgs {
             || self.spawn_max_lifetime.is_some()
             || self.spawn_children.is_some()
     }
+
+    fn given(&self) -> bool {
+        self.spawn_given() || self.thread_open.is_some()
+    }
 }
 
 /// The new policy of `agent set` with spawn flags: the agent's policy now,
-/// with the `spawn` block changed. `policy` is a `--policy` value, if
-/// given; else the CLI reads the agent. `None`: no spawn flag.
+/// with the `spawn` block and `thread_open` changed. `policy` is a
+/// `--policy` value, if given; else the CLI reads the agent. `None`: no
+/// spawn flag.
 pub async fn policy_with_spawn(
     ctx: &Ctx,
     agent: &str,
@@ -112,6 +121,12 @@ pub async fn policy_with_spawn(
     };
     if !policy.is_object() {
         policy = json!({});
+    }
+    if let Some(v) = &a.thread_open {
+        policy["thread_open"] = json!(super::agents::switch(v, "--thread-open")?);
+    }
+    if !a.spawn_given() {
+        return Ok(Some(policy));
     }
     if a.no_spawn {
         if let Some(o) = policy.as_object_mut() {
@@ -636,6 +651,61 @@ mod tests {
         .await;
         r.unwrap();
         assert_eq!(reqs[1].body, Some(json!({"policy": {"mail_to": ["*"]}})));
+    }
+
+    /// TER-93: `--thread-open` sets `policy.thread_open` and keeps the rest.
+    #[tokio::test]
+    async fn set_grants_and_revokes_thread_open() {
+        let (r, _, reqs) = run(
+            false,
+            &["agent", "set", "terra/w", "--thread-open", "on"],
+            vec![
+                (
+                    200,
+                    json!({"policy": {"mail_to": ["*"], "spawn": {"templates": ["*"]}}}),
+                ),
+                (200, json!({"project": "terra", "name": "w"})),
+            ],
+        )
+        .await;
+        r.unwrap();
+        assert_eq!(
+            reqs[1].body,
+            Some(json!({"policy": {"mail_to": ["*"], "spawn": {"templates": ["*"]},
+                                   "thread_open": true}}))
+        );
+        let (r, _, reqs) = run(
+            false,
+            &[
+                "agent",
+                "set",
+                "terra/w",
+                "--thread-open",
+                "off",
+                "--no-spawn",
+            ],
+            vec![
+                (
+                    200,
+                    json!({"policy": {"mail_to": ["*"], "thread_open": true,
+                                      "spawn": {"templates": ["*"]}}}),
+                ),
+                (200, json!({"project": "terra", "name": "w"})),
+            ],
+        )
+        .await;
+        r.unwrap();
+        assert_eq!(
+            reqs[1].body,
+            Some(json!({"policy": {"mail_to": ["*"], "thread_open": false}}))
+        );
+        let (r, _, _) = run(
+            false,
+            &["agent", "set", "terra/w", "--thread-open", "maybe"],
+            vec![(200, json!({"policy": {}}))],
+        )
+        .await;
+        assert!(r.unwrap_err().to_string().contains("--thread-open"));
     }
 
     #[tokio::test]

@@ -167,10 +167,12 @@ impl Thread {
         (self.scope != GLOBAL).then_some(self.scope.as_str())
     }
 
-    /// The caller may read the thread: the attached agent or the report-to
-    /// lead (the operator always may).
+    /// The caller may read the thread: the attached agent, the report-to
+    /// lead, or the agent that opened it (TER-93; the operator always may).
     pub fn involves(&self, agent: &str) -> bool {
-        self.agent.as_deref() == Some(agent) || self.report_to.as_deref() == Some(agent)
+        self.agent.as_deref() == Some(agent)
+            || self.report_to.as_deref() == Some(agent)
+            || self.opened_by == agent
     }
 }
 
@@ -314,7 +316,7 @@ pub struct Filter {
     /// Every status.
     pub all: bool,
     pub scope: Option<String>,
-    /// Only the threads of this agent: attached or report-to.
+    /// Only the threads of this agent: attached, report-to, or opener.
     pub involving: Option<String>,
 }
 
@@ -327,7 +329,7 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
          WHERE (?1 IS NULL OR status = ?1)
            AND (?1 IS NOT NULL OR ?2 OR status != 'closed')
            AND (?3 IS NULL OR scope = ?3)
-           AND (?4 IS NULL OR agent = ?4 OR report_to = ?4)",
+           AND (?4 IS NULL OR agent = ?4 OR report_to = ?4 OR opened_by = ?4)",
     )?;
     let rows = st
         .query_map(params![status, f.all, f.scope, f.involving], |r| {
