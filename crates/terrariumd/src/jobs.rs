@@ -87,10 +87,6 @@ const STEP_MAX: usize = 64 * 1024;
 const RECIPE_MAX: usize = 1024 * 1024;
 /// The time limit of a prepare, push, or cleanup step.
 const STEP_TIMEOUT: u64 = 900;
-/// The time after a step's timeout when the client's own timeout ends it,
-/// should the kill on the target not end it first: the grace of the kill
-/// and the time limit of the kill command, with room.
-const KILL_MARGIN: u64 = crate::run_kill::GRACE_SECS * 2 + 60;
 
 /// The controls of the running jobs, by job ID, for a cancel. The job IDs
 /// are ULIDs, so one map serves every daemon in a process (the tests).
@@ -326,11 +322,11 @@ fn error_end(message: impl Into<String>) -> JobEnd {
 /// Run one step on the target and read it to the end. The step can be
 /// killed through [`kill`] while it runs.
 ///
-/// A kill or the step's `timeout_secs` ends the whole process group and
+/// A kill, or the step's `timeout_secs`, ends the whole process group and
 /// session of the step on the target ([`crate::run_kill`]), not only the
-/// local client (TER-115). The step returns only after that kill ended,
-/// so the job keeps its slot until its processes are gone. The client's
-/// own timeout stays as a backstop, [`KILL_MARGIN`] later.
+/// local `ssh` or `docker exec` client (TER-115). The step returns only
+/// after that kill ended, so the job keeps its slot until its processes
+/// are gone.
 async fn step(
     state: &Shared,
     job: &str,
@@ -338,44 +334,14 @@ async fn step(
     cmd: &RemoteCmd,
     max: usize,
 ) -> ApiResult<Collected> {
-    let limit = cmd.timeout_secs.filter(|t| *t > 0);
-    let backstop = RemoteCmd {
-        timeout_secs: limit.map(|t| t.saturating_add(KILL_MARGIN)),
-        ..cmd.clone()
-    };
-    let (running, report) = crate::run_kill::start(state, def, &backstop)?;
-    let ctl = running.ctl.clone();
-    set_control(job, Some(ctl.clone()));
-    let read = running.collect(max);
-    tokio::pin!(read);
-    let mut timed_out = false;
-    let mut c = match limit {
-        None => read.await,
-        Some(t) => match tokio::time::timeout(Duration::from_secs(t), &mut read).await {
-            Ok(c) => c,
-            Err(_) => {
-                timed_out = true;
-                let _ = ctl.send(Control::Kill);
-                read.await
-            }
-        },
-    };
-    drop(ctl);
+    let (running, report) = crate::run_kill::start(state, def, cmd)?;
+    set_control(job, Some(running.ctl.clone()));
+    let mut c = running.collect(max).await;
     let kill = match report {
         Some(rx) => crate::run_kill::report(rx).await,
         None => None,
     };
-    if timed_out {
-        c.end = Some(End::Exit {
-            code: None,
-            signal: None,
-            reason: "timeout".into(),
-        });
-    }
     if let Some(r) = kill {
-        if r["left"].as_array().is_some_and(|l| !l.is_empty()) || r.get("error").is_some() {
-            warn!(job, report = %r, "the kill of a job step left processes on the target");
-        }
         c.stderr
             .extend_from_slice(format!("\n[killed on the target: {r}]\n").as_bytes());
     }

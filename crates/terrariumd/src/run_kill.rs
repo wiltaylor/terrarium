@@ -14,6 +14,9 @@
 //! [`GRACE_SECS`], sends `KILL` to the ones left, and prints the PIDs. Only
 //! then does the client of the run get its own kill. The result is a
 //! [`report`] that `DELETE /api/waits/{id}?kill=true` returns as `kill`.
+//! A run that hits its own timeout (the client's, which leaves the command
+//! on a docker or ssh target) gets the same kill before its end goes out
+//! (TER-115).
 //!
 //! A process that leaves both the group and the session (`setsid` in the
 //! command) is not found. A kill in the moment before the wrapper wrote its
@@ -29,7 +32,7 @@ use tracing::{debug, warn};
 
 use crate::api::Shared;
 use crate::error::{ApiError, ApiResult};
-use crate::executor::{Control, Ev, RemoteCmd, Running, start_cmd};
+use crate::executor::{Control, End, Ev, RemoteCmd, Running, start_cmd};
 
 /// The time between `TERM` and `KILL`.
 pub const GRACE_SECS: u64 = 5;
@@ -196,8 +199,26 @@ where
     Ok((guard(inner, start, killer, tx), Some(rx)))
 }
 
+/// How the forward of a guarded run stopped.
+enum Stop {
+    /// The run ended by itself.
+    Ended,
+    /// A `Kill`, or nobody reads the run any more.
+    Killed,
+    /// The run hit its own timeout: the client is gone, the command on
+    /// the target may not be. The held end goes out after the kill.
+    TimedOut(Ev),
+}
+
+/// Is `ev` the end of a run that hit its timeout?
+fn is_timeout(ev: &Ev) -> bool {
+    matches!(ev, Ev::End(End::Exit { reason, .. }) if reason == "timeout")
+}
+
 /// Forward `inner`. A `Kill` (or the drop of the returned run) runs
-/// `killer` on the target first, then kills `inner`.
+/// `killer` on the target first, then kills `inner`. A run that hits its
+/// own timeout runs `killer` too, and its end goes out only after the
+/// kill, with the report ready (TER-115).
 fn guard<F>(
     inner: Running,
     start: F,
@@ -211,30 +232,40 @@ where
     let (ctx, mut crx) = mpsc::unbounded_channel::<Control>();
     tokio::spawn(async move {
         let Running { mut events, ctl } = inner;
-        let killed = loop {
+        let stop = loop {
             tokio::select! {
                 ev = events.recv() => {
-                    let Some(ev) = ev else { break false };
+                    let Some(ev) = ev else { break Stop::Ended };
+                    if is_timeout(&ev) {
+                        break Stop::TimedOut(ev);
+                    }
                     let last = matches!(ev, Ev::End(_));
                     if etx.send(ev).await.is_err() {
                         // Nobody reads the run any more: end it.
-                        break !last;
+                        break if last { Stop::Ended } else { Stop::Killed };
                     }
                     if last {
-                        break false;
+                        break Stop::Ended;
                     }
                 }
                 c = crx.recv() => match c {
-                    None | Some(Control::Kill) => break true,
+                    None | Some(Control::Kill) => break Stop::Killed,
                     Some(c) => { let _ = ctl.send(c); }
                 },
             }
         };
-        drop(etx);
-        if !killed {
-            report.send_replace(Some(Value::Null));
-            return;
-        }
+        let held = match stop {
+            Stop::Ended => {
+                drop(etx);
+                report.send_replace(Some(Value::Null));
+                return;
+            }
+            Stop::Killed => {
+                drop(etx);
+                None
+            }
+            Stop::TimedOut(ev) => Some((etx, ev)),
+        };
         // Read the run's output meanwhile: a host session that nobody
         // reads is released, and that kills it at once, without TERM.
         let run_kill = async {
@@ -274,6 +305,9 @@ where
             debug!(report = %r, "killed a run on its target");
         }
         report.send_replace(Some(r));
+        if let Some((etx, ev)) = held {
+            let _ = etx.send(ev).await;
+        }
     });
     Running {
         events: erx,
