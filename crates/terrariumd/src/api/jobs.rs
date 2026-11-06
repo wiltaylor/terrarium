@@ -56,10 +56,15 @@ async fn hosts_view(state: &Shared, actor: &Actor) -> ApiResult<Value> {
         .db
         .read(|c| Ok((jobs::host_caps(c)?, jobs::running(c)?)))
         .await?;
-    let mut running = std::collections::BTreeMap::<String, std::collections::BTreeMap<String, usize>>::new();
+    let mut running =
+        std::collections::BTreeMap::<String, std::collections::BTreeMap<String, usize>>::new();
     for job in jobs {
         if let Some(host) = job.host {
-            *running.entry(host).or_default().entry(job.project).or_default() += 1;
+            *running
+                .entry(host)
+                .or_default()
+                .entry(job.project)
+                .or_default() += 1;
         }
     }
     let mut names: Vec<String> = caps
@@ -85,7 +90,8 @@ async fn hosts_view(state: &Shared, actor: &Actor) -> ApiResult<Value> {
                         object.remove("updated_by");
                         object.remove("updated_at");
                     }
-                    view["projects"] = json!({a.project.clone(): counts.get(&a.project).copied().unwrap_or(0)});
+                    view["projects"] =
+                        json!({a.project.clone(): counts.get(&a.project).copied().unwrap_or(0)});
                 }
             }
             view

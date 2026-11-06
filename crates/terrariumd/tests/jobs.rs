@@ -19,20 +19,66 @@ use terrarium_host::{Client, ClientOptions};
 const DEADLINE: Duration = Duration::from_secs(90);
 
 #[tokio::test]
+async fn host_caps_accept_names_ids_and_ssh_aliases() {
+    let td = TestDaemon::start().await;
+    let h = td.post("/api/hosts", json!({"name": "machine"})).await.ok().clone();
+    let id = h["id"].as_str().unwrap();
+    let cap = td.put("/api/job-hosts/machine", json!({"heavy_jobs": 2})).await.ok().clone();
+    assert_eq!(cap["hosts"][0]["host"], id);
+    let cap = td.put(&format!("/api/job-hosts/{id}"), json!({"heavy_jobs": 1})).await.ok().clone();
+    assert_eq!(cap["hosts"].as_array().unwrap().len(), 1);
+    assert_eq!(cap["hosts"][0]["heavy_jobs"], 1);
+    td.delete(&format!("/api/job-hosts/{id}")).await.ok();
+    let cap = td.put("/api/job-hosts/localhost", json!({"heavy_jobs": 2})).await.ok().clone();
+    let key = cap["hosts"][0]["host"].as_str().unwrap();
+    assert!(key.parse::<std::net::IpAddr>().is_ok());
+    let cap = td.put(&format!("/api/job-hosts/{key}"), json!({"heavy_jobs": 1})).await.ok().clone();
+    assert_eq!(cap["hosts"].as_array().unwrap().len(), 1);
+    assert_eq!(cap["hosts"][0]["host"], key);
+    assert_eq!(cap["hosts"][0]["heavy_jobs"], 1);
+}
+
+#[tokio::test]
 async fn host_counts_respect_the_readers_project() {
     use terrariumd::store::jobs::{self, JobKind, NewJob};
     let td = TestDaemon::start().await;
     for project in ["p", "q"] {
         td.project(project).await;
-        let card = td.post(&format!("/api/projects/{project}/cards"), json!({"title": "job"})).await.ok()["id"].as_str().unwrap().to_owned();
+        let card = td
+            .post(
+                &format!("/api/projects/{project}/cards"),
+                json!({"title": "job"}),
+            )
+            .await
+            .ok()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let project = project.to_owned();
-        td.daemon.as_ref().unwrap().state.db.write("operator", move |t| {
-            let j = jobs::create(t, NewJob { project, card, kind: JobKind::Validate,
-                repo: "app".into(), branch: "next".into(), commit: None, by_agent: None })?;
-            jobs::start(t, &j.id, "machine")?;
-            jobs::set_host_cap(t, "machine", Some(2))?;
-            Ok(())
-        }).await.unwrap();
+        td.daemon
+            .as_ref()
+            .unwrap()
+            .state
+            .db
+            .write("operator", move |t| {
+                let j = jobs::create(
+                    t,
+                    NewJob {
+                        project,
+                        card,
+                        kind: JobKind::Validate,
+                        repo: "app".into(),
+                        branch: "next".into(),
+                        commit: None,
+                        by_agent: None,
+                    },
+                )?;
+                jobs::start(t, &j.id, "machine")?;
+                jobs::set_host_cap(t, "machine", Some(2))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
     for (name, roles, all) in [
         ("worker", json!([]), false),
@@ -41,7 +87,11 @@ async fn host_counts_respect_the_readers_project() {
         ("sysadmin", json!(["sysadmin"]), true),
     ] {
         td.agent("p", name, json!({"roles": roles})).await;
-        let v = td.get_as(&format!("p/{name}"), "/api/job-hosts").await.ok().clone();
+        let v = td
+            .get_as(&format!("p/{name}"), "/api/job-hosts")
+            .await
+            .ok()
+            .clone();
         let h = &v["hosts"][0];
         assert_eq!(h["running"], 2);
         assert_eq!(h["projects"]["p"], 1);
@@ -52,6 +102,10 @@ async fn host_counts_respect_the_readers_project() {
     let v = td.get("/api/job-hosts").await.ok().clone();
     assert_eq!(v["hosts"][0]["projects"], json!({"p": 1, "q": 1}));
     assert!(v["hosts"][0].get("updated_by").is_some());
+    td.project("empty").await;
+    td.agent("empty", "worker", json!({})).await;
+    let v = td.get_as("empty/worker", "/api/job-hosts").await.ok().clone();
+    assert_eq!(v["hosts"][0]["projects"], json!({"empty": 0}));
 }
 
 struct Lab {
