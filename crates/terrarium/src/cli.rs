@@ -1260,11 +1260,20 @@ pub enum CardCmd {
         comment: Option<String>,
     },
     /// Queue a merge of the card branch onto `next` (project_admin): the
-    /// job merges, validates, and pushes `next` when green
+    /// job merges, validates, and pushes `next` when green. With several
+    /// cards, one job merges them in the given order, validates once, and
+    /// pushes `next` when green. A card that conflicts goes back to
+    /// `ready`; on red the batch splits in halves until the failing card is
+    /// found, and the others merge
     Merge {
-        id: String,
+        /// The cards, in merge order
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<String>,
+        /// The repo (default: the card's, or the project's only repo)
         #[arg(long)]
         repo: Option<String>,
+        /// The branch (one card only; default: the card's, or the card ID
+        /// in lower case)
         #[arg(long)]
         branch: Option<String>,
     },

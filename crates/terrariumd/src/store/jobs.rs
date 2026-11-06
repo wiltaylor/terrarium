@@ -8,10 +8,15 @@
 //!   cap on one host (TER-97, `job_hosts`), and at most `slots` running
 //!   at a time per project. A merge job runs alone in its project: no
 //!   other job of the project runs with it (TER-71 review, R1).
-//! - A card has at most one job that is queued or running.
+//! - A card has at most one job that is queued or running, also as a
+//!   card of a batch.
+//! - A merge job can merge several cards in order (TER-112, `batch`): one
+//!   validation for all. A red batch splits into two halves, queued at
+//!   the front, the left half first (`parent` is the red batch).
 //! - The one rerun of a failed job is a new row with `attempt` 2 and the
 //!   `created_at` of the first try, so it goes to the front of the queue.
-//! - Events `job` {change, project, id, card, kind, state, attempt}.
+//! - Events `job` {change, project, id, card, kind, state, attempt, outcome,
+//!   cards?} (`cards`: the cards of a batch).
 
 use std::collections::{HashMap, HashSet};
 
@@ -125,6 +130,46 @@ pub struct Job {
     /// The host that the job runs on: set when it starts (TER-97).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// The cards of a batch merge, in merge order (TER-112). Empty for a
+    /// job of one card. `card`, `branch`, and `by_agent` are then those of
+    /// the first card.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch: Vec<BatchCard>,
+    /// The red batch that this job was split from (TER-112).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+}
+
+/// A card of a batch merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchCard {
+    pub card: String,
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent: Option<String>,
+    /// `conflict` when the branch did not merge onto `next` and the cards
+    /// before it; the card then left the batch. `None`: it merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The conflicting files of a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Job {
+    /// The cards of the job: the batch, or the one card.
+    pub fn cards(&self) -> Vec<BatchCard> {
+        if !self.batch.is_empty() {
+            return self.batch.clone();
+        }
+        vec![BatchCard {
+            card: self.card.clone(),
+            branch: self.branch.clone(),
+            by_agent: self.by_agent.clone(),
+            outcome: None,
+            note: None,
+        }]
+    }
 }
 
 /// A new job.
@@ -137,6 +182,9 @@ pub struct NewJob {
     pub branch: String,
     pub commit: Option<String>,
     pub by_agent: Option<String>,
+    /// The cards of a batch merge, in order; empty for one card. The first
+    /// is the job's `card`.
+    pub batch: Vec<BatchCard>,
 }
 
 /// The end of a job.
@@ -147,15 +195,22 @@ pub struct JobEnd {
     pub exit_code: Option<i64>,
     pub tail: Option<String>,
     pub head: Option<String>,
+    /// The batch with the outcome of each card (a conflict), when the job
+    /// merged a batch.
+    pub batch: Option<Vec<BatchCard>>,
 }
 
 const COLS: &str = "id, project, card, kind, repo, branch, commit_sha, state, attempt, outcome,
                     exit_code, tail, head, by_agent, created_by, created_at, started_at, ended_at,
-                    host";
+                    host, batch, parent";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
     let kind: String = r.get(3)?;
     let state: String = r.get(7)?;
+    let batch: Option<String> = r.get(19)?;
+    let batch = batch
+        .and_then(|b| serde_json::from_str(&b).ok())
+        .unwrap_or_default();
     Ok(Job {
         id: r.get(0)?,
         project: r.get(1)?,
@@ -176,6 +231,8 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
         started_at: r.get(16)?,
         ended_at: r.get(17)?,
         host: r.get(18)?,
+        batch,
+        parent: r.get(20)?,
     })
 }
 
@@ -218,7 +275,9 @@ pub fn open_of_card(conn: &Connection, card: &str) -> ApiResult<Option<Job>> {
     Ok(conn
         .query_row(
             &format!(
-                "SELECT {COLS} FROM jobs WHERE card = ?1 AND state IN ('queued', 'running')
+                "SELECT {COLS} FROM jobs WHERE state IN ('queued', 'running')
+                   AND (card = ?1 OR EXISTS (SELECT 1 FROM json_each(jobs.batch)
+                                             WHERE json_extract(value, '$.card') = ?1))
                  ORDER BY created_at LIMIT 1"
             ),
             [card],
@@ -490,84 +549,224 @@ fn emit(t: &mut Tx<'_>, j: &Job, change: &str) -> ApiResult<()> {
         j.card,
         j.state.as_str()
     );
-    t.emit(
-        EventDraft::new(
-            "job",
-            summary,
-            json!({"change": change, "project": j.project, "id": j.id, "card": j.card,
-                   "kind": j.kind, "state": j.state, "attempt": j.attempt,
-                   "outcome": j.outcome}),
-        )
-        .project(j.project.clone()),
-    )?;
+    let mut data = json!({"change": change, "project": j.project, "id": j.id, "card": j.card,
+                          "kind": j.kind, "state": j.state, "attempt": j.attempt,
+                          "outcome": j.outcome});
+    if !j.batch.is_empty() {
+        data["cards"] = json!(j.batch.iter().map(|c| &c.card).collect::<Vec<_>>());
+    }
+    t.emit(EventDraft::new("job", summary, data).project(j.project.clone()))?;
     Ok(())
 }
 
-/// Queue a job. A card has at most one open job.
-pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
-    if let Some(open) = open_of_card(t, &n.card)? {
-        return Err(ApiError::conflict(format!(
-            "card {} has a {} job {} that is {} already; cancel it first",
-            n.card,
-            open.kind.as_str(),
-            open.id,
-            open.state.as_str()
-        )));
+/// The most cards in one batch merge.
+pub const BATCH_MAX: usize = 32;
+
+/// The JSON text of a batch; `None` for a job of one card.
+fn batch_text(batch: &[BatchCard]) -> ApiResult<Option<String>> {
+    if batch.is_empty() {
+        return Ok(None);
     }
-    let id = ulid::Ulid::new().to_string();
+    serde_json::to_string(batch)
+        .map(Some)
+        .map_err(|e| ApiError::internal(format!("cannot store the batch: {e}")))
+}
+
+/// The row of a new queued job. `created_at` and `created_by` come from the
+/// first try for a rerun or a split.
+struct Insert<'a> {
+    id: String,
+    first: &'a BatchCard,
+    batch: &'a [BatchCard],
+    project: &'a str,
+    kind: JobKind,
+    repo: &'a str,
+    commit: Option<&'a str>,
+    attempt: i64,
+    parent: Option<&'a str>,
+    created_by: &'a str,
+    created_at: &'a str,
+}
+
+fn insert(t: &mut Tx<'_>, i: Insert<'_>) -> ApiResult<Job> {
     t.execute(
         "INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state, attempt,
-                           by_agent, created_by, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 1, ?8, ?9, ?10)",
+                           by_agent, created_by, created_at, batch, parent)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
-            id,
-            n.project,
-            n.card,
-            n.kind.as_str(),
-            n.repo,
-            n.branch,
-            n.commit,
-            n.by_agent,
-            t.actor,
-            now()
+            i.id,
+            i.project,
+            i.first.card,
+            i.kind.as_str(),
+            i.repo,
+            i.first.branch,
+            i.commit,
+            i.attempt,
+            i.first.by_agent,
+            i.created_by,
+            i.created_at,
+            batch_text(i.batch)?,
+            i.parent
         ],
     )?;
-    let job = get(t, &id)?;
-    t.audit(
-        "job.create",
-        &id,
-        Some(&job.project),
-        json!({"card": job.card, "kind": job.kind, "repo": job.repo, "branch": job.branch,
-               "commit": job.commit}),
+    get(t, &i.id)
+}
+
+/// Queue a job. A card has at most one open job. A batch (two or more
+/// cards, a merge only) starts with the job's own card.
+pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
+    if !n.batch.is_empty() {
+        if n.kind != JobKind::Merge {
+            return Err(ApiError::invalid("only a merge job takes a batch"));
+        }
+        if n.batch.len() < 2 || n.batch[0].card != n.card {
+            return Err(ApiError::invalid(
+                "a batch has two or more cards and starts with the job's card",
+            ));
+        }
+        if n.batch.len() > BATCH_MAX {
+            return Err(ApiError::invalid(format!(
+                "a batch has at most {BATCH_MAX} cards"
+            )));
+        }
+        let mut seen = HashSet::new();
+        for c in &n.batch {
+            if !seen.insert(c.card.as_str()) {
+                return Err(ApiError::invalid(format!(
+                    "card {} is twice in the batch",
+                    c.card
+                )));
+            }
+        }
+    }
+    let first = BatchCard {
+        card: n.card.clone(),
+        branch: n.branch.clone(),
+        by_agent: n.by_agent.clone(),
+        outcome: None,
+        note: None,
+    };
+    let cards: Vec<&str> = if n.batch.is_empty() {
+        vec![n.card.as_str()]
+    } else {
+        n.batch.iter().map(|c| c.card.as_str()).collect()
+    };
+    for card in cards {
+        if let Some(open) = open_of_card(t, card)? {
+            return Err(ApiError::conflict(format!(
+                "card {card} has a {} job {} that is {} already; cancel it first",
+                open.kind.as_str(),
+                open.id,
+                open.state.as_str()
+            )));
+        }
+    }
+    let (actor, at) = (t.actor.to_owned(), now());
+    let job = insert(
+        t,
+        Insert {
+            id: ulid::Ulid::new().to_string(),
+            first: &first,
+            batch: &n.batch,
+            project: &n.project,
+            kind: n.kind,
+            repo: &n.repo,
+            commit: n.commit.as_deref(),
+            attempt: 1,
+            parent: None,
+            created_by: &actor,
+            created_at: &at,
+        },
+    )?;
+    let mut detail = json!({"card": job.card, "kind": job.kind, "repo": job.repo,
+                            "branch": job.branch, "commit": job.commit});
+    if !job.batch.is_empty() {
+        detail["batch"] = json!(job.batch.iter().map(|c| &c.card).collect::<Vec<_>>());
+    }
+    t.audit("job.create", &job.id, Some(&job.project), detail)?;
+    emit(t, &job, "queued")?;
+    Ok(job)
+}
+
+/// Queue the one rerun of a failed job: attempt 2, at the front. `cards`
+/// is the batch to run again (the cards that did not conflict); `None`
+/// keeps the job's cards.
+pub fn rerun(t: &mut Tx<'_>, failed: &Job, cards: Option<&[BatchCard]>) -> ApiResult<Job> {
+    let cards = clean(cards.map_or_else(|| failed.cards(), <[_]>::to_vec));
+    let Some(first) = cards.first() else {
+        return Err(ApiError::internal("a rerun without cards"));
+    };
+    let batch = if cards.len() > 1 { &cards[..] } else { &[] };
+    let job = insert(
+        t,
+        Insert {
+            id: ulid::Ulid::new().to_string(),
+            first,
+            batch,
+            project: &failed.project,
+            kind: failed.kind,
+            repo: &failed.repo,
+            commit: failed.commit.as_deref(),
+            attempt: failed.attempt + 1,
+            parent: failed.parent.as_deref(),
+            created_by: &failed.created_by,
+            created_at: &failed.created_at,
+        },
     )?;
     emit(t, &job, "queued")?;
     Ok(job)
 }
 
-/// Queue the one rerun of a failed job: attempt 2, at the front.
-pub fn rerun(t: &mut Tx<'_>, failed: &Job) -> ApiResult<Job> {
-    let id = ulid::Ulid::new().to_string();
-    t.execute(
-        "INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state, attempt,
-                           by_agent, created_by, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11)",
-        params![
-            id,
-            failed.project,
-            failed.card,
-            failed.kind.as_str(),
-            failed.repo,
-            failed.branch,
-            failed.commit,
-            failed.attempt + 1,
-            failed.by_agent,
-            failed.created_by,
-            failed.created_at
-        ],
-    )?;
-    let job = get(t, &id)?;
-    emit(t, &job, "queued")?;
-    Ok(job)
+/// The cards without the outcome of an earlier run.
+fn clean(cards: Vec<BatchCard>) -> Vec<BatchCard> {
+    cards
+        .into_iter()
+        .map(|c| BatchCard {
+            outcome: None,
+            note: None,
+            ..c
+        })
+        .collect()
+}
+
+/// Split the cards of a red batch (two or more) into two halves, each
+/// queued at the front with `parent` set to the red job. The left half
+/// starts first: it has the lower ID at the same `created_at`, and a
+/// merge runs alone in its project, so the right half merges onto `next`
+/// with the left half in it. A half of one card is a job of one card.
+pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, Job)> {
+    if cards.len() < 2 {
+        return Err(ApiError::internal("a split needs two or more cards"));
+    }
+    let cards = clean(cards.to_vec());
+    let (left, right) = cards.split_at(cards.len() / 2);
+    let mut ids = [ulid::Ulid::new(), ulid::Ulid::new()];
+    ids.sort();
+    let mut out = Vec::new();
+    for (id, half) in ids.iter().zip([left, right]) {
+        let batch = if half.len() > 1 { half } else { &[] };
+        let job = insert(
+            t,
+            Insert {
+                id: id.to_string(),
+                first: &half[0],
+                batch,
+                project: &red.project,
+                kind: red.kind,
+                repo: &red.repo,
+                commit: None,
+                attempt: 1,
+                parent: Some(&red.id),
+                created_by: &red.created_by,
+                created_at: &red.created_at,
+            },
+        )?;
+        emit(t, &job, "queued")?;
+        out.push(job);
+    }
+    let right = out.pop().ok_or_else(|| ApiError::internal("no right half"))?;
+    let left = out.pop().ok_or_else(|| ApiError::internal("no left half"))?;
+    Ok((left, right))
 }
 
 /// Mark a queued job as running on `host`. False when it is no longer queued (a
@@ -596,7 +795,7 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
     };
     let n = t.execute(
         "UPDATE jobs SET state = ?2, outcome = ?3, exit_code = ?4, tail = ?5, head = ?6,
-                         ended_at = ?7
+                         ended_at = ?7, batch = COALESCE(?8, batch)
          WHERE id = ?1 AND state = 'running'",
         params![
             id,
@@ -605,7 +804,11 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
             end.exit_code,
             end.tail.as_deref().map(clip_tail),
             end.head,
-            now()
+            now(),
+            match &end.batch {
+                Some(b) => batch_text(b)?,
+                None => None,
+            }
         ],
     )?;
     if n == 0 {
@@ -755,6 +958,8 @@ mod tests {
             started_at: None,
             ended_at: None,
             host: None,
+            batch: Vec::new(),
+            parent: None,
         }
     }
 

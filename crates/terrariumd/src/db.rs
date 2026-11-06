@@ -2098,6 +2098,16 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
+    // 73: batch merges (TER-112, `crate::jobs`). `jobs.batch` is the JSON
+    // list of the cards of a merge job that merges several cards in order
+    // ([{card, branch, by_agent, outcome?, note?}]); `null` for a job of
+    // one card. `jobs.parent` is the job that a split of a red batch came
+    // from. Self-contained: when another branch takes this number, move
+    // this entry to the end of the list.
+    r#"
+    ALTER TABLE jobs ADD COLUMN batch TEXT;
+    ALTER TABLE jobs ADD COLUMN parent TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
