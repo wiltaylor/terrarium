@@ -1,0 +1,77 @@
+// @vitest-environment jsdom
+// TER-40: new Inbox items from the event stream do not reset the card that
+// the operator works on. The typed answer, the chosen option, and the focus
+// stay; the card keeps its DOM.
+import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
+import { createComponent } from "solid-js";
+import { render } from "solid-js/web";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentEvent } from "../../api/types";
+import { createMockApi } from "../../api/mock";
+import { waitFor } from "../../test/wait";
+
+const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
+const listeners: ((e: AgentEvent) => void)[] = [];
+vi.mock("../../stores", () => ({
+  api,
+  events: { on: (fn: (e: AgentEvent) => void) => (listeners.push(fn), () => {}) },
+  inbox: { refresh: async () => {} },
+  projects: { projects: () => [] },
+  agents: { state: { agents: [] } },
+}));
+
+const { default: InboxPage } = await import("./InboxPage");
+
+let dispose: (() => void) | undefined;
+afterEach(() => {
+  dispose?.();
+  document.body.innerHTML = "";
+});
+
+function mount(url: string) {
+  const el = document.createElement("div");
+  document.body.append(el);
+  const history = createMemoryHistory();
+  history.set({ value: url });
+  dispose = render(
+    () =>
+      createComponent(MemoryRouter, {
+        history,
+        get children() {
+          return createComponent(Route, { path: "*", component: InboxPage });
+        },
+      }),
+    el,
+  );
+  return el;
+}
+
+describe("the Inbox keeps the card in work (TER-40)", () => {
+  it("keeps the draft, the chosen option, the focus, and the card's DOM when new items come", async () => {
+    const q = api.world.questions!.find((x) => x.kind === "question" && x.status === "open" && x.options.length >= 2)!;
+    const el = mount("/inbox");
+    const card = () => el.querySelector(`article[aria-label='Question ${q.id}']`) as HTMLElement | null;
+    await waitFor(() => expect(card()).not.toBeNull());
+    const first = card()!;
+    const box = first.querySelector("textarea[aria-label='Answer text']") as HTMLTextAreaElement;
+    const option = [...first.querySelectorAll("[role=group][aria-label=Options] button")][1] as HTMLButtonElement;
+    option.click();
+    box.focus();
+    box.value = "half of my answer";
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    const before = el.querySelectorAll("article").length;
+    // New items: two mails to the operator, then the inbox events.
+    for (const body of ["one", "two"]) {
+      await api.mail.send({ from: "terrarium/lead", to: "operator", subject: `new ${body}`, body });
+    }
+    for (const fn of listeners) fn({ kind: "inbox", data: { item: "mail:x", kind: "mail", change: "opened" } } as unknown as AgentEvent);
+    await waitFor(() => expect(el.querySelectorAll("article").length).toBe(before + 2), 3000);
+    // The same card, with its state.
+    expect(card()).toBe(first);
+    expect(first.querySelector("textarea[aria-label='Answer text']")).toBe(box);
+    expect(box.value).toBe("half of my answer");
+    expect(option.getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).toBe(box);
+    expect(el.textContent).toContain("new two");
+  });
+});

@@ -5,6 +5,7 @@
 
 import { useSearchParams } from "@solidjs/router";
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
 import { api, events, inbox, projects } from "../../stores";
@@ -27,7 +28,30 @@ export default function InboxPage() {
   const project = () => params.project ?? "";
   const keep = (i: InboxItem) => matchesTabs(i, tab(), status(), project());
 
-  const [list, setList] = createSignal<InboxItem[]>([]);
+  // The items in a store, reconciled by `id` (TER-40): a reload after an
+  // inbox event keeps the object, and so the DOM and the local state of
+  // each card that stays (a typed answer, a chosen option, an open reply,
+  // the focus). Only new and gone items change the DOM.
+  const [items, setItems] = createStore<{ list: InboxItem[] }>({ list: [] });
+  const list = () => items.list;
+  const setList = (next: InboxItem[] | ((cur: InboxItem[]) => InboxItem[])) => {
+    const rows = typeof next === "function" ? next(items.list) : next;
+    keepView(() => setItems("list", reconcile(rows, { key: "id", merge: true })));
+  };
+  let listEl: HTMLDivElement | undefined;
+  /**
+   * Run `change`, and keep the card that holds the focus (else the first
+   * card in view) at the same place on the screen: a new item above it
+   * must not move what the operator works on.
+   */
+  const keepView = (change: () => void) => {
+    const anchor = anchorCard(listEl);
+    const before = anchor?.getBoundingClientRect().top;
+    change();
+    if (!anchor || before === undefined) return;
+    const after = anchor.getBoundingClientRect().top;
+    if (anchor.isConnected && after !== before) window.scrollBy(0, after - before);
+  };
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
   let gen = 0;
@@ -140,7 +164,7 @@ export default function InboxPage() {
         </p>
       </Show>
       <Show when={list().length} fallback={<Empty>{loading() ? "Loading…" : emptyText(tab(), status())}</Empty>}>
-        <div class="stack">
+        <div class="stack" ref={listEl}>
           <For each={list()}>
             {(item) => (
               <div id={inboxItemDomId(item.id)} classList={{ "inbox-target": params.item === item.id }}>
@@ -191,3 +215,13 @@ function EyeIcon() {
     </svg>
   );
 }
+
+/** The card to keep in place: the one that holds the focus, else the first one whose top is in view. */
+function anchorCard(listEl: HTMLElement | undefined): HTMLElement | undefined {
+  if (!listEl) return undefined;
+  const cards = [...listEl.children] as HTMLElement[];
+  const focused = document.activeElement;
+  const withFocus = focused ? cards.find((c) => c.contains(focused)) : undefined;
+  return withFocus ?? cards.find((c) => c.getBoundingClientRect().bottom > 0);
+}
+
