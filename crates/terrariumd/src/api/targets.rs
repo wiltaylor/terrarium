@@ -348,6 +348,9 @@ async fn create(
     if let Some(p) = &def.project {
         def.name = prefixed(p, &def.name);
     }
+    if def.host.is_none() {
+        crate::jobs::prepare_hosts(&state.db, def.address.clone()).await?;
+    }
     let max = state.max_targets_per_project;
     let r = state
         .db
@@ -389,6 +392,9 @@ async fn update(
         && p.as_str() != current.def.project.as_deref()
     {
         policy::define_target(&actor, p.as_str())?;
+    }
+    if let Some(address) = patch.get("address").and_then(Value::as_str) {
+        crate::jobs::prepare_hosts(&state.db, Some(address.to_owned())).await?;
     }
     let r = state
         .db

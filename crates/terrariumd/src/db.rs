@@ -2170,6 +2170,15 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE jobs ADD COLUMN parent TEXT;
     ALTER TABLE jobs ADD COLUMN split_path TEXT NOT NULL DEFAULT '';
     "#,
+    // 76: pin job-host DNS identities across queue ticks and restarts.
+    // Follows 74 (TER-91) and 75 (TER-112). Keep this entry self-contained
+    // and renumber at merge if the integration order changes.
+    r#"
+    CREATE TABLE job_host_keys (
+        hostname TEXT PRIMARY KEY,
+        host_key TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
