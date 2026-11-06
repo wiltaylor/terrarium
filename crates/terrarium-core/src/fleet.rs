@@ -107,7 +107,24 @@ const AGENT_KEYS: &[&str] = &[
     "new_session_on_prompt_change",
     "start",
 ];
-const POLICY_KEYS: &[&str] = &["targets", "mail_to", "cross_project"];
+const POLICY_KEYS: &[&str] = &[
+    "targets",
+    "mail_to",
+    "cross_project",
+    "calendar_write",
+    "thread_open",
+    "spawn",
+];
+/// The keys of `policy.spawn` (TER-86, TER-74), in the order of the schema.
+const SPAWN_KEYS: &[&str] = &[
+    "templates",
+    "max_concurrent",
+    "max_per_day",
+    "max_lifetime",
+    "may_spawn_children",
+    "bound",
+    "max_bound_lifetime",
+];
 const REPO_KEYS: &[&str] = &["name", "url", "default_branch", "credential", "path"];
 const CHECKOUT_KEYS: &[&str] = &["on_agent_create"];
 const TARGET_KEYS: &[&str] = &[
@@ -1198,12 +1215,13 @@ impl Fleet {
             let mut t = table_of(d);
             let policy = t.remove("policy");
             w.table(Some(&format!("[[{header}]]")), &t, TEMPLATE_KEYS);
-            if let Some(toml::Value::Table(pt)) = policy {
-                w.table(Some(&format!("[{header}.policy]")), &pt, POLICY_KEYS);
-            }
+            write_policy(w, policy, header);
         };
         if !self.defaults.is_empty() {
-            w.table(Some("[defaults]"), &table_of(&self.defaults), AGENT_KEYS);
+            let mut dt = table_of(&self.defaults);
+            let policy = dt.remove("policy");
+            w.table(Some("[defaults]"), &dt, AGENT_KEYS);
+            write_policy(&mut w, policy, "defaults");
         }
         for s in &self.subscriptions {
             w.table(Some("[[subscriptions]]"), &table_of(s), SUBSCRIPTION_KEYS);
@@ -1260,9 +1278,7 @@ impl Fleet {
                 }
                 let policy = at.remove("policy");
                 w.table(Some("[[projects.agents]]"), &at, AGENT_KEYS);
-                if let Some(toml::Value::Table(pt)) = policy {
-                    w.table(Some("[projects.agents.policy]"), &pt, POLICY_KEYS);
-                }
+                write_policy(&mut w, policy, "projects.agents");
             }
             for d in &p.targets {
                 let mut tt = target_table(d);
@@ -1342,6 +1358,20 @@ impl Writer {
 
 fn table_of<T: Serialize>(v: &T) -> toml::Table {
     toml::Table::try_from(v).unwrap_or_default()
+}
+
+/// The `policy` of the object under `<header>` as the sub-table
+/// `[<header>.policy]`, with its `spawn` block as `[<header>.policy.spawn]`
+/// (TER-86).
+fn write_policy(w: &mut Writer, policy: Option<toml::Value>, header: &str) {
+    let Some(toml::Value::Table(mut pt)) = policy else {
+        return;
+    };
+    let spawn = pt.remove("spawn");
+    w.table(Some(&format!("[{header}.policy]")), &pt, POLICY_KEYS);
+    if let Some(toml::Value::Table(st)) = spawn {
+        w.table(Some(&format!("[{header}.policy.spawn]")), &st, SPAWN_KEYS);
+    }
 }
 
 /// One target under `[[<header>]]`, with its `limits` as the sub-table
@@ -1490,6 +1520,67 @@ pids = 512
             .ok()
             .unwrap_or_else(|e| panic!("{e:#?}\n{out}"));
         assert_eq!(f, again, "{out}");
+    }
+
+    /// TER-86: the spawn policy (with the bound fields of TER-74),
+    /// `thread_open` (TER-93), and `calendar_write` parse and round-trip.
+    #[test]
+    fn spawn_policy_and_rights_parse_and_round_trip() {
+        let text = r#"
+[defaults]
+harness = "claude"
+[defaults.policy]
+thread_open = true
+
+[[projects]]
+name = "alpha"
+
+[[projects.agents]]
+name = "lead"
+roles = ["project_admin"]
+[projects.agents.policy]
+calendar_write = true
+thread_open = true
+[projects.agents.policy.spawn]
+templates = ["worker", "global:*"]
+max_concurrent = 3
+max_per_day = 10
+max_lifetime = "4h"
+may_spawn_children = true
+bound = true
+max_bound_lifetime = "3d"
+
+[[projects.agents]]
+name = "w"
+"#;
+        let f = parse(text, Some("sp"))
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}"));
+        let lead = &f.projects[0].agents[0].def.policy;
+        let sp = lead.spawn.as_deref().unwrap();
+        assert_eq!(sp.templates, ["worker", "global:*"]);
+        assert_eq!(
+            (sp.max_concurrent, sp.max_per_day, sp.max_lifetime.as_deref()),
+            (3, Some(10), Some("4h"))
+        );
+        assert!(sp.may_spawn_children && sp.bound);
+        assert_eq!(sp.max_bound_lifetime.as_deref(), Some("3d"));
+        assert!(lead.thread_open && lead.calendar_write);
+        assert!(f.projects[0].agents[1].def.policy.thread_open);
+        let out = f.to_toml();
+        assert!(out.contains("[projects.agents.policy.spawn]"), "{out}");
+        assert!(out.contains("[defaults.policy]"), "{out}");
+        let again = parse(&out, Some("sp"))
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}\n{out}"));
+        assert_eq!(f, again, "{out}");
+
+        let bad = text.replace("bound = true", "bonud = true");
+        let errs = parse(&bad, Some("sp")).ok().unwrap_err();
+        assert!(
+            errs.iter().any(|i| i.message.contains("bonud")),
+            "{errs:#?}"
+        );
     }
 
     #[test]
