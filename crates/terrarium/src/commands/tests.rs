@@ -176,11 +176,26 @@ async fn daemon_and_system() {
     assert!(out.contains("worker: starting -> idle"), "{out}");
     let out = ok(false, &["whoami"], vec![], vec![]).await;
     assert_eq!(out, "operator\n");
-    let out = ok(true, &["whoami"], vec![], vec![]).await;
+    // The runner copy has no roles; the daemon row has a global and a
+    // project role. whoami shows the daemon row, as `agent show` does.
+    let out = ok(
+        true,
+        &["whoami"],
+        vec![(
+            200,
+            json!({"id": ME, "roles": ["sysadmin", "project_admin"]}),
+        )],
+        vec![req(
+            Get,
+            concat!("/api/agents/", "01AGENTAGENTAGENTAGENTAGEN"),
+        )],
+    )
+    .await;
     assert!(
         out.contains("agent: worker") && out.contains("project: terra"),
         "{out}"
     );
+    assert!(out.contains("roles: sysadmin,project_admin"), "{out}");
 }
 
 #[tokio::test]

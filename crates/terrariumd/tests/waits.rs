@@ -1130,14 +1130,11 @@ async fn a_kill_on_a_host_target_ends_the_children() {
     kill_ends_the_child(td, &w1, "box", dir.path()).await;
 }
 
-/// TER-99: a kill of a run on a docker target ends the process in the
-/// container, children too. The fake `docker exec` runs the command in a
-/// new session, as runc does, so the kill of the `docker` client does not
-/// reach it.
-#[tokio::test]
-async fn a_kill_on_a_docker_target_ends_the_children_in_the_container() {
-    let bins = tempfile::tempdir().unwrap();
-    let docker = bins.path().join("docker");
+/// A fake `docker` whose `exec` runs the command in a new session, as runc
+/// does, so the kill of the `docker` client does not reach it. A lab with
+/// it and the docker target `dbox`, usable by the agent `w1` (its ID).
+async fn docker_lab(bins: &std::path::Path) -> (Lab, String) {
+    let docker = bins.join("docker");
     std::fs::write(
         &docker,
         r#"#!/bin/sh
@@ -1170,5 +1167,41 @@ esac
         .await);
     td.post_empty(&format!("/api/agents/{w1}/start")).await.ok();
     td.wait_status(&w1, "idle").await;
-    kill_ends_the_child(td, &w1, "dbox", bins.path()).await;
+    (lab, w1)
+}
+
+/// TER-99: a kill of a run on a docker target ends the process in the
+/// container, children too. The fake `docker exec` runs the command in a
+/// new session, as runc does, so the kill of the `docker` client does not
+/// reach it.
+#[tokio::test]
+async fn a_kill_on_a_docker_target_ends_the_children_in_the_container() {
+    let bins = tempfile::tempdir().unwrap();
+    let (lab, w1) = docker_lab(bins.path()).await;
+    kill_ends_the_child(&lab.td, &w1, "dbox", bins.path()).await;
+}
+
+/// TER-115: a run on a docker target that hits its own timeout ends the
+/// process in the container and its child, both deaf to `TERM`. The wait
+/// resolves only after the kill: then no process of the run is left.
+#[tokio::test]
+async fn a_run_timeout_on_a_docker_target_ends_the_children_in_the_container() {
+    let bins = tempfile::tempdir().unwrap();
+    let (lab, w1) = docker_lab(bins.path()).await;
+    let td = &lab.td;
+    let child_file = bins.path().join("timeout.child");
+    let r = run(
+        td,
+        &w1,
+        json!({"target": "dbox", "name": "deaf", "timeout": "3",
+               "cmd": ["sh", "-c", "trap '' TERM; sleep 300 & echo $! > \"$1\"; wait", "run",
+                       child_file.display().to_string()]}),
+    )
+    .await;
+    let wid = r["wait"]["id"].as_str().unwrap().to_owned();
+    let child = read_pid(&child_file).await;
+    assert!(alive(child));
+    let t = wait_state(td, &wid, "timed_out").await;
+    assert_eq!(t["result"]["reason"], "timeout", "{t}");
+    assert!(!alive(child), "the child {child} outlived its run: {t}");
 }
