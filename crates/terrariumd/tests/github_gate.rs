@@ -384,6 +384,20 @@ async fn the_lock_holds_when_the_lead_changes_the_column_roles() {
     .await;
     assert_eq!(c["column"], "stuck");
     let id2 = c["id"].as_str().unwrap().to_owned();
+    // A column with the name `blocked` and no role, while `stuck` has the
+    // role (review round 2, minor 2). The API refuses such a board, so
+    // the test writes it in the database, as an old board could have it.
+    // A new held card still goes to `stuck`, the column with the role.
+    rename_column(&td, "parked", "blocked").await;
+    let c = make(
+        &td,
+        "proj/w1",
+        json!({"title": "GitHub #24: held", "labels": ["github"], "github_author": "eve"}),
+    )
+    .await;
+    assert_eq!(c["column"], "stuck", "{c}");
+    assert_eq!(card(&td, &id).await["column"], "blocked");
+    rename_column(&td, "blocked", "parked").await;
     // No column has the role `blocked` now: still no move, and a new
     // GitHub card off the list is refused (fails closed), not made.
     td.patch_as("proj/lead", board, columns(false)).await.ok();
@@ -406,6 +420,84 @@ async fn the_lock_holds_when_the_lead_changes_the_column_roles() {
     // The operator still moves it.
     let m = td.patch(&path, json!({"column": "backlog"})).await;
     assert_eq!(m.ok()["column"], "backlog");
+}
+
+/// Rename a column of `proj` in the database, past the board rules of
+/// the API.
+async fn rename_column(td: &TestDaemon, from: &str, to: &str) {
+    let (from, to) = (from.to_owned(), to.to_owned());
+    let n = td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("test", move |t| {
+            Ok(t.execute(
+                "UPDATE board_columns SET name = ?2 WHERE project = 'proj' AND name = ?1",
+                [&from, &to],
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+/// A schedule `card` action does not move a held card (review round 2,
+/// blocker 1). A project-owned schedule runs as the operator. The lead
+/// makes one that closes the card with the label `trigger:k` to `ready`,
+/// and puts that label on the held card. Run now finds no open card, and
+/// the held card stays in blocked. A plain card with the label is closed,
+/// so the gate is the reason.
+#[tokio::test]
+async fn a_schedule_card_action_does_not_move_a_held_card() {
+    let td = setup().await;
+    let id = held(&td, 25).await;
+    let path = format!("/api/cards/{id}");
+    let s = td
+        .post_as(
+            "proj/lead",
+            "/api/schedules",
+            json!({"name": "close-k", "project": "proj", "owner": "project",
+                   "spec": {"kind": "interval", "every": "1h"},
+                   "action": {"type": "card", "op": "close", "key": "k", "column": "ready"}}),
+        )
+        .await;
+    let sid = s.ok()["id"].as_str().unwrap().to_owned();
+    assert_eq!(s.body["owner"], "project", "{}", s.body);
+    td.patch_as("proj/lead", &path, json!({"add_labels": ["trigger:k"]}))
+        .await
+        .ok();
+    let c = card(&td, &id).await;
+    assert!(labels(&c).contains(&"trigger:k".to_owned()), "{c}");
+    let run = td
+        .post_empty_as("proj/lead", &format!("/api/schedules/{sid}/run"))
+        .await;
+    let run = run.ok().clone();
+    assert_eq!(run["status"], "ok", "{run}");
+    assert!(run["output"]["card"].is_null(), "{run}");
+    let c = card(&td, &id).await;
+    assert_eq!(c["column"], "blocked", "{c}");
+    assert!(labels(&c).contains(&"hold".to_owned()), "{c}");
+    // A plain card with the label: the schedule closes it, and the held
+    // card stays.
+    let p = make(
+        &td,
+        "proj/w1",
+        json!({"title": "Plain", "labels": ["trigger:k"]}),
+    )
+    .await;
+    let run = td
+        .post_empty_as("proj/lead", &format!("/api/schedules/{sid}/run"))
+        .await;
+    let run = run.ok().clone();
+    assert_eq!(run["status"], "ok", "{run}");
+    assert_eq!(run["output"]["card"], p["id"], "{run}");
+    assert_eq!(
+        card(&td, p["id"].as_str().unwrap()).await["column"],
+        "ready"
+    );
+    assert_eq!(card(&td, &id).await["column"], "blocked");
 }
 
 /// No job takes a held card out of blocked (review round 1, F2): a
