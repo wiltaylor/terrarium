@@ -3704,7 +3704,8 @@ nothing. A new proposal replaces the old one. The operator then:
   `operator`, `handoff.by` stays the agent). With no proposal
   it is `409 conflict`; `confirm` with a `summary` or `links` is `422
   invalid`;
-- or writes on: a message or a response clears the proposal (a decline),
+- or writes on: a message, a response, or an answer (or acknowledgement)
+  that settles the last open question clears the proposal (a decline),
   and the agent goes on;
 - or closes at any time, in any status, with a handoff of its own:
   `POST .../close` without `confirm` (`close_reason` `operator`).
@@ -3719,7 +3720,11 @@ lifecycle, below), and its session is archived (§6.6, the session
 archive). The close keeps the session in `session_id`, and each `card` link
 of the handoff gets a comment of `system` that names the thread and links
 to the session (`/sessions/<id>`), so `GET /api/cards/{id}/sessions` lists
-it. A card link that does not resolve gets no comment. The thread stays
+it. Only a card that the reader of the handoff may read gets the comment:
+the agent that wrote the handoff, else (an operator or a stale close) the
+report-to lead. A card link that does not resolve or that the reader may
+not read gets no comment; the `thread.close` audit row lists it in
+`skipped_cards` with the reason. The thread stays
 readable: `GET /api/threads?status=closed`.
 
 **Untouched threads** (TER-95, `crates/terrariumd/src/thread_close.rs`).
