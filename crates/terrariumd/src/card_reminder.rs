@@ -226,8 +226,7 @@ async fn remind(state: &Shared, agent: AgentId) {
             let cards = board::working_cards_of(c, &key)?;
             // Work that wakes the agent anyway: its turn comes first, and
             // the idle after it checks the cards again (TER-50).
-            let queued = agents::queued_count(c, &key)? > 0
-                || waits::wake_unseen(c, &key, &since)?;
+            let queued = agents::queued_count(c, &key)? > 0 || waits::wake_unseen(c, &key, &since)?;
             Ok((v, reset || queued, cards))
         })
         .await;
