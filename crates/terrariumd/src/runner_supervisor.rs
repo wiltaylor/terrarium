@@ -1144,7 +1144,7 @@ struct StoreView {
     secrets: crate::secrets::grants::LaunchSecrets,
     /// An ephemeral agent (PLAN §18, "Ephemeral agents"): the name of its
     /// owner and its lifetime, for the ephemeral part of the prompt.
-    ephemeral: Option<(String, String)>,
+    ephemeral: Option<crate::spawn::PromptInfo>,
 }
 
 enum SubscriptionCheck {
@@ -1526,11 +1526,11 @@ impl RunnerSupervisor {
         // the prompt of a session.
         let mut text = prompt::compose(base.as_deref(), &template, &ctx);
         // An ephemeral agent learns its owner and how to finish.
-        if let Some((owner, lifetime)) = &view.ephemeral {
+        if let Some(info) = &view.ephemeral {
             text = format!(
                 "{}\n\n{}",
                 text.trim_end(),
-                crate::spawn::prompt_section(owner, lifetime)
+                crate::spawn::prompt_section(info)
             );
         }
 

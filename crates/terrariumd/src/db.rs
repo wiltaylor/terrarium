@@ -2098,10 +2098,29 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
-    // 73: batch merges (TER-112, `crate::jobs`). `jobs.batch` is the JSON
-    // list of the cards of a merge job that merges several cards in order
-    // ([{card, branch, by_agent, outcome?, note?}]); `null` for a job of
-    // one card. `jobs.parent` is the job that a split of a red batch came
+    // 73: bound ephemeral agents (TER-74, `crate::bound`). `bound_kind`
+    // and `bound_id` name the object whose life the agent shares (for
+    // example `card`, `TER-74`); NULL: a plain spawn. At most one open
+    // spawn per object. `parked_at` and `park_reason`: the agent is parked
+    // (stopped, no wake) while its object waits; NULL: not parked.
+    // `unpark_at`: an unpark waits for a place of the owner (first in,
+    // first out); NULL: none.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE spawns ADD COLUMN bound_kind TEXT;
+    ALTER TABLE spawns ADD COLUMN bound_id TEXT;
+    ALTER TABLE spawns ADD COLUMN parked_at TEXT;
+    ALTER TABLE spawns ADD COLUMN park_reason TEXT;
+    ALTER TABLE spawns ADD COLUMN unpark_at TEXT;
+    CREATE UNIQUE INDEX spawns_bound_open ON spawns(bound_kind, bound_id)
+        WHERE finished_at IS NULL AND bound_kind IS NOT NULL;
+    "#,
+    // 75: batch merges (TER-112, `crate::jobs`). The list is by position:
+    // this entry goes after TER-91's 74; until TER-91 is on `next` it is
+    // the 74th. `jobs.batch` is the JSON list of the cards of a merge job
+    // that merges several cards in order ([{card, branch, by_agent,
+    // outcome?, note?}]); `null` for a job of one card. `jobs.parent` is the job that a split of a red batch came
     // from. `jobs.split_path` orders the halves of the splits of one root
     // batch (`0` left, `1` right, per level; empty for no split).
     // Self-contained: when another branch takes this number, move this
