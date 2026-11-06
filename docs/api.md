@@ -10178,8 +10178,9 @@ validate or a merge is a `409 conflict` that says how to set it.
   when `next` moved, the job fails.
 
 Jobs start first in, first out, with at most `slots` running per project.
-A merge job does not start while another merge job of the same repo runs.
-A card has at most one queued or running job.
+A merge job runs alone in its project: it starts only when no other job of
+the project runs, no job behind it starts first, and no job starts while
+it runs (see "Limits" below). A card has at most one queued or running job.
 
 A job is three runs on the target, and a merge job has one more. The
 prepare run (clone, checkout, merge) and the push run get the repo
@@ -10191,11 +10192,34 @@ The recipe can change its clone: make commits, move HEAD, or write
 job never runs in that clone, and never pushes what HEAD is after the
 recipe:
 
-1. The prepare run records the merge commit before the recipe runs.
+1. The prepare run records the merge commit before the recipe runs, and
+   keeps it as `refs/job/merge` in the clone.
 2. A run without any credential makes a fresh bare repo next to the clone
-   and fetches exactly that commit from the clone over `file://`. When
-   the commit is gone, the job fails (`error`).
-3. The push run pushes that commit ID to `next` from the fresh repo.
+   and fetches `refs/job/merge` from the clone over `file://`. It must be
+   the recorded commit; else the job fails (`error`).
+3. The push run checks that the fresh repo still holds that commit, and
+   pushes that commit ID to `next` from it.
+
+ssh in the git runs reads no config file (`-F /dev/null`), so a planted
+`~/.ssh/config` cannot send the push to another host or run a
+`ProxyCommand`. Its known hosts are a file of the job, seeded from the
+daemon's known hosts, not `~/.ssh/known_hosts`. The key file is in a 0700
+dir of the job (`<clone>.ssh`), not in `/tmp`. The cleanup removes the
+clone, the push repo, and that dir.
+
+#### Limits
+
+Every run of a job on a target runs as the same user: the recipe, and
+the runs that hold the credential. So any recipe on the target can reach
+the files of the credential runs. It can leave a background process
+behind, or, while it runs next to another job of the project, write that
+job's push repo or read its key file. Any worker can start such a recipe
+with `card validate` on its own branch, so the exposure is any worker at
+the next merge, not only the merging card. A merge job runs alone in its
+project to shrink this, but a validate job still fetches with the
+credential while other recipes of the project run. The full fix (each
+recipe as its own user, or the credential runs on a host that runs no
+recipe) is TER-103.
 
 ### 35.3 Results
 

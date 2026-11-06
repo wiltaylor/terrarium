@@ -5,8 +5,8 @@
 //!   a card commit) or `merge` (merge a card branch onto `next`, run the
 //!   recipe on the result, push `next` when it is green).
 //! - Jobs start first in, first out, at most `slots` running at a time
-//!   per project. A merge job does not start while another merge job of
-//!   the same repo runs.
+//!   per project. A merge job runs alone in its project: no other job of
+//!   the project runs with it.
 //! - A card has at most one job that is queued or running.
 //! - The one rerun of a failed job is a new row with `attempt` 2 and the
 //!   `created_at` of the first try, so it goes to the front of the queue.
@@ -237,9 +237,11 @@ pub fn running(conn: &Connection) -> ApiResult<Vec<Job>> {
 }
 
 /// The queued jobs of `project` that may start now with `slots` places:
-/// first in, first out, at most `slots` running, and one merge job per
-/// repo at a time. A merge job that must wait for its repo does not hold
-/// back the jobs behind it.
+/// first in, first out, at most `slots` running. A merge job runs alone in
+/// its project (review of TER-71, R1): it starts only when no other job of
+/// the project runs, no job behind it starts before it, and no job starts
+/// while it runs. The recipes of one target run as one user, so a recipe
+/// that runs next to a merge could reach the push step's files.
 pub fn startable(conn: &Connection, project: &str, slots: usize) -> ApiResult<Vec<Job>> {
     let running: Vec<Job> = {
         let mut st = conn.prepare(&format!(
@@ -249,14 +251,9 @@ pub fn startable(conn: &Connection, project: &str, slots: usize) -> ApiResult<Ve
             .collect::<Result<Vec<_>, _>>()?
     };
     let mut free = slots.saturating_sub(running.len());
-    if free == 0 {
+    if free == 0 || running.iter().any(|j| j.kind == JobKind::Merge) {
         return Ok(Vec::new());
     }
-    let mut merging: Vec<String> = running
-        .iter()
-        .filter(|j| j.kind == JobKind::Merge)
-        .map(|j| j.repo.clone())
-        .collect();
     let mut st = conn.prepare(&format!(
         "SELECT {COLS} FROM jobs WHERE project = ?1 AND state = 'queued'
          ORDER BY created_at, attempt DESC, id"
@@ -264,16 +261,18 @@ pub fn startable(conn: &Connection, project: &str, slots: usize) -> ApiResult<Ve
     let queued = st
         .query_map([project], row)?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut out = Vec::new();
+    let mut out: Vec<Job> = Vec::new();
     for j in queued {
         if free == 0 {
             break;
         }
         if j.kind == JobKind::Merge {
-            if merging.contains(&j.repo) {
-                continue;
+            // Alone: only when nothing runs and nothing starts with it;
+            // else it waits, and so does every job behind it.
+            if running.is_empty() && out.is_empty() {
+                out.push(j);
             }
-            merging.push(j.repo.clone());
+            break;
         }
         free -= 1;
         out.push(j);

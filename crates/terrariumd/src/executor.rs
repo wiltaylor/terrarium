@@ -1337,6 +1337,16 @@ impl Executor {
     }
 }
 
+/// The daemon's known hosts, for the git steps on a target
+/// (`TERRARIUM_GIT_KNOWN_HOSTS`): ssh there reads no `~/.ssh/known_hosts`,
+/// which a recipe or an agent could seed. `None` when the daemon has none.
+pub fn git_known_hosts(state: &Shared) -> Option<String> {
+    let path = known_hosts(&state.state_dir).ok()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 pub(crate) fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let dir = state_dir.join("ssh");
@@ -4098,7 +4108,10 @@ pub async fn on_agent_stop(
 /// branch, depth. The secret comes in the env: `TERRARIUM_GIT_USERNAME` and
 /// `TERRARIUM_GIT_PASSWORD` for a token (a credential helper of `-c` reads
 /// them; the helper text holds no secret), or `TERRARIUM_GIT_SSH_KEY`
-/// (written to a 0600 temp file for `GIT_SSH_COMMAND`, removed at exit).
+/// (written to a 0600 file in a 0700 temp dir for `GIT_SSH_COMMAND`,
+/// removed at exit). ssh reads no config file (`-F /dev/null`), and its
+/// known hosts are a file in that dir, seeded from
+/// `TERRARIUM_GIT_KNOWN_HOSTS` ([`git_known_hosts`]).
 ///
 /// The agent can write the repo on the target, so the script treats its
 /// config as hostile (secret manager review S9, the rules of `crate::git`):
@@ -4125,18 +4138,33 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OB
   GIT_SSH GIT_SSH_VARIANT GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS=false SSH_ASKPASS=false LC_ALL=C
-export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+# ssh reads no config file (`-F /dev/null`: a planted ~/.ssh/config
+# cannot redirect the host or run a ProxyCommand), and keeps its host keys
+# and the key file in a 0700 dir of its own: TERRARIUM_GIT_SSH_DIR (the
+# job's dir), else a new temp dir. TERRARIUM_GIT_KNOWN_HOSTS seeds the
+# known hosts (the daemon's).
+sshdir=${TERRARIUM_GIT_SSH_DIR:-}
+sshtmp=
+if [ -n "$sshdir" ]; then
+  mkdir -p -m 700 -- "$sshdir" && chmod 700 -- "$sshdir" || { echo "cannot make $sshdir"; exit 2; }
+else
+  sshdir=$(mktemp -d) || exit 2
+  sshtmp=$sshdir
+fi
+printf '%s\n' "${TERRARIUM_GIT_KNOWN_HOSTS:-}" > "$sshdir/known_hosts"
+unset TERRARIUM_GIT_KNOWN_HOSTS TERRARIUM_GIT_SSH_DIR
+sshbase="ssh -F /dev/null -o UserKnownHostsFile=$sshdir/known_hosts -o GlobalKnownHostsFile=/dev/null -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+export GIT_SSH_COMMAND="$sshbase"
 helper=
 keyfile=
+trap 'if [ -n "$keyfile" ]; then rm -f "$keyfile"; fi; if [ -n "$sshtmp" ]; then rm -rf "$sshtmp"; fi' EXIT
 if [ -n "${TERRARIUM_GIT_PASSWORD:-}" ]; then
   helper='!f() { test "$1" = get || exit 0; echo "username=$TERRARIUM_GIT_USERNAME"; echo "password=$TERRARIUM_GIT_PASSWORD"; }; f'
 fi
 if [ -n "${TERRARIUM_GIT_SSH_KEY:-}" ]; then
-  keyfile=$(mktemp)
-  trap 'rm -f "$keyfile"' EXIT
-  chmod 600 "$keyfile"
-  printf '%s\n' "$TERRARIUM_GIT_SSH_KEY" > "$keyfile"
-  export GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+  keyfile=$sshdir/key
+  (umask 077 && printf '%s\n' "$TERRARIUM_GIT_SSH_KEY" > "$keyfile")
+  export GIT_SSH_COMMAND="$sshbase -i $keyfile -o IdentitiesOnly=yes"
 fi
 unset TERRARIUM_GIT_SSH_KEY
 G() {
@@ -4155,7 +4183,8 @@ forget() {
   unset TERRARIUM_GIT_PASSWORD TERRARIUM_GIT_USERNAME
   helper=
   if [ -n "$keyfile" ]; then rm -f "$keyfile"; fi
-  export GIT_SSH_COMMAND="ssh -o BatchMode=yes"
+  keyfile=
+  export GIT_SSH_COMMAND="$sshbase"
 }
 check_config() {
   if [ -e "$dest/.git/commondir" ]; then echo ".git/commondir"; return; fi
@@ -4314,6 +4343,9 @@ pub async fn checkout_on_target(
         ));
     }
     let mut cmd = checkout_cmd(url, dest, branch, depth, secret)?;
+    if let Some(k) = git_known_hosts(state) {
+        cmd.env.insert("TERRARIUM_GIT_KNOWN_HOSTS".into(), k);
+    }
     cmd.holder = holder_of(actor);
     let c = start_cmd(state, &row.def, &cmd)?.collect(256 * 1024).await;
     if !c.end().success() {

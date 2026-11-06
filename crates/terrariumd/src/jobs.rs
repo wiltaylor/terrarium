@@ -3,7 +3,7 @@
 //!
 //! - A tick (each [`TICK`], and at once after a queue or an end) starts
 //!   the queued jobs that have a slot: first in, first out, at most the
-//!   project's `slots`, one merge job per repo. The pick and the start are
+//!   project's `slots`; a merge job runs alone. The pick and the start are
 //!   one write, so two ticks cannot overfill the slots.
 //! - A job is three commands on the project's target, each its own run:
 //!   1. prepare, with the repo credential in its env: a fresh clone in
@@ -347,6 +347,7 @@ async fn run_inner(state: &Shared, job: &Job, def: &DeliveryDef) -> ApiResult<Jo
         dir: &dir,
         secret,
         holder: holder.clone(),
+        known_hosts: executor::git_known_hosts(state),
     };
     let result = steps(&ctx, recipe, def.timeout_secs()).await;
     let clean = RemoteCmd {
@@ -378,6 +379,8 @@ struct StepCtx<'a> {
     dir: &'a str,
     secret: Option<&'a crate::secrets::Secret>,
     holder: Option<String>,
+    /// The daemon's known hosts ([`executor::git_known_hosts`]).
+    known_hosts: Option<String>,
 }
 
 impl StepCtx<'_> {
@@ -390,9 +393,22 @@ impl StepCtx<'_> {
             "sh".to_owned(),
         ];
         argv.extend(args.iter().map(|a| (*a).to_owned()));
+        let mut env = executor::checkout_env(self.secret);
+        if let Some(k) = &self.known_hosts {
+            env.insert("TERRARIUM_GIT_KNOWN_HOSTS".into(), k.clone());
+        }
+        // The key file and the host keys go in a 0700 dir of the job, not
+        // in /tmp. A path that the shell would split gets a temp dir.
+        let ssh_dir = format!("{}.ssh", self.dir);
+        if ssh_dir
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+        {
+            env.insert("TERRARIUM_GIT_SSH_DIR".into(), ssh_dir);
+        }
         RemoteCmd {
             argv,
-            env: executor::checkout_env(self.secret),
+            env,
             timeout_secs: Some(STEP_TIMEOUT),
             holder: self.holder.clone(),
             ..RemoteCmd::default()
@@ -547,7 +563,13 @@ pub async fn remote_head(
             repo.url.clone(),
             branch.to_owned(),
         ],
-        env: executor::checkout_env(secret.as_ref().map(|(_, s)| s)),
+        env: {
+            let mut env = executor::checkout_env(secret.as_ref().map(|(_, s)| s));
+            if let Some(k) = executor::git_known_hosts(state) {
+                env.insert("TERRARIUM_GIT_KNOWN_HOSTS".into(), k);
+            }
+            env
+        },
         timeout_secs: Some(120),
         holder: Some(format!("{project}/jobs")),
         ..RemoteCmd::default()
@@ -802,18 +824,33 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OB
   GIT_SSH GIT_SSH_VARIANT GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS=false SSH_ASKPASS=false LC_ALL=C
-export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+# ssh reads no config file (`-F /dev/null`: a planted ~/.ssh/config
+# cannot redirect the host or run a ProxyCommand), and keeps its host keys
+# and the key file in a 0700 dir of its own: TERRARIUM_GIT_SSH_DIR (the
+# job's dir), else a new temp dir. TERRARIUM_GIT_KNOWN_HOSTS seeds the
+# known hosts (the daemon's).
+sshdir=${TERRARIUM_GIT_SSH_DIR:-}
+sshtmp=
+if [ -n "$sshdir" ]; then
+  mkdir -p -m 700 -- "$sshdir" && chmod 700 -- "$sshdir" || { echo "cannot make $sshdir"; exit 2; }
+else
+  sshdir=$(mktemp -d) || exit 2
+  sshtmp=$sshdir
+fi
+printf '%s\n' "${TERRARIUM_GIT_KNOWN_HOSTS:-}" > "$sshdir/known_hosts"
+unset TERRARIUM_GIT_KNOWN_HOSTS TERRARIUM_GIT_SSH_DIR
+sshbase="ssh -F /dev/null -o UserKnownHostsFile=$sshdir/known_hosts -o GlobalKnownHostsFile=/dev/null -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+export GIT_SSH_COMMAND="$sshbase"
 helper=
 keyfile=
+trap 'if [ -n "$keyfile" ]; then rm -f "$keyfile"; fi; if [ -n "$sshtmp" ]; then rm -rf "$sshtmp"; fi' EXIT
 if [ -n "${TERRARIUM_GIT_PASSWORD:-}" ]; then
   helper='!f() { test "$1" = get || exit 0; echo "username=$TERRARIUM_GIT_USERNAME"; echo "password=$TERRARIUM_GIT_PASSWORD"; }; f'
 fi
 if [ -n "${TERRARIUM_GIT_SSH_KEY:-}" ]; then
-  keyfile=$(mktemp)
-  trap 'rm -f "$keyfile"' EXIT
-  chmod 600 "$keyfile"
-  printf '%s\n' "$TERRARIUM_GIT_SSH_KEY" > "$keyfile"
-  export GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+  keyfile=$sshdir/key
+  (umask 077 && printf '%s\n' "$TERRARIUM_GIT_SSH_KEY" > "$keyfile")
+  export GIT_SSH_COMMAND="$sshbase -i $keyfile -o IdentitiesOnly=yes"
 fi
 unset TERRARIUM_GIT_SSH_KEY
 G() {
@@ -833,7 +870,8 @@ forget() {
   unset TERRARIUM_GIT_PASSWORD TERRARIUM_GIT_USERNAME
   helper=
   if [ -n "$keyfile" ]; then rm -f "$keyfile"; fi
-  export GIT_SSH_COMMAND="ssh -o BatchMode=yes"
+  keyfile=
+  export GIT_SSH_COMMAND="$sshbase"
 }
 res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 "#;
@@ -854,6 +892,7 @@ if [ "$kind" = merge ]; then
     G -C "$dir" merge --abort
     res conflict; exit 0
   fi
+  G -C "$dir" update-ref refs/job/merge HEAD || { res error; exit 2; }
 else
   if ! g -C "$dir" fetch -q -- "$url" "+refs/heads/$branch:refs/remotes/job/card"; then
     forget; echo "cannot fetch $branch"; res error; exit 2
@@ -882,37 +921,102 @@ fi
 "#;
 
 /// Step 3a, without the credential: `dir push sha`. A fresh bare repo at
-/// `push` gets exactly the merge commit `sha` (recorded in step 1, before
-/// the recipe ran) from the job clone over `file://`. The fetch checks the
-/// object IDs, so the content is the validated merge whatever the recipe
-/// did to the clone. Nothing of the clone's config reaches step 3b.
+/// `push` fetches `refs/job/merge` (made in step 1, before the recipe ran)
+/// from the job clone over `file://`, and must find exactly the merge
+/// commit `sha` that step 1 recorded. The fetch checks the object IDs, so
+/// the content is the validated merge whatever the recipe did to the
+/// clone; a moved or deleted ref fails the job. Nothing of the clone's
+/// config reaches step 3b.
 const COLLECT_SCRIPT: &str = r#"dir=$1; push=$2; sha=$3
 case "$sha" in *[!0-9a-f]*|'') echo "bad merge commit"; res error; exit 2 ;; esac
 case "$push" in /*/*) ;; *) echo "the push dir is not absolute"; res error; exit 2 ;; esac
 rm -rf -- "$push" && G init -q --bare --template= "$push" || { echo "cannot make the push repo"; res error; exit 2; }
-if ! G -c uploadpack.allowAnySHA1InWant=true -C "$push" fetch -q --no-tags -- "file://$dir/.git" "+$sha:refs/heads/merge"; then
-  echo "the merge commit $sha is not in the job clone any more"; res error; exit 2
+if ! G -C "$push" fetch -q --no-tags -- "file://$dir/.git" "+refs/job/merge:refs/heads/merge"; then
+  echo "refs/job/merge is not in the job clone any more"; res error; exit 2
 fi
 if [ "$(G -C "$push" rev-parse --verify -q "refs/heads/merge^{commit}")" != "$sha" ]; then
-  echo "the push repo does not hold the merge commit $sha"; res error; exit 2
+  echo "refs/job/merge of the job clone is not the merge commit $sha"; res error; exit 2
 fi
 res ok "$sha"
 "#;
 
 /// Step 3b: `url push sha`. Push exactly the merge commit `sha` to `next`
-/// from the fresh repo of step 3a, not forced.
+/// from the fresh repo of step 3a, not forced. The push repo must still
+/// hold `sha` as `refs/heads/merge`.
 const PUSH_SCRIPT: &str = r#"url=$1; push=$2; sha=$3
 case "$sha" in *[!0-9a-f]*|'') forget; echo "bad merge commit"; res error; exit 2 ;; esac
+if [ "$(G -C "$push" rev-parse --verify -q "refs/heads/merge^{commit}")" != "$sha" ]; then
+  forget; echo "the push repo does not hold the merge commit $sha"; res error; exit 2
+fi
 if g -C "$push" push -q -- "$url" "$sha:refs/heads/next"; then forget; res ok; else forget; res error; exit 2; fi
 "#;
 
-/// The end: `dir`. Remove the clone and the push repo.
-const CLEAN_SCRIPT: &str = r#"case "$1" in /*/*) rm -rf -- "$1" "$1.push" ;; *) exit 2 ;; esac"#;
+/// The end: `dir`. Remove the clone, the push repo, and the ssh dir.
+const CLEAN_SCRIPT: &str =
+    r#"case "$1" in /*/*) rm -rf -- "$1" "$1.push" "$1.ssh" ;; *) exit 2 ;; esac"#;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Review of TER-71, major 1: ssh in the git steps reads no config
+    /// file, keeps its host keys and the key file in the job's 0700 dir,
+    /// and `forget` removes the key. ssh finds `~/.ssh/config` through the
+    /// passwd home, not `$HOME`, so a test cannot plant one without
+    /// touching the real file; `ssh -G` prints the config that a
+    /// connection would use instead.
+    #[test]
+    fn ssh_reads_no_config_and_keeps_the_key_in_the_job_dir() {
+        if std::process::Command::new("ssh").arg("-V").output().is_err() {
+            eprintln!("no ssh on this machine: skipped");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("job.ssh");
+        let d = dir.display().to_string();
+        let script = format!(
+            "{GIT_PRELUDE}{}",
+            r#"ls -ld "$sshdir" | cut -c1-10
+ls -l "$keyfile" | cut -c1-10
+cat "$sshdir/known_hosts"
+eval "$GIT_SSH_COMMAND -G forge.example" | grep -E '^(hostname|proxycommand|userknownhostsfile|identityfile) '
+forget
+if [ -e "$sshdir/key" ]; then echo key-left; else echo key-gone; fi
+echo "after: $GIT_SSH_COMMAND"
+"#
+        );
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap())
+            .env("TERRARIUM_GIT_SSH_DIR", &dir)
+            .env("TERRARIUM_GIT_SSH_KEY", "not a key")
+            .env("TERRARIUM_GIT_KNOWN_HOSTS", "forge.example ssh-ed25519 AAAAtest")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{text}\n{}", String::from_utf8_lossy(&out.stderr));
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "drwx------", "{text}");
+        assert_eq!(lines[1], "-rw-------", "{text}");
+        assert_eq!(lines[2], "forge.example ssh-ed25519 AAAAtest", "{text}");
+        assert!(text.contains("hostname forge.example\n"), "{text}");
+        assert!(
+            text.contains(&format!("userknownhostsfile {d}/known_hosts")),
+            "{text}"
+        );
+        assert!(text.contains(&format!("identityfile {d}/key")), "{text}");
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with("proxycommand ") && l != "proxycommand none"),
+            "{text}"
+        );
+        assert!(text.contains("key-gone"), "{text}");
+        assert!(text.contains("after: ssh -F /dev/null "), "{text}");
+    }
 
     #[test]
     fn result_line_takes_the_last_one() {
