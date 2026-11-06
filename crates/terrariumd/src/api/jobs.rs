@@ -230,7 +230,9 @@ async fn show(
 }
 
 /// Cancel: the actor that queued the job, the card's worker, or a
-/// project admin.
+/// project admin. A batch merge holds the cards of several workers, so
+/// only the actor that queued it or a project admin cancels it (TER-112
+/// review, F3).
 async fn cancel(
     State(state): State<Shared>,
     actor: Actor,
@@ -238,9 +240,10 @@ async fn cancel(
 ) -> ApiResult<Json<Job>> {
     let job = find(&state, &actor, id).await?;
     let own = actor.label() == job.created_by
-        || actor
-            .agent()
-            .is_some_and(|a| job.by_agent.as_deref() == Some(a.name.as_str()));
+        || (job.batch.is_empty()
+            && actor
+                .agent()
+                .is_some_and(|a| job.by_agent.as_deref() == Some(a.name.as_str())));
     if !own {
         policy::admin_project(&actor, &job.project, "cancelling another agent's job")?;
     }

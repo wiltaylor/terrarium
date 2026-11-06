@@ -12,7 +12,10 @@
 //!   card of a batch.
 //! - A merge job can merge several cards in order (TER-112, `batch`): one
 //!   validation for all. A red batch splits into two halves, queued at
-//!   the front, the left half first (`parent` is the red batch).
+//!   the front (`parent` is the red batch). `split_path` keeps the halves
+//!   of one root batch in merge order, also over nested splits: the left
+//!   half adds `0` to the path of its parent, the right half `1`, and the
+//!   queue sorts on the path after `created_at` and `attempt`.
 //! - The one rerun of a failed job is a new row with `attempt` 2 and the
 //!   `created_at` of the first try, so it goes to the front of the queue.
 //! - Events `job` {change, project, id, card, kind, state, attempt, outcome,
@@ -138,6 +141,11 @@ pub struct Job {
     /// The red batch that this job was split from (TER-112).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The place of a split job in its root batch: `0` and `1` for each
+    /// left and right half on the way down. Empty for a job that is no
+    /// split. The queue sorts on it, so the halves run in merge order.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub split_path: String,
 }
 
 /// A card of a batch merge.
@@ -202,7 +210,7 @@ pub struct JobEnd {
 
 const COLS: &str = "id, project, card, kind, repo, branch, commit_sha, state, attempt, outcome,
                     exit_code, tail, head, by_agent, created_by, created_at, started_at, ended_at,
-                    host, batch, parent";
+                    host, batch, parent, split_path";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
     let kind: String = r.get(3)?;
@@ -233,6 +241,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
         host: r.get(18)?,
         batch,
         parent: r.get(20)?,
+        split_path: r.get(21)?,
     })
 }
 
@@ -392,10 +401,11 @@ pub fn pick(
 }
 
 /// The queued jobs of all projects, first in, first out (a rerun keeps the
-/// `created_at` of its first try, and goes before a job of the same time).
+/// `created_at` of its first try, and goes before a job of the same time;
+/// the halves of a split go in the order of their `split_path`).
 pub fn queued(conn: &Connection) -> ApiResult<Vec<Job>> {
     let mut st = conn.prepare(&format!(
-        "SELECT {COLS} FROM jobs WHERE state = 'queued' ORDER BY created_at, attempt DESC, id"
+        "SELECT {COLS} FROM jobs WHERE state = 'queued' ORDER BY created_at, attempt DESC, split_path, id"
     ))?;
     let rows = st.query_map([], row)?.collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
@@ -584,6 +594,7 @@ struct Insert<'a> {
     commit: Option<&'a str>,
     attempt: i64,
     parent: Option<&'a str>,
+    split_path: &'a str,
     created_by: &'a str,
     created_at: &'a str,
 }
@@ -591,8 +602,8 @@ struct Insert<'a> {
 fn insert(t: &mut Tx<'_>, i: Insert<'_>) -> ApiResult<Job> {
     t.execute(
         "INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state, attempt,
-                           by_agent, created_by, created_at, batch, parent)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13)",
+                           by_agent, created_by, created_at, batch, parent, split_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             i.id,
             i.project,
@@ -606,7 +617,8 @@ fn insert(t: &mut Tx<'_>, i: Insert<'_>) -> ApiResult<Job> {
             i.created_by,
             i.created_at,
             batch_text(i.batch)?,
-            i.parent
+            i.parent,
+            i.split_path
         ],
     )?;
     get(t, &i.id)
@@ -674,6 +686,7 @@ pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
             commit: n.commit.as_deref(),
             attempt: 1,
             parent: None,
+            split_path: "",
             created_by: &actor,
             created_at: &at,
         },
@@ -709,6 +722,7 @@ pub fn rerun(t: &mut Tx<'_>, failed: &Job, cards: Option<&[BatchCard]>) -> ApiRe
             commit: failed.commit.as_deref(),
             attempt: failed.attempt + 1,
             parent: failed.parent.as_deref(),
+            split_path: &failed.split_path,
             created_by: &failed.created_by,
             created_at: &failed.created_at,
         },
@@ -731,24 +745,25 @@ fn clean(cards: Vec<BatchCard>) -> Vec<BatchCard> {
 
 /// Split the cards of a red batch (two or more) into two halves, each
 /// queued at the front with `parent` set to the red job. The left half
-/// starts first: it has the lower ID at the same `created_at`, and a
-/// merge runs alone in its project, so the right half merges onto `next`
-/// with the left half in it. A half of one card is a job of one card.
+/// and all the splits below it run before the right half: their
+/// `split_path` (the red job's, then `0` or `1`) sorts first at the same
+/// `created_at` (TER-112 review, F1). A merge runs alone in its project,
+/// so the right half merges onto `next` with the left half in it. A half
+/// of one card is a job of one card.
 pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, Job)> {
     if cards.len() < 2 {
         return Err(ApiError::internal("a split needs two or more cards"));
     }
     let cards = clean(cards.to_vec());
     let (left, right) = cards.split_at(cards.len() / 2);
-    let mut ids = [ulid::Ulid::new(), ulid::Ulid::new()];
-    ids.sort();
     let mut out = Vec::new();
-    for (id, half) in ids.iter().zip([left, right]) {
+    for (side, half) in ["0", "1"].into_iter().zip([left, right]) {
         let batch = if half.len() > 1 { half } else { &[] };
+        let path = format!("{}{side}", red.split_path);
         let job = insert(
             t,
             Insert {
-                id: id.to_string(),
+                id: ulid::Ulid::new().to_string(),
                 first: &half[0],
                 batch,
                 project: &red.project,
@@ -757,6 +772,7 @@ pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, 
                 commit: None,
                 attempt: 1,
                 parent: Some(&red.id),
+                split_path: &path,
                 created_by: &red.created_by,
                 created_at: &red.created_at,
             },
@@ -924,8 +940,10 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
 pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
     let ahead: i64 = conn.query_row(
         "SELECT count(*) FROM jobs WHERE project = ?1 AND state = 'queued'
-           AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))",
-        params![job.project, job.created_at, job.id],
+           AND (created_at < ?2 OR (created_at = ?2 AND attempt > ?4)
+                OR (created_at = ?2 AND attempt = ?4
+                    AND (split_path < ?5 OR (split_path = ?5 AND id < ?3))))",
+        params![job.project, job.created_at, job.id, job.attempt, job.split_path],
         |r| r.get(0),
     )?;
     let running: i64 = conn.query_row(
@@ -964,6 +982,7 @@ mod tests {
             host: None,
             batch: Vec::new(),
             parent: None,
+            split_path: String::new(),
         }
     }
 

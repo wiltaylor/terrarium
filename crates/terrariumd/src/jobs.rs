@@ -13,8 +13,9 @@
 //!      commit. A merge job checks out `next` and merges the card branch
 //!      with `--no-ff`; a conflict ends the job (never resolved, never
 //!      rerun). A batch merge (TER-112) merges its card branches in
-//!      order; a card that conflicts leaves the batch (its merge is
-//!      aborted) and the others go on. When none merges, the job ends as
+//!      order; a card that conflicts, or whose merge fails otherwise
+//!      (unrelated histories), leaves the batch (its merge is aborted or
+//!      reset) and the others go on. When none merges, the job ends as
 //!      a conflict.
 //!   2. the recipe (`sh -c <recipe>` in the clone), without any
 //!      credential: it runs the repo's code.
@@ -981,7 +982,7 @@ fn card_view(j: &Job, c: &BatchCard) -> Job {
         v.exit_code = None;
         v.head = None;
         v.tail = Some(format!(
-            "the branch `{}` does not merge onto `next` and the cards before it in the batch; the queue does not resolve conflicts. Files:\n{}",
+            "the branch `{}` does not merge onto `next` and the cards before it in the batch; the queue does not resolve conflicts. Files, or why the merge failed:\n{}",
             c.branch,
             c.note.as_deref().unwrap_or("")
         ));
@@ -1201,12 +1202,18 @@ if [ "$kind" = merge ]; then
   # the next branch merges onto the ones before it.
   i=0; merged=0
   for b in "$@"; do
-    if G -C "$dir" merge -q --no-ff --no-edit -m "Merge $b onto next" "refs/remotes/job/card$i"; then
+    if out=$(G -C "$dir" merge -q --no-ff --no-edit -m "Merge $b onto next" "refs/remotes/job/card$i" 2>&1); then
       merged=$((merged + 1))
     else
       printf 'TERRARIUM_CONFLICT\t%s\n' "$i"
       G -C "$dir" diff --name-only --diff-filter=U
-      G -C "$dir" merge --abort || { res error; exit 2; }
+      # A merge that fails without a conflict (for example unrelated
+      # histories) leaves no merge to abort: say why, and reset the tree,
+      # so that only this branch leaves the merge.
+      if ! G -C "$dir" merge --abort 2>/dev/null; then
+        printf 'the merge failed without a conflict:\n%s\n' "$out"
+        G -C "$dir" reset -q --hard HEAD || { res error; exit 2; }
+      fi
     fi
     i=$((i + 1))
   done

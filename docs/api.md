@@ -10284,17 +10284,23 @@ the host it started on (`host` in the job).
 A batch merge:
 
 - A card whose branch does not merge onto `next` and the cards before it
-  leaves the batch: its merge is aborted, and the next card merges. It
+  leaves the batch: its merge is aborted, and the next card merges. A
+  merge that fails without a conflict (for example an unrelated history)
+  is the same: the tree is reset, and the card's note says why. The card
   gets `outcome: conflict` in `batch` and fails at once, as above. When
   no card merges, the job ends as a `conflict`.
 - Pass: each merged card moves to `accepted`.
 - Red with two or more merged cards: the batch splits into two halves (a
   half of one card is a job of one card). Both are queued at the front,
-  the left half first, with `parent` set to the red job. A merge runs
-  alone in its project, so the right half merges onto a `next` that holds
-  the left half. The halves split again on red, until the failing card is
-  found. The other cards merge. Each card gets a comment with the jobs of
-  the split.
+  with `parent` set to the red job. The halves split again on red, until
+  the failing card is found. The other cards merge. Each card gets a
+  comment with the jobs of the split.
+- The order holds over nested splits: `split_path` in the job adds `0`
+  for a left half and `1` for a right half to the path of its parent,
+  and the queue sorts on it after `created_at` and `attempt`. So the left
+  half and all its splits run before the right half. A merge runs alone
+  in its project, so the right half merges onto a `next` that holds the
+  cards of the left half that passed.
 - A card that a split leaves alone and that is red fails without the
   rerun: the red batch was its first red. A batch that ends with one
   merged card and red follows the rule of one card.
@@ -10313,7 +10319,7 @@ start with `Job queue:`.
 | `POST /api/merges`                 | a project admin                       | `{cards, repo?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
-| `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels |
+| `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels. A batch merge: the creator or a project admin only, as it holds the cards of several workers; every card of the batch loses the job labels |
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.

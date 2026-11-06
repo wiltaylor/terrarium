@@ -1013,6 +1013,15 @@ async fn a_green_batch_of_three_merges_in_one_job() {
         )
         .await
         .err(422, "invalid");
+    // The first card is w1's: w1 still may not cancel the batch (review
+    // F3), as it holds the other cards too.
+    lab.td
+        .patch(
+            &format!("/api/cards/{}", cards[0]),
+            json!({"add_labels": ["by:w1"]}),
+        )
+        .await
+        .ok();
     let r = lab
         .td
         .post_as(&lab.lead, "/api/merges", json!({"cards": cards}))
@@ -1020,6 +1029,17 @@ async fn a_green_batch_of_three_merges_in_one_job() {
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["job"]["kind"], "merge");
     assert_eq!(r.body["job"]["card"], cards[0].as_str());
+    assert_eq!(r.body["job"]["by_agent"], "w1", "{}", r.body);
+    let job_id = r.body["job"]["id"].as_str().unwrap().to_owned();
+    lab.td
+        .req(
+            hyper::Method::DELETE,
+            &format!("/api/jobs/{job_id}"),
+            None,
+            Some(&lab.w1),
+        )
+        .await
+        .err(403, "forbidden");
     let batch: Vec<&str> = r.body["job"]["batch"]
         .as_array()
         .unwrap()
@@ -1073,7 +1093,9 @@ async fn a_green_batch_of_three_merges_in_one_job() {
 
 /// TER-112: a red batch splits in halves until it finds the failing card.
 /// The failing card goes to the top of `ready` with the failure block,
-/// and the other cards merge, in order.
+/// and the other cards merge, in order. The bad card is in the left half,
+/// so the left half splits again and its halves must still run before
+/// the right half (review F1, F2).
 #[tokio::test]
 async fn a_red_batch_finds_the_failing_card_and_the_others_merge() {
     let lab = lab(2).await;
@@ -1081,12 +1103,14 @@ async fn a_red_batch_finds_the_failing_card_and_the_others_merge() {
     let h1 = lab.branch("ter-r1", "next", &[("OK", "yes\n"), ("r1", "1")]);
     let h2 = lab.branch("ter-r2", "next", &[("OK", "yes\n"), ("BAD", "2")]);
     let h3 = lab.branch("ter-r3", "next", &[("OK", "yes\n"), ("r3", "3")]);
+    let h4 = lab.branch("ter-r4", "next", &[("OK", "yes\n"), ("r4", "4")]);
     let c1 = lab.card("r1", "ter-r1").await;
     let c2 = lab.card("r2", "ter-r2").await;
     let c3 = lab.card("r3", "ter-r3").await;
+    let c4 = lab.card("r4", "ter-r4").await;
     let r = lab
         .td
-        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3]}))
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3, c4]}))
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let bad = lab
@@ -1098,34 +1122,35 @@ async fn a_red_batch_finds_the_failing_card_and_the_others_merge() {
     assert!(body.contains("ter-r2"), "{body}");
     assert!(body.ends_with("the card body"), "{body}");
     assert!(bad["assignee"].is_null(), "{bad}");
-    for c in [&c1, &c3] {
+    for c in [&c1, &c3, &c4] {
         lab.until_card(c, "accepted", |c| c["column"] == "accepted")
             .await;
     }
     let jobs = lab.until_idle().await;
-    // The batch of 3 (red), then [r1] (green) and [r2 r3] (red), then
-    // [r2] (red, no rerun: its batch was red) and [r3] (green).
+    // [r1 r2 r3 r4] red; [r1 r2] red, then [r1] green and [r2] red (no
+    // rerun: its batch was red); then [r3 r4] green.
     assert_eq!(jobs.len(), 5, "{jobs:#?}");
-    let passed: Vec<&str> = jobs
-        .iter()
-        .filter(|j| j["state"] == "passed")
-        .map(|j| j["card"].as_str().unwrap())
-        .collect();
-    assert_eq!(passed.len(), 2, "{jobs:#?}");
-    assert!(passed.contains(&c1.as_str()) && passed.contains(&c3.as_str()));
-    assert!(
-        jobs.iter()
-            .all(|j| j["batch"].is_null() || j["state"] == "failed"),
-        "{jobs:#?}"
-    );
+    let state_of = |path: &str| -> String {
+        let j = jobs
+            .iter()
+            .find(|j| j["split_path"].as_str().unwrap_or("") == path)
+            .unwrap_or_else(|| panic!("no job at {path:?}: {jobs:#?}"));
+        j["state"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(state_of(""), "failed");
+    assert_eq!(state_of("0"), "failed");
+    assert_eq!(state_of("00"), "passed");
+    assert_eq!(state_of("01"), "failed");
+    assert_eq!(state_of("1"), "passed");
     assert!(
         jobs.iter()
             .filter(|j| j["outcome"] == "red")
             .all(|j| j["attempt"] == 1),
         "a card split out alone is not rerun: {jobs:#?}"
     );
-    git(&lab.origin, &["merge-base", "--is-ancestor", &h1, "next"]);
-    git(&lab.origin, &["merge-base", "--is-ancestor", &h3, "next"]);
+    for h in [&h1, &h3, &h4] {
+        git(&lab.origin, &["merge-base", "--is-ancestor", h, "next"]);
+    }
     let out = std::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", &h2, "next"])
         .current_dir(&lab.origin)
@@ -1134,7 +1159,11 @@ async fn a_red_batch_finds_the_failing_card_and_the_others_merge() {
     assert!(!out.success(), "the red card is not on next");
     assert_eq!(
         next_merges(&lab),
-        ["Merge ter-r1 onto next", "Merge ter-r3 onto next"]
+        [
+            "Merge ter-r1 onto next",
+            "Merge ter-r3 onto next",
+            "Merge ter-r4 onto next"
+        ]
     );
     let c1v = lab.card_of(&c1).await;
     assert!(comments(&c1v).contains("The batch splits"), "{c1v}");
@@ -1176,5 +1205,51 @@ async fn a_conflict_in_a_batch_drops_only_that_card() {
     assert_eq!(
         next_merges(&lab),
         ["Merge ter-k1 onto next", "Merge ter-k3 onto next"]
+    );
+}
+
+/// TER-112 review F4: a branch whose merge fails without a conflict (an
+/// unrelated history) leaves the batch alone; the others merge in the same
+/// job.
+#[tokio::test]
+async fn a_merge_that_fails_without_a_conflict_drops_only_that_card() {
+    let lab = lab(2).await;
+    let h1 = lab.branch("ter-u1", "next", &[("u1", "1"), ("OK", "y\n")]);
+    // An orphan branch: no history in common with `next`.
+    git(&lab.work, &["checkout", "-q", "--orphan", "ter-u2"]);
+    git(&lab.work, &["rm", "-rq", "--cached", "."]);
+    std::fs::write(lab.work.join("u2"), "2").unwrap();
+    git(&lab.work, &["add", "u2"]);
+    git(&lab.work, &["commit", "-q", "-m", "orphan"]);
+    git(&lab.work, &["push", "-q", "-f", "origin", "ter-u2"]);
+    git(&lab.work, &["clean", "-fdq"]);
+    let h3 = lab.branch("ter-u3", "next", &[("u3", "3"), ("OK", "y\n")]);
+    let c1 = lab.card("u1", "ter-u1").await;
+    let c2 = lab.card("u2", "ter-u2").await;
+    let c3 = lab.card("u3", "ter-u3").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let u2 = lab
+        .until_card(&c2, "ready", |c| c["column"] == "ready")
+        .await;
+    let body = u2["body"].as_str().unwrap();
+    assert!(body.contains("outcome conflict"), "{body}");
+    assert!(body.contains("without a conflict"), "{body}");
+    for c in [&c1, &c3] {
+        lab.until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "{jobs:#?}");
+    assert_eq!(jobs[0]["state"], "passed");
+    for h in [&h1, &h3] {
+        git(&lab.origin, &["merge-base", "--is-ancestor", h, "next"]);
+    }
+    assert_eq!(
+        next_merges(&lab),
+        ["Merge ter-u1 onto next", "Merge ter-u3 onto next"]
     );
 }
