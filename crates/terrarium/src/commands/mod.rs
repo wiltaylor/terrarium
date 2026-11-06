@@ -11,6 +11,7 @@ pub mod db;
 pub mod events;
 pub mod fleet;
 pub mod inspect;
+pub mod jobs;
 pub mod knowledge;
 pub mod mail;
 pub mod monitors;
@@ -112,6 +113,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
             remote::exec(ctx, target, &opts, cmd).await
         }
         Command::Run { command, args } => waits::run(ctx, command.as_ref(), args).await,
+        Command::Job { command } => jobs::job(ctx, command).await,
         Command::Wait { command } => waits::wait(ctx, command).await,
         Command::Question { command } => questions::question(ctx, command).await,
         Command::Notify(args) => questions::notify(ctx, args).await,

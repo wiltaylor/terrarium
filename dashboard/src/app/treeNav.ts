@@ -18,6 +18,10 @@ export interface TreeRow {
   add?: boolean;
   /** True for an agent row: the `p` key pins or unpins its conversation. */
   pin?: boolean;
+  /** True for a project or folder row: the `m` key opens Move to folder. */
+  move?: boolean;
+  /** True for a folder row: F2 renames it and Delete deletes it. */
+  edit?: boolean;
 }
 
 /** The result of a key on a row. */
@@ -32,6 +36,12 @@ export type TreeAction =
   | { add: true }
   /** `p` on an agent row: pin or unpin. */
   | { pin: true }
+  /** `m` on a project or folder row: Move to folder. */
+  | { move: true }
+  /** F2 on a folder row. */
+  | { rename: true }
+  /** Delete on a folder row. */
+  | { remove: true }
   /** The key belongs to the tree, but there is nothing to do. */
   | { none: true };
 
@@ -65,6 +75,12 @@ export function treeKeyAction(keys: readonly string[], row: TreeRow, key: string
       return row.add ? { add: true } : null;
     case "p":
       return row.pin ? { pin: true } : null;
+    case "m":
+      return row.move ? { move: true } : null;
+    case "F2":
+      return row.edit ? { rename: true } : null;
+    case "Delete":
+      return row.edit ? { remove: true } : null;
   }
   return null;
 }
@@ -111,6 +127,9 @@ export function createRovingTree(opts: { keys: () => string[]; preferred?: () =>
             onActivate?: () => void;
             onAdd?: () => void;
             onPin?: () => void;
+            onMove?: () => void;
+            onRename?: () => void;
+            onRemove?: () => void;
           })
         | null,
     ) => {
@@ -127,6 +146,9 @@ export function createRovingTree(opts: { keys: () => string[]; preferred?: () =>
       else if ("click" in action) target.click();
       else if ("add" in action) r.onAdd?.();
       else if ("pin" in action) r.onPin?.();
+      else if ("move" in action) r.onMove?.();
+      else if ("rename" in action) r.onRename?.();
+      else if ("remove" in action) r.onRemove?.();
     },
   };
 }

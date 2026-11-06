@@ -11,6 +11,10 @@ pub enum Role {
     ProjectAdmin,
     /// Administers the whole system.
     Sysadmin,
+    /// System architect (TER-47): reads what a sysadmin reads, in every
+    /// project, and writes only as a member of its own project. Only the
+    /// operator grants it.
+    Architect,
 }
 
 /// A review decision on a version or a wiki page. See PLAN §15.

@@ -440,34 +440,49 @@ refused it. Do not parse the message; use `code`.
 The daemon checks the actor on every call (PLAN §10). The operator may do
 everything. Every privileged action writes an audit row (§9).
 
-| Capability | member | project_admin | sysadmin |
-|---|---|---|---|
-| Read own project: project, agents, repos, targets, board, cards | yes | yes | all projects |
-| Browse a repo (§5.3): its trees, files, changes, commits | own project | own project | all projects |
-| Mail (§7.1 scope rules) | own project | own project | any agent |
-| Read and reply from the project inbox | no | own project | any project |
-| Create, change, start, stop, restart, delete agents; send turns; answer; attach the PTY | no | own project | any |
-| Read agent templates (§21) | own project and global | own project and global | all |
-| Create, change, delete agent templates (§21) | no | own project | any, global too |
-| Assign, reassign, reopen any card; edit columns and WIP limits; archive any card | no | own project | any |
-| Attach repos; change the project | no | own project | any |
-| Grant, extend, or revoke a target lease (§17.7) | no | a target of own project, to an agent of own project | any |
-| Check out a repo into its own workspace; ask the credential helper (§5.1) | own project | own project | own project |
-| Check out a repo into another agent's workspace | no | own project | any |
-| Store, list, show, or delete secrets (§5.2); never a value | no | own project | any, global too |
-| Reveal the value of a secret (§5.2) | no | no | no (operator only) |
-| Create and delete projects; `POST /api/reload` | no | no | yes |
-| Read the self-update state, check for a release, update, roll back (§34) | no | no | yes |
-| Drain the daemon for an update (§34.5) | no | no | no (operator only) |
-| Grant or revoke `project_admin` | no | own project | any |
-| Grant or revoke `sysadmin` | no | no | no (operator only) |
-| Read the audit log | no | own project's rows | all |
-| Read memories, pages, artifacts, versions; write memories, links, tags, pages, uploads, versions | own project | own project | any |
-| Read and write the DB (§27): types, records, queries | own project | own project | any |
-| Delete a DB type with its records (§27) | no | own project | any |
-| Edit or delete any memory; move, delete, or undelete a page; delete any artifact; release a version | no | own project | any |
-| Approve or reject a version | no | no | no (operator only) |
-| Prune artifacts | no | no | yes |
+| Capability | member | project_admin | sysadmin | system architect |
+|---|---|---|---| --- |
+| Read own project: project, agents, repos, targets, board, cards | yes | yes | all projects | all projects |
+| Browse a repo (§5.3): its trees, files, changes, commits | own project | own project | all projects | all projects |
+| Mail (§7.1 scope rules) | own project | own project | any agent | own project (as a member); reads every thread |
+| Read and reply from the project inbox | no | own project | any project | read any project, reply no |
+| Create, change, start, stop, restart, delete agents; send turns; answer; attach the PTY | no | own project | any | no (reads agents, sessions, transcripts, the screen) |
+| Read agent templates (§21) | own project and global | own project and global | all | all |
+| Create, change, delete agent templates (§21) | no | own project | any, global too | no |
+| Assign, reassign, reopen any card; edit columns and WIP limits; archive any card | no | own project | any | no |
+| Attach repos; change the project | no | own project | any | no |
+| Grant, extend, or revoke a target lease (§17.7) | no | a target of own project, to an agent of own project | any | no |
+| Check out a repo into its own workspace; ask the credential helper (§5.1) | own project | own project | own project | own project |
+| Check out a repo into another agent's workspace | no | own project | any | no |
+| Store, list, show, or delete secrets (§5.2); never a value | no | own project | any, global too | list and show any (metadata); store and delete no |
+| Reveal the value of a secret (§5.2) | no | no | no (operator only) | no (operator only) |
+| Create and delete projects; `POST /api/reload` | no | no | yes | no |
+| Read the self-update state, check for a release, update, roll back (§34) | no | no | yes | read only |
+| Drain the daemon for an update (§34.5) | no | no | no (operator only) | no (operator only) |
+| Grant or revoke `project_admin` | no | own project | any | no |
+| Grant or revoke `sysadmin` | no | no | no (operator only) | no (operator only) |
+| Read the audit log | no | own project's rows | all | all |
+| Read memories, pages, artifacts, versions; write memories, links, tags, pages, uploads, versions | own project | own project | any | read any; write own project |
+| Read and write the DB (§27): types, records, queries | own project | own project | any | read any; write own project |
+| Delete a DB type with its records (§27) | no | own project | any | no |
+| Edit or delete any memory; move, delete, or undelete a page; delete any artifact; release a version | no | own project | any | no |
+| Approve or reject a version | no | no | no (operator only) | no (operator only) |
+| Prune artifacts | no | no | yes | no |
+| Grant or revoke `architect` | no | no | no (operator only) | no |
+| Run a command, a shell, a copy, or keys on a target or an agent | per the target rules (§17.4) | per the target rules (§17.4) | any | no |
+
+The `system architect` (role `architect`, TER-47) plans large changes: it
+reads what a sysadmin reads, in every project (the lists, boards, cards,
+agents and their sessions, transcripts, and screens, mail threads and
+project inboxes, the audit log, the event stream, secret metadata, the
+self-update state), and writes only what a member of its own project may
+write: its own cards, comments, memories, pages, uploads, and mail. In
+another project it changes nothing, and it never runs a command, opens a
+terminal, controls an agent, grants, or leases. Only the operator grants
+or revokes it. An agent has `architect` alone or with `project_admin` of
+its own project; with `sysadmin` it is `422 invalid` (sysadmin already
+reads everything). An architect gets the worker persona unless it is also
+a project_admin.
 
 Limits that always hold:
 
@@ -863,7 +878,7 @@ three letters and digits in upper case, then longer, then with a number
 | `GET /api/projects` | | `200` projects by name | an agent sees its own project |
 | `POST /api/projects` | `{"name", "description"?, "card_prefix"?}` | `201` project | sysadmin |
 | `GET /api/projects/{name}` | | `200` project | read |
-| `PATCH /api/projects/{name}` | `{"description"?, "card_prefix"?}` | `200` project | project_admin |
+| `PATCH /api/projects/{name}` | `{"description"?, "card_prefix"?, "idle_alert"?}` | `200` project | project_admin |
 | `DELETE /api/projects/{name}?confirm=true` | | `204` | sysadmin |
 | `GET /api/projects/{name}/agents` | | `200` agents by ID | read |
 | `GET /api/projects/{name}/targets` | | `200` targets, the project's and the global ones | read |
@@ -876,6 +891,11 @@ three letters and digits in upper case, then longer, then with a number
 Names are 1 to 63 of `a-z`, `0-9`, `-`, `_`, and start with a letter or a
 digit. `card_prefix` is 1 to 10 of `A-Z` and `0-9`, and starts with a
 letter. The prefix cannot change after the first card (`conflict`).
+
+`idle_alert` is the threshold of the idle alert (§6.2, "Idle alert"): a
+duration (`15m`, `1h`), or `off` (also `0`). `null` sets the default
+(15m), and the project then shows no `idle_alert`. Another value is
+`invalid`. A file project cannot set it yet.
 
 `DELETE` refuses a project that has agents (`conflict`), and a file project
 (`file_managed`). It deletes the board and the repos.
@@ -2071,6 +2091,8 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/compact` | none, or `{"then"?: "<prompt>", "defer"?: false}` | `202` agent with `reset` (below). At rest: `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused or held. `409 not_running`: the agent does not run. |
 | `POST /api/agents/{id}/new-session` | none, or `{"then"?: "<prompt>", "recap"?: true, "defer"?: false}` | `202` agent with `reset` (below). A new harness session, not a resume. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run, or an earlier turn still waits in the store) |
+| `GET /api/agents/{id}/queued` | none | `200 {"items": [{"id", "source", "text", "body", "created_at"}]}`: the turns that wait in the store for the agent's wake (`"queued": true` above), oldest first. `source` is where the turn waits: `store` (the live queues of a running agent come with TER-66). `text` is the turn as it will be typed, `body` the text after its tag. Redacted for the caller. The read right of the agent (TER-54). |
+| `DELETE /api/agents/{id}/queued/{turn}?source=store` | none | `204`. Drops one queued turn before the wake types it. `source`: the `source` of the turn in the list (default `store`; another value is `422`); the others keep their order. project_admin of the agent's project, sysadmin, or the operator. `404` when the turn does not wait (any more): the wake hands the turns over one at a time, so a removed turn is never typed and a typed turn is `404`. Audit `agent.queued.remove` with the turn ID and its length (TER-54). |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/interrupt` | none | `202 {"accepted": true, "interrupted": true}`. Stops the running turn; the harness keeps running (§6.5, "Interrupt"). |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
@@ -2157,6 +2179,32 @@ the role `working`) gets one turn from the daemon, for example:
   `reminded` (§9). It wakes no agent and nudges no lead.
 - **Setting.** `card_reminder` of the agent (§6.1); absent: the daemon's
   `TERRARIUM_CARD_REMINDER` (on).
+
+**Idle alert (TER-67).** The card reminder asks the agent. The idle alert
+tells the project's leads when the assignee of a card in progress rests
+with no wait for too long, so a WIP place does not stay held while both
+sides wait. The daemon checks on each lifecycle tick (15 s).
+
+- **Which cards.** Not archived, in the column with the role `working` or
+  a column named `research`, with an agent as assignee.
+- **Resting.** The assignee's status is `idle` or `stopped`, it is not
+  paused, and it has no open wait (`waiting` never counts). The rest
+  starts at the first `idle` or `stopped` status after the newest other
+  status, so an idle stop does not start it again, and a turn or a wait
+  does.
+- **Threshold.** The project's `idle_alert` (§5): default 15m, `off`
+  for none.
+- **Crossing.** The card gets `idle_since` (the start of the rest, §8.1)
+  and a `card` event with the change `idle` (`idle_since`, `mailed`). The
+  leads of the project (agents with `project_admin`, other than the
+  assignee; with none, the operator) get one mail from `system` in one
+  thread: the agent, the card, the idle time, and the last line of the
+  agent's transcript as quoted data. Once for each card and rest, also
+  across a daemon restart.
+- **Clearing.** When the assignee works again, waits, or is paused, a
+  newer rest starts, the card moves to another column or gets another
+  assignee, or the threshold is `off`: `idle_since` goes, with a `card`
+  event with the change `idle_cleared`.
 
 **Auto compact (PLAN §18).** The daemon can compact the session of an
 agent at rest. Each compaction is one model call, so all of it is off by
@@ -3328,7 +3376,7 @@ for any agent.
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
+| `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?, "targets"?, "grants"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
 | `GET /api/agents/{owner}/spawned` | `?limit=&cursor=`; for `operator`: `?project=` | `200` the spawns of the owner, running and finished, newest first, paged (§2.4). |
 | `GET /api/spawns/{id}` | | `200` one spawn, also after the finish. |
 | `POST /api/agents/{id}/done` | `{"result"?}` | `202` the spawn. The close follows after 3 s. |
@@ -3353,6 +3401,28 @@ or the operator may spawn for an owner. The checks, in order:
   `max_per_day`: else `409 conflict`, with the name of the limit.
 - The roles and the policy of the template need the rights of a create by
   the caller (§6.1); a disabled subscription is `422 invalid` (§16.2).
+- Each of `targets` and `grants` is a list of at most 32 entries; an
+  empty entry or a bad grant is `422 invalid`. Each entry needs a right of
+  the owner (below), also when a lead or the operator spawns for it.
+
+**Rights from the owner** (TER-65, `crates/terrariumd/src/spawn_rights.rs`).
+A spawn gives the ephemeral agent rights beyond its template, each one
+checked against the owner at the spawn. None goes past what the owner
+holds.
+
+| Field | Entry | The ephemeral agent gets |
+|---|---|---|
+| `targets` | A target name: global, or of the project. | A target in the owner's `policy.targets` goes into its `policy.targets`, also a global one that a project_admin could not add by `agent set`. A target that the owner holds by an active lease gives it a lease (`target.grant`) that ends with the owner's lease or its own deadline, whichever is first. An exclusive lease of the owner is `409 conflict`. Any other target is `403 forbidden`, with the target named; an unknown one is `404`. |
+| `grants` | `<name>` or `<scope>/<name>` (the project secret first, then the global one), with `:use` or `:read`. | An agent grant (`secret.grant`, with `spawn_owner`) at that level, when the owner holds the secret (its own grant or its project's) at that level or higher: else `403 forbidden`, with the secret and the levels named. No level: the kind's default, at most the owner's. A `read` grant keeps the owner's env var name. |
+
+A template with no `subscription` and no `subscription_pool` takes the
+owner's subscription and pool when the owner runs the same harness, so
+the quota switch (§16.3) covers the ephemeral agent. The operator as owner
+holds every right: a target or secret needs only to exist and be in reach
+of the project. The audit row `agent.spawn` has `rights` (`targets`,
+`leases`, `grants`, no value), `subscription`, and `subscription_pool`.
+The close revokes the leases of the ephemeral agent, and the removal of
+its row deletes its grants, so no right outlives it.
 
 The name is `<owner>-<template>-<n>`, with the lowest `n` that no agent
 and no spawn of the project has, unless the body gives `name`. The agent
@@ -3464,6 +3534,44 @@ removes the tab at the `agent_removed` event. A pin writes the audit row
 `agent.pin`, and an unpin writes `agent.unpin` (`{owner}`). A pin emits
 no event: the dashboard reads the list again when its window gets the
 focus.
+
+### 6.12 Project folders
+
+The code is in `crates/terrariumd/src/store/project_folders.rs` and
+`crates/terrariumd/src/api/project_folders.rs`. The tables are
+`project_folders` and `project_placements` (migration 68).
+
+The dashboard groups the projects under Projects in its sidebar into
+folders, nested (TER-48). The folders are on the daemon, so they are the
+same in each browser. They only order the sidebar: a folder changes no
+right, scope, or name. Only the operator and a sysadmin read or write
+them: another agent gets `403`, also on a read.
+
+A folder nests at most 8 levels deep (a root folder is level 1). A
+project's place is a row in `project_placements`. A project with no
+row sits at the root, after the placed ones, by name. In each parent the
+folders come first, in `position` order, then the projects. Each write
+renumbers the positions of the parent that it changes from 0.
+
+```json
+{"folders":[{"id":"01JQ...","name":"Work","parent_id":null,"position":0,"created_at":"...","updated_at":"..."}],
+ "placements":[{"project":"demo","folder_id":"01JQ...","position":0}]}
+```
+
+| Endpoint | Answer |
+|---|---|
+| `GET /api/project-folders` | `200` `{folders, placements}`: every folder (by parent, then position) and every placed project. |
+| `POST /api/project-folders` | `{name, parent_id?}`. `201` the folder, at the end of its parent. An unknown parent is `404`. A folder below level 8 is `422`. |
+| `PATCH /api/project-folders/{id}` | `{name?, parent_id?, position?}`. `200` the folder. `parent_id` absent keeps the parent, `null` moves the folder to the root. A move into the folder itself or one of its subfolders, or one that nests deeper than 8 levels, is `422`. A move without `position` goes to the end. |
+| `DELETE /api/project-folders/{id}` | `204`. Its subfolders move to its parent, at its place, in their order. Its projects move to its parent, after the projects there. |
+| `PUT /api/projects/{name}/folder` | `{folder_id, position?}`. `200` `{project, folder_id, position}`. `folder_id` `null` is the root. Without `position` the project goes to the end. An unknown project or folder is `404`. |
+
+A name is trimmed, and has 1 to 64 characters and no control
+characters (`422`). Two folders may have the same name. The delete of a
+project removes its place (a foreign key). The writes add the audit rows
+`project_folder.create`, `project_folder.update`, `project_folder.delete`,
+and `project.folder`. No event goes out: the dashboard reads the tree
+again when its window gets the focus.
 
 ## 7. Mail
 
@@ -3644,6 +3752,9 @@ A card:
 - `done_at` is when the card last moved to `done`. A move out of `done`
   clears it. It is absent for a card that is not done, and for a card done
   before migration 40.
+- `idle_since` is the idle mark (§6.2, "Idle alert"): the assignee rests
+  with no wait since this time, past the project's `idle_alert`, and the
+  leads got a mail. It is absent when the card has no mark.
 - `blocked_by` lists the dependencies that are neither `done` nor archived.
 - `tests` is the latest test run that is linked to the card (§29):
   `{"id","name","status","counts":{"passed","failed","errored","skipped","total"},"created_at"}`.
@@ -3749,7 +3860,7 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 |---|---|---|
 | `GET /api/projects/{name}/board` | | `200` board |
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
-| `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards by number, cursor: number |
+| `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
 | `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |
 | `GET /api/cards/{id}` | | `200` card |
@@ -3822,13 +3933,18 @@ project for the operator and a sysadmin, the own project for another agent.
 A column matches when its role or its name (any case) is one of the values,
 so `working` finds the column with that role and `research` the column
 named `research` (it has no role). By project, then column position, then
-card position; at most 500. Each card is a card with two more fields:
+card position; at most 500. Each card is a card with more fields:
 
-- `column_kind`: `working` for the column with that role, else the column
-  name in lower case (`research`).
+- `column_kind`: `working` or `blocked` for the column with that role,
+  else the column name in lower case (`research`).
 - `assignee_status`: the stored status of the assignee agent (`working`,
   `idle`, `waiting`, `blocked`, `stopped`, ...). Absent for the operator,
   no assignee, or a removed agent.
+- `blocked_since` and `blocked_reason` (TER-51), only for a card in the
+  blocked column: when the card moved there and the comment of that move
+  (what is needed), from the last `moved` event to the blocked column.
+  Without that event, `updated_at` and the newest comment. The dashboard
+  home lists them with `?columns=blocked`.
 
 **Card patch.** Every field is optional:
 `title`, `body`, `labels`, `add_labels`, `remove_labels`, `repo`, `branch`,
@@ -4076,7 +4192,7 @@ Kinds:
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning`, `usage_limit` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). A `usage_limit` (`{message, resets_at?}`) is the provider's refusal of a turn for a usage limit or a rate limit (§16.6). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
 | `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true`, `held_reason`, and `thread_state: "paused"`. A release (§7.4) emits the event again with `released: true`. |
-| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared), or `reminded` (`eta_passed`: the daemon reminded the idle assignee to update the card, §6.2 "Card reminder"). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
+| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared), `reminded` (`eta_passed`: the daemon reminded the idle assignee to update the card, §6.2 "Card reminder"), `idle` (`idle_since`, `mailed`: the idle alert marked the card and mailed the leads, §6.2 "Idle alert"), or `idle_cleared` (`idle_since`: the mark went). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `question_guard` | `{question, mailed}`: a member ended its turn with a question in plain text and reported nothing, so the daemon set `blocked` (reason "asked a question in plain text: ...") and mailed `mailed` (the leads, or `operator`). `question` is the first 200 characters. The actor is `system`. PLAN §8.4. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |
@@ -9796,6 +9912,16 @@ so a later `terrarium-compose up -d` keeps it. A source deploy
 wins again. In a dev checkout (`just up`), set `TERRARIUM_IMAGE` in `.env`
 to the release image, or `just up` builds and starts `terrarium:dev` again.
 
+**The updater itself** is not moved by an update: it moves only the
+terrarium container, and goes on with the image that it started with. To
+give the updater a new build, start it again from the release image after
+an update: `<dir>/terrarium-compose up -d --no-deps terrarium-updater`.
+The wrapper reads the image file, and the updater image defaults to the
+daemon image, so the updater gets the release image of the image file.
+Set `TERRARIUM_UPDATER_IMAGE` in `.env` to pin another image. Start no
+update while the updater restarts. `terrarium admin update status` shows
+the build of the updater (`updater:`).
+
 ### 34.2 Settings
 
 The daemon:
@@ -9817,7 +9943,7 @@ The updater:
 | `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium` | The GitHub repo: the identity of the signing workflow. |
 | `TERRARIUM_UPDATE_DRAIN_WAIT` | `600` | Seconds that the drain waits for the running turns. |
 | `TERRARIUM_UPDATE_HEALTH_TIMEOUT` | `900` | Seconds that the new container has to become healthy. The first start installs the harnesses only when the tools dir has none; an update finds them. |
-| `TERRARIUM_UPDATER_TARGET` | the service `terrarium` of the compose project of the updater | The name of the terrarium container. |
+| `TERRARIUM_UPDATER_TARGET` | the service `terrarium` of the compose project of the updater | The name of the terrarium container. compose.yaml passes it from `.env`; empty is the default. Set it when the compose labels of the container are lost. |
 | `TERRARIUM_UPDATER_STATE` | `/updater` | The state dir: `history.json` (the last 20 runs), `previous.json` (the rollback target), and `image`. |
 
 A bad `TERRARIUM_SELF_UPDATE` or `TERRARIUM_UPDATE_CHANNEL` stops the start
@@ -9836,7 +9962,7 @@ The updater does these steps, and records each one (`steps` of a run):
 | `pull` | Pulls the image by digest. Before the drain, so a slow or failed pull stops no work. |
 | `drain` | Runs `terrarium admin update drain --wait <s>` in the container (§34.5). |
 | `backup` | Runs `terrariumd backup create --json` in the container: a full backup in the backup dir (§32). Migrations only go forward; the way back needs it. |
-| `stop`, `remove`, `start` | Stops the container (its stop timeout), removes it, and makes a new one with the same settings (binds, ports, networks, labels, the seccomp profile, the env of compose) and the new image. The env, command, and user of the old image do not carry over: the new image brings its own. |
+| `stop`, `remove`, `start` | Stops the container (its stop timeout), removes it, and makes a new one with the same settings (binds, ports, networks, labels, the seccomp profile, the env of compose) and the new image. The env, command, user, and labels of the old image do not carry over: the new image brings its own. Each compose label (`com.docker.compose.*`: the project, the service, the working dir, the config files) stays, also when the old image has it: an image that `docker compose build` made carries the project and service labels, and without them the next `inspect` finds no container. |
 | `health` | Waits until the health check passes, then runs `terrarium daemon status` in the new container. |
 
 A failure before `stop` changes nothing: the updater ends the drain
@@ -10017,3 +10143,151 @@ twice. At the first read of the updater history, the older runs get no
 mail. The auto-update writes the window before it asks the updater: the
 backup holds the mark, so a rollback does not start the same update again
 in the same window.
+
+## 35. The job queue
+
+Each project can have a job queue (TER-71, `crate::jobs`). A job runs the
+project's validation recipe on a clean clone, never in an agent's working
+tree. The daemon moves the card on the result, so a worker moves on to its
+next card at once.
+
+### 35.1 The config
+
+`GET /api/projects/{name}/delivery` (members) and `PUT` (a project admin
+or the operator) read and set the config. The body is a JSON object:
+
+| field          | meaning                                                         | default               |
+|----------------|-----------------------------------------------------------------|-----------------------|
+| `target`       | the target that runs the jobs                                   | none: no queue        |
+| `recipe`       | the command, run with `sh -c` in the root of the clone          | none: no queue        |
+| `slots`        | the most jobs that run at the same time                         | 2                     |
+| `next_repos`   | the repos (by name) that have a `next` branch for merge jobs    | none                  |
+| `work_dir`     | the dir on the target for the job clones                        | `/tmp/terrarium-jobs` |
+| `timeout_secs` | the most time the recipe may run                                | 3600                  |
+
+The target must be a target of the project. A global target needs a
+sysadmin or the operator. The audit row `project.delivery` keeps the old
+and the new config. With no target or no recipe, the queue is off, and a
+validate or a merge is a `409 conflict` that says how to set it.
+
+### 35.2 Jobs
+
+- `validate`: check out the card commit and run the recipe.
+- `merge`: check out `next`, merge the card branch with `--no-ff`, run the
+  recipe, and push `next` when the recipe passes. The push is not forced:
+  when `next` moved, the job fails.
+
+Jobs start first in, first out across all projects. A job starts when:
+
+1. its host is under its cap (the host cap, below), and
+2. its project has fewer than `slots` jobs running.
+
+A merge job runs alone in its project: it starts only when no other job of
+the project runs, no job behind it starts first, and no job starts while
+it runs (see "Limits" below). Otherwise a job that must wait does not hold
+back a later job that may start. A card has at most one queued or running
+job.
+
+A job is three runs on the target, and a merge job has one more. The
+prepare run (clone, checkout, merge) and the push run get the repo
+credential in their env. The recipe run gets no credential, because it
+runs the repo's code. Each run of a job runs at low priority: `ionice
+-c3 nice -n19 <command>`. The daemon checks one time per target (per
+daemon run) that `ionice -c3` works. Without it, the runs use `nice -n19`
+only. The output tail of the job ends with the wrapper (`[run as: ...]`).
+
+The recipe can change its clone: make commits, move HEAD, or write
+`.git/config` (for example `url.<base>.insteadOf`). So the push of a merge
+job never runs in that clone, and never pushes what HEAD is after the
+recipe:
+
+1. The prepare run records the merge commit before the recipe runs, and
+   keeps it as `refs/job/merge` in the clone.
+2. A run without any credential makes a fresh bare repo next to the clone
+   and fetches `refs/job/merge` from the clone over `file://`. It must be
+   the recorded commit; else the job fails (`error`).
+3. The push run checks that the fresh repo still holds that commit, and
+   pushes that commit ID to `next` from it.
+
+ssh in the git runs reads no config file (`-F /dev/null`), so a planted
+`~/.ssh/config` cannot send the push to another host or run a
+`ProxyCommand`. Its known hosts are a file of the job, seeded from the
+repo host keys (below), not `~/.ssh/known_hosts`. The key file is in a 0700
+dir of the job (`<clone>.ssh`), not in `/tmp`. The cleanup removes the
+clone, the push repo, and that dir.
+
+#### Limits
+
+Every run of a job on a target runs as the same user: the recipe, and
+the runs that hold the credential. So any recipe on the target can reach
+the files of the credential runs. It can leave a background process
+behind, or, while it runs next to another job of the project, write that
+job's push repo or read its key file. Any worker can start such a recipe
+with `card validate` on its own branch, so the exposure is any worker at
+the next merge, not only the merging card. A merge job runs alone in its
+project to shrink this, but a validate job still fetches with the
+credential while other recipes of the project run. Two more paths of the
+same kind: the recipes of another project on a shared global target (the
+merge-alone rule keeps apart only the jobs of one project), and an agent
+with exec on the delivery target, which can reach `<clone>.ssh/key` or
+the push repo with no recipe at all. The full fix (each recipe as its own
+user, or the credential runs on a host that runs no recipe) is TER-103.
+
+The known hosts of the git runs are the repo host keys that the daemon's
+own git trusts (GitHub's published keys and the recorded ones), not the
+host keys of the targets. A forge whose key the daemon has not recorded
+is accepted on first use in each run (`accept-new`).
+
+#### The host cap
+
+The projects of one host share its disk and its CPUs. The host cap is the
+most jobs of all projects that run on one host at the same time. The
+daemon checks it before the slots of the project. The host of a job is
+the host agent of the delivery target (`host`), else the host part of its
+`address`, else the target name. A host without a cap has no limit. The
+default is no cap.
+
+Builds and tests that agents start by hand (`terrarium exec`, `terrarium
+run`) are not jobs of the queue. The host cap does not count them, and
+they do not get the low priority.
+
+| method and path                 | who                           | what |
+|---------------------------------|-------------------------------|------|
+| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, heavy_jobs, running, updated_by, updated_at}]}`: each host with a cap or a running job. `heavy_jobs` is `null` without a cap |
+| `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
+| `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
+
+The audit row `job.host_cap` keeps the old and the new cap. A job keeps
+the host it started on (`host` in the job).
+
+### 35.3 Results
+
+- Pass: the labels `validation:queued` and `validation:running` go away.
+  A validate card moves to `review`, a merge card to `accepted`. The move
+  comment gives the job, the commit, the tested head, the exit code, and
+  the times.
+- Fail: the job runs once more, at the front of the queue. A merge
+  conflict is not run again and is never resolved. After the second
+  failure, a block `Validation failed: ...` with the output tail goes to
+  the top of the card body. The card moves to the top of `ready` with no
+  assignee, and the worker of its `by:<agent>` label gets a mail from
+  `system`.
+- A daemon restart loses the running jobs: they fail (`error`) and follow
+  the same rule.
+
+The card writes of the queue are made as the operator. Their comments
+start with `Job queue:`.
+
+### 35.4 Endpoints
+
+| method and path                    | who                                   | what |
+|------------------------------------|---------------------------------------|------|
+| `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` on the target. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
+| `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
+| `GET /api/jobs/{id}`               | members                               | one job with its output tail |
+| `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels |
+
+The repo defaults to the card's repo, then to the project's only repo. The
+branch defaults to the card's branch, then to the card ID in lower case.
+Events `job` {change, project, id, card, kind, state, attempt, outcome}.

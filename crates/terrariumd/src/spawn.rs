@@ -44,6 +44,7 @@ use crate::api::Shared;
 use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
 use crate::policy;
+use crate::spawn_rights;
 use crate::store::agents::{self, AgentView};
 use crate::store::spawns::{self, MAX_TASK, NewSpawn, OPERATOR, Spawn};
 use crate::store::waits::{self, NewWait, Wait, WaitKind, WaitState};
@@ -140,6 +141,14 @@ pub struct SpawnBody {
     /// (`POST /api/agents/operator/spawn`).
     #[serde(default)]
     pub project: Option<String>,
+    /// Targets for the ephemeral agent, each one that the owner may use
+    /// (TER-65, [`crate::spawn_rights`]).
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// Secrets for the ephemeral agent: `<name>` or `<scope>/<name>`, with
+    /// `:use` or `:read`, each one that the owner holds at that level.
+    #[serde(default)]
+    pub grants: Vec<String>,
 }
 
 /// The answer of a spawn: the spawn row, the agent, and the wait.
@@ -226,6 +235,11 @@ pub async fn spawn(
     if let Some(n) = &body.name {
         crate::store::check_name("agent", n)?;
     }
+    let target_names = spawn_rights::clean_list("targets", &body.targets)?;
+    let grant_asks = spawn_rights::clean_list("grants", &body.grants)?
+        .iter()
+        .map(|g| spawn_rights::parse_grant(g))
+        .collect::<ApiResult<Vec<_>>>()?;
     // The owner's spawn policy. The operator spawns with no policy.
     let rules = match &owner.view {
         Some(v) => match &v.agent.policy.spawn {
@@ -298,6 +312,7 @@ pub async fn spawn(
         .as_ref()
         .filter(|sp| sp.may_spawn_children)
         .map(|sp| Box::new(sp.for_child()));
+    spawn_rights::inherit_pool(&mut def, owner.view.as_ref());
     for role in &def.roles {
         policy::change_role(actor, "", &def.project, *role)?;
     }
@@ -316,6 +331,7 @@ pub async fn spawn(
     };
     let turn = turn_tag::render(&source, &task);
     let (work_dir, who, rules2) = (state.work_dir.clone(), actor.clone(), rules.clone());
+    let owner_view = owner.view.clone();
     let (oid, oname, tref, tkey) = (
         owner.id.clone(),
         owner.name.clone(),
@@ -358,6 +374,20 @@ pub async fn spawn(
                 }
             }
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
+            // The rights from the owner (TER-65): checked against the owner,
+            // not by the policy rule above, so a lead passes on a global
+            // target that it may use.
+            let ov = owner_view.as_ref();
+            let target_grants =
+                spawn_rights::check_targets(t, ov, &def.project, &target_names)?;
+            let secret_grants = spawn_rights::check_grants(t, ov, &def.project, &grant_asks)?;
+            for tg in &target_grants {
+                if let spawn_rights::TargetGrant::Policy(n) = tg
+                    && !def.policy.targets.contains(n)
+                {
+                    def.policy.targets.push(n.clone());
+                }
+            }
             def.subscription_pool = agents::check_pool(
                 t,
                 def.harness,
@@ -380,6 +410,16 @@ pub async fn spawn(
                     deadline_at: &deadline,
                 },
             )?;
+            let rights = spawn_rights::apply(
+                t,
+                owner_view.as_ref(),
+                &id,
+                &def.name,
+                &def.project,
+                &deadline,
+                &target_grants,
+                &secret_grants,
+            )?;
             crate::store::transcripts::record_turn(t, &id, &turn)?;
             agents::queue_turn(t, &id, &turn)?;
             t.audit(
@@ -388,7 +428,9 @@ pub async fn spawn(
                 Some(&def.project),
                 json!({"owner": oid, "owner_name": oname, "name": def.name,
                        "template": tkey, "task_bytes": task.len(),
-                       "deadline_at": deadline}),
+                       "deadline_at": deadline, "rights": rights,
+                       "subscription": def.subscription,
+                       "subscription_pool": def.subscription_pool}),
             )?;
             let w = if wait {
                 let w = waits::create(
@@ -707,6 +749,7 @@ pub async fn close(
                 json!({"owner": sp.owner, "name": sp.name, "outcome": outcome}),
             )?;
             if has_row {
+                spawn_rights::on_close(t, &key)?;
                 agents::delete(t, &key)?;
             }
             spawns::get(t, &key)
@@ -790,7 +833,7 @@ pub async fn owner_removed(state: &Shared, owner: &str) {
 pub async fn cancel(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Spawn> {
     let key = id.to_owned();
     let sp = state.db.read(move |c| spawns::get(c, &key)).await?;
-    policy::read_project(actor, &sp.project)?;
+    policy::write_project(actor, &sp.project)?;
     policy::cancel_spawn(actor, &sp.owner, &sp.project)?;
     if !sp.running() {
         return Err(ApiError::conflict(format!(

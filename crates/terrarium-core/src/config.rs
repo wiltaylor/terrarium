@@ -818,6 +818,63 @@ pub struct CheckoutDef {
     pub on_agent_create: Vec<String>,
 }
 
+/// The job queue config of a project (TER-71), stored per project in the
+/// daemon (`PUT /api/projects/{name}/delivery`). With no `target` or no
+/// `recipe`, the project has no queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryDef {
+    /// The target that runs the jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The validation command, run with `sh -c` in the root of the
+    /// checkout, for example `just ci::validate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
+    /// The most jobs that run at the same time. Default 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots: Option<u32>,
+    /// The repos (by name) that have a `next` branch for merge jobs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_repos: Vec<String>,
+    /// The dir on the target under which each job gets a fresh clone.
+    /// Default `/tmp/terrarium-jobs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_dir: Option<String>,
+    /// The most time a job may run, in seconds. Default 3600.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl DeliveryDef {
+    /// The default number of slots.
+    pub const DEFAULT_SLOTS: u32 = 2;
+    /// The default work dir on the target.
+    pub const DEFAULT_WORK_DIR: &'static str = "/tmp/terrarium-jobs";
+    /// The default job timeout.
+    pub const DEFAULT_TIMEOUT_SECS: u64 = 3600;
+
+    /// True when the project has a queue.
+    pub fn enabled(&self) -> bool {
+        self.target.as_deref().is_some_and(|t| !t.is_empty())
+            && self.recipe.as_deref().is_some_and(|r| !r.trim().is_empty())
+    }
+
+    pub fn slots(&self) -> usize {
+        self.slots.unwrap_or(Self::DEFAULT_SLOTS).max(1) as usize
+    }
+
+    pub fn work_dir(&self) -> &str {
+        self.work_dir.as_deref().unwrap_or(Self::DEFAULT_WORK_DIR)
+    }
+
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs
+            .unwrap_or(Self::DEFAULT_TIMEOUT_SECS)
+            .max(1)
+    }
+}
+
 /// A project definition, `projects/<name>.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectDef {

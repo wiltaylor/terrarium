@@ -102,6 +102,10 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
                 if let Some(d) = p["description"].as_str().filter(|d| !d.is_empty()) {
                     c.line(d);
                 }
+                c.line(format!(
+                    "idle alert: {}",
+                    p["idle_alert"].as_str().unwrap_or("15m (default)")
+                ));
                 c.line("\nagents:");
                 print_table(c, &agent_rows(as_items(&v["agents"])), AGENT_COLS, "  none");
                 c.line("\nrepos:");
@@ -191,11 +195,17 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
             name,
             description,
             prefix,
+            idle_alert,
         } => {
             let name = ctx.project_or(name.as_deref()).await?;
             let mut body = json!({});
             set_opt(&mut body, "description", description.clone());
             set_opt(&mut body, "card_prefix", prefix.clone());
+            match idle_alert.as_deref().map(str::trim) {
+                Some("default") => body["idle_alert"] = Value::Null,
+                Some(v) => body["idle_alert"] = v.into(),
+                None => {}
+            }
             let p = ctx.api.patch(&project_path(&name), body).await?;
             ctx.emit(&p, |c, p| {
                 c.line(format!("updated project {}", field(p, "name")))
@@ -214,6 +224,7 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
         }
         ProjectCmd::Repos { name } => repos(ctx, name.as_deref()).await,
         ProjectCmd::RepoAdd(a) => repo_add(ctx, a).await,
+        ProjectCmd::Delivery { command } => super::jobs::delivery(ctx, command).await,
     }
 }
 

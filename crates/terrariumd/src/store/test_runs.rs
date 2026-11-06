@@ -591,6 +591,7 @@ pub fn update_links(
     p: &LinksPatch,
 ) -> ApiResult<TestRunSummary> {
     let row = find_for(t, actor, id)?;
+    policy::write_test_runs(actor, &row.project)?;
     let total =
         p.add_cards.len() + p.remove_cards.len() + p.add_versions.len() + p.remove_versions.len();
     if total == 0 {

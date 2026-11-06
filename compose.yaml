@@ -157,6 +157,9 @@ services:
       TERRARIUM_UPDATE_REPO: ${TERRARIUM_UPDATE_REPO:-wiltaylor/terrarium}
       TERRARIUM_UPDATE_DRAIN_WAIT: ${TERRARIUM_UPDATE_DRAIN_WAIT:-600}
       TERRARIUM_UPDATE_HEALTH_TIMEOUT: ${TERRARIUM_UPDATE_HEALTH_TIMEOUT:-900}
+      # The name of the terrarium container. Empty: the service `terrarium`
+      # of this compose project, found by its compose labels.
+      TERRARIUM_UPDATER_TARGET: ${TERRARIUM_UPDATER_TARGET:-}
       TERRARIUM_UPDATER_SOCKET: /run/terrarium-updater/updater.sock
       TERRARIUM_UPDATER_STATE: /updater
     volumes:

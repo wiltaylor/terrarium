@@ -8,7 +8,7 @@ import { isMock } from "../api";
 import { CriticalBanner } from "../components/CriticalBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
-import { agents, api, auth, events, inbox, pins, projects, signOutNow, subscriptions, theme } from "../stores";
+import { agents, api, auth, events, inbox, pins, projectFolders, projects, signOutNow, subscriptions, theme } from "../stores";
 import { badge } from "../features/inbox/model";
 import { SETTINGS_ITEMS, TOP_ITEMS } from "./nav";
 import { ProjectTree } from "./ProjectTree";
@@ -26,9 +26,12 @@ export function Layout(props: RouteSectionProps) {
     void agents.refresh();
     void inbox.refresh();
     void pins.refresh();
-    // The pins are on the daemon: read them again when the operator comes back (another browser may have changed them).
+    // The pins and the project folders are on the daemon: read them again when the operator comes back (another
+    // browser may have changed them).
     const again = () => {
-      if (document.visibilityState === "visible") void pins.refresh();
+      if (document.visibilityState !== "visible") return;
+      void pins.refresh();
+      void projectFolders.refresh();
     };
     document.addEventListener("visibilitychange", again);
     window.addEventListener("focus", again);

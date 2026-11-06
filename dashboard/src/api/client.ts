@@ -14,7 +14,7 @@ import { createTranscriptStream, type TranscriptStream } from "./sse";
 import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 // Secrets (PLAN §16b): a block of its own.
-import type { Pin } from "./types";
+import type { Pin, ProjectFolder, ProjectFolderTree, ProjectPlacement } from "./types";
 import type { CalendarEvent, CalendarGrant, CalendarGrantResult, CalendarInput, CalendarRange, CalendarView, CalendarWatcher, CalendarWatchResult } from "./types";
 import type { NewSecret, NewSecretGrant, RevealedSecret, Secret, SecretGenerate, SecretGrant, SecretPut, TargetPatch, TargetTestReport } from "./types";
 import type {
@@ -166,6 +166,8 @@ import type {
   WebhookDelivery,
   WebhookTestResult,
   TestEvent,
+  QueuedSource,
+  QueuedTurn,
   Session,
   AgentScreen,
   Spawn,
@@ -350,6 +352,10 @@ export interface Api {
      * `409 conflict`: no turn runs.
      */
     interrupt(id: string): Promise<{ accepted: boolean; interrupted: boolean }>;
+    /** `GET /api/agents/{id}/queued` (docs/api.md §6.2, TER-54): the turns that wait in the store for the agent's wake, oldest first. The read right of the agent. */
+    queued(id: string): Promise<{ items: QueuedTurn[] }>;
+    /** `DELETE /api/agents/{id}/queued/{turn}` (TER-54): drop one queued turn. project_admin, sysadmin, or the operator. `404`: the turn went out already. */
+    removeQueued(id: string, turn: number, source?: QueuedSource): Promise<void>;
     answer(id: string, body: { request_id: string; answer: unknown } | { text: string }): Promise<{ accepted: boolean }>;
     events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
     sessions(id: string, q?: PageQuery): Promise<Page<Session>>;
@@ -561,6 +567,20 @@ export interface Api {
     pin(agent: string): Promise<Pin[]>;
     /** `DELETE /api/pins/{agent}`: unpin. No pin is no error. */
     unpin(agent: string): Promise<Pin[]>;
+  };
+
+  /**
+   * Project folders of the sidebar (docs/api.md §6.12). Kept on the daemon, so they are the same in each browser. The
+   * operator and a sysadmin only. A delete moves the subfolders and projects of the folder up one level.
+   */
+  projectFolders: {
+    list(): Promise<ProjectFolderTree>;
+    create(body: { name: string; parent_id?: string | null }): Promise<ProjectFolder>;
+    /** `parent_id` absent keeps the parent, null moves the folder to the root. */
+    update(id: string, body: { name?: string; parent_id?: string | null; position?: number }): Promise<ProjectFolder>;
+    remove(id: string): Promise<void>;
+    /** `PUT /api/projects/{name}/folder`: put the project in a folder, or at the root with null. */
+    place(project: string, folderId: string | null, position?: number): Promise<ProjectPlacement>;
   };
 
   /**
@@ -1121,6 +1141,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       sendRaw: (id, text) => post(`${a(id)}/send`, { text, raw: true }),
       keys: (id, keys) => post(`${a(id)}/keys`, { keys }),
       interrupt: (id) => post(`${a(id)}/interrupt`),
+      queued: (id) => get(`${a(id)}/queued`),
+      removeQueued: (id, turn, source = "store") => del(`${a(id)}/queued/${seg(String(turn))}`, { source }),
       answer: (id, body) => post(`${a(id)}/answer`, body),
       events: (id, q = {}) => page(`${a(id)}/events`, { ...q }),
       sessions: (id, q = {}) => page(`${a(id)}/sessions`, { ...q }),
@@ -1289,6 +1311,15 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       },
       links: (id, body) => patch(`/api/test-runs/${seg(id)}/links`, body),
       remove: (id) => del(`/api/test-runs/${seg(id)}`),
+    },
+
+    projectFolders: {
+      list: () => get("/api/project-folders"),
+      create: (body) => post("/api/project-folders", body),
+      update: (id, body) => patch(`/api/project-folders/${seg(id)}`, body),
+      remove: (id) => del(`/api/project-folders/${seg(id)}`),
+      place: (project, folderId, position) =>
+        put(`/api/projects/${seg(project)}/folder`, position === undefined ? { folder_id: folderId } : { folder_id: folderId, position }),
     },
 
     pins: {

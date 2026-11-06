@@ -548,20 +548,23 @@ async fn pause(ctx: &Ctx, agent: &str, action: &str) -> anyhow::Result<()> {
         .api
         .post(&format!("{}/{action}", agent_path(agent)), None)
         .await?;
-    ctx.emit(&r, |c, r| {
-        let queued = r["queued"].as_u64().unwrap_or(0);
-        let state = if r["paused"].as_bool() == Some(true) {
-            "paused"
-        } else {
-            "not paused"
-        };
-        c.line(format!(
-            "{}/{} is {state} ({}, {queued} queued)",
-            field(r, "project"),
-            field(r, "name"),
-            field(r, "status")
-        ));
-    })
+    ctx.emit(&r, |c, r| c.line(pause_line(action, r)))
+}
+
+/// The line of `agent pause|unpause` from the agent after the call
+/// (TER-45): `paused p/w (stopped, 1 queued)` or `unpaused p/w (starting,
+/// 1 queued)`. A flag that did not end as asked says so.
+fn pause_line(action: &str, r: &Value) -> String {
+    let queued = r["queued"].as_u64().unwrap_or(0);
+    let paused = r["paused"].as_bool() == Some(true);
+    let who = format!("{}/{}", field(r, "project"), field(r, "name"));
+    let what = match (action, paused) {
+        ("pause", true) => format!("paused {who}"),
+        ("unpause", false) => format!("unpaused {who}"),
+        (_, true) => format!("{who} is still paused"),
+        (_, false) => format!("{who} is not paused"),
+    };
+    format!("{what} ({}, {queued} queued)", field(r, "status"))
 }
 
 /// How long `agent start|stop|restart` waits for the new status.
@@ -739,4 +742,34 @@ pub async fn status(ctx: &Ctx, cmd: &StatusCmd) -> anyhow::Result<()> {
         .post(&format!("{}/status", agent_path(&me)), Some(body))
         .await?;
     ctx.emit(&r, |c, _| c.line(format!("status: {status}")))
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use serde_json::json;
+
+    use super::pause_line;
+
+    /// TER-45: a pause or an unpause that took names what it did; a flag
+    /// that did not end as asked says so.
+    #[test]
+    fn the_pause_line_names_the_action() {
+        let a = |paused: bool, status: &str| json!({"project": "p", "name": "w", "paused": paused, "status": status, "queued": 1});
+        assert_eq!(
+            pause_line("pause", &a(true, "stopped")),
+            "paused p/w (stopped, 1 queued)"
+        );
+        assert_eq!(
+            pause_line("unpause", &a(false, "starting")),
+            "unpaused p/w (starting, 1 queued)"
+        );
+        assert_eq!(
+            pause_line("unpause", &a(true, "stopped")),
+            "p/w is still paused (stopped, 1 queued)"
+        );
+        assert_eq!(
+            pause_line("pause", &a(false, "idle")),
+            "p/w is not paused (idle, 1 queued)"
+        );
+    }
 }

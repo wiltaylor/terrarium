@@ -40,7 +40,7 @@ async fn list(
     ApiQuery(page): ApiQuery<Page>,
 ) -> ApiResult<Response> {
     let only = match &actor {
-        Actor::Agent(a) if !a.is_sysadmin() => Some(a.project.clone()),
+        Actor::Agent(a) if !a.reads_all() => Some(a.project.clone()),
         _ => None,
     };
     let rows = state

@@ -16,9 +16,26 @@ export const AGENT_STATUSES = [
 ] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
+/** The queue of a queued turn. */
+export type QueuedSource = "store";
+
+/** One turn that waits in the store for its agent's wake (`GET /api/agents/{id}/queued`, TER-54). */
+export interface QueuedTurn {
+  id: number;
+  /** Where the turn waits: `store` (the daemon's queue for an agent that does not run). TER-66 adds the live queues. */
+  source: QueuedSource;
+  /** The turn as it will be typed, with its tag (`[User] ...`). */
+  text: string;
+  /** The text after the tag: what the composer gets for an edit. */
+  body: string;
+  created_at: string;
+}
+
 /** Roles above `member`. The daemon drops `member`; it is implicit. */
-export type Role = "sysadmin" | "project_admin" | "member";
-export const GRANTABLE_ROLES = ["project_admin", "sysadmin"] as const;
+export type Role = "sysadmin" | "project_admin" | "member" | "architect";
+export const GRANTABLE_ROLES = ["project_admin", "sysadmin", "architect"] as const;
+/** The label of a role in the dashboard: `architect` is the system architect (TER-47). */
+export const roleLabel = (r: string): string => (r === "architect" ? "system architect" : r);
 
 export type RestartPolicy = "always" | "on-failure" | "never";
 export const RESTART_POLICIES: RestartPolicy[] = ["on-failure", "always", "never"];
@@ -285,6 +302,8 @@ export interface Project {
   description?: string;
   card_prefix: string;
   source?: Source;
+  /** The idle alert (TER-67): `off` or a duration such as `15m`. Absent: the default, 15m. */
+  idle_alert?: string;
   created_at: string;
   updated_at?: string;
 }
@@ -1624,6 +1643,8 @@ export interface Card {
   done_at?: string | null;
   /** The latest test run linked to the card (docs/api.md, test runs). Absent when no run is linked. */
   tests?: CardTests;
+  /** The idle mark (docs/api.md §6.2 "Idle alert", TER-67): the assignee rests with no wait since this time, past the project's idle alert, and the leads were told. */
+  idle_since?: string | null;
 }
 
 /** A card of `GET /api/cards` (docs/api.md §8, TER-43): a card in the working or research column of a board, with its column kind and the status of its assignee agent. */
@@ -1632,6 +1653,10 @@ export interface ActiveCard extends Card {
   column_kind: string;
   /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
   assignee_status?: string;
+  /** A card in the blocked column (TER-51): when it moved there. */
+  blocked_since?: string;
+  /** A card in the blocked column: the comment of that move, or the newest comment without one. */
+  blocked_reason?: string;
 }
 
 export interface Board {
@@ -1922,6 +1947,29 @@ export interface Pin {
   project: string;
   name: string;
   pinned_at: string;
+}
+
+/** One project folder of the sidebar (`GET /api/project-folders`, docs/api.md §6.12). `parent_id` null is the root. */
+export interface ProjectFolder {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The folder of one project (docs/api.md §6.12). A project with no placement sits at the root, after the placed ones. */
+export interface ProjectPlacement {
+  project: string;
+  folder_id: string | null;
+  position: number;
+}
+
+/** `GET /api/project-folders`: every folder and every placed project. */
+export interface ProjectFolderTree {
+  folders: ProjectFolder[];
+  placements: ProjectPlacement[];
 }
 
 /** `POST /api/agents/{id}/attachments` (docs/api.md §6.5): an image in the agent's workspace. */

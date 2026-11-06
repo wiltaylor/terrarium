@@ -15,12 +15,14 @@ mod fleet;
 mod hosts;
 mod inbox;
 pub mod install;
+mod jobs;
 mod longpoll;
 mod mail;
 mod memory;
 mod monitors;
 mod pins;
 mod pipelines;
+mod project_folders;
 mod projects;
 mod questions;
 mod records;
@@ -279,6 +281,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .route("/events", get(streams::firehose).post(event_sources::emit))
         .route("/events/latest", get(streams::latest))
         .merge(projects::routes())
+        .merge(project_folders::routes())
         .merge(repos::routes())
         .merge(repo_trees::routes())
         .merge(secrets::routes())
@@ -312,6 +315,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(waits::routes())
         .merge(questions::routes())
         .merge(inbox::routes())
+        .merge(jobs::routes())
         .merge(config::routes())
         .merge(skills::routes())
         .merge(system_prompts::routes())

@@ -1985,6 +1985,119 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX questions_agent ON questions(agent, status);
     CREATE INDEX questions_status ON questions(status, project);
     "#,
+    // 68: project folders of the dashboard sidebar (TER-48, docs/api.md
+    // §6.12, `crate::store::project_folders`). Folders nest by
+    // `parent_id` (NULL is the root). A project's place is a row in
+    // `project_placements`; a project with no row sits at the root. The
+    // projects table is not touched: its rows come from definition files.
+    // The cascade removes the place of a deleted project. A folder delete
+    // moves its content up in the store before the row goes, so the
+    // `parent_id` foreign keys have no action. Self-contained: when
+    // another branch takes this number, move this entry to the end of the
+    // list.
+    r#"
+    CREATE TABLE project_folders (
+        id         TEXT PRIMARY KEY,
+        name       TEXT NOT NULL,
+        parent_id  TEXT REFERENCES project_folders(id),
+        position   INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX project_folders_parent ON project_folders(parent_id, position);
+    CREATE TABLE project_placements (
+        project   TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,
+        folder_id TEXT REFERENCES project_folders(id),
+        position  INTEGER NOT NULL
+    );
+    CREATE INDEX project_placements_folder ON project_placements(folder_id, position);
+    "#,
+    // 69: the role `architect` (TER-47) in the CHECK of `roles.role`. It
+    // comes after 68 of TER-48 (project folders): when both branches are
+    // merged, this entry is the last. The column is part of the primary
+    // key, so the table is made again. No table refers to `roles` (it
+    // refers to `agents`), so the drop deletes no other row.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list. The test finds it by the name
+    // `roles_architect`.
+    r#"
+    CREATE TABLE roles_architect (
+        agent_id   TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        role       TEXT NOT NULL CHECK (role IN ('project_admin', 'sysadmin', 'architect')),
+        project    TEXT,
+        granted_by TEXT NOT NULL,
+        granted_at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, role)
+    );
+    INSERT INTO roles_architect (agent_id, role, project, granted_by, granted_at)
+        SELECT agent_id, role, project, granted_by, granted_at FROM roles;
+    DROP TABLE roles;
+    ALTER TABLE roles_architect RENAME TO roles;
+    "#,
+    // 70: the idle alert (TER-67, `crate::idle_alert`). `projects.idle_alert`
+    // is the project's threshold (`null`: the default, `off`, or a
+    // duration). `cards.idle_since` marks a card whose assignee rests with
+    // no wait past that threshold: the start of the rest. Self-contained:
+    // when another branch takes this number, move this entry to the end.
+    r#"
+    ALTER TABLE projects ADD COLUMN idle_alert TEXT;
+    ALTER TABLE cards ADD COLUMN idle_since TEXT;
+    "#,
+    // 71: the job queue of a project (TER-71, `crate::jobs`). A job
+    // validates a card commit, or merges a card branch onto `next` and
+    // validates the result. Jobs start first in, first out, at most the
+    // project's `slots` at a time. `attempt` is 1, or 2 for the
+    // one rerun of a failed job. `outcome` says why a job failed (`red`,
+    // `conflict`, `error`). `project_delivery` holds the queue config of a
+    // project (JSON `DeliveryDef`). Self-contained: when another branch
+    // takes this number, move this entry to the end of the list.
+    r#"
+    CREATE TABLE jobs (
+        id          TEXT PRIMARY KEY,
+        project     TEXT NOT NULL,
+        card        TEXT NOT NULL,
+        kind        TEXT NOT NULL CHECK (kind IN ('validate', 'merge')),
+        repo        TEXT NOT NULL,
+        branch      TEXT NOT NULL,
+        commit_sha  TEXT,
+        state       TEXT NOT NULL DEFAULT 'queued'
+            CHECK (state IN ('queued', 'running', 'passed', 'failed', 'cancelled')),
+        attempt     INTEGER NOT NULL DEFAULT 1,
+        outcome     TEXT,
+        exit_code   INTEGER,
+        tail        TEXT,
+        head        TEXT,
+        by_agent    TEXT,
+        created_by  TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        started_at  TEXT,
+        ended_at    TEXT
+    );
+    CREATE INDEX jobs_project_state ON jobs(project, state, created_at);
+    CREATE INDEX jobs_card ON jobs(card);
+    CREATE TABLE project_delivery (
+        project    TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE ON UPDATE CASCADE,
+        def        TEXT NOT NULL,                     -- JSON DeliveryDef
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    "#,
+    // 72: a host-wide cap on the running jobs of the job queue (TER-97,
+    // `crate::jobs`). `jobs.host` is the host that a running job took a
+    // place on (set when it starts). `job_hosts` holds the cap of a host:
+    // the most jobs of all projects that run on it at once. A host
+    // without a row has no cap. Self-contained: when another branch takes
+    // this number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE jobs ADD COLUMN host TEXT;
+    CREATE INDEX jobs_host_state ON jobs(host, state);
+    CREATE TABLE job_hosts (
+        host       TEXT PRIMARY KEY,
+        heavy_jobs INTEGER NOT NULL CHECK (heavy_jobs >= 1),
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -3398,6 +3511,68 @@ mod tests {
             conn.execute("UPDATE questions SET kind = 'bogus' WHERE id = 'Q1'", [])
                 .is_err()
         );
+    }
+
+    /// Migration 69 keeps each role and takes `architect`. Found by its
+    /// content.
+    #[test]
+    fn migration_69_keeps_roles_and_takes_architect() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("roles_architect"))
+            .unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 't', 't');
+             INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+               VALUES ('A1', 'a', 'p', 'claude', '/w', 't', 't');
+             INSERT INTO roles (agent_id, role, project, granted_by, granted_at)
+               VALUES ('A1', 'sysadmin', NULL, 'operator', 't');",
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO roles (agent_id, role, granted_by, granted_at)
+                 VALUES ('A1', 'architect', 'operator', 't')",
+                [],
+            )
+            .is_err()
+        );
+        migrate(&mut conn).unwrap();
+        let roles: Vec<String> = conn
+            .prepare("SELECT role FROM roles WHERE agent_id = 'A1'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(roles, ["sysadmin"]);
+        conn.execute(
+            "INSERT INTO roles (agent_id, role, granted_by, granted_at)
+             VALUES ('A1', 'architect', 'operator', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO roles (agent_id, role, granted_by, granted_at)
+                 VALUES ('A1', 'bogus', 'operator', 't')",
+                [],
+            )
+            .is_err()
+        );
+        // The cascade from agents still works.
+        conn.execute("DELETE FROM agents WHERE id = 'A1'", [])
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM roles", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

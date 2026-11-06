@@ -8,6 +8,7 @@
 //   pages before it.
 // - `composerState`: when the operator may type a turn.
 // - `canInterrupt` / `interruptNote`: the Stop button and its note.
+// - `footerState`: the live line under the transcript (TER-54).
 // - `tailOnScroll` / `tailOnAppend`: auto-scroll that pauses when the
 //   operator scrolls up.
 // - `sessionGone`: the open session is not there (any more), so the view
@@ -267,6 +268,40 @@ export const canInterrupt = (o: { agentStatus: AgentStatus | undefined; sessionA
 /** The note under the composer after a Stop: the turn ended with the reason `interrupted`. */
 export const interruptNote = (o: { agentStatus: AgentStatus | undefined; reason?: string | null }): string | null =>
   o.reason === "interrupted" && (o.agentStatus === "idle" || o.agentStatus === "waiting") ? "Interrupted: the turn stopped, and the agent is idle." : null;
+
+/**
+ * The live line at the bottom of the conversation (TER-54): what the agent does now, from its
+ * status. `running`: a turn or a start is in progress (the line shows a moving indicator).
+ */
+export interface FooterState {
+  text: string;
+  running: boolean;
+  tone: "" | "ok" | "info" | "warn" | "err";
+}
+
+export function footerState(o: { status: AgentStatus | undefined; reason?: string | null; waitingOn?: string | null; paused?: boolean }): FooterState {
+  const why = o.reason?.trim();
+  if (o.paused && (o.status === "stopped" || !o.status)) return { text: "Paused", running: false, tone: "warn" };
+  switch (o.status) {
+    case "working":
+      return { text: "Thinking…", running: true, tone: "info" };
+    case "starting":
+    case "restarting":
+      return { text: o.status === "starting" ? "Starting…" : "Restarting…", running: true, tone: "info" };
+    case "waiting":
+      return { text: o.waitingOn ? `Waiting on ${o.waitingOn}` : "Waiting", running: false, tone: "" };
+    case "blocked":
+      return { text: why ? `Blocked: ${why}` : "Blocked", running: false, tone: "warn" };
+    case "idle":
+      return { text: "Idle", running: false, tone: "ok" };
+    case "stopped":
+      return { text: why ? `Stopped (${why})` : "Stopped", running: false, tone: "" };
+    case "error":
+      return { text: why ? `Error: ${why}` : "Error", running: false, tone: "err" };
+    default:
+      return { text: "Unknown", running: false, tone: "" };
+  }
+}
 
 /** Enter sends; Shift+Enter (and Enter while an IME composes) does not. */
 export const isSendKey = (e: { key: string; shiftKey: boolean; isComposing?: boolean; altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean }): boolean =>

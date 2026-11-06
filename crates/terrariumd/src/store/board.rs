@@ -162,6 +162,11 @@ pub struct Card {
     /// The latest test run linked to the card (PLAN §15.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tests: Option<crate::store::test_runs::CardTests>,
+    /// The idle mark (TER-67, `crate::idle_alert`): the assignee rests with
+    /// no wait since this time, past the project's idle alert, and the
+    /// leads were told. It clears when the assignee works again or waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -211,6 +216,7 @@ struct CardRow {
     eta_set_at: Option<String>,
     eta_set_by: Option<String>,
     done_at: Option<String>,
+    idle_since: Option<String>,
 }
 
 fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
@@ -235,6 +241,7 @@ fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
         eta_set_at: r.get("eta_set_at")?,
         eta_set_by: r.get("eta_set_by")?,
         done_at: r.get("done_at")?,
+        idle_since: r.get("idle_since")?,
     })
 }
 
@@ -523,6 +530,7 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         eta_set_by: row.eta_set_by,
         eta_set_by_name,
         done_at: row.done_at,
+        idle_since: row.idle_since,
     })
 }
 
@@ -575,7 +583,20 @@ pub struct CardFilter {
     pub archived: bool,
 }
 
-/// Cards by number. The cursor is a card number.
+/// The place of a card in [`list_cards`]: column position, card position,
+/// card number. The cursor is the place of the last card of the page, as
+/// `<column>.<position>.<number>`.
+fn list_cursor(cursor: Option<&str>) -> (i64, i64, i64) {
+    let mut parts = cursor.unwrap_or_default().split('.').map(str::parse::<i64>);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(k)), Some(Ok(p)), Some(Ok(n)), None) => (k, p, n),
+        // No cursor, or one that is not ours: start at the top.
+        _ => (i64::MIN, i64::MIN, i64::MIN),
+    }
+}
+
+/// Cards in board order (TER-73): by the place of their column on the
+/// board, then by their place in the column (the top first), then by number.
 pub fn list_cards(
     conn: &Connection,
     project: &str,
@@ -584,7 +605,7 @@ pub fn list_cards(
     page: &Page,
 ) -> ApiResult<Paged<Card>> {
     let limit = page.limit();
-    let after: i64 = page.cursor().and_then(|c| c.parse().ok()).unwrap_or(0);
+    let (after_k, after_p, after_n) = list_cursor(page.cursor());
     // A role alias (`working`, `blocked`) names the column with that role.
     // An unknown name matches no card, as before.
     let column_name = f.column.as_deref().map(|c| {
@@ -592,35 +613,48 @@ pub fn list_cards(
             .map(|k| k.name)
             .unwrap_or_else(|_| c.to_owned())
     });
-    let mut stmt = conn.prepare(&format!(
-        "{CARD_SELECT} WHERE c.project = ?1 AND c.number > ?2
+    let mut stmt = conn.prepare(
+        "SELECT c.*, k.name AS column_name, k.role AS column_role,
+                k.position AS column_position
+           FROM cards c JOIN board_columns k ON k.id = c.column_id
+          WHERE c.project = ?1
+           AND (k.position, c.position, c.number) > (?2, ?9, ?10)
            AND (?3 IS NULL OR k.name = ?3)
            AND (?4 IS NULL OR c.assignee = ?4)
            AND (?5 = 0 OR c.assignee IS NULL)
            AND (?6 IS NULL OR EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?6))
            AND c.archived = ?7
-         ORDER BY c.number LIMIT ?8"
-    ))?;
+         ORDER BY k.position, c.position, c.number LIMIT ?8",
+    )?;
     let rows = stmt
         .query_map(
             params![
                 project,
-                after,
+                after_k,
                 column_name,
                 assignee,
                 f.unassigned as i64,
                 f.label,
                 f.archived as i64,
-                (limit + 1) as i64
+                (limit + 1) as i64,
+                after_p,
+                after_n
             ],
-            |r| Ok((r.get::<_, i64>("number")?, card_row(r)?)),
+            |r| {
+                let place = (
+                    r.get::<_, i64>("column_position")?,
+                    r.get::<_, i64>("position")?,
+                    r.get::<_, i64>("number")?,
+                );
+                Ok((place, card_row(r)?))
+            },
         )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::new();
-    for (n, row) in rows {
-        out.push((n, render(conn, row)?));
+    for (place, row) in rows {
+        out.push((place, render(conn, row)?));
     }
-    let paged = Paged::from_rows(out, limit, |(n, _)| n.to_string());
+    let paged = Paged::from_rows(out, limit, |((k, p, n), _)| format!("{k}.{p}.{n}"));
     Ok(Paged {
         items: paged.items.into_iter().map(|(_, c)| c).collect(),
         next: paged.next,
@@ -641,6 +675,37 @@ pub struct ActiveCard {
     /// a removed agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee_status: Option<String>,
+    /// A card in the blocked column (TER-51): when it moved there (the
+    /// last move event; the card's `updated_at` without one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_since: Option<String>,
+    /// A card in the blocked column: the comment of that move (what is
+    /// needed), or the newest comment without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
+/// When a card in the blocked column moved there, and the comment of that
+/// move. The move event has both; without one (a card from before the
+/// event log), `updated_at` and the newest comment.
+fn blocked_info(conn: &Connection, card: &Card) -> ApiResult<(String, Option<String>)> {
+    let ev: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT at, json_extract(payload, '$.comment') FROM events
+              WHERE card = ?1 AND kind = 'card'
+                AND json_extract(payload, '$.change') = 'moved'
+                AND json_extract(payload, '$.to_role') = ?2
+              ORDER BY seq DESC LIMIT 1",
+            params![card.id, BLOCKED],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let newest = || card.comments.last().map(|c| c.body.clone());
+    Ok(match ev {
+        Some((at, Some(c))) if !c.trim().is_empty() => (at, Some(c)),
+        Some((at, _)) => (at, newest()),
+        None => (card.updated_at.clone(), newest()),
+    })
 }
 
 /// The most cards of [`active_cards`].
@@ -677,6 +742,7 @@ pub fn active_cards(
     for row in rows {
         let kind = match row.column_role.as_deref() {
             Some(WORKING) => WORKING.to_owned(),
+            Some(BLOCKED) => BLOCKED.to_owned(),
             _ => row.column.to_lowercase(),
         };
         let card = render(conn, row)?;
@@ -688,10 +754,18 @@ pub fn active_cards(
                 .optional()?,
             _ => None,
         };
+        let (blocked_since, blocked_reason) = if kind == BLOCKED {
+            let (since, reason) = blocked_info(conn, &card)?;
+            (Some(since), reason)
+        } else {
+            (None, None)
+        };
         out.push(ActiveCard {
             card,
             column_kind: kind,
             assignee_status: status,
+            blocked_since,
+            blocked_reason,
         });
     }
     Ok(out)
@@ -952,7 +1026,7 @@ pub fn check_test_link(
     project: &str,
 ) -> ApiResult<String> {
     let card = find_row(conn, id)?;
-    policy::read_project(actor, &card.project)?;
+    policy::write_project(actor, &card.project)?;
     if card.project != project {
         return Err(ApiError::invalid(format!(
             "a test run links to a card of its project; {} is in `{}`",
@@ -995,7 +1069,7 @@ pub fn card_ref(conn: &Connection, id: &str) -> ApiResult<CardRef> {
 /// edit (PLAN §13). The card must not be archived.
 pub fn check_file_edit(conn: &Connection, actor: &Actor, id: &str) -> ApiResult<CardRef> {
     let card = find_row(conn, id)?;
-    policy::read_project(actor, &card.project)?;
+    policy::write_project(actor, &card.project)?;
     not_archived(&card)?;
     may_edit(actor, &card)?;
     Ok(card_ref_of(&card))
@@ -1124,9 +1198,11 @@ fn apply_move(
         params![to.id, at, card.id],
     )?;
     // `done_at` is when the card moved to `done`; another column clears it.
+    // A move to another column ends the idle mark (TER-67).
     t.execute(
         "UPDATE cards SET column_id = ?2, position = ?3, updated_at = ?4,
-            done_at = CASE WHEN ?5 THEN done_at WHEN ?6 THEN ?4 ELSE NULL END
+            done_at = CASE WHEN ?5 THEN done_at WHEN ?6 THEN ?4 ELSE NULL END,
+            idle_since = CASE WHEN ?5 THEN idle_since ELSE NULL END
          WHERE id = ?1",
         params![card.id, to.id, at, now(), same, to.name == DONE],
     )?;
@@ -1184,7 +1260,7 @@ pub fn move_card(
     comment: Option<&str>,
 ) -> ApiResult<Card> {
     let card = find_row(t, id)?;
-    policy::read_project(actor, &card.project)?;
+    policy::write_project(actor, &card.project)?;
     let to = column(t, &card.project, column_name)?;
     check_move(t, actor, &card, &to, comment)?;
     apply_move(t, actor, &card, &to, position, comment)?;
@@ -1221,7 +1297,7 @@ fn resolve_assignee(
 /// Assign a card, or unassign it with `None`.
 pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -> ApiResult<Card> {
     let card = find_row(t, id)?;
-    policy::read_project(actor, &card.project)?;
+    policy::write_project(actor, &card.project)?;
     not_archived(&card)?;
     let to = who
         .map(|w| resolve_assignee(t, &card.project, w, actor))
@@ -1248,7 +1324,7 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
         return get_card(t, &card.id);
     }
     t.execute(
-        "UPDATE cards SET assignee = ?2, updated_at = ?3 WHERE id = ?1",
+        "UPDATE cards SET assignee = ?2, idle_since = NULL, updated_at = ?3 WHERE id = ?1",
         params![card.id, new, now()],
     )?;
     if let Some(prev) = card.assignee.as_ref().filter(|a| **a != me) {
@@ -1272,7 +1348,7 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
 /// Assign a card to the caller and move it to the `working` column.
 pub fn claim_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<Card> {
     let card = find_row(t, id)?;
-    policy::read_project(actor, &card.project)?;
+    policy::write_project(actor, &card.project)?;
     not_archived(&card)?;
     let me = actor.address();
     if let Some(current) = card.assignee.as_ref().filter(|a| **a != me) {
@@ -1287,7 +1363,7 @@ pub fn claim_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<Card> {
     }
     if card.assignee.is_none() {
         t.execute(
-            "UPDATE cards SET assignee = ?2, updated_at = ?3 WHERE id = ?1",
+            "UPDATE cards SET assignee = ?2, idle_since = NULL, updated_at = ?3 WHERE id = ?1",
             params![card.id, me, now()],
         )?;
         let row = find_row(t, &card.id)?;
@@ -1393,7 +1469,7 @@ pub fn create_card(
     project: &str,
     mut new: NewCard,
 ) -> ApiResult<Card> {
-    policy::read_project(actor, project)?;
+    policy::write_project(actor, project)?;
     let prefix = crate::store::projects::get(t, project)?.card_prefix;
     let mut thread = None;
     if let Some(mid) = &new.from_mail {
@@ -1489,7 +1565,9 @@ pub fn create_card(
     get_card(t, &id)
 }
 
-fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+/// A field that tells `null` from absent: absent is `None`, `null` is
+/// `Some(None)`.
+pub(crate) fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -1536,7 +1614,7 @@ pub struct CardPatch {
 
 pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> ApiResult<Card> {
     let card = find_row(t, id)?;
-    policy::read_project(actor, &card.project)?;
+    policy::write_project(actor, &card.project)?;
     let mut p = p;
     // `add_labels` and `remove_labels` change the current labels in this
     // write, so two changes at once do not lose each other's labels.
@@ -1638,7 +1716,7 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
 /// reassignment is.
 pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> ApiResult<Card> {
     let card = find_row(t, id)?;
-    policy::read_project(actor, &card.project)?;
+    policy::write_project(actor, &card.project)?;
     not_archived(&card)?;
     may_edit(actor, &card)?;
     let at = match eta {
@@ -1688,7 +1766,7 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
 /// Archive a card. It leaves the board; its history stays.
 pub fn archive_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
     let card = find_row(t, id)?;
-    policy::read_project(actor, &card.project)?;
+    policy::write_project(actor, &card.project)?;
     if card.archived {
         return Ok(());
     }
@@ -1714,7 +1792,7 @@ pub fn archive_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
 
 pub fn add_comment(t: &mut Tx<'_>, actor: &Actor, id: &str, body: &str) -> ApiResult<Card> {
     let card = find_row(t, id)?;
-    policy::read_project(actor, &card.project)?;
+    policy::write_project(actor, &card.project)?;
     let body = body.trim();
     if body.is_empty() {
         return Err(ApiError::invalid("the comment is empty"));
@@ -1736,7 +1814,7 @@ pub struct NewLink {
 
 pub fn add_link(t: &mut Tx<'_>, actor: &Actor, id: &str, link: &NewLink) -> ApiResult<Card> {
     let card = find_row(t, id)?;
-    policy::read_project(actor, &card.project)?;
+    policy::write_project(actor, &card.project)?;
     not_archived(&card)?;
     may_edit(actor, &card)?;
     let reference = link.reference.trim();

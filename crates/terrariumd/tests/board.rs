@@ -88,7 +88,70 @@ async fn board_shape_and_card_ids() {
     let l = td.get("/api/projects/proj/cards?label=x").await;
     assert_eq!(l.ok()[0]["id"], "TER-1");
     let l = td.get("/api/projects/proj/cards?limit=1").await;
-    assert_eq!(l.next_cursor().as_deref(), Some("1"));
+    assert_eq!(l.ok()[0]["id"], "TER-1");
+    let cursor = l.next_cursor().expect("a second page");
+    let l = td
+        .get(&format!("/api/projects/proj/cards?limit=1&cursor={cursor}"))
+        .await;
+    assert_eq!(l.ok()[0]["id"], "TER-2");
+    assert_eq!(l.next_cursor(), None);
+}
+
+fn ids(v: &Value) -> Vec<&str> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect()
+}
+
+/// TER-73: the card list is in board order: by column, then by place in
+/// the column (the top first), not by card number. Paging keeps that order.
+#[tokio::test]
+async fn the_card_list_is_in_board_order() {
+    let td = setup().await;
+    for t in ["A", "B", "C"] {
+        card(&td, "proj/lead", json!({"title": t, "column": "ready"})).await;
+    }
+    card(&td, "proj/lead", json!({"title": "D"})).await;
+    // TER-3 goes to the top of ready.
+    td.post(
+        "/api/cards/TER-3/move",
+        json!({"column": "ready", "position": 0}),
+    )
+    .await
+    .ok();
+    let all = td.get("/api/projects/proj/cards").await;
+    assert_eq!(ids(all.ok()), ["TER-4", "TER-3", "TER-1", "TER-2"]);
+    let ready = td
+        .get("/api/projects/proj/cards?column=ready&unassigned=true")
+        .await;
+    let ready = ready.ok();
+    assert_eq!(ids(ready), ["TER-3", "TER-1", "TER-2"]);
+    let pos: Vec<i64> = ready
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["position"].as_i64().unwrap())
+        .collect();
+    assert_eq!(pos, [0, 1, 2]);
+    // One card a page gives the same order.
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let path = match &cursor {
+            Some(c) => format!("/api/projects/proj/cards?limit=1&cursor={c}"),
+            None => "/api/projects/proj/cards?limit=1".to_owned(),
+        };
+        let page = td.get(&path).await;
+        seen.extend(ids(page.ok()).into_iter().map(str::to_owned));
+        cursor = page.next_cursor();
+        if cursor.is_none() {
+            break;
+        }
+        assert!(seen.len() < 10, "the pages do not end");
+    }
+    assert_eq!(seen, ["TER-4", "TER-3", "TER-1", "TER-2"]);
 }
 
 #[tokio::test]
@@ -1314,4 +1377,64 @@ async fn active_cards_across_projects_follow_the_rights() {
     assert_eq!(ids(&r).len(), 2, "{r:#?}");
     let r = td.get("/api/cards?columns=backlog").await.ok().clone();
     assert_eq!(ids(&r), [k3]);
+}
+
+/// TER-51: `GET /api/cards?columns=blocked` gives each blocked card with
+/// `column_kind: blocked`, when it moved there (`blocked_since`), and the
+/// comment of that move (`blocked_reason`). Other cards have neither.
+#[tokio::test]
+async fn blocked_cards_have_the_time_and_the_reason_of_the_move() {
+    let td = setup().await;
+    let k1 = card(&td, "proj/w1", json!({"title": "Parser"})).await;
+    td.post_empty_as("proj/w1", &format!("/api/cards/{k1}/claim"))
+        .await
+        .ok();
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{k1}/comments"),
+        json!({"body": "an older comment"}),
+    )
+    .await
+    .ok();
+    let before = td.get(&format!("/api/cards/{k1}")).await.ok().clone();
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{k1}/move"),
+        json!({"column": "blocked", "comment": "need a target\nsecond line"}),
+    )
+    .await
+    .ok();
+    // A later comment does not change the reason.
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{k1}/comments"),
+        json!({"body": "still waiting"}),
+    )
+    .await
+    .ok();
+    let k2 = card(&td, "proj/w2", json!({"title": "Other"})).await;
+    td.post_empty_as("proj/w2", &format!("/api/cards/{k2}/claim"))
+        .await
+        .ok();
+
+    let r = td.get("/api/cards?columns=blocked").await.ok().clone();
+    let rows = r.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{r:#?}");
+    let b = &rows[0];
+    assert_eq!(b["id"], k1);
+    assert_eq!(b["column_kind"], "blocked");
+    assert_eq!(b["blocked_reason"], "need a target\nsecond line");
+    let since = b["blocked_since"].as_str().unwrap();
+    assert!(
+        since >= before["updated_at"].as_str().unwrap(),
+        "{since} {before:#?}"
+    );
+    assert_eq!(b["assignee_name"], "proj/w1");
+
+    // The working card has no blocked fields.
+    let w = td.get("/api/cards?columns=working").await.ok().clone();
+    let w = w.as_array().unwrap();
+    assert_eq!(w.len(), 1);
+    assert!(w[0].get("blocked_since").is_none(), "{w:#?}");
+    assert!(w[0].get("blocked_reason").is_none());
 }

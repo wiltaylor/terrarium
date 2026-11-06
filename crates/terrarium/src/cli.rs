@@ -245,6 +245,13 @@ pub enum Command {
         #[command(flatten)]
         args: RunArgs,
     },
+    /// The job queue of a project (TER-71): list, show, and cancel the
+    /// validate and merge jobs
+    #[command(visible_alias = "jobs")]
+    Job {
+        #[command(subcommand)]
+        command: JobCmd,
+    },
     /// Register a wait: on an agent, a process, a time, or a card. The
     /// command does not block: end the turn, and the daemon mails you when
     /// the wait ends. While a wait is open, your status is `waiting`
@@ -407,6 +414,11 @@ pub enum ProjectCmd {
         description: Option<String>,
         #[arg(long)]
         prefix: Option<String>,
+        /// How long the assignee of a card in progress may rest with no
+        /// wait before the leads get a mail and the card an idle mark:
+        /// a duration (`15m`, `1h`), `off`, or `default` (15m)
+        #[arg(long)]
+        idle_alert: Option<String>,
     },
     /// Delete a project (sysadmin)
     Rm {
@@ -434,6 +446,73 @@ pub enum ProjectCmd {
     },
     /// Attach a repo to the project (project_admin)
     RepoAdd(RepoAddArgs),
+    /// The job queue config of the project: target, recipe, slots, and
+    /// the repos with a `next` branch
+    Delivery {
+        #[command(subcommand)]
+        command: DeliveryCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DeliveryCmd {
+    /// Show the queue config (`--project`, or the current one)
+    Show,
+    /// Change the queue config; flags that you leave out keep their value
+    /// (project_admin; a global target needs sysadmin)
+    Set(DeliverySetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DeliverySetArgs {
+    /// The target that runs the jobs; `""` turns the queue off
+    #[arg(long)]
+    pub target: Option<String>,
+    /// The validation command, run with `sh -c` in the checkout root
+    #[arg(long)]
+    pub recipe: Option<String>,
+    /// The most jobs at the same time (default 2)
+    #[arg(long)]
+    pub slots: Option<u32>,
+    /// A repo with a `next` branch for merge jobs (repeat; replaces the
+    /// list)
+    #[arg(long = "next-repo")]
+    pub next_repos: Vec<String>,
+    /// The dir on the target for the job clones (default /tmp/terrarium-jobs)
+    #[arg(long)]
+    pub work_dir: Option<String>,
+    /// The most seconds a recipe may run (default 3600)
+    #[arg(long)]
+    pub timeout: Option<u64>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JobCmd {
+    /// List the jobs of the project, newest first
+    Ls {
+        /// queued, running, passed, failed, or cancelled
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Show a job with its output tail
+    Show { id: String },
+    /// Cancel a queued or running job (a running one is killed)
+    Cancel { id: String },
+    /// The host caps: the most jobs of all projects that run on a host at
+    /// once, and the jobs that run on each host now
+    Hosts,
+    /// Set the cap of a host, or take it away with `--clear`
+    /// (sysadmin). The host is the target's host agent, else the host of
+    /// its address, else the target name
+    HostCap {
+        host: String,
+        /// The most jobs that run on the host at once
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        heavy_jobs: Option<u32>,
+        /// No cap on the host
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -1160,6 +1239,34 @@ pub enum CardCmd {
         /// Set the ETA too: a duration such as 45m, 2h30m, or 1d
         #[arg(long, value_name = "DURATION|TIME")]
         eta: Option<String>,
+    },
+    /// Queue a validation of the card's pushed commit: moves the card to
+    /// `validating`, clears the assignee, adds `by:<you>`. Then take your
+    /// next card; the daemon moves this one on the result
+    Validate {
+        id: String,
+        /// The pushed commit: it must be the head of the branch on the
+        /// remote
+        #[arg(long)]
+        commit: Option<String>,
+        /// The repo (default: the card's, or the project's only repo)
+        #[arg(long)]
+        repo: Option<String>,
+        /// The branch (default: the card's, or the card ID in lower case)
+        #[arg(long)]
+        branch: Option<String>,
+        /// Added to the move comment
+        #[arg(long, short = 'm')]
+        comment: Option<String>,
+    },
+    /// Queue a merge of the card branch onto `next` (project_admin): the
+    /// job merges, validates, and pushes `next` when green
+    Merge {
+        id: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     /// Move a card to a column
     Move {

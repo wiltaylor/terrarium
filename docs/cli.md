@@ -1137,6 +1137,43 @@ new and the removed tests.
 The packaged skill `terrarium-tests` gives the command that makes a
 standard file for each test framework.
 
+### The job queue
+
+```
+terrarium card validate <id> [--commit sha] [--repo r] [--branch b] [-m text]
+terrarium card merge <id> [--repo r] [--branch b]          project_admin
+terrarium job ls [--state queued|running|passed|failed|cancelled]
+terrarium job show <id>
+terrarium job cancel <id>
+terrarium job hosts
+terrarium job host-cap <host> <n> | --clear                sysadmin
+terrarium project delivery show
+terrarium project delivery set [--target t] [--recipe cmd] [--slots n]
+                               [--next-repo r]... [--work-dir d] [--timeout secs]
+```
+
+`card validate` queues a validation of the card's pushed commit
+(docs/api.md §35). It moves the card to `validating`, keeps you assigned,
+and adds `by:<you>`. Then take your next card: the daemon moves this one to
+`review` when it passes, or to the top of `ready` with a failure block
+when it fails twice. `--commit` must be the head of the branch on the
+remote. The answer says whether the job starts now, or its place in the
+queue.
+
+`card merge` queues a merge of the card branch onto `next`. The job
+validates the merge and pushes `next` when it is green, and the card moves
+to `accepted`.
+
+`job host-cap` sets the most jobs of all projects that run on one host at
+the same time (docs/api.md §35.2, "The host cap"). The host is the host
+agent of the target, else the host of its address, else the target name.
+`job hosts` shows the caps and the running jobs per host. Jobs run at low
+IO and CPU priority (`ionice -c3 nice -n19`). Builds that you start with
+`terrarium exec` or `terrarium run` are outside the queue.
+
+`project delivery set` keeps the flags that you leave out. `--target ""`
+or `--recipe ""` turns the queue off. `--next-repo` replaces the list.
+
 ### Monitors and the dashboard
 
 ```
@@ -2229,6 +2266,10 @@ Use JSON in a script:
 ```sh
 terrarium --json card ls --unassigned --column ready | jq -r '.[0].id'
 ```
+
+`card ls` lists the cards in board order: by column, then by place in the
+column, the top first. `POS` is the place in the column, from 0. So the first
+line of `card ls --unassigned --column ready` is the top card of `ready`.
 
 ## 8. Limits
 
