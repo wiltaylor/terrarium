@@ -709,6 +709,153 @@ async fn export_captures_a_hand_built_project() {
         .err(422, "invalid");
 }
 
+/// TER-87: an export carries the job queue config of a project as
+/// `[projects.delivery]`. Export then plan shows no change, and an apply
+/// on a new daemon gives the same config. A fleet keeps the target rule
+/// of `PUT /api/projects/{name}/delivery`.
+#[tokio::test]
+async fn export_and_apply_carry_the_job_queue_config() {
+    let td = TestDaemon::start().await;
+    td.project("dq").await;
+    td.post(
+        "/api/projects/dq/repos",
+        json!({"url": "https://example.com/x/tool.git"}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/targets",
+        json!({"name": "box", "kind": "ssh", "project": "dq", "address": "u@h"}),
+    )
+    .await
+    .ok();
+    td.agent("dq", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let def = json!({
+        "target": "dq-box",
+        "recipe": "just ci::validate",
+        "slots": 3,
+        "next_repos": ["tool"],
+        "work_dir": "/srv/jobs",
+        "timeout_secs": 5400,
+    });
+    td.put("/api/projects/dq/delivery", def.clone()).await.ok();
+
+    let e = td.get("/api/fleet/export?project=dq").await;
+    let content = e.ok()["content"].as_str().unwrap().to_owned();
+    assert!(content.contains("[projects.delivery]"), "{content}");
+    let plan = td.post("/api/fleet/plan", body(&content)).await;
+    let s = &plan.ok()["summary"];
+    assert_eq!(s["update"], 0, "{}", plan.body);
+    assert_eq!(s["create"], 0, "{}", plan.body);
+    let p = entry(&plan.body, "project", "dq");
+    assert_eq!(p["action"], "unchanged", "{p}");
+
+    // A new daemon: the apply gives the same config, and a second plan
+    // shows no change.
+    let nd = TestDaemon::start().await;
+    let r = nd.post("/api/fleet/apply", body(&content)).await;
+    assert_eq!(r.ok()["summary"]["conflict"], 0, "{}", r.body);
+    let got = nd.get("/api/projects/dq/delivery").await;
+    assert_eq!(got.ok()["delivery"], def, "{}", got.body);
+    assert_eq!(got.body["enabled"], true);
+    let plan = nd.post("/api/fleet/plan", body(&content)).await;
+    let s = &plan.ok()["summary"];
+    assert_eq!((s["update"].as_u64(), s["create"].as_u64()), (Some(0), Some(0)), "{}", plan.body);
+    let again = nd.get("/api/fleet/export?project=dq").await;
+    assert_eq!(again.ok()["content"].as_str().unwrap(), content);
+
+    // The plan names the field; the project admin may change the recipe.
+    let lead = agent_by_key(&nd, "dq/lead").await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let recipe = content.replace("recipe = \"just ci::validate\"", "recipe = \"true\"");
+    assert_ne!(recipe, content);
+    let plan = nd.post("/api/fleet/plan", body(&recipe)).await;
+    let p = entry(plan.ok(), "project", "dq");
+    assert_eq!(p["action"], "update", "{p}");
+    assert_eq!(p["changes"][0]["field"], "delivery", "{p}");
+    nd.post_as(&lead, "/api/fleet/apply", body(&recipe))
+        .await
+        .ok();
+    let got = nd.get("/api/projects/dq/delivery").await;
+    assert_eq!(got.ok()["delivery"]["recipe"], "true");
+
+    // A global target: the operator yes, the project admin no.
+    nd.post(
+        "/api/targets",
+        json!({"name": "gbox", "kind": "ssh", "address": "u@g"}),
+    )
+    .await
+    .ok();
+    let global = recipe.replace("target = \"dq-box\"", "target = \"gbox\"");
+    assert_ne!(global, recipe);
+    let r = nd.post_as(&lead, "/api/fleet/apply", body(&global)).await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("projects.dq.delivery"),
+        "{}",
+        r.body
+    );
+    assert_eq!(
+        nd.get("/api/projects/dq/delivery").await.ok()["delivery"]["target"],
+        "dq-box"
+    );
+    nd.post("/api/fleet/apply", body(&global)).await.ok();
+    assert_eq!(
+        nd.get("/api/projects/dq/delivery").await.ok()["delivery"]["target"],
+        "gbox"
+    );
+    // An unchanged config needs no right: the lead applies the same file.
+    nd.post_as(&lead, "/api/fleet/apply", body(&global))
+        .await
+        .ok();
+
+    // The target of another project: no, also for the operator.
+    nd.project("other").await;
+    nd.post(
+        "/api/targets",
+        json!({"name": "box", "kind": "ssh", "project": "other", "address": "u@o"}),
+    )
+    .await
+    .ok();
+    let foreign = global.replace("target = \"gbox\"", "target = \"other-box\"");
+    nd.post("/api/fleet/apply", body(&foreign))
+        .await
+        .err(403, "forbidden");
+    // A repo that the project does not have: no.
+    let bad_repo = global.replace("next_repos = [\"tool\"]", "next_repos = [\"nope\"]");
+    assert_ne!(bad_repo, global);
+    nd.post("/api/fleet/apply", body(&bad_repo))
+        .await
+        .err(422, "invalid");
+
+    // The file drops the table the fleet applied: the apply clears the
+    // config, and the fleet no longer manages it.
+    let head = "[projects.delivery]\n";
+    let at = global.find(head).unwrap();
+    let end = global[at..].find("\n\n").map_or(global.len(), |n| at + n + 1);
+    let dropped = format!("{}{}", &global[..at], &global[end..]);
+    let plan = nd.post("/api/fleet/plan", body(&dropped)).await;
+    let p = entry(plan.ok(), "project", "dq");
+    assert_eq!(p["changes"][0]["field"], "delivery", "{p}");
+    assert_eq!(p["changes"][0]["to"], json!({}), "{p}");
+    nd.post("/api/fleet/apply", body(&dropped)).await.ok();
+    let got = nd.get("/api/projects/dq/delivery").await;
+    assert_eq!(got.ok()["delivery"], json!({}), "{}", got.body);
+    assert_eq!(got.body["enabled"], false);
+    let plan = nd.post("/api/fleet/plan", body(&dropped)).await;
+    assert_eq!(plan.ok()["summary"]["update"], 0, "{}", plan.body);
+    // A config set by hand now stays: the fleet does not manage it.
+    nd.put("/api/projects/dq/delivery", def.clone()).await.ok();
+    let plan = nd.post("/api/fleet/plan", body(&dropped)).await;
+    assert_eq!(plan.ok()["summary"]["update"], 0, "{}", plan.body);
+}
+
 /// TER-86: an export carries the spawn policy (with the bound fields of
 /// TER-74), `thread_open` (TER-93), and `calendar_write`, so export then
 /// plan shows no change. A plan names the policy key that an update

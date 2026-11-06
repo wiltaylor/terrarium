@@ -35,12 +35,11 @@ use terrarium_core::config::DeliveryDef;
 use super::{ApiJson, ApiQuery, Shared};
 use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult};
-use crate::executor;
 use crate::jobs as rt;
 use crate::policy;
 use crate::store::board::{self, Card, CardPatch};
 use crate::store::jobs::{self, Job, JobKind, JobState, NewJob};
-use crate::store::{github_gate, hosts, projects, repos, targets};
+use crate::store::{github_gate, hosts, projects, repos};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -221,31 +220,7 @@ async fn set_delivery(
         .db
         .write(actor.label(), move |t| {
             projects::get(t, &name)?;
-            // The recipe runs on the target: a target of this project, or a
-            // global one only when a sysadmin or the operator sets it.
-            if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty()) {
-                let row = targets::get(t, target)?;
-                match &row.def.project {
-                    Some(p) if *p == name => {}
-                    Some(p) => {
-                        return Err(ApiError::forbidden(format!(
-                            "target `{target}` belongs to project `{p}`; the job queue of `{name}` uses its own targets"
-                        )));
-                    }
-                    None => policy::sysadmin(
-                        &actor,
-                        &format!("running the job queue of `{name}` on the global target `{target}`"),
-                    )?,
-                }
-                executor::no_exec(&row.def)?;
-            }
-            for r in &def.next_repos {
-                if repos::find_by_name(t, &name, r)?.is_none() {
-                    return Err(ApiError::invalid(format!(
-                        "`next_repos` names `{r}`, which is not a repo of `{name}`"
-                    )));
-                }
-            }
+            rt::check_delivery(t, &actor, &name, &def)?;
             jobs::set_delivery(t, &name, &def)
         })
         .await?;
