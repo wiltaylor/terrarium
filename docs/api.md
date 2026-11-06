@@ -10177,15 +10177,24 @@ validate or a merge is a `409 conflict` that says how to set it.
   recipe, and push `next` when the recipe passes. The push is not forced:
   when `next` moved, the job fails.
 
-Jobs start first in, first out, with at most `slots` running per project.
+Jobs start first in, first out across all projects. A job starts when:
+
+1. its host is under its cap (the host cap, below), and
+2. its project has fewer than `slots` jobs running.
+
 A merge job runs alone in its project: it starts only when no other job of
 the project runs, no job behind it starts first, and no job starts while
-it runs (see "Limits" below). A card has at most one queued or running job.
+it runs (see "Limits" below). Otherwise a job that must wait does not hold
+back a later job that may start. A card has at most one queued or running
+job.
 
 A job is three runs on the target, and a merge job has one more. The
 prepare run (clone, checkout, merge) and the push run get the repo
 credential in their env. The recipe run gets no credential, because it
-runs the repo's code.
+runs the repo's code. Each run of a job runs at low priority: `ionice
+-c3 nice -n19 <command>`. The daemon checks one time per target (per
+daemon run) that `ionice -c3` works. Without it, the runs use `nice -n19`
+only. The output tail of the job ends with the wrapper (`[run as: ...]`).
 
 The recipe can change its clone: make commits, move HEAD, or write
 `.git/config` (for example `url.<base>.insteadOf`). So the push of a merge
@@ -10228,6 +10237,28 @@ The known hosts of the git runs are the repo host keys that the daemon's
 own git trusts (GitHub's published keys and the recorded ones), not the
 host keys of the targets. A forge whose key the daemon has not recorded
 is accepted on first use in each run (`accept-new`).
+
+#### The host cap
+
+The projects of one host share its disk and its CPUs. The host cap is the
+most jobs of all projects that run on one host at the same time. The
+daemon checks it before the slots of the project. The host of a job is
+the host agent of the delivery target (`host`), else the host part of its
+`address`, else the target name. A host without a cap has no limit. The
+default is no cap.
+
+Builds and tests that agents start by hand (`terrarium exec`, `terrarium
+run`) are not jobs of the queue. The host cap does not count them, and
+they do not get the low priority.
+
+| method and path                 | who                           | what |
+|---------------------------------|-------------------------------|------|
+| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, heavy_jobs, running, updated_by, updated_at}]}`: each host with a cap or a running job. `heavy_jobs` is `null` without a cap |
+| `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
+| `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
+
+The audit row `job.host_cap` keeps the old and the new cap. A job keeps
+the host it started on (`host` in the job).
 
 ### 35.3 Results
 

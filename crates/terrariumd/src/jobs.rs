@@ -2,9 +2,11 @@
 //! [`crate::store::jobs`].
 //!
 //! - A tick (each [`TICK`], and at once after a queue or an end) starts
-//!   the queued jobs that have a slot: first in, first out, at most the
-//!   project's `slots`; a merge job runs alone. The pick and the start are
-//!   one write, so two ticks cannot overfill the slots.
+//!   the queued jobs that have a place: first in, first out across
+//!   projects, at most the host cap of the target's host (TER-97), then
+//!   at most the project's `slots`; a merge job runs alone in its
+//!   project. The pick and the start are one write, so two ticks cannot
+//!   overfill the slots.
 //! - A job is three commands on the project's target, each its own run:
 //!   1. prepare, with the repo credential in its env: a fresh clone in
 //!      `<work_dir>/<project>/<job>`. A validate job checks out the card
@@ -22,6 +24,9 @@
 //!      - with the credential: push that commit ID from the fresh repo
 //!        to `next`. Not forced: when `next` moved, the push fails.
 //!
+//!
+//!   Each step runs as `ionice -c3 nice -n19 <argv>` (`nice` only on a
+//!   target without `ionice`), so jobs do not starve their host.
 //!   Then the clone and the push repo are removed.
 //! - On the end the daemon moves the card itself (as the operator, with a
 //!   comment that starts "Job queue:"): a pass moves a validate card to
@@ -150,50 +155,44 @@ pub fn kick(state: &Shared) {
     });
 }
 
-/// Start each queued job that has a slot.
+/// Start each queued job that has a place: on its host (the host cap,
+/// across projects) and in its project (the slots). One write for all
+/// projects, so the host counts hold.
 pub async fn tick(state: &Shared) -> ApiResult<()> {
-    let projects = state.db.read(jobs::projects_with_queued).await?;
-    for p in projects {
-        let project = p.clone();
-        let started = state
-            .db
-            .write("system", move |t| {
-                let def = jobs::delivery(t, &project)?;
-                if !def.enabled() {
-                    return Ok(Vec::new());
+    let started = state
+        .db
+        .write("system", move |t| {
+            let mut out = Vec::new();
+            for (j, host, def) in jobs::startable(t)? {
+                if jobs::start(t, &j.id, &host)? {
+                    set_labels(t, &j.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
+                    out.push((jobs::get(t, &j.id)?, def));
                 }
-                let mut out = Vec::new();
-                for j in jobs::startable(t, &project, def.slots())? {
-                    if jobs::start(t, &j.id)? {
-                        set_labels(t, &j.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
-                        out.push((jobs::get(t, &j.id)?, def.clone()));
+            }
+            Ok(out)
+        })
+        .await?;
+    for (job, def) in started {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let end = run(&state, &job, &def).await;
+            set_control(&job.id, None);
+            let id = job.id.clone();
+            let ended = state
+                .db
+                .write("system", move |t| jobs::finish(t, &id, &end))
+                .await;
+            match ended {
+                Ok(Some(j)) => {
+                    if let Err(e) = after_end(&state, &j).await {
+                        warn!(job = %j.id, "cannot handle the end of a job: {e}");
                     }
                 }
-                Ok(out)
-            })
-            .await?;
-        for (job, def) in started {
-            let state = state.clone();
-            tokio::spawn(async move {
-                let end = run(&state, &job, &def).await;
-                set_control(&job.id, None);
-                let id = job.id.clone();
-                let ended = state
-                    .db
-                    .write("system", move |t| jobs::finish(t, &id, &end))
-                    .await;
-                match ended {
-                    Ok(Some(j)) => {
-                        if let Err(e) = after_end(&state, &j).await {
-                            warn!(job = %j.id, "cannot handle the end of a job: {e}");
-                        }
-                    }
-                    Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
-                    Err(e) => warn!(job = %job.id, "cannot end a job: {e}"),
-                }
-                kick(&state);
-            });
-        }
+                Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
+                Err(e) => warn!(job = %job.id, "cannot end a job: {e}"),
+            }
+            kick(&state);
+        });
     }
     Ok(())
 }
@@ -339,6 +338,7 @@ async fn run_inner(state: &Shared, job: &Job, def: &DeliveryDef) -> ApiResult<Jo
         check_commit(c)?;
     }
     let holder = Some(format!("{}/jobs", job.project));
+    let ionice = has_ionice(state, job, &target, &row.def, holder.clone()).await;
     let ctx = StepCtx {
         state,
         job,
@@ -347,6 +347,7 @@ async fn run_inner(state: &Shared, job: &Job, def: &DeliveryDef) -> ApiResult<Jo
         dir: &dir,
         secret,
         holder: holder.clone(),
+        ionice,
         known_hosts: executor::git_known_hosts(state),
     };
     let result = steps(&ctx, recipe, def.timeout_secs()).await;
@@ -370,6 +371,74 @@ async fn run_inner(state: &Shared, job: &Job, def: &DeliveryDef) -> ApiResult<Jo
     result
 }
 
+/// The command that the steps of a job run under (TER-97): the idle IO
+/// class and the lowest CPU priority, so that a job does not starve the
+/// agents and the other work on its host. Without `ionice`, `nice` only.
+pub fn low_priority(argv: Vec<String>, ionice: bool) -> Vec<String> {
+    let mut out: Vec<String> = if ionice {
+        vec!["ionice".into(), "-c3".into()]
+    } else {
+        Vec::new()
+    };
+    out.extend(["nice".to_owned(), "-n19".to_owned()]);
+    out.extend(argv);
+    out
+}
+
+/// The targets that have a working `ionice`, by target name: checked once
+/// per target in a daemon run.
+fn ionice_of() -> &'static Mutex<HashMap<String, bool>> {
+    static C: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// True when `ionice -c3` works on the target. Checked once per target;
+/// a check that cannot run is not kept, and counts as false.
+async fn has_ionice(
+    state: &Shared,
+    job: &Job,
+    name: &str,
+    def: &terrarium_core::config::TargetDef,
+    holder: Option<String>,
+) -> bool {
+    let known = match ionice_of().lock() {
+        Ok(m) => m.get(name).copied(),
+        Err(p) => p.into_inner().get(name).copied(),
+    };
+    if let Some(k) = known {
+        return k;
+    }
+    let probe = RemoteCmd {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            "command -v ionice >/dev/null 2>&1 && ionice -c3 true".into(),
+        ],
+        timeout_secs: Some(60),
+        holder,
+        ..RemoteCmd::default()
+    };
+    match step(state, &job.id, def, &probe, STEP_MAX).await {
+        Ok(c) => {
+            let ok = c.end.as_ref().is_some_and(End::success);
+            // Keep only an answer: an exit code. An error, a signal, or a
+            // timeout is checked again on the next job.
+            if matches!(c.end, Some(End::Exit { code: Some(_), .. })) {
+                let mut m = match ionice_of().lock() {
+                    Ok(m) => m,
+                    Err(p) => p.into_inner(),
+                };
+                m.insert(name.to_owned(), ok);
+            }
+            ok
+        }
+        Err(e) => {
+            warn!(job = %job.id, target = name, "cannot check for ionice: {e}");
+            false
+        }
+    }
+}
+
 /// What the steps of one job share.
 struct StepCtx<'a> {
     state: &'a Shared,
@@ -379,6 +448,8 @@ struct StepCtx<'a> {
     dir: &'a str,
     secret: Option<&'a crate::secrets::Secret>,
     holder: Option<String>,
+    /// The target has a working `ionice` ([`has_ionice`]).
+    ionice: bool,
     /// The daemon's known hosts ([`executor::git_known_hosts`]).
     known_hosts: Option<String>,
 }
@@ -423,8 +494,13 @@ impl StepCtx<'_> {
         }
     }
 
+    /// Run a step at low IO and CPU priority ([`low_priority`]).
     async fn run(&self, cmd: &RemoteCmd, max: usize) -> ApiResult<Collected> {
-        step(self.state, &self.job.id, self.def, cmd, max).await
+        let cmd = RemoteCmd {
+            argv: low_priority(cmd.argv.clone(), self.ionice),
+            ..cmd.clone()
+        };
+        step(self.state, &self.job.id, self.def, &cmd, max).await
     }
 }
 
@@ -487,9 +563,10 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         outcome: (!ok).then(|| "red".to_owned()),
         exit_code: exit_code(c.end.as_ref()),
         tail: Some(format!(
-            "{}\n[{}]",
+            "{}\n[{}]\n[run as: {} sh -c <recipe>]",
             output_of(&c).trim_end(),
-            end_text(c.end.as_ref())
+            end_text(c.end.as_ref()),
+            low_priority(Vec::new(), x.ionice).join(" ")
         )),
         head: Some(head.clone()),
     };
@@ -1027,6 +1104,19 @@ echo "after: $GIT_SSH_COMMAND"
         );
         assert!(text.contains("key-gone"), "{text}");
         assert!(text.contains("after: ssh -F /dev/null "), "{text}");
+    }
+
+    #[test]
+    fn steps_run_at_low_priority() {
+        let argv = vec!["sh".to_owned(), "-c".to_owned(), "just ci".to_owned()];
+        assert_eq!(
+            low_priority(argv.clone(), true),
+            ["ionice", "-c3", "nice", "-n19", "sh", "-c", "just ci"]
+        );
+        assert_eq!(
+            low_priority(argv, false),
+            ["nice", "-n19", "sh", "-c", "just ci"]
+        );
     }
 
     #[test]

@@ -651,6 +651,174 @@ async fn a_cancel_ends_a_queued_job() {
     assert!(!labels(&c).iter().any(|l| l.starts_with("validation:")));
 }
 
+/// TER-97: the host cap counts the jobs of all projects on one host. `p`
+/// and `q` each have 2 slots, on targets of the host agent `lab1`, with a
+/// cap of 1 on `lab1`: never more than one job runs, and the jobs start in
+/// the order they were queued, across the projects. The recipe checks that
+/// it runs 19 steps nicer than this process (at most 19), and in the idle
+/// IO class when the machine has a working `ionice -c3`.
+#[tokio::test]
+async fn the_host_cap_holds_across_projects_in_order() {
+    let lab = lab(2).await;
+    let wd = lab._dirs.path().join("jobs").display().to_string();
+    // `nice -n19` adds 19 to the niceness of the host agent (this test
+    // process), at most 19: a run under a parent at -4 gets 15.
+    let base: i32 = String::from_utf8(std::process::Command::new("nice").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let want = (base + 19).min(19);
+    let recipe = format!(
+        "test -f OK && test \"$(nice)\" = {want} \
+         && {{ ! ionice -c3 true 2>/dev/null || ionice -p $$ | grep -q idle; }} \
+         && sleep 1"
+    );
+    let recipe = recipe.as_str();
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": recipe, "slots": 2, "work_dir": wd}),
+        )
+        .await
+        .ok();
+    let r = lab
+        .td
+        .patch(
+            "/api/projects/q/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"}, {"name": "validating"},
+                {"name": "review"}, {"name": "accepted"},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = lab
+        .td
+        .post(
+            "/api/projects/q/repos",
+            json!({"url": lab.origin.display().to_string(), "name": "app"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    lab.td
+        .put(
+            "/api/projects/q/delivery",
+            json!({"target": "q-box", "recipe": recipe, "slots": 2, "work_dir": wd}),
+        )
+        .await
+        .ok();
+
+    // Only a sysadmin or the operator sets a cap; 0 is not a cap.
+    lab.td
+        .put_as(&lab.lead, "/api/job-hosts/lab1", json!({"heavy_jobs": 1}))
+        .await
+        .err(403, "forbidden");
+    lab.td
+        .put("/api/job-hosts/lab1", json!({"heavy_jobs": 0}))
+        .await
+        .err(422, "invalid");
+    let r = lab
+        .td
+        .put("/api/job-hosts/lab1", json!({"heavy_jobs": 1}))
+        .await;
+    assert_eq!(r.ok()["hosts"][0]["host"], "lab1", "{}", r.body);
+    assert_eq!(r.ok()["hosts"][0]["heavy_jobs"], 1, "{}", r.body);
+    let audit = lab
+        .td
+        .get("/api/audit?action=job.host_cap&order=desc")
+        .await;
+    assert_eq!(audit.ok()[0]["detail"]["new"], 1, "{}", audit.body);
+
+    // Queue p, q, p, q: the operator queues (a project admin of both).
+    let mut cards = Vec::new();
+    for (n, project) in [("h1", "p"), ("h2", "q"), ("h3", "p"), ("h4", "q")] {
+        let branch = format!("ter-{n}");
+        let head = lab.branch(&branch, "next", &[("OK", n)]);
+        let r = lab
+            .td
+            .post(
+                &format!("/api/projects/{project}/cards"),
+                json!({"title": n, "branch": branch, "column": "backlog"}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        let id = r.body["id"].as_str().unwrap().to_owned();
+        let r = lab
+            .td
+            .post(
+                &format!("/api/cards/{id}/validate"),
+                json!({"commit": head, "repo": "app"}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        assert_eq!(r.body["queue"]["host"]["host"], "lab1", "{}", r.body);
+        assert_eq!(r.body["queue"]["host"]["heavy_jobs"], 1, "{}", r.body);
+        cards.push(id);
+    }
+
+    // While they run, never more than one runs on lab1.
+    let all = |v: &Value| v.as_i64().unwrap();
+    let start = Instant::now();
+    loop {
+        let p = lab.td.get("/api/projects/p/jobs").await.ok().clone();
+        let q = lab.td.get("/api/projects/q/jobs").await.ok().clone();
+        let h = lab.td.get("/api/job-hosts").await.ok().clone();
+        let running = all(&p["running"]) + all(&q["running"]);
+        assert!(running <= 1, "p {p}\nq {q}");
+        assert!(h["hosts"][0]["running"].as_i64().unwrap() <= 1, "{h}");
+        if running == 0 && all(&p["queued"]) + all(&q["queued"]) == 0 {
+            break;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the queues never drained: p {p}\nq {q}"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    // First in, first out across the projects, with no overlap.
+    let mut jobs: Vec<Value> = Vec::new();
+    for project in ["p", "q"] {
+        let v = lab
+            .td
+            .get(&format!("/api/projects/{project}/jobs"))
+            .await
+            .ok()
+            .clone();
+        jobs.extend(v["jobs"].as_array().unwrap().iter().cloned());
+    }
+    assert!(
+        jobs.iter()
+            .all(|j| j["state"] == "passed" && j["host"] == "lab1"),
+        "{jobs:#?}"
+    );
+    jobs.sort_by(|a, b| {
+        a["started_at"]
+            .as_str()
+            .unwrap()
+            .cmp(b["started_at"].as_str().unwrap())
+    });
+    let order: Vec<&str> = jobs.iter().map(|j| j["card"].as_str().unwrap()).collect();
+    assert_eq!(order, cards.iter().map(String::as_str).collect::<Vec<_>>());
+    for w in jobs.windows(2) {
+        assert!(
+            w[1]["started_at"].as_str().unwrap() >= w[0]["ended_at"].as_str().unwrap(),
+            "{w:?}"
+        );
+    }
+    // The wrapper is on the job.
+    let id = jobs[0]["id"].as_str().unwrap();
+    let j = lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+    let tail = j["tail"].as_str().unwrap();
+    assert!(tail.contains("nice -n19 sh -c <recipe>]"), "{tail}");
+
+    // The cap goes away: the host has no cap and no running job.
+    let r = lab.td.delete("/api/job-hosts/lab1").await;
+    assert_eq!(r.ok()["hosts"], json!([]), "{}", r.body);
+}
+
 /// Queue a merge of a new card on `branch` with `recipe`, wait for the
 /// end, and return the job.
 async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {

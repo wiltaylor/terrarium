@@ -1145,6 +1145,8 @@ terrarium card merge <id> [--repo r] [--branch b]          project_admin
 terrarium job ls [--state queued|running|passed|failed|cancelled]
 terrarium job show <id>
 terrarium job cancel <id>
+terrarium job hosts
+terrarium job host-cap <host> <n> | --clear                sysadmin
 terrarium project delivery show
 terrarium project delivery set [--target t] [--recipe cmd] [--slots n]
                                [--next-repo r]... [--work-dir d] [--timeout secs]
@@ -1161,6 +1163,13 @@ queue.
 `card merge` queues a merge of the card branch onto `next`. The job
 validates the merge and pushes `next` when it is green, and the card moves
 to `accepted`.
+
+`job host-cap` sets the most jobs of all projects that run on one host at
+the same time (docs/api.md §35.2, "The host cap"). The host is the host
+agent of the target, else the host of its address, else the target name.
+`job hosts` shows the caps and the running jobs per host. Jobs run at low
+IO and CPU priority (`ionice -c3 nice -n19`). Builds that you start with
+`terrarium exec` or `terrarium run` are outside the queue.
 
 `project delivery set` keeps the flags that you leave out. `--target ""`
 or `--recipe ""` turns the queue off. `--next-repo` replaces the list.

@@ -2082,6 +2082,22 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
+    // 72: a host-wide cap on the running jobs of the job queue (TER-97,
+    // `crate::jobs`). `jobs.host` is the host that a running job took a
+    // place on (set when it starts). `job_hosts` holds the cap of a host:
+    // the most jobs of all projects that run on it at once. A host
+    // without a row has no cap. Self-contained: when another branch takes
+    // this number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE jobs ADD COLUMN host TEXT;
+    CREATE INDEX jobs_host_state ON jobs(host, state);
+    CREATE TABLE job_hosts (
+        host       TEXT PRIMARY KEY,
+        heavy_jobs INTEGER NOT NULL CHECK (heavy_jobs >= 1),
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

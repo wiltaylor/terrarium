@@ -13,11 +13,14 @@
 //!   validates; the daemon clears the name on the final move.
 //! - `POST /api/cards/{id}/merge` {repo?, branch?}: a project admin. A
 //!   queued merge job; the card stays where it is until the job ends.
+//! - `GET /api/job-hosts` (any actor): the host caps (TER-97) and the
+//!   running jobs per host. `PUT /api/job-hosts/{host}` {heavy_jobs}
+//!   (sysadmin or the operator): set the cap of a host; `DELETE`: no cap.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -43,6 +46,75 @@ pub fn routes() -> Router<Shared> {
         .route("/jobs/{id}", get(show).delete(cancel))
         .route("/cards/{id}/validate", post(validate))
         .route("/cards/{id}/merge", post(merge))
+        .route("/job-hosts", get(list_hosts))
+        .route("/job-hosts/{host}", put(set_host).delete(clear_host))
+}
+
+/// The host caps and the running jobs on each host.
+async fn hosts_view(state: &Shared) -> ApiResult<Value> {
+    let (caps, running) = state
+        .db
+        .read(|c| Ok((jobs::host_caps(c)?, jobs::running_per_host(c)?)))
+        .await?;
+    let mut names: Vec<String> = caps
+        .iter()
+        .map(|c| c.host.clone())
+        .chain(running.keys().cloned())
+        .collect();
+    names.sort();
+    names.dedup();
+    let hosts: Vec<Value> = names
+        .into_iter()
+        .map(|h| {
+            let cap = caps.iter().find(|c| c.host == h);
+            json!({"host": h, "heavy_jobs": cap.map(|c| c.heavy_jobs),
+                   "running": running.get(&h).copied().unwrap_or(0),
+                   "updated_by": cap.map(|c| c.updated_by.clone()),
+                   "updated_at": cap.map(|c| c.updated_at.clone())})
+        })
+        .collect();
+    Ok(json!({"hosts": hosts}))
+}
+
+async fn list_hosts(State(state): State<Shared>, _actor: Actor) -> ApiResult<Json<Value>> {
+    Ok(Json(hosts_view(&state).await?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostCapBody {
+    heavy_jobs: u32,
+}
+
+async fn set_host(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(host): Path<String>,
+    ApiJson(body): ApiJson<HostCapBody>,
+) -> ApiResult<Json<Value>> {
+    policy::sysadmin(&actor, "setting the job cap of a host")?;
+    state
+        .db
+        .write(actor.label(), move |t| {
+            jobs::set_host_cap(t, &host, Some(body.heavy_jobs))
+        })
+        .await?;
+    rt::kick(&state);
+    Ok(Json(hosts_view(&state).await?))
+}
+
+async fn clear_host(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(host): Path<String>,
+) -> ApiResult<Json<Value>> {
+    policy::sysadmin(&actor, "taking away the job cap of a host")?;
+    state
+        .db
+        .write(actor.label(), move |t| jobs::set_host_cap(t, &host, None))
+        .await?;
+    rt::kick(&state);
+    Ok(Json(hosts_view(&state).await?))
 }
 
 async fn show_delivery(
@@ -266,19 +338,32 @@ fn enabled(def: &DeliveryDef, project: &str) -> ApiResult<()> {
     )))
 }
 
-/// The answer of a queue: the job and its place.
-fn queued_answer(job: Job, place: (i64, i64), slots: usize) -> Response {
+/// The answer of a queue: the job and its place. `room`: the host of the
+/// project's target, its running jobs, and its cap, when it has one.
+fn queued_answer(
+    job: Job,
+    place: (i64, i64),
+    room: Option<(String, usize, u32)>,
+    slots: usize,
+) -> Response {
     let (position, running) = place;
-    let note = if position as usize <= slots.saturating_sub(running as usize) {
+    let host_full = room
+        .as_ref()
+        .is_some_and(|(_, used, cap)| *used >= *cap as usize);
+    let mut note = if position as usize <= slots.saturating_sub(running as usize) && !host_full {
         format!("starts now ({running} of {slots} slots in use)")
     } else {
         format!("queued at place {position}; {running} of {slots} slots in use")
     };
+    if let Some((host, used, cap)) = &room {
+        note.push_str(&format!("; host `{host}` runs {used} of {cap} jobs"));
+    }
+    let host = room.map(|(h, used, cap)| json!({"host": h, "running": used, "heavy_jobs": cap}));
     (
         StatusCode::CREATED,
         Json(
             json!({"job": job, "queue": {"position": position, "running": running,
-                                          "slots": slots, "note": note}}),
+                                          "slots": slots, "note": note, "host": host}}),
         ),
     )
         .into_response()
@@ -407,11 +492,12 @@ async fn validate(
                 board::add_comment(t, &Actor::Operator, &card.id, &note)?;
             }
             let place = jobs::place(t, &job)?;
-            Ok((job, place))
+            let room = jobs::host_room(t, &job.project)?;
+            Ok((job, (place, room)))
         })
         .await?;
     rt::kick(&state);
-    Ok(queued_answer(job, place, slots))
+    Ok(queued_answer(job, place.0, place.1, slots))
 }
 
 async fn merge(
@@ -464,9 +550,10 @@ async fn merge(
                 ),
             )?;
             let place = jobs::place(t, &job)?;
-            Ok((job, place, def.slots()))
+            let room = jobs::host_room(t, &job.project)?;
+            Ok((job, place, room, def.slots()))
         })
         .await?;
     rt::kick(&state);
-    Ok(queued_answer(job.0, job.1, job.2))
+    Ok(queued_answer(job.0, job.1, job.2, job.3))
 }
