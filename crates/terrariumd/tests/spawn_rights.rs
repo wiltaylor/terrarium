@@ -42,7 +42,7 @@ fn id(v: &Value) -> String {
 /// A project `p` with the template `worker`, a lead, a worker `w` that
 /// may spawn `worker` and uses the global target `box`, the project
 /// targets `pbox` and `xbox`, the global target `other`, and the secrets
-/// `global/openai` (`w` reads it, env `OPENAI_KEY`), `global/gh` (`w` uses
+/// `global/openai` (`w` reads it, env `SPAWN_RIGHTS_DB_PASS`), `global/gh` (`w` uses
 /// it), and `p/db` (no grant).
 async fn setup() -> (TestDaemon, String, String) {
     let td = TestDaemon::start().await;
@@ -93,7 +93,7 @@ async fn setup() -> (TestDaemon, String, String) {
     .ok();
     td.post(
         "/api/secrets/global/openai/grants",
-        json!({"grantee": "agent:p/w", "level": "read", "env": "OPENAI_KEY"}),
+        json!({"grantee": "agent:p/w", "level": "read", "env": "SPAWN_RIGHTS_DB_PASS"}),
     )
     .await
     .ok();
@@ -253,7 +253,7 @@ async fn grants_stay_within_the_owner_level_and_end_with_the_child() {
     let mine: Vec<&Value> = g.iter().filter(|x| x["grantee"] == key).collect();
     assert_eq!(mine.len(), 1, "{g:?}");
     assert_eq!(mine[0]["level"], "read");
-    assert_eq!(mine[0]["env"], "OPENAI_KEY");
+    assert_eq!(mine[0]["env"], "SPAWN_RIGHTS_DB_PASS");
     let g = grants_of(&td, "global/gh").await;
     let mine: Vec<&Value> = g.iter().filter(|x| x["grantee"] == key).collect();
     assert_eq!(mine[0]["level"], "use");
