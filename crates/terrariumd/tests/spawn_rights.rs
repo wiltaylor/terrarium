@@ -41,7 +41,7 @@ fn id(v: &Value) -> String {
 
 /// A project `p` with the template `worker`, a lead, a worker `w` that
 /// may spawn `worker` and uses the global target `box`, the project
-/// targets `pbox` and `xbox`, the global target `other`, and the secrets
+/// targets `p-pbox` and `p-xbox`, the global target `other`, and the secrets
 /// `global/openai` (`w` reads it, env `SPAWN_RIGHTS_DB_PASS`), `global/gh` (`w` uses
 /// it), and `p/db` (no grant).
 async fn setup() -> (TestDaemon, String, String) {
@@ -57,8 +57,8 @@ async fn setup() -> (TestDaemon, String, String) {
     for t in [
         json!({"name": "box", "kind": "ssh", "address": "u@h"}),
         json!({"name": "other", "kind": "ssh", "address": "u@h"}),
-        json!({"name": "pbox", "kind": "ssh", "project": "p", "address": "u@h"}),
-        json!({"name": "xbox", "kind": "ssh", "project": "p", "address": "u@h"}),
+        json!({"name": "p-pbox", "kind": "ssh", "project": "p", "address": "u@h"}),
+        json!({"name": "p-xbox", "kind": "ssh", "project": "p", "address": "u@h"}),
     ] {
         td.post("/api/targets", t).await.ok();
     }
@@ -162,9 +162,9 @@ async fn targets_come_only_from_the_owner_policy() {
     // The lead spawns for `w`: the rights are `w`'s, not the lead's.
     let r = spawn_as(&td, &lead, &w, json!({"targets": ["box"]})).await;
     assert_eq!(r.status, 201, "{}", r.body);
-    let r = spawn_as(&td, &lead, &w, json!({"targets": ["pbox"]})).await;
+    let r = spawn_as(&td, &lead, &w, json!({"targets": ["p-pbox"]})).await;
     assert_eq!(r.status, 403, "{}", r.body);
-    assert!(message(&r).contains("target `pbox`"), "{}", r.body);
+    assert!(message(&r).contains("target `p-pbox`"), "{}", r.body);
 
     // An unknown target is 404; a bad list is 422.
     let r = spawn_as(&td, &w, &w, json!({"targets": ["nope"]})).await;
@@ -190,12 +190,12 @@ async fn a_leased_target_gives_a_shorter_lease_that_ends_at_the_close() {
     let (td, _lead, w) = setup().await;
     let until = "2099-01-01T00:00:00.000Z";
     td.post(
-        "/api/targets/pbox/leases",
+        "/api/targets/p-pbox/leases",
         json!({"agent": "w", "until": until}),
     )
     .await
     .ok();
-    let r = spawn_as(&td, &w, &w, json!({"targets": ["pbox"]})).await;
+    let r = spawn_as(&td, &w, &w, json!({"targets": ["p-pbox"]})).await;
     assert_eq!(r.status, 201, "{}", r.body);
     let child = id(&r.body);
     assert!(
@@ -207,7 +207,7 @@ async fn a_leased_target_gives_a_shorter_lease_that_ends_at_the_close() {
     );
     let held = leases_of(&td, &child).await;
     assert_eq!(held.len(), 1, "{held:?}");
-    assert_eq!(held[0]["target"], "pbox");
+    assert_eq!(held[0]["target"], "p-pbox");
     assert_eq!(held[0]["state"], "active");
     assert_eq!(held[0]["exclusive"], false);
     // The lifetime (2 h) ends before the owner's lease.
@@ -217,7 +217,7 @@ async fn a_leased_target_gives_a_shorter_lease_that_ends_at_the_close() {
 
     cancel(&td, &child).await;
     let after = td
-        .get("/api/targets/pbox/leases?all=true")
+        .get("/api/targets/p-pbox/leases?all=true")
         .await
         .ok()
         .as_array()
@@ -229,12 +229,12 @@ async fn a_leased_target_gives_a_shorter_lease_that_ends_at_the_close() {
 
     // An exclusive lease has room for one holder.
     td.post(
-        "/api/targets/xbox/leases",
+        "/api/targets/p-xbox/leases",
         json!({"agent": "w", "exclusive": true}),
     )
     .await
     .ok();
-    let r = spawn_as(&td, &w, &w, json!({"targets": ["xbox"]})).await;
+    let r = spawn_as(&td, &w, &w, json!({"targets": ["p-xbox"]})).await;
     assert_eq!(r.status, 409, "{}", r.body);
     assert!(message(&r).contains("exclusive"), "{}", r.body);
 }
@@ -301,13 +301,13 @@ async fn the_operator_owner_gives_any_reachable_right() {
         .post(
             "/api/agents/operator/spawn",
             json!({"template": "worker", "task": "t", "project": "p",
-                   "targets": ["other", "pbox"], "grants": ["db"]}),
+                   "targets": ["other", "p-pbox"], "grants": ["db"]}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(
         r.body["agent"]["policy"]["targets"],
-        json!(["other", "pbox"])
+        json!(["other", "p-pbox"])
     );
     let child = id(&r.body);
     let g = grants_of(&td, "p/db").await;
