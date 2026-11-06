@@ -465,7 +465,13 @@ async fn the_proxy_enforces_push_deny_and_keeps_the_token() {
     let (s, h, _) = proxy_get(&refs, None).await;
     assert_eq!(s, 401);
     assert!(h.get("www-authenticate").is_some());
-    let forged = format!("{}00", &token[..token.len() - 2]);
+    // Flip one hex digit in the middle of the MAC to a different value. A
+    // change of case decodes to the same bytes, so it would not forge.
+    let (head, sig) = token.rsplit_once('.').unwrap();
+    let i = sig.len() / 2;
+    let d = u8::from_str_radix(&sig[i..=i], 16).unwrap() ^ 1;
+    let forged = format!("{head}.{}{d:x}{}", &sig[..i], &sig[i + 1..]);
+    assert_ne!(forged.to_ascii_lowercase(), token.to_ascii_lowercase());
     assert_eq!(proxy_get(&refs, Some(&forged)).await.0, 401);
     assert_eq!(proxy_get(&refs, Some(FORGE_TOKEN)).await.0, 401);
     let (s, _, body) = proxy_get(&refs, Some(&other_token)).await;
