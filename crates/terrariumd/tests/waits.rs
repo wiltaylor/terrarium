@@ -852,6 +852,11 @@ struct Lab {
 }
 
 async fn lab() -> Lab {
+    lab_with(None).await
+}
+
+/// [`lab`] with a `docker` binary for the host agent.
+async fn lab_with(docker: Option<&std::path::Path>) -> Lab {
     let td = TestDaemon::start().await;
     fast(&td);
     let state = td.daemon.as_ref().unwrap().state.clone();
@@ -863,6 +868,13 @@ async fn lab() -> Lab {
     let mut o =
         terrarium_host::ClientOptions::new(format!("ws://{addr}/hosts/connect"), &token, "lab1");
     o.capabilities.shell = Some("/bin/sh".into());
+    if let Some(d) = docker {
+        o.capabilities.docker = terrarium_core::protocol::ToolCapability {
+            present: true,
+            version: Some("29.8.0".into()),
+        };
+        o.docker_bin = d.display().to_string();
+    }
     o.backoff_min = Duration::from_millis(50);
     o.backoff_max = Duration::from_millis(200);
     let host = tokio::spawn(terrarium_host::Client::new(o).run());
@@ -1043,4 +1055,117 @@ async fn a_wait_on_an_exec_session_follows_its_end() {
     )
     .await
     .err(404, "not_found");
+}
+
+// ------------------------------------------------------------- TER-99
+
+/// Is `pid` a live process (not gone, not a zombie)?
+fn alive(pid: u64) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .is_ok_and(|s| !s.rsplit(") ").next().unwrap_or("").starts_with('Z'))
+}
+
+async fn read_pid(file: &std::path::Path) -> u64 {
+    let mut pid = None;
+    until("the child pid", || {
+        pid = std::fs::read_to_string(file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+        let found = pid.is_some();
+        async move { found }
+    })
+    .await;
+    pid.unwrap()
+}
+
+/// Run a command with a child on `target`, kill the run, and check that
+/// the child got TERM and is gone.
+async fn kill_ends_the_child(td: &TestDaemon, agent: &str, target: &str, dir: &std::path::Path) {
+    let child_file = dir.join(format!("{target}.child"));
+    let r = run(
+        td,
+        agent,
+        json!({"target": target, "name": "tree",
+               "cmd": ["sh", "-c", "sleep 300 & echo $! > \"$1\"; wait", "run",
+                       child_file.display().to_string()]}),
+    )
+    .await;
+    let wid = r["wait"]["id"].as_str().unwrap().to_owned();
+    let child = read_pid(&child_file).await;
+    assert!(alive(child));
+    let k = td
+        .req(
+            hyper::Method::DELETE,
+            &format!("/api/waits/{wid}?kill=true"),
+            None,
+            Some(agent),
+        )
+        .await;
+    let k = k.ok();
+    assert_eq!(k["state"], "cancelled", "{k}");
+    let report = &k["kill"];
+    assert!(
+        report["term"].as_array().unwrap().contains(&json!(child)),
+        "{k}"
+    );
+    assert_eq!(report["left"], json!([]), "{k}");
+    assert!(!alive(child), "the child {child} still runs on {target}: {k}");
+}
+
+/// TER-99: a kill of a run on a host target ends the children of the
+/// command, and the answer reports the PIDs.
+#[tokio::test]
+async fn a_kill_on_a_host_target_ends_the_children() {
+    let lab = lab().await;
+    let td = &lab.td;
+    let w1 = id(&td
+        .agent("p", "w1", json!({"policy": {"targets": ["box"]}}))
+        .await);
+    td.post_empty(&format!("/api/agents/{w1}/start")).await.ok();
+    td.wait_status(&w1, "idle").await;
+    let dir = tempfile::tempdir().unwrap();
+    kill_ends_the_child(td, &w1, "box", dir.path()).await;
+}
+
+/// TER-99: a kill of a run on a docker target ends the process in the
+/// container, children too. The fake `docker exec` runs the command in a
+/// new session, as runc does, so the kill of the `docker` client does not
+/// reach it.
+#[tokio::test]
+async fn a_kill_on_a_docker_target_ends_the_children_in_the_container() {
+    let bins = tempfile::tempdir().unwrap();
+    let docker = bins.path().join("docker");
+    std::fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1" in
+  inspect) echo '[{"Id":"abc","Name":"/terrarium-dbox","State":{"Status":"running"}}]' ;;
+  run) echo abc ;;
+  exec) shift
+    while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w|-e|-u) shift 2 ;; *) break ;; esac; done
+    shift
+    ( exec setsid "$@" ) &
+    wait $! ;;
+esac
+"#,
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let lab = lab_with(Some(&docker)).await;
+    let td = &lab.td;
+    td.post(
+        "/api/targets",
+        json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3"}),
+    )
+    .await
+    .ok();
+    let w1 = id(&td
+        .agent("p", "w1", json!({"policy": {"targets": ["dbox"]}}))
+        .await);
+    td.post_empty(&format!("/api/agents/{w1}/start")).await.ok();
+    td.wait_status(&w1, "idle").await;
+    kill_ends_the_child(td, &w1, "dbox", bins.path()).await;
 }
