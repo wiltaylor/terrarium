@@ -1296,26 +1296,63 @@ async fn a_cancel_ends_every_process_before_the_next_job_starts() {
     }
 }
 
-/// TER-115 review: a merge job cancelled while its recipe runs does not
-/// push `next`, even when the recipe ends with exit 0 on the `TERM` of
-/// the kill. The test waits until the job's clone is gone (the clean-up
-/// runs last), then checks `next`.
+/// TER-115 review (round 2, minor 2): a merge job that gets a cancel
+/// between two steps starts no more steps, so it does not push `next`.
+/// A fake `ionice` holds the first ionice probe (the step before the
+/// prepare step) until the kill. The cancel comes during the probe, so
+/// the kill ends only the probe, and only the killed() check keeps the
+/// prepare, recipe, collect, and push steps from running. A validate job
+/// behind it (one slot) starts only after the merge job's run ended.
 #[tokio::test]
 async fn a_cancelled_merge_job_does_not_push() {
-    let lab = lab(1).await;
-    let before = git(&lab.origin, &["rev-parse", "next"]);
-    let started = lab._dirs.path().join("started");
-    let work_dir = lab._dirs.path().join("jobs");
-    lab.td
+    use std::os::unix::fs::PermissionsExt;
+    let bins = tempfile::tempdir().unwrap();
+    let docker = fake_docker(bins.path());
+    let script = std::fs::read_to_string(&docker).unwrap().replacen(
+        "#!/bin/sh\n",
+        &format!(
+            "#!/bin/sh\nPATH='{}':\"$PATH\"; export PATH\n",
+            bins.path().display()
+        ),
+        1,
+    );
+    std::fs::write(&docker, script).unwrap();
+    let probe = bins.path().join("probe");
+    let ionice = bins.path().join("ionice");
+    std::fs::write(
+        &ionice,
+        format!(
+            "#!/bin/sh\nif [ ! -e '{p}' ]; then echo $$ > '{p}'; exec sleep 300; fi\nshift\nexec \"$@\"\n",
+            p = probe.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ionice, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let lab = lab_with(1, Some(&docker)).await;
+    // A target name of its own: the ionice answer is kept per target name
+    // in the process, and this test needs the probe to run.
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "p-ibox", "kind": "docker", "host": "lab1", "image": "alpine:3",
+                   "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let ran = bins.path().join("ran");
+    let work_dir = bins.path().join("jobs");
+    let r = lab
+        .td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "p-box", "next_repos": ["app"],
-                   "recipe": format!("trap 'exit 0' TERM; echo $$ > '{}'; sleep 300 & wait",
-                                     started.display()),
+            json!({"target": "p-ibox", "slots": 1, "next_repos": ["app"],
+                   "recipe": format!("echo \"$PWD\" >> '{}'; test -f OK", ran.display()),
                    "work_dir": work_dir.display().to_string()}),
         )
-        .await
-        .ok();
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let before = git(&lab.origin, &["rev-parse", "next"]);
     lab.branch("ter-mc", "next", &[("OK", "yes\n")]);
     let card = lab.card("mc", "ter-mc").await;
     let r = lab
@@ -1324,22 +1361,34 @@ async fn a_cancelled_merge_job_does_not_push() {
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let job = r.body["job"]["id"].as_str().unwrap().to_owned();
-    pids(&started, 1).await;
+    let held = pids(&probe, 1).await[0];
+    assert!(alive(held));
     let r = lab.td.delete(&format!("/api/jobs/{job}")).await;
     assert_eq!(r.ok()["state"], "cancelled");
-    let clone = work_dir.join("p").join(&job);
-    let start = Instant::now();
-    while clone.exists() {
-        assert!(
-            start.elapsed() < DEADLINE,
-            "the clone {} stays",
-            clone.display()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let h2 = lab.branch("ter-mv", "next", &[("OK", "yes\n")]);
+    let c2 = lab.card("mv", "ter-mv").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c2}/validate"),
+            json!({"commit": h2}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let v = r.body["job"]["id"].as_str().unwrap().to_owned();
+    let jobs = lab.until_idle().await;
+    let of = |id: &str| jobs.iter().find(|j| j["id"] == id).unwrap().clone();
+    assert_eq!(of(&job)["state"], "cancelled", "{jobs:#?}");
+    assert_eq!(of(&v)["state"], "passed", "{jobs:#?}");
+    assert!(!alive(held), "the probe {held} outlived the kill");
+    let log = std::fs::read_to_string(&ran).unwrap_or_default();
+    assert!(
+        !log.contains(&job),
+        "the cancelled job ran its recipe: {log}"
+    );
+    assert!(log.contains(&v), "the validate job did not run: {log}");
     assert_eq!(git(&lab.origin, &["rev-parse", "next"]), before);
-    let j = lab.td.get(&format!("/api/jobs/{job}")).await.ok().clone();
-    assert_eq!(j["state"], "cancelled", "{j}");
 }
 
 /// Set the recipe of project `p`, with the lab's work dir.

@@ -407,6 +407,11 @@ async fn step(
 ) -> ApiResult<Collected> {
     let (running, report) = crate::run_kill::start(state, def, cmd)?;
     set_control(job, Some(running.ctl.clone()));
+    // A kill between the check in [`StepCtx::run`] and set_control found
+    // the old control or none: kill this step now.
+    if killed(job) {
+        let _ = running.ctl.send(Control::Kill);
+    }
     let mut c = running.collect(max).await;
     let kill = match report {
         Some(rx) => crate::run_kill::report(rx).await,
