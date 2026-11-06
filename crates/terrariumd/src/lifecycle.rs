@@ -25,6 +25,11 @@
 //! - **Pause** (`crate::api::agents`): the `paused` flag. A pause stops a
 //!   running agent with the reason `paused`. The wake refuses a paused
 //!   agent.
+//! - **Park** (`crate::bound`, TER-74): a bound ephemeral agent whose
+//!   object waits is parked. The wake refuses it, and the idle pass stops
+//!   it as soon as it is at rest (no idle time), with the reason
+//!   `parked`. A live exec session or an open `process` wait keeps it
+//!   running; queued work does not (it waits for the unpark).
 //! - **Auto compact.** With `compact_on_idle` (else
 //!   `TERRARIUM_COMPACT_ON_IDLE`, default off), an agent at its idle stop
 //!   compacts its session first, and then stops. An agent with no idle
@@ -86,6 +91,8 @@ pub const CAUSE_MANUAL: &str = "manual";
 pub const REASON_IDLE: &str = "idle";
 /// The status reason of the stop of a pause.
 pub const REASON_PAUSED: &str = "paused";
+/// The status reason of the stop of a parked bound agent (TER-74).
+pub const REASON_PARKED: &str = "parked";
 
 /// The global idle stop from [`ENV_IDLE_STOP`]. A value that does not
 /// parse gives the default, with a warning.
@@ -323,6 +330,9 @@ pub enum Woke {
     Busy,
     /// The agent is paused: its work waits for the unpause.
     Paused,
+    /// The agent is a parked bound agent (`crate::bound`): its work waits
+    /// for the unpark.
+    Parked,
     /// The agent is in `error`: its work waits for the operator.
     Error,
     /// The daemon drains for a self-update (`crate::self_update`): the
@@ -367,10 +377,11 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
                 Some(n) => crate::store::subscriptions::find(c, n)?.is_some_and(|s| !s.enabled),
                 None => false,
             };
-            Ok((v, holds, disabled))
+            let parked = v.ephemeral && crate::store::spawns::is_parked(c, &key)?;
+            Ok((v, holds, disabled, parked))
         })
         .await;
-    let (view, holds, disabled) = match read {
+    let (view, holds, disabled, parked) = match read {
         Ok(r) => r,
         Err(e) if e.code == Code::NotFound => return Woke::Gone,
         Err(e) => {
@@ -380,6 +391,9 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
     };
     if view.paused {
         return Woke::Paused;
+    }
+    if parked {
+        return Woke::Parked;
     }
     if runs(state, id).await {
         deliver_turns(state, id).await;
@@ -575,6 +589,45 @@ async fn idle_stop(state: &Shared, id: AgentId) {
     }
 }
 
+/// Stop the parked bound agent `id` (TER-74), as an idle stop with the
+/// reason `parked`.
+async fn park_stop(state: &Shared, id: AgentId) {
+    guard(&state.lifecycle.resting).remove(&id);
+    state.lifecycle.expect_stop(id, REASON_PARKED);
+    info!(agent = %id, "the bound agent is parked and at rest; stopping it");
+    if let Err(e) = state
+        .supervisor
+        .stop_by(id, terrarium_runner::StoppedBy::Operator)
+        .await
+    {
+        state.lifecycle.forget_stop(id);
+        debug!(agent = %id, "the park did not stop the agent: {e}");
+    }
+}
+
+/// True when the parked agent `id` must not stop now: a wake on the way,
+/// a live exec session, or an open `process` wait. Queued work does not
+/// count: it waits for the unpark.
+async fn keeps_running_parked(state: &Shared, id: AgentId) -> bool {
+    let key = id.to_string();
+    if state.lifecycle.waking(id) || state.executor.live_of(&key) > 0 {
+        return true;
+    }
+    state
+        .db
+        .read(move |c| {
+            let runs: i64 = c.query_row(
+                "SELECT count(*) FROM waits
+                 WHERE agent = ?1 AND state = 'open' AND kind = 'process'",
+                [&key],
+                |r| r.get(0),
+            )?;
+            Ok(runs > 0)
+        })
+        .await
+        .unwrap_or(true)
+}
+
 /// True when agent `id` must not stop for idleness now: it has a live exec
 /// session, an open `process` wait, queued work, or a wake on the way.
 async fn keeps_running(state: &Shared, id: AgentId) -> bool {
@@ -707,7 +760,23 @@ pub async fn idle_pass(state: &Shared) {
         .iter()
         .filter_map(|i| i.parse().ok())
         .collect();
+    let parked: HashSet<AgentId> = state
+        .db
+        .read(crate::store::spawns::parked_ids)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i.parse().ok())
+        .collect();
     for r in at_rest {
+        // A parked bound agent stops at once, before a reset or a
+        // compaction: those run in the session after the unpark.
+        if parked.contains(&r.id) {
+            if !state.lifecycle.compacting(r.id) && !keeps_running_parked(state, r.id).await {
+                park_stop(state, r.id).await;
+            }
+            continue;
+        }
         let rested = now.duration_since(r.since);
         let stop_due = r.stop_after.is_some_and(|l| rested >= l);
         if state.lifecycle.compacting(r.id) {

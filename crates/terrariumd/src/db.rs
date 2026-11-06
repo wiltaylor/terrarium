@@ -2098,7 +2098,25 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
-    // 73: pin job-host DNS identities across queue ticks and restarts.
+    // 73: bound ephemeral agents (TER-74, `crate::bound`). `bound_kind`
+    // and `bound_id` name the object whose life the agent shares (for
+    // example `card`, `TER-74`); NULL: a plain spawn. At most one open
+    // spawn per object. `parked_at` and `park_reason`: the agent is parked
+    // (stopped, no wake) while its object waits; NULL: not parked.
+    // `unpark_at`: an unpark waits for a place of the owner (first in,
+    // first out); NULL: none.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE spawns ADD COLUMN bound_kind TEXT;
+    ALTER TABLE spawns ADD COLUMN bound_id TEXT;
+    ALTER TABLE spawns ADD COLUMN parked_at TEXT;
+    ALTER TABLE spawns ADD COLUMN park_reason TEXT;
+    ALTER TABLE spawns ADD COLUMN unpark_at TEXT;
+    CREATE UNIQUE INDEX spawns_bound_open ON spawns(bound_kind, bound_id)
+        WHERE finished_at IS NULL AND bound_kind IS NOT NULL;
+    "#,
+    // 74: pin job-host DNS identities across queue ticks and restarts.
     r#"
     CREATE TABLE job_host_keys (
         hostname TEXT PRIMARY KEY,

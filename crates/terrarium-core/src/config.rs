@@ -44,6 +44,10 @@ pub const SPAWN_DEFAULT_CONCURRENT: u32 = 2;
 pub const SPAWN_DEFAULT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(2 * 3600);
 /// The longest lifetime of an ephemeral agent.
 pub const SPAWN_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+/// The longest life of a bound ephemeral agent (TER-74), and the default
+/// of [`SpawnPolicy::max_bound_lifetime`].
+pub const SPAWN_MAX_BOUND_LIFETIME: std::time::Duration =
+    std::time::Duration::from_secs(30 * 24 * 3600);
 /// The highest `max_concurrent` and `max_per_day`.
 pub const SPAWN_MAX_COUNT: u32 = 50;
 
@@ -72,6 +76,16 @@ pub struct SpawnPolicy {
     /// that has `may_spawn_children = false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub may_spawn_children: bool,
+    /// The agent may bind an ephemeral agent to an object (TER-74, a
+    /// card): the bound agent lives until the object is finished, at most
+    /// [`Self::max_bound_lifetime`], in place of `max_lifetime`. Default
+    /// off. A child never gets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bound: bool,
+    /// The cap of the life of a bound ephemeral agent: a duration such as
+    /// `3d`. Absent: 30 days. At most 30 days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bound_lifetime: Option<String>,
 }
 
 fn default_spawn_concurrent() -> u32 {
@@ -86,6 +100,8 @@ impl Default for SpawnPolicy {
             max_per_day: None,
             max_lifetime: None,
             may_spawn_children: false,
+            bound: false,
+            max_bound_lifetime: None,
         }
     }
 }
@@ -123,8 +139,32 @@ impl SpawnPolicy {
         Ok(d)
     }
 
+    /// The cap of the life of a bound ephemeral agent (TER-74).
+    pub fn bound_lifetime(&self) -> std::result::Result<std::time::Duration, String> {
+        let Some(text) = self
+            .max_bound_lifetime
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+        else {
+            return Ok(SPAWN_MAX_BOUND_LIFETIME);
+        };
+        let d = crate::eta::parse_duration(text.trim())
+            .ok()
+            .and_then(|d| d.to_std().ok())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| {
+                format!("spawn.max_bound_lifetime `{text}` is not a duration such as 12h or 3d")
+            })?;
+        if d > SPAWN_MAX_BOUND_LIFETIME {
+            return Err(format!(
+                "spawn.max_bound_lifetime `{text}` is longer than the maximum, 30d"
+            ));
+        }
+        Ok(d)
+    }
+
     /// Check the block: each template entry has a valid form, the counts
-    /// are in range, and the lifetime parses.
+    /// are in range, and the lifetimes parse.
     pub fn check(&self) -> std::result::Result<(), String> {
         for t in &self.templates {
             check_spawn_entry(t)?;
@@ -143,7 +183,8 @@ impl SpawnPolicy {
                 SPAWN_MAX_COUNT * 20
             ));
         }
-        self.lifetime().map(|_| ())
+        self.lifetime()?;
+        self.bound_lifetime().map(|_| ())
     }
 
     /// Does an entry of `templates` allow the template `t`?
@@ -162,10 +203,12 @@ impl SpawnPolicy {
         })
     }
 
-    /// The policy of a child: a copy with `may_spawn_children = false`.
+    /// The policy of a child: a copy with `may_spawn_children` and
+    /// `bound` off.
     pub fn for_child(&self) -> Self {
         Self {
             may_spawn_children: false,
+            bound: false,
             ..self.clone()
         }
     }
@@ -1592,6 +1635,8 @@ You are a careful reviewer for {{project.name}}.
             (r#"{"max_per_day": 0}"#, "max_per_day"),
             (r#"{"max_lifetime": "25h"}"#, "24h"),
             (r#"{"max_lifetime": "0s"}"#, "max_lifetime"),
+            (r#"{"max_bound_lifetime": "31d"}"#, "30d"),
+            (r#"{"max_bound_lifetime": "x"}"#, "max_bound_lifetime"),
         ] {
             let sp: SpawnPolicy = serde_json::from_str(json).unwrap();
             let e = sp.check().unwrap_err();
@@ -1605,6 +1650,14 @@ You are a careful reviewer for {{project.name}}.
         };
         assert_eq!(p.lifetime().unwrap().as_secs(), 1800);
         assert!(!p.for_child().may_spawn_children);
+        // Bound agents (TER-74): off by default, 30 days by default.
+        assert!(!p.bound);
+        assert_eq!(p.bound_lifetime().unwrap(), SPAWN_MAX_BOUND_LIFETIME);
+        let b: SpawnPolicy =
+            serde_json::from_str(r#"{"bound": true, "max_bound_lifetime": "3d"}"#).unwrap();
+        b.check().unwrap();
+        assert_eq!(b.bound_lifetime().unwrap().as_secs(), 3 * 24 * 3600);
+        assert!(!b.for_child().bound);
         // A policy without the block reads and writes as before.
         let pol: Policy = serde_json::from_str(r#"{"targets": []}"#).unwrap();
         assert!(pol.spawn.is_none());
