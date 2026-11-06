@@ -3465,6 +3465,44 @@ removes the tab at the `agent_removed` event. A pin writes the audit row
 no event: the dashboard reads the list again when its window gets the
 focus.
 
+### 6.12 Project folders
+
+The code is in `crates/terrariumd/src/store/project_folders.rs` and
+`crates/terrariumd/src/api/project_folders.rs`. The tables are
+`project_folders` and `project_placements` (migration 68).
+
+The dashboard groups the projects under Projects in its sidebar into
+folders, nested (TER-48). The folders are on the daemon, so they are the
+same in each browser. They only order the sidebar: a folder changes no
+right, scope, or name. Only the operator and a sysadmin read or write
+them: another agent gets `403`, also on a read.
+
+A folder nests at most 8 levels deep (a root folder is level 1). A
+project's place is a row in `project_placements`. A project with no
+row sits at the root, after the placed ones, by name. In each parent the
+folders come first, in `position` order, then the projects. Each write
+renumbers the positions of the parent that it changes from 0.
+
+```json
+{"folders":[{"id":"01JQ...","name":"Work","parent_id":null,"position":0,"created_at":"...","updated_at":"..."}],
+ "placements":[{"project":"demo","folder_id":"01JQ...","position":0}]}
+```
+
+| Endpoint | Answer |
+|---|---|
+| `GET /api/project-folders` | `200` `{folders, placements}`: every folder (by parent, then position) and every placed project. |
+| `POST /api/project-folders` | `{name, parent_id?}`. `201` the folder, at the end of its parent. An unknown parent is `404`. A folder below level 8 is `422`. |
+| `PATCH /api/project-folders/{id}` | `{name?, parent_id?, position?}`. `200` the folder. `parent_id` absent keeps the parent, `null` moves the folder to the root. A move into the folder itself or one of its subfolders, or one that nests deeper than 8 levels, is `422`. A move without `position` goes to the end. |
+| `DELETE /api/project-folders/{id}` | `204`. Its subfolders move to its parent, at its place, in their order. Its projects move to its parent, after the projects there. |
+| `PUT /api/projects/{name}/folder` | `{folder_id, position?}`. `200` `{project, folder_id, position}`. `folder_id` `null` is the root. Without `position` the project goes to the end. An unknown project or folder is `404`. |
+
+A name is trimmed, and has 1 to 64 characters and no control
+characters (`422`). Two folders may have the same name. The delete of a
+project removes its place (a foreign key). The writes add the audit rows
+`project_folder.create`, `project_folder.update`, `project_folder.delete`,
+and `project.folder`. No event goes out: the dashboard reads the tree
+again when its window gets the focus.
+
 ## 7. Mail
 
 A message:
