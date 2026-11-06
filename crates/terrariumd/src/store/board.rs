@@ -419,21 +419,39 @@ pub fn trigger_label(key: &str) -> String {
 
 /// The newest card of `project` with the label `label` that is not in
 /// `done` and not archived.
+/// The newest open card with `label`. Cards that the GitHub author gate
+/// holds (TER-85) are skipped, so a schedule `card` action never finds,
+/// moves or closes one.
 pub fn find_open_by_label(
     conn: &Connection,
     project: &str,
     label: &str,
 ) -> ApiResult<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT c.id FROM cards c JOIN board_columns col ON col.id = c.column_id
-             WHERE c.project = ?1 AND c.archived = 0 AND col.name <> ?3
-               AND EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?2)
-             ORDER BY c.number DESC LIMIT 1",
-            params![project, label, DONE],
-            |r| r.get(0),
-        )
-        .optional()?)
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.title, c.labels FROM cards c JOIN board_columns col ON col.id = c.column_id
+         WHERE c.project = ?1 AND c.archived = 0 AND col.name <> ?3
+           AND EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?2)
+         ORDER BY c.number DESC",
+    )?;
+    let rows = stmt.query_map(params![project, label, DONE], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, title, labels) = row?;
+        if !github_gate::is_held(&title, &json_col::<Vec<String>>(&labels)) {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the GitHub author gate holds the card `id` (TER-85).
+pub fn is_held(conn: &Connection, id: &str) -> ApiResult<bool> {
+    Ok(card_is_held(&find_row(conn, id)?))
 }
 
 fn deps(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {

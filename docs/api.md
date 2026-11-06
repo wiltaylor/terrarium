@@ -4249,7 +4249,9 @@ The gap: `github_author` is what the creating agent says. The daemon does
 not read the issue, so an agent that gives a false author, or that makes
 the card with neither the label nor the title, gets past the gate. The
 gate enforces the rule against mistakes, not against a hostile agent.
-A schedule `card` action (§19) that runs as the operator is not gated.
+A card that a schedule `card` action (§19) opens as the operator is not
+gated. The action never finds a held card: `close` does not move it and
+`open` does not comment on it, whatever its `trigger:<key>` label.
 A daemon-side issue sync that takes the author from the signed GitHub
 webhook closes the gap (TER-124). The ingest listener (§20) must then be
 reachable from GitHub.

@@ -1333,6 +1333,14 @@ async fn card_action(state: &Shared, actor: Actor, w: CardWork, ctx: &RunCtx) ->
                     ))
                 }
                 (CardOp::Close, Some(id)) => {
+                    // find_open_by_label skips held cards. Check again, so
+                    // a schedule that runs as the operator never moves a
+                    // card that the GitHub author gate holds (TER-85).
+                    if board::is_held(t, &id)? {
+                        return Err(ApiError::forbidden(format!(
+                            "{id} is held by the GitHub author gate; a schedule does not move it"
+                        )));
+                    }
                     let to = w.column.as_deref().unwrap_or(board::DONE);
                     let comment = Some(body.as_str()).filter(|b| !b.is_empty());
                     let c = board::move_card(t, &actor, &id, to, None, comment)?;
