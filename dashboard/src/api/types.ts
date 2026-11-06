@@ -16,6 +16,21 @@ export const AGENT_STATUSES = [
 ] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
+/** The queue of a queued turn. */
+export type QueuedSource = "store";
+
+/** One turn that waits in the store for its agent's wake (`GET /api/agents/{id}/queued`, TER-54). */
+export interface QueuedTurn {
+  id: number;
+  /** Where the turn waits: `store` (the daemon's queue for an agent that does not run). TER-66 adds the live queues. */
+  source: QueuedSource;
+  /** The turn as it will be typed, with its tag (`[User] ...`). */
+  text: string;
+  /** The text after the tag: what the composer gets for an edit. */
+  body: string;
+  created_at: string;
+}
+
 /** Roles above `member`. The daemon drops `member`; it is implicit. */
 export type Role = "sysadmin" | "project_admin" | "member" | "architect";
 export const GRANTABLE_ROLES = ["project_admin", "sysadmin", "architect"] as const;

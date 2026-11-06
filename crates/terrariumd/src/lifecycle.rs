@@ -180,6 +180,10 @@ pub struct Lifecycle {
     pub resets: crate::reset::Runs,
     /// The card reminder (`crate::card_reminder`).
     pub reminders: crate::card_reminder::Reminders,
+    /// One lock for each agent around the hand-over of one queued turn
+    /// (TER-54): a remove of that turn comes before it or after it, so a
+    /// removed turn is never typed and a typed turn is never shown removed.
+    turn_locks: Mutex<HashMap<AgentId, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -187,6 +191,11 @@ fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Lifecycle {
+    /// The queued-turn lock of agent `id` ([`Lifecycle::turn_locks`]).
+    pub fn turn_lock(&self, id: AgentId) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        guard(&self.turn_locks).entry(id).or_default().clone()
+    }
+
     pub fn tuning(&self) -> Tuning {
         *guard(&self.tuning)
     }
@@ -504,7 +513,10 @@ pub async fn wake_with_work(state: &Shared, only: Option<AgentId>, cause: &'stat
 
 /// Give the queued turns of a running agent to the supervisor, in order,
 /// and delete them. A turn that the supervisor refuses stays, with the
-/// turns after it.
+/// turns after it. Each turn goes under the agent's turn lock
+/// ([`Lifecycle::turn_lock`]): a turn that was removed meanwhile is
+/// skipped, and the row of a turn goes only after the supervisor took it,
+/// so a later turn cannot pass it (TER-25).
 async fn deliver_turns(state: &Shared, id: AgentId) {
     let key = id.to_string();
     let turns = match state.db.read(move |c| agents::queued_turns(c, &key)).await {
@@ -514,22 +526,31 @@ async fn deliver_turns(state: &Shared, id: AgentId) {
             return;
         }
     };
-    let mut last = None;
+    let lock = state.lifecycle.turn_lock(id);
     for t in turns {
-        match state.supervisor.send_turn(id, t.text).await {
-            Ok(()) => last = Some(t.id),
+        let _held = lock.lock().await;
+        let (key, turn) = (id.to_string(), t.id);
+        match state
+            .db
+            .read(move |c| agents::queued_turn_waits(c, &key, turn))
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => continue,
             Err(e) => {
-                debug!(agent = %id, "a queued turn waits: {e}");
-                break;
+                warn!(agent = %id, "cannot read the queued turns: {e}");
+                return;
             }
         }
-    }
-    if let Some(upto) = last {
+        if let Err(e) = state.supervisor.send_turn(id, t.text).await {
+            debug!(agent = %id, "a queued turn waits: {e}");
+            break;
+        }
         let key = id.to_string();
         if let Err(e) = state
             .db
-            .write("system", move |t| {
-                agents::forget_queued_turns(t, &key, upto)
+            .write("system", move |tx| {
+                agents::forget_queued_turns(tx, &key, turn)
             })
             .await
         {

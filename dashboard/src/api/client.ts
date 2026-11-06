@@ -166,6 +166,8 @@ import type {
   WebhookDelivery,
   WebhookTestResult,
   TestEvent,
+  QueuedSource,
+  QueuedTurn,
   Session,
   AgentScreen,
   Spawn,
@@ -350,6 +352,10 @@ export interface Api {
      * `409 conflict`: no turn runs.
      */
     interrupt(id: string): Promise<{ accepted: boolean; interrupted: boolean }>;
+    /** `GET /api/agents/{id}/queued` (docs/api.md §6.2, TER-54): the turns that wait in the store for the agent's wake, oldest first. The read right of the agent. */
+    queued(id: string): Promise<{ items: QueuedTurn[] }>;
+    /** `DELETE /api/agents/{id}/queued/{turn}` (TER-54): drop one queued turn. project_admin, sysadmin, or the operator. `404`: the turn went out already. */
+    removeQueued(id: string, turn: number, source?: QueuedSource): Promise<void>;
     answer(id: string, body: { request_id: string; answer: unknown } | { text: string }): Promise<{ accepted: boolean }>;
     events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
     sessions(id: string, q?: PageQuery): Promise<Page<Session>>;
@@ -1135,6 +1141,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       sendRaw: (id, text) => post(`${a(id)}/send`, { text, raw: true }),
       keys: (id, keys) => post(`${a(id)}/keys`, { keys }),
       interrupt: (id) => post(`${a(id)}/interrupt`),
+      queued: (id) => get(`${a(id)}/queued`),
+      removeQueued: (id, turn, source = "store") => del(`${a(id)}/queued/${seg(String(turn))}`, { source }),
       answer: (id, body) => post(`${a(id)}/answer`, body),
       events: (id, q = {}) => page(`${a(id)}/events`, { ...q }),
       sessions: (id, q = {}) => page(`${a(id)}/sessions`, { ...q }),

@@ -6,14 +6,15 @@
 // Agent-written text is untrusted: see ./TranscriptLog.
 
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
-import type { Agent, Session } from "../../../api/types";
+import type { Agent, QueuedTurn, Session } from "../../../api/types";
+import { ApiError } from "../../../api/http";
 import { StatusBadge } from "../../../components/StatusBadge";
 import { ErrorBanner } from "../../../components/ui";
 import { api } from "../../../stores";
 import { currentSession } from "../sessions";
 import { bytes } from "../../../lib/format";
 import { canSend, imageProblem, imagesFromFiles, imagesFromItems, submitTurn, thumbnailOf, type DraftImage } from "./attachments";
-import { canInterrupt, composerState, interruptNote, isSendKey, sessionGone } from "./model";
+import { canInterrupt, composerState, footerState, interruptNote, isSendKey, sessionGone } from "./model";
 import { createTranscriptView, StreamChip, TranscriptLog } from "./TranscriptLog";
 
 const LIVE = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
@@ -81,6 +82,9 @@ export function Conversation(props: { agent: Agent; onOpenTerminal?: () => void;
   );
 
   // The transcript's own `active` (its page, then `status` frames). When it cannot load, the list's word.
+  // A queued turn that the operator takes back to edit: it goes into the composer (TER-54).
+  const [draft, setDraft] = createSignal<{ text: string; n: number } | undefined>(undefined);
+
   const isActive = () => {
     if (!t.error()) return t.active();
     const s = session();
@@ -114,10 +118,103 @@ export function Conversation(props: { agent: Agent; onOpenTerminal?: () => void;
         label="Conversation"
         empty={<p class="muted convo-note">{loaded() ? "No session yet. Send a turn: the agent wakes to run it." : "Loading…"}</p>}
       />
+      <LiveLine agent={props.agent} />
+      <QueuedTurns agent={props.agent} onEdit={(text) => setDraft({ text, n: (draft()?.n ?? 0) + 1 })} />
       {/* The view always shows the agent's current session (`currentSession`): a turn may go. */}
-      <Composer agent={props.agent} sessionActive={isActive()} current />
+      <Composer agent={props.agent} sessionActive={isActive()} current draft={draft()} />
       {props.footer}
     </section>
+  );
+}
+
+/** The live line under the transcript (TER-54): thinking, waiting, idle, stopped, blocked. */
+export function LiveLine(props: { agent: Agent }) {
+  const st = () => footerState({ status: props.agent.status, reason: props.agent.status_reason, waitingOn: props.agent.waiting_on, paused: props.agent.paused });
+  return (
+    <div class="convo-live" classList={{ [`tone-${st().tone}`]: !!st().tone }} role="status" aria-live="polite" data-running={st().running ? "true" : "false"}>
+      <Show when={st().running} fallback={<span class="convo-live-dot" aria-hidden="true" />}>
+        <span class="convo-live-spinner" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+      </Show>
+      <span class="small">{st().text}</span>
+    </div>
+  );
+}
+
+/**
+ * The turns that wait in the store for the agent's wake (TER-54), oldest first, at the bottom of
+ * the conversation. Edit takes a turn out of the queue and gives its text to the composer; Remove
+ * drops it. The list reads again when the agent's `queued` count or status changes.
+ */
+export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => void }) {
+  const [items, setItems] = createSignal<QueuedTurn[]>([]);
+  const [error, setError] = createSignal<unknown>(null);
+  const [busy, setBusy] = createSignal<number | null>(null);
+  let gen = 0;
+  const load = async () => {
+    const mine = ++gen;
+    try {
+      const r = await api.agents.queued(props.agent.id);
+      if (mine === gen) setItems(r.items);
+    } catch (e) {
+      if (mine === gen) setError(e);
+    }
+  };
+  // `queued` counts turns, mail, and pointers; 0 means no queued turn, so no read.
+  createEffect(
+    on([() => props.agent.id, () => props.agent.queued ?? 0, () => props.agent.status], ([, n]) => {
+      if (n > 0) void load();
+      else {
+        gen++;
+        setItems([]);
+      }
+    }),
+  );
+  onCleanup(() => gen++);
+  const take = async (turn: QueuedTurn, edit: boolean) => {
+    if (busy() !== null) return;
+    setBusy(turn.id);
+    try {
+      await api.agents.removeQueued(props.agent.id, turn.id, turn.source);
+      setItems((cur) => cur.filter((t) => t.id !== turn.id));
+      setError(null);
+      if (edit) props.onEdit(turn.body);
+    } catch (e) {
+      setError(e instanceof ApiError && e.status === 404 ? new Error("That turn went to the agent already; it is no longer queued.") : e);
+      void load();
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Show when={items().length || error()}>
+      <section class="convo-queued" aria-label="Queued turns">
+        <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+        <Show when={items().length}>
+          <p class="small muted convo-queued-head">Queued: these turns go to the agent in this order when it wakes.</p>
+          <ol class="convo-queued-list">
+            <For each={items()}>
+              {(turn) => (
+                <li class="convo-queued-item" data-source={turn.source}>
+                  <span class="convo-queued-text">{turn.body}</span>
+                  <span class="row convo-queued-actions">
+                    <button type="button" class="small" disabled={busy() !== null} onClick={() => void take(turn, true)}>
+                      Edit
+                    </button>
+                    <button type="button" class="small danger" disabled={busy() !== null} onClick={() => void take(turn, false)}>
+                      Remove
+                    </button>
+                  </span>
+                </li>
+              )}
+            </For>
+          </ol>
+        </Show>
+      </section>
+    </Show>
   );
 }
 
@@ -127,7 +224,7 @@ export function Conversation(props: { agent: Agent; onOpenTerminal?: () => void;
  * `current`: the view shows the agent's current session; only then may a
  * turn go (TER-44: a turn wakes a stopped agent, so liveness does not matter).
  */
-export function Composer(props: { agent: Agent; sessionActive: boolean; current: boolean }) {
+export function Composer(props: { agent: Agent; sessionActive: boolean; current: boolean; draft?: { text: string; n: number } }) {
   const [text, setText] = createSignal("");
   const [images, setImages] = createSignal<DraftImage[]>([]);
   const [busy, setBusy] = createSignal(false);
@@ -136,8 +233,21 @@ export function Composer(props: { agent: Agent; sessionActive: boolean; current:
   const [dragging, setDragging] = createSignal(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let fileInput: HTMLInputElement | undefined;
+  let textArea: HTMLTextAreaElement | undefined;
   let nextId = 0;
   onCleanup(() => clearTimeout(timer));
+  // A queued turn taken back to edit (TER-54): its text joins the draft.
+  createEffect(
+    on(
+      () => props.draft,
+      (d) => {
+        if (!d) return;
+        setText((cur) => (cur.trim() ? `${cur}\n${d.text}` : d.text));
+        textArea?.focus();
+      },
+      { defer: true },
+    ),
+  );
   const state = () => composerState({ agentStatus: props.agent.status, current: props.current, paused: props.agent.paused });
 
   // ----- Stop: interrupt the running turn (issue #12) -----
@@ -246,6 +356,7 @@ export function Composer(props: { agent: Agent; sessionActive: boolean; current:
       </Show>
       <div class="convo-compose-row">
         <textarea
+          ref={textArea}
           rows={2}
           value={text()}
           disabled={!state().enabled}
