@@ -257,7 +257,8 @@ export function formFromSchedule(s: Schedule): ScheduleForm {
   if (s.spec.kind === "cron") Object.assign(f, { expr: s.spec.expr, tz: s.spec.tz || "UTC" }, presetOf(s.spec.expr));
   else if (s.spec.kind === "interval") f.every = s.spec.every;
   else if (s.spec.kind === "at") f.at = localInput(s.spec.at);
-  else Object.assign(f, triggerFieldsFromSpec(s.spec));
+  else if (s.spec.kind === "on") Object.assign(f, triggerFieldsFromSpec(s.spec));
+  // A project action (`manual`) has no spec fields.
   const a = s.action;
   if (a.type === "mail") Object.assign(f, { mailTo: a.to, mailSubject: a.subject, mailBody: a.body });
   else if (a.type === "turn") Object.assign(f, { agent: a.agent, text: a.text, startIfStopped: !!a.start_if_stopped });

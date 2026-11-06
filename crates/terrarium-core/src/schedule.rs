@@ -499,7 +499,8 @@ action = { type = "mail", to = "lead", subject = "standup", body = "post your st
 
     #[test]
     fn a_manual_spec_is_a_bare_kind() {
-        let s: ScheduleSpec = serde_json::from_value(serde_json::json!({"kind": "manual"})).unwrap();
+        let s: ScheduleSpec =
+            serde_json::from_value(serde_json::json!({"kind": "manual"})).unwrap();
         assert_eq!(s, ScheduleSpec::Manual {});
         assert!(s.is_manual() && !s.is_trigger());
         assert_eq!(s.kind(), "manual");
@@ -517,8 +518,10 @@ action = { type = "exec", target = "box", cmd = ["./deploy.sh"] }
         .unwrap();
         assert!(d.spec.is_manual());
         assert!(
-            serde_json::from_value::<ScheduleSpec>(serde_json::json!({"kind": "manual", "at": "x"}))
-                .is_err()
+            serde_json::from_value::<ScheduleSpec>(
+                serde_json::json!({"kind": "manual", "at": "x"})
+            )
+            .is_err()
         );
     }
 
