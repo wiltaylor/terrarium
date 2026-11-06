@@ -436,7 +436,7 @@ pub fn grant_policy(actor: &Actor, grants: &[String]) -> ApiResult<()> {
 ///   role above `member`) of its project, with templates of the project
 ///   or global ones (the entries name nothing else). It may not write its
 ///   own block or the block of an admin, and it may not set
-///   `may_spawn_children`.
+///   `may_spawn_children` or `bound` (TER-74).
 pub fn set_spawn_policy(
     actor: &Actor,
     target: Option<&str>,
@@ -479,6 +479,9 @@ pub fn set_spawn_policy(
             "setting spawn.may_spawn_children",
             "sysadmin or the operator",
         ));
+    }
+    if new.spawn.as_ref().is_some_and(|s| s.bound) && !before.is_some_and(|b| b.bound) {
+        return Err(deny("setting spawn.bound", "sysadmin or the operator"));
     }
     Ok(())
 }
@@ -1404,6 +1407,15 @@ mod tests {
             set_spawn_policy(&lead, Some("l2"), &[Role::ProjectAdmin], Some(&none), &some).is_err()
         );
         assert!(set_spawn_policy(&lead, Some("w"), &[], Some(&none), &children).is_err());
+        // The bind right (TER-74): not from a lead; from sysadmin, yes.
+        let bound = with(Some(SpawnPolicy {
+            templates: vec!["project:*".into()],
+            bound: true,
+            ..SpawnPolicy::default()
+        }));
+        assert!(set_spawn_policy(&lead, Some("w"), &[], Some(&none), &bound).is_err());
+        assert!(set_spawn_policy(&lead, Some("w"), &[], Some(&some), &bound).is_err());
+        assert!(set_spawn_policy(&sys, Some("w"), &[], Some(&none), &bound).is_ok());
         // A lead may remove the block of a member.
         assert!(set_spawn_policy(&lead, Some("w"), &[], Some(&some), &none).is_ok());
         // Sysadmin and the operator: anything valid.
