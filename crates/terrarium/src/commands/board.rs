@@ -491,9 +491,10 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
             branch,
             comment,
         } => super::jobs::validate(ctx, &card_path(id), commit, repo, branch, comment).await,
-        CardCmd::Merge { id, repo, branch } => {
-            super::jobs::merge(ctx, &card_path(id), repo, branch).await
-        }
+        CardCmd::Merge { ids, repo, branch } => match ids.as_slice() {
+            [id] => super::jobs::merge(ctx, &card_path(id), repo, branch).await,
+            _ => super::jobs::merge_batch(ctx, ids, repo, branch).await,
+        },
         CardCmd::Assign { id, agent } => {
             let who = match agent.as_str() {
                 "none" | "-" => Value::Null,
@@ -606,6 +607,7 @@ async fn new(ctx: &Ctx, a: &CardNewArgs) -> anyhow::Result<()> {
     set_opt(&mut b, "repo", a.repo.clone());
     set_opt(&mut b, "branch", a.branch.clone());
     set_opt(&mut b, "from_mail", a.from_mail.clone());
+    set_opt(&mut b, "github_author", a.github_author.clone());
     set_opt(&mut b, "comment", ctx.opt_text(a.comment.as_deref())?);
     set_opt(
         &mut b,

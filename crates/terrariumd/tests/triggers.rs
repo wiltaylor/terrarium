@@ -87,6 +87,36 @@ async fn runs(td: &TestDaemon, sid: &str) -> Vec<Value> {
     v
 }
 
+/// The runs of `sid` once it has `want` of them and none is `running`, then
+/// after a short pause, so a late extra run shows too. The runs of a
+/// trigger start after the pass that moves the cursor, so `settle` alone
+/// does not mean they have a row yet. Returns the last read after 5 s.
+async fn settled_runs(td: &TestDaemon, sid: &str, want: usize) -> Vec<Value> {
+    let st = state(td);
+    let owned = sid.to_owned();
+    for _ in 0..250 {
+        let s = owned.clone();
+        let running: i64 = st
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM schedule_runs WHERE schedule = ?1 AND status = 'running'",
+                    [s],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        let now = runs(td, sid).await;
+        if now.len() >= want && running == 0 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            return runs(td, sid).await;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    runs(td, sid).await
+}
+
 /// A project `terra` with a lead (project_admin) and a worker; a project
 /// `ops`.
 async fn setup(td: &TestDaemon) -> (String, String) {
@@ -540,8 +570,8 @@ async fn the_cursor_resumes_after_a_restart_with_catch_up() {
         .ok());
     let s = emit(&td, "terra", "ci.run.failed", ci("r/a", "main")).await;
     settle(&td, s).await;
-    assert_eq!(runs(&td, &once).await.len(), 1);
-    assert_eq!(runs(&td, &skip).await.len(), 1);
+    assert_eq!(settled_runs(&td, &once, 1).await.len(), 1);
+    assert_eq!(settled_runs(&td, &skip, 1).await.len(), 1);
 
     // The daemon stops; two events come while it is down.
     td.daemon.take().unwrap().shutdown();
@@ -561,10 +591,10 @@ async fn the_cursor_resumes_after_a_restart_with_catch_up() {
     let s = emit(&td, "terra", "ci.run.failed", ci("r/a", "z")).await;
     settle(&td, s).await;
     // `once` ran the two missed events and the new one; `skip` only the
-    // new one.
-    let o = runs(&td, &once).await;
+    // new one. Count only when the catch-up runs have ended.
+    let o = settled_runs(&td, &once, 4).await;
     assert_eq!(o.len(), 4, "{o:?}");
-    let k = runs(&td, &skip).await;
+    let k = settled_runs(&td, &skip, 2).await;
     assert_eq!(k.len(), 2, "{k:?}");
     assert_eq!(k[1]["event_seq"], s);
 }

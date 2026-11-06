@@ -66,7 +66,7 @@ fn rows(v: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn context_value(ctx: &Ctx, c: &QuestionContext) -> anyhow::Result<Option<String>> {
+pub(super) fn context_value(ctx: &Ctx, c: &QuestionContext) -> anyhow::Result<Option<String>> {
     if let Some(text) = &c.context {
         return Ok(Some(ctx.text(text)?));
     }
@@ -104,7 +104,7 @@ fn json_list(ctx: &Ctx, arg: &str, what: &str, key: &str) -> anyhow::Result<Vec<
 
 /// The items of a bundle from `--items-file`: a plain string is an item
 /// with no options. The daemon checks the rest.
-fn items_value(ctx: &Ctx, arg: &str) -> anyhow::Result<Value> {
+pub(super) fn items_value(ctx: &Ctx, arg: &str) -> anyhow::Result<Value> {
     let items = json_list(ctx, arg, "items", "items")?
         .into_iter()
         .map(|i| match i {
@@ -631,7 +631,7 @@ fn card_value(body: &mut Value, card: &Option<String>, no_card: bool) {
 }
 
 /// `--urgent` or `--critical` (clap lets only one through) as `priority`.
-fn set_priority(body: &mut Value, urgent: bool, critical: bool) {
+pub(super) fn set_priority(body: &mut Value, urgent: bool, critical: bool) {
     if critical {
         body["priority"] = json!("critical");
     } else if urgent {

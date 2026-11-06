@@ -2098,6 +2098,126 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
+    // 73: bound ephemeral agents (TER-74, `crate::bound`). `bound_kind`
+    // and `bound_id` name the object whose life the agent shares (for
+    // example `card`, `TER-74`); NULL: a plain spawn. At most one open
+    // spawn per object. `parked_at` and `park_reason`: the agent is parked
+    // (stopped, no wake) while its object waits; NULL: not parked.
+    // `unpark_at`: an unpark waits for a place of the owner (first in,
+    // first out); NULL: none.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE spawns ADD COLUMN bound_kind TEXT;
+    ALTER TABLE spawns ADD COLUMN bound_id TEXT;
+    ALTER TABLE spawns ADD COLUMN parked_at TEXT;
+    ALTER TABLE spawns ADD COLUMN park_reason TEXT;
+    ALTER TABLE spawns ADD COLUMN unpark_at TEXT;
+    CREATE UNIQUE INDEX spawns_bound_open ON spawns(bound_kind, bound_id)
+        WHERE finished_at IS NULL AND bound_kind IS NOT NULL;
+    "#,
+    // 74: Inbox threads (TER-91, `crate::store::threads`): a conversation
+    // of the operator with one agent on one topic. `report_to` is the lead
+    // of the scope (D34), set at the open. `status` is `waiting_operator`,
+    // `waiting_agent`, or `closed`. `response` is the newest overall
+    // response of the operator (JSON `{text, by, at}`); `handoff` is set
+    // at the close (JSON). `thread_messages` holds the conversation; the
+    // questions of a thread have `questions.thread`. Self-contained: when
+    // another branch takes this number, move this entry to the end.
+    r#"
+    CREATE TABLE threads (
+        id         TEXT PRIMARY KEY,
+        topic      TEXT NOT NULL,
+        scope      TEXT NOT NULL,
+        template   TEXT,
+        opened_by  TEXT NOT NULL,
+        agent      TEXT,
+        report_to  TEXT,
+        status     TEXT NOT NULL
+            CHECK (status IN ('waiting_operator', 'waiting_agent', 'closed')),
+        response   TEXT,
+        handoff    TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        closed_at  TEXT,
+        closed_by  TEXT
+    );
+    CREATE INDEX threads_status ON threads(status, updated_at);
+    CREATE INDEX threads_agent ON threads(agent);
+    CREATE INDEX threads_report_to ON threads(report_to);
+    CREATE TABLE thread_messages (
+        id      TEXT PRIMARY KEY,
+        thread  TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        author  TEXT NOT NULL,
+        kind    TEXT NOT NULL CHECK (kind IN ('message', 'response')),
+        text    TEXT NOT NULL,
+        at      TEXT NOT NULL
+    );
+    CREATE INDEX thread_messages_thread ON thread_messages(thread, at);
+    ALTER TABLE questions ADD COLUMN thread TEXT;
+    CREATE INDEX questions_thread ON questions(thread);
+    "#,
+    // 75: batch merges (TER-112, `crate::jobs`). `jobs.batch` is the JSON
+    // list of the cards of a merge job that merges several cards in order
+    // ([{card, branch, by_agent, outcome?, note?}]); `null` for a job of
+    // one card. `jobs.parent` is the job that a split of a red batch came
+    // from. `jobs.split_path` orders the halves of the splits of one root
+    // batch (`0` left, `1` right, per level; empty for no split).
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE jobs ADD COLUMN batch TEXT;
+    ALTER TABLE jobs ADD COLUMN parent TEXT;
+    ALTER TABLE jobs ADD COLUMN split_path TEXT NOT NULL DEFAULT '';
+    "#,
+    // 76: pin job-host DNS identities across queue ticks and restarts.
+    // Follows 74 (TER-91) and 75 (TER-112). Keep this entry self-contained
+    // and renumber at merge if the integration order changes.
+    r#"
+    CREATE TABLE job_host_keys (
+        hostname TEXT PRIMARY KEY,
+        host_key TEXT NOT NULL
+    );
+    "#,
+    // 77: the addresses of a host agent (TER-105, `crate::store::jobs`).
+    // An SSH target whose address is an alias of a host agent counts on
+    // that host agent's key for the host cap. `alias` is the address key
+    // (no user, no port, lowercase). One host agent per alias. Self-
+    // contained: when another branch takes this number, move this entry
+    // to the end of the list.
+    r#"
+    CREATE TABLE job_host_aliases (
+        alias      TEXT PRIMARY KEY,
+        host_id    TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX job_host_aliases_host ON job_host_aliases(host_id);
+    "#,
+    // 78: the close of an Inbox thread (TER-95, `crate::thread_close`).
+    // `close_proposal` is the agent's proposed handoff (JSON `{summary,
+    // links, by, at}`) that the operator confirms; NULL: none.
+    // `close_reason` is `operator`, `confirmed`, `stale`, or `failed_start`
+    // on a closed thread. `session_id` is the session of the thread agent,
+    // archived when the agent ends. `reminded_at` is the time of the last
+    // Inbox reminder of an untouched thread. Self-contained: when another
+    // branch takes this number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE threads ADD COLUMN close_proposal TEXT;
+    ALTER TABLE threads ADD COLUMN close_reason TEXT;
+    ALTER TABLE threads ADD COLUMN session_id TEXT;
+    ALTER TABLE threads ADD COLUMN reminded_at TEXT;
+    "#,
+    // 79: the GitHub author gate (TER-85, `crate::store::github_gate`).
+    // `projects.github_authors` is the JSON list of the GitHub logins
+    // whose issues count as work; NULL: no gate. `questions.hold_card` is
+    // the held card of a hold question that the daemon opened; NULL for
+    // other questions. Self-contained: when another branch takes this
+    // number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE projects ADD COLUMN github_authors TEXT;
+    ALTER TABLE questions ADD COLUMN hold_card TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

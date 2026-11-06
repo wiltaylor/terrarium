@@ -275,6 +275,9 @@ struct AskBody {
     /// `TERRARIUM_WAIT_DEFAULT_TIMEOUT`.
     #[serde(default)]
     timeout: Option<String>,
+    /// Ask in this Inbox thread (TER-91): the agent is its attached agent.
+    #[serde(default)]
+    thread: Option<String>,
 }
 
 /// The answer of `POST /api/agents/{id}/questions`: the question, and
@@ -350,7 +353,19 @@ async fn ask(
             ));
         }
     };
-    policy::ask_question(&actor, &key, &a.agent.project, what)?;
+    // In its own thread, the attached agent asks also without a leader
+    // role (the store checks that the thread is its own and open).
+    let thread = b
+        .thread
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned);
+    if thread.is_some() {
+        policy::ask_in_thread(&actor, &key, what)?;
+    } else {
+        policy::ask_question(&actor, &key, &a.agent.project, what)?;
+    }
     let tuning = state.waits.tuning();
     let timeout_at = match (b.wait, b.timeout.as_deref()) {
         (false, Some(_)) => {
@@ -375,6 +390,8 @@ async fn ask(
         context: b.context,
         card: b.card,
         priority: b.priority.unwrap_or_default(),
+        thread,
+        hold_card: None,
     };
     let wait = b.wait;
     let (question, wait) = state

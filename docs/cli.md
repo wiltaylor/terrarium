@@ -344,6 +344,7 @@ terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--m
                     [--compact-on-idle on|off|default] [--compact-max-age 24h|off|default]
                     [--spawn-template t]... [--spawn-max-concurrent n] [--spawn-max-per-day n|0]
                     [--spawn-max-lifetime 2h] [--spawn-children on|off] [--no-spawn]
+                    [--thread-open on|off]
 terrarium agent set <agent> --save-system-prompt <name>  save the custom text in the library, and select it
 terrarium agent swap <agent> <subscription>  move to another plan account of the pool
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
@@ -524,6 +525,9 @@ policy (the CLI reads the policy first, or takes `--policy`):
 `--spawn-children on|off`, and `--no-spawn`, which removes the rights. A
 lead sets them on a member of its project; `--spawn-children on` needs a
 sysadmin or the operator.
+`--thread-open on|off` sets `policy.thread_open`, the right to open Inbox
+threads (`thread new`), with the same rule: a lead on a member of its
+project, a sysadmin or the operator on any agent.
 
 `agent rm` deletes the agent. The daemon moves the agent dir and the
 workspace `work/<project>/<agent>` to `<state>/trash/<ulid>-<ts>/` (the
@@ -881,6 +885,7 @@ terrarium card ls [-c column] [--mine | --assignee a] [--unassigned] [--label l]
 terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
                    [--assignee a] [--repo r] [--branch b] [-m comment] [--eta 2h30m]
+                   [--github-author login]   the issue author of a GitHub card (api.md §8.3)
 terrarium card new --from-mail <message id> [...]
 terrarium card edit <id> [--title t] [-b body] [--label l|none]... [--depends-on id|none]...
                     [--repo r|none] [--branch b|none]
@@ -1142,11 +1147,13 @@ standard file for each test framework.
 ```
 terrarium card validate <id> [--commit sha] [--repo r] [--branch b] [-m text]
 terrarium card merge <id> [--repo r] [--branch b]          project_admin
+terrarium card merge <id> <id>... [--repo r]               project_admin
 terrarium job ls [--state queued|running|passed|failed|cancelled]
 terrarium job show <id>
 terrarium job cancel <id>
 terrarium job hosts
 terrarium job host-cap <host> <n> | --clear                sysadmin
+terrarium job host-alias <host-agent> <address>... | --clear  sysadmin
 terrarium project delivery show
 terrarium project delivery set [--target t] [--recipe cmd] [--slots n]
                                [--next-repo r]... [--work-dir d] [--timeout secs]
@@ -1164,10 +1171,21 @@ queue.
 validates the merge and pushes `next` when it is green, and the card moves
 to `accepted`.
 
+With two or more cards, `card merge` queues one batch merge job
+(`POST /api/merges`, docs/api.md §35.3). It merges the card branches onto
+`next` in the given order, validates once, and pushes `next` when green.
+A card that conflicts goes to the top of `ready` at once. On red, the
+batch splits in halves until it finds the failing card, which goes to the
+top of `ready`. The other cards merge. `--branch` takes one card only.
+
 `job host-cap` sets the most jobs of all projects that run on one host at
 the same time (docs/api.md §35.2, "The host cap"). The host is the host
 agent of the target, else the host of its address, else the target name.
-`job hosts` shows the caps and the running jobs per host. Jobs run at low
+`job host-alias` lists the SSH addresses of a host agent's machine (for
+example `job host-alias helios 10.3.0.2`). An SSH target on one of them
+then counts on the host agent, so both share one cap. It replaces the
+list. `job hosts` shows the caps, the running jobs, the host-agent name,
+and the aliases per host. Jobs run at low
 IO and CPU priority (`ionice -c3 nice -n19`). Builds that you start with
 `terrarium exec` or `terrarium run` are outside the queue.
 
@@ -1649,6 +1667,55 @@ terrarium admin inbox resume <thread-id> [-m note]
 - `admin inbox release` delivers one held message of the loop guard;
   `admin inbox resume` ends the pause of a thread and releases its held
   messages, with an optional note to the participants (api.md §7.4).
+
+### Inbox threads
+
+[api.md §6.13](api.md#613-inbox-threads) is the contract; the wiki page
+`inbox-threads` is the plan. A thread is a conversation between the
+operator and one agent on one topic, in the Inbox, with questions inside
+and an overall response (the approval record).
+
+```
+terrarium thread new --topic "<one line>" [--template <t>] [--scope global|<project>] [--agent <agent>] [-m <text|->]
+terrarium thread post <id> -m <text|->
+terrarium thread ask <id> "<question>" [-o <choice>]... [--context <text|-> | --context-file <path>] [--urgent | --critical]
+terrarium thread ask <id> "<summary>" --bundle (--item "<text>"... | --items-file <path|->) [--context ...]
+terrarium thread respond <id> -m <text|->
+terrarium thread close <id> [--handoff <text|->] [--link <kind>:<ref>]...
+terrarium thread close <id> --confirm
+terrarium thread ls [--status waiting_operator|waiting_agent|closed|open|all] [--scope global|<project>]
+terrarium thread show <id>
+```
+
+- `new` opens a thread and prints `thread <id> opened (<scope>, reports to
+  <lead>, <status>).` An agent needs the right `thread:open` (`agent set
+  --thread-open on`) and a `--template` whose rights do not exceed its own
+  (A1): a template with a role, a target, or another right that the agent
+  does not hold is refused (`403`, exit 3), and the message names the
+  right. The operator opens any thread. The scope defaults to the agent's
+  own project, and to `global` for the operator; an agent opens only in
+  its own project or `global`. `--agent` names the attached agent until
+  the daemon spawns it from the template.
+- `post` adds a message: the attached agent or the operator.
+- `ask` is for the attached agent: a question in its thread, or with
+  `--bundle` a bundle (the items as for `question bundle`). The question
+  shows in the thread, and the operator answers it there. A member asks
+  in its thread too. The operator does not ask (exit 2).
+- `respond` sends the operator's overall response.
+- `close` closes the thread with a handoff summary and links (`card`,
+  `mail`, `wiki`, `memory`, `url`, `other`). For the attached agent the
+  close is a proposal: it prints `thread <id> close proposed
+  (waiting_operator).`, and `show` prints the proposed handoff. The
+  operator confirms it with `--confirm` (the proposed handoff, no
+  `--handoff` or `--link`), declines it by writing on (`post`, `respond`),
+  or closes at any time with a handoff of its own. At the close the agent
+  ends, its session is archived, and the thread (`session_id`) and each
+  handoff card (a comment) link to it.
+- `ls` lists the threads (an agent: the ones it opened, is attached to,
+  or reports from; a sysadmin or an architect: all): `ID`, `STATUS`, `SCOPE`, `AGENT`, `MSGS`, `OPEN_Q`,
+  `LAST`, `TOPIC`. `show` prints the fields, then each message, the
+  response, and the handoff between data markers, and one line for each
+  question.
 
 ### Fleet files
 

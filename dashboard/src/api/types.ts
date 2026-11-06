@@ -981,6 +981,8 @@ export interface Question {
   /** `operator` or `agent:<ulid>`. */
   retracted_by?: string | null;
   thread_id: string;
+  /** The Inbox thread that the question was asked in (docs/api.md §6.13). Absent on the others. */
+  thread?: string;
   created_at: string;
   updated_at: string;
   revision: number;
@@ -1085,7 +1087,9 @@ export type TurnPart =
   | { source: "agent"; sender: string; body: string }
   | { source: "mailbox"; sender: string; subject: string; thread: string; message?: string; body: string }
   /** `kind`: recap, card, lease, nudge, or schedule (`detail` is the schedule name). */
-  | { source: "system"; kind: string; detail?: string; body: string };
+  | { source: "system"; kind: string; detail?: string; body: string }
+  /** `thread`: the Inbox thread whose operator message this is (TER-92). */
+  | { source: "thread"; thread: string; body: string };
 
 export interface BlockUsage {
   input: number;
@@ -1250,6 +1254,8 @@ export const EVENT_KINDS = [
   "question",
   // The operator's inbox: `{item, kind, change, project?}` on each change of an item.
   "inbox",
+  // docs/api.md §6.13: `{change, id, scope, status}`, an Inbox thread.
+  "thread",
   // docs/api.md §4: a harness update in the container.
   "harness",
   // docs/api.md §19: `{change, schedule, run?, status?}`.
@@ -1378,7 +1384,7 @@ export interface ProjectInboxQuery {
 
 // ----- The operator's inbox: what waits for the operator -----
 
-export type InboxKind = "question" | "notice" | "mail" | "system" | "watch";
+export type InboxKind = "question" | "notice" | "mail" | "system" | "watch" | "thread";
 export type InboxStatus = "open" | "done" | "all";
 
 /** A thread that the loop guard paused, with the messages that it held. */
@@ -1437,7 +1443,7 @@ export interface InboxAsk {
 
 /**
  * One thing that waits for the operator (`GET /api/inbox`). `id` is
- * `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, `thread:<thread id>`, or `watch:<thread id>`.
+ * `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, `thread:<thread id>`, `watch:<thread id>`, or `inbox-thread:<id>`.
  * A `watch` item waits for an agent, not for the operator.
  * A bundle is an item of the kind `question`.
  * A system item shows only while it is open.
@@ -1461,6 +1467,8 @@ export interface InboxItem {
   system?: PausedThread;
   /** Kind `watch`: the watch. Kind `mail` on a watched thread: the watch that the mail answers. */
   watch?: InboxWatch;
+  /** Kind `thread`: the Inbox thread as `GET /api/threads` lists it (docs/api.md §6.13). */
+  thread?: Thread;
 }
 
 export interface InboxQuery {
@@ -1481,6 +1489,8 @@ export interface InboxCounts {
   system: number;
   /** The open watches. Not in `open`: a watch waits for an agent. Absent on an older daemon. */
   watch?: number;
+  /** The open Inbox threads. Absent on an older daemon. */
+  thread?: number;
 }
 
 /** `POST /api/inbox/mail/{id}/ack`: the acknowledged message, and the replies (one for each participant). */
@@ -1502,6 +1512,106 @@ export interface InboxEventData {
   kind: InboxKind;
   change: "opened" | "updated" | "closed";
   project?: string;
+}
+
+// ----- Inbox threads (docs/api.md §6.13) -----
+
+/** Who must act on a thread. */
+export type ThreadStatus = "waiting_operator" | "waiting_agent" | "closed";
+
+/** One message of a thread. `text` is Markdown: untrusted data. */
+export interface ThreadMessage {
+  id: string;
+  /** `operator`, or an agent ULID. */
+  author: string;
+  author_name: string;
+  /** `response`: the operator's overall response. */
+  kind: "message" | "response";
+  text: string;
+  at: string;
+}
+
+/** The operator's overall response: the approval record. */
+export interface ThreadResponse {
+  text: string;
+  by: string;
+  at: string;
+}
+
+export type ThreadLinkKind = "card" | "mail" | "wiki" | "memory" | "url" | "other";
+
+export interface ThreadLink {
+  kind: ThreadLinkKind;
+  ref: string;
+}
+
+/** Set at the close. */
+export interface ThreadHandoff {
+  summary: string;
+  links: ThreadLink[];
+  by: string;
+  at: string;
+}
+
+/**
+ * An Inbox thread: a conversation between the operator and one agent on one
+ * topic. `GET /api/threads/{id}` has `messages` and `questions`; a list has
+ * `message_count`, `open_questions`, and `last_at` instead.
+ */
+export interface Thread {
+  id: string;
+  topic: string;
+  /** `global`, or a project name. */
+  scope: string;
+  template: string | null;
+  /** `operator`, or an agent ULID. */
+  opened_by: string;
+  opened_by_name: string;
+  agent: string | null;
+  agent_name: string | null;
+  report_to: string | null;
+  report_to_name: string | null;
+  status: ThreadStatus;
+  messages?: ThreadMessage[];
+  questions?: Question[];
+  response: ThreadResponse | null;
+  handoff: ThreadHandoff | null;
+  message_count?: number;
+  open_questions?: number;
+  last_at?: string;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+  closed_by: string | null;
+}
+
+/** `POST /api/threads`. `agent`: a ULID or `project/name`, until TER-92 spawns it from the template. */
+export interface NewThread {
+  topic: string;
+  scope?: string;
+  template?: string;
+  agent?: string;
+  text?: string;
+}
+
+export interface ThreadQuery {
+  /** Default `open`: not closed. */
+  status?: ThreadStatus | "open" | "all";
+  scope?: string;
+}
+
+/** `POST /api/threads/{id}/close`: the handoff. */
+export interface ThreadClose {
+  summary?: string;
+  links?: ThreadLink[];
+}
+
+/** `data` of a `thread` event. */
+export interface ThreadEventData {
+  change: "opened" | "message" | "response" | "question" | "closed";
+  id: string;
+  scope: string;
+  status: ThreadStatus;
 }
 
 // ----- Board (§13, docs/api.md §8) -----

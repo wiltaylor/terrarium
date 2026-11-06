@@ -54,6 +54,13 @@ pub struct SpawnArgs {
     /// `:read`. Repeat for more
     #[arg(long = "grant", value_name = "SECRET[:LEVEL]")]
     pub grants: Vec<String>,
+    /// Bind the ephemeral agent to a card of the owner's project (TER-74):
+    /// it lives until the card is merged onto `next`, done, or archived,
+    /// not for its lifetime. It is stopped while the card waits in
+    /// validating, review, or accepted, and starts again in its own
+    /// session when the card comes back
+    #[arg(long, value_name = "CARD")]
+    pub card: Option<String>,
 }
 
 /// The spawn rights flags of `agent set` (the policy block `spawn`).
@@ -75,28 +82,49 @@ pub struct SpawnRightsArgs {
     /// The ephemeral agents may spawn too (sysadmin or the operator)
     #[arg(long, value_name = "on|off")]
     pub spawn_children: Option<String>,
+    /// The agent may bind an ephemeral agent to a card (`agent spawn
+    /// --card`), which then lives until the card is finished (sysadmin or
+    /// the operator)
+    #[arg(long, value_name = "on|off")]
+    pub spawn_bound: Option<String>,
+    /// The cap of the life of a bound ephemeral agent (default and at most
+    /// 30d)
+    #[arg(long, value_name = "DURATION")]
+    pub spawn_max_bound_lifetime: Option<String>,
     /// Remove the spawn rights
     #[arg(long, conflicts_with_all = [
         "spawn_templates", "spawn_max_concurrent", "spawn_max_per_day",
-        "spawn_max_lifetime", "spawn_children"
+        "spawn_max_lifetime", "spawn_children", "spawn_bound",
+        "spawn_max_bound_lifetime"
     ])]
     pub no_spawn: bool,
+    /// The right thread:open: the agent opens Inbox threads (`terrarium
+    /// thread new`), with templates that do not exceed its rights
+    #[arg(long, value_name = "on|off")]
+    pub thread_open: Option<String>,
 }
 
 impl SpawnRightsArgs {
-    fn given(&self) -> bool {
+    fn spawn_given(&self) -> bool {
         self.no_spawn
             || !self.spawn_templates.is_empty()
             || self.spawn_max_concurrent.is_some()
             || self.spawn_max_per_day.is_some()
             || self.spawn_max_lifetime.is_some()
             || self.spawn_children.is_some()
+            || self.spawn_bound.is_some()
+            || self.spawn_max_bound_lifetime.is_some()
+    }
+
+    fn given(&self) -> bool {
+        self.spawn_given() || self.thread_open.is_some()
     }
 }
 
 /// The new policy of `agent set` with spawn flags: the agent's policy now,
-/// with the `spawn` block changed. `policy` is a `--policy` value, if
-/// given; else the CLI reads the agent. `None`: no spawn flag.
+/// with the `spawn` block and `thread_open` changed. `policy` is a
+/// `--policy` value, if given; else the CLI reads the agent. `None`: no
+/// spawn flag.
 pub async fn policy_with_spawn(
     ctx: &Ctx,
     agent: &str,
@@ -112,6 +140,12 @@ pub async fn policy_with_spawn(
     };
     if !policy.is_object() {
         policy = json!({});
+    }
+    if let Some(v) = &a.thread_open {
+        policy["thread_open"] = json!(super::agents::switch(v, "--thread-open")?);
+    }
+    if !a.spawn_given() {
+        return Ok(Some(policy));
     }
     if a.no_spawn {
         if let Some(o) = policy.as_object_mut() {
@@ -143,6 +177,12 @@ pub async fn policy_with_spawn(
     }
     if let Some(v) = &a.spawn_children {
         sp["may_spawn_children"] = json!(super::agents::switch(v, "--spawn-children")?);
+    }
+    if let Some(v) = &a.spawn_bound {
+        sp["bound"] = json!(super::agents::switch(v, "--spawn-bound")?);
+    }
+    if let Some(d) = &a.spawn_max_bound_lifetime {
+        sp["max_bound_lifetime"] = json!(d);
     }
     policy["spawn"] = sp;
     Ok(Some(policy))
@@ -219,6 +259,9 @@ pub async fn spawn(ctx: &Ctx, a: &SpawnArgs) -> anyhow::Result<()> {
     if !a.grants.is_empty() {
         body["grants"] = json!(a.grants);
     }
+    if let Some(c) = &a.card {
+        body["bind"] = json!(format!("card:{c}"));
+    }
     if who == "operator" {
         match &ctx.project {
             Some(p) => body["project"] = json!(p),
@@ -245,13 +288,19 @@ pub async fn spawn(ctx: &Ctx, a: &SpawnArgs) -> anyhow::Result<()> {
         return poll(ctx, &r, a.timeout.as_deref()).await;
     }
     ctx.emit(&r, |c, r| {
+        let life = match r["bound"].as_str() {
+            Some(b) => format!(
+                "bound to {b}, at most until {}",
+                short_time(&field(r, "deadline_at"))
+            ),
+            None => format!("lifetime until {}", short_time(&field(r, "deadline_at"))),
+        };
         c.line(format!(
-            "spawned {}/{} (template {}, {}); lifetime until {}",
+            "spawned {}/{} (template {}, {}); {life}",
             field(r, "project"),
             field(r, "name"),
             field(r, "template"),
             field(r, "harness"),
-            short_time(&field(r, "deadline_at"))
         ));
         if r["finished_at"].is_string() {
             c.line(format!(
@@ -636,6 +685,63 @@ mod tests {
         .await;
         r.unwrap();
         assert_eq!(reqs[1].body, Some(json!({"policy": {"mail_to": ["*"]}})));
+    }
+
+    /// TER-93: `--thread-open` sets `policy.thread_open` and keeps the rest.
+    #[tokio::test]
+    async fn set_grants_and_revokes_thread_open() {
+        let (r, _, reqs) = run(
+            false,
+            &["agent", "set", "terra/w", "--thread-open", "on"],
+            vec![
+                (
+                    200,
+                    json!({"policy": {"mail_to": ["*"], "spawn": {"templates": ["*"]}}}),
+                ),
+                (200, json!({"project": "terra", "name": "w"})),
+            ],
+        )
+        .await;
+        r.unwrap();
+        assert_eq!(
+            reqs[1].body,
+            Some(
+                json!({"policy": {"mail_to": ["*"], "spawn": {"templates": ["*"]},
+                                   "thread_open": true}})
+            )
+        );
+        let (r, _, reqs) = run(
+            false,
+            &[
+                "agent",
+                "set",
+                "terra/w",
+                "--thread-open",
+                "off",
+                "--no-spawn",
+            ],
+            vec![
+                (
+                    200,
+                    json!({"policy": {"mail_to": ["*"], "thread_open": true,
+                                      "spawn": {"templates": ["*"]}}}),
+                ),
+                (200, json!({"project": "terra", "name": "w"})),
+            ],
+        )
+        .await;
+        r.unwrap();
+        assert_eq!(
+            reqs[1].body,
+            Some(json!({"policy": {"mail_to": ["*"], "thread_open": false}}))
+        );
+        let (r, _, _) = run(
+            false,
+            &["agent", "set", "terra/w", "--thread-open", "maybe"],
+            vec![(200, json!({"policy": {}}))],
+        )
+        .await;
+        assert!(r.unwrap_err().to_string().contains("--thread-open"));
     }
 
     #[tokio::test]

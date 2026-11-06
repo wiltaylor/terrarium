@@ -239,6 +239,8 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_WS_QUERY_TOKEN` | `0`: refuse the bearer token in `?token=` on a WebSocket upgrade (`401`). `1` (or `true`, `yes`, `on`): take it, with a warning in the log. Clients send the token as the subprotocol `bearer.<token>`. |
 | `TERRARIUM_SESSION_TTL` | `30d`. The life of a dashboard session cookie: seconds, or a number with `s`, `m`, `h`, or `d`. The daemon renews the cookie past half its life. |
 | `TERRARIUM_CLI_SESSION_TTL` | `90d`. The life of a CLI session token (`terrarium login`). |
+| `TERRARIUM_THREAD_REMINDER` | `3d`. The time that an Inbox thread waits on the operator with no activity before its one Inbox reminder ([api.md](api.md) §6.13). `off` (or `0`): none. |
+| `TERRARIUM_THREAD_STALE` | `14d`. The time that an Inbox thread waits on the operator with no activity before the daemon closes it as stale and mails its report-to lead ([api.md](api.md) §6.13). `off` (or `0`): none. |
 | `TERRARIUM_SESSION_MAX_AGE` | `90d`. The longest life of a dashboard session through its renewals, from the login. |
 | `TERRARIUM_PASSWORD`, `TERRARIUM_PASSWORD_FILE` | unset. The first operator password, set at the start when none is set. The daemon then starts again without both variables, so no child process inherits them. Remove them after the first start; use `terrariumd password set`. |
 | `TERRARIUM_SSH` | `ssh`. The ssh binary for `ssh` targets. |

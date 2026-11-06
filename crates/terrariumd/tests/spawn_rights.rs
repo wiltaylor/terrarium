@@ -361,3 +361,30 @@ async fn the_child_takes_the_owner_pool() {
     assert_eq!(r.body["agent"]["subscription"], "max-b");
     assert!(r.body["agent"]["subscription_pool"].is_null(), "{}", r.body);
 }
+
+/// TER-93 (review finding 1): a spawn gives no `thread:open` past the
+/// owner's. A template cannot carry `policy.thread_open` (the template
+/// files take `targets`, `mail_to`, and `cross_project` only), and the
+/// child of an owner without the right has none.
+#[tokio::test]
+async fn a_spawn_gives_no_thread_open_past_the_owner() {
+    let (td, lead, w) = setup().await;
+    let r = td
+        .post(
+            "/api/templates",
+            json!({"name": "opener", "project": "p",
+                   "spec": {"harness": "claude", "policy": {"thread_open": true}}}),
+        )
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    assert!(message(&r).contains("policy.thread_open"), "{}", r.body);
+
+    // `w` has spawn rights and no thread:open: its child has none.
+    let r = spawn_as(&td, &w, &w, json!({})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_ne!(r.body["agent"]["policy"]["thread_open"], true, "{}", r.body);
+    // The lead spawns for `w`: still `w`'s rights.
+    let r = spawn_as(&td, &lead, &w, json!({})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_ne!(r.body["agent"]["policy"]["thread_open"], true, "{}", r.body);
+}

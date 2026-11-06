@@ -272,6 +272,13 @@ pub enum Command {
     /// in the Inbox; the acknowledgement comes as mail. Use `question ask`
     /// when you need a decision
     Notify(NotifyArgs),
+    /// Inbox threads: a conversation between the operator and one agent on
+    /// one topic, with questions inside and an overall response. Open one
+    /// with the right thread:open; the template may not exceed your rights
+    Thread {
+        #[command(subcommand)]
+        command: ThreadCmd,
+    },
     /// Get a mail when an agent goes idle, waiting, blocked, error, or
     /// stopped: `watch <agent> --on blocked,error`
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
@@ -510,6 +517,19 @@ pub enum JobCmd {
         #[arg(required_unless_present = "clear", conflicts_with = "clear")]
         heavy_jobs: Option<u32>,
         /// No cap on the host
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Set the addresses of a host agent (sysadmin): an SSH target on one
+    /// of them counts on the host agent's cap. Replaces the list; take
+    /// all away with `--clear`
+    HostAlias {
+        /// The host agent, by name or ID
+        host: String,
+        /// SSH addresses or host names of the same machine
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        aliases: Vec<String>,
+        /// No aliases
         #[arg(long)]
         clear: bool,
     },
@@ -1260,11 +1280,20 @@ pub enum CardCmd {
         comment: Option<String>,
     },
     /// Queue a merge of the card branch onto `next` (project_admin): the
-    /// job merges, validates, and pushes `next` when green
+    /// job merges, validates, and pushes `next` when green. With several
+    /// cards, one job merges them in the given order, validates once, and
+    /// pushes `next` when green. A card that conflicts goes back to
+    /// `ready`; on red the batch splits in halves until the failing card is
+    /// found, and the others merge
     Merge {
-        id: String,
+        /// The cards, in merge order
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<String>,
+        /// The repo (default: the card's, or the project's only repo)
         #[arg(long)]
         repo: Option<String>,
+        /// The branch (one card only; default: the card's, or the card ID
+        /// in lower case)
         #[arg(long)]
         branch: Option<String>,
     },
@@ -1422,6 +1451,11 @@ pub struct CardNewArgs {
     /// The ETA: a duration such as 45m, 2h30m, or 1d, or an RFC 3339 time
     #[arg(long, value_name = "DURATION|TIME")]
     pub eta: Option<String>,
+    /// The GitHub login of the issue author, for a GitHub card (label
+    /// `github` or a `GitHub #<n>:` title). An author off the project's
+    /// `github_authors` list holds the card for the operator
+    #[arg(long, value_name = "LOGIN")]
+    pub github_author: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2457,6 +2491,100 @@ pub struct QuestionContext {
     /// Read the context from a file
     #[arg(long)]
     pub context_file: Option<PathBuf>,
+}
+
+/// `terrarium thread ...` (docs/api.md §6.13): Inbox threads.
+#[derive(Debug, Subcommand)]
+pub enum ThreadCmd {
+    /// Open a thread. An agent needs the right thread:open and a template
+    /// whose rights do not exceed its own; the operator opens any thread
+    New {
+        /// The agent template of the thread's agent
+        #[arg(long)]
+        template: Option<String>,
+        /// The topic: one line, at most 200 characters
+        #[arg(long)]
+        topic: String,
+        /// `global` or a project (default: your project; the operator:
+        /// `global`)
+        #[arg(long)]
+        scope: Option<String>,
+        /// An existing agent to attach: a ULID or `project/name`. Without
+        /// it, the daemon spawns the thread's agent from the template
+        #[arg(long)]
+        agent: Option<String>,
+        /// The first message, as Markdown (`-` reads stdin)
+        #[arg(short = 'm', long = "message")]
+        message: Option<String>,
+    },
+    /// Post a message to a thread (its agent or the operator)
+    Post {
+        id: String,
+        /// The message, as Markdown (`-` reads stdin)
+        #[arg(short = 'm', long = "message")]
+        message: String,
+    },
+    /// Ask the operator a question in your thread; with --bundle, several
+    /// related questions as one bundle. The operator answers in the thread
+    Ask {
+        id: String,
+        /// The question, or the summary of a bundle (`-` reads stdin)
+        text: String,
+        /// A choice for the operator; repeat for more (at most 10)
+        #[arg(long = "option", short = 'o', conflicts_with = "bundle")]
+        options: Vec<String>,
+        /// Ask a bundle: the questions come from --item or --items-file
+        #[arg(long)]
+        bundle: bool,
+        /// One question of the bundle, with no options; repeat for each
+        #[arg(long = "item", requires = "bundle", conflicts_with = "items_file")]
+        items: Vec<String>,
+        /// The questions of the bundle as JSON (`-` reads stdin), the format
+        /// of `question bundle --items-file`
+        #[arg(long, requires = "bundle")]
+        items_file: Option<String>,
+        #[command(flatten)]
+        context: QuestionContext,
+        #[arg(long, conflicts_with = "critical")]
+        urgent: bool,
+        #[arg(long)]
+        critical: bool,
+    },
+    /// Send the overall response of a thread: the approval record (the
+    /// operator)
+    Respond {
+        id: String,
+        /// The response, as Markdown (`-` reads stdin)
+        #[arg(short = 'm', long = "message")]
+        message: String,
+    },
+    /// Close a thread with a handoff summary. An agent proposes the close;
+    /// the operator confirms it (`--confirm`) or closes at any time
+    Close {
+        id: String,
+        /// Confirm the agent's close proposal, with its handoff (the
+        /// operator)
+        #[arg(long, conflicts_with_all = ["handoff", "links"])]
+        confirm: bool,
+        /// The handoff summary: what the thread produced (`-` reads stdin)
+        #[arg(long)]
+        handoff: Option<String>,
+        /// A link of the handoff: `<kind>:<ref>`, kind card, mail, wiki,
+        /// memory, url, or other; repeat for more
+        #[arg(long = "link", value_name = "KIND:REF")]
+        links: Vec<String>,
+    },
+    /// List the threads: the open ones (an agent: its own)
+    Ls {
+        /// waiting_operator, waiting_agent, closed, open, or all
+        #[arg(long)]
+        status: Option<String>,
+        /// `global` or a project
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Show a thread: its messages, questions, response, and handoff
+    Show { id: String },
 }
 
 /// `terrarium notify ...` (docs/api.md §6.8): a notice to the operator.

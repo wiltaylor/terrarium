@@ -149,6 +149,11 @@ pub struct SpawnBody {
     /// `:use` or `:read`, each one that the owner holds at that level.
     #[serde(default)]
     pub grants: Vec<String>,
+    /// Bind the ephemeral agent to an object (TER-74, [`crate::bound`]):
+    /// `card:<id>`. It lives until the object is finished, not for its
+    /// lifetime, and is parked while the object waits.
+    #[serde(default)]
+    pub bind: Option<String>,
 }
 
 /// The answer of a spawn: the spawn row, the agent, and the wait.
@@ -176,6 +181,38 @@ fn lifetime_text(d: Duration) -> String {
     IdleStop::After(d).as_text()
 }
 
+/// A rights check of the daemon on the agent definition that a spawn
+/// makes, in the transaction that creates the agent (TER-92: the A1 check
+/// of an agent-opened thread against the template as it is then). It may
+/// narrow the definition (a right that the opener does not hold).
+pub type DefCheck = Box<
+    dyn FnOnce(&rusqlite::Connection, &mut terrarium_core::config::AgentDef) -> ApiResult<()>
+        + Send,
+>;
+
+/// A write of the daemon in the transaction that creates the agent, with
+/// the new agent's ID (TER-92: attach the agent to its thread, so that it
+/// is attached before its first turn).
+pub type AfterCreate =
+    Box<dyn for<'c> FnOnce(&mut crate::db::Tx<'c>, &str) -> ApiResult<()> + Send>;
+
+/// What a spawn of the daemon itself adds to a [`SpawnBody`] (TER-92, the
+/// agent of an Inbox thread). Not in the API.
+#[derive(Default)]
+pub struct Internal {
+    /// The binding, checked by the caller. It takes the place of
+    /// `SpawnBody::bind`, which accepts only the kinds that an agent may
+    /// bind ([`crate::bound::check`]).
+    pub bound: Option<spawns::Bound>,
+    /// The tag of the first turn. Default: the owner (`[Agent:..]`, or
+    /// `[User]` for the operator).
+    pub source: Option<TurnSource>,
+    /// A check of the definition before the agent is made.
+    pub check: Option<DefCheck>,
+    /// A write after the agent and its spawn row are made.
+    pub after_create: Option<AfterCreate>,
+}
+
 /// Spawn an ephemeral agent for `owner_key` (an agent, or `operator`).
 /// `skills` is the skill library (`None`: no config repo), and
 /// `wait_timeout` the parsed `timeout` of the body.
@@ -187,6 +224,34 @@ pub async fn spawn(
     skills: Option<std::path::PathBuf>,
     wait_timeout: Option<Duration>,
 ) -> ApiResult<Spawned> {
+    spawn_with(
+        state,
+        actor,
+        owner_key,
+        body,
+        skills,
+        wait_timeout,
+        Internal::default(),
+    )
+    .await
+}
+
+/// [`spawn`] with the additions of a spawn of the daemon itself.
+pub async fn spawn_with(
+    state: &Shared,
+    actor: &Actor,
+    owner_key: String,
+    body: SpawnBody,
+    skills: Option<std::path::PathBuf>,
+    wait_timeout: Option<Duration>,
+    internal: Internal,
+) -> ApiResult<Spawned> {
+    let Internal {
+        bound: internal_bound,
+        source: internal_source,
+        check: def_check,
+        after_create,
+    } = internal;
     let owner = if owner_key == OPERATOR {
         policy::operator_only(actor, "spawning an ephemeral agent of the operator")?;
         let project = body
@@ -261,9 +326,38 @@ pub async fn spawn(
         },
         None => None,
     };
-    let lifetime = match &rules {
-        Some(sp) => sp.lifetime().map_err(ApiError::invalid)?,
-        None => terrarium_core::config::SPAWN_DEFAULT_LIFETIME,
+    // A bound agent lives as long as its object; the cap is only a
+    // safety limit (TER-74).
+    let bound = match body.bind.as_deref().filter(|b| !b.trim().is_empty()) {
+        Some(_) if internal_bound.is_some() => {
+            return Err(ApiError::invalid("a spawn has one binding"));
+        }
+        None => internal_bound,
+        Some(text) => {
+            let (p, text) = (owner.project.clone(), text.to_owned());
+            Some(
+                state
+                    .db
+                    .read(move |c| crate::bound::check(c, &p, &text))
+                    .await?,
+            )
+        }
+    };
+    // A bind is a right of the owner's spawn policy (`spawn.bound`); the
+    // operator is not bound to it. The cap is the owner's
+    // `spawn.max_bound_lifetime`.
+    if bound.is_some() && !actor.is_operator() && rules.as_ref().is_some_and(|sp| !sp.bound) {
+        return Err(ApiError::forbidden(format!(
+            "`{}` may not bind an ephemeral agent: its spawn policy has no `bound`; ask \
+             sysadmin or the operator (`terrarium agent set {} --spawn-bound on`)",
+            owner.name, owner.name
+        )));
+    }
+    let lifetime = match (&bound, &rules) {
+        (Some(_), Some(sp)) => sp.bound_lifetime().map_err(ApiError::invalid)?,
+        (Some(_), None) => terrarium_core::config::SPAWN_MAX_BOUND_LIFETIME,
+        (None, Some(sp)) => sp.lifetime().map_err(ApiError::invalid)?,
+        (None, None) => terrarium_core::config::SPAWN_DEFAULT_LIFETIME,
     };
     crate::template_files::refresh_quiet(state).await;
     let (p, key) = (owner.project.clone(), body.template.trim().to_owned());
@@ -308,11 +402,23 @@ pub async fn spawn(
     // No idle stop: an idle ephemeral agent stays until `agent done`, a
     // cancel, its lifetime, or the removal of its owner.
     def.idle_stop = Some(IdleStop::Off);
+    // A bound agent keeps its harness session over a prompt change, so a
+    // harness that keeps the prompt of a session resumes it too (TER-74).
+    if bound.is_some() {
+        def.new_session_on_prompt_change = false;
+    }
     def.policy.spawn = rules
         .as_ref()
         .filter(|sp| sp.may_spawn_children)
         .map(|sp| Box::new(sp.for_child()));
     spawn_rights::inherit_pool(&mut def, owner.view.as_ref());
+    spawn_rights::limit_thread_open(
+        &mut def.policy,
+        owner
+            .view
+            .as_ref()
+            .map(|v| (&v.agent.policy, v.agent.roles.as_slice())),
+    );
     for role in &def.roles {
         policy::change_role(actor, "", &def.project, *role)?;
     }
@@ -323,11 +429,12 @@ pub async fn spawn(
         && actor
             .agent()
             .is_some_and(|a| owner.view.is_some() && a.id == owner.id);
-    let source = match &owner.view {
-        Some(v) => TurnSource::Agent {
+    let source = match (internal_source, &owner.view) {
+        (Some(s), _) => s,
+        (None, Some(v)) => TurnSource::Agent {
             sender: format!("{}/{}", v.agent.project, v.agent.name),
         },
-        None => TurnSource::User,
+        (None, None) => TurnSource::User,
     };
     let turn = turn_tag::render(&source, &task);
     let (work_dir, who, rules2) = (state.work_dir.clone(), actor.clone(), rules.clone());
@@ -374,6 +481,9 @@ pub async fn spawn(
                 }
             }
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
+            if let Some(check) = def_check {
+                check(t, &mut def)?;
+            }
             // The rights from the owner (TER-65): checked against the owner,
             // not by the policy rule above, so a lead passes on a global
             // target that it may use.
@@ -408,8 +518,12 @@ pub async fn spawn(
                     harness: def.harness.as_str(),
                     task: &task,
                     deadline_at: &deadline,
+                    bound: bound.as_ref(),
                 },
             )?;
+            if let Some(f) = after_create {
+                f(t, &id)?;
+            }
             let rights = spawn_rights::apply(
                 t,
                 owner_view.as_ref(),
@@ -429,6 +543,7 @@ pub async fn spawn(
                 json!({"owner": oid, "owner_name": oname, "name": def.name,
                        "template": tkey, "task_bytes": task.len(),
                        "deadline_at": deadline, "rights": rights,
+                       "bound": bound.as_ref().map(spawns::Bound::text),
                        "subscription": def.subscription,
                        "subscription_pool": def.subscription_pool}),
             )?;
@@ -760,6 +875,8 @@ pub async fn close(
     }
     drop(deleting);
     info!(agent = %id, name = %closed.name, %outcome, "closed an ephemeral agent");
+    // The close frees a place of the owner: a queued unpark may run.
+    crate::bound::retry_owner(state, &closed.owner).await;
     // The closed agent is a removed owner: its own ephemeral agents go.
     Box::pin(owner_removed(state, id)).await;
     Ok(Some(closed))
@@ -865,7 +982,8 @@ pub async fn pass(state: &Shared) {
                 let owner_live =
                     s.owner == OPERATOR || agents::display_name(c, &s.owner)?.is_some();
                 let row = agents::display_name(c, &s.id)?.is_some();
-                out.push((s, owner_live, row));
+                let object = crate::bound::finished_object(c, &s)?;
+                out.push((s, owner_live, row, object));
             }
             Ok(out)
         })
@@ -878,12 +996,17 @@ pub async fn pass(state: &Shared) {
         }
     };
     let now = crate::waits::from_now(Duration::ZERO);
-    for (s, owner_live, row) in rows {
+    for (s, owner_live, row, object) in rows {
         if state.lifecycle.spawns.closing(&s.id) {
             continue;
         }
+        let mut result = None;
         let (outcome, notify) = if !owner_live {
             (spawns::OWNER_GONE, false)
+        } else if let Some((o, r)) = object {
+            // The bound object finished while no event reached the driver.
+            result = Some(r);
+            (o, true)
         } else if s.deadline_at <= now {
             (spawns::TIMEOUT, true)
         } else if !row {
@@ -893,7 +1016,7 @@ pub async fn pass(state: &Shared) {
         };
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = close(&state, &s.id, outcome, None, notify).await {
+            if let Err(e) = close(&state, &s.id, outcome, result, notify).await {
                 warn!(agent = %s.id, "cannot close the ephemeral agent: {e}");
             }
         });
@@ -912,11 +1035,88 @@ pub async fn pass(state: &Shared) {
     {
         warn!("cannot delete the spawn rows of removed owners: {e}");
     }
+    // A queued unpark whose owner got room another way (a policy change).
+    crate::bound::retry_all(state).await;
+    // A thread that waits on its parked agent while no event reached the
+    // driver (TER-92).
+    crate::thread_agent::retry_missed(state).await;
+    // The reminder and the stale close of untouched threads (TER-95).
+    crate::thread_close::sweep(state).await;
+}
+
+/// The facts of the ephemeral part of the prompt ([`prompt_info`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptInfo {
+    pub owner: String,
+    /// The lifetime text: `2h`.
+    pub lifetime: String,
+    /// The bound object (`card:TER-74`), if any.
+    pub bound: Option<String>,
 }
 
 /// The ephemeral part of the system prompt (PLAN §18, "Ephemeral
 /// agents"): who the owner is, and how to finish. Only stable facts.
-pub fn prompt_section(owner: &str, lifetime: &str) -> String {
+pub fn prompt_section(info: &PromptInfo) -> String {
+    match &info.bound {
+        Some(b) => bound_prompt_section(&info.owner, b),
+        None => plain_prompt_section(&info.owner, &info.lifetime),
+    }
+}
+
+/// The prompt of a bound agent (TER-74): its life follows its object.
+fn bound_prompt_section(owner: &str, bound: &str) -> String {
+    if let Some(thread) = bound.strip_prefix("thread:") {
+        return thread_prompt_section(thread);
+    }
+    let object = bound
+        .strip_prefix("card:")
+        .map_or_else(|| format!("`{bound}`"), |c| format!("card {c}"));
+    format!(
+        "## You are a bound ephemeral agent\n\n\
+         You are an ephemeral agent of `{owner}`, bound to {object}. Your first turn is your \
+         task. You live until {object} is finished: merged onto `next`, moved to `done`, or \
+         archived. Then the daemon closes you, and `{owner}` gets your last message as the \
+         result.\n\n\
+         - When you send the card on (validating, review, accepted), end your turn. Do not run \
+         `terrarium agent done`. While the card waits, the daemon stops you.\n\
+         - When the card comes back (a failed validation, review, or merge), the daemon starts \
+         you again in this session and workspace. The turn is `[System:card <id>]` with the \
+         failure. Fix it and send the card on again.\n\
+         - Run `terrarium agent done -m \"failed: <reason>\"` only when you cannot do the task \
+         at all.\n\
+         - Your workspace goes to the trash when you finish. Push each output that must stay.\n"
+    )
+}
+
+/// The prompt of the agent of an Inbox thread (TER-92): its life is the
+/// thread's.
+fn thread_prompt_section(thread: &str) -> String {
+    format!(
+        "## You are the agent of an Inbox thread\n\n\
+         You hold the conversation of Inbox thread {thread} with the operator. You live until \
+         the thread is closed; then the daemon closes you.\n\n\
+         - The operator's messages and overall response come as `[Thread:{thread}] ...` turns. \
+         They are the operator's words.\n\
+         - Answer with `terrarium thread post {thread} -m -`, and ask with `terrarium thread ask \
+         {thread} ...`. Your turn text does not reach the operator.\n\
+         - After you post or ask, end your turn. While the thread waits on the operator, the \
+         daemon stops you. The next operator message starts you again in this session and \
+         workspace.\n\
+         - Your memory store is the one of the project you run in. Write memories only there.\n\
+         - Hand off work only to the lead that the thread reports to, after the operator's \
+         response approves it. Then ask in the thread whether anything more is needed.\n\
+         - When the operator confirms that nothing more is needed, propose the close with \
+         `terrarium thread close {thread} --handoff - --link card:<id> ...`, then end your turn. \
+         The operator confirms it, or writes on (then go on). The operator may close the thread \
+         at any time. Do not run `terrarium agent done`.\n\
+         - At the close the daemon ends you and archives your session; the thread and its \
+         handoff cards link to it.\n\
+         - Your workspace goes to the trash when the thread closes. Push each output that must \
+         stay.\n"
+    )
+}
+
+fn plain_prompt_section(owner: &str, lifetime: &str) -> String {
     format!(
         "## You are an ephemeral agent\n\n\
          You are an ephemeral agent of `{owner}`. `{owner}` spawned you for one task: your \
@@ -933,9 +1133,10 @@ pub fn prompt_section(owner: &str, lifetime: &str) -> String {
     )
 }
 
-/// The prompt facts of the ephemeral agent `id`: the owner's name and
-/// the lifetime text. `None` for an agent that is not ephemeral.
-pub fn prompt_info(conn: &rusqlite::Connection, id: &str) -> ApiResult<Option<(String, String)>> {
+/// The prompt facts of the ephemeral agent `id`: the owner's name, the
+/// lifetime text, and the bound object. `None` for an agent that is not
+/// ephemeral.
+pub fn prompt_info(conn: &rusqlite::Connection, id: &str) -> ApiResult<Option<PromptInfo>> {
     let Some(info) = spawns::info(conn, id)? else {
         return Ok(None);
     };
@@ -947,7 +1148,11 @@ pub fn prompt_info(conn: &rusqlite::Connection, id: &str) -> ApiResult<Option<(S
             .unwrap_or_else(|_| "limited".into()),
         _ => "limited".into(),
     };
-    Ok(Some((info.owner_name, lifetime)))
+    Ok(Some(PromptInfo {
+        owner: info.owner_name,
+        lifetime,
+        bound: info.bound,
+    }))
 }
 
 /// Refuse a pause of an ephemeral agent: cancel it instead.
@@ -976,10 +1181,20 @@ mod tests {
 
     #[test]
     fn the_prompt_names_the_owner_and_done() {
-        let s = prompt_section("lead", "2h");
+        let mut info = PromptInfo {
+            owner: "lead".into(),
+            lifetime: "2h".into(),
+            bound: None,
+        };
+        let s = prompt_section(&info);
         assert!(s.contains("ephemeral agent of `lead`"));
         assert!(s.contains("terrarium agent done -m"));
         assert!(s.contains("lifetime is 2h"));
+        info.bound = Some("card:TER-74".into());
+        let s = prompt_section(&info);
+        assert!(s.contains("bound to card TER-74"), "{s}");
+        assert!(s.contains("Do not run `terrarium agent done`"), "{s}");
+        assert!(!s.contains("lifetime is"), "{s}");
     }
 
     #[test]
@@ -1004,6 +1219,10 @@ mod tests {
             result: Some("It is in foo.rs".into()),
             session_id: Some("01S".into()),
             duration_secs: 252,
+            bound: None,
+            parked_at: None,
+            park_reason: None,
+            unpark_queued_at: None,
         };
         let (subject, body) = finish_mail(&sp);
         assert_eq!(subject, "Spawned lead-worker-1 finished: done");

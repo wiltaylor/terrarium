@@ -26,10 +26,10 @@ function checkBlock(b: Block, harness: string) {
   if (b.kind === "tool_result") expect(b.result).toMatchObject({ tool_id: expect.any(String), output: expect.any(String), is_error: expect.any(Boolean) });
   if (b.origin) expect(["operator", "agent", "agent_mail_pointer", "system", "user"]).toContain(b.origin);
   for (const p of b.parts ?? []) {
-    expect(["user", "agent", "mailbox", "system"]).toContain(p.source);
+    expect(["user", "agent", "mailbox", "system", "thread"]).toContain(p.source);
     expect(typeof p.body).toBe("string");
   }
-  if (b.parts?.length) expect(b.origin).toBe({ user: "operator", agent: "agent", mailbox: "agent_mail_pointer", system: "system" }[b.parts[0]!.source]);
+  if (b.parts?.length) expect(b.origin).toBe({ user: "operator", agent: "agent", mailbox: "agent_mail_pointer", system: "system", thread: "operator" }[b.parts[0]!.source]);
   if (b.usage) expect(Object.keys(b.usage).sort()).toEqual(["cache_read", "cache_write", "input", "output"]);
 }
 

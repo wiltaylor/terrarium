@@ -13,9 +13,15 @@
 //!   validates; the daemon clears the name on the final move.
 //! - `POST /api/cards/{id}/merge` {repo?, branch?}: a project admin. A
 //!   queued merge job; the card stays where it is until the job ends.
+//! - `POST /api/merges` {cards, repo?} (TER-112): a project admin. One
+//!   merge job for the cards of one project, merged in the given order and
+//!   validated once. One card is the same as `POST /api/cards/{id}/merge`.
 //! - `GET /api/job-hosts` (any actor): the host caps (TER-97) and the
 //!   running jobs per host. `PUT /api/job-hosts/{host}` {heavy_jobs}
 //!   (sysadmin or the operator): set the cap of a host; `DELETE`: no cap.
+//!   `PUT /api/job-hosts/{host}/aliases` {aliases} (sysadmin or the
+//!   operator, TER-105): the addresses of a host agent, so an SSH target
+//!   on one of them counts on the host agent's cap.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -34,7 +40,7 @@ use crate::jobs as rt;
 use crate::policy;
 use crate::store::board::{self, Card, CardPatch};
 use crate::store::jobs::{self, Job, JobKind, JobState, NewJob};
-use crate::store::{projects, repos, targets};
+use crate::store::{github_gate, hosts, projects, repos, targets};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -46,20 +52,42 @@ pub fn routes() -> Router<Shared> {
         .route("/jobs/{id}", get(show).delete(cancel))
         .route("/cards/{id}/validate", post(validate))
         .route("/cards/{id}/merge", post(merge))
+        .route("/merges", post(merge_batch))
         .route("/job-hosts", get(list_hosts))
         .route("/job-hosts/{host}", put(set_host).delete(clear_host))
+        .route("/job-hosts/{host}/aliases", put(set_aliases))
 }
 
 /// The host caps and the running jobs on each host.
-async fn hosts_view(state: &Shared) -> ApiResult<Value> {
-    let (caps, running) = state
+async fn hosts_view(state: &Shared, actor: &Actor) -> ApiResult<Value> {
+    rt::prepare_hosts(&state.db, None).await?;
+    let (caps, jobs, agents, aliases) = state
         .db
-        .read(|c| Ok((jobs::host_caps(c)?, jobs::running_per_host(c)?)))
+        .read(|c| {
+            Ok((
+                jobs::host_caps(c)?,
+                jobs::running(c)?,
+                hosts::list(c)?,
+                jobs::host_aliases(c)?,
+            ))
+        })
         .await?;
+    let mut running =
+        std::collections::BTreeMap::<String, std::collections::BTreeMap<String, usize>>::new();
+    for job in jobs {
+        if let Some(host) = job.host {
+            *running
+                .entry(host)
+                .or_default()
+                .entry(job.project)
+                .or_default() += 1;
+        }
+    }
     let mut names: Vec<String> = caps
         .iter()
         .map(|c| c.host.clone())
         .chain(running.keys().cloned())
+        .chain(aliases.keys().cloned())
         .collect();
     names.sort();
     names.dedup();
@@ -67,17 +95,36 @@ async fn hosts_view(state: &Shared) -> ApiResult<Value> {
         .into_iter()
         .map(|h| {
             let cap = caps.iter().find(|c| c.host == h);
-            json!({"host": h, "heavy_jobs": cap.map(|c| c.heavy_jobs),
-                   "running": running.get(&h).copied().unwrap_or(0),
+            let counts = running.get(&h).cloned().unwrap_or_default();
+            let total: usize = counts.values().sum();
+            let mut view = json!({"host": h, "heavy_jobs": cap.map(|c| c.heavy_jobs),
+                   "running": total,
                    "updated_by": cap.map(|c| c.updated_by.clone()),
-                   "updated_at": cap.map(|c| c.updated_at.clone())})
+                   "updated_at": cap.map(|c| c.updated_at.clone()), "projects": counts});
+            // The host agent of the key, and the addresses that count on it.
+            if let Some(agent) = agents.iter().find(|a| a.id == h) {
+                view["name"] = json!(agent.name);
+                view["aliases"] = json!(aliases.get(&h).cloned().unwrap_or_default());
+            }
+            if let Actor::Agent(a) = actor
+                && !a.reads_all()
+            {
+                if let Some(object) = view.as_object_mut() {
+                    object.remove("updated_by");
+                    object.remove("updated_at");
+                    object.remove("aliases");
+                }
+                view["projects"] =
+                    json!({a.project.clone(): counts.get(&a.project).copied().unwrap_or(0)});
+            }
+            view
         })
         .collect();
     Ok(json!({"hosts": hosts}))
 }
 
-async fn list_hosts(State(state): State<Shared>, _actor: Actor) -> ApiResult<Json<Value>> {
-    Ok(Json(hosts_view(&state).await?))
+async fn list_hosts(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Value>> {
+    Ok(Json(hosts_view(&state, &actor).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +140,7 @@ async fn set_host(
     ApiJson(body): ApiJson<HostCapBody>,
 ) -> ApiResult<Json<Value>> {
     policy::sysadmin(&actor, "setting the job cap of a host")?;
+    rt::prepare_hosts(&state.db, Some(host.clone())).await?;
     state
         .db
         .write(actor.label(), move |t| {
@@ -100,7 +148,7 @@ async fn set_host(
         })
         .await?;
     rt::kick(&state);
-    Ok(Json(hosts_view(&state).await?))
+    Ok(Json(hosts_view(&state, &actor).await?))
 }
 
 async fn clear_host(
@@ -109,12 +157,39 @@ async fn clear_host(
     Path(host): Path<String>,
 ) -> ApiResult<Json<Value>> {
     policy::sysadmin(&actor, "taking away the job cap of a host")?;
+    rt::prepare_hosts(&state.db, Some(host.clone())).await?;
     state
         .db
         .write(actor.label(), move |t| jobs::set_host_cap(t, &host, None))
         .await?;
     rt::kick(&state);
-    Ok(Json(hosts_view(&state).await?))
+    Ok(Json(hosts_view(&state, &actor).await?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AliasesBody {
+    aliases: Vec<String>,
+}
+
+/// Set the addresses of a host agent (TER-105). The alias names are
+/// pinned outside the DB lock after the write, as target addresses are.
+async fn set_aliases(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(host): Path<String>,
+    ApiJson(body): ApiJson<AliasesBody>,
+) -> ApiResult<Json<Value>> {
+    policy::sysadmin(&actor, "setting the aliases of a job host")?;
+    state
+        .db
+        .write(actor.label(), move |t| {
+            jobs::set_host_aliases(t, &host, &body.aliases)
+        })
+        .await?;
+    rt::prepare_hosts(&state.db, None).await?;
+    rt::kick(&state);
+    Ok(Json(hosts_view(&state, &actor).await?))
 }
 
 async fn show_delivery(
@@ -226,7 +301,9 @@ async fn show(
 }
 
 /// Cancel: the actor that queued the job, the card's worker, or a
-/// project admin.
+/// project admin. A batch merge holds the cards of several workers, so
+/// only the actor that queued it or a project admin cancels it (TER-112
+/// review, F3).
 async fn cancel(
     State(state): State<Shared>,
     actor: Actor,
@@ -234,9 +311,10 @@ async fn cancel(
 ) -> ApiResult<Json<Job>> {
     let job = find(&state, &actor, id).await?;
     let own = actor.label() == job.created_by
-        || actor
-            .agent()
-            .is_some_and(|a| job.by_agent.as_deref() == Some(a.name.as_str()));
+        || (job.batch.is_empty()
+            && actor
+                .agent()
+                .is_some_and(|a| job.by_agent.as_deref() == Some(a.name.as_str())));
     if !own {
         policy::admin_project(&actor, &job.project, "cancelling another agent's job")?;
     }
@@ -245,14 +323,16 @@ async fn cancel(
         .db
         .write(actor.label(), move |t| {
             let j = jobs::cancel(t, &jid)?;
-            let patch = CardPatch {
-                remove_labels: vec![rt::LABEL_QUEUED.into(), rt::LABEL_RUNNING.into()],
-                ..CardPatch::default()
-            };
-            if let Err(e) = board::update_card(t, &Actor::Operator, &j.card, patch)
-                && !e.code.status().is_client_error()
-            {
-                return Err(e);
+            for c in j.cards() {
+                let patch = CardPatch {
+                    remove_labels: vec![rt::LABEL_QUEUED.into(), rt::LABEL_RUNNING.into()],
+                    ..CardPatch::default()
+                };
+                if let Err(e) = board::update_card(t, &Actor::Operator, &c.card, patch)
+                    && !e.code.status().is_client_error()
+                {
+                    return Err(e);
+                }
             }
             Ok(j)
         })
@@ -278,6 +358,15 @@ struct ValidateBody {
     /// Added to the move comment.
     #[serde(default)]
     comment: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchBody {
+    /// The cards, in merge order.
+    cards: Vec<String>,
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -369,10 +458,26 @@ fn queued_answer(
         .into_response()
 }
 
+/// The GitHub author gate (TER-85): no job for a held card. A job moves
+/// the card as the operator (to `validating`, then on with its result),
+/// so a job would take a held card out of the blocked column. This holds
+/// for the operator too: the operator releases the card first.
+fn not_held(card: &Card) -> ApiResult<()> {
+    if github_gate::is_held(&card.title, &card.labels) {
+        return Err(ApiError::forbidden(format!(
+            "{} is held by the GitHub author gate: no validate or merge job for it until the \
+             operator releases it",
+            card.id
+        )));
+    }
+    Ok(())
+}
+
 /// Who may queue a validation of a card: its assignee or a project
-/// admin.
+/// admin. Never for a held card ([`not_held`]).
 fn may_validate(actor: &Actor, card: &Card) -> ApiResult<()> {
     policy::read_project(actor, &card.project)?;
+    not_held(card)?;
     if card.assignee.as_deref() == Some(actor.address().as_str()) {
         return Ok(());
     }
@@ -430,6 +535,7 @@ async fn validate(
         }
     }
     let slots = def.slots();
+    rt::prepare_hosts(&state.db, None).await?;
     let (job, place) = state
         .db
         .write(actor.label(), move |t| {
@@ -449,6 +555,7 @@ async fn validate(
                     branch: branch.clone(),
                     commit: b.commit.clone(),
                     by_agent: by.clone(),
+                    batch: Vec::new(),
                 },
             )?;
             let mut add = vec![rt::LABEL_QUEUED.to_owned()];
@@ -506,11 +613,13 @@ async fn merge(
     Path(id): Path<String>,
     ApiJson(b): ApiJson<MergeBody>,
 ) -> ApiResult<Response> {
+    rt::prepare_hosts(&state.db, None).await?;
     let job = state
         .db
         .write(actor.label(), move |t| {
             let card = board::get_card(t, &board::normalise_id(&id))?;
             policy::admin_project(&actor, &card.project, "queueing a merge onto next")?;
+            not_held(&card)?;
             if card.archived {
                 return Err(ApiError::conflict(format!("card {} is archived", card.id)));
             }
@@ -533,6 +642,7 @@ async fn merge(
                     branch: branch.clone(),
                     commit: None,
                     by_agent: rt::by_agent_of(&card.labels),
+                    batch: Vec::new(),
                 },
             )?;
             let patch = CardPatch {
@@ -549,6 +659,130 @@ async fn merge(
                     job.id
                 ),
             )?;
+            let place = jobs::place(t, &job)?;
+            let room = jobs::host_room(t, &job.project)?;
+            Ok((job, place, room, def.slots()))
+        })
+        .await?;
+    rt::kick(&state);
+    Ok(queued_answer(job.0, job.1, job.2, job.3))
+}
+
+/// One merge job for several cards (TER-112): merged onto `next` in the
+/// given order, validated once, pushed when green. All cards are of one
+/// project and one repo; each branch is the card's (or its ID in lower
+/// case).
+async fn merge_batch(
+    State(state): State<Shared>,
+    actor: Actor,
+    ApiJson(b): ApiJson<BatchBody>,
+) -> ApiResult<Response> {
+    if b.cards.is_empty() {
+        return Err(ApiError::invalid(
+            "`cards` is empty: give one or more card IDs",
+        ));
+    }
+    if b.cards.len() > jobs::BATCH_MAX {
+        return Err(ApiError::invalid(format!(
+            "a batch has at most {} cards",
+            jobs::BATCH_MAX
+        )));
+    }
+    let job = state
+        .db
+        .write(actor.label(), move |t| {
+            let mut cards: Vec<Card> = Vec::new();
+            for id in &b.cards {
+                let card = board::get_card(t, &board::normalise_id(id))?;
+                policy::admin_project(&actor, &card.project, "queueing a merge onto next")?;
+                not_held(&card)?;
+                if card.archived {
+                    return Err(ApiError::conflict(format!("card {} is archived", card.id)));
+                }
+                if cards.iter().any(|c| c.id == card.id) {
+                    return Err(ApiError::invalid(format!(
+                        "card {} is twice in `cards`",
+                        card.id
+                    )));
+                }
+                if let Some(first) = cards.first()
+                    && first.project != card.project
+                {
+                    return Err(ApiError::invalid(format!(
+                        "card {} is in project `{}`, card {} in `{}`: a batch is one project",
+                        card.id, card.project, first.id, first.project
+                    )));
+                }
+                cards.push(card);
+            }
+            let project = cards[0].project.clone();
+            let def = jobs::delivery(t, &project)?;
+            enabled(&def, &project)?;
+            let mut repo: Option<String> = None;
+            let mut batch = Vec::new();
+            for card in &cards {
+                let r = repo_of(t, card, b.repo.clone())?;
+                match &repo {
+                    Some(have) if *have != r => {
+                        return Err(ApiError::invalid(format!(
+                            "card {} is in repo `{r}`, the batch in `{have}`: a batch is one repo",
+                            card.id
+                        )));
+                    }
+                    _ => repo = Some(r),
+                }
+                batch.push(jobs::BatchCard {
+                    card: card.id.clone(),
+                    branch: branch_of(card, None)?,
+                    by_agent: rt::by_agent_of(&card.labels),
+                    outcome: None,
+                    note: None,
+                });
+            }
+            let repo = repo.unwrap_or_default();
+            if !def.next_repos.contains(&repo) {
+                return Err(ApiError::conflict(format!(
+                    "repo `{repo}` has no `next` branch in the queue config: add it to `next_repos`"
+                )));
+            }
+            let first = batch[0].clone();
+            let job = jobs::create(
+                t,
+                NewJob {
+                    project: project.clone(),
+                    card: first.card.clone(),
+                    kind: JobKind::Merge,
+                    repo: repo.clone(),
+                    branch: first.branch.clone(),
+                    commit: None,
+                    by_agent: first.by_agent.clone(),
+                    batch: if batch.len() > 1 { batch.clone() } else { Vec::new() },
+                },
+            )?;
+            let names: Vec<&str> = batch.iter().map(|c| c.card.as_str()).collect();
+            for (i, c) in batch.iter().enumerate() {
+                let patch = CardPatch {
+                    add_labels: vec![rt::LABEL_QUEUED.into()],
+                    ..CardPatch::default()
+                };
+                board::update_card(t, &Actor::Operator, &c.card, patch)?;
+                let note = if batch.len() > 1 {
+                    format!(
+                        "Job queue: merge job {} queued: {} onto next of {repo}, card {} of {} in the batch {}.",
+                        job.id,
+                        c.branch,
+                        i + 1,
+                        batch.len(),
+                        names.join(" ")
+                    )
+                } else {
+                    format!(
+                        "Job queue: merge job {} queued: {} onto next of {repo}.",
+                        job.id, c.branch
+                    )
+                };
+                board::add_comment(t, &Actor::Operator, &c.card, &note)?;
+            }
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
             Ok((job, place, room, def.slots()))

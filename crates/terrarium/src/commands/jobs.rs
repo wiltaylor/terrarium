@@ -1,5 +1,5 @@
 //! The job queue of a project (TER-71): `job ls | show | cancel`,
-//! `job hosts | host-cap` (TER-97),
+//! `job hosts | host-cap` (TER-97), `job host-alias` (TER-105),
 //! `project delivery show | set`, and `card validate | merge`.
 
 use serde_json::{Value, json};
@@ -14,6 +14,8 @@ use crate::transport::encode;
 
 const HOST_COLS: &[(&str, &str)] = &[
     ("HOST", "host"),
+    ("NAME", "name"),
+    ("ALIASES", "aliases"),
     ("CAP", "heavy_jobs"),
     ("RUNNING", "running"),
     ("UPDATED BY", "updated_by"),
@@ -80,6 +82,16 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
                 (false, Some(n)) => ctx.api.put(&path, json!({"heavy_jobs": n})).await?,
                 _ => ctx.api.delete(&path, vec![]).await?,
             };
+            ctx.emit(&v, print_hosts)
+        }
+        JobCmd::HostAlias {
+            host,
+            aliases,
+            clear,
+        } => {
+            let path = format!("/api/job-hosts/{}/aliases", encode(host));
+            let aliases: &[String] = if *clear { &[] } else { aliases };
+            let v = ctx.api.put(&path, json!({ "aliases": aliases })).await?;
             ctx.emit(&v, print_hosts)
         }
         JobCmd::Cancel { id } => {
@@ -234,6 +246,40 @@ pub async fn merge(
         .post(&format!("{card_path}/merge"), Some(body))
         .await?;
     ctx.emit(&v, queued_line)
+}
+
+/// `card merge` with two or more cards: one batch merge job (TER-112).
+pub async fn merge_batch(
+    ctx: &Ctx,
+    ids: &[String],
+    repo: &Option<String>,
+    branch: &Option<String>,
+) -> anyhow::Result<()> {
+    if branch.is_some() {
+        anyhow::bail!(
+            "--branch takes one card; a batch merges the branch of each card (set it with `card edit --branch`)"
+        );
+    }
+    let mut body = json!({"cards": ids});
+    if let Some(r) = repo {
+        body["repo"] = json!(r);
+    }
+    let v = ctx.api.post("/api/merges", Some(body)).await?;
+    ctx.emit(&v, |c, v| {
+        let cards: Vec<&str> = v["job"]["batch"]
+            .as_array()
+            .map(|b| b.iter().filter_map(|c| c["card"].as_str()).collect())
+            .unwrap_or_default();
+        c.line(format!(
+            "queued batch merge job {} for {} ({} cards, {}): {}",
+            field(&v["job"], "id"),
+            cards.join(" "),
+            cards.len(),
+            field(&v["job"], "repo"),
+            field(&v["queue"], "note")
+        ));
+        c.line("The daemon moves each card on the result: merged cards to accepted, a failing card to the top of ready.");
+    })
 }
 
 fn queued_line(c: &Ctx, v: &Value) {

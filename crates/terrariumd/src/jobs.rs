@@ -12,7 +12,11 @@
 //!      `<work_dir>/<project>/<job>`. A validate job checks out the card
 //!      commit. A merge job checks out `next` and merges the card branch
 //!      with `--no-ff`; a conflict ends the job (never resolved, never
-//!      rerun).
+//!      rerun). A batch merge (TER-112) merges its card branches in
+//!      order; a card that conflicts, or whose merge fails otherwise
+//!      (unrelated histories), leaves the batch (its merge is aborted or
+//!      reset) and the others go on. When none merges, the job ends as
+//!      a conflict.
 //!   2. the recipe (`sh -c <recipe>` in the clone), without any
 //!      credential: it runs the repo's code.
 //!   3. a merge job only, when the recipe passed: push the merge commit
@@ -28,6 +32,11 @@
 //!   Each step runs as `ionice -c3 nice -n19 <argv>` (`nice` only on a
 //!   target without `ionice`), so jobs do not starve their host.
 //!   Then the clone and the push repo are removed.
+//! - A step that hits its timeout, or a cancel, ends the process group and
+//!   the session of the step on the target (`TERM`, then `KILL`), through
+//!   [`crate::run_kill`]: killing the `ssh` or `docker exec` client alone
+//!   leaves the recipe running. The job keeps its slot (and its place on
+//!   the host cap) until that kill ended (TER-115).
 //! - On the end the daemon moves the card itself (as the operator, with a
 //!   comment that starts "Job queue:"): a pass moves a validate card to
 //!   `review` and a merge card to `accepted`. A failure is rerun once
@@ -35,13 +44,20 @@
 //!   block at the top of the card body, moves the card to the top of
 //!   `ready`, and mails the worker of its `by:<agent>` label. The final
 //!   move (a pass, or the second failure) also clears the assignee.
+//! - A batch merge (TER-112): a pass moves each merged card to `accepted`.
+//!   A card that conflicted fails at once. A red batch of two or more
+//!   merged cards splits into two halves ([`jobs::split`]), each queued at
+//!   the front, the left half first, so the failing card is found by
+//!   bisection and the others merge. A card split out alone that is red
+//!   fails without the rerun: the red batch was its first red. An error
+//!   (not red) runs the batch once more.
 //! - The labels `validation:queued` and `validation:running` follow the
 //!   job, so the board shows it.
 //! - A daemon restart loses the runs: each running job fails (`error`)
 //!   and goes through the rerun rule.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -58,7 +74,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::executor::{self, Collected, Control, End, RemoteCmd};
 use crate::secrets;
 use crate::store::board::{self, CardPatch};
-use crate::store::jobs::{self, Job, JobEnd, JobKind};
+use crate::store::jobs::{self, BatchCard, Job, JobEnd, JobKind};
 use crate::store::mail::{self, Address, Outgoing};
 use crate::store::{repos, targets};
 
@@ -105,9 +121,56 @@ fn set_control(job: &str, ctl: Option<mpsc::UnboundedSender<Control>>) {
     }
 }
 
-/// Kill the current step of a running job. The job then ends as
-/// cancelled (its row is cancelled first, so the end does nothing).
+/// The IDs of the jobs whose run has not ended yet ([`tick`] adds and
+/// removes them), and of the ones among them that got a [`kill`]. A
+/// cancelled job keeps its place in the queue while it drains (TER-115).
+#[derive(Default)]
+struct Live {
+    runs: HashSet<String>,
+    killed: HashSet<String>,
+}
+
+fn live() -> MutexGuard<'static, Live> {
+    static L: OnceLock<Mutex<Live>> = OnceLock::new();
+    match L.get_or_init(Mutex::default).lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// A job in [`Live::runs`] while this lives: a run that ends in any way,
+/// a panic too, frees its place.
+struct LiveRun(String);
+
+impl LiveRun {
+    fn new(job: &str) -> Self {
+        live().runs.insert(job.to_owned());
+        Self(job.to_owned())
+    }
+}
+
+impl Drop for LiveRun {
+    fn drop(&mut self) {
+        let mut l = live();
+        l.runs.remove(&self.0);
+        l.killed.remove(&self.0);
+    }
+}
+
+/// True when the job got a [`kill`]: its next steps do not start.
+fn killed(job: &str) -> bool {
+    live().killed.contains(job)
+}
+
+/// Kill the current step of a running job, and keep the next steps from
+/// starting (the clean-up of its clone still runs). The job then ends as
+/// cancelled (its row is cancelled first, so the end does nothing). The
+/// kill ends the processes of the step on the target, and the job keeps
+/// its place until they are gone.
 pub fn kill(job: &str) {
+    // Marked whether the run is there yet or not, so a run that starts
+    // after the cancel starts no step. [`LiveRun`] clears the mark.
+    live().killed.insert(job.to_owned());
     let m = match controls().lock() {
         Ok(m) => m,
         Err(p) => p.into_inner(),
@@ -123,6 +186,9 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         if let Some(state) = weak.upgrade() {
+            if let Err(e) = prepare_hosts(&state.db, None).await {
+                warn!("cannot initialize stored job host keys: {e}");
+            }
             match state.db.write("system", jobs::fail_lost).await {
                 Ok(lost) => {
                     for j in lost {
@@ -159,20 +225,27 @@ pub fn kick(state: &Shared) {
 /// across projects) and in its project (the slots). One write for all
 /// projects, so the host counts hold.
 pub async fn tick(state: &Shared) -> ApiResult<()> {
+    prepare_hosts(&state.db, None).await?;
+    // The live runs are read and added in the write, so two ticks and a
+    // cancel (all writes) see them in order.
     let started = state
         .db
         .write("system", move |t| {
+            let draining: Vec<String> = live().runs.iter().cloned().collect();
             let mut out = Vec::new();
-            for (j, host, def) in jobs::startable(t)? {
+            for (j, host, def) in jobs::startable(t, &draining)? {
                 if jobs::start(t, &j.id, &host)? {
-                    set_labels(t, &j.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
-                    out.push((jobs::get(t, &j.id)?, def));
+                    let run = LiveRun::new(&j.id);
+                    for c in j.cards() {
+                        set_labels(t, &c.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
+                    }
+                    out.push((jobs::get(t, &j.id)?, def, run));
                 }
             }
             Ok(out)
         })
         .await?;
-    for (job, def) in started {
+    for (job, def, live_run) in started {
         let state = state.clone();
         tokio::spawn(async move {
             let end = run(&state, &job, &def).await;
@@ -191,10 +264,51 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
                 Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
                 Err(e) => warn!(job = %job.id, "cannot end a job: {e}"),
             }
+            drop(live_run);
             kick(&state);
         });
     }
     Ok(())
+}
+
+/// Resolve only unpinned names, on the blocking pool and outside DB closures.
+/// The persisted first answer (including failures) keeps counts and caps stable.
+pub async fn prepare_hosts(db: &crate::db::Db, extra: Option<String>) -> ApiResult<()> {
+    prepare_hosts_with(db, extra, |hostname| {
+        use std::net::ToSocketAddrs;
+        let mut ips: Vec<_> = (hostname, 22)
+            .to_socket_addrs()
+            .map(|all| all.map(|s| s.ip()).collect())
+            .unwrap_or_default();
+        ips.sort();
+        ips.dedup();
+        ips.first()
+            .map_or_else(|| hostname.to_owned(), ToString::to_string)
+    })
+    .await
+}
+
+async fn prepare_hosts_with(
+    db: &crate::db::Db,
+    extra: Option<String>,
+    resolve: impl Fn(&str) -> String + Send + 'static,
+) -> ApiResult<()> {
+    let names = db.read(move |c| jobs::unresolved_hosts(c, extra)).await?;
+    if names.is_empty() {
+        return Ok(());
+    }
+    let keys = tokio::task::spawn_blocking(move || {
+        names
+            .into_iter()
+            .map(|name| {
+                let key = resolve(&name);
+                (name, key)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("host resolver failed: {e}")))?;
+    db.write("system", move |t| jobs::pin_hosts(t, keys)).await
 }
 
 /// Add and take away card labels, keeping the others. A card that is gone
@@ -278,6 +392,12 @@ fn error_end(message: impl Into<String>) -> JobEnd {
 
 /// Run one step on the target and read it to the end. The step can be
 /// killed through [`kill`] while it runs.
+///
+/// A kill, or the step's `timeout_secs`, ends the whole process group and
+/// session of the step on the target ([`crate::run_kill`]), not only the
+/// local `ssh` or `docker exec` client (TER-115). The step returns only
+/// after that kill ended, so the job keeps its slot until its processes
+/// are gone.
 async fn step(
     state: &Shared,
     job: &str,
@@ -285,9 +405,23 @@ async fn step(
     cmd: &RemoteCmd,
     max: usize,
 ) -> ApiResult<Collected> {
-    let running = executor::start_cmd(state, def, cmd)?;
+    let (running, report) = crate::run_kill::start(state, def, cmd)?;
     set_control(job, Some(running.ctl.clone()));
-    Ok(running.collect(max).await)
+    // A kill between the check in [`StepCtx::run`] and set_control found
+    // the old control or none: kill this step now.
+    if killed(job) {
+        let _ = running.ctl.send(Control::Kill);
+    }
+    let mut c = running.collect(max).await;
+    let kill = match report {
+        Some(rx) => crate::run_kill::report(rx).await,
+        None => None,
+    };
+    if let Some(r) = kill {
+        c.stderr
+            .extend_from_slice(format!("\n[killed on the target: {r}]\n").as_bytes());
+    }
+    Ok(c)
 }
 
 /// Run a job to its end. Never fails: an error is a failed end.
@@ -494,8 +628,12 @@ impl StepCtx<'_> {
         }
     }
 
-    /// Run a step at low IO and CPU priority ([`low_priority`]).
+    /// Run a step at low IO and CPU priority ([`low_priority`]). A job
+    /// that got a [`kill`] starts no more steps.
     async fn run(&self, cmd: &RemoteCmd, max: usize) -> ApiResult<Collected> {
+        if killed(&self.job.id) {
+            return Err(ApiError::conflict("the job was cancelled"));
+        }
         let cmd = RemoteCmd {
             argv: low_priority(cmd.argv.clone(), self.ionice),
             ..cmd.clone()
@@ -507,31 +645,44 @@ impl StepCtx<'_> {
 /// Prepare, run the recipe, and push `next` for a merge.
 async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEnd> {
     let job = x.job;
-    let prep = x.git_cmd(
-        PREPARE_SCRIPT,
-        &[
-            x.url,
-            x.dir,
-            job.kind.as_str(),
-            &job.branch,
-            job.commit.as_deref().unwrap_or(""),
-        ],
-    );
+    let mut args: Vec<&str> = vec![
+        x.url,
+        x.dir,
+        job.kind.as_str(),
+        &job.branch,
+        job.commit.as_deref().unwrap_or(""),
+    ];
+    // The other branches of a batch, in order, after the first.
+    let cards = job.cards();
+    if job.kind == JobKind::Merge {
+        for c in cards.iter().skip(1) {
+            check_ref(&c.branch)?;
+            args.push(&c.branch);
+        }
+    }
+    let prep = x.git_cmd(PREPARE_SCRIPT, &args);
     let c = x.run(&prep, STEP_MAX).await?;
     let r = result_line(&c.stdout);
+    // The batch with the cards that conflicted marked.
+    let batch = (!job.batch.is_empty()).then(|| mark_conflicts(&job.batch, &c.stdout));
     let head = match r.get("outcome").map(String::as_str) {
         Some("ok") => r.get("head").cloned().filter(|h| !h.is_empty()),
         Some("conflict") => {
+            let what = if job.batch.is_empty() {
+                format!("the branch `{}` does", job.branch)
+            } else {
+                "none of the branches of the batch does".to_owned()
+            };
             return Ok(JobEnd {
                 passed: false,
                 outcome: Some("conflict".into()),
                 exit_code: exit_code(c.end.as_ref()),
                 tail: Some(format!(
-                    "the branch `{}` does not merge onto `next` without conflicts; the queue does not resolve them. Files:\n{}",
-                    job.branch,
+                    "{what} not merge onto `next` without conflicts; the queue does not resolve them. Files:\n{}",
                     output_of(&c)
                 )),
                 head: None,
+                batch,
             });
         }
         _ => None,
@@ -547,6 +698,7 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
                 output_of(&c)
             )),
             head: None,
+            batch,
         });
     };
     let recipe_cmd = RemoteCmd {
@@ -558,17 +710,22 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
     };
     let c = x.run(&recipe_cmd, RECIPE_MAX).await?;
     let ok = c.end.as_ref().is_some_and(End::success);
+    let mut tail = format!(
+        "{}\n[{}]\n[run as: {} sh -c <recipe>]",
+        output_of(&c).trim_end(),
+        end_text(c.end.as_ref()),
+        low_priority(Vec::new(), x.ionice).join(" ")
+    );
+    if let Some(b) = &batch {
+        tail.push_str(&format!("\n[{}]", batch_summary(b)));
+    }
     let result = JobEnd {
         passed: ok,
         outcome: (!ok).then(|| "red".to_owned()),
         exit_code: exit_code(c.end.as_ref()),
-        tail: Some(format!(
-            "{}\n[{}]\n[run as: {} sh -c <recipe>]",
-            output_of(&c).trim_end(),
-            end_text(c.end.as_ref()),
-            low_priority(Vec::new(), x.ionice).join(" ")
-        )),
+        tail: Some(tail),
         head: Some(head.clone()),
+        batch: batch.clone(),
     };
     if !ok || job.kind != JobKind::Merge {
         return Ok(result);
@@ -590,6 +747,7 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
                 output_of(&c)
             )),
             head: Some(head),
+            batch,
         });
     }
     let push = x.git_cmd(PUSH_SCRIPT, &[x.url, &push_dir, &head]);
@@ -607,7 +765,75 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
             output_of(&c)
         )),
         head: Some(head),
+        batch,
     })
+}
+
+/// The conflicts that the prepare step of a batch printed: each
+/// `TERRARIUM_CONFLICT <index>` line, then the conflicting files, by the
+/// index of the branch in the batch.
+fn conflicts(stdout: &[u8]) -> HashMap<usize, String> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut out: HashMap<usize, String> = HashMap::new();
+    let mut at: Option<usize> = None;
+    for line in text.lines() {
+        if let Some(i) = line.strip_prefix("TERRARIUM_CONFLICT\t") {
+            at = i.trim().parse().ok();
+            if let Some(i) = at {
+                out.entry(i).or_default();
+            }
+        } else if line.starts_with("TERRARIUM_") {
+            at = None;
+        } else if let Some(i) = at {
+            let files = out.entry(i).or_default();
+            if !files.is_empty() {
+                files.push('\n');
+            }
+            files.push_str(line);
+        }
+    }
+    out
+}
+
+/// The batch with each card that conflicted marked `conflict`, with its
+/// files.
+fn mark_conflicts(batch: &[BatchCard], stdout: &[u8]) -> Vec<BatchCard> {
+    let found = conflicts(stdout);
+    batch
+        .iter()
+        .enumerate()
+        .map(|(i, c)| match found.get(&i) {
+            Some(files) => BatchCard {
+                outcome: Some("conflict".into()),
+                note: Some(files.clone()),
+                ..c.clone()
+            },
+            None => BatchCard {
+                outcome: None,
+                note: None,
+                ..c.clone()
+            },
+        })
+        .collect()
+}
+
+/// One line on the cards of a batch: those that merged, and those that
+/// conflicted.
+fn batch_summary(batch: &[BatchCard]) -> String {
+    let (bad, good): (Vec<&BatchCard>, Vec<&BatchCard>) = batch
+        .iter()
+        .partition(|c| c.outcome.as_deref() == Some("conflict"));
+    let names = |l: &[&BatchCard]| {
+        l.iter()
+            .map(|c| c.card.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut s = format!("batch: merged {}", names(&good));
+    if !bad.is_empty() {
+        s.push_str(&format!("; left out on a conflict {}", names(&bad)));
+    }
+    s
 }
 
 /// The head commit of `branch` of `repo` on its remote, read with `git
@@ -702,6 +928,13 @@ fn end_comment(j: &Job, verdict: &str) -> String {
         j.repo,
         j.branch
     );
+    if !j.batch.is_empty() {
+        let cards: Vec<&str> = j.batch.iter().map(|c| c.card.as_str()).collect();
+        s.push_str(&format!(", batch of {}: {}", cards.len(), cards.join(" ")));
+    }
+    if let Some(p) = &j.parent {
+        s.push_str(&format!(", split from job {p}"));
+    }
     if let Some(c) = &j.commit {
         s.push_str(&format!(", commit {c}"));
     }
@@ -758,49 +991,163 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
     state
         .db
         .write("system", move |t| {
-            if j.state == jobs::JobState::Passed {
-                set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
-                let to = match j.kind {
-                    JobKind::Validate => COL_REVIEW,
-                    JobKind::Merge => COL_ACCEPTED,
-                };
-                let note = end_comment(&j, "passed");
-                move_or_comment(t, &j.card, to, None, &note)?;
-                return unassign(t, &j.card);
+            if j.batch.is_empty() {
+                single_end(t, &j)
+            } else {
+                batch_end(t, &j)
             }
-            let rerun = j.attempt < 2 && j.outcome.as_deref() != Some("conflict");
-            if rerun {
-                let next = jobs::rerun(t, &j)?;
-                set_labels(t, &j.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
-                let note = format!(
-                    "{} It runs once more as job {} (flaky tests).",
-                    end_comment(&j, "failed"),
-                    next.id
-                );
-                return comment(t, &j.card, &note);
-            }
-            set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
-            let card = match board::get_card(t, &j.card) {
-                Ok(c) => c,
-                Err(e) if e.code.status().is_client_error() => return Ok(()),
-                Err(e) => return Err(e),
-            };
-            let body = format!("{}{}", failure_block(&j), card.body);
-            let patch = CardPatch {
-                body: Some(body),
-                ..CardPatch::default()
-            };
-            board::update_card(t, &Actor::Operator, &j.card, patch)?;
-            let note = end_comment(&j, "failed again");
-            move_or_comment(t, &j.card, COL_READY, Some(0), &note)?;
-            unassign(t, &j.card)?;
-            if let Some(who) = &j.by_agent {
-                notify_worker(t, &j, who)?;
-            }
-            Ok(())
         })
         .await?;
     kick(state);
+    Ok(())
+}
+
+/// The end of a job of one card.
+fn single_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    if j.state == jobs::JobState::Passed {
+        return pass_card(t, j);
+    }
+    let outcome = j.outcome.as_deref();
+    // A card split out of a red batch alone was red there already: a red
+    // of its own is the second.
+    let split_red = j.parent.is_some() && outcome == Some("red");
+    if j.attempt < 2 && outcome != Some("conflict") && !split_red {
+        let next = jobs::rerun(t, j, None)?;
+        set_labels(t, &j.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
+        let note = format!(
+            "{} It runs once more as job {} (flaky tests).",
+            end_comment(j, "failed"),
+            next.id
+        );
+        return comment(t, &j.card, &note);
+    }
+    let verdict = if split_red {
+        "failed (red alone after its batch was red)"
+    } else {
+        "failed again"
+    };
+    fail_card(t, j, verdict)
+}
+
+/// The end of a batch merge: the merged cards pass, or the batch splits,
+/// or it runs once more. A card that conflicted fails now.
+fn batch_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    let (conflicted, merged): (Vec<BatchCard>, Vec<BatchCard>) = j
+        .batch
+        .iter()
+        .cloned()
+        .partition(|c| c.outcome.as_deref() == Some("conflict"));
+    for c in &conflicted {
+        fail_card(t, &card_view(j, c), "left the batch on a conflict")?;
+    }
+    if j.state == jobs::JobState::Passed {
+        for c in &merged {
+            pass_card(t, &card_view(j, c))?;
+        }
+        return Ok(());
+    }
+    if merged.is_empty() {
+        return Ok(());
+    }
+    let red = j.outcome.as_deref() == Some("red");
+    if red && merged.len() >= 2 {
+        let (left, right) = jobs::split(t, j, &merged)?;
+        let names = |x: &Job| {
+            x.cards()
+                .iter()
+                .map(|c| c.card.clone())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        for c in &merged {
+            let v = card_view(j, c);
+            set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
+            let note = format!(
+                "{} The batch splits to find the failing card: job {} ({}) first, then job {} ({}).",
+                end_comment(&v, "failed"),
+                left.id,
+                names(&left),
+                right.id,
+                names(&right)
+            );
+            comment(t, &c.card, &note)?;
+        }
+        return Ok(());
+    }
+    // One card merged and the batch is red, or the job could not run.
+    let split_red = red && j.parent.is_some();
+    if j.attempt < 2 && !split_red {
+        let next = jobs::rerun(t, j, Some(&merged))?;
+        for c in &merged {
+            set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
+            let note = format!(
+                "{} It runs once more as job {}.",
+                end_comment(&card_view(j, c), "failed"),
+                next.id
+            );
+            comment(t, &c.card, &note)?;
+        }
+        return Ok(());
+    }
+    for c in &merged {
+        fail_card(t, &card_view(j, c), "failed again")?;
+    }
+    Ok(())
+}
+
+/// The job as one card of its batch sees it: the card, its branch, and
+/// its worker. A card that conflicted gets the conflict as its outcome.
+fn card_view(j: &Job, c: &BatchCard) -> Job {
+    let mut v = j.clone();
+    v.card = c.card.clone();
+    v.branch = c.branch.clone();
+    v.by_agent = c.by_agent.clone();
+    if c.outcome.as_deref() == Some("conflict") {
+        v.outcome = Some("conflict".into());
+        v.exit_code = None;
+        v.head = None;
+        v.tail = Some(format!(
+            "the branch `{}` does not merge onto `next` and the cards before it in the batch; the queue does not resolve conflicts. Files, or why the merge failed:\n{}",
+            c.branch,
+            c.note.as_deref().unwrap_or("")
+        ));
+    }
+    v
+}
+
+/// A pass: clear the job labels, move the card on, and free it.
+fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
+    let to = match j.kind {
+        JobKind::Validate => COL_REVIEW,
+        JobKind::Merge => COL_ACCEPTED,
+    };
+    let note = end_comment(j, "passed");
+    move_or_comment(t, &j.card, to, None, &note)?;
+    unassign(t, &j.card)
+}
+
+/// The final failure of a card: the failure block, the top of `ready`,
+/// no assignee, and a mail to its worker.
+fn fail_card(t: &mut Tx<'_>, j: &Job, verdict: &str) -> ApiResult<()> {
+    set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
+    let card = match board::get_card(t, &j.card) {
+        Ok(c) => c,
+        Err(e) if e.code.status().is_client_error() => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let body = format!("{}{}", failure_block(j), card.body);
+    let patch = CardPatch {
+        body: Some(body),
+        ..CardPatch::default()
+    };
+    board::update_card(t, &Actor::Operator, &j.card, patch)?;
+    let note = end_comment(j, verdict);
+    move_or_comment(t, &j.card, COL_READY, Some(0), &note)?;
+    unassign(t, &j.card)?;
+    if let Some(who) = &j.by_agent {
+        notify_worker(t, j, who)?;
+    }
     Ok(())
 }
 
@@ -853,7 +1200,7 @@ fn notify_worker(t: &mut Tx<'_>, j: &Job, who: &str) -> ApiResult<()> {
     let subject = format!("{}: validation failed", j.card);
     let body = format!(
         "{}\nThe card is at the top of ready, for you first. The failure block is at the top of the card body.\n",
-        end_comment(j, "failed twice")
+        end_comment(j, "failed")
     );
     mail::send(
         t,
@@ -953,22 +1300,49 @@ forget() {
 res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 "#;
 
-/// Step 1: `url dir kind branch commit`. Prints `outcome=ok head=<sha>`,
+/// Step 1: `url dir kind branch commit [branch...]` (the other branches of
+/// a batch merge, in order). Prints `TERRARIUM_CONFLICT <index>` and the
+/// files for each branch that conflicts, then `outcome=ok head=<sha>`,
 /// `outcome=conflict`, or `outcome=error`.
 const PREPARE_SCRIPT: &str = r#"url=$1; dir=$2; kind=$3; branch=$4; commit=$5
+shift 5
 case "$dir" in /*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
 rm -rf -- "$dir" && mkdir -p -- "$dir" && G -C "$dir" init -q || { forget; res error; exit 2; }
 if [ "$kind" = merge ]; then
-  if ! g -C "$dir" fetch -q -- "$url" "+refs/heads/next:refs/remotes/job/next" "+refs/heads/$branch:refs/remotes/job/card"; then
-    forget; echo "cannot fetch next and $branch (does the repo have a next branch?)"; res error; exit 2
+  # The branches of the merge, in order: the job's, then the rest of a
+  # batch. The daemon checked each name (no space, no glob character).
+  set -- "$branch" "$@"
+  specs="+refs/heads/next:refs/remotes/job/next"
+  i=0
+  for b in "$@"; do specs="$specs +refs/heads/$b:refs/remotes/job/card$i"; i=$((i + 1)); done
+  set -f
+  # shellcheck disable=SC2086
+  if ! g -C "$dir" fetch -q -- "$url" $specs; then
+    forget; echo "cannot fetch next and $* (does the repo have a next branch?)"; res error; exit 2
   fi
+  set +f
   forget
   G -C "$dir" checkout -q -B next refs/remotes/job/next || { res error; exit 2; }
-  if ! G -C "$dir" merge -q --no-ff --no-edit -m "Merge $branch onto next" refs/remotes/job/card; then
-    G -C "$dir" diff --name-only --diff-filter=U
-    G -C "$dir" merge --abort
-    res conflict; exit 0
-  fi
+  # A branch that conflicts leaves the merge: its merge is aborted, and
+  # the next branch merges onto the ones before it.
+  i=0; merged=0
+  for b in "$@"; do
+    if out=$(G -C "$dir" merge -q --no-ff --no-edit -m "Merge $b onto next" "refs/remotes/job/card$i" 2>&1); then
+      merged=$((merged + 1))
+    else
+      printf 'TERRARIUM_CONFLICT\t%s\n' "$i"
+      G -C "$dir" diff --name-only --diff-filter=U
+      # A merge that fails without a conflict (for example unrelated
+      # histories) leaves no merge to abort: say why, and reset the tree,
+      # so that only this branch leaves the merge.
+      if ! G -C "$dir" merge --abort 2>/dev/null; then
+        printf 'the merge failed without a conflict:\n%s\n' "$out"
+        G -C "$dir" reset -q --hard HEAD || { res error; exit 2; }
+      fi
+    fi
+    i=$((i + 1))
+  done
+  if [ "$merged" = 0 ]; then res conflict; exit 0; fi
   G -C "$dir" update-ref refs/job/merge HEAD || { res error; exit 2; }
 else
   if ! g -C "$dir" fetch -q -- "$url" "+refs/heads/$branch:refs/remotes/job/card"; then
@@ -1143,9 +1517,99 @@ echo "after: $GIT_SSH_COMMAND"
     }
 
     #[test]
+    fn batch_conflicts_are_read_by_index() {
+        let out = b"TERRARIUM_CONFLICT\t1\nREADME\nsrc/a.rs\nTERRARIUM_CONFLICT\t3\nb.txt\nTERRARIUM_JOB\toutcome=ok\thead=abc\n";
+        let found = conflicts(out);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[&1], "README\nsrc/a.rs");
+        assert_eq!(found[&3], "b.txt");
+        let card = |c: &str| BatchCard {
+            card: c.into(),
+            branch: c.to_lowercase(),
+            by_agent: None,
+            outcome: None,
+            note: None,
+        };
+        let batch = vec![card("T-1"), card("T-2"), card("T-3"), card("T-4")];
+        let marked = mark_conflicts(&batch, out);
+        let outcomes: Vec<Option<&str>> = marked.iter().map(|c| c.outcome.as_deref()).collect();
+        assert_eq!(outcomes, [None, Some("conflict"), None, Some("conflict")]);
+        assert_eq!(
+            batch_summary(&marked),
+            "batch: merged T-1 T-3; left out on a conflict T-2 T-4"
+        );
+    }
+
+    #[test]
     fn by_agent_label() {
         let labels = vec!["ci".to_owned(), "by:dash-ci".to_owned()];
         assert_eq!(by_agent_of(&labels).as_deref(), Some("dash-ci"));
         assert_eq!(by_agent_of(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn host_resolution_does_not_hold_the_database_and_is_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let db = crate::db::Db::new(
+            crate::db::open(&path).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        let started = Arc::new(tokio::sync::Notify::new());
+        let ready = started.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let resolver_db = db.clone();
+        let task = tokio::spawn(async move {
+            prepare_hosts_with(
+                &resolver_db,
+                Some("round-robin.invalid".into()),
+                move |_| {
+                    ready.notify_one();
+                    wait.recv().unwrap();
+                    "192.0.2.1".into()
+                },
+            )
+            .await
+            .unwrap();
+        });
+        started.notified().await;
+        let read = tokio::time::timeout(
+            Duration::from_secs(2),
+            db.read(|c| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)),
+        )
+        .await;
+        release.send(()).unwrap();
+        task.await.unwrap();
+        assert_eq!(read.unwrap().unwrap(), 1);
+        // A new handle simulates a restart. A changed DNS answer must not
+        // move a running job away from its cap, or retry a failed lookup.
+        let reopened = crate::db::Db::new(
+            crate::db::open(&path).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        prepare_hosts_with(&reopened, Some("ROUND-ROBIN.INVALID:2222".into()), |_| {
+            panic!("must not resolve again")
+        })
+        .await
+        .unwrap();
+        let key: String = reopened
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT host_key FROM job_host_keys WHERE hostname = 'round-robin.invalid'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(key, "192.0.2.1");
+        prepare_hosts_with(&reopened, Some("failed.invalid".into()), str::to_owned)
+            .await
+            .unwrap();
+        prepare_hosts_with(&reopened, Some("FAILED.INVALID".into()), |_| {
+            panic!("failed lookups must be pinned too")
+        })
+        .await
+        .unwrap();
     }
 }

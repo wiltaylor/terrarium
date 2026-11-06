@@ -18,6 +18,318 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(90);
 
+#[tokio::test]
+async fn host_caps_accept_names_ids_and_ssh_aliases() {
+    let td = TestDaemon::start().await;
+    let h = td
+        .post("/api/hosts", json!({"name": "machine"}))
+        .await
+        .ok()
+        .clone();
+    let id = h["id"].as_str().unwrap();
+    // Legacy rows were stored under names, and aliases may have distinct caps.
+    let legacy_id = id.to_owned();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "INSERT INTO job_hosts VALUES ('machine', 1, 'operator', 'old')",
+                [],
+            )?;
+            t.execute(
+                "INSERT INTO job_hosts VALUES (?1, 3, 'operator', 'new')",
+                [&legacy_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let legacy = td.get("/api/job-hosts").await.ok().clone();
+    assert_eq!(legacy["hosts"].as_array().unwrap().len(), 1);
+    assert_eq!(legacy["hosts"][0]["host"], id);
+    assert_eq!(legacy["hosts"][0]["heavy_jobs"], 1);
+    let cap = td
+        .put("/api/job-hosts/machine", json!({"heavy_jobs": 2}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(cap["hosts"][0]["host"], id);
+    let cap = td
+        .put(&format!("/api/job-hosts/{id}"), json!({"heavy_jobs": 1}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(cap["hosts"].as_array().unwrap().len(), 1);
+    assert_eq!(cap["hosts"][0]["heavy_jobs"], 1);
+    let rows: i64 = td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM job_hosts", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "a cap write must remove legacy aliases");
+    td.delete(&format!("/api/job-hosts/{id}")).await.ok();
+    let cap = td
+        .put("/api/job-hosts/localhost", json!({"heavy_jobs": 2}))
+        .await
+        .ok()
+        .clone();
+    let key = cap["hosts"][0]["host"].as_str().unwrap();
+    assert!(key.parse::<std::net::IpAddr>().is_ok());
+    let cap = td
+        .put(&format!("/api/job-hosts/{key}"), json!({"heavy_jobs": 1}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(cap["hosts"].as_array().unwrap().len(), 1);
+    assert_eq!(cap["hosts"][0]["host"], key);
+    assert_eq!(cap["hosts"][0]["heavy_jobs"], 1);
+}
+
+#[tokio::test]
+async fn host_counts_respect_the_readers_project() {
+    use terrariumd::store::jobs::{self, JobKind, NewJob};
+    let td = TestDaemon::start().await;
+    for project in ["p", "q"] {
+        td.project(project).await;
+        let card = td
+            .post(
+                &format!("/api/projects/{project}/cards"),
+                json!({"title": "job"}),
+            )
+            .await
+            .ok()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let project = project.to_owned();
+        td.daemon
+            .as_ref()
+            .unwrap()
+            .state
+            .db
+            .write("operator", move |t| {
+                let j = jobs::create(
+                    t,
+                    NewJob {
+                        project,
+                        card,
+                        kind: JobKind::Validate,
+                        batch: Vec::new(),
+                        repo: "app".into(),
+                        branch: "next".into(),
+                        commit: None,
+                        by_agent: None,
+                    },
+                )?;
+                jobs::start(t, &j.id, "machine")?;
+                jobs::set_host_cap(t, "machine", Some(2))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    for (name, roles, all) in [
+        ("worker", json!([]), false),
+        ("lead", json!(["project_admin"]), false),
+        ("architect", json!(["architect"]), true),
+        ("sysadmin", json!(["sysadmin"]), true),
+    ] {
+        td.agent("p", name, json!({"roles": roles})).await;
+        let v = td
+            .get_as(&format!("p/{name}"), "/api/job-hosts")
+            .await
+            .ok()
+            .clone();
+        let h = &v["hosts"][0];
+        assert_eq!(h["running"], 2);
+        assert_eq!(h["projects"]["p"], 1);
+        assert_eq!(h["projects"].get("q").is_some(), all);
+        assert_eq!(h.get("updated_by").is_some(), all);
+        assert_eq!(h.get("updated_at").is_some(), all);
+    }
+    let v = td.get("/api/job-hosts").await.ok().clone();
+    assert_eq!(v["hosts"][0]["projects"], json!({"p": 1, "q": 1}));
+    assert!(v["hosts"][0].get("updated_by").is_some());
+    td.project("empty").await;
+    td.agent("empty", "worker", json!({})).await;
+    let v = td
+        .get_as("empty/worker", "/api/job-hosts")
+        .await
+        .ok()
+        .clone();
+    assert_eq!(v["hosts"][0]["projects"], json!({"empty": 0}));
+}
+
+/// TER-105: an SSH target on an address of a host agent's machine counts
+/// on the host agent: `job-hosts` shows one host, and its cap holds across
+/// the host-agent target and the SSH target.
+#[tokio::test]
+async fn an_ssh_alias_of_a_host_agent_is_one_host() {
+    use terrariumd::store::jobs::{self, JobKind, NewJob};
+    let td = TestDaemon::start().await;
+    let id = td.post("/api/hosts", json!({"name": "helios"})).await.ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    td.post("/api/hosts", json!({"name": "other"})).await.ok();
+    for (project, target) in [
+        (
+            "p",
+            json!({"name": "p-build", "kind": "host", "host": "helios", "project": "p"}),
+        ),
+        (
+            "q",
+            json!({"name": "q-vm", "kind": "ssh", "address": "ci@10.3.0.2:22", "project": "q"}),
+        ),
+    ] {
+        td.project(project).await;
+        td.post("/api/targets", target.clone()).await.ok();
+        td.put(
+            &format!("/api/projects/{project}/delivery"),
+            json!({"target": target["name"], "recipe": "true"}),
+        )
+        .await
+        .ok();
+    }
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    // A job of q runs on the SSH target, stored under its address. No job
+    // is queued, so the daemon's own tick starts nothing during the test.
+    let card = td
+        .post("/api/projects/q/cards", json!({"title": "job"}))
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    db.write("operator", move |t| {
+        let j = jobs::create(
+            t,
+            NewJob {
+                project: "q".into(),
+                card,
+                kind: JobKind::Validate,
+                batch: Vec::new(),
+                repo: "app".into(),
+                branch: "next".into(),
+                commit: None,
+                by_agent: None,
+            },
+        )?;
+        jobs::start(t, &j.id, "10.3.0.2")?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    td.put("/api/job-hosts/helios", json!({"heavy_jobs": 1}))
+        .await
+        .ok();
+    // The host of the queue of p, its running jobs, and its cap: what the
+    // pick checks before a job of p starts.
+    let room = |db: terrariumd::db::Db, project: &'static str| async move {
+        db.read(move |c| jobs::host_room(c, project)).await.unwrap()
+    };
+    // Without an alias: two hosts, and helios has room for a job of p.
+    let v = td.get("/api/job-hosts").await.ok().clone();
+    assert_eq!(v["hosts"].as_array().unwrap().len(), 2, "{v}");
+    assert_eq!(room(db.clone(), "p").await, Some((id.clone(), 0, 1)));
+    // 10.3.0.2 has no cap of its own.
+    assert_eq!(room(db.clone(), "q").await, None);
+
+    // Only a sysadmin or the operator sets aliases.
+    td.agent("q", "worker", json!({})).await;
+    td.put_as(
+        "q/worker",
+        "/api/job-hosts/helios/aliases",
+        json!({"aliases": ["10.3.0.2"]}),
+    )
+    .await
+    .err(403, "forbidden");
+    td.put(
+        "/api/job-hosts/nope/aliases",
+        json!({"aliases": ["10.3.0.2"]}),
+    )
+    .await
+    .err(404, "not_found");
+    td.put(
+        "/api/job-hosts/helios/aliases",
+        json!({"aliases": ["other"]}),
+    )
+    .await
+    .err(422, "invalid");
+
+    let v = td
+        .put(
+            "/api/job-hosts/helios/aliases",
+            json!({"aliases": ["ci@10.3.0.2:22", "Helios.LAN"]}),
+        )
+        .await
+        .ok()
+        .clone();
+    let hosts = v["hosts"].as_array().unwrap();
+    assert_eq!(hosts.len(), 1, "{v}");
+    assert_eq!(hosts[0]["host"], id);
+    assert_eq!(hosts[0]["name"], "helios");
+    assert_eq!(hosts[0]["aliases"], json!(["10.3.0.2", "helios.lan"]));
+    assert_eq!(hosts[0]["running"], 1);
+    assert_eq!(hosts[0]["projects"]["q"], 1);
+    assert_eq!(hosts[0]["heavy_jobs"], 1);
+    // The cap holds across both targets: the q job on the SSH target
+    // fills helios, so the p job waits.
+    assert_eq!(room(db.clone(), "p").await, Some((id.clone(), 1, 1)));
+    assert_eq!(room(db.clone(), "q").await, Some((id.clone(), 1, 1)));
+    // A worker sees the name, not the aliases.
+    let v = td.get_as("q/worker", "/api/job-hosts").await.ok().clone();
+    assert_eq!(v["hosts"][0]["name"], "helios");
+    assert!(v["hosts"][0].get("aliases").is_none());
+
+    // One host agent per alias.
+    td.put(
+        "/api/job-hosts/other/aliases",
+        json!({"aliases": ["10.3.0.2"]}),
+    )
+    .await
+    .err(409, "conflict");
+    // A cap set by the alias lands on the host agent.
+    let v = td
+        .put("/api/job-hosts/10.3.0.2", json!({"heavy_jobs": 2}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(v["hosts"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["hosts"][0]["host"], id);
+    assert_eq!(v["hosts"][0]["heavy_jobs"], 2);
+    assert_eq!(room(db.clone(), "p").await, Some((id.clone(), 1, 2)));
+    td.put("/api/job-hosts/helios", json!({"heavy_jobs": 1}))
+        .await
+        .ok();
+
+    // An empty list takes the aliases away, and so does a revoke.
+    td.put("/api/job-hosts/helios/aliases", json!({"aliases": []}))
+        .await
+        .ok();
+    assert_eq!(room(db.clone(), "p").await, Some((id.clone(), 0, 1)));
+    td.put(
+        "/api/job-hosts/helios/aliases",
+        json!({"aliases": ["10.3.0.2"]}),
+    )
+    .await
+    .ok();
+    assert_eq!(room(db.clone(), "p").await, Some((id.clone(), 1, 1)));
+    td.delete("/api/hosts/helios").await.ok();
+    let left: i64 = db
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM job_host_aliases", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
 struct Lab {
     td: TestDaemon,
     _dirs: tempfile::TempDir,
@@ -54,6 +366,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// `p` with repo `app` (a bare repo with `main` and `next`), the lead
 /// and worker `w1`, and the queue set: `test -f OK`, `slots`.
 async fn lab(slots: u32) -> Lab {
+    lab_with(slots, None).await
+}
+
+/// [`lab`] with a `docker` binary for the host agent.
+async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
     let td = TestDaemon::start().await;
     let state = td.daemon.as_ref().unwrap().state.clone();
     let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
@@ -67,6 +384,13 @@ async fn lab(slots: u32) -> Lab {
         shell: Some("/bin/sh".into()),
         ..Default::default()
     };
+    if let Some(d) = docker {
+        o.capabilities.docker = terrarium_core::protocol::ToolCapability {
+            present: true,
+            version: Some("29.8.0".into()),
+        };
+        o.docker_bin = d.display().to_string();
+    }
     o.backoff_min = Duration::from_millis(50);
     o.backoff_max = Duration::from_millis(200);
     let dirs = tempfile::tempdir().unwrap();
@@ -660,6 +984,7 @@ async fn a_cancel_ends_a_queued_job() {
 #[tokio::test]
 async fn the_host_cap_holds_across_projects_in_order() {
     let lab = lab(2).await;
+    let host_id = lab.td.get("/api/hosts/lab1").await.body["id"].clone();
     let wd = lab._dirs.path().join("jobs").display().to_string();
     // `nice -n19` adds 19 to the niceness of the host agent (this test
     // process), at most 19: a run under a parent at -4 gets 15.
@@ -723,7 +1048,7 @@ async fn the_host_cap_holds_across_projects_in_order() {
         .td
         .put("/api/job-hosts/lab1", json!({"heavy_jobs": 1}))
         .await;
-    assert_eq!(r.ok()["hosts"][0]["host"], "lab1", "{}", r.body);
+    assert_eq!(r.ok()["hosts"][0]["host"], host_id, "{}", r.body);
     assert_eq!(r.ok()["hosts"][0]["heavy_jobs"], 1, "{}", r.body);
     let audit = lab
         .td
@@ -753,7 +1078,7 @@ async fn the_host_cap_holds_across_projects_in_order() {
             )
             .await;
         assert_eq!(r.status, 201, "{}", r.body);
-        assert_eq!(r.body["queue"]["host"]["host"], "lab1", "{}", r.body);
+        assert_eq!(r.body["queue"]["host"]["host"], host_id, "{}", r.body);
         assert_eq!(r.body["queue"]["host"]["heavy_jobs"], 1, "{}", r.body);
         cards.push(id);
     }
@@ -791,7 +1116,7 @@ async fn the_host_cap_holds_across_projects_in_order() {
     }
     assert!(
         jobs.iter()
-            .all(|j| j["state"] == "passed" && j["host"] == "lab1"),
+            .all(|j| j["state"] == "passed" && j["host"] == host_id),
         "{jobs:#?}"
     );
     jobs.sort_by(|a, b| {
@@ -952,4 +1277,579 @@ async fn a_merge_job_runs_alone_in_its_project() {
     let t = |j: &Value, k: &str| j[k].as_str().unwrap().to_owned();
     assert!(t(&m, "started_at") >= t(&v1, "ended_at"), "{jobs:#?}");
     assert!(t(&v3, "started_at") >= t(&m, "ended_at"), "{jobs:#?}");
+}
+
+// ------------------------------------------------------------- TER-115
+
+/// Is `pid` a live process (not gone, not a zombie)?
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .is_ok_and(|s| !s.rsplit(") ").next().unwrap_or("").starts_with('Z'))
+}
+
+/// The PIDs in `file`, one per line, once there are at least `n`.
+async fn pids(file: &Path, n: usize) -> Vec<u32> {
+    let start = Instant::now();
+    loop {
+        let p: Vec<u32> = std::fs::read_to_string(file)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect();
+        if p.len() >= n {
+            return p;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "no {n} pids in {}",
+            file.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A fake `docker` whose `exec` runs the command in a new session on
+/// this machine, as runc does in a container: a kill of the `docker`
+/// client (the host agent's timeout and kill) does not reach it.
+fn fake_docker(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let docker = dir.join("docker");
+    std::fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1" in
+  inspect) echo '[{"Id":"abc","Name":"/terrarium-p-dbox","State":{"Status":"running"}}]' ;;
+  run) echo abc ;;
+  exec) shift
+    while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;; *) break ;; esac; done
+    shift
+    ( exec setsid "$@" ) &
+    wait $! ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    docker
+}
+
+/// A lab whose queue runs on the docker target `p-dbox` (fake docker), with
+/// a recipe that starts a child, ignores `TERM` (the child too), and
+/// appends the child's PID to the returned file.
+async fn docker_lab(slots: u32, timeout_secs: u64) -> (Lab, tempfile::TempDir, PathBuf) {
+    let bins = tempfile::tempdir().unwrap();
+    let docker = fake_docker(bins.path());
+    let lab = lab_with(slots, Some(&docker)).await;
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "p-dbox", "kind": "docker", "host": "lab1", "image": "alpine:3",
+                   "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child_file = bins.path().join("children");
+    let recipe = format!(
+        "trap '' TERM; sleep 300 & echo $! >> '{}'; wait",
+        child_file.display()
+    );
+    let work_dir = bins.path().join("jobs");
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-dbox", "recipe": recipe, "slots": slots,
+                   "timeout_secs": timeout_secs,
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    (lab, bins, child_file)
+}
+
+/// Poll job `id` until its state is not `state`; return it.
+async fn until_not(lab: &Lab, id: &str, state: &str) -> Value {
+    let start = Instant::now();
+    loop {
+        let j = lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+        if j["state"] != state {
+            return j;
+        }
+        assert!(start.elapsed() < DEADLINE, "job {id} stays {state}: {j}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// TER-115: a recipe on a docker target (its command in its own session,
+/// as in a container) starts a child that ignores `TERM`, and the job
+/// hits its timeout. The job ends only after the kill on the target: when
+/// it shows as ended, no process of it is left. The rerun does the same.
+#[tokio::test]
+async fn a_job_timeout_ends_every_process_of_the_recipe() {
+    let (lab, _bins, children) = docker_lab(1, 3).await;
+    let h = lab.branch("ter-t1", "next", &[("OK", "1")]);
+    let c = lab.card("t1", "ter-t1").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c}/validate"),
+            json!({"commit": h}),
+        )
+        .await;
+    let j1 = r.ok()["job"]["id"].as_str().unwrap().to_owned();
+    let first = pids(&children, 1).await[0];
+    assert!(alive(first));
+    let j = until_not(&lab, &j1, "running").await;
+    assert!(!alive(first), "the child {first} outlived its job: {j}");
+    assert_eq!(j["state"], "failed", "{j}");
+    assert_eq!(j["outcome"], "red", "{j}");
+    let tail = j["tail"].as_str().unwrap_or("");
+    assert!(tail.contains("timeout"), "{j}");
+    assert!(tail.contains("killed on the target"), "{j}");
+    // The rerun times out the same way.
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    for p in pids(&children, 2).await {
+        assert!(!alive(p), "the child {p} outlived its job");
+    }
+}
+
+/// TER-115: a cancel of a running job ends every process of its recipe on
+/// the target, and the next job starts only after they are gone.
+#[tokio::test]
+async fn a_cancel_ends_every_process_before_the_next_job_starts() {
+    let (lab, _bins, children) = docker_lab(1, 600).await;
+    let h1 = lab.branch("ter-k1", "next", &[("OK", "1")]);
+    let h2 = lab.branch("ter-k2", "next", &[("OK", "2")]);
+    let c1 = lab.card("k1", "ter-k1").await;
+    let c2 = lab.card("k2", "ter-k2").await;
+    let mut ids = Vec::new();
+    for (c, h) in [(&c1, &h1), (&c2, &h2)] {
+        let r = lab
+            .td
+            .post_as(
+                &lab.w1,
+                &format!("/api/cards/{c}/validate"),
+                json!({"commit": h}),
+            )
+            .await;
+        ids.push(r.ok()["job"]["id"].as_str().unwrap().to_owned());
+    }
+    let first = pids(&children, 1).await[0];
+    assert!(alive(first));
+    let r = lab.td.delete(&format!("/api/jobs/{}", ids[0])).await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    let j2 = until_not(&lab, &ids[1], "queued").await;
+    assert!(
+        !alive(first),
+        "job 2 started while the child {first} of job 1 ran: {j2}"
+    );
+    // Job 2's recipe runs; cancel it too.
+    let all = pids(&children, 2).await;
+    let r = lab.td.delete(&format!("/api/jobs/{}", ids[1])).await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    for p in all {
+        let start = Instant::now();
+        while alive(p) {
+            assert!(start.elapsed() < DEADLINE, "the child {p} outlived its job");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// TER-115 review (round 2, minor 2): a merge job that gets a cancel
+/// between two steps starts no more steps, so it does not push `next`.
+/// A fake `ionice` holds the first ionice probe (the step before the
+/// prepare step) until the kill. The cancel comes during the probe, so
+/// the kill ends only the probe, and only the killed() check keeps the
+/// prepare, recipe, collect, and push steps from running. A validate job
+/// behind it (one slot) starts only after the merge job's run ended.
+#[tokio::test]
+async fn a_cancelled_merge_job_does_not_push() {
+    use std::os::unix::fs::PermissionsExt;
+    let bins = tempfile::tempdir().unwrap();
+    let docker = fake_docker(bins.path());
+    let script = std::fs::read_to_string(&docker).unwrap().replacen(
+        "#!/bin/sh\n",
+        &format!(
+            "#!/bin/sh\nPATH='{}':\"$PATH\"; export PATH\n",
+            bins.path().display()
+        ),
+        1,
+    );
+    std::fs::write(&docker, script).unwrap();
+    let probe = bins.path().join("probe");
+    let ionice = bins.path().join("ionice");
+    std::fs::write(
+        &ionice,
+        format!(
+            "#!/bin/sh\nif [ ! -e '{p}' ]; then echo $$ > '{p}'; exec sleep 300; fi\nshift\nexec \"$@\"\n",
+            p = probe.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ionice, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let lab = lab_with(1, Some(&docker)).await;
+    // A target name of its own: the ionice answer is kept per target name
+    // in the process, and this test needs the probe to run.
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "p-ibox", "kind": "docker", "host": "lab1", "image": "alpine:3",
+                   "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let ran = bins.path().join("ran");
+    let work_dir = bins.path().join("jobs");
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-ibox", "slots": 1, "next_repos": ["app"],
+                   "recipe": format!("echo \"$PWD\" >> '{}'; test -f OK", ran.display()),
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let before = git(&lab.origin, &["rev-parse", "next"]);
+    lab.branch("ter-mc", "next", &[("OK", "yes\n")]);
+    let card = lab.card("mc", "ter-mc").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job = r.body["job"]["id"].as_str().unwrap().to_owned();
+    let held = pids(&probe, 1).await[0];
+    assert!(alive(held));
+    let r = lab.td.delete(&format!("/api/jobs/{job}")).await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    let h2 = lab.branch("ter-mv", "next", &[("OK", "yes\n")]);
+    let c2 = lab.card("mv", "ter-mv").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c2}/validate"),
+            json!({"commit": h2}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let v = r.body["job"]["id"].as_str().unwrap().to_owned();
+    let jobs = lab.until_idle().await;
+    let of = |id: &str| jobs.iter().find(|j| j["id"] == id).unwrap().clone();
+    assert_eq!(of(&job)["state"], "cancelled", "{jobs:#?}");
+    assert_eq!(of(&v)["state"], "passed", "{jobs:#?}");
+    assert!(!alive(held), "the probe {held} outlived the kill");
+    let log = std::fs::read_to_string(&ran).unwrap_or_default();
+    assert!(
+        !log.contains(&job),
+        "the cancelled job ran its recipe: {log}"
+    );
+    assert!(log.contains(&v), "the validate job did not run: {log}");
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), before);
+}
+
+/// Set the recipe of project `p`, with the lab's work dir.
+async fn set_recipe(lab: &Lab, recipe: &str) {
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": recipe, "slots": 2, "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+}
+
+/// The subjects of the merges on `next` of the remote, oldest first.
+fn next_merges(lab: &Lab) -> Vec<String> {
+    let log = git(
+        &lab.origin,
+        &["log", "--first-parent", "--reverse", "--format=%s", "next"],
+    );
+    log.lines()
+        .filter(|l| l.starts_with("Merge "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// TER-112: one merge job takes three cards, merges them onto `next` in
+/// the given order, validates once, pushes `next`, and moves each card to
+/// `accepted`.
+#[tokio::test]
+async fn a_green_batch_of_three_merges_in_one_job() {
+    let lab = lab(2).await;
+    set_recipe(
+        &lab,
+        "test -f OK && test -f g1 && test -f g2 && test -f g3 && sleep 1",
+    )
+    .await;
+    let mut heads = Vec::new();
+    let mut cards = Vec::new();
+    for n in ["g1", "g2", "g3"] {
+        let b = format!("ter-{n}");
+        heads.push(lab.branch(&b, "next", &[("OK", "yes\n"), (n, n)]));
+        cards.push(lab.card(n, &b).await);
+    }
+    // Only an admin queues a batch, and a batch is checked.
+    lab.td
+        .post_as(&lab.w1, "/api/merges", json!({"cards": cards}))
+        .await
+        .err(403, "forbidden");
+    lab.td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": []}))
+        .await
+        .err(422, "invalid");
+    lab.td
+        .post_as(
+            &lab.lead,
+            "/api/merges",
+            json!({"cards": [cards[0], cards[0]]}),
+        )
+        .await
+        .err(422, "invalid");
+    // The first card is w1's: w1 still may not cancel the batch (review
+    // F3), as it holds the other cards too.
+    lab.td
+        .patch(
+            &format!("/api/cards/{}", cards[0]),
+            json!({"add_labels": ["by:w1"]}),
+        )
+        .await
+        .ok();
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": cards}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["kind"], "merge");
+    assert_eq!(r.body["job"]["card"], cards[0].as_str());
+    assert_eq!(r.body["job"]["by_agent"], "w1", "{}", r.body);
+    let job_id = r.body["job"]["id"].as_str().unwrap().to_owned();
+    lab.td
+        .req(
+            hyper::Method::DELETE,
+            &format!("/api/jobs/{job_id}"),
+            None,
+            Some(&lab.w1),
+        )
+        .await
+        .err(403, "forbidden");
+    let batch: Vec<&str> = r.body["job"]["batch"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["card"].as_str().unwrap())
+        .collect();
+    assert_eq!(batch, cards.iter().map(String::as_str).collect::<Vec<_>>());
+    // A card of the open batch takes no other job.
+    lab.td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{}/merge", cards[1]),
+            json!({}),
+        )
+        .await
+        .err(409, "conflict");
+    // Each card shows the job, unless the job has ended already.
+    for c in &cards {
+        let card = lab.card_of(c).await;
+        let l = labels(&card);
+        assert!(
+            l.iter().any(|l| l.starts_with("validation:")) || card["column"] == "accepted",
+            "{c}: {l:?}"
+        );
+    }
+    for c in &cards {
+        let card = lab
+            .until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+        let l = labels(&card);
+        assert!(!l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
+        assert!(comments(&card).contains("batch of 3"), "{card}");
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "one job for the batch: {jobs:#?}");
+    assert_eq!(jobs[0]["state"], "passed");
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    assert_eq!(jobs[0]["head"].as_str().unwrap(), next);
+    for h in &heads {
+        git(&lab.origin, &["merge-base", "--is-ancestor", h, "next"]);
+    }
+    assert_eq!(
+        next_merges(&lab),
+        [
+            "Merge ter-g1 onto next",
+            "Merge ter-g2 onto next",
+            "Merge ter-g3 onto next"
+        ]
+    );
+}
+
+/// TER-112: a red batch splits in halves until it finds the failing card.
+/// The failing card goes to the top of `ready` with the failure block,
+/// and the other cards merge, in order. The bad card is in the left half,
+/// so the left half splits again and its halves must still run before
+/// the right half (review F1, F2).
+#[tokio::test]
+async fn a_red_batch_finds_the_failing_card_and_the_others_merge() {
+    let lab = lab(2).await;
+    set_recipe(&lab, "test -f OK && test ! -f BAD").await;
+    let h1 = lab.branch("ter-r1", "next", &[("OK", "yes\n"), ("r1", "1")]);
+    let h2 = lab.branch("ter-r2", "next", &[("OK", "yes\n"), ("BAD", "2")]);
+    let h3 = lab.branch("ter-r3", "next", &[("OK", "yes\n"), ("r3", "3")]);
+    let h4 = lab.branch("ter-r4", "next", &[("OK", "yes\n"), ("r4", "4")]);
+    let c1 = lab.card("r1", "ter-r1").await;
+    let c2 = lab.card("r2", "ter-r2").await;
+    let c3 = lab.card("r3", "ter-r3").await;
+    let c4 = lab.card("r4", "ter-r4").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3, c4]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let bad = lab
+        .until_card(&c2, "ready", |c| c["column"] == "ready")
+        .await;
+    let body = bad["body"].as_str().unwrap();
+    assert!(body.starts_with("Validation failed: "), "{body}");
+    assert!(body.contains("outcome red"), "{body}");
+    assert!(body.contains("ter-r2"), "{body}");
+    assert!(body.ends_with("the card body"), "{body}");
+    assert!(bad["assignee"].is_null(), "{bad}");
+    for c in [&c1, &c3, &c4] {
+        lab.until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+    }
+    let jobs = lab.until_idle().await;
+    // [r1 r2 r3 r4] red; [r1 r2] red, then [r1] green and [r2] red (no
+    // rerun: its batch was red); then [r3 r4] green.
+    assert_eq!(jobs.len(), 5, "{jobs:#?}");
+    let state_of = |path: &str| -> String {
+        let j = jobs
+            .iter()
+            .find(|j| j["split_path"].as_str().unwrap_or("") == path)
+            .unwrap_or_else(|| panic!("no job at {path:?}: {jobs:#?}"));
+        j["state"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(state_of(""), "failed");
+    assert_eq!(state_of("0"), "failed");
+    assert_eq!(state_of("00"), "passed");
+    assert_eq!(state_of("01"), "failed");
+    assert_eq!(state_of("1"), "passed");
+    assert!(
+        jobs.iter()
+            .filter(|j| j["outcome"] == "red")
+            .all(|j| j["attempt"] == 1),
+        "a card split out alone is not rerun: {jobs:#?}"
+    );
+    for h in [&h1, &h3, &h4] {
+        git(&lab.origin, &["merge-base", "--is-ancestor", h, "next"]);
+    }
+    let out = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", &h2, "next"])
+        .current_dir(&lab.origin)
+        .status()
+        .unwrap();
+    assert!(!out.success(), "the red card is not on next");
+    assert_eq!(
+        next_merges(&lab),
+        [
+            "Merge ter-r1 onto next",
+            "Merge ter-r3 onto next",
+            "Merge ter-r4 onto next"
+        ]
+    );
+    let c1v = lab.card_of(&c1).await;
+    assert!(comments(&c1v).contains("The batch splits"), "{c1v}");
+}
+
+/// TER-112: a card of a batch that conflicts with the cards before it
+/// leaves the batch at once (a conflict is never resolved or rerun); the
+/// others validate and merge in the same job.
+#[tokio::test]
+async fn a_conflict_in_a_batch_drops_only_that_card() {
+    let lab = lab(2).await;
+    lab.branch("ter-k1", "next", &[("README", "k1\n"), ("OK", "y\n")]);
+    lab.branch("ter-k2", "next", &[("README", "k2\n"), ("OK", "y\n")]);
+    let h3 = lab.branch("ter-k3", "next", &[("k3", "3"), ("OK", "y\n")]);
+    let c1 = lab.card("k1", "ter-k1").await;
+    let c2 = lab.card("k2", "ter-k2").await;
+    let c3 = lab.card("k3", "ter-k3").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let k2 = lab
+        .until_card(&c2, "ready", |c| c["column"] == "ready")
+        .await;
+    let body = k2["body"].as_str().unwrap();
+    assert!(body.starts_with("Validation failed: "), "{body}");
+    assert!(body.contains("outcome conflict"), "{body}");
+    assert!(body.contains("README"), "{body}");
+    for c in [&c1, &c3] {
+        lab.until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "{jobs:#?}");
+    assert_eq!(jobs[0]["state"], "passed");
+    assert_eq!(jobs[0]["batch"][1]["outcome"], "conflict", "{jobs:#?}");
+    git(&lab.origin, &["merge-base", "--is-ancestor", &h3, "next"]);
+    assert_eq!(
+        next_merges(&lab),
+        ["Merge ter-k1 onto next", "Merge ter-k3 onto next"]
+    );
+}
+
+/// TER-112 review F4: a branch whose merge fails without a conflict (an
+/// unrelated history) leaves the batch alone; the others merge in the same
+/// job.
+#[tokio::test]
+async fn a_merge_that_fails_without_a_conflict_drops_only_that_card() {
+    let lab = lab(2).await;
+    let h1 = lab.branch("ter-u1", "next", &[("u1", "1"), ("OK", "y\n")]);
+    // An orphan branch: no history in common with `next`.
+    git(&lab.work, &["checkout", "-q", "--orphan", "ter-u2"]);
+    git(&lab.work, &["rm", "-rq", "--cached", "."]);
+    std::fs::write(lab.work.join("u2"), "2").unwrap();
+    git(&lab.work, &["add", "u2"]);
+    git(&lab.work, &["commit", "-q", "-m", "orphan"]);
+    git(&lab.work, &["push", "-q", "-f", "origin", "ter-u2"]);
+    git(&lab.work, &["clean", "-fdq"]);
+    let h3 = lab.branch("ter-u3", "next", &[("u3", "3"), ("OK", "y\n")]);
+    let c1 = lab.card("u1", "ter-u1").await;
+    let c2 = lab.card("u2", "ter-u2").await;
+    let c3 = lab.card("u3", "ter-u3").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2, c3]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let u2 = lab
+        .until_card(&c2, "ready", |c| c["column"] == "ready")
+        .await;
+    let body = u2["body"].as_str().unwrap();
+    assert!(body.contains("outcome conflict"), "{body}");
+    assert!(body.contains("without a conflict"), "{body}");
+    for c in [&c1, &c3] {
+        lab.until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "{jobs:#?}");
+    assert_eq!(jobs[0]["state"], "passed");
+    for h in [&h1, &h3] {
+        git(&lab.origin, &["merge-base", "--is-ancestor", h, "next"]);
+    }
+    assert_eq!(
+        next_merges(&lab),
+        ["Merge ter-u1 onto next", "Merge ter-u3 onto next"]
+    );
 }

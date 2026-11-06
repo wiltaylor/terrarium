@@ -226,6 +226,7 @@ async fn create(
         .write(actor.label(), move |t| {
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
             policy::set_spawn_policy(&who, None, &def.roles, None, &def.policy)?;
+            policy::set_thread_open(&who, None, &def.roles, None, &def.policy)?;
             // A missing subscription fails at the first wake: refuse it now.
             agents::check_subscription_exists(t, def.harness, def.subscription.as_deref())?;
             def.subscription_pool = agents::check_pool(
@@ -348,6 +349,7 @@ async fn update(
                 let now = agents::get(t, &id)?.agent;
                 agents::check_policy(t, &who, &project, Some(&now.policy), new)?;
                 policy::set_spawn_policy(&who, Some(&id), &now.roles, Some(&now.policy), new)?;
+                policy::set_thread_open(&who, Some(&id), &now.roles, Some(&now.policy), new)?;
             }
             let mut patch = patch;
             // A missing subscription fails at the next wake: refuse it now.

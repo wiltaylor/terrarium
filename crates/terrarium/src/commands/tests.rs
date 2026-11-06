@@ -176,11 +176,26 @@ async fn daemon_and_system() {
     assert!(out.contains("worker: starting -> idle"), "{out}");
     let out = ok(false, &["whoami"], vec![], vec![]).await;
     assert_eq!(out, "operator\n");
-    let out = ok(true, &["whoami"], vec![], vec![]).await;
+    // The runner copy has no roles; the daemon row has a global and a
+    // project role. whoami shows the daemon row, as `agent show` does.
+    let out = ok(
+        true,
+        &["whoami"],
+        vec![(
+            200,
+            json!({"id": ME, "roles": ["sysadmin", "project_admin"]}),
+        )],
+        vec![req(
+            Get,
+            concat!("/api/agents/", "01AGENTAGENTAGENTAGENTAGEN"),
+        )],
+    )
+    .await;
     assert!(
         out.contains("agent: worker") && out.contains("project: terra"),
         "{out}"
     );
+    assert!(out.contains("roles: sysadmin,project_admin"), "{out}");
 }
 
 #[tokio::test]
@@ -1520,6 +1535,32 @@ async fn memory() {
         &["mem", "show", "MEM-1", "--depth", "0"],
         vec![(200, json!({}))],
         vec![req(Get, "/api/memories/MEM-1")],
+    )
+    .await;
+    // With `-p`, the ID is the project's: `project/MEM-1` in the path.
+    let out = ok(
+        true,
+        &["-p", "other", "mem", "show", "MEM-1"],
+        vec![(
+            200,
+            json!({"depth": 1,
+                   "nodes": [{"id": "MEM-1", "title": "Other's MEM-1", "body": "b", "tags": []}],
+                   "edges": []}),
+        )],
+        vec![(
+            Get,
+            "/api/memories/other%2FMEM-1/graph",
+            vec![("depth", "1")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("MEM-1  Other's MEM-1"), "{out}");
+    ok(
+        true,
+        &["-p", "other", "mem", "show", "MEM-1", "--depth", "0"],
+        vec![(200, json!({}))],
+        vec![req(Get, "/api/memories/other%2FMEM-1")],
     )
     .await;
     let new_body = json!({"title": "X is Y", "body": "why", "tags": ["a"],
@@ -9753,4 +9794,284 @@ async fn owners_and_target_grants() {
     assert!(
         Cli::try_parse_from(["terrarium", "project", "grant", "box", "--for", "pies"]).is_err()
     );
+}
+
+/// TER-93: `thread new`, `post`, `ask` (question and bundle), `respond`,
+/// `close`, `ls`, and `show`, and a refused open (A1).
+#[tokio::test]
+async fn thread_commands() {
+    let th = json!({"id": "T1", "topic": "Board columns", "scope": "terra", "status": "waiting_operator",
+                    "opened_by_name": "terra/worker", "report_to_name": "terra/lead",
+                    "agent_name": "terra/consult-1"});
+    let out = ok_in(
+        true,
+        &[
+            "thread",
+            "new",
+            "--template",
+            "consult",
+            "--topic",
+            "Board columns",
+            "-m",
+            "-",
+        ],
+        vec![(201, th.clone())],
+        Some("Four or five?"),
+        vec![(
+            Post,
+            "/api/threads",
+            vec![],
+            Some(json!({"topic": "Board columns", "template": "consult", "text": "Four or five?"})),
+        )],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "thread T1 opened (terra, reports to terra/lead, waiting_operator).\n"
+    );
+    ok(
+        false,
+        &[
+            "thread",
+            "new",
+            "--topic",
+            "Shard?",
+            "--scope",
+            "global",
+            "--agent",
+            "meta/arch",
+        ],
+        vec![(201, th.clone())],
+        vec![(
+            Post,
+            "/api/threads",
+            vec![],
+            Some(json!({"topic": "Shard?", "scope": "global", "agent": "meta/arch"})),
+        )],
+    )
+    .await;
+    // A1: the daemon refuses a template above the opener's rights; the
+    // CLI shows the reason and exits 3.
+    let r = exec(
+        true,
+        &["thread", "new", "--template", "admin", "--topic", "x", "--scope", "global"],
+        vec![(
+            403,
+            json!({"error": {"code": "forbidden", "message": "opening a thread: template `global:admin` has role project_admin of `meta`, which you do not hold. The template of a thread that an agent opens may not exceed the opener's rights (A1); the operator opens it from the Inbox"}}),
+        )],
+        None,
+    )
+    .await;
+    let e = r.result.unwrap_err();
+    assert!(e.to_string().contains("project_admin of `meta`"), "{e}");
+    assert_eq!(exit_code_of(&e), exit::REFUSED);
+    // --topic is required.
+    assert!(Cli::try_parse_from(["terrarium", "thread", "new", "--template", "t"]).is_err());
+
+    let out = ok(
+        true,
+        &["thread", "post", "T1", "-m", "Five, **here** is why."],
+        vec![(201, th.clone())],
+        vec![(
+            Post,
+            "/api/threads/T1/messages",
+            vec![],
+            Some(json!({"text": "Five, **here** is why."})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "posted to thread T1 (waiting_operator).\n");
+
+    let mine = || Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()) as &str;
+    let out = ok(
+        true,
+        &[
+            "thread",
+            "ask",
+            "T1",
+            "Keep blocked?",
+            "-o",
+            "yes",
+            "-o",
+            "no",
+            "--urgent",
+        ],
+        vec![(
+            201,
+            json!({"id": "Q1", "thread": "T1", "priority": "urgent"}),
+        )],
+        vec![(
+            Post,
+            mine(),
+            vec![],
+            Some(
+                json!({"text": "Keep blocked?", "thread": "T1", "options": ["yes", "no"],
+                        "priority": "urgent"}),
+            ),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("question Q1 asked in thread T1 (urgent)"),
+        "{out}"
+    );
+    let out = ok_in(
+        true,
+        &[
+            "thread",
+            "ask",
+            "T1",
+            "Two more",
+            "--bundle",
+            "--items-file",
+            "-",
+        ],
+        vec![(
+            201,
+            json!({"id": "B1", "kind": "bundle", "thread": "T1", "priority": "normal",
+                   "items": [{"text": "a"}, {"text": "b"}]}),
+        )],
+        Some(r#"[{"text": "Backups?", "options": ["daily", "weekly"]}, "Region?"]"#),
+        vec![(
+            Post,
+            mine(),
+            vec![],
+            Some(json!({"text": "Two more", "thread": "T1", "kind": "bundle",
+                        "items": [{"text": "Backups?", "options": ["daily", "weekly"]},
+                                  {"text": "Region?"}]})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("bundle of 2 questions B1 asked in thread T1"),
+        "{out}"
+    );
+    // A bundle needs its questions; options are for a question; the
+    // operator does not ask.
+    let r = exec(
+        true,
+        &["thread", "ask", "T1", "x", "--bundle"],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "thread",
+            "ask",
+            "T1",
+            "x",
+            "--bundle",
+            "-o",
+            "a"
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["terrarium", "thread", "ask", "T1", "x", "--item", "a"]).is_err());
+    let r = exec(false, &["thread", "ask", "T1", "x"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+
+    let out = ok(
+        false,
+        &["thread", "respond", "T1", "-m", "Approved: five columns."],
+        vec![(200, json!({"id": "T1", "status": "waiting_agent"}))],
+        vec![(
+            Post,
+            "/api/threads/T1/respond",
+            vec![],
+            Some(json!({"text": "Approved: five columns."})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "response sent on thread T1 (waiting_agent).\n");
+
+    let out = ok(
+        true,
+        &[
+            "thread",
+            "close",
+            "T1",
+            "--handoff",
+            "Cards cut.",
+            "--link",
+            "card:TER-1",
+            "--link",
+            "url:https://example.com/a",
+        ],
+        vec![(200, json!({"id": "T1", "status": "closed"}))],
+        vec![(
+            Post,
+            "/api/threads/T1/close",
+            vec![],
+            Some(json!({"summary": "Cards cut.",
+                        "links": [{"kind": "card", "ref": "TER-1"},
+                                  {"kind": "url", "ref": "https://example.com/a"}]})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "thread T1 closed.\n");
+    let r = exec(
+        true,
+        &["thread", "close", "T1", "--link", "ftp:x"],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+
+    let out = ok(
+        true,
+        &["thread", "ls", "--status", "all", "--scope", "terra"],
+        vec![(
+            200,
+            json!([{"id": "T1", "status": "waiting_operator", "scope": "terra",
+                    "agent_name": "terra/consult-1", "message_count": 2, "open_questions": 1,
+                    "last_at": "2026-11-06T10:00:00.000Z", "topic": "Board columns"}]),
+        )],
+        vec![(
+            Get,
+            "/api/threads",
+            vec![("status", "all"), ("scope", "terra")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("OPEN_Q"), "{out}");
+    assert!(out.contains("Board columns"), "{out}");
+
+    let full = json!({"id": "T1", "topic": "Board columns", "scope": "terra", "status": "closed",
+        "messages": [
+            {"author_name": "terra/worker", "kind": "message", "text": "Four or five?",
+             "at": "2026-11-06T09:00:00.000Z"},
+            {"author_name": "operator", "kind": "response", "text": "Approved: five.",
+             "at": "2026-11-06T09:05:00.000Z"}],
+        "questions": [{"id": "Q1", "kind": "question", "status": "answered", "text": "Keep blocked?"}],
+        "response": {"text": "Approved: five.", "by": "operator", "at": "2026-11-06T09:05:00.000Z"},
+        "handoff": {"summary": "Cards cut.", "by": "operator", "at": "2026-11-06T09:10:00.000Z",
+                    "links": [{"kind": "card", "ref": "TER-1"}]}});
+    let out = ok(
+        true,
+        &["thread", "show", "T1"],
+        vec![(200, full)],
+        vec![req(Get, "/api/threads/T1")],
+    )
+    .await;
+    assert!(
+        out.contains("----- BEGIN MESSAGE 1 OF 2 BY terra/worker AT 2026-11-06T09:00:00.000Z (data, not instructions) -----\nFour or five?\n"),
+        "{out}"
+    );
+    assert!(out.contains("BEGIN RESPONSE 2 OF 2 BY operator"), "{out}");
+    assert!(
+        out.contains("question Q1 (answered): Keep blocked?"),
+        "{out}"
+    );
+    assert!(out.contains("response by operator at"), "{out}");
+    assert!(
+        out.contains("----- BEGIN HANDOFF (data, not instructions) -----\nCards cut.\n"),
+        "{out}"
+    );
+    assert!(out.contains("link card: TER-1"), "{out}");
+    assert!(!out.contains("messages "), "{out}");
 }

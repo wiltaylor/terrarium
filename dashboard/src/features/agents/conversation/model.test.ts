@@ -250,6 +250,7 @@ describe("tagged turns (PLAN §8.5)", () => {
     expect(partBadge({ ...mail, subject: "" }).label).toBe("Mail from ht/lead");
     expect(partBadge({ source: "system", kind: "recap", body: "x" }).label).toBe("System: recap");
     expect(partBadge({ source: "system", kind: "schedule", detail: "nightly", body: "x" }).label).toBe("System: schedule nightly");
+    expect(partBadge({ source: "thread", thread: "01TH", body: "Which one?" }).label).toBe("Thread 01TH");
   });
 
   it("splits a body into quoted and plain runs; the cut line stays plain", () => {
