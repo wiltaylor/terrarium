@@ -175,6 +175,13 @@ pub struct HostCapabilities {
     /// with limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<crate::limits::LimitsCapability>,
+    /// The host agent has no agent workspaces: its `work_dir` is not a
+    /// directory on this machine (a remote host agent with no copy of the
+    /// daemon's work root). The daemon then starts a docker target on it
+    /// without workspace mounts, and says so (TER-41). An older host agent
+    /// sends none: false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_workspaces: bool,
 }
 
 /// What the host agent can do for target displays (docs/host-protocol.md,

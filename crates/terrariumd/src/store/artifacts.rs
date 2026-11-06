@@ -817,7 +817,7 @@ pub fn create(
     limits: &Limits,
 ) -> ApiResult<Artifact> {
     projects::get(t, project)?;
-    policy::read_project(actor, project)?;
+    policy::write_project(actor, project)?;
     let name = check_name(&u.name)?;
     let (_, used) = used_bytes(t, project)?;
     if used + blob.size > limits.project_quota_bytes {
@@ -936,6 +936,8 @@ pub fn add_link(
     l: &NewArtifactLink,
 ) -> ApiResult<Artifact> {
     let row = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     link_row(t, actor, &row, l)?;
     render(t, by_pk(t, row.pk)?)
 }
@@ -954,6 +956,8 @@ fn on_released_version(conn: &Connection, pk: i64) -> ApiResult<Option<String>> 
 /// Delete an artifact. Returns the blob to remove when no one else uses it.
 pub fn delete(t: &mut Tx<'_>, actor: &Actor, key: &str) -> ApiResult<(String, String)> {
     let row = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     policy::delete_artifact(actor, &row.project, &row.created_by)?;
     if let Some(v) = on_released_version(t, row.pk)? {
         return Err(ApiError::conflict(format!(

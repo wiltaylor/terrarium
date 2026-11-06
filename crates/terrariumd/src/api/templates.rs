@@ -71,7 +71,7 @@ async fn list(
 ) -> ApiResult<Json<Vec<Template>>> {
     let sees_all = match &actor {
         Actor::Operator => true,
-        Actor::Agent(a) => a.is_sysadmin(),
+        Actor::Agent(a) => a.reads_all(),
     };
     let f = match (
         q.scope.as_deref().filter(|s| !s.is_empty()),

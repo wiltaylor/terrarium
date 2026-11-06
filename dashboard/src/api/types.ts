@@ -17,8 +17,10 @@ export const AGENT_STATUSES = [
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
 /** Roles above `member`. The daemon drops `member`; it is implicit. */
-export type Role = "sysadmin" | "project_admin" | "member";
-export const GRANTABLE_ROLES = ["project_admin", "sysadmin"] as const;
+export type Role = "sysadmin" | "project_admin" | "member" | "architect";
+export const GRANTABLE_ROLES = ["project_admin", "sysadmin", "architect"] as const;
+/** The label of a role in the dashboard: `architect` is the system architect (TER-47). */
+export const roleLabel = (r: string): string => (r === "architect" ? "system architect" : r);
 
 export type RestartPolicy = "always" | "on-failure" | "never";
 export const RESTART_POLICIES: RestartPolicy[] = ["on-failure", "always", "never"];
@@ -1632,6 +1634,10 @@ export interface ActiveCard extends Card {
   column_kind: string;
   /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
   assignee_status?: string;
+  /** A card in the blocked column (TER-51): when it moved there. */
+  blocked_since?: string;
+  /** A card in the blocked column: the comment of that move, or the newest comment without one. */
+  blocked_reason?: string;
 }
 
 export interface Board {
@@ -1922,6 +1928,29 @@ export interface Pin {
   project: string;
   name: string;
   pinned_at: string;
+}
+
+/** One project folder of the sidebar (`GET /api/project-folders`, docs/api.md §6.12). `parent_id` null is the root. */
+export interface ProjectFolder {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The folder of one project (docs/api.md §6.12). A project with no placement sits at the root, after the placed ones. */
+export interface ProjectPlacement {
+  project: string;
+  folder_id: string | null;
+  position: number;
+}
+
+/** `GET /api/project-folders`: every folder and every placed project. */
+export interface ProjectFolderTree {
+  folders: ProjectFolder[];
+  placements: ProjectPlacement[];
 }
 
 /** `POST /api/agents/{id}/attachments` (docs/api.md §6.5): an image in the agent's workspace. */

@@ -790,7 +790,7 @@ pub async fn owner_removed(state: &Shared, owner: &str) {
 pub async fn cancel(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Spawn> {
     let key = id.to_owned();
     let sp = state.db.read(move |c| spawns::get(c, &key)).await?;
-    policy::read_project(actor, &sp.project)?;
+    policy::write_project(actor, &sp.project)?;
     policy::cancel_spawn(actor, &sp.owner, &sp.project)?;
     if !sp.running() {
         return Err(ApiError::conflict(format!(

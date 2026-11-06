@@ -11,6 +11,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const [agentList, setAgentList] = createSignal<{ id: string; project: string; name: string; status: string }[]>([]);
 
 vi.mock("../stores", () => ({
+  // No folders: the caller is not the operator or a sysadmin (TER-48).
+  projectFolders: {
+    available: () => false,
+    folders: () => [],
+    placements: () => [],
+    error: () => null,
+    clearError: () => {},
+    refresh: async () => {},
+  },
   projects: {
     projects: () => [{ name: "alpha" }, { name: "my app" }],
     selected: () => null,

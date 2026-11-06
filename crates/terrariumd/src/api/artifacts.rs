@@ -292,7 +292,7 @@ async fn upload(
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<(StatusCode, Json<Artifact>)> {
-    policy::read_project(&actor, &name)?;
+    policy::write_project(&actor, &name)?;
     let p = name.clone();
     state
         .db

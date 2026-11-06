@@ -3,13 +3,15 @@
 // the loop guard paused. Tabs pick the kind and Open or Done; the project
 // filter picks one project. `inbox` and `question` events read the list again.
 
-import { useSearchParams } from "@solidjs/router";
+import { A, useSearchParams } from "@solidjs/router";
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
 import { api, events, inbox, projects } from "../../stores";
 import { MailItemCard, PausedThreadCard, WatchCard } from "./cards";
 import { AskDialog } from "./AskDialog";
+import { MessageDialog } from "./MessageDialog";
 import { canForward, emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, statusTabOf, type InboxStatusTab, type InboxTab } from "./model";
 import { questionItemId } from "./questions";
 import { inboxItemDomId } from "./critical";
@@ -27,7 +29,30 @@ export default function InboxPage() {
   const project = () => params.project ?? "";
   const keep = (i: InboxItem) => matchesTabs(i, tab(), status(), project());
 
-  const [list, setList] = createSignal<InboxItem[]>([]);
+  // The items in a store, reconciled by `id` (TER-40): a reload after an
+  // inbox event keeps the object, and so the DOM and the local state of
+  // each card that stays (a typed answer, a chosen option, an open reply,
+  // the focus). Only new and gone items change the DOM.
+  const [items, setItems] = createStore<{ list: InboxItem[] }>({ list: [] });
+  const list = () => items.list;
+  const setList = (next: InboxItem[] | ((cur: InboxItem[]) => InboxItem[])) => {
+    const rows = typeof next === "function" ? next(items.list) : next;
+    keepView(() => setItems("list", reconcile(rows, { key: "id", merge: true })));
+  };
+  let listEl: HTMLDivElement | undefined;
+  /**
+   * Run `change`, and keep the card that holds the focus (else the first
+   * card in view) at the same place on the screen: a new item above it
+   * must not move what the operator works on.
+   */
+  const keepView = (change: () => void) => {
+    const anchor = anchorCard(listEl);
+    const before = anchor?.getBoundingClientRect().top;
+    change();
+    if (!anchor || before === undefined) return;
+    const after = anchor.getBoundingClientRect().top;
+    if (anchor.isConnected && after !== before) window.scrollBy(0, after - before);
+  };
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
   let gen = 0;
@@ -83,6 +108,14 @@ export default function InboxPage() {
   /** The open dialog: an ask (no question), or a forward of a question. */
   const [asking, setAsking] = createSignal<{ question?: Question } | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
+  /** "Message an agent" (TER-46): the dialog, and the last mail sent from it. */
+  const [messaging, setMessaging] = createSignal(false);
+  const [sent, setSent] = createSignal<{ agent: string; thread: string } | null>(null);
+  const messaged = (m: { to_name: string; thread_id: string }) => {
+    setMessaging(false);
+    setSent({ agent: m.to_name, thread: m.thread_id });
+    setTimeout(() => setSent(null), 8000);
+  };
   const asked = (agent: string, forward: boolean) => {
     setAsking(null);
     setNotice(`${forward ? "Forwarded" : "Asked"}. The Asked tab shows the thread until ${agent} answers.`);
@@ -120,6 +153,9 @@ export default function InboxPage() {
           </For>
         </select>
         <button onClick={() => void reload()}>Refresh</button>
+        <button onClick={() => setMessaging(true)} title="Send one mail to an agent; nothing waits for an answer">
+          Message an agent
+        </button>
         <button class="primary" onClick={() => setAsking({})}>
           Ask an agent
         </button>
@@ -134,13 +170,20 @@ export default function InboxPage() {
       </Show>
       <Tabs tabs={STATUS_TABS} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s, tab: params.tab === "watch" ? undefined : params.tab })} />
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <Show when={sent()}>
+        {(s) => (
+          <p class="notice small" role="status" style={{ margin: 0 }}>
+            Sent to {s().agent}. <A href={`/mail?open=${encodeURIComponent(s().thread)}`}>Open the thread</A>
+          </p>
+        )}
+      </Show>
       <Show when={notice()}>
         <p class="notice small" role="status" style={{ margin: 0 }}>
           {notice()}
         </p>
       </Show>
       <Show when={list().length} fallback={<Empty>{loading() ? "Loading…" : emptyText(tab(), status())}</Empty>}>
-        <div class="stack">
+        <div class="stack" ref={listEl}>
           <For each={list()}>
             {(item) => (
               <div id={inboxItemDomId(item.id)} classList={{ "inbox-target": params.item === item.id }}>
@@ -175,6 +218,9 @@ export default function InboxPage() {
           </For>
         </div>
       </Show>
+      <Show when={messaging()}>
+        <MessageDialog onClose={() => setMessaging(false)} onSent={messaged} />
+      </Show>
       <Show when={asking()}>
         {(a) => <AskDialog question={a().question} onClose={() => setAsking(null)} onAsked={(r) => asked(r.watch.agent_name, !!a().question)} />}
       </Show>
@@ -191,3 +237,13 @@ function EyeIcon() {
     </svg>
   );
 }
+
+/** The card to keep in place: the one that holds the focus, else the first one whose top is in view. */
+function anchorCard(listEl: HTMLElement | undefined): HTMLElement | undefined {
+  if (!listEl) return undefined;
+  const cards = [...listEl.children] as HTMLElement[];
+  const focused = document.activeElement;
+  const withFocus = focused ? cards.find((c) => c.contains(focused)) : undefined;
+  return withFocus ?? cards.find((c) => c.getBoundingClientRect().bottom > 0);
+}
+

@@ -175,6 +175,25 @@ export function askBody(to: string, text: string, question?: string): { body: { 
   return { body: { to: agent, ...(t ? { text: t } : {}), ...(question ? { question } : {}) } };
 }
 
+/** The longest subject of a message from the Inbox (TER-46). */
+export const MESSAGE_SUBJECT_MAX = 80;
+
+/**
+ * The mail of "Message an agent" (TER-46): to the agent, the subject from the
+ * first line of the text (cut at {@link MESSAGE_SUBJECT_MAX} characters), the
+ * whole text as the body. A plain mail: no watch, nothing waits for an answer.
+ */
+export function messageBody(to: string, text: string): { body: { to: string; subject: string; body: string } } | { error: string } {
+  const agent = to.trim();
+  const t = text.trim();
+  if (!agent) return { error: "Pick an agent." };
+  if (!t) return { error: "Write the message." };
+  if (t.length > ASK_TEXT_MAX) return { error: `The text has ${t.length} characters; at most ${ASK_TEXT_MAX}.` };
+  const first = t.split("\n").find((l) => l.trim())!.trim();
+  const subject = first.length > MESSAGE_SUBJECT_MAX ? `${first.slice(0, MESSAGE_SUBJECT_MAX - 1)}…` : first;
+  return { body: { to: agent, subject, body: t } };
+}
+
 /** The state of a watch: waiting for the agent, answered, or cancelled. */
 export function watchState(w: Pick<InboxWatch, "waiting" | "cancelled_at" | "replies">): { label: string; chip: string } {
   if (w.cancelled_at) return { label: "cancelled", chip: "" };

@@ -10,6 +10,13 @@ use std::path::{Path, PathBuf};
 use crate::protocol::WorkspaceMount;
 use crate::verb::BuildError;
 
+/// Does this host have the agent workspaces: is `work_dir` a directory
+/// here? A remote host agent with no copy of the daemon's work root has
+/// none, and says so in its capabilities (`no_workspaces`, TER-41).
+pub fn available(work_dir: &Path) -> bool {
+    std::fs::canonicalize(work_dir).is_ok_and(|p| p.is_dir())
+}
+
 /// The real path of the workspace `m` under `work_dir`.
 pub fn resolve(work_dir: &Path, m: &WorkspaceMount) -> Result<PathBuf, BuildError> {
     m.check().map_err(BuildError::bad)?;
@@ -50,6 +57,17 @@ mod tests {
 
     fn ws(p: &str) -> WorkspaceMount {
         WorkspaceMount { path: p.into() }
+    }
+
+    /// TER-41: a host has the workspaces only when work_dir is a directory.
+    #[test]
+    fn workspaces_are_available_only_with_a_work_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(available(dir.path()));
+        assert!(!available(&dir.path().join("missing")));
+        let file = dir.path().join("f");
+        std::fs::write(&file, "x").unwrap();
+        assert!(!available(&file));
     }
 
     #[test]

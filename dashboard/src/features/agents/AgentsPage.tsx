@@ -4,7 +4,7 @@ import { LeaseChips } from "../../components/Leases";
 import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
-import { AGENT_STATUSES, type Agent, type AgentStatus } from "../../api/types";
+import { AGENT_STATUSES, roleLabel, type Agent, type AgentStatus } from "../../api/types";
 import { duration } from "../../lib/format";
 import { agents, leases } from "../../stores";
 import { NewAgentDialog } from "./NewAgentDialog";
@@ -12,7 +12,7 @@ import { NewAgentDialog } from "./NewAgentDialog";
 export function RoleBadges(props: { agent: Agent }) {
   return (
     <For each={props.agent.roles.filter((r) => r !== "member")}>
-      {(r) => <span class={`chip ${r === "sysadmin" ? "bad" : "info"}`}>{r}</span>}
+      {(r) => <span class={`chip ${r === "sysadmin" ? "bad" : "info"}`}>{roleLabel(r)}</span>}
     </For>
   );
 }

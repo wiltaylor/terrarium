@@ -66,7 +66,7 @@ async fn visible(
     let Actor::Agent(a) = actor else {
         return Ok(None);
     };
-    if a.is_sysadmin() {
+    if a.reads_all() {
         return Ok(None);
     }
     let id = a.id.clone();
@@ -212,7 +212,7 @@ async fn usage(
     actor: Actor,
     Path(name): Path<String>,
 ) -> ApiResult<Json<Usage>> {
-    policy::sysadmin(&actor, "reading the users of a skill")?;
+    policy::read_system(&actor, "reading the users of a skill")?;
     terrarium_core::skills::check_name(&name).map_err(ApiError::invalid)?;
     let index = skills::LibraryIndex::read(library_opt(&state).as_deref());
     let u = state

@@ -41,7 +41,7 @@ const WHAT: &str = "the self-update";
 
 /// `GET /api/system/update`.
 async fn status(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Report>> {
-    policy::sysadmin(&actor, "reading the self-update")?;
+    policy::read_system(&actor, "reading the self-update")?;
     Ok(Json(self_update::report(&state).await))
 }
 
