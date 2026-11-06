@@ -124,7 +124,8 @@ fn check_rights(
 ) -> ApiResult<()> {
     let Some(key) = template.map(str::trim).filter(|k| !k.is_empty()) else {
         return Err(ApiError::invalid(
-            "`template` is empty: an agent names the template of the thread it opens              (`terrarium thread new --template <t>`)",
+            "`template` is empty: an agent names the template of the thread it opens \
+             (`terrarium thread new --template <t>`)",
         ));
     };
     let project = if scope == threads::GLOBAL {
@@ -140,7 +141,9 @@ fn check_rights(
             return Ok(());
         }
         Err(ApiError::forbidden(format!(
-            "opening a thread: {what} has {}, which you do not hold. The template of a thread              that an agent opens may not exceed the opener's rights (A1); the operator opens              it from the Inbox",
+            "opening a thread: {what} has {}, which you do not hold. The template of a thread \
+             that an agent opens may not exceed the opener's rights (A1); the operator opens \
+             it from the Inbox",
             excess.join(", ")
         )))
     };

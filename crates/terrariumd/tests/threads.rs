@@ -668,9 +668,10 @@ async fn an_agent_with_thread_open_opens_within_its_rights() {
     assert_eq!(r.body["report_to"], lab.meta_lead.as_str());
 
     // An agent names a template; an unknown one is 404.
-    open_as(&lab.w, json!({"topic": "x"}))
-        .await
-        .err(422, "invalid");
+    let r = open_as(&lab.w, json!({"topic": "x"})).await;
+    r.err(422, "invalid");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(!msg.contains("  "), "one space between words: {msg}");
     open_as(&lab.w, json!({"topic": "x", "template": "nope"}))
         .await
         .err(404, "not_found");
@@ -681,6 +682,7 @@ async fn an_agent_with_thread_open_opens_within_its_rights() {
     let msg = r.body["error"]["message"].as_str().unwrap();
     assert!(msg.contains("project_admin of `p`"), "{msg}");
     assert!(msg.contains("A1"), "{msg}");
+    assert!(!msg.contains("  "), "one space between words: {msg}");
     open_as(
         &lab.w,
         json!({"topic": "x", "scope": "global", "template": "architect"}),
