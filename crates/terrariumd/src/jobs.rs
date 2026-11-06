@@ -134,6 +134,9 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         if let Some(state) = weak.upgrade() {
+            if let Err(e) = prepare_hosts(&state.db, None).await {
+                warn!("cannot initialize stored job host keys: {e}");
+            }
             match state.db.write("system", jobs::fail_lost).await {
                 Ok(lost) => {
                     for j in lost {
@@ -170,6 +173,7 @@ pub fn kick(state: &Shared) {
 /// across projects) and in its project (the slots). One write for all
 /// projects, so the host counts hold.
 pub async fn tick(state: &Shared) -> ApiResult<()> {
+    prepare_hosts(&state.db, None).await?;
     let started = state
         .db
         .write("system", move |t| {
@@ -208,6 +212,46 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
         });
     }
     Ok(())
+}
+
+/// Resolve only unpinned names, on the blocking pool and outside DB closures.
+/// The persisted first answer (including failures) keeps counts and caps stable.
+pub async fn prepare_hosts(db: &crate::db::Db, extra: Option<String>) -> ApiResult<()> {
+    prepare_hosts_with(db, extra, |hostname| {
+        use std::net::ToSocketAddrs;
+        let mut ips: Vec<_> = (hostname, 22)
+            .to_socket_addrs()
+            .map(|all| all.map(|s| s.ip()).collect())
+            .unwrap_or_default();
+        ips.sort();
+        ips.dedup();
+        ips.first()
+            .map_or_else(|| hostname.to_owned(), ToString::to_string)
+    })
+    .await
+}
+
+async fn prepare_hosts_with(
+    db: &crate::db::Db,
+    extra: Option<String>,
+    resolve: impl Fn(&str) -> String + Send + 'static,
+) -> ApiResult<()> {
+    let names = db.read(move |c| jobs::unresolved_hosts(c, extra)).await?;
+    if names.is_empty() {
+        return Ok(());
+    }
+    let keys = tokio::task::spawn_blocking(move || {
+        names
+            .into_iter()
+            .map(|name| {
+                let key = resolve(&name);
+                (name, key)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("host resolver failed: {e}")))?;
+    db.write("system", move |t| jobs::pin_hosts(t, keys)).await
 }
 
 /// Add and take away card labels, keeping the others. A card that is gone
@@ -1420,5 +1464,71 @@ echo "after: $GIT_SSH_COMMAND"
         let labels = vec!["ci".to_owned(), "by:dash-ci".to_owned()];
         assert_eq!(by_agent_of(&labels).as_deref(), Some("dash-ci"));
         assert_eq!(by_agent_of(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn host_resolution_does_not_hold_the_database_and_is_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let db = crate::db::Db::new(
+            crate::db::open(&path).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        let started = Arc::new(tokio::sync::Notify::new());
+        let ready = started.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let resolver_db = db.clone();
+        let task = tokio::spawn(async move {
+            prepare_hosts_with(
+                &resolver_db,
+                Some("round-robin.invalid".into()),
+                move |_| {
+                    ready.notify_one();
+                    wait.recv().unwrap();
+                    "192.0.2.1".into()
+                },
+            )
+            .await
+            .unwrap();
+        });
+        started.notified().await;
+        let read = tokio::time::timeout(
+            Duration::from_secs(2),
+            db.read(|c| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)),
+        )
+        .await;
+        release.send(()).unwrap();
+        task.await.unwrap();
+        assert_eq!(read.unwrap().unwrap(), 1);
+        // A new handle simulates a restart. A changed DNS answer must not
+        // move a running job away from its cap, or retry a failed lookup.
+        let reopened = crate::db::Db::new(
+            crate::db::open(&path).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        prepare_hosts_with(&reopened, Some("ROUND-ROBIN.INVALID:2222".into()), |_| {
+            panic!("must not resolve again")
+        })
+        .await
+        .unwrap();
+        let key: String = reopened
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT host_key FROM job_host_keys WHERE hostname = 'round-robin.invalid'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(key, "192.0.2.1");
+        prepare_hosts_with(&reopened, Some("failed.invalid".into()), str::to_owned)
+            .await
+            .unwrap();
+        prepare_hosts_with(&reopened, Some("FAILED.INVALID".into()), |_| {
+            panic!("failed lookups must be pinned too")
+        })
+        .await
+        .unwrap();
     }
 }
