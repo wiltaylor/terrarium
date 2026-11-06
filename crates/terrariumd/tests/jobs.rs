@@ -203,6 +203,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// `p` with repo `app` (a bare repo with `main` and `next`), the lead
 /// and worker `w1`, and the queue set: `test -f OK`, `slots`.
 async fn lab(slots: u32) -> Lab {
+    lab_with(slots, None).await
+}
+
+/// [`lab`] with a `docker` binary for the host agent.
+async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
     let td = TestDaemon::start().await;
     let state = td.daemon.as_ref().unwrap().state.clone();
     let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
@@ -216,6 +221,13 @@ async fn lab(slots: u32) -> Lab {
         shell: Some("/bin/sh".into()),
         ..Default::default()
     };
+    if let Some(d) = docker {
+        o.capabilities.docker = terrarium_core::protocol::ToolCapability {
+            present: true,
+            version: Some("29.8.0".into()),
+        };
+        o.docker_bin = d.display().to_string();
+    }
     o.backoff_min = Duration::from_millis(50);
     o.backoff_max = Duration::from_millis(200);
     let dirs = tempfile::tempdir().unwrap();
@@ -1102,6 +1114,281 @@ async fn a_merge_job_runs_alone_in_its_project() {
     let t = |j: &Value, k: &str| j[k].as_str().unwrap().to_owned();
     assert!(t(&m, "started_at") >= t(&v1, "ended_at"), "{jobs:#?}");
     assert!(t(&v3, "started_at") >= t(&m, "ended_at"), "{jobs:#?}");
+}
+
+// ------------------------------------------------------------- TER-115
+
+/// Is `pid` a live process (not gone, not a zombie)?
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .is_ok_and(|s| !s.rsplit(") ").next().unwrap_or("").starts_with('Z'))
+}
+
+/// The PIDs in `file`, one per line, once there are at least `n`.
+async fn pids(file: &Path, n: usize) -> Vec<u32> {
+    let start = Instant::now();
+    loop {
+        let p: Vec<u32> = std::fs::read_to_string(file)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect();
+        if p.len() >= n {
+            return p;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "no {n} pids in {}",
+            file.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A fake `docker` whose `exec` runs the command in a new session on
+/// this machine, as runc does in a container: a kill of the `docker`
+/// client (the host agent's timeout and kill) does not reach it.
+fn fake_docker(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let docker = dir.join("docker");
+    std::fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1" in
+  inspect) echo '[{"Id":"abc","Name":"/terrarium-p-dbox","State":{"Status":"running"}}]' ;;
+  run) echo abc ;;
+  exec) shift
+    while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;; *) break ;; esac; done
+    shift
+    ( exec setsid "$@" ) &
+    wait $! ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    docker
+}
+
+/// A lab whose queue runs on the docker target `p-dbox` (fake docker), with
+/// a recipe that starts a child, ignores `TERM` (the child too), and
+/// appends the child's PID to the returned file.
+async fn docker_lab(slots: u32, timeout_secs: u64) -> (Lab, tempfile::TempDir, PathBuf) {
+    let bins = tempfile::tempdir().unwrap();
+    let docker = fake_docker(bins.path());
+    let lab = lab_with(slots, Some(&docker)).await;
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "p-dbox", "kind": "docker", "host": "lab1", "image": "alpine:3",
+                   "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child_file = bins.path().join("children");
+    let recipe = format!(
+        "trap '' TERM; sleep 300 & echo $! >> '{}'; wait",
+        child_file.display()
+    );
+    let work_dir = bins.path().join("jobs");
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-dbox", "recipe": recipe, "slots": slots,
+                   "timeout_secs": timeout_secs,
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    (lab, bins, child_file)
+}
+
+/// Poll job `id` until its state is not `state`; return it.
+async fn until_not(lab: &Lab, id: &str, state: &str) -> Value {
+    let start = Instant::now();
+    loop {
+        let j = lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+        if j["state"] != state {
+            return j;
+        }
+        assert!(start.elapsed() < DEADLINE, "job {id} stays {state}: {j}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// TER-115: a recipe on a docker target (its command in its own session,
+/// as in a container) starts a child that ignores `TERM`, and the job
+/// hits its timeout. The job ends only after the kill on the target: when
+/// it shows as ended, no process of it is left. The rerun does the same.
+#[tokio::test]
+async fn a_job_timeout_ends_every_process_of_the_recipe() {
+    let (lab, _bins, children) = docker_lab(1, 3).await;
+    let h = lab.branch("ter-t1", "next", &[("OK", "1")]);
+    let c = lab.card("t1", "ter-t1").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c}/validate"),
+            json!({"commit": h}),
+        )
+        .await;
+    let j1 = r.ok()["job"]["id"].as_str().unwrap().to_owned();
+    let first = pids(&children, 1).await[0];
+    assert!(alive(first));
+    let j = until_not(&lab, &j1, "running").await;
+    assert!(!alive(first), "the child {first} outlived its job: {j}");
+    assert_eq!(j["state"], "failed", "{j}");
+    assert_eq!(j["outcome"], "red", "{j}");
+    let tail = j["tail"].as_str().unwrap_or("");
+    assert!(tail.contains("timeout"), "{j}");
+    assert!(tail.contains("killed on the target"), "{j}");
+    // The rerun times out the same way.
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    for p in pids(&children, 2).await {
+        assert!(!alive(p), "the child {p} outlived its job");
+    }
+}
+
+/// TER-115: a cancel of a running job ends every process of its recipe on
+/// the target, and the next job starts only after they are gone.
+#[tokio::test]
+async fn a_cancel_ends_every_process_before_the_next_job_starts() {
+    let (lab, _bins, children) = docker_lab(1, 600).await;
+    let h1 = lab.branch("ter-k1", "next", &[("OK", "1")]);
+    let h2 = lab.branch("ter-k2", "next", &[("OK", "2")]);
+    let c1 = lab.card("k1", "ter-k1").await;
+    let c2 = lab.card("k2", "ter-k2").await;
+    let mut ids = Vec::new();
+    for (c, h) in [(&c1, &h1), (&c2, &h2)] {
+        let r = lab
+            .td
+            .post_as(
+                &lab.w1,
+                &format!("/api/cards/{c}/validate"),
+                json!({"commit": h}),
+            )
+            .await;
+        ids.push(r.ok()["job"]["id"].as_str().unwrap().to_owned());
+    }
+    let first = pids(&children, 1).await[0];
+    assert!(alive(first));
+    let r = lab.td.delete(&format!("/api/jobs/{}", ids[0])).await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    let j2 = until_not(&lab, &ids[1], "queued").await;
+    assert!(
+        !alive(first),
+        "job 2 started while the child {first} of job 1 ran: {j2}"
+    );
+    // Job 2's recipe runs; cancel it too.
+    let all = pids(&children, 2).await;
+    let r = lab.td.delete(&format!("/api/jobs/{}", ids[1])).await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    for p in all {
+        let start = Instant::now();
+        while alive(p) {
+            assert!(start.elapsed() < DEADLINE, "the child {p} outlived its job");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// TER-115 review (round 2, minor 2): a merge job that gets a cancel
+/// between two steps starts no more steps, so it does not push `next`.
+/// A fake `ionice` holds the first ionice probe (the step before the
+/// prepare step) until the kill. The cancel comes during the probe, so
+/// the kill ends only the probe, and only the killed() check keeps the
+/// prepare, recipe, collect, and push steps from running. A validate job
+/// behind it (one slot) starts only after the merge job's run ended.
+#[tokio::test]
+async fn a_cancelled_merge_job_does_not_push() {
+    use std::os::unix::fs::PermissionsExt;
+    let bins = tempfile::tempdir().unwrap();
+    let docker = fake_docker(bins.path());
+    let script = std::fs::read_to_string(&docker).unwrap().replacen(
+        "#!/bin/sh\n",
+        &format!(
+            "#!/bin/sh\nPATH='{}':\"$PATH\"; export PATH\n",
+            bins.path().display()
+        ),
+        1,
+    );
+    std::fs::write(&docker, script).unwrap();
+    let probe = bins.path().join("probe");
+    let ionice = bins.path().join("ionice");
+    std::fs::write(
+        &ionice,
+        format!(
+            "#!/bin/sh\nif [ ! -e '{p}' ]; then echo $$ > '{p}'; exec sleep 300; fi\nshift\nexec \"$@\"\n",
+            p = probe.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ionice, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let lab = lab_with(1, Some(&docker)).await;
+    // A target name of its own: the ionice answer is kept per target name
+    // in the process, and this test needs the probe to run.
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "p-ibox", "kind": "docker", "host": "lab1", "image": "alpine:3",
+                   "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let ran = bins.path().join("ran");
+    let work_dir = bins.path().join("jobs");
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-ibox", "slots": 1, "next_repos": ["app"],
+                   "recipe": format!("echo \"$PWD\" >> '{}'; test -f OK", ran.display()),
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let before = git(&lab.origin, &["rev-parse", "next"]);
+    lab.branch("ter-mc", "next", &[("OK", "yes\n")]);
+    let card = lab.card("mc", "ter-mc").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job = r.body["job"]["id"].as_str().unwrap().to_owned();
+    let held = pids(&probe, 1).await[0];
+    assert!(alive(held));
+    let r = lab.td.delete(&format!("/api/jobs/{job}")).await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    let h2 = lab.branch("ter-mv", "next", &[("OK", "yes\n")]);
+    let c2 = lab.card("mv", "ter-mv").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c2}/validate"),
+            json!({"commit": h2}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let v = r.body["job"]["id"].as_str().unwrap().to_owned();
+    let jobs = lab.until_idle().await;
+    let of = |id: &str| jobs.iter().find(|j| j["id"] == id).unwrap().clone();
+    assert_eq!(of(&job)["state"], "cancelled", "{jobs:#?}");
+    assert_eq!(of(&v)["state"], "passed", "{jobs:#?}");
+    assert!(!alive(held), "the probe {held} outlived the kill");
+    let log = std::fs::read_to_string(&ran).unwrap_or_default();
+    assert!(
+        !log.contains(&job),
+        "the cancelled job ran its recipe: {log}"
+    );
+    assert!(log.contains(&v), "the validate job did not run: {log}");
+    assert_eq!(git(&lab.origin, &["rev-parse", "next"]), before);
 }
 
 /// Set the recipe of project `p`, with the lab's work dir.

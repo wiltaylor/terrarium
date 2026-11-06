@@ -14,6 +14,9 @@
 //! [`GRACE_SECS`], sends `KILL` to the ones left, and prints the PIDs. Only
 //! then does the client of the run get its own kill. The result is a
 //! [`report`] that `DELETE /api/waits/{id}?kill=true` returns as `kill`.
+//! A run that hits its own timeout (the client's, which leaves the command
+//! on a docker or ssh target) gets the same kill before its end goes out
+//! (TER-115).
 //!
 //! A process that leaves both the group and the session (`setsid` in the
 //! command) is not found. A kill in the moment before the wrapper wrote its
@@ -29,7 +32,7 @@ use tracing::{debug, warn};
 
 use crate::api::Shared;
 use crate::error::{ApiError, ApiResult};
-use crate::executor::{Control, Ev, RemoteCmd, Running, start_cmd};
+use crate::executor::{Control, End, Ev, RemoteCmd, Running, start_cmd};
 
 /// The time between `TERM` and `KILL`.
 pub const GRACE_SECS: u64 = 5;
@@ -196,8 +199,26 @@ where
     Ok((guard(inner, start, killer, tx), Some(rx)))
 }
 
+/// How the forward of a guarded run stopped.
+enum Stop {
+    /// The run ended by itself.
+    Ended,
+    /// A `Kill`, or nobody reads the run any more.
+    Killed,
+    /// The run hit its own timeout: the client is gone, the command on
+    /// the target may not be. The held end goes out after the kill.
+    TimedOut(Ev),
+}
+
+/// Is `ev` the end of a run that hit its timeout?
+fn is_timeout(ev: &Ev) -> bool {
+    matches!(ev, Ev::End(End::Exit { reason, .. }) if reason == "timeout")
+}
+
 /// Forward `inner`. A `Kill` (or the drop of the returned run) runs
-/// `killer` on the target first, then kills `inner`.
+/// `killer` on the target first, then kills `inner`. A run that hits its
+/// own timeout runs `killer` too, and its end goes out only after the
+/// kill, with the report ready (TER-115).
 fn guard<F>(
     inner: Running,
     start: F,
@@ -211,30 +232,40 @@ where
     let (ctx, mut crx) = mpsc::unbounded_channel::<Control>();
     tokio::spawn(async move {
         let Running { mut events, ctl } = inner;
-        let killed = loop {
+        let stop = loop {
             tokio::select! {
                 ev = events.recv() => {
-                    let Some(ev) = ev else { break false };
+                    let Some(ev) = ev else { break Stop::Ended };
+                    if is_timeout(&ev) {
+                        break Stop::TimedOut(ev);
+                    }
                     let last = matches!(ev, Ev::End(_));
                     if etx.send(ev).await.is_err() {
                         // Nobody reads the run any more: end it.
-                        break !last;
+                        break if last { Stop::Ended } else { Stop::Killed };
                     }
                     if last {
-                        break false;
+                        break Stop::Ended;
                     }
                 }
                 c = crx.recv() => match c {
-                    None | Some(Control::Kill) => break true,
+                    None | Some(Control::Kill) => break Stop::Killed,
                     Some(c) => { let _ = ctl.send(c); }
                 },
             }
         };
-        drop(etx);
-        if !killed {
-            report.send_replace(Some(Value::Null));
-            return;
-        }
+        let held = match stop {
+            Stop::Ended => {
+                drop(etx);
+                report.send_replace(Some(Value::Null));
+                return;
+            }
+            Stop::Killed => {
+                drop(etx);
+                None
+            }
+            Stop::TimedOut(ev) => Some((etx, ev)),
+        };
         // Read the run's output meanwhile: a host session that nobody
         // reads is released, and that kills it at once, without TERM.
         let run_kill = async {
@@ -274,6 +305,9 @@ where
             debug!(report = %r, "killed a run on its target");
         }
         report.send_replace(Some(r));
+        if let Some((etx, ev)) = held {
+            let _ = etx.send(ev).await;
+        }
     });
     Running {
         events: erx,
@@ -424,6 +458,61 @@ mod tests {
         assert!(!r["kill"].as_array().unwrap().is_empty(), "{r}");
         assert!(!alive(child), "the child {child} still runs: {r}");
         assert!(!alive(r["pid"].as_u64().unwrap() as u32), "{r}");
+    }
+
+    /// TER-115: a run over ssh that hits its own timeout, with no `Kill`:
+    /// the client dies, the session on the target runs on, and the guard
+    /// runs the kill command before the end goes out.
+    #[tokio::test]
+    async fn a_timeout_over_ssh_ends_the_children_on_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join("ssh");
+        std::fs::write(
+            &ssh,
+            "#!/bin/sh\nfor a; do last=$a; done\n( exec setsid sh -c \"$last\" ) &\nwait $!\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let known = dir.path().join("known_hosts");
+        let mut def: TargetDef =
+            toml::from_str("kind = \"ssh\"\naddress = \"build@box\"\n").unwrap();
+        def.name = "remote".into();
+        let ssh_bin = ssh.display().to_string();
+        let starter = move |c: RemoteCmd| {
+            let plan = ssh_plan(&ssh_bin, &def, None, &known, &c)?;
+            let mut p = tokio::process::Command::new(&plan.program);
+            p.args(&plan.args);
+            let t = c.timeout_secs.map(Duration::from_secs);
+            Ok(pump_process(p, plan.stdin_prefix, t, None))
+        };
+        let child_file = dir.path().join("child");
+        let cmd = RemoteCmd {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "trap '' TERM; sleep 300 & echo $! > \"$1\"; wait".into(),
+                "run".into(),
+                child_file.display().to_string(),
+            ],
+            timeout_secs: Some(2),
+            ..RemoteCmd::default()
+        };
+        let (run, report) = start_with(starter, &cmd, 1).unwrap();
+        let child = read_pid(&child_file).await;
+        assert!(alive(child));
+        let c = run.collect(1024).await;
+        assert!(
+            matches!(&c.end, Some(End::Exit { reason, .. }) if reason == "timeout"),
+            "{:?}",
+            c.end
+        );
+        // The end came after the kill: the report is there, nothing is left.
+        let report = report.unwrap();
+        assert!(report.borrow().is_some(), "the end came before the kill");
+        let r = super::report(report).await.expect("a kill report");
+        assert!(r["term"].as_array().unwrap().contains(&json!(child)), "{r}");
+        assert_eq!(r["left"], json!([]), "{r}");
+        assert!(!alive(child), "the child {child} still runs: {r}");
     }
 
     /// A run that ends by itself reports no kill.
