@@ -2086,10 +2086,8 @@ const MIGRATIONS: &[&str] = &[
     // `crate::jobs`). `jobs.host` is the host that a running job took a
     // place on (set when it starts). `job_hosts` holds the cap of a host:
     // the most jobs of all projects that run on it at once. A host
-    // without a row has no cap. It comes after TER-71's 71 (and TER-67's
-    // 70); until `next` has TER-67, it is at index 71 on this branch.
-    // Self-contained: when another branch takes this number, move this
-    // entry to the end of the list.
+    // without a row has no cap. Self-contained: when another branch takes
+    // this number, move this entry to the end of the list.
     r#"
     ALTER TABLE jobs ADD COLUMN host TEXT;
     CREATE INDEX jobs_host_state ON jobs(host, state);
