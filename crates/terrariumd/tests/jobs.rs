@@ -29,11 +29,24 @@ async fn host_caps_accept_names_ids_and_ssh_aliases() {
     let id = h["id"].as_str().unwrap();
     // Legacy rows were stored under names, and aliases may have distinct caps.
     let legacy_id = id.to_owned();
-    td.daemon.as_ref().unwrap().state.db.write("operator", move |t| {
-        t.execute("INSERT INTO job_hosts VALUES ('machine', 1, 'operator', 'old')", [])?;
-        t.execute("INSERT INTO job_hosts VALUES (?1, 3, 'operator', 'new')", [&legacy_id])?;
-        Ok(())
-    }).await.unwrap();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "INSERT INTO job_hosts VALUES ('machine', 1, 'operator', 'old')",
+                [],
+            )?;
+            t.execute(
+                "INSERT INTO job_hosts VALUES (?1, 3, 'operator', 'new')",
+                [&legacy_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let legacy = td.get("/api/job-hosts").await.ok().clone();
     assert_eq!(legacy["hosts"].as_array().unwrap().len(), 1);
     assert_eq!(legacy["hosts"][0]["host"], id);
@@ -51,9 +64,15 @@ async fn host_caps_accept_names_ids_and_ssh_aliases() {
         .clone();
     assert_eq!(cap["hosts"].as_array().unwrap().len(), 1);
     assert_eq!(cap["hosts"][0]["heavy_jobs"], 1);
-    let rows: i64 = td.daemon.as_ref().unwrap().state.db.read(|c| {
-        Ok(c.query_row("SELECT count(*) FROM job_hosts", [], |r| r.get(0))?)
-    }).await.unwrap();
+    let rows: i64 = td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM job_hosts", [], |r| r.get(0))?))
+        .await
+        .unwrap();
     assert_eq!(rows, 1, "a cap write must remove legacy aliases");
     td.delete(&format!("/api/job-hosts/{id}")).await.ok();
     let cap = td

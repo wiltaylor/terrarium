@@ -279,25 +279,48 @@ fn canonical_key(conn: &Connection, key: &str) -> ApiResult<String> {
         return Ok(host.id);
     }
     let hostname = address_key(key);
-    Ok(conn.query_row("SELECT host_key FROM job_host_keys WHERE hostname = ?1", [&hostname], |r| r.get(0)).optional()?.unwrap_or(hostname))
+    Ok(conn
+        .query_row(
+            "SELECT host_key FROM job_host_keys WHERE hostname = ?1",
+            [&hostname],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(hostname))
 }
 
 /// Names that still need a pinned identity. No network IO under the DB lock.
 pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<Vec<String>> {
-    let mut keys: Vec<String> = targets::list(conn)?.into_iter()
+    let mut keys: Vec<String> = targets::list(conn)?
+        .into_iter()
         .filter(|t| t.def.host.is_none())
-        .filter_map(|t| t.def.address).collect();
-    let mut st = conn.prepare("SELECT host FROM job_hosts UNION SELECT host FROM jobs WHERE host IS NOT NULL")?;
-    keys.extend(st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
+        .filter_map(|t| t.def.address)
+        .collect();
+    let mut st = conn
+        .prepare("SELECT host FROM job_hosts UNION SELECT host FROM jobs WHERE host IS NOT NULL")?;
+    keys.extend(
+        st.query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     keys.extend(extra);
     let agents = hosts::list(conn)?;
     let mut names = Vec::new();
     for key in keys {
-        if agents.iter().any(|h| h.name == key || h.id == key) { continue; }
+        if agents.iter().any(|h| h.name == key || h.id == key) {
+            continue;
+        }
         let hostname = address_key(&key);
-        if hostname.parse::<std::net::IpAddr>().is_ok() || hostname.is_empty() { continue; }
-        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)", [&hostname], |r| r.get(0))?;
-        if !exists { names.push(hostname); }
+        if hostname.parse::<std::net::IpAddr>().is_ok() || hostname.is_empty() {
+            continue;
+        }
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)",
+            [&hostname],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            names.push(hostname);
+        }
     }
     names.sort();
     names.dedup();
@@ -1003,11 +1026,20 @@ mod tests {
     fn missing_target_and_agent_keys_match_caps() {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
-        let def: DeliveryDef = serde_json::from_value(json!({"target": "MiXeD.INVALID", "recipe": "true"})).unwrap();
-        assert_eq!(host_of(&conn, &def), canonical_key(&conn, "MiXeD.INVALID").unwrap());
-        let target: TargetDef = serde_json::from_value(json!({"kind": "host", "host": "MiXeD.INVALID"})).unwrap();
+        let def: DeliveryDef =
+            serde_json::from_value(json!({"target": "MiXeD.INVALID", "recipe": "true"})).unwrap();
+        assert_eq!(
+            host_of(&conn, &def),
+            canonical_key(&conn, "MiXeD.INVALID").unwrap()
+        );
+        let target: TargetDef =
+            serde_json::from_value(json!({"kind": "host", "host": "MiXeD.INVALID"})).unwrap();
         conn.execute("INSERT INTO targets (name, def, source, state, snapshots, created_at, updated_at) VALUES ('box', ?1, 'api', 'unknown', '[]', '', '')", [serde_json::to_string(&target).unwrap()]).unwrap();
-        let def: DeliveryDef = serde_json::from_value(json!({"target": "box", "recipe": "true"})).unwrap();
-        assert_eq!(host_of(&conn, &def), canonical_key(&conn, "MiXeD.INVALID").unwrap());
+        let def: DeliveryDef =
+            serde_json::from_value(json!({"target": "box", "recipe": "true"})).unwrap();
+        assert_eq!(
+            host_of(&conn, &def),
+            canonical_key(&conn, "MiXeD.INVALID").unwrap()
+        );
     }
 }
