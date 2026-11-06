@@ -45,6 +45,7 @@ mod system_update;
 mod targets;
 mod templates;
 mod test_runs;
+mod threads;
 mod tools;
 mod transcripts;
 mod usage;
@@ -314,6 +315,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(templates::routes())
         .merge(waits::routes())
         .merge(questions::routes())
+        .merge(threads::routes())
         .merge(inbox::routes())
         .merge(jobs::routes())
         .merge(config::routes())

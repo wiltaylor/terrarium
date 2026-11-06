@@ -2098,6 +2098,47 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
+    // 73: Inbox threads (TER-91, `crate::store::threads`): a conversation
+    // of the operator with one agent on one topic. `report_to` is the lead
+    // of the scope (D34), set at the open. `status` is `waiting_operator`,
+    // `waiting_agent`, or `closed`. `response` is the newest overall
+    // response of the operator (JSON `{text, by, at}`); `handoff` is set
+    // at the close (JSON). `thread_messages` holds the conversation; the
+    // questions of a thread have `questions.thread`. Self-contained: when
+    // another branch takes this number, move this entry to the end.
+    r#"
+    CREATE TABLE threads (
+        id         TEXT PRIMARY KEY,
+        topic      TEXT NOT NULL,
+        scope      TEXT NOT NULL,
+        template   TEXT,
+        opened_by  TEXT NOT NULL,
+        agent      TEXT,
+        report_to  TEXT,
+        status     TEXT NOT NULL
+            CHECK (status IN ('waiting_operator', 'waiting_agent', 'closed')),
+        response   TEXT,
+        handoff    TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        closed_at  TEXT,
+        closed_by  TEXT
+    );
+    CREATE INDEX threads_status ON threads(status, updated_at);
+    CREATE INDEX threads_agent ON threads(agent);
+    CREATE INDEX threads_report_to ON threads(report_to);
+    CREATE TABLE thread_messages (
+        id      TEXT PRIMARY KEY,
+        thread  TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        author  TEXT NOT NULL,
+        kind    TEXT NOT NULL CHECK (kind IN ('message', 'response')),
+        text    TEXT NOT NULL,
+        at      TEXT NOT NULL
+    );
+    CREATE INDEX thread_messages_thread ON thread_messages(thread, at);
+    ALTER TABLE questions ADD COLUMN thread TEXT;
+    CREATE INDEX questions_thread ON questions(thread);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

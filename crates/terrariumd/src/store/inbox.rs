@@ -31,6 +31,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
 use crate::store::mail::{self, Message};
 use crate::store::questions::{self, Priority, Question, QuestionKind, QuestionStatus};
+use crate::store::threads::{self, Thread, ThreadStatus};
 
 /// The kind of an Inbox item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -41,6 +42,8 @@ pub enum InboxKind {
     Mail,
     System,
     Watch,
+    /// An Inbox thread (TER-91).
+    Thread,
 }
 
 impl InboxKind {
@@ -51,8 +54,9 @@ impl InboxKind {
             "mail" => Ok(Self::Mail),
             "system" => Ok(Self::System),
             "watch" => Ok(Self::Watch),
+            "thread" => Ok(Self::Thread),
             other => Err(ApiError::invalid(format!(
-                "bad kind `{other}`: use question, notice, mail, system, or watch"
+                "bad kind `{other}`: use question, notice, mail, system, watch, or thread"
             ))),
         }
     }
@@ -146,7 +150,7 @@ impl Watch {
 #[derive(Debug, Clone, Serialize)]
 pub struct InboxItem {
     /// `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`,
-    /// `thread:<thread id>`, or `watch:<thread id>`.
+    /// `thread:<thread id>`, `watch:<thread id>`, or `inbox-thread:<id>`.
     pub id: String,
     pub kind: InboxKind,
     pub open: bool,
@@ -167,6 +171,9 @@ pub struct InboxItem {
     /// watch that the mail answers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watch: Option<Watch>,
+    /// A `thread` item: the thread as a list shows it (TER-91).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<Thread>,
 }
 
 /// The filters of the Inbox.
@@ -213,6 +220,7 @@ fn question_item(q: Question) -> InboxItem {
         message: None,
         system: None,
         watch: None,
+        thread: None,
     }
 }
 
@@ -229,6 +237,7 @@ fn mail_item(m: Message, open: bool) -> InboxItem {
         message: Some(m),
         system: None,
         watch: None,
+        thread: None,
     }
 }
 
@@ -280,6 +289,7 @@ fn system_item(conn: &Connection, thread: &str) -> ApiResult<InboxItem> {
             held,
         }),
         watch: None,
+        thread: None,
     })
 }
 
@@ -296,6 +306,7 @@ fn watch_item(w: Watch) -> InboxItem {
         message: None,
         system: None,
         watch: Some(w),
+        thread: None,
     }
 }
 
@@ -581,7 +592,51 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
         out.extend(take(Some(done))?);
         out.extend(take(Some(QuestionStatus::Retracted))?);
     }
-    Ok(out.into_iter().map(question_item).collect())
+    // A question of a thread shows in its thread item, not on its own.
+    Ok(out
+        .into_iter()
+        .filter(|q| q.thread.is_none())
+        .map(question_item)
+        .collect())
+}
+
+/// The item of an Inbox thread: open while it waits for the operator;
+/// urgent or critical by its open questions.
+fn thread_item(conn: &Connection, th: Thread) -> ApiResult<InboxItem> {
+    let open = th.status == ThreadStatus::WaitingOperator;
+    let (urgent, critical) = if open {
+        threads::urgency(conn, &th.id)?
+    } else {
+        (false, false)
+    };
+    Ok(InboxItem {
+        id: th.item_id(),
+        kind: InboxKind::Thread,
+        open,
+        urgent,
+        critical,
+        project: th.project().map(str::to_owned),
+        at: th.last_at.clone().unwrap_or_else(|| th.updated_at.clone()),
+        question: None,
+        message: None,
+        system: None,
+        watch: None,
+        thread: Some(th),
+    })
+}
+
+/// The thread items of the filter.
+fn thread_items(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
+    let mut out = Vec::new();
+    for th in threads::list_all(conn, f.status.done())? {
+        let item = thread_item(conn, th)?;
+        if ((item.open && f.status.open()) || (!item.open && f.status.done()))
+            && in_project(f, &item)
+        {
+            out.push(item);
+        }
+    }
+    Ok(out)
 }
 
 /// The Inbox: critical first, then urgent, then the newest first. The
@@ -641,6 +696,9 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
             }
         }
     }
+    if wants(f, InboxKind::Thread) {
+        items.extend(thread_items(conn, f)?);
+    }
     if wants(f, InboxKind::System) && f.status.open() {
         for thread in mail::guard_threads(conn)? {
             let item = system_item(conn, &thread)?;
@@ -675,14 +733,16 @@ pub struct Counts {
     /// The open watches: they wait for an agent, so `open` does not count
     /// them.
     pub watch: usize,
+    /// The Inbox threads that wait for the operator.
+    pub thread: usize,
 }
 
 /// The counts of the open items, of every project or of one.
 pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
-    let q = questions::open_total(conn, project, Some(QuestionKind::Question))?;
-    let b = questions::open_total(conn, project, Some(QuestionKind::Bundle))?;
-    let r = questions::open_total(conn, project, Some(QuestionKind::ToolRun))?;
-    let n = questions::open_total(conn, project, Some(QuestionKind::Notice))?;
+    let q = questions::inbox_open_total(conn, project, Some(QuestionKind::Question))?;
+    let b = questions::inbox_open_total(conn, project, Some(QuestionKind::Bundle))?;
+    let r = questions::inbox_open_total(conn, project, Some(QuestionKind::ToolRun))?;
+    let n = questions::inbox_open_total(conn, project, Some(QuestionKind::Notice))?;
     // A bundle counts once, as a question; so does a tool run approval.
     let (question, notice) = (q.open + b.open + r.open, n.open);
     let f = Filter {
@@ -706,15 +766,20 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
         .map(watch_item)
         .filter(|i| i.open && in_project(&f, i))
         .count();
+    let thread_rows = thread_items(conn, &f)?;
+    let thread = thread_rows.len();
+    let thread_urgent = thread_rows.iter().filter(|i| i.urgent).count();
+    let thread_critical = thread_rows.iter().filter(|i| i.critical).count();
     Ok(Counts {
-        open: question + notice + mail + system,
-        urgent: q.urgent + b.urgent + r.urgent + n.urgent,
-        critical: q.critical + b.critical + r.critical + n.critical,
+        open: question + notice + mail + system + thread,
+        urgent: q.urgent + b.urgent + r.urgent + n.urgent + thread_urgent,
+        critical: q.critical + b.critical + r.critical + n.critical + thread_critical,
         question,
         notice,
         mail,
         system,
         watch,
+        thread,
     })
 }
 

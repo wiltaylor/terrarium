@@ -252,6 +252,9 @@ pub struct Question {
     pub used_at: Option<String>,
     /// The mail thread of the question: the answer goes on it.
     pub thread_id: String,
+    /// The Inbox thread the question was asked in (TER-91), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// 1 at the ask; each update adds 1.
@@ -311,6 +314,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Question> {
         tool_run: tool_run.and_then(|v| serde_json::from_str(&v).ok()),
         used_at: r.get("used_at")?,
         thread_id: r.get("thread_id")?,
+        thread: r.get("thread")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
         revision: r.get("revision")?,
@@ -443,11 +447,31 @@ pub fn open_total(
     project: Option<&str>,
     kind: Option<QuestionKind>,
 ) -> ApiResult<OpenTotal> {
+    open_total_of(conn, project, kind, false)
+}
+
+/// [`open_total`] without the questions of Inbox threads: the Inbox counts
+/// those through their thread item (TER-91).
+pub fn inbox_open_total(
+    conn: &Connection,
+    project: Option<&str>,
+    kind: Option<QuestionKind>,
+) -> ApiResult<OpenTotal> {
+    open_total_of(conn, project, kind, true)
+}
+
+fn open_total_of(
+    conn: &Connection,
+    project: Option<&str>,
+    kind: Option<QuestionKind>,
+    no_thread: bool,
+) -> ApiResult<OpenTotal> {
     let (total, urgent, critical): (i64, i64, i64) = conn.query_row(
         "SELECT count(*), coalesce(sum(priority IN ('urgent', 'critical')), 0),
                 coalesce(sum(priority = 'critical'), 0) FROM questions
-         WHERE status = 'open' AND (?1 IS NULL OR project = ?1) AND (?2 IS NULL OR kind = ?2)",
-        params![project, kind.map(QuestionKind::as_str)],
+         WHERE status = 'open' AND (?1 IS NULL OR project = ?1) AND (?2 IS NULL OR kind = ?2)
+           AND (NOT ?3 OR thread IS NULL)",
+        params![project, kind.map(QuestionKind::as_str), no_thread],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let n = |v: i64| usize::try_from(v).unwrap_or(0);
@@ -651,6 +675,9 @@ pub struct NewQuestion {
     pub context: Option<String>,
     pub card: Option<String>,
     pub priority: Priority,
+    /// The Inbox thread to ask in (TER-91): the asking agent must be its
+    /// attached agent, and the thread open.
+    pub thread: Option<String>,
 }
 
 /// Write a new question: check the limits, refuse a copy of an open
@@ -664,6 +691,10 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     let items = check_items(n.kind, &n.items)?;
     let context = check_context(n.context.as_deref())?;
     let card = check_card(t, &project, n.card.as_deref())?;
+    let thread = match n.thread.as_deref() {
+        Some(th) => Some(crate::store::threads::check_ask(t, th, &n.agent)?.id),
+        None => None,
+    };
     let (text, options, context) = redact_fields(t, text, options, context);
     let items = redact_items(t, items);
     let open = list(
@@ -706,8 +737,9 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     let at = now();
     t.execute(
         "INSERT INTO questions (id, agent, project, text, options, context, card, priority,
-                                status, thread_id, created_at, updated_at, revision, kind, items)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9, ?10, ?10, 1, ?11, ?12)",
+                                status, thread_id, created_at, updated_at, revision, kind, items,
+                                thread)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9, ?10, ?10, 1, ?11, ?12, ?13)",
         params![
             id,
             n.agent,
@@ -720,12 +752,16 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
             thread,
             at,
             n.kind.as_str(),
-            items_json(n.kind, &items)
+            items_json(n.kind, &items),
+            thread
         ],
     )?;
     let q = get(t, &id)?;
     let mut detail = json!({"agent": q.agent, "kind": q.kind, "text": short(&q.text, 200),
                             "priority": q.priority, "options": q.options.len()});
+    if let Some(th) = &q.thread {
+        detail["thread"] = json!(th);
+    }
     if q.kind == QuestionKind::Bundle {
         detail["items"] = json!(q.items.len());
     }
@@ -1530,6 +1566,11 @@ fn emit_change(
         draft = draft.card(c.clone());
     }
     t.emit(draft)?;
+    // A question of a thread is no Inbox item of its own: its thread
+    // follows it.
+    if let Some(th) = q.thread.clone() {
+        return crate::store::threads::on_question(t, &th, q, change);
+    }
     let inbox_change = match (change, q.status) {
         ("asked", _) => "opened",
         (_, QuestionStatus::Open) | ("updated", _) => "updated",
