@@ -4540,7 +4540,11 @@ mod tests {
         // Each published key, by type and key: the file may hold it on a
         // line with a hashed host name (copied from ~/.ssh/known_hosts).
         fn key(l: &str) -> Vec<String> {
-            l.split_whitespace().skip(1).take(2).map(str::to_owned).collect()
+            l.split_whitespace()
+                .skip(1)
+                .take(2)
+                .map(str::to_owned)
+                .collect()
         }
         for k in crate::git::PUBLISHED_HOST_KEYS {
             assert!(
