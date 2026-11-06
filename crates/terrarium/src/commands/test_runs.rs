@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::print_table;
 use crate::api::{CliError, query};
 use crate::cli::TestCmd;
-use crate::commands::artifacts::base64;
+use crate::commands::artifacts::{base64, no_version_flag};
 use crate::commands::projects::project_path;
 use crate::commands::system::as_items;
 use crate::ctx::Ctx;
@@ -75,7 +75,7 @@ pub fn push_body(
     format: &str,
     name: Option<&str>,
     cards: &[String],
-    versions: &[String],
+    labels: &[String],
     commit: Option<&str>,
     branch: Option<&str>,
 ) -> anyhow::Result<Value> {
@@ -111,8 +111,8 @@ pub fn push_body(
     if !cards.is_empty() {
         b["cards"] = json!(cards);
     }
-    if !versions.is_empty() {
-        b["versions"] = json!(versions);
+    if !labels.is_empty() {
+        b["labels"] = json!(labels);
     }
     if let Some(c) = commit {
         b["commit"] = json!(c);
@@ -140,26 +140,26 @@ fn summary_line(v: &Value) -> String {
 
 fn print_links(ctx: &Ctx, v: &Value) {
     let cards = as_items(&v["cards"]);
-    let versions: Vec<String> = as_items(&v["versions"])
+    let labels: Vec<String> = as_items(&v["labels"])
         .iter()
-        .map(|x| field(x, "name"))
+        .map(|x| x.as_str().unwrap_or("-").to_owned())
         .collect();
-    if !cards.is_empty() || !versions.is_empty() {
+    if !cards.is_empty() || !labels.is_empty() {
         let cards: Vec<String> = cards
             .iter()
             .map(|c| c.as_str().unwrap_or("-").to_owned())
             .collect();
         ctx.line(format!(
-            "linked: cards {}  versions {}",
+            "linked: cards {}  labels {}",
             if cards.is_empty() {
                 "-".into()
             } else {
                 cards.join(", ")
             },
-            if versions.is_empty() {
+            if labels.is_empty() {
                 "-".into()
             } else {
-                versions.join(", ")
+                labels.join(", ")
             }
         ));
     }
@@ -221,18 +221,20 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
             format,
             name,
             cards,
+            labels,
             versions,
             commit,
             branch,
             fail_on_failures,
         } => {
+            no_version_flag(!versions.is_empty())?;
             let p = ctx.project_or(None).await?;
             let body = push_body(
                 file,
                 format,
                 name.as_deref(),
                 cards,
-                versions,
+                labels,
                 commit.as_deref(),
                 branch.as_deref(),
             )?;
@@ -257,14 +259,16 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
         }
         TestCmd::Ls {
             card,
+            label,
             version,
             name,
             failed,
         } => {
+            no_version_flag(version.is_some())?;
             let p = ctx.project_or(None).await?;
             let q = query([
                 ("card", card.clone()),
-                ("version", version.clone()),
+                ("label", label.clone()),
                 ("name", name.clone()),
                 ("status", failed.then(|| "failed".to_owned())),
             ]);
@@ -395,21 +399,24 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
         TestCmd::Link {
             id,
             cards,
+            labels,
             versions,
         }
         | TestCmd::Unlink {
             id,
             cards,
+            labels,
             versions,
         } => {
-            if cards.is_empty() && versions.is_empty() {
-                return Err(CliError::usage("give --card or --version"));
+            no_version_flag(!versions.is_empty())?;
+            if cards.is_empty() && labels.is_empty() {
+                return Err(CliError::usage("give --card or --label"));
             }
             let add = matches!(cmd, TestCmd::Link { .. });
             let body = if add {
-                json!({"add_cards": cards, "add_versions": versions})
+                json!({"add_cards": cards, "add_labels": labels})
             } else {
-                json!({"remove_cards": cards, "remove_versions": versions})
+                json!({"remove_cards": cards, "remove_labels": labels})
             };
             let v = ctx
                 .api

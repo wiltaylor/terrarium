@@ -75,10 +75,14 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Dashboard { command } => monitors::dashboard(ctx, command).await,
         Command::Pipeline { command } => pipelines::pipeline(ctx, command).await,
         Command::Calendar { command } => calendar::calendar(ctx, command).await,
-        Command::Version { command: None } => system::version(ctx).await,
-        Command::Version {
-            command: Some(command),
-        } => artifacts::version(ctx, command).await,
+        Command::Version { removed } if removed.is_empty() => system::version(ctx).await,
+        Command::Version { removed } => Err(crate::api::CliError::usage(format!(
+            "`terrarium version {}` is removed: versions are card labels \
+             (version:vnext, renamed to version:<X.Y.Z> at the cut). Use `card ls --label \
+             version:<X.Y.Z>`, `--label` on `test push` and `artifact push`, and \
+             `terrarium question ask` (through the lead) for the operator's review",
+            removed.join(" ")
+        ))),
         Command::Usage { command } => system::usage(ctx, command.as_ref()).await,
         Command::Status { command } => agents::status(ctx, command).await,
         Command::Targets {
