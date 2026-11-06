@@ -20,9 +20,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::agent_template::{self, TemplateDef};
-use terrarium_core::config::{
-    AgentDef, Policy, ProjectDef, RepoDef, SubscriptionDef, TargetDef,
-};
+use terrarium_core::config::{AgentDef, Policy, ProjectDef, RepoDef, SubscriptionDef, TargetDef};
 use terrarium_core::fleet::{self, Fleet, Issue, Kind};
 use terrarium_core::{HarnessId, Role};
 

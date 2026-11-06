@@ -768,7 +768,9 @@ async fn export_keeps_the_spawn_policy_and_rights() {
     // A file without the lead's spawn block: the plan names `policy.spawn`.
     let head = "[projects.agents.policy.spawn]\n";
     let at = content.find(head).unwrap();
-    let end = content[at..].find("\n\n").map_or(content.len(), |n| at + n + 1);
+    let end = content[at..]
+        .find("\n\n")
+        .map_or(content.len(), |n| at + n + 1);
     let dropped = format!("{}{}", &content[..at], &content[end..]);
     let plan = td.post("/api/fleet/plan", body(&dropped)).await;
     let a = entry(plan.ok(), "agent", "sp/lead");

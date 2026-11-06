@@ -1560,7 +1560,11 @@ name = "w"
         let sp = lead.spawn.as_deref().unwrap();
         assert_eq!(sp.templates, ["worker", "global:*"]);
         assert_eq!(
-            (sp.max_concurrent, sp.max_per_day, sp.max_lifetime.as_deref()),
+            (
+                sp.max_concurrent,
+                sp.max_per_day,
+                sp.max_lifetime.as_deref()
+            ),
             (3, Some(10), Some("4h"))
         );
         assert!(sp.may_spawn_children && sp.bound);
