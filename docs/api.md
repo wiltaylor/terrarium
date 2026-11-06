@@ -10085,3 +10085,76 @@ twice. At the first read of the updater history, the older runs get no
 mail. The auto-update writes the window before it asks the updater: the
 backup holds the mark, so a rollback does not start the same update again
 in the same window.
+
+## 35. The job queue
+
+Each project can have a job queue (TER-71, `crate::jobs`). A job runs the
+project's validation recipe on a clean clone, never in an agent's working
+tree. The daemon moves the card on the result, so a worker moves on to its
+next card at once.
+
+### 35.1 The config
+
+`GET /api/projects/{name}/delivery` (members) and `PUT` (a project admin
+or the operator) read and set the config. The body is a JSON object:
+
+| field          | meaning                                                         | default               |
+|----------------|-----------------------------------------------------------------|-----------------------|
+| `target`       | the target that runs the jobs                                   | none: no queue        |
+| `recipe`       | the command, run with `sh -c` in the root of the clone          | none: no queue        |
+| `slots`        | the most jobs that run at the same time                         | 2                     |
+| `next_repos`   | the repos (by name) that have a `next` branch for merge jobs    | none                  |
+| `work_dir`     | the dir on the target for the job clones                        | `/tmp/terrarium-jobs` |
+| `timeout_secs` | the most time the recipe may run                                | 3600                  |
+
+The target must be a target of the project. A global target needs a
+sysadmin or the operator. The audit row `project.delivery` keeps the old
+and the new config. With no target or no recipe, the queue is off, and a
+validate or a merge is a `409 conflict` that says how to set it.
+
+### 35.2 Jobs
+
+- `validate`: check out the card commit and run the recipe.
+- `merge`: check out `next`, merge the card branch with `--no-ff`, run the
+  recipe, and push `next` when the recipe passes. The push is not forced:
+  when `next` moved, the job fails.
+
+Jobs start first in, first out, with at most `slots` running per project.
+A merge job does not start while another merge job of the same repo runs.
+A card has at most one queued or running job.
+
+A job is three runs on the target. The prepare run (clone, checkout,
+merge) and the push run get the repo credential in their env. The recipe
+run gets no credential, because it runs the repo's code.
+
+### 35.3 Results
+
+- Pass: the labels `validation:queued` and `validation:running` go away.
+  A validate card moves to `review`, a merge card to `accepted`. The move
+  comment gives the job, the commit, the tested head, the exit code, and
+  the times.
+- Fail: the job runs once more, at the front of the queue. A merge
+  conflict is not run again and is never resolved. After the second
+  failure, a block `Validation failed: ...` with the output tail goes to
+  the top of the card body. The card moves to the top of `ready` with no
+  assignee, and the worker of its `by:<agent>` label gets a mail from
+  `system`.
+- A daemon restart loses the running jobs: they fail (`error`) and follow
+  the same rule.
+
+The card writes of the queue are made as the operator. Their comments
+start with `Job queue:`.
+
+### 35.4 Endpoints
+
+| method and path                    | who                                   | what |
+|------------------------------------|---------------------------------------|------|
+| `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` on the target. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, no assignee, and the job. `201` `{job, queue: {position, running, slots, note}}` |
+| `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
+| `GET /api/jobs/{id}`               | members                               | one job with its output tail |
+| `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels |
+
+The repo defaults to the card's repo, then to the project's only repo. The
+branch defaults to the card's branch, then to the card ID in lower case.
+Events `job` {change, project, id, card, kind, state, attempt, outcome}.
