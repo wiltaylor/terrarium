@@ -1690,8 +1690,8 @@ terrarium thread show <id>
 - `close` closes the thread with a handoff summary and links (`card`,
   `mail`, `wiki`, `memory`, `url`, `other`). For an agent the close is a
   proposal that the operator confirms (TER-95); until then it closes.
-- `ls` lists the threads (an agent: the ones it is attached to, reports
-  from, or opened): `ID`, `STATUS`, `SCOPE`, `AGENT`, `MSGS`, `OPEN_Q`,
+- `ls` lists the threads (an agent: the ones it opened, is attached to,
+  or reports from; a sysadmin or an architect: all): `ID`, `STATUS`, `SCOPE`, `AGENT`, `MSGS`, `OPEN_Q`,
   `LAST`, `TOPIC`. `show` prints the fields, then each message, the
   response, and the handoff between data markers, and one line for each
   question.

@@ -3247,7 +3247,7 @@ kinds:
 | `mail` | A message to `operator` (§7). | Its `state` is `queued` or `delivered`: not acknowledged. | `POST /api/inbox/mail/{id}/ack` |
 | `system` | A thread of the loop guard (§7.4): it is paused now, or it has a held message that is not released. | The thread is paused, or a held message is not released. | `POST /api/mail/{id}/release`, `POST /api/mail/threads/{thread}/resume` |
 | `watch` | A question that the operator asked an agent, or a question of the Inbox that the operator forwarded to one (below, "Ask and forward"). It waits for the agent, not for the operator. | The newest message of its thread is the operator's, and it is not cancelled. | `DELETE /api/inbox/watches/{thread}` |
-| `thread` | An Inbox thread (§6.13), with its questions inside. A question asked in a thread is not an item of its own. | The thread is `waiting_operator`. | `POST /api/threads/{id}/messages`, `.../respond`, `.../close`, and the question verbs |
+| `thread` | An Inbox thread (§6.13), with its questions inside. A question asked in a thread is not an item of its own. | The thread is `waiting_operator`, or it is not closed and has an open question. | `POST /api/threads/{id}/messages`, `.../respond`, `.../close`, and the question verbs |
 
 The notice of a pause (`Thread T needs a human`, from `system`) is not a
 `mail` item: the `system` item of the thread shows it.
@@ -3615,7 +3615,7 @@ There is no register of threads and no conflict check between threads
 | `agent`, `agent_name` | The attached agent: one per thread, or `null` while it has none. Until TER-92 spawns it from the template, the opener names an existing agent: of the scope project, or any agent for `global`. |
 | `report_to`, `report_to_name` | The lead that the thread reports to (D34): for `global`, the lead of project `meta`; else the lead of the scope project. The lead of a project is its project_admin agent named `lead`, else its first project_admin by name. Set at the open; it does not change. A scope without a lead is `409 conflict` at the open. |
 | `status` | `waiting_operator`, `waiting_agent`, or `closed` (below). |
-| `messages` | The conversation, the oldest first: `{id, author, author_name, kind, text, at}`. `author` is `operator` or an agent ULID. `kind` is `message`, or `response` for the operator's overall response. `text` is Markdown, at most 32 KiB: untrusted data for every reader. |
+| `messages` | The conversation, in the order of the writes (two writes in the same millisecond keep their order): `{id, author, author_name, kind, text, at}`. `author` is `operator` or an agent ULID. `kind` is `message`, or `response` for the operator's overall response. `text` is Markdown, at most 32 KiB: untrusted data for every reader. |
 | `questions` | The questions, notices, and bundles of the thread (§6.8), the oldest first. |
 | `response` | The newest overall response of the operator, `{text, by, at}`, or `null`. It is the approval record: the agent quotes it word for word in each card or mail it hands off (D34). Each response is also a message of kind `response`. |
 | `handoff` | Set at the close: `{summary, links, by, at}`. `links` are at most 50 `{kind, ref}`, with `kind` one of `card`, `mail`, `wiki`, `memory`, `url`, `other`, and `ref` at most 500 characters. |
@@ -3630,15 +3630,28 @@ retract of one of its questions makes it `waiting_agent` when no question
 of the thread is open any more. A closed thread does not change, and each
 write to it is `409 conflict`.
 
+**Close.** A close retracts the open questions of the thread first
+(`retract_reason` `thread <id> was closed`), so that no question stays open
+in a closed thread, and the waits on them end (§6.7). A close by the
+operator mails the agent about each retract, as `.../retract` does (§6.8).
+
 **Rights.**
 
 | Action | Who |
 |---|---|
 | Open | The operator, with any scope and template. An agent with the right `thread:open` (below), in its own project or `global` (another project needs sysadmin, as each write does), with a template within its rights (A1, below). Another agent gets `403`. |
-| Read, list | The operator; the attached agent, the report-to lead, and the agent that opened it, for their threads. Another agent gets `404` for one thread; a list shows it only its own threads. A sysadmin or an architect has no more here. |
+| Read, list | The operator, and an agent that reads all (sysadmin, architect): every thread. Another agent: the threads that it opened (`opened_by`), is attached to, or is the report-to lead of. It gets `404` for any other thread, and a list shows it only those threads. |
 | Post a message | The operator and the attached agent. |
 | Respond | The operator. |
 | Close | The operator, and the attached agent. (TER-95 makes the agent's close a proposal that the operator confirms.) |
+
+The errors of the verbs on one thread, in this order: an unknown thread,
+or one that the caller may not read, is `404 not_found`. A reader that may
+not do the verb is `403 forbidden` (for example the report-to lead on
+`messages` or `close`, or an agent on `respond`). A write to a closed thread
+is `409 conflict`. A bad body is `422 invalid`. `POST /api/threads` by an
+agent is `403 forbidden`; a scope without a lead is `409 conflict`; an
+unknown scope or agent is `404 not_found`.
 | Ask a question in a thread | The attached agent, also when it is not a leader: `POST /api/agents/{id}/questions` with `"thread"`. |
 
 | Endpoint | Body or query | Answer |
@@ -3648,7 +3661,7 @@ write to it is `409 conflict`.
 | `GET /api/threads/{id}` | | `200` the thread |
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
-| `POST /api/threads/{id}/close` | `{"summary"?, "links"?}`; `summary` at most 8 KiB | `200` the thread, `closed`, with `handoff` |
+| `POST /api/threads/{id}/close` | `{"summary"?, "links"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | `200` the thread, `closed`, with `handoff`; its open questions are `retracted` |
 
 **The right `thread:open`** (TER-93). The policy field `thread_open`
 (§6.1, `policy`) lets an agent open threads (`terrarium thread new`). It
@@ -3691,10 +3704,20 @@ it with the verbs of §6.8. A `thread` of another agent, or of a closed
 thread, is `409 conflict`; an unknown thread is `404 not_found`. A question
 of a thread is not an Inbox item of its own: the `thread` item shows it.
 
+A question keeps the project of the agent that asks it, also in a `global`
+thread. So `GET /api/questions` (§6.8) shows a question of a global thread
+to the project_admin of the asking agent's project, as it does for the
+agent's other questions. The Inbox shows it only inside the thread item,
+which has the thread's project (`null` for `global`), so the Inbox
+`?project=` filter follows the thread, not the question.
+
 **The Inbox.** A thread is an Inbox item of kind `thread` with the ID
 `inbox-thread:<id>` (`thread:<id>` stays the ID of a `system` item, a mail
 thread of the loop guard). It is open while the thread is
-`waiting_operator`. The item has `thread`: the thread as
+`waiting_operator`, or while it is not closed and has an open question (a
+message or a response of the operator makes the thread `waiting_agent`, but
+its open questions still wait for the operator). The Inbox shows every
+thread, without the limit of 200 of the list. The item has `thread`: the thread as
 `GET /api/threads` lists it. `GET /api/inbox?kind=thread` filters them, and
 `/api/inbox/counts` has `thread`. An item is urgent when one of its open
 questions is urgent or critical.

@@ -3,8 +3,9 @@
 //! - `POST /api/threads`: open a thread. The operator, or an agent with
 //!   the right `thread:open` (TER-93) with a template that does not exceed
 //!   its own rights (A1).
-//! - `GET /api/threads[?status=&scope=]`: the operator sees all; an agent
-//!   sees the threads it is attached to or reports from.
+//! - `GET /api/threads[?status=&scope=]`: the operator and an agent that
+//!   reads all (sysadmin, architect) see all; another agent sees the
+//!   threads it opened, is attached to, or is the report-to lead of.
 //! - `GET /api/threads/{id}`: the thread with its messages and questions.
 //! - `POST /api/threads/{id}/messages` (the operator, the attached agent).
 //! - `POST /api/threads/{id}/respond` (the operator): the overall response.
@@ -36,11 +37,13 @@ pub fn routes() -> Router<Shared> {
         .route("/threads/{id}/close", post(close))
 }
 
-/// A thread that the caller may read; else `404`.
+/// A thread that the caller may read; else `404`: the operator, an agent
+/// that reads all (sysadmin, architect), and the opener, the attached agent
+/// and the report-to lead.
 fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
     match actor {
         Actor::Operator => Ok(th),
-        Actor::Agent(a) if th.involves(&a.id) => Ok(th),
+        Actor::Agent(a) if a.reads_all() || th.involves(&a.id) => Ok(th),
         Actor::Agent(_) => Err(ApiError::not_found(format!("no thread `{}`", th.id))),
     }
 }
@@ -199,7 +202,10 @@ async fn list(
         status,
         all,
         scope: q.scope.filter(|s| !s.trim().is_empty()),
-        involving: actor.agent().map(|a| a.id.clone()),
+        involving: actor
+            .agent()
+            .filter(|a| !a.reads_all())
+            .map(|a| a.id.clone()),
     };
     Ok(Json(state.db.read(move |c| threads::list(c, &f)).await?))
 }

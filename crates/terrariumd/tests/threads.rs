@@ -428,6 +428,153 @@ async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
         .err(409, "conflict");
 }
 
+#[tokio::test]
+async fn an_open_question_keeps_the_item_open_and_a_close_retracts_it() {
+    let lab = lab().await;
+    let t = lab
+        .open(json!({"topic": "Retention", "scope": "p", "agent": "p/arch"}))
+        .await;
+    let tid = t["id"].as_str().unwrap().to_owned();
+    let asks = format!("/api/agents/{}/questions", lab.arch);
+    let r = lab
+        .td
+        .post_as(
+            &lab.arch,
+            &asks,
+            json!({"text": "Keep 30 days?", "options": ["yes", "no"],
+                   "priority": "urgent", "thread": tid}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let qid = r.body["id"].as_str().unwrap().to_owned();
+    let item = |items: &Value| {
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == format!("inbox-thread:{tid}"))
+            .cloned()
+    };
+
+    // A message and a response of the operator make the thread wait for
+    // the agent, but the open question keeps the item open, urgent and
+    // counted.
+    lab.td
+        .post(
+            &format!("/api/threads/{tid}/messages"),
+            json!({"text": "Think about legal holds first."}),
+        )
+        .await
+        .ok();
+    lab.td
+        .post(
+            &format!("/api/threads/{tid}/respond"),
+            json!({"text": "Go ahead with the plan."}),
+        )
+        .await
+        .ok();
+    assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
+    let items = lab.td.get("/api/inbox?kind=thread").await.ok().clone();
+    let it = item(&items).expect("the item with an open question is open");
+    assert_eq!(it["open"], true);
+    assert_eq!(it["urgent"], true);
+    let counts = lab.td.get("/api/inbox/counts").await.ok().clone();
+    assert_eq!(counts["thread"], 1, "{counts}");
+    assert_eq!(counts["urgent"], 1, "{counts}");
+
+    // The operator's close retracts the open question: nothing stays open
+    // and hidden in a closed thread.
+    let th = lab
+        .td
+        .post_empty(&format!("/api/threads/{tid}/close"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(th["status"], "closed");
+    assert_eq!(th["questions"][0]["status"], "retracted");
+    assert_eq!(th["questions"][0]["retracted_by"], "operator");
+    assert_eq!(
+        th["questions"][0]["retract_reason"],
+        format!("thread {tid} was closed")
+    );
+    let q = lab
+        .td
+        .get(&format!("/api/questions/{qid}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(q["status"], "retracted");
+    let items = lab.td.get("/api/inbox?kind=thread").await.ok().clone();
+    assert!(item(&items).is_none(), "{items}");
+    let counts = lab.td.get("/api/inbox/counts").await.ok().clone();
+    assert_eq!(counts["thread"], 0, "{counts}");
+    assert_eq!(counts["question"], 0, "{counts}");
+
+    // The agent's close retracts its own open questions too.
+    let t2 = lab
+        .open(json!({"topic": "Backups", "scope": "p", "agent": "p/arch"}))
+        .await;
+    let t2 = t2["id"].as_str().unwrap().to_owned();
+    lab.td
+        .post_as(
+            &lab.arch,
+            &asks,
+            json!({"text": "Daily?", "options": ["yes", "no"], "thread": t2}),
+        )
+        .await
+        .ok();
+    let th = lab
+        .td
+        .post_as(&lab.arch, &format!("/api/threads/{t2}/close"), json!({}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(th["questions"][0]["status"], "retracted");
+    assert_eq!(
+        th["questions"][0]["retracted_by"],
+        format!("agent:{}", lab.arch)
+    );
+}
+
+#[tokio::test]
+async fn an_agent_that_reads_all_reads_and_lists_every_thread() {
+    let lab = lab().await;
+    let archi = lab
+        .td
+        .agent("q", "archi", json!({"roles": ["architect"]}))
+        .await;
+    let archi = archi["id"].as_str().unwrap().to_owned();
+    let t = lab
+        .open(json!({"topic": "Board columns", "scope": "p", "agent": "p/arch"}))
+        .await;
+    let tid = t["id"].as_str().unwrap().to_owned();
+    lab.open(json!({"topic": "Global one", "agent": "p/w"}))
+        .await;
+    // An architect of another project lists and reads all threads ...
+    let all = lab.td.get_as(&archi, "/api/threads").await.ok().clone();
+    assert_eq!(all.as_array().unwrap().len(), 2, "{all}");
+    let th = lab
+        .td
+        .get_as(&archi, &format!("/api/threads/{tid}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(th["id"], tid.as_str());
+    // ... but does not post or close.
+    lab.td
+        .post_as(
+            &archi,
+            &format!("/api/threads/{tid}/messages"),
+            json!({"text": "hi"}),
+        )
+        .await
+        .err(403, "forbidden");
+    lab.td
+        .post_as(&archi, &format!("/api/threads/{tid}/close"), json!({}))
+        .await
+        .err(403, "forbidden");
+}
+
 /// The templates of the rights tests: `consult` (project `p`, a member),
 /// `p-admin` (project `p`, project_admin), and the global `helper` (a
 /// member), `admin` (project_admin), and `architect` (architect).
@@ -639,7 +786,8 @@ async fn an_architect_posts_in_its_thread_and_writes_nowhere_else() {
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["thread"], gid.as_str());
 
-    // It reads every project, but a thread of `p` is not its own: no post.
+    // It reads every thread (reads_all), but a thread of `p` is not its
+    // own: it reads it and does not post to it.
     let t = lab
         .open(json!({"topic": "Columns", "scope": "p", "agent": "p/arch"}))
         .await;
@@ -651,7 +799,11 @@ async fn an_architect_posts_in_its_thread_and_writes_nowhere_else() {
             json!({"text": "Mine now."}),
         )
         .await
-        .err(404, "not_found");
+        .err(403, "forbidden");
+    lab.td
+        .get_as(&arch, &format!("/api/threads/{tid}"))
+        .await
+        .ok();
     // It still writes nothing in another project: no card in `p`.
     lab.td
         .post_as(
