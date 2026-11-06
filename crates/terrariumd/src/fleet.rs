@@ -20,7 +20,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::agent_template::{self, TemplateDef};
-use terrarium_core::config::{AgentDef, ProjectDef, RepoDef, SubscriptionDef, TargetDef};
+use terrarium_core::config::{AgentDef, Policy, ProjectDef, RepoDef, SubscriptionDef, TargetDef};
 use terrarium_core::fleet::{self, Fleet, Issue, Kind};
 use terrarium_core::{HarnessId, Role};
 
@@ -101,6 +101,19 @@ pub struct Entry {
     /// (`policy::policy_grants`).
     #[serde(skip)]
     pub policy_grants: Vec<String>,
+    /// An agent: its policy now (`None`: a new agent), the policy of the
+    /// file, and its roles after the apply, for the checks of the spawn
+    /// rights and `thread_open` (TER-86).
+    #[serde(skip)]
+    pub policy_change: Option<Box<PolicyChange>>,
+}
+
+/// The policy that an apply writes on one agent (TER-86).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolicyChange {
+    pub old: Option<Policy>,
+    pub new: Policy,
+    pub roles: Vec<Role>,
 }
 
 /// The counts of a plan.
@@ -550,13 +563,28 @@ fn diff(to: &Value, from: &Value) -> Vec<Change> {
         .flat_map(|o| o.keys())
         .collect();
     keys.into_iter()
-        .filter_map(|k| {
+        .flat_map(|k| {
             let (a, b) = (&from[k.as_str()], &to[k.as_str()]);
-            (a != b).then(|| Change {
+            if a == b {
+                return Vec::new();
+            }
+            // A policy on both sides: one change per policy key
+            // (`policy.spawn`), so the plan names what an update changes
+            // (TER-86).
+            if k == "policy" && a.is_object() && b.is_object() {
+                return diff(b, a)
+                    .into_iter()
+                    .map(|c| Change {
+                        field: format!("policy.{}", c.field),
+                        ..c
+                    })
+                    .collect();
+            }
+            vec![Change {
                 field: k.clone(),
                 from: a.clone(),
                 to: b.clone(),
-            })
+            }]
         })
         .collect()
 }
@@ -607,6 +635,7 @@ fn classify(
         id: None,
         roles_touched: Vec::new(),
         policy_grants: Vec::new(),
+        policy_change: None,
     };
     if let Some(o) = owner.filter(|o| o.fleet != fleet) {
         e.action = Action::Conflict;
@@ -779,6 +808,11 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
             &a.def.policy,
             &project_target,
         );
+        e.policy_change = Some(Box::new(PolicyChange {
+            old: view.as_ref().map(|v| v.agent.policy.clone()),
+            new: a.def.policy.clone(),
+            roles: a.def.roles.clone(),
+        }));
         if let Some(v) = &view {
             e.id = Some(v.agent.id.to_string());
             e.live = v.agent.status.is_live();
@@ -1217,6 +1251,14 @@ pub fn authorize(actor: &Actor, plan: &Plan, prune: bool) -> ApiResult<()> {
                             )?;
                         }
                         policy::grant_policy(actor, &e.policy_grants)?;
+                        // The rules of `PATCH /api/agents/{id}` for the
+                        // spawn rights and `thread_open` (TER-86).
+                        if let Some(pc) = &e.policy_change {
+                            let target = e.id.as_deref();
+                            let old = pc.old.as_ref();
+                            policy::set_spawn_policy(actor, target, &pc.roles, old, &pc.new)?;
+                            policy::set_thread_open(actor, target, &pc.roles, old, &pc.new)?;
+                        }
                     }
                     Ok(())
                 }

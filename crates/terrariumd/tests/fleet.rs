@@ -709,6 +709,97 @@ async fn export_captures_a_hand_built_project() {
         .err(422, "invalid");
 }
 
+/// TER-86: an export carries the spawn policy (with the bound fields of
+/// TER-74), `thread_open` (TER-93), and `calendar_write`, so export then
+/// plan shows no change. A plan names the policy key that an update
+/// changes, and a fleet keeps the rules of the spawn rights.
+#[tokio::test]
+async fn export_keeps_the_spawn_policy_and_rights() {
+    let td = TestDaemon::start().await;
+    td.project("sp").await;
+    let spawn = json!({
+        "templates": ["worker", "global:*"],
+        "max_concurrent": 3,
+        "max_per_day": 10,
+        "max_lifetime": "4h",
+        "may_spawn_children": true,
+        "bound": true,
+        "max_bound_lifetime": "3d",
+    });
+    let lead = td
+        .agent(
+            "sp",
+            "lead",
+            json!({"roles": ["project_admin"], "policy": {
+                "spawn": spawn, "thread_open": true, "calendar_write": true}}),
+        )
+        .await;
+    let lead = lead["id"].as_str().unwrap().to_owned();
+    td.agent(
+        "sp",
+        "worker",
+        json!({"policy": {"spawn": {"templates": ["worker"]}}}),
+    )
+    .await;
+
+    let e = td.get("/api/fleet/export?project=sp").await;
+    let content = e.ok()["content"].as_str().unwrap().to_owned();
+    assert!(
+        content.contains("[projects.agents.policy.spawn]"),
+        "{content}"
+    );
+    let plan = td.post("/api/fleet/plan", body(&content)).await;
+    let s = &plan.ok()["summary"];
+    assert_eq!(s["unchanged"], 3, "{}", plan.body);
+    assert_eq!(s["update"], 0, "{}", plan.body);
+    for key in ["sp/lead", "sp/worker"] {
+        let a = entry(&plan.body, "agent", key);
+        assert_eq!(a["action"], "unchanged", "{a}");
+        assert!(a.get("changes").is_none(), "{a}");
+    }
+    td.post("/api/fleet/apply", body(&content)).await.ok();
+    let l = agent_by_key(&td, "sp/lead").await;
+    assert_eq!(l["policy"]["spawn"], spawn, "{l}");
+    assert_eq!(l["policy"]["thread_open"], true);
+    assert_eq!(l["policy"]["calendar_write"], true);
+    let plan = td.post("/api/fleet/plan", body(&content)).await;
+    assert_eq!(plan.ok()["summary"]["update"], 0, "{}", plan.body);
+
+    // A file without the lead's spawn block: the plan names `policy.spawn`.
+    let head = "[projects.agents.policy.spawn]\n";
+    let at = content.find(head).unwrap();
+    let end = content[at..]
+        .find("\n\n")
+        .map_or(content.len(), |n| at + n + 1);
+    let dropped = format!("{}{}", &content[..at], &content[end..]);
+    let plan = td.post("/api/fleet/plan", body(&dropped)).await;
+    let a = entry(plan.ok(), "agent", "sp/lead");
+    assert_eq!(a["action"], "update", "{a}");
+    assert_eq!(a["changes"][0]["field"], "policy.spawn", "{a}");
+    assert_eq!(a["changes"][0]["to"], Value::Null);
+
+    // The lead may not set `spawn.bound` on a member through a fleet.
+    let bound = content.replace(
+        "[projects.agents.policy.spawn]\ntemplates = [\"worker\"]",
+        "[projects.agents.policy.spawn]\ntemplates = [\"worker\"]\nbound = true",
+    );
+    assert_ne!(bound, content);
+    let r = td.post_as(&lead, "/api/fleet/apply", body(&bound)).await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("spawn.bound"),
+        "{}",
+        r.body
+    );
+    // Nor drop its own spawn rights.
+    td.post_as(&lead, "/api/fleet/apply", body(&dropped))
+        .await
+        .err(403, "forbidden");
+}
+
 #[tokio::test]
 async fn the_lists_show_the_fleet_source_and_a_file_object_stays_file() {
     let mut td = TestDaemon::with_config(|c| {
