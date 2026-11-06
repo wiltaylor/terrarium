@@ -35,6 +35,20 @@ fn soon(ms: i64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// A settle time that no test run reaches. An `agent` wait whose agent is
+/// done at the create resolves as `done` by the timer after the settle
+/// time (300 ms in `fast`). A test whose next step must find such a wait
+/// still open, and that does not test the settle time, uses this: on a
+/// loaded machine the next step can come later than 300 ms (TER-60).
+fn no_settle(td: &TestDaemon) {
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let t = state.waits.tuning();
+    state.waits.set_tuning(Tuning {
+        settle: Duration::from_secs(3600),
+        ..t
+    });
+}
+
 async fn setup() -> (TestDaemon, String, String) {
     let td = TestDaemon::start().await;
     fast(&td);
@@ -188,18 +202,38 @@ async fn three_waits_that_end_apart_send_three_mails() {
         ids.push(w["id"].as_str().unwrap().to_owned());
     }
     assert_eq!(status(&td, &lead).await, "waiting");
-    let mut seen = Vec::new();
+    let mut ends = Vec::new();
     for (i, wid) in ids.iter().enumerate() {
-        wait_state(&td, wid, "resolved").await;
+        let w = wait_state(&td, wid, "resolved").await;
+        ends.push(w["resolved_at"].as_str().unwrap().to_owned());
         until("the next wake mail", || async {
             system_mail(&td, &lead).await.len() == i + 1
         })
         .await;
-        seen.push(status(&td, &lead).await);
         let m = system_mail(&td, &lead).await[i].clone();
         assert!(m["body"].as_str().unwrap().contains(wid.as_str()), "{m}");
     }
-    assert_eq!(seen, ["waiting", "waiting", "idle"]);
+    td.wait_status(&lead, "idle").await;
+    // The status stays `waiting` until the last wait ends. Read from the
+    // status events, not from a GET after each mail: on a loaded machine
+    // that GET can come after the next wait has ended (TER-60).
+    let ev = td
+        .get(&format!("/api/agents/{lead}/events?kind=status"))
+        .await;
+    let ev = ev.ok().as_array().unwrap().clone();
+    let from = ev
+        .iter()
+        .position(|e| e["data"]["status"] == "waiting")
+        .expect("a waiting status event");
+    let idle = from
+        + ev[from..]
+            .iter()
+            .position(|e| e["data"]["status"] != "waiting")
+            .expect("a status event after waiting");
+    assert_eq!(ev[idle]["data"]["status"], "idle", "{ev:#?}");
+    let idle_at = ev[idle]["at"].as_str().unwrap();
+    assert!(idle_at >= ends[2].as_str(), "idle at {idle_at}, last end {}", ends[2]);
+    assert!(idle_at >= ends[1].as_str());
     let bodies: Vec<String> = system_mail(&td, &lead)
         .await
         .iter()
@@ -293,6 +327,9 @@ async fn a_wait_on_a_done_agent_resolves_after_the_settle_time() {
 #[tokio::test]
 async fn until_options_and_terminal_outcomes() {
     let (td, lead, w1) = setup().await;
+    // w1 is done at each create: the waits must stay open until the step
+    // that ends them, not end as `done` by the settle time.
+    no_settle(&td);
     let blocked = new_wait(
         &td,
         &lead,
@@ -347,6 +384,7 @@ async fn until_options_and_terminal_outcomes() {
 #[tokio::test]
 async fn a_delete_ends_waits_as_deleted_when_the_stop_lands_first() {
     let (td, lead, w1) = setup().await;
+    no_settle(&td);
     let done = new_wait(&td, &lead, json!({"kind": "agent", "agent": "w1"})).await;
     let blocked = new_wait(
         &td,
@@ -373,6 +411,8 @@ async fn a_delete_ends_waits_as_deleted_when_the_stop_lands_first() {
 #[tokio::test]
 async fn a_cycle_is_refused_with_its_path() {
     let (td, lead, w1) = setup().await;
+    // The chain must stay open until the third wait closes the cycle.
+    no_settle(&td);
     let w2 = id(&td.agent("p", "w2", json!({})).await);
     new_wait(&td, &lead, json!({"kind": "agent", "agent": "w1"})).await;
     new_wait(&td, &w1, json!({"kind": "agent", "agent": "w2"})).await;
