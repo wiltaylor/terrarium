@@ -2993,7 +2993,7 @@ sessions of the agent.
 | `POST /api/agents/{id}/waits` | below | `201` the wait | the agent itself, the operator |
 | `POST /api/agents/{id}/run` | `{"target", "cmd": [..], "name"?, "cwd"?, "env"?, "timeout"?, "reason"?, "agent"?}` | `201 {"wait", "session_id", "target"}` | the agent itself, the operator; the run uses the agent's rights |
 | `GET /api/waits/{id}` | | `200` the wait | as for the list; else `404` |
-| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait | `200` the cancelled wait; a wait that is not open is `409 conflict` | as for the list |
+| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait: on a `host`, `docker`, or `ssh` target each process of the process group and session of the run gets `TERM`, then `KILL` after 5 s | `200` the cancelled wait; with a kill on such a target also `kill`: `{pid, term, kill, left}` (the PIDs on the target that got `TERM`, needed `KILL`, and still run) or `{error}`; a wait that is not open is `409 conflict` | as for the list |
 | `GET /api/waits/{id}/log` | `?max=` bytes (at most 65536) | `200 {"wait_id", "session_id", "target", "running", "output", "end"?}` | as for the list; a wait that is not `process` is `422` |
 
 The create body:
