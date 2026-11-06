@@ -261,7 +261,7 @@ pub fn turn_facts(conn: &Connection, id: &str, end_seq: i64) -> ApiResult<TurnFa
 
 /// The leads of `project` (agents with `project_admin`), other than
 /// `except`, by name.
-fn leads(conn: &Connection, project: &str, except: &str) -> ApiResult<Vec<Address>> {
+pub(crate) fn leads(conn: &Connection, project: &str, except: &str) -> ApiResult<Vec<Address>> {
     let mut stmt = conn.prepare(
         "SELECT a.id, a.name FROM agents a JOIN roles r ON r.agent_id = a.id
          WHERE a.project = ?1 AND r.role = 'project_admin' AND a.id <> ?2
@@ -372,7 +372,7 @@ pub async fn check_text(state: &Shared, id: &str, end_seq: i64, text: &str) -> A
 
 /// The last assistant text of the current session of agent `id`, from its
 /// transcript. `None` when there is no session file, or no text.
-async fn read_last_text(state: &Shared, id: &str) -> Option<String> {
+pub(crate) async fn read_last_text(state: &Shared, id: &str) -> Option<String> {
     let key = id.to_owned();
     let (view, row) = state
         .db

@@ -162,6 +162,11 @@ pub struct Card {
     /// The latest test run linked to the card (PLAN §15.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tests: Option<crate::store::test_runs::CardTests>,
+    /// The idle mark (TER-67, `crate::idle_alert`): the assignee rests with
+    /// no wait since this time, past the project's idle alert, and the
+    /// leads were told. It clears when the assignee works again or waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -211,6 +216,7 @@ struct CardRow {
     eta_set_at: Option<String>,
     eta_set_by: Option<String>,
     done_at: Option<String>,
+    idle_since: Option<String>,
 }
 
 fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
@@ -235,6 +241,7 @@ fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
         eta_set_at: r.get("eta_set_at")?,
         eta_set_by: r.get("eta_set_by")?,
         done_at: r.get("done_at")?,
+        idle_since: r.get("idle_since")?,
     })
 }
 
@@ -523,6 +530,7 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         eta_set_by: row.eta_set_by,
         eta_set_by_name,
         done_at: row.done_at,
+        idle_since: row.idle_since,
     })
 }
 
@@ -1164,9 +1172,11 @@ fn apply_move(
         params![to.id, at, card.id],
     )?;
     // `done_at` is when the card moved to `done`; another column clears it.
+    // A move to another column ends the idle mark (TER-67).
     t.execute(
         "UPDATE cards SET column_id = ?2, position = ?3, updated_at = ?4,
-            done_at = CASE WHEN ?5 THEN done_at WHEN ?6 THEN ?4 ELSE NULL END
+            done_at = CASE WHEN ?5 THEN done_at WHEN ?6 THEN ?4 ELSE NULL END,
+            idle_since = CASE WHEN ?5 THEN idle_since ELSE NULL END
          WHERE id = ?1",
         params![card.id, to.id, at, now(), same, to.name == DONE],
     )?;
@@ -1288,7 +1298,7 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
         return get_card(t, &card.id);
     }
     t.execute(
-        "UPDATE cards SET assignee = ?2, updated_at = ?3 WHERE id = ?1",
+        "UPDATE cards SET assignee = ?2, idle_since = NULL, updated_at = ?3 WHERE id = ?1",
         params![card.id, new, now()],
     )?;
     if let Some(prev) = card.assignee.as_ref().filter(|a| **a != me) {
@@ -1327,7 +1337,7 @@ pub fn claim_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<Card> {
     }
     if card.assignee.is_none() {
         t.execute(
-            "UPDATE cards SET assignee = ?2, updated_at = ?3 WHERE id = ?1",
+            "UPDATE cards SET assignee = ?2, idle_since = NULL, updated_at = ?3 WHERE id = ?1",
             params![card.id, me, now()],
         )?;
         let row = find_row(t, &card.id)?;
@@ -1529,7 +1539,9 @@ pub fn create_card(
     get_card(t, &id)
 }
 
-fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+/// A field that tells `null` from absent: absent is `None`, `null` is
+/// `Some(None)`.
+pub(crate) fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
