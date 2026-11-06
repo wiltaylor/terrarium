@@ -216,7 +216,7 @@ async fn round_trip(harness: &str) {
         first.contains("You are the agent of Inbox thread"),
         "{first}"
     );
-    assert!(first.contains("Topic: Cache layer."), "{first}");
+    assert!(first.contains("The operator's topic: Cache layer"), "{first}");
     assert!(first.contains("Should we cache the board?"), "{first}");
     lab.td.wait_status(&eph, "idle").await;
     let before = lab.sessions(&eph).await;
@@ -393,9 +393,37 @@ async fn the_agent_lives_as_long_as_its_thread() {
     lab.post_as(&eph, &tid, "What should the layout solve?")
         .await;
     lab.parked(&eph).await;
+    // More than 24 hours of waiting (review round 1, finding 4): the spawn
+    // and the park move back 25 hours, and a timer pass leaves it alone.
+    let back = (chrono::Utc::now() - chrono::Duration::hours(25))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let key = eph.clone();
+    s.db.write("system", move |t| {
+        t.execute(
+            "UPDATE spawns SET spawned_at = ?2, parked_at = ?2 WHERE id = ?1",
+            [&key, &back],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     terrariumd::spawn::pass(&s).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(lab.spawn_row(&eph).await["finished_at"].is_null());
+    let sp = lab.spawn_row(&eph).await;
+    assert!(sp["finished_at"].is_null(), "{sp}");
+    assert!(sp["parked_at"].is_string(), "{sp}");
+    assert_eq!(lab.agent(&eph).await["status"], "stopped");
+    // It still restarts in its session on the next operator message.
+    lab.td
+        .post(
+            &format!("/api/threads/{tid}/messages"),
+            json!({"text": "Two regions."}),
+        )
+        .await
+        .ok();
+    lab.prompt(&eph, &format!("[Thread:{tid}] Two regions.")).await;
+    lab.td.wait_status(&eph, "idle").await;
+    assert_eq!(lab.sessions(&eph).await[0]["resumes"], 1);
     // The agent proposes the close itself: it ends.
     let r = lab
         .td
@@ -499,9 +527,9 @@ async fn a1_is_checked_again_at_the_spawn() {
         async move {
             s.db.read(move |c| {
                 let tp = terrariumd::store::templates::resolve(c, "p", "consult")?;
-                let def = terrarium_core::agent_template::to_def(&tp.spec, "x", "p")
+                let mut def = terrarium_core::agent_template::to_def(&tp.spec, "x", "p")
                     .map_err(|e| terrariumd::error::ApiError::invalid(e.to_string()))?;
-                terrariumd::thread_agent::check_a1(c, &w, &def)
+                terrariumd::thread_agent::check_a1(c, &w, &mut def)
             })
             .await
         }
@@ -524,6 +552,143 @@ async fn a1_is_checked_again_at_the_spawn() {
     // A gone opener cannot be checked: refused.
     let e = check("01NOAGENT".into()).await.unwrap_err();
     assert_eq!(e.code.status().as_u16(), 403, "{}", e.message);
+}
+
+/// Open a thread in the store only, as if the daemon stopped between the
+/// open and the spawn: no agent, opened 2 minutes ago.
+async fn unstarted(lab: &Lab, opener: &str, template: &str) -> String {
+    let s = state(&lab.td);
+    let opener = opener.to_owned();
+    let template = template.to_owned();
+    s.db.write("system", move |t| {
+        let th = terrariumd::store::threads::open(
+            t,
+            terrariumd::store::threads::NewThread {
+                topic: "Unstarted".into(),
+                scope: "p".into(),
+                template: Some(template),
+                opened_by: opener,
+                agent: None,
+                text: Some("Go on.".into()),
+            },
+        )?;
+        let back = (chrono::Utc::now() - chrono::Duration::minutes(2))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        t.execute(
+            "UPDATE threads SET created_at = ?2 WHERE id = ?1",
+            [&th.id, &back],
+        )?;
+        Ok(th.id)
+    })
+    .await
+    .unwrap()
+}
+
+/// Review round 1, findings 3 and 6: a thread that a daemon stop left
+/// with a template and no agent gets its agent on the timer, attached in
+/// the spawn transaction. For an agent opener the spawn checks A1 against
+/// the template as it is then: after the template gains project_admin,
+/// the spawn is refused, no agent is made, and the thread is closed with
+/// the reason.
+#[tokio::test]
+async fn the_timer_starts_unstarted_threads_with_a1() {
+    let lab = lab().await;
+    let s = state(&lab.td);
+    let tid = unstarted(&lab, &lab.w, "consult").await;
+    terrariumd::thread_agent::retry_missed(&s).await;
+    let th = lab.thread(&tid).await;
+    let eph = th["agent"].as_str().expect("an agent").to_owned();
+    assert_eq!(
+        lab.spawn_row(&eph).await["bound"],
+        format!("thread:{tid}")
+    );
+    lab.prompt(&eph, &format!("[Thread:{tid}]")).await;
+    // A second pass starts nothing more.
+    terrariumd::thread_agent::retry_missed(&s).await;
+    let all = lab
+        .td
+        .get("/api/agents/operator/spawned?project=p")
+        .await
+        .ok()
+        .clone();
+    assert_eq!(all.as_array().unwrap().len(), 1, "{all}");
+
+    // The template changes after the open: the spawn refuses it.
+    let r = lab
+        .td
+        .patch(
+            "/api/templates/p%2Fconsult",
+            json!({"spec": {"harness": "claude", "roles": ["project_admin"]}}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let tid = unstarted(&lab, &lab.w, "consult").await;
+    terrariumd::thread_agent::retry_missed(&s).await;
+    let th = lab.thread(&tid).await;
+    assert_eq!(th["status"], "closed", "{th}");
+    assert!(th["agent"].is_null(), "{th}");
+    let why = th["handoff"]["summary"].as_str().unwrap();
+    assert!(why.starts_with("The thread agent did not start"), "{why}");
+    assert!(why.contains("project_admin"), "{why}");
+    let all = lab
+        .td
+        .get("/api/agents/operator/spawned?project=p")
+        .await
+        .ok()
+        .clone();
+    assert_eq!(all.as_array().unwrap().len(), 1, "no new spawn: {all}");
+    // The operator opens with any template: its unstarted thread starts.
+    let tid = unstarted(&lab, "operator", "consult").await;
+    terrariumd::thread_agent::retry_missed(&s).await;
+    assert!(lab.thread(&tid).await["agent"].is_string());
+}
+
+/// Review round 1, finding 1: the opener is the owner for the rights. The
+/// thread agent keeps `thread_open` only while the opener holds it.
+#[tokio::test]
+async fn the_agent_keeps_thread_open_only_with_the_opener() {
+    let lab = lab().await;
+    let s = state(&lab.td);
+    let check = |w: String| {
+        let s = s.clone();
+        async move {
+            s.db.read(move |c| {
+                let tp = terrariumd::store::templates::resolve(c, "p", "consult")?;
+                let mut def = terrarium_core::agent_template::to_def(&tp.spec, "x", "p")
+                    .map_err(|e| terrariumd::error::ApiError::invalid(e.to_string()))?;
+                def.policy.thread_open = true;
+                terrariumd::thread_agent::check_a1(c, &w, &mut def)?;
+                Ok(def.policy.thread_open)
+            })
+            .await
+            .unwrap()
+        }
+    };
+    assert!(check(lab.w.clone()).await);
+    lab.td
+        .patch(
+            &format!("/api/agents/{}", lab.w),
+            json!({"policy": {"thread_open": false}}),
+        )
+        .await
+        .ok();
+    assert!(!check(lab.w.clone()).await);
+    // A real thread agent of `w` has no thread_open (a template cannot
+    // carry it, and `w` holds it at the open).
+    lab.td
+        .patch(
+            &format!("/api/agents/{}", lab.w),
+            json!({"policy": {"thread_open": true}}),
+        )
+        .await
+        .ok();
+    let r = lab
+        .td
+        .post_as(&lab.w, "/api/threads", json!({"topic": "T", "template": "consult"}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let eph = r.body["agent"].as_str().unwrap().to_owned();
+    assert_ne!(lab.agent(&eph).await["policy"]["thread_open"], true);
 }
 
 /// A thread that waits on its parked agent while no event reached the
@@ -564,8 +729,9 @@ async fn a_missed_event_unparks_on_the_timer() {
     lab.td.wait_status(&eph, "idle").await;
 }
 
-/// A2: the thread agent writes memories in the project it runs in, and
-/// not in another one.
+/// A2: the thread agent reads and writes the memories of the project it
+/// runs in, and neither reads nor writes another one; a global thread's
+/// agent writes in `meta`.
 #[tokio::test]
 async fn the_agent_uses_the_memory_of_its_project() {
     let lab = lab().await;
@@ -596,4 +762,47 @@ async fn the_agent_uses_the_memory_of_its_project() {
         )
         .await;
     r.err(403, "forbidden");
+    // A memory of `q`: not readable for the agent of a `p` thread.
+    let q_lead = lab.td.get("/api/agents/q%2Flead").await.ok().clone();
+    let r = lab
+        .td
+        .post_as(
+            q_lead["id"].as_str().unwrap(),
+            "/api/projects/q/memories",
+            json!({"title": "Q only"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let qid = id(&r.body);
+    let qref = if qid.contains('/') {
+        qid.replace('/', "%2F")
+    } else {
+        format!("q%2F{qid}")
+    };
+    lab.td
+        .get_as(&eph, &format!("/api/memories/{qref}"))
+        .await
+        .err(403, "forbidden");
+    lab.td
+        .get_as(&eph, "/api/projects/q/memories")
+        .await
+        .err(403, "forbidden");
+    // A global thread's agent runs in `meta` and writes there.
+    let g = lab
+        .open(json!({"topic": "Global memory", "template": "helper"}))
+        .await;
+    let geph = g["agent"].as_str().unwrap().to_owned();
+    let r = lab
+        .td
+        .post_as(
+            &geph,
+            "/api/projects/meta/memories",
+            json!({"title": "Global threads run in meta"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    lab.td
+        .post_as(&geph, "/api/projects/p/memories", json!({"title": "No"}))
+        .await
+        .err(403, "forbidden");
 }

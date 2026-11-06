@@ -3733,8 +3733,9 @@ of that project (A2). Only the daemon binds to a thread: a spawn with
 `bind: "thread:<id>"` is `422 invalid`.
 
 - **Turns.** Its first turn is `[Thread:<id>]` with the topic, the opener,
-  the report-to lead, and the first message (an agent opener's message is
-  quoted with `> `). Each operator message and each overall response is a
+  the report-to lead, and the first message. An agent opener's topic and
+  message are quoted with `> ` as data: a `[Thread:]` turn counts as the
+  operator's. Each operator message and each overall response is a
   `[Thread:<id>] <text>` turn. Its replies are `POST .../messages`, not
   turn text.
 - **Park.** A message or a question of the agent that leaves the thread
@@ -3756,6 +3757,14 @@ of that project (A2). Only the daemon binds to a thread: a spawn with
   the thread is closed with `The thread agent did not start: <reason>` as
   the handoff summary, and the open answers that error, with `thread <id>
   is closed: its agent did not start: ...` as the message.
+- **Attach.** The agent is attached (`agent`) in the transaction that makes
+  it, before its first turn. The spawn timer starts the agent of an open
+  thread that has a template and no agent and was opened more than a
+  minute ago (a daemon stop between the open and the spawn).
+- **Rights.** For an agent-opened thread the opener is the owner for the
+  rights (TER-65): the agent keeps `thread_open` only when the opener
+  holds it at the spawn. There is no limit on the count of thread agents
+  (D35).
 - **A1 at the spawn.** For an agent-opened thread, the daemon checks A1
   again in the transaction that makes the agent: the rights of the agent
   that the template makes at that moment against the opener's rights at

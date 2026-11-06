@@ -183,10 +183,18 @@ fn lifetime_text(d: Duration) -> String {
 
 /// A rights check of the daemon on the agent definition that a spawn
 /// makes, in the transaction that creates the agent (TER-92: the A1 check
-/// of an agent-opened thread against the template as it is then).
+/// of an agent-opened thread against the template as it is then). It may
+/// narrow the definition (a right that the opener does not hold).
 pub type DefCheck = Box<
-    dyn FnOnce(&rusqlite::Connection, &terrarium_core::config::AgentDef) -> ApiResult<()> + Send,
+    dyn FnOnce(&rusqlite::Connection, &mut terrarium_core::config::AgentDef) -> ApiResult<()>
+        + Send,
 >;
+
+/// A write of the daemon in the transaction that creates the agent, with
+/// the new agent's ID (TER-92: attach the agent to its thread, so that it
+/// is attached before its first turn).
+pub type AfterCreate =
+    Box<dyn for<'c> FnOnce(&mut crate::db::Tx<'c>, &str) -> ApiResult<()> + Send>;
 
 /// What a spawn of the daemon itself adds to a [`SpawnBody`] (TER-92, the
 /// agent of an Inbox thread). Not in the API.
@@ -201,6 +209,8 @@ pub struct Internal {
     pub source: Option<TurnSource>,
     /// A check of the definition before the agent is made.
     pub check: Option<DefCheck>,
+    /// A write after the agent and its spawn row are made.
+    pub after_create: Option<AfterCreate>,
 }
 
 /// Spawn an ephemeral agent for `owner_key` (an agent, or `operator`).
@@ -240,6 +250,7 @@ pub async fn spawn_with(
         bound: internal_bound,
         source: internal_source,
         check: def_check,
+        after_create,
     } = internal;
     let owner = if owner_key == OPERATOR {
         policy::operator_only(actor, "spawning an ephemeral agent of the operator")?;
@@ -471,7 +482,7 @@ pub async fn spawn_with(
             }
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
             if let Some(check) = def_check {
-                check(t, &def)?;
+                check(t, &mut def)?;
             }
             // The rights from the owner (TER-65): checked against the owner,
             // not by the policy rule above, so a lead passes on a global
@@ -510,6 +521,9 @@ pub async fn spawn_with(
                     bound: bound.as_ref(),
                 },
             )?;
+            if let Some(f) = after_create {
+                f(t, &id)?;
+            }
             let rights = spawn_rights::apply(
                 t,
                 owner_view.as_ref(),
