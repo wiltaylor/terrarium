@@ -691,7 +691,7 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     let items = check_items(n.kind, &n.items)?;
     let context = check_context(n.context.as_deref())?;
     let card = check_card(t, &project, n.card.as_deref())?;
-    let thread = match n.thread.as_deref() {
+    let in_thread = match n.thread.as_deref() {
         Some(th) => Some(crate::store::threads::check_ask(t, th, &n.agent)?.id),
         None => None,
     };
@@ -753,7 +753,7 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
             at,
             n.kind.as_str(),
             items_json(n.kind, &items),
-            thread
+            in_thread
         ],
     )?;
     let q = get(t, &id)?;
@@ -1966,6 +1966,7 @@ mod tests {
             tool_run: None,
             used_at: None,
             thread_id: "T1".into(),
+            thread: None,
             created_at: "t".into(),
             updated_at: "t".into(),
             revision: 2,
