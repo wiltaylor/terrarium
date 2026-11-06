@@ -671,8 +671,10 @@ mod tests {
         r.unwrap();
         assert_eq!(
             reqs[1].body,
-            Some(json!({"policy": {"mail_to": ["*"], "spawn": {"templates": ["*"]},
-                                   "thread_open": true}}))
+            Some(
+                json!({"policy": {"mail_to": ["*"], "spawn": {"templates": ["*"]},
+                                   "thread_open": true}})
+            )
         );
         let (r, _, reqs) = run(
             false,

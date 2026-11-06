@@ -541,9 +541,12 @@ async fn an_agent_with_thread_open_opens_within_its_rights() {
     .await
     .err(403, "forbidden");
     // Another project's scope is a write outside the own project.
-    open_as(&lab.w, json!({"topic": "x", "scope": "q", "template": "helper"}))
-        .await
-        .err(403, "forbidden");
+    open_as(
+        &lab.w,
+        json!({"topic": "x", "scope": "q", "template": "helper"}),
+    )
+    .await
+    .err(403, "forbidden");
     // A named agent may not exceed the opener's rights either.
     let r = open_as(
         &lab.w,
@@ -651,7 +654,11 @@ async fn an_architect_posts_in_its_thread_and_writes_nowhere_else() {
         .err(404, "not_found");
     // It still writes nothing in another project: no card in `p`.
     lab.td
-        .post_as(&arch, "/api/projects/p/cards", json!({"title": "From the architect"}))
+        .post_as(
+            &arch,
+            "/api/projects/p/cards",
+            json!({"title": "From the architect"}),
+        )
         .await
         .err(403, "forbidden");
 

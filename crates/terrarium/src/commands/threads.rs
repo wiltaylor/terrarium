@@ -104,7 +104,11 @@ fn print_thread(c: &Ctx, v: &Value) {
         delimited(c, "RESPONSE", r["text"].as_str().unwrap_or_default());
     }
     if let Some(h) = handoff.as_ref().filter(|h| h.is_object()) {
-        c.line(format!("handoff by {} at {}:", field(h, "by"), field(h, "at")));
+        c.line(format!(
+            "handoff by {} at {}:",
+            field(h, "by"),
+            field(h, "at")
+        ));
         delimited(c, "HANDOFF", h["summary"].as_str().unwrap_or_default());
         for l in as_items(&h["links"]) {
             c.line(format!("link {}: {}", field(l, "kind"), field(l, "ref")));
@@ -182,9 +186,7 @@ pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
                 body["kind"] = json!("bundle");
                 body["items"] = match items_file {
                     Some(f) => items_value(ctx, f)?,
-                    None if !items.is_empty() => {
-                        items.iter().map(|t| json!({"text": t})).collect()
-                    }
+                    None if !items.is_empty() => items.iter().map(|t| json!({"text": t})).collect(),
                     None => {
                         return Err(CliError::usage(
                             "a bundle needs its questions: --item <text>... or --items-file",

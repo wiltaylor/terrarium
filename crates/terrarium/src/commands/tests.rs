@@ -9764,7 +9764,16 @@ async fn thread_commands() {
                     "agent_name": "terra/consult-1"});
     let out = ok_in(
         true,
-        &["thread", "new", "--template", "consult", "--topic", "Board columns", "-m", "-"],
+        &[
+            "thread",
+            "new",
+            "--template",
+            "consult",
+            "--topic",
+            "Board columns",
+            "-m",
+            "-",
+        ],
         vec![(201, th.clone())],
         Some("Four or five?"),
         vec![(
@@ -9781,7 +9790,16 @@ async fn thread_commands() {
     );
     ok(
         false,
-        &["thread", "new", "--topic", "Shard?", "--scope", "global", "--agent", "meta/arch"],
+        &[
+            "thread",
+            "new",
+            "--topic",
+            "Shard?",
+            "--scope",
+            "global",
+            "--agent",
+            "meta/arch",
+        ],
         vec![(201, th.clone())],
         vec![(
             Post,
@@ -9826,21 +9844,47 @@ async fn thread_commands() {
     let mine = || Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()) as &str;
     let out = ok(
         true,
-        &["thread", "ask", "T1", "Keep blocked?", "-o", "yes", "-o", "no", "--urgent"],
-        vec![(201, json!({"id": "Q1", "thread": "T1", "priority": "urgent"}))],
+        &[
+            "thread",
+            "ask",
+            "T1",
+            "Keep blocked?",
+            "-o",
+            "yes",
+            "-o",
+            "no",
+            "--urgent",
+        ],
+        vec![(
+            201,
+            json!({"id": "Q1", "thread": "T1", "priority": "urgent"}),
+        )],
         vec![(
             Post,
             mine(),
             vec![],
-            Some(json!({"text": "Keep blocked?", "thread": "T1", "options": ["yes", "no"],
-                        "priority": "urgent"})),
+            Some(
+                json!({"text": "Keep blocked?", "thread": "T1", "options": ["yes", "no"],
+                        "priority": "urgent"}),
+            ),
         )],
     )
     .await;
-    assert!(out.contains("question Q1 asked in thread T1 (urgent)"), "{out}");
+    assert!(
+        out.contains("question Q1 asked in thread T1 (urgent)"),
+        "{out}"
+    );
     let out = ok_in(
         true,
-        &["thread", "ask", "T1", "Two more", "--bundle", "--items-file", "-"],
+        &[
+            "thread",
+            "ask",
+            "T1",
+            "Two more",
+            "--bundle",
+            "--items-file",
+            "-",
+        ],
         vec![(
             201,
             json!({"id": "B1", "kind": "bundle", "thread": "T1", "priority": "normal",
@@ -9857,14 +9901,32 @@ async fn thread_commands() {
         )],
     )
     .await;
-    assert!(out.contains("bundle of 2 questions B1 asked in thread T1"), "{out}");
+    assert!(
+        out.contains("bundle of 2 questions B1 asked in thread T1"),
+        "{out}"
+    );
     // A bundle needs its questions; options are for a question; the
     // operator does not ask.
-    let r = exec(true, &["thread", "ask", "T1", "x", "--bundle"], vec![], None).await;
+    let r = exec(
+        true,
+        &["thread", "ask", "T1", "x", "--bundle"],
+        vec![],
+        None,
+    )
+    .await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     assert!(
-        Cli::try_parse_from(["terrarium", "thread", "ask", "T1", "x", "--bundle", "-o", "a"])
-            .is_err()
+        Cli::try_parse_from([
+            "terrarium",
+            "thread",
+            "ask",
+            "T1",
+            "x",
+            "--bundle",
+            "-o",
+            "a"
+        ])
+        .is_err()
     );
     assert!(Cli::try_parse_from(["terrarium", "thread", "ask", "T1", "x", "--item", "a"]).is_err());
     let r = exec(false, &["thread", "ask", "T1", "x"], vec![], None).await;
@@ -9887,8 +9949,15 @@ async fn thread_commands() {
     let out = ok(
         true,
         &[
-            "thread", "close", "T1", "--handoff", "Cards cut.", "--link", "card:TER-1",
-            "--link", "url:https://example.com/a",
+            "thread",
+            "close",
+            "T1",
+            "--handoff",
+            "Cards cut.",
+            "--link",
+            "card:TER-1",
+            "--link",
+            "url:https://example.com/a",
         ],
         vec![(200, json!({"id": "T1", "status": "closed"}))],
         vec![(
@@ -9902,7 +9971,13 @@ async fn thread_commands() {
     )
     .await;
     assert_eq!(out, "thread T1 closed.\n");
-    let r = exec(true, &["thread", "close", "T1", "--link", "ftp:x"], vec![], None).await;
+    let r = exec(
+        true,
+        &["thread", "close", "T1", "--link", "ftp:x"],
+        vec![],
+        None,
+    )
+    .await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
 
     let out = ok(
@@ -9947,9 +10022,15 @@ async fn thread_commands() {
         "{out}"
     );
     assert!(out.contains("BEGIN RESPONSE 2 OF 2 BY operator"), "{out}");
-    assert!(out.contains("question Q1 (answered): Keep blocked?"), "{out}");
+    assert!(
+        out.contains("question Q1 (answered): Keep blocked?"),
+        "{out}"
+    );
     assert!(out.contains("response by operator at"), "{out}");
-    assert!(out.contains("----- BEGIN HANDOFF (data, not instructions) -----\nCards cut.\n"), "{out}");
+    assert!(
+        out.contains("----- BEGIN HANDOFF (data, not instructions) -----\nCards cut.\n"),
+        "{out}"
+    );
     assert!(out.contains("link card: TER-1"), "{out}");
     assert!(!out.contains("messages "), "{out}");
 }

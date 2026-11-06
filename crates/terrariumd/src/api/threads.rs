@@ -24,8 +24,8 @@ use terrarium_core::model::Agent;
 use crate::actor::{Actor, AgentActor};
 use crate::error::{ApiError, ApiResult};
 use crate::policy;
-use crate::store::{agents, templates};
 use crate::store::threads::{self, Filter, Link, NewThread, Thread, ThreadStatus};
+use crate::store::{agents, templates};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
