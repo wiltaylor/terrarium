@@ -24,13 +24,13 @@ use terrarium_core::config::DeliveryDef;
 
 use super::{ApiJson, ApiQuery, Shared};
 use crate::actor::Actor;
-use crate::db::Tx;
 use crate::error::{ApiError, ApiResult};
 use crate::jobs as rt;
 use crate::policy;
 use crate::store::board::{self, Card, CardPatch};
 use crate::store::jobs::{self, Job, JobKind, JobState, NewJob};
-use crate::store::{projects, repos};
+use crate::executor;
+use crate::store::{projects, repos, targets};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -73,6 +73,24 @@ async fn set_delivery(
         .db
         .write(actor.label(), move |t| {
             projects::get(t, &name)?;
+            // The recipe runs on the target: a target of this project, or a
+            // global one only when a sysadmin or the operator sets it.
+            if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty()) {
+                let row = targets::get(t, target)?;
+                match &row.def.project {
+                    Some(p) if *p == name => {}
+                    Some(p) => {
+                        return Err(ApiError::forbidden(format!(
+                            "target `{target}` belongs to project `{p}`; the job queue of `{name}` uses its own targets"
+                        )));
+                    }
+                    None => policy::sysadmin(
+                        &actor,
+                        &format!("running the job queue of `{name}` on the global target `{target}`"),
+                    )?,
+                }
+                executor::no_exec(&row.def)?;
+            }
             for r in &def.next_repos {
                 if repos::find_by_name(t, &name, r)?.is_none() {
                     return Err(ApiError::invalid(format!(
@@ -200,7 +218,7 @@ struct MergeBody {
 
 /// The repo of a job: the given one, the card's, or the project's only
 /// repo.
-fn repo_of(t: &Tx<'_>, card: &Card, given: Option<String>) -> ApiResult<String> {
+fn repo_of(t: &rusqlite::Connection, card: &Card, given: Option<String>) -> ApiResult<String> {
     if let Some(r) = given.or_else(|| card.repo.clone()) {
         if repos::find_by_name(t, &card.project, &r)?.is_none() {
             return Err(ApiError::invalid(format!(
@@ -247,6 +265,36 @@ fn enabled(def: &DeliveryDef, project: &str) -> ApiResult<()> {
     )))
 }
 
+/// The answer of a queue: the job and its place.
+fn queued_answer(job: Job, place: (i64, i64), slots: usize) -> Response {
+    let (position, running) = place;
+    let note = if position as usize <= slots.saturating_sub(running as usize) {
+        format!("starts now ({running} of {slots} slots in use)")
+    } else {
+        format!("queued at place {position}; {running} of {slots} slots in use")
+    };
+    (
+        StatusCode::CREATED,
+        Json(json!({"job": job, "queue": {"position": position, "running": running,
+                                          "slots": slots, "note": note}})),
+    )
+        .into_response()
+}
+
+/// Who may queue a validation of a card: its assignee or a project
+/// admin.
+fn may_validate(actor: &Actor, card: &Card) -> ApiResult<()> {
+    policy::read_project(actor, &card.project)?;
+    if card.assignee.as_deref() == Some(actor.address().as_str()) {
+        return Ok(());
+    }
+    policy::admin_project(
+        actor,
+        &card.project,
+        "queueing a validation of a card that is not yours",
+    )
+}
+
 async fn validate(
     State(state): State<Shared>,
     actor: Actor,
@@ -256,26 +304,49 @@ async fn validate(
     if let Some(c) = &b.commit {
         rt::check_commit(c)?;
     }
-    let job = state
+    // Read and check first; the remote check runs outside the write.
+    let card_id = board::normalise_id(&id);
+    let (a, given_repo, given_branch) = (actor.clone(), b.repo.clone(), b.branch.clone());
+    let (card, def, repo, branch) = state
         .db
-        .write(actor.label(), move |t| {
-            let card = board::get_card(t, &board::normalise_id(&id))?;
-            policy::read_project(&actor, &card.project)?;
-            let mine = card.assignee.as_deref() == Some(actor.address().as_str());
-            if !mine {
-                policy::admin_project(
-                    &actor,
-                    &card.project,
-                    "queueing a validation of a card that is not yours",
-                )?;
-            }
+        .read(move |c| {
+            let card = board::get_card(c, &card_id)?;
+            may_validate(&a, &card)?;
             if card.archived {
                 return Err(ApiError::conflict(format!("card {} is archived", card.id)));
             }
-            let def = jobs::delivery(t, &card.project)?;
+            let def = jobs::delivery(c, &card.project)?;
             enabled(&def, &card.project)?;
-            let repo = repo_of(t, &card, b.repo)?;
-            let branch = branch_of(&card, b.branch)?;
+            let repo = repo_of(c, &card, given_repo)?;
+            let branch = branch_of(&card, given_branch)?;
+            Ok((card, def, repo, branch))
+        })
+        .await?;
+    // The job must test what was pushed: the commit is the head of the
+    // branch on the remote.
+    if let Some(commit) = &b.commit {
+        let target = def.target.clone().unwrap_or_default();
+        let head = rt::remote_head(&state, &card.project, &repo, &target, &branch).await?;
+        match head {
+            Some(h) if h.starts_with(&commit.to_lowercase()) => {}
+            Some(h) => {
+                return Err(ApiError::conflict(format!(
+                    "commit {commit} is not the head of `{branch}` on the remote (the head is {h}): push it first, or give the head"
+                )));
+            }
+            None => {
+                return Err(ApiError::conflict(format!(
+                    "branch `{branch}` is not on the remote of `{repo}`: push it first"
+                )));
+            }
+        }
+    }
+    let slots = def.slots();
+    let (job, place) = state
+        .db
+        .write(actor.label(), move |t| {
+            let card = board::get_card(t, &card.id)?;
+            may_validate(&actor, &card)?;
             let by = actor
                 .agent()
                 .map(|a| a.name.clone())
@@ -328,11 +399,12 @@ async fn validate(
             if card.assignee.is_some() {
                 board::assign_card(t, &Actor::Operator, &card.id, None)?;
             }
-            Ok(job)
+            let place = jobs::place(t, &job)?;
+            Ok((job, place))
         })
         .await?;
     rt::kick(&state);
-    Ok((StatusCode::CREATED, Json(job)).into_response())
+    Ok(queued_answer(job, place, slots))
 }
 
 async fn merge(
@@ -384,9 +456,10 @@ async fn merge(
                     job.id
                 ),
             )?;
-            Ok(job)
+            let place = jobs::place(t, &job)?;
+            Ok((job, place, def.slots()))
         })
         .await?;
     rt::kick(&state);
-    Ok((StatusCode::CREATED, Json(job)).into_response())
+    Ok(queued_answer(job.0, job.1, job.2))
 }

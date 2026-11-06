@@ -2036,7 +2036,7 @@ const MIGRATIONS: &[&str] = &[
     // 70: the job queue of a project (TER-71, `crate::jobs`). A job
     // validates a card commit, or merges a card branch onto `next` and
     // validates the result. Jobs start first in, first out, at most the
-    // project's `[delivery] slots` at a time. `attempt` is 1, or 2 for the
+    // project's `slots` at a time. `attempt` is 1, or 2 for the
     // one rerun of a failed job. `outcome` says why a job failed (`red`,
     // `conflict`, `error`). `project_delivery` holds the queue config of a
     // project (JSON `DeliveryDef`). Self-contained: when another branch

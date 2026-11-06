@@ -480,6 +480,55 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
     })
 }
 
+/// The head commit of `branch` of `repo` on its remote, read with `git
+/// ls-remote` on the project's delivery target (the daemon may not reach
+/// the forge itself). `None`: the branch is not on the remote.
+pub async fn remote_head(
+    state: &Shared,
+    project: &str,
+    repo_name: &str,
+    target: &str,
+    branch: &str,
+) -> ApiResult<Option<String>> {
+    check_ref(branch)?;
+    let (p, r, tn) = (project.to_owned(), repo_name.to_owned(), target.to_owned());
+    let (repo, row) = state
+        .db
+        .read(move |c| {
+            let repo = repos::find_by_name(c, &p, &r)?
+                .ok_or_else(|| ApiError::not_found(format!("no repo `{r}` in `{p}`")))?;
+            Ok((repo, targets::get(c, &tn)?))
+        })
+        .await?;
+    let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
+    let cmd = RemoteCmd {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            format!("{GIT_PRELUDE}{LS_REMOTE_SCRIPT}"),
+            "sh".into(),
+            repo.url.clone(),
+            branch.to_owned(),
+        ],
+        env: executor::checkout_env(secret.as_ref().map(|(_, s)| s)),
+        timeout_secs: Some(120),
+        holder: Some(format!("{project}/jobs")),
+        ..RemoteCmd::default()
+    };
+    let c = executor::start_cmd(state, &row.def, &cmd)?
+        .collect(STEP_MAX)
+        .await;
+    let r = result_line(&c.stdout);
+    match r.get("outcome").map(String::as_str) {
+        Some("ok") => Ok(r.get("head").cloned().filter(|h| !h.is_empty())),
+        _ => Err(ApiError::conflict(format!(
+            "cannot read branch `{branch}` of `{repo_name}` on target `{target}` ({}): {}",
+            end_text(c.end.as_ref()),
+            output_of(&c).trim()
+        ))),
+    }
+}
+
 /// A branch name that git and the scripts take.
 pub fn check_ref(b: &str) -> ApiResult<()> {
     if b.is_empty()
@@ -770,6 +819,16 @@ else
   fi
 fi
 res ok "$(G -C "$dir" rev-parse HEAD)"
+"#;
+
+/// `url branch`: the head of the branch on the remote (empty when the
+/// remote has no such branch).
+const LS_REMOTE_SCRIPT: &str = r#"url=$1; branch=$2
+if out=$(g ls-remote -- "$url" "refs/heads/$branch"); then
+  forget; res ok "$(printf '%s\n' "$out" | awk 'NR==1 {print $1}')"
+else
+  forget; res error; exit 2
+fi
 "#;
 
 /// Step 3: `url dir`. Push the merge commit to `next`, not forced.

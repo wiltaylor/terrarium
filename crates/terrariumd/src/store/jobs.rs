@@ -490,6 +490,7 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
     if def.slots == Some(0) {
         return Err(ApiError::invalid("`slots` must be 1 or more"));
     }
+    let old = delivery(t, project)?;
     let text = serde_json::to_string(def)
         .map_err(|e| ApiError::internal(format!("cannot store the delivery config: {e}")))?;
     t.execute(
@@ -502,7 +503,24 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
         "project.delivery",
         project,
         Some(project),
-        serde_json::to_value(def).unwrap_or_default(),
+        json!({"old": old, "new": def}),
     )?;
     delivery(t, project)
+}
+
+/// Where a queued job stands: its place among the queued jobs of its
+/// project (1 starts next), and the running count.
+pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
+    let ahead: i64 = conn.query_row(
+        "SELECT count(*) FROM jobs WHERE project = ?1 AND state = 'queued'
+           AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))",
+        params![job.project, job.created_at, job.id],
+        |r| r.get(0),
+    )?;
+    let running: i64 = conn.query_row(
+        "SELECT count(*) FROM jobs WHERE project = ?1 AND state = 'running'",
+        [&job.project],
+        |r| r.get(0),
+    )?;
+    Ok((ahead + 1, running))
 }
