@@ -256,9 +256,12 @@ async fn the_config_is_checked_and_audited() {
     assert_eq!(v.ok()["enabled"], true);
     assert_eq!(v.ok()["slots"], 2);
     // Another project's target: no.
-    td.put("/api/projects/p/delivery", json!({"target": "qbox", "recipe": "true"}))
-        .await
-        .err(403, "forbidden");
+    td.put(
+        "/api/projects/p/delivery",
+        json!({"target": "qbox", "recipe": "true"}),
+    )
+    .await
+    .err(403, "forbidden");
     // A global target: the operator yes, a project admin no.
     td.put_as(
         &lab.lead,
@@ -276,9 +279,12 @@ async fn the_config_is_checked_and_audited() {
     .await
     .err(403, "forbidden");
     // Bad values.
-    td.put("/api/projects/p/delivery", json!({"target": "pbox", "slots": 0}))
-        .await
-        .err(422, "invalid");
+    td.put(
+        "/api/projects/p/delivery",
+        json!({"target": "pbox", "slots": 0}),
+    )
+    .await
+    .err(422, "invalid");
     td.put(
         "/api/projects/p/delivery",
         json!({"target": "pbox", "next_repos": ["nope"]}),
@@ -363,16 +369,16 @@ async fn a_green_validation_moves_the_card_to_review() {
     assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
     let l = labels(&c);
     assert!(l.contains(&"by:w1".to_owned()), "{l:?}");
-    assert!(
-        l.iter().any(|l| l.starts_with("validation:")),
-        "{l:?}"
-    );
+    assert!(l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
     let c = lab
         .until_card(&id, "review", |c| c["column"] == "review")
         .await;
     let l = labels(&c);
     assert!(!l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
-    assert!(c["assignee"].is_null(), "the final move frees the card: {c}");
+    assert!(
+        c["assignee"].is_null(),
+        "the final move frees the card: {c}"
+    );
     let text = comments(&c);
     assert!(text.contains("passed"), "{text}");
     assert!(text.contains("done by w1"), "{text}");
@@ -442,10 +448,12 @@ async fn a_red_validation_runs_twice_then_goes_to_the_top_of_ready() {
     let start = Instant::now();
     loop {
         let mail = lab.td.mail_of(&lab.w1).await;
-        if mail
-            .iter()
-            .any(|m| m["subject"].as_str().unwrap_or("").contains("validation failed"))
-        {
+        if mail.iter().any(|m| {
+            m["subject"]
+                .as_str()
+                .unwrap_or("")
+                .contains("validation failed")
+        }) {
             break;
         }
         assert!(start.elapsed() < DEADLINE, "no mail to w1: {mail:?}");
@@ -474,10 +482,7 @@ async fn a_merge_validates_and_pushes_next() {
     // `next` on the remote holds the card commit, in a merge commit.
     let next = git(&lab.origin, &["rev-parse", "next"]);
     assert_ne!(next, head);
-    git(
-        &lab.origin,
-        &["merge-base", "--is-ancestor", &head, "next"],
-    );
+    git(&lab.origin, &["merge-base", "--is-ancestor", &head, "next"]);
     let parents = git(&lab.origin, &["rev-list", "--parents", "-n", "1", "next"]);
     assert_eq!(parents.split_whitespace().count(), 3, "{parents}");
     let jobs = lab.until_idle().await;
@@ -589,7 +594,11 @@ async fn a_cancel_ends_a_queued_job() {
     let c2 = lab.card("f2", "ter-f2").await;
     let j1 = lab
         .td
-        .post_as(&lab.w1, &format!("/api/cards/{c1}/validate"), json!({"commit": h1}))
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c1}/validate"),
+            json!({"commit": h1}),
+        )
         .await
         .ok()["job"]["id"]
         .as_str()
@@ -597,7 +606,11 @@ async fn a_cancel_ends_a_queued_job() {
         .to_owned();
     let r = lab
         .td
-        .post_as(&lab.w1, &format!("/api/cards/{c2}/validate"), json!({"commit": h2}))
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c2}/validate"),
+            json!({"commit": h2}),
+        )
         .await;
     assert_eq!(r.body["queue"]["position"], 1, "{}", r.body);
     let j2 = r.body["job"]["id"].as_str().unwrap().to_owned();

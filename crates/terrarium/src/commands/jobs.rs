@@ -108,7 +108,11 @@ pub async fn delivery(ctx: &Ctx, cmd: &DeliveryCmd) -> anyhow::Result<()> {
 
 /// The current config with the given flags over it.
 fn merged(cur: &Value, a: &DeliverySetArgs) -> Value {
-    let mut d = if cur.is_object() { cur.clone() } else { json!({}) };
+    let mut d = if cur.is_object() {
+        cur.clone()
+    } else {
+        json!({})
+    };
     let mut put = |k: &str, v: Option<Value>| {
         if let Some(v) = v {
             if v.as_str() == Some("") {

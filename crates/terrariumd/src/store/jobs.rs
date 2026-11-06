@@ -481,7 +481,9 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
         return Err(ApiError::invalid("`recipe` holds a NUL byte"));
     }
     if let Some(w) = &def.work_dir
-        && (!w.starts_with('/') || w.split('/').any(|c| c == "..") || w.trim_end_matches('/').is_empty())
+        && (!w.starts_with('/')
+            || w.split('/').any(|c| c == "..")
+            || w.trim_end_matches('/').is_empty())
     {
         return Err(ApiError::invalid(format!(
             "`work_dir` `{w}` must be an absolute dir without `..`, and not `/`"

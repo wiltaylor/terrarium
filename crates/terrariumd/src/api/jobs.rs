@@ -26,11 +26,11 @@ use terrarium_core::config::DeliveryDef;
 use super::{ApiJson, ApiQuery, Shared};
 use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult};
+use crate::executor;
 use crate::jobs as rt;
 use crate::policy;
 use crate::store::board::{self, Card, CardPatch};
 use crate::store::jobs::{self, Job, JobKind, JobState, NewJob};
-use crate::executor;
 use crate::store::{projects, repos, targets};
 
 pub fn routes() -> Router<Shared> {
@@ -276,8 +276,10 @@ fn queued_answer(job: Job, place: (i64, i64), slots: usize) -> Response {
     };
     (
         StatusCode::CREATED,
-        Json(json!({"job": job, "queue": {"position": position, "running": running,
-                                          "slots": slots, "note": note}})),
+        Json(
+            json!({"job": job, "queue": {"position": position, "running": running,
+                                          "slots": slots, "note": note}}),
+        ),
     )
         .into_response()
 }
@@ -380,9 +382,16 @@ async fn validate(
             let mut note = format!(
                 "Job queue: validate job {} queued. Repo {repo}, branch {branch}, commit {}.",
                 job.id,
-                b.commit.as_deref().unwrap_or("the branch head at the start")
+                b.commit
+                    .as_deref()
+                    .unwrap_or("the branch head at the start")
             );
-            if let Some(c) = b.comment.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            if let Some(c) = b
+                .comment
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            {
                 note = format!("{c}\n\n{note}");
             }
             if card.column != rt::COL_VALIDATING {

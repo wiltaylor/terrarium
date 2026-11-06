@@ -11,6 +11,7 @@ pub mod db;
 pub mod events;
 pub mod fleet;
 pub mod inspect;
+pub mod jobs;
 pub mod knowledge;
 pub mod mail;
 pub mod monitors;
@@ -30,7 +31,6 @@ pub mod templates;
 pub mod test_runs;
 pub mod tools;
 pub mod update;
-pub mod jobs;
 pub mod waits;
 
 #[cfg(test)]

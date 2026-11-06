@@ -215,7 +215,11 @@ fn set_labels(t: &mut Tx<'_>, card: &str, add: &[&str], remove: &[&str]) -> ApiR
 fn result_line(stdout: &[u8]) -> HashMap<String, String> {
     let text = String::from_utf8_lossy(stdout);
     let mut out = HashMap::new();
-    if let Some(line) = text.lines().rev().find(|l| l.starts_with("TERRARIUM_JOB\t")) {
+    if let Some(line) = text
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("TERRARIUM_JOB\t"))
+    {
         for kv in line.split('\t').skip(1) {
             if let Some((k, v)) = kv.split_once('=') {
                 out.insert(k.to_owned(), v.to_owned());
@@ -610,7 +614,8 @@ fn failure_block(j: &Job) -> String {
         j.branch,
         j.commit.as_deref().unwrap_or("-"),
         j.head.as_deref().unwrap_or("-"),
-        j.exit_code.map_or_else(|| "-".to_owned(), |c| c.to_string()),
+        j.exit_code
+            .map_or_else(|| "-".to_owned(), |c| c.to_string()),
         j.outcome.as_deref().unwrap_or("-"),
         j.attempt
     )
@@ -859,7 +864,8 @@ mod tests {
 
     #[test]
     fn result_line_takes_the_last_one() {
-        let out = b"noise\nTERRARIUM_JOB\toutcome=error\thead=\nTERRARIUM_JOB\toutcome=ok\thead=abc\n";
+        let out =
+            b"noise\nTERRARIUM_JOB\toutcome=error\thead=\nTERRARIUM_JOB\toutcome=ok\thead=abc\n";
         let r = result_line(out);
         assert_eq!(r["outcome"], "ok");
         assert_eq!(r["head"], "abc");
