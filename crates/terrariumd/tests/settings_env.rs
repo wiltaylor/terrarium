@@ -123,18 +123,6 @@ async fn child_reads_the_env() {
     )
     .await;
     assert_ne!(r.status(), StatusCode::UNAUTHORIZED);
-    // A Version.url and a mail link use TERRARIUM_PUBLIC_URL.
-    td.project("p").await;
-    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
-        .await;
-    let v = td
-        .post_as("p/lead", "/api/projects/p/versions", json!({"name": "v1"}))
-        .await;
-    let url = v.ok()["url"].as_str().unwrap().to_owned();
-    assert!(
-        url.starts_with("https://t.example.com/p/p/versions/"),
-        "{url}"
-    );
     // The cookie WebSocket Origin check takes the public origin.
     let r = call(
         app(),

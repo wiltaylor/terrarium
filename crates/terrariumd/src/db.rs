@@ -2953,6 +2953,41 @@ mod tests {
         }
     }
 
+    /// TER-58: migration 80 adds the label tables and keeps the rows of
+    /// the version tables.
+    #[test]
+    fn migration_80_keeps_the_version_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..79] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 79).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 't', 't');
+             INSERT INTO versions (id, project, name, status, created_by, created_at, updated_at)
+               VALUES ('V1', 'p', 'v1.0.0', 'released', 'operator', 't', 't');
+             INSERT INTO version_reviews (id, version, author, decision, created_at)
+               VALUES ('R1', 'V1', 'operator', 'approved', 't');",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 79);
+        let n: i64 = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM versions WHERE status = 'released')
+                      + (SELECT count(*) FROM version_reviews)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        for table in ["test_run_labels", "artifact_labels"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table}");
+        }
+    }
+
     #[test]
     fn migration_2_keeps_old_events() {
         let mut conn = Connection::open_in_memory().unwrap();
