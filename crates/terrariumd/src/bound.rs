@@ -4,7 +4,9 @@
 //!
 //! - **Bind.** A spawn with `bind: "<kind>:<id>"` ([`check`]) is bound to
 //!   that object. Kinds: `card` (a card of the owner's project, not done
-//!   and not archived). At most one open spawn per object. The owner's
+//!   and not archived), and `thread` (an Inbox thread, TER-92): only the
+//!   daemon binds to a thread, at its open ([`crate::thread_agent`]). At
+//!   most one open spawn per object. The owner's
 //!   spawn policy needs `bound` (the operator spawns with no right). A
 //!   bound agent has no lifetime timeout; the owner's
 //!   `spawn.max_bound_lifetime` (default and most 30 days) is only a cap,
@@ -47,8 +49,9 @@
 //! The unpark turn is `[System:card <id>]` with the move, then the move
 //! comment and the top of the card body (where the job queue and the
 //! reviewer put the failure block) as quoted data between BEGIN and END
-//! markers, as `card show` prints them. Other owners (threads, TER-92)
-//! call [`park`], [`unpark`], and [`end`] with their own kind.
+//! markers, as `card show` prints them. Other owners call [`park`],
+//! [`unpark`], and [`end`] with their own kind: the thread driver
+//! ([`crate::thread_agent::handle`], TER-92) runs in the same event loop.
 
 use serde_json::{Value, json};
 use terrarium_core::AgentId;
@@ -93,6 +96,12 @@ pub fn check(conn: &rusqlite::Connection, project: &str, text: &str) -> ApiResul
                 )));
             }
             Bound::new(KIND_CARD, &card.id)
+        }
+        crate::thread_agent::KIND_THREAD => {
+            return Err(ApiError::invalid(format!(
+                "bind `{text}`: the daemon binds the agent of a thread when the thread opens \
+                 (`terrarium thread new --template <t>`); a spawn binds only to a card"
+            )));
         }
         _ => {
             return Err(ApiError::invalid(format!(
@@ -306,12 +315,14 @@ pub async fn retry_all(state: &Shared) {
 }
 
 /// The object `b` is finished: close its open agent with `outcome` and
-/// `result`. False when it has none.
+/// `result`; with `notify`, the owner gets the result. False when it has
+/// none.
 pub async fn end(
     state: &Shared,
     b: &Bound,
     outcome: &'static str,
     result: String,
+    notify: bool,
 ) -> ApiResult<bool> {
     let key = b.clone();
     let Some(sp) = state.db.read(move |c| spawns::open_bound(c, &key)).await? else {
@@ -326,7 +337,7 @@ pub async fn end(
         Some(m) => format!("{result}.\n\nThe last message of the agent:\n{m}"),
         None => format!("{result}."),
     };
-    crate::spawn::close(state, &sp.id, outcome, Some(result), true).await?;
+    crate::spawn::close(state, &sp.id, outcome, Some(result), notify).await?;
     Ok(true)
 }
 
@@ -486,7 +497,7 @@ async fn handle(state: &Shared, ev: StoredEvent) {
             // listener loop.
             let state = state.clone();
             tokio::spawn(async move {
-                if let Err(e) = end(&state, &b, outcome, result).await {
+                if let Err(e) = end(&state, &b, outcome, result, true).await {
                     warn!(bound = %b.text(), "cannot close the bound agent: {e}");
                 }
             });
@@ -498,8 +509,9 @@ async fn handle(state: &Shared, ev: StoredEvent) {
     }
 }
 
-/// The card driver: park, unpark, and end the agents bound to cards on
-/// card and job events. One event at a time, in order.
+/// The driver: park, unpark, and end the agents bound to cards on card
+/// and job events, and the agents of threads on thread events
+/// ([`crate::thread_agent::handle`]). One event at a time, in order.
 pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let mut rx = state.db.hub().subscribe();
     let state = state.clone();
@@ -515,6 +527,8 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             };
             if card_of(&ev).is_some() {
                 handle(&state, ev).await;
+            } else if ev.kind == "thread" {
+                crate::thread_agent::handle(&state, ev).await;
             }
         }
     })
@@ -530,6 +544,9 @@ pub fn finished_object(
     let Some(text) = &sp.bound else {
         return Ok(None);
     };
+    if let Some(thread) = text.strip_prefix("thread:") {
+        return crate::thread_agent::finished(conn, thread);
+    }
     let Some(card_id) = text.strip_prefix("card:") else {
         return Ok(None);
     };

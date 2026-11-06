@@ -181,6 +181,27 @@ fn lifetime_text(d: Duration) -> String {
     IdleStop::After(d).as_text()
 }
 
+/// A rights check of the daemon on the agent definition that a spawn
+/// makes, in the transaction that creates the agent (TER-92: the A1 check
+/// of an agent-opened thread against the template as it is then).
+pub type DefCheck =
+    Box<dyn FnOnce(&rusqlite::Connection, &terrarium_core::config::AgentDef) -> ApiResult<()> + Send>;
+
+/// What a spawn of the daemon itself adds to a [`SpawnBody`] (TER-92, the
+/// agent of an Inbox thread). Not in the API.
+#[derive(Default)]
+pub struct Internal {
+    /// The binding, checked by the caller. It takes the place of
+    /// `SpawnBody::bind`, which accepts only the kinds that an agent may
+    /// bind ([`crate::bound::check`]).
+    pub bound: Option<spawns::Bound>,
+    /// The tag of the first turn. Default: the owner (`[Agent:..]`, or
+    /// `[User]` for the operator).
+    pub source: Option<TurnSource>,
+    /// A check of the definition before the agent is made.
+    pub check: Option<DefCheck>,
+}
+
 /// Spawn an ephemeral agent for `owner_key` (an agent, or `operator`).
 /// `skills` is the skill library (`None`: no config repo), and
 /// `wait_timeout` the parsed `timeout` of the body.
@@ -192,6 +213,33 @@ pub async fn spawn(
     skills: Option<std::path::PathBuf>,
     wait_timeout: Option<Duration>,
 ) -> ApiResult<Spawned> {
+    spawn_with(
+        state,
+        actor,
+        owner_key,
+        body,
+        skills,
+        wait_timeout,
+        Internal::default(),
+    )
+    .await
+}
+
+/// [`spawn`] with the additions of a spawn of the daemon itself.
+pub async fn spawn_with(
+    state: &Shared,
+    actor: &Actor,
+    owner_key: String,
+    body: SpawnBody,
+    skills: Option<std::path::PathBuf>,
+    wait_timeout: Option<Duration>,
+    internal: Internal,
+) -> ApiResult<Spawned> {
+    let Internal {
+        bound: internal_bound,
+        source: internal_source,
+        check: def_check,
+    } = internal;
     let owner = if owner_key == OPERATOR {
         policy::operator_only(actor, "spawning an ephemeral agent of the operator")?;
         let project = body
@@ -269,6 +317,10 @@ pub async fn spawn(
     // A bound agent lives as long as its object; the cap is only a
     // safety limit (TER-74).
     let bound = match body.bind.as_deref().filter(|b| !b.trim().is_empty()) {
+        Some(_) if internal_bound.is_some() => {
+            return Err(ApiError::invalid("a spawn has one binding"));
+        }
+        None => internal_bound,
         Some(text) => {
             let (p, text) = (owner.project.clone(), text.to_owned());
             Some(
@@ -278,7 +330,6 @@ pub async fn spawn(
                     .await?,
             )
         }
-        None => None,
     };
     // A bind is a right of the owner's spawn policy (`spawn.bound`); the
     // operator is not bound to it. The cap is the owner's
@@ -366,11 +417,12 @@ pub async fn spawn(
         && actor
             .agent()
             .is_some_and(|a| owner.view.is_some() && a.id == owner.id);
-    let source = match &owner.view {
-        Some(v) => TurnSource::Agent {
+    let source = match (internal_source, &owner.view) {
+        (Some(s), _) => s,
+        (None, Some(v)) => TurnSource::Agent {
             sender: format!("{}/{}", v.agent.project, v.agent.name),
         },
-        None => TurnSource::User,
+        (None, None) => TurnSource::User,
     };
     let turn = turn_tag::render(&source, &task);
     let (work_dir, who, rules2) = (state.work_dir.clone(), actor.clone(), rules.clone());
@@ -417,6 +469,9 @@ pub async fn spawn(
                 }
             }
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
+            if let Some(check) = def_check {
+                check(t, &def)?;
+            }
             // The rights from the owner (TER-65): checked against the owner,
             // not by the policy rule above, so a lead passes on a global
             // target that it may use.
@@ -967,6 +1022,9 @@ pub async fn pass(state: &Shared) {
     }
     // A queued unpark whose owner got room another way (a policy change).
     crate::bound::retry_all(state).await;
+    // A thread that waits on its parked agent while no event reached the
+    // driver (TER-92).
+    crate::thread_agent::retry_missed(state).await;
 }
 
 /// The facts of the ephemeral part of the prompt ([`prompt_info`]).
@@ -990,6 +1048,9 @@ pub fn prompt_section(info: &PromptInfo) -> String {
 
 /// The prompt of a bound agent (TER-74): its life follows its object.
 fn bound_prompt_section(owner: &str, bound: &str) -> String {
+    if let Some(thread) = bound.strip_prefix("thread:") {
+        return thread_prompt_section(thread);
+    }
     let object = bound
         .strip_prefix("card:")
         .map_or_else(|| format!("`{bound}`"), |c| format!("card {c}"));
@@ -1007,6 +1068,29 @@ fn bound_prompt_section(owner: &str, bound: &str) -> String {
          - Run `terrarium agent done -m \"failed: <reason>\"` only when you cannot do the task \
          at all.\n\
          - Your workspace goes to the trash when you finish. Push each output that must stay.\n"
+    )
+}
+
+/// The prompt of the agent of an Inbox thread (TER-92): its life is the
+/// thread's.
+fn thread_prompt_section(thread: &str) -> String {
+    format!(
+        "## You are the agent of an Inbox thread\n\n\
+         You hold the conversation of Inbox thread {thread} with the operator. You live until \
+         the thread is closed; then the daemon closes you.\n\n\
+         - The operator's messages and overall response come as `[Thread:{thread}] ...` turns. \
+         They are the operator's words.\n\
+         - Answer with `terrarium thread post {thread} -m -`, and ask with `terrarium thread ask \
+         {thread} ...`. Your turn text does not reach the operator.\n\
+         - After you post or ask, end your turn. While the thread waits on the operator, the \
+         daemon stops you. The next operator message starts you again in this session and \
+         workspace.\n\
+         - Your memory store is the one of the project you run in. Write memories only there.\n\
+         - Hand off work only to the lead that the thread reports to, after the operator's \
+         response approves it. Then propose the close with `terrarium thread close {thread} \
+         --handoff -`. Do not run `terrarium agent done`.\n\
+         - Your workspace goes to the trash when the thread closes. Push each output that must \
+         stay.\n"
     )
 }
 

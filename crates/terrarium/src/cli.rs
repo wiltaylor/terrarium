@@ -2482,8 +2482,8 @@ pub enum ThreadCmd {
         /// `global`)
         #[arg(long)]
         scope: Option<String>,
-        /// The attached agent, until the daemon spawns it from the
-        /// template: a ULID or `project/name`
+        /// An existing agent to attach: a ULID or `project/name`. Without
+        /// it, the daemon spawns the thread's agent from the template
         #[arg(long)]
         agent: Option<String>,
         /// The first message, as Markdown (`-` reads stdin)
