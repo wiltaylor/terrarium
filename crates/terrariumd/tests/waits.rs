@@ -30,11 +30,6 @@ fn id(v: &Value) -> String {
     v["id"].as_str().unwrap().to_owned()
 }
 
-fn soon(ms: i64) -> String {
-    (chrono::Utc::now() + chrono::Duration::milliseconds(ms))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
 /// A settle time that no test run reaches. An `agent` wait whose agent is
 /// done at the create resolves as `done` by the timer after the settle
 /// time (300 ms in `fast`). A test whose next step must find such a wait
@@ -96,8 +91,15 @@ async fn system_mail(td: &TestDaemon, agent: &str) -> Vec<Value> {
         .clone()
 }
 
+/// How long `until` and `wait_state` look before they give up. A bound
+/// for a hung test, not a timing assumption: each check passes as soon as
+/// its state is there. A loaded machine (20 runs at 2 CPUs) can take more
+/// than 8 s for a mail (TER-60).
+const PATIENCE: Duration = Duration::from_secs(60);
+
 async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
-    for _ in 0..400 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         if f().await {
             return;
         }
@@ -108,7 +110,8 @@ async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl Fn
 
 async fn wait_state(td: &TestDaemon, wait: &str, state: &str) -> Value {
     let mut last = Value::Null;
-    for _ in 0..400 {
+    let end = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < end {
         last = td.get(&format!("/api/waits/{wait}")).await.body;
         if last["state"] == state {
             return last;
@@ -222,55 +225,63 @@ async fn an_open_wait_shows_as_waiting_and_the_end_mails_the_waiter() {
     assert_eq!(changes, ["opened", "cancelled", "opened", "resolved"]);
 }
 
+/// A card of project `p` for a card wait, made by `agent`.
+async fn new_card(td: &TestDaemon, agent: &str, title: &str) -> String {
+    td.post_as(agent, "/api/projects/p/cards", json!({"title": title}))
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Move `card` to `review`: the end of a card wait on that column.
+async fn to_review(td: &TestDaemon, agent: &str, card: &str) {
+    td.post_as(
+        agent,
+        &format!("/api/cards/{card}/move"),
+        json!({"column": "review"}),
+    )
+    .await
+    .ok();
+}
+
 /// Each wait that ends gets its own mail: three ends at three times are
-/// three mails, and the status stays `waiting` until the last one.
+/// three mails, and the status stays `waiting` until the last one. Card
+/// waits, which end only when the test moves the card: time waits can
+/// end in one tick on a loaded machine and share a mail, or end before
+/// the next one is made (TER-60).
 #[tokio::test]
 async fn three_waits_that_end_apart_send_three_mails() {
     let (td, lead, _) = setup().await;
+    let mut cards = Vec::new();
     let mut ids = Vec::new();
-    // `for` is relative to the daemon's clock: a slow request cannot put
-    // the time in the past (TER-60).
-    for secs in ["1", "2", "3"] {
-        let w = new_wait(&td, &lead, json!({"kind": "time", "for": secs})).await;
-        ids.push(w["id"].as_str().unwrap().to_owned());
+    for n in 0..3 {
+        let c = new_card(&td, &lead, &format!("Step {n}")).await;
+        let w = new_wait(
+            &td,
+            &lead,
+            json!({"kind": "card", "card": c, "column": "review"}),
+        )
+        .await;
+        cards.push(c);
+        ids.push(id(&w));
     }
     assert_eq!(status(&td, &lead).await, "waiting");
-    let mut ends = Vec::new();
-    for (i, wid) in ids.iter().enumerate() {
-        let w = wait_state(&td, wid, "resolved").await;
-        ends.push(w["resolved_at"].as_str().unwrap().to_owned());
+    let mut seen = Vec::new();
+    for (i, (card, wid)) in cards.iter().zip(&ids).enumerate() {
+        to_review(&td, &lead, card).await;
+        wait_state(&td, wid, "resolved").await;
         until("the next wake mail", || async {
             system_mail(&td, &lead).await.len() == i + 1
         })
         .await;
+        // The next wait ends only at the next move: this read is safe.
+        seen.push(status(&td, &lead).await);
         let m = system_mail(&td, &lead).await[i].clone();
         assert!(m["body"].as_str().unwrap().contains(wid.as_str()), "{m}");
     }
-    td.wait_status(&lead, "idle").await;
-    // The status stays `waiting` until the last wait ends. Read from the
-    // status events, not from a GET after each mail: on a loaded machine
-    // that GET can come after the next wait has ended (TER-60).
-    let ev = td
-        .get(&format!("/api/agents/{lead}/events?kind=status"))
-        .await;
-    let ev = ev.ok().as_array().unwrap().clone();
-    let from = ev
-        .iter()
-        .position(|e| e["data"]["status"] == "waiting")
-        .expect("a waiting status event");
-    let idle = from
-        + ev[from..]
-            .iter()
-            .position(|e| e["data"]["status"] != "waiting")
-            .expect("a status event after waiting");
-    assert_eq!(ev[idle]["data"]["status"], "idle", "{ev:#?}");
-    let idle_at = ev[idle]["at"].as_str().unwrap();
-    assert!(
-        idle_at >= ends[2].as_str(),
-        "idle at {idle_at}, last end {}",
-        ends[2]
-    );
-    assert!(idle_at >= ends[1].as_str());
+    assert_eq!(seen, ["waiting", "waiting", "idle"]);
     let bodies: Vec<String> = system_mail(&td, &lead)
         .await
         .iter()
@@ -289,16 +300,21 @@ async fn three_waits_that_end_apart_send_three_mails() {
     assert!(bodies[2].contains("no open waits"), "{}", bodies[2]);
 }
 
-/// Ends in one debounce window share one mail, which lists each wait.
+/// Ends in one debounce window share one mail, which lists each wait. Two
+/// card waits on one card: one move ends both in one check (TER-60).
 #[tokio::test]
 async fn ends_in_one_window_share_one_mail() {
     let (td, lead, _) = setup().await;
-    // One `at` for both, so they end in the same tick. Far enough ahead
-    // that a slow request does not land after it (TER-60).
-    let at = soon(3000);
+    let card = new_card(&td, &lead, "Both").await;
     for _ in 0..2 {
-        new_wait(&td, &lead, json!({"kind": "time", "at": at})).await;
+        new_wait(
+            &td,
+            &lead,
+            json!({"kind": "card", "card": card, "column": "review"}),
+        )
+        .await;
     }
+    to_review(&td, &lead, &card).await;
     until("one wake mail", || async {
         system_mail(&td, &lead).await.len() == 1
     })
