@@ -2098,14 +2098,16 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
-    // 73: Inbox threads (TER-91, `crate::store::threads`): a conversation
+    // 74: Inbox threads (TER-91, `crate::store::threads`): a conversation
     // of the operator with one agent on one topic. `report_to` is the lead
     // of the scope (D34), set at the open. `status` is `waiting_operator`,
     // `waiting_agent`, or `closed`. `response` is the newest overall
     // response of the operator (JSON `{text, by, at}`); `handoff` is set
     // at the close (JSON). `thread_messages` holds the conversation; the
-    // questions of a thread have `questions.thread`. Self-contained: when
-    // another branch takes this number, move this entry to the end.
+    // questions of a thread have `questions.thread`. It comes after 73 of
+    // TER-74 (bound ephemeral agents), which merges onto `next` first.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end.
     r#"
     CREATE TABLE threads (
         id         TEXT PRIMARY KEY,

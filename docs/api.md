@@ -3645,14 +3645,18 @@ operator mails the agent about each retract, as `.../retract` does (§6.8).
 | Respond | The operator. |
 | Close | The operator, and the attached agent. (TER-95 makes the agent's close a proposal that the operator confirms.) |
 
-The errors of the verbs on one thread, in this order: an unknown thread,
-or one that the caller may not read, is `404 not_found`. A reader that may
-not do the verb is `403 forbidden` (for example the report-to lead on
-`messages` or `close`, or an agent on `respond`). A write to a closed thread
-is `409 conflict`. A bad body is `422 invalid`. `POST /api/threads` by an
-agent is `403 forbidden`; a scope without a lead is `409 conflict`; an
-unknown scope or agent is `404 not_found`.
 | Ask a question in a thread | The attached agent, also when it is not a leader: `POST /api/agents/{id}/questions` with `"thread"`. |
+
+**Errors.** A body that does not parse (not JSON, a wrong type, or an
+unknown field) is `400 bad_request` before any check below. After the body
+parses, the verbs on one thread fail in this order: an unknown thread, or
+one that the caller may not read, is `404 not_found`. A reader that may not
+do the verb is `403 forbidden` (for example the report-to lead on
+`messages` or `close`). `respond` by an agent is `403 forbidden` before the
+thread is looked up. A write to a closed thread is `409 conflict`. A field
+that fails its check (an empty `text`, a bad link) is `422 invalid`.
+`POST /api/threads` by an agent is `403 forbidden`. A scope without a lead
+is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
