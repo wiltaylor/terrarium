@@ -650,3 +650,79 @@ async fn a_cancel_ends_a_queued_job() {
     assert_eq!(c["column"], "validating");
     assert!(!labels(&c).iter().any(|l| l.starts_with("validation:")));
 }
+
+/// Queue a merge of a new card on `branch` with `recipe`, wait for the
+/// end, and return the job.
+async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": recipe, "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    lab.branch(branch, "next", &[("OK", "yes\n")]);
+    let id = lab.card(branch, branch).await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{id}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    jobs.into_iter().find(|j| j["card"] == id.as_str()).unwrap()
+}
+
+/// Review B1: the recipe commits in its clone and moves HEAD. The push
+/// sends the merge commit that the prepare step recorded, never the
+/// recipe's commit.
+#[tokio::test]
+async fn a_merge_pushes_the_recorded_commit_not_the_head_after_the_recipe() {
+    let lab = lab(2).await;
+    let before = git(&lab.origin, &["rev-parse", "next"]);
+    let job = merge_with_recipe(
+        &lab,
+        "ter-m1",
+        "test -f OK && echo evil > EVIL && git add EVIL \
+         && git -c user.name=x -c user.email=x@x commit -q -m evil \
+         && git checkout -q -B other && test \"$(git log -1 --format=%s)\" = evil",
+    )
+    .await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    assert_ne!(next, before);
+    assert_eq!(job["head"].as_str().unwrap(), next, "{job:#}");
+    assert_eq!(
+        git(&lab.origin, &["log", "-1", "--format=%s", "next"]),
+        "Merge ter-m1 onto next"
+    );
+    let files = git(&lab.origin, &["ls-tree", "--name-only", "next"]);
+    assert!(!files.lines().any(|f| f == "EVIL"), "{files}");
+    let all = git(&lab.origin, &["log", "--all", "--format=%s"]);
+    assert!(!all.lines().any(|l| l == "evil"), "{all}");
+}
+
+/// Review B2: the recipe plants `url.<x>.insteadOf` and `pushInsteadOf`
+/// in its clone's `.git/config` to send the push (and the credential) to
+/// another repo. The push does not read that config: `next` goes to the
+/// project's repo, and the other repo gets nothing.
+#[tokio::test]
+async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
+    let lab = lab(2).await;
+    let evil = lab._dirs.path().join("evil.git");
+    std::fs::create_dir_all(&evil).unwrap();
+    git(&evil, &["init", "-q", "--bare", "-b", "main"]);
+    let (origin, evil_s) = (lab.origin.display().to_string(), evil.display().to_string());
+    let recipe = format!(
+        "test -f OK && git config 'url.{evil_s}.insteadOf' '{origin}' \
+         && git config 'url.{evil_s}.pushInsteadOf' '{origin}' \
+         && git config remote.pushDefault evil && git config remote.evil.url '{evil_s}'"
+    );
+    let job = merge_with_recipe(&lab, "ter-m2", &recipe).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    assert_eq!(
+        job["head"].as_str().unwrap(),
+        git(&lab.origin, &["rev-parse", "next"])
+    );
+    assert_eq!(git(&evil, &["for-each-ref"]), "", "the other repo got a push");
+}

@@ -14,10 +14,15 @@
 //!   2. the recipe (`sh -c <recipe>` in the clone), without any
 //!      credential: it runs the repo's code.
 //!   3. a merge job only, when the recipe passed: push the merge commit
-//!      to `next`, with the credential again. Not forced: when `next`
-//!      moved, the push fails.
+//!      to `next`. The recipe may have changed the clone (new commits, a
+//!      moved HEAD, its `.git/config`), so the push never runs there:
+//!      a. without any credential: a fresh bare repo `<clone>.push`
+//!         fetches exactly the merge commit that step 1 recorded, over
+//!         `file://`. A commit that is gone fails the job.
+//!      b. with the credential: push that commit ID from the fresh repo
+//!         to `next`. Not forced: when `next` moved, the push fails.
 //!
-//!   Then the clone is removed.
+//!   Then the clone and the push repo are removed.
 //! - On the end the daemon moves the card itself (as the operator, with a
 //!   comment that starts "Job queue:"): a pass moves a validate card to
 //!   `review` and a merge card to `accepted`. A failure is rerun once
@@ -394,6 +399,14 @@ impl StepCtx<'_> {
         }
     }
 
+    /// A git step without the credential.
+    fn plain_cmd(&self, script: &str, args: &[&str]) -> RemoteCmd {
+        RemoteCmd {
+            env: Default::default(),
+            ..self.git_cmd(script, args)
+        }
+    }
+
     async fn run(&self, cmd: &RemoteCmd, max: usize) -> ApiResult<Collected> {
         step(self.state, &self.job.id, self.def, cmd, max).await
     }
@@ -467,7 +480,26 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
     if !ok || job.kind != JobKind::Merge {
         return Ok(result);
     }
-    let push = x.git_cmd(PUSH_SCRIPT, &[x.url, x.dir]);
+    // The push never runs in the clone that the recipe ran in: a fresh
+    // repo gets the recorded merge commit, and only that commit goes out.
+    check_commit(&head)?;
+    let push_dir = format!("{}.push", x.dir);
+    let collect = x.plain_cmd(COLLECT_SCRIPT, &[x.dir, &push_dir, &head]);
+    let c = x.run(&collect, STEP_MAX).await?;
+    if result_line(&c.stdout).get("outcome").map(String::as_str) != Some("ok") {
+        return Ok(JobEnd {
+            passed: false,
+            outcome: Some("error".into()),
+            exit_code: exit_code(c.end.as_ref()),
+            tail: Some(format!(
+                "the recipe passed, but the merge commit {head} could not be taken from the job clone ({}); did the recipe change the clone?\n{}",
+                end_text(c.end.as_ref()),
+                output_of(&c)
+            )),
+            head: Some(head),
+        });
+    }
+    let push = x.git_cmd(PUSH_SCRIPT, &[x.url, &push_dir, &head]);
     let c = x.run(&push, STEP_MAX).await?;
     if result_line(&c.stdout).get("outcome").map(String::as_str) == Some("ok") {
         return Ok(result);
@@ -849,13 +881,33 @@ else
 fi
 "#;
 
-/// Step 3: `url dir`. Push the merge commit to `next`, not forced.
-const PUSH_SCRIPT: &str = r#"url=$1; dir=$2
-if g -C "$dir" push -q -- "$url" HEAD:refs/heads/next; then forget; res ok; else forget; res error; exit 2; fi
+/// Step 3a, without the credential: `dir push sha`. A fresh bare repo at
+/// `push` gets exactly the merge commit `sha` (recorded in step 1, before
+/// the recipe ran) from the job clone over `file://`. The fetch checks the
+/// object IDs, so the content is the validated merge whatever the recipe
+/// did to the clone. Nothing of the clone's config reaches step 3b.
+const COLLECT_SCRIPT: &str = r#"dir=$1; push=$2; sha=$3
+case "$sha" in *[!0-9a-f]*|'') echo "bad merge commit"; res error; exit 2 ;; esac
+case "$push" in /*/*) ;; *) echo "the push dir is not absolute"; res error; exit 2 ;; esac
+rm -rf -- "$push" && G init -q --bare --template= "$push" || { echo "cannot make the push repo"; res error; exit 2; }
+if ! G -c uploadpack.allowAnySHA1InWant=true -C "$push" fetch -q --no-tags -- "file://$dir/.git" "+$sha:refs/heads/merge"; then
+  echo "the merge commit $sha is not in the job clone any more"; res error; exit 2
+fi
+if [ "$(G -C "$push" rev-parse --verify -q "refs/heads/merge^{commit}")" != "$sha" ]; then
+  echo "the push repo does not hold the merge commit $sha"; res error; exit 2
+fi
+res ok "$sha"
 "#;
 
-/// The end: `dir`. Remove the clone.
-const CLEAN_SCRIPT: &str = r#"case "$1" in /*/*) rm -rf -- "$1" ;; *) exit 2 ;; esac"#;
+/// Step 3b: `url push sha`. Push exactly the merge commit `sha` to `next`
+/// from the fresh repo of step 3a, not forced.
+const PUSH_SCRIPT: &str = r#"url=$1; push=$2; sha=$3
+case "$sha" in *[!0-9a-f]*|'') forget; echo "bad merge commit"; res error; exit 2 ;; esac
+if g -C "$push" push -q -- "$url" "$sha:refs/heads/next"; then forget; res ok; else forget; res error; exit 2; fi
+"#;
+
+/// The end: `dir`. Remove the clone and the push repo.
+const CLEAN_SCRIPT: &str = r#"case "$1" in /*/*) rm -rf -- "$1" "$1.push" ;; *) exit 2 ;; esac"#;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

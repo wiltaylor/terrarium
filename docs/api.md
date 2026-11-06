@@ -10123,9 +10123,21 @@ Jobs start first in, first out, with at most `slots` running per project.
 A merge job does not start while another merge job of the same repo runs.
 A card has at most one queued or running job.
 
-A job is three runs on the target. The prepare run (clone, checkout,
-merge) and the push run get the repo credential in their env. The recipe
-run gets no credential, because it runs the repo's code.
+A job is three runs on the target, and a merge job has one more. The
+prepare run (clone, checkout, merge) and the push run get the repo
+credential in their env. The recipe run gets no credential, because it
+runs the repo's code.
+
+The recipe can change its clone: make commits, move HEAD, or write
+`.git/config` (for example `url.<base>.insteadOf`). So the push of a merge
+job never runs in that clone, and never pushes what HEAD is after the
+recipe:
+
+1. The prepare run records the merge commit before the recipe runs.
+2. A run without any credential makes a fresh bare repo next to the clone
+   and fetches exactly that commit from the clone over `file://`. When
+   the commit is gone, the job fails (`error`).
+3. The push run pushes that commit ID to `next` from the fresh repo.
 
 ### 35.3 Results
 
