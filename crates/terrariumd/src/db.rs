@@ -2034,14 +2034,17 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE roles;
     ALTER TABLE roles_architect RENAME TO roles;
     "#,
-    // 70: the job queue of a project (TER-71, `crate::jobs`). A job
+    // 71: the job queue of a project (TER-71, `crate::jobs`). A job
     // validates a card commit, or merges a card branch onto `next` and
     // validates the result. Jobs start first in, first out, at most the
     // project's `slots` at a time. `attempt` is 1, or 2 for the
     // one rerun of a failed job. `outcome` says why a job failed (`red`,
     // `conflict`, `error`). `project_delivery` holds the queue config of a
-    // project (JSON `DeliveryDef`). Self-contained: when another branch
-    // takes this number, move this entry to the end of the list.
+    // project (JSON `DeliveryDef`). It comes after migration 70 of TER-67
+    // (the idle alert), which merges onto `next` first; until `next` has
+    // it, this entry is at index 70 on this branch. Self-contained: when
+    // another branch takes this number, move this entry to the end of the
+    // list.
     r#"
     CREATE TABLE jobs (
         id          TEXT PRIMARY KEY,
