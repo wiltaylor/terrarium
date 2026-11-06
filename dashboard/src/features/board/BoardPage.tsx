@@ -8,6 +8,7 @@ import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from ".
 import type { Card, Column, NewCard, Question, Version } from "../../api/types";
 import { ago, compact, humanize } from "../../lib/format";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
+import { idleBadge } from "../../lib/idle";
 import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { CardQuestions } from "./CardQuestions";
@@ -644,6 +645,13 @@ function KCard(props: {
             <span class="chip warn" title={`Waiting on ${props.card.blocked_by.join(", ")}`}>
               waits on {props.card.blocked_by.length}
             </span>
+          </Show>
+          <Show when={idleBadge(props.card, props.now)}>
+            {(b) => (
+              <span class="chip warn idle-badge" title={b().title} aria-label={b().title}>
+                {b().label}
+              </span>
+            )}
           </Show>
         </span>
       </div>

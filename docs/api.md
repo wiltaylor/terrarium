@@ -878,7 +878,7 @@ three letters and digits in upper case, then longer, then with a number
 | `GET /api/projects` | | `200` projects by name | an agent sees its own project |
 | `POST /api/projects` | `{"name", "description"?, "card_prefix"?}` | `201` project | sysadmin |
 | `GET /api/projects/{name}` | | `200` project | read |
-| `PATCH /api/projects/{name}` | `{"description"?, "card_prefix"?}` | `200` project | project_admin |
+| `PATCH /api/projects/{name}` | `{"description"?, "card_prefix"?, "idle_alert"?}` | `200` project | project_admin |
 | `DELETE /api/projects/{name}?confirm=true` | | `204` | sysadmin |
 | `GET /api/projects/{name}/agents` | | `200` agents by ID | read |
 | `GET /api/projects/{name}/targets` | | `200` targets, the project's and the global ones | read |
@@ -891,6 +891,11 @@ three letters and digits in upper case, then longer, then with a number
 Names are 1 to 63 of `a-z`, `0-9`, `-`, `_`, and start with a letter or a
 digit. `card_prefix` is 1 to 10 of `A-Z` and `0-9`, and starts with a
 letter. The prefix cannot change after the first card (`conflict`).
+
+`idle_alert` is the threshold of the idle alert (§6.2, "Idle alert"): a
+duration (`15m`, `1h`), or `off` (also `0`). `null` sets the default
+(15m), and the project then shows no `idle_alert`. Another value is
+`invalid`. A file project cannot set it yet.
 
 `DELETE` refuses a project that has agents (`conflict`), and a file project
 (`file_managed`). It deletes the board and the repos.
@@ -2172,6 +2177,32 @@ the role `working`) gets one turn from the daemon, for example:
   `reminded` (§9). It wakes no agent and nudges no lead.
 - **Setting.** `card_reminder` of the agent (§6.1); absent: the daemon's
   `TERRARIUM_CARD_REMINDER` (on).
+
+**Idle alert (TER-67).** The card reminder asks the agent. The idle alert
+tells the project's leads when the assignee of a card in progress rests
+with no wait for too long, so a WIP place does not stay held while both
+sides wait. The daemon checks on each lifecycle tick (15 s).
+
+- **Which cards.** Not archived, in the column with the role `working` or
+  a column named `research`, with an agent as assignee.
+- **Resting.** The assignee's status is `idle` or `stopped`, it is not
+  paused, and it has no open wait (`waiting` never counts). The rest
+  starts at the first `idle` or `stopped` status after the newest other
+  status, so an idle stop does not start it again, and a turn or a wait
+  does.
+- **Threshold.** The project's `idle_alert` (§5): default 15m, `off`
+  for none.
+- **Crossing.** The card gets `idle_since` (the start of the rest, §8.1)
+  and a `card` event with the change `idle` (`idle_since`, `mailed`). The
+  leads of the project (agents with `project_admin`, other than the
+  assignee; with none, the operator) get one mail from `system` in one
+  thread: the agent, the card, the idle time, and the last line of the
+  agent's transcript as quoted data. Once for each card and rest, also
+  across a daemon restart.
+- **Clearing.** When the assignee works again, waits, or is paused, a
+  newer rest starts, the card moves to another column or gets another
+  assignee, or the threshold is `off`: `idle_since` goes, with a `card`
+  event with the change `idle_cleared`.
 
 **Auto compact (PLAN §18).** The daemon can compact the session of an
 agent at rest. Each compaction is one model call, so all of it is off by
@@ -3697,6 +3728,9 @@ A card:
 - `done_at` is when the card last moved to `done`. A move out of `done`
   clears it. It is absent for a card that is not done, and for a card done
   before migration 40.
+- `idle_since` is the idle mark (§6.2, "Idle alert"): the assignee rests
+  with no wait since this time, past the project's `idle_alert`, and the
+  leads got a mail. It is absent when the card has no mark.
 - `blocked_by` lists the dependencies that are neither `done` nor archived.
 - `tests` is the latest test run that is linked to the card (§29):
   `{"id","name","status","counts":{"passed","failed","errored","skipped","total"},"created_at"}`.
@@ -4134,7 +4168,7 @@ Kinds:
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning`, `usage_limit` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). A `usage_limit` (`{message, resets_at?}`) is the provider's refusal of a turn for a usage limit or a rate limit (§16.6). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
 | `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true`, `held_reason`, and `thread_state: "paused"`. A release (§7.4) emits the event again with `released: true`. |
-| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared), or `reminded` (`eta_passed`: the daemon reminded the idle assignee to update the card, §6.2 "Card reminder"). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
+| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared), `reminded` (`eta_passed`: the daemon reminded the idle assignee to update the card, §6.2 "Card reminder"), `idle` (`idle_since`, `mailed`: the idle alert marked the card and mailed the leads, §6.2 "Idle alert"), or `idle_cleared` (`idle_since`: the mark went). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `question_guard` | `{question, mailed}`: a member ended its turn with a question in plain text and reported nothing, so the daemon set `blocked` (reason "asked a question in plain text: ...") and mailed `mailed` (the leads, or `operator`). `question` is the first 200 characters. The actor is `system`. PLAN §8.4. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |

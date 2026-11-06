@@ -20,7 +20,30 @@ const CARD_COLS: &[(&str, &str)] = &[
     ("ASSIGNEE", "assignee_name"),
     ("LABELS", "labels"),
     ("BLOCKED BY", "blocked_by"),
+    ("IDLE", "idle"),
 ];
+
+/// The idle time of a card with an idle mark (TER-67): `25m` since
+/// `idle_since`. `None` for a card with no mark.
+pub fn idle_for(k: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let since = chrono::DateTime::parse_from_rfc3339(k["idle_since"].as_str()?).ok()?;
+    let secs = (now - since.with_timezone(&chrono::Utc)).num_seconds();
+    Some(super::inspect::duration(secs))
+}
+
+/// The cards of a list, each with `idle` for the table.
+fn card_rows(items: &[Value], now: chrono::DateTime<chrono::Utc>) -> Vec<Value> {
+    items
+        .iter()
+        .map(|k| {
+            let mut k = k.clone();
+            if let Some(d) = idle_for(&k, now) {
+                k["idle"] = d.into();
+            }
+            k
+        })
+        .collect()
+}
 
 fn card_path(id: &str) -> String {
     format!("/api/cards/{}", encode(id))
@@ -256,8 +279,11 @@ async fn show_board(ctx: &Ctx, path: &str) -> anyhow::Result<()> {
                     "-" => String::new(),
                     a => format!("  @{a}"),
                 };
+                let idle = idle_for(card, chrono::Utc::now())
+                    .map(|d| format!("  (idle {d})"))
+                    .unwrap_or_default();
                 c.line(format!(
-                    "  {:<9} {}{who}",
+                    "  {:<9} {}{who}{idle}",
                     field(card, "id"),
                     field(card, "title")
                 ));
@@ -296,6 +322,12 @@ pub fn print_card(ctx: &Ctx, k: &Value) {
     ));
     if let Some(eta) = eta_line(k, chrono::Utc::now()) {
         ctx.line(eta);
+    }
+    if let Some(d) = idle_for(k, chrono::Utc::now()) {
+        ctx.line(format!(
+            "idle: the assignee rests with no wait since {} ({d}); the leads were told",
+            field(k, "idle_since")
+        ));
     }
     if let Some(body) = k["body"].as_str().filter(|b| !b.is_empty()) {
         delimited(ctx, "CARD BODY", body);
@@ -389,7 +421,8 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                     .await?,
             );
             ctx.emit(&v, |c, v| {
-                print_table(c, as_items(v), CARD_COLS, "no cards")
+                let rows = card_rows(as_items(v), chrono::Utc::now());
+                print_table(c, &rows, CARD_COLS, "no cards")
             })
         }
         CardCmd::Show { id } => {
