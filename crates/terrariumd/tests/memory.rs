@@ -357,3 +357,43 @@ async fn links_contradictions_first_and_graph() {
     let ev = td.get("/api/events?kind=memory.linked").await;
     assert_eq!(ev.ok().as_array().unwrap().len(), 3);
 }
+
+#[tokio::test]
+async fn same_id_in_two_projects_resolves_by_project() {
+    let td = setup().await;
+    mem(&td, "proj/w1", json!({"title": "Proj MEM-1 (GPU wheels)"})).await;
+    td.post_as(
+        "other/x",
+        "/api/projects/other/memories",
+        json!({"title": "Other MEM-1 (API limit)"}),
+    )
+    .await
+    .ok();
+
+    // Each project's MEM-1, by its key, for the show and the graph route.
+    let r = td.get("/api/memories/proj%2FMEM-1").await;
+    assert_eq!(r.ok()["title"], "Proj MEM-1 (GPU wheels)");
+    let r = td.get("/api/memories/other%2FMEM-1").await;
+    assert_eq!(r.ok()["title"], "Other MEM-1 (API limit)");
+    let r = td.get("/api/memories/proj%2FMEM-1/graph?depth=1").await;
+    assert_eq!(r.ok()["nodes"][0]["title"], "Proj MEM-1 (GPU wheels)");
+    let r = td.get("/api/memories/other%2FMEM-1/graph?depth=1").await;
+    assert_eq!(r.ok()["nodes"][0]["title"], "Other MEM-1 (API limit)");
+
+    // A bare ID is the caller's own project.
+    let r = td.get_as("proj/w1", "/api/memories/MEM-1").await;
+    assert_eq!(r.ok()["title"], "Proj MEM-1 (GPU wheels)");
+    let r = td.get_as("other/x", "/api/memories/MEM-1").await;
+    assert_eq!(r.ok()["title"], "Other MEM-1 (API limit)");
+
+    // A project the caller may not read is refused, for show and graph.
+    td.get_as("other/x", "/api/memories/proj%2FMEM-1")
+        .await
+        .err(403, "forbidden");
+    td.get_as("other/x", "/api/memories/proj%2FMEM-1/graph?depth=1")
+        .await
+        .err(403, "forbidden");
+    td.get_as("proj/w1", "/api/memories/other%2FMEM-1")
+        .await
+        .err(403, "forbidden");
+}
