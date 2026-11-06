@@ -344,6 +344,7 @@ terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--m
                     [--compact-on-idle on|off|default] [--compact-max-age 24h|off|default]
                     [--spawn-template t]... [--spawn-max-concurrent n] [--spawn-max-per-day n|0]
                     [--spawn-max-lifetime 2h] [--spawn-children on|off] [--no-spawn]
+                    [--thread-open on|off]
 terrarium agent set <agent> --save-system-prompt <name>  save the custom text in the library, and select it
 terrarium agent swap <agent> <subscription>  move to another plan account of the pool
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
@@ -524,6 +525,9 @@ policy (the CLI reads the policy first, or takes `--policy`):
 `--spawn-children on|off`, and `--no-spawn`, which removes the rights. A
 lead sets them on a member of its project; `--spawn-children on` needs a
 sysadmin or the operator.
+`--thread-open on|off` sets `policy.thread_open`, the right to open Inbox
+threads (`thread new`), with the same rule: a lead on a member of its
+project, a sysadmin or the operator on any agent.
 
 `agent rm` deletes the agent. The daemon moves the agent dir and the
 workspace `work/<project>/<agent>` to `<state>/trash/<ulid>-<ts>/` (the
@@ -1649,6 +1653,48 @@ terrarium admin inbox resume <thread-id> [-m note]
 - `admin inbox release` delivers one held message of the loop guard;
   `admin inbox resume` ends the pause of a thread and releases its held
   messages, with an optional note to the participants (api.md §7.4).
+
+### Inbox threads
+
+[api.md §6.13](api.md#613-inbox-threads) is the contract; the wiki page
+`inbox-threads` is the plan. A thread is a conversation between the
+operator and one agent on one topic, in the Inbox, with questions inside
+and an overall response (the approval record).
+
+```
+terrarium thread new --topic "<one line>" [--template <t>] [--scope global|<project>] [--agent <agent>] [-m <text|->]
+terrarium thread post <id> -m <text|->
+terrarium thread ask <id> "<question>" [-o <choice>]... [--context <text|-> | --context-file <path>] [--urgent | --critical]
+terrarium thread ask <id> "<summary>" --bundle (--item "<text>"... | --items-file <path|->) [--context ...]
+terrarium thread respond <id> -m <text|->
+terrarium thread close <id> [--handoff <text|->] [--link <kind>:<ref>]...
+terrarium thread ls [--status waiting_operator|waiting_agent|closed|open|all] [--scope global|<project>]
+terrarium thread show <id>
+```
+
+- `new` opens a thread and prints `thread <id> opened (<scope>, reports to
+  <lead>, <status>).` An agent needs the right `thread:open` (`agent set
+  --thread-open on`) and a `--template` whose rights do not exceed its own
+  (A1): a template with a role, a target, or another right that the agent
+  does not hold is refused (`403`, exit 3), and the message names the
+  right. The operator opens any thread. The scope defaults to the agent's
+  own project, and to `global` for the operator; an agent opens only in
+  its own project or `global`. `--agent` names the attached agent until
+  the daemon spawns it from the template.
+- `post` adds a message: the attached agent or the operator.
+- `ask` is for the attached agent: a question in its thread, or with
+  `--bundle` a bundle (the items as for `question bundle`). The question
+  shows in the thread, and the operator answers it there. A member asks
+  in its thread too. The operator does not ask (exit 2).
+- `respond` sends the operator's overall response.
+- `close` closes the thread with a handoff summary and links (`card`,
+  `mail`, `wiki`, `memory`, `url`, `other`). For an agent the close is a
+  proposal that the operator confirms (TER-95); until then it closes.
+- `ls` lists the threads (an agent: the ones it opened, is attached to,
+  or reports from; a sysadmin or an architect: all): `ID`, `STATUS`, `SCOPE`, `AGENT`, `MSGS`, `OPEN_Q`,
+  `LAST`, `TOPIC`. `show` prints the fields, then each message, the
+  response, and the handoff between data markers, and one line for each
+  question.
 
 ### Fleet files
 

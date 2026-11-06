@@ -349,6 +349,13 @@ pub async fn spawn(
         .filter(|sp| sp.may_spawn_children)
         .map(|sp| Box::new(sp.for_child()));
     spawn_rights::inherit_pool(&mut def, owner.view.as_ref());
+    spawn_rights::limit_thread_open(
+        &mut def.policy,
+        owner
+            .view
+            .as_ref()
+            .map(|v| (&v.agent.policy, v.agent.roles.as_slice())),
+    );
     for role in &def.roles {
         policy::change_role(actor, "", &def.project, *role)?;
     }

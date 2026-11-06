@@ -3666,7 +3666,7 @@ There is no register of threads and no conflict check between threads
 | `id` | The thread ID (a ULID). |
 | `topic` | One line, at most 200 characters. Set at the open; it does not change. |
 | `scope` | `global`, or the name of a project. |
-| `template` | The agent template of the attached agent (TER-92 spawns the agent from it). Optional; the template is not checked yet. |
+| `template` | The agent template of the attached agent (TER-92 spawns the agent from it). Optional for the operator, and not checked. An agent must name it, and its rights are checked (A1, below). |
 | `opened_by`, `opened_by_name` | `operator`, or the ULID and `project/name` of the agent that opened it. |
 | `agent`, `agent_name` | The attached agent: one per thread, or `null` while it has none. Until TER-92 spawns it from the template, the opener names an existing agent: of the scope project, or any agent for `global`. |
 | `report_to`, `report_to_name` | The lead that the thread reports to (D34): for `global`, the lead of project `meta`; else the lead of the scope project. The lead of a project is its project_admin agent named `lead`, else its first project_admin by name. Set at the open; it does not change. A scope without a lead is `409 conflict` at the open. |
@@ -3695,8 +3695,8 @@ operator mails the agent about each retract, as `.../retract` does (§6.8).
 
 | Action | Who |
 |---|---|
-| Open | The operator, with any scope and template. (An agent with the right `thread:open` comes with TER-93; until then an agent gets `403`.) |
-| Read, list | The operator, and an agent that reads all (sysadmin, architect): every thread. Another agent: the threads that it opened (`opened_by`, with TER-93), is attached to, or is the report-to lead of. It gets `404` for any other thread, and a list shows it only those threads. |
+| Open | The operator, with any scope and template. An agent with the right `thread:open` (below), in its own project or `global` (another project needs sysadmin, as each write does), with a template within its rights (A1, below). Another agent gets `403`. |
+| Read, list | The operator, and an agent that reads all (sysadmin, architect): every thread. Another agent: the threads that it opened (`opened_by`), is attached to, or is the report-to lead of. It gets `404` for any other thread, and a list shows it only those threads. |
 | Post a message | The operator and the attached agent. |
 | Respond | The operator. |
 | Close | The operator, and the attached agent. (TER-95 makes the agent's close a proposal that the operator confirms.) |
@@ -3716,12 +3716,45 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `POST /api/threads` | `{"topic", "scope"?, "template"?, "agent"?, "text"?}`; `scope` defaults to `global`, `agent` is a ULID or `project/name` | `201` the thread |
+| `POST /api/threads` | `{"topic", "scope"?, "template"?, "agent"?, "text"?}`; `scope` defaults to `global` for the operator and to the own project for an agent; `agent` is a ULID or `project/name` | `201` the thread. An agent: `403` without `thread:open`, for another project, or for a template or agent above its rights (A1); `422` with no `template`; `404` for an unknown template |
 | `GET /api/threads` | `?status=waiting_operator\|waiting_agent\|closed\|open\|all` (default `open`: not closed), `?scope=` | `200` the threads without `messages` and `questions`, with `message_count`, `open_questions`, and `last_at`. The ones that wait for the operator first, then the newest activity first. At most 200. |
 | `GET /api/threads/{id}` | | `200` the thread |
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | `200` the thread, `closed`, with `handoff`; its open questions are `retracted` |
+
+**The right `thread:open`** (TER-93). The policy field `thread_open`
+(§6.1, `policy`) lets an agent open threads (`terrarium thread new`). It
+is granted like the spawn rights (§6.10): the operator and a sysadmin set
+it on any agent, a project_admin on a member of its project, but not on
+itself and not on an admin (`PATCH /api/agents/{id}` with `policy`, or
+`terrarium agent set <agent> --thread-open on`). There is no limit on the
+threads that an agent opens (D35).
+
+**The rights check (A1).** An agent-opened thread may only use a template
+whose rights do not exceed the opener's; the operator opens a thread with
+any template. The template resolves in the project of the thread's agent:
+the scope project, or `meta` for `global`. A sysadmin holds every right.
+For the others, `403` names each right that the template (or a named
+`agent`) has and the opener does not hold:
+
+- a role: `project_admin` of that project needs the opener to be its
+  project_admin; `architect` needs an architect opener; `sysadmin` needs a
+  sysadmin;
+- a target that is not in the opener's `policy.targets`, unless it is a
+  target of that project and the opener administers the project;
+- a `cross_project` entry that the opener does not have, and a `mail_to`
+  entry of another project that the opener's `mail_to` or `cross_project`
+  does not cover;
+- spawn rights, unless the opener could grant them (a project_admin, for a
+  member of its project, with no `may_spawn_children`) or holds them;
+- `calendar_write`, unless the opener has it or administers the project.
+
+So a project lead with `thread:open` opens a `global` thread with a member
+template, but not with a template that has `project_admin` (of `meta`)
+or `architect`. An architect posts and asks in its own thread as the
+attached agent, and opens threads in its own project or `global` with
+templates within its rights; it writes in no other project.
 
 **Questions in a thread.** `POST /api/agents/{id}/questions` takes
 `"thread": "<id>"`: the attached agent asks in its open thread. The

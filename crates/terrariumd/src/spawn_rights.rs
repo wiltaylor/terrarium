@@ -23,7 +23,8 @@
 
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use terrarium_core::config::AgentDef;
+use terrarium_core::Role;
+use terrarium_core::config::{AgentDef, Policy};
 
 use crate::db::Tx;
 use crate::error::{ApiError, ApiResult};
@@ -296,6 +297,20 @@ pub fn inherit_pool(def: &mut AgentDef, owner: OwnerView<'_>) {
     def.subscription_pool = v.agent.subscription_pool.clone();
 }
 
+/// Keep `policy.thread_open` (the right `thread:open`, TER-93) on a child
+/// only when its owner holds it: the operator (`None`), a sysadmin, or an
+/// owner with `thread_open`. The template files take no `thread_open` key
+/// today; this keeps the rule of TER-65 (no right past the owner's) if a
+/// definition ever carries it.
+pub fn limit_thread_open(policy: &mut Policy, owner: Option<(&Policy, &[Role])>) {
+    if let Some((p, roles)) = owner
+        && !p.thread_open
+        && !roles.contains(&Role::Sysadmin)
+    {
+        policy.thread_open = false;
+    }
+}
+
 /// Write the leases and the grants of the new child `child` (`name` in
 /// `project`), whose lifetime ends at `deadline`. The answer is the audit
 /// part: the targets and the grants, with no secret value.
@@ -428,6 +443,25 @@ mod tests {
         for bad in ["", ":read", "gh:write", "/gh", "a/b/c", "p/"] {
             assert!(parse_grant(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn thread_open_stays_only_when_the_owner_holds_it() {
+        let on = Policy {
+            thread_open: true,
+            ..Policy::default()
+        };
+        let off = Policy::default();
+        let child = |owner: Option<(&Policy, &[Role])>| {
+            let mut p = on.clone();
+            limit_thread_open(&mut p, owner);
+            p.thread_open
+        };
+        assert!(child(None));
+        assert!(child(Some((&on, &[]))));
+        assert!(!child(Some((&off, &[]))));
+        assert!(!child(Some((&off, &[Role::ProjectAdmin]))));
+        assert!(child(Some((&off, &[Role::Sysadmin]))));
     }
 
     #[test]
