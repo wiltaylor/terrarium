@@ -16,6 +16,7 @@ use crate::transport::encode;
 const CARD_COLS: &[(&str, &str)] = &[
     ("ID", "id"),
     ("COLUMN", "column"),
+    ("POS", "position"),
     ("TITLE", "title"),
     ("ASSIGNEE", "assignee_name"),
     ("LABELS", "labels"),

@@ -2258,6 +2258,10 @@ Use JSON in a script:
 terrarium --json card ls --unassigned --column ready | jq -r '.[0].id'
 ```
 
+`card ls` lists the cards in board order: by column, then by place in the
+column, the top first. `POS` is the place in the column, from 0. So the first
+line of `card ls --unassigned --column ready` is the top card of `ready`.
+
 ## 8. Limits
 
 - Through the tunnel, the runner refuses a line longer than 4 MiB
