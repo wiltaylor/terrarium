@@ -10,9 +10,10 @@
 //!   agent that compacts, and an agent with a pending reset get nothing.
 //!   The check runs at the change to `idle`, so it comes before the idle
 //!   stop, which needs a full rest. An agent with queued work (a mail, a
-//!   pointer, a turn, the `--then` of a reset) or a wait that ended in the
-//!   last [`JUST_ENDED`] (its wake mail comes next) gets nothing: that turn
-//!   wakes it anyway, and the idle after it checks again (TER-50).
+//!   pointer, a turn, the `--then` of a reset), or with the wake mail of a
+//!   wait still to come or sent after its last turn started, gets nothing:
+//!   that mail wakes it anyway, and the idle after it checks again
+//!   (TER-50).
 //! - **Limits.** Once for each card: a card is due again only after
 //!   [`REMIND_AGAIN`], or when its ETA passed after the last reminder. The
 //!   agent's own answer (a comment, an ETA) does not make the card due
@@ -38,10 +39,6 @@ use crate::store::{agents, board, waits};
 
 /// The global default of `card_reminder` (`on` or `off`). Unset: on.
 pub const ENV_CARD_REMINDER: &str = "TERRARIUM_CARD_REMINDER";
-
-/// A wait that ended this recently has its wake mail on the way or just
-/// typed: no reminder before it (TER-50).
-pub const JUST_ENDED: Duration = Duration::from_secs(10);
 
 /// After a reminder, the time until the same card is due again.
 pub const REMIND_AGAIN: Duration = Duration::from_secs(60 * 60);
@@ -72,6 +69,9 @@ pub struct Reminders {
     default_on: AtomicBool,
     /// The agents that were `working` since their last start or idle.
     ran: Mutex<HashSet<AgentId>>,
+    /// The start of each agent's last turn (`working`), in the stored time
+    /// form: a wake mail sent after it has had no turn yet.
+    turn_at: Mutex<HashMap<AgentId, String>>,
     /// The agents whose [`check`] runs: the idle stop waits for it.
     checking: Mutex<HashSet<AgentId>>,
     sent: Mutex<HashMap<(AgentId, String), Sent>>,
@@ -82,6 +82,7 @@ impl Default for Reminders {
         Self {
             default_on: AtomicBool::new(default_from_env()),
             ran: Mutex::default(),
+            turn_at: Mutex::default(),
             checking: Mutex::default(),
             sent: Mutex::default(),
         }
@@ -111,6 +112,7 @@ impl Reminders {
         match status {
             AgentStatus::Working => {
                 ran.insert(agent);
+                guard(&self.turn_at).insert(agent, crate::db::now());
                 false
             }
             AgentStatus::Idle => {
@@ -212,8 +214,10 @@ async fn remind(state: &Shared, agent: AgentId) {
         return;
     }
     let key = agent.to_string();
-    let since = (chrono::Utc::now() - chrono::Duration::from_std(JUST_ENDED).unwrap_or_default())
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let since = guard(&state.lifecycle.reminders.turn_at)
+        .get(&agent)
+        .cloned()
+        .unwrap_or_else(crate::db::now);
     let read = state
         .db
         .read(move |c| {
@@ -223,7 +227,7 @@ async fn remind(state: &Shared, agent: AgentId) {
             // Work that wakes the agent anyway: its turn comes first, and
             // the idle after it checks the cards again (TER-50).
             let queued = agents::queued_count(c, &key)? > 0
-                || waits::ended_recently(c, &key, &since)?;
+                || waits::wake_unseen(c, &key, &since)?;
             Ok((v, reset || queued, cards))
         })
         .await;
