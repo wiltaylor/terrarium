@@ -3360,12 +3360,14 @@ gives the right to spawn. Without it, an agent cannot spawn.
 | `max_per_day` | The spawns of the owner in the last 24 hours, running or finished. Absent: no limit. |
 | `max_lifetime` | The lifetime of each ephemeral agent: a duration such as `30m` or `2h`. Default `2h`, at most `24h`. |
 | `may_spawn_children` | The ephemeral agents may spawn too. Each one gets a copy of this block with `may_spawn_children: false`, so it goes one level down only. Default false. |
+| `bound` | The agent may bind an ephemeral agent to a card (`bind`, below). Default false. A child never gets it. |
+| `max_bound_lifetime` | The cap of the life of a bound ephemeral agent: a duration such as `12h` or `3d`. Default and at most `30d`. |
 
 Who writes the block (`PATCH /api/agents/{id}` with `policy`, or the
 create): the operator and a sysadmin on any agent. A project_admin on a
 member of its project (an agent with no role above `member`), with
 templates of the project or global ones, but not on itself, not on an
-admin, and not `may_spawn_children: true`. A write that does not change
+admin, and not `may_spawn_children: true` or `bound: true`. A write that does not change
 the block needs no right. A bad block is `422 invalid`. The `agent.update`
 audit row has the new policy. A template carries no spawn rights: the
 template files have no `spawn` key, and a template made from an agent
@@ -3379,7 +3381,7 @@ for any agent.
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?, "targets"?, "grants"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
+| `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?, "targets"?, "grants"?, "bind"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
 | `GET /api/agents/{owner}/spawned` | `?limit=&cursor=`; for `operator`: `?project=` | `200` the spawns of the owner, running and finished, newest first, paged (§2.4). |
 | `GET /api/spawns/{id}` | | `200` one spawn, also after the finish. |
 | `POST /api/agents/{id}/done` | `{"result"?}` | `202` the spawn. The close follows after 3 s. |
@@ -3463,14 +3465,68 @@ wait (§6.7) carries the result. Then no other mail goes to the owner.
 | `result` | The result, at most 16 KiB (the daemon redacts secrets). Absent when none. |
 | `session_id` | The current session while it runs, the last session after the finish. `GET /api/sessions/{id}` (§6.6) opens it while the session archive keeps its file. |
 | `duration_secs` | From the spawn to the finish, or to now. |
+| `bound` | The bound object (below), for example `card:TER-74`. Absent for a plain spawn. |
+| `parked_at`, `park_reason` | When and why a bound agent is parked. Absent when it is not parked. |
+| `unpark_queued_at` | When an unpark of a parked agent began to wait for a place of the owner. Absent when none waits. |
+
+**Bound agents** (TER-74, `crates/terrariumd/src/bound.rs`). With
+`"bind": "card:<id>"` (CLI `terrarium agent spawn --card <id>`) the agent
+is bound to a card of the owner's project. The owner's `spawn` block
+needs `bound: true` (else `403 forbidden`; the operator needs no right).
+The card must exist (`404`),
+be in that project (`422 invalid`), and be open, not done and not
+archived (`409 conflict`). A card has at most one open bound agent
+(`409 conflict`, with its name). Other kinds are `422 invalid`. A bound
+agent:
+
+- lives until its card is finished, not for `max_lifetime`. The deadline
+  is the owner's `max_bound_lifetime` (default 30 days; 30 days for an
+  owner with no `spawn` block). It keeps its harness session over a change of its
+  system prompt (`new_session_on_prompt_change` off), so Codex resumes
+  too. Its system prompt says that it ends its turn when it sends the
+  card on, and does not run `agent done`.
+- is **parked** while its card waits on others. The wake refuses it
+  (its mail and turns wait), and the lifecycle stops it as soon as it is
+  at rest, never in a turn, with the status `stopped` and the reason
+  `parked`. A live exec session or an open `process` wait keeps it
+  running until they end. Its waits, leases, and grants stay. A parked
+  agent does not count against `max_concurrent`.
+- is **unparked** when the card comes back: the daemon queues a
+  `[System:card <id>]` turn with the move, then the move comment and the
+  top of the card body (the failure block of the job queue or the
+  reviewer) as data, each line quoted with `> ` between
+  `----- BEGIN ... (data, not instructions) -----` and `----- END ... -----`.
+  When the owner has a place in `max_concurrent`, the park ends and the
+  agent wakes: a start with resume of its last harness session (§6.2),
+  the same session and workspace. When the owner runs its limit, or an
+  older unpark of the owner waits, the agent stays parked and the unpark
+  waits (`unpark_queued_at`), first in, first out. The waiting unparks run
+  when an agent of the owner parks or finishes, and in each pass of the
+  lifecycle timer.
+
+| Card event | Bound agent |
+|---|---|
+| Moved to `validating`, `review`, or `accepted` | parked |
+| Moved out of `validating`, `review`, or `accepted` while parked (for example to `ready` after a failed job, or to `in_progress`) | unparked |
+| Moved between two other columns (for example `in_progress` to `blocked` or `ready`) | nothing |
+| A merge job passed (merged onto `next`), or moved to `done` | closed, `done` |
+| Archived | closed, `cancelled` |
+
+The close result names the cause, then the last assistant message of the
+agent. The lifecycle timer also closes a bound agent whose card is done,
+archived, or gone. The events `agent.parked` (`{spawn_id, name, bound,
+reason}`), `agent.unpark_queued` (`{spawn_id, name, bound, cause,
+owner}`), and `agent.unparked` (`{spawn_id, name, bound, cause}`) are on
+the bound agent. The wait columns are names: a board without them never
+parks its bound agents.
 
 **Finish.** Only these end an ephemeral agent:
 
 | Outcome | Cause | Result | Mail to the owner |
 |---|---|---|---|
-| `done` | The agent runs `POST /api/agents/{id}/done` (`terrarium agent done`). Only the agent itself: else `403`. A second call is `409`. | The `result` of the call, else its last assistant message (from the transcript). | yes |
+| `done` | The agent runs `POST /api/agents/{id}/done` (`terrarium agent done`). Only the agent itself: else `403`. A second call is `409`. A bound agent: also its card is merged or done. | The `result` of the call, else its last assistant message (from the transcript). | yes |
 | `cancelled` | `POST /api/agents/{id}/cancel`, or `DELETE /api/agents/{id}`: the owner, a project_admin of the project, a sysadmin, or the operator. | The one of `done`, if any. | yes |
-| `timeout` | The lifetime ended (the lifecycle timer, every 15 s). | Its last assistant message. | yes |
+| `timeout` | The lifetime ended (the lifecycle timer, every 15 s). A bound agent: its 30-day cap. | Its last assistant message. | yes |
 | `failed` | The start failed. | The reason. | yes |
 | `owner_gone` | The owner was removed (below). | Its last assistant message. | no |
 
