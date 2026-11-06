@@ -167,7 +167,10 @@ async fn upload_list_show_raw_and_the_card_chip() {
         .await;
     r.err(400, "bad_request");
     assert!(
-        r.body["error"]["message"].as_str().unwrap().contains("label"),
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("label"),
         "{}",
         r.body
     );
@@ -552,16 +555,18 @@ async fn links_follow_card_rights_and_take_labels() {
         .get("/api/projects/proj/test-runs?label=version:1.0.0")
         .await;
     assert_eq!(by_label.ok().as_array().unwrap().len(), 1);
-    let by_label = td.get("/api/projects/proj/test-runs?label=version:9.9.9").await;
+    let by_label = td
+        .get("/api/projects/proj/test-runs?label=version:9.9.9")
+        .await;
     assert_eq!(by_label.ok().as_array().unwrap().len(), 0);
     let v = td
         .patch_as("proj/w1", &url, json!({"remove_labels": ["version:vnext"]}))
         .await;
     assert_eq!(v.ok()["labels"], json!(["version:1.0.0"]));
-    // The version fields are gone: 400 or 422, never a silent ignore.
+    // The version fields are gone: 400, never a silent ignore.
     td.patch_as("proj/w1", &url, json!({"add_versions": ["v1"]}))
         .await
-        .err(422, "invalid");
+        .err(400, "bad_request");
     td.get("/api/projects/proj/test-runs?version=v1")
         .await
         .err(400, "bad_request");
@@ -580,7 +585,9 @@ async fn links_follow_card_rights_and_take_labels() {
         .collect();
     assert_eq!(
         changes,
-        ["created", "linked", "linked", "linked", "unlinked", "unlinked"]
+        [
+            "created", "linked", "linked", "linked", "unlinked", "unlinked"
+        ]
     );
     // A card of another project.
     let other_card = td

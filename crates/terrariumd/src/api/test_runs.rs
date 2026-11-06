@@ -139,7 +139,10 @@ fn parse_upload(headers: &HeaderMap, query: &[(String, String)], body: Bytes) ->
             .ok_or_else(|| ApiError::bad_request("the multipart upload needs a `file` part"))?;
         let mut cards = texts("card");
         cards.extend(texts("cards"));
-        if parts.iter().any(|p| p.name == "version" || p.name == "versions") {
+        if parts
+            .iter()
+            .any(|p| p.name == "version" || p.name == "versions")
+        {
             return Err(no_versions());
         }
         let mut labels = texts("label");

@@ -11,7 +11,6 @@ use clap::Parser;
 use common::TestDaemon;
 use http_body_util::BodyExt;
 use hyper::{Request, StatusCode};
-use serde_json::json;
 use terrariumd::settings::Settings;
 
 const CHILD: &str = "TERRARIUM_TEST_SETTINGS_CHILD";

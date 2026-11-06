@@ -2807,10 +2807,7 @@ async fn artifact_push_attaches_to_page_card_and_version() {
         ],
         vec![
             (201, art.clone()),
-            (
-                201,
-                json!({"links": [{"kind": "page"}, {"kind": "label"}]}),
-            ),
+            (201, json!({"links": [{"kind": "page"}, {"kind": "label"}]})),
             (
                 201,
                 json!({"links": [{"kind": "page"}, {"kind": "label"}, {"kind": "card"}]}),
