@@ -1389,6 +1389,30 @@ echo "after: $GIT_SSH_COMMAND"
     }
 
     #[test]
+    fn batch_conflicts_are_read_by_index() {
+        let out = b"TERRARIUM_CONFLICT\t1\nREADME\nsrc/a.rs\nTERRARIUM_CONFLICT\t3\nb.txt\nTERRARIUM_JOB\toutcome=ok\thead=abc\n";
+        let found = conflicts(out);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[&1], "README\nsrc/a.rs");
+        assert_eq!(found[&3], "b.txt");
+        let card = |c: &str| BatchCard {
+            card: c.into(),
+            branch: c.to_lowercase(),
+            by_agent: None,
+            outcome: None,
+            note: None,
+        };
+        let batch = vec![card("T-1"), card("T-2"), card("T-3"), card("T-4")];
+        let marked = mark_conflicts(&batch, out);
+        let outcomes: Vec<Option<&str>> = marked.iter().map(|c| c.outcome.as_deref()).collect();
+        assert_eq!(outcomes, [None, Some("conflict"), None, Some("conflict")]);
+        assert_eq!(
+            batch_summary(&marked),
+            "batch: merged T-1 T-3; left out on a conflict T-2 T-4"
+        );
+    }
+
+    #[test]
     fn by_agent_label() {
         let labels = vec!["ci".to_owned(), "by:dash-ci".to_owned()];
         assert_eq!(by_agent_of(&labels).as_deref(), Some("dash-ci"));
