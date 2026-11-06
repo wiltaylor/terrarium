@@ -214,6 +214,7 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
         }
         ProjectCmd::Repos { name } => repos(ctx, name.as_deref()).await,
         ProjectCmd::RepoAdd(a) => repo_add(ctx, a).await,
+        ProjectCmd::Delivery { command } => super::jobs::delivery(ctx, command).await,
     }
 }
 
