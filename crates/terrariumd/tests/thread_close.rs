@@ -235,7 +235,10 @@ async fn archived_and_linked(lab: &Lab, tid: &str, eph: &str, sid: &str, cards: 
             .cloned()
             .unwrap_or_else(|| panic!("no system comment on {card}: {c:#}"));
         let body = comment["body"].as_str().unwrap();
-        assert!(body.contains(&format!("Inbox thread {tid} was closed")), "{body}");
+        assert!(
+            body.contains(&format!("Inbox thread {tid} was closed")),
+            "{body}"
+        );
         assert!(body.contains(&format!("/sessions/{sid}")), "{body}");
         assert_eq!(comment["session"]["id"], sid, "{comment}");
     }
@@ -245,7 +248,10 @@ async fn archived_and_linked(lab: &Lab, tid: &str, eph: &str, sid: &str, cards: 
 async fn the_agent_proposes_and_the_operator_confirms() {
     let lab = lab().await;
     let (tid, eph, sid) = lab.started("Cache layer").await;
-    let (c1, c2) = (lab.card("Cache the board").await, lab.card("Cache cards").await);
+    let (c1, c2) = (
+        lab.card("Cache the board").await,
+        lab.card("Cache cards").await,
+    );
 
     // The agent's close is a proposal: the thread stays open and waits on
     // the operator, and the agent parks.
@@ -363,9 +369,7 @@ async fn the_operator_declines_and_closes_at_any_time() {
         .err(409, "conflict");
     // A new proposal replaces the old one; the response declines it too.
     lab.propose(&eph, &tid, json!({"summary": "First."})).await;
-    let th = lab
-        .propose(&eph, &tid, json!({"summary": "Second."}))
-        .await;
+    let th = lab.propose(&eph, &tid, json!({"summary": "Second."})).await;
     assert_eq!(th["close_proposal"]["summary"], "Second.");
     let th = lab
         .td
@@ -494,10 +498,12 @@ async fn activity_after_a_reminder_allows_a_new_one_and_off_sends_none() {
         .await
         .ok();
     let s = state(&lab.td);
-    s.lifecycle.threads.set_tuning(terrariumd::thread_close::Tuning {
-        reminder_after: Duration::from_millis(200),
-        stale_after: Duration::ZERO,
-    });
+    s.lifecycle
+        .threads
+        .set_tuning(terrariumd::thread_close::Tuning {
+            reminder_after: Duration::from_millis(200),
+            stale_after: Duration::ZERO,
+        });
     let count = || async {
         lab.td
             .get("/api/mail?to=operator&from=system")
@@ -537,12 +543,17 @@ async fn activity_after_a_reminder_allows_a_new_one_and_off_sends_none() {
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
     // Both off: nothing more.
-    s.lifecycle.threads.set_tuning(terrariumd::thread_close::Tuning {
-        reminder_after: Duration::ZERO,
-        stale_after: Duration::ZERO,
-    });
+    s.lifecycle
+        .threads
+        .set_tuning(terrariumd::thread_close::Tuning {
+            reminder_after: Duration::ZERO,
+            stale_after: Duration::ZERO,
+        });
     lab.td
-        .post(&format!("/api/threads/{tid}/messages"), json!({"text": "x"}))
+        .post(
+            &format!("/api/threads/{tid}/messages"),
+            json!({"text": "x"}),
+        )
         .await
         .ok();
     lab.td

@@ -138,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
     // The web settings, from the flags and the env, in one place.
     let artifact_listen = settings.artifact_listen();
     let mut web = settings.web();
+    let thread_tuning = settings.thread_tuning();
     // The dial-in listener of the host agents (docs/host-protocol.md
     // "TLS"). TERRARIUM_HOST_TLS_CERT and TERRARIUM_HOST_TLS_KEY turn on
     // TLS and bind 0.0.0.0:8082; without them it is plaintext on
@@ -187,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
         .state
         .lifecycle
         .threads
-        .set_tuning(settings.thread_tuning());
+        .set_tuning(thread_tuning);
     // The harness auto-update (TERRARIUM_HARNESS_AUTO_UPDATE). Without a
     // tools dir it has nothing to update.
     daemon

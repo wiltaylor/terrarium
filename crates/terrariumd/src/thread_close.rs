@@ -124,7 +124,10 @@ fn untouched(conn: &Connection, before: &str, unreminded: bool) -> ApiResult<Vec
 /// (another write can come between the read and the write).
 fn still_untouched(t: &Tx<'_>, id: &str, before: &str) -> ApiResult<Option<Thread>> {
     let th = threads::get_bare(t, id)?;
-    Ok((th.status == ThreadStatus::WaitingOperator && th.updated_at.as_str() < before).then_some(th))
+    Ok(
+        (th.status == ThreadStatus::WaitingOperator && th.updated_at.as_str() < before)
+            .then_some(th),
+    )
 }
 
 /// `text` quoted with `> ` (data from the operator or an agent).
@@ -218,7 +221,14 @@ fn close_stale(t: &mut Tx<'_>, id: &str, before: &str, after: Duration) -> ApiRe
     while summary.len() > threads::MAX_SUMMARY {
         summary.pop();
     }
-    let th = threads::close(t, &th.id, "system", CloseReason::Stale, Some(&summary), links)?;
+    let th = threads::close(
+        t,
+        &th.id,
+        "system",
+        CloseReason::Stale,
+        Some(&summary),
+        links,
+    )?;
     if let Some(lead) = th.report_to.as_deref() {
         match mail::resolve(t, lead, None) {
             Ok(to) => {
@@ -234,7 +244,9 @@ fn close_stale(t: &mut Tx<'_>, id: &str, before: &str, after: Duration) -> ApiRe
                     topic = quoted(&th.topic),
                 );
                 if let Some(s) = &th.session_id {
-                    body.push_str(&format!("\nThe archived session of its agent: /sessions/{s}\n"));
+                    body.push_str(&format!(
+                        "\nThe archived session of its agent: /sessions/{s}\n"
+                    ));
                 }
                 body.push_str(&format!(
                     "\nRead it with `terrarium thread show {}`.\n",
@@ -252,7 +264,9 @@ fn close_stale(t: &mut Tx<'_>, id: &str, before: &str, after: Duration) -> ApiRe
                     },
                 )?;
             }
-            Err(e) => warn!(thread = %th.id, "no stale mail: the report-to lead is gone: {}", e.message),
+            Err(e) => {
+                warn!(thread = %th.id, "no stale mail: the report-to lead is gone: {}", e.message)
+            }
         }
     }
     Ok(true)

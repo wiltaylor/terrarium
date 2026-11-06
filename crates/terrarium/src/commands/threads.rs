@@ -123,7 +123,11 @@ fn print_thread(c: &Ctx, v: &Value) {
             field(p, "at"),
             field(v, "id")
         ));
-        delimited(c, "PROPOSED HANDOFF", p["summary"].as_str().unwrap_or_default());
+        delimited(
+            c,
+            "PROPOSED HANDOFF",
+            p["summary"].as_str().unwrap_or_default(),
+        );
         for l in as_items(&p["links"]) {
             c.line(format!("link {}: {}", field(l, "kind"), field(l, "ref")));
         }
