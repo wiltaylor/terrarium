@@ -52,6 +52,7 @@ pub fn routes() -> Router<Shared> {
 
 /// The host caps and the running jobs on each host.
 async fn hosts_view(state: &Shared, actor: &Actor) -> ApiResult<Value> {
+    rt::prepare_hosts(&state.db, None).await?;
     let (caps, jobs) = state
         .db
         .read(|c| Ok((jobs::host_caps(c)?, jobs::running(c)?)))
@@ -117,6 +118,7 @@ async fn set_host(
     ApiJson(body): ApiJson<HostCapBody>,
 ) -> ApiResult<Json<Value>> {
     policy::sysadmin(&actor, "setting the job cap of a host")?;
+    rt::prepare_hosts(&state.db, Some(host.clone())).await?;
     state
         .db
         .write(actor.label(), move |t| {
@@ -133,6 +135,7 @@ async fn clear_host(
     Path(host): Path<String>,
 ) -> ApiResult<Json<Value>> {
     policy::sysadmin(&actor, "taking away the job cap of a host")?;
+    rt::prepare_hosts(&state.db, Some(host.clone())).await?;
     state
         .db
         .write(actor.label(), move |t| jobs::set_host_cap(t, &host, None))
@@ -454,6 +457,7 @@ async fn validate(
         }
     }
     let slots = def.slots();
+    rt::prepare_hosts(&state.db, None).await?;
     let (job, place) = state
         .db
         .write(actor.label(), move |t| {
@@ -530,6 +534,7 @@ async fn merge(
     Path(id): Path<String>,
     ApiJson(b): ApiJson<MergeBody>,
 ) -> ApiResult<Response> {
+    rt::prepare_hosts(&state.db, None).await?;
     let job = state
         .db
         .write(actor.label(), move |t| {

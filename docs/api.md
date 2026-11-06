@@ -10246,6 +10246,9 @@ daemon checks it before the slots of the project. The host of a job is
 the stable ID of the delivery target's host agent (`host`), else the
 resolved IP of its SSH `address` (sorted first address when there are
 several, lowercase hostname when resolution fails), else the target name.
+DNS is resolved outside the database lock on first use. The first result,
+including a failed lookup, is persisted by hostname and reused across
+ticks and daemon restarts, so a changing DNS answer cannot split a cap.
 SSH usernames and ports do not affect the key. An SSH target and a host
 agent on the same machine count as two hosts. Cross-transport machine
 identity is not inferred. A host without a cap has no limit. The

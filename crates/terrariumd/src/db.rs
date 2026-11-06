@@ -2098,6 +2098,13 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
+    // 73: pin job-host DNS identities across queue ticks and restarts.
+    r#"
+    CREATE TABLE job_host_keys (
+        hostname TEXT PRIMARY KEY,
+        host_key TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

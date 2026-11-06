@@ -14,7 +14,6 @@
 //! - Events `job` {change, project, id, card, kind, state, attempt}.
 
 use std::collections::{HashMap, HashSet};
-use std::net::ToSocketAddrs;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -268,17 +267,6 @@ fn address_key(a: &str) -> String {
         Some(v6) => v6.split(']').next().unwrap_or(v6),
         None => a.split(':').next().unwrap_or(a),
     };
-    if !a.is_empty() {
-        let mut addresses: Vec<_> = (a, 22)
-            .to_socket_addrs()
-            .map(|all| all.map(|s| s.ip()).collect())
-            .unwrap_or_default();
-        addresses.sort();
-        addresses.dedup();
-        return addresses
-            .first()
-            .map_or_else(|| a.to_lowercase(), ToString::to_string);
-    }
     a.to_lowercase()
 }
 
@@ -290,7 +278,38 @@ fn canonical_key(conn: &Connection, key: &str) -> ApiResult<String> {
     {
         return Ok(host.id);
     }
-    Ok(address_key(key))
+    let hostname = address_key(key);
+    Ok(conn.query_row("SELECT host_key FROM job_host_keys WHERE hostname = ?1", [&hostname], |r| r.get(0)).optional()?.unwrap_or(hostname))
+}
+
+/// Names that still need a pinned identity. No network IO under the DB lock.
+pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<Vec<String>> {
+    let mut keys: Vec<String> = targets::list(conn)?.into_iter()
+        .filter(|t| t.def.host.is_none())
+        .filter_map(|t| t.def.address).collect();
+    let mut st = conn.prepare("SELECT host FROM job_hosts UNION SELECT host FROM jobs WHERE host IS NOT NULL")?;
+    keys.extend(st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
+    keys.extend(extra);
+    let agents = hosts::list(conn)?;
+    let mut names = Vec::new();
+    for key in keys {
+        if agents.iter().any(|h| h.name == key || h.id == key) { continue; }
+        let hostname = address_key(&key);
+        if hostname.parse::<std::net::IpAddr>().is_ok() || hostname.is_empty() { continue; }
+        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)", [&hostname], |r| r.get(0))?;
+        if !exists { names.push(hostname); }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// First writer wins, including a failed resolution pinned to the hostname.
+pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
+    for (hostname, key) in keys {
+        t.execute("INSERT INTO job_host_keys (hostname, host_key) VALUES (?1, ?2) ON CONFLICT(hostname) DO NOTHING", params![hostname, key])?;
+    }
+    Ok(())
 }
 
 /// What the pick knows of a project that has queued jobs.
@@ -421,7 +440,7 @@ pub fn startable(conn: &Connection) -> ApiResult<Vec<(Job, String, DeliveryDef)>
 /// keeps its name as the key; the job then fails when it runs.
 fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
     let target = def.target.clone().unwrap_or_default();
-    match targets::get(conn, &target) {
+    let key = match targets::get(conn, &target) {
         Ok(row) => row
             .def
             .host
@@ -429,7 +448,8 @@ fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
             .and_then(|name| hosts::find(conn, name).ok().flatten())
             .map_or_else(|| host_key(&target, &row.def), |h| h.id),
         Err(_) => target,
-    }
+    };
+    canonical_key(conn, &key).unwrap_or_else(|_| address_key(&key))
 }
 
 /// The host of the delivery target of `project`, its running jobs, and
@@ -977,5 +997,17 @@ mod tests {
         );
         assert_eq!(address_key("BUILD.INVALID"), "build.invalid");
         assert_eq!(address_key("ci@127.0.0.1:2222"), "127.0.0.1");
+    }
+
+    #[test]
+    fn missing_target_and_agent_keys_match_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        let def: DeliveryDef = serde_json::from_value(json!({"target": "MiXeD.INVALID", "recipe": "true"})).unwrap();
+        assert_eq!(host_of(&conn, &def), canonical_key(&conn, "MiXeD.INVALID").unwrap());
+        let target: TargetDef = serde_json::from_value(json!({"kind": "host", "host": "MiXeD.INVALID"})).unwrap();
+        conn.execute("INSERT INTO targets (name, def, source, state, snapshots, created_at, updated_at) VALUES ('box', ?1, 'api', 'unknown', '[]', '', '')", [serde_json::to_string(&target).unwrap()]).unwrap();
+        let def: DeliveryDef = serde_json::from_value(json!({"target": "box", "recipe": "true"})).unwrap();
+        assert_eq!(host_of(&conn, &def), canonical_key(&conn, "MiXeD.INVALID").unwrap());
     }
 }
