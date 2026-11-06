@@ -520,6 +520,19 @@ pub enum JobCmd {
         #[arg(long)]
         clear: bool,
     },
+    /// Set the addresses of a host agent (sysadmin): an SSH target on one
+    /// of them counts on the host agent's cap. Replaces the list; take
+    /// all away with `--clear`
+    HostAlias {
+        /// The host agent, by name or ID
+        host: String,
+        /// SSH addresses or host names of the same machine
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        aliases: Vec<String>,
+        /// No aliases
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Debug, Args)]

@@ -10525,9 +10525,20 @@ The first result,
 including a failed lookup, is persisted by hostname and reused across
 ticks and daemon restarts, so a changing DNS answer cannot split a cap.
 SSH usernames and ports do not affect the key. An SSH target and a host
-agent on the same machine count as two hosts. Cross-transport machine
-identity is not inferred. A host without a cap has no limit. The
-default is no cap.
+agent on the same machine count as two hosts, unless the address is an
+alias of the host agent (below). Cross-transport machine identity is not
+inferred. A host without a cap has no limit. The default is no cap.
+
+A sysadmin or the operator lists the addresses of a host agent's machine
+(TER-105). An SSH target whose address is one of them counts on the host
+agent's key: one running count and one cap. An alias matches the target
+address as written (no user, no port, lowercase), or by its pinned key
+(an alias host name is pinned as a target address is, outside the
+database lock). An alias belongs to one host agent, and it cannot be the
+name of a host agent. The aliases go when the host agent is revoked.
+Running jobs and caps stored under an alias count on the host agent at
+once. When both keys had a cap, the stricter applies until a cap write
+replaces them.
 
 Builds and tests that agents start by hand (`terrarium exec`, `terrarium
 run`) are not jobs of the queue. The host cap does not count them, and
@@ -10535,9 +10546,10 @@ they do not get the low priority.
 
 | method and path                 | who                           | what |
 |---------------------------------|-------------------------------|------|
-| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, heavy_jobs, running, projects, updated_by?, updated_at?}]}`: each host with a cap or a running job. `heavy_jobs` is `null` without a cap. Visibility is scoped as described below |
+| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, name?, aliases?, heavy_jobs, running, projects, updated_by?, updated_at?}]}`: each host with a cap, a running job, or aliases. `name` is the host-agent name when the key is a host agent. `heavy_jobs` is `null` without a cap. Visibility is scoped as described below |
 | `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
 | `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
+| `PUT /api/job-hosts/{host}/aliases` | a sysadmin, the operator  | `{aliases: [address]}` (at most 32): the addresses of the host agent `{host}` (name or ID). Replaces the list; `[]` takes all away. 404 for no host agent, 409 when another host agent has the alias. The answer is the list above |
 
 The audit row `job.host_cap` keeps the old and the new cap. A job keeps
 the host it started on (`host` in the job).
@@ -10547,8 +10559,8 @@ are resolved in the same way as target addresses. `GET /api/job-hosts`
 also includes `projects`, a map of project names to running counts.
 The operator, sysadmin and architect see all project counts and cap audit
 fields. Other agents see the total `running` count and only their own
-project's count (including zero). Their response omits `updated_by` and
-`updated_at`. No job records are returned.
+project's count (including zero). Their response omits `updated_by`,
+`updated_at`, and `aliases`. No job records are returned.
 
 Previously stored host names and address aliases are normalized when
 counting running jobs and reading caps. If several old caps resolve to
