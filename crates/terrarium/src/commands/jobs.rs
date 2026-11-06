@@ -1,4 +1,5 @@
 //! The job queue of a project (TER-71): `job ls | show | cancel`,
+//! `job hosts | host-cap` (TER-97),
 //! `project delivery show | set`, and `card validate | merge`.
 
 use serde_json::{Value, json};
@@ -10,6 +11,14 @@ use crate::commands::projects::project_path;
 use crate::ctx::Ctx;
 use crate::output::field;
 use crate::transport::encode;
+
+const HOST_COLS: &[(&str, &str)] = &[
+    ("HOST", "host"),
+    ("CAP", "heavy_jobs"),
+    ("RUNNING", "running"),
+    ("UPDATED BY", "updated_by"),
+    ("AT", "updated_at"),
+];
 
 const JOB_COLS: &[(&str, &str)] = &[
     ("ID", "id"),
@@ -57,6 +66,22 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
                 .await?;
             ctx.emit(&v, print_job)
         }
+        JobCmd::Hosts => {
+            let v = ctx.api.get("/api/job-hosts", vec![]).await?;
+            ctx.emit(&v, print_hosts)
+        }
+        JobCmd::HostCap {
+            host,
+            heavy_jobs,
+            clear,
+        } => {
+            let path = format!("/api/job-hosts/{}", encode(host));
+            let v = match (clear, heavy_jobs) {
+                (false, Some(n)) => ctx.api.put(&path, json!({"heavy_jobs": n})).await?,
+                _ => ctx.api.delete(&path, vec![]).await?,
+            };
+            ctx.emit(&v, print_hosts)
+        }
         JobCmd::Cancel { id } => {
             let v = ctx
                 .api
@@ -72,6 +97,11 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
             })
         }
     }
+}
+
+fn print_hosts(c: &Ctx, v: &Value) {
+    let items = v["hosts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    print_table(c, items, HOST_COLS, "no host caps and no running jobs");
 }
 
 fn print_job(c: &Ctx, v: &Value) {

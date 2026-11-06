@@ -10119,13 +10119,44 @@ validate or a merge is a `409 conflict` that says how to set it.
   recipe, and push `next` when the recipe passes. The push is not forced:
   when `next` moved, the job fails.
 
-Jobs start first in, first out, with at most `slots` running per project.
-A merge job does not start while another merge job of the same repo runs.
+Jobs start first in, first out across all projects. A job starts when:
+
+1. its host is under its cap (the host cap, below),
+2. its project has fewer than `slots` jobs running, and
+3. for a merge job, no other merge job of the same repo runs.
+
+A job that must wait does not hold back a later job that may start.
 A card has at most one queued or running job.
 
 A job is three runs on the target. The prepare run (clone, checkout,
 merge) and the push run get the repo credential in their env. The recipe
-run gets no credential, because it runs the repo's code.
+run gets no credential, because it runs the repo's code. Each of the
+three runs at low priority: `ionice -c3 nice -n19 <command>`. The daemon
+checks one time per target (per daemon run) that `ionice -c3` works.
+Without it, the runs use `nice -n19` only. The run list of the target
+shows the wrapper.
+
+#### The host cap
+
+The projects of one host share its disk and its CPUs. The host cap is the
+most jobs of all projects that run on one host at the same time. The
+daemon checks it before the slots of the project. The host of a job is
+the host agent of the delivery target (`host`), else the host part of its
+`address`, else the target name. A host without a cap has no limit. The
+default is no cap.
+
+Builds and tests that agents start by hand (`terrarium exec`, `terrarium
+run`) are not jobs of the queue. The host cap does not count them, and
+they do not get the low priority.
+
+| method and path                 | who                           | what |
+|---------------------------------|-------------------------------|------|
+| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, heavy_jobs, running, updated_by, updated_at}]}`: each host with a cap or a running job. `heavy_jobs` is `null` without a cap |
+| `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
+| `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
+
+The audit row `job.host_cap` keeps the old and the new cap. A job keeps
+the host it started on (`host` in the job).
 
 ### 35.3 Results
 

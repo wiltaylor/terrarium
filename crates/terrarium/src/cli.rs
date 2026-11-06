@@ -493,6 +493,21 @@ pub enum JobCmd {
     Show { id: String },
     /// Cancel a queued or running job (a running one is killed)
     Cancel { id: String },
+    /// The host caps: the most jobs of all projects that run on a host at
+    /// once, and the jobs that run on each host now
+    Hosts,
+    /// Set the cap of a host, or take it away with `--clear`
+    /// (sysadmin). The host is the target's host agent, else the host of
+    /// its address, else the target name
+    HostCap {
+        host: String,
+        /// The most jobs that run on the host at once
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        heavy_jobs: Option<u32>,
+        /// No cap on the host
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Debug, Args)]

@@ -4,23 +4,27 @@
 //! - A job is `validate` (run the project's recipe on a clean checkout of
 //!   a card commit) or `merge` (merge a card branch onto `next`, run the
 //!   recipe on the result, push `next` when it is green).
-//! - Jobs start first in, first out, at most `slots` running at a time
-//!   per project. A merge job does not start while another merge job of
-//!   the same repo runs.
+//! - Jobs start first in, first out across projects, at most the host
+//!   cap on one host (TER-97, `job_hosts`), and at most `slots` running
+//!   at a time per project. A merge job does not start while another
+//!   merge job of the same repo runs.
 //! - A card has at most one job that is queued or running.
 //! - The one rerun of a failed job is a new row with `attempt` 2 and the
 //!   `created_at` of the first try, so it goes to the front of the queue.
 //! - Events `job` {change, project, id, card, kind, state, attempt}.
 
+use std::collections::{HashMap, HashSet};
+
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use terrarium_core::config::DeliveryDef;
+use terrarium_core::config::{DeliveryDef, TargetDef};
 
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
+use crate::store::targets;
 
 /// The output tail that a job keeps.
 pub const TAIL_MAX: usize = 4000;
@@ -118,6 +122,9 @@ pub struct Job {
     pub created_at: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
+    /// The host that the job runs on: set when it starts (TER-97).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// A new job.
@@ -143,7 +150,8 @@ pub struct JobEnd {
 }
 
 const COLS: &str = "id, project, card, kind, repo, branch, commit_sha, state, attempt, outcome,
-                    exit_code, tail, head, by_agent, created_by, created_at, started_at, ended_at";
+                    exit_code, tail, head, by_agent, created_by, created_at, started_at, ended_at,
+                    host";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
     let kind: String = r.get(3)?;
@@ -167,6 +175,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
         created_at: r.get(15)?,
         started_at: r.get(16)?,
         ended_at: r.get(17)?,
+        host: r.get(18)?,
     })
 }
 
@@ -218,15 +227,6 @@ pub fn open_of_card(conn: &Connection, card: &str) -> ApiResult<Option<Job>> {
         .optional()?)
 }
 
-/// The projects that have a queued job.
-pub fn projects_with_queued(conn: &Connection) -> ApiResult<Vec<String>> {
-    let mut st = conn.prepare("SELECT DISTINCT project FROM jobs WHERE state = 'queued'")?;
-    let rows = st
-        .query_map([], |r| r.get(0))?
-        .collect::<Result<Vec<String>, _>>()?;
-    Ok(rows)
-}
-
 /// The jobs that are running, in all projects.
 pub fn running(conn: &Connection) -> ApiResult<Vec<Job>> {
     let mut st = conn.prepare(&format!(
@@ -236,47 +236,229 @@ pub fn running(conn: &Connection) -> ApiResult<Vec<Job>> {
     Ok(rows)
 }
 
-/// The queued jobs of `project` that may start now with `slots` places:
-/// first in, first out, at most `slots` running, and one merge job per
-/// repo at a time. A merge job that must wait for its repo does not hold
-/// back the jobs behind it.
-pub fn startable(conn: &Connection, project: &str, slots: usize) -> ApiResult<Vec<Job>> {
-    let running: Vec<Job> = {
-        let mut st = conn.prepare(&format!(
-            "SELECT {COLS} FROM jobs WHERE project = ?1 AND state = 'running'"
-        ))?;
-        st.query_map([project], row)?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    let mut free = slots.saturating_sub(running.len());
-    if free == 0 {
-        return Ok(Vec::new());
+/// The host key of a target (TER-97): its host agent (`host`), else the
+/// host part of its `address` (without the user and the port), else its
+/// name. The host cap of the job queue counts the running jobs per key.
+pub fn host_key(name: &str, def: &TargetDef) -> String {
+    if let Some(h) = def.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        return h.to_owned();
     }
-    let mut merging: Vec<String> = running
-        .iter()
-        .filter(|j| j.kind == JobKind::Merge)
-        .map(|j| j.repo.clone())
-        .collect();
-    let mut st = conn.prepare(&format!(
-        "SELECT {COLS} FROM jobs WHERE project = ?1 AND state = 'queued'
-         ORDER BY created_at, attempt DESC, id"
-    ))?;
-    let queued = st
-        .query_map([project], row)?
-        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(a) = def.address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        let a = a.rsplit_once('@').map_or(a, |(_, h)| h);
+        let a = match a.strip_prefix('[') {
+            Some(v6) => v6.split(']').next().unwrap_or(v6),
+            None => a.split(':').next().unwrap_or(a),
+        };
+        if !a.is_empty() {
+            return a.to_owned();
+        }
+    }
+    name.to_owned()
+}
+
+/// What the pick knows of a project that has queued jobs.
+#[derive(Debug, Clone)]
+pub struct QueueOf {
+    /// The project's `slots`.
+    pub slots: usize,
+    /// The host key of the project's delivery target.
+    pub host: String,
+}
+
+/// The queued jobs that may start now, with the host each one takes a
+/// place on, in all projects: first in, first out across projects. A
+/// job starts when (1) its host is under its cap (`caps`; a host without
+/// one has no cap), (2) its project is under its `slots`, and (3) for a
+/// merge job, no other merge job of its repo runs. A job that must wait
+/// does not hold back the jobs behind it that may start. A project
+/// missing from `queues` has no queue, and its jobs wait.
+pub fn pick(
+    queued: Vec<Job>,
+    running: &[Job],
+    queues: &HashMap<String, QueueOf>,
+    caps: &HashMap<String, usize>,
+) -> Vec<(Job, String)> {
+    let mut on_host: HashMap<String, usize> = HashMap::new();
+    let mut in_project: HashMap<String, usize> = HashMap::new();
+    let mut merging: HashSet<(String, String)> = HashSet::new();
+    for j in running {
+        let host = j
+            .host
+            .clone()
+            .or_else(|| queues.get(&j.project).map(|q| q.host.clone()));
+        if let Some(h) = host {
+            *on_host.entry(h).or_default() += 1;
+        }
+        *in_project.entry(j.project.clone()).or_default() += 1;
+        if j.kind == JobKind::Merge {
+            merging.insert((j.project.clone(), j.repo.clone()));
+        }
+    }
     let mut out = Vec::new();
     for j in queued {
-        if free == 0 {
-            break;
+        let Some(q) = queues.get(&j.project) else {
+            continue;
+        };
+        let used = on_host.get(&q.host).copied().unwrap_or(0);
+        if caps.get(&q.host).is_some_and(|cap| used >= *cap) {
+            continue;
         }
-        if j.kind == JobKind::Merge {
-            if merging.contains(&j.repo) {
-                continue;
-            }
-            merging.push(j.repo.clone());
+        if in_project.get(&j.project).copied().unwrap_or(0) >= q.slots {
+            continue;
         }
-        free -= 1;
-        out.push(j);
+        if j.kind == JobKind::Merge && !merging.insert((j.project.clone(), j.repo.clone())) {
+            continue;
+        }
+        *on_host.entry(q.host.clone()).or_default() += 1;
+        *in_project.entry(j.project.clone()).or_default() += 1;
+        out.push((j, q.host.clone()));
+    }
+    out
+}
+
+/// The queued jobs of all projects, first in, first out (a rerun keeps the
+/// `created_at` of its first try, and goes before a job of the same time).
+pub fn queued(conn: &Connection) -> ApiResult<Vec<Job>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {COLS} FROM jobs WHERE state = 'queued' ORDER BY created_at, attempt DESC, id"
+    ))?;
+    let rows = st.query_map([], row)?.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The queued jobs that may start now ([`pick`]), read in `conn`, with
+/// the delivery config of each job's project.
+pub fn startable(conn: &Connection) -> ApiResult<Vec<(Job, String, DeliveryDef)>> {
+    let queued = queued(conn)?;
+    if queued.is_empty() {
+        return Ok(Vec::new());
+    }
+    let running = running(conn)?;
+    let mut defs: HashMap<String, DeliveryDef> = HashMap::new();
+    let mut queues: HashMap<String, QueueOf> = HashMap::new();
+    let projects: HashSet<&str> = queued
+        .iter()
+        .chain(running.iter())
+        .map(|j| j.project.as_str())
+        .collect();
+    for p in projects {
+        let def = delivery(conn, p)?;
+        if !def.enabled() {
+            continue;
+        }
+        let host = host_of(conn, &def);
+        queues.insert(
+            p.to_owned(),
+            QueueOf {
+                slots: def.slots(),
+                host,
+            },
+        );
+        defs.insert(p.to_owned(), def);
+    }
+    let caps = host_caps(conn)?
+        .into_iter()
+        .map(|c| (c.host, c.heavy_jobs as usize))
+        .collect();
+    Ok(pick(queued, &running, &queues, &caps)
+        .into_iter()
+        .filter_map(|(j, h)| {
+            let def = defs.get(&j.project)?.clone();
+            Some((j, h, def))
+        })
+        .collect())
+}
+
+/// The host key of the delivery target of `def`. A target that is gone
+/// keeps its name as the key; the job then fails when it runs.
+fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
+    let target = def.target.clone().unwrap_or_default();
+    match targets::get(conn, &target) {
+        Ok(row) => host_key(&target, &row.def),
+        Err(_) => target,
+    }
+}
+
+/// The host of the delivery target of `project`, its running jobs, and
+/// its cap. `None` when the project has no queue or the host no cap.
+pub fn host_room(conn: &Connection, project: &str) -> ApiResult<Option<(String, usize, u32)>> {
+    let def = delivery(conn, project)?;
+    if !def.enabled() {
+        return Ok(None);
+    }
+    let host = host_of(conn, &def);
+    let Some(cap) = host_caps(conn)?.into_iter().find(|c| c.host == host) else {
+        return Ok(None);
+    };
+    let used = running_per_host(conn)?.get(&host).copied().unwrap_or(0);
+    Ok(Some((host, used, cap.heavy_jobs)))
+}
+
+/// The cap of a host: the most jobs of all projects that run on it at
+/// once (TER-97).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCap {
+    pub host: String,
+    pub heavy_jobs: u32,
+    pub updated_by: String,
+    pub updated_at: String,
+}
+
+/// The host caps, by host.
+pub fn host_caps(conn: &Connection) -> ApiResult<Vec<HostCap>> {
+    let mut st = conn.prepare(
+        "SELECT host, heavy_jobs, updated_by, updated_at FROM job_hosts ORDER BY host",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok(HostCap {
+                host: r.get(0)?,
+                heavy_jobs: r.get(1)?,
+                updated_by: r.get(2)?,
+                updated_at: r.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Set the cap of a host, or take it away (`None`: no cap).
+pub fn set_host_cap(t: &mut Tx<'_>, host: &str, heavy_jobs: Option<u32>) -> ApiResult<Option<HostCap>> {
+    let host = host.trim();
+    if host.is_empty() || host.len() > 253 || host.chars().any(|c| c.is_control() || c == '/') {
+        return Err(ApiError::invalid(format!("bad host `{host}`")));
+    }
+    let old = host_caps(t)?.into_iter().find(|c| c.host == host);
+    match heavy_jobs {
+        Some(0) => return Err(ApiError::invalid("`heavy_jobs` must be 1 or more")),
+        Some(n) => {
+            t.execute(
+                "INSERT INTO job_hosts (host, heavy_jobs, updated_by, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(host) DO UPDATE SET heavy_jobs = ?2, updated_by = ?3, updated_at = ?4",
+                params![host, n, t.actor, now()],
+            )?;
+        }
+        None => {
+            t.execute("DELETE FROM job_hosts WHERE host = ?1", [host])?;
+        }
+    }
+    t.audit(
+        "job.host_cap",
+        host,
+        None,
+        json!({"old": old.as_ref().map(|c| c.heavy_jobs), "new": heavy_jobs}),
+    )?;
+    Ok(host_caps(t)?.into_iter().find(|c| c.host == host))
+}
+
+/// The running jobs per host key.
+pub fn running_per_host(conn: &Connection) -> ApiResult<HashMap<String, usize>> {
+    let mut out = HashMap::new();
+    for j in running(conn)? {
+        if let Some(h) = j.host {
+            *out.entry(h).or_default() += 1;
+        }
     }
     Ok(out)
 }
@@ -369,12 +551,13 @@ pub fn rerun(t: &mut Tx<'_>, failed: &Job) -> ApiResult<Job> {
     Ok(job)
 }
 
-/// Mark a queued job as running. False when it is no longer queued (a
+/// Mark a queued job as running on `host`. False when it is no longer queued (a
 /// cancel came first).
-pub fn start(t: &mut Tx<'_>, id: &str) -> ApiResult<bool> {
+pub fn start(t: &mut Tx<'_>, id: &str, host: &str) -> ApiResult<bool> {
     let n = t.execute(
-        "UPDATE jobs SET state = 'running', started_at = ?2 WHERE id = ?1 AND state = 'queued'",
-        params![id, now()],
+        "UPDATE jobs SET state = 'running', started_at = ?2, host = ?3
+         WHERE id = ?1 AND state = 'queued'",
+        params![id, now(), host],
     )?;
     if n == 0 {
         return Ok(false);
@@ -525,4 +708,149 @@ pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
         |r| r.get(0),
     )?;
     Ok((ahead + 1, running))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn job(id: &str, project: &str, kind: JobKind, repo: &str, at: &str) -> Job {
+        Job {
+            id: id.into(),
+            project: project.into(),
+            card: format!("C-{id}"),
+            kind,
+            repo: repo.into(),
+            branch: "b".into(),
+            commit: None,
+            state: JobState::Queued,
+            attempt: 1,
+            outcome: None,
+            exit_code: None,
+            tail: None,
+            head: None,
+            by_agent: None,
+            created_by: "t".into(),
+            created_at: at.into(),
+            started_at: None,
+            ended_at: None,
+            host: None,
+        }
+    }
+
+    fn running(mut j: Job, host: &str) -> Job {
+        j.state = JobState::Running;
+        j.host = Some(host.into());
+        j
+    }
+
+    fn queues(list: &[(&str, usize, &str)]) -> HashMap<String, QueueOf> {
+        list.iter()
+            .map(|(p, slots, host)| {
+                (
+                    (*p).to_owned(),
+                    QueueOf {
+                        slots: *slots,
+                        host: (*host).to_owned(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn ids(picked: &[(Job, String)]) -> Vec<&str> {
+        picked.iter().map(|(j, _)| j.id.as_str()).collect()
+    }
+
+    #[test]
+    fn the_host_cap_holds_across_projects_in_order() {
+        let q = queues(&[("a", 4, "helios"), ("b", 4, "helios")]);
+        let caps = HashMap::from([("helios".to_owned(), 2)]);
+        let queued = vec![
+            job("1", "a", JobKind::Validate, "r", "t1"),
+            job("2", "b", JobKind::Validate, "r", "t2"),
+            job("3", "a", JobKind::Validate, "r", "t3"),
+            job("4", "b", JobKind::Validate, "r", "t4"),
+        ];
+        let p = pick(queued.clone(), &[], &q, &caps);
+        assert_eq!(ids(&p), ["1", "2"]);
+        assert!(p.iter().all(|(_, h)| h == "helios"));
+        // One job of `a` runs: one place is left, and it goes to the
+        // oldest queued job, whatever its project.
+        let run = [running(job("0", "a", JobKind::Validate, "r", "t0"), "helios")];
+        let p = pick(queued[1..].to_vec(), &run, &q, &caps);
+        assert_eq!(ids(&p), ["2"]);
+        // The host is full: nothing starts.
+        let run = [
+            running(job("0", "a", JobKind::Validate, "r", "t0"), "helios"),
+            running(job("9", "b", JobKind::Validate, "r", "t0"), "helios"),
+        ];
+        assert!(pick(queued.clone(), &run, &q, &caps).is_empty());
+        // Without a cap, only the slots count.
+        let p = pick(queued, &run, &q, &HashMap::new());
+        assert_eq!(ids(&p), ["1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn the_host_cap_comes_before_the_slots_and_other_hosts_go_on() {
+        let q = queues(&[("a", 1, "helios"), ("b", 2, "helios"), ("c", 2, "zeus")]);
+        let caps = HashMap::from([("helios".to_owned(), 2), ("zeus".to_owned(), 1)]);
+        let queued = vec![
+            job("1", "a", JobKind::Validate, "r", "t1"),
+            // `a` has one slot: 2 waits, and 3 of `b` goes before it.
+            job("2", "a", JobKind::Validate, "r", "t2"),
+            job("3", "b", JobKind::Validate, "r", "t3"),
+            // helios is full now.
+            job("4", "b", JobKind::Validate, "r", "t4"),
+            // Another host is not held back.
+            job("5", "c", JobKind::Validate, "r", "t5"),
+            job("6", "c", JobKind::Validate, "r", "t6"),
+            // No queue: never starts.
+            job("7", "gone", JobKind::Validate, "r", "t7"),
+        ];
+        let p = pick(queued, &[], &q, &caps);
+        assert_eq!(ids(&p), ["1", "3", "5"]);
+        let hosts: Vec<&str> = p.iter().map(|(_, h)| h.as_str()).collect();
+        assert_eq!(hosts, ["helios", "helios", "zeus"]);
+    }
+
+    #[test]
+    fn one_merge_per_repo_and_project() {
+        let q = queues(&[("a", 4, "h"), ("b", 4, "h")]);
+        let queued = vec![
+            job("1", "a", JobKind::Merge, "app", "t1"),
+            job("2", "a", JobKind::Merge, "app", "t2"),
+            job("3", "b", JobKind::Merge, "app", "t3"),
+            job("4", "a", JobKind::Merge, "lib", "t4"),
+        ];
+        let p = pick(queued, &[], &q, &HashMap::new());
+        assert_eq!(ids(&p), ["1", "3", "4"]);
+    }
+
+    #[test]
+    fn host_keys() {
+        let def = |v: serde_json::Value| -> TargetDef { serde_json::from_value(v).unwrap() };
+        assert_eq!(
+            host_key("t", &def(json!({"kind": "host", "host": "helios"}))),
+            "helios"
+        );
+        assert_eq!(
+            host_key("t", &def(json!({"kind": "docker", "host": "helios", "image": "x"}))),
+            "helios"
+        );
+        for (addr, want) in [
+            ("ci@build1.lan", "build1.lan"),
+            ("build1.lan:2222", "build1.lan"),
+            ("ci@[fd00::1]:22", "fd00::1"),
+            ("10.0.0.5", "10.0.0.5"),
+        ] {
+            assert_eq!(
+                host_key("t", &def(json!({"kind": "ssh", "address": addr}))),
+                want,
+                "{addr}"
+            );
+        }
+        assert_eq!(host_key("t", &def(json!({"kind": "ssh"}))), "t");
+    }
 }
