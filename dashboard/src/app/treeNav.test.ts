@@ -7,6 +7,14 @@ describe("treeKeyAction", () => {
   const root = { key: "root", open: true };
   const leaf = (key: string) => ({ key, parent: "root" });
 
+  it("gives m, F2, and Delete only to the rows that have them", () => {
+    const keys = ["root", "f:1", "p:a"];
+    expect(treeKeyAction(keys, { key: "p:a", move: true }, "m")).toEqual({ move: true });
+    expect(treeKeyAction(keys, { key: "p:a" }, "m")).toBeNull();
+    expect(treeKeyAction(keys, { key: "f:1", edit: true }, "F2")).toEqual({ rename: true });
+    expect(treeKeyAction(keys, { key: "f:1", edit: true }, "Delete")).toEqual({ remove: true });
+    expect(treeKeyAction(keys, { key: "p:a" }, "Delete")).toBeNull();
+  });
   it("moves up, down, to the first row, and to the last row", () => {
     expect(treeKeyAction(keys, root, "ArrowDown")).toEqual({ focus: "a:1" });
     expect(treeKeyAction(keys, leaf("a:1"), "ArrowDown")).toEqual({ focus: "a:2" });
