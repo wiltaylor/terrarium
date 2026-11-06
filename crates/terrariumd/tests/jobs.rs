@@ -50,7 +50,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
-/// A daemon with host agent `lab1`, the project target `pbox`, project
+/// A daemon with host agent `lab1`, the project target `p-box`, project
 /// `p` with repo `app` (a bare repo with `main` and `next`), the lead
 /// and worker `w1`, and the queue set: `test -f OK`, `slots`.
 async fn lab(slots: u32) -> Lab {
@@ -86,14 +86,14 @@ async fn lab(slots: u32) -> Lab {
     let r = td
         .post(
             "/api/targets",
-            json!({"name": "pbox", "kind": "host", "host": "lab1", "project": "p"}),
+            json!({"name": "p-box", "kind": "host", "host": "lab1", "project": "p"}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let r = td
         .post(
             "/api/targets",
-            json!({"name": "qbox", "kind": "host", "host": "lab1", "project": "q"}),
+            json!({"name": "q-box", "kind": "host", "host": "lab1", "project": "q"}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
@@ -141,7 +141,7 @@ async fn lab(slots: u32) -> Lab {
     let r = td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "pbox", "recipe": "test -f OK", "slots": slots,
+            json!({"target": "p-box", "recipe": "test -f OK", "slots": slots,
                    "next_repos": ["app"], "work_dir": work_dir.display().to_string()}),
         )
         .await;
@@ -258,7 +258,7 @@ async fn the_config_is_checked_and_audited() {
     // Another project's target: no.
     td.put(
         "/api/projects/p/delivery",
-        json!({"target": "qbox", "recipe": "true"}),
+        json!({"target": "q-box", "recipe": "true"}),
     )
     .await
     .err(403, "forbidden");
@@ -274,20 +274,20 @@ async fn the_config_is_checked_and_audited() {
     td.put_as(
         &lab.w1,
         "/api/projects/p/delivery",
-        json!({"target": "pbox", "recipe": "true"}),
+        json!({"target": "p-box", "recipe": "true"}),
     )
     .await
     .err(403, "forbidden");
     // Bad values.
     td.put(
         "/api/projects/p/delivery",
-        json!({"target": "pbox", "slots": 0}),
+        json!({"target": "p-box", "slots": 0}),
     )
     .await
     .err(422, "invalid");
     td.put(
         "/api/projects/p/delivery",
-        json!({"target": "pbox", "next_repos": ["nope"]}),
+        json!({"target": "p-box", "next_repos": ["nope"]}),
     )
     .await
     .err(422, "invalid");
@@ -296,7 +296,7 @@ async fn the_config_is_checked_and_audited() {
         .put_as(
             &lab.lead,
             "/api/projects/p/delivery",
-            json!({"target": "pbox", "recipe": "true", "next_repos": ["app"]}),
+            json!({"target": "p-box", "recipe": "true", "next_repos": ["app"]}),
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
@@ -305,7 +305,7 @@ async fn the_config_is_checked_and_audited() {
     assert_eq!(last["old"]["recipe"], "test -f OK", "{last}");
     assert_eq!(last["new"]["recipe"], "true", "{last}");
     // No recipe: the queue is off and a validate is refused.
-    td.put("/api/projects/p/delivery", json!({"target": "pbox"}))
+    td.put("/api/projects/p/delivery", json!({"target": "p-box"}))
         .await
         .ok();
     let id = lab.card("c", "ter-x").await;
@@ -524,7 +524,7 @@ async fn jobs_keep_to_the_slots_in_order() {
     lab.td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "pbox", "recipe": "test -f OK && sleep 1", "slots": 1,
+            json!({"target": "p-box", "recipe": "test -f OK && sleep 1", "slots": 1,
                    "next_repos": ["app"],
                    "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
         )
@@ -584,7 +584,7 @@ async fn a_cancel_ends_a_queued_job() {
     lab.td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "pbox", "recipe": "sleep 30", "slots": 1}),
+            json!({"target": "p-box", "recipe": "sleep 30", "slots": 1}),
         )
         .await
         .ok();
