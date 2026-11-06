@@ -1985,12 +1985,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX questions_agent ON questions(agent, status);
     CREATE INDEX questions_status ON questions(status, project);
     "#,
-    // 68: the role `architect` (TER-47) in the CHECK of `roles.role`. The
-    // column is part of the primary key, so the table is made again. No
-    // table refers to `roles` (it refers to `agents`), so the drop deletes
-    // no other row. Self-contained: when another branch takes this number,
-    // move this entry to the end of the list. The test finds it by the
-    // name `roles_architect`.
+    // 69: the role `architect` (TER-47) in the CHECK of `roles.role`. It
+    // comes after 68 of TER-48 (project folders): when both branches are
+    // merged, this entry is the last. The column is part of the primary
+    // key, so the table is made again. No table refers to `roles` (it
+    // refers to `agents`), so the drop deletes no other row.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list. The test finds it by the name
+    // `roles_architect`.
     r#"
     CREATE TABLE roles_architect (
         agent_id   TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -3420,10 +3422,10 @@ mod tests {
         );
     }
 
-    /// Migration 68 keeps each role and takes `architect`. Found by its
+    /// Migration 69 keeps each role and takes `architect`. Found by its
     /// content.
     #[test]
-    fn migration_68_keeps_roles_and_takes_architect() {
+    fn migration_69_keeps_roles_and_takes_architect() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         let n = MIGRATIONS

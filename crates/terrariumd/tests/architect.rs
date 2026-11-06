@@ -319,6 +319,109 @@ async fn an_architect_writes_nothing_in_another_project() {
     assert!(c["comments"].as_array().unwrap().is_empty(), "{c}");
 }
 
+/// Every write handler behind `api::agents::load` (which takes the read
+/// right) has a second check that refuses an architect: exactly 403 for an
+/// agent of another project, and nothing changes.
+#[tokio::test]
+async fn an_architect_controls_no_agent_of_another_project() {
+    use hyper::Method;
+    let w = world().await;
+    let td = &w.td;
+    let a = w.arch.as_str();
+    let q = format!("/api/agents/{}", w.qw);
+    let before = td.get(&q).await.ok().clone();
+    let calls: Vec<(&str, Method, String, Option<Value>)> = vec![
+        (
+            "update",
+            Method::PATCH,
+            q.clone(),
+            Some(json!({"model": "x"})),
+        ),
+        (
+            "remove",
+            Method::DELETE,
+            format!("{q}?confirm=true"),
+            None,
+        ),
+        (
+            "swap",
+            Method::POST,
+            format!("{q}/subscription"),
+            Some(json!({"subscription": "s"})),
+        ),
+        ("start", Method::POST, format!("{q}/start"), None),
+        ("stop", Method::POST, format!("{q}/stop"), None),
+        ("restart", Method::POST, format!("{q}/restart"), None),
+        ("pause", Method::POST, format!("{q}/pause"), None),
+        ("unpause", Method::POST, format!("{q}/unpause"), None),
+        ("compact", Method::POST, format!("{q}/compact"), None),
+        ("new-session", Method::POST, format!("{q}/new-session"), None),
+        (
+            "send",
+            Method::POST,
+            format!("{q}/send"),
+            Some(json!({"text": "do it"})),
+        ),
+        (
+            "keys",
+            Method::POST,
+            format!("{q}/keys"),
+            Some(json!({"keys": ["esc"]})),
+        ),
+        ("interrupt", Method::POST, format!("{q}/interrupt"), None),
+        (
+            "answer",
+            Method::POST,
+            format!("{q}/answer"),
+            Some(json!({"text": "yes"})),
+        ),
+        (
+            "roles",
+            Method::PUT,
+            format!("{q}/roles"),
+            Some(json!({"roles": ["project_admin"]})),
+        ),
+        (
+            "attachment",
+            Method::POST,
+            format!("{q}/attachments"),
+            Some(json!({"name": "a.png", "data": "iVBORw0KGgo="})),
+        ),
+        (
+            "spawn",
+            Method::POST,
+            format!("{q}/spawn"),
+            Some(json!({"template": "t", "task": "x"})),
+        ),
+        (
+            "wait",
+            Method::POST,
+            format!("{q}/waits"),
+            Some(json!({"kind": "time", "for": "1m"})),
+        ),
+        (
+            "question",
+            Method::POST,
+            format!("{q}/questions"),
+            Some(json!({"text": "t"})),
+        ),
+        (
+            "status",
+            Method::POST,
+            format!("{q}/status"),
+            Some(json!({"status": "idle"})),
+        ),
+    ];
+    for (what, m, path, body) in calls {
+        let r = td.req(m, &path, body, Some(a)).await;
+        assert_eq!(r.status, 403, "{what}: {}", r.body);
+    }
+    let after = td.get(&q).await.ok().clone();
+    assert_eq!(before["status"], after["status"]);
+    assert_eq!(before["model"], after["model"]);
+    assert_eq!(after["roles"], json!([]));
+}
+
 /// In its own project, an architect writes as a member.
 #[tokio::test]
 async fn an_architect_writes_as_a_member_in_its_own_project() {
