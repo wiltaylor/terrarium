@@ -15,13 +15,6 @@ export const THREAD_LINK_KINDS: readonly ThreadLinkKind[] = ["card", "mail", "wi
 /** The chat page of a thread. */
 export const threadHref = (id: string) => `/inbox/threads/${encodeURIComponent(id)}`;
 
-/** The status tabs of the Threads view: the open threads (not closed), or the closed ones. */
-export const THREAD_STATUS_TABS = [
-  { id: "open", label: "Open" },
-  { id: "closed", label: "Closed" },
-] as const;
-export type ThreadStatusTab = (typeof THREAD_STATUS_TABS)[number]["id"];
-
 /** The open questions of a thread: the `questions` of a full thread, else `open_questions` of a list row. */
 export const openQuestionCount = (t: Pick<Thread, "questions" | "open_questions">): number => (t.questions ? t.questions.filter((q) => q.status === "open").length : (t.open_questions ?? 0));
 

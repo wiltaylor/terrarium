@@ -10,6 +10,7 @@
 import { A, useParams } from "@solidjs/router";
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
+import { ApiError } from "../../api/http";
 import type { Question, Thread, ThreadLink } from "../../api/types";
 import { SafeHtml } from "../../components/SafeHtml";
 import { Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
@@ -80,6 +81,10 @@ export default function ThreadPage() {
     return s && s !== "global" ? s : "";
   };
   const [closing, setClosing] = createSignal(false);
+  /** A write got a 409: the thread changed elsewhere (closed, for example). Read it again, also without events. */
+  const conflict = (e: unknown) => {
+    if (e instanceof ApiError && e.status === 409) void load();
+  };
 
   return (
     <div class="stack thread-page">
@@ -151,6 +156,7 @@ export default function ThreadPage() {
                 max={THREAD_MESSAGE_MAX}
                 send={(text) => api.threads.post(t().id, text)}
                 onSent={changed}
+                onError={conflict}
               />
               <Composer
                 label="Response"
@@ -161,12 +167,14 @@ export default function ThreadPage() {
                 max={THREAD_RESPONSE_MAX}
                 send={(text) => api.threads.respond(t().id, text)}
                 onSent={changed}
+                onError={conflict}
               />
             </Show>
             <Show when={closing()}>
               <CloseDialog
                 thread={t()}
                 onClose={() => setClosing(false)}
+                onError={conflict}
                 onClosed={(next) => {
                   setClosing(false);
                   changed(next);
@@ -207,7 +215,7 @@ function ThreadMeta(props: { thread: Thread; now: number }) {
 }
 
 /** A text box with one send button: a message or the overall response. */
-function Composer(props: { label: string; title?: string; hint?: string; placeholder: string; button: string; max: number; send: (text: string) => Promise<Thread>; onSent: (t: Thread) => void }) {
+function Composer(props: { label: string; title?: string; hint?: string; placeholder: string; button: string; max: number; send: (text: string) => Promise<Thread>; onSent: (t: Thread) => void; onError?: (e: unknown) => void }) {
   const [text, setText] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
@@ -223,6 +231,7 @@ function Composer(props: { label: string; title?: string; hint?: string; placeho
       setError(null);
     } catch (err) {
       setError(err);
+      props.onError?.(err);
     } finally {
       setBusy(false);
     }
@@ -247,7 +256,7 @@ function Composer(props: { label: string; title?: string; hint?: string; placeho
 }
 
 /** The confirmation of a close, with the handoff: a summary and links. The open questions of the thread are retracted. */
-function CloseDialog(props: { thread: Thread; onClose: () => void; onClosed: (t: Thread) => void }) {
+function CloseDialog(props: { thread: Thread; onClose: () => void; onClosed: (t: Thread) => void; onError?: (e: unknown) => void }) {
   const [summary, setSummary] = createSignal("");
   const [links, setLinks] = createSignal("");
   const [busy, setBusy] = createSignal(false);
@@ -262,6 +271,7 @@ function CloseDialog(props: { thread: Thread; onClose: () => void; onClosed: (t:
       props.onClosed(await api.threads.close(props.thread.id, b.body));
     } catch (err) {
       setError(err);
+      props.onError?.(err);
     } finally {
       setBusy(false);
     }
@@ -271,7 +281,7 @@ function CloseDialog(props: { thread: Thread; onClose: () => void; onClosed: (t:
       <form class="stack" style={{ gap: "8px" }} onSubmit={submit} aria-label="Close the thread">
         <ErrorBanner error={error()} onDismiss={() => setError(null)} />
         <p class="small" style={{ margin: 0 }}>
-          A closed thread takes no more messages. It stays readable under the Closed tab of Threads.
+          A closed thread takes no more messages. It stays readable under Threads, on the Done tab.
         </p>
         <Show when={open() > 0}>
           <p class="small warn-text" style={{ margin: 0 }} data-testid="close-retracts">

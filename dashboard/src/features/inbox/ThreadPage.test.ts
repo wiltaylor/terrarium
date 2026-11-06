@@ -76,6 +76,20 @@ describe("the Threads tab of the Inbox", () => {
     expect(el.textContent).not.toContain("Keep the audit rows when we prune?");
   });
 
+  it("follows the project filter: only the threads of that scope, no global ones", async () => {
+    // A global thread (the mock has no lead of `meta`, so it cannot open one).
+    const seeded = api.world.threads!.find((t) => t.status === "waiting_agent")!;
+    api.world.threads!.push({ ...seeded, id: "01JBTHRDGLOBAL0000000000001", topic: "A global question", scope: "global", messages: [] });
+    let { el } = mount("/inbox?tab=thread&project=webshop");
+    await waitFor(() => expect(el.textContent).toContain("Checkout retries"));
+    expect(el.querySelectorAll("article[aria-label^='Thread ']").length).toBe(1);
+    expect(el.textContent).not.toContain("A global question");
+    expect(el.textContent).not.toContain("Split the event store by project?");
+    ({ el } = mount("/inbox?tab=thread"));
+    await waitFor(() => expect(el.textContent).toContain("A global question"));
+    api.world.threads!.splice(api.world.threads!.findIndex((t) => t.id === "01JBTHRDGLOBAL0000000000001"), 1);
+  });
+
   it("opens a thread from the New thread dialog and shows its chat page", async () => {
     const { el, history } = mount("/inbox?tab=thread");
     await waitFor(() => expect(button("New thread")).toBeTruthy());
@@ -171,6 +185,28 @@ describe("the chat page of a thread", () => {
     button("Yes, close the thread")!.click();
     await waitFor(() => expect(status(el)).toBe("closed"));
     expect(el.querySelector("article[aria-label^='Question ']")!.textContent).toContain("retracted");
+  });
+
+  it("drops a javascript: Markdown link in a message", async () => {
+    const t = await api.threads.open({ topic: "Links", scope: "terrarium", agent: "terrarium/lead" });
+    api.sim.threadPost(t.id, "See [the plan](javascript:alert(1)) and [the board](https://example.com/b).");
+    const { el } = mount(`/inbox/threads/${t.id}`);
+    await waitFor(() => expect(el.querySelector("[aria-label=Conversation]")?.textContent).toContain("the plan"));
+    const hrefs = [...el.querySelectorAll("[aria-label=Conversation] a")].map((a) => a.getAttribute("href") ?? "");
+    expect(hrefs).toContain("https://example.com/b");
+    expect(hrefs.some((h) => h.toLowerCase().includes("javascript"))).toBe(false);
+  });
+
+  it("reads the thread again when a write gets a 409, also without events", async () => {
+    const t = await api.threads.open({ topic: "Closed elsewhere", scope: "terrarium", agent: "terrarium/lead" });
+    const { el } = mount(`/inbox/threads/${t.id}`);
+    await waitFor(() => expect(el.querySelector("h1")?.textContent).toBe("Closed elsewhere"));
+    await api.threads.close(t.id, { summary: "Closed by the CLI." });
+    setValue("textarea[aria-label='Message text']", "Still there?");
+    button("Send")!.click();
+    await waitFor(() => expect(status(el)).toBe("closed"));
+    expect(el.querySelector("section[aria-label=Handoff]")!.textContent).toContain("Closed by the CLI.");
+    expect(el.querySelector("form[aria-label=Message]")).toBeNull();
   });
 
   it("shows a missing thread", async () => {
