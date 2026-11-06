@@ -187,11 +187,7 @@ pub async fn end(
     result: String,
 ) -> ApiResult<bool> {
     let key = b.clone();
-    let Some(sp) = state
-        .db
-        .read(move |c| spawns::open_bound(c, &key))
-        .await?
-    else {
+    let Some(sp) = state.db.read(move |c| spawns::open_bound(c, &key)).await? else {
         return Ok(false);
     };
     info!(agent = %sp.id, bound = %b.text(), %outcome, "the object of a bound agent ended");
@@ -246,12 +242,18 @@ fn action_of(ev: &StoredEvent, parked: bool) -> Option<Action> {
     match ev.kind.as_str() {
         "card" => match s("change")? {
             "moved" => on_move(s("from")?, s("to")?, s("to_role"), parked),
-            "archived" => Some(Action::End(spawns::CANCELLED, "the card was archived".into())),
+            "archived" => Some(Action::End(
+                spawns::CANCELLED,
+                "the card was archived".into(),
+            )),
             _ => None,
         },
         "job" if s("kind") == Some("merge") && s("state") == Some("passed") => Some(Action::End(
             spawns::DONE,
-            format!("the card was merged onto next (job {})", s("id").unwrap_or("?")),
+            format!(
+                "the card was merged onto next (job {})",
+                s("id").unwrap_or("?")
+            ),
         )),
         _ => None,
     }
@@ -261,7 +263,11 @@ fn action_of(ev: &StoredEvent, parked: bool) -> Option<Action> {
 fn card_of(ev: &StoredEvent) -> Option<String> {
     match ev.kind.as_str() {
         "card" => ev.card.clone(),
-        "job" => ev.data.get("card").and_then(Value::as_str).map(str::to_owned),
+        "job" => ev
+            .data
+            .get("card")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         _ => None,
     }
 }
@@ -314,11 +320,7 @@ async fn handle(state: &Shared, ev: StoredEvent) {
     let Some(card_id) = card_of(&ev) else { return };
     let b = Bound::new(KIND_CARD, &card_id);
     let key = b.clone();
-    let open = match state
-        .db
-        .read(move |c| spawns::open_bound(c, &key))
-        .await
-    {
+    let open = match state.db.read(move |c| spawns::open_bound(c, &key)).await {
         Ok(Some(sp)) => sp,
         Ok(None) => return,
         Err(e) => {
@@ -430,8 +432,14 @@ mod tests {
             Some(Action::End("done", _))
         ));
         // A failure: back to ready from a wait column.
-        assert_eq!(on_move("validating", "ready", None, true), Some(Action::Unpark));
-        assert_eq!(on_move("review", "backlog", None, true), Some(Action::Unpark));
+        assert_eq!(
+            on_move("validating", "ready", None, true),
+            Some(Action::Unpark)
+        );
+        assert_eq!(
+            on_move("review", "backlog", None, true),
+            Some(Action::Unpark)
+        );
         // To the working or blocked column: unpark only a parked agent.
         assert_eq!(
             on_move("review", "in_progress", Some("working"), true),
@@ -441,8 +449,14 @@ mod tests {
             on_move("ready", "in_progress", Some("working"), true),
             Some(Action::Unpark)
         );
-        assert_eq!(on_move("ready", "in_progress", Some("working"), false), None);
-        assert_eq!(on_move("in_progress", "blocked", Some("blocked"), false), None);
+        assert_eq!(
+            on_move("ready", "in_progress", Some("working"), false),
+            None
+        );
+        assert_eq!(
+            on_move("in_progress", "blocked", Some("blocked"), false),
+            None
+        );
         // A lead takes the card back to ready or backlog: park.
         assert_eq!(on_move("in_progress", "ready", None, false), park("ready"));
         assert_eq!(on_move("ready", "backlog", None, true), park("backlog"));

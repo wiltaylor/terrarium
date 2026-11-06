@@ -232,12 +232,11 @@ async fn a_bound_agent_outlives_the_lifetime_and_a_parked_one_holds_no_place() {
     // The system prompt facts: bound, so no lifetime text.
     let s = state(&td);
     let key = eph.clone();
-    let info = s
-        .db
-        .read(move |c| terrariumd::spawn::prompt_info(c, &key))
-        .await
-        .unwrap()
-        .unwrap();
+    let info =
+        s.db.read(move |c| terrariumd::spawn::prompt_info(c, &key))
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(info.bound.as_deref(), Some(format!("card:{c}").as_str()));
     // max_concurrent 1: a plain spawn is refused while the bound agent runs.
     let plain = json!({"template": "w-claude", "task": "other"});
@@ -272,7 +271,13 @@ async fn round_trip(harness: &str) {
     assert!(harness_session.is_string());
 
     // To validating: parked, then stopped at rest.
-    mv(&td, &c, "validating", Some("Job queue: validate job queued.")).await;
+    mv(
+        &td,
+        &c,
+        "validating",
+        Some("Job queue: validate job queued."),
+    )
+    .await;
     parked(&td, &eph).await;
     let sp = spawn_row(&td, &eph).await;
     assert_eq!(sp["park_reason"], "card in validating", "{sp}");
@@ -285,9 +290,12 @@ async fn round_trip(harness: &str) {
     assert_eq!(ev.as_array().unwrap().len(), 1, "{ev}");
 
     // Mail does not wake a parked agent.
-    td.post("/api/mail", json!({"to": format!("p/{}", sp["name"].as_str().unwrap()), "body": "hi"}))
-        .await
-        .ok();
+    td.post(
+        "/api/mail",
+        json!({"to": format!("p/{}", sp["name"].as_str().unwrap()), "body": "hi"}),
+    )
+    .await
+    .ok();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(agent(&td, &eph).await["status"], "stopped");
 
@@ -299,7 +307,13 @@ async fn round_trip(harness: &str) {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    mv(&td, &c, "ready", Some("Job queue: validate job 01J (attempt 2) failed again.")).await;
+    mv(
+        &td,
+        &c,
+        "ready",
+        Some("Job queue: validate job 01J (attempt 2) failed again."),
+    )
+    .await;
     until("the unpark turn", || async {
         td.sup
             .prompts(aid)

@@ -968,10 +968,9 @@ pub fn prompt_section(info: &PromptInfo) -> String {
 
 /// The prompt of a bound agent (TER-74): its life follows its object.
 fn bound_prompt_section(owner: &str, bound: &str) -> String {
-    let object = bound.strip_prefix("card:").map_or_else(
-        || format!("`{bound}`"),
-        |c| format!("card {c}"),
-    );
+    let object = bound
+        .strip_prefix("card:")
+        .map_or_else(|| format!("`{bound}`"), |c| format!("card {c}"));
     format!(
         "## You are a bound ephemeral agent\n\n\
          You are an ephemeral agent of `{owner}`, bound to {object}. Your first turn is your \

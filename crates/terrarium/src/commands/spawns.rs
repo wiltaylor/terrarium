@@ -256,7 +256,10 @@ pub async fn spawn(ctx: &Ctx, a: &SpawnArgs) -> anyhow::Result<()> {
     }
     ctx.emit(&r, |c, r| {
         let life = match r["bound"].as_str() {
-            Some(b) => format!("bound to {b}, at most until {}", short_time(&field(r, "deadline_at"))),
+            Some(b) => format!(
+                "bound to {b}, at most until {}",
+                short_time(&field(r, "deadline_at"))
+            ),
             None => format!("lifetime until {}", short_time(&field(r, "deadline_at"))),
         };
         c.line(format!(
