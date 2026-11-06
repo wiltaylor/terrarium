@@ -2218,6 +2218,33 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE projects ADD COLUMN github_authors TEXT;
     ALTER TABLE questions ADD COLUMN hold_card TEXT;
     "#,
+    // 80: labels on test runs and artifacts (TER-58). Versions are card
+    // labels (`version:vnext`, `version:<X.Y.Z>`), so a run or an
+    // artifact links to a label in place of a version object. A label is
+    // free text. The version tables of migrations 3, 49, and 50
+    // (`versions`, `version_cards`, `version_artifacts`, `version_reviews`,
+    // `test_run_versions`) are no longer read or written, except that the
+    // artifact prune still counts `version_artifacts`. They keep their
+    // rows; a later version drops them. Self-contained: when another
+    // branch takes this number, move this entry to the end of the list.
+    r#"
+    CREATE TABLE test_run_labels (
+        run        INTEGER NOT NULL REFERENCES test_runs(pk) ON DELETE CASCADE,
+        label      TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run, label)
+    );
+    CREATE INDEX test_run_labels_label ON test_run_labels(label, run);
+    CREATE TABLE artifact_labels (
+        artifact   INTEGER NOT NULL REFERENCES artifacts(pk) ON DELETE CASCADE,
+        label      TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (artifact, label)
+    );
+    CREATE INDEX artifact_labels_label ON artifact_labels(label, artifact);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -2903,6 +2930,8 @@ mod tests {
             "test_cases",
             "test_run_cards",
             "test_run_versions",
+            "test_run_labels",
+            "artifact_labels",
             "spawns",
             "monitors",
             "webhook_deliveries",

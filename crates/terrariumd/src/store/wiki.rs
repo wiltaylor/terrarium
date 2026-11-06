@@ -79,10 +79,10 @@ pub struct PageSummary {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WikiLink {
-    /// `page`, `card`, `memory`, `version`, or `artifact`.
+    /// `page`, `card`, `memory`, or `artifact`. A link stored before
+    /// TER-58 can be `version` (`project/<version name>`).
     pub kind: String,
-    /// `project/path`, a card ID, `project/MEM-n`, `project/<version>`, or
-    /// `project/ART-n`.
+    /// `project/path`, a card ID, `project/MEM-n`, or `project/ART-n`.
     pub target: String,
 }
 
@@ -314,7 +314,7 @@ fn short_re() -> &'static Regex {
 }
 
 /// The links in `body`, for a page of `project`.
-pub fn extract_links(conn: &Connection, project: &str, body: &str) -> ApiResult<Vec<WikiLink>> {
+pub fn extract_links(project: &str, body: &str) -> Vec<WikiLink> {
     let mut out: Vec<WikiLink> = Vec::new();
     let mut push = |kind: &str, target: String| {
         if !out.iter().any(|l| l.kind == kind && l.target == target) {
@@ -343,23 +343,7 @@ pub fn extract_links(conn: &Connection, project: &str, body: &str) -> ApiResult<
             }
             continue;
         }
-        let is_version = (raw.starts_with('v')
-            && raw[1..].starts_with(|c: char| c.is_ascii_digit()))
-            || conn
-                .query_row(
-                    "SELECT 1 FROM versions WHERE project = ?1 AND name = ?2
-                     AND NOT EXISTS (SELECT 1 FROM wiki_pages WHERE project = ?1 AND path = ?2
-                                     AND deleted_at IS NULL)",
-                    params![project, raw],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-        if is_version {
-            push("version", format!("{project}/{raw}"));
-        } else {
-            push("page", format!("{project}/{raw}"));
-        }
+        push("page", format!("{project}/{raw}"));
     }
     for cap in embed_re().captures_iter(body) {
         let raw = cap[1].to_owned();
@@ -369,7 +353,7 @@ pub fn extract_links(conn: &Connection, project: &str, body: &str) -> ApiResult<
         };
         push("artifact", target);
     }
-    Ok(out)
+    out
 }
 
 /// Paths are slugs with `/`: lower-case letters, digits, `-`, `_`, `.`.
@@ -598,7 +582,7 @@ pub fn get(conn: &Connection, actor: &Actor, key: &str) -> ApiResult<WikiPage> {
 /// Index the current revision: links, full text, title, and front matter.
 fn index(t: &Tx<'_>, page: &PageRow, body: &str) -> ApiResult<()> {
     t.execute("DELETE FROM wiki_links WHERE page = ?1", [&page.id])?;
-    for l in extract_links(t, &page.project, body)? {
+    for l in extract_links(&page.project, body) {
         t.execute(
             "INSERT OR IGNORE INTO wiki_links (page, kind, target) VALUES (?1, ?2, ?3)",
             params![page.id, l.kind, l.target],
@@ -1260,55 +1244,6 @@ pub fn backlinks(conn: &Connection, actor: &Actor, key: &str) -> ApiResult<Vec<P
         .collect())
 }
 
-/// The live pages of `project` whose latest revision at `until` differs
-/// from the one at `since`. Used by version compare.
-pub fn changed_between(
-    conn: &Connection,
-    project: &str,
-    since: &str,
-    until: &str,
-) -> ApiResult<Vec<PageChange>> {
-    let mut stmt = conn.prepare(
-        "SELECT p.id, p.path,
-                (SELECT max(rev) FROM wiki_revisions r WHERE r.page = p.id AND r.created_at <= ?2),
-                (SELECT max(rev) FROM wiki_revisions r WHERE r.page = p.id AND r.created_at <= ?3)
-         FROM wiki_pages p WHERE p.project = ?1 AND p.deleted_at IS NULL ORDER BY p.path",
-    )?;
-    let rows = stmt
-        .query_map(params![project, since, until], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<i64>>(2)?,
-                r.get::<_, Option<i64>>(3)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(id, path, from_rev, to_rev)| {
-            let to_rev = to_rev?;
-            (from_rev != Some(to_rev)).then_some(PageChange {
-                id,
-                path,
-                from_rev,
-                to_rev,
-            })
-        })
-        .collect())
-}
-
-/// A page that changed between two times.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PageChange {
-    pub id: String,
-    pub path: String,
-    /// The revision at the earlier time; absent for a new page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from_rev: Option<i64>,
-    pub to_rev: i64,
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1359,18 +1294,16 @@ mod tests {
 
     #[test]
     fn links() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::migrate(&mut conn).unwrap();
         let body = "See [[designs/runner-v2]], [[TER-42]], [[MEM-17|a fact]], [[v0.3.0]], \
                     [[project:other/reports/x]], ![d](artifact:ART-9), [r](artifact:art-10)\n\
                     ```artifact ART-11```\n";
-        let links = extract_links(&conn, "p", body).unwrap();
+        let links = extract_links("p", body);
         let got: Vec<(String, String)> = links.into_iter().map(|l| (l.kind, l.target)).collect();
         for want in [
             ("page", "p/designs/runner-v2"),
             ("card", "TER-42"),
             ("memory", "p/MEM-17"),
-            ("version", "p/v0.3.0"),
+            ("page", "p/v0.3.0"),
             ("page", "other/reports/x"),
             ("artifact", "p/ART-9"),
             ("artifact", "p/ART-10"),

@@ -103,7 +103,6 @@ const ACTOR_ATTRIBUTED: &[&str] = &[
     "wiki.",
     "artifact.",
     "memory.",
-    "version.",
     "db.",
     "test_run",
 ];

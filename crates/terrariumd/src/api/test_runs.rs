@@ -4,12 +4,15 @@
 //! An upload is one of:
 //!
 //! - JSON with `content` (the file as text) or `data_base64`, and the
-//!   fields `file_name`, `name`, `format`, `cards`, `versions`, `commit`,
+//!   fields `file_name`, `name`, `format`, `cards`, `labels`, `commit`,
 //!   `branch` (the CLI sends this);
 //! - `multipart/form-data` with a `file` part and the same fields as text
-//!   parts (`card` and `version` can repeat);
+//!   parts (`card` and `label` can repeat);
 //! - any other body: the file itself, with the fields in the query
-//!   (`?name=&format=&card=&card=&version=&commit=&branch=&file_name=`).
+//!   (`?name=&format=&card=&card=&label=&commit=&branch=&file_name=`).
+//!
+//! A `version` field gives 400: version objects are removed (TER-58), a
+//! run links to a version label with `label`.
 //!
 //! The parse runs off the async threads, before the write.
 
@@ -67,7 +70,9 @@ struct Envelope {
     #[serde(default)]
     cards: Vec<String>,
     #[serde(default)]
-    versions: Vec<String>,
+    labels: Vec<String>,
+    #[serde(default)]
+    versions: Option<serde_json::Value>,
     #[serde(default)]
     commit: Option<String>,
     #[serde(default)]
@@ -95,6 +100,14 @@ type Upload = (Vec<u8>, Option<Format>, NewRun);
 
 fn format_of(v: Option<&str>) -> ApiResult<Option<Format>> {
     Format::parse_name(v.unwrap_or("auto")).map_err(test_runs::parse_error)
+}
+
+/// The answer to a `version` field: version objects are removed (TER-58).
+fn no_versions() -> ApiError {
+    ApiError::bad_request(
+        "version objects are removed (TER-58): link the run to a version label \
+         with `label` (`labels` in JSON), such as `version:1.4.0`",
+    )
 }
 
 fn too_large(size: usize) -> ApiError {
@@ -126,13 +139,16 @@ fn parse_upload(headers: &HeaderMap, query: &[(String, String)], body: Bytes) ->
             .ok_or_else(|| ApiError::bad_request("the multipart upload needs a `file` part"))?;
         let mut cards = texts("card");
         cards.extend(texts("cards"));
-        let mut versions = texts("version");
-        versions.extend(texts("versions"));
+        if parts.iter().any(|p| p.name == "version" || p.name == "versions") {
+            return Err(no_versions());
+        }
+        let mut labels = texts("label");
+        labels.extend(texts("labels"));
         let meta = NewRun {
             name: text("name"),
             file_name: text("file_name").or_else(|| file.filename.clone()),
             cards,
-            versions,
+            labels,
             commit: text("commit"),
             branch: text("branch"),
         };
@@ -142,6 +158,9 @@ fn parse_upload(headers: &HeaderMap, query: &[(String, String)], body: Bytes) ->
     if (ct.is_empty() || ct.starts_with("application/json")) && is_envelope(&body) {
         let e: Envelope = serde_json::from_slice(&body)
             .map_err(|e| ApiError::bad_request(format!("bad upload JSON: {e}")))?;
+        if e.versions.is_some() {
+            return Err(no_versions());
+        }
         let data = match (e.content, e.data_base64) {
             (Some(c), None) => c.into_bytes(),
             (None, Some(b)) => {
@@ -164,7 +183,7 @@ fn parse_upload(headers: &HeaderMap, query: &[(String, String)], body: Bytes) ->
             name: e.name,
             file_name: e.file_name,
             cards: e.cards,
-            versions: e.versions,
+            labels: e.labels,
             commit: e.commit,
             branch: e.branch,
         };
@@ -186,11 +205,14 @@ fn parse_upload(headers: &HeaderMap, query: &[(String, String)], body: Bytes) ->
             .collect()
     };
     for (k, _) in query {
+        if k == "version" {
+            return Err(no_versions());
+        }
         if ![
             "name",
             "format",
             "card",
-            "version",
+            "label",
             "commit",
             "branch",
             "file_name",
@@ -198,7 +220,7 @@ fn parse_upload(headers: &HeaderMap, query: &[(String, String)], body: Bytes) ->
         .contains(&k.as_str())
         {
             return Err(ApiError::bad_request(format!(
-                "unknown query field `{k}`: use name, format, card, version, commit, branch, file_name"
+                "unknown query field `{k}`: use name, format, card, label, commit, branch, file_name"
             )));
         }
     }
@@ -207,7 +229,7 @@ fn parse_upload(headers: &HeaderMap, query: &[(String, String)], body: Bytes) ->
         name: one("name"),
         file_name: one("file_name"),
         cards: many("card"),
-        versions: many("version"),
+        labels: many("label"),
         commit: one("commit"),
         branch: one("branch"),
     };
