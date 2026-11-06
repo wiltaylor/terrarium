@@ -36,6 +36,7 @@ import { limitsInfo, limitsKindError, resolveLimits } from "../../lib/limits";
 import { mockChanges, mockCommit, mockCommits, mockFile, mockList, mockTrees } from "./repoTrees";
 import type {
   Agent,
+  QueuedTurn,
   AgentDef,
   Harness,
   AgentEvent,
@@ -960,13 +961,14 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   });
   // ----- wakes: work for an agent that does not run -----
   /** The turns that wait for a stopped or paused agent. The rest of `queued` (mail, cards) has no body in the mock. */
-  const queuedTurns: Record<string, string[]> = {};
+  const queuedTurns: Record<string, QueuedTurn[]> = {};
+  let nextQueued = 0;
   /** The agent is ready: the queued work goes to it. */
   const flushQueue = (a: Agent) => {
     const turns = queuedTurns[a.id] ?? [];
     delete queuedTurns[a.id];
     delete a.queued;
-    for (const t of turns) deliverTurn(a, t);
+    for (const t of turns) deliverTurn(a, t.body);
   };
   /** Start a stopped agent (with resume) for `cause`, then deliver its queued work. A paused, live, or errored agent does not wake. */
   const wake = (a: Agent, cause: string) => {
@@ -2721,13 +2723,25 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           audit("agent.send", a.id, a.project, { chars: text.length });
           if (!LIVE.includes(a.status) || a.paused) {
             // The turn waits; the agent wakes (unless paused) and then takes it.
-            (queuedTurns[a.id] ??= []).push(text);
+            (queuedTurns[a.id] ??= []).push({ id: ++nextQueued, text: `[User] ${text}`, body: text, created_at: iso() });
             a.queued = (a.queued ?? 0) + 1;
             if (!a.paused) later(() => wake(a, "turn"), 0);
             return { accepted: true, queued: true };
           }
           deliverTurn(a, text);
           return { accepted: true };
+        }),
+      queued: (id) => reply(() => ({ items: clone(queuedTurns[agent(id).id] ?? []) })),
+      removeQueued: (id, turn) =>
+        reply(() => {
+          const a = agent(id);
+          const list = queuedTurns[a.id] ?? [];
+          const i = list.findIndex((t) => t.id === Number(turn));
+          if (i < 0) fail(404, "not_found", `turn ${turn} does not wait for the agent (it went out, or it never was)`);
+          const [gone] = list.splice(i, 1);
+          a.queued = (a.queued ?? 1) - 1;
+          if (a.queued <= 0) delete a.queued;
+          audit("agent.queued.remove", a.id, a.project, { turn: gone!.id, bytes: gone!.text.length });
         }),
       attach: (id, file) =>
         reply(() => {

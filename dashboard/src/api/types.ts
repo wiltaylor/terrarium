@@ -16,6 +16,16 @@ export const AGENT_STATUSES = [
 ] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
+/** One turn that waits in the store for its agent's wake (`GET /api/agents/{id}/queued`, TER-54). */
+export interface QueuedTurn {
+  id: number;
+  /** The turn as it will be typed, with its tag (`[User] ...`). */
+  text: string;
+  /** The text after the tag: what the composer gets for an edit. */
+  body: string;
+  created_at: string;
+}
+
 /** Roles above `member`. The daemon drops `member`; it is implicit. */
 export type Role = "sysadmin" | "project_admin" | "member";
 export const GRANTABLE_ROLES = ["project_admin", "sysadmin"] as const;
