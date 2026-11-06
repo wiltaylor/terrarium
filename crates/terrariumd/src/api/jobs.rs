@@ -84,15 +84,15 @@ async fn hosts_view(state: &Shared, actor: &Actor) -> ApiResult<Value> {
                    "running": total,
                    "updated_by": cap.map(|c| c.updated_by.clone()),
                    "updated_at": cap.map(|c| c.updated_at.clone()), "projects": counts});
-            if let Actor::Agent(a) = actor {
-                if !a.reads_all() {
-                    if let Some(object) = view.as_object_mut() {
-                        object.remove("updated_by");
-                        object.remove("updated_at");
-                    }
-                    view["projects"] =
-                        json!({a.project.clone(): counts.get(&a.project).copied().unwrap_or(0)});
+            if let Actor::Agent(a) = actor
+                && !a.reads_all()
+            {
+                if let Some(object) = view.as_object_mut() {
+                    object.remove("updated_by");
+                    object.remove("updated_at");
                 }
+                view["projects"] =
+                    json!({a.project.clone(): counts.get(&a.project).copied().unwrap_or(0)});
             }
             view
         })
