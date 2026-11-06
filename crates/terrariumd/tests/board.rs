@@ -88,7 +88,70 @@ async fn board_shape_and_card_ids() {
     let l = td.get("/api/projects/proj/cards?label=x").await;
     assert_eq!(l.ok()[0]["id"], "TER-1");
     let l = td.get("/api/projects/proj/cards?limit=1").await;
-    assert_eq!(l.next_cursor().as_deref(), Some("1"));
+    assert_eq!(l.ok()[0]["id"], "TER-1");
+    let cursor = l.next_cursor().expect("a second page");
+    let l = td
+        .get(&format!("/api/projects/proj/cards?limit=1&cursor={cursor}"))
+        .await;
+    assert_eq!(l.ok()[0]["id"], "TER-2");
+    assert_eq!(l.next_cursor(), None);
+}
+
+fn ids(v: &Value) -> Vec<&str> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect()
+}
+
+/// TER-73: the card list is in board order: by column, then by place in
+/// the column (the top first), not by card number. Paging keeps that order.
+#[tokio::test]
+async fn the_card_list_is_in_board_order() {
+    let td = setup().await;
+    for t in ["A", "B", "C"] {
+        card(&td, "proj/lead", json!({"title": t, "column": "ready"})).await;
+    }
+    card(&td, "proj/lead", json!({"title": "D"})).await;
+    // TER-3 goes to the top of ready.
+    td.post(
+        "/api/cards/TER-3/move",
+        json!({"column": "ready", "position": 0}),
+    )
+    .await
+    .ok();
+    let all = td.get("/api/projects/proj/cards").await;
+    assert_eq!(ids(all.ok()), ["TER-4", "TER-3", "TER-1", "TER-2"]);
+    let ready = td
+        .get("/api/projects/proj/cards?column=ready&unassigned=true")
+        .await;
+    let ready = ready.ok();
+    assert_eq!(ids(ready), ["TER-3", "TER-1", "TER-2"]);
+    let pos: Vec<i64> = ready
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["position"].as_i64().unwrap())
+        .collect();
+    assert_eq!(pos, [0, 1, 2]);
+    // One card a page gives the same order.
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let path = match &cursor {
+            Some(c) => format!("/api/projects/proj/cards?limit=1&cursor={c}"),
+            None => "/api/projects/proj/cards?limit=1".to_owned(),
+        };
+        let page = td.get(&path).await;
+        seen.extend(ids(page.ok()).into_iter().map(str::to_owned));
+        cursor = page.next_cursor();
+        if cursor.is_none() {
+            break;
+        }
+        assert!(seen.len() < 10, "the pages do not end");
+    }
+    assert_eq!(seen, ["TER-4", "TER-3", "TER-1", "TER-2"]);
 }
 
 #[tokio::test]

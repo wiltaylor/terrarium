@@ -575,7 +575,20 @@ pub struct CardFilter {
     pub archived: bool,
 }
 
-/// Cards by number. The cursor is a card number.
+/// The place of a card in [`list_cards`]: column position, card position,
+/// card number. The cursor is the place of the last card of the page, as
+/// `<column>.<position>.<number>`.
+fn list_cursor(cursor: Option<&str>) -> (i64, i64, i64) {
+    let mut parts = cursor.unwrap_or_default().split('.').map(str::parse::<i64>);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(k)), Some(Ok(p)), Some(Ok(n)), None) => (k, p, n),
+        // No cursor, or one that is not ours: start at the top.
+        _ => (i64::MIN, i64::MIN, i64::MIN),
+    }
+}
+
+/// Cards in board order (TER-73): by the place of their column on the
+/// board, then by their place in the column (the top first), then by number.
 pub fn list_cards(
     conn: &Connection,
     project: &str,
@@ -584,7 +597,7 @@ pub fn list_cards(
     page: &Page,
 ) -> ApiResult<Paged<Card>> {
     let limit = page.limit();
-    let after: i64 = page.cursor().and_then(|c| c.parse().ok()).unwrap_or(0);
+    let (after_k, after_p, after_n) = list_cursor(page.cursor());
     // A role alias (`working`, `blocked`) names the column with that role.
     // An unknown name matches no card, as before.
     let column_name = f.column.as_deref().map(|c| {
@@ -592,35 +605,48 @@ pub fn list_cards(
             .map(|k| k.name)
             .unwrap_or_else(|_| c.to_owned())
     });
-    let mut stmt = conn.prepare(&format!(
-        "{CARD_SELECT} WHERE c.project = ?1 AND c.number > ?2
+    let mut stmt = conn.prepare(
+        "SELECT c.*, k.name AS column_name, k.role AS column_role,
+                k.position AS column_position
+           FROM cards c JOIN board_columns k ON k.id = c.column_id
+          WHERE c.project = ?1
+           AND (k.position, c.position, c.number) > (?2, ?9, ?10)
            AND (?3 IS NULL OR k.name = ?3)
            AND (?4 IS NULL OR c.assignee = ?4)
            AND (?5 = 0 OR c.assignee IS NULL)
            AND (?6 IS NULL OR EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?6))
            AND c.archived = ?7
-         ORDER BY c.number LIMIT ?8"
-    ))?;
+         ORDER BY k.position, c.position, c.number LIMIT ?8",
+    )?;
     let rows = stmt
         .query_map(
             params![
                 project,
-                after,
+                after_k,
                 column_name,
                 assignee,
                 f.unassigned as i64,
                 f.label,
                 f.archived as i64,
-                (limit + 1) as i64
+                (limit + 1) as i64,
+                after_p,
+                after_n
             ],
-            |r| Ok((r.get::<_, i64>("number")?, card_row(r)?)),
+            |r| {
+                let place = (
+                    r.get::<_, i64>("column_position")?,
+                    r.get::<_, i64>("position")?,
+                    r.get::<_, i64>("number")?,
+                );
+                Ok((place, card_row(r)?))
+            },
         )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::new();
-    for (n, row) in rows {
-        out.push((n, render(conn, row)?));
+    for (place, row) in rows {
+        out.push((place, render(conn, row)?));
     }
-    let paged = Paged::from_rows(out, limit, |(n, _)| n.to_string());
+    let paged = Paged::from_rows(out, limit, |((k, p, n), _)| format!("{k}.{p}.{n}"));
     Ok(Paged {
         items: paged.items.into_iter().map(|(_, c)| c).collect(),
         next: paged.next,
