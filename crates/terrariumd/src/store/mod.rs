@@ -12,6 +12,7 @@ pub mod event_sources;
 pub mod harness_updates;
 pub mod hosts;
 pub mod inbox;
+pub mod jobs;
 pub mod leases;
 pub mod mail;
 pub mod memory;

@@ -484,6 +484,16 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                 None => c.line(format!("{} has no ETA", field(k, "id"))),
             })
         }
+        CardCmd::Validate {
+            id,
+            commit,
+            repo,
+            branch,
+            comment,
+        } => super::jobs::validate(ctx, &card_path(id), commit, repo, branch, comment).await,
+        CardCmd::Merge { id, repo, branch } => {
+            super::jobs::merge(ctx, &card_path(id), repo, branch).await
+        }
         CardCmd::Assign { id, agent } => {
             let who = match agent.as_str() {
                 "none" | "-" => Value::Null,

@@ -1137,6 +1137,34 @@ new and the removed tests.
 The packaged skill `terrarium-tests` gives the command that makes a
 standard file for each test framework.
 
+### The job queue
+
+```
+terrarium card validate <id> [--commit sha] [--repo r] [--branch b] [-m text]
+terrarium card merge <id> [--repo r] [--branch b]          project_admin
+terrarium job ls [--state queued|running|passed|failed|cancelled]
+terrarium job show <id>
+terrarium job cancel <id>
+terrarium project delivery show
+terrarium project delivery set [--target t] [--recipe cmd] [--slots n]
+                               [--next-repo r]... [--work-dir d] [--timeout secs]
+```
+
+`card validate` queues a validation of the card's pushed commit
+(docs/api.md §35). It moves the card to `validating`, keeps you assigned,
+and adds `by:<you>`. Then take your next card: the daemon moves this one to
+`review` when it passes, or to the top of `ready` with a failure block
+when it fails twice. `--commit` must be the head of the branch on the
+remote. The answer says whether the job starts now, or its place in the
+queue.
+
+`card merge` queues a merge of the card branch onto `next`. The job
+validates the merge and pushes `next` when it is green, and the card moves
+to `accepted`.
+
+`project delivery set` keeps the flags that you leave out. `--target ""`
+or `--recipe ""` turns the queue off. `--next-repo` replaces the list.
+
 ### Monitors and the dashboard
 
 ```
