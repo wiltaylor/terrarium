@@ -1146,6 +1146,7 @@ standard file for each test framework.
 ```
 terrarium card validate <id> [--commit sha] [--repo r] [--branch b] [-m text]
 terrarium card merge <id> [--repo r] [--branch b]          project_admin
+terrarium card merge <id> <id>... [--repo r]               project_admin
 terrarium job ls [--state queued|running|passed|failed|cancelled]
 terrarium job show <id>
 terrarium job cancel <id>
@@ -1167,6 +1168,13 @@ queue.
 `card merge` queues a merge of the card branch onto `next`. The job
 validates the merge and pushes `next` when it is green, and the card moves
 to `accepted`.
+
+With two or more cards, `card merge` queues one batch merge job
+(`POST /api/merges`, docs/api.md §35.3). It merges the card branches onto
+`next` in the given order, validates once, and pushes `next` when green.
+A card that conflicts goes to the top of `ready` at once. On red, the
+batch splits in halves until it finds the failing card, which goes to the
+top of `ready`. The other cards merge. `--branch` takes one card only.
 
 `job host-cap` sets the most jobs of all projects that run on one host at
 the same time (docs/api.md §35.2, "The host cap"). The host is the host

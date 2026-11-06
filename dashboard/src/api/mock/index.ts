@@ -34,6 +34,7 @@ import { defaultTitle } from "../../features/board/columns";
 import { checkColumnEdits } from "./boardColumns";
 import { limitsInfo, limitsKindError, resolveLimits } from "../../lib/limits";
 import { mockChanges, mockCommit, mockCommits, mockFile, mockList, mockTrees } from "./repoTrees";
+import type { Question, Thread } from "../types";
 import type {
   Agent,
   QueuedTurn,
@@ -114,6 +115,7 @@ import { createEventSourceMock } from "./eventSources";
 import { createWaitMock } from "./waits";
 import { createQuestionMock } from "./questions";
 import { createInboxMock, isPauseNotice } from "./inbox";
+import { createThreadMock } from "./threads";
 import { createConfigMock } from "./config";
 import { createSkillMock, skillsError } from "./skills";
 import { createToolMock } from "./tools";
@@ -279,6 +281,10 @@ export interface MockSim {
   setWindow(subscription: string, window: string, usedPct: number): void;
   /** Emit `subscription.offer` for each detected login with no subscription, as the daemon does at start. */
   offerLogins(): void;
+  /** The attached agent of an Inbox thread posts a message (docs/api.md §6.13). */
+  threadPost(id: string, text: string): Thread;
+  /** The attached agent of an Inbox thread asks a question or a bundle in it. */
+  threadAsk(id: string, q: Pick<Question, "text"> & Partial<Question>): Question;
 }
 
 /** The audit name of a terminal key, as the daemon gives it (docs/api.md §6.5); 422 for a key it refuses. */
@@ -970,6 +976,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     sendMail: (to, from, subject, body, thread) => sendMail(to, from, subject, body, thread),
     questionClosed: (id, result) => waitMock.questionClosed(id, result),
     inboxEvent: (d) => inboxEvent(d),
+    threadQuestion: (q, change) => threadMock.onQuestion(q, change),
+  });
+  // ----- Inbox threads (docs/api.md §6.13) -----
+  const threadMock = createThreadMock({
+    w,
+    iso,
+    ulid,
+    reply,
+    fail,
+    emit,
+    agent,
+    audit: (action, target, proj, detail) => audit(action, target, proj, detail),
+    inboxEvent: (d) => inboxEvent(d),
+    retractQuestion: (id, reason, byOwner) => void questionMock.retractNow(id, reason, byOwner),
   });
   // ----- wakes: work for an agent that does not run -----
   /** The turns that wait for a stopped or paused agent. The rest of `queued` (mail, cards) has no body in the mock. */
@@ -1503,6 +1523,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     inboxEvent: (d) => inboxEvent(d),
     agent: (key) => agent(key),
     audit: (action, target, proj, detail) => audit(action, target, proj, detail),
+    threadItems: () => threadMock.items(),
   });
   /** The first read sets `read_by` (docs/api.md §7). */
   const readBy = (m: Message, reader: string) => {
@@ -3827,6 +3848,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     },
 
     inbox: inboxMock.inbox,
+    threads: threadMock.threads,
 
     projectInbox: {
       list: (proj, q = {}) => reply(() => (project(proj), listMail((m) => m.to === `project:${proj}`, q))),
@@ -4280,6 +4302,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   };
   const sim: MockSim = {
     setWindow,
+    threadPost: (id, text) => threadMock.agentPost(id, text),
+    threadAsk: (id, q) => threadMock.agentAsk(id, q),
     offerLogins: () => {
       for (const d of detected()) {
         const { suggested, ...login } = d;

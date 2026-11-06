@@ -2993,7 +2993,7 @@ sessions of the agent.
 | `POST /api/agents/{id}/waits` | below | `201` the wait | the agent itself, the operator |
 | `POST /api/agents/{id}/run` | `{"target", "cmd": [..], "name"?, "cwd"?, "env"?, "timeout"?, "reason"?, "agent"?}` | `201 {"wait", "session_id", "target"}` | the agent itself, the operator; the run uses the agent's rights |
 | `GET /api/waits/{id}` | | `200` the wait | as for the list; else `404` |
-| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait | `200` the cancelled wait; a wait that is not open is `409 conflict` | as for the list |
+| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait: on a `host`, `docker`, or `ssh` target each process of the process group and session of the run gets `TERM`, then `KILL` after 5 s | `200` the cancelled wait; with a kill on such a target also `kill`: `{pid, term, kill, left}` (the PIDs on the target that got `TERM`, needed `KILL`, and still run) or `{error}`; a wait that is not open is `409 conflict` | as for the list |
 | `GET /api/waits/{id}/log` | `?max=` bytes (at most 65536) | `200 {"wait_id", "session_id", "target", "running", "output", "end"?}` | as for the list; a wait that is not `process` is `422` |
 
 The create body:
@@ -10442,6 +10442,12 @@ validate or a merge is a `409 conflict` that says how to set it.
 - `merge`: check out `next`, merge the card branch with `--no-ff`, run the
   recipe, and push `next` when the recipe passes. The push is not forced:
   when `next` moved, the job fails.
+- A batch merge (TER-112) is one `merge` job for several cards of one
+  project and one repo. It merges the card branches onto `next` in the
+  given order, each with `--no-ff`, runs the recipe once on the result,
+  and pushes `next` when it passes. `batch` in the job lists the cards
+  (`[{card, branch, by_agent?, outcome?, note?}]`); `card`, `branch`, and
+  `by_agent` are those of the first card. See 35.3 for the results.
 
 Jobs start first in, first out across all projects. A job starts when:
 
@@ -10541,6 +10547,32 @@ the host it started on (`host` in the job).
 - A daemon restart loses the running jobs: they fail (`error`) and follow
   the same rule.
 
+A batch merge:
+
+- A card whose branch does not merge onto `next` and the cards before it
+  leaves the batch: its merge is aborted, and the next card merges. A
+  merge that fails without a conflict (for example an unrelated history)
+  is the same: the tree is reset, and the card's note says why. The card
+  gets `outcome: conflict` in `batch` and fails at once, as above. When
+  no card merges, the job ends as a `conflict`.
+- Pass: each merged card moves to `accepted`.
+- Red with two or more merged cards: the batch splits into two halves (a
+  half of one card is a job of one card). Both are queued at the front,
+  with `parent` set to the red job. The halves split again on red, until
+  the failing card is found. The other cards merge. Each card gets a
+  comment with the jobs of the split.
+- The order holds over nested splits: `split_path` in the job adds `0`
+  for a left half and `1` for a right half to the path of its parent,
+  and the queue sorts on it after `created_at` and `attempt`. So the left
+  half and all its splits run before the right half. A merge runs alone
+  in its project, so the right half merges onto a `next` that holds the
+  cards of the left half that passed.
+- A card that a split leaves alone and that is red fails without the
+  rerun: the red batch was its first red. A batch that ends with one
+  merged card and red follows the rule of one card.
+- Any other failure (`error`) runs the batch once more with the merged
+  cards, then fails each of them.
+
 The card writes of the queue are made as the operator. Their comments
 start with `Job queue:`.
 
@@ -10550,10 +10582,12 @@ start with `Job queue:`.
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` on the target. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `POST /api/merges`                 | a project admin                       | `{cards, repo?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
-| `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels |
+| `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels. A batch merge: the creator or a project admin only, as it holds the cards of several workers; every card of the batch loses the job labels |
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
-Events `job` {change, project, id, card, kind, state, attempt, outcome}.
+Events `job` {change, project, id, card, kind, state, attempt, outcome,
+cards?}; `cards` lists the cards of a batch.
