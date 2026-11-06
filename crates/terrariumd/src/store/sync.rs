@@ -87,6 +87,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
                         let patch = projects::ProjectPatch {
                             description: None,
                             card_prefix: def.prefix.clone(),
+                            idle_alert: None,
                         };
                         if let Err(e) = projects::update(t, &def.name, &patch) {
                             report
