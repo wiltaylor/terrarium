@@ -1543,7 +1543,7 @@ async fn memory() {
         vec![req(Get, "/api/memories/other%2FMEM-1")],
     )
     .await;
-    let new_body =json!({"title": "X is Y", "body": "why", "tags": ["a"],
+    let new_body = json!({"title": "X is Y", "body": "why", "tags": ["a"],
         "sources": [{"kind": "card", "ref": "TER-1"}], "links": [{"to": "MEM-2", "relation": "supports"}]});
     let args = [
         "mem",
