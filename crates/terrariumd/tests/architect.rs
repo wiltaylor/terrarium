@@ -176,7 +176,7 @@ async fn an_architect_reads_every_project() {
     let cards = get("/api/cards?columns=backlog".into()).await.ok().clone();
     assert!(cards.to_string().contains(&w.qcard), "{cards}");
     let targets = get("/api/targets".into()).await.ok().clone();
-    assert!(targets.to_string().contains("\"box\""), "{targets}");
+    assert!(targets.to_string().contains("\"q-box\""), "{targets}");
     // Secret metadata, never a value.
     let secrets = get("/api/secrets".into()).await.ok().clone();
     assert!(secrets.to_string().contains("\"gh\""), "{secrets}");
@@ -286,12 +286,12 @@ async fn an_architect_writes_nothing_in_another_project() {
         "agent keys",
     );
     refused(
-        &td.post_as(a, "/api/targets/box/leases", json!({"agent": "q/w"}))
+        &td.post_as(a, "/api/targets/q-box/leases", json!({"agent": "q/w"}))
             .await,
         "lease",
     );
     refused(
-        &td.post_as(a, "/api/targets/box/exec", json!({"cmd": ["true"]}))
+        &td.post_as(a, "/api/targets/q-box/exec", json!({"cmd": ["true"]}))
             .await,
         "exec on a target",
     );
