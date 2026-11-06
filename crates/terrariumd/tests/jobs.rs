@@ -655,15 +655,31 @@ async fn a_cancel_ends_a_queued_job() {
 /// and `q` each have 2 slots, on targets of the host agent `lab1`, with a
 /// cap of 1 on `lab1`: never more than one job runs, and the jobs start in
 /// the order they were queued, across the projects. The recipe checks that
-/// it runs at the lowest CPU priority (and the idle IO class, when the
-/// machine has `ionice`).
+/// it runs 19 steps nicer than this process (at most 19), and in the idle
+/// IO class when the machine has a working `ionice -c3`.
 #[tokio::test]
 async fn the_host_cap_holds_across_projects_in_order() {
     let lab = lab(2).await;
     let wd = lab._dirs.path().join("jobs").display().to_string();
-    let recipe = "test -f OK && test \"$(nice)\" = 19 \
-                  && { ! ionice -c3 true 2>/dev/null || ionice -p $$ | grep -q idle; } \
-                  && sleep 1";
+    // `nice -n19` adds 19 to the niceness of the host agent (this test
+    // process), at most 19: a run under a parent at -4 gets 15.
+    let base: i32 = String::from_utf8(
+        std::process::Command::new("nice")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .parse()
+    .unwrap();
+    let want = (base + 19).min(19);
+    let recipe = format!(
+        "test -f OK && test \"$(nice)\" = {want} \
+         && {{ ! ionice -c3 true 2>/dev/null || ionice -p $$ | grep -q idle; }} \
+         && sleep 1"
+    );
+    let recipe = recipe.as_str();
     lab.td
         .put(
             "/api/projects/p/delivery",
