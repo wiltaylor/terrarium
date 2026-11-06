@@ -585,7 +585,9 @@ async fn merge_batch(
     ApiJson(b): ApiJson<BatchBody>,
 ) -> ApiResult<Response> {
     if b.cards.is_empty() {
-        return Err(ApiError::invalid("`cards` is empty: give one or more card IDs"));
+        return Err(ApiError::invalid(
+            "`cards` is empty: give one or more card IDs",
+        ));
     }
     if b.cards.len() > jobs::BATCH_MAX {
         return Err(ApiError::invalid(format!(

@@ -984,7 +984,11 @@ fn next_merges(lab: &Lab) -> Vec<String> {
 #[tokio::test]
 async fn a_green_batch_of_three_merges_in_one_job() {
     let lab = lab(2).await;
-    set_recipe(&lab, "test -f OK && test -f g1 && test -f g2 && test -f g3 && sleep 1").await;
+    set_recipe(
+        &lab,
+        "test -f OK && test -f g1 && test -f g2 && test -f g3 && sleep 1",
+    )
+    .await;
     let mut heads = Vec::new();
     let mut cards = Vec::new();
     for n in ["g1", "g2", "g3"] {
@@ -1025,7 +1029,11 @@ async fn a_green_batch_of_three_merges_in_one_job() {
     assert_eq!(batch, cards.iter().map(String::as_str).collect::<Vec<_>>());
     // A card of the open batch takes no other job.
     lab.td
-        .post_as(&lab.lead, &format!("/api/cards/{}/merge", cards[1]), json!({}))
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{}/merge", cards[1]),
+            json!({}),
+        )
         .await
         .err(409, "conflict");
     // Each card shows the job, unless the job has ended already.

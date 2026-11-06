@@ -804,11 +804,7 @@ fn end_comment(j: &Job, verdict: &str) -> String {
     );
     if !j.batch.is_empty() {
         let cards: Vec<&str> = j.batch.iter().map(|c| c.card.as_str()).collect();
-        s.push_str(&format!(
-            ", batch of {}: {}",
-            cards.len(),
-            cards.join(" ")
-        ));
+        s.push_str(&format!(", batch of {}: {}", cards.len(), cards.join(" ")));
     }
     if let Some(p) = &j.parent {
         s.push_str(&format!(", split from job {p}"));

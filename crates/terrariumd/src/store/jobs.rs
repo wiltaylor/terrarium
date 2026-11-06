@@ -764,8 +764,12 @@ pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, 
         emit(t, &job, "queued")?;
         out.push(job);
     }
-    let right = out.pop().ok_or_else(|| ApiError::internal("no right half"))?;
-    let left = out.pop().ok_or_else(|| ApiError::internal("no left half"))?;
+    let right = out
+        .pop()
+        .ok_or_else(|| ApiError::internal("no right half"))?;
+    let left = out
+        .pop()
+        .ok_or_else(|| ApiError::internal("no left half"))?;
     Ok((left, right))
 }
 
