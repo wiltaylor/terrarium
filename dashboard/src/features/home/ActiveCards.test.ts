@@ -87,6 +87,47 @@ describe("ActiveCards", () => {
     expect(el.textContent).toContain("1 in progress, 1 in research");
   });
 
+  it("lines up the columns: one table and one column template for all projects, the same cells in each row", async () => {
+    active.mockResolvedValue([
+      card({ id: "AB-2", project: "abc", title: "Spike", column: "research", column_kind: "research" }),
+      card({ id: "AB-3", project: "abc", title: "A very long title that the column cuts with an ellipsis", assignee: "A2", assignee_name: "abc/dev" }),
+      card({ assignee: "A1", assignee_name: "terrarium/rust-ci", assignee_status: "working", eta_at: "2026-11-05T11:00:00Z" }),
+    ]);
+    const el = await mount(Date.parse("2026-11-05T10:00:00Z"));
+    await vi.waitFor(() => expect(el.querySelectorAll("tr[data-card]").length).toBe(3));
+
+    // One table, one colgroup of five columns: every group shares the widths.
+    const tables = el.querySelectorAll("table");
+    expect(tables.length).toBe(1);
+    expect(tables[0]!.classList.contains("active-table")).toBe(true);
+    const cols = [...tables[0]!.querySelectorAll(":scope > colgroup > col")].map((c) => c.className);
+    expect(cols).toEqual(["col-id", "col-title", "col-column", "col-agent", "col-eta"]);
+    expect([...tables[0]!.querySelectorAll("thead th")].map((t) => t.textContent)).toEqual(["Card", "Title", "Column", "Agent", "ETA"]);
+
+    // A group head row per project, across all columns.
+    const heads = [...el.querySelectorAll("tbody.active-project > tr.active-group > th")];
+    expect(heads.map((h) => h.textContent)).toEqual(["abc", "terrarium"]);
+    for (const h of heads) expect(h.getAttribute("colspan")).toBe("5");
+
+    // Every card row has the same five cells, in the same order.
+    const shape = (tr: Element) =>
+      [...tr.children].map((td) => {
+        if (td.querySelector('a[href*="?card="]')) return "id";
+        if (td.classList.contains("active-title")) return "title";
+        if (td.querySelector(".chip") && !td.classList.contains("active-agent")) return "column";
+        if (td.classList.contains("active-agent")) return "agent";
+        return "eta";
+      });
+    for (const tr of el.querySelectorAll("tr[data-card]")) {
+      expect(tr.children.length).toBe(5);
+      expect(shape(tr)).toEqual(["id", "title", "column", "agent", "eta"]);
+    }
+
+    // The full title is the tooltip of the cut cell.
+    const long = el.querySelector('tr[data-card="AB-3"] td.active-title')!;
+    expect(long.getAttribute("title")).toBe("A very long title that the column cuts with an ellipsis");
+  });
+
   it("shows the empty state", async () => {
     active.mockResolvedValue([]);
     const el = await mount(Date.now());

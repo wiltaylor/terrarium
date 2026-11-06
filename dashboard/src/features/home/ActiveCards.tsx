@@ -1,7 +1,8 @@
 // Home, Work in progress (TER-43): every card in a working or research
 // column of every project, with its project, column, agent and live
 // status, and ETA. It reloads on card and agent status events (batched)
-// and each minute.
+// and each minute. All projects share one table with one column template,
+// so the columns line up across the project groups (TER-52).
 
 import { A } from "@solidjs/router";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
@@ -45,14 +46,35 @@ export function ActiveCards(props: { now: number }) {
         when={list().length > 0}
         fallback={<Empty>{cards.loading && !cards.latest ? "Loading…" : "No card is in progress or in research."}</Empty>}
       >
-        <For each={byProject(list())}>
-          {(g) => (
-            <div class="active-project">
-              <h3>
-                <A href={`/p/${encodeURIComponent(g.project)}/board`}>{g.project}</A>
-              </h3>
-              <table>
-                <tbody>
+        {/* One table for all projects, so the columns line up across the groups (TER-52). */}
+        <div class="table-wrap">
+          <table class="active-table">
+            <colgroup>
+              <col class="col-id" />
+              <col class="col-title" />
+              <col class="col-column" />
+              <col class="col-agent" />
+              <col class="col-eta" />
+            </colgroup>
+            <thead class="sr-only">
+              <tr>
+                <th scope="col">Card</th>
+                <th scope="col">Title</th>
+                <th scope="col">Column</th>
+                <th scope="col">Agent</th>
+                <th scope="col">ETA</th>
+              </tr>
+            </thead>
+            <For each={byProject(list())}>
+              {(g) => (
+                <tbody class="active-project">
+                  <tr class="active-group">
+                    <th scope="colgroup" colSpan={5}>
+                      <h3>
+                        <A href={`/p/${encodeURIComponent(g.project)}/board`}>{g.project}</A>
+                      </h3>
+                    </th>
+                  </tr>
                   <For each={g.cards}>
                     {(c) => {
                       const eta = () => etaText(c, props.now);
@@ -61,11 +83,13 @@ export function ActiveCards(props: { now: number }) {
                           <td class="mono">
                             <A href={cardHref(c.project, c.id)}>{c.id}</A>
                           </td>
-                          <td>{c.title}</td>
+                          <td class="active-title" title={c.title}>
+                            {c.title}
+                          </td>
                           <td>
                             <span class="chip">{columnLabel(c.column_kind)}</span>
                           </td>
-                          <td>
+                          <td class="active-agent">
                             <Show when={c.assignee && c.assignee !== "operator"} fallback={<span class="muted">{assigneeText(c)}</span>}>
                               <A href={`/agents/${encodeURIComponent(c.assignee!)}`}>{assigneeText(c)}</A>
                             </Show>{" "}
@@ -83,10 +107,10 @@ export function ActiveCards(props: { now: number }) {
                     }}
                   </For>
                 </tbody>
-              </table>
-            </div>
-          )}
-        </For>
+              )}
+            </For>
+          </table>
+        </div>
       </Show>
     </section>
   );

@@ -3996,3 +3996,38 @@ pre.spawn-text {
 .card-file-image { max-width: 100%; height: auto; display: block; }
 .card-file-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font-size: 12px; }
 p.warn { color: var(--warn); margin: 0; }
+/* Home, Work in progress (TER-52): one table for every project group, with fixed column widths, so the columns line
+   up. The title takes the free width and ends with an ellipsis (the full title is its tooltip). */
+.active-table {
+  table-layout: fixed;
+  min-width: 640px;
+}
+.active-table .col-id {
+  width: 7.5em;
+}
+.active-table .col-column {
+  width: 8.5em;
+}
+.active-table .col-agent {
+  width: 15em;
+}
+.active-table .col-eta {
+  width: 8em;
+}
+.active-table td {
+  vertical-align: middle;
+}
+.active-table td.active-title,
+.active-table td.active-agent {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.active-table .active-group th {
+  padding: 14px 10px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.active-table .active-group h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
