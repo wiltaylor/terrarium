@@ -1028,9 +1028,14 @@ async fn a_green_batch_of_three_merges_in_one_job() {
         .post_as(&lab.lead, &format!("/api/cards/{}/merge", cards[1]), json!({}))
         .await
         .err(409, "conflict");
+    // Each card shows the job, unless the job has ended already.
     for c in &cards {
-        let l = labels(&lab.card_of(c).await);
-        assert!(l.iter().any(|l| l.starts_with("validation:")), "{c}: {l:?}");
+        let card = lab.card_of(c).await;
+        let l = labels(&card);
+        assert!(
+            l.iter().any(|l| l.starts_with("validation:")) || card["column"] == "accepted",
+            "{c}: {l:?}"
+        );
     }
     for c in &cards {
         let card = lab
