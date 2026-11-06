@@ -10149,7 +10149,7 @@ start with `Job queue:`.
 
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|
-| `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` on the target. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, no assignee, and the job. `201` `{job, queue: {position, running, slots, note}}` |
+| `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` on the target. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |

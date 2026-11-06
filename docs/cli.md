@@ -1151,7 +1151,7 @@ terrarium project delivery set [--target t] [--recipe cmd] [--slots n]
 ```
 
 `card validate` queues a validation of the card's pushed commit
-(docs/api.md §35). It moves the card to `validating`, clears the assignee,
+(docs/api.md §35). It moves the card to `validating`, keeps you assigned,
 and adds `by:<you>`. Then take your next card: the daemon moves this one to
 `review` when it passes, or to the top of `ready` with a failure block
 when it fails twice. `--commit` must be the head of the branch on the

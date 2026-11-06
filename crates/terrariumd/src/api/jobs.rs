@@ -8,8 +8,9 @@
 //!   is killed).
 //! - `POST /api/cards/{id}/validate` {commit?, repo?, branch?, comment?}:
 //!   the card's assignee or a project admin. In one write: the labels
-//!   `by:<agent>` and `validation:queued`, the move to `validating`, no
-//!   assignee, and a queued validate job.
+//!   `by:<agent>` and `validation:queued`, the move to `validating`, and a
+//!   queued validate job. The worker stays assigned while the card
+//!   validates; the daemon clears the name on the final move.
 //! - `POST /api/cards/{id}/merge` {repo?, branch?}: a project admin. A
 //!   queued merge job; the card stays where it is until the job ends.
 
@@ -395,9 +396,6 @@ async fn validate(
                 )?;
             } else {
                 board::add_comment(t, &Actor::Operator, &card.id, &note)?;
-            }
-            if card.assignee.is_some() {
-                board::assign_card(t, &Actor::Operator, &card.id, None)?;
             }
             let place = jobs::place(t, &job)?;
             Ok((job, place))

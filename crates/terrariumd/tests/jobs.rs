@@ -357,10 +357,10 @@ async fn a_green_validation_moves_the_card_to_review() {
     assert_eq!(r.body["job"]["kind"], "validate");
     assert_eq!(r.body["queue"]["position"], 1, "{}", r.body);
     assert_eq!(r.body["queue"]["slots"], 2);
-    // At once: validating, no assignee, by:w1 and a job label.
+    // At once: validating, still w1's, by:w1 and a job label.
     let c = lab.card_of(&id).await;
     assert_eq!(c["column"], "validating");
-    assert!(c["assignee"].is_null(), "{c}");
+    assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
     let l = labels(&c);
     assert!(l.contains(&"by:w1".to_owned()), "{l:?}");
     assert!(
@@ -372,6 +372,7 @@ async fn a_green_validation_moves_the_card_to_review() {
         .await;
     let l = labels(&c);
     assert!(!l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
+    assert!(c["assignee"].is_null(), "the final move frees the card: {c}");
     let text = comments(&c);
     assert!(text.contains("passed"), "{text}");
     assert!(text.contains("done by w1"), "{text}");

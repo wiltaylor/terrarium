@@ -23,7 +23,8 @@
 //!   `review` and a merge card to `accepted`. A failure is rerun once
 //!   (not a conflict). The second failure writes a "Validation failed"
 //!   block at the top of the card body, moves the card to the top of
-//!   `ready`, and mails the worker of its `by:<agent>` label.
+//!   `ready`, and mails the worker of its `by:<agent>` label. The final
+//!   move (a pass, or the second failure) also clears the assignee.
 //! - The labels `validation:queued` and `validation:running` follow the
 //!   job, so the board shows it.
 //! - A daemon restart loses the runs: each running job fails (`error`)
@@ -628,7 +629,8 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
                     JobKind::Merge => COL_ACCEPTED,
                 };
                 let note = end_comment(&j, "passed");
-                return move_or_comment(t, &j.card, to, None, &note);
+                move_or_comment(t, &j.card, to, None, &note)?;
+                return unassign(t, &j.card);
             }
             let rerun = j.attempt < 2 && j.outcome.as_deref() != Some("conflict");
             if rerun {
@@ -655,6 +657,7 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
             board::update_card(t, &Actor::Operator, &j.card, patch)?;
             let note = end_comment(&j, "failed again");
             move_or_comment(t, &j.card, COL_READY, Some(0), &note)?;
+            unassign(t, &j.card)?;
             if let Some(who) = &j.by_agent {
                 notify_worker(t, &j, who)?;
             }
@@ -663,6 +666,16 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
         .await?;
     kick(state);
     Ok(())
+}
+
+/// Clear the card's assignee: the worker stays assigned while the card
+/// validates (it can edit only its own cards), and the final move frees it.
+fn unassign(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
+    match board::assign_card(t, &Actor::Operator, card, None) {
+        Ok(_) => Ok(()),
+        Err(e) if e.code.status().is_client_error() => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn comment(t: &mut Tx<'_>, card: &str, text: &str) -> ApiResult<()> {
