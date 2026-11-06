@@ -83,6 +83,18 @@ async fn lab(slots: u32) -> Lab {
     }
     td.project("p").await;
     td.project("q").await;
+    // The columns of the delivery process, as on the terrarium board.
+    let r = td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"}, {"name": "validating"},
+                {"name": "review"}, {"name": "accepted"},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
     let r = td
         .post(
             "/api/targets",
@@ -300,7 +312,7 @@ async fn the_config_is_checked_and_audited() {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let audit = td.get("/api/audit?action=project.delivery").await;
+    let audit = td.get("/api/audit?action=project.delivery&order=desc").await;
     let last = &audit.ok()[0]["detail"];
     assert_eq!(last["old"]["recipe"], "test -f OK", "{last}");
     assert_eq!(last["new"]["recipe"], "true", "{last}");
