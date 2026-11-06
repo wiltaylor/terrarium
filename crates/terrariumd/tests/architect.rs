@@ -337,12 +337,7 @@ async fn an_architect_controls_no_agent_of_another_project() {
             q.clone(),
             Some(json!({"model": "x"})),
         ),
-        (
-            "remove",
-            Method::DELETE,
-            format!("{q}?confirm=true"),
-            None,
-        ),
+        ("remove", Method::DELETE, format!("{q}?confirm=true"), None),
         (
             "swap",
             Method::POST,
@@ -355,7 +350,12 @@ async fn an_architect_controls_no_agent_of_another_project() {
         ("pause", Method::POST, format!("{q}/pause"), None),
         ("unpause", Method::POST, format!("{q}/unpause"), None),
         ("compact", Method::POST, format!("{q}/compact"), None),
-        ("new-session", Method::POST, format!("{q}/new-session"), None),
+        (
+            "new-session",
+            Method::POST,
+            format!("{q}/new-session"),
+            None,
+        ),
         (
             "send",
             Method::POST,
