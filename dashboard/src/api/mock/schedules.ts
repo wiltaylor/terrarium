@@ -543,6 +543,10 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
   };
 
   const key = (s: Schedule) => (s.project ? `${s.project}/${s.name}` : s.name);
+  /** A disabled project action does not run: not by run, test, or redeliver (docs/api.md §19.8). */
+  const actionOff = (s: Schedule) => {
+    if (s.spec.kind === "manual" && !s.enabled) fail(409, "conflict", `action \`${key(s)}\` is disabled; enable it first (terrarium schedule enable ${key(s)})`);
+  };
   /** The daemon's `emit`: IDs only. */
   const event = (s: Schedule, change: string, r?: ScheduleRun, actor = "operator") =>
     c.emit({
@@ -702,8 +706,7 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         .reply(() => {
           const s = schedule(id);
           mayRead(s.project);
-          // A disabled project action does not run (docs/api.md §19.8).
-          if (s.spec.kind === "manual" && !s.enabled) fail(409, "conflict", `action \`${key(s)}\` is disabled; enable it first (terrarium schedule enable ${key(s)})`);
+          actionOff(s);
           mayWrite(s.project);
           mayReach(s.project, s.action);
           const r: ScheduleRun = { id: c.ulid("run"), schedule: s.id, started_at: c.iso(), finished_at: null, status: "running", trigger: "manual", summary: "running", output: {}, error: null, actor: "operator", event_seq: null };
@@ -752,6 +755,7 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
       c.reply(() => {
         const s = schedule(id);
         mayRead(s.project);
+        actionOff(s);
         mayWrite(s.project);
         const a = webhookOf(s);
         const old = w.webhookDeliveries.find((d) => d.id === delivery && d.schedule === s.id) ?? fail(404, "not_found", `no webhook delivery \`${delivery}\` of schedule \`${key(s)}\``);
@@ -768,6 +772,7 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
       c.reply(() => {
         const s = schedule(id);
         mayRead(s.project);
+        actionOff(s);
         mayWrite(s.project);
         const a = webhookOf(s);
         checkWebhook(a, s.project);

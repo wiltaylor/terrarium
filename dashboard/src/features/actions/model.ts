@@ -39,9 +39,6 @@ export function runsAs(s: Pick<Schedule, "owner" | "run_as" | "project">): strin
   return s.run_as === "operator" ? "you (the operator)" : s.run_as;
 }
 
-/** The default exec limit of the daemon, in seconds. */
-const EXEC_DEFAULT_SECS = 300;
-
 /** The page of the action's runs: the Actions tab of the project's schedules, with the action open. */
 export const historyHref = (s: Pick<Schedule, "id" | "project">): string => `/p/${encodeURIComponent(s.project ?? "")}/schedules?tab=actions&open=${encodeURIComponent(s.id)}`;
 
@@ -51,20 +48,27 @@ export interface ConfirmText {
   what: string;
   /** Who the run acts as. */
   as: string;
-  /** An exec: it runs on the target, how long it may take, and where the result goes. */
-  exec?: { target: string; cmd: string; limitSecs: number };
+  /**
+   * An exec: it runs on the target, how long it may take, and where the
+   * result goes. `limitSecs` is the action's `timeout_secs`; absent, the
+   * daemon's default applies, and the text names no number, so a change of
+   * the default in the daemon does not make it wrong.
+   */
+  exec?: { target: string; cmd: string; limitSecs?: number };
 }
 
 export function confirmText(s: Schedule): ConfirmText {
   const t: ConfirmText = { what: actionWords(s.action, s.project), as: runsAs(s) };
   if (s.action.type === "exec") {
-    t.exec = { target: s.action.target, cmd: s.action.cmd.join(" "), limitSecs: Math.min(s.action.timeout_secs ?? EXEC_DEFAULT_SECS, 3600) };
+    const limit = s.action.timeout_secs;
+    t.exec = { target: s.action.target, cmd: s.action.cmd.join(" "), ...(limit ? { limitSecs: limit } : {}) };
   }
   return t;
 }
 
-/** The limit of an exec in words: "5 min", "15 min", "1 h". */
-export function limitWords(secs: number): string {
+/** The limit of an exec in words: "5 min", "15 min", "1 h"; no limit given: the daemon's default. */
+export function limitWords(secs?: number): string {
+  if (!secs) return "the default exec limit";
   if (secs < 60) return `${secs} s`;
   if (secs < 3600) return `${Math.round(secs / 60)} min`;
   return `${Math.round(secs / 360) / 10} h`;

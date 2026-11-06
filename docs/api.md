@@ -7394,8 +7394,8 @@ A run:
 | `POST /api/schedules/{id}/disable` | | `200`, the schedule. |
 | `GET /api/schedules/{id}/runs?limit=&cursor=` | | `200`, the runs, newest first, with `X-Next-Cursor` (§2.4). |
 | `GET /api/schedules/{id}/deliveries?limit=&cursor=` | | `200`, the webhook deliveries, newest first, with `X-Next-Cursor` (§19.5). The read rights of the schedule. |
-| `POST /api/schedules/{id}/deliveries/{delivery}/redeliver` | | `202`, a new `pending` delivery: a copy of `{delivery}` with `redelivery_of`, due now. The rights of a run-now. A `dropped` row is `422`. |
-| `POST /api/schedules/{id}/test` | none, or `{event?: {kind?, summary?, project?, agent?, actor?, data?}}` | `200`, a test run (§19.7): `{test: true, action, matched, reason?, event?, status?, summary?, output?, error?, delivery?, request?}`. Any action kind. The rights of a run-now; for a webhook, a secret that the caller or `run_as` may not use is `403`. A body that is not this shape is `400`; an empty `event.kind` or an `event.data` that is not an object is `422` (`details.field` `event.kind`, `event.data`). |
+| `POST /api/schedules/{id}/deliveries/{delivery}/redeliver` | | `202`, a new `pending` delivery: a copy of `{delivery}` with `redelivery_of`, due now. The rights of a run-now. A `dropped` row is `422`. A disabled project action is `409` (§19.8). |
+| `POST /api/schedules/{id}/test` | none, or `{event?: {kind?, summary?, project?, agent?, actor?, data?}}` | `200`, a test run (§19.7): `{test: true, action, matched, reason?, event?, status?, summary?, output?, error?, delivery?, request?}`. Any action kind. The rights of a run-now; for a webhook, a secret that the caller or `run_as` may not use is `403`. A body that is not this shape is `400`; an empty `event.kind` or an `event.data` that is not an object is `422` (`details.field` `event.kind`, `event.data`). A disabled project action is `409` (§19.8). |
 
 Errors:
 
@@ -7926,7 +7926,9 @@ The rules are those of any schedule (§19.3, §19.6):
   rights (a project-owned action), checked again at each run. The card
   action of a project-owned action keeps the GitHub author gate (TER-85):
   a `close` never moves a held card.
-- A disabled action does not run: `POST .../run` is `409`.
+- A disabled action does not run: `POST .../run`, `POST .../test`
+  (§19.7), and `POST .../deliveries/{delivery}/redeliver` are `409`.
+  Enable it first.
 - Each run is a run of §19.1 with `trigger: manual` and the caller as
   `actor`. It writes the audit row `schedule.run` and the `schedule`
   events `run_started` and `run_finished`.

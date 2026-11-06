@@ -483,23 +483,7 @@ async fn run_now(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Run>> {
     let s = load(&state, &actor, id).await?;
-    // A disabled project action does not run: its button is off. A
-    // disabled time schedule still runs now, as before.
-    if s.spec.is_manual() && !s.enabled {
-        return Err(ApiError::conflict(format!(
-            "action `{}` is disabled; enable it first (terrarium schedule enable {})",
-            s.key(),
-            s.key()
-        )));
-    }
-    let check = actor.clone();
-    let (project, spec, action, owner) =
-        (s.project.clone(), s.spec.clone(), s.action.clone(), s.owner);
-    let reach = state
-        .db
-        .read(move |c| check_write(c, &check, owner, project.as_deref(), &spec, &action))
-        .await?;
-    caller_may_act(&state, &actor, &s, &reach).await?;
+    may_run(&state, &actor, &s).await?;
     Ok(Json(
         run_schedule(&state, &s.id, "manual", actor.label()).await?,
     ))
@@ -533,8 +517,24 @@ async fn may_send(state: &Shared, actor: &Actor, s: &Schedule) -> ApiResult<()> 
     may_run(state, actor, s).await
 }
 
-/// The rights of a run-now or a test run, for any action.
+/// A disabled project action does not run: not by run-now, a test run, or
+/// a webhook redeliver (docs/api.md §19.8). A disabled time schedule or
+/// trigger still runs now, as before.
+fn action_off(s: &Schedule) -> ApiResult<()> {
+    if s.spec.is_manual() && !s.enabled {
+        return Err(ApiError::conflict(format!(
+            "action `{}` is disabled; enable it first (terrarium schedule enable {})",
+            s.key(),
+            s.key()
+        )));
+    }
+    Ok(())
+}
+
+/// The rights of a run-now, a test run, or a redeliver, for any action;
+/// and a disabled project action is `409` ([`action_off`]).
 async fn may_run(state: &Shared, actor: &Actor, s: &Schedule) -> ApiResult<()> {
+    action_off(s)?;
     let check = actor.clone();
     let (project, spec, action, owner) =
         (s.project.clone(), s.spec.clone(), s.action.clone(), s.owner);

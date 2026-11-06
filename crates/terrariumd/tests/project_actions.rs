@@ -145,7 +145,7 @@ async fn an_action_runs_only_on_demand_with_audit_and_events() {
 #[tokio::test]
 async fn a_disabled_action_does_not_run() {
     let td = TestDaemon::start().await;
-    let (lead, _, _) = setup(&td).await;
+    let (lead, worker, _) = setup(&td).await;
     let mut body = action("off", "worker");
     body["enabled"] = json!(false);
     let r = td.post_as(&lead, "/api/schedules", body).await;
@@ -161,8 +161,21 @@ async fn a_disabled_action_does_not_run() {
         "{}",
         r.body
     );
+    // A test run (`terrarium schedule test`) does not run it either: the
+    // action is real, for an exec a deploy (review round 1, finding 1).
+    let r = td.post_empty(&format!("/api/schedules/{aid}/test")).await;
+    r.err(409, "conflict");
     let runs = td.get(&format!("/api/schedules/{aid}/runs")).await;
     assert!(runs.ok().as_array().unwrap().is_empty());
+    assert!(td.mail_of(&worker).await.is_empty(), "no mail went out");
+    let rows = td.get("/api/audit?action=schedule.test").await;
+    assert!(rows.ok().as_array().unwrap().is_empty());
+    // Enabled, the test runs.
+    td.post_empty(&format!("/api/schedules/{aid}/enable"))
+        .await
+        .ok();
+    let t = td.post_empty(&format!("/api/schedules/{aid}/test")).await;
+    assert_eq!(t.ok()["status"], "ok", "{}", t.body);
     // A disabled time schedule still runs now, as before.
     let t = td
         .post(
@@ -272,4 +285,75 @@ fn a_manual_spec_has_no_time() {
             .is_none()
     );
     terrariumd::store::schedules::validate_spec(&spec, Utc::now()).unwrap();
+}
+
+/// A project-owned action runs with the project's rights and the
+/// operator's paths, as a project-owned schedule does (§19.6). Its card
+/// action keeps the GitHub author gate (TER-85): a `close` never moves a
+/// held card, and closes a plain card with the same label.
+#[tokio::test]
+async fn a_project_owned_card_action_keeps_the_github_gate() {
+    let td = TestDaemon::start().await;
+    let (lead, worker, _) = setup(&td).await;
+    td.patch("/api/projects/terra", json!({"github_authors": ["wiltaylor"]}))
+        .await
+        .ok();
+    let cards = "/api/projects/terra/cards";
+    let held = td
+        .post_as(
+            &worker,
+            cards,
+            json!({"title": "GitHub #7: held", "labels": ["github"], "github_author": "eve"}),
+        )
+        .await;
+    let held = held.ok().clone();
+    assert_eq!(held["column"], "blocked", "{held}");
+    let hid = id(&held);
+    td.patch_as(
+        &lead,
+        &format!("/api/cards/{hid}"),
+        json!({"add_labels": ["trigger:k"]}),
+    )
+    .await
+    .ok();
+    let a = td
+        .post_as(
+            &lead,
+            "/api/schedules",
+            json!({"name": "close-k", "project": "terra", "owner": "project",
+                   "spec": {"kind": "manual"},
+                   "action": {"type": "card", "op": "close", "key": "k", "column": "ready"}}),
+        )
+        .await;
+    assert_eq!(a.status, 201, "{}", a.body);
+    assert_eq!(a.body["owner"], "project");
+    let aid = id(&a.body);
+    let run = td
+        .post_empty_as(&lead, &format!("/api/schedules/{aid}/run"))
+        .await;
+    let run = run.ok().clone();
+    assert_eq!(run["status"], "ok", "{run}");
+    assert!(run["output"]["card"].is_null(), "{run}");
+    assert_eq!(run["actor"], format!("agent:{lead}"));
+    let c = td.get(&format!("/api/cards/{hid}")).await;
+    assert_eq!(c.ok()["column"], "blocked", "{}", c.body);
+    // A plain card with the label: the action closes it.
+    let plain = td
+        .post_as(
+            &worker,
+            cards,
+            json!({"title": "Plain", "labels": ["trigger:k"]}),
+        )
+        .await;
+    let pid = id(plain.ok());
+    let run = td
+        .post_empty_as(&lead, &format!("/api/schedules/{aid}/run"))
+        .await;
+    let run = run.ok().clone();
+    assert_eq!(run["status"], "ok", "{run}");
+    assert_eq!(run["output"]["card"], pid.as_str(), "{run}");
+    let c = td.get(&format!("/api/cards/{pid}")).await;
+    assert_eq!(c.ok()["column"], "ready");
+    let c = td.get(&format!("/api/cards/{hid}")).await;
+    assert_eq!(c.ok()["column"], "blocked");
 }

@@ -1984,6 +1984,7 @@ describe("triggers (docs/api.md §19.4)", () => {
     const off = await api.schedules.disable(made.id);
     expect(off.next_run_at).toBeNull();
     await expect(api.schedules.run(made.id)).rejects.toMatchObject({ status: 409, code: "conflict" });
+    await expect(api.schedules.test(made.id)).rejects.toMatchObject({ status: 409, code: "conflict" });
     const on = await api.schedules.enable(made.id);
     expect(on.next_run_at).toBeNull();
   });

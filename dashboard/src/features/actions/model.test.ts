@@ -59,7 +59,9 @@ describe("project actions", () => {
     expect(mail.exec).toBeUndefined();
     const ex = confirmText(sched({ action: { type: "exec", target: "box", cmd: ["./deploy.sh", "staging"], timeout_secs: 900 } }));
     expect(ex.exec).toEqual({ target: "box", cmd: "./deploy.sh staging", limitSecs: 900 });
-    expect(confirmText(sched({ action: { type: "exec", target: "box", cmd: ["ls"] } })).exec!.limitSecs).toBe(300);
+    // No timeout_secs: the daemon's default, named without a number.
+    expect(confirmText(sched({ action: { type: "exec", target: "box", cmd: ["ls"] } })).exec!.limitSecs).toBeUndefined();
+    expect(limitWords(undefined)).toBe("the default exec limit");
     expect(limitWords(30)).toBe("30 s");
     expect(limitWords(900)).toBe("15 min");
     expect(limitWords(3600)).toBe("1 h");
