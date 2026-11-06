@@ -822,6 +822,7 @@ async fn the_host_cap_holds_across_projects_in_order() {
     // The cap goes away: the host has no cap and no running job.
     let r = lab.td.delete("/api/job-hosts/lab1").await;
     assert_eq!(r.ok()["hosts"], json!([]), "{}", r.body);
+}
 
 /// Queue a merge of a new card on `branch` with `recipe`, wait for the
 /// end, and return the job.
