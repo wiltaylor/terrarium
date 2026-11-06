@@ -64,6 +64,21 @@ async fn setup() -> (TestDaemon, String, String) {
     (td, lead, w1)
 }
 
+/// The statuses of `agent` from its `status` events, oldest first. A test
+/// that must see a short state (`waiting` while a wait of one second is
+/// open) reads them, not a GET that can come after the state ended
+/// (TER-60).
+async fn statuses(td: &TestDaemon, agent: &str) -> Vec<String> {
+    td.get(&format!("/api/agents/{agent}/events?kind=status"))
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["data"]["status"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
 async fn status(td: &TestDaemon, agent: &str) -> String {
     td.get(&format!("/api/agents/{agent}")).await.body["status"]
         .as_str()
@@ -114,12 +129,10 @@ async fn new_wait(td: &TestDaemon, agent: &str, body: Value) -> Value {
 #[tokio::test]
 async fn an_open_wait_shows_as_waiting_and_the_end_mails_the_waiter() {
     let (td, lead, _) = setup().await;
-    let w = new_wait(
-        &td,
-        &lead,
-        json!({"kind": "time", "at": soon(600), "reason": "check the build later"}),
-    )
-    .await;
+    // The view while a wait is open: a wait that cannot end during the
+    // checks, however slow the machine (TER-60). The waiter's own cancel
+    // sends no mail.
+    let w = new_wait(&td, &lead, json!({"kind": "time", "for": "1h"})).await;
     assert_eq!(w["state"], "open");
     assert_eq!(w["kind"], "time");
     assert_eq!(w["agent_name"], "p/lead");
@@ -146,7 +159,25 @@ async fn an_open_wait_shows_as_waiting_and_the_end_mails_the_waiter() {
     let last = ev.ok().as_array().unwrap().last().unwrap().clone();
     assert_eq!(last["data"]["status"], "waiting");
     assert_eq!(last["data"]["waits"], 1);
+    let r = td
+        .req(
+            hyper::Method::DELETE,
+            &format!("/api/waits/{}", id(&w)),
+            None,
+            Some(&lead),
+        )
+        .await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    td.wait_status(&lead, "idle").await;
 
+    // The end mails the waiter. `for` is relative to the daemon's clock,
+    // so a slow request cannot put the time in the past.
+    let w = new_wait(
+        &td,
+        &lead,
+        json!({"kind": "time", "for": "1", "reason": "check the build later"}),
+    )
+    .await;
     let done = wait_state(&td, w["id"].as_str().unwrap(), "resolved").await;
     assert_eq!(done["result"]["outcome"], "due");
     td.wait_status(&lead, "idle").await;
@@ -188,7 +219,7 @@ async fn an_open_wait_shows_as_waiting_and_the_end_mails_the_waiter() {
         .iter()
         .map(|e| e["data"]["change"].as_str().unwrap())
         .collect();
-    assert_eq!(changes, ["opened", "resolved"]);
+    assert_eq!(changes, ["opened", "cancelled", "opened", "resolved"]);
 }
 
 /// Each wait that ends gets its own mail: three ends at three times are
@@ -197,8 +228,10 @@ async fn an_open_wait_shows_as_waiting_and_the_end_mails_the_waiter() {
 async fn three_waits_that_end_apart_send_three_mails() {
     let (td, lead, _) = setup().await;
     let mut ids = Vec::new();
-    for ms in [500, 1300, 2100] {
-        let w = new_wait(&td, &lead, json!({"kind": "time", "at": soon(ms)})).await;
+    // `for` is relative to the daemon's clock: a slow request cannot put
+    // the time in the past (TER-60).
+    for secs in ["1", "2", "3"] {
+        let w = new_wait(&td, &lead, json!({"kind": "time", "for": secs})).await;
         ids.push(w["id"].as_str().unwrap().to_owned());
     }
     assert_eq!(status(&td, &lead).await, "waiting");
@@ -260,7 +293,9 @@ async fn three_waits_that_end_apart_send_three_mails() {
 #[tokio::test]
 async fn ends_in_one_window_share_one_mail() {
     let (td, lead, _) = setup().await;
-    let at = soon(400);
+    // One `at` for both, so they end in the same tick. Far enough ahead
+    // that a slow request does not land after it (TER-60).
+    let at = soon(3000);
     for _ in 0..2 {
         new_wait(&td, &lead, json!({"kind": "time", "at": at})).await;
     }
@@ -285,17 +320,29 @@ async fn ends_in_one_window_share_one_mail() {
 async fn chained_waits_propagate() {
     let (td, lead, w1) = setup().await;
     td.sup.set_mail_push(true);
-    let b = new_wait(&td, &w1, json!({"kind": "time", "at": soon(400)})).await;
-    assert_eq!(status(&td, &w1).await, "waiting");
+    let b = new_wait(&td, &w1, json!({"kind": "time", "for": "1"})).await;
+    // From the events: the wait can end before a GET (TER-60).
+    until("w1 waiting", || async {
+        statuses(&td, &w1).await.iter().any(|s| s == "waiting")
+    })
+    .await;
     let a = new_wait(&td, &lead, json!({"kind": "agent", "agent": "w1"})).await;
     assert_eq!(a["spec"]["until"], "done");
     assert_eq!(a["summary"], "agent p/w1 (done)");
     assert_eq!(status(&td, &lead).await, "waiting");
-    // B's wait ends; A still waits until B has had its mail and its turn.
-    wait_state(&td, b["id"].as_str().unwrap(), "resolved").await;
-    let a_open = td.get(&format!("/api/waits/{}", id(&a))).await;
-    assert_eq!(a_open.body["state"], "open");
+    // B's wait ends; A still waits until B has had its mail and its turn:
+    // A ends after B's wake mail went out (the stored times, not a GET
+    // in between).
+    let b_end = wait_state(&td, b["id"].as_str().unwrap(), "resolved").await;
     let done = wait_state(&td, &id(&a), "resolved").await;
+    let b_mail = wait_state(&td, b["id"].as_str().unwrap(), "resolved").await;
+    let (a_at, b_at) = (
+        done["resolved_at"].as_str().unwrap(),
+        b_end["resolved_at"].as_str().unwrap(),
+    );
+    assert!(a_at > b_at, "A {a_at} B {b_at}");
+    let sent = b_mail["notified_at"].as_str().unwrap();
+    assert!(a_at >= sent, "A {a_at} B's mail {sent}");
     assert_eq!(done["result"]["outcome"], "done");
     // B got its wake mail and took it (delivered by the push).
     let bm = system_mail(&td, &w1).await;
@@ -446,11 +493,15 @@ async fn a_cycle_is_refused_with_its_path() {
 #[tokio::test]
 async fn timeout_cancel_and_limits() {
     let (td, lead, w1) = setup().await;
-    // A timeout ends the wait as `timed_out`, with a mail.
+    // w1 is done: without this, the settle time and the timeout race to
+    // end the wait (TER-60).
+    no_settle(&td);
+    // A timeout ends the wait as `timed_out`, with a mail. A relative
+    // timeout: a slow request cannot put it in the past.
     let t = new_wait(
         &td,
         &lead,
-        json!({"kind": "agent", "agent": "w1", "until": "blocked", "timeout": soon(300)}),
+        json!({"kind": "agent", "agent": "w1", "until": "blocked", "timeout": "1"}),
     )
     .await;
     assert!(t["timeout_at"].is_string());
@@ -856,7 +907,11 @@ async fn a_process_wait_resolves_with_the_exit_code_and_the_output_as_data() {
     assert!(r["session_id"].is_string());
     assert_eq!(r["wait"]["summary"], "process build on box");
     assert_eq!(r["wait"]["spec"]["run"], true);
-    assert_eq!(status(td, &w1).await, "waiting");
+    // From the events: the run can end before a GET (TER-60).
+    until("w1 waiting", || async {
+        statuses(td, &w1).await.iter().any(|s| s == "waiting")
+    })
+    .await;
     // The run does not belong to a turn: a turn starts and ends meanwhile.
     td.post(&format!("/api/agents/{w1}/send"), json!({"text": "next"}))
         .await
