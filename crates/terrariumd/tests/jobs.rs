@@ -663,16 +663,11 @@ async fn the_host_cap_holds_across_projects_in_order() {
     let wd = lab._dirs.path().join("jobs").display().to_string();
     // `nice -n19` adds 19 to the niceness of the host agent (this test
     // process), at most 19: a run under a parent at -4 gets 15.
-    let base: i32 = String::from_utf8(
-        std::process::Command::new("nice")
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .parse()
-    .unwrap();
+    let base: i32 = String::from_utf8(std::process::Command::new("nice").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     let want = (base + 19).min(19);
     let recipe = format!(
         "test -f OK && test \"$(nice)\" = {want} \
