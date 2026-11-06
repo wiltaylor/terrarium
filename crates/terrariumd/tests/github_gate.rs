@@ -115,7 +115,10 @@ async fn only_the_operator_sets_the_allow_list() {
     .err(422, "invalid");
     allow(&td, &["@wiltaylor", "wiltaylor-daf"]).await;
     let p = td.get("/api/projects/proj").await;
-    assert_eq!(p.ok()["github_authors"], json!(["wiltaylor", "wiltaylor-daf"]));
+    assert_eq!(
+        p.ok()["github_authors"],
+        json!(["wiltaylor", "wiltaylor-daf"])
+    );
     allow(&td, &[]).await;
     let p = td.get("/api/projects/proj").await;
     assert!(p.ok().get("github_authors").is_none(), "{}", p.body);
@@ -254,9 +257,8 @@ async fn only_the_operator_releases_a_held_card() {
 async fn the_operator_answer_releases_or_keeps_the_card() {
     let td = setup().await;
     allow(&td, &["wiltaylor"]).await;
-    let mk = |t: &'static str| {
-        json!({"title": t, "labels": ["github", "bug"], "github_author": "eve"})
-    };
+    let mk =
+        |t: &'static str| json!({"title": t, "labels": ["github", "bug"], "github_author": "eve"});
     let kept = make(&td, "proj/w1", mk("GitHub #6: keep")).await["id"]
         .as_str()
         .unwrap()
@@ -306,10 +308,15 @@ async fn an_agent_cannot_label_a_card_github_later() {
     td.patch_as("proj/lead", &path, json!({"title": "GitHub #9: later"}))
         .await
         .err(403, "forbidden");
-    td.patch(&path, json!({"add_labels": ["github"]})).await.ok();
+    td.patch(&path, json!({"add_labels": ["github"]}))
+        .await
+        .ok();
     // The operator's own GitHub cards are not gated.
     let c = td
-        .post(CARDS, json!({"title": "GitHub #10: mine", "column": "ready"}))
+        .post(
+            CARDS,
+            json!({"title": "GitHub #10: mine", "column": "ready"}),
+        )
         .await;
     assert_eq!(c.ok()["column"], "ready");
 }

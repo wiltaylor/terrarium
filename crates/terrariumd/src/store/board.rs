@@ -1622,7 +1622,10 @@ fn hold(
         "Title: {}\nGitHub author given: {}\nThe author is what the agent said; the daemon \
          does not read the issue.",
         row.title,
-        author.map(str::trim).filter(|a| !a.is_empty()).unwrap_or("(none)")
+        author
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .unwrap_or("(none)")
     );
     questions::ask(
         t,
@@ -1630,7 +1633,10 @@ fn hold(
             agent: agent.id.clone(),
             kind: questions::QuestionKind::Question,
             text: github_gate::question_text(&row.id, &row.project, author),
-            options: vec![github_gate::RELEASE.to_owned(), github_gate::KEEP.to_owned()],
+            options: vec![
+                github_gate::RELEASE.to_owned(),
+                github_gate::KEEP.to_owned(),
+            ],
             context: Some(context),
             // The question lives in the agent's project; link the card
             // when it is there too.
