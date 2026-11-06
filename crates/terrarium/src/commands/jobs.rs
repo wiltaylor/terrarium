@@ -236,6 +236,40 @@ pub async fn merge(
     ctx.emit(&v, queued_line)
 }
 
+/// `card merge` with two or more cards: one batch merge job (TER-112).
+pub async fn merge_batch(
+    ctx: &Ctx,
+    ids: &[String],
+    repo: &Option<String>,
+    branch: &Option<String>,
+) -> anyhow::Result<()> {
+    if branch.is_some() {
+        anyhow::bail!(
+            "--branch takes one card; a batch merges the branch of each card (set it with `card edit --branch`)"
+        );
+    }
+    let mut body = json!({"cards": ids});
+    if let Some(r) = repo {
+        body["repo"] = json!(r);
+    }
+    let v = ctx.api.post("/api/merges", Some(body)).await?;
+    ctx.emit(&v, |c, v| {
+        let cards: Vec<&str> = v["job"]["batch"]
+            .as_array()
+            .map(|b| b.iter().filter_map(|c| c["card"].as_str()).collect())
+            .unwrap_or_default();
+        c.line(format!(
+            "queued batch merge job {} for {} ({} cards, {}): {}",
+            field(&v["job"], "id"),
+            cards.join(" "),
+            cards.len(),
+            field(&v["job"], "repo"),
+            field(&v["queue"], "note")
+        ));
+        c.line("The daemon moves each card on the result: merged cards to accepted, a failing card to the top of ready.");
+    })
+}
+
 fn queued_line(c: &Ctx, v: &Value) {
     let j = &v["job"];
     c.line(format!(
