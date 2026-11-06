@@ -943,7 +943,13 @@ pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
            AND (created_at < ?2 OR (created_at = ?2 AND attempt > ?4)
                 OR (created_at = ?2 AND attempt = ?4
                     AND (split_path < ?5 OR (split_path = ?5 AND id < ?3))))",
-        params![job.project, job.created_at, job.id, job.attempt, job.split_path],
+        params![
+            job.project,
+            job.created_at,
+            job.id,
+            job.attempt,
+            job.split_path
+        ],
         |r| r.get(0),
     )?;
     let running: i64 = conn.query_row(
