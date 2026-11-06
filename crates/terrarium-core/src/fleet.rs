@@ -1698,7 +1698,11 @@ name = "beta"
         for (from, to, word) in [
             ("slots = 3", "slots = 0", "slots"),
             ("timeout_secs = 5400", "timeout = 5400", "timeout"),
-            ("recipe = \"just ci::validate\"", "recipe = 7", "expected a string"),
+            (
+                "recipe = \"just ci::validate\"",
+                "recipe = 7",
+                "expected a string",
+            ),
         ] {
             let bad = text.replace(from, to);
             let errs = parse(&bad, Some("dl")).ok().unwrap_err();
