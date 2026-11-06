@@ -2541,9 +2541,13 @@ pub enum ThreadCmd {
         message: String,
     },
     /// Close a thread with a handoff summary. An agent proposes the close;
-    /// the operator confirms it
+    /// the operator confirms it (`--confirm`) or closes at any time
     Close {
         id: String,
+        /// Confirm the agent's close proposal, with its handoff (the
+        /// operator)
+        #[arg(long, conflicts_with_all = ["handoff", "links"])]
+        confirm: bool,
         /// The handoff summary: what the thread produced (`-` reads stdin)
         #[arg(long)]
         handoff: Option<String>,

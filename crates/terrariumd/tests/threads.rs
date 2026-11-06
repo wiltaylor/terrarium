@@ -223,9 +223,26 @@ async fn a_thread_opens_talks_responds_and_closes() {
                    "links": [{"kind": "card", "ref": "P-1"}, {"kind": "wiki", "ref": "board"}]}),
         )
         .await;
+    // The agent's close is a proposal (TER-95); the operator confirms it.
     let th = r.ok().clone();
+    assert_eq!(th["status"], "waiting_operator");
+    assert_eq!(
+        th["close_proposal"]["summary"],
+        "Cards cut for the board columns."
+    );
+    let th = lab
+        .td
+        .post(
+            &format!("/api/threads/{tid}/close"),
+            json!({"confirm": true}),
+        )
+        .await
+        .ok()
+        .clone();
     assert_eq!(th["status"], "closed");
-    assert_eq!(th["closed_by"], lab.arch.as_str());
+    assert_eq!(th["closed_by"], "operator");
+    assert_eq!(th["close_reason"], "confirmed");
+    assert_eq!(th["handoff"]["by"], lab.arch.as_str());
     assert_eq!(th["handoff"]["summary"], "Cards cut for the board columns.");
     assert_eq!(th["handoff"]["links"][0]["kind"], "card");
     assert_eq!(th["handoff"]["links"][0]["ref"], "P-1");
@@ -519,7 +536,8 @@ async fn an_open_question_keeps_the_item_open_and_a_close_retracts_it() {
     assert_eq!(counts["thread"], 0, "{counts}");
     assert_eq!(counts["question"], 0, "{counts}");
 
-    // The agent's close retracts its own open questions too.
+    // The agent's close proposal keeps its open questions; the confirm
+    // retracts them (TER-95).
     let t2 = lab
         .open(json!({"topic": "Backups", "scope": "p", "agent": "p/arch"}))
         .await;
@@ -538,11 +556,18 @@ async fn an_open_question_keeps_the_item_open_and_a_close_retracts_it() {
         .await
         .ok()
         .clone();
+    assert_eq!(th["questions"][0]["status"], "open");
+    let th = lab
+        .td
+        .post(
+            &format!("/api/threads/{t2}/close"),
+            json!({"confirm": true}),
+        )
+        .await
+        .ok()
+        .clone();
     assert_eq!(th["questions"][0]["status"], "retracted");
-    assert_eq!(
-        th["questions"][0]["retracted_by"],
-        format!("agent:{}", lab.arch)
-    );
+    assert_eq!(th["questions"][0]["retracted_by"], "operator");
 }
 
 #[tokio::test]

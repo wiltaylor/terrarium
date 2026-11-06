@@ -1040,6 +1040,8 @@ pub async fn pass(state: &Shared) {
     // A thread that waits on its parked agent while no event reached the
     // driver (TER-92).
     crate::thread_agent::retry_missed(state).await;
+    // The reminder and the stale close of untouched threads (TER-95).
+    crate::thread_close::sweep(state).await;
 }
 
 /// The facts of the ephemeral part of the prompt ([`prompt_info`]).
@@ -1102,8 +1104,13 @@ fn thread_prompt_section(thread: &str) -> String {
          workspace.\n\
          - Your memory store is the one of the project you run in. Write memories only there.\n\
          - Hand off work only to the lead that the thread reports to, after the operator's \
-         response approves it. Then propose the close with `terrarium thread close {thread} \
-         --handoff -`. Do not run `terrarium agent done`.\n\
+         response approves it. Then ask in the thread whether anything more is needed.\n\
+         - When the operator confirms that nothing more is needed, propose the close with \
+         `terrarium thread close {thread} --handoff - --link card:<id> ...`, then end your turn. \
+         The operator confirms it, or writes on (then go on). The operator may close the thread \
+         at any time. Do not run `terrarium agent done`.\n\
+         - At the close the daemon ends you and archives your session; the thread and its \
+         handoff cards link to it.\n\
          - Your workspace goes to the trash when the thread closes. Push each output that must \
          stay.\n"
     )

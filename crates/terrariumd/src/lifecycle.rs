@@ -187,6 +187,9 @@ pub struct Lifecycle {
     pub resets: crate::reset::Runs,
     /// The card reminder (`crate::card_reminder`).
     pub reminders: crate::card_reminder::Reminders,
+    /// The reminder and the stale close of untouched Inbox threads
+    /// (`crate::thread_close`).
+    pub threads: crate::thread_close::Runtime,
     /// One lock for each agent around the hand-over of one queued turn
     /// (TER-54): a remove of that turn comes before it or after it, so a
     /// removed turn is never typed and a typed turn is never shown removed.

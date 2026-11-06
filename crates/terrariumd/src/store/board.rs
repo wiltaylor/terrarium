@@ -1803,6 +1803,32 @@ pub fn add_comment(t: &mut Tx<'_>, actor: &Actor, id: &str, body: &str) -> ApiRe
     get_card(t, &card.id)
 }
 
+/// A comment of `system` on card `id` that links to `session` (the
+/// archived session of a thread agent, TER-95), so that the card's
+/// sessions list it. No rights check: the daemon writes it. The card ID.
+pub fn system_comment(
+    t: &mut Tx<'_>,
+    id: &str,
+    body: &str,
+    session: Option<&str>,
+) -> ApiResult<String> {
+    let card = find_row(t, id)?;
+    t.execute(
+        "INSERT INTO card_comments (id, card, author, body, created_at, session_id)
+         VALUES (?1, ?2, 'system', ?3, ?4, ?5)",
+        params![
+            ulid::Ulid::new().to_string(),
+            card.id,
+            t.redact(body),
+            now(),
+            session
+        ],
+    )?;
+    touch(t, &card.id)?;
+    card_event(t, &card, "commented", json!({"comment": body}))?;
+    Ok(card.id)
+}
+
 /// The body of `POST /api/cards/{id}/links`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

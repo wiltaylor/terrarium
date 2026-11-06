@@ -234,6 +234,28 @@ pub struct Settings {
     )]
     pub harness_update_mail: crate::harness_auto_update::UpdateMail,
 
+    /// The time that an Inbox thread waits on the operator with no
+    /// activity before its one Inbox reminder (TER-95): a duration (`3d`,
+    /// `12h`), or `off` (also `0`).
+    #[arg(
+        long,
+        env = crate::thread_close::ENV_REMINDER,
+        default_value = "3d",
+        value_parser = crate::thread_close::parse_setting
+    )]
+    pub thread_reminder: std::time::Duration,
+
+    /// The time that an Inbox thread waits on the operator with no
+    /// activity before the daemon closes it as stale and mails its
+    /// report-to lead (TER-95): a duration (`14d`), or `off` (also `0`).
+    #[arg(
+        long,
+        env = crate::thread_close::ENV_STALE,
+        default_value = "14d",
+        value_parser = crate::thread_close::parse_setting
+    )]
+    pub thread_stale: std::time::Duration,
+
     /// The tools dir: the npm prefix that holds the harnesses
     /// (`<dir>/bin` first on `PATH`). At start the daemon installs each pin
     /// of `<config dir>/harnesses.toml` that is missing there, and
@@ -747,6 +769,14 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
 }
 
 impl Settings {
+    /// The times of the untouched Inbox threads (TER-95).
+    pub fn thread_tuning(&self) -> crate::thread_close::Tuning {
+        crate::thread_close::Tuning {
+            reminder_after: self.thread_reminder,
+            stale_after: self.thread_stale,
+        }
+    }
+
     /// The web settings from the flags and the env.
     pub fn web(&self) -> WebConfig {
         WebConfig {
@@ -802,6 +832,24 @@ mod tests {
             Some("https://x")
         );
         assert_eq!(clean_url(Some("")), None);
+    }
+
+    #[test]
+    fn thread_times_default_and_turn_off() {
+        let s = Settings::try_parse_from(["terrariumd"]).unwrap();
+        assert_eq!(s.thread_tuning(), crate::thread_close::Tuning::default());
+        let s = Settings::try_parse_from([
+            "terrariumd",
+            "--thread-reminder",
+            "12h",
+            "--thread-stale",
+            "off",
+        ])
+        .unwrap();
+        let t = s.thread_tuning();
+        assert_eq!(t.reminder_after.as_secs(), 43_200);
+        assert!(t.stale_after.is_zero());
+        assert!(Settings::try_parse_from(["terrariumd", "--thread-stale", "soon"]).is_err());
     }
 
     #[test]

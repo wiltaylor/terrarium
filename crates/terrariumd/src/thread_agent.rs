@@ -254,6 +254,7 @@ pub async fn start(
                         t,
                         &tid,
                         "system",
+                        threads::CloseReason::FailedStart,
                         Some(&format!("The thread agent did not start: {why}")),
                         Vec::new(),
                     )
@@ -404,6 +405,9 @@ pub fn action_of(ev: &StoredEvent) -> Option<(String, Action)> {
         }
         ("question", ThreadStatus::WaitingOperator) => Action::Park,
         ("question", ThreadStatus::WaitingAgent) => Action::Wake,
+        // The agent proposed the close: it waits for the operator's
+        // confirm (TER-95).
+        ("close_proposed", ThreadStatus::WaitingOperator) => Action::Park,
         _ => return None,
     };
     Some((id, action))
@@ -628,6 +632,18 @@ mod tests {
         assert_eq!(
             a(json!({"change": "closed", "id": "01T", "status": "closed"})),
             Some(Action::End)
+        );
+        assert_eq!(
+            a(
+                json!({"change": "close_proposed", "id": "01T", "status": "waiting_operator",
+                     "author": "01AGENT"})
+            ),
+            Some(Action::Park)
+        );
+        // A reminder changes nothing for the agent.
+        assert_eq!(
+            a(json!({"change": "reminded", "id": "01T", "status": "waiting_operator"})),
+            None
         );
         // The open and the attach do nothing: the first turn comes with
         // the spawn.

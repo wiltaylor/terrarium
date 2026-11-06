@@ -181,6 +181,13 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // The reminder and the stale close of untouched Inbox threads
+    // (TERRARIUM_THREAD_REMINDER, TERRARIUM_THREAD_STALE).
+    daemon
+        .state
+        .lifecycle
+        .threads
+        .set_tuning(settings.thread_tuning());
     // The harness auto-update (TERRARIUM_HARNESS_AUTO_UPDATE). Without a
     // tools dir it has nothing to update.
     daemon

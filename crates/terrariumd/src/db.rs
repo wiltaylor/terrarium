@@ -2179,6 +2179,20 @@ const MIGRATIONS: &[&str] = &[
         host_key TEXT NOT NULL
     );
     "#,
+    // 77: the close of an Inbox thread (TER-95, `crate::thread_close`).
+    // `close_proposal` is the agent's proposed handoff (JSON `{summary,
+    // links, by, at}`) that the operator confirms; NULL: none.
+    // `close_reason` is `operator`, `confirmed`, `stale`, or `failed_start`
+    // on a closed thread. `session_id` is the session of the thread agent,
+    // archived when the agent ends. `reminded_at` is the time of the last
+    // Inbox reminder of an untouched thread. Self-contained: when another
+    // branch takes this number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE threads ADD COLUMN close_proposal TEXT;
+    ALTER TABLE threads ADD COLUMN close_reason TEXT;
+    ALTER TABLE threads ADD COLUMN session_id TEXT;
+    ALTER TABLE threads ADD COLUMN reminded_at TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
