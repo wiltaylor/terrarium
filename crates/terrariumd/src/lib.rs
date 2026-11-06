@@ -10,6 +10,7 @@ pub mod agent_tools;
 pub mod api;
 pub mod assets;
 pub mod backup;
+pub mod bound;
 pub mod calendar;
 pub mod card_delivery;
 pub mod card_reminder;
@@ -340,6 +341,8 @@ pub async fn start_with_usage(
     tasks.extend(lifecycle::spawn(&state));
     // The card files of each assigned card, in the workspace (§8.4).
     tasks.push(card_delivery::spawn(&state));
+    // The agents bound to cards: park, unpark, and end (TER-74).
+    tasks.push(bound::spawn(&state));
     tasks.extend(start_usage(&state).await);
     Ok(Daemon {
         state,

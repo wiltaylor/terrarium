@@ -2098,6 +2098,21 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
+    // 73: bound ephemeral agents (TER-74, `crate::bound`). `bound_kind`
+    // and `bound_id` name the object whose life the agent shares (for
+    // example `card`, `TER-74`); NULL: a plain spawn. At most one open
+    // spawn per object. `parked_at` and `park_reason`: the agent is parked
+    // (stopped, no wake) while its object waits; NULL: not parked.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE spawns ADD COLUMN bound_kind TEXT;
+    ALTER TABLE spawns ADD COLUMN bound_id TEXT;
+    ALTER TABLE spawns ADD COLUMN parked_at TEXT;
+    ALTER TABLE spawns ADD COLUMN park_reason TEXT;
+    CREATE UNIQUE INDEX spawns_bound_open ON spawns(bound_kind, bound_id)
+        WHERE finished_at IS NULL AND bound_kind IS NOT NULL;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

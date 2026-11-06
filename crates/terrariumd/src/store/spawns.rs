@@ -66,6 +66,16 @@ pub struct Spawn {
     pub session_id: Option<String>,
     /// From the spawn to the finish, or to now.
     pub duration_secs: i64,
+    /// The object whose life the agent shares (TER-74, `crate::bound`):
+    /// `card:TER-74`. Absent for a plain spawn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound: Option<String>,
+    /// When the agent was parked: stopped, with no wake, while its object
+    /// waits. Absent when it is not parked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parked_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub park_reason: Option<String>,
 }
 
 impl Spawn {
@@ -82,6 +92,9 @@ pub struct SpawnInfo {
     pub task: String,
     pub spawned_at: String,
     pub deadline_at: String,
+    /// The bound object (`card:TER-74`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<String>,
 }
 
 /// A new spawn row.
@@ -96,6 +109,37 @@ pub struct NewSpawn<'a> {
     pub harness: &'a str,
     pub task: &'a str,
     pub deadline_at: &'a str,
+    /// The bound object, if any.
+    pub bound: Option<&'a Bound>,
+}
+
+/// The object whose life a bound ephemeral agent shares (TER-74): a kind
+/// (`card`; threads later) and the ID of the object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bound {
+    pub kind: String,
+    pub id: String,
+}
+
+impl Bound {
+    pub fn new(kind: &str, id: &str) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            id: id.to_owned(),
+        }
+    }
+
+    /// `card:TER-74`.
+    pub fn text(&self) -> String {
+        format!("{}:{}", self.kind, self.id)
+    }
+}
+
+fn bound_text(kind: Option<String>, id: Option<String>) -> Option<String> {
+    match (kind, id) {
+        (Some(k), Some(i)) => Some(format!("{k}:{i}")),
+        _ => None,
+    }
 }
 
 /// The first line of `text`, at most `n` characters.
@@ -163,6 +207,9 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Spawn> {
         outcome: r.get("outcome")?,
         result: r.get("result")?,
         session_id: stored_session.or(live_session),
+        bound: bound_text(r.get("bound_kind")?, r.get("bound_id")?),
+        parked_at: r.get("parked_at")?,
+        park_reason: r.get("park_reason")?,
     })
 }
 
@@ -177,8 +224,8 @@ const SELECT: &str = "SELECT s.*, a.status AS live_status,
 pub fn insert(t: &mut Tx<'_>, n: &NewSpawn<'_>) -> ApiResult<()> {
     t.execute(
         "INSERT INTO spawns (id, owner, owner_name, project, name, template, harness, task,
-                             spawned_by, spawned_at, deadline_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                             spawned_by, spawned_at, deadline_at, bound_kind, bound_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             n.id,
             n.owner,
@@ -190,7 +237,9 @@ pub fn insert(t: &mut Tx<'_>, n: &NewSpawn<'_>) -> ApiResult<()> {
             n.task,
             t.actor,
             now(),
-            n.deadline_at
+            n.deadline_at,
+            n.bound.map(|b| b.kind.as_str()),
+            n.bound.map(|b| b.id.as_str())
         ],
     )?;
     t.execute(
@@ -223,8 +272,8 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Spawn> {
 pub fn info(conn: &Connection, id: &str) -> ApiResult<Option<SpawnInfo>> {
     Ok(conn
         .query_row(
-            "SELECT owner_name, template, task, spawned_at, deadline_at FROM spawns
-             WHERE id = ?1",
+            "SELECT owner_name, template, task, spawned_at, deadline_at, bound_kind, bound_id
+             FROM spawns WHERE id = ?1",
             [id],
             |r| {
                 Ok(SpawnInfo {
@@ -233,16 +282,19 @@ pub fn info(conn: &Connection, id: &str) -> ApiResult<Option<SpawnInfo>> {
                     task: r.get(2)?,
                     spawned_at: r.get(3)?,
                     deadline_at: r.get(4)?,
+                    bound: bound_text(r.get(5)?, r.get(6)?),
                 })
             },
         )
         .optional()?)
 }
 
-/// The ephemeral agents of `owner` that have not finished.
+/// The ephemeral agents of `owner` that have not finished and are not
+/// parked (TER-74: a parked agent holds no place).
 pub fn running_count(conn: &Connection, owner: &str) -> ApiResult<usize> {
     let n: i64 = conn.query_row(
-        "SELECT count(*) FROM spawns WHERE owner = ?1 AND finished_at IS NULL",
+        "SELECT count(*) FROM spawns
+         WHERE owner = ?1 AND finished_at IS NULL AND parked_at IS NULL",
         [owner],
         |r| r.get(0),
     )?;
@@ -312,6 +364,62 @@ pub fn open_of(conn: &Connection, owner: &str) -> ApiResult<Vec<Spawn>> {
     ))?;
     let rows = stmt
         .query_map([owner], row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The open spawn bound to `b`, if any.
+pub fn open_bound(conn: &Connection, b: &Bound) -> ApiResult<Option<Spawn>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "{SELECT} WHERE s.bound_kind = ?1 AND s.bound_id = ?2 AND s.finished_at IS NULL"
+            ),
+            params![b.kind, b.id],
+            row,
+        )
+        .optional()?)
+}
+
+/// Park the open spawn `id` with `reason`. False when it is finished or
+/// parked already.
+pub fn set_parked(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<bool> {
+    let n = t.execute(
+        "UPDATE spawns SET parked_at = ?2, park_reason = ?3
+         WHERE id = ?1 AND finished_at IS NULL AND parked_at IS NULL",
+        params![id, now(), reason],
+    )?;
+    Ok(n > 0)
+}
+
+/// Clear the park of the open spawn `id`. False when it was not parked.
+pub fn clear_parked(t: &mut Tx<'_>, id: &str) -> ApiResult<bool> {
+    let n = t.execute(
+        "UPDATE spawns SET parked_at = NULL, park_reason = NULL
+         WHERE id = ?1 AND finished_at IS NULL AND parked_at IS NOT NULL",
+        [id],
+    )?;
+    Ok(n > 0)
+}
+
+/// True when the agent `id` is a parked ephemeral agent.
+pub fn is_parked(conn: &Connection, id: &str) -> ApiResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM spawns
+         WHERE id = ?1 AND finished_at IS NULL AND parked_at IS NOT NULL",
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// The IDs of the parked ephemeral agents.
+pub fn parked_ids(conn: &Connection) -> ApiResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM spawns WHERE finished_at IS NULL AND parked_at IS NOT NULL ORDER BY id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| r.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }

@@ -54,6 +54,13 @@ pub struct SpawnArgs {
     /// `:read`. Repeat for more
     #[arg(long = "grant", value_name = "SECRET[:LEVEL]")]
     pub grants: Vec<String>,
+    /// Bind the ephemeral agent to a card of the owner's project (TER-74):
+    /// it lives until the card is merged onto `next`, done, or archived,
+    /// not for its lifetime. It is stopped while the card waits in
+    /// validating, review, or accepted, and starts again in its own
+    /// session when the card comes back
+    #[arg(long, value_name = "CARD")]
+    pub card: Option<String>,
 }
 
 /// The spawn rights flags of `agent set` (the policy block `spawn`).
@@ -219,6 +226,9 @@ pub async fn spawn(ctx: &Ctx, a: &SpawnArgs) -> anyhow::Result<()> {
     if !a.grants.is_empty() {
         body["grants"] = json!(a.grants);
     }
+    if let Some(c) = &a.card {
+        body["bind"] = json!(format!("card:{c}"));
+    }
     if who == "operator" {
         match &ctx.project {
             Some(p) => body["project"] = json!(p),
@@ -245,13 +255,16 @@ pub async fn spawn(ctx: &Ctx, a: &SpawnArgs) -> anyhow::Result<()> {
         return poll(ctx, &r, a.timeout.as_deref()).await;
     }
     ctx.emit(&r, |c, r| {
+        let life = match r["bound"].as_str() {
+            Some(b) => format!("bound to {b}, at most until {}", short_time(&field(r, "deadline_at"))),
+            None => format!("lifetime until {}", short_time(&field(r, "deadline_at"))),
+        };
         c.line(format!(
-            "spawned {}/{} (template {}, {}); lifetime until {}",
+            "spawned {}/{} (template {}, {}); {life}",
             field(r, "project"),
             field(r, "name"),
             field(r, "template"),
             field(r, "harness"),
-            short_time(&field(r, "deadline_at"))
         ));
         if r["finished_at"].is_string() {
             c.line(format!(
