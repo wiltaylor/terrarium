@@ -216,8 +216,16 @@ async fn archived_and_linked(lab: &Lab, tid: &str, eph: &str, sid: &str, cards: 
     let th = lab.thread(tid).await;
     assert_eq!(th["session_id"], sid, "{th:#}");
     let key = sid.to_owned();
+    // The delete marks the session removed first; the archive copy of its
+    // file follows.
     until("the archived session", || async {
         lab.td.get(&format!("/api/sessions/{key}")).await.ok()["removed"] == true
+            && lab
+                .td
+                .get(&format!("/api/sessions/{key}/transcript"))
+                .await
+                .status
+                == 200
     })
     .await;
     let t = lab.td.get(&format!("/api/sessions/{sid}/transcript")).await;
