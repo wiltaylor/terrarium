@@ -1487,7 +1487,10 @@ pub fn apply(
         crate::jobs::check_delivery(t, actor, project, &def)
             .and_then(|()| jobs::set_delivery(t, project, &def))
             .map_err(|e| {
-                ApiError::new(e.code, format!("projects.{project}.delivery: {}", e.message))
+                ApiError::new(
+                    e.code,
+                    format!("projects.{project}.delivery: {}", e.message),
+                )
             })?;
         record_project(t, &name, &p.def, p.delivery.is_some())?;
     }

@@ -761,7 +761,12 @@ async fn export_and_apply_carry_the_job_queue_config() {
     assert_eq!(got.body["enabled"], true);
     let plan = nd.post("/api/fleet/plan", body(&content)).await;
     let s = &plan.ok()["summary"];
-    assert_eq!((s["update"].as_u64(), s["create"].as_u64()), (Some(0), Some(0)), "{}", plan.body);
+    assert_eq!(
+        (s["update"].as_u64(), s["create"].as_u64()),
+        (Some(0), Some(0)),
+        "{}",
+        plan.body
+    );
     let again = nd.get("/api/fleet/export?project=dq").await;
     assert_eq!(again.ok()["content"].as_str().unwrap(), content);
 
@@ -838,7 +843,9 @@ async fn export_and_apply_carry_the_job_queue_config() {
     // config, and the fleet no longer manages it.
     let head = "[projects.delivery]\n";
     let at = global.find(head).unwrap();
-    let end = global[at..].find("\n\n").map_or(global.len(), |n| at + n + 1);
+    let end = global[at..]
+        .find("\n\n")
+        .map_or(global.len(), |n| at + n + 1);
     let dropped = format!("{}{}", &global[..at], &global[end..]);
     let plan = nd.post("/api/fleet/plan", body(&dropped)).await;
     let p = entry(plan.ok(), "project", "dq");

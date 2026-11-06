@@ -49,8 +49,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_template::{self, Lookup, Spec, TemplateDef};
 use crate::config::{
-    AgentDef, DeliveryDef, Policy, ProjectDef, RestartPolicy, SYSTEM_PROMPT_FILE_KEY, SubscriptionDef,
-    TargetDef, clean_system_prompt, inline_system_prompt_file,
+    AgentDef, DeliveryDef, Policy, ProjectDef, RestartPolicy, SYSTEM_PROMPT_FILE_KEY,
+    SubscriptionDef, TargetDef, clean_system_prompt, inline_system_prompt_file,
 };
 use crate::harness::HarnessId;
 use crate::role::Role;
@@ -990,7 +990,10 @@ fn delivery(v: Option<toml::Value>, at: &str, issues: &mut Vec<Issue>) -> Option
     let t = match v? {
         toml::Value::Table(t) => t,
         _ => {
-            issues.push(Issue::error(at, "`delivery` must be a table: [projects.delivery]"));
+            issues.push(Issue::error(
+                at,
+                "`delivery` must be a table: [projects.delivery]",
+            ));
             return None;
         }
     };
@@ -1695,7 +1698,7 @@ name = "beta"
         for (from, to, word) in [
             ("slots = 3", "slots = 0", "slots"),
             ("timeout_secs = 5400", "timeout = 5400", "timeout"),
-            ("recipe = \"just ci::validate\"", "recipe = 7", "recipe"),
+            ("recipe = \"just ci::validate\"", "recipe = 7", "expected a string"),
         ] {
             let bad = text.replace(from, to);
             let errs = parse(&bad, Some("dl")).ok().unwrap_err();
