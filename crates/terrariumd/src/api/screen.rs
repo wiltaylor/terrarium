@@ -51,7 +51,10 @@ async fn screen(
     ApiQuery(q): ApiQuery<ScreenQuery>,
 ) -> ApiResult<Json<Value>> {
     let a = load(&state, &actor, id).await?;
-    policy::admin_project(&actor, &a.agent.project, "reading an agent screen")?;
+    // A read: a sysadmin or an architect reads each screen (TER-47).
+    if !actor.agent().is_some_and(|x| x.reads_all()) {
+        policy::admin_project(&actor, &a.agent.project, "reading an agent screen")?;
+    }
     let snap = state
         .supervisor
         .screen(a.agent.id)

@@ -3076,15 +3076,13 @@ async fn leader_worker_flow_commands() {
             vec![req(Post, path)],
         )
         .await;
-        let state = if verb == "pause" {
-            "paused"
+        // TER-45: the line names what the call did, not a bare state.
+        let what = if verb == "pause" {
+            "paused terra/w-dem-3"
         } else {
-            "not paused"
+            "unpaused terra/w-dem-3"
         };
-        assert_eq!(
-            out,
-            format!("terra/w-dem-3 is {state} (stopped, 1 queued)\n")
-        );
+        assert_eq!(out, format!("{what} (stopped, 1 queued)\n"));
     }
     ok(
         true,
@@ -7456,7 +7454,7 @@ async fn agent_lifecycle_commands() {
         vec![req(Post, "/api/agents/terra%2Fw/pause")],
     )
     .await;
-    assert_eq!(out, "terra/w is paused (stopping, 0 queued)\n");
+    assert_eq!(out, "paused terra/w (stopping, 0 queued)\n");
     ok(
         false,
         &["agent", "unpause", "w"],

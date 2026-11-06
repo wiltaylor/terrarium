@@ -21,6 +21,7 @@ mod memory;
 mod monitors;
 mod pins;
 mod pipelines;
+mod project_folders;
 mod projects;
 mod questions;
 mod records;
@@ -279,6 +280,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .route("/events", get(streams::firehose).post(event_sources::emit))
         .route("/events/latest", get(streams::latest))
         .merge(projects::routes())
+        .merge(project_folders::routes())
         .merge(repos::routes())
         .merge(repo_trees::routes())
         .merge(secrets::routes())

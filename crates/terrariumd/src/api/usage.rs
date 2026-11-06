@@ -78,7 +78,7 @@ async fn series(
         f.agent = Some(a.agent.id.to_string());
     }
     if let Actor::Agent(a) = &actor
-        && !a.is_sysadmin()
+        && !a.reads_all()
     {
         match &f.project {
             Some(p) => policy::read_project(&actor, p)?,

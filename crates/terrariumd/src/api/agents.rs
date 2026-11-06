@@ -99,7 +99,7 @@ async fn list(
     ApiQuery(q): ApiQuery<ListQuery>,
 ) -> ApiResult<Response> {
     let project = match (&actor, q.project) {
-        (Actor::Agent(a), None) if !a.is_sysadmin() => Some(a.project.clone()),
+        (Actor::Agent(a), None) if !a.reads_all() => Some(a.project.clone()),
         (_, p) => p,
     };
     if let Some(p) = &project {
@@ -1379,7 +1379,7 @@ async fn set_roles(
         RolesBody::List(r) | RolesBody::Object { roles: r } => r,
     };
     let id = a.agent.id.to_string();
-    for role in [Role::ProjectAdmin, Role::Sysadmin] {
+    for role in [Role::ProjectAdmin, Role::Sysadmin, Role::Architect] {
         if wanted.contains(&role) != a.agent.roles.contains(&role) {
             policy::change_role(&actor, &id, &a.agent.project, role)?;
         }

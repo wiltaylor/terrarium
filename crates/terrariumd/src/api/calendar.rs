@@ -200,7 +200,7 @@ async fn combined(
             Filter::Projects(vec![p.clone()])
         }
         (None, Actor::Operator) => Filter::All,
-        (None, Actor::Agent(a)) if a.is_sysadmin() => Filter::All,
+        (None, Actor::Agent(a)) if a.reads_all() => Filter::All,
         (None, Actor::Agent(a)) => Filter::Projects(vec![a.project.clone()]),
     };
     let write = q.project.as_deref().map(Some);

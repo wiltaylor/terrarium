@@ -191,8 +191,9 @@ fn fingerprint(cert: &Path) -> anyhow::Result<()> {
 }
 
 async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
-    let caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
+    let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
     let paths = cfg.paths();
+    caps.no_workspaces = !terrarium_host::workspace::available(&paths.work_dir);
     let transport = cfg.daemon_url.as_ref().map(|_| cfg.transport());
     let (tls_mode, tls_error) = match &transport {
         Some(Ok(t)) => (Some(t.mode.clone()), None),
@@ -363,7 +364,15 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let transport = cfg.transport()?;
     let token = cfg.resolve_token()?;
     let name = cfg.resolve_name();
-    let caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
+    let mut caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
+    caps.no_workspaces = !terrarium_host::workspace::available(&cfg.paths().work_dir);
+    if caps.no_workspaces {
+        tracing::warn!(
+            work_dir = %cfg.paths().work_dir.display(),
+            "work_dir is not a directory here: this host has no agent workspaces, and docker \
+             targets on it start without /work mounts"
+        );
+    }
     let url = transport.url.clone();
     tracing::info!(%url, %name, tls = %transport.mode.describe(), docker = caps.docker.present, vmlab = caps.vmlab.present, desktop_display = caps.display.enabled, "starting");
     if caps.display.enabled {

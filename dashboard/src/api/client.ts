@@ -14,7 +14,7 @@ import { createTranscriptStream, type TranscriptStream } from "./sse";
 import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 // Secrets (PLAN §16b): a block of its own.
-import type { Pin } from "./types";
+import type { Pin, ProjectFolder, ProjectFolderTree, ProjectPlacement } from "./types";
 import type { CalendarEvent, CalendarGrant, CalendarGrantResult, CalendarInput, CalendarRange, CalendarView, CalendarWatcher, CalendarWatchResult } from "./types";
 import type { NewSecret, NewSecretGrant, RevealedSecret, Secret, SecretGenerate, SecretGrant, SecretPut, TargetPatch, TargetTestReport } from "./types";
 import type {
@@ -567,6 +567,20 @@ export interface Api {
     pin(agent: string): Promise<Pin[]>;
     /** `DELETE /api/pins/{agent}`: unpin. No pin is no error. */
     unpin(agent: string): Promise<Pin[]>;
+  };
+
+  /**
+   * Project folders of the sidebar (docs/api.md §6.12). Kept on the daemon, so they are the same in each browser. The
+   * operator and a sysadmin only. A delete moves the subfolders and projects of the folder up one level.
+   */
+  projectFolders: {
+    list(): Promise<ProjectFolderTree>;
+    create(body: { name: string; parent_id?: string | null }): Promise<ProjectFolder>;
+    /** `parent_id` absent keeps the parent, null moves the folder to the root. */
+    update(id: string, body: { name?: string; parent_id?: string | null; position?: number }): Promise<ProjectFolder>;
+    remove(id: string): Promise<void>;
+    /** `PUT /api/projects/{name}/folder`: put the project in a folder, or at the root with null. */
+    place(project: string, folderId: string | null, position?: number): Promise<ProjectPlacement>;
   };
 
   /**
@@ -1297,6 +1311,15 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       },
       links: (id, body) => patch(`/api/test-runs/${seg(id)}/links`, body),
       remove: (id) => del(`/api/test-runs/${seg(id)}`),
+    },
+
+    projectFolders: {
+      list: () => get("/api/project-folders"),
+      create: (body) => post("/api/project-folders", body),
+      update: (id, body) => patch(`/api/project-folders/${seg(id)}`, body),
+      remove: (id) => del(`/api/project-folders/${seg(id)}`),
+      place: (project, folderId, position) =>
+        put(`/api/projects/${seg(project)}/folder`, position === undefined ? { folder_id: folderId } : { folder_id: folderId, position }),
     },
 
     pins: {

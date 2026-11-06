@@ -1315,3 +1315,63 @@ async fn active_cards_across_projects_follow_the_rights() {
     let r = td.get("/api/cards?columns=backlog").await.ok().clone();
     assert_eq!(ids(&r), [k3]);
 }
+
+/// TER-51: `GET /api/cards?columns=blocked` gives each blocked card with
+/// `column_kind: blocked`, when it moved there (`blocked_since`), and the
+/// comment of that move (`blocked_reason`). Other cards have neither.
+#[tokio::test]
+async fn blocked_cards_have_the_time_and_the_reason_of_the_move() {
+    let td = setup().await;
+    let k1 = card(&td, "proj/w1", json!({"title": "Parser"})).await;
+    td.post_empty_as("proj/w1", &format!("/api/cards/{k1}/claim"))
+        .await
+        .ok();
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{k1}/comments"),
+        json!({"body": "an older comment"}),
+    )
+    .await
+    .ok();
+    let before = td.get(&format!("/api/cards/{k1}")).await.ok().clone();
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{k1}/move"),
+        json!({"column": "blocked", "comment": "need a target\nsecond line"}),
+    )
+    .await
+    .ok();
+    // A later comment does not change the reason.
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{k1}/comments"),
+        json!({"body": "still waiting"}),
+    )
+    .await
+    .ok();
+    let k2 = card(&td, "proj/w2", json!({"title": "Other"})).await;
+    td.post_empty_as("proj/w2", &format!("/api/cards/{k2}/claim"))
+        .await
+        .ok();
+
+    let r = td.get("/api/cards?columns=blocked").await.ok().clone();
+    let rows = r.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{r:#?}");
+    let b = &rows[0];
+    assert_eq!(b["id"], k1);
+    assert_eq!(b["column_kind"], "blocked");
+    assert_eq!(b["blocked_reason"], "need a target\nsecond line");
+    let since = b["blocked_since"].as_str().unwrap();
+    assert!(
+        since >= before["updated_at"].as_str().unwrap(),
+        "{since} {before:#?}"
+    );
+    assert_eq!(b["assignee_name"], "proj/w1");
+
+    // The working card has no blocked fields.
+    let w = td.get("/api/cards?columns=working").await.ok().clone();
+    let w = w.as_array().unwrap();
+    assert_eq!(w.len(), 1);
+    assert!(w[0].get("blocked_since").is_none(), "{w:#?}");
+    assert!(w[0].get("blocked_reason").is_none());
+}

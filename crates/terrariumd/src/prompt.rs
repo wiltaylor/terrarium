@@ -150,6 +150,7 @@ fn role_list(roles: &[Role]) -> String {
             Role::Member => "member",
             Role::ProjectAdmin => "project_admin",
             Role::Sysadmin => "sysadmin",
+            Role::Architect => "architect",
         })
         .collect::<Vec<_>>()
         .join(", ")

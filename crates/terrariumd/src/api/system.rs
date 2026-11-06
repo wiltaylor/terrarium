@@ -841,7 +841,7 @@ pub async fn reload(State(state): State<Shared>, actor: Actor) -> ApiResult<Json
 pub fn audit_scope(actor: &Actor) -> ApiResult<Option<String>> {
     match actor {
         Actor::Operator => Ok(None),
-        Actor::Agent(a) if a.is_sysadmin() => Ok(None),
+        Actor::Agent(a) if a.reads_all() => Ok(None),
         Actor::Agent(a) if a.roles.contains(&Role::ProjectAdmin) => Ok(Some(a.project.clone())),
         Actor::Agent(_) => Err(ApiError::forbidden(
             "reading the audit log needs project_admin, sysadmin, or the operator",

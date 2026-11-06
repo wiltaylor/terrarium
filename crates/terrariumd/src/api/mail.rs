@@ -96,7 +96,9 @@ async fn list(
             };
             if let Actor::Agent(a) = &actor {
                 match f.to.as_deref().and_then(|t| t.strip_prefix("project:")) {
-                    Some(p) => policy::read_inbox(&actor, p)?,
+                    Some(p) => policy::view_inbox(&actor, p)?,
+                    // A sysadmin or an architect reads every thread (TER-47).
+                    None if a.reads_all() => {}
                     None => f.involving = Some(a.id.clone()),
                 }
             }
@@ -230,7 +232,10 @@ async fn show(
             Ok(m)
         })
         .await?;
-    if !may_read_message(&actor, &m) {
+    // A sysadmin or an architect reads each message (TER-47); a mark read or
+    // a reply keeps its own check.
+    let reads_all = actor.agent().is_some_and(|a| a.reads_all());
+    if !reads_all && !may_read_message(&actor, &m) {
         return Err(ApiError::not_found(format!("no message `{}`", m.id)));
     }
     Linker::new(&state, &actor).show(&mut m.link);
@@ -382,7 +387,7 @@ async fn inbox_list(
     ApiQuery(q): ApiQuery<InboxQuery>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> ApiResult<Response> {
-    policy::read_inbox(&actor, &name)?;
+    policy::view_inbox(&actor, &name)?;
     let rows = longpoll::hold(&state, wait, &["mail"], || {
         let (name, page, unread, st, thread) = (
             name.clone(),
@@ -460,7 +465,7 @@ async fn inbox_show(
     actor: Actor,
     Path((name, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Message>> {
-    policy::read_inbox(&actor, &name)?;
+    policy::view_inbox(&actor, &name)?;
     let m = state
         .db
         .read(move |c| {

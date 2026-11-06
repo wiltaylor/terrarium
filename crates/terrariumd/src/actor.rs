@@ -48,6 +48,12 @@ impl AgentActor {
         self.roles.contains(&Role::Sysadmin)
     }
 
+    /// `sysadmin` or `architect`: reads every project (TER-47). Only for
+    /// the checks of a read; a write never takes it.
+    pub fn reads_all(&self) -> bool {
+        self.is_sysadmin() || self.roles.contains(&Role::Architect)
+    }
+
     /// `project_admin` of `project`, or `sysadmin`.
     pub fn is_admin_of(&self, project: &str) -> bool {
         self.is_sysadmin() || (self.roles.contains(&Role::ProjectAdmin) && self.project == project)

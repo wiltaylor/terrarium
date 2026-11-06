@@ -123,6 +123,7 @@ import { createTestRunMock } from "./testRuns";
 import { createMonitorMock } from "./monitors";
 import { createPipelineMock } from "./pipelines";
 import { createCalendarMock } from "./calendar";
+import { createProjectFolderMock } from "./projectFolders";
 import { createCardFileMock } from "./cardFiles";
 import { createSpawnMock } from "./spawns";
 import { applyTemplate, compactMaxAgeError, compactOnIdleError, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
@@ -884,6 +885,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   let pipelineCounter = 0;
   const pipelineMock = createPipelineMock({ reply, fail, emit, audit, project: (name) => project(name), caller: opts.scheduleCaller, ulid: (tag) => fakeUlid(tag, ++pipelineCounter), now });
   if (w.projects.some((x) => x.name === "terrarium")) pipelineMock.seed();
+  // Project folders of the sidebar (docs/api.md §6.12): ./projectFolders. No seed.
+  let folderCounter = 0;
+  const folderMock = createProjectFolderMock({
+    reply,
+    fail,
+    audit,
+    project: (name) => project(name),
+    caller: opts.scheduleCaller,
+    ulid: (tag) => fakeUlid(tag, ++folderCounter),
+    iso,
+  });
   // The calendar (docs/api.md §33): ./calendar. The seed gives project `terrarium` a weekly maintenance window, a freeze,
   // a deploy, and a monthly task, and the global calendar a host window. Watcher mail comes from `system`.
   let calendarCounter = 0;
@@ -2381,6 +2393,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (w.agents.some((a) => a.project === name)) fail(409, "conflict", `project \`${name}\` has agents; delete them first`);
           w.projects = w.projects.filter((x) => x.name !== name);
           w.repos = w.repos.filter((r) => r.project !== name);
+          folderMock.onProjectRemoved(name);
           w.cards = w.cards.filter((c) => c.project !== name);
           delete w.columns[name];
           audit("project.delete", name, name, {});
@@ -3041,8 +3054,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             .sort((a, b) => a.project.localeCompare(b.project) || colIndex(a.project, a.column) - colIndex(b.project, b.column) || a.position - b.position)
             .map((c) => {
               const as = c.assignee ? w.agents.find((a) => a.id === c.assignee) : undefined;
-              const kind = roleOf(c.project, c.column) === "working" ? "working" : c.column.toLowerCase();
-              return { ...view(c), column_kind: kind, ...(as ? { assignee_status: as.status } : {}) };
+              const role = roleOf(c.project, c.column);
+              const kind = role === "working" || role === "blocked" ? role : c.column.toLowerCase();
+              const row: ActiveCard = { ...view(c), column_kind: kind, ...(as ? { assignee_status: as.status } : {}) };
+              if (kind === "blocked") {
+                // The daemon's `blocked_info`: the last move to the blocked column, else updated_at and the newest comment.
+                const ev = w.events.filter((e) => e.card === c.id && e.kind === "card" && e.data.change === "moved" && e.data.to_role === "blocked").at(-1);
+                const note = typeof ev?.data.comment === "string" && ev.data.comment.trim() ? ev.data.comment : row.comments.at(-1)?.body;
+                row.blocked_since = ev?.at ?? c.updated_at;
+                if (note) row.blocked_reason = note;
+              }
+              return row;
             });
           return rows.slice(0, 500);
         }),
@@ -4154,6 +4176,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     monitors: monitorMock.api,
     pipelines: pipelineMock.api,
     calendar: calendarMock.api,
+
+    projectFolders: folderMock.api,
 
     // docs/api.md §6.11: operator only; each call answers with the list.
     pins: (() => {

@@ -113,7 +113,7 @@ async fn active_cards(
         .collect();
     let projects: Option<Vec<String>> = match &actor {
         Actor::Operator => None,
-        Actor::Agent(a) if a.is_sysadmin() => None,
+        Actor::Agent(a) if a.reads_all() => None,
         Actor::Agent(a) => Some(vec![a.project.clone()]),
     };
     Ok(Json(
