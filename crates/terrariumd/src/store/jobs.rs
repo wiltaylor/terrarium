@@ -243,7 +243,12 @@ pub fn host_key(name: &str, def: &TargetDef) -> String {
     if let Some(h) = def.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
         return h.to_owned();
     }
-    if let Some(a) = def.address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+    if let Some(a) = def
+        .address
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
         let a = a.rsplit_once('@').map_or(a, |(_, h)| h);
         let a = match a.strip_prefix('[') {
             Some(v6) => v6.split(']').next().unwrap_or(v6),
@@ -406,9 +411,8 @@ pub struct HostCap {
 
 /// The host caps, by host.
 pub fn host_caps(conn: &Connection) -> ApiResult<Vec<HostCap>> {
-    let mut st = conn.prepare(
-        "SELECT host, heavy_jobs, updated_by, updated_at FROM job_hosts ORDER BY host",
-    )?;
+    let mut st = conn
+        .prepare("SELECT host, heavy_jobs, updated_by, updated_at FROM job_hosts ORDER BY host")?;
     let rows = st
         .query_map([], |r| {
             Ok(HostCap {
@@ -423,7 +427,11 @@ pub fn host_caps(conn: &Connection) -> ApiResult<Vec<HostCap>> {
 }
 
 /// Set the cap of a host, or take it away (`None`: no cap).
-pub fn set_host_cap(t: &mut Tx<'_>, host: &str, heavy_jobs: Option<u32>) -> ApiResult<Option<HostCap>> {
+pub fn set_host_cap(
+    t: &mut Tx<'_>,
+    host: &str,
+    heavy_jobs: Option<u32>,
+) -> ApiResult<Option<HostCap>> {
     let host = host.trim();
     if host.is_empty() || host.len() > 253 || host.chars().any(|c| c.is_control() || c == '/') {
         return Err(ApiError::invalid(format!("bad host `{host}`")));
@@ -778,7 +786,10 @@ mod tests {
         assert!(p.iter().all(|(_, h)| h == "helios"));
         // One job of `a` runs: one place is left, and it goes to the
         // oldest queued job, whatever its project.
-        let run = [running(job("0", "a", JobKind::Validate, "r", "t0"), "helios")];
+        let run = [running(
+            job("0", "a", JobKind::Validate, "r", "t0"),
+            "helios",
+        )];
         let p = pick(queued[1..].to_vec(), &run, &q, &caps);
         assert_eq!(ids(&p), ["2"]);
         // The host is full: nothing starts.
@@ -836,7 +847,10 @@ mod tests {
             "helios"
         );
         assert_eq!(
-            host_key("t", &def(json!({"kind": "docker", "host": "helios", "image": "x"}))),
+            host_key(
+                "t",
+                &def(json!({"kind": "docker", "host": "helios", "image": "x"}))
+            ),
             "helios"
         );
         for (addr, want) in [

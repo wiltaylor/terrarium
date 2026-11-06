@@ -312,7 +312,9 @@ async fn the_config_is_checked_and_audited() {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let audit = td.get("/api/audit?action=project.delivery&order=desc").await;
+    let audit = td
+        .get("/api/audit?action=project.delivery&order=desc")
+        .await;
     let last = &audit.ok()[0]["detail"];
     assert_eq!(last["old"]["recipe"], "test -f OK", "{last}");
     assert_eq!(last["new"]["recipe"], "true", "{last}");
@@ -758,7 +760,10 @@ async fn the_host_cap_holds_across_projects_in_order() {
         if running == 0 && all(&p["queued"]) + all(&q["queued"]) == 0 {
             break;
         }
-        assert!(start.elapsed() < DEADLINE, "the queues never drained: p {p}\nq {q}");
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the queues never drained: p {p}\nq {q}"
+        );
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 
@@ -774,7 +779,8 @@ async fn the_host_cap_holds_across_projects_in_order() {
         jobs.extend(v["jobs"].as_array().unwrap().iter().cloned());
     }
     assert!(
-        jobs.iter().all(|j| j["state"] == "passed" && j["host"] == "lab1"),
+        jobs.iter()
+            .all(|j| j["state"] == "passed" && j["host"] == "lab1"),
         "{jobs:#?}"
     );
     jobs.sort_by(|a, b| {
