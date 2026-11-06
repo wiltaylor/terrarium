@@ -13,6 +13,9 @@
 //!   validates; the daemon clears the name on the final move.
 //! - `POST /api/cards/{id}/merge` {repo?, branch?}: a project admin. A
 //!   queued merge job; the card stays where it is until the job ends.
+//! - `POST /api/merges` {cards, repo?} (TER-112): a project admin. One
+//!   merge job for the cards of one project, merged in the given order and
+//!   validated once. One card is the same as `POST /api/cards/{id}/merge`.
 //! - `GET /api/job-hosts` (any actor): the host caps (TER-97) and the
 //!   running jobs per host. `PUT /api/job-hosts/{host}` {heavy_jobs}
 //!   (sysadmin or the operator): set the cap of a host; `DELETE`: no cap.
@@ -46,6 +49,7 @@ pub fn routes() -> Router<Shared> {
         .route("/jobs/{id}", get(show).delete(cancel))
         .route("/cards/{id}/validate", post(validate))
         .route("/cards/{id}/merge", post(merge))
+        .route("/merges", post(merge_batch))
         .route("/job-hosts", get(list_hosts))
         .route("/job-hosts/{host}", put(set_host).delete(clear_host))
 }
@@ -253,7 +257,9 @@ async fn show(
 }
 
 /// Cancel: the actor that queued the job, the card's worker, or a
-/// project admin.
+/// project admin. A batch merge holds the cards of several workers, so
+/// only the actor that queued it or a project admin cancels it (TER-112
+/// review, F3).
 async fn cancel(
     State(state): State<Shared>,
     actor: Actor,
@@ -261,9 +267,10 @@ async fn cancel(
 ) -> ApiResult<Json<Job>> {
     let job = find(&state, &actor, id).await?;
     let own = actor.label() == job.created_by
-        || actor
-            .agent()
-            .is_some_and(|a| job.by_agent.as_deref() == Some(a.name.as_str()));
+        || (job.batch.is_empty()
+            && actor
+                .agent()
+                .is_some_and(|a| job.by_agent.as_deref() == Some(a.name.as_str())));
     if !own {
         policy::admin_project(&actor, &job.project, "cancelling another agent's job")?;
     }
@@ -272,14 +279,16 @@ async fn cancel(
         .db
         .write(actor.label(), move |t| {
             let j = jobs::cancel(t, &jid)?;
-            let patch = CardPatch {
-                remove_labels: vec![rt::LABEL_QUEUED.into(), rt::LABEL_RUNNING.into()],
-                ..CardPatch::default()
-            };
-            if let Err(e) = board::update_card(t, &Actor::Operator, &j.card, patch)
-                && !e.code.status().is_client_error()
-            {
-                return Err(e);
+            for c in j.cards() {
+                let patch = CardPatch {
+                    remove_labels: vec![rt::LABEL_QUEUED.into(), rt::LABEL_RUNNING.into()],
+                    ..CardPatch::default()
+                };
+                if let Err(e) = board::update_card(t, &Actor::Operator, &c.card, patch)
+                    && !e.code.status().is_client_error()
+                {
+                    return Err(e);
+                }
             }
             Ok(j)
         })
@@ -305,6 +314,15 @@ struct ValidateBody {
     /// Added to the move comment.
     #[serde(default)]
     comment: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchBody {
+    /// The cards, in merge order.
+    cards: Vec<String>,
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -477,6 +495,7 @@ async fn validate(
                     branch: branch.clone(),
                     commit: b.commit.clone(),
                     by_agent: by.clone(),
+                    batch: Vec::new(),
                 },
             )?;
             let mut add = vec![rt::LABEL_QUEUED.to_owned()];
@@ -562,6 +581,7 @@ async fn merge(
                     branch: branch.clone(),
                     commit: None,
                     by_agent: rt::by_agent_of(&card.labels),
+                    batch: Vec::new(),
                 },
             )?;
             let patch = CardPatch {
@@ -578,6 +598,129 @@ async fn merge(
                     job.id
                 ),
             )?;
+            let place = jobs::place(t, &job)?;
+            let room = jobs::host_room(t, &job.project)?;
+            Ok((job, place, room, def.slots()))
+        })
+        .await?;
+    rt::kick(&state);
+    Ok(queued_answer(job.0, job.1, job.2, job.3))
+}
+
+/// One merge job for several cards (TER-112): merged onto `next` in the
+/// given order, validated once, pushed when green. All cards are of one
+/// project and one repo; each branch is the card's (or its ID in lower
+/// case).
+async fn merge_batch(
+    State(state): State<Shared>,
+    actor: Actor,
+    ApiJson(b): ApiJson<BatchBody>,
+) -> ApiResult<Response> {
+    if b.cards.is_empty() {
+        return Err(ApiError::invalid(
+            "`cards` is empty: give one or more card IDs",
+        ));
+    }
+    if b.cards.len() > jobs::BATCH_MAX {
+        return Err(ApiError::invalid(format!(
+            "a batch has at most {} cards",
+            jobs::BATCH_MAX
+        )));
+    }
+    let job = state
+        .db
+        .write(actor.label(), move |t| {
+            let mut cards: Vec<Card> = Vec::new();
+            for id in &b.cards {
+                let card = board::get_card(t, &board::normalise_id(id))?;
+                policy::admin_project(&actor, &card.project, "queueing a merge onto next")?;
+                if card.archived {
+                    return Err(ApiError::conflict(format!("card {} is archived", card.id)));
+                }
+                if cards.iter().any(|c| c.id == card.id) {
+                    return Err(ApiError::invalid(format!(
+                        "card {} is twice in `cards`",
+                        card.id
+                    )));
+                }
+                if let Some(first) = cards.first()
+                    && first.project != card.project
+                {
+                    return Err(ApiError::invalid(format!(
+                        "card {} is in project `{}`, card {} in `{}`: a batch is one project",
+                        card.id, card.project, first.id, first.project
+                    )));
+                }
+                cards.push(card);
+            }
+            let project = cards[0].project.clone();
+            let def = jobs::delivery(t, &project)?;
+            enabled(&def, &project)?;
+            let mut repo: Option<String> = None;
+            let mut batch = Vec::new();
+            for card in &cards {
+                let r = repo_of(t, card, b.repo.clone())?;
+                match &repo {
+                    Some(have) if *have != r => {
+                        return Err(ApiError::invalid(format!(
+                            "card {} is in repo `{r}`, the batch in `{have}`: a batch is one repo",
+                            card.id
+                        )));
+                    }
+                    _ => repo = Some(r),
+                }
+                batch.push(jobs::BatchCard {
+                    card: card.id.clone(),
+                    branch: branch_of(card, None)?,
+                    by_agent: rt::by_agent_of(&card.labels),
+                    outcome: None,
+                    note: None,
+                });
+            }
+            let repo = repo.unwrap_or_default();
+            if !def.next_repos.contains(&repo) {
+                return Err(ApiError::conflict(format!(
+                    "repo `{repo}` has no `next` branch in the queue config: add it to `next_repos`"
+                )));
+            }
+            let first = batch[0].clone();
+            let job = jobs::create(
+                t,
+                NewJob {
+                    project: project.clone(),
+                    card: first.card.clone(),
+                    kind: JobKind::Merge,
+                    repo: repo.clone(),
+                    branch: first.branch.clone(),
+                    commit: None,
+                    by_agent: first.by_agent.clone(),
+                    batch: if batch.len() > 1 { batch.clone() } else { Vec::new() },
+                },
+            )?;
+            let names: Vec<&str> = batch.iter().map(|c| c.card.as_str()).collect();
+            for (i, c) in batch.iter().enumerate() {
+                let patch = CardPatch {
+                    add_labels: vec![rt::LABEL_QUEUED.into()],
+                    ..CardPatch::default()
+                };
+                board::update_card(t, &Actor::Operator, &c.card, patch)?;
+                let note = if batch.len() > 1 {
+                    format!(
+                        "Job queue: merge job {} queued: {} onto next of {repo}, card {} of {} in the batch {}.",
+                        job.id,
+                        c.branch,
+                        i + 1,
+                        batch.len(),
+                        names.join(" ")
+                    )
+                } else {
+                    format!(
+                        "Job queue: merge job {} queued: {} onto next of {repo}.",
+                        job.id, c.branch
+                    )
+                };
+                board::add_comment(t, &Actor::Operator, &c.card, &note)?;
+            }
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
             Ok((job, place, room, def.slots()))

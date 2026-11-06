@@ -445,7 +445,8 @@ async fn the_inbox_mixes_the_kinds_with_the_counts() {
     assert!(ids.contains(&format!("thread:{thread}").as_str()));
     assert_eq!(
         counts,
-        json!({"open": 4, "urgent": 1, "critical": 0, "question": 1, "notice": 1, "mail": 1, "system": 1, "watch": 0})
+        json!({"open": 4, "urgent": 1, "critical": 0, "question": 1, "notice": 1, "mail": 1, "system": 1, "watch": 0,
+               "thread": 0})
     );
     // The pause notice to the operator is the system item, not a mail item.
     let sys = rows.iter().find(|r| r["kind"] == "system").unwrap();

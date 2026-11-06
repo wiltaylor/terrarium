@@ -3594,7 +3594,11 @@ async fn scheduled_exec_runs_through_the_executor() {
     let docker = runs.iter().find(|r| r.output["target"] == "dbox").unwrap();
     assert_eq!(docker.status, "ok", "{docker:?}");
     assert!(
-        lab.log().contains("docker exec") && lab.log().contains("terrarium-dbox make test"),
+        // The command runs behind the PID-file wrapper (TER-99).
+        lab.log().contains("docker exec")
+            && lab.log().contains("terrarium-dbox sh -c")
+            && lab.log().contains("terrarium-run /tmp/terrarium-run-")
+            && lab.log().contains(".pid make test"),
         "{}",
         lab.log()
     );

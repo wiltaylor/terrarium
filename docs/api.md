@@ -2993,7 +2993,7 @@ sessions of the agent.
 | `POST /api/agents/{id}/waits` | below | `201` the wait | the agent itself, the operator |
 | `POST /api/agents/{id}/run` | `{"target", "cmd": [..], "name"?, "cwd"?, "env"?, "timeout"?, "reason"?, "agent"?}` | `201 {"wait", "session_id", "target"}` | the agent itself, the operator; the run uses the agent's rights |
 | `GET /api/waits/{id}` | | `200` the wait | as for the list; else `404` |
-| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait | `200` the cancelled wait; a wait that is not open is `409 conflict` | as for the list |
+| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait: on a `host`, `docker`, or `ssh` target each process of the process group and session of the run gets `TERM`, then `KILL` after 5 s | `200` the cancelled wait; with a kill on such a target also `kill`: `{pid, term, kill, left}` (the PIDs on the target that got `TERM`, needed `KILL`, and still run) or `{error}`; a wait that is not open is `409 conflict` | as for the list |
 | `GET /api/waits/{id}/log` | `?max=` bytes (at most 65536) | `200 {"wait_id", "session_id", "target", "running", "output", "end"?}` | as for the list; a wait that is not `process` is `422` |
 
 The create body:
@@ -3104,6 +3104,7 @@ except for the differences in "Bundles" below.
 | `answered_by`, `answered_by_name` | `operator`, or the ULID and `project/name` of a sysadmin agent. |
 | `retract_reason`, `retracted_by` | The reason, and the actor label (`operator`, `agent:<ulid>`, or `system` for a deleted agent). |
 | `thread_id` | The mail thread of the question. The answer goes on it. |
+| `thread` | The Inbox thread that the question was asked in (§6.13), or absent. |
 | `revision` | 1 at the ask. Each update that changes a field adds 1. |
 
 The rights:
@@ -3119,7 +3120,7 @@ The rights:
 | Endpoint | Body or query | Answer |
 |---|---|---|
 | `GET /api/agents/{id}/questions` | `?status=open\|answered\|acknowledged\|retracted`, `?all=true`, `?kind=question\|notice\|bundle` | `200` the questions and notices of the agent. No filter: the open ones and those answered or acknowledged in the last 24 h. |
-| `POST /api/agents/{id}/questions` | `{"kind"?, "text", "options"?, "items"?, "context"?, "card"?, "priority"?, "wait"?, "timeout"?}`; `kind` is `question` (the default), `notice`, or `bundle` (with `items`) | `201` the question, notice, or bundle; with `wait: true`, also `wait`: the new `question` wait (§6.7) |
+| `POST /api/agents/{id}/questions` | `{"kind"?, "text", "options"?, "items"?, "context"?, "card"?, "priority"?, "wait"?, "timeout"?, "thread"?}`; `thread` asks in an Inbox thread (§6.13); `kind` is `question` (the default), `notice`, or `bundle` (with `items`) | `201` the question, notice, or bundle; with `wait: true`, also `wait`: the new `question` wait (§6.7) |
 | `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=`, `?kind=`, `?card=` | `200` at most 200 questions and notices. `?card=` keeps the questions linked to that card; an unknown card is `404`. Open first (critical first, then urgent, then the oldest first), then the others (the newest first). `X-Open-Questions`, `X-Urgent-Questions` (urgent and critical), and `X-Critical-Questions` count the open ones of the `kind` filter (both kinds without it). The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
 | `GET /api/questions/{id}` | | `200` the question |
 | `PATCH /api/questions/{id}` | `{"text"?, "options"?, "items"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field; `items` replaces all items of a bundle. `{"card": "<id>" \| null}` alone links or unlinks a card (see "Cards") | `200` the question. A question that is not open is `409 conflict`, except for a change of the card by the operator or a sysadmin. A card of another project, or an unknown card, is `422 invalid`. |
@@ -3236,7 +3237,7 @@ PLAN §12e gives the design. The code is in
 `crates/terrariumd/src/api/inbox.rs`.
 
 The Inbox is the list of the things that wait for the operator. It is a
-view, not a table: it copies no mail body. Each item has one of five
+view, not a table: it copies no mail body. Each item has one of six
 kinds:
 
 | Kind | What | Open while | The operator's verbs |
@@ -3246,6 +3247,7 @@ kinds:
 | `mail` | A message to `operator` (§7). | Its `state` is `queued` or `delivered`: not acknowledged. | `POST /api/inbox/mail/{id}/ack` |
 | `system` | A thread of the loop guard (§7.4): it is paused now, or it has a held message that is not released. | The thread is paused, or a held message is not released. | `POST /api/mail/{id}/release`, `POST /api/mail/threads/{thread}/resume` |
 | `watch` | A question that the operator asked an agent, or a question of the Inbox that the operator forwarded to one (below, "Ask and forward"). It waits for the agent, not for the operator. | The newest message of its thread is the operator's, and it is not cancelled. | `DELETE /api/inbox/watches/{thread}` |
+| `thread` | An Inbox thread (§6.13), with its questions inside. A question asked in a thread is not an item of its own. | The thread is `waiting_operator`, or it is not closed and has an open question. | `POST /api/threads/{id}/messages`, `.../respond`, `.../close`, and the question verbs |
 
 The notice of a pause (`Thread T needs a human`, from `system`) is not a
 `mail` item: the `system` item of the thread shows it.
@@ -3264,19 +3266,20 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 
 | Field | Meaning |
 |---|---|
-| `id` | `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, `thread:<thread id>`, or `watch:<thread id>`. |
+| `id` | `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, `thread:<thread id>`, `watch:<thread id>`, or `inbox-thread:<id>`. |
 | `open` | The item waits for the operator. |
-| `urgent` | An open question or notice with `priority: urgent` or `critical`. Mail and system items are not urgent. |
+| `urgent` | An open question or notice with `priority: urgent` or `critical`, or an open thread with such an open question. Mail and system items are not urgent. |
 | `critical` | An open question or notice with `priority: critical`. The dashboard shows the newest one in a banner on each page, with a link to `/inbox?item=<id>`, and flashes its browser tab while the page is hidden or has no focus. |
 | `project` | The project of the asking agent, of the sender of the mail, of the first agent on the thread, or of the watched agent. `null` for mail from `system` or from the operator. |
 | `at` | When the item came in: the ask, the send, the first held message that is not released, or the ask of a watch. |
 | `question`, `message`, `system` | The question or notice, the message, or the thread. A system item has `paused`, `agent_run` (the agent-to-agent messages since the last reset), `limit` (`TERRARIUM_MAIL_LOOP_LIMIT`), `participants`, and `held` (the held messages that are not released). |
 | `watch` | On a `watch` item: the watch (below). On a `mail` item whose thread is watched: the watch that the mail answers, so the dashboard can show "answer to your question" and link the forwarded question. Absent otherwise. |
+| `thread` | On a `thread` item: the thread as `GET /api/threads` lists it (§6.13), with `message_count`, `open_questions`, and `last_at`. |
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system\|watch`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
-| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system", "watch"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. `open` does not count `watch`: a watch waits for an agent. The dashboard badge shows `open`, red when `urgent` is not 0. |
+| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system\|watch\|thread`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
+| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system", "watch", "thread"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. `open` does not count `watch`: a watch waits for an agent. The dashboard badge shows `open`, red when `urgent` is not 0. |
 | `POST /api/inbox/mail/{id}/ack` | `{"reply"?}`, or no body | `200` `{"message", "replies"}`. The mail becomes `read`. With `reply`, the reply goes as `operator` on the thread of the mail to its other participants (§7.2), and the mail becomes `replied`. A message that is not to the operator is `404`. One that is acknowledged already is `409 conflict`. A reply to a system mail that has nobody to answer is `422 invalid`. |
 
 | `POST /api/inbox/asks` | `{"to", "text"?, "question"?}` | `201` `{"message", "watch"}`: the mail (§7) and the new watch. Below. |
@@ -3628,6 +3631,164 @@ project removes its place (a foreign key). The writes add the audit rows
 `project_folder.create`, `project_folder.update`, `project_folder.delete`,
 and `project.folder`. No event goes out: the dashboard reads the tree
 again when its window gets the focus.
+
+### 6.13 Inbox threads
+
+The plan is the wiki page `inbox-threads` (approved by the operator,
+decisions D34 to D37). The code is in
+`crates/terrariumd/src/store/threads.rs` and
+`crates/terrariumd/src/api/threads.rs`.
+
+A **thread** is a text conversation between the operator and one agent on
+one topic, in the Inbox. It holds the messages, the questions and bundles
+that the agent asks in it (§6.8, with a `thread` link), the operator's
+overall `response` (the approval record), and, at the close, a `handoff`.
+There is no register of threads and no conflict check between threads
+(D36).
+
+```json
+{"id":"01M7...","topic":"Shard the event store?","scope":"global",
+ "template":"architect","opened_by":"operator","opened_by_name":"operator",
+ "agent":"01M7...","agent_name":"meta/architect-t1",
+ "report_to":"01M5...","report_to_name":"meta/lead",
+ "status":"waiting_operator",
+ "messages":[{"id":"01M7...","author":"operator","author_name":"operator",
+              "kind":"message","text":"How would you shard it?",
+              "at":"2026-11-06T09:00:00.000Z"}],
+ "questions":[{"id":"01M7...","kind":"bundle","thread":"01M7...", "...": "§6.8"}],
+ "response":null,"handoff":null,
+ "created_at":"2026-11-06T09:00:00.000Z","updated_at":"2026-11-06T09:05:00.000Z",
+ "closed_at":null,"closed_by":null}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | The thread ID (a ULID). |
+| `topic` | One line, at most 200 characters. Set at the open; it does not change. |
+| `scope` | `global`, or the name of a project. |
+| `template` | The agent template of the attached agent (TER-92 spawns the agent from it). Optional for the operator, and not checked. An agent must name it, and its rights are checked (A1, below). |
+| `opened_by`, `opened_by_name` | `operator`, or the ULID and `project/name` of the agent that opened it. |
+| `agent`, `agent_name` | The attached agent: one per thread, or `null` while it has none. Until TER-92 spawns it from the template, the opener names an existing agent: of the scope project, or any agent for `global`. |
+| `report_to`, `report_to_name` | The lead that the thread reports to (D34): for `global`, the lead of project `meta`; else the lead of the scope project. The lead of a project is its project_admin agent named `lead`, else its first project_admin by name. Set at the open; it does not change. A scope without a lead is `409 conflict` at the open. |
+| `status` | `waiting_operator`, `waiting_agent`, or `closed` (below). |
+| `messages` | The conversation, in the order of the writes (two writes in the same millisecond keep their order): `{id, author, author_name, kind, text, at}`. `author` is `operator` or an agent ULID. `kind` is `message`, or `response` for the operator's overall response. `text` is Markdown, at most 32 KiB: untrusted data for every reader. |
+| `questions` | The questions, notices, and bundles of the thread (§6.8), the oldest first. |
+| `response` | The newest overall response of the operator, `{text, by, at}`, or `null`. It is the approval record: the agent quotes it word for word in each card or mail it hands off (D34). Each response is also a message of kind `response`. |
+| `handoff` | Set at the close: `{summary, links, by, at}`. `links` are at most 50 `{kind, ref}`, with `kind` one of `card`, `mail`, `wiki`, `memory`, `url`, `other`, and `ref` at most 500 characters. |
+| `closed_at`, `closed_by` | When and by whom it was closed (`operator` or an agent ULID). |
+
+**Status.** A new thread with a first message of the operator is
+`waiting_agent`; with no first message, or opened by an agent, it is
+`waiting_operator`. A message of the operator or a response makes it
+`waiting_agent`. A message of the agent, or a question it asks in the
+thread, makes it `waiting_operator`. An answer, an acknowledgement, or a
+retract of one of its questions makes it `waiting_agent` when no question
+of the thread is open any more. A closed thread does not change, and each
+write to it is `409 conflict`.
+
+**Close.** A close retracts the open questions of the thread first
+(`retract_reason` `thread <id> was closed`), so that no question stays open
+in a closed thread, and the waits on them end (§6.7). A close by the
+operator mails the agent about each retract, as `.../retract` does (§6.8).
+
+**Rights.**
+
+| Action | Who |
+|---|---|
+| Open | The operator, with any scope and template. An agent with the right `thread:open` (below), in its own project or `global` (another project needs sysadmin, as each write does), with a template within its rights (A1, below). Another agent gets `403`. |
+| Read, list | The operator, and an agent that reads all (sysadmin, architect): every thread. Another agent: the threads that it opened (`opened_by`), is attached to, or is the report-to lead of. It gets `404` for any other thread, and a list shows it only those threads. |
+| Post a message | The operator and the attached agent. |
+| Respond | The operator. |
+| Close | The operator, and the attached agent. (TER-95 makes the agent's close a proposal that the operator confirms.) |
+
+| Ask a question in a thread | The attached agent, also when it is not a leader: `POST /api/agents/{id}/questions` with `"thread"`. |
+
+**Errors.** A body that does not parse (not JSON, a wrong type, or an
+unknown field) is `400 bad_request` before any check below. After the body
+parses, the verbs on one thread fail in this order: an unknown thread, or
+one that the caller may not read, is `404 not_found`. A reader that may not
+do the verb is `403 forbidden` (for example the report-to lead on
+`messages` or `close`). `respond` by an agent is `403 forbidden` before the
+thread is looked up. A write to a closed thread is `409 conflict`. A field
+that fails its check (an empty `text`, a bad link) is `422 invalid`.
+`POST /api/threads` by an agent is `403 forbidden`. A scope without a lead
+is `409 conflict`, and an unknown scope or agent is `404 not_found`.
+
+| Endpoint | Body or query | Answer |
+|---|---|---|
+| `POST /api/threads` | `{"topic", "scope"?, "template"?, "agent"?, "text"?}`; `scope` defaults to `global` for the operator and to the own project for an agent; `agent` is a ULID or `project/name` | `201` the thread. An agent: `403` without `thread:open`, for another project, or for a template or agent above its rights (A1); `422` with no `template`; `404` for an unknown template |
+| `GET /api/threads` | `?status=waiting_operator\|waiting_agent\|closed\|open\|all` (default `open`: not closed), `?scope=` | `200` the threads without `messages` and `questions`, with `message_count`, `open_questions`, and `last_at`. The ones that wait for the operator first, then the newest activity first. At most 200. |
+| `GET /api/threads/{id}` | | `200` the thread |
+| `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
+| `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
+| `POST /api/threads/{id}/close` | `{"summary"?, "links"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | `200` the thread, `closed`, with `handoff`; its open questions are `retracted` |
+
+**The right `thread:open`** (TER-93). The policy field `thread_open`
+(§6.1, `policy`) lets an agent open threads (`terrarium thread new`). It
+is granted like the spawn rights (§6.10): the operator and a sysadmin set
+it on any agent, a project_admin on a member of its project, but not on
+itself and not on an admin (`PATCH /api/agents/{id}` with `policy`, or
+`terrarium agent set <agent> --thread-open on`). There is no limit on the
+threads that an agent opens (D35).
+
+**The rights check (A1).** An agent-opened thread may only use a template
+whose rights do not exceed the opener's; the operator opens a thread with
+any template. The template resolves in the project of the thread's agent:
+the scope project, or `meta` for `global`. A sysadmin holds every right.
+For the others, `403` names each right that the template (or a named
+`agent`) has and the opener does not hold:
+
+- a role: `project_admin` of that project needs the opener to be its
+  project_admin; `architect` needs an architect opener; `sysadmin` needs a
+  sysadmin;
+- a target that is not in the opener's `policy.targets`, unless it is a
+  target of that project and the opener administers the project;
+- a `cross_project` entry that the opener does not have, and a `mail_to`
+  entry of another project that the opener's `mail_to` or `cross_project`
+  does not cover;
+- spawn rights, unless the opener could grant them (a project_admin, for a
+  member of its project, with no `may_spawn_children`) or holds them;
+- `calendar_write`, unless the opener has it or administers the project.
+
+So a project lead with `thread:open` opens a `global` thread with a member
+template, but not with a template that has `project_admin` (of `meta`)
+or `architect`. An architect posts and asks in its own thread as the
+attached agent, and opens threads in its own project or `global` with
+templates within its rights; it writes in no other project.
+
+**Questions in a thread.** `POST /api/agents/{id}/questions` takes
+`"thread": "<id>"`: the attached agent asks in its open thread. The
+question gets `thread` (absent on the others), shows in the thread's
+`questions`, and makes the thread `waiting_operator`. The operator answers
+it with the verbs of §6.8. A `thread` of another agent, or of a closed
+thread, is `409 conflict`; an unknown thread is `404 not_found`. A question
+of a thread is not an Inbox item of its own: the `thread` item shows it.
+
+A question keeps the project of the agent that asks it, also in a `global`
+thread. So `GET /api/questions` (§6.8) shows a question of a global thread
+to the project_admin of the asking agent's project, as it does for the
+agent's other questions. The Inbox shows it only inside the thread item,
+which has the thread's project (`null` for `global`), so the Inbox
+`?project=` filter follows the thread, not the question.
+
+**The Inbox.** A thread is an Inbox item of kind `thread` with the ID
+`inbox-thread:<id>` (`thread:<id>` stays the ID of a `system` item, a mail
+thread of the loop guard). It is open while the thread is
+`waiting_operator`, or while it is not closed and has an open question (a
+message or a response of the operator makes the thread `waiting_agent`, but
+its open questions still wait for the operator). The Inbox shows every
+thread, without the limit of 200 of the list. The item has `thread`: the thread as
+`GET /api/threads` lists it. `GET /api/inbox?kind=thread` filters them, and
+`/api/inbox/counts` has `thread`. An item is urgent when one of its open
+questions is urgent or critical.
+
+**Delivery.** The operator's messages and responses reach the attached
+agent as turns with TER-92 (`[Thread:<id>] ...`). Until then the agent
+reads its thread with `GET /api/threads/{id}`.
+
+Events: `thread` `{change, id, scope, status}`, with `change` one of
+`opened`, `message`, `response`, `question`, `closed`; and an `inbox` event
+for the item. Audit rows: `thread.open`, `thread.respond`, `thread.close`.
 
 ## 7. Mail
 
@@ -10232,6 +10393,12 @@ validate or a merge is a `409 conflict` that says how to set it.
 - `merge`: check out `next`, merge the card branch with `--no-ff`, run the
   recipe, and push `next` when the recipe passes. The push is not forced:
   when `next` moved, the job fails.
+- A batch merge (TER-112) is one `merge` job for several cards of one
+  project and one repo. It merges the card branches onto `next` in the
+  given order, each with `--no-ff`, runs the recipe once on the result,
+  and pushes `next` when it passes. `batch` in the job lists the cards
+  (`[{card, branch, by_agent?, outcome?, note?}]`); `card`, `branch`, and
+  `by_agent` are those of the first card. See 35.3 for the results.
 
 Jobs start first in, first out across all projects. A job starts when:
 
@@ -10353,6 +10520,32 @@ one key, the strictest applies until a cap write replaces them.
 - A daemon restart loses the running jobs: they fail (`error`) and follow
   the same rule.
 
+A batch merge:
+
+- A card whose branch does not merge onto `next` and the cards before it
+  leaves the batch: its merge is aborted, and the next card merges. A
+  merge that fails without a conflict (for example an unrelated history)
+  is the same: the tree is reset, and the card's note says why. The card
+  gets `outcome: conflict` in `batch` and fails at once, as above. When
+  no card merges, the job ends as a `conflict`.
+- Pass: each merged card moves to `accepted`.
+- Red with two or more merged cards: the batch splits into two halves (a
+  half of one card is a job of one card). Both are queued at the front,
+  with `parent` set to the red job. The halves split again on red, until
+  the failing card is found. The other cards merge. Each card gets a
+  comment with the jobs of the split.
+- The order holds over nested splits: `split_path` in the job adds `0`
+  for a left half and `1` for a right half to the path of its parent,
+  and the queue sorts on it after `created_at` and `attempt`. So the left
+  half and all its splits run before the right half. A merge runs alone
+  in its project, so the right half merges onto a `next` that holds the
+  cards of the left half that passed.
+- A card that a split leaves alone and that is red fails without the
+  rerun: the red batch was its first red. A batch that ends with one
+  merged card and red follows the rule of one card.
+- Any other failure (`error`) runs the batch once more with the merged
+  cards, then fails each of them.
+
 The card writes of the queue are made as the operator. Their comments
 start with `Job queue:`.
 
@@ -10362,10 +10555,12 @@ start with `Job queue:`.
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` on the target. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `POST /api/merges`                 | a project admin                       | `{cards, repo?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
-| `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels |
+| `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels. A batch merge: the creator or a project admin only, as it holds the cards of several workers; every card of the batch loses the job labels |
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
-Events `job` {change, project, id, card, kind, state, attempt, outcome}.
+Events `job` {change, project, id, card, kind, state, attempt, outcome,
+cards?}; `cards` lists the cards of a batch.

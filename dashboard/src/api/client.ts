@@ -15,6 +15,7 @@ import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 // Secrets (PLAN §16b): a block of its own.
 import type { Pin, ProjectFolder, ProjectFolderTree, ProjectPlacement } from "./types";
+import type { NewThread, Thread, ThreadClose, ThreadQuery } from "./types";
 import type { CalendarEvent, CalendarGrant, CalendarGrantResult, CalendarInput, CalendarRange, CalendarView, CalendarWatcher, CalendarWatchResult } from "./types";
 import type { NewSecret, NewSecretGrant, RevealedSecret, Secret, SecretGenerate, SecretGrant, SecretPut, TargetPatch, TargetTestReport } from "./types";
 import type {
@@ -751,6 +752,22 @@ export interface Api {
     cancelWatch(thread: string): Promise<InboxWatch>;
   };
 
+  /** Inbox threads (docs/api.md §6.13): a conversation with one agent on one topic. */
+  threads: {
+    /** `GET /api/threads?status=&scope=`: open (not closed) by default; the ones that wait for the operator first, then the newest activity. At most 200. */
+    list(q?: ThreadQuery): Promise<Thread[]>;
+    /** `GET /api/threads/{id}`: with `messages` and `questions`. */
+    get(id: string): Promise<Thread>;
+    /** `POST /api/threads`: open a thread. `scope` defaults to `global`. */
+    open(body: NewThread): Promise<Thread>;
+    /** `POST /api/threads/{id}/messages`: a message of the operator; the thread waits for the agent. */
+    post(id: string, text: string): Promise<Thread>;
+    /** `POST /api/threads/{id}/respond`: the operator's overall response, the approval record. */
+    respond(id: string, text: string): Promise<Thread>;
+    /** `POST /api/threads/{id}/close`: close with a handoff; the open questions of the thread are retracted. */
+    close(id: string, body?: ThreadClose): Promise<Thread>;
+  };
+
   /** The inbox of a project: the address `project:<name>`. */
   projectInbox: {
     list(project: string, q?: ProjectInboxQuery): Promise<Page<Message>>;
@@ -1437,6 +1454,14 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       ackMail: (id, reply) => post(`/api/inbox/mail/${seg(id)}/ack`, reply ? { reply } : {}),
       ask: (body) => post("/api/inbox/asks", body),
       cancelWatch: (thread) => t.request<InboxWatch>("DELETE", `/api/inbox/watches/${seg(thread)}`, {}),
+    },
+    threads: {
+      list: (q = {}) => get("/api/threads", Object.keys(q).length ? { ...q } : undefined),
+      get: (id) => get(`/api/threads/${seg(id)}`),
+      open: (body) => post("/api/threads", body),
+      post: (id, text) => post(`/api/threads/${seg(id)}/messages`, { text }),
+      respond: (id, text) => post(`/api/threads/${seg(id)}/respond`, { text }),
+      close: (id, body = {}) => post(`/api/threads/${seg(id)}/close`, body),
     },
 
     projectInbox: {
