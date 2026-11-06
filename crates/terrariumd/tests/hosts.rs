@@ -3928,3 +3928,100 @@ async fn a_host_exec_runs_in_the_slice_of_its_holder() {
         "{out}"
     );
 }
+
+/// TER-41: a remote host agent with no agent workspaces (its work_dir is
+/// not a directory there) says so in its capabilities. `up` of a docker
+/// target on it starts the container with no /work mount (as an attach to
+/// such a host does), records no attached workspace, and says so in
+/// `workspace_note`. A lease to another running agent attaches nothing and
+/// gives no attach error.
+#[tokio::test]
+async fn a_docker_target_on_a_host_without_workspaces_starts_without_mounts() {
+    let lab = Lab::start().await;
+    let token = lab.register("remote1").await;
+    let mut o = ClientOptions::new(
+        format!("ws://{}/hosts/connect", lab.addr),
+        &token,
+        "remote1",
+    );
+    o.capabilities = HostCapabilities {
+        docker: ToolCapability {
+            present: true,
+            version: Some("29.8.0".into()),
+        },
+        shell: Some("/bin/sh".into()),
+        no_workspaces: true,
+        ..Default::default()
+    };
+    o.backoff_min = Duration::from_millis(50);
+    o.backoff_max = Duration::from_millis(200);
+    o.docker_bin = lab.bins.path().join("docker").display().to_string();
+    o.vmlab_bin = lab.bins.path().join("vmlab").display().to_string();
+    // No copy of the daemon's work root on this host.
+    o.paths = terrarium_host::HostPaths {
+        work_dir: lab.bins.path().join("no-such-work-dir"),
+        instances_dir: lab.bins.path().join("instances"),
+        repos_dir: lab.bins.path().join("repos"),
+    };
+    let _h = tokio::spawn(Client::new(o).run());
+    lab.wait_online("remote1", true).await;
+    lab.td.project("terra").await;
+    let owner = id_of(
+        &lab.td
+            .agent(
+                "terra",
+                "owner",
+                json!({"policy": {"targets": ["terra-rbox"]}}),
+            )
+            .await,
+    );
+    let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
+    lab.target(
+        json!({"name": "terra-rbox", "kind": "docker", "host": "remote1", "project": "terra",
+                      "image": "alpine:3", "ephemeral": true}),
+    )
+    .await;
+    for a in [&owner, &w] {
+        lab.td
+            .post_empty(&format!("/api/agents/{a}/start"))
+            .await
+            .ok();
+        lab.td.wait_status(a, "idle").await;
+    }
+    let r = lab.td.post_empty("/api/targets/terra-rbox/up").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["state"], "running", "{}", r.body);
+    let note = r.body["workspace_note"].as_str().unwrap_or_default();
+    assert!(
+        note.contains("no agent workspaces") && note.contains("remote1"),
+        "{}",
+        r.body
+    );
+    assert!(r.body.get("attach_error").is_none(), "{}", r.body);
+    let t = lab.td.get("/api/targets/terra-rbox").await.ok().clone();
+    let attached = t["runtime"].get("attached").cloned().unwrap_or(json!([]));
+    assert_eq!(attached, json!([]), "{t}");
+    let log = lab.log();
+    let run = log
+        .lines()
+        .rfind(|l| l.starts_with("docker run"))
+        .unwrap_or_default()
+        .to_owned();
+    assert!(!run.is_empty(), "{log}");
+    assert!(!run.contains(":/work/"), "{run}");
+    // A lease to another running agent: nothing to attach, no error.
+    let r = lab
+        .td
+        .post(
+            "/api/targets/terra-rbox/leases",
+            json!({"agent": "terra/worker"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert!(r.body.get("lifecycle_error").is_none(), "{}", r.body);
+    assert!(
+        r.body["lifecycle"].get("attach_error").is_none() || r.body["lifecycle"].is_null(),
+        "{}",
+        r.body
+    );
+}
