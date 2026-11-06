@@ -659,6 +659,21 @@ pub fn ask_question(actor: &Actor, owner: &str, project: &str, what: &str) -> Ap
     }
 }
 
+/// Ask a question in an Inbox thread (TER-91): the agent itself, also when
+/// it is not a leader. The store checks that the thread is its own.
+pub fn ask_in_thread(actor: &Actor, owner: &str, what: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Agent(a) if a.id == owner => Ok(()),
+        Actor::Agent(_) => Err(ApiError::forbidden(format!(
+            "{what}: an agent asks only its own questions"
+        ))),
+        Actor::Operator => Err(ApiError::forbidden(format!(
+            "{what}: the operator posts to a thread (POST /api/threads/{{id}}/messages); an \
+             agent asks in it"
+        ))),
+    }
+}
+
 /// Link a question of `owner` (an agent of `project`) to a card, or
 /// unlink it: the operator or a sysadmin at any time (`Ok(true)`), the
 /// asking leader while the question is open (`Ok(false)`).
