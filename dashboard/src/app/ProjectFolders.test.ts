@@ -132,7 +132,8 @@ describe("project folders in the tree", () => {
     // The target and its parents open, so the row stays in view.
     await want(() => inFolder(el, infra).includes("p:terrarium"));
     expect(top(el)).toEqual([`f:${work}`, "p:webshop"]);
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    // The dialog closes when the daemon has answered.
+    await want(() => !document.querySelector('[role="dialog"]'));
   });
 
   it("moves a project by a drop onto a folder row, and back by a drop onto the Projects row", async () => {
