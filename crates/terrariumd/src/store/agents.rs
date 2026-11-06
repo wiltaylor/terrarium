@@ -377,10 +377,12 @@ pub fn with_pending_reset(conn: &Connection) -> ApiResult<Vec<String>> {
 }
 
 /// One turn that waits for the wake of its agent (`queued_turns`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QueuedTurn {
     pub id: i64,
+    /// The turn as it will be typed, with its tag line.
     pub text: String,
+    pub created_at: String,
 }
 
 /// Keep `text` as a turn for agent `id`, after the turns that wait already.
@@ -403,17 +405,46 @@ pub fn has_queued_turns(conn: &Connection, id: &str) -> ApiResult<bool> {
 
 /// The queued turns of agent `id`, oldest first.
 pub fn queued_turns(conn: &Connection, id: &str) -> ApiResult<Vec<QueuedTurn>> {
-    let mut stmt =
-        conn.prepare("SELECT id, text FROM queued_turns WHERE agent = ?1 ORDER BY id")?;
+    let mut stmt = conn
+        .prepare("SELECT id, text, created_at FROM queued_turns WHERE agent = ?1 ORDER BY id")?;
     let rows = stmt
         .query_map([id], |r| {
             Ok(QueuedTurn {
                 id: r.get(0)?,
                 text: r.get(1)?,
+                created_at: r.get(2)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// True when the queued turn `turn` of agent `id` still waits.
+pub fn queued_turn_waits(conn: &Connection, id: &str, turn: i64) -> ApiResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM queued_turns WHERE agent = ?1 AND id = ?2)",
+        params![id, turn],
+        |r| r.get(0),
+    )?)
+}
+
+/// Delete the queued turn `turn` of agent `id` (TER-54). `None`: it does
+/// not wait (any more): it went to the supervisor, or it never was.
+pub fn remove_queued_turn(t: &mut Tx<'_>, id: &str, turn: i64) -> ApiResult<Option<QueuedTurn>> {
+    Ok(t
+        .query_row(
+            "DELETE FROM queued_turns WHERE agent = ?1 AND id = ?2
+             RETURNING id, text, created_at",
+            params![id, turn],
+            |r| {
+                Ok(QueuedTurn {
+                    id: r.get(0)?,
+                    text: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 /// Delete the queued turns of agent `id` up to `upto` (the ID of the

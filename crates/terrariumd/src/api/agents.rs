@@ -37,6 +37,11 @@ pub fn routes() -> Router<Shared> {
         .route("/agents/{id}/pty", get(streams::pty))
         .route("/agents/{id}/roles", get(roles).put(set_roles))
         .route("/agents/{id}/subscription", post(swap))
+        .route("/agents/{id}/queued", get(queued))
+        .route(
+            "/agents/{id}/queued/{turn}",
+            axum::routing::delete(remove_queued),
+        )
 }
 
 pub fn supervisor_error(e: SupervisorError) -> ApiError {
@@ -1392,6 +1397,114 @@ async fn set_roles(
         })
         .await?;
     Ok(Json(roles))
+}
+
+/// One queued turn in the answer of `GET /api/agents/{id}/queued`.
+#[derive(Debug, Serialize)]
+struct QueuedView {
+    id: i64,
+    /// The turn as it will be typed, with its tag (`[User] ...`).
+    text: String,
+    /// The text after the tag: what the composer gets for an edit.
+    body: String,
+    created_at: String,
+}
+
+/// The text of a turn after its tag (`[User] `, `[Agent:p/a] `,
+/// `[System:schedule s] `). A text with no tag stays.
+fn untagged(text: &str) -> &str {
+    if let Some(rest) = text.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+        && !rest[..end].contains('\n')
+    {
+        let after = &rest[end + 1..];
+        return after.strip_prefix(' ').unwrap_or(after);
+    }
+    text
+}
+
+/// `GET /api/agents/{id}/queued` (TER-54): the turns that wait in the
+/// store for the agent's wake, oldest first, redacted for the caller. The
+/// read right of the agent, as its transcripts.
+async fn queued(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let a = load(&state, &actor, id).await?;
+    let key = a.agent.id.to_string();
+    let turns = state
+        .db
+        .read(move |c| agents::queued_turns(c, &key))
+        .await?;
+    let redactor = state.db.redactor().get();
+    let view = crate::secrets::redact::view_of(&actor);
+    let items: Vec<QueuedView> = turns
+        .into_iter()
+        .map(|t| {
+            let text = redactor.redact_string_as(t.text, &view).0;
+            QueuedView {
+                id: t.id,
+                body: untagged(&text).to_owned(),
+                text,
+                created_at: t.created_at,
+            }
+        })
+        .collect();
+    Ok(Json(json!({"items": items})))
+}
+
+/// `DELETE /api/agents/{id}/queued/{turn}` (TER-54): drop one queued turn
+/// before the wake types it. The right of a turn: project_admin of the
+/// agent's project, sysadmin, or the operator. 404 when the turn does not
+/// wait (any more): the wake gave it to the agent, or it never was. The
+/// turns after it keep their order.
+async fn remove_queued(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((id, turn)): Path<(String, i64)>,
+) -> ApiResult<StatusCode> {
+    let a = load(&state, &actor, id).await?;
+    policy::admin_project(&actor, &a.agent.project, "removing a queued turn")?;
+    let lock = state.lifecycle.turn_lock(agent_id(&a));
+    let _held = lock.lock().await;
+    let (key, project) = (a.agent.id.to_string(), a.agent.project.clone());
+    let removed = state
+        .db
+        .write(actor.label(), move |t| {
+            let r = agents::remove_queued_turn(t, &key, turn)?;
+            if let Some(q) = &r {
+                t.audit(
+                    "agent.queued.remove",
+                    &key,
+                    Some(&project),
+                    json!({"turn": q.id, "bytes": q.text.len()}),
+                )?;
+            }
+            Ok(r)
+        })
+        .await?;
+    match removed {
+        Some(_) => Ok(StatusCode::NO_CONTENT),
+        None => Err(ApiError::not_found(format!(
+            "turn {turn} does not wait for the agent (it went out, or it never was)"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod queued_tests {
+    use super::untagged;
+
+    #[test]
+    fn the_body_is_the_text_after_the_tag() {
+        assert_eq!(untagged("[User] Run the tests"), "Run the tests");
+        assert_eq!(untagged("[Agent:p/lead] Do TER-4."), "Do TER-4.");
+        assert_eq!(untagged("[System:schedule s] go"), "go");
+        assert_eq!(untagged("[User]"), "");
+        assert_eq!(untagged("no tag"), "no tag");
+        assert_eq!(untagged("[not\nclosed] x"), "[not\nclosed] x");
+    }
 }
 
 #[cfg(test)]
