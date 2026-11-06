@@ -294,7 +294,13 @@ fn last_line(text: &str) -> Option<String> {
     Some(out)
 }
 
-fn card_event(t: &mut Tx<'_>, row: &Row, change: &str, summary: String, data: serde_json::Value) -> ApiResult<()> {
+fn card_event(
+    t: &mut Tx<'_>,
+    row: &Row,
+    change: &str,
+    summary: String,
+    data: serde_json::Value,
+) -> ApiResult<()> {
     let mut data = data;
     if let serde_json::Value::Object(m) = &mut data {
         m.insert("change".into(), json!(change));
@@ -325,7 +331,13 @@ fn clear(t: &mut Tx<'_>, row: &Row) -> ApiResult<()> {
     )
 }
 
-fn mark(t: &mut Tx<'_>, row: &Row, since: &str, now: DateTime<Utc>, line: Option<&str>) -> ApiResult<()> {
+fn mark(
+    t: &mut Tx<'_>,
+    row: &Row,
+    since: &str,
+    now: DateTime<Utc>,
+    line: Option<&str>,
+) -> ApiResult<()> {
     t.execute(
         "UPDATE cards SET idle_since = ?2 WHERE id = ?1",
         params![row.card, since],
@@ -462,7 +474,10 @@ mod tests {
     #[test]
     fn a_rest_past_the_threshold_marks_the_card() {
         let r = row();
-        assert_eq!(decide(&r, Some(REST), at("2026-11-06T04:14:59Z")), Step::Keep);
+        assert_eq!(
+            decide(&r, Some(REST), at("2026-11-06T04:14:59Z")),
+            Step::Keep
+        );
         assert_eq!(
             decide(&r, Some(REST), at("2026-11-06T04:15:00Z")),
             Step::Mark(REST.into())
@@ -547,10 +562,18 @@ mod tests {
 
     #[test]
     fn the_mail_names_the_agent_the_card_and_the_line() {
-        let (s, b) = message(&row(), REST, at("2026-11-06T04:20:00Z"), Some("Waiting on CI."));
+        let (s, b) = message(
+            &row(),
+            REST,
+            at("2026-11-06T04:20:00Z"),
+            Some("Waiting on CI."),
+        );
         assert_eq!(s, "p/w1 is idle on P-1 with no wait");
         assert!(b.contains("holds card P-1 (Build) in `in_progress`"), "{b}");
-        assert!(b.contains("since 2026-11-06T04:00:00.000Z (20 minutes)"), "{b}");
+        assert!(
+            b.contains("since 2026-11-06T04:00:00.000Z (20 minutes)"),
+            "{b}"
+        );
         assert!(b.contains("15m (the default)"), "{b}");
         assert!(b.contains("> Waiting on CI."), "{b}");
         let (_, none) = message(&row(), REST, at("2026-11-06T04:20:00Z"), None);
@@ -576,7 +599,12 @@ mod tests {
             conn.execute(
                 "INSERT INTO events (seq, id, agent_id, kind, payload, at)
                  VALUES (?1, ?2, 'a', 'status', ?3, ?4)",
-                params![seq, format!("e{seq}"), json!({"status": status}).to_string(), at],
+                params![
+                    seq,
+                    format!("e{seq}"),
+                    json!({"status": status}).to_string(),
+                    at
+                ],
             )
             .unwrap();
         };

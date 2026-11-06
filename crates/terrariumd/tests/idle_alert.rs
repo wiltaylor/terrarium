@@ -86,7 +86,12 @@ async fn changes(td: &TestDaemon, c: &str, change: &str) -> usize {
 /// Project `project` with the idle alert `alert`, a lead (not started)
 /// when `lead`, and the worker `w1`, started and idle, with no card
 /// reminder. Returns the lead and the worker IDs.
-async fn setup(td: &TestDaemon, project: &str, alert: &str, lead: bool) -> (Option<String>, String) {
+async fn setup(
+    td: &TestDaemon,
+    project: &str,
+    alert: &str,
+    lead: bool,
+) -> (Option<String>, String) {
     fast(td);
     td.project(project).await;
     td.patch(
@@ -113,7 +118,11 @@ async fn setup(td: &TestDaemon, project: &str, alert: &str, lead: bool) -> (Opti
 /// A card that agent `w` made and claimed: in the working column.
 async fn claimed(td: &TestDaemon, project: &str, w: &str, title: &str) -> String {
     let c = id(td
-        .post_as(w, &format!("/api/projects/{project}/cards"), json!({"title": title}))
+        .post_as(
+            w,
+            &format!("/api/projects/{project}/cards"),
+            json!({"title": title}),
+        )
         .await
         .ok());
     td.post_as(w, &format!("/api/cards/{c}/claim"), json!({}))
@@ -152,10 +161,16 @@ async fn an_idle_worker_with_a_card_and_no_wait_mails_the_lead_once() {
     })
     .await;
     let since = card(&td, &c).await["idle_since"].clone();
-    until("the lead mail", || async { !alerts(&td, &lead).await.is_empty() }).await;
+    until("the lead mail", || async {
+        !alerts(&td, &lead).await.is_empty()
+    })
+    .await;
     let mail = alerts(&td, &lead).await;
     assert_eq!(mail.len(), 1, "{mail:#?}");
-    assert_eq!(mail[0]["subject"], format!("p/w1 is idle on {c} with no wait"));
+    assert_eq!(
+        mail[0]["subject"],
+        format!("p/w1 is idle on {c} with no wait")
+    );
     let body = td
         .get_as(&lead, &format!("/api/mail/{}", id(&mail[0])))
         .await
@@ -165,7 +180,10 @@ async fn an_idle_worker_with_a_card_and_no_wait_mails_the_lead_once() {
         .to_owned();
     assert!(body.contains(&format!("holds card {c} (Build)")), "{body}");
     assert!(body.contains("with no registered wait"), "{body}");
-    assert!(body.contains("The idle alert of project `p` is 1s"), "{body}");
+    assert!(
+        body.contains("The idle alert of project `p` is 1s"),
+        "{body}"
+    );
     assert_eq!(changes(&td, &c, "idle").await, 1);
     // The lists show the mark.
     let listed = td.get("/api/projects/p/cards").await.ok().clone();
@@ -286,7 +304,10 @@ async fn without_a_lead_the_operator_gets_the_mail() {
     .await;
     let mail = alerts(&td, "operator").await;
     assert_eq!(mail.len(), 1, "{mail:#?}");
-    assert_eq!(mail[0]["subject"], format!("solo/w1 is idle on {c} with no wait"));
+    assert_eq!(
+        mail[0]["subject"],
+        format!("solo/w1 is idle on {c} with no wait")
+    );
 }
 
 /// The setting: a duration, `off` (also `0`), or `null` for the default.
@@ -300,7 +321,9 @@ async fn the_idle_alert_setting_takes_a_duration_or_off() {
         .patch("/api/projects/p", json!({"idle_alert": "20m"}))
         .await;
     assert_eq!(r.ok()["idle_alert"], "20m");
-    let r = td.patch("/api/projects/p", json!({"idle_alert": "0"})).await;
+    let r = td
+        .patch("/api/projects/p", json!({"idle_alert": "0"}))
+        .await;
     assert_eq!(r.ok()["idle_alert"], "off");
     let r = td
         .patch("/api/projects/p", json!({"idle_alert": "soon"}))
