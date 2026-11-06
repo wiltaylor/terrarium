@@ -21,7 +21,6 @@ validate:
 	just ci::test
 	just ci::scripts-test
 	just ci::dashboard-check
-	npm --prefix dashboard test
 
 # Check Rust formatting without changing files
 [group('ci')]
@@ -33,17 +32,24 @@ fmt-check: require-cargo
 lint: require-cargo
 	cargo clippy --workspace --all-targets -- -D warnings
 
-# Run the Rust unit and integration tests; --no-fail-fast runs every test binary, so one failure does not hide the rest
+# Run the Rust unit and integration tests; --no-fail-fast runs every test binary, so one failure does not hide the rest. With RESULTS_DIR set, libtest writes JSON to $RESULTS_DIR/rust.json
 [group('ci')]
 test: require-cargo
-	cargo test --workspace --no-fail-fast
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [ -z "${RESULTS_DIR:-}" ]; then
+		cargo test --workspace --no-fail-fast
+		exit 0
+	fi
+	mkdir -p "$RESULTS_DIR"
+	RUSTC_BOOTSTRAP=1 cargo test --workspace --no-fail-fast -- -Z unstable-options --format json --report-time > "$RESULTS_DIR/rust.json"
 
 # Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer, the deploy, the CI workflow)
 [group('ci')]
 scripts-test: require-uv
 	uv run python -m unittest discover -s scripts -p 'test_*.py'
 
-# Run the dashboard's `npm run check` (typecheck and lint); skips when dashboard/ has no package.json
+# Run the dashboard's `npm run check` (typecheck and lint) and its unit tests; skips when dashboard/ has no package.json. With RESULTS_DIR set, the tests also write JUnit XML to $RESULTS_DIR/dashboard.xml
 [group('ci')]
 dashboard-check:
 	#!/usr/bin/env bash
@@ -53,12 +59,21 @@ dashboard-check:
 		exit 0
 	fi
 	command -v npm > /dev/null 2>&1 || { echo "npm is required: install Node 22.19 or later" >&2; exit 1; }
+	results=""
+	if [ -n "${RESULTS_DIR:-}" ]; then
+		mkdir -p "$RESULTS_DIR"
+		results=$(realpath "$RESULTS_DIR")
+	fi
 	cd dashboard
 	if [ ! -d node_modules ]; then
 		if [ -f package-lock.json ]; then npm ci; else npm install; fi
 	fi
 	npm run check
-	npm run test -- --run
+	if [ -z "$results" ]; then
+		npm run test -- --run
+	else
+		npm run test -- --run --reporter=default --reporter=junit --outputFile.junit="$results/dashboard.xml"
+	fi
 
 # Adapter compatibility suite against the pinned harness versions (docs/compat-suite.md). Not in `check`: it needs real logins and spends up to 3 model turns per harness. `harness`: all, claude, codex, copilot, pi, or a comma list
 [group('ci')]
