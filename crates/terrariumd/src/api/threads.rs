@@ -2,7 +2,8 @@
 //!
 //! - `POST /api/threads`: open a thread. The operator, or an agent with
 //!   the right `thread:open` (TER-93) with a template that does not exceed
-//!   its own rights (A1).
+//!   its own rights (A1). With a template and no named agent, the daemon
+//!   spawns the thread's agent ([`crate::thread_agent`], TER-92).
 //! - `GET /api/threads[?status=&scope=]`: the operator and an agent that
 //!   reads all (sysadmin, architect) see all; another agent sees the
 //!   threads it opened, is attached to, or is the report-to lead of.
@@ -107,6 +108,14 @@ async fn open(
             )
         })
         .await?;
+    // A template and no named agent: the daemon spawns the thread's agent
+    // now (TER-92), and checks A1 again against the template as it is then.
+    let th = if th.template.is_some() && th.agent.is_none() {
+        let lib = super::skills::library_opt(&state);
+        crate::thread_agent::start(&state, th, lib).await?
+    } else {
+        th
+    };
     Ok((StatusCode::CREATED, Json(th)).into_response())
 }
 

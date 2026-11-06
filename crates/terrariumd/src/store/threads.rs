@@ -513,20 +513,41 @@ fn insert_message(
     kind: &str,
     text: &str,
     at: &str,
-) -> ApiResult<()> {
+) -> ApiResult<String> {
+    let id = ulid::Ulid::new().to_string();
     t.execute(
         "INSERT INTO thread_messages (id, thread, author, kind, text, at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            ulid::Ulid::new().to_string(),
-            thread,
-            author,
-            kind,
-            text,
-            at
-        ],
+        params![id, thread, author, kind, text, at],
     )?;
-    Ok(())
+    Ok(id)
+}
+
+/// One message of thread `thread` by its ID.
+pub fn message(conn: &Connection, thread: &str, id: &str) -> ApiResult<ThreadMessage> {
+    messages(conn, thread)?
+        .into_iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| ApiError::not_found(format!("thread {thread} has no message `{id}`")))
+}
+
+/// Attach the agent `agent` (a ULID) to thread `id`: the agent that the
+/// daemon spawned for it at the open (TER-92, [`crate::thread_agent`]).
+pub fn set_agent(t: &mut Tx<'_>, id: &str, agent: &str) -> ApiResult<Thread> {
+    let at = now();
+    t.execute(
+        "UPDATE threads SET agent = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, agent, at],
+    )?;
+    let th = get(t, id)?;
+    t.audit(
+        "thread.agent",
+        &th.id,
+        th.project(),
+        json!({"agent": agent, "template": th.template}),
+    )?;
+    emit(t, &th, "agent")?;
+    Ok(th)
 }
 
 fn not_closed(th: &Thread, what: &str) -> ApiResult<()> {
@@ -554,7 +575,7 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     not_closed(&th, "a message")?;
     let text = t.redact_string(check_text("text", text, MAX_MESSAGE)?);
     let at = now();
-    insert_message(t, &th.id, author, "message", &text, &at)?;
+    let msg = insert_message(t, &th.id, author, "message", &text, &at)?;
     let status = if author == "operator" {
         ThreadStatus::WaitingAgent
     } else {
@@ -562,7 +583,7 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     };
     set_status(t, &th.id, status, &at)?;
     let th = get(t, &th.id)?;
-    emit(t, &th, "message")?;
+    emit_with(t, &th, "message", json!({"message": msg, "author": author}))?;
     Ok(th)
 }
 
@@ -573,7 +594,7 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
     not_closed(&th, "a response")?;
     let text = t.redact_string(check_text("text", text, MAX_RESPONSE)?);
     let at = now();
-    insert_message(t, &th.id, "operator", "response", &text, &at)?;
+    let msg = insert_message(t, &th.id, "operator", "response", &text, &at)?;
     let response = Response {
         text: text.clone(),
         by: "operator".into(),
@@ -591,7 +612,12 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
         th.project(),
         json!({"text": questions::short(&text, 200)}),
     )?;
-    emit(t, &th, "response")?;
+    emit_with(
+        t,
+        &th,
+        "response",
+        json!({"message": msg, "author": "operator"}),
+    )?;
     Ok(th)
 }
 
@@ -733,8 +759,18 @@ pub fn on_question(t: &mut Tx<'_>, id: &str, q: &Question, change: &str) -> ApiR
 
 /// The `thread` and `inbox` events of a change.
 fn emit(t: &mut Tx<'_>, th: &Thread, change: &str) -> ApiResult<()> {
-    let data: Value = json!({"change": change, "id": th.id, "scope": th.scope,
-                             "status": th.status});
+    emit_with(t, th, change, json!({}))
+}
+
+/// [`emit`] with more fields in the `thread` event: `message` (the ID of
+/// the new message) and `author`, which the thread agent driver reads
+/// ([`crate::thread_agent`]).
+fn emit_with(t: &mut Tx<'_>, th: &Thread, change: &str, extra: Value) -> ApiResult<()> {
+    let mut data: Value = json!({"change": change, "id": th.id, "scope": th.scope,
+                                 "status": th.status});
+    if let (Some(d), Value::Object(x)) = (data.as_object_mut(), extra) {
+        d.extend(x);
+    }
     // The summary of a project thread has no topic: the project's readers
     // of the events need not see it. A global thread's events are in no
     // project.

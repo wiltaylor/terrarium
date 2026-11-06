@@ -32,6 +32,11 @@
 //!   Each step runs as `ionice -c3 nice -n19 <argv>` (`nice` only on a
 //!   target without `ionice`), so jobs do not starve their host.
 //!   Then the clone and the push repo are removed.
+//! - A step that hits its timeout, or a cancel, ends the process group and
+//!   the session of the step on the target (`TERM`, then `KILL`), through
+//!   [`crate::run_kill`]: killing the `ssh` or `docker exec` client alone
+//!   leaves the recipe running. The job keeps its slot (and its place on
+//!   the host cap) until that kill ended (TER-115).
 //! - On the end the daemon moves the card itself (as the operator, with a
 //!   comment that starts "Job queue:"): a pass moves a validate card to
 //!   `review` and a merge card to `accepted`. A failure is rerun once
@@ -51,8 +56,8 @@
 //! - A daemon restart loses the runs: each running job fails (`error`)
 //!   and goes through the rerun rule.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -116,9 +121,56 @@ fn set_control(job: &str, ctl: Option<mpsc::UnboundedSender<Control>>) {
     }
 }
 
-/// Kill the current step of a running job. The job then ends as
-/// cancelled (its row is cancelled first, so the end does nothing).
+/// The IDs of the jobs whose run has not ended yet ([`tick`] adds and
+/// removes them), and of the ones among them that got a [`kill`]. A
+/// cancelled job keeps its place in the queue while it drains (TER-115).
+#[derive(Default)]
+struct Live {
+    runs: HashSet<String>,
+    killed: HashSet<String>,
+}
+
+fn live() -> MutexGuard<'static, Live> {
+    static L: OnceLock<Mutex<Live>> = OnceLock::new();
+    match L.get_or_init(Mutex::default).lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// A job in [`Live::runs`] while this lives: a run that ends in any way,
+/// a panic too, frees its place.
+struct LiveRun(String);
+
+impl LiveRun {
+    fn new(job: &str) -> Self {
+        live().runs.insert(job.to_owned());
+        Self(job.to_owned())
+    }
+}
+
+impl Drop for LiveRun {
+    fn drop(&mut self) {
+        let mut l = live();
+        l.runs.remove(&self.0);
+        l.killed.remove(&self.0);
+    }
+}
+
+/// True when the job got a [`kill`]: its next steps do not start.
+fn killed(job: &str) -> bool {
+    live().killed.contains(job)
+}
+
+/// Kill the current step of a running job, and keep the next steps from
+/// starting (the clean-up of its clone still runs). The job then ends as
+/// cancelled (its row is cancelled first, so the end does nothing). The
+/// kill ends the processes of the step on the target, and the job keeps
+/// its place until they are gone.
 pub fn kill(job: &str) {
+    // Marked whether the run is there yet or not, so a run that starts
+    // after the cancel starts no step. [`LiveRun`] clears the mark.
+    live().killed.insert(job.to_owned());
     let m = match controls().lock() {
         Ok(m) => m,
         Err(p) => p.into_inner(),
@@ -174,22 +226,26 @@ pub fn kick(state: &Shared) {
 /// projects, so the host counts hold.
 pub async fn tick(state: &Shared) -> ApiResult<()> {
     prepare_hosts(&state.db, None).await?;
+    // The live runs are read and added in the write, so two ticks and a
+    // cancel (all writes) see them in order.
     let started = state
         .db
         .write("system", move |t| {
+            let draining: Vec<String> = live().runs.iter().cloned().collect();
             let mut out = Vec::new();
-            for (j, host, def) in jobs::startable(t)? {
+            for (j, host, def) in jobs::startable(t, &draining)? {
                 if jobs::start(t, &j.id, &host)? {
+                    let run = LiveRun::new(&j.id);
                     for c in j.cards() {
                         set_labels(t, &c.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
                     }
-                    out.push((jobs::get(t, &j.id)?, def));
+                    out.push((jobs::get(t, &j.id)?, def, run));
                 }
             }
             Ok(out)
         })
         .await?;
-    for (job, def) in started {
+    for (job, def, live_run) in started {
         let state = state.clone();
         tokio::spawn(async move {
             let end = run(&state, &job, &def).await;
@@ -208,6 +264,7 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
                 Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
                 Err(e) => warn!(job = %job.id, "cannot end a job: {e}"),
             }
+            drop(live_run);
             kick(&state);
         });
     }
@@ -335,6 +392,12 @@ fn error_end(message: impl Into<String>) -> JobEnd {
 
 /// Run one step on the target and read it to the end. The step can be
 /// killed through [`kill`] while it runs.
+///
+/// A kill, or the step's `timeout_secs`, ends the whole process group and
+/// session of the step on the target ([`crate::run_kill`]), not only the
+/// local `ssh` or `docker exec` client (TER-115). The step returns only
+/// after that kill ended, so the job keeps its slot until its processes
+/// are gone.
 async fn step(
     state: &Shared,
     job: &str,
@@ -342,9 +405,23 @@ async fn step(
     cmd: &RemoteCmd,
     max: usize,
 ) -> ApiResult<Collected> {
-    let running = executor::start_cmd(state, def, cmd)?;
+    let (running, report) = crate::run_kill::start(state, def, cmd)?;
     set_control(job, Some(running.ctl.clone()));
-    Ok(running.collect(max).await)
+    // A kill between the check in [`StepCtx::run`] and set_control found
+    // the old control or none: kill this step now.
+    if killed(job) {
+        let _ = running.ctl.send(Control::Kill);
+    }
+    let mut c = running.collect(max).await;
+    let kill = match report {
+        Some(rx) => crate::run_kill::report(rx).await,
+        None => None,
+    };
+    if let Some(r) = kill {
+        c.stderr
+            .extend_from_slice(format!("\n[killed on the target: {r}]\n").as_bytes());
+    }
+    Ok(c)
 }
 
 /// Run a job to its end. Never fails: an error is a failed end.
@@ -551,8 +628,12 @@ impl StepCtx<'_> {
         }
     }
 
-    /// Run a step at low IO and CPU priority ([`low_priority`]).
+    /// Run a step at low IO and CPU priority ([`low_priority`]). A job
+    /// that got a [`kill`] starts no more steps.
     async fn run(&self, cmd: &RemoteCmd, max: usize) -> ApiResult<Collected> {
+        if killed(&self.job.id) {
+            return Err(ApiError::conflict("the job was cancelled"));
+        }
         let cmd = RemoteCmd {
             argv: low_priority(cmd.argv.clone(), self.ionice),
             ..cmd.clone()

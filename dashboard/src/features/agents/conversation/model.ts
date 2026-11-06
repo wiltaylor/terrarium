@@ -71,6 +71,8 @@ export function partBadge(part: TurnPart): Chip {
     }
     case "system":
       return { label: `System: ${part.kind}${part.detail ? ` ${part.detail}` : ""}`, tone: "warn", title: "Terrarium typed this turn." };
+    case "thread":
+      return { label: `Thread ${part.thread}`, tone: "ok", title: `The operator wrote in Inbox thread ${part.thread}.` };
   }
 }
 
