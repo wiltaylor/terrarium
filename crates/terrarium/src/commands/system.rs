@@ -179,7 +179,12 @@ pub async fn whoami(ctx: &Ctx) -> anyhow::Result<()> {
         let v = json!({"actor": "operator", "endpoint": ctx.api.describe()});
         return ctx.emit(&v, |c, _| c.line("operator"));
     };
-    let me = ctx.identity().await?.clone();
+    let mut me = ctx.identity().await?.clone();
+    // The runner copies the roles when it launches and never sees a later
+    // grant. `agent show` reads the daemon row, and so does policy, so the
+    // roles come from that same route.
+    let row = ctx.api.get(&super::agent_path(&env.agent), vec![]).await?;
+    me["roles"] = row["roles"].clone();
     ctx.emit(&me, |c, me| {
         let name = me["name"]
             .as_str()
