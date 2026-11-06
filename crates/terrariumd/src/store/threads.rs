@@ -772,10 +772,12 @@ pub fn confirm_close(t: &mut Tx<'_>, id: &str) -> ApiResult<Thread> {
             th.id
         )));
     };
-    close(
+    // The handoff stays the agent's: it wrote it.
+    close_as(
         t,
         &th.id,
         "operator",
+        &p.by,
         CloseReason::Confirmed,
         Some(&p.summary),
         p.links,
@@ -806,6 +808,19 @@ pub fn close(
     summary: Option<&str>,
     links: Vec<Link>,
 ) -> ApiResult<Thread> {
+    close_as(t, id, by, by, reason, summary, links)
+}
+
+/// [`close`] by `by`, with a handoff written by `author`.
+fn close_as(
+    t: &mut Tx<'_>,
+    id: &str,
+    by: &str,
+    author: &str,
+    reason: CloseReason,
+    summary: Option<&str>,
+    links: Vec<Link>,
+) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
     not_closed(&th, "a close")?;
     let (summary, checked) = checked_handoff(t, summary, links)?;
@@ -827,7 +842,7 @@ pub fn close(
     let handoff = Handoff {
         summary,
         links: checked,
-        by: by.to_owned(),
+        by: author.to_owned(),
         at: at.clone(),
     };
     t.execute(

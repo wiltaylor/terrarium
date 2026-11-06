@@ -3700,7 +3700,8 @@ and makes the thread `waiting_operator` (the agent parks). It closes
 nothing. A new proposal replaces the old one. The operator then:
 
 - confirms it: `POST .../close` with `{"confirm": true}` closes the thread
-  with the proposed handoff (`close_reason` `confirmed`). With no proposal
+  with the proposed handoff (`close_reason` `confirmed`; `closed_by` is
+  `operator`, `handoff.by` stays the agent). With no proposal
   it is `409 conflict`; `confirm` with a `summary` or `links` is `422
   invalid`;
 - or writes on: a message or a response clears the proposal (a decline),

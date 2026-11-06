@@ -307,7 +307,7 @@ async fn the_agent_proposes_and_the_operator_confirms() {
     assert_eq!(th["close_reason"], "confirmed");
     assert_eq!(th["closed_by"], "operator");
     assert_eq!(th["handoff"]["summary"], "Two cards cut.");
-    assert_eq!(th["handoff"]["by"], "operator");
+    assert_eq!(th["handoff"]["by"], eph.as_str());
     assert_eq!(th["handoff"]["links"][0]["ref"], c1.as_str());
     assert!(th["close_proposal"].is_null());
     assert_eq!(th["session_id"], sid.as_str());
