@@ -96,8 +96,15 @@ async fn the_list_shows_the_turns_in_order() {
     assert_eq!(r.status, 200, "{}", r.body);
     td.project("other").await;
     td.agent("other", "x", json!({})).await;
-    let r = td.get_as("other/x", &format!("/api/agents/{w}/queued")).await;
-    assert!(r.status == 403 || r.status == 404, "{} {}", r.status, r.body);
+    let r = td
+        .get_as("other/x", &format!("/api/agents/{w}/queued"))
+        .await;
+    assert!(
+        r.status == 403 || r.status == 404,
+        "{} {}",
+        r.status,
+        r.body
+    );
 }
 
 /// A remove: the operator and the project's lead; not a member. The turns
@@ -187,10 +194,7 @@ async fn a_remove_during_a_wake_is_exact() {
     })
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        td.sup.prompts(aid(&w)),
-        ["[User] first", "[User] third"]
-    );
+    assert_eq!(td.sup.prompts(aid(&w)), ["[User] first", "[User] third"]);
     let r = td.delete(&format!("/api/agents/{w}/queued/{first}")).await;
     assert_eq!(r.status, 404, "{}", r.body);
     assert!(queued(&td, &w).await.is_empty());
