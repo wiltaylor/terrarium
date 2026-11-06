@@ -600,10 +600,12 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
         .collect())
 }
 
-/// The item of an Inbox thread: open while it waits for the operator;
-/// urgent or critical by its open questions.
+/// The item of an Inbox thread: open while it waits for the operator or
+/// has an open question (its questions are no items of their own); urgent
+/// or critical by its open questions.
 fn thread_item(conn: &Connection, th: Thread) -> ApiResult<InboxItem> {
-    let open = th.status == ThreadStatus::WaitingOperator;
+    let open = th.status == ThreadStatus::WaitingOperator
+        || (th.status != ThreadStatus::Closed && th.open_questions.unwrap_or(0) > 0);
     let (urgent, critical) = if open {
         threads::urgency(conn, &th.id)?
     } else {
@@ -733,7 +735,8 @@ pub struct Counts {
     /// The open watches: they wait for an agent, so `open` does not count
     /// them.
     pub watch: usize,
-    /// The Inbox threads that wait for the operator.
+    /// The open thread items: waiting for the operator, or with an open
+    /// question.
     pub thread: usize,
 }
 

@@ -167,10 +167,13 @@ impl Thread {
         (self.scope != GLOBAL).then_some(self.scope.as_str())
     }
 
-    /// The caller may read the thread: the attached agent or the report-to
-    /// lead (the operator always may).
+    /// The agent is in the thread: its opener, its attached agent, or its
+    /// report-to lead. Such an agent may read it; so may the operator and an
+    /// agent that reads all (the API layer).
     pub fn involves(&self, agent: &str) -> bool {
-        self.agent.as_deref() == Some(agent) || self.report_to.as_deref() == Some(agent)
+        self.opened_by == agent
+            || self.agent.as_deref() == Some(agent)
+            || self.report_to.as_deref() == Some(agent)
     }
 }
 
@@ -242,7 +245,7 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Thread> {
 fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
     let mut st = conn.prepare(
         "SELECT id, author, kind, text, at FROM thread_messages WHERE thread = ?1
-         ORDER BY at, id",
+         ORDER BY rowid",
     )?;
     let rows = st
         .query_map([thread], |r| {
@@ -314,20 +317,26 @@ pub struct Filter {
     /// Every status.
     pub all: bool,
     pub scope: Option<String>,
-    /// Only the threads of this agent: attached or report-to.
+    /// Only the threads of this agent: opener, attached, or report-to.
     pub involving: Option<String>,
 }
 
 /// The threads of a filter, without messages: the ones that wait for the
-/// operator first, then the newest activity first.
+/// operator first, then the newest activity first. At most [`LIST_MAX`].
 pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
+    let mut out = list_unbounded(conn, f)?;
+    out.truncate(LIST_MAX);
+    Ok(out)
+}
+
+fn list_unbounded(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
     let status = f.status.map(ThreadStatus::as_str);
     let mut st = conn.prepare(
         "SELECT * FROM threads
          WHERE (?1 IS NULL OR status = ?1)
            AND (?1 IS NOT NULL OR ?2 OR status != 'closed')
            AND (?3 IS NULL OR scope = ?3)
-           AND (?4 IS NULL OR agent = ?4 OR report_to = ?4)",
+           AND (?4 IS NULL OR agent = ?4 OR report_to = ?4 OR opened_by = ?4)",
     )?;
     let rows = st
         .query_map(params![status, f.all, f.scope, f.involving], |r| {
@@ -342,13 +351,13 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
         let w = |t: &Thread| t.status != ThreadStatus::WaitingOperator;
         w(a).cmp(&w(b)).then_with(|| b.last_at.cmp(&a.last_at))
     });
-    out.truncate(LIST_MAX);
     Ok(out)
 }
 
-/// The threads that wait for the operator or for an agent (for the Inbox).
+/// Every thread that is not closed, and the closed ones with `closed_too`,
+/// with no limit (for the Inbox).
 pub fn list_all(conn: &Connection, closed_too: bool) -> ApiResult<Vec<Thread>> {
-    list(
+    list_unbounded(
         conn,
         &Filter {
             all: closed_too,
@@ -586,7 +595,9 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
     Ok(th)
 }
 
-/// Close a thread with a handoff (summary and links).
+/// Close a thread with a handoff (summary and links). The open questions
+/// of the thread are retracted first, so that none stays open in a closed
+/// thread and the waits on them end.
 pub fn close(
     t: &mut Tx<'_>,
     id: &str,
@@ -631,6 +642,19 @@ pub fn close(
             reference: t.redact_string(reference),
         });
     }
+    let open: Vec<String> = {
+        let mut st = t.prepare(
+            "SELECT id FROM questions WHERE thread = ?1 AND status = 'open'
+             ORDER BY created_at, id",
+        )?;
+        st.query_map([&th.id], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let by_owner = th.agent.as_deref() == Some(by);
+    let reason = format!("thread {} was closed", th.id);
+    for q in &open {
+        questions::retract(t, q, by_owner, Some(&reason))?;
+    }
     let at = now();
     let handoff = Handoff {
         summary,
@@ -649,7 +673,8 @@ pub fn close(
         "thread.close",
         &th.id,
         th.project(),
-        json!({"by": by, "links": th.handoff.as_ref().map_or(0, |h| h.links.len())}),
+        json!({"by": by, "links": th.handoff.as_ref().map_or(0, |h| h.links.len()),
+               "retracted": open}),
     )?;
     emit(t, &th, "closed")?;
     Ok(th)
