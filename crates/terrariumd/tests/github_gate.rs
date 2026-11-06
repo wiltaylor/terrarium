@@ -418,9 +418,13 @@ async fn no_assign_validate_or_merge_for_a_held_card() {
     td.patch_as("proj/lead", &path, json!({"assignee": "w1"}))
         .await
         .err(403, "forbidden");
-    td.post_as("proj/w1", &format!("{path}/assign"), json!({"assignee": "me"}))
-        .await
-        .err(403, "forbidden");
+    td.post_as(
+        "proj/w1",
+        &format!("{path}/assign"),
+        json!({"assignee": "me"}),
+    )
+    .await
+    .err(403, "forbidden");
     let c = card(&td, &id).await;
     assert!(c["assignee"].is_null(), "{c}");
     for who in ["proj/lead", "proj/w1"] {
