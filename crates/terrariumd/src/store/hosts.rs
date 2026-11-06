@@ -287,6 +287,11 @@ pub fn mark_used(t: &mut Tx<'_>, name: &str, from: Option<&str>) -> ApiResult<()
 
 /// Delete a host row, so its token stops working. False when it was absent.
 pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<bool> {
+    // Its job-host aliases go with it (TER-105).
+    t.execute(
+        "DELETE FROM job_host_aliases WHERE host_id IN (SELECT id FROM hosts WHERE name = ?1)",
+        [name],
+    )?;
     Ok(t.execute("DELETE FROM hosts WHERE name = ?1", [name])? > 0)
 }
 

@@ -347,14 +347,125 @@ fn canonical_key(conn: &Connection, key: &str) -> ApiResult<String> {
         return Ok(host.id);
     }
     let hostname = address_key(key);
-    Ok(conn
+    let pinned: String = conn
         .query_row(
             "SELECT host_key FROM job_host_keys WHERE hostname = ?1",
             [&hostname],
             |r| r.get(0),
         )
         .optional()?
-        .unwrap_or(hostname))
+        .unwrap_or_else(|| hostname.clone());
+    // An address that a host agent lists as its own (TER-105): by the name
+    // as written, or by the pinned key of both.
+    let agent: Option<String> = conn
+        .query_row(
+            "SELECT a.host_id FROM job_host_aliases a
+             JOIN hosts h ON h.id = a.host_id
+             LEFT JOIN job_host_keys k ON k.hostname = a.alias
+             WHERE a.alias = ?1 OR a.alias = ?2 OR COALESCE(k.host_key, a.alias) = ?2
+             ORDER BY a.alias LIMIT 1",
+            params![hostname, pinned],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(agent.unwrap_or(pinned))
+}
+
+/// The most aliases of one host agent.
+const MAX_ALIASES: usize = 32;
+
+/// The aliases of each host agent, by host-agent ID, sorted.
+pub fn host_aliases(conn: &Connection) -> ApiResult<HashMap<String, Vec<String>>> {
+    let mut st = conn.prepare("SELECT host_id, alias FROM job_host_aliases ORDER BY alias")?;
+    let rows = st
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for (id, alias) in rows {
+        out.entry(id).or_default().push(alias);
+    }
+    Ok(out)
+}
+
+/// Set the addresses of a host agent (`host`: its name or ID), so that an
+/// SSH target on one of them counts on the host agent for the host cap
+/// (TER-105). Replaces the list; an empty list takes all away. Returns the
+/// host-agent ID and the stored aliases.
+pub fn set_host_aliases(
+    t: &mut Tx<'_>,
+    host: &str,
+    aliases: &[String],
+) -> ApiResult<(String, Vec<String>)> {
+    let agents = hosts::list(t)?;
+    let Some(agent) = agents
+        .iter()
+        .find(|h| h.name == host.trim() || h.id == host.trim())
+    else {
+        return Err(ApiError::not_found(format!("no host agent `{host}`")));
+    };
+    if aliases.len() > MAX_ALIASES {
+        return Err(ApiError::invalid(format!(
+            "at most {MAX_ALIASES} aliases per host agent"
+        )));
+    }
+    let mut keys = Vec::new();
+    for a in aliases {
+        let a = a.trim();
+        if a.len() > 253
+            || a.chars()
+                .any(|c| c.is_control() || c == '/' || c.is_whitespace())
+        {
+            return Err(ApiError::invalid(format!("bad alias `{a}`")));
+        }
+        let key = address_key(a);
+        if key.is_empty() {
+            return Err(ApiError::invalid(format!("bad alias `{a}`")));
+        }
+        if agents.iter().any(|h| h.name == key || h.id == key) {
+            return Err(ApiError::invalid(format!(
+                "alias `{key}` is the name of a host agent"
+            )));
+        }
+        let owner: Option<String> = t
+            .query_row(
+                "SELECT host_id FROM job_host_aliases WHERE alias = ?1",
+                [&key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(owner) = owner.filter(|o| *o != agent.id) {
+            let name = agents
+                .iter()
+                .find(|h| h.id == owner)
+                .map_or(owner.as_str(), |h| h.name.as_str());
+            return Err(ApiError::conflict(format!(
+                "alias `{key}` belongs to host agent `{name}`"
+            )));
+        }
+        keys.push(key);
+    }
+    keys.sort();
+    keys.dedup();
+    let old = host_aliases(t)?.remove(&agent.id).unwrap_or_default();
+    t.execute(
+        "DELETE FROM job_host_aliases WHERE host_id = ?1",
+        [&agent.id],
+    )?;
+    let at = now();
+    for key in &keys {
+        t.execute(
+            "INSERT INTO job_host_aliases (alias, host_id, updated_by, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![key, agent.id, t.actor, at],
+        )?;
+    }
+    t.audit(
+        "job.host_aliases",
+        &agent.id,
+        None,
+        json!({"host": agent.name, "old": old, "new": keys}),
+    )?;
+    Ok((agent.id.clone(), keys))
 }
 
 /// Names that still need a pinned identity. No network IO under the DB lock.
@@ -364,8 +475,10 @@ pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<V
         .filter(|t| t.def.host.is_none())
         .filter_map(|t| t.def.address)
         .collect();
-    let mut st = conn
-        .prepare("SELECT host FROM job_hosts UNION SELECT host FROM jobs WHERE host IS NOT NULL")?;
+    let mut st = conn.prepare(
+        "SELECT host FROM job_hosts UNION SELECT host FROM jobs WHERE host IS NOT NULL
+         UNION SELECT alias FROM job_host_aliases",
+    )?;
     keys.extend(
         st.query_map([], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?,
@@ -1271,6 +1384,44 @@ mod tests {
         );
         assert_eq!(address_key("BUILD.INVALID"), "build.invalid");
         assert_eq!(address_key("ci@127.0.0.1:2222"), "127.0.0.1");
+    }
+
+    /// TER-105: an alias matches an address as written, or by the pinned
+    /// key of both, and only while its host agent exists.
+    #[test]
+    fn host_agent_aliases_match_by_name_and_by_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        conn.execute_batch(
+            "INSERT INTO hosts (name, id, token_hash, created_by, created_at)
+               VALUES ('helios', 'H1', 'x', 'operator', '');
+             INSERT INTO job_host_aliases VALUES ('10.3.0.2', 'H1', 'operator', '');
+             INSERT INTO job_host_aliases VALUES ('helios.lan', 'H1', 'operator', '');
+             INSERT INTO job_host_aliases VALUES ('gone.lan', 'H9', 'operator', '');
+             INSERT INTO job_host_keys VALUES ('vm.lan', '10.3.0.2');
+             INSERT INTO job_host_keys VALUES ('helios.lan', '10.3.0.9');",
+        )
+        .unwrap();
+        for (key, want) in [
+            ("ci@10.3.0.2:22", "H1"),
+            ("HELIOS.LAN:2222", "H1"),
+            // Pinned to an IP alias.
+            ("vm.lan", "H1"),
+            // The pinned key of an alias host name.
+            ("10.3.0.9", "H1"),
+            ("helios", "H1"),
+            ("10.3.0.3", "10.3.0.3"),
+            // The host agent of the alias is gone.
+            ("gone.lan", "gone.lan"),
+        ] {
+            assert_eq!(canonical_key(&conn, key).unwrap(), want, "{key}");
+        }
+        let unresolved = unresolved_hosts(&conn, None).unwrap();
+        assert!(
+            unresolved.contains(&"gone.lan".to_owned()),
+            "{unresolved:?}"
+        );
+        assert!(!unresolved.contains(&"helios.lan".to_owned()));
     }
 
     #[test]

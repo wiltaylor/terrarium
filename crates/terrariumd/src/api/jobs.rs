@@ -19,6 +19,9 @@
 //! - `GET /api/job-hosts` (any actor): the host caps (TER-97) and the
 //!   running jobs per host. `PUT /api/job-hosts/{host}` {heavy_jobs}
 //!   (sysadmin or the operator): set the cap of a host; `DELETE`: no cap.
+//!   `PUT /api/job-hosts/{host}/aliases` {aliases} (sysadmin or the
+//!   operator, TER-105): the addresses of a host agent, so an SSH target
+//!   on one of them counts on the host agent's cap.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -37,7 +40,7 @@ use crate::jobs as rt;
 use crate::policy;
 use crate::store::board::{self, Card, CardPatch};
 use crate::store::jobs::{self, Job, JobKind, JobState, NewJob};
-use crate::store::{projects, repos, targets};
+use crate::store::{hosts, projects, repos, targets};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -52,14 +55,22 @@ pub fn routes() -> Router<Shared> {
         .route("/merges", post(merge_batch))
         .route("/job-hosts", get(list_hosts))
         .route("/job-hosts/{host}", put(set_host).delete(clear_host))
+        .route("/job-hosts/{host}/aliases", put(set_aliases))
 }
 
 /// The host caps and the running jobs on each host.
 async fn hosts_view(state: &Shared, actor: &Actor) -> ApiResult<Value> {
     rt::prepare_hosts(&state.db, None).await?;
-    let (caps, jobs) = state
+    let (caps, jobs, agents, aliases) = state
         .db
-        .read(|c| Ok((jobs::host_caps(c)?, jobs::running(c)?)))
+        .read(|c| {
+            Ok((
+                jobs::host_caps(c)?,
+                jobs::running(c)?,
+                hosts::list(c)?,
+                jobs::host_aliases(c)?,
+            ))
+        })
         .await?;
     let mut running =
         std::collections::BTreeMap::<String, std::collections::BTreeMap<String, usize>>::new();
@@ -76,6 +87,7 @@ async fn hosts_view(state: &Shared, actor: &Actor) -> ApiResult<Value> {
         .iter()
         .map(|c| c.host.clone())
         .chain(running.keys().cloned())
+        .chain(aliases.keys().cloned())
         .collect();
     names.sort();
     names.dedup();
@@ -89,12 +101,18 @@ async fn hosts_view(state: &Shared, actor: &Actor) -> ApiResult<Value> {
                    "running": total,
                    "updated_by": cap.map(|c| c.updated_by.clone()),
                    "updated_at": cap.map(|c| c.updated_at.clone()), "projects": counts});
+            // The host agent of the key, and the addresses that count on it.
+            if let Some(agent) = agents.iter().find(|a| a.id == h) {
+                view["name"] = json!(agent.name);
+                view["aliases"] = json!(aliases.get(&h).cloned().unwrap_or_default());
+            }
             if let Actor::Agent(a) = actor
                 && !a.reads_all()
             {
                 if let Some(object) = view.as_object_mut() {
                     object.remove("updated_by");
                     object.remove("updated_at");
+                    object.remove("aliases");
                 }
                 view["projects"] =
                     json!({a.project.clone(): counts.get(&a.project).copied().unwrap_or(0)});
@@ -144,6 +162,32 @@ async fn clear_host(
         .db
         .write(actor.label(), move |t| jobs::set_host_cap(t, &host, None))
         .await?;
+    rt::kick(&state);
+    Ok(Json(hosts_view(&state, &actor).await?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AliasesBody {
+    aliases: Vec<String>,
+}
+
+/// Set the addresses of a host agent (TER-105). The alias names are
+/// pinned outside the DB lock after the write, as target addresses are.
+async fn set_aliases(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(host): Path<String>,
+    ApiJson(body): ApiJson<AliasesBody>,
+) -> ApiResult<Json<Value>> {
+    policy::sysadmin(&actor, "setting the aliases of a job host")?;
+    state
+        .db
+        .write(actor.label(), move |t| {
+            jobs::set_host_aliases(t, &host, &body.aliases)
+        })
+        .await?;
+    rt::prepare_hosts(&state.db, None).await?;
     rt::kick(&state);
     Ok(Json(hosts_view(&state, &actor).await?))
 }

@@ -1,5 +1,5 @@
 //! The job queue of a project (TER-71): `job ls | show | cancel`,
-//! `job hosts | host-cap` (TER-97),
+//! `job hosts | host-cap` (TER-97), `job host-alias` (TER-105),
 //! `project delivery show | set`, and `card validate | merge`.
 
 use serde_json::{Value, json};
@@ -14,6 +14,8 @@ use crate::transport::encode;
 
 const HOST_COLS: &[(&str, &str)] = &[
     ("HOST", "host"),
+    ("NAME", "name"),
+    ("ALIASES", "aliases"),
     ("CAP", "heavy_jobs"),
     ("RUNNING", "running"),
     ("UPDATED BY", "updated_by"),
@@ -80,6 +82,16 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
                 (false, Some(n)) => ctx.api.put(&path, json!({"heavy_jobs": n})).await?,
                 _ => ctx.api.delete(&path, vec![]).await?,
             };
+            ctx.emit(&v, print_hosts)
+        }
+        JobCmd::HostAlias {
+            host,
+            aliases,
+            clear,
+        } => {
+            let path = format!("/api/job-hosts/{}/aliases", encode(host));
+            let aliases: &[String] = if *clear { &[] } else { aliases };
+            let v = ctx.api.put(&path, json!({ "aliases": aliases })).await?;
             ctx.emit(&v, print_hosts)
         }
         JobCmd::Cancel { id } => {
