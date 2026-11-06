@@ -10128,13 +10128,24 @@ Jobs start first in, first out across all projects. A job starts when:
 A job that must wait does not hold back a later job that may start.
 A card has at most one queued or running job.
 
-A job is three runs on the target. The prepare run (clone, checkout,
-merge) and the push run get the repo credential in their env. The recipe
-run gets no credential, because it runs the repo's code. Each of the
-three runs at low priority: `ionice -c3 nice -n19 <command>`. The daemon
-checks one time per target (per daemon run) that `ionice -c3` works.
-Without it, the runs use `nice -n19` only. The run list of the target
-shows the wrapper.
+A job is three runs on the target, and a merge job has one more. The
+prepare run (clone, checkout, merge) and the push run get the repo
+credential in their env. The recipe run gets no credential, because it
+runs the repo's code. Each run of a job runs at low priority: `ionice
+-c3 nice -n19 <command>`. The daemon checks one time per target (per
+daemon run) that `ionice -c3` works. Without it, the runs use `nice -n19`
+only. The output tail of the job ends with the wrapper (`[run as: ...]`).
+
+The recipe can change its clone: make commits, move HEAD, or write
+`.git/config` (for example `url.<base>.insteadOf`). So the push of a merge
+job never runs in that clone, and never pushes what HEAD is after the
+recipe:
+
+1. The prepare run records the merge commit before the recipe runs.
+2. A run without any credential makes a fresh bare repo next to the clone
+   and fetches exactly that commit from the clone over `file://`. When
+   the commit is gone, the job fails (`error`).
+3. The push run pushes that commit ID to `next` from the fresh repo.
 
 #### The host cap
 

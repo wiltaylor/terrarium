@@ -2034,14 +2034,17 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE roles;
     ALTER TABLE roles_architect RENAME TO roles;
     "#,
-    // 70: the job queue of a project (TER-71, `crate::jobs`). A job
+    // 71: the job queue of a project (TER-71, `crate::jobs`). A job
     // validates a card commit, or merges a card branch onto `next` and
     // validates the result. Jobs start first in, first out, at most the
     // project's `slots` at a time. `attempt` is 1, or 2 for the
     // one rerun of a failed job. `outcome` says why a job failed (`red`,
     // `conflict`, `error`). `project_delivery` holds the queue config of a
-    // project (JSON `DeliveryDef`). Self-contained: when another branch
-    // takes this number, move this entry to the end of the list.
+    // project (JSON `DeliveryDef`). It comes after migration 70 of TER-67
+    // (the idle alert), which merges onto `next` first; until `next` has
+    // it, this entry is at index 70 on this branch. Self-contained: when
+    // another branch takes this number, move this entry to the end of the
+    // list.
     r#"
     CREATE TABLE jobs (
         id          TEXT PRIMARY KEY,
@@ -2073,12 +2076,14 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
-    // 71: a host-wide cap on the running jobs of the job queue (TER-97,
+    // 72: a host-wide cap on the running jobs of the job queue (TER-97,
     // `crate::jobs`). `jobs.host` is the host that a running job took a
     // place on (set when it starts). `job_hosts` holds the cap of a host:
     // the most jobs of all projects that run on it at once. A host
-    // without a row has no cap. Self-contained: when another branch takes
-    // this number, move this entry to the end of the list.
+    // without a row has no cap. It comes after TER-71's 71 (and TER-67's
+    // 70); until `next` has TER-67, it is at index 71 on this branch.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
     r#"
     ALTER TABLE jobs ADD COLUMN host TEXT;
     CREATE INDEX jobs_host_state ON jobs(host, state);
