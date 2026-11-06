@@ -1532,7 +1532,12 @@ async fn memory() {
                    "nodes": [{"id": "MEM-1", "title": "Other's MEM-1", "body": "b", "tags": []}],
                    "edges": []}),
         )],
-        vec![(Get, "/api/memories/other%2FMEM-1/graph", vec![("depth", "1")], None)],
+        vec![(
+            Get,
+            "/api/memories/other%2FMEM-1/graph",
+            vec![("depth", "1")],
+            None,
+        )],
     )
     .await;
     assert!(out.contains("MEM-1  Other's MEM-1"), "{out}");
