@@ -9796,6 +9796,16 @@ so a later `terrarium-compose up -d` keeps it. A source deploy
 wins again. In a dev checkout (`just up`), set `TERRARIUM_IMAGE` in `.env`
 to the release image, or `just up` builds and starts `terrarium:dev` again.
 
+**The updater itself** is not moved by an update: it moves only the
+terrarium container, and goes on with the image that it started with. To
+give the updater a new build, start it again from the release image after
+an update: `<dir>/terrarium-compose up -d --no-deps terrarium-updater`.
+The wrapper reads the image file, and the updater image defaults to the
+daemon image, so the updater gets the release image of the image file.
+Set `TERRARIUM_UPDATER_IMAGE` in `.env` to pin another image. Start no
+update while the updater restarts. `terrarium admin update status` shows
+the build of the updater (`updater:`).
+
 ### 34.2 Settings
 
 The daemon:
@@ -9817,7 +9827,7 @@ The updater:
 | `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium` | The GitHub repo: the identity of the signing workflow. |
 | `TERRARIUM_UPDATE_DRAIN_WAIT` | `600` | Seconds that the drain waits for the running turns. |
 | `TERRARIUM_UPDATE_HEALTH_TIMEOUT` | `900` | Seconds that the new container has to become healthy. The first start installs the harnesses only when the tools dir has none; an update finds them. |
-| `TERRARIUM_UPDATER_TARGET` | the service `terrarium` of the compose project of the updater | The name of the terrarium container. |
+| `TERRARIUM_UPDATER_TARGET` | the service `terrarium` of the compose project of the updater | The name of the terrarium container. compose.yaml passes it from `.env`; empty is the default. Set it when the compose labels of the container are lost. |
 | `TERRARIUM_UPDATER_STATE` | `/updater` | The state dir: `history.json` (the last 20 runs), `previous.json` (the rollback target), and `image`. |
 
 A bad `TERRARIUM_SELF_UPDATE` or `TERRARIUM_UPDATE_CHANNEL` stops the start
@@ -9836,7 +9846,7 @@ The updater does these steps, and records each one (`steps` of a run):
 | `pull` | Pulls the image by digest. Before the drain, so a slow or failed pull stops no work. |
 | `drain` | Runs `terrarium admin update drain --wait <s>` in the container (§34.5). |
 | `backup` | Runs `terrariumd backup create --json` in the container: a full backup in the backup dir (§32). Migrations only go forward; the way back needs it. |
-| `stop`, `remove`, `start` | Stops the container (its stop timeout), removes it, and makes a new one with the same settings (binds, ports, networks, labels, the seccomp profile, the env of compose) and the new image. The env, command, and user of the old image do not carry over: the new image brings its own. |
+| `stop`, `remove`, `start` | Stops the container (its stop timeout), removes it, and makes a new one with the same settings (binds, ports, networks, labels, the seccomp profile, the env of compose) and the new image. The env, command, user, and labels of the old image do not carry over: the new image brings its own. Each compose label (`com.docker.compose.*`: the project, the service, the working dir, the config files) stays, also when the old image has it: an image that `docker compose build` made carries the project and service labels, and without them the next `inspect` finds no container. |
 | `health` | Waits until the health check passes, then runs `terrarium daemon status` in the new container. |
 
 A failure before `stop` changes nothing: the updater ends the drain

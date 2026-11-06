@@ -141,7 +141,8 @@ async fn serve(socket: &std::path::Path, a: ServeArgs) -> anyhow::Result<()> {
     let updater = Arc::new(Updater::new(
         Arc::new(Docker {
             socket: a.docker,
-            target: a.target,
+            // compose.yaml passes an empty TERRARIUM_UPDATER_TARGET when .env has none.
+            target: a.target.filter(|t| !t.trim().is_empty()),
         }),
         Arc::new(HttpRegistry::new().map_err(anyhow::Error::msg)?),
         Arc::new(CommandVerifier {
