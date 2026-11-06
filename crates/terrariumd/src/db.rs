@@ -2116,7 +2116,9 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX spawns_bound_open ON spawns(bound_kind, bound_id)
         WHERE finished_at IS NULL AND bound_kind IS NOT NULL;
     "#,
-    // 74: pin job-host DNS identities across queue ticks and restarts.
+    // 76: pin job-host DNS identities across queue ticks and restarts.
+    // Follows 74 (TER-91) and 75 (TER-112) in the merge queue. Renumber
+    // at merge if that order changes, keeping this entry self-contained.
     r#"
     CREATE TABLE job_host_keys (
         hostname TEXT PRIMARY KEY,
