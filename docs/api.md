@@ -904,8 +904,10 @@ sets it (`403` for every agent, a sysadmin too). A login is 1 to 39 of
 `a-z`, `A-Z`, `0-9`, `-`, and does not start with `-`; a leading `@` is
 dropped, and a copy in another case is dropped. Another value is
 `invalid`. A file project sets it with the key `github_authors` in
-`projects/<name>.toml`; a fleet file cannot set it. The project shows the
-list, and no `github_authors` when it is empty.
+`projects/<name>.toml`, and its `PATCH` is `file_managed` as for every
+other field. A fleet file cannot set it: the key in `[[projects]]` is an
+error. The project shows the list, and no `github_authors` when it is
+empty.
 
 `DELETE` refuses a project that has agents (`conflict`), and a file project
 (`file_managed`). It deletes the board and the repos.
@@ -4165,7 +4167,9 @@ is a card with the label `github` (any case), or a title that starts with
   missing or not on the list (the case does not matter, and a leading `@`
   is dropped). The card is held. It goes to the blocked column with the
   labels `github` and `hold` and a move comment that says why, whatever
-  `column` the request asks for. The request's `comment` becomes a plain
+  `column` the request asks for. That is the column with the role
+  `blocked`, not a column that only has the name. When no column has the
+  role, the create is `422` and no card is made. The request's `comment` becomes a plain
   comment. `assignee` and `eta_at` do not apply. In the same write, the
   daemon opens a question to the operator for the creating agent (§6.8):
   the card is linked, `hold_card` is the card ID, and the options are
@@ -4173,9 +4177,13 @@ is a card with the label `github` (any case), or a title that starts with
   agent's open questions. When the agent has 50 open, the create is `429`
   and no card is made. A GitHub card from an author on the list, and any
   card that the operator makes, follows the normal rules.
-- **Lock.** Only the operator moves a held card out of the blocked
-  column. A move or a claim by an agent, a project admin or a sysadmin
-  included, is `403`. An agent's edit that leaves the card no longer held
+- **Lock.** Only the operator moves a held card, from any column. The
+  lock does not depend on the role of the column, so a board change that
+  moves or drops the role `blocked` does not open it. A move, a claim, or
+  an assign (not an unassign) by an agent, a project admin or a sysadmin
+  included, is `403`. No one queues a validate or a merge job for a held
+  card, the operator included (`403`, §35.4): a job moves its card as
+  the operator. The operator releases the card first. An agent's edit that leaves the card no longer held
   (it takes off `hold`, or takes off `github` and the `GitHub #<n>:` title)
   is `403`. Other edits are allowed. Only the operator answers or retracts
   the hold question, and no one changes it (`403`).
@@ -4184,8 +4192,8 @@ is a card with the label `github` (any case), or a title that starts with
   `GitHub #<n>:` title) is `403`. GitHub work starts with `card new`, so
   it meets the gate.
 - **Answer.** The operator answers the hold question with `Release to
-  backlog`: the daemon takes off `hold` and moves the card from the blocked
-  column to the backlog, in the same write. Any other answer leaves the
+  backlog`: the daemon takes off `hold` and moves the card to the backlog
+  from any column, in the same write. Any other answer leaves the
   card held. The operator can also edit or move the card directly.
 
 The gap: `github_author` is what the creating agent says. The daemon does
@@ -10613,6 +10621,9 @@ start with `Job queue:`.
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
 | `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels. A batch merge: the creator or a project admin only, as it holds the cards of several workers; every card of the batch loses the job labels |
+
+A held card (the GitHub author gate, §8.3) gets no validate or merge
+job, from any caller (`403`).
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
