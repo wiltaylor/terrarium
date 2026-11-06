@@ -173,7 +173,11 @@ async fn targets_come_only_from_the_owner_policy() {
     assert_eq!(r.status, 422, "{}", r.body);
 
     // The audit row names the owner and the targets.
-    let audit = td.get("/api/audit?action=agent.spawn").await.body.to_string();
+    let audit = td
+        .get("/api/audit?action=agent.spawn")
+        .await
+        .body
+        .to_string();
     assert!(audit.contains(&w), "{audit}");
     assert!(audit.contains("\"targets\":[\"box\"]"), "{audit}");
 }
@@ -255,8 +259,15 @@ async fn grants_stay_within_the_owner_level_and_end_with_the_child() {
     assert_eq!(mine[0]["level"], "use");
     assert!(mine[0].get("env").is_none(), "{g:?}");
     // The audit names the owner, with no value.
-    let audit = td.get("/api/audit?action=secret.grant").await.body.to_string();
-    assert!(audit.contains(&format!("\"spawn_owner\":\"{w}\"")), "{audit}");
+    let audit = td
+        .get("/api/audit?action=secret.grant")
+        .await
+        .body
+        .to_string();
+    assert!(
+        audit.contains(&format!("\"spawn_owner\":\"{w}\"")),
+        "{audit}"
+    );
     assert!(!audit.contains(KEY) && !audit.contains(TOKEN));
 
     // A use grant does not give read; no grant gives nothing; the
@@ -294,7 +305,10 @@ async fn the_operator_owner_gives_any_reachable_right() {
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    assert_eq!(r.body["agent"]["policy"]["targets"], json!(["other", "pbox"]));
+    assert_eq!(
+        r.body["agent"]["policy"]["targets"],
+        json!(["other", "pbox"])
+    );
     let child = id(&r.body);
     let g = grants_of(&td, "p/db").await;
     assert!(
@@ -308,7 +322,7 @@ async fn the_operator_owner_gives_any_reachable_right() {
 #[tokio::test]
 async fn the_child_takes_the_owner_pool() {
     let (td, _lead, _w) = setup().await;
-    let s = state(&td);
+    let s = state(&td).state_dir.clone();
     for n in ["max-a", "max-b"] {
         td.post(
             "/api/subscriptions",
@@ -317,8 +331,7 @@ async fn the_child_takes_the_owner_pool() {
         .await
         .ok();
         let login = r#"{"claudeAiOauth": {"accessToken": "t", "refreshToken": "r", "expiresAt": 4102444800000}}"#;
-        terrariumd::accounts::write_credential(&s, n, HarnessId::Claude, login.as_bytes())
-            .unwrap();
+        terrariumd::accounts::write_credential(&s, n, HarnessId::Claude, login.as_bytes()).unwrap();
     }
     let o = id(&td
         .agent(
@@ -331,7 +344,10 @@ async fn the_child_takes_the_owner_pool() {
     let r = spawn_as(&td, &o, &o, json!({})).await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["agent"]["subscription"], "max-a");
-    assert_eq!(r.body["agent"]["subscription_pool"], json!(["max-a", "max-b"]));
+    assert_eq!(
+        r.body["agent"]["subscription_pool"],
+        json!(["max-a", "max-b"])
+    );
 
     td.post(
         "/api/templates",
