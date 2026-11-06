@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::TestDaemon;
+use common::{TestDaemon, write};
 use serde_json::{Value, json};
 
 const CARDS: &str = "/api/projects/proj/cards";
@@ -319,4 +319,162 @@ async fn an_agent_cannot_label_a_card_github_later() {
         )
         .await;
     assert_eq!(c.ok()["column"], "ready");
+}
+
+/// Make a held card in `proj` for an author off the list.
+async fn held(td: &TestDaemon, n: u32) -> String {
+    allow(td, &["wiltaylor"]).await;
+    let c = make(
+        td,
+        "proj/w1",
+        json!({"title": format!("GitHub #{n}: held"), "labels": ["github"],
+               "github_author": "eve"}),
+    )
+    .await;
+    assert_eq!(c["column"], "blocked");
+    c["id"].as_str().unwrap().to_owned()
+}
+
+/// The lock does not depend on the column role (review round 1, F1). The
+/// lead moves the `blocked` role to another column, or drops it: the held
+/// card still moves only by the operator. A new held card goes to the
+/// column with the role, not to a column that is only named `blocked`.
+#[tokio::test]
+async fn the_lock_holds_when_the_lead_changes_the_column_roles() {
+    let td = setup().await;
+    let id = held(&td, 20).await;
+    let path = format!("/api/cards/{id}");
+    let board = "/api/projects/proj/board";
+    // The default board. The role `blocked` goes to a new column
+    // `parked`; the column `blocked` keeps its name and has no role.
+    let columns = |blocked_role: bool| {
+        let mut parked = json!({"name": "parked"});
+        if blocked_role {
+            parked["role"] = json!("blocked");
+        }
+        json!({"columns": [
+            {"name": "backlog"}, {"name": "ready"},
+            {"name": "in_progress", "role": "working"}, {"name": "review"},
+            {"name": "blocked"}, parked, {"name": "done"}]})
+    };
+    td.patch_as("proj/lead", board, columns(true)).await.ok();
+    assert_eq!(card(&td, &id).await["column"], "blocked");
+    for to in ["ready", "backlog", "parked"] {
+        td.patch_as("proj/lead", &path, json!({"column": to}))
+            .await
+            .err(403, "forbidden");
+    }
+    td.post_as("proj/w1", &format!("{path}/claim"), json!({}))
+        .await
+        .err(403, "forbidden");
+    // A new held card goes to `parked`, the column with the role.
+    let c = make(
+        &td,
+        "proj/w1",
+        json!({"title": "GitHub #21: held", "labels": ["github"], "github_author": "eve"}),
+    )
+    .await;
+    assert_eq!(c["column"], "parked");
+    let id2 = c["id"].as_str().unwrap().to_owned();
+    // No column has the role `blocked` now: still no move, and a new
+    // GitHub card off the list is refused (fails closed), not made.
+    td.patch_as("proj/lead", board, columns(false)).await.ok();
+    td.post_as(
+        "proj/w1",
+        CARDS,
+        json!({"title": "GitHub #23: no role", "labels": ["github"], "github_author": "eve"}),
+    )
+    .await
+    .err(422, "invalid");
+    for card_id in [&id, &id2] {
+        td.patch_as(
+            "proj/lead",
+            &format!("/api/cards/{card_id}"),
+            json!({"column": "ready"}),
+        )
+        .await
+        .err(403, "forbidden");
+    }
+    // The operator still moves it.
+    let m = td.patch(&path, json!({"column": "backlog"})).await;
+    assert_eq!(m.ok()["column"], "backlog");
+}
+
+/// No job takes a held card out of blocked (review round 1, F2): a
+/// worker cannot assign itself, and no one queues a validate or merge job
+/// for it, the operator included. Job moves run as the operator, so the
+/// refusal is at the queue. A plain card gets past the gate (and stops at
+/// the missing job queue).
+#[tokio::test]
+async fn no_assign_validate_or_merge_for_a_held_card() {
+    let td = setup().await;
+    let id = held(&td, 22).await;
+    let path = format!("/api/cards/{id}");
+    for who in ["w1", "me"] {
+        td.patch_as("proj/w1", &path, json!({"assignee": who}))
+            .await
+            .err(403, "forbidden");
+    }
+    td.patch_as("proj/lead", &path, json!({"assignee": "w1"}))
+        .await
+        .err(403, "forbidden");
+    td.post_as("proj/w1", &format!("{path}/assign"), json!({"assignee": "me"}))
+        .await
+        .err(403, "forbidden");
+    let c = card(&td, &id).await;
+    assert!(c["assignee"].is_null(), "{c}");
+    for who in ["proj/lead", "proj/w1"] {
+        td.post_as(who, &format!("{path}/validate"), json!({}))
+            .await
+            .err(403, "forbidden");
+    }
+    td.post(&format!("{path}/validate"), json!({}))
+        .await
+        .err(403, "forbidden");
+    td.post_as("proj/lead", &format!("{path}/merge"), json!({}))
+        .await
+        .err(403, "forbidden");
+    td.post(&format!("{path}/merge"), json!({}))
+        .await
+        .err(403, "forbidden");
+    td.post_as("proj/lead", "/api/merges", json!({"cards": [id]}))
+        .await
+        .err(403, "forbidden");
+    assert_eq!(card(&td, &id).await["column"], "blocked");
+    // The gate is the reason: a plain card passes it and meets the
+    // missing job queue.
+    let p = make(&td, "proj/w1", json!({"title": "Plain", "assignee": "me"})).await;
+    let r = td
+        .post_as(
+            "proj/w1",
+            &format!("/api/cards/{}/validate", p["id"].as_str().unwrap()),
+            json!({}),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 409, "{}", r.body);
+}
+
+/// A file project takes its list from `projects/<name>.toml` (review
+/// round 1, F3). The API refuses a change (`file_managed`), so a sync
+/// never undoes an operator PATCH with no notice.
+#[tokio::test]
+async fn a_file_project_takes_the_list_only_from_its_file() {
+    let td = TestDaemon::with_config(|c| {
+        write(
+            c,
+            "projects/gh.toml",
+            "description = \"x\"\nprefix = \"GH\"\ngithub_authors = [\"wiltaylor\"]\n",
+        );
+    })
+    .await;
+    let p = td.get("/api/projects/gh").await;
+    assert_eq!(p.ok()["source"], "file");
+    assert_eq!(p.body["github_authors"], json!(["wiltaylor"]));
+    for list in [json!([]), json!(["wiltaylor", "mallory"])] {
+        td.patch("/api/projects/gh", json!({"github_authors": list}))
+            .await
+            .err(409, "file_managed");
+    }
+    let p = td.get("/api/projects/gh").await;
+    assert_eq!(p.ok()["github_authors"], json!(["wiltaylor"]));
 }

@@ -321,6 +321,18 @@ fn column(conn: &Connection, project: &str, name: &str) -> ApiResult<ColumnRow> 
     )))
 }
 
+/// The column with the role `role` on the board of `project`, never a
+/// column that only has the name (422 when no column has the role).
+fn role_column(conn: &Connection, project: &str, role: &str) -> ApiResult<ColumnRow> {
+    let cols = column_rows(conn, project)?;
+    let names = names_of(&cols);
+    cols.into_iter().find(|c| c.is(role)).ok_or_else(|| {
+        ApiError::invalid(format!(
+            "the board of `{project}` has no column with the role `{role}`; columns: {names}"
+        ))
+    })
+}
+
 /// The name of the column that `name` means on the board of `project`: a
 /// column name, or a role alias (`working`, `blocked`). 422 when there is
 /// no such column.
@@ -1097,6 +1109,12 @@ pub fn file_event(
     )
 }
 
+/// Whether the GitHub author gate holds `card` (TER-85): a GitHub card
+/// with the label `hold`.
+fn card_is_held(card: &CardRow) -> bool {
+    github_gate::is_held(&card.title, &json_col::<Vec<String>>(&card.labels))
+}
+
 fn not_archived(card: &CardRow) -> ApiResult<()> {
     if card.archived {
         Err(ApiError::conflict(format!("{} is archived", card.id)))
@@ -1115,13 +1133,10 @@ fn check_move(
     comment: Option<&str>,
 ) -> ApiResult<()> {
     not_archived(card)?;
-    // The GitHub author gate (TER-85): a held card leaves the blocked
-    // column only by the operator.
-    if to.id != card.column_id
-        && card.column_role.as_deref() == Some(BLOCKED)
-        && !matches!(actor, Actor::Operator)
-        && github_gate::is_held(&card.title, &json_col::<Vec<String>>(&card.labels))
-    {
+    // The GitHub author gate (TER-85): only the operator moves a held
+    // card, whatever the role of its column. The role of a column can
+    // change (`set_columns`), so the lock does not depend on it.
+    if to.id != card.column_id && !matches!(actor, Actor::Operator) && card_is_held(card) {
         return Err(ApiError::forbidden(format!(
             "{} is held by the GitHub author gate; only the operator moves it out of `{}`",
             card.id, card.column
@@ -1314,6 +1329,14 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
     let to = who
         .map(|w| resolve_assignee(t, &card.project, w, actor))
         .transpose()?;
+    // The GitHub author gate (TER-85): only the operator assigns a held
+    // card. Unassigning stays open: it gives no one the card.
+    if to.is_some() && !matches!(actor, Actor::Operator) && card_is_held(&card) {
+        return Err(ApiError::forbidden(format!(
+            "{} is held by the GitHub author gate; only the operator assigns it",
+            card.id
+        )));
+    }
     let me = actor.address();
     let admin = policy::is_admin_of(actor, &card.project);
     if !admin {
@@ -1615,7 +1638,7 @@ fn hold(
     row: &CardRow,
     author: Option<&str>,
 ) -> ApiResult<()> {
-    let blocked = column(t, &row.project, BLOCKED)?;
+    let blocked = role_column(t, &row.project, BLOCKED)?;
     let comment = github_gate::hold_comment(&row.project, author);
     apply_move(t, actor, row, &blocked, None, Some(&comment))?;
     let context = format!(
@@ -1659,6 +1682,7 @@ pub(crate) fn release_hold(t: &mut Tx<'_>, id: &str, question: &str) -> ApiResul
     if card.archived {
         return Ok(());
     }
+    let held = card_is_held(&card);
     let labels: Vec<String> = json_col(&card.labels);
     let kept = github_gate::without_hold(&labels);
     if kept != labels {
@@ -1670,7 +1694,9 @@ pub(crate) fn release_hold(t: &mut Tx<'_>, id: &str, question: &str) -> ApiResul
         card_event(t, &row, "edited", json!({"fields": ["labels"]}))?;
     }
     let row = find_row(t, &card.id)?;
-    if row.column_role.as_deref() == Some(BLOCKED) {
+    // The lock does not depend on the column role, so neither does the
+    // release: a held card goes to the backlog from any column.
+    if held && row.column != BACKLOG {
         let backlog = column(t, &row.project, BACKLOG)?;
         let comment = format!(
             "Released by the operator (the answer to hold question {question}): the card is work."

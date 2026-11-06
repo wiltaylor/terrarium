@@ -81,6 +81,9 @@ const PROJECT_KEYS: &[&str] = &[
     "schedules",
     "templates",
 ];
+/// The project key of the GitHub author gate (TER-85). A fleet file
+/// cannot set it.
+const GITHUB_AUTHORS_KEY: &str = "github_authors";
 const AGENT_KEYS: &[&str] = &[
     "name",
     "template",
@@ -735,6 +738,18 @@ fn project(
     issues: &mut Vec<Issue>,
 ) -> Option<FleetProject> {
     let defaults = cx.defaults;
+    // The GitHub author gate (TER-85): the allow list is set only by the
+    // operator or by `projects/<name>.toml`, never by a fleet file. Say so,
+    // and drop the key so that no fleet def carries a list.
+    if t.remove(GITHUB_AUTHORS_KEY).is_some() {
+        issues.push(Issue::error(
+            at,
+            format!(
+                "`{GITHUB_AUTHORS_KEY}` (the GitHub author gate) is not a fleet key: set it in \
+                 projects/<name>.toml, or as the operator with PATCH /api/projects/<name>"
+            ),
+        ));
+    }
     unknown_keys(&t, PROJECT_KEYS, at, issues);
     let agent_tables = tables(&mut t, "agents", at, issues);
     let target_tables = tables(&mut t, "targets", at, issues);
@@ -1709,6 +1724,25 @@ default_skills = false
         assert!(
             errors(&p).iter().any(|e| e.contains("needs a `name`")),
             "{p:?}"
+        );
+    }
+
+    #[test]
+    fn a_fleet_file_cannot_set_github_authors() {
+        let text = "[[projects]]\nname = \"p\"\ngithub_authors = [\"someone\"]\n";
+        let p = parse(text, Some("f"));
+        let errs = errors(&p);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(
+            errs[0].contains("`github_authors` (the GitHub author gate) is not a fleet key"),
+            "{errs:?}"
+        );
+        // The parsed def carries no list, so an apply that ignored the
+        // error still sets none.
+        assert!(
+            p.fleet
+                .as_ref()
+                .is_none_or(|f| f.projects[0].def.github_authors.is_empty())
         );
     }
 

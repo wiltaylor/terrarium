@@ -37,7 +37,7 @@ use crate::jobs as rt;
 use crate::policy;
 use crate::store::board::{self, Card, CardPatch};
 use crate::store::jobs::{self, Job, JobKind, JobState, NewJob};
-use crate::store::{projects, repos, targets};
+use crate::store::{github_gate, projects, repos, targets};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -414,10 +414,26 @@ fn queued_answer(
         .into_response()
 }
 
+/// The GitHub author gate (TER-85): no job for a held card. A job moves
+/// the card as the operator (to `validating`, then on with its result),
+/// so a job would take a held card out of the blocked column. This holds
+/// for the operator too: the operator releases the card first.
+fn not_held(card: &Card) -> ApiResult<()> {
+    if github_gate::is_held(&card.title, &card.labels) {
+        return Err(ApiError::forbidden(format!(
+            "{} is held by the GitHub author gate: no validate or merge job for it until the \
+             operator releases it",
+            card.id
+        )));
+    }
+    Ok(())
+}
+
 /// Who may queue a validation of a card: its assignee or a project
-/// admin.
+/// admin. Never for a held card ([`not_held`]).
 fn may_validate(actor: &Actor, card: &Card) -> ApiResult<()> {
     policy::read_project(actor, &card.project)?;
+    not_held(card)?;
     if card.assignee.as_deref() == Some(actor.address().as_str()) {
         return Ok(());
     }
@@ -559,6 +575,7 @@ async fn merge(
         .write(actor.label(), move |t| {
             let card = board::get_card(t, &board::normalise_id(&id))?;
             policy::admin_project(&actor, &card.project, "queueing a merge onto next")?;
+            not_held(&card)?;
             if card.archived {
                 return Err(ApiError::conflict(format!("card {} is archived", card.id)));
             }
@@ -634,6 +651,7 @@ async fn merge_batch(
             for id in &b.cards {
                 let card = board::get_card(t, &board::normalise_id(id))?;
                 policy::admin_project(&actor, &card.project, "queueing a merge onto next")?;
+                not_held(&card)?;
                 if card.archived {
                     return Err(ApiError::conflict(format!("card {} is archived", card.id)));
                 }
