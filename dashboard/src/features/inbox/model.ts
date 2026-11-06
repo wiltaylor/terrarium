@@ -13,6 +13,7 @@ export const INBOX_TABS = [
   { id: "notice", label: "Notices" },
   { id: "mail", label: "Mail to you" },
   { id: "system", label: "System" },
+  { id: "thread", label: "Threads" },
 ] as const;
 /** A kind tab. `watch` is no tab (the Asked status tab lists the waiting asks), but an older link may name it. */
 export type InboxTab = (typeof INBOX_TABS)[number]["id"] | "watch";
@@ -37,7 +38,7 @@ export function statusTabOf(status: string | undefined, tab: string | undefined)
   return "open";
 }
 
-export const EMPTY_COUNTS: InboxCounts = { open: 0, urgent: 0, critical: 0, question: 0, notice: 0, mail: 0, system: 0, watch: 0 };
+export const EMPTY_COUNTS: InboxCounts = { open: 0, urgent: 0, critical: 0, question: 0, notice: 0, mail: 0, system: 0, watch: 0, thread: 0 };
 
 /** The query of a tab pair, for `GET /api/inbox`. */
 export function inboxQuery(tab: InboxTab, status: InboxStatusTab, project: string): { status: InboxStatus; kind?: InboxKind; project?: string } {
@@ -99,13 +100,14 @@ export function countItems(items: InboxItem[]): InboxCounts {
     mail: n("mail"),
     system: n("system"),
     watch: n("watch"),
+    thread: n("thread"),
   };
 }
 
 /** The nav badge: no badge when nothing is open; red when one item is urgent or critical, else the info style. */
 export function badge(c: InboxCounts): { n: number; cls: string; title: string } | null {
   if (c.open <= 0) return null;
-  const parts = (["question", "notice", "mail", "system"] as const).filter((k) => c[k] > 0).map((k) => `${c[k]} ${KIND_LABELS[k]}`);
+  const parts = (["question", "notice", "mail", "system", "thread"] as const).filter((k) => (c[k] ?? 0) > 0).map((k) => `${c[k]} ${KIND_LABELS[k]}`);
   return {
     n: c.open,
     cls: c.urgent > 0 || (c.critical ?? 0) > 0 ? "nav-count" : "nav-count info",
@@ -113,7 +115,7 @@ export function badge(c: InboxCounts): { n: number; cls: string; title: string }
   };
 }
 
-export const KIND_LABELS: Record<InboxKind, string> = { question: "question", notice: "notice", mail: "mail", system: "paused thread", watch: "asked" };
+export const KIND_LABELS: Record<InboxKind, string> = { question: "question", notice: "notice", mail: "mail", system: "paused thread", watch: "asked", thread: "thread" };
 
 /** Events that change the inbox: an `inbox` event, or a `question` event (an older daemon sends no `inbox` event). */
 export const isInboxEvent = (e: Pick<AgentEvent, "kind">): boolean => e.kind === "inbox" || e.kind === "question";

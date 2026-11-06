@@ -29,6 +29,8 @@ export interface QuestionMockContext {
   questionClosed: (questionId: string, result: Record<string, unknown>) => void;
   /** An `inbox` event (./inbox.ts). */
   inboxEvent: (d: InboxEventData) => void;
+  /** A question of an Inbox thread changed (./threads.ts): the thread item stands for it in the Inbox. */
+  threadQuestion?: (q: Question, change: QuestionEventData["change"]) => void;
 }
 
 /** The longest answer, as in the daemon. */
@@ -204,6 +206,8 @@ export function createQuestionMock(c: QuestionMockContext) {
       summary: `${q.agent_name.split("/")[1] ?? q.agent_name}: ${q.kind} ${change}: ${shortText(q.text, 80)}`,
       data: data as unknown as Record<string, unknown>,
     });
+    // A question of a thread is not an Inbox item of its own (docs/api.md §6.13).
+    if (q.thread) return c.threadQuestion?.(q, change);
     c.inboxEvent({ item: questionItemId(q), kind: q.kind === "notice" ? "notice" : "question", change: q.status === "open" || change === "updated" ? (change === "asked" ? "opened" : "updated") : "closed", project: q.project });
   };
 
@@ -275,6 +279,20 @@ export function createQuestionMock(c: QuestionMockContext) {
     return q;
   };
 
+  /** Retract an open question: by the operator (a mail tells the agent), or by its own agent (no mail). */
+  const retractNow = (id: string, reason: string | undefined, byOwner: boolean): Question => {
+    const q = question(id);
+    if (q.status !== "open") notOpen(q, "a retract");
+    const r = reason?.trim() || null;
+    Object.assign(q, { status: "retracted", retract_reason: r, retracted_by: byOwner ? `agent:${q.agent}` : "operator", updated_at: c.iso() });
+    c.questionClosed(q.id, { outcome: "retracted" });
+    if (!byOwner)
+      c.sendMail(q.agent, "operator", `Retracted: ${shortText(q.text)}`, `The operator retracted your ${q.kind} ${q.id}: you need no ${q.kind === "bundle" ? "answers" : "answer"} to it.\n\nYour question:\n${quoted(q.text)}${r ? `\nThe reason:\n${quoted(r)}` : ""}`, q.thread_id);
+    c.audit("question.retract", q.id, q.project, { agent: q.agent, reason: r, by_owner: byOwner });
+    event(q, "retracted", byOwner ? "agent" : "operator");
+    return q;
+  };
+
   const questions: Api["questions"] = {
     list: (q = {}) =>
       reply(() => {
@@ -331,18 +349,7 @@ export function createQuestionMock(c: QuestionMockContext) {
         event(q, "answered");
         return q;
       }),
-    retract: (id, reason) =>
-      reply(() => {
-        const q = question(id);
-        if (q.status !== "open") notOpen(q, "a retract");
-        const r = reason?.trim() || null;
-        Object.assign(q, { status: "retracted", retract_reason: r, retracted_by: "operator", updated_at: c.iso() });
-        c.questionClosed(q.id, { outcome: "retracted" });
-        c.sendMail(q.agent, "operator", `Retracted: ${shortText(q.text)}`, `The operator retracted your ${q.kind} ${q.id}: you need no ${q.kind === "bundle" ? "answers" : "answer"} to it.\n\nYour question:\n${quoted(q.text)}${r ? `\nThe reason:\n${quoted(r)}` : ""}`, q.thread_id);
-        c.audit("question.retract", q.id, q.project, { agent: q.agent, reason: r, by_owner: false });
-        event(q, "retracted");
-        return q;
-      }),
+    retract: (id, reason) => reply(() => retractNow(id, reason, false)),
     ack: (id, text) =>
       reply(() => {
         const q = question(id);
@@ -379,5 +386,5 @@ export function createQuestionMock(c: QuestionMockContext) {
       }),
   };
 
-  return { questions };
+  return { questions, retractNow };
 }
