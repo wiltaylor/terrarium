@@ -230,7 +230,7 @@ async fn folders_nest_move_and_delete_up() {
     td.put("/api/projects/alpha/folder", json!({"folder_id": sub}))
         .await
         .ok();
-    let r = td.delete("/api/projects/alpha").await;
+    let r = td.delete("/api/projects/alpha?confirm=true").await;
     assert!(r.status.is_success(), "{}", r.body);
     assert_eq!(
         places(td.get("/api/project-folders").await.ok()),
