@@ -63,7 +63,7 @@ Rules:
 
 ## Long-poll for `wait` commands
 
-`terrarium mail wait`, `terrarium card wait`, and `terrarium version wait`
+`terrarium mail wait` and `terrarium card wait`
 call list endpoints with `?wait=<seconds>` (max 300). The daemon holds the
 request until a matching item appears or the time runs out, then answers as
 normal. An empty array means timeout. The CLI loops until its own

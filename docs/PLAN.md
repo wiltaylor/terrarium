@@ -1081,19 +1081,11 @@ terrarium wiki section <page> <heading> --body - [-m summary]   replace one sect
 terrarium wiki append <page> --body - [-m summary]
 terrarium wiki history <page> | diff <page> <a> <b>
 terrarium wiki mv <old> <new> | rm <page>    admins; history kept
-terrarium artifact push <file|dir> [--name n] [--page p | --version v | --card c] [--note ...]
+terrarium artifact push <file|dir> [--name n] [--page p | --label l | --card c] [--note ...]
                                              uploads; a dir becomes a static bundle; prints the preview URL
-terrarium artifact ls [--page p | --version v | --card c]
+terrarium artifact ls [--page p | --label l | --card c]
 terrarium artifact url <id>                  stable preview URL to paste into mail or a page
 terrarium artifact rm <id>                   own and unattached only
-terrarium version new <name> [--notes -] [--repo r --ref sha] [--card id]...
-terrarium version ls | show <name>
-terrarium version rename <name> <new-name>   draft or rejected; cards, reviews, artifacts stay
-terrarium version add-card | rm-card <name> <card>...   draft or rejected
-terrarium version attach <name> <artifact-id>
-terrarium version submit <name>              draft -> in_review; mails the operator with the link
-terrarium version wait <name> [--timeout 3600]   block until approved or rejected
-terrarium version release <name>             admins; approved -> released
 terrarium mail check                         counts, unread first
 terrarium mail read [--thread T] [--mark]
 terrarium mail send <agent> [-s subject] [-t thread] <body | ->
@@ -2275,6 +2267,13 @@ that is not deleted, are kept. Unattached artifacts older than a configurable
 age are pruned, with a warning in the audit log a day before.
 
 ### 15.3 Versions
+
+> Removed in TER-58. Versions are card labels: `version:vnext` puts a card
+> in the next version, and at the cut the lead renames it to
+> `version:<X.Y.Z>`. Test runs and artifacts link to the label
+> (`--label`). The operator reviews a result through `terrarium question
+> ask`. The version API, CLI, and events are gone; the tables keep their
+> rows until a later version drops them. The text below is the old design.
 
 A version is a named point in a project's life that the user can review:
 `v0.3.0`, `demo-2026-10-31`, `perf-fix-candidate`. It gathers notes, the

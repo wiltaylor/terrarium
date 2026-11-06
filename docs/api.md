@@ -13,7 +13,7 @@ Sections: [1 Transports](#1-transports-and-callers) ·
 [4 System](#4-system) · [5 Projects and repos](#5-projects) ·
 [6 Agents](#6-agents) · [7 Mail](#7-mail) · [8 Board](#8-board) ·
 [9 Events](#9-events) · [10 Memory](#10-memory-graph) · [11 Wiki](#11-wiki) ·
-[12 Artifacts](#12-artifacts) · [13 Versions](#13-versions) ·
+[12 Artifacts](#12-artifacts) · [13 Versions (removed)](#13-versions-removed) ·
 [14 Not in this phase](#14-not-in-this-phase) ·
 [15 Notes for clients](#15-notes-for-clients) ·
 [16 Subscriptions and usage](#16-subscriptions-and-usage) ·
@@ -345,8 +345,8 @@ curl -s --unix-socket $S -H 'X-Terrarium-Agent: terrarium/worker' http://localho
 - Cards have short IDs, `<card_prefix>-<number>`, for example `TER-42`. The
   daemon accepts any case (`ter-42`).
 - Memories and artifacts have project-local IDs, `MEM-17` and `ART-9`
-  (§10, §12). Wiki pages and versions have ULID IDs, and also keys by
-  path or name (§11, §13).
+  (§10, §12). Wiki pages have ULID IDs, and also keys by
+  path (§11).
 - Enum values are `snake_case`. Restart policies are `kebab-case`
   (`on-failure`).
 
@@ -464,7 +464,7 @@ everything. Every privileged action writes an audit row (§9).
 | Grant or revoke `project_admin` | no | own project | any | no |
 | Grant or revoke `sysadmin` | no | no | no (operator only) | no (operator only) |
 | Read the audit log | no | own project's rows | all | all |
-| Read memories, pages, artifacts, versions; write memories, links, tags, pages, uploads, versions | own project | own project | any | read any; write own project |
+| Read memories, pages, artifacts; write memories, links, tags, pages, uploads | own project | own project | any | read any; write own project |
 | Read and write the DB (§27): types, records, queries | own project | own project | any | read any; write own project |
 | Delete a DB type with its records (§27) | no | own project | any | no |
 | Edit or delete any memory; move, delete, or undelete a page; delete any artifact; release a version | no | own project | any | no |
@@ -848,7 +848,8 @@ never the text), `agent.keys` (`keys`: the key names; a text key as
 on a card that is not its own), `card.file_add`, `card.file_replace`, `card.file_remove` (§8.4), `definitions.sync`, `memory.edit` and
 `memory.delete` (§10), `wiki.delete`, `wiki.move`, `wiki.undelete` (§11),
 `artifact.delete`, `artifact.prune_warning`, `artifact.prune` (§12),
-`version.approve`, `version.reject`, `version.release` (§13),
+`version.approve`, `version.reject`, `version.release` (§13; old rows
+only, TER-58 removed the versions),
 `host.create`, `host.revoke`, `target.create`, `target.update`,
 `target.delete`, `targets.sync`, `target.exec`, `target.cp`, `target.up`,
 `target.down`, `target.snapshot`, `target.restore`, `target.status`,
@@ -4846,7 +4847,7 @@ Files and static bundles (PLAN §15.2). The code is in
  "name":"report.html","content_type":"text/html; charset=utf-8","size":5120,
  "sha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","kind":"file",
  "renders":true,"created_by":"...","created_by_name":"proj/w1","created_at":"...",
- "links":[{"kind":"version","ref":"01M5...","label":"v0.3.0","created_by":"...","created_at":"..."}],
+ "links":[{"kind":"label","ref":"version:0.3.0","created_by":"...","created_at":"..."}],
  "embedded_in":["proj/reports/perf"]}
 ```
 
@@ -4858,7 +4859,7 @@ Files and static bundles (PLAN §15.2). The code is in
 - `renders` is true when the viewer may show the file inline. Else the
   viewer offers a download. A bundle always renders, in a sandboxed frame.
 - `links` kinds: `page` (`ref` is the page ID, `label` the path), `card`,
-  `version` (`label` is the name). `embedded_in` lists the live pages that
+  and `label` (`ref` is the label, such as `version:0.3.0`; TER-58). `embedded_in` lists the live pages that
   embed the artifact (§11.1).
 
 ### 12.2 Upload
@@ -4879,8 +4880,8 @@ Multipart (`multipart/form-data`): a `file` part with the bytes (its
 `kind`, `content_type`, and `attach` (the JSON object above) or
 `attach_kind` with `attach_ref`.
 
-- `kind` defaults to `file`. `attach` is optional. Its `ref` is a page key,
-  a version key, or a card ID of the same project.
+- `kind` defaults to `file`. `attach` is optional. Its `ref` is a page key
+  or a card ID of the same project, or a label.
 - The daemon sniffs the content type from the bytes, then from the name, and
   fixes it. It does not trust `content_type`. An executable (ELF, PE,
   Mach-O, WebAssembly, or a `#!` script) is `application/octet-stream` and
@@ -4920,14 +4921,15 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
 | `GET /api/projects/{name}/artifacts/usage` | | `200 {"project", "count", "used_bytes", "quota_bytes", "max_file_bytes"}` |
 | `GET /api/artifacts/{id}` | | `200` artifact |
 | `DELETE /api/artifacts/{id}` | | `204`; the author or an admin |
-| `POST /api/artifacts/{id}/links` | `{"kind": "page" \| "version" \| "card", "ref"}` | `201` artifact |
+| `POST /api/artifacts/{id}/links` | `{"kind": "page" \| "card" \| "label", "ref"}` | `201` artifact |
 | `POST /api/artifacts/{id}/url` | none, or `{"ttl"?}` | `200 {"url", "exp", "expires_at"}` |
 | `POST /api/artifacts/prune` | `{"dry_run"?, "as_of"?}` | `200` prune report; sysadmin or operator |
 
-- Every member of the project uploads, reads, and attaches. A `version`
-  link follows the version edit rules (§13.2).
-- `DELETE` refuses an artifact on a released version (`409 conflict`). An
-  admin delete of another author's artifact writes `artifact.delete`. The
+- Every member of the project uploads, reads, and attaches. A label is
+  free text (1 to 200 characters, trimmed, no control characters); the
+  daemon does not check that a card has it. The kind `version` gives
+  `422 invalid` with a message that names `label`.
+- An admin delete of another author's artifact writes `artifact.delete`. The
   blob goes when no artifact uses it.
 
 ### 12.4 Serving: `GET /a/{uid}/{path}`
@@ -5002,8 +5004,9 @@ port (8081) as a separate origin. The dashboard embeds them in
 `POST /api/artifacts/prune` calls it. `dry_run` defaults to `true` on the
 endpoint. `as_of` is an RFC 3339 time; the default is now.
 
-- The rule keeps an artifact that is attached to a version (released or
-  not), a live page, or a card, or that a live page embeds.
+- The rule keeps an artifact that is attached to a live page, a card, or a
+  label, or to a version from before TER-58 (the old `version_artifacts`
+  rows), or that a live page embeds.
 - An unattached artifact older than `retention_days - 1` days gets the
   audit row `artifact.prune_warning` with `prune_after`.
 - An unattached artifact older than `retention_days` whose warning is a day
@@ -5017,116 +5020,20 @@ endpoint. `as_of` is an RFC 3339 time; the default is now.
  "warned":[],"kept":3}
 ```
 
-## 13. Versions
+## 13. Versions (removed)
 
-Release points that the user reviews (PLAN §15.3). The code is in
-`crates/terrariumd/src/store/versions.rs`.
+TER-58 removed the version objects. Versions are card labels:
+`version:vnext` puts a card in the next version, and at the cut the lead
+renames it to `version:<X.Y.Z>`. `GET /api/projects/{name}/cards?label=`
+lists the cards of a version. A test run (§29) or an artifact (§12) links
+to the label. The operator's review of a result is a question (`terrarium
+question ask`) with the artifacts linked.
 
-### 13.1 Shapes
-
-```json
-{"id":"01M5PA1A0K16V6G88P3SE78WAB","project":"proj","name":"v0.1.0","status":"approved",
- "notes":"Fixed arm64.","git_ref":"abc123","thread_id":"01M5PA1A...",
- "created_by":"...","created_by_name":"proj/lead","created_at":"...","updated_at":"...",
- "submitted_at":"...","submitted_by":"...","decided_at":"...","decided_by":"operator",
- "url":"https://terrarium.example.com/p/proj/versions/01M5PA1A0K16V6G88P3SE78WAB",
- "cards":[{"id":"TER-1","title":"Parser","column":"done"}],
- "artifacts":[{"id":"ART-1","uid":"...","name":"report.txt","kind":"file",
-               "content_type":"text/plain; charset=utf-8","size":6}],
- "reviews":[{"id":"...","author":"...","author_name":"proj/lead","decision":"submitted",
-             "comment":"Please look.","created_at":"..."}]}
-```
-
-- `{id}` is the ULID, `project/name` (`proj%2Fv0.1.0`), or a name in the
-  caller's project.
-- Names are 1 to 63 of `A-Z`, `a-z`, `0-9`, `.`, `_`, `-`, and start with a
-  letter or a digit. A name is unique in its project.
-- Statuses: `draft`, `in_review`, `approved`, `rejected`, `released`.
-- `reviews` decisions: `submitted`, `approved`, `rejected`, `released`.
-- `url` is the dashboard page of the version, `/p/<project>/versions/<id>`:
-  absolute on `TERRARIUM_PUBLIC_URL` when it is set (the same link as the
-  review mail, §13.2), else the path alone, which the dashboard opens on
-  its own origin. The dashboard redirects this path in one hop to the
-  version rows of the project board, which open the Version modal
-  (`/p/<project>/board?version=<id>`).
-- `archived` (always present), `archived_at`, and `archived_by` (absent when
-  not archived): an archived version keeps its status and its reviews. It
-  has no row on the board and is not in the default list.
-
-### 13.2 Rules
-
-- Every member creates versions. The creator, a project admin, or the
-  operator edits and submits one.
-- Edits (`PATCH`, artifact links) happen in `draft` and `rejected` only.
-  Else `409 conflict`.
-- `submit` (from `draft` or `rejected`) sets `in_review` and mails the
-  operator from `project:<name>`: the dashboard link
-  (`<TERRARIUM_PUBLIC_URL>/p/<project>/versions/<id>`; the default of
-  `TERRARIUM_PUBLIC_URL` is `http://localhost:8080`), the comment, the
-  notes, the cards, and the artifacts. The mail starts the review thread
-  (`thread_id`). A second submit posts on the same thread.
-- Only the operator approves or rejects, and only `in_review`. A rejection
-  needs `comment` (`422 comment_required`). The decision writes a review,
-  the audit row `version.approve` or `version.reject`, a comment on every
-  linked card, and a mail to the submitter on the review thread.
-- `release` needs a project admin, a sysadmin, or the operator, and an
-  `approved` version. It writes `version.release` in the audit log.
-- A released version is immutable: every change is `409 conflict`. Its
-  artifacts cannot be deleted, and retention keeps them.
-- `archive` and `unarchive` need the creator, a project admin, or the
-  operator (the rights of an edit), in any status, a released version too.
-  They write the audit row `version.archive` or `version.unarchive` and the
-  event `version.archived` or `version.unarchived` (`data.archived`). A
-  version that is already in that state comes back unchanged, with no
-  event. Migration 49 adds the flag.
-
-### 13.3 Endpoints
-
-| Endpoint | Body | Answer |
-|---|---|---|
-| `GET /api/projects/{name}/versions?status=&name=&archived=&wait=` | | `200` versions newest first, cursor: ID. `archived`: `false` (the default) for the versions that are not archived, `true` for the archived ones, `all` for both; another value is `400 bad_request` |
-| `POST /api/projects/{name}/versions` | `{"name", "notes"?, "repo"?, "git_ref"?, "cards"?, "artifacts"?}` | `201` version |
-| `GET /api/versions/{id}` | | `200` version |
-| `PATCH /api/versions/{id}` | version patch | `200` version |
-| `POST /api/versions/{id}/submit` | none, or `{"comment"?}` | `200` version |
-| `POST /api/versions/{id}/approve` | none, or `{"comment"?}` | `200` version; operator |
-| `POST /api/versions/{id}/reject` | `{"comment"}` | `200` version; operator |
-| `POST /api/versions/{id}/release` | none, or `{"comment"?}` | `200` version; admins |
-| `POST /api/versions/{id}/archive` | none | `200` version; the creator, a project admin, or the operator |
-| `POST /api/versions/{id}/unarchive` | none | `200` version; the same rights |
-| `GET /api/versions/{id}/compare?to=` | | `200` compare |
-
-- `wait` (seconds, at most 300) holds an empty list until a `version.*`
-  event, for `terrarium version wait` (`docs/agent-rpc.md`).
-- The patch: `name`, `notes`, `repo`, `git_ref` (an empty string clears
-  it), `cards` or `artifacts` (replace the set), `add_cards`,
-  `remove_cards`, `add_artifacts`, `remove_artifacts`. Cards and artifacts
-  must be in the version's project. A version takes a patch while it is
-  `draft` or `rejected` (else `409 conflict`).
-- A new `name` renames the version (a name that the project has is `409`).
-  The cards, artifacts, reviews, and review thread stay with it: they belong
-  to its ID. So one open version (`vnext`) can take cards over time
-  (`add_cards`), be renamed to its number at the cut, and be submitted,
-  and a new `vnext` can start (CLI: `terrarium version rename`, `version
-  add-card`, `version rm-card`).
-
-Compare:
-
-```json
-{"version":"v2","to":"v1","since":"...","until":"...",
- "cards":{"added":["TER-2"],"removed":["TER-1"],"landed":["TER-2"]},
- "artifacts":{"added":["ART-1"],"removed":[]},
- "pages":[{"id":"...","path":"notes","from_rev":1,"to_rev":2},{"id":"...","path":"new-page","to_rev":1}]}
-```
-
-- The time of a version is `released_at`, else `submitted_at`, else now.
-  `since` and `until` are the two times, earlier first.
-- `cards.added` and `cards.removed` compare the linked cards.
-  `cards.landed` are the cards of the project that moved to `done` between
-  the two times.
-- `pages` are the live pages whose latest revision changed between the two
-  times. A new page has no `from_rev`. Use `GET /api/wiki/{id}/diff` for the
-  text.
+Every `/api/projects/{name}/versions` and `/api/versions/...` route gives
+`404`. The `version.*` events are gone. The tables `versions`,
+`version_cards`, `version_artifacts`, `version_reviews`, and
+`test_run_versions` keep their rows, and nothing reads or writes them
+except the artifact prune (§12.5). A later version drops them.
 
 ## 14. Not in this phase
 
@@ -9164,31 +9071,34 @@ A compare:
 | Endpoint | Body | Answer |
 |---|---|---|
 | `POST /api/projects/{p}/test-runs` | the upload (below) | `201` run |
-| `GET /api/projects/{p}/test-runs?card=&version=&name=&status=&limit=&cursor=` | | `200` runs, newest first; `X-Next-Cursor` (§2.4) |
+| `GET /api/projects/{p}/test-runs?card=&label=&name=&status=&limit=&cursor=` | | `200` runs, newest first; `X-Next-Cursor` (§2.4) |
 | `GET /api/test-runs/{id}?status=&q=&limit=&cursor=` | | `200` one run with its suites and a page of cases |
 | `GET /api/test-runs/{id}/raw` | | `200` the original file |
 | `GET /api/test-runs/{id}/compare?with=<id>\|previous` | | `200` compare |
-| `PATCH /api/test-runs/{id}/links` | `{"add_cards"?, "remove_cards"?, "add_versions"?, "remove_versions"?}` | `200` run |
+| `PATCH /api/test-runs/{id}/links` | `{"add_cards"?, "remove_cards"?, "add_labels"?, "remove_labels"?}` | `200` run |
 | `DELETE /api/test-runs/{id}` | | `204` |
 
 **Upload.** Send the file in one of three ways:
 
 - JSON (the CLI sends this): `{"content": "<the file text>"}` or
   `{"data_base64": "…"}`, with the optional fields `file_name`, `name`,
-  `format`, `cards` (a list of card IDs), `versions` (a list of version
-  names or IDs), `commit`, and `branch`. A JSON body is this envelope
+  `format`, `cards` (a list of card IDs), `labels` (a list of labels, such
+  as `version:1.4.0`), `commit`, and `branch`. A JSON body is this envelope
   only when it has the key `content` or `data_base64`.
 - `multipart/form-data`: the part `file`, and the text parts `name`,
-  `format`, `card` (repeat it), `version` (repeat it), `commit`, and
+  `format`, `card` (repeat it), `label` (repeat it), `commit`, and
   `branch`. The file name of the part is the `file_name`.
 - Any other body is the file itself. Give the fields in the query:
-  `?name=&format=auto&card=DEMO-1&card=DEMO-2&version=v1&commit=&branch=&file_name=`.
+  `?name=&format=auto&card=DEMO-1&card=DEMO-2&label=version:1.0.0&commit=&branch=&file_name=`.
+
+A `versions` field, a `version` part, or a `version` query field is
+`400 bad_request` with a message that names `label` (TER-58).
 
 `format` is `auto` (the default) or a format of §29.1. An unknown format
 is `422 invalid`. A link that the caller may not make (§29.4) fails the
 upload: nothing is stored.
 
-**Lists.** `card` (a card ID), `version` (a version name or ID), `name`
+**Lists.** `card` (a card ID), `label` (the exact label), `name`
 (the exact run name), and `status` (`passed`, `failed`, or `empty`)
 filter the runs. `limit` is 100 by default, at most 1000.
 
@@ -9208,8 +9118,7 @@ last page.
 the same name in the project. `with=<id>` is any run of the same
 project; an unknown ID is `404`.
 
-**Links.** Each list in the body holds card IDs or version names (or
-IDs). A link that exists already, and an unlink of a link that does not
+**Links.** Each list in the body holds card IDs or labels. A link that exists already, and an unlink of a link that does not
 exist, change nothing.
 
 ### 29.4 Rules
@@ -9220,17 +9129,16 @@ exist, change nothing.
 - **Links.** A link to a card follows the edit rights of the card
   (§8.2): its assignee or its creator, a project admin, or the operator;
   not an archived card; a `done` card only for a project admin or the
-  operator. A link to a version follows the edit rights of the version
-  (§13.2): its creator, a project admin, or the operator, while the
-  version is `draft` or `rejected`. The same rights apply to an unlink.
-  A card or a version of another project is `422 invalid`.
+  operator. The same rights apply to an unlink. A card of another project
+  is `422 invalid`. A label is free text (1 to 200 characters, trimmed,
+  no control characters): any member that uploads links and unlinks it.
 - **Deletes.** The creator of the run, a project_admin of the project, a
   sysadmin, or the operator deletes a run. A delete by another actor
   writes the audit row `test_run.delete` with the name and the counts.
 - **No automatic actions.** A failing run moves no card and changes no
-  version. The agents and the operator decide.
+  label. The agents and the operator decide.
 - **Events.** The event `test_run` (§9) has `{"change","project","id",
-  "name","counts","cards","versions"}`, with `change` = `created`,
+  "name","counts","cards","labels"}`, with `change` = `created`,
   `linked`, `unlinked`, or `deleted`.
 
 ## 30. Monitors and the project dashboard

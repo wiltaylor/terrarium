@@ -1,6 +1,6 @@
 ---
 name: terrarium-tests
-description: Push test result files (JUnit XML, TRX, CTRF, libtest JSON, Vitest, Jest, TAP) with `terrarium test push`, and link them to the card or the version. Do it after each test run that proves work.
+description: Push test result files (JUnit XML, TRX, CTRF, libtest JSON, Vitest, Jest, TAP) with `terrarium test push`, and link them to the card or a version label. Do it after each test run that proves work.
 metadata:
   terrarium-default: "true"
 ---
@@ -11,7 +11,7 @@ Terrarium keeps the results of test runs. You upload a standard test
 result file with `terrarium test push`. The daemon reads the file and
 keeps each test case: its status, its duration, its failure message, its
 trace, and its output. The operator sees the run on the board (Board →
-Tests), on the card, and in the Version modal. The operator can compare
+Tests) and on the card. The operator can compare
 a run with the previous run of the same name.
 
 A test run is proof. A pass count in a comment is a claim. Push the file
@@ -23,8 +23,8 @@ so that the operator can see each test.
   card with `--card <id>`.
 - Before you move a card to review. The reviewer reads the run on the
   card.
-- Before you submit a version. Link the run with `--version <name>`.
-  You can link a run only to a version in `draft` or `rejected`.
+- For a release. Versions are card labels: link the run with
+  `--label version:<X.Y.Z>` (or `--label version:vnext`).
 - When tests fail and you report the failure. A failing run shows the
   messages and the traces better than a comment.
 
@@ -118,7 +118,7 @@ terrarium test push target/nextest/ci/junit.xml --name unit --card TER-12 \
 
 - `--name` names the run. Use the same name for the same suite each
   time (`unit`, `e2e`, `api`), so that the compare finds the previous run.
-- `--card <id>` and `--version <name>` link the run. Give each flag more
+- `--card <id>` and `--label <label>` link the run. Give each flag more
   than once for more links.
 - `--format` is `auto` by default. Terrarium finds the format from the
   content. Give `junit`, `trx`, `ctrf`, `libtest-json`, `vitest-json`,
@@ -133,6 +133,7 @@ also when tests fail: it uploads, it does not judge. Add
 
 ```sh
 terrarium test ls --card TER-12          # the runs of a card, newest first
+terrarium test ls --label version:1.4.0  # the runs of a version
 terrarium test ls --name unit --failed   # failing runs of one name
 terrarium test show <id> --failed        # the failing cases with messages
 terrarium test compare <id>              # against the previous run of the same name
@@ -146,13 +147,15 @@ the new tests, and the removed tests.
 ## Links and deletes
 
 ```sh
-terrarium test link <id> --card TER-12 --version v1.4.0
+terrarium test link <id> --card TER-12 --label version:1.4.0
 terrarium test unlink <id> --card TER-9
 terrarium test rm <id>
 ```
 
 You link a run to a card that you can change: your card, or a card that
-you made. A project admin links to any card.
+you made. A project admin links to any card. Any member of the project
+links a label. `--version` is removed: it exits with an error that names
+`--label`.
 
 ## Rules
 
