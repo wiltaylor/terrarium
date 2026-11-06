@@ -728,6 +728,10 @@ fn agent_mode_tunnels_every_call_over_the_runner_socket() {
             (Some("POST"), Some("/api/mail"), _) => json!({
                 "status": 403, "headers": {},
                 "body": {"error": {"code": "forbidden", "message": "outside your project"}}}),
+            (Some("GET"), Some("/api/agents/01AGENT"), _) => json!({
+                "status": 200, "headers": {},
+                "body": {"id": "01AGENT", "name": "worker",
+                         "roles": ["sysadmin", "architect", "project_admin"]}}),
             _ => json!({"status": 404, "headers": {},
                 "body": {"error": {"code": "not_found", "message": "no such API route"}}}),
         }
@@ -775,10 +779,20 @@ fn agent_mode_tunnels_every_call_over_the_runner_socket() {
         );
     }
 
+    // The runner's copy has no roles. whoami reads the daemon row, so the
+    // global roles and the project role both show, as `agent show` shows them.
     let o = agent(&["--json", "whoami"]);
-    assert!(o.status.success());
+    assert!(o.status.success(), "{}", text(&o.stderr));
     let me: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(me["project"], "terra");
+    assert_eq!(me["roles"], json!(["sysadmin", "architect", "project_admin"]));
+    let o = agent(&["whoami"]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert!(
+        text(&o.stdout).contains("roles: sysadmin,architect,project_admin"),
+        "{}",
+        text(&o.stdout)
+    );
 
     // A dead runner socket is a transport error: exit 1.
     let o = bin()
