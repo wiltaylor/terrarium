@@ -968,7 +968,11 @@ mod tests {
     /// connection would use instead.
     #[test]
     fn ssh_reads_no_config_and_keeps_the_key_in_the_job_dir() {
-        if std::process::Command::new("ssh").arg("-V").output().is_err() {
+        if std::process::Command::new("ssh")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
             eprintln!("no ssh on this machine: skipped");
             return;
         }
@@ -993,11 +997,18 @@ echo "after: $GIT_SSH_COMMAND"
             .env("PATH", std::env::var("PATH").unwrap())
             .env("TERRARIUM_GIT_SSH_DIR", &dir)
             .env("TERRARIUM_GIT_SSH_KEY", "not a key")
-            .env("TERRARIUM_GIT_KNOWN_HOSTS", "forge.example ssh-ed25519 AAAAtest")
+            .env(
+                "TERRARIUM_GIT_KNOWN_HOSTS",
+                "forge.example ssh-ed25519 AAAAtest",
+            )
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "{text}\n{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{text}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "drwx------", "{text}");
         assert_eq!(lines[1], "-rw-------", "{text}");

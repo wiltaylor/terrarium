@@ -754,7 +754,11 @@ async fn a_merge_job_runs_alone_in_its_project() {
     let c3 = lab.card("a3", "ter-a3").await;
     let r = lab
         .td
-        .post_as(&lab.w1, &format!("/api/cards/{c1}/validate"), json!({"commit": h1}))
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c1}/validate"),
+            json!({"commit": h1}),
+        )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let r = lab
@@ -764,7 +768,11 @@ async fn a_merge_job_runs_alone_in_its_project() {
     assert_eq!(r.status, 201, "{}", r.body);
     let r = lab
         .td
-        .post_as(&lab.w1, &format!("/api/cards/{c3}/validate"), json!({"commit": h3}))
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c3}/validate"),
+            json!({"commit": h3}),
+        )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let jobs = lab.until_idle().await;
