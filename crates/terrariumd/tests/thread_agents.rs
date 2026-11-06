@@ -428,7 +428,8 @@ async fn the_agent_lives_as_long_as_its_thread() {
         .await;
     lab.td.wait_status(&eph, "idle").await;
     assert_eq!(lab.sessions(&eph).await[0]["resumes"], 1);
-    // The agent proposes the close itself: it ends.
+    // The agent proposes the close: it parks; the operator confirms, and
+    // it ends (TER-95).
     let r = lab
         .td
         .post_as(
@@ -438,6 +439,15 @@ async fn the_agent_lives_as_long_as_its_thread() {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["status"], "waiting_operator", "{}", r.body);
+    lab.parked(&eph).await;
+    lab.td
+        .post(
+            &format!("/api/threads/{tid}/close"),
+            json!({"confirm": true}),
+        )
+        .await
+        .ok();
     lab.closed(&eph).await;
     assert_eq!(lab.spawn_row(&eph).await["outcome"], "done");
 }

@@ -1681,6 +1681,7 @@ terrarium thread ask <id> "<question>" [-o <choice>]... [--context <text|-> | --
 terrarium thread ask <id> "<summary>" --bundle (--item "<text>"... | --items-file <path|->) [--context ...]
 terrarium thread respond <id> -m <text|->
 terrarium thread close <id> [--handoff <text|->] [--link <kind>:<ref>]...
+terrarium thread close <id> --confirm
 terrarium thread ls [--status waiting_operator|waiting_agent|closed|open|all] [--scope global|<project>]
 terrarium thread show <id>
 ```
@@ -1701,8 +1702,14 @@ terrarium thread show <id>
   in its thread too. The operator does not ask (exit 2).
 - `respond` sends the operator's overall response.
 - `close` closes the thread with a handoff summary and links (`card`,
-  `mail`, `wiki`, `memory`, `url`, `other`). For an agent the close is a
-  proposal that the operator confirms (TER-95); until then it closes.
+  `mail`, `wiki`, `memory`, `url`, `other`). For the attached agent the
+  close is a proposal: it prints `thread <id> close proposed
+  (waiting_operator).`, and `show` prints the proposed handoff. The
+  operator confirms it with `--confirm` (the proposed handoff, no
+  `--handoff` or `--link`), declines it by writing on (`post`, `respond`),
+  or closes at any time with a handoff of its own. At the close the agent
+  ends, its session is archived, and the thread (`session_id`) and each
+  handoff card (a comment) link to it.
 - `ls` lists the threads (an agent: the ones it opened, is attached to,
   or reports from; a sysadmin or an architect: all): `ID`, `STATUS`, `SCOPE`, `AGENT`, `MSGS`, `OPEN_Q`,
   `LAST`, `TOPIC`. `show` prints the fields, then each message, the

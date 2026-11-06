@@ -22,11 +22,13 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::actor::Actor;
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
+use crate::policy;
 use crate::store::questions::{self, Question, QuestionStatus};
-use crate::store::{agents, projects};
+use crate::store::{agents, board, projects, spawns};
 
 /// The longest topic, in characters.
 pub const MAX_TOPIC: usize = 200;
@@ -154,6 +156,44 @@ pub struct Thread {
     pub updated_at: String,
     pub closed_at: Option<String>,
     pub closed_by: Option<String>,
+    /// The close that the attached agent proposes (TER-95): the handoff
+    /// that the operator confirms. `None`: no proposal.
+    #[serde(default)]
+    pub close_proposal: Option<Handoff>,
+    /// Why a closed thread closed: [`CloseReason`].
+    #[serde(default)]
+    pub close_reason: Option<String>,
+    /// The session of the thread agent, archived when the agent ends at
+    /// the close: `/sessions/<id>` opens it.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// The last Inbox reminder of the untouched thread.
+    #[serde(default)]
+    pub reminded_at: Option<String>,
+}
+
+/// Why a thread closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseReason {
+    /// The operator closed it.
+    Operator,
+    /// The operator confirmed the agent's proposal.
+    Confirmed,
+    /// Untouched while it waited on the operator (the stale close).
+    Stale,
+    /// Its agent did not start.
+    FailedStart,
+}
+
+impl CloseReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Confirmed => "confirmed",
+            Self::Stale => "stale",
+            Self::FailedStart => "failed_start",
+        }
+    }
 }
 
 impl Thread {
@@ -222,6 +262,12 @@ fn row(conn: &Connection, r: &Row<'_>) -> rusqlite::Result<Thread> {
         updated_at: r.get("updated_at")?,
         closed_at: r.get("closed_at")?,
         closed_by: r.get("closed_by")?,
+        close_proposal: r
+            .get::<_, Option<String>>("close_proposal")?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        close_reason: r.get("close_reason")?,
+        session_id: r.get("session_id")?,
+        reminded_at: r.get("reminded_at")?,
     })
 }
 
@@ -582,6 +628,11 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
         ThreadStatus::WaitingOperator
     };
     set_status(t, &th.id, status, &at)?;
+    if author == "operator" {
+        // The operator writes on: a close proposal of the agent is
+        // declined (TER-95).
+        clear_proposal(t, &th.id)?;
+    }
     let th = get(t, &th.id)?;
     emit_with(t, &th, "message", json!({"message": msg, "author": author}))?;
     Ok(th)
@@ -601,7 +652,8 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
         at: at.clone(),
     };
     t.execute(
-        "UPDATE threads SET response = ?2, status = 'waiting_agent', updated_at = ?3
+        "UPDATE threads SET response = ?2, status = 'waiting_agent', updated_at = ?3,
+                            close_proposal = NULL
          WHERE id = ?1",
         params![th.id, json!(response).to_string(), at],
     )?;
@@ -621,18 +673,20 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
     Ok(th)
 }
 
-/// Close a thread with a handoff (summary and links). The open questions
-/// of the thread are retracted first, so that none stays open in a closed
-/// thread and the waits on them end.
-pub fn close(
+fn clear_proposal(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
+    t.execute(
+        "UPDATE threads SET close_proposal = NULL WHERE id = ?1",
+        [id],
+    )?;
+    Ok(())
+}
+
+/// Check a handoff: the summary (empty when absent) and the links.
+fn checked_handoff(
     t: &mut Tx<'_>,
-    id: &str,
-    by: &str,
     summary: Option<&str>,
     links: Vec<Link>,
-) -> ApiResult<Thread> {
-    let th = get_bare(t, id)?;
-    not_closed(&th, "a close")?;
+) -> ApiResult<(String, Vec<Link>)> {
     let summary = match summary.map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) => t.redact_string(check_text("summary", s, MAX_SUMMARY)?),
         None => String::new(),
@@ -668,6 +722,110 @@ pub fn close(
             reference: t.redact_string(reference),
         });
     }
+    Ok((summary, checked))
+}
+
+/// The attached agent proposes the close (TER-95, wiki `inbox-threads`
+/// §5.2): the handoff waits in `close_proposal` until the operator
+/// confirms it ([`confirm_close`]) or writes on (a message or a response
+/// declines it). The thread waits on the operator, so the agent parks. A
+/// new proposal replaces the old one.
+pub fn propose_close(
+    t: &mut Tx<'_>,
+    id: &str,
+    by: &str,
+    summary: Option<&str>,
+    links: Vec<Link>,
+) -> ApiResult<Thread> {
+    let th = get_bare(t, id)?;
+    not_closed(&th, "a close proposal")?;
+    let (summary, links) = checked_handoff(t, summary, links)?;
+    let at = now();
+    let proposal = Handoff {
+        summary,
+        links,
+        by: by.to_owned(),
+        at: at.clone(),
+    };
+    t.execute(
+        "UPDATE threads SET close_proposal = ?2, status = 'waiting_operator', updated_at = ?3
+         WHERE id = ?1",
+        params![th.id, json!(proposal).to_string(), at],
+    )?;
+    let th = get(t, &th.id)?;
+    t.audit(
+        "thread.propose_close",
+        &th.id,
+        th.project(),
+        json!({"by": by, "links": proposal.links.len()}),
+    )?;
+    emit_with(t, &th, "close_proposed", json!({"author": by}))?;
+    Ok(th)
+}
+
+/// The operator confirms the agent's close proposal: the thread closes
+/// with the proposed handoff. No proposal is `409 conflict`.
+pub fn confirm_close(t: &mut Tx<'_>, id: &str) -> ApiResult<Thread> {
+    let th = get_bare(t, id)?;
+    not_closed(&th, "a confirm")?;
+    let Some(p) = th.close_proposal else {
+        return Err(ApiError::conflict(format!(
+            "thread {} has no close proposal to confirm: close it with a handoff of your own",
+            th.id
+        )));
+    };
+    // The handoff stays the agent's: it wrote it.
+    close_as(
+        t,
+        &th.id,
+        "operator",
+        &p.by,
+        CloseReason::Confirmed,
+        Some(&p.summary),
+        p.links,
+    )
+}
+
+/// The session of the agent of thread `th` that the close archives: the
+/// current session of its bound (spawned) agent. `None` for a named agent
+/// (it lives on) or an agent with no session yet.
+fn agent_session(conn: &Connection, th: &Thread) -> ApiResult<Option<String>> {
+    let Some(sp) = spawns::open_bound(conn, &crate::thread_agent::bound(&th.id))? else {
+        return Ok(None);
+    };
+    Ok(agents::current_session(conn, &sp.id)?.or(sp.session_id))
+}
+
+/// Close a thread with a handoff (summary and links), for `reason`. The
+/// open questions of the thread are retracted first, so that none stays
+/// open in a closed thread and the waits on them end. The session of the
+/// thread agent is kept in `session_id`, and each handoff card gets a
+/// comment that links to it (TER-95); the agent ends after the commit
+/// ([`crate::thread_agent`]), and its session is archived then.
+pub fn close(
+    t: &mut Tx<'_>,
+    id: &str,
+    by: &str,
+    reason: CloseReason,
+    summary: Option<&str>,
+    links: Vec<Link>,
+) -> ApiResult<Thread> {
+    close_as(t, id, by, by, reason, summary, links)
+}
+
+/// [`close`] by `by`, with a handoff written by `author`.
+fn close_as(
+    t: &mut Tx<'_>,
+    id: &str,
+    by: &str,
+    author: &str,
+    reason: CloseReason,
+    summary: Option<&str>,
+    links: Vec<Link>,
+) -> ApiResult<Thread> {
+    let th = get_bare(t, id)?;
+    not_closed(&th, "a close")?;
+    let (summary, checked) = checked_handoff(t, summary, links)?;
     let open: Vec<String> = {
         let mut st = t.prepare(
             "SELECT id FROM questions WHERE thread = ?1 AND status = 'open'
@@ -677,33 +835,99 @@ pub fn close(
             .collect::<Result<Vec<_>, _>>()?
     };
     let by_owner = th.agent.as_deref() == Some(by);
-    let reason = format!("thread {} was closed", th.id);
+    let why = format!("thread {} was closed", th.id);
     for q in &open {
-        questions::retract(t, q, by_owner, Some(&reason))?;
+        questions::retract(t, q, by_owner, Some(&why))?;
     }
+    let session = agent_session(t, &th)?;
     let at = now();
     let handoff = Handoff {
         summary,
         links: checked,
-        by: by.to_owned(),
+        by: author.to_owned(),
         at: at.clone(),
     };
     t.execute(
         "UPDATE threads SET status = 'closed', handoff = ?2, closed_at = ?3, closed_by = ?4,
-                            updated_at = ?3
+                            updated_at = ?3, close_reason = ?5, close_proposal = NULL,
+                            session_id = coalesce(?6, session_id)
          WHERE id = ?1",
-        params![th.id, json!(handoff).to_string(), at, by],
+        params![
+            th.id,
+            json!(handoff).to_string(),
+            at,
+            by,
+            reason.as_str(),
+            session
+        ],
     )?;
     let th = get(t, &th.id)?;
+    let (cards, skipped) = link_cards(t, &th)?;
     t.audit(
         "thread.close",
         &th.id,
         th.project(),
-        json!({"by": by, "links": th.handoff.as_ref().map_or(0, |h| h.links.len()),
-               "retracted": open}),
+        json!({"by": by, "reason": reason.as_str(),
+               "links": th.handoff.as_ref().map_or(0, |h| h.links.len()),
+               "retracted": open, "session": th.session_id, "cards": cards,
+               "skipped_cards": skipped}),
     )?;
     emit(t, &th, "closed")?;
     Ok(th)
+}
+
+/// Comment on each card of the handoff of the closed thread `th`, with a
+/// link to the archived session of its agent (the comment's session). Only
+/// a card that the reader of the handoff may read gets the comment: the
+/// agent that wrote the handoff, else (an operator or a stale close) the
+/// report-to lead of the thread. A card that does not resolve or that the
+/// reader may not read is skipped, with the reason. `(commented, skipped)`.
+fn link_cards(t: &mut Tx<'_>, th: &Thread) -> ApiResult<(Vec<String>, Vec<Value>)> {
+    let Some(h) = &th.handoff else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let reader_key = if h.by != "operator" && h.by != "system" {
+        Some(h.by.as_str())
+    } else {
+        th.report_to.as_deref()
+    };
+    let reader = match reader_key {
+        Some(k) => agents::actor_for(t, k)?,
+        None => None,
+    };
+    let mut body = format!(
+        "Inbox thread {} was closed ({}).",
+        th.id,
+        th.close_reason.as_deref().unwrap_or("closed")
+    );
+    match &th.session_id {
+        Some(s) => body.push_str(&format!(
+            " The session of its agent {} is archived: /sessions/{s}",
+            th.agent_name.as_deref().unwrap_or("-")
+        )),
+        None => body.push_str(" Its agent has no archived session."),
+    }
+    let mut out = Vec::new();
+    let mut skipped = Vec::new();
+    for l in h.links.iter().filter(|l| l.kind == "card") {
+        let res = match &reader {
+            None => Err(ApiError::forbidden(
+                "the handoff has no reader whose rights can be checked",
+            )),
+            Some(a) => board::card_project(t, &l.reference).and_then(|p| {
+                policy::read_project(&Actor::Agent(a.clone()), &p)?;
+                board::system_comment(t, &l.reference, &body, th.session_id.as_deref())
+            }),
+        };
+        match res {
+            Ok(card) => out.push(card),
+            Err(e) => {
+                tracing::warn!(thread = %th.id, card = %l.reference, "no session link on a handoff card: {}", e.message);
+                skipped.push(json!({"card": l.reference, "reason": e.message}));
+            }
+        }
+    }
+    Ok((out, skipped))
 }
 
 /// Check that `agent` may ask a question in thread `id`: it is the
@@ -745,7 +969,20 @@ pub fn on_question(t: &mut Tx<'_>, id: &str, q: &Question, change: &str) -> ApiR
         None
     };
     match status {
-        Some(s) => set_status(t, &th.id, s, &at)?,
+        Some(s) => {
+            set_status(t, &th.id, s, &at)?;
+            // The operator answers the last open question: it writes on,
+            // so a close proposal of the agent is declined, as in [`post`]
+            // and [`respond`] (TER-95).
+            if s == ThreadStatus::WaitingAgent
+                && matches!(
+                    q.status,
+                    QuestionStatus::Answered | QuestionStatus::Acknowledged
+                )
+            {
+                clear_proposal(t, &th.id)?;
+            }
+        }
         None => {
             t.execute(
                 "UPDATE threads SET updated_at = ?2 WHERE id = ?1",
@@ -758,7 +995,7 @@ pub fn on_question(t: &mut Tx<'_>, id: &str, q: &Question, change: &str) -> ApiR
 }
 
 /// The `thread` and `inbox` events of a change.
-fn emit(t: &mut Tx<'_>, th: &Thread, change: &str) -> ApiResult<()> {
+pub fn emit(t: &mut Tx<'_>, th: &Thread, change: &str) -> ApiResult<()> {
     emit_with(t, th, change, json!({}))
 }
 

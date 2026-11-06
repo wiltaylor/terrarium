@@ -288,6 +288,8 @@ gives them to the routers and the mail code.
 | `TERRARIUM_IDLE_STOP` | none | `10m` | The idle stop of an agent that sets no `idle_stop` (§6.2, PLAN §18): a duration (`30m`, `1h30m`), or `off` (also `0`). The daemon reads it once. |
 | `TERRARIUM_COMPACT_ON_IDLE` | none | `off` | The `compact_on_idle` of an agent that sets none (§6.2, "Auto compact"): `on` or `off` (also `1`, `true`, `yes`, and `0`, `false`, `no`). The daemon reads it once. |
 | `TERRARIUM_COMPACT_MAX_AGE` | none | `off` | The `compact_max_age` of an agent that sets none (§6.2, "Auto compact"): a duration (`24h`, `12h30m`), or `off` (also `0`). The daemon reads it once. |
+| `TERRARIUM_THREAD_REMINDER` | `--thread-reminder` | `3d` | The time that an Inbox thread waits on the operator with no activity before its one Inbox reminder (§6.13, "Untouched threads"): a duration (`12h`), or `off` (also `0`). |
+| `TERRARIUM_THREAD_STALE` | `--thread-stale` | `14d` | The time that an Inbox thread waits on the operator with no activity before the daemon closes it as stale and mails its report-to lead (§6.13): a duration, or `off` (also `0`). |
 | `TERRARIUM_CARD_REMINDER` | none | `on` | The `card_reminder` of an agent that sets none (§6.2, "Card reminder"): `on` or `off` (also `1`, `true`, `yes`, and `0`, `false`, `no`). Empty or not valid: on. The daemon reads it once. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
@@ -3658,7 +3660,8 @@ There is no register of threads and no conflict check between threads
  "questions":[{"id":"01M7...","kind":"bundle","thread":"01M7...", "...": "§6.8"}],
  "response":null,"handoff":null,
  "created_at":"2026-11-06T09:00:00.000Z","updated_at":"2026-11-06T09:05:00.000Z",
- "closed_at":null,"closed_by":null}
+ "closed_at":null,"closed_by":null,"close_proposal":null,"close_reason":null,
+ "session_id":null,"reminded_at":null}
 ```
 
 | Field | Meaning |
@@ -3675,7 +3678,11 @@ There is no register of threads and no conflict check between threads
 | `questions` | The questions, notices, and bundles of the thread (§6.8), the oldest first. |
 | `response` | The newest overall response of the operator, `{text, by, at}`, or `null`. It is the approval record: the agent quotes it word for word in each card or mail it hands off (D34). Each response is also a message of kind `response`. |
 | `handoff` | Set at the close: `{summary, links, by, at}`. `links` are at most 50 `{kind, ref}`, with `kind` one of `card`, `mail`, `wiki`, `memory`, `url`, `other`, and `ref` at most 500 characters. |
-| `closed_at`, `closed_by` | When and by whom it was closed (`operator` or an agent ULID). |
+| `closed_at`, `closed_by` | When and by whom it was closed: `operator`, or `system` for a stale close or a failed start. |
+| `close_proposal` | The close that the attached agent proposes (TER-95): `{summary, links, by, at}`, as `handoff`, or `null`. The operator confirms it (below). |
+| `close_reason` | On a closed thread: `confirmed` (the operator confirmed the agent's proposal), `operator` (the operator closed it), `stale` (untouched, below), or `failed_start` (its agent did not start). |
+| `session_id` | The session of the thread agent, set at the close: the agent ends and its session is archived (§6.6), so `/sessions/<id>` opens it after the agent is gone. `null` for a named agent, which lives on. |
+| `reminded_at` | The time of the last Inbox reminder of the untouched thread (below), or `null`. |
 
 **Status.** A new thread with a first message of the operator is
 `waiting_agent`; with no first message, or opened by an agent, it is
@@ -3686,10 +3693,52 @@ retract of one of its questions makes it `waiting_agent` when no question
 of the thread is open any more. A closed thread does not change, and each
 write to it is `409 conflict`.
 
-**Close.** A close retracts the open questions of the thread first
+**Close** (TER-95, wiki `inbox-threads` §5). The attached agent hands off
+its work, asks in the thread whether anything more is needed, and then
+proposes the close: `POST .../close` by the agent sets `close_proposal`
+and makes the thread `waiting_operator` (the agent parks). It closes
+nothing. A new proposal replaces the old one. The operator then:
+
+- confirms it: `POST .../close` with `{"confirm": true}` closes the thread
+  with the proposed handoff (`close_reason` `confirmed`; `closed_by` is
+  `operator`, `handoff.by` stays the agent). With no proposal
+  it is `409 conflict`; `confirm` with a `summary` or `links` is `422
+  invalid`;
+- or writes on: a message, a response, or an answer (or acknowledgement)
+  that settles the last open question clears the proposal (a decline),
+  and the agent goes on;
+- or closes at any time, in any status, with a handoff of its own:
+  `POST .../close` without `confirm` (`close_reason` `operator`).
+
+A close retracts the open questions of the thread first
 (`retract_reason` `thread <id> was closed`), so that no question stays open
 in a closed thread, and the waits on them end (§6.7). A close by the
 operator mails the agent about each retract, as `.../retract` does (§6.8).
+
+At the close the thread agent ends (`agent done` through the bound agent
+lifecycle, below), and its session is archived (§6.6, the session
+archive). The close keeps the session in `session_id`, and each `card` link
+of the handoff gets a comment of `system` that names the thread and links
+to the session (`/sessions/<id>`), so `GET /api/cards/{id}/sessions` lists
+it. Only a card that the reader of the handoff may read gets the comment:
+the agent that wrote the handoff, else (an operator or a stale close) the
+report-to lead. A card link that does not resolve or that the reader may
+not read gets no comment; the `thread.close` audit row lists it in
+`skipped_cards` with the reason. The thread stays
+readable: `GET /api/threads?status=closed`.
+
+**Untouched threads** (TER-95, `crates/terrariumd/src/thread_close.rs`).
+A thread that is `waiting_operator` with no activity (its `updated_at`: a
+message, a response, a question, a proposal) gets one Inbox reminder after
+`TERRARIUM_THREAD_REMINDER` (default `3d`): a mail from `system` to the
+operator, `Reminder: thread <topic> waits on you`, and `reminded_at`. A
+reminder is no activity; new activity allows one more reminder later. After
+`TERRARIUM_THREAD_STALE` (default `14d`) with no activity the daemon closes
+the thread (`closed_by` `system`, `close_reason` `stale`; the handoff says
+so and keeps the summary and the links of a proposal), and mails the
+report-to lead (`Thread <id> closed as stale`, with the topic quoted and
+the session link). The agent costs nothing meanwhile: it is parked. The
+spawn timer checks both on each tick. `off` (or `0`) turns one off.
 
 **Rights.**
 
@@ -3699,7 +3748,7 @@ operator mails the agent about each retract, as `.../retract` does (§6.8).
 | Read, list | The operator, and an agent that reads all (sysadmin, architect): every thread. Another agent: the threads that it opened (`opened_by`), is attached to, or is the report-to lead of. It gets `404` for any other thread, and a list shows it only those threads. |
 | Post a message | The operator and the attached agent. |
 | Respond | The operator. |
-| Close | The operator, and the attached agent. (TER-95 makes the agent's close a proposal that the operator confirms.) |
+| Close | The operator, at any time. The attached agent proposes the close; the operator confirms it (`confirm`). |
 
 | Ask a question in a thread | The attached agent, also when it is not a leader: `POST /api/agents/{id}/questions` with `"thread"`. |
 
@@ -3721,7 +3770,7 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `GET /api/threads/{id}` | | `200` the thread |
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
-| `POST /api/threads/{id}/close` | `{"summary"?, "links"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | `200` the thread, `closed`, with `handoff`; its open questions are `retracted` |
+| `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
 
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
 A thread opened with a `template` and no `agent` gets its agent at the
@@ -3752,7 +3801,8 @@ of that project (A2). Only the daemon binds to a thread: a spawn with
   the 30-day cap of §6.10. The operator has no `spawn.max_concurrent`, so
   an unpark never waits (D35).
 - **End.** The close of the thread closes the agent (`done`, result `the
-  thread was closed`), with no mail to the owner.
+  thread was closed`), with no mail to the owner. A close proposal of the
+  agent parks it, as a message does; only the close ends it.
 - **Failed start.** When the spawn is refused or the agent does not start,
   the thread is closed with `The thread agent did not start: <reason>` as
   the handoff summary, and the open answers that error, with `thread <id>
@@ -3836,8 +3886,11 @@ agent as turns with TER-92 (`[Thread:<id>] ...`). Until then the agent
 reads its thread with `GET /api/threads/{id}`.
 
 Events: `thread` `{change, id, scope, status}`, with `change` one of
-`opened`, `message`, `response`, `question`, `closed`; and an `inbox` event
-for the item. Audit rows: `thread.open`, `thread.respond`, `thread.close`.
+`opened`, `agent`, `message`, `response`, `question`, `close_proposed`,
+`reminded`, `closed`; and an `inbox` event for the item. Audit rows:
+`thread.open`, `thread.agent`, `thread.respond`, `thread.propose_close`,
+`thread.remind`, `thread.close` (with `reason`, `session`, and the
+commented `cards`).
 
 ## 7. Mail
 
