@@ -724,5 +724,9 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
         job["head"].as_str().unwrap(),
         git(&lab.origin, &["rev-parse", "next"])
     );
-    assert_eq!(git(&evil, &["for-each-ref"]), "", "the other repo got a push");
+    assert_eq!(
+        git(&evil, &["for-each-ref"]),
+        "",
+        "the other repo got a push"
+    );
 }

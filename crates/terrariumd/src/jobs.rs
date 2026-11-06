@@ -16,11 +16,11 @@
 //!   3. a merge job only, when the recipe passed: push the merge commit
 //!      to `next`. The recipe may have changed the clone (new commits, a
 //!      moved HEAD, its `.git/config`), so the push never runs there:
-//!      a. without any credential: a fresh bare repo `<clone>.push`
-//!         fetches exactly the merge commit that step 1 recorded, over
-//!         `file://`. A commit that is gone fails the job.
-//!      b. with the credential: push that commit ID from the fresh repo
-//!         to `next`. Not forced: when `next` moved, the push fails.
+//!      - without any credential: a fresh bare repo `<clone>.push`
+//!        fetches exactly the merge commit that step 1 recorded, over
+//!        `file://`. A commit that is gone fails the job.
+//!      - with the credential: push that commit ID from the fresh repo
+//!        to `next`. Not forced: when `next` moved, the push fails.
 //!
 //!   Then the clone and the push repo are removed.
 //! - On the end the daemon moves the card itself (as the operator, with a
