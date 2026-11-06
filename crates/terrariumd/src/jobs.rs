@@ -28,6 +28,11 @@
 //!   Each step runs as `ionice -c3 nice -n19 <argv>` (`nice` only on a
 //!   target without `ionice`), so jobs do not starve their host.
 //!   Then the clone and the push repo are removed.
+//! - A step that hits its timeout, or a cancel, ends the process group and
+//!   the session of the step on the target (`TERM`, then `KILL`), through
+//!   [`crate::run_kill`]: killing the `ssh` or `docker exec` client alone
+//!   leaves the recipe running. The job keeps its slot (and its place on
+//!   the host cap) until that kill ended (TER-115).
 //! - On the end the daemon moves the card itself (as the operator, with a
 //!   comment that starts "Job queue:"): a pass moves a validate card to
 //!   `review` and a merge card to `accepted`. A failure is rerun once
@@ -40,8 +45,8 @@
 //! - A daemon restart loses the runs: each running job fails (`error`)
 //!   and goes through the rerun rule.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -82,6 +87,10 @@ const STEP_MAX: usize = 64 * 1024;
 const RECIPE_MAX: usize = 1024 * 1024;
 /// The time limit of a prepare, push, or cleanup step.
 const STEP_TIMEOUT: u64 = 900;
+/// The time after a step's timeout when the client's own timeout ends it,
+/// should the kill on the target not end it first: the grace of the kill
+/// and the time limit of the kill command, with room.
+const KILL_MARGIN: u64 = crate::run_kill::GRACE_SECS * 2 + 60;
 
 /// The controls of the running jobs, by job ID, for a cancel. The job IDs
 /// are ULIDs, so one map serves every daemon in a process (the tests).
@@ -105,9 +114,40 @@ fn set_control(job: &str, ctl: Option<mpsc::UnboundedSender<Control>>) {
     }
 }
 
-/// Kill the current step of a running job. The job then ends as
-/// cancelled (its row is cancelled first, so the end does nothing).
+/// The IDs of the jobs whose run has not ended yet ([`tick`] adds and
+/// removes them), and of the ones among them that got a [`kill`]. A
+/// cancelled job keeps its place in the queue while it drains (TER-115).
+#[derive(Default)]
+struct Live {
+    runs: HashSet<String>,
+    killed: HashSet<String>,
+}
+
+fn live() -> MutexGuard<'static, Live> {
+    static L: OnceLock<Mutex<Live>> = OnceLock::new();
+    match L.get_or_init(Mutex::default).lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// True when the job got a [`kill`]: its next steps do not start.
+fn killed(job: &str) -> bool {
+    live().killed.contains(job)
+}
+
+/// Kill the current step of a running job, and keep the next steps from
+/// starting (the clean-up of its clone still runs). The job then ends as
+/// cancelled (its row is cancelled first, so the end does nothing). The
+/// kill ends the processes of the step on the target, and the job keeps
+/// its place until they are gone.
 pub fn kill(job: &str) {
+    {
+        let mut l = live();
+        if l.runs.contains(job) {
+            l.killed.insert(job.to_owned());
+        }
+    }
     let m = match controls().lock() {
         Ok(m) => m,
         Err(p) => p.into_inner(),
@@ -159,11 +199,12 @@ pub fn kick(state: &Shared) {
 /// across projects) and in its project (the slots). One write for all
 /// projects, so the host counts hold.
 pub async fn tick(state: &Shared) -> ApiResult<()> {
+    let draining: Vec<String> = live().runs.iter().cloned().collect();
     let started = state
         .db
         .write("system", move |t| {
             let mut out = Vec::new();
-            for (j, host, def) in jobs::startable(t)? {
+            for (j, host, def) in jobs::startable(t, &draining)? {
                 if jobs::start(t, &j.id, &host)? {
                     set_labels(t, &j.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
                     out.push((jobs::get(t, &j.id)?, def));
@@ -174,6 +215,7 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
         .await?;
     for (job, def) in started {
         let state = state.clone();
+        live().runs.insert(job.id.clone());
         tokio::spawn(async move {
             let end = run(&state, &job, &def).await;
             set_control(&job.id, None);
@@ -190,6 +232,11 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
                 }
                 Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
                 Err(e) => warn!(job = %job.id, "cannot end a job: {e}"),
+            }
+            {
+                let mut l = live();
+                l.runs.remove(&job.id);
+                l.killed.remove(&job.id);
             }
             kick(&state);
         });
@@ -278,6 +325,12 @@ fn error_end(message: impl Into<String>) -> JobEnd {
 
 /// Run one step on the target and read it to the end. The step can be
 /// killed through [`kill`] while it runs.
+///
+/// A kill or the step's `timeout_secs` ends the whole process group and
+/// session of the step on the target ([`crate::run_kill`]), not only the
+/// local client (TER-115). The step returns only after that kill ended,
+/// so the job keeps its slot until its processes are gone. The client's
+/// own timeout stays as a backstop, [`KILL_MARGIN`] later.
 async fn step(
     state: &Shared,
     job: &str,
@@ -285,9 +338,48 @@ async fn step(
     cmd: &RemoteCmd,
     max: usize,
 ) -> ApiResult<Collected> {
-    let running = executor::start_cmd(state, def, cmd)?;
-    set_control(job, Some(running.ctl.clone()));
-    Ok(running.collect(max).await)
+    let limit = cmd.timeout_secs.filter(|t| *t > 0);
+    let backstop = RemoteCmd {
+        timeout_secs: limit.map(|t| t.saturating_add(KILL_MARGIN)),
+        ..cmd.clone()
+    };
+    let (running, report) = crate::run_kill::start(state, def, &backstop)?;
+    let ctl = running.ctl.clone();
+    set_control(job, Some(ctl.clone()));
+    let read = running.collect(max);
+    tokio::pin!(read);
+    let mut timed_out = false;
+    let mut c = match limit {
+        None => read.await,
+        Some(t) => match tokio::time::timeout(Duration::from_secs(t), &mut read).await {
+            Ok(c) => c,
+            Err(_) => {
+                timed_out = true;
+                let _ = ctl.send(Control::Kill);
+                read.await
+            }
+        },
+    };
+    drop(ctl);
+    let kill = match report {
+        Some(rx) => crate::run_kill::report(rx).await,
+        None => None,
+    };
+    if timed_out {
+        c.end = Some(End::Exit {
+            code: None,
+            signal: None,
+            reason: "timeout".into(),
+        });
+    }
+    if let Some(r) = kill {
+        if r["left"].as_array().is_some_and(|l| !l.is_empty()) || r.get("error").is_some() {
+            warn!(job, report = %r, "the kill of a job step left processes on the target");
+        }
+        c.stderr
+            .extend_from_slice(format!("\n[killed on the target: {r}]\n").as_bytes());
+    }
+    Ok(c)
 }
 
 /// Run a job to its end. Never fails: an error is a failed end.
@@ -494,8 +586,12 @@ impl StepCtx<'_> {
         }
     }
 
-    /// Run a step at low IO and CPU priority ([`low_priority`]).
+    /// Run a step at low IO and CPU priority ([`low_priority`]). A job
+    /// that got a [`kill`] starts no more steps.
     async fn run(&self, cmd: &RemoteCmd, max: usize) -> ApiResult<Collected> {
+        if killed(&self.job.id) {
+            return Err(ApiError::conflict("the job was cancelled"));
+        }
         let cmd = RemoteCmd {
             argv: low_priority(cmd.argv.clone(), self.ionice),
             ..cmd.clone()

@@ -343,13 +343,30 @@ pub fn queued(conn: &Connection) -> ApiResult<Vec<Job>> {
 }
 
 /// The queued jobs that may start now ([`pick`]), read in `conn`, with
-/// the delivery config of each job's project.
-pub fn startable(conn: &Connection) -> ApiResult<Vec<(Job, String, DeliveryDef)>> {
+/// the delivery config of each job's project. `draining` are the IDs of
+/// the jobs whose run has not ended yet: a cancelled one among them keeps
+/// its place until its processes on the target are gone (TER-115).
+pub fn startable(
+    conn: &Connection,
+    draining: &[String],
+) -> ApiResult<Vec<(Job, String, DeliveryDef)>> {
     let queued = queued(conn)?;
     if queued.is_empty() {
         return Ok(Vec::new());
     }
-    let running = running(conn)?;
+    let mut running = running(conn)?;
+    for id in draining {
+        if running.iter().any(|j| j.id == *id) {
+            continue;
+        }
+        // A job of another daemon in the same process (the tests) is not
+        // in this database.
+        if let Ok(j) = get(conn, id)
+            && j.state == JobState::Cancelled
+        {
+            running.push(j);
+        }
+    }
     let mut defs: HashMap<String, DeliveryDef> = HashMap::new();
     let mut queues: HashMap<String, QueueOf> = HashMap::new();
     let projects: HashSet<&str> = queued
