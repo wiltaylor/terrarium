@@ -10243,8 +10243,12 @@ is accepted on first use in each run (`accept-new`).
 The projects of one host share its disk and its CPUs. The host cap is the
 most jobs of all projects that run on one host at the same time. The
 daemon checks it before the slots of the project. The host of a job is
-the host agent of the delivery target (`host`), else the host part of its
-`address`, else the target name. A host without a cap has no limit. The
+the stable ID of the delivery target's host agent (`host`), else the
+resolved IP of its SSH `address` (sorted first address when there are
+several, lowercase hostname when resolution fails), else the target name.
+SSH usernames and ports do not affect the key. An SSH target and a host
+agent on the same machine count as two hosts. Cross-transport machine
+identity is not inferred. A host without a cap has no limit. The
 default is no cap.
 
 Builds and tests that agents start by hand (`terrarium exec`, `terrarium
@@ -10259,6 +10263,14 @@ they do not get the low priority.
 
 The audit row `job.host_cap` keeps the old and the new cap. A job keeps
 the host it started on (`host` in the job).
+
+Host-cap writes accept a host-agent name or a resolved key. SSH names
+are resolved in the same way as target addresses. `GET /api/job-hosts`
+also includes `projects`, a map of project names to running counts.
+The operator, sysadmin and architect see all project counts and cap audit
+fields. Other agents see the total `running` count and only their own
+project's count (including zero). Their response omits `updated_by` and
+`updated_at`. No job records are returned.
 
 ### 35.3 Results
 

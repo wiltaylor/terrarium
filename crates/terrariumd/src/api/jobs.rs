@@ -51,11 +51,17 @@ pub fn routes() -> Router<Shared> {
 }
 
 /// The host caps and the running jobs on each host.
-async fn hosts_view(state: &Shared) -> ApiResult<Value> {
-    let (caps, running) = state
+async fn hosts_view(state: &Shared, actor: &Actor) -> ApiResult<Value> {
+    let (caps, jobs) = state
         .db
-        .read(|c| Ok((jobs::host_caps(c)?, jobs::running_per_host(c)?)))
+        .read(|c| Ok((jobs::host_caps(c)?, jobs::running(c)?)))
         .await?;
+    let mut running = std::collections::BTreeMap::<String, std::collections::BTreeMap<String, usize>>::new();
+    for job in jobs {
+        if let Some(host) = job.host {
+            *running.entry(host).or_default().entry(job.project).or_default() += 1;
+        }
+    }
     let mut names: Vec<String> = caps
         .iter()
         .map(|c| c.host.clone())
@@ -67,17 +73,29 @@ async fn hosts_view(state: &Shared) -> ApiResult<Value> {
         .into_iter()
         .map(|h| {
             let cap = caps.iter().find(|c| c.host == h);
-            json!({"host": h, "heavy_jobs": cap.map(|c| c.heavy_jobs),
-                   "running": running.get(&h).copied().unwrap_or(0),
+            let counts = running.get(&h).cloned().unwrap_or_default();
+            let total: usize = counts.values().sum();
+            let mut view = json!({"host": h, "heavy_jobs": cap.map(|c| c.heavy_jobs),
+                   "running": total,
                    "updated_by": cap.map(|c| c.updated_by.clone()),
-                   "updated_at": cap.map(|c| c.updated_at.clone())})
+                   "updated_at": cap.map(|c| c.updated_at.clone()), "projects": counts});
+            if let Actor::Agent(a) = actor {
+                if !a.reads_all() {
+                    if let Some(object) = view.as_object_mut() {
+                        object.remove("updated_by");
+                        object.remove("updated_at");
+                    }
+                    view["projects"] = json!({a.project.clone(): counts.get(&a.project).copied().unwrap_or(0)});
+                }
+            }
+            view
         })
         .collect();
     Ok(json!({"hosts": hosts}))
 }
 
-async fn list_hosts(State(state): State<Shared>, _actor: Actor) -> ApiResult<Json<Value>> {
-    Ok(Json(hosts_view(&state).await?))
+async fn list_hosts(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Value>> {
+    Ok(Json(hosts_view(&state, &actor).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,7 +118,7 @@ async fn set_host(
         })
         .await?;
     rt::kick(&state);
-    Ok(Json(hosts_view(&state).await?))
+    Ok(Json(hosts_view(&state, &actor).await?))
 }
 
 async fn clear_host(
@@ -114,7 +132,7 @@ async fn clear_host(
         .write(actor.label(), move |t| jobs::set_host_cap(t, &host, None))
         .await?;
     rt::kick(&state);
-    Ok(Json(hosts_view(&state).await?))
+    Ok(Json(hosts_view(&state, &actor).await?))
 }
 
 async fn show_delivery(

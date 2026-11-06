@@ -18,6 +18,42 @@ use terrarium_host::{Client, ClientOptions};
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(90);
 
+#[tokio::test]
+async fn host_counts_respect_the_readers_project() {
+    use terrariumd::store::jobs::{self, JobKind, NewJob};
+    let td = TestDaemon::start().await;
+    for project in ["p", "q"] {
+        td.project(project).await;
+        let card = td.post(&format!("/api/projects/{project}/cards"), json!({"title": "job"})).await.ok()["id"].as_str().unwrap().to_owned();
+        let project = project.to_owned();
+        td.daemon.as_ref().unwrap().state.db.write("operator", move |t| {
+            let j = jobs::create(t, NewJob { project, card, kind: JobKind::Validate,
+                repo: "app".into(), branch: "next".into(), commit: None, by_agent: None })?;
+            jobs::start(t, &j.id, "machine")?;
+            jobs::set_host_cap(t, "machine", Some(2))?;
+            Ok(())
+        }).await.unwrap();
+    }
+    for (name, roles, all) in [
+        ("worker", json!([]), false),
+        ("lead", json!(["project_admin"]), false),
+        ("architect", json!(["architect"]), true),
+        ("sysadmin", json!(["sysadmin"]), true),
+    ] {
+        td.agent("p", name, json!({"roles": roles})).await;
+        let v = td.get_as(&format!("p/{name}"), "/api/job-hosts").await.ok().clone();
+        let h = &v["hosts"][0];
+        assert_eq!(h["running"], 2);
+        assert_eq!(h["projects"]["p"], 1);
+        assert_eq!(h["projects"].get("q").is_some(), all);
+        assert_eq!(h.get("updated_by").is_some(), all);
+        assert_eq!(h.get("updated_at").is_some(), all);
+    }
+    let v = td.get("/api/job-hosts").await.ok().clone();
+    assert_eq!(v["hosts"][0]["projects"], json!({"p": 1, "q": 1}));
+    assert!(v["hosts"][0].get("updated_by").is_some());
+}
+
 struct Lab {
     td: TestDaemon,
     _dirs: tempfile::TempDir,
@@ -660,6 +696,7 @@ async fn a_cancel_ends_a_queued_job() {
 #[tokio::test]
 async fn the_host_cap_holds_across_projects_in_order() {
     let lab = lab(2).await;
+    let host_id = lab.td.get("/api/hosts/lab1").await.body["id"].clone();
     let wd = lab._dirs.path().join("jobs").display().to_string();
     // `nice -n19` adds 19 to the niceness of the host agent (this test
     // process), at most 19: a run under a parent at -4 gets 15.
@@ -723,7 +760,7 @@ async fn the_host_cap_holds_across_projects_in_order() {
         .td
         .put("/api/job-hosts/lab1", json!({"heavy_jobs": 1}))
         .await;
-    assert_eq!(r.ok()["hosts"][0]["host"], "lab1", "{}", r.body);
+    assert_eq!(r.ok()["hosts"][0]["host"], host_id, "{}", r.body);
     assert_eq!(r.ok()["hosts"][0]["heavy_jobs"], 1, "{}", r.body);
     let audit = lab
         .td
@@ -753,7 +790,7 @@ async fn the_host_cap_holds_across_projects_in_order() {
             )
             .await;
         assert_eq!(r.status, 201, "{}", r.body);
-        assert_eq!(r.body["queue"]["host"]["host"], "lab1", "{}", r.body);
+        assert_eq!(r.body["queue"]["host"]["host"], host_id, "{}", r.body);
         assert_eq!(r.body["queue"]["host"]["heavy_jobs"], 1, "{}", r.body);
         cards.push(id);
     }
@@ -791,7 +828,7 @@ async fn the_host_cap_holds_across_projects_in_order() {
     }
     assert!(
         jobs.iter()
-            .all(|j| j["state"] == "passed" && j["host"] == "lab1"),
+            .all(|j| j["state"] == "passed" && j["host"] == host_id),
         "{jobs:#?}"
     );
     jobs.sort_by(|a, b| {

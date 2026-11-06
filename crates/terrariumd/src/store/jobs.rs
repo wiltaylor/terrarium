@@ -14,6 +14,7 @@
 //! - Events `job` {change, project, id, card, kind, state, attempt}.
 
 use std::collections::{HashMap, HashSet};
+use std::net::ToSocketAddrs;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -24,7 +25,7 @@ use terrarium_core::config::{DeliveryDef, TargetDef};
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
-use crate::store::targets;
+use crate::store::{hosts, targets};
 
 /// The output tail that a job keeps.
 pub const TAIL_MAX: usize = 4000;
@@ -249,16 +250,27 @@ pub fn host_key(name: &str, def: &TargetDef) -> String {
         .map(str::trim)
         .filter(|a| !a.is_empty())
     {
+        return address_key(a);
+    }
+    name.to_owned()
+}
+
+fn address_key(a: &str) -> String {
         let a = a.rsplit_once('@').map_or(a, |(_, h)| h);
         let a = match a.strip_prefix('[') {
             Some(v6) => v6.split(']').next().unwrap_or(v6),
             None => a.split(':').next().unwrap_or(a),
         };
         if !a.is_empty() {
-            return a.to_owned();
+            let mut addresses: Vec<_> = (a, 22)
+                .to_socket_addrs()
+                .map(|all| all.map(|s| s.ip()).collect())
+                .unwrap_or_default();
+            addresses.sort();
+            addresses.dedup();
+            return addresses.first().map_or_else(|| a.to_lowercase(), ToString::to_string);
         }
-    }
-    name.to_owned()
+    a.to_lowercase()
 }
 
 /// What the pick knows of a project that has queued jobs.
@@ -390,7 +402,9 @@ pub fn startable(conn: &Connection) -> ApiResult<Vec<(Job, String, DeliveryDef)>
 fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
     let target = def.target.clone().unwrap_or_default();
     match targets::get(conn, &target) {
-        Ok(row) => host_key(&target, &row.def),
+        Ok(row) => row.def.host.as_deref()
+            .and_then(|name| hosts::find(conn, name).ok().flatten())
+            .map_or_else(|| host_key(&target, &row.def), |h| h.id),
         Err(_) => target,
     }
 }
@@ -447,6 +461,11 @@ pub fn set_host_cap(
     if host.is_empty() || host.len() > 253 || host.chars().any(|c| c.is_control() || c == '/') {
         return Err(ApiError::invalid(format!("bad host `{host}`")));
     }
+    let canonical = hosts::find(t, host)?.map_or_else(
+        || address_key(host),
+        |h| h.id,
+    );
+    let host = canonical.as_str();
     let old = host_caps(t)?.into_iter().find(|c| c.host == host);
     match heavy_jobs {
         Some(0) => return Err(ApiError::invalid("`heavy_jobs` must be 1 or more")),
@@ -910,5 +929,8 @@ mod tests {
             );
         }
         assert_eq!(host_key("t", &def(json!({"kind": "ssh"}))), "t");
+        assert_eq!(address_key("ci@localhost:2222"), address_key("localhost:22"));
+        assert_eq!(address_key("BUILD.INVALID"), "build.invalid");
+        assert_eq!(address_key("ci@127.0.0.1:2222"), "127.0.0.1");
     }
 }
