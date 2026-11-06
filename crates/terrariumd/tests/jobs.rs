@@ -199,41 +199,30 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
         .ok();
     }
     let db = td.daemon.as_ref().unwrap().state.db.clone();
-    // A job of q runs on the SSH target (stored under its address), and a
-    // job of p waits for the host-agent target.
-    let mut cards = Vec::new();
-    for project in ["q", "p"] {
-        let card = td
-            .post(
-                &format!("/api/projects/{project}/cards"),
-                json!({"title": "job"}),
-            )
-            .await
-            .ok()["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        cards.push((project.to_owned(), card));
-    }
+    // A job of q runs on the SSH target, stored under its address. No job
+    // is queued, so the daemon's own tick starts nothing during the test.
+    let card = td
+        .post("/api/projects/q/cards", json!({"title": "job"}))
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     db.write("operator", move |t| {
-        for (i, (project, card)) in cards.into_iter().enumerate() {
-            let j = jobs::create(
-                t,
-                NewJob {
-                    project,
-                    card,
-                    kind: JobKind::Validate,
-                    batch: Vec::new(),
-                    repo: "app".into(),
-                    branch: "next".into(),
-                    commit: None,
-                    by_agent: None,
-                },
-            )?;
-            if i == 0 {
-                jobs::start(t, &j.id, "10.3.0.2")?;
-            }
-        }
+        let j = jobs::create(
+            t,
+            NewJob {
+                project: "q".into(),
+                card,
+                kind: JobKind::Validate,
+                batch: Vec::new(),
+                repo: "app".into(),
+                branch: "next".into(),
+                commit: None,
+                by_agent: None,
+            },
+        )?;
+        jobs::start(t, &j.id, "10.3.0.2")?;
         Ok(())
     })
     .await
@@ -241,13 +230,17 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
     td.put("/api/job-hosts/helios", json!({"heavy_jobs": 1}))
         .await
         .ok();
-    let startable = |db: terrariumd::db::Db| async move {
-        db.read(|c| Ok(jobs::startable(c)?.len())).await.unwrap()
+    // The host of the queue of p, its running jobs, and its cap: what the
+    // pick checks before a job of p starts.
+    let room = |db: terrariumd::db::Db, project: &'static str| async move {
+        db.read(move |c| jobs::host_room(c, project)).await.unwrap()
     };
-    // Without an alias: two hosts, and the p job may start on helios.
+    // Without an alias: two hosts, and helios has room for a job of p.
     let v = td.get("/api/job-hosts").await.ok().clone();
     assert_eq!(v["hosts"].as_array().unwrap().len(), 2, "{v}");
-    assert_eq!(startable(db.clone()).await, 1);
+    assert_eq!(room(db.clone(), "p").await, Some((id.clone(), 0, 1)));
+    // 10.3.0.2 has no cap of its own.
+    assert_eq!(room(db.clone(), "q").await, None);
 
     // Only a sysadmin or the operator sets aliases.
     td.agent("q", "worker", json!({})).await;
@@ -289,7 +282,8 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
     assert_eq!(hosts[0]["heavy_jobs"], 1);
     // The cap holds across both targets: the q job on the SSH target
     // fills helios, so the p job waits.
-    assert_eq!(startable(db.clone()).await, 0);
+    assert_eq!(room(db.clone(), "p").await, Some((id.clone(), 1, 1)));
+    assert_eq!(room(db.clone(), "q").await, Some((id.clone(), 1, 1)));
     // A worker sees the name, not the aliases.
     let v = td.get_as("q/worker", "/api/job-hosts").await.ok().clone();
     assert_eq!(v["hosts"][0]["name"], "helios");
@@ -311,23 +305,23 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
     assert_eq!(v["hosts"].as_array().unwrap().len(), 1, "{v}");
     assert_eq!(v["hosts"][0]["host"], id);
     assert_eq!(v["hosts"][0]["heavy_jobs"], 2);
-    assert_eq!(startable(db.clone()).await, 1);
+    assert_eq!(room(db.clone(), "p").await, Some((id.clone(), 1, 2)));
     td.put("/api/job-hosts/helios", json!({"heavy_jobs": 1}))
         .await
         .ok();
 
-    // Revoking the host agent takes its aliases away.
+    // An empty list takes the aliases away, and so does a revoke.
     td.put("/api/job-hosts/helios/aliases", json!({"aliases": []}))
         .await
         .ok();
-    assert_eq!(startable(db.clone()).await, 1);
+    assert_eq!(room(db.clone(), "p").await, Some((id.clone(), 0, 1)));
     td.put(
         "/api/job-hosts/helios/aliases",
         json!({"aliases": ["10.3.0.2"]}),
     )
     .await
     .ok();
-    assert_eq!(startable(db.clone()).await, 0);
+    assert_eq!(room(db.clone(), "p").await, Some((id.clone(), 1, 1)));
     td.delete("/api/hosts/helios").await.ok();
     let left: i64 = db
         .read(|c| Ok(c.query_row("SELECT count(*) FROM job_host_aliases", [], |r| r.get(0))?))
