@@ -9,7 +9,11 @@
 //!   started (a wake with no turn yet) get nothing. A paused agent, an
 //!   agent that compacts, and an agent with a pending reset get nothing.
 //!   The check runs at the change to `idle`, so it comes before the idle
-//!   stop, which needs a full rest.
+//!   stop, which needs a full rest. An agent with queued work (a mail, a
+//!   pointer, a turn, the `--then` of a reset), or with the wake mail of a
+//!   wait still to come or sent after its last turn started, gets nothing:
+//!   that mail wakes it anyway, and the idle after it checks again
+//!   (TER-50).
 //! - **Limits.** Once for each card: a card is due again only after
 //!   [`REMIND_AGAIN`], or when its ETA passed after the last reminder. The
 //!   agent's own answer (a comment, an ETA) does not make the card due
@@ -31,7 +35,7 @@ use terrarium_core::{AgentId, AgentStatus};
 use tracing::{debug, info, warn};
 
 use crate::api::Shared;
-use crate::store::{agents, board};
+use crate::store::{agents, board, waits};
 
 /// The global default of `card_reminder` (`on` or `off`). Unset: on.
 pub const ENV_CARD_REMINDER: &str = "TERRARIUM_CARD_REMINDER";
@@ -65,6 +69,9 @@ pub struct Reminders {
     default_on: AtomicBool,
     /// The agents that were `working` since their last start or idle.
     ran: Mutex<HashSet<AgentId>>,
+    /// The start of each agent's last turn (`working`), in the stored time
+    /// form: a wake mail sent after it has had no turn yet.
+    turn_at: Mutex<HashMap<AgentId, String>>,
     /// The agents whose [`check`] runs: the idle stop waits for it.
     checking: Mutex<HashSet<AgentId>>,
     sent: Mutex<HashMap<(AgentId, String), Sent>>,
@@ -75,6 +82,7 @@ impl Default for Reminders {
         Self {
             default_on: AtomicBool::new(default_from_env()),
             ran: Mutex::default(),
+            turn_at: Mutex::default(),
             checking: Mutex::default(),
             sent: Mutex::default(),
         }
@@ -104,6 +112,7 @@ impl Reminders {
         match status {
             AgentStatus::Working => {
                 ran.insert(agent);
+                guard(&self.turn_at).insert(agent, crate::db::now());
                 false
             }
             AgentStatus::Idle => {
@@ -205,16 +214,23 @@ async fn remind(state: &Shared, agent: AgentId) {
         return;
     }
     let key = agent.to_string();
+    let since = guard(&state.lifecycle.reminders.turn_at)
+        .get(&agent)
+        .cloned()
+        .unwrap_or_else(crate::db::now);
     let read = state
         .db
         .read(move |c| {
             let v = agents::get(c, &key)?;
             let reset = agents::pending_reset(c, &key)?.is_some();
             let cards = board::working_cards_of(c, &key)?;
-            Ok((v, reset, cards))
+            // Work that wakes the agent anyway: its turn comes first, and
+            // the idle after it checks the cards again (TER-50).
+            let queued = agents::queued_count(c, &key)? > 0 || waits::wake_unseen(c, &key, &since)?;
+            Ok((v, reset || queued, cards))
         })
         .await;
-    let (view, reset, cards) = match read {
+    let (view, skip, cards) = match read {
         Ok(r) => r,
         Err(e) => {
             debug!(agent = %agent, "the card reminder cannot read the agent: {e}");
@@ -226,7 +242,7 @@ async fn remind(state: &Shared, agent: AgentId) {
         .agent
         .card_reminder
         .unwrap_or_else(|| reminders.default_on());
-    if !on || view.paused || reset || cards.is_empty() {
+    if !on || view.paused || skip || cards.is_empty() {
         return;
     }
     if state.supervisor.status(agent).await != Some(AgentStatus::Idle) {

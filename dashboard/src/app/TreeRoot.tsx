@@ -22,6 +22,14 @@ export const expanded = createExpandedStore(
   })(),
 );
 
+/** The drop handlers of a row, and whether a drag is over it now. */
+export interface DropTarget {
+  over: boolean;
+  onDragOver: (e: DragEvent) => void;
+  onDragLeave: (e: DragEvent) => void;
+  onDrop: (e: DragEvent) => void;
+}
+
 export function TreeRoot(props: {
   label: string;
   href: string;
@@ -39,6 +47,8 @@ export function TreeRoot(props: {
   nav: ReturnType<typeof createRovingTree>;
   /** After the label, on the root row. */
   badge?: JSX.Element;
+  /** Drag and drop onto the root row (project folders: the top level). */
+  drop?: DropTarget;
   /** Show the filter input (when the root is open). */
   showFilter?: boolean;
   query?: string;
@@ -53,7 +63,10 @@ export function TreeRoot(props: {
         href={props.href}
         end
         activeClass="active"
-        class={`tree-row ${props.rowClass ?? "tree-root"}`}
+        class={`tree-row ${props.rowClass ?? "tree-root"}${props.drop?.over ? " drop-target" : ""}`}
+        onDragOver={(e) => props.drop?.onDragOver(e)}
+        onDragLeave={(e) => props.drop?.onDragLeave(e)}
+        onDrop={(e) => props.drop?.onDrop(e)}
         role="treeitem"
         aria-expanded={props.open}
         aria-owns={props.groupId}

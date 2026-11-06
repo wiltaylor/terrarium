@@ -22,9 +22,9 @@ fn deny(what: &str, need: &str) -> ApiError {
 pub fn read_project(actor: &Actor, project: &str) -> ApiResult<()> {
     match actor {
         Actor::Operator => Ok(()),
-        Actor::Agent(a) if a.project == project || a.is_sysadmin() => Ok(()),
+        Actor::Agent(a) if a.project == project || a.reads_all() => Ok(()),
         Actor::Agent(_) => Err(ApiError::forbidden(format!(
-            "project `{project}` is not your project; reading it needs sysadmin"
+            "project `{project}` is not your project; reading it needs sysadmin or architect"
         ))),
     }
 }
@@ -49,6 +49,30 @@ pub fn admin_project(actor: &Actor, project: &str, what: &str) -> ApiResult<()> 
             what,
             &format!("project_admin of `{project}`, sysadmin, or the operator"),
         ))
+    }
+}
+
+/// The project gate of a write (TER-47): the own project, a sysadmin, or
+/// the operator. It is what [`read_project`] was before the architect: an
+/// architect reads every project but writes only in its own, as a member.
+pub fn write_project(actor: &Actor, project: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.project == project || a.is_sysadmin() => Ok(()),
+        Actor::Agent(_) => Err(ApiError::forbidden(format!(
+            "project `{project}` is not your project; writing in it needs sysadmin"
+        ))),
+    }
+}
+
+/// A read of the whole system that a `sysadmin` and an `architect` may do
+/// (TER-47): the global event sources, the users of a skill, the state of
+/// the self-update.
+pub fn read_system(actor: &Actor, what: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.reads_all() => Ok(()),
+        Actor::Agent(_) => Err(deny(what, "sysadmin, architect, or the operator")),
     }
 }
 
@@ -188,7 +212,7 @@ pub fn checkout_into(
             "the repo is in project `{repo_project}`; the agent is in `{agent_project}`"
         )));
     }
-    read_project(actor, repo_project)?;
+    write_project(actor, repo_project)?;
     match actor {
         Actor::Agent(a) if a.id == agent_id => Ok(()),
         _ => admin_project(
@@ -221,7 +245,7 @@ pub fn attach_local_repo(roles: &[Role]) -> ApiResult<()> {
 pub fn read_subscriptions(actor: &Actor) -> ApiResult<()> {
     match actor {
         Actor::Operator => Ok(()),
-        Actor::Agent(a) if a.is_sysadmin() || a.roles.contains(&Role::ProjectAdmin) => Ok(()),
+        Actor::Agent(a) if a.reads_all() || a.roles.contains(&Role::ProjectAdmin) => Ok(()),
         Actor::Agent(_) => Err(deny(
             "reading all subscriptions",
             "project_admin, sysadmin, or the operator",
@@ -234,7 +258,7 @@ pub fn read_subscriptions(actor: &Actor) -> ApiResult<()> {
 pub fn read_subscription_models(actor: &Actor, projects: &[String]) -> ApiResult<()> {
     match actor {
         Actor::Operator => Ok(()),
-        Actor::Agent(a) if a.is_sysadmin() || projects.iter().any(|p| a.is_admin_of(p)) => Ok(()),
+        Actor::Agent(a) if a.reads_all() || projects.iter().any(|p| a.is_admin_of(p)) => Ok(()),
         Actor::Agent(_) => Err(deny(
             "reading the models of a subscription",
             "project_admin of a project that uses it, sysadmin, or the operator",
@@ -508,6 +532,15 @@ pub fn read_inbox(actor: &Actor, project: &str) -> ApiResult<()> {
     admin_project(actor, project, "reading the project inbox")
 }
 
+/// View a project inbox (list and show, never mark read or reply): its
+/// admin, or a sysadmin or architect (TER-47).
+pub fn view_inbox(actor: &Actor, project: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Agent(a) if a.reads_all() => Ok(()),
+        _ => read_inbox(actor, project),
+    }
+}
+
 /// Grant or revoke `role` on the agent `target` of `target_project`.
 pub fn change_role(actor: &Actor, target: &str, target_project: &str, role: Role) -> ApiResult<()> {
     if let Actor::Agent(a) = actor
@@ -517,8 +550,9 @@ pub fn change_role(actor: &Actor, target: &str, target_project: &str, role: Role
     }
     match role {
         Role::Member => Ok(()),
-        Role::Sysadmin if actor.is_operator() => Ok(()),
+        Role::Sysadmin | Role::Architect if actor.is_operator() => Ok(()),
         Role::Sysadmin => Err(deny("granting or revoking sysadmin", "the operator")),
+        Role::Architect => Err(deny("granting or revoking architect", "the operator")),
         Role::ProjectAdmin => {
             admin_project(actor, target_project, "granting or revoking project_admin")
         }
@@ -638,7 +672,7 @@ pub fn link_question(actor: &Actor, owner: &str, project: &str) -> ApiResult<boo
 pub fn read_questions(actor: &Actor, owner: &str, project: &str) -> ApiResult<()> {
     match actor {
         Actor::Operator => Ok(()),
-        Actor::Agent(a) if a.id == owner || a.is_admin_of(project) => Ok(()),
+        Actor::Agent(a) if a.id == owner || a.is_admin_of(project) || a.reads_all() => Ok(()),
         Actor::Agent(_) => Err(deny(
             "reading questions",
             &format!("the agent itself, project_admin of `{project}`, sysadmin, or the operator"),
@@ -673,7 +707,7 @@ pub fn retract_question(actor: &Actor, owner: &str, project: &str) -> ApiResult<
 /// `cross_project` entry (`project/name` or `project/*`), as mail does. A
 /// sysadmin reaches every agent.
 pub fn reach_agent(waiter: &AgentActor, name: &str, project: &str) -> ApiResult<()> {
-    if waiter.is_sysadmin() || waiter.project == project {
+    if waiter.reads_all() || waiter.project == project {
         return Ok(());
     }
     let full = format!("{project}/{name}");
@@ -865,7 +899,7 @@ pub fn read_db(actor: &Actor, project: &str) -> ApiResult<()> {
 /// delete a type with no records or a record. Every member writes, so an
 /// agent can make its own types.
 pub fn write_db(actor: &Actor, project: &str) -> ApiResult<()> {
-    read_project(actor, project).map_err(|_| {
+    write_project(actor, project).map_err(|_| {
         ApiError::forbidden(format!(
             "project `{project}` is not your project; writing its DB needs sysadmin"
         ))
@@ -916,7 +950,7 @@ pub fn delete_artifact(actor: &Actor, project: &str, author: &str) -> ApiResult<
 
 /// Upload a test run: every member of the project (its agents too).
 pub fn write_test_runs(actor: &Actor, project: &str) -> ApiResult<()> {
-    read_project(actor, project).map_err(|_| {
+    write_project(actor, project).map_err(|_| {
         ApiError::forbidden(format!(
             "project `{project}` is not your project; uploading its test runs needs sysadmin"
         ))

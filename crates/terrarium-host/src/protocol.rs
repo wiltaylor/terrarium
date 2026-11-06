@@ -1327,6 +1327,7 @@ mod tests {
                     reason: None,
                     docker: true,
                 }),
+                no_workspaces: true,
             },
             max_sessions: 32,
             max_running_targets: Some(4),

@@ -324,7 +324,7 @@ async fn checkout(
         .db
         .read(move |c| repos::resolve(c, &id, context.as_deref()))
         .await?;
-    policy::read_project(&actor, &repo.project)?;
+    policy::write_project(&actor, &repo.project)?;
     if let Some(target) = body.target.clone() {
         return Ok(
             Json(checkout_target(&state, &actor, &repo, &target, &body).await?).into_response(),

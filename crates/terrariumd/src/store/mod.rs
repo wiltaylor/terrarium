@@ -20,6 +20,7 @@ pub mod monitors;
 pub mod pins;
 pub mod pipelines;
 pub mod pointers;
+pub mod project_folders;
 pub mod projects;
 pub mod questions;
 pub mod records;

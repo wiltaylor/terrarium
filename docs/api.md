@@ -440,34 +440,49 @@ refused it. Do not parse the message; use `code`.
 The daemon checks the actor on every call (PLAN §10). The operator may do
 everything. Every privileged action writes an audit row (§9).
 
-| Capability | member | project_admin | sysadmin |
-|---|---|---|---|
-| Read own project: project, agents, repos, targets, board, cards | yes | yes | all projects |
-| Browse a repo (§5.3): its trees, files, changes, commits | own project | own project | all projects |
-| Mail (§7.1 scope rules) | own project | own project | any agent |
-| Read and reply from the project inbox | no | own project | any project |
-| Create, change, start, stop, restart, delete agents; send turns; answer; attach the PTY | no | own project | any |
-| Read agent templates (§21) | own project and global | own project and global | all |
-| Create, change, delete agent templates (§21) | no | own project | any, global too |
-| Assign, reassign, reopen any card; edit columns and WIP limits; archive any card | no | own project | any |
-| Attach repos; change the project | no | own project | any |
-| Grant, extend, or revoke a target lease (§17.7) | no | a target of own project, to an agent of own project | any |
-| Check out a repo into its own workspace; ask the credential helper (§5.1) | own project | own project | own project |
-| Check out a repo into another agent's workspace | no | own project | any |
-| Store, list, show, or delete secrets (§5.2); never a value | no | own project | any, global too |
-| Reveal the value of a secret (§5.2) | no | no | no (operator only) |
-| Create and delete projects; `POST /api/reload` | no | no | yes |
-| Read the self-update state, check for a release, update, roll back (§34) | no | no | yes |
-| Drain the daemon for an update (§34.5) | no | no | no (operator only) |
-| Grant or revoke `project_admin` | no | own project | any |
-| Grant or revoke `sysadmin` | no | no | no (operator only) |
-| Read the audit log | no | own project's rows | all |
-| Read memories, pages, artifacts, versions; write memories, links, tags, pages, uploads, versions | own project | own project | any |
-| Read and write the DB (§27): types, records, queries | own project | own project | any |
-| Delete a DB type with its records (§27) | no | own project | any |
-| Edit or delete any memory; move, delete, or undelete a page; delete any artifact; release a version | no | own project | any |
-| Approve or reject a version | no | no | no (operator only) |
-| Prune artifacts | no | no | yes |
+| Capability | member | project_admin | sysadmin | system architect |
+|---|---|---|---| --- |
+| Read own project: project, agents, repos, targets, board, cards | yes | yes | all projects | all projects |
+| Browse a repo (§5.3): its trees, files, changes, commits | own project | own project | all projects | all projects |
+| Mail (§7.1 scope rules) | own project | own project | any agent | own project (as a member); reads every thread |
+| Read and reply from the project inbox | no | own project | any project | read any project, reply no |
+| Create, change, start, stop, restart, delete agents; send turns; answer; attach the PTY | no | own project | any | no (reads agents, sessions, transcripts, the screen) |
+| Read agent templates (§21) | own project and global | own project and global | all | all |
+| Create, change, delete agent templates (§21) | no | own project | any, global too | no |
+| Assign, reassign, reopen any card; edit columns and WIP limits; archive any card | no | own project | any | no |
+| Attach repos; change the project | no | own project | any | no |
+| Grant, extend, or revoke a target lease (§17.7) | no | a target of own project, to an agent of own project | any | no |
+| Check out a repo into its own workspace; ask the credential helper (§5.1) | own project | own project | own project | own project |
+| Check out a repo into another agent's workspace | no | own project | any | no |
+| Store, list, show, or delete secrets (§5.2); never a value | no | own project | any, global too | list and show any (metadata); store and delete no |
+| Reveal the value of a secret (§5.2) | no | no | no (operator only) | no (operator only) |
+| Create and delete projects; `POST /api/reload` | no | no | yes | no |
+| Read the self-update state, check for a release, update, roll back (§34) | no | no | yes | read only |
+| Drain the daemon for an update (§34.5) | no | no | no (operator only) | no (operator only) |
+| Grant or revoke `project_admin` | no | own project | any | no |
+| Grant or revoke `sysadmin` | no | no | no (operator only) | no (operator only) |
+| Read the audit log | no | own project's rows | all | all |
+| Read memories, pages, artifacts, versions; write memories, links, tags, pages, uploads, versions | own project | own project | any | read any; write own project |
+| Read and write the DB (§27): types, records, queries | own project | own project | any | read any; write own project |
+| Delete a DB type with its records (§27) | no | own project | any | no |
+| Edit or delete any memory; move, delete, or undelete a page; delete any artifact; release a version | no | own project | any | no |
+| Approve or reject a version | no | no | no (operator only) | no (operator only) |
+| Prune artifacts | no | no | yes | no |
+| Grant or revoke `architect` | no | no | no (operator only) | no |
+| Run a command, a shell, a copy, or keys on a target or an agent | per the target rules (§17.4) | per the target rules (§17.4) | any | no |
+
+The `system architect` (role `architect`, TER-47) plans large changes: it
+reads what a sysadmin reads, in every project (the lists, boards, cards,
+agents and their sessions, transcripts, and screens, mail threads and
+project inboxes, the audit log, the event stream, secret metadata, the
+self-update state), and writes only what a member of its own project may
+write: its own cards, comments, memories, pages, uploads, and mail. In
+another project it changes nothing, and it never runs a command, opens a
+terminal, controls an agent, grants, or leases. Only the operator grants
+or revokes it. An agent has `architect` alone or with `project_admin` of
+its own project; with `sysadmin` it is `422 invalid` (sysadmin already
+reads everything). An architect gets the worker persona unless it is also
+a project_admin.
 
 Limits that always hold:
 
@@ -3465,6 +3480,44 @@ removes the tab at the `agent_removed` event. A pin writes the audit row
 no event: the dashboard reads the list again when its window gets the
 focus.
 
+### 6.12 Project folders
+
+The code is in `crates/terrariumd/src/store/project_folders.rs` and
+`crates/terrariumd/src/api/project_folders.rs`. The tables are
+`project_folders` and `project_placements` (migration 68).
+
+The dashboard groups the projects under Projects in its sidebar into
+folders, nested (TER-48). The folders are on the daemon, so they are the
+same in each browser. They only order the sidebar: a folder changes no
+right, scope, or name. Only the operator and a sysadmin read or write
+them: another agent gets `403`, also on a read.
+
+A folder nests at most 8 levels deep (a root folder is level 1). A
+project's place is a row in `project_placements`. A project with no
+row sits at the root, after the placed ones, by name. In each parent the
+folders come first, in `position` order, then the projects. Each write
+renumbers the positions of the parent that it changes from 0.
+
+```json
+{"folders":[{"id":"01JQ...","name":"Work","parent_id":null,"position":0,"created_at":"...","updated_at":"..."}],
+ "placements":[{"project":"demo","folder_id":"01JQ...","position":0}]}
+```
+
+| Endpoint | Answer |
+|---|---|
+| `GET /api/project-folders` | `200` `{folders, placements}`: every folder (by parent, then position) and every placed project. |
+| `POST /api/project-folders` | `{name, parent_id?}`. `201` the folder, at the end of its parent. An unknown parent is `404`. A folder below level 8 is `422`. |
+| `PATCH /api/project-folders/{id}` | `{name?, parent_id?, position?}`. `200` the folder. `parent_id` absent keeps the parent, `null` moves the folder to the root. A move into the folder itself or one of its subfolders, or one that nests deeper than 8 levels, is `422`. A move without `position` goes to the end. |
+| `DELETE /api/project-folders/{id}` | `204`. Its subfolders move to its parent, at its place, in their order. Its projects move to its parent, after the projects there. |
+| `PUT /api/projects/{name}/folder` | `{folder_id, position?}`. `200` `{project, folder_id, position}`. `folder_id` `null` is the root. Without `position` the project goes to the end. An unknown project or folder is `404`. |
+
+A name is trimmed, and has 1 to 64 characters and no control
+characters (`422`). Two folders may have the same name. The delete of a
+project removes its place (a foreign key). The writes add the audit rows
+`project_folder.create`, `project_folder.update`, `project_folder.delete`,
+and `project.folder`. No event goes out: the dashboard reads the tree
+again when its window gets the focus.
+
 ## 7. Mail
 
 A message:
@@ -3822,13 +3875,18 @@ project for the operator and a sysadmin, the own project for another agent.
 A column matches when its role or its name (any case) is one of the values,
 so `working` finds the column with that role and `research` the column
 named `research` (it has no role). By project, then column position, then
-card position; at most 500. Each card is a card with two more fields:
+card position; at most 500. Each card is a card with more fields:
 
-- `column_kind`: `working` for the column with that role, else the column
-  name in lower case (`research`).
+- `column_kind`: `working` or `blocked` for the column with that role,
+  else the column name in lower case (`research`).
 - `assignee_status`: the stored status of the assignee agent (`working`,
   `idle`, `waiting`, `blocked`, `stopped`, ...). Absent for the operator,
   no assignee, or a removed agent.
+- `blocked_since` and `blocked_reason` (TER-51), only for a card in the
+  blocked column: when the card moved there and the comment of that move
+  (what is needed), from the last `moved` event to the blocked column.
+  Without that event, `updated_at` and the newest comment. The dashboard
+  home lists them with `?columns=blocked`.
 
 **Card patch.** Every field is optional:
 `title`, `body`, `labels`, `add_labels`, `remove_labels`, `repo`, `branch`,
@@ -9796,6 +9854,16 @@ so a later `terrarium-compose up -d` keeps it. A source deploy
 wins again. In a dev checkout (`just up`), set `TERRARIUM_IMAGE` in `.env`
 to the release image, or `just up` builds and starts `terrarium:dev` again.
 
+**The updater itself** is not moved by an update: it moves only the
+terrarium container, and goes on with the image that it started with. To
+give the updater a new build, start it again from the release image after
+an update: `<dir>/terrarium-compose up -d --no-deps terrarium-updater`.
+The wrapper reads the image file, and the updater image defaults to the
+daemon image, so the updater gets the release image of the image file.
+Set `TERRARIUM_UPDATER_IMAGE` in `.env` to pin another image. Start no
+update while the updater restarts. `terrarium admin update status` shows
+the build of the updater (`updater:`).
+
 ### 34.2 Settings
 
 The daemon:
@@ -9817,7 +9885,7 @@ The updater:
 | `TERRARIUM_UPDATE_REPO` | `wiltaylor/terrarium` | The GitHub repo: the identity of the signing workflow. |
 | `TERRARIUM_UPDATE_DRAIN_WAIT` | `600` | Seconds that the drain waits for the running turns. |
 | `TERRARIUM_UPDATE_HEALTH_TIMEOUT` | `900` | Seconds that the new container has to become healthy. The first start installs the harnesses only when the tools dir has none; an update finds them. |
-| `TERRARIUM_UPDATER_TARGET` | the service `terrarium` of the compose project of the updater | The name of the terrarium container. |
+| `TERRARIUM_UPDATER_TARGET` | the service `terrarium` of the compose project of the updater | The name of the terrarium container. compose.yaml passes it from `.env`; empty is the default. Set it when the compose labels of the container are lost. |
 | `TERRARIUM_UPDATER_STATE` | `/updater` | The state dir: `history.json` (the last 20 runs), `previous.json` (the rollback target), and `image`. |
 
 A bad `TERRARIUM_SELF_UPDATE` or `TERRARIUM_UPDATE_CHANNEL` stops the start
@@ -9836,7 +9904,7 @@ The updater does these steps, and records each one (`steps` of a run):
 | `pull` | Pulls the image by digest. Before the drain, so a slow or failed pull stops no work. |
 | `drain` | Runs `terrarium admin update drain --wait <s>` in the container (§34.5). |
 | `backup` | Runs `terrariumd backup create --json` in the container: a full backup in the backup dir (§32). Migrations only go forward; the way back needs it. |
-| `stop`, `remove`, `start` | Stops the container (its stop timeout), removes it, and makes a new one with the same settings (binds, ports, networks, labels, the seccomp profile, the env of compose) and the new image. The env, command, and user of the old image do not carry over: the new image brings its own. |
+| `stop`, `remove`, `start` | Stops the container (its stop timeout), removes it, and makes a new one with the same settings (binds, ports, networks, labels, the seccomp profile, the env of compose) and the new image. The env, command, user, and labels of the old image do not carry over: the new image brings its own. Each compose label (`com.docker.compose.*`: the project, the service, the working dir, the config files) stays, also when the old image has it: an image that `docker compose build` made carries the project and service labels, and without them the next `inspect` finds no container. |
 | `health` | Waits until the health check passes, then runs `terrarium daemon status` in the new container. |
 
 A failure before `stop` changes nothing: the updater ends the drain

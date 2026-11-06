@@ -928,6 +928,11 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
 /// 3. Else the daemon launches the agent again, with `--resume` of its
 ///    last harness session. An agent that cannot start gets `error`, with
 ///    the reason.
+///
+/// A paused agent is never launched again (TER-45): a pause just before a
+/// restart can leave a live status in the store, because the stop of the
+/// pause writes `stopped` later. With no runner it gets `stopped` with the
+/// reason `paused`; a runner that still lives is stopped.
 async fn reconcile(state: &Shared) -> ApiResult<()> {
     // The default plan accounts first: an agent with no subscription
     // launches on its harness's default (PLAN §16.3). Idempotent; the
@@ -952,9 +957,37 @@ async fn reconcile(state: &Shared) -> ApiResult<()> {
             .db
             .read(move |c| Ok((agents::get(c, &key)?, agents::runner_seq(c, &key)?)))
             .await?;
+        let paused = view.paused;
         match state.supervisor.recover(view.agent, since).await {
+            Ok(Recovery::Attached) if paused => {
+                info!(agent = %id, "connected to the runner of a paused agent; stopping it");
+                state
+                    .lifecycle
+                    .expect_stop(agent_id, lifecycle::REASON_PAUSED);
+                if let Err(e) = state.supervisor.stop(agent_id).await {
+                    state.lifecycle.forget_stop(agent_id);
+                    warn!(agent = %id, "cannot stop the runner of a paused agent: {e}");
+                }
+                continue;
+            }
             Ok(Recovery::Attached) => {
                 info!(agent = %id, since, "connected to the live runner again");
+                continue;
+            }
+            Ok(Recovery::Gone) if paused => {
+                info!(agent = %id, "a paused agent stays stopped after the daemon start");
+                let key = id.clone();
+                state
+                    .db
+                    .write("system", move |t| {
+                        apply_status(
+                            t,
+                            &key,
+                            AgentStatus::Stopped,
+                            Some(lifecycle::REASON_PAUSED),
+                        )
+                    })
+                    .await?;
                 continue;
             }
             Ok(Recovery::Ended) => continue,

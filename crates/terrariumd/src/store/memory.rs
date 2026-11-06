@@ -629,7 +629,7 @@ fn emit(t: &mut Tx<'_>, row: &MemRow, change: &str, extra: serde_json::Value) ->
 
 pub fn create(t: &mut Tx<'_>, actor: &Actor, project: &str, m: NewMemory) -> ApiResult<Created> {
     projects::get(t, project)?;
-    policy::read_project(actor, project)?;
+    policy::write_project(actor, project)?;
     let title = t.redact_string(check_title(&m.title)?);
     let tags = clean_tags(&m.tags)?;
     let num = next_number(t, project, "memory")?;
@@ -661,6 +661,8 @@ pub fn create(t: &mut Tx<'_>, actor: &Actor, project: &str, m: NewMemory) -> Api
 
 pub fn update(t: &mut Tx<'_>, actor: &Actor, key: &str, p: MemoryPatch) -> ApiResult<Memory> {
     let row = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     let id = short(row.num);
     let full_edit = p.title.is_some()
         || p.body.is_some()
@@ -725,6 +727,8 @@ pub fn update(t: &mut Tx<'_>, actor: &Actor, key: &str, p: MemoryPatch) -> ApiRe
 
 pub fn delete(t: &mut Tx<'_>, actor: &Actor, key: &str) -> ApiResult<()> {
     let row = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &row.project)?;
     policy::delete_memory(actor, &row.project)?;
     t.execute("DELETE FROM memories WHERE pk = ?1", [row.pk])?;
     let id = short(row.num);
@@ -824,6 +828,8 @@ fn add_link_rows(
 
 pub fn add_link(t: &mut Tx<'_>, actor: &Actor, key: &str, link: &NewLinkIn) -> ApiResult<Memory> {
     let from = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &from.project)?;
     add_link_rows(
         t,
         actor,
@@ -844,6 +850,8 @@ pub fn remove_link(
     relation: &str,
 ) -> ApiResult<Memory> {
     let from = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &from.project)?;
     check_relation(relation)?;
     let target = find(t, to, Some(&from.project))?;
     let author: String = t
@@ -883,6 +891,8 @@ pub fn remove_link(
 /// `key` is superseded by `by`.
 pub fn supersede(t: &mut Tx<'_>, actor: &Actor, key: &str, by: &str) -> ApiResult<Memory> {
     let old = find_for(t, actor, key)?;
+    // A write: the own project only, also for an architect (TER-47).
+    crate::policy::write_project(actor, &old.project)?;
     let new = find(t, by, Some(&old.project))?;
     if new.project != old.project {
         return Err(ApiError::invalid(

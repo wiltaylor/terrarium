@@ -2160,6 +2160,26 @@ async fn docker_state(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     }
 }
 
+/// The target's host agent said that it has no agent workspaces (its
+/// `work_dir` is not a directory there: a remote host, TER-41).
+fn host_has_no_workspaces(state: &Shared, def: &TargetDef) -> bool {
+    def.host
+        .as_deref()
+        .and_then(|h| state.executor.hosts.capabilities(h))
+        .is_some_and(|c| c.no_workspaces)
+}
+
+/// The `workspace_note` of an `up` on a host with no workspaces.
+fn no_workspace_note(def: &TargetDef) -> String {
+    format!(
+        "host `{}` has no agent workspaces (its work_dir is not a directory there): the \
+         container runs with no /work mount, so commands see no workspace; check a branch out \
+         in the container (`terrarium repo checkout --target {}`)",
+        def.host.as_deref().unwrap_or("?"),
+        def.name
+    )
+}
+
 async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> ApiResult<()> {
     let workspaces: Vec<WorkspaceMount> = workspaces
         .iter()
@@ -2323,6 +2343,7 @@ pub async fn lifecycle(
     let mut add_snapshot = None;
     let mut result = None;
     let mut attach_error: Option<String> = None;
+    let mut workspace_note: Option<String> = None;
     let mut attached: Option<Vec<String>> = None;
     let new_state: String = match def.kind {
         TargetKind::Host | TargetKind::Ssh => match verb_kind {
@@ -2379,7 +2400,11 @@ pub async fn lifecycle(
                     // The workspaces of the running holders (and the agent
                     // that starts), bound at `/work/<project>/<agent>`. An
                     // existing container (`container`) gets none.
-                    let want = if def.container.is_none() {
+                    let bare = host_has_no_workspaces(state, def);
+                    if bare {
+                        workspace_note = Some(no_workspace_note(def));
+                    }
+                    let want = if def.container.is_none() && !bare {
                         attach_set(
                             state,
                             &def.name,
@@ -2567,6 +2592,9 @@ pub async fn lifecycle(
     let mut out = json!({"target": def.name, "verb": verb_kind, "state": new_state});
     if let Some(e) = attach_error {
         out["attach_error"] = e.into();
+    }
+    if let Some(n) = workspace_note {
+        out["workspace_note"] = n.into();
     }
     if matches!(verb_kind, V::Snapshot | V::Restore) {
         out["snapshot"] = snapshot.into();
@@ -3818,6 +3846,10 @@ pub async fn attach_join(
     let n = target.to_owned();
     let row = state.db.read(move |c| targets::get(c, &n)).await?;
     if !attaches(&row.def) || row.def.lab_from_workspace || row.state != "running" {
+        return Ok(None);
+    }
+    // A host with no workspaces mounts none: nothing to attach (TER-41).
+    if host_has_no_workspaces(state, &row.def) {
         return Ok(None);
     }
     let h = holder_info(state, agent, None).await?;

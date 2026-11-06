@@ -72,6 +72,11 @@ describe("the open set", () => {
     expect(prune([ROOT_CLOSED, "gone"], ["a"])).toEqual([ROOT_CLOSED]);
     expect(prune(["a", "gone"], [])).toEqual(["a", "gone"]);
   });
+  it("keeps open folders while the folders are not loaded, and drops gone ones after", () => {
+    expect(prune(["a", "folder:F1", "folder:F2"], ["a"])).toEqual(["a", "folder:F1", "folder:F2"]);
+    expect(prune(["a", "folder:F1", "folder:F2"], ["a"], ["F1"])).toEqual(["a", "folder:F1"]);
+    expect(prune(["folder:F1"], [], [])).toEqual([]);
+  });
   it("drops the old Agents root from a stored list, also before the projects are loaded", () => {
     expect(prune(["a", OLD_AGENTS_ROOT], [])).toEqual(["a"]);
     expect(prune([OLD_AGENTS_ROOT, "a", ROOT_CLOSED], ["a"])).toEqual(["a", ROOT_CLOSED]);

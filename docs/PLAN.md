@@ -1255,7 +1255,8 @@ docs/api.md §5.3.
 
 ## 10. Roles and leader agents
 
-Every agent is a `member` of its project. Two roles add power. The daemon
+Every agent is a `member` of its project. Two roles add power, and a
+third (`architect`) adds only reads. The daemon
 checks the role on every CLI and API call, and writes every privileged action
 to the audit log with the agent's ID.
 
@@ -1290,6 +1291,18 @@ to the audit log with the agent's ID.
 | Grant `project_admin` | no | in project | anywhere |
 | Grant `sysadmin` | no | no | no (operator only) |
 | Manage credentials and host agent tokens | no | no | no (operator only) |
+
+**The system architect** (role `architect`, asked for by the operator on
+2026-11-05, TER-47) helps plan big changes and cannot change them: it
+reads what a sysadmin reads, in every project, and writes only as a member
+of its own project (its cards, comments, memories, pages, uploads, and
+mail). It does not create, start, stop, or send to agents, grant, lease,
+run a command or open a terminal on a target, reload, update, or create or
+delete projects, and it never sees a secret value. Only the operator
+grants or revokes it, and not together with `sysadmin`. The daemon is
+deny by default: the architect passes only the checks of a read
+(`reads_all`), and each write checks the own project
+(`policy::write_project`). `docs/api.md` §3 has the full column.
 
 Limits that always hold:
 

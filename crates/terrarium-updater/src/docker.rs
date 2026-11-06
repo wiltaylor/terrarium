@@ -7,7 +7,10 @@
 //! The env, the command, the entrypoint, the labels, and the user of the
 //! old *image* are not copied: Docker merges the ones of the new image at
 //! create. So a new image that changes its own `ENV` or `CMD` takes
-//! effect.
+//! effect. The compose labels (`com.docker.compose.*`) are the exception:
+//! they always stay. An image that `docker compose build` made carries the
+//! project and service labels too, and the release image does not, so
+//! without them the next update cannot find the container (TER-55).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -309,6 +312,13 @@ fn strings(v: &Value) -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// A label that compose sets on a container: the project, the service,
+/// the working dir, the config files, and the rest. The updater keeps each
+/// one, also when the old image has the same label.
+fn is_compose_label(key: &str) -> bool {
+    key.starts_with("com.docker.compose.")
+}
+
 /// The body of `POST /containers/create` for a container like `spec`
 /// (`{container, image}`: the inspect record and the config of its image)
 /// with the image `reference`.
@@ -335,7 +345,7 @@ pub fn create_body(spec: &Value, reference: &str) -> Value {
         }
     }
     if let Some(labels) = cfg.get_mut("Labels").and_then(Value::as_object_mut) {
-        labels.retain(|k, v| img["Labels"].get(k) != Some(v));
+        labels.retain(|k, v| is_compose_label(k) || img["Labels"].get(k) != Some(v));
     }
     if let Some(vols) = cfg.get_mut("Volumes").and_then(Value::as_object_mut)
         && let Some(iv) = img["Volumes"].as_object()
@@ -391,7 +401,7 @@ pub fn once_body(spec: &Value, reference: &str, argv: &[String]) -> Value {
         o.remove("ExposedPorts");
         o.remove("Hostname");
         if let Some(labels) = o.get_mut("Labels").and_then(Value::as_object_mut) {
-            labels.retain(|k, _| !k.starts_with("com.docker.compose."));
+            labels.retain(|k, _| !is_compose_label(k));
         }
         o.insert("NetworkingConfig".into(), json!({"EndpointsConfig": {}}));
         if let Some(h) = o.get_mut("HostConfig").and_then(Value::as_object_mut) {
@@ -668,6 +678,73 @@ mod tests {
             b["NetworkingConfig"]["EndpointsConfig"]["terrarium_default"]["Aliases"],
             json!(["terrarium"])
         );
+    }
+
+    /// The labels that Docker gives a container made from `body` with
+    /// `image`: the image labels, then the labels of the body.
+    fn merged_labels(image: &Value, body: &Value) -> Value {
+        let mut l = image["Labels"].as_object().cloned().unwrap_or_default();
+        for (k, v) in body["Labels"].as_object().cloned().unwrap_or_default() {
+            l.insert(k, v);
+        }
+        Value::Object(l)
+    }
+
+    /// The `/containers/json` filter of `target_id` matches these labels.
+    fn found_by_compose(labels: &Value, project: &str) -> bool {
+        labels[LABEL_PROJECT] == project && labels[LABEL_SERVICE] == SERVICE
+    }
+
+    #[test]
+    fn two_updates_in_a_row_keep_the_compose_labels_of_a_compose_built_image() {
+        // TER-55: `docker compose build` puts the project and service labels on
+        // the image as well. The first update dropped them (equal to the old
+        // image's), and the second update found no container.
+        let compose = json!({
+            "com.docker.compose.project": "terrarium-deploy",
+            "com.docker.compose.service": "terrarium",
+            "com.docker.compose.project.working_dir": "/srv/terrarium-deploy",
+            "com.docker.compose.project.config_files": "/srv/terrarium-deploy/compose.yaml",
+            "com.docker.compose.container-number": "1",
+            "com.docker.compose.oneoff": "False",
+            "com.docker.compose.version": "2.29.7"
+        });
+        let mut s = spec();
+        s["container"]["Config"]["Labels"] = compose.clone();
+        s["container"]["Config"]["Labels"][LABEL_VERSION] = json!("0.1.0");
+        s["image"]["Labels"] = json!({
+            "com.docker.compose.project": "terrarium-deploy",
+            "com.docker.compose.service": "terrarium",
+            "com.docker.compose.version": "2.29.7",
+            LABEL_VERSION: "0.1.0"
+        });
+        assert!(found_by_compose(
+            &s["container"]["Config"]["Labels"],
+            "terrarium-deploy"
+        ));
+
+        // Update 1: to a release image, which has no compose labels.
+        let release1 = json!({"Labels": {LABEL_VERSION: "0.1.1"}});
+        let b1 = create_body(&s, "ghcr.io/x/t@sha256:1");
+        assert_eq!(
+            b1["Labels"], compose,
+            "every compose label stays, the old version goes"
+        );
+        let after1 = merged_labels(&release1, &b1);
+        assert_eq!(after1[LABEL_VERSION], "0.1.1");
+        assert!(found_by_compose(&after1, "terrarium-deploy"));
+
+        // Update 2: from the container that update 1 made.
+        let mut s2 = s.clone();
+        s2["container"]["Config"]["Labels"] = after1;
+        s2["container"]["Config"]["Image"] = json!("ghcr.io/x/t@sha256:1");
+        s2["image"] = release1;
+        let release2 = json!({"Labels": {LABEL_VERSION: "0.1.2"}});
+        let b2 = create_body(&s2, "ghcr.io/x/t@sha256:2");
+        assert_eq!(b2["Labels"], compose);
+        let after2 = merged_labels(&release2, &b2);
+        assert_eq!(after2[LABEL_VERSION], "0.1.2");
+        assert!(found_by_compose(&after2, "terrarium-deploy"));
     }
 
     #[test]
