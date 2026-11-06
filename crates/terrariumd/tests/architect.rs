@@ -290,21 +290,19 @@ async fn an_architect_writes_nothing_in_another_project() {
             .await,
         "lease",
     );
-    refused(
-        &td.post_as(a, "/api/targets/q-box/exec", json!({"cmd": ["true"]}))
-            .await,
-        "exec on a target",
-    );
+    // Exec on a target the architect can see: 403, not a hidden 404.
+    td.post_as(a, "/api/targets/q-box/exec", json!({"cmd": ["true"]}))
+        .await
+        .err(403, "forbidden");
     refused(
         &td.post_as(a, "/api/projects", json!({"name": "new"})).await,
         "project create",
     );
     refused(&td.post_empty_as(a, "/api/reload").await, "reload");
-    refused(
-        &td.post_as(a, "/api/secrets/global/gh/reveal", json!({"password": "x"}))
-            .await,
-        "secret value",
-    );
+    // The secret value: operator only.
+    td.post_as(a, "/api/secrets/global/gh/reveal", json!({"password": "x"}))
+        .await
+        .err(403, "forbidden");
     // The terminal attach takes input: refused also as a view.
     let ws = td.ws(&format!("/api/agents/{}/pty", w.qw), Some(a)).await;
     match ws {
