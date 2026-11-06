@@ -27,6 +27,7 @@ pub mod harness_auto_update;
 pub mod harness_tools;
 pub mod harness_versions;
 pub mod hosts;
+pub mod idle_alert;
 pub mod ingest;
 pub mod leases;
 pub mod lifecycle;

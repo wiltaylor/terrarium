@@ -407,6 +407,11 @@ pub enum ProjectCmd {
         description: Option<String>,
         #[arg(long)]
         prefix: Option<String>,
+        /// How long the assignee of a card in progress may rest with no
+        /// wait before the leads get a mail and the card an idle mark:
+        /// a duration (`15m`, `1h`), `off`, or `default` (15m)
+        #[arg(long)]
+        idle_alert: Option<String>,
     },
     /// Delete a project (sysadmin)
     Rm {

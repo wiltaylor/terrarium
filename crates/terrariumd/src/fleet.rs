@@ -1564,6 +1564,7 @@ fn apply_project(t: &mut Tx<'_>, fleet_name: &str, def: &ProjectDef) -> ApiResul
                     &ProjectPatch {
                         description: Some(description),
                         card_prefix: prefix,
+                        idle_alert: None,
                     },
                 )?;
             }

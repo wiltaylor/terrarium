@@ -2034,6 +2034,15 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE roles;
     ALTER TABLE roles_architect RENAME TO roles;
     "#,
+    // 70: the idle alert (TER-67, `crate::idle_alert`). `projects.idle_alert`
+    // is the project's threshold (`null`: the default, `off`, or a
+    // duration). `cards.idle_since` marks a card whose assignee rests with
+    // no wait past that threshold: the start of the rest. Self-contained:
+    // when another branch takes this number, move this entry to the end.
+    r#"
+    ALTER TABLE projects ADD COLUMN idle_alert TEXT;
+    ALTER TABLE cards ADD COLUMN idle_since TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

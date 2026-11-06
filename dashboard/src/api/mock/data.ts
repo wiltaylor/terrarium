@@ -372,7 +372,7 @@ export function seed(now: number = Date.now()): MockWorld {
     card("TER-17", "terrarium", "backlog", "Memory graph FTS5 index", { labels: ["memory"] }),
     card("TER-18", "terrarium", "backlog", "Artifact origin with signed URLs", { labels: ["artifacts", "security"] }),
     card("WEB-1", "webshop", "done", "Product listing page", { assigneeName: "shop-lead" }),
-    card("WEB-4", "webshop", "in_progress", "Checkout flow", { assigneeName: "shop-lead", labels: ["checkout"], eta_at: ahead(72), eta_set_at: ago(8), eta_set_by: byName("shop-lead").id, eta_set_by_name: "webshop/shop-lead" }),
+    card("WEB-4", "webshop", "in_progress", "Checkout flow", { assigneeName: "shop-lead", labels: ["checkout"], eta_at: ahead(72), eta_set_at: ago(8), eta_set_by: byName("shop-lead").id, eta_set_by_name: "webshop/shop-lead", idle_since: ago(22) }),
     card("WEB-5", "webshop", "blocked", "Dark mode stylesheet", {
       assigneeName: "css-worker",
       comments: [comment("css-worker", "Blocked: the harness crashed twice on the same prompt.", 26)],
