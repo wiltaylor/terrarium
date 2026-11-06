@@ -4539,7 +4539,9 @@ mod tests {
         let text = repo_known_hosts(state.path()).unwrap();
         // Each published key, by type and key: the file may hold it on a
         // line with a hashed host name (copied from ~/.ssh/known_hosts).
-        let key = |l: &str| l.split_whitespace().skip(1).take(2).collect::<Vec<_>>();
+        fn key(l: &str) -> Vec<String> {
+            l.split_whitespace().skip(1).take(2).map(str::to_owned).collect()
+        }
         for k in crate::git::PUBLISHED_HOST_KEYS {
             assert!(
                 text.lines().any(|l| key(l) == key(k)),
