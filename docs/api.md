@@ -3826,7 +3826,7 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 |---|---|---|
 | `GET /api/projects/{name}/board` | | `200` board |
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
-| `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards by number, cursor: number |
+| `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
 | `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |
 | `GET /api/cards/{id}` | | `200` card |
