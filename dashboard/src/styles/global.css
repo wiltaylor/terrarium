@@ -2097,6 +2097,31 @@ a.chip.card-link:hover {
   border-color: var(--danger);
   border-width: 2px;
 }
+/* Inbox threads (docs/api.md §6.13): a row that waits on the operator, and the chat page. */
+.thread-row.waits {
+  border-left: 3px solid var(--warn);
+}
+.thread-msg {
+  max-width: 85%;
+  justify-self: start;
+}
+.thread-msg.mine {
+  justify-self: end;
+  background: var(--accent-soft);
+}
+.thread-msg.response {
+  border-color: var(--link);
+  border-width: 2px;
+}
+.thread-question {
+  max-width: 85%;
+}
+@media (max-width: 760px) {
+  .thread-msg,
+  .thread-question {
+    max-width: 100%;
+  }
+}
 .inbox-target {
   border-radius: var(--radius);
   outline: 3px solid var(--danger);

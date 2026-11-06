@@ -34,6 +34,8 @@ export interface InboxMockContext {
   /** An agent key: a ULID, `project/name`, or a name; `404` when unknown. */
   agent: (key: string) => Agent;
   audit: (action: string, target: string, project: string | undefined, detail: Record<string, unknown>) => void;
+  /** The Inbox items of the threads (./threads.ts, docs/api.md §6.13). */
+  threadItems?: () => InboxItem[];
 }
 
 /** The most bytes of a forwarded context, as the daemon (`FORWARD_CONTEXT_MAX`). */
@@ -198,10 +200,14 @@ export function createInboxMock(c: InboxMockContext) {
   const items = (): InboxItem[] => {
     const threads = [...new Set(w.mail.map((m) => m.thread_id))];
     return [
-      ...questions().map(questionItem),
+      // A question of a thread is not an item of its own: the thread item shows it.
+      ...questions()
+        .filter((q) => !q.thread)
+        .map(questionItem),
       ...w.mail.filter((m) => m.to_kind === "operator" && !isPauseNotice(m)).map(mailItem),
       ...threads.map(threadItem).filter((x): x is InboxItem => !!x),
       ...watchRows().map((r) => watchItem(watchOf(r.thread_id)!)),
+      ...(c.threadItems?.() ?? []),
     ];
   };
 
@@ -218,7 +224,7 @@ export function createInboxMock(c: InboxMockContext) {
     // A watch waits for an agent: it is not in `open`.
     const open = all.filter((i) => i.kind !== "watch");
     const n = (k: InboxKind) => all.filter((i) => i.kind === k).length;
-    return { open: open.length, urgent: open.filter((i) => i.urgent).length, critical: open.filter((i) => i.critical).length, question: n("question"), notice: n("notice"), mail: n("mail"), system: n("system"), watch: n("watch") };
+    return { open: open.length, urgent: open.filter((i) => i.urgent).length, critical: open.filter((i) => i.critical).length, question: n("question"), notice: n("notice"), mail: n("mail"), system: n("system"), watch: n("watch"), thread: n("thread") };
   };
 
   /** Is the thread item open now? For the `inbox` event of a change. */
@@ -240,7 +246,7 @@ export function createInboxMock(c: InboxMockContext) {
       reply(() => {
         const status = q.status ?? "open";
         if (!["open", "done", "all"].includes(status)) fail(422, "invalid", `bad status \`${status}\`: use open, done, or all`);
-        if (q.kind && !["question", "notice", "mail", "system", "watch"].includes(q.kind)) fail(422, "invalid", `bad kind \`${q.kind}\`: use question, notice, mail, system, or watch`);
+        if (q.kind && !["question", "notice", "mail", "system", "watch", "thread"].includes(q.kind)) fail(422, "invalid", `bad kind \`${q.kind}\`: use question, notice, mail, system, watch, or thread`);
         return items()
           .filter((i) => (status === "all" || (status === "open") === i.open) && (!q.kind || i.kind === q.kind) && (!q.project || i.project === q.project))
           .sort(order);

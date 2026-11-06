@@ -14,6 +14,7 @@ const AgentDetail = lazy(() => import("../features/agents/AgentDetail"));
 const SubscriptionsPage = lazy(() => import("../features/subscriptions/SubscriptionsPage"));
 const MailPage = lazy(() => import("../features/mail/MailPage"));
 const InboxPage = lazy(() => import("../features/inbox/InboxPage"));
+const ThreadPage = lazy(() => import("../features/inbox/ThreadPage"));
 const MemoryPage = lazy(() => import("../features/memory/MemoryPage"));
 const WikiPage = lazy(() => import("../features/wiki/WikiPage"));
 const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
@@ -83,6 +84,7 @@ export function App() {
         <Route path="/agents/:id" component={AgentDetail} />
         <Route path="/sessions/:id" component={SessionPage} />
         <Route path="/inbox" component={InboxPage} />
+        <Route path="/inbox/threads/:id" component={ThreadPage} />
         <Route path="/schedules" component={SchedulesPage} />
         {/* The logs screen: a tab bar over one route per tab (nav.ts LOGS_TABS). /logs redirects to the first tab. */}
         <Route path="/logs" component={LogsPage}>

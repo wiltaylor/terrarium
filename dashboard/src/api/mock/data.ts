@@ -7,6 +7,7 @@ import { seedTemplates } from "./templates";
 import { seedTranscripts } from "./transcripts";
 import { seedSpawns } from "./spawns";
 import { seedWaits, syncWaitFields } from "./waits";
+import type { MockThread } from "./threads";
 import type {
   Agent,
   AgentEvent,
@@ -94,6 +95,8 @@ export interface MockWorld {
   watches: Watch[];
   /** Questions of the leaders to the operator (./questions.ts seeds them). */
   questions?: Question[];
+  /** Inbox threads (./threads.ts seeds them). Their questions are in `questions`, with `thread`. */
+  threads?: MockThread[];
   /** The output of each process wait by wait ID (untrusted text). */
   waitLogs: Record<string, string>;
   hosts: Host[];
