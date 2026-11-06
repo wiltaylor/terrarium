@@ -4168,8 +4168,8 @@ is a card with the label `github` (any case), or a title that starts with
   is dropped). The card is held. It goes to the blocked column with the
   labels `github` and `hold` and a move comment that says why, whatever
   `column` the request asks for. That is the column with the role
-  `blocked`, not a column that only has the name. When no column has the
-  role, the create is `422` and no card is made. The request's `comment` becomes a plain
+  `blocked`. When no column has the role, the create is `422` and no card
+  is made. The request's `comment` becomes a plain
   comment. `assignee` and `eta_at` do not apply. In the same write, the
   daemon opens a question to the operator for the creating agent (§6.8):
   the card is linked, `hold_card` is the card ID, and the options are

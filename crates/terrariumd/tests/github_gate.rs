@@ -338,16 +338,18 @@ async fn held(td: &TestDaemon, n: u32) -> String {
 /// The lock does not depend on the column role (review round 1, F1). The
 /// lead moves the `blocked` role to another column, or drops it: the held
 /// card still moves only by the operator. A new held card goes to the
-/// column with the role, not to a column that is only named `blocked`.
+/// column with the role.
 #[tokio::test]
 async fn the_lock_holds_when_the_lead_changes_the_column_roles() {
     let td = setup().await;
     let id = held(&td, 20).await;
     let path = format!("/api/cards/{id}");
     let board = "/api/projects/proj/board";
-    // The default board. The role `blocked` goes to a new column
-    // `parked`; the column `blocked` keeps its name and has no role.
-    // An absent role keeps the role, so `null` clears it.
+    // The default board. The lead renames `blocked` to `parked` with no
+    // role (the name `blocked` is kept for the role) and gives the role
+    // `blocked` to a new column `stuck`. The held card is in `parked`, a
+    // column with no role. An absent role keeps the role, so `null`
+    // clears it.
     let columns = |blocked_role: bool| {
         let role = if blocked_role {
             json!("blocked")
@@ -357,12 +359,12 @@ async fn the_lock_holds_when_the_lead_changes_the_column_roles() {
         json!({"columns": [
             {"name": "backlog"}, {"name": "ready"},
             {"name": "in_progress", "role": "working"}, {"name": "review"},
-            {"name": "blocked", "role": null}, {"name": "parked", "role": role},
-            {"name": "done"}]})
+            {"name": "parked", "rename_from": "blocked", "role": null},
+            {"name": "stuck", "role": role}, {"name": "done"}]})
     };
     td.patch_as("proj/lead", board, columns(true)).await.ok();
-    assert_eq!(card(&td, &id).await["column"], "blocked");
-    for to in ["ready", "backlog", "parked"] {
+    assert_eq!(card(&td, &id).await["column"], "parked");
+    for to in ["ready", "backlog", "stuck"] {
         td.patch_as("proj/lead", &path, json!({"column": to}))
             .await
             .err(403, "forbidden");
@@ -370,14 +372,14 @@ async fn the_lock_holds_when_the_lead_changes_the_column_roles() {
     td.post_as("proj/w1", &format!("{path}/claim"), json!({}))
         .await
         .err(403, "forbidden");
-    // A new held card goes to `parked`, the column with the role.
+    // A new held card goes to `stuck`, the column with the role.
     let c = make(
         &td,
         "proj/w1",
         json!({"title": "GitHub #21: held", "labels": ["github"], "github_author": "eve"}),
     )
     .await;
-    assert_eq!(c["column"], "parked");
+    assert_eq!(c["column"], "stuck");
     let id2 = c["id"].as_str().unwrap().to_owned();
     // No column has the role `blocked` now: still no move, and a new
     // GitHub card off the list is refused (fails closed), not made.
