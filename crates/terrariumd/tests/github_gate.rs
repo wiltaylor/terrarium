@@ -350,17 +350,20 @@ async fn the_lock_holds_when_the_lead_changes_the_column_roles() {
     // `blocked` to a new column `stuck`. The held card is in `parked`, a
     // column with no role. An absent role keeps the role, so `null`
     // clears it.
+    // The first change renames; the second keeps `parked` as it is.
     let columns = |blocked_role: bool| {
-        let role = if blocked_role {
-            json!("blocked")
+        let (role, parked) = if blocked_role {
+            (
+                json!("blocked"),
+                json!({"name": "parked", "rename_from": "blocked", "role": null}),
+            )
         } else {
-            Value::Null
+            (Value::Null, json!({"name": "parked"}))
         };
         json!({"columns": [
             {"name": "backlog"}, {"name": "ready"},
             {"name": "in_progress", "role": "working"}, {"name": "review"},
-            {"name": "parked", "rename_from": "blocked", "role": null},
-            {"name": "stuck", "role": role}, {"name": "done"}]})
+            parked, {"name": "stuck", "role": role}, {"name": "done"}]})
     };
     td.patch_as("proj/lead", board, columns(true)).await.ok();
     assert_eq!(card(&td, &id).await["column"], "parked");
