@@ -312,7 +312,9 @@ async fn the_config_is_checked_and_audited() {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let audit = td.get("/api/audit?action=project.delivery&order=desc").await;
+    let audit = td
+        .get("/api/audit?action=project.delivery&order=desc")
+        .await;
     let last = &audit.ok()[0]["detail"];
     assert_eq!(last["old"]["recipe"], "test -f OK", "{last}");
     assert_eq!(last["new"]["recipe"], "true", "{last}");
