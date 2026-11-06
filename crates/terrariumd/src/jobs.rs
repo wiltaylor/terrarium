@@ -285,8 +285,7 @@ async fn step(
     cmd: &RemoteCmd,
     max: usize,
 ) -> ApiResult<Collected> {
-    // A kill ends the process tree of the step on the target (TER-99).
-    let (running, _) = crate::run_kill::start(state, def, cmd)?;
+    let running = executor::start_cmd(state, def, cmd)?;
     set_control(job, Some(running.ctl.clone()));
     Ok(running.collect(max).await)
 }
