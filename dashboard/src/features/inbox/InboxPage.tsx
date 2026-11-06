@@ -3,7 +3,7 @@
 // the loop guard paused. Tabs pick the kind and Open or Done; the project
 // filter picks one project. `inbox` and `question` events read the list again.
 
-import { useSearchParams } from "@solidjs/router";
+import { A, useSearchParams } from "@solidjs/router";
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";
@@ -11,6 +11,7 @@ import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui"
 import { api, events, inbox, projects } from "../../stores";
 import { MailItemCard, PausedThreadCard, WatchCard } from "./cards";
 import { AskDialog } from "./AskDialog";
+import { MessageDialog } from "./MessageDialog";
 import { canForward, emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, statusTabOf, type InboxStatusTab, type InboxTab } from "./model";
 import { questionItemId } from "./questions";
 import { inboxItemDomId } from "./critical";
@@ -107,6 +108,14 @@ export default function InboxPage() {
   /** The open dialog: an ask (no question), or a forward of a question. */
   const [asking, setAsking] = createSignal<{ question?: Question } | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
+  /** "Message an agent" (TER-46): the dialog, and the last mail sent from it. */
+  const [messaging, setMessaging] = createSignal(false);
+  const [sent, setSent] = createSignal<{ agent: string; thread: string } | null>(null);
+  const messaged = (m: { to_name: string; thread_id: string }) => {
+    setMessaging(false);
+    setSent({ agent: m.to_name, thread: m.thread_id });
+    setTimeout(() => setSent(null), 8000);
+  };
   const asked = (agent: string, forward: boolean) => {
     setAsking(null);
     setNotice(`${forward ? "Forwarded" : "Asked"}. The Asked tab shows the thread until ${agent} answers.`);
@@ -144,6 +153,9 @@ export default function InboxPage() {
           </For>
         </select>
         <button onClick={() => void reload()}>Refresh</button>
+        <button onClick={() => setMessaging(true)} title="Send one mail to an agent; nothing waits for an answer">
+          Message an agent
+        </button>
         <button class="primary" onClick={() => setAsking({})}>
           Ask an agent
         </button>
@@ -158,6 +170,13 @@ export default function InboxPage() {
       </Show>
       <Tabs tabs={STATUS_TABS} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s, tab: params.tab === "watch" ? undefined : params.tab })} />
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <Show when={sent()}>
+        {(s) => (
+          <p class="notice small" role="status" style={{ margin: 0 }}>
+            Sent to {s().agent}. <A href={`/mail?open=${encodeURIComponent(s().thread)}`}>Open the thread</A>
+          </p>
+        )}
+      </Show>
       <Show when={notice()}>
         <p class="notice small" role="status" style={{ margin: 0 }}>
           {notice()}
@@ -198,6 +217,9 @@ export default function InboxPage() {
             )}
           </For>
         </div>
+      </Show>
+      <Show when={messaging()}>
+        <MessageDialog onClose={() => setMessaging(false)} onSent={messaged} />
       </Show>
       <Show when={asking()}>
         {(a) => <AskDialog question={a().question} onClose={() => setAsking(null)} onAsked={(r) => asked(r.watch.agent_name, !!a().question)} />}
