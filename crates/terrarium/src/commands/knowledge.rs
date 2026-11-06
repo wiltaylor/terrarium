@@ -126,12 +126,17 @@ pub async fn mem(ctx: &Ctx, cmd: &MemCmd) -> anyhow::Result<()> {
             })
         }
         MemCmd::Show { id, depth } => {
+            // IDs are per project: with `-p`, send `project/MEM-n`.
+            let key = match &ctx.project {
+                Some(p) if !id.contains('/') => format!("{p}/{id}"),
+                _ => id.clone(),
+            };
             let v = if *depth == 0 {
-                ctx.api.get(&mem_path(id), vec![]).await?
+                ctx.api.get(&mem_path(&key), vec![]).await?
             } else {
                 ctx.api
                     .get(
-                        &format!("{}/graph", mem_path(id)),
+                        &format!("{}/graph", mem_path(&key)),
                         query([("depth", Some(depth.to_string()))]),
                     )
                     .await?

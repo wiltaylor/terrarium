@@ -748,6 +748,8 @@ pub struct ExecSession {
     /// kind. Kept on the session, so the answer does not change when the
     /// run ends.
     pub takes_stdin: std::sync::atomic::AtomicBool,
+    /// The report of a kill of a wrapped run ([`crate::run_kill`]).
+    kill_report: Mutex<Option<crate::run_kill::Report>>,
 }
 
 /// One answer of `GET .../output`.
@@ -811,6 +813,7 @@ impl ExecSession {
                 touched: Mutex::new(Instant::now()),
                 limit: limit.max(1),
                 takes_stdin: std::sync::atomic::AtomicBool::new(true),
+                kill_report: Mutex::new(None),
             }),
             rx,
         )
@@ -895,6 +898,28 @@ impl ExecSession {
     /// End the run: kill the process, release the host session.
     pub fn kill(&self) {
         let _ = self.control.send(Control::Kill);
+    }
+
+    /// [`Self::kill`], then wait for the report of the kill on the target
+    /// ([`crate::run_kill::report`]): the PIDs that got `TERM` and `KILL`,
+    /// and the ones left. `None` for a run without one, or one that ended
+    /// before.
+    pub async fn kill_and_report(&self) -> Option<Value> {
+        let rx = self
+            .kill_report
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let done = self.is_done();
+        self.kill();
+        match rx {
+            Some(rx) if !done => crate::run_kill::report(rx).await,
+            _ => None,
+        }
+    }
+
+    fn set_kill_report(&self, r: Option<crate::run_kill::Report>) {
+        *self.kill_report.lock().unwrap_or_else(|e| e.into_inner()) = r;
     }
 
     /// Read output from `since`, waiting up to `wait` for some. `since`
@@ -1576,7 +1601,7 @@ pub async fn start_exec_as(
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
     let mut cmd = cmd;
     cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
-    let run = start_cmd(state, &def, &cmd)?;
+    let (run, report) = crate::run_kill::start(state, &def, &cmd)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
     let view = match actor {
         Actor::Agent(a) => terrarium_core::redact::View::Scope(a.project.clone()),
@@ -1590,6 +1615,7 @@ pub async fn start_exec_as(
         kind,
         state.executor.buffer_limit,
     );
+    sess.set_kill_report(report);
     tokio::spawn(attach(run, sess.clone(), ctl, false, false));
     state.executor.insert(sess.clone());
     let mut detail = json!({"session": sess.id, "kind": targets::kind_str(row.def.kind),
@@ -1659,7 +1685,7 @@ pub async fn start_tool_exec(
     cmd.shell = false;
     cmd.pty = None;
     cmd.holder = holder_of(actor);
-    let running = start_cmd(state, &def, &cmd)?;
+    let (running, report) = crate::run_kill::start(state, &def, &cmd)?;
     let (sess, ctl) = ExecSession::new(
         name,
         actor.agent().map(|a| a.id.clone()),
@@ -1667,6 +1693,7 @@ pub async fn start_tool_exec(
         state.executor.buffer_limit,
     );
     sess.takes_stdin.store(run.stdin, Ordering::SeqCst);
+    sess.set_kill_report(report);
     let daemon = state.db.redactor().get();
     tokio::spawn(attach_tool(running, sess.clone(), ctl, run, daemon));
     state.executor.insert(sess.clone());

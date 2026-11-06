@@ -195,7 +195,16 @@ async fn a_thread_opens_talks_responds_and_closes() {
         .await
         .err(403, "forbidden");
 
-    // The agent closes with a handoff; a bad link kind is refused first.
+    // The agent closes with a handoff; a body that does not parse and a
+    // bad link kind are refused first.
+    lab.td
+        .post_as(
+            &lab.arch,
+            &format!("/api/threads/{tid}/close"),
+            json!({"bogus": 1}),
+        )
+        .await
+        .err(400, "bad_request");
     lab.td
         .post_as(
             &lab.arch,

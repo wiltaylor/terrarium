@@ -735,15 +735,18 @@ pub fn on_question(t: &mut Tx<'_>, id: &str, q: &Question, change: &str) -> ApiR
 fn emit(t: &mut Tx<'_>, th: &Thread, change: &str) -> ApiResult<()> {
     let data: Value = json!({"change": change, "id": th.id, "scope": th.scope,
                              "status": th.status});
-    let mut draft = EventDraft::new(
-        "thread",
-        format!(
+    // The summary of a project thread has no topic: the project's readers
+    // of the events need not see it. A global thread's events are in no
+    // project.
+    let summary = match th.project() {
+        Some(_) => format!("thread {} {change} ({})", th.id, th.status.as_str()),
+        None => format!(
             "thread {} {change}: {}",
             th.id,
             questions::short(&th.topic, 80)
         ),
-        data,
-    );
+    };
+    let mut draft = EventDraft::new("thread", summary, data);
     if let Some(p) = th.project() {
         draft = draft.project(p.to_owned());
     }
