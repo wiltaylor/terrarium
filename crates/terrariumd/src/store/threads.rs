@@ -330,10 +330,9 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
            AND (?4 IS NULL OR agent = ?4 OR report_to = ?4)",
     )?;
     let rows = st
-        .query_map(
-            params![status, f.all, f.scope, f.involving],
-            |r| row(conn, r),
-        )?
+        .query_map(params![status, f.all, f.scope, f.involving], |r| {
+            row(conn, r)
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut out = rows
         .into_iter()
@@ -509,7 +508,14 @@ fn insert_message(
     t.execute(
         "INSERT INTO thread_messages (id, thread, author, kind, text, at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![ulid::Ulid::new().to_string(), thread, author, kind, text, at],
+        params![
+            ulid::Ulid::new().to_string(),
+            thread,
+            author,
+            kind,
+            text,
+            at
+        ],
     )?;
     Ok(())
 }

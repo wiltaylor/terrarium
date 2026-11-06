@@ -73,8 +73,8 @@ async fn open(
             let scope = b.scope.unwrap_or_default();
             let agent = match b.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
                 Some(key) => {
-                    let context = (scope != threads::GLOBAL && !scope.is_empty())
-                        .then_some(scope.as_str());
+                    let context =
+                        (scope != threads::GLOBAL && !scope.is_empty()).then_some(scope.as_str());
                     Some(agents::find(t, key, context)?.agent.id.to_string())
                 }
                 None => None,

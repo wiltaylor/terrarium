@@ -53,7 +53,11 @@ impl Lab {
     }
 
     async fn thread(&self, id: &str) -> Value {
-        self.td.get(&format!("/api/threads/{id}")).await.ok().clone()
+        self.td
+            .get(&format!("/api/threads/{id}"))
+            .await
+            .ok()
+            .clone()
     }
 }
 
@@ -63,8 +67,10 @@ async fn a_thread_opens_talks_responds_and_closes() {
     // A global thread reports to the lead of `meta`; with a first message
     // of the operator it waits for the agent.
     let g = lab
-        .open(json!({"topic": "Shard the event store?", "template": "architect",
-                     "agent": "p/arch", "text": "How would you shard it?"}))
+        .open(
+            json!({"topic": "Shard the event store?", "template": "architect",
+                     "agent": "p/arch", "text": "How would you shard it?"}),
+        )
         .await;
     assert_eq!(g["scope"], "global");
     assert_eq!(g["template"], "architect");
@@ -118,7 +124,10 @@ async fn a_thread_opens_talks_responds_and_closes() {
         )
         .await;
     let th = r.ok().clone();
-    assert_eq!(th["response"]["text"], "Approved: four columns plus blocked.");
+    assert_eq!(
+        th["response"]["text"],
+        "Approved: four columns plus blocked."
+    );
     assert_eq!(th["response"]["by"], "operator");
     assert_eq!(th["status"], "waiting_agent");
     let msgs = th["messages"].as_array().unwrap();
@@ -162,7 +171,11 @@ async fn a_thread_opens_talks_responds_and_closes() {
     // Rights: an agent does not open (TER-93 brings `thread:open`), the
     // report-to lead reads but does not post, only the operator responds.
     lab.td
-        .post_as(&lab.p_lead, "/api/threads", json!({"topic": "x", "scope": "p"}))
+        .post_as(
+            &lab.p_lead,
+            "/api/threads",
+            json!({"topic": "x", "scope": "p"}),
+        )
         .await
         .err(403, "forbidden");
     lab.td
@@ -268,7 +281,9 @@ async fn the_open_checks_its_fields_and_the_lead() {
         .await
         .err(409, "conflict");
     // A project thread's agent is of its project.
-    lab.td.agent("q", "qa", json!({"roles": ["project_admin"]})).await;
+    lab.td
+        .agent("q", "qa", json!({"roles": ["project_admin"]}))
+        .await;
     lab.td
         .post(
             "/api/threads",
@@ -291,8 +306,10 @@ async fn the_open_checks_its_fields_and_the_lead() {
 async fn questions_in_a_thread_show_in_it_and_drive_its_status() {
     let lab = lab().await;
     let t = lab
-        .open(json!({"topic": "Retention", "scope": "p", "agent": "p/arch",
-                     "text": "What retention do we need?"}))
+        .open(
+            json!({"topic": "Retention", "scope": "p", "agent": "p/arch",
+                     "text": "What retention do we need?"}),
+        )
         .await;
     let tid = t["id"].as_str().unwrap().to_owned();
     let ask = |body: Value| {
