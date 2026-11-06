@@ -18,16 +18,17 @@ describe("questions in the mock", () => {
   it("lists the open questions, urgent first, with the daemon's fields", async () => {
     const api = mock();
     const open = await api.questions.list({ kind: "question" });
-    expect(open.length).toBe(2);
+    // Two of the leaders, two of the seeded Inbox thread (./threads.ts).
+    expect(open.length).toBe(4);
     expect(open[0]!.priority).toBe("urgent");
     expect(open.every((q) => q.status === "open" && q.kind === "question")).toBe(true);
     // Without `kind`: every kind.
-    expect((await api.questions.list()).map((q) => q.kind)).toEqual(["question", "question", "notice", "bundle"]);
+    expect((await api.questions.list()).map((q) => q.kind)).toEqual(["question", "question", "notice", "question", "question", "bundle"]);
     for (const k of ["id", "kind", "agent", "agent_name", "project", "text", "options", "priority", "status", "thread_id", "created_at", "updated_at", "revision"]) {
       expect(open[0]).toHaveProperty(k);
     }
-    expect((await api.questions.list({ status: "all", kind: "question" })).length).toBe(4);
-    expect((await api.questions.list({ status: "all" })).length).toBe(7);
+    expect((await api.questions.list({ status: "all", kind: "question" })).length).toBe(6);
+    expect((await api.questions.list({ status: "all" })).length).toBe(9);
     expect((await api.questions.list({ project: "webshop" })).map((q) => q.agent_name)).toEqual(["webshop/shop-lead"]);
     // The agent list: open, and answered or acknowledged in the last 24 h; `all` adds the retracted one.
     const mine = await api.questions.ofAgent("terrarium/lead");

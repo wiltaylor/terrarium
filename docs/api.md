@@ -3666,7 +3666,7 @@ There is no register of threads and no conflict check between threads
 | `id` | The thread ID (a ULID). |
 | `topic` | One line, at most 200 characters. Set at the open; it does not change. |
 | `scope` | `global`, or the name of a project. |
-| `template` | The agent template of the attached agent (TER-92 spawns the agent from it). Optional; the template is not checked yet. |
+| `template` | The agent template of the attached agent (TER-92 spawns the agent from it). Optional for the operator, and not checked. An agent must name it, and its rights are checked (A1, below). |
 | `opened_by`, `opened_by_name` | `operator`, or the ULID and `project/name` of the agent that opened it. |
 | `agent`, `agent_name` | The attached agent: one per thread, or `null` while it has none. Until TER-92 spawns it from the template, the opener names an existing agent: of the scope project, or any agent for `global`. |
 | `report_to`, `report_to_name` | The lead that the thread reports to (D34): for `global`, the lead of project `meta`; else the lead of the scope project. The lead of a project is its project_admin agent named `lead`, else its first project_admin by name. Set at the open; it does not change. A scope without a lead is `409 conflict` at the open. |
@@ -3695,8 +3695,8 @@ operator mails the agent about each retract, as `.../retract` does (§6.8).
 
 | Action | Who |
 |---|---|
-| Open | The operator, with any scope and template. (An agent with the right `thread:open` comes with TER-93; until then an agent gets `403`.) |
-| Read, list | The operator, and an agent that reads all (sysadmin, architect): every thread. Another agent: the threads that it opened (`opened_by`, with TER-93), is attached to, or is the report-to lead of. It gets `404` for any other thread, and a list shows it only those threads. |
+| Open | The operator, with any scope and template. An agent with the right `thread:open` (below), in its own project or `global` (another project needs sysadmin, as each write does), with a template within its rights (A1, below). Another agent gets `403`. |
+| Read, list | The operator, and an agent that reads all (sysadmin, architect): every thread. Another agent: the threads that it opened (`opened_by`), is attached to, or is the report-to lead of. It gets `404` for any other thread, and a list shows it only those threads. |
 | Post a message | The operator and the attached agent. |
 | Respond | The operator. |
 | Close | The operator, and the attached agent. (TER-95 makes the agent's close a proposal that the operator confirms.) |
@@ -3716,12 +3716,45 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `POST /api/threads` | `{"topic", "scope"?, "template"?, "agent"?, "text"?}`; `scope` defaults to `global`, `agent` is a ULID or `project/name` | `201` the thread |
+| `POST /api/threads` | `{"topic", "scope"?, "template"?, "agent"?, "text"?}`; `scope` defaults to `global` for the operator and to the own project for an agent; `agent` is a ULID or `project/name` | `201` the thread. An agent: `403` without `thread:open`, for another project, or for a template or agent above its rights (A1); `422` with no `template`; `404` for an unknown template |
 | `GET /api/threads` | `?status=waiting_operator\|waiting_agent\|closed\|open\|all` (default `open`: not closed), `?scope=` | `200` the threads without `messages` and `questions`, with `message_count`, `open_questions`, and `last_at`. The ones that wait for the operator first, then the newest activity first. At most 200. |
 | `GET /api/threads/{id}` | | `200` the thread |
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | `200` the thread, `closed`, with `handoff`; its open questions are `retracted` |
+
+**The right `thread:open`** (TER-93). The policy field `thread_open`
+(§6.1, `policy`) lets an agent open threads (`terrarium thread new`). It
+is granted like the spawn rights (§6.10): the operator and a sysadmin set
+it on any agent, a project_admin on a member of its project, but not on
+itself and not on an admin (`PATCH /api/agents/{id}` with `policy`, or
+`terrarium agent set <agent> --thread-open on`). There is no limit on the
+threads that an agent opens (D35).
+
+**The rights check (A1).** An agent-opened thread may only use a template
+whose rights do not exceed the opener's; the operator opens a thread with
+any template. The template resolves in the project of the thread's agent:
+the scope project, or `meta` for `global`. A sysadmin holds every right.
+For the others, `403` names each right that the template (or a named
+`agent`) has and the opener does not hold:
+
+- a role: `project_admin` of that project needs the opener to be its
+  project_admin; `architect` needs an architect opener; `sysadmin` needs a
+  sysadmin;
+- a target that is not in the opener's `policy.targets`, unless it is a
+  target of that project and the opener administers the project;
+- a `cross_project` entry that the opener does not have, and a `mail_to`
+  entry of another project that the opener's `mail_to` or `cross_project`
+  does not cover;
+- spawn rights, unless the opener could grant them (a project_admin, for a
+  member of its project, with no `may_spawn_children`) or holds them;
+- `calendar_write`, unless the opener has it or administers the project.
+
+So a project lead with `thread:open` opens a `global` thread with a member
+template, but not with a template that has `project_admin` (of `meta`)
+or `architect`. An architect posts and asks in its own thread as the
+attached agent, and opens threads in its own project or `global` with
+templates within its rights; it writes in no other project.
 
 **Questions in a thread.** `POST /api/agents/{id}/questions` takes
 `"thread": "<id>"`: the attached agent asks in its open thread. The
@@ -10360,6 +10393,12 @@ validate or a merge is a `409 conflict` that says how to set it.
 - `merge`: check out `next`, merge the card branch with `--no-ff`, run the
   recipe, and push `next` when the recipe passes. The push is not forced:
   when `next` moved, the job fails.
+- A batch merge (TER-112) is one `merge` job for several cards of one
+  project and one repo. It merges the card branches onto `next` in the
+  given order, each with `--no-ff`, runs the recipe once on the result,
+  and pushes `next` when it passes. `batch` in the job lists the cards
+  (`[{card, branch, by_agent?, outcome?, note?}]`); `card`, `branch`, and
+  `by_agent` are those of the first card. See 35.3 for the results.
 
 Jobs start first in, first out across all projects. A job starts when:
 
@@ -10427,8 +10466,18 @@ is accepted on first use in each run (`accept-new`).
 The projects of one host share its disk and its CPUs. The host cap is the
 most jobs of all projects that run on one host at the same time. The
 daemon checks it before the slots of the project. The host of a job is
-the host agent of the delivery target (`host`), else the host part of its
-`address`, else the target name. A host without a cap has no limit. The
+the stable ID of the delivery target's host agent (`host`), else the
+resolved IP of its SSH `address` (sorted first address when there are
+several, lowercase hostname when resolution fails), else the target name.
+DNS is resolved outside the database lock when an API target is set or
+its address changes, and at daemon startup for existing targets. Targets
+from file or fleet changes and legacy cap rows are backfilled before use.
+The first result,
+including a failed lookup, is persisted by hostname and reused across
+ticks and daemon restarts, so a changing DNS answer cannot split a cap.
+SSH usernames and ports do not affect the key. An SSH target and a host
+agent on the same machine count as two hosts. Cross-transport machine
+identity is not inferred. A host without a cap has no limit. The
 default is no cap.
 
 Builds and tests that agents start by hand (`terrarium exec`, `terrarium
@@ -10437,12 +10486,24 @@ they do not get the low priority.
 
 | method and path                 | who                           | what |
 |---------------------------------|-------------------------------|------|
-| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, heavy_jobs, running, updated_by, updated_at}]}`: each host with a cap or a running job. `heavy_jobs` is `null` without a cap |
+| `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, heavy_jobs, running, projects, updated_by?, updated_at?}]}`: each host with a cap or a running job. `heavy_jobs` is `null` without a cap. Visibility is scoped as described below |
 | `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
 | `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
 
 The audit row `job.host_cap` keeps the old and the new cap. A job keeps
 the host it started on (`host` in the job).
+
+Host-cap writes accept a host-agent name or a resolved key. SSH names
+are resolved in the same way as target addresses. `GET /api/job-hosts`
+also includes `projects`, a map of project names to running counts.
+The operator, sysadmin and architect see all project counts and cap audit
+fields. Other agents see the total `running` count and only their own
+project's count (including zero). Their response omits `updated_by` and
+`updated_at`. No job records are returned.
+
+Previously stored host names and address aliases are normalized when
+counting running jobs and reading caps. If several old caps resolve to
+one key, the strictest applies until a cap write replaces them.
 
 ### 35.3 Results
 
@@ -10459,6 +10520,32 @@ the host it started on (`host` in the job).
 - A daemon restart loses the running jobs: they fail (`error`) and follow
   the same rule.
 
+A batch merge:
+
+- A card whose branch does not merge onto `next` and the cards before it
+  leaves the batch: its merge is aborted, and the next card merges. A
+  merge that fails without a conflict (for example an unrelated history)
+  is the same: the tree is reset, and the card's note says why. The card
+  gets `outcome: conflict` in `batch` and fails at once, as above. When
+  no card merges, the job ends as a `conflict`.
+- Pass: each merged card moves to `accepted`.
+- Red with two or more merged cards: the batch splits into two halves (a
+  half of one card is a job of one card). Both are queued at the front,
+  with `parent` set to the red job. The halves split again on red, until
+  the failing card is found. The other cards merge. Each card gets a
+  comment with the jobs of the split.
+- The order holds over nested splits: `split_path` in the job adds `0`
+  for a left half and `1` for a right half to the path of its parent,
+  and the queue sorts on it after `created_at` and `attempt`. So the left
+  half and all its splits run before the right half. A merge runs alone
+  in its project, so the right half merges onto a `next` that holds the
+  cards of the left half that passed.
+- A card that a split leaves alone and that is red fails without the
+  rerun: the red batch was its first red. A batch that ends with one
+  merged card and red follows the rule of one card.
+- Any other failure (`error`) runs the batch once more with the merged
+  cards, then fails each of them.
+
 The card writes of the queue are made as the operator. Their comments
 start with `Job queue:`.
 
@@ -10468,10 +10555,12 @@ start with `Job queue:`.
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` on the target. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `POST /api/merges`                 | a project admin                       | `{cards, repo?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
-| `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels |
+| `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels. A batch merge: the creator or a project admin only, as it holds the cards of several workers; every card of the batch loses the job labels |
 
 The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
-Events `job` {change, project, id, card, kind, state, attempt, outcome}.
+Events `job` {change, project, id, card, kind, state, attempt, outcome,
+cards?}; `cards` lists the cards of a batch.

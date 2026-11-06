@@ -8,10 +8,18 @@
 //!   cap on one host (TER-97, `job_hosts`), and at most `slots` running
 //!   at a time per project. A merge job runs alone in its project: no
 //!   other job of the project runs with it (TER-71 review, R1).
-//! - A card has at most one job that is queued or running.
+//! - A card has at most one job that is queued or running, also as a
+//!   card of a batch.
+//! - A merge job can merge several cards in order (TER-112, `batch`): one
+//!   validation for all. A red batch splits into two halves, queued at
+//!   the front (`parent` is the red batch). `split_path` keeps the halves
+//!   of one root batch in merge order, also over nested splits: the left
+//!   half adds `0` to the path of its parent, the right half `1`, and the
+//!   queue sorts on the path after `created_at` and `attempt`.
 //! - The one rerun of a failed job is a new row with `attempt` 2 and the
 //!   `created_at` of the first try, so it goes to the front of the queue.
-//! - Events `job` {change, project, id, card, kind, state, attempt}.
+//! - Events `job` {change, project, id, card, kind, state, attempt, outcome,
+//!   cards?} (`cards`: the cards of a batch).
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,7 +32,7 @@ use terrarium_core::config::{DeliveryDef, TargetDef};
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
-use crate::store::targets;
+use crate::store::{hosts, targets};
 
 /// The output tail that a job keeps.
 pub const TAIL_MAX: usize = 4000;
@@ -125,6 +133,51 @@ pub struct Job {
     /// The host that the job runs on: set when it starts (TER-97).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// The cards of a batch merge, in merge order (TER-112). Empty for a
+    /// job of one card. `card`, `branch`, and `by_agent` are then those of
+    /// the first card.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch: Vec<BatchCard>,
+    /// The red batch that this job was split from (TER-112).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// The place of a split job in its root batch: `0` and `1` for each
+    /// left and right half on the way down. Empty for a job that is no
+    /// split. The queue sorts on it, so the halves run in merge order.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub split_path: String,
+}
+
+/// A card of a batch merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchCard {
+    pub card: String,
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent: Option<String>,
+    /// `conflict` when the branch did not merge onto `next` and the cards
+    /// before it; the card then left the batch. `None`: it merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The conflicting files of a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Job {
+    /// The cards of the job: the batch, or the one card.
+    pub fn cards(&self) -> Vec<BatchCard> {
+        if !self.batch.is_empty() {
+            return self.batch.clone();
+        }
+        vec![BatchCard {
+            card: self.card.clone(),
+            branch: self.branch.clone(),
+            by_agent: self.by_agent.clone(),
+            outcome: None,
+            note: None,
+        }]
+    }
 }
 
 /// A new job.
@@ -137,6 +190,9 @@ pub struct NewJob {
     pub branch: String,
     pub commit: Option<String>,
     pub by_agent: Option<String>,
+    /// The cards of a batch merge, in order; empty for one card. The first
+    /// is the job's `card`.
+    pub batch: Vec<BatchCard>,
 }
 
 /// The end of a job.
@@ -147,15 +203,22 @@ pub struct JobEnd {
     pub exit_code: Option<i64>,
     pub tail: Option<String>,
     pub head: Option<String>,
+    /// The batch with the outcome of each card (a conflict), when the job
+    /// merged a batch.
+    pub batch: Option<Vec<BatchCard>>,
 }
 
 const COLS: &str = "id, project, card, kind, repo, branch, commit_sha, state, attempt, outcome,
                     exit_code, tail, head, by_agent, created_by, created_at, started_at, ended_at,
-                    host";
+                    host, batch, parent, split_path";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
     let kind: String = r.get(3)?;
     let state: String = r.get(7)?;
+    let batch: Option<String> = r.get(19)?;
+    let batch = batch
+        .and_then(|b| serde_json::from_str(&b).ok())
+        .unwrap_or_default();
     Ok(Job {
         id: r.get(0)?,
         project: r.get(1)?,
@@ -176,6 +239,9 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
         started_at: r.get(16)?,
         ended_at: r.get(17)?,
         host: r.get(18)?,
+        batch,
+        parent: r.get(20)?,
+        split_path: r.get(21)?,
     })
 }
 
@@ -218,7 +284,9 @@ pub fn open_of_card(conn: &Connection, card: &str) -> ApiResult<Option<Job>> {
     Ok(conn
         .query_row(
             &format!(
-                "SELECT {COLS} FROM jobs WHERE card = ?1 AND state IN ('queued', 'running')
+                "SELECT {COLS} FROM jobs WHERE state IN ('queued', 'running')
+                   AND (card = ?1 OR EXISTS (SELECT 1 FROM json_each(jobs.batch)
+                                             WHERE json_extract(value, '$.card') = ?1))
                  ORDER BY created_at LIMIT 1"
             ),
             [card],
@@ -232,13 +300,17 @@ pub fn running(conn: &Connection) -> ApiResult<Vec<Job>> {
     let mut st = conn.prepare(&format!(
         "SELECT {COLS} FROM jobs WHERE state = 'running' ORDER BY started_at"
     ))?;
-    let rows = st.query_map([], row)?.collect::<Result<Vec<_>, _>>()?;
+    let mut rows = st.query_map([], row)?.collect::<Result<Vec<_>, _>>()?;
+    for job in &mut rows {
+        if let Some(host) = &job.host {
+            job.host = Some(canonical_key(conn, host)?);
+        }
+    }
     Ok(rows)
 }
 
-/// The host key of a target (TER-97): its host agent (`host`), else the
-/// host part of its `address` (without the user and the port), else its
-/// name. The host cap of the job queue counts the running jobs per key.
+/// The address-based key of a target. Host-agent names are resolved to
+/// stable IDs by `host_of`, which has access to the host registry.
 pub fn host_key(name: &str, def: &TargetDef) -> String {
     if let Some(h) = def.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
         return h.to_owned();
@@ -249,16 +321,86 @@ pub fn host_key(name: &str, def: &TargetDef) -> String {
         .map(str::trim)
         .filter(|a| !a.is_empty())
     {
-        let a = a.rsplit_once('@').map_or(a, |(_, h)| h);
-        let a = match a.strip_prefix('[') {
-            Some(v6) => v6.split(']').next().unwrap_or(v6),
-            None => a.split(':').next().unwrap_or(a),
-        };
-        if !a.is_empty() {
-            return a.to_owned();
-        }
+        return address_key(a);
     }
     name.to_owned()
+}
+
+fn address_key(a: &str) -> String {
+    let a = a.rsplit_once('@').map_or(a, |(_, h)| h);
+    if let Ok(ip) = a.parse::<std::net::IpAddr>() {
+        return ip.to_string();
+    }
+    let a = match a.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(v6),
+        None => a.split(':').next().unwrap_or(a),
+    };
+    a.to_lowercase()
+}
+
+/// Accept both host-agent names and stable keys, including old stored keys.
+fn canonical_key(conn: &Connection, key: &str) -> ApiResult<String> {
+    if let Some(host) = hosts::list(conn)?
+        .into_iter()
+        .find(|h| h.name == key || h.id == key)
+    {
+        return Ok(host.id);
+    }
+    let hostname = address_key(key);
+    Ok(conn
+        .query_row(
+            "SELECT host_key FROM job_host_keys WHERE hostname = ?1",
+            [&hostname],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(hostname))
+}
+
+/// Names that still need a pinned identity. No network IO under the DB lock.
+pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<Vec<String>> {
+    let mut keys: Vec<String> = targets::list(conn)?
+        .into_iter()
+        .filter(|t| t.def.host.is_none())
+        .filter_map(|t| t.def.address)
+        .collect();
+    let mut st = conn
+        .prepare("SELECT host FROM job_hosts UNION SELECT host FROM jobs WHERE host IS NOT NULL")?;
+    keys.extend(
+        st.query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    keys.extend(extra);
+    let agents = hosts::list(conn)?;
+    let mut names = Vec::new();
+    for key in keys {
+        if agents.iter().any(|h| h.name == key || h.id == key) {
+            continue;
+        }
+        let hostname = address_key(&key);
+        if hostname.parse::<std::net::IpAddr>().is_ok() || hostname.is_empty() {
+            continue;
+        }
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)",
+            [&hostname],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            names.push(hostname);
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// First writer wins, including a failed resolution pinned to the hostname.
+pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
+    for (hostname, key) in keys {
+        t.execute("INSERT INTO job_host_keys (hostname, host_key) VALUES (?1, ?2) ON CONFLICT(hostname) DO NOTHING", params![hostname, key])?;
+    }
+    Ok(())
 }
 
 /// What the pick knows of a project that has queued jobs.
@@ -333,10 +475,11 @@ pub fn pick(
 }
 
 /// The queued jobs of all projects, first in, first out (a rerun keeps the
-/// `created_at` of its first try, and goes before a job of the same time).
+/// `created_at` of its first try, and goes before a job of the same time;
+/// the halves of a split go in the order of their `split_path`).
 pub fn queued(conn: &Connection) -> ApiResult<Vec<Job>> {
     let mut st = conn.prepare(&format!(
-        "SELECT {COLS} FROM jobs WHERE state = 'queued' ORDER BY created_at, attempt DESC, id"
+        "SELECT {COLS} FROM jobs WHERE state = 'queued' ORDER BY created_at, attempt DESC, split_path, id"
     ))?;
     let rows = st.query_map([], row)?.collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
@@ -406,10 +549,16 @@ pub fn startable(
 /// keeps its name as the key; the job then fails when it runs.
 fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
     let target = def.target.clone().unwrap_or_default();
-    match targets::get(conn, &target) {
-        Ok(row) => host_key(&target, &row.def),
+    let key = match targets::get(conn, &target) {
+        Ok(row) => row
+            .def
+            .host
+            .as_deref()
+            .and_then(|name| hosts::find(conn, name).ok().flatten())
+            .map_or_else(|| host_key(&target, &row.def), |h| h.id),
         Err(_) => target,
-    }
+    };
+    canonical_key(conn, &key).unwrap_or_else(|_| address_key(&key))
 }
 
 /// The host of the delivery target of `project`, its running jobs, and
@@ -451,7 +600,19 @@ pub fn host_caps(conn: &Connection) -> ApiResult<Vec<HostCap>> {
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+    let mut caps = std::collections::BTreeMap::<String, HostCap>::new();
+    for mut cap in rows {
+        cap.host = canonical_key(conn, &cap.host)?;
+        // Old aliases may each have a cap. Keep the stricter one until
+        // the operator explicitly replaces it through set_host_cap.
+        if caps
+            .get(&cap.host)
+            .is_none_or(|old| cap.heavy_jobs < old.heavy_jobs)
+        {
+            caps.insert(cap.host.clone(), cap);
+        }
+    }
+    Ok(caps.into_values().collect())
 }
 
 /// Set the cap of a host, or take it away (`None`: no cap).
@@ -464,7 +625,19 @@ pub fn set_host_cap(
     if host.is_empty() || host.len() > 253 || host.chars().any(|c| c.is_control() || c == '/') {
         return Err(ApiError::invalid(format!("bad host `{host}`")));
     }
+    let canonical = canonical_key(t, host)?;
+    let host = canonical.as_str();
     let old = host_caps(t)?.into_iter().find(|c| c.host == host);
+    let keys = {
+        let mut st = t.prepare("SELECT host FROM job_hosts")?;
+        st.query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for key in keys {
+        if canonical_key(t, &key)? == host {
+            t.execute("DELETE FROM job_hosts WHERE host = ?1", [key])?;
+        }
+    }
     match heavy_jobs {
         Some(0) => return Err(ApiError::invalid("`heavy_jobs` must be 1 or more")),
         Some(n) => {
@@ -507,84 +680,234 @@ fn emit(t: &mut Tx<'_>, j: &Job, change: &str) -> ApiResult<()> {
         j.card,
         j.state.as_str()
     );
-    t.emit(
-        EventDraft::new(
-            "job",
-            summary,
-            json!({"change": change, "project": j.project, "id": j.id, "card": j.card,
-                   "kind": j.kind, "state": j.state, "attempt": j.attempt,
-                   "outcome": j.outcome}),
-        )
-        .project(j.project.clone()),
-    )?;
+    let mut data = json!({"change": change, "project": j.project, "id": j.id, "card": j.card,
+                          "kind": j.kind, "state": j.state, "attempt": j.attempt,
+                          "outcome": j.outcome});
+    if !j.batch.is_empty() {
+        data["cards"] = json!(j.batch.iter().map(|c| &c.card).collect::<Vec<_>>());
+    }
+    t.emit(EventDraft::new("job", summary, data).project(j.project.clone()))?;
     Ok(())
 }
 
-/// Queue a job. A card has at most one open job.
-pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
-    if let Some(open) = open_of_card(t, &n.card)? {
-        return Err(ApiError::conflict(format!(
-            "card {} has a {} job {} that is {} already; cancel it first",
-            n.card,
-            open.kind.as_str(),
-            open.id,
-            open.state.as_str()
-        )));
+/// The most cards in one batch merge.
+pub const BATCH_MAX: usize = 32;
+
+/// The JSON text of a batch; `None` for a job of one card.
+fn batch_text(batch: &[BatchCard]) -> ApiResult<Option<String>> {
+    if batch.is_empty() {
+        return Ok(None);
     }
-    let id = ulid::Ulid::new().to_string();
+    serde_json::to_string(batch)
+        .map(Some)
+        .map_err(|e| ApiError::internal(format!("cannot store the batch: {e}")))
+}
+
+/// The row of a new queued job. `created_at` and `created_by` come from the
+/// first try for a rerun or a split.
+struct Insert<'a> {
+    id: String,
+    first: &'a BatchCard,
+    batch: &'a [BatchCard],
+    project: &'a str,
+    kind: JobKind,
+    repo: &'a str,
+    commit: Option<&'a str>,
+    attempt: i64,
+    parent: Option<&'a str>,
+    split_path: &'a str,
+    created_by: &'a str,
+    created_at: &'a str,
+}
+
+fn insert(t: &mut Tx<'_>, i: Insert<'_>) -> ApiResult<Job> {
     t.execute(
         "INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state, attempt,
-                           by_agent, created_by, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 1, ?8, ?9, ?10)",
+                           by_agent, created_by, created_at, batch, parent, split_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
-            id,
-            n.project,
-            n.card,
-            n.kind.as_str(),
-            n.repo,
-            n.branch,
-            n.commit,
-            n.by_agent,
-            t.actor,
-            now()
+            i.id,
+            i.project,
+            i.first.card,
+            i.kind.as_str(),
+            i.repo,
+            i.first.branch,
+            i.commit,
+            i.attempt,
+            i.first.by_agent,
+            i.created_by,
+            i.created_at,
+            batch_text(i.batch)?,
+            i.parent,
+            i.split_path
         ],
     )?;
-    let job = get(t, &id)?;
-    t.audit(
-        "job.create",
-        &id,
-        Some(&job.project),
-        json!({"card": job.card, "kind": job.kind, "repo": job.repo, "branch": job.branch,
-               "commit": job.commit}),
+    get(t, &i.id)
+}
+
+/// Queue a job. A card has at most one open job. A batch (two or more
+/// cards, a merge only) starts with the job's own card.
+pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
+    if !n.batch.is_empty() {
+        if n.kind != JobKind::Merge {
+            return Err(ApiError::invalid("only a merge job takes a batch"));
+        }
+        if n.batch.len() < 2 || n.batch[0].card != n.card {
+            return Err(ApiError::invalid(
+                "a batch has two or more cards and starts with the job's card",
+            ));
+        }
+        if n.batch.len() > BATCH_MAX {
+            return Err(ApiError::invalid(format!(
+                "a batch has at most {BATCH_MAX} cards"
+            )));
+        }
+        let mut seen = HashSet::new();
+        for c in &n.batch {
+            if !seen.insert(c.card.as_str()) {
+                return Err(ApiError::invalid(format!(
+                    "card {} is twice in the batch",
+                    c.card
+                )));
+            }
+        }
+    }
+    let first = BatchCard {
+        card: n.card.clone(),
+        branch: n.branch.clone(),
+        by_agent: n.by_agent.clone(),
+        outcome: None,
+        note: None,
+    };
+    let cards: Vec<&str> = if n.batch.is_empty() {
+        vec![n.card.as_str()]
+    } else {
+        n.batch.iter().map(|c| c.card.as_str()).collect()
+    };
+    for card in cards {
+        if let Some(open) = open_of_card(t, card)? {
+            return Err(ApiError::conflict(format!(
+                "card {card} has a {} job {} that is {} already; cancel it first",
+                open.kind.as_str(),
+                open.id,
+                open.state.as_str()
+            )));
+        }
+    }
+    let (actor, at) = (t.actor.to_owned(), now());
+    let job = insert(
+        t,
+        Insert {
+            id: ulid::Ulid::new().to_string(),
+            first: &first,
+            batch: &n.batch,
+            project: &n.project,
+            kind: n.kind,
+            repo: &n.repo,
+            commit: n.commit.as_deref(),
+            attempt: 1,
+            parent: None,
+            split_path: "",
+            created_by: &actor,
+            created_at: &at,
+        },
+    )?;
+    let mut detail = json!({"card": job.card, "kind": job.kind, "repo": job.repo,
+                            "branch": job.branch, "commit": job.commit});
+    if !job.batch.is_empty() {
+        detail["batch"] = json!(job.batch.iter().map(|c| &c.card).collect::<Vec<_>>());
+    }
+    t.audit("job.create", &job.id, Some(&job.project), detail)?;
+    emit(t, &job, "queued")?;
+    Ok(job)
+}
+
+/// Queue the one rerun of a failed job: attempt 2, at the front. `cards`
+/// is the batch to run again (the cards that did not conflict); `None`
+/// keeps the job's cards.
+pub fn rerun(t: &mut Tx<'_>, failed: &Job, cards: Option<&[BatchCard]>) -> ApiResult<Job> {
+    let cards = clean(cards.map_or_else(|| failed.cards(), <[_]>::to_vec));
+    let Some(first) = cards.first() else {
+        return Err(ApiError::internal("a rerun without cards"));
+    };
+    let batch = if cards.len() > 1 { &cards[..] } else { &[] };
+    let job = insert(
+        t,
+        Insert {
+            id: ulid::Ulid::new().to_string(),
+            first,
+            batch,
+            project: &failed.project,
+            kind: failed.kind,
+            repo: &failed.repo,
+            commit: failed.commit.as_deref(),
+            attempt: failed.attempt + 1,
+            parent: failed.parent.as_deref(),
+            split_path: &failed.split_path,
+            created_by: &failed.created_by,
+            created_at: &failed.created_at,
+        },
     )?;
     emit(t, &job, "queued")?;
     Ok(job)
 }
 
-/// Queue the one rerun of a failed job: attempt 2, at the front.
-pub fn rerun(t: &mut Tx<'_>, failed: &Job) -> ApiResult<Job> {
-    let id = ulid::Ulid::new().to_string();
-    t.execute(
-        "INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state, attempt,
-                           by_agent, created_by, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11)",
-        params![
-            id,
-            failed.project,
-            failed.card,
-            failed.kind.as_str(),
-            failed.repo,
-            failed.branch,
-            failed.commit,
-            failed.attempt + 1,
-            failed.by_agent,
-            failed.created_by,
-            failed.created_at
-        ],
-    )?;
-    let job = get(t, &id)?;
-    emit(t, &job, "queued")?;
-    Ok(job)
+/// The cards without the outcome of an earlier run.
+fn clean(cards: Vec<BatchCard>) -> Vec<BatchCard> {
+    cards
+        .into_iter()
+        .map(|c| BatchCard {
+            outcome: None,
+            note: None,
+            ..c
+        })
+        .collect()
+}
+
+/// Split the cards of a red batch (two or more) into two halves, each
+/// queued at the front with `parent` set to the red job. The left half
+/// and all the splits below it run before the right half: their
+/// `split_path` (the red job's, then `0` or `1`) sorts first at the same
+/// `created_at` (TER-112 review, F1). A merge runs alone in its project,
+/// so the right half merges onto `next` with the left half in it. A half
+/// of one card is a job of one card.
+pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, Job)> {
+    if cards.len() < 2 {
+        return Err(ApiError::internal("a split needs two or more cards"));
+    }
+    let cards = clean(cards.to_vec());
+    let (left, right) = cards.split_at(cards.len() / 2);
+    let mut out = Vec::new();
+    for (side, half) in ["0", "1"].into_iter().zip([left, right]) {
+        let batch = if half.len() > 1 { half } else { &[] };
+        let path = format!("{}{side}", red.split_path);
+        let job = insert(
+            t,
+            Insert {
+                id: ulid::Ulid::new().to_string(),
+                first: &half[0],
+                batch,
+                project: &red.project,
+                kind: red.kind,
+                repo: &red.repo,
+                commit: None,
+                attempt: 1,
+                parent: Some(&red.id),
+                split_path: &path,
+                created_by: &red.created_by,
+                created_at: &red.created_at,
+            },
+        )?;
+        emit(t, &job, "queued")?;
+        out.push(job);
+    }
+    let right = out
+        .pop()
+        .ok_or_else(|| ApiError::internal("no right half"))?;
+    let left = out
+        .pop()
+        .ok_or_else(|| ApiError::internal("no left half"))?;
+    Ok((left, right))
 }
 
 /// Mark a queued job as running on `host`. False when it is no longer queued (a
@@ -613,7 +936,7 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
     };
     let n = t.execute(
         "UPDATE jobs SET state = ?2, outcome = ?3, exit_code = ?4, tail = ?5, head = ?6,
-                         ended_at = ?7
+                         ended_at = ?7, batch = COALESCE(?8, batch)
          WHERE id = ?1 AND state = 'running'",
         params![
             id,
@@ -622,7 +945,11 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
             end.exit_code,
             end.tail.as_deref().map(clip_tail),
             end.head,
-            now()
+            now(),
+            match &end.batch {
+                Some(b) => batch_text(b)?,
+                None => None,
+            }
         ],
     )?;
     if n == 0 {
@@ -734,8 +1061,16 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
 pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
     let ahead: i64 = conn.query_row(
         "SELECT count(*) FROM jobs WHERE project = ?1 AND state = 'queued'
-           AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))",
-        params![job.project, job.created_at, job.id],
+           AND (created_at < ?2 OR (created_at = ?2 AND attempt > ?4)
+                OR (created_at = ?2 AND attempt = ?4
+                    AND (split_path < ?5 OR (split_path = ?5 AND id < ?3))))",
+        params![
+            job.project,
+            job.created_at,
+            job.id,
+            job.attempt,
+            job.split_path
+        ],
         |r| r.get(0),
     )?;
     let running: i64 = conn.query_row(
@@ -772,6 +1107,9 @@ mod tests {
             started_at: None,
             ended_at: None,
             host: None,
+            batch: Vec::new(),
+            parent: None,
+            split_path: String::new(),
         }
     }
 
@@ -927,5 +1265,32 @@ mod tests {
             );
         }
         assert_eq!(host_key("t", &def(json!({"kind": "ssh"}))), "t");
+        assert_eq!(
+            address_key("ci@localhost:2222"),
+            address_key("localhost:22")
+        );
+        assert_eq!(address_key("BUILD.INVALID"), "build.invalid");
+        assert_eq!(address_key("ci@127.0.0.1:2222"), "127.0.0.1");
+    }
+
+    #[test]
+    fn missing_target_and_agent_keys_match_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        let def: DeliveryDef =
+            serde_json::from_value(json!({"target": "MiXeD.INVALID", "recipe": "true"})).unwrap();
+        assert_eq!(
+            host_of(&conn, &def),
+            canonical_key(&conn, "MiXeD.INVALID").unwrap()
+        );
+        let target: TargetDef =
+            serde_json::from_value(json!({"kind": "host", "host": "MiXeD.INVALID"})).unwrap();
+        conn.execute("INSERT INTO targets (name, def, source, state, snapshots, created_at, updated_at) VALUES ('box', ?1, 'api', 'unknown', '[]', '', '')", [serde_json::to_string(&target).unwrap()]).unwrap();
+        let def: DeliveryDef =
+            serde_json::from_value(json!({"target": "box", "recipe": "true"})).unwrap();
+        assert_eq!(
+            host_of(&conn, &def),
+            canonical_key(&conn, "MiXeD.INVALID").unwrap()
+        );
     }
 }

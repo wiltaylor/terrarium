@@ -2157,6 +2157,28 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE questions ADD COLUMN thread TEXT;
     CREATE INDEX questions_thread ON questions(thread);
     "#,
+    // 75: batch merges (TER-112, `crate::jobs`). `jobs.batch` is the JSON
+    // list of the cards of a merge job that merges several cards in order
+    // ([{card, branch, by_agent, outcome?, note?}]); `null` for a job of
+    // one card. `jobs.parent` is the job that a split of a red batch came
+    // from. `jobs.split_path` orders the halves of the splits of one root
+    // batch (`0` left, `1` right, per level; empty for no split).
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE jobs ADD COLUMN batch TEXT;
+    ALTER TABLE jobs ADD COLUMN parent TEXT;
+    ALTER TABLE jobs ADD COLUMN split_path TEXT NOT NULL DEFAULT '';
+    "#,
+    // 76: pin job-host DNS identities across queue ticks and restarts.
+    // Follows 74 (TER-91) and 75 (TER-112). Keep this entry self-contained
+    // and renumber at merge if the integration order changes.
+    r#"
+    CREATE TABLE job_host_keys (
+        hostname TEXT PRIMARY KEY,
+        host_key TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

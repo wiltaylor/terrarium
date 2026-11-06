@@ -1284,6 +1284,8 @@ to the audit log with the agent's ID.
 | Read the calendar (§15.8; the global events too) | own project | own project | all |
 | Add calendar events; change and remove any (§15.8; a global event needs sysadmin) | own events, with the policy field `calendar_write` | in project | anywhere |
 | Grant and revoke `calendar_write` (§15.8) | no | in project | anywhere |
+| Open an Inbox thread (api.md §6.13; own project or `global`; the template may not exceed the opener's rights, A1) | with `thread_open` | with `thread_open` | with `thread_open`, anywhere |
+| Grant and revoke `thread_open` (not on itself, not on an admin) | no | members in project | anywhere |
 | Create and delete projects | no | no | yes |
 | Define global targets | no | no | yes |
 | List host agents | yes | yes | yes |

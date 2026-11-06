@@ -29,6 +29,7 @@ pub mod system;
 pub mod system_prompts;
 pub mod templates;
 pub mod test_runs;
+pub mod threads;
 pub mod tools;
 pub mod update;
 pub mod waits;
@@ -117,6 +118,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Wait { command } => waits::wait(ctx, command).await,
         Command::Question { command } => questions::question(ctx, command).await,
         Command::Notify(args) => questions::notify(ctx, args).await,
+        Command::Thread { command } => threads::thread(ctx, command).await,
         Command::Watch { command, args } => waits::watch(ctx, command.as_ref(), args).await,
         Command::Shell { target } => remote::shell(ctx, target).await,
         Command::Cp { src, dst } => remote::cp(ctx, src, dst).await,
