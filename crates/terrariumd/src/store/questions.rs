@@ -1999,6 +1999,7 @@ mod tests {
             retracted_by: None,
             tool_run: None,
             used_at: None,
+            hold_card: None,
             thread_id: "T1".into(),
             thread: None,
             created_at: "t".into(),
