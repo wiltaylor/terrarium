@@ -59,12 +59,20 @@ Do not spawn:
 ## How to spawn
 
 ```sh
-terrarium agent spawn <template> --task "<task>" [--name <name>] [--wait [--timeout 1h]]
+terrarium agent spawn <template> --task "<task>" [--name <name>] [--wait [--timeout 1h]] [--target <t>]... [--grant <secret>[:level]]...
 terrarium agent spawn <template> --task-file task.md
 terrarium agent spawn <template> --task-file - < task.md
 ```
 
 - The name is `<you>-<template>-<n>` unless you give `--name`.
+- `--target <name>` (repeat for more) gives it a target that you may use:
+  one in your policy, or one that you hold by a lease (it gets a lease
+  that ends no later than yours). An exclusive lease cannot be shared.
+- `--grant <secret>[:use|:read]` (repeat for more) gives it a secret that
+  you hold, at most at your level. A `read` grant keeps your env var.
+- A template with no account uses your account and pool.
+- A target or secret that you do not hold fails with `403` and its name.
+  The leases and grants end when the ephemeral agent finishes.
 - The task is the first turn of the ephemeral agent. The turn names you as
   the sender.
 - With `--wait`, you get a wait on the finish. End your turn after the

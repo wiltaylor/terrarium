@@ -3345,7 +3345,7 @@ for any agent.
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
+| `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?, "targets"?, "grants"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
 | `GET /api/agents/{owner}/spawned` | `?limit=&cursor=`; for `operator`: `?project=` | `200` the spawns of the owner, running and finished, newest first, paged (§2.4). |
 | `GET /api/spawns/{id}` | | `200` one spawn, also after the finish. |
 | `POST /api/agents/{id}/done` | `{"result"?}` | `202` the spawn. The close follows after 3 s. |
@@ -3370,6 +3370,28 @@ or the operator may spawn for an owner. The checks, in order:
   `max_per_day`: else `409 conflict`, with the name of the limit.
 - The roles and the policy of the template need the rights of a create by
   the caller (§6.1); a disabled subscription is `422 invalid` (§16.2).
+- Each of `targets` and `grants` is a list of at most 32 entries; an
+  empty entry or a bad grant is `422 invalid`. Each entry needs a right of
+  the owner (below), also when a lead or the operator spawns for it.
+
+**Rights from the owner** (TER-65, `crates/terrariumd/src/spawn_rights.rs`).
+A spawn gives the ephemeral agent rights beyond its template, each one
+checked against the owner at the spawn. None goes past what the owner
+holds.
+
+| Field | Entry | The ephemeral agent gets |
+|---|---|---|
+| `targets` | A target name: global, or of the project. | A target in the owner's `policy.targets` goes into its `policy.targets`, also a global one that a project_admin could not add by `agent set`. A target that the owner holds by an active lease gives it a lease (`target.grant`) that ends with the owner's lease or its own deadline, whichever is first. An exclusive lease of the owner is `409 conflict`. Any other target is `403 forbidden`, with the target named; an unknown one is `404`. |
+| `grants` | `<name>` or `<scope>/<name>` (the project secret first, then the global one), with `:use` or `:read`. | An agent grant (`secret.grant`, with `spawn_owner`) at that level, when the owner holds the secret (its own grant or its project's) at that level or higher: else `403 forbidden`, with the secret and the levels named. No level: the kind's default, at most the owner's. A `read` grant keeps the owner's env var name. |
+
+A template with no `subscription` and no `subscription_pool` takes the
+owner's subscription and pool when the owner runs the same harness, so
+the quota switch (§16.3) covers the ephemeral agent. The operator as owner
+holds every right: a target or secret needs only to exist and be in reach
+of the project. The audit row `agent.spawn` has `rights` (`targets`,
+`leases`, `grants`, no value), `subscription`, and `subscription_pool`.
+The close revokes the leases of the ephemeral agent, and the removal of
+its row deletes its grants, so no right outlives it.
 
 The name is `<owner>-<template>-<n>`, with the lowest `n` that no agent
 and no spawn of the project has, unless the body gives `name`. The agent
