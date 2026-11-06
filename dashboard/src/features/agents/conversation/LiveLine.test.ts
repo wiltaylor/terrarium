@@ -39,7 +39,7 @@ afterEach(() => {
 const agent = (status: AgentStatus, more: Partial<Agent> = {}) =>
   ({ id: "A1", name: "w1", project: "p", harness: "claude", status, ...more }) as unknown as Agent;
 
-const turn = (id: number, body: string): QueuedTurn => ({ id, text: `[User] ${body}`, body, created_at: "2026-11-06T01:00:00.000Z" });
+const turn = (id: number, body: string): QueuedTurn => ({ id, source: "store", text: `[User] ${body}`, body, created_at: "2026-11-06T01:00:00.000Z" });
 
 describe("footerState", () => {
   it("names each status", () => {
@@ -116,7 +116,7 @@ describe("the queued turns", () => {
     await vi.waitFor(() => expect(items()).toEqual(["first", "second"]));
     expect(queued).toHaveBeenCalledWith("A1");
     button(1, "Edit").click();
-    expect(removeQueued).toHaveBeenCalledWith("A1", 2);
+    expect(removeQueued).toHaveBeenCalledWith("A1", 2, "store");
     await vi.waitFor(() => expect(items()).toEqual(["first"]));
     expect(box().value).toBe("second");
     // A second edit joins the draft on a new line.
@@ -132,7 +132,7 @@ describe("the queued turns", () => {
     const { items, button, box } = mountConversation(agent("stopped", { queued: 2, paused: true }));
     await vi.waitFor(() => expect(items()).toEqual(["first", "second"]));
     button(0, "Remove").click();
-    expect(removeQueued).toHaveBeenCalledWith("A1", 1);
+    expect(removeQueued).toHaveBeenCalledWith("A1", 1, "store");
     await vi.waitFor(() => expect(items()).toEqual(["second"]));
     expect(box().value).toBe("");
   });

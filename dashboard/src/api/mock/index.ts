@@ -2723,7 +2723,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           audit("agent.send", a.id, a.project, { chars: text.length });
           if (!LIVE.includes(a.status) || a.paused) {
             // The turn waits; the agent wakes (unless paused) and then takes it.
-            (queuedTurns[a.id] ??= []).push({ id: ++nextQueued, text: `[User] ${text}`, body: text, created_at: iso() });
+            (queuedTurns[a.id] ??= []).push({ id: ++nextQueued, source: "store", text: `[User] ${text}`, body: text, created_at: iso() });
             a.queued = (a.queued ?? 0) + 1;
             if (!a.paused) later(() => wake(a, "turn"), 0);
             return { accepted: true, queued: true };
@@ -2732,9 +2732,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           return { accepted: true };
         }),
       queued: (id) => reply(() => ({ items: clone(queuedTurns[agent(id).id] ?? []) })),
-      removeQueued: (id, turn) =>
+      removeQueued: (id, turn, source = "store") =>
         reply(() => {
           const a = agent(id);
+          if (source !== "store") fail(422, "invalid", `unknown queue \`${source}\`: give \`store\` (the source of the turn in the list)`);
           const list = queuedTurns[a.id] ?? [];
           const i = list.findIndex((t) => t.id === Number(turn));
           if (i < 0) fail(404, "not_found", `turn ${turn} does not wait for the agent (it went out, or it never was)`);

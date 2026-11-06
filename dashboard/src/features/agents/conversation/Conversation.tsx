@@ -178,7 +178,7 @@ export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => voi
     if (busy() !== null) return;
     setBusy(turn.id);
     try {
-      await api.agents.removeQueued(props.agent.id, turn.id);
+      await api.agents.removeQueued(props.agent.id, turn.id, turn.source);
       setItems((cur) => cur.filter((t) => t.id !== turn.id));
       setError(null);
       if (edit) props.onEdit(turn.body);
@@ -198,7 +198,7 @@ export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => voi
           <ol class="convo-queued-list">
             <For each={items()}>
               {(turn) => (
-                <li class="convo-queued-item">
+                <li class="convo-queued-item" data-source={turn.source}>
                   <span class="convo-queued-text">{turn.body}</span>
                   <span class="row convo-queued-actions">
                     <button type="button" class="small" disabled={busy() !== null} onClick={() => void take(turn, true)}>

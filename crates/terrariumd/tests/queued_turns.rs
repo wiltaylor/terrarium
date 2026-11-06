@@ -87,6 +87,7 @@ async fn the_list_shows_the_turns_in_order() {
     let items = queued(&td, &w).await;
     assert_eq!(bodies(&items), ["first", "second", "third"]);
     assert_eq!(items[0]["text"], "[User] first");
+    assert_eq!(items[0]["source"], "store");
     assert!(items[0]["created_at"].as_str().unwrap().ends_with('Z'));
     let ids: Vec<i64> = items.iter().map(|i| i["id"].as_i64().unwrap()).collect();
     assert!(ids.windows(2).all(|p| p[0] < p[1]), "{ids:?}");
@@ -117,6 +118,9 @@ async fn a_remove_keeps_the_order_and_needs_a_lead() {
     assert_eq!(r.status, 204, "{}", r.body);
     let r = td.delete(&path).await;
     assert_eq!(r.status, 404, "{}", r.body);
+    td.delete(&format!("{path}?source=runner"))
+        .await
+        .err(422, "invalid");
     let r = td.delete(&format!("/api/agents/{w}/queued/{first}")).await;
     assert_eq!(r.status, 204, "{}", r.body);
     assert_eq!(bodies(&queued(&td, &w).await), ["third"]);

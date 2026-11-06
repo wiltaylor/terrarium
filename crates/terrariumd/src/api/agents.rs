@@ -1403,6 +1403,9 @@ async fn set_roles(
 #[derive(Debug, Serialize)]
 struct QueuedView {
     id: i64,
+    /// Where the turn waits: `store` (the `queued_turns` table, for an
+    /// agent that does not run). TER-66 adds the live queues.
+    source: &'static str,
     /// The turn as it will be typed, with its tag (`[User] ...`).
     text: String,
     /// The text after the tag: what the composer gets for an edit.
@@ -1421,6 +1424,17 @@ fn untagged(text: &str) -> &str {
         return after.strip_prefix(' ').unwrap_or(after);
     }
     text
+}
+
+/// The `source` of a turn in the store (`queued_turns`).
+const QUEUE_STORE: &str = "store";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueuedQuery {
+    /// The queue of the turn (`source` of the list). Default: `store`.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// `GET /api/agents/{id}/queued` (TER-54): the turns that wait in the
@@ -1445,6 +1459,7 @@ async fn queued(
             let text = redactor.redact_string_as(t.text, &view).0;
             QueuedView {
                 id: t.id,
+                source: QUEUE_STORE,
                 body: untagged(&text).to_owned(),
                 text,
                 created_at: t.created_at,
@@ -1463,8 +1478,16 @@ async fn remove_queued(
     State(state): State<Shared>,
     actor: Actor,
     Path((id, turn)): Path<(String, i64)>,
+    ApiQuery(q): ApiQuery<QueuedQuery>,
 ) -> ApiResult<StatusCode> {
     let a = load(&state, &actor, id).await?;
+    if let Some(s) = q.source.as_deref()
+        && s != QUEUE_STORE
+    {
+        return Err(ApiError::invalid(format!(
+            "unknown queue `{s}`: give `store` (the source of the turn in the list)"
+        )));
+    }
     policy::admin_project(&actor, &a.agent.project, "removing a queued turn")?;
     let lock = state.lifecycle.turn_lock(agent_id(&a));
     let _held = lock.lock().await;
