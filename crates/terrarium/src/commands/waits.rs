@@ -241,6 +241,32 @@ pub async fn run(ctx: &Ctx, cmd: Option<&RunCmd>, a: &RunArgs) -> anyhow::Result
                 .await?;
             ctx.emit(&v, |c, v| {
                 c.line(format!("killed the run of wait {}", field(v, "id")));
+                let k = &v["kill"];
+                let pids = |key: &str| -> String {
+                    k[key]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default()
+                };
+                if let Some(e) = k["error"].as_str() {
+                    c.line(format!("the kill on the target failed: {e}"));
+                } else if k.is_object() && k["pid"].is_null() {
+                    c.line("no process group of the run on the target");
+                } else if k.is_object() {
+                    c.line(format!("TERM: {}", pids("term")));
+                    if !pids("kill").is_empty() {
+                        c.line(format!("KILL after the grace time: {}", pids("kill")));
+                    }
+                    match pids("left").as_str() {
+                        "" => c.line("no process of the run is left"),
+                        left => c.line(format!("still running on the target: {left}")),
+                    }
+                }
             })
         }
     }

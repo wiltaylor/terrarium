@@ -497,13 +497,16 @@ struct CancelQuery {
 }
 
 /// `DELETE /api/waits/{id}[?kill=true]`: cancel an open wait. `kill` also
-/// ends the run of a `process` wait; without it, the run goes on.
+/// ends the run of a `process` wait; without it, the run goes on. A kill
+/// ends the process group and session of the run on the target (`TERM`,
+/// then `KILL` after a grace time), and the answer has the report as
+/// `kill`: `{pid, term, kill, left}` (TER-99).
 async fn cancel(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
     ApiQuery(q): ApiQuery<CancelQuery>,
-) -> ApiResult<Json<Wait>> {
+) -> ApiResult<Json<Value>> {
     let w = find_wait(&state, &actor, id).await?;
     policy::manage_waits(&actor, &w.agent, &w.project, "cancelling a wait")?;
     if w.state != WaitState::Open {
@@ -528,12 +531,22 @@ async fn cancel(
             )
         })
         .await?;
-    if q.kill.unwrap_or(false) && w.kind == WaitKind::Process {
-        rt::kill_run(&state, &w);
-    }
+    let report = if q.kill.unwrap_or(false) && w.kind == WaitKind::Process {
+        rt::kill_run_report(&state, &w).await
+    } else {
+        None
+    };
     let id = w.id.clone();
     match done {
-        Some(_) => Ok(Json(state.db.read(move |c| waits::get(c, &id)).await?)),
+        Some(_) => {
+            let wait = state.db.read(move |c| waits::get(c, &id)).await?;
+            let mut v = serde_json::to_value(wait)
+                .map_err(|e| ApiError::internal(format!("cannot encode the wait: {e}")))?;
+            if let (Some(r), Value::Object(m)) = (report, &mut v) {
+                m.insert("kill".into(), r);
+            }
+            Ok(Json(v))
+        }
         None => Err(ApiError::conflict(format!("wait {} ended meanwhile", w.id))),
     }
 }
