@@ -300,6 +300,13 @@ pub fn kill_run(state: &Shared, w: &Wait) {
     }
 }
 
+/// [`kill_run`], and wait for the report of the kill on the target
+/// ([`crate::run_kill`]): `{pid, term, kill, left}` or `{error}`.
+pub async fn kill_run_report(state: &Shared, w: &Wait) -> Option<Value> {
+    let s = w.session().and_then(|s| state.executor.find(s))?;
+    s.kill_and_report().await
+}
+
 /// The result of a process wait from the end of its run.
 fn run_result(end: &End, started: Instant, tail: Option<&TailBuf>) -> (WaitState, Value) {
     let mut r = match end {

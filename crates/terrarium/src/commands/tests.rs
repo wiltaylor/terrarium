@@ -1522,6 +1522,32 @@ async fn memory() {
         vec![req(Get, "/api/memories/MEM-1")],
     )
     .await;
+    // With `-p`, the ID is the project's: `project/MEM-1` in the path.
+    let out = ok(
+        true,
+        &["-p", "other", "mem", "show", "MEM-1"],
+        vec![(
+            200,
+            json!({"depth": 1,
+                   "nodes": [{"id": "MEM-1", "title": "Other's MEM-1", "body": "b", "tags": []}],
+                   "edges": []}),
+        )],
+        vec![(
+            Get,
+            "/api/memories/other%2FMEM-1/graph",
+            vec![("depth", "1")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("MEM-1  Other's MEM-1"), "{out}");
+    ok(
+        true,
+        &["-p", "other", "mem", "show", "MEM-1", "--depth", "0"],
+        vec![(200, json!({}))],
+        vec![req(Get, "/api/memories/other%2FMEM-1")],
+    )
+    .await;
     let new_body = json!({"title": "X is Y", "body": "why", "tags": ["a"],
         "sources": [{"kind": "card", "ref": "TER-1"}], "links": [{"to": "MEM-2", "relation": "supports"}]});
     let args = [

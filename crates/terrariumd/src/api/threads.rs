@@ -293,7 +293,7 @@ async fn close(
     let b: CloseBody = if body.iter().all(u8::is_ascii_whitespace) {
         CloseBody::default()
     } else {
-        serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
     };
     let by = actor.address();
     let label = actor.label();
