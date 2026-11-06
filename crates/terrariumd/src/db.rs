@@ -1985,6 +1985,45 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX questions_agent ON questions(agent, status);
     CREATE INDEX questions_status ON questions(status, project);
     "#,
+    // 68: the job queue of a project (TER-71, `crate::jobs`). A job
+    // validates a card commit, or merges a card branch onto `next` and
+    // validates the result. Jobs start first in, first out, at most the
+    // project's `[delivery] slots` at a time. `attempt` is 1, or 2 for the
+    // one rerun of a failed job. `outcome` says why a job failed (`red`,
+    // `conflict`, `error`). `project_delivery` holds the queue config of a
+    // project (JSON `DeliveryDef`). Self-contained: when another branch
+    // takes this number, move this entry to the end of the list.
+    r#"
+    CREATE TABLE jobs (
+        id          TEXT PRIMARY KEY,
+        project     TEXT NOT NULL,
+        card        TEXT NOT NULL,
+        kind        TEXT NOT NULL CHECK (kind IN ('validate', 'merge')),
+        repo        TEXT NOT NULL,
+        branch      TEXT NOT NULL,
+        commit_sha  TEXT,
+        state       TEXT NOT NULL DEFAULT 'queued'
+            CHECK (state IN ('queued', 'running', 'passed', 'failed', 'cancelled')),
+        attempt     INTEGER NOT NULL DEFAULT 1,
+        outcome     TEXT,
+        exit_code   INTEGER,
+        tail        TEXT,
+        head        TEXT,
+        by_agent    TEXT,
+        created_by  TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        started_at  TEXT,
+        ended_at    TEXT
+    );
+    CREATE INDEX jobs_project_state ON jobs(project, state, created_at);
+    CREATE INDEX jobs_card ON jobs(card);
+    CREATE TABLE project_delivery (
+        project    TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE ON UPDATE CASCADE,
+        def        TEXT NOT NULL,                     -- JSON DeliveryDef
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
