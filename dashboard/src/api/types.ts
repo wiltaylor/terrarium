@@ -1924,6 +1924,29 @@ export interface Pin {
   pinned_at: string;
 }
 
+/** One project folder of the sidebar (`GET /api/project-folders`, docs/api.md §6.12). `parent_id` null is the root. */
+export interface ProjectFolder {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The folder of one project (docs/api.md §6.12). A project with no placement sits at the root, after the placed ones. */
+export interface ProjectPlacement {
+  project: string;
+  folder_id: string | null;
+  position: number;
+}
+
+/** `GET /api/project-folders`: every folder and every placed project. */
+export interface ProjectFolderTree {
+  folders: ProjectFolder[];
+  placements: ProjectPlacement[];
+}
+
 /** `POST /api/agents/{id}/attachments` (docs/api.md §6.5): an image in the agent's workspace. */
 export interface Attachment {
   /** The path of the file as the agent sees it (in the sandbox). Never the host path. */

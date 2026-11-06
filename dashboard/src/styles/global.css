@@ -3996,3 +3996,75 @@ pre.spawn-text {
 .card-file-image { max-width: 100%; height: auto; display: block; }
 .card-file-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font-size: 12px; }
 p.warn { color: var(--warn); margin: 0; }
+/* Project folders in the sidebar (TER-48): the folder row, the drop target of a drag, and the "⋯" menu of a row. */
+.tree-folder-icon {
+  flex: none;
+  color: var(--muted);
+}
+.tree-row.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+  background: var(--accent-soft);
+}
+.tree-menu {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
+.tree-menu-button {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  opacity: 0.55;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+.tree-row:hover .tree-menu-button,
+.tree-menu-button[aria-expanded="true"] {
+  opacity: 1;
+}
+.tree-menu-button:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.tree-menu-list {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  min-width: 160px;
+  margin: 2px 0 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.18);
+}
+.tree-menu-list button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+}
+.tree-menu-list button:hover {
+  background: var(--surface-2);
+}
+.folder-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 50vh;
+  overflow: auto;
+}
+.folder-choice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}

@@ -153,12 +153,13 @@ export function toggle(list: readonly string[], name: string): string[] {
 /**
  * Drop the names of projects that are gone, and their Agents and Repos nodes. An empty
  * `known` list (not loaded yet) keeps all. The root marker stays. The old
- * Agents root goes always.
+ * Agents root goes always. A folder (`folder:<id>`) stays while `folders`
+ * is null (not loaded, or no access), else while its ID is in `folders`.
  */
-export function prune(list: readonly string[], known: readonly string[]): string[] {
-  const kept = list.filter((n) => n !== OLD_AGENTS_ROOT);
+export function prune(list: readonly string[], known: readonly string[], folders: readonly string[] | null = null): string[] {
+  const kept = list.filter((n) => n !== OLD_AGENTS_ROOT && (folders === null || !n.startsWith("folder:") || folders.includes(n.slice(7))));
   if (known.length === 0) return kept;
-  return kept.filter((n) => n === ROOT_CLOSED || known.includes(n) || known.includes(projectOfNode(n) ?? ""));
+  return kept.filter((n) => n === ROOT_CLOSED || n.startsWith("folder:") || known.includes(n) || known.includes(projectOfNode(n) ?? ""));
 }
 
 /** True for the pages under the Projects root: the cards (/projects) and every /p/<name>/... page. */
@@ -261,8 +262,8 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
       open(PROJECTS_ROOT);
       if (p) open(p);
     },
-    prune: (known: readonly string[]) => {
-      const next = prune(list(), known);
+    prune: (known: readonly string[], folders: readonly string[] | null = null) => {
+      const next = prune(list(), known, folders);
       if (next.length !== list().length) write(next);
     },
   };

@@ -1985,6 +1985,33 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX questions_agent ON questions(agent, status);
     CREATE INDEX questions_status ON questions(status, project);
     "#,
+    // 68: project folders of the dashboard sidebar (TER-48, docs/api.md
+    // §6.12, `crate::store::project_folders`). Folders nest by
+    // `parent_id` (NULL is the root). A project's place is a row in
+    // `project_placements`; a project with no row sits at the root. The
+    // projects table is not touched: its rows come from definition files.
+    // The cascade removes the place of a deleted project. A folder delete
+    // moves its content up in the store before the row goes, so the
+    // `parent_id` foreign keys have no action. Self-contained: when
+    // another branch takes this number, move this entry to the end of the
+    // list.
+    r#"
+    CREATE TABLE project_folders (
+        id         TEXT PRIMARY KEY,
+        name       TEXT NOT NULL,
+        parent_id  TEXT REFERENCES project_folders(id),
+        position   INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX project_folders_parent ON project_folders(parent_id, position);
+    CREATE TABLE project_placements (
+        project   TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,
+        folder_id TEXT REFERENCES project_folders(id),
+        position  INTEGER NOT NULL
+    );
+    CREATE INDEX project_placements_folder ON project_placements(folder_id, position);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
