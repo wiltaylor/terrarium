@@ -11,6 +11,7 @@ import { Empty, ErrorBanner } from "../../components/ui";
 import { api, events } from "../../stores";
 import { cardHref } from "../inbox/questions";
 import { assigneeText, byProject, columnLabel, etaText, statusTone, summary } from "./active";
+import { idleBadge } from "../../lib/idle";
 
 /** The section. `now` drives the ETA countdown. */
 export function ActiveCards(props: { now: number }) {
@@ -95,6 +96,16 @@ export function ActiveCards(props: { now: number }) {
                             </Show>{" "}
                             <Show when={c.assignee_status}>
                               <span class={`chip ${statusTone(c.assignee_status)}`}>{c.assignee_status}</span>
+                            </Show>
+                            <Show when={idleBadge(c, props.now)}>
+                              {(b) => (
+                                <>
+                                  {" "}
+                                  <span class="chip warn idle-badge" title={b().title} aria-label={b().title}>
+                                    {b().label}
+                                  </span>
+                                </>
+                              )}
                             </Show>
                           </td>
                           <td class="small">

@@ -16,6 +16,21 @@ export const AGENT_STATUSES = [
 ] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
+/** The queue of a queued turn. */
+export type QueuedSource = "store";
+
+/** One turn that waits in the store for its agent's wake (`GET /api/agents/{id}/queued`, TER-54). */
+export interface QueuedTurn {
+  id: number;
+  /** Where the turn waits: `store` (the daemon's queue for an agent that does not run). TER-66 adds the live queues. */
+  source: QueuedSource;
+  /** The turn as it will be typed, with its tag (`[User] ...`). */
+  text: string;
+  /** The text after the tag: what the composer gets for an edit. */
+  body: string;
+  created_at: string;
+}
+
 /** Roles above `member`. The daemon drops `member`; it is implicit. */
 export type Role = "sysadmin" | "project_admin" | "member" | "architect";
 export const GRANTABLE_ROLES = ["project_admin", "sysadmin", "architect"] as const;
@@ -287,6 +302,8 @@ export interface Project {
   description?: string;
   card_prefix: string;
   source?: Source;
+  /** The idle alert (TER-67): `off` or a duration such as `15m`. Absent: the default, 15m. */
+  idle_alert?: string;
   created_at: string;
   updated_at?: string;
 }
@@ -1626,6 +1643,8 @@ export interface Card {
   done_at?: string | null;
   /** The latest test run linked to the card (docs/api.md, test runs). Absent when no run is linked. */
   tests?: CardTests;
+  /** The idle mark (docs/api.md §6.2 "Idle alert", TER-67): the assignee rests with no wait since this time, past the project's idle alert, and the leads were told. */
+  idle_since?: string | null;
 }
 
 /** A card of `GET /api/cards` (docs/api.md §8, TER-43): a card in the working or research column of a board, with its column kind and the status of its assignee agent. */

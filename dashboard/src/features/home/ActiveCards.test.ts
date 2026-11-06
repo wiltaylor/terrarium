@@ -128,6 +128,19 @@ describe("ActiveCards", () => {
     expect(long.getAttribute("title")).toBe("A very long title that the column cuts with an ellipsis");
   });
 
+  it("shows the idle mark of a card next to the agent status (TER-67)", async () => {
+    active.mockResolvedValue([
+      card({ assignee: "A1", assignee_name: "terrarium/w2", assignee_status: "idle", idle_since: "2026-11-05T09:40:00.000Z" }),
+      card({ id: "TER-2", assignee: "A2", assignee_name: "terrarium/w3", assignee_status: "working" }),
+    ]);
+    const el = await mount(Date.parse("2026-11-05T10:00:00Z"));
+    await vi.waitFor(() => expect(el.querySelectorAll("tr[data-card]").length).toBe(2));
+    const badge = el.querySelector('tr[data-card="TER-1"] td.active-agent .idle-badge')!;
+    expect(badge.textContent).toBe("idle 20m");
+    expect(badge.getAttribute("title")).toContain("leads were told");
+    expect(el.querySelector('tr[data-card="TER-2"] .idle-badge')).toBeNull();
+  });
+
   it("shows the empty state", async () => {
     active.mockResolvedValue([]);
     const el = await mount(Date.now());

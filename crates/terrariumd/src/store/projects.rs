@@ -31,6 +31,12 @@ pub struct Project {
     /// `file` (declared in `projects/<name>.toml`), `api`, or
     /// `fleet:<name>` (owned by a fleet).
     pub source: String,
+    /// The idle alert (TER-67, `crate::idle_alert`): how long the assignee
+    /// of a card in progress may rest with no wait before the leads hear of
+    /// it. `off`, or a duration (`15m`). `None`: the default
+    /// ([`crate::idle_alert::DEFAULT`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_alert: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -43,6 +49,7 @@ fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
             .unwrap_or_default(),
         card_prefix: r.get("prefix")?,
         source: r.get("source")?,
+        idle_alert: r.get("idle_alert")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -213,6 +220,10 @@ pub struct ProjectPatch {
     pub description: Option<String>,
     #[serde(default, alias = "prefix")]
     pub card_prefix: Option<String>,
+    /// The idle alert: `off` (or `0`), a duration (`15m`, `1h`), or `null`
+    /// for the default.
+    #[serde(default, deserialize_with = "crate::store::board::double_option")]
+    pub idle_alert: Option<Option<String>>,
 }
 
 /// Change a project. The card prefix may change only while the project has
@@ -246,6 +257,17 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
             params![name, d],
         )?;
     }
+    if let Some(alert) = &patch.idle_alert {
+        let alert = alert
+            .as_deref()
+            .map(crate::idle_alert::normalise)
+            .transpose()
+            .map_err(ApiError::invalid)?;
+        t.execute(
+            "UPDATE projects SET idle_alert = ?2 WHERE name = ?1",
+            params![name, alert],
+        )?;
+    }
     t.execute(
         "UPDATE projects SET updated_at = ?2 WHERE name = ?1",
         params![name, now()],
@@ -254,7 +276,8 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
         "project.update",
         name,
         Some(name),
-        json!({"description": patch.description, "card_prefix": patch.card_prefix}),
+        json!({"description": patch.description, "card_prefix": patch.card_prefix,
+               "idle_alert": patch.idle_alert}),
     )?;
     get(t, name)
 }

@@ -878,7 +878,7 @@ three letters and digits in upper case, then longer, then with a number
 | `GET /api/projects` | | `200` projects by name | an agent sees its own project |
 | `POST /api/projects` | `{"name", "description"?, "card_prefix"?}` | `201` project | sysadmin |
 | `GET /api/projects/{name}` | | `200` project | read |
-| `PATCH /api/projects/{name}` | `{"description"?, "card_prefix"?}` | `200` project | project_admin |
+| `PATCH /api/projects/{name}` | `{"description"?, "card_prefix"?, "idle_alert"?}` | `200` project | project_admin |
 | `DELETE /api/projects/{name}?confirm=true` | | `204` | sysadmin |
 | `GET /api/projects/{name}/agents` | | `200` agents by ID | read |
 | `GET /api/projects/{name}/targets` | | `200` targets, the project's and the global ones | read |
@@ -891,6 +891,11 @@ three letters and digits in upper case, then longer, then with a number
 Names are 1 to 63 of `a-z`, `0-9`, `-`, `_`, and start with a letter or a
 digit. `card_prefix` is 1 to 10 of `A-Z` and `0-9`, and starts with a
 letter. The prefix cannot change after the first card (`conflict`).
+
+`idle_alert` is the threshold of the idle alert (§6.2, "Idle alert"): a
+duration (`15m`, `1h`), or `off` (also `0`). `null` sets the default
+(15m), and the project then shows no `idle_alert`. Another value is
+`invalid`. A file project cannot set it yet.
 
 `DELETE` refuses a project that has agents (`conflict`), and a file project
 (`file_managed`). It deletes the board and the repos.
@@ -2086,6 +2091,8 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/compact` | none, or `{"then"?: "<prompt>", "defer"?: false}` | `202` agent with `reset` (below). At rest: `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused or held. `409 not_running`: the agent does not run. |
 | `POST /api/agents/{id}/new-session` | none, or `{"then"?: "<prompt>", "recap"?: true, "defer"?: false}` | `202` agent with `reset` (below). A new harness session, not a resume. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run, or an earlier turn still waits in the store) |
+| `GET /api/agents/{id}/queued` | none | `200 {"items": [{"id", "source", "text", "body", "created_at"}]}`: the turns that wait in the store for the agent's wake (`"queued": true` above), oldest first. `source` is where the turn waits: `store` (the live queues of a running agent come with TER-66). `text` is the turn as it will be typed, `body` the text after its tag. Redacted for the caller. The read right of the agent (TER-54). |
+| `DELETE /api/agents/{id}/queued/{turn}?source=store` | none | `204`. Drops one queued turn before the wake types it. `source`: the `source` of the turn in the list (default `store`; another value is `422`); the others keep their order. project_admin of the agent's project, sysadmin, or the operator. `404` when the turn does not wait (any more): the wake hands the turns over one at a time, so a removed turn is never typed and a typed turn is `404`. Audit `agent.queued.remove` with the turn ID and its length (TER-54). |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/interrupt` | none | `202 {"accepted": true, "interrupted": true}`. Stops the running turn; the harness keeps running (§6.5, "Interrupt"). |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
@@ -2172,6 +2179,32 @@ the role `working`) gets one turn from the daemon, for example:
   `reminded` (§9). It wakes no agent and nudges no lead.
 - **Setting.** `card_reminder` of the agent (§6.1); absent: the daemon's
   `TERRARIUM_CARD_REMINDER` (on).
+
+**Idle alert (TER-67).** The card reminder asks the agent. The idle alert
+tells the project's leads when the assignee of a card in progress rests
+with no wait for too long, so a WIP place does not stay held while both
+sides wait. The daemon checks on each lifecycle tick (15 s).
+
+- **Which cards.** Not archived, in the column with the role `working` or
+  a column named `research`, with an agent as assignee.
+- **Resting.** The assignee's status is `idle` or `stopped`, it is not
+  paused, and it has no open wait (`waiting` never counts). The rest
+  starts at the first `idle` or `stopped` status after the newest other
+  status, so an idle stop does not start it again, and a turn or a wait
+  does.
+- **Threshold.** The project's `idle_alert` (§5): default 15m, `off`
+  for none.
+- **Crossing.** The card gets `idle_since` (the start of the rest, §8.1)
+  and a `card` event with the change `idle` (`idle_since`, `mailed`). The
+  leads of the project (agents with `project_admin`, other than the
+  assignee; with none, the operator) get one mail from `system` in one
+  thread: the agent, the card, the idle time, and the last line of the
+  agent's transcript as quoted data. Once for each card and rest, also
+  across a daemon restart.
+- **Clearing.** When the assignee works again, waits, or is paused, a
+  newer rest starts, the card moves to another column or gets another
+  assignee, or the threshold is `off`: `idle_since` goes, with a `card`
+  event with the change `idle_cleared`.
 
 **Auto compact (PLAN §18).** The daemon can compact the session of an
 agent at rest. Each compaction is one model call, so all of it is off by
@@ -3343,7 +3376,7 @@ for any agent.
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
+| `POST /api/agents/{owner}/spawn` | `{"template", "task", "name"?, "wait"?, "timeout"?, "project"?, "targets"?, "grants"?}` | `201` the spawn (below), with `agent` (the agent object) and `wait` (the wait, when one was made). |
 | `GET /api/agents/{owner}/spawned` | `?limit=&cursor=`; for `operator`: `?project=` | `200` the spawns of the owner, running and finished, newest first, paged (§2.4). |
 | `GET /api/spawns/{id}` | | `200` one spawn, also after the finish. |
 | `POST /api/agents/{id}/done` | `{"result"?}` | `202` the spawn. The close follows after 3 s. |
@@ -3368,6 +3401,28 @@ or the operator may spawn for an owner. The checks, in order:
   `max_per_day`: else `409 conflict`, with the name of the limit.
 - The roles and the policy of the template need the rights of a create by
   the caller (§6.1); a disabled subscription is `422 invalid` (§16.2).
+- Each of `targets` and `grants` is a list of at most 32 entries; an
+  empty entry or a bad grant is `422 invalid`. Each entry needs a right of
+  the owner (below), also when a lead or the operator spawns for it.
+
+**Rights from the owner** (TER-65, `crates/terrariumd/src/spawn_rights.rs`).
+A spawn gives the ephemeral agent rights beyond its template, each one
+checked against the owner at the spawn. None goes past what the owner
+holds.
+
+| Field | Entry | The ephemeral agent gets |
+|---|---|---|
+| `targets` | A target name: global, or of the project. | A target in the owner's `policy.targets` goes into its `policy.targets`, also a global one that a project_admin could not add by `agent set`. A target that the owner holds by an active lease gives it a lease (`target.grant`) that ends with the owner's lease or its own deadline, whichever is first. An exclusive lease of the owner is `409 conflict`. Any other target is `403 forbidden`, with the target named; an unknown one is `404`. |
+| `grants` | `<name>` or `<scope>/<name>` (the project secret first, then the global one), with `:use` or `:read`. | An agent grant (`secret.grant`, with `spawn_owner`) at that level, when the owner holds the secret (its own grant or its project's) at that level or higher: else `403 forbidden`, with the secret and the levels named. No level: the kind's default, at most the owner's. A `read` grant keeps the owner's env var name. |
+
+A template with no `subscription` and no `subscription_pool` takes the
+owner's subscription and pool when the owner runs the same harness, so
+the quota switch (§16.3) covers the ephemeral agent. The operator as owner
+holds every right: a target or secret needs only to exist and be in reach
+of the project. The audit row `agent.spawn` has `rights` (`targets`,
+`leases`, `grants`, no value), `subscription`, and `subscription_pool`.
+The close revokes the leases of the ephemeral agent, and the removal of
+its row deletes its grants, so no right outlives it.
 
 The name is `<owner>-<template>-<n>`, with the lowest `n` that no agent
 and no spawn of the project has, unless the body gives `name`. The agent
@@ -3697,6 +3752,9 @@ A card:
 - `done_at` is when the card last moved to `done`. A move out of `done`
   clears it. It is absent for a card that is not done, and for a card done
   before migration 40.
+- `idle_since` is the idle mark (§6.2, "Idle alert"): the assignee rests
+  with no wait since this time, past the project's `idle_alert`, and the
+  leads got a mail. It is absent when the card has no mark.
 - `blocked_by` lists the dependencies that are neither `done` nor archived.
 - `tests` is the latest test run that is linked to the card (§29):
   `{"id","name","status","counts":{"passed","failed","errored","skipped","total"},"created_at"}`.
@@ -3802,7 +3860,7 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 |---|---|---|
 | `GET /api/projects/{name}/board` | | `200` board |
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
-| `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards by number, cursor: number |
+| `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
 | `GET /api/cards?columns=working,research` | | `200` the active cards of every board the caller may read (below) |
 | `GET /api/cards/{id}` | | `200` card |
@@ -4134,7 +4192,7 @@ Kinds:
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning`, `usage_limit` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). A `usage_limit` (`{message, resets_at?}`) is the provider's refusal of a turn for a usage limit or a rate limit (§16.6). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
 | `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true`, `held_reason`, and `thread_state: "paused"`. A release (§7.4) emits the event again with `released: true`. |
-| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared), or `reminded` (`eta_passed`: the daemon reminded the idle assignee to update the card, §6.2 "Card reminder"). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
+| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared), `reminded` (`eta_passed`: the daemon reminded the idle assignee to update the card, §6.2 "Card reminder"), `idle` (`idle_since`, `mailed`: the idle alert marked the card and mailed the leads, §6.2 "Idle alert"), or `idle_cleared` (`idle_since`: the mark went). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `question_guard` | `{question, mailed}`: a member ended its turn with a question in plain text and reported nothing, so the daemon set `blocked` (reason "asked a question in plain text: ...") and mailed `mailed` (the leads, or `operator`). `question` is the first 200 characters. The actor is `system`. PLAN §8.4. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |
