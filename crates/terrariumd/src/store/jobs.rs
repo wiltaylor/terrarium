@@ -6,8 +6,8 @@
 //!   recipe on the result, push `next` when it is green).
 //! - Jobs start first in, first out across projects, at most the host
 //!   cap on one host (TER-97, `job_hosts`), and at most `slots` running
-//!   at a time per project. A merge job does not start while another
-//!   merge job of the same repo runs.
+//!   at a time per project. A merge job runs alone in its project: no
+//!   other job of the project runs with it (TER-71 review, R1).
 //! - A card has at most one job that is queued or running.
 //! - The one rerun of a failed job is a new row with `attempt` 2 and the
 //!   `created_at` of the first try, so it goes to the front of the queue.
@@ -273,10 +273,13 @@ pub struct QueueOf {
 /// The queued jobs that may start now, with the host each one takes a
 /// place on, in all projects: first in, first out across projects. A
 /// job starts when (1) its host is under its cap (`caps`; a host without
-/// one has no cap), (2) its project is under its `slots`, and (3) for a
-/// merge job, no other merge job of its repo runs. A job that must wait
-/// does not hold back the jobs behind it that may start. A project
-/// missing from `queues` has no queue, and its jobs wait.
+/// one has no cap), and (2) its project is under its `slots`. A merge job
+/// runs alone in its project (TER-71 review, R1: the recipes of a target
+/// run as one user): it starts only when no other job of the project runs
+/// or starts, and once the pick reaches it (started or not) or while it
+/// runs, no other job of its project starts. A job that must wait does not
+/// hold back the jobs of other projects behind it. A project missing from
+/// `queues` has no queue, and its jobs wait.
 pub fn pick(
     queued: Vec<Job>,
     running: &[Job],
@@ -285,7 +288,8 @@ pub fn pick(
 ) -> Vec<(Job, String)> {
     let mut on_host: HashMap<String, usize> = HashMap::new();
     let mut in_project: HashMap<String, usize> = HashMap::new();
-    let mut merging: HashSet<(String, String)> = HashSet::new();
+    // The projects where no more job may start in this pick.
+    let mut closed: HashSet<String> = HashSet::new();
     for j in running {
         let host = j
             .host
@@ -296,7 +300,7 @@ pub fn pick(
         }
         *in_project.entry(j.project.clone()).or_default() += 1;
         if j.kind == JobKind::Merge {
-            merging.insert((j.project.clone(), j.repo.clone()));
+            closed.insert(j.project.clone());
         }
     }
     let mut out = Vec::new();
@@ -304,14 +308,21 @@ pub fn pick(
         let Some(q) = queues.get(&j.project) else {
             continue;
         };
+        if closed.contains(&j.project) {
+            continue;
+        }
+        let merge = j.kind == JobKind::Merge;
+        if merge {
+            // The jobs behind a merge wait for it, whether it starts now
+            // or not.
+            closed.insert(j.project.clone());
+        }
         let used = on_host.get(&q.host).copied().unwrap_or(0);
         if caps.get(&q.host).is_some_and(|cap| used >= *cap) {
             continue;
         }
-        if in_project.get(&j.project).copied().unwrap_or(0) >= q.slots {
-            continue;
-        }
-        if j.kind == JobKind::Merge && !merging.insert((j.project.clone(), j.repo.clone())) {
+        let busy = in_project.get(&j.project).copied().unwrap_or(0);
+        if (merge && busy > 0) || busy >= q.slots {
             continue;
         }
         *on_host.entry(q.host.clone()).or_default() += 1;
@@ -827,16 +838,49 @@ mod tests {
     }
 
     #[test]
-    fn one_merge_per_repo_and_project() {
+    fn a_merge_runs_alone_in_its_project() {
         let q = queues(&[("a", 4, "h"), ("b", 4, "h")]);
+        let none = HashMap::new();
+        // A merge starts when nothing of its project runs or starts, and
+        // the jobs behind it in its project wait. Project b goes on.
         let queued = vec![
             job("1", "a", JobKind::Merge, "app", "t1"),
-            job("2", "a", JobKind::Merge, "app", "t2"),
-            job("3", "b", JobKind::Merge, "app", "t3"),
+            job("2", "a", JobKind::Validate, "app", "t2"),
+            job("3", "b", JobKind::Validate, "app", "t3"),
             job("4", "a", JobKind::Merge, "lib", "t4"),
+            job("5", "b", JobKind::Merge, "app", "t5"),
         ];
-        let p = pick(queued, &[], &q, &HashMap::new());
-        assert_eq!(ids(&p), ["1", "3", "4"]);
+        assert_eq!(ids(&pick(queued, &[], &q, &none)), ["1", "3"]);
+        // A job of `a` runs: the merge waits, and so does the job behind it.
+        let run = [running(job("0", "a", JobKind::Validate, "r", "t0"), "h")];
+        let queued = vec![
+            job("1", "a", JobKind::Merge, "app", "t1"),
+            job("2", "a", JobKind::Validate, "app", "t2"),
+            job("3", "b", JobKind::Validate, "app", "t3"),
+        ];
+        assert_eq!(ids(&pick(queued.clone(), &run, &q, &none)), ["3"]);
+        // A validate job before the merge in the same pick: the merge waits.
+        let queued = vec![
+            job("1", "a", JobKind::Validate, "app", "t1"),
+            job("2", "a", JobKind::Merge, "app", "t2"),
+            job("3", "a", JobKind::Validate, "app", "t3"),
+        ];
+        assert_eq!(ids(&pick(queued, &[], &q, &none)), ["1"]);
+        // A merge of `a` runs: nothing else of `a` starts.
+        let run = [running(job("0", "a", JobKind::Merge, "app", "t0"), "h")];
+        let queued = vec![
+            job("2", "a", JobKind::Validate, "app", "t2"),
+            job("3", "b", JobKind::Validate, "app", "t3"),
+        ];
+        assert_eq!(ids(&pick(queued, &run, &q, &none)), ["3"]);
+        // A merge that waits for the host cap holds back its project.
+        let caps = HashMap::from([("h".to_owned(), 1)]);
+        let run = [running(job("0", "b", JobKind::Validate, "r", "t0"), "h")];
+        let queued = vec![
+            job("1", "a", JobKind::Merge, "app", "t1"),
+            job("2", "a", JobKind::Validate, "app", "t2"),
+        ];
+        assert!(pick(queued, &run, &q, &caps).is_empty());
     }
 
     #[test]

@@ -898,3 +898,58 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
         "the other repo got a push"
     );
 }
+
+/// Review of TER-71, major 2: a merge job runs alone in its project. With 2
+/// slots, a validate job runs, then the merge (queued second) waits for it,
+/// and a validate job queued after the merge waits for the merge.
+#[tokio::test]
+async fn a_merge_job_runs_alone_in_its_project() {
+    let lab = lab(2).await;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "test -f OK && sleep 1", "slots": 2,
+                   "next_repos": ["app"],
+                   "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
+        )
+        .await
+        .ok();
+    let h1 = lab.branch("ter-a1", "next", &[("OK", "1")]);
+    lab.branch("ter-a2", "next", &[("OK", "2")]);
+    let h3 = lab.branch("ter-a3", "next", &[("OK", "3")]);
+    let c1 = lab.card("a1", "ter-a1").await;
+    let c2 = lab.card("a2", "ter-a2").await;
+    let c3 = lab.card("a3", "ter-a3").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c1}/validate"),
+            json!({"commit": h1}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{c2}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c3}/validate"),
+            json!({"commit": h3}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    let of = |c: &str| jobs.iter().find(|j| j["card"] == c).unwrap().clone();
+    let (v1, m, v3) = (of(&c1), of(&c2), of(&c3));
+    for j in [&v1, &m, &v3] {
+        assert_eq!(j["state"], "passed", "{jobs:#?}");
+    }
+    let t = |j: &Value, k: &str| j[k].as_str().unwrap().to_owned();
+    assert!(t(&m, "started_at") >= t(&v1, "ended_at"), "{jobs:#?}");
+    assert!(t(&v3, "started_at") >= t(&m, "ended_at"), "{jobs:#?}");
+}
