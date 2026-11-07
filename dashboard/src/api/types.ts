@@ -1568,6 +1568,8 @@ export interface Thread {
   status: ThreadStatus;
   /** When the agent moved the thread into tracking (TER-145); set while it tracks. An older daemon sends none. */
   tracking_at?: string | null;
+  /** The linked cards whose project the reader may read, the oldest link first (TER-146); also in a list (TER-147). An older daemon sends none. */
+  cards?: ThreadCard[];
   messages?: ThreadMessage[];
   questions?: Question[];
   response: ThreadResponse | null;
@@ -1583,6 +1585,15 @@ export interface Thread {
   close_proposal?: ThreadHandoff | null;
   /** Why a closed thread closed. Absent on a daemon before 0.3.0. */
   close_reason?: ThreadCloseReason | null;
+}
+
+/** A card that a thread tracks (TER-146, docs/api.md §6.13 "Linked cards"): only the reference; the dashboard reads the card from its board. */
+export interface ThreadCard {
+  project: string;
+  card: string;
+  linked_by: string;
+  linked_by_name?: string;
+  linked_at: string;
 }
 
 /** `confirmed`: the operator confirmed the agent's proposal; `operator`: the operator closed it; `stale`: untouched; `failed_start`: its agent did not start. */
