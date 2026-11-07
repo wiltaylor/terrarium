@@ -404,8 +404,9 @@ pub fn pump_process(
 
 // ------------------------------------------------------------ the commands
 
-/// A command for a target.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A command for a target. `Debug` shows the env names, not the values
+/// (a value can be a secret, TER-142).
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct RemoteCmd {
     /// The program and its arguments. Empty with `shell`.
     pub argv: Vec<String>,
@@ -422,6 +423,21 @@ pub struct RemoteCmd {
     /// The owner of the resource budget on a `host` target with `limits`:
     /// `<project>/<agent>` of the caller. `None` is the operator.
     pub holder: Option<String>,
+}
+
+impl std::fmt::Debug for RemoteCmd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteCmd")
+            .field("argv", &self.argv)
+            .field("cwd", &self.cwd)
+            .field("env", &self.env.keys().collect::<Vec<_>>())
+            .field("pty", &self.pty)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("shell", &self.shell)
+            .field("agent", &self.agent)
+            .field("holder", &self.holder)
+            .finish()
+    }
 }
 
 /// The [`RemoteCmd::holder`] of an actor.
@@ -1595,6 +1611,32 @@ pub async fn start_exec_as(
     cmd: RemoteCmd,
     on: Option<OnBehalf>,
 ) -> ApiResult<Arc<ExecSession>> {
+    start_exec_secrets(state, actor, name, cmd, on, Vec::new()).await
+}
+
+/// [`start_exec`] for `terrarium run` with secret values in `cmd.env`
+/// (TER-142, `crate::secrets::run_env`): `secrets` is `(label, value)` of
+/// each one. The output is redacted with these values first, also a value
+/// that the daemon matcher leaves out as weak (at least
+/// [`TOOL_SECRET_MIN`] bytes), then with the daemon matcher.
+pub async fn start_run_exec(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+    cmd: RemoteCmd,
+    secrets: Vec<(String, zeroize::Zeroizing<String>)>,
+) -> ApiResult<Arc<ExecSession>> {
+    start_exec_secrets(state, actor, name, cmd, None, secrets).await
+}
+
+async fn start_exec_secrets(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+    cmd: RemoteCmd,
+    on: Option<OnBehalf>,
+    secrets: Vec<(String, zeroize::Zeroizing<String>)>,
+) -> ApiResult<Arc<ExecSession>> {
     let on = on.unwrap_or_default();
     let row = usable(state, actor, name).await?;
     check_cap(state, actor)?;
@@ -1607,7 +1649,9 @@ pub async fn start_exec_as(
         Actor::Agent(a) => terrarium_core::redact::View::Scope(a.project.clone()),
         Actor::Operator => terrarium_core::redact::View::All,
     };
-    let run = redact_run(run, state.db.redactor().get(), view);
+    let own = own_redactor(&secrets);
+    drop(secrets);
+    let run = redact_run(run, own, state.db.redactor().get(), view);
     let kind = if cmd.shell { "shell" } else { "exec" };
     let (sess, ctl) = ExecSession::new(
         name,
@@ -1726,6 +1770,29 @@ impl ToolRedact {
     }
 }
 
+/// The matcher of a run's own secret values (`(label, value)`): each
+/// value of at least [`TOOL_SECRET_MIN`] bytes, also a weak one. `None`
+/// with no value.
+fn own_redactor(
+    secrets: &[(String, zeroize::Zeroizing<String>)],
+) -> Option<Arc<terrarium_core::redact::Redactor>> {
+    use terrarium_core::redact::{Entry, Redactor};
+    if secrets.is_empty() {
+        return None;
+    }
+    let r = Redactor::build_min(
+        secrets.iter().map(|(label, v)| Entry {
+            label: label.clone(),
+            scope: None,
+            value: v.as_bytes(),
+        }),
+        |_| true,
+        TOOL_SECRET_MIN,
+    )
+    .unwrap_or_else(|_| Redactor::empty());
+    (!r.is_empty()).then(|| Arc::new(r))
+}
+
 /// Forward a tool run into its session: the cap, the redaction of each
 /// stream, and the stdin rule ([`ToolRun`]).
 async fn attach_tool(
@@ -1835,26 +1902,74 @@ async fn attach_tool(
 /// apart than this is not found whole (PLAN §16b.6).
 pub const REDACT_FLUSH_IDLE: Duration = Duration::from_millis(200);
 
+/// The redaction of one output stream of an exec: the run's own values
+/// first (`terrarium run` secrets, TER-142), then the daemon matcher.
+struct ExecRedact {
+    own: Option<terrarium_core::redact::StreamRedactor>,
+    daemon: terrarium_core::redact::StreamRedactor,
+}
+
+impl ExecRedact {
+    fn new(
+        own: Option<&Arc<terrarium_core::redact::Redactor>>,
+        daemon: &Arc<terrarium_core::redact::Redactor>,
+        view: &terrarium_core::redact::View,
+    ) -> Self {
+        use terrarium_core::redact::{StreamRedactor, View};
+        Self {
+            own: own.map(|o| StreamRedactor::new(o.clone(), View::All)),
+            daemon: StreamRedactor::new(daemon.clone(), view.clone()),
+        }
+    }
+
+    fn held(&self) -> usize {
+        self.own.as_ref().map_or(0, |o| o.held()) + self.daemon.held()
+    }
+
+    fn push(&mut self, b: &[u8]) -> Vec<u8> {
+        match &mut self.own {
+            Some(o) => {
+                let mid = o.push(b);
+                self.daemon.push(&mid)
+            }
+            None => self.daemon.push(b),
+        }
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        let mut out = match &mut self.own {
+            Some(o) => {
+                let mid = o.finish();
+                self.daemon.push(&mid)
+            }
+            None => Vec::new(),
+        };
+        out.extend(self.daemon.finish());
+        out
+    }
+}
+
 /// Redact the stdout and stderr of `run` as streams ([`StreamRedactor`]),
 /// for `view`, so that a secret split across two output chunks is found
-/// (TER-33). With no secret in the matcher, `run` is returned as it is.
+/// (TER-33). `own`: the run's own secret values, matched first (TER-142).
+/// With no secret in either matcher, `run` is returned as it is.
 ///
 /// [`StreamRedactor`]: terrarium_core::redact::StreamRedactor
 fn redact_run(
     run: Running,
+    own: Option<Arc<terrarium_core::redact::Redactor>>,
     redactor: Arc<terrarium_core::redact::Redactor>,
     view: terrarium_core::redact::View,
 ) -> Running {
-    use terrarium_core::redact::StreamRedactor;
-    if redactor.is_empty() {
+    if redactor.is_empty() && own.is_none() {
         return run;
     }
     let Running { mut events, ctl } = run;
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
-        let mut out = StreamRedactor::new(redactor.clone(), view.clone());
-        let mut err = StreamRedactor::new(redactor, view);
-        let flush = |out: &mut StreamRedactor, err: &mut StreamRedactor| {
+        let mut out = ExecRedact::new(own.as_ref(), &redactor, &view);
+        let mut err = ExecRedact::new(own.as_ref(), &redactor, &view);
+        let flush = |out: &mut ExecRedact, err: &mut ExecRedact| {
             [
                 (Stream::Stdout, out.finish()),
                 (Stream::Stderr, err.finish()),

@@ -7,7 +7,8 @@
 //! - `GET /api/agent/secrets`: the caller's effective grants (its own and
 //!   its project's), with no value.
 //! - `POST /api/agent/secrets/{name}/get`: one value, for a `read` grant
-//!   only. Each answer writes `secret.get`. At most [`GET_LIMIT`] a
+//!   only (a `run` grant is refused: its value goes only into `terrarium
+//!   run`, TER-142). Each answer writes `secret.get`. At most [`GET_LIMIT`] a
 //!   minute per agent.
 //! - `POST /api/agent/secrets/env`: the env vars of the caller's `read`
 //!   grants and the credential env of its harness (the subscription's API
@@ -57,13 +58,17 @@ const GET_WINDOW: Duration = Duration::from_secs(60);
 pub struct GrantBody {
     /// `agent:<project>/<name>`, `agent:<id>`, or `project:<name>`.
     pub grantee: String,
-    /// `use` or `read`. Default: `use` for `token`, `github_token`, and
-    /// `ssh_key`; `read` for the other kinds.
+    /// `use`, `run`, or `read`. Default: `use` for `token`,
+    /// `github_token`, and `ssh_key`; `read` for the other kinds.
     #[serde(default)]
     pub level: Option<Level>,
     /// An env var name. Needs `read`.
     #[serde(default)]
     pub env: Option<String>,
+    /// The targets of a `run` grant: one or more (TER-142). The other
+    /// levels take none.
+    #[serde(default)]
+    pub targets: Vec<String>,
 }
 
 /// The query of `DELETE /api/secrets/{scope}/{name}/grants`.
@@ -111,6 +116,7 @@ async fn create(
                 return Err(no_secret(&s, &n));
             };
             let grantee = grants::parse_grantee(t, &b.grantee)?;
+            grants::check_targets_exist(t, grantee.project(), &b.targets)?;
             let (grant, created) = grants::put(
                 t,
                 &info,
@@ -118,6 +124,7 @@ async fn create(
                     grantee: &grantee,
                     level: b.level,
                     env: b.env.as_deref(),
+                    targets: &b.targets,
                     by: &by,
                 },
             )?;
@@ -128,7 +135,8 @@ async fn create(
                 json!({
                     "scope": s, "name": n, "kind": info.kind,
                     "grantee": grant.grantee, "grantee_label": grant.grantee_label,
-                    "level": grant.level, "env": grant.env, "created": created,
+                    "level": grant.level, "env": grant.env, "targets": grant.targets,
+                    "created": created,
                 }),
             )?;
             Ok((grant, created))
@@ -273,12 +281,26 @@ async fn read_value(
             {
                 return Err(crate::git_proxy::use_only_error(&e.scope, &e.name));
             }
-            if e.level != Level::Read {
-                return Err(ApiError::forbidden(format!(
-                    "your grant of secret `{}/{}` is `use`: the brokers use it, and you cannot \
-                     read it; reading needs a `read` grant",
-                    e.scope, e.name
-                )));
+            match e.level {
+                Level::Read => {}
+                Level::Run => {
+                    return Err(ApiError::forbidden(format!(
+                        "your grant of secret `{}/{}` is `run`: the daemon puts it into the env \
+                         of `terrarium run -e KEY=@secret:{}` on {}, and you cannot read it; \
+                         reading needs a `read` grant",
+                        e.scope,
+                        e.name,
+                        e.name,
+                        e.targets.join(", ")
+                    )));
+                }
+                Level::Use => {
+                    return Err(ApiError::forbidden(format!(
+                        "your grant of secret `{}/{}` is `use`: the brokers use it, and you \
+                         cannot read it; reading needs a `read` grant",
+                        e.scope, e.name
+                    )));
+                }
             }
             let field = match b.field.clone() {
                 Some(f) => f,
