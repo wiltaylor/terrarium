@@ -1191,10 +1191,13 @@ IO and CPU priority (`ionice -c3 nice -n19`). Builds that you start with
 `job stats` gives the first-attempt pass rate of the project's jobs over a
 window (default 7 days; `--since` takes a duration such as `30d`, an RFC
 3339 time, or `HH:MM` today), per kind and in all. A `conflict` is no
-first attempt: it never ran the recipe. It also gives the reruns that
+first attempt: it never ran the recipe. A job that could not run (outcome
+`error`, such as a host agent offline) is no attempt either: it shows as
+`could not run`. It also gives the reruns that
 passed, the counts, the failed recipe steps, and the test targets that
 failed most often. The targets come from the `error: N targets failed:`
-lines of each failed job's output tail. `-p` picks another project, and
+lines of each failed job's output tail. When the tail clip cut that header
+off, the job counts in `test-step fails with no target`. `-p` picks another project, and
 `--json` gives all targets (docs/api.md §35.4).
 
 `project delivery set` keeps the flags that you leave out. `--target ""`

@@ -286,8 +286,9 @@ pub struct FirstAttempts {
     /// Ended first attempts that ran the recipe: `passed + failed`.
     pub ended: u64,
     pub passed: u64,
-    /// Failed with `red` or `error`. A `conflict` never ran the recipe, so
-    /// it is counted in [`JobStats::conflicts`] and not here.
+    /// Failed with `red` (or a timeout). A `conflict` and an `error` never
+    /// ran the tests, so they count in [`JobStats::conflicts`] and
+    /// [`JobStats::errors`] and not here.
     pub failed: u64,
     /// `passed / ended`, from 0 to 1. `None` with no ended first attempt.
     pub pass_rate: Option<f64>,
@@ -329,7 +330,10 @@ pub struct StepFails {
 /// A rerun keeps the `created_at` of its first try, so both tries fall in
 /// the same window. The halves of a split batch (`parent` set) are a
 /// search for the failing card: they count in `splits`, not as first
-/// attempts or reruns.
+/// attempts or reruns. A job with outcome `error` could not run (host
+/// agent offline, prepare step failed, push to `next` failed): it says
+/// nothing about test stability, so it counts in `errors`, not as a first
+/// attempt or a rerun.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct JobStats {
     pub project: String,
@@ -344,6 +348,8 @@ pub struct JobStats {
     pub reruns: FirstAttempts,
     /// First attempts that ended in a merge conflict.
     pub conflicts: u64,
+    /// First attempts and reruns that could not run (outcome `error`).
+    pub errors: u64,
     pub cancelled: u64,
     /// Queued or running.
     pub open: u64,
@@ -353,6 +359,10 @@ pub struct JobStats {
     pub failed_steps: Vec<StepFails>,
     /// The test targets that failed, most first.
     pub failed_targets: Vec<TargetFails>,
+    /// Failed jobs whose `test` step failed but whose tail names no target:
+    /// the 4000-byte tail clip cut off the `error: N targets failed:`
+    /// header, or the step failed before cargo listed targets.
+    pub untargeted_test_fails: u64,
 }
 
 /// The test targets that a job tail names as failed: the indented lines
@@ -435,12 +445,17 @@ pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStat
         let state = JobState::parse(&state).unwrap_or(JobState::Failed);
         let first = attempt <= 1 && parent.is_none();
         if let Some(tail) = tail.as_deref() {
-            for t in failed_targets(tail) {
+            let found = failed_targets(tail);
+            let step = failed_step(tail);
+            if found.is_empty() && step.as_deref() == Some("test") {
+                s.untargeted_test_fails += 1;
+            }
+            for t in found {
                 let e = targets.entry(t).or_default();
                 e.0 += 1;
                 e.1 += u64::from(first);
             }
-            if let Some(step) = failed_step(tail) {
+            if let Some(step) = step {
                 *steps.entry(step).or_default() += 1;
             }
         }
@@ -457,6 +472,10 @@ pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStat
         }
         if parent.is_some() {
             s.splits += 1;
+            continue;
+        }
+        if outcome.as_deref() == Some("error") {
+            s.errors += 1;
             continue;
         }
         let passed = state == JobState::Passed;
@@ -1789,6 +1808,37 @@ mod tests {
                 Some(RED_TAIL),
                 Some("a5"),
             ),
+            (
+                "a8",
+                "p",
+                "validate",
+                "failed",
+                1,
+                Some("error"),
+                Some("the job could not run: host agent `helios` is offline\n"),
+                None,
+            ),
+            (
+                "a8r",
+                "p",
+                "validate",
+                "failed",
+                2,
+                Some("error"),
+                Some("the job could not run: host agent `helios` is offline\n"),
+                None,
+            ),
+            (
+                "a9",
+                "p",
+                "validate",
+                "failed",
+                1,
+                Some("red"),
+                Some("    `-p terrariumd --test jobs`\nerror: recipe `test` failed\n"),
+                None,
+            ),
+            ("a9r", "p", "validate", "passed", 2, None, None, None),
             ("a6", "p", "validate", "cancelled", 1, None, None, None),
             ("a7", "p", "validate", "queued", 1, None, None, None),
             (
@@ -1819,20 +1869,24 @@ mod tests {
         )
         .unwrap();
         let s = stats(&conn, "p", "2026-11-01T00:00:00.000Z").unwrap();
-        assert_eq!(s.jobs, 9);
+        assert_eq!(s.jobs, 13);
         assert_eq!(
             s.first_attempt,
             FirstAttempts {
-                ended: 4,
+                ended: 5,
                 passed: 2,
-                failed: 2,
-                pass_rate: Some(0.5)
+                failed: 3,
+                pass_rate: Some(0.4)
             }
         );
-        assert_eq!((s.validate.ended, s.validate.passed), (2, 1));
+        assert_eq!((s.validate.ended, s.validate.passed), (3, 1));
         assert_eq!((s.merge.ended, s.merge.passed), (2, 1));
-        assert_eq!((s.reruns.ended, s.reruns.passed), (1, 1));
+        assert_eq!((s.reruns.ended, s.reruns.passed), (2, 2));
         assert_eq!((s.conflicts, s.cancelled, s.open, s.splits), (1, 1, 1, 1));
+        // The helios-offline pair counts apart, not as fails.
+        assert_eq!(s.errors, 2);
+        // a9: the clip cut the `error: 1 target failed:` header off.
+        assert_eq!(s.untargeted_test_fails, 1);
         assert_eq!(
             s.failed_targets,
             vec![
@@ -1852,7 +1906,7 @@ mod tests {
             s.failed_steps,
             vec![StepFails {
                 step: "test".into(),
-                failed: 3
+                failed: 4
             }]
         );
         let empty = stats(&conn, "none", "2026-11-01T00:00:00.000Z").unwrap();

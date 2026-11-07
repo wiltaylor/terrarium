@@ -159,8 +159,9 @@ fn print_stats(c: &Ctx, v: &Value) {
         rate(&v["reruns"])
     ));
     c.line(format!(
-        "conflicts {}, cancelled {}, open {}, split halves {}",
+        "conflicts {}, could not run {}, cancelled {}, open {}, split halves {}",
         field(v, "conflicts"),
+        field(v, "errors"),
         field(v, "cancelled"),
         field(v, "open"),
         field(v, "splits")
@@ -187,6 +188,12 @@ fn print_stats(c: &Ctx, v: &Value) {
         ));
     } else {
         c.line("failed test targets:");
+    }
+    if v["untargeted_test_fails"].as_u64().unwrap_or(0) > 0 {
+        c.line(format!(
+            "test-step fails with no target in the tail (clipped): {}",
+            field(v, "untargeted_test_fails")
+        ));
     }
     print_table(
         c,
@@ -383,4 +390,47 @@ fn queued_line(c: &Ctx, v: &Value) {
         field(&v["queue"], "note")
     ));
     c.line("The daemon moves the card on the result. Take your next card.");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::transport::mock::MockTransport;
+
+    #[test]
+    fn stats_print_the_rates_counts_and_top_targets() {
+        let ctx = Ctx::for_test(Arc::new(MockTransport::new()), None);
+        let targets: Vec<Value> = (0..12)
+            .map(|i| json!({"target": format!("-p app --test t{i:02}"), "failed": 12 - i,
+                            "first_attempt": 1}))
+            .collect();
+        let v = json!({
+            "project": "p", "since": "2026-11-01T00:00:00.000Z", "jobs": 13,
+            "first_attempt": {"ended": 5, "passed": 2, "failed": 3, "pass_rate": 0.4},
+            "validate": {"ended": 3, "passed": 1, "failed": 2, "pass_rate": 1.0 / 3.0},
+            "merge": {"ended": 2, "passed": 1, "failed": 1, "pass_rate": 0.5},
+            "reruns": {"ended": 0, "passed": 0, "failed": 0, "pass_rate": null},
+            "conflicts": 1, "errors": 2, "cancelled": 1, "open": 1, "splits": 1,
+            "failed_steps": [{"step": "test", "failed": 4}],
+            "failed_targets": targets,
+            "untargeted_test_fails": 1,
+        });
+        print_stats(&ctx, &v);
+        let out = ctx.out.captured();
+        assert!(out.contains("jobs of p since 2026-11-01T00:00:00.000Z: 13"), "{out}");
+        assert!(out.contains("first-attempt pass rate: 40% (2/5)"), "{out}");
+        assert!(out.contains("validate 33% (1/3), merge 50% (1/2)"), "{out}");
+        assert!(out.contains("reruns passed: - (0/0)"), "{out}");
+        assert!(
+            out.contains("conflicts 1, could not run 2, cancelled 1, open 1, split halves 1"),
+            "{out}"
+        );
+        assert!(out.contains("failed steps: test 4"), "{out}");
+        assert!(out.contains("top 10 of 12, --json for all"), "{out}");
+        assert!(out.contains("(clipped): 1"), "{out}");
+        assert!(out.contains("-p app --test t09"), "{out}");
+        assert!(!out.contains("-p app --test t10"), "{out}");
+    }
 }

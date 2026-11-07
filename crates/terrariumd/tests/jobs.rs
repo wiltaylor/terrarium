@@ -842,6 +842,8 @@ async fn the_stats_give_the_first_attempt_pass_rate_and_the_failed_targets() {
     assert_eq!(s["validate"]["ended"], 2, "{s}");
     assert_eq!(s["reruns"]["ended"], 1, "{s}");
     assert_eq!(s["reruns"]["passed"], 0, "{s}");
+    assert_eq!(s["errors"], 0, "{s}");
+    assert_eq!(s["untargeted_test_fails"], 0, "{s}");
     assert_eq!(
         s["failed_targets"],
         json!([{"target": "-p app --test flaky", "failed": 2, "first_attempt": 1}]),
