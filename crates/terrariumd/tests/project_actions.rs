@@ -1,4 +1,4 @@
-//! Project actions (TER-53, docs/api.md §19.8): a schedule with the spec
+//! Project actions (TER-53, docs/api.md §19.10): a schedule with the spec
 //! `manual`. No timer and no event runs it; a person runs it with
 //! `POST /api/schedules/{id}/run`. The rights, the audit row, and the
 //! events are those of any schedule.

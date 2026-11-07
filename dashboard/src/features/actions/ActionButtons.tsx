@@ -1,4 +1,4 @@
-// The buttons of the project actions (TER-53, docs/api.md §19.8), on the
+// The buttons of the project actions (TER-53, docs/api.md §19.10), on the
 // project dashboard and next to the project name in Home 'Work in
 // progress'. A click opens the confirm step: what the action does, who it
 // runs as, and for an exec the target, the time limit, and the run history
