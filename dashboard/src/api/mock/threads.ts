@@ -229,7 +229,7 @@ export function createThreadMock(c: ThreadMockContext) {
         if (!["open", "all", "waiting_operator", "waiting_agent", "tracking", "closed"].includes(st)) fail(422, "invalid", `bad status \`${st}\`: use waiting_operator, waiting_agent, tracking, closed, open, or all`);
         return rows()
           .filter((t) => (st === "all" ? true : st === "open" ? t.status !== "closed" : t.status === st) && (!q.scope || t.scope === q.scope))
-          .map(listed)
+          .map((t) => listed(t))
           .sort((a, b) => Number(b.status === "waiting_operator") - Number(a.status === "waiting_operator") || b.last_at!.localeCompare(a.last_at!) || b.id.localeCompare(a.id))
           .slice(0, LIST_MAX);
       }),
