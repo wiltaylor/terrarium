@@ -766,12 +766,6 @@ async fn merge_batch(
             "`cards` is empty: give one or more card IDs",
         ));
     }
-    if b.cards.len() > jobs::BATCH_MAX {
-        return Err(ApiError::invalid(format!(
-            "a batch has at most {} cards",
-            jobs::BATCH_MAX
-        )));
-    }
     let planned_secs = planned(b.eta.as_deref())?;
     let job = state
         .db

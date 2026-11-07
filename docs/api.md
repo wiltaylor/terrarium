@@ -8067,8 +8067,10 @@ any number of `if_card` and `if_job` conditions on the current state
 `card_move` (`to`, `from?`, `comment?`, `position?` `top` or `bottom`),
 `card_label` (`add?`, `remove?`), `card_comment` (`text`), `card_assign`
 (`who`), `card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
-`job_queue` (`kind` `validate`, `merge`, or `batch`; `from` and `limit?`
-for a batch), `job_cancel`, `job_rerun` (`max_attempts?`), `job_split`,
+`job_queue` (`kind` `validate`, `merge`, or `batch`; `from`, `limit?`,
+`min_cards?`, and `max_wait_minutes?` for a batch only;
+`max_wait_minutes` needs `min_cards`, and `min_cards` is at most
+`limit`), `job_cancel`, `job_rerun` (`max_attempts?`), `job_split`,
 `job_fix` (`to?`, `labels?`), `agent_park`, `agent_unpark` (`turn?`), and
 `agent_end` (`outcome` `done` or `cancelled`).
 
@@ -8249,11 +8251,19 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
   its repo and branch (the card's, else its ID in lower case), with the
   API's checks (the queue is set, a merge needs `project_admin` and a
   repo in `next_repos`). `batch` queues one merge of the cards of column
-  `from` in board order, at most `limit` (and 32); a held card or one
-  with an open job is left out (`left_out` in the detail). A card with an
-  open job, or no card to merge: a no-op. The labels, the comment and the
-  move of the API's queue are not part of the verb: a rule does them with
-  the card verbs on the `job` event.
+  `from` in board order, at most `limit` (absent: all; the daemon has no
+  batch limit of its own, TER-162 D9); a held card or one with an open
+  job is left out (`left_out` in the detail). With `min_cards` the batch
+  goes only when that many cards wait (held cards and cards with a job
+  do not count), or, with `max_wait_minutes`, when the first of them came
+  into the column that many minutes ago (its newest move, else its
+  creation); until then the verb is a no-op whose detail has `waiting`,
+  `due` (the time the wait ends), and the reason. A card with an open
+  job, or no card to merge: a no-op. The move of a card is not part of
+  the verb: a rule does it with `card_move` on the `job` event. With
+  `board_flow = code` a merge or a batch that the verb queues gets the
+  `validation:queued` label and the queue comment on each card, as from
+  the API; with `rules` the pack writes them on the `job` event.
 - `job_cancel`: cancel the event's job, else the open job of the run's
   card, and write its `job.verdict` (`cancelled`); a running job is
   killed. As the API cancel, with `board_flow = code` it takes the
@@ -8285,6 +8295,16 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
   turn. `agent_park` takes a `reason` (default `rule <name>`).
   `agent_end` closes the agent with `outcome` as `agent done` does, with
   `result` for the owner (default `the rule <name> ended it`).
+
+Timers (TER-172): the engine checks the batch rules (`job_queue` of kind
+`batch` with `min_cards` and `max_wait_minutes`) about every 10 seconds.
+When cards wait in the rule's `from` column, fewer than `min_cards`, and
+the first came `max_wait_minutes` ago, it writes one `rule.timer` event
+(actor `system`, `data: {rule, due, waiting}`) for that wait. A
+`rule.timer` event plans a run of the rule it names only, without a card;
+`on` and `when` do not apply to it, and a rule with an `if_card` does not
+run for it. The verb checks the time again. A daemon restart may write
+the timer of the same wait once more; the second run is then a no-op.
 
 Once per job: `job.verdict` comes once for each card of a batch, so a
 rule on it runs once per card; `job_rerun`, `job_split` and `job_fix`
@@ -8423,6 +8443,23 @@ a comment); a batch merge ends the bound agent of each card, not only
 the first; and the pack acts a moment after the event (§19.9), so the
 queue can start the next queued job before a rule splits or reruns the
 one that ended (the order of the merges after a split can differ).
+
+The merge queue column (TER-172, TER-162 D8, D9) is a set of opt-in
+rules, not part of the pack, because a board without that column would
+fail each run. A project copies the rules of
+`crates/terrarium-core/src/rules.merge_queue.wcl` into its `rules.wcl`;
+they work with either board flow, and need a `merge_queue` column (role
+or name) and a `review` column:
+
+| Rule | On | Does |
+|---|---|---|
+| `merge-queue-move` | a new merge job (`card merge`, `POST /api/merges`, or the batch rule) | each card to `@merge_queue` (a card there already stays) |
+| `merge-queue-cancel` | a cancelled merge verdict | the card from `@merge_queue` back to `@review` |
+| `merge-queue-batch` | a card moved to the `merge_queue` role column, and its timer | one batch merge of the cards that wait in `@merge_queue`, in board order: `limit = 8`, `min_cards = 8`, `max_wait_minutes = 30` (8 cards wait, or 30 minutes after the first one) |
+
+The pass (`@accepted`), the red result (the top of `@ready`), and the
+labels and comments stay with the flow of the project. Change the three
+numbers of `merge-queue-batch` to change the batch.
 
 A switch back from `rules` to `code` drops the pack at the next pass of
 the engine. A job that ended under `rules` but whose events the engine
@@ -11447,7 +11484,7 @@ start with `Job queue:`.
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?, eta?}`. `eta` is the planned duration (§35.5). The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?}`. `eta` is the planned duration (§35.5). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
-| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
+| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of one or more cards, in this order (no limit of the daemon; the batch rule of the merge queue sets its own, §19.11). All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/projects/{name}/jobs/stats` | members                            | `?since=`: an RFC 3339 time, or a duration back from now such as `7d` (the default); anything else is `400`. The jobs created at or after `since` (a rerun keeps the `created_at` of its first try): `{project, since, jobs, first_attempt, validate, merge, reruns, conflicts, errors, cancelled, open, splits, failed_steps: [{step, failed}], failed_targets: [{target, failed, first_attempt}], untargeted_test_fails}`. Each of `first_attempt`, `validate`, `merge`, and `reruns` is `{ended, passed, failed, pass_rate}`; `pass_rate` is `passed / ended` from 0 to 1, `null` with none ended. A first attempt is attempt 1 and no split half; a `conflict` counts in `conflicts`, not in `ended`. A job with outcome `error` could not run (host agent offline, prepare step failed, push to `next` failed): first attempts and reruns with it count in `errors`, not in `ended`, so an outage does not lower the rate. Split halves count in `splits` only. `failed_targets` (most first) come from the `error: N targets failed:` lines of the failed jobs' output tails, all attempts; `failed_steps` from the first ``error: recipe `<step>` failed`` line, or `timeout`. `untargeted_test_fails` counts the failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |

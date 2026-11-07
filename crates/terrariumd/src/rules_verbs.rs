@@ -26,6 +26,7 @@
 //!   every few seconds, the spawn timer runs the queued unparks and ends
 //!   the agent of a finished card.
 
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use terrarium_core::AgentId;
@@ -43,6 +44,7 @@ use crate::rules_engine::{Done, RunCtx, lookup};
 use crate::store::board::{self, Card, CardPatch, NewCard, NewLink};
 use crate::store::jobs::{self, BatchCard, Job, JobKind, JobState, NewJob};
 use crate::store::mail::{self, Address};
+use crate::store::schedules;
 use crate::store::spawns::{self, Bound};
 
 /// The arguments whose text an agent reads: their placeholders are filled
@@ -494,15 +496,103 @@ fn job_queue(
             planned_secs: None,
         },
     )?;
+    if kind == JobKind::Merge && crate::jobs::code_flow(t, &job.project)? {
+        crate::jobs::mark_queued(t, &job)?;
+    }
     effects.push(Effect::Kick);
     Ok(changed(
         json!({"job": job.id, "kind": job.kind, "card": card.id}),
     ))
 }
 
+/// The cards of a batch of column `from` (TER-172).
+#[derive(Debug, Clone, Default)]
+pub struct BatchPick {
+    /// The cards that the batch takes: board order, at most the limit.
+    pub cards: Vec<Card>,
+    /// The cards of the column that wait for a batch (not held, no open
+    /// job), apart from the limit.
+    pub waiting: usize,
+    /// When the first of those came into the column (its newest move,
+    /// else its creation).
+    pub first_since: Option<DateTime<Utc>>,
+    /// The cards of the column that the batch leaves out, with the reason.
+    pub left_out: Vec<Value>,
+}
+
+/// The cards of column `from` of `project` that a batch takes, in board
+/// order, at most `limit` (`None`: all). A card that is held or has an
+/// open job is left out. There is no limit of the daemon's own: the rule
+/// sets it (TER-162 D9).
+pub fn pick_batch(
+    conn: &Connection,
+    project: &str,
+    from: &str,
+    limit: Option<usize>,
+) -> ApiResult<BatchPick> {
+    let board = board::get_board(conn, project)?;
+    let mut out = BatchPick::default();
+    for c in board.cards.iter().filter(|c| c.column == from) {
+        if api_jobs::not_held(c).is_err() {
+            out.left_out.push(json!({"card": c.id, "reason": "held"}));
+            continue;
+        }
+        if let Some(j) = open_job(conn, &c.id)? {
+            out.left_out
+                .push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
+            continue;
+        }
+        out.waiting += 1;
+        let since = board::last_moved_at(conn, &c.id)?.unwrap_or_else(|| c.created_at.clone());
+        if let Ok(t) = DateTime::parse_from_rfc3339(&since) {
+            let t = t.with_timezone(&Utc);
+            out.first_since = Some(out.first_since.map_or(t, |f| f.min(t)));
+        }
+        if limit.is_none_or(|l| out.cards.len() < l) {
+            out.cards.push(c.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// When a batch with `min_cards` and `max_wait_minutes` goes: `Ok` now,
+/// `Err((reason, due))` when it waits, with the time it goes by the
+/// wait (`None`: only a card more makes it go).
+pub fn batch_goes(
+    pick: &BatchPick,
+    min_cards: Option<i64>,
+    max_wait_minutes: Option<i64>,
+    now: DateTime<Utc>,
+) -> Result<(), (String, Option<DateTime<Utc>>)> {
+    let Some(min) = min_cards.and_then(|n| usize::try_from(n).ok()) else {
+        return Ok(());
+    };
+    if pick.waiting >= min {
+        return Ok(());
+    }
+    let due = max_wait_minutes
+        .zip(pick.first_since)
+        .map(|(m, first)| first + chrono::Duration::minutes(m));
+    match due {
+        Some(d) if d <= now => Ok(()),
+        Some(d) => Err((
+            format!(
+                "{} of {min} cards wait; the batch goes at {} ({} minutes after the first one)",
+                pick.waiting,
+                schedules::stamp(d),
+                max_wait_minutes.unwrap_or_default()
+            ),
+            Some(d),
+        )),
+        None => Err((format!("{} of {min} cards wait", pick.waiting), None)),
+    }
+}
+
 /// One merge job for the cards of column `from` in board order, at most
-/// `limit` (and [`jobs::BATCH_MAX`]). A card that is held or has an open
-/// job is left out.
+/// `limit`. A card that is held or has an open job is left out. With
+/// `min_cards` the job waits for that many cards, or (with
+/// `max_wait_minutes`) until the first card waited that long; until then
+/// the verb is a no-op that says when the batch goes.
 fn queue_batch(
     t: &mut Tx<'_>,
     actor: &Actor,
@@ -513,39 +603,31 @@ fn queue_batch(
     let project = ctx.project.clone();
     policy::admin_project(actor, &project, "queueing a merge onto next")?;
     let from = column_name(ctx, a.raw("from").unwrap_or_default())?;
-    let limit = a
-        .count("limit")
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(jobs::BATCH_MAX)
-        .min(jobs::BATCH_MAX);
+    let limit = a.count("limit").and_then(|n| usize::try_from(n).ok());
     let def = jobs::delivery(t, &project)?;
     api_jobs::enabled(&def, &project)?;
-    let board = board::get_board(t, &project)?;
-    let mut left_out = Vec::new();
-    let mut picked: Vec<&Card> = Vec::new();
-    for c in board.cards.iter().filter(|c| c.column == from) {
-        if picked.len() >= limit {
-            break;
-        }
-        if api_jobs::not_held(c).is_err() {
-            left_out.push(json!({"card": c.id, "reason": "held"}));
-            continue;
-        }
-        if let Some(j) = open_job(t, &c.id)? {
-            left_out.push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
-            continue;
-        }
-        picked.push(c);
-    }
-    if picked.is_empty() {
+    let pick = pick_batch(t, &project, &from, limit)?;
+    let left_out = pick.left_out.clone();
+    if pick.cards.is_empty() {
         return Ok(noop(json!({
             "column": from, "left_out": left_out,
             "reason": format!("no card to merge in {from}"),
         })));
     }
+    if let Err((reason, due)) = batch_goes(
+        &pick,
+        a.count("min_cards"),
+        a.count("max_wait_minutes"),
+        Utc::now(),
+    ) {
+        return Ok(noop(json!({
+            "column": from, "waiting": pick.waiting, "left_out": left_out,
+            "due": due.map(schedules::stamp), "reason": reason,
+        })));
+    }
     let mut repo: Option<String> = None;
     let mut batch = Vec::new();
-    for c in &picked {
+    for c in &pick.cards {
         let r = api_jobs::repo_of(t, c, None)?;
         match &repo {
             Some(have) if *have != r => {
@@ -586,6 +668,9 @@ fn queue_batch(
             planned_secs: None,
         },
     )?;
+    if crate::jobs::code_flow(t, &project)? {
+        crate::jobs::mark_queued(t, &job)?;
+    }
     effects.push(Effect::Kick);
     Ok(changed(
         json!({"job": job.id, "kind": "merge", "cards": names, "left_out": left_out}),
