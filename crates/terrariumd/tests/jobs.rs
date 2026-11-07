@@ -726,6 +726,58 @@ async fn a_green_validation_moves_the_card_to_review() {
     assert_eq!(j["exit_code"], 0);
 }
 
+/// TER-165: the daemon finds the columns by role. `validating` is renamed
+/// and keeps its role. `review` has no role and `qa` has it, so the role
+/// wins over the name. `accepted` has no role, so its name is the fallback.
+#[tokio::test]
+async fn the_job_queue_finds_its_columns_by_role_then_by_name() {
+    let lab = lab(2).await;
+    let r = lab
+        .td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"},
+                {"name": "checking", "rename_from": "validating", "role": "validating"},
+                // A column that omits `role` keeps its old role: the default
+                // board gives `review` the role `review`, so say null.
+                {"name": "review", "role": null}, {"name": "qa", "role": "review"},
+                {"name": "accepted", "role": null},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // A validate pass: the card is in the role column, then in `qa`.
+    let head = lab.branch("ter-a", "next", &[("OK", "yes\n")]);
+    let a = lab.card("by role", "ter-a").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{a}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let c = lab.card_of(&a).await;
+    assert_eq!(c["column"], "checking", "{c}");
+    lab.until_card(&a, "qa", |c| c["column"] == "qa").await;
+    // A merge pass: the name `accepted` is the fallback.
+    let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
+    let b = lab.card("by name", "ter-c").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{b}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["kind"], "merge");
+    lab.until_card(&b, "accepted", |c| c["column"] == "accepted")
+        .await;
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    assert_ne!(next, head);
+}
+
 /// TER-107: a validate leaves one `validation:*` label and one `by:` label,
 /// even when the card already has stale ones.
 #[tokio::test]

@@ -87,11 +87,14 @@ pub const TICK: Duration = Duration::from_secs(5);
 pub const LABEL_QUEUED: &str = "validation:queued";
 /// The label of a card whose job runs.
 pub const LABEL_RUNNING: &str = "validation:running";
-/// The column of a card whose job is open.
+/// The name of the column of a card whose job is open, used when no column
+/// has the role `validating` (see `board::role_name`).
 pub const COL_VALIDATING: &str = "validating";
-/// Where a validate pass goes.
+/// The name of the column where a validate pass goes, used when no column
+/// has the role `review`.
 pub const COL_REVIEW: &str = "review";
-/// Where a merge pass goes.
+/// The name of the column where a merge pass goes, used when no column has
+/// the role `accepted`.
 pub const COL_ACCEPTED: &str = "accepted";
 /// Where a failure goes, at the top.
 pub const COL_READY: &str = "ready";
@@ -1197,11 +1200,11 @@ fn card_view(j: &Job, c: &BatchCard) -> Job {
 fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
     let to = match j.kind {
-        JobKind::Validate => COL_REVIEW,
-        JobKind::Merge => COL_ACCEPTED,
+        JobKind::Validate => board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?,
+        JobKind::Merge => board::role_name(t, &j.project, board::ACCEPTED, COL_ACCEPTED)?,
     };
     let note = end_comment(j, "passed");
-    move_or_comment(t, &j.card, to, None, &note)?;
+    move_or_comment(t, &j.card, &to, None, &note)?;
     unassign(t, &j.card)
 }
 
