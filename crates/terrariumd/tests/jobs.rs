@@ -3351,3 +3351,76 @@ async fn the_recipe_gets_the_job_kind_and_the_changed_files() {
     assert!(text.contains("base=unset\nfiles=unset\n"), "{text}");
     assert_eq!(text.lines().count(), 4, "{text}");
 }
+
+// ------------------------------------------------------------- TER-196
+
+/// TER-196: the host agent restarts while the recipe of a batch merge
+/// runs, so the daemon gets "the host agent no longer holds the session".
+/// That is no red: the batch does not split, the same job goes back to
+/// the queue with its attempt, reruns whole, and both cards merge.
+#[tokio::test]
+async fn a_lost_host_agent_session_reruns_the_whole_batch() {
+    let lab = lab(2).await;
+    let marks = tempfile::tempdir().unwrap();
+    let m = marks.path().display().to_string();
+    // Each run counts itself. The first run waits to be lost; the rerun
+    // passes.
+    set_recipe(
+        &lab,
+        &format!(
+            "test -f OK && test -f s1 && test -f s2 && echo run >> '{m}/runs' && \
+             if test -f '{m}/ran'; then exit 0; fi; touch '{m}/ran'; sleep 60"
+        ),
+    )
+    .await;
+    lab.branch("ter-s1", "next", &[("OK", "yes\n"), ("s1", "1")]);
+    lab.branch("ter-s2", "next", &[("OK", "yes\n"), ("s2", "2")]);
+    let c1 = lab.card("s1", "ter-s1").await;
+    let c2 = lab.card("s2", "ter-s2").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job_id = r.body["job"]["id"].as_str().unwrap().to_owned();
+
+    // The recipe runs: restart the host agent. The new one does not hold
+    // the session of the run.
+    let ran = marks.path().join("ran");
+    let start = Instant::now();
+    while !ran.exists() {
+        assert!(start.elapsed() < DEADLINE, "the recipe never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    lab.agent_down().await;
+    lab.agent_up().await;
+
+    for c in [&c1, &c2] {
+        let card = lab
+            .until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+        let text = comments(&card);
+        assert!(!text.contains("The batch splits"), "{card}");
+        assert!(
+            !card["body"].as_str().unwrap().contains("Validation failed"),
+            "{card}"
+        );
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "the batch did not split: {jobs:#?}");
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{job_id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(j["attempt"], 1, "a lost session used an attempt: {j:#}");
+    assert_eq!(j["batch"].as_array().unwrap().len(), 2, "{j:#}");
+    let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
+    assert_eq!(runs.lines().count(), 2, "the same job ran twice: {runs}");
+    assert_eq!(
+        next_merges(&lab),
+        ["Merge ter-s1 onto next", "Merge ter-s2 onto next"]
+    );
+}
