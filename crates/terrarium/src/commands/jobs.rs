@@ -403,8 +403,10 @@ mod tests {
     fn stats_print_the_rates_counts_and_top_targets() {
         let ctx = Ctx::for_test(Arc::new(MockTransport::new()), None);
         let targets: Vec<Value> = (0..12)
-            .map(|i| json!({"target": format!("-p app --test t{i:02}"), "failed": 12 - i,
-                            "first_attempt": 1}))
+            .map(|i| {
+                json!({"target": format!("-p app --test t{i:02}"), "failed": 12 - i,
+                            "first_attempt": 1})
+            })
             .collect();
         let v = json!({
             "project": "p", "since": "2026-11-01T00:00:00.000Z", "jobs": 13,
@@ -419,7 +421,10 @@ mod tests {
         });
         print_stats(&ctx, &v);
         let out = ctx.out.captured();
-        assert!(out.contains("jobs of p since 2026-11-01T00:00:00.000Z: 13"), "{out}");
+        assert!(
+            out.contains("jobs of p since 2026-11-01T00:00:00.000Z: 13"),
+            "{out}"
+        );
         assert!(out.contains("first-attempt pass rate: 40% (2/5)"), "{out}");
         assert!(out.contains("validate 33% (1/3), merge 50% (1/2)"), "{out}");
         assert!(out.contains("reruns passed: - (0/0)"), "{out}");
