@@ -614,3 +614,284 @@ async fn a_column_removed_after_the_check_fails_the_run() {
         "{last:?}"
     );
 }
+
+const FEW: &str = r#"rule "few" {
+  on = ["test.ping"]
+  max_per_hour = 2
+  card_comment { text = "few {{event.data.n}}" }
+}
+"#;
+
+const MANY: &str = r#"rule "many" {
+  on = ["test.ping"]
+  card_comment { text = "many {{event.data.n}}" }
+}
+"#;
+
+/// The rate limits of the loop guard: they stop a loop that the chain
+/// depth does not see (one that goes through an agent, depth 0 again).
+#[tokio::test]
+async fn the_rate_limits_stop_a_rule_per_hour_and_per_card() {
+    let td = TestDaemon::start().await;
+
+    // max_per_hour = 2: the third event of the hour starts no run, also
+    // on another card.
+    td.project("few").await;
+    put_rules(&td, "few", FEW).await;
+    let mut cards = Vec::new();
+    for t in ["a", "b", "c"] {
+        cards.push(new_card(&td, "few", json!({"title": t})).await);
+    }
+    settle(&td).await;
+    for (n, card) in cards.iter().enumerate() {
+        ping(&td, "few", card, n as i64 + 1).await;
+    }
+    settle(&td).await;
+    assert_eq!(bodies(&comments(&td, &cards[0]).await), vec!["few `1`"]);
+    assert_eq!(bodies(&comments(&td, &cards[1]).await), vec!["few `2`"]);
+    assert!(comments(&td, &cards[2]).await.is_empty());
+    let mut r = runs(&td, "few").await;
+    r.sort_by_key(|r| r["event_seq"].as_i64());
+    let states: Vec<&str> = r.iter().map(|r| r["state"].as_str().unwrap()).collect();
+    assert_eq!(states, vec!["done", "done", "skipped"], "{r:?}");
+    assert_eq!(r[2]["card"], cards[2].as_str());
+    let reason = r[2]["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("rate limit: 2 runs in an hour"),
+        "{reason}"
+    );
+
+    // The default limit (30) holds, but one card takes at most 10 runs of
+    // a rule in an hour.
+    td.project("many").await;
+    put_rules(&td, "many", MANY).await;
+    let card = new_card(&td, "many", json!({"title": "busy"})).await;
+    let other = new_card(&td, "many", json!({"title": "quiet"})).await;
+    settle(&td).await;
+    for n in 1..=11 {
+        ping(&td, "many", &card, n).await;
+    }
+    ping(&td, "many", &other, 12).await;
+    settle(&td).await;
+    let c = comments(&td, &card).await;
+    assert_eq!(c.len(), 10, "{c:?}");
+    assert_eq!(c[9].1, "many `10`");
+    assert_eq!(
+        bodies(&comments(&td, &other).await),
+        vec!["many `12`"],
+        "another card still runs"
+    );
+    let r = runs(&td, "many").await;
+    let skipped: Vec<&Value> = r.iter().filter(|r| r["state"] == "skipped").collect();
+    assert_eq!(skipped.len(), 1, "{r:?}");
+    assert_eq!(skipped[0]["card"], card.as_str());
+    let reason = skipped[0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains(&format!("card rate limit: 10 runs for {card} in an hour")),
+        "{reason}"
+    );
+    assert_eq!(r.iter().filter(|r| r["state"] == "done").count(), 11);
+}
+
+const STATE: &str = r#"rule "open-job" {
+  on = ["job"]
+  if_job { state = ["queued", "running"] }
+  card_comment { text = "job {{job.id}}" }
+}
+
+rule "red-job" {
+  on = ["job"]
+  if_job { outcome = ["red"] }
+  card_comment { text = "red" }
+}
+
+rule "backlog-only" {
+  on = ["test.ping"]
+  if_card { column = ["backlog"]  assigned = false  archived = false }
+  card_comment { text = "in backlog {{event.data.n}}" }
+}
+"#;
+
+/// `if_job` (state, outcome, an event without its job) and the `if_card`
+/// fields `column`, `assigned` and `archived`, on the current state.
+#[tokio::test]
+async fn job_and_card_conditions_read_the_current_state() {
+    use terrariumd::store::jobs::{self, JobKind, NewJob};
+    let td = TestDaemon::start().await;
+    td.project("state").await;
+    put_rules(&td, "state", STATE).await;
+    let a = new_card(&td, "state", json!({"title": "a"})).await;
+    let b = new_card(&td, "state", json!({"title": "b"})).await;
+    let c = new_card(&td, "state", json!({"title": "c"})).await;
+    td.post(&format!("/api/cards/{b}/move"), json!({"column": "ready"}))
+        .await
+        .ok();
+    let d = td.delete(&format!("/api/cards/{c}")).await;
+    assert_eq!(d.status, 204);
+    settle(&td).await;
+
+    ping(&td, "state", &a, 1).await;
+    ping(&td, "state", &b, 2).await;
+    ping(&td, "state", &c, 3).await;
+    settle(&td).await;
+    assert_eq!(bodies(&comments(&td, &a).await), vec!["in backlog `1`"]);
+    assert!(comments(&td, &b).await.is_empty());
+    assert!(comments(&td, &c).await.is_empty());
+    let r = runs(&td, "state").await;
+    let reason_of = |card: &str| {
+        r.iter()
+            .find(|r| r["rule"] == "backlog-only" && r["card"] == card)
+            .map(|r| (r["state"].clone(), r["reason"].as_str().unwrap_or("").to_owned()))
+            .unwrap()
+    };
+    let (s, why) = reason_of(&b);
+    assert_eq!(s, "skipped");
+    assert!(why.contains(&format!("{b} is in ready")), "{why}");
+    let (s, why) = reason_of(&c);
+    assert_eq!(s, "skipped");
+    assert!(why.contains(&format!("{c} is archived")), "{why}");
+
+    // A job event: the job is queued (or running), its outcome is none.
+    let card = a.clone();
+    let job = state(&td)
+        .db
+        .write("operator", move |t| {
+            jobs::create(
+                t,
+                NewJob {
+                    project: "state".into(),
+                    card,
+                    kind: JobKind::Validate,
+                    batch: Vec::new(),
+                    repo: "app".into(),
+                    branch: "next".into(),
+                    commit: None,
+                    by_agent: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    settle(&td).await;
+    let ca = comments(&td, &a).await;
+    let want = format!("job `{}`", job.id);
+    assert_eq!(
+        bodies(&ca).iter().filter(|b| **b == want).count(),
+        1,
+        "{ca:?}"
+    );
+    assert!(!bodies(&ca).contains(&"red"), "{ca:?}");
+    let r = runs(&td, "state").await;
+    let red: Vec<&Value> = r.iter().filter(|r| r["rule"] == "red-job").collect();
+    assert!(!red.is_empty(), "{r:?}");
+    assert!(red.iter().all(|r| r["state"] == "skipped"), "{red:?}");
+    assert!(
+        red[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("if_job 1 does not hold: the outcome is"),
+        "{red:?}"
+    );
+
+    // A job event whose job is not in the store: no job, no run.
+    let (project, card) = ("state".to_owned(), a.clone());
+    let seq = state(&td)
+        .db
+        .write(SOURCE, move |t| {
+            Ok(t.emit(
+                EventDraft::new(
+                    "job",
+                    "a lost job",
+                    json!({"id": "no-such-job", "card": card, "state": "queued"}),
+                )
+                .project(project),
+            )?
+            .seq)
+        })
+        .await
+        .unwrap();
+    settle(&td).await;
+    let r = runs(&td, "state").await;
+    let lost = r
+        .iter()
+        .find(|r| r["rule"] == "open-job" && r["event_seq"] == seq)
+        .unwrap();
+    assert_eq!(lost["state"], "skipped", "{lost:?}");
+    assert!(
+        lost["reason"]
+            .as_str()
+            .unwrap()
+            .contains("if_job 1: the event has no job"),
+        "{lost:?}"
+    );
+}
+
+const ON_OFF: &str = r#"rule "note" {
+  on = ["test.ping"]
+  card_comment { text = "note {{event.data.n}}" }
+}
+"#;
+
+const OFF: &str = r#"rule "note" {
+  on = ["test.ping"]
+  enabled = false
+  card_comment { text = "note {{event.data.n}}" }
+}
+"#;
+
+/// A planned run of a rule that is disabled (or gone) before the run
+/// starts does not act.
+#[tokio::test]
+async fn a_rule_disabled_after_the_plan_does_not_run_its_pending_rows() {
+    let mut td = TestDaemon::start().await;
+    td.project("off").await;
+    put_rules(&td, "off", ON_OFF).await;
+    let card = new_card(&td, "off", json!({"title": "c"})).await;
+    settle(&td).await;
+
+    // With the daemon down: plan one event, then disable the rule.
+    td.daemon.take().unwrap().shutdown();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let path = td.state.join("terrarium.db");
+    {
+        let conn = terrariumd::db::open(&path).unwrap();
+        terrariumd::events::insert(
+            &conn,
+            SOURCE,
+            EventDraft::new("test.ping", "down", json!({"n": 1}))
+                .project("off")
+                .card(card.clone()),
+        )
+        .unwrap();
+        let db = terrariumd::db::Db::new(conn, EventHub::default());
+        let mut cache = rules_engine::Cache::default();
+        let projects = rules_engine::load(&db, &mut cache).await.unwrap();
+        let (written, _) = rules_engine::plan_pass(&db, projects, chrono::Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(written, 1);
+        db.write("system", |t| {
+            t.execute(
+                "UPDATE project_rules SET text = ?1, hash = 'disabled' WHERE project = 'off'",
+                [OFF],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    td.boot(None, None).await;
+    settle(&td).await;
+    assert!(comments(&td, &card).await.is_empty(), "the run did not act");
+    let r = runs(&td, "off").await;
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0]["state"], "skipped");
+    assert!(
+        r[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("disabled or gone since the plan"),
+        "{r:?}"
+    );
+}

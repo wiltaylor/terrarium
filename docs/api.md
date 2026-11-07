@@ -7914,11 +7914,16 @@ on the events of the log.
   times in an hour (default 30), and at most 10 times for one card in an
   hour. A guard records a `skipped` run with the reason.
 - Order. The runs of one card go one after another, in event order and
-  then in rule order. The runs of other cards go beside them.
+  then in rule order. The runs of other cards go beside them. A run that
+  the engine cannot record (a database error) stays pending and holds the
+  later runs of its card until the next pass.
 - Start checks, when a run starts (after the earlier runs of its card):
+  the rule must still be stored and enabled (else the run is `skipped`),
   each column that the rule names must still be on the board (else the
   run is `failed`), the card must still exist, and each `if_card` and
-  `if_job` must hold (else the run is `skipped` with the reason).
+  `if_job` must hold (else the run is `skipped` with the reason). A run
+  acts as its rule was at the plan: an edit of the rule after the plan
+  does not change a planned run, and a run that started goes to its end.
 - Actions. The actions run in the order of the file, each in its own
   write together with the run's step counter, so a restart goes on at
   the next action and never repeats a database action. The first action
@@ -7963,7 +7968,7 @@ its action with ``verb `card.move` is not implemented yet`` (TER-169).
 | Method and path | Body | Answer |
 |---|---|---|
 | `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. No rules and no `text`: `404`. |
-| `GET /api/projects/{name}/rules/runs?rule=&limit=` | | `200`, `{runs: [{id, project, rule, rule_hash, event_seq, card?, state, step, steps, reason?, created_at, updated_at}]}`, newest first (`limit` 1 to 500, default 100). `state` is `pending`, `done`, `noop`, `failed`, or `skipped`; `step` the next action (pending) or the actions run; `steps` one `{verb, ok, changed?, detail?, error?}` for each action run. The project keeps its newest 500 finished runs. |
+| `GET /api/projects/{name}/rules/runs?rule=&limit=` | | `200`, `{runs: [{id, project, rule, rule_hash, event_seq, card?, state, step, steps, reason?, created_at, updated_at}]}`, newest first (`limit` 1 to 500, default 100). `state` is `pending`, `done`, `noop`, `failed`, or `skipped`; `step` the next action (pending) or the actions run; `steps` one `{verb, ok, changed?, detail?, error?}` for each action run. The project keeps its newest 500 finished runs, and every run of the last hour (the rate limits count them). |
 
 Both: whoever reads the project.
 

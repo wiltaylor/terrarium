@@ -20,7 +20,9 @@
 //!   writes a `skipped` row with the reason.
 //! - **Per-card order.** [`run_pending`] runs the pending rows in event
 //!   order, then rule order. The rows of one card (its lane) run one after
-//!   another; other lanes run beside them.
+//!   another; other lanes run beside them. A row that cannot be recorded
+//!   stops its lane until the next pass. A row of a rule that is disabled
+//!   or gone since the plan is skipped when it has not started.
 //! - **Conditions on the current state** (`if_card`, `if_job`) and the
 //!   column check (each column that the rule names is still on the board)
 //!   run in the write of the first action, so they see the state after the
@@ -44,7 +46,7 @@
 //! The verbs come with TER-169. Until then only `card.comment` runs; each
 //! other verb fails its action with "not implemented yet".
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -393,7 +395,7 @@ pub async fn plan_pass(
         }
         set_cursor(t, last)?;
         for p in &touched {
-            prune(t, p)?;
+            prune(t, p, now)?;
         }
         Ok((written, evs.len() == BATCH))
     })
@@ -443,13 +445,16 @@ fn insert_run(
     Ok(())
 }
 
-/// Keep the newest [`KEEP_RUNS`] finished rows of `project`.
-fn prune(t: &Tx<'_>, project: &str) -> ApiResult<()> {
+/// Keep the newest [`KEEP_RUNS`] finished rows of `project`, and every row
+/// of the last hour: the rate limits of [`decide`] count those.
+fn prune(t: &Tx<'_>, project: &str, now: DateTime<Utc>) -> ApiResult<()> {
+    let hour_ago = schedules::stamp(now - chrono::Duration::hours(1));
     t.execute(
-        "DELETE FROM rule_runs WHERE project = ?1 AND state != 'pending' AND id NOT IN (
+        "DELETE FROM rule_runs WHERE project = ?1 AND state != 'pending' AND created_at < ?3
+            AND id NOT IN (
              SELECT id FROM rule_runs WHERE project = ?1 AND state != 'pending'
               ORDER BY id DESC LIMIT ?2)",
-        params![project, KEEP_RUNS],
+        params![project, KEEP_RUNS, hour_ago],
     )?;
     Ok(())
 }
@@ -534,10 +539,28 @@ pub fn list_runs(
     Ok(rows)
 }
 
+/// The enabled rules of `projects`, as (project, rule): a pending run of
+/// any other rule (disabled or gone since its plan) does not start.
+pub fn live_rules(projects: &[ProjectRules]) -> HashSet<(String, String)> {
+    projects
+        .iter()
+        .flat_map(|p| {
+            p.set
+                .rules
+                .iter()
+                .filter(|r| r.enabled)
+                .map(|r| (p.project.clone(), r.name.clone()))
+        })
+        .collect()
+}
+
 /// Run the pending rows (at most [`RUN_BATCH`]): the rows of one lane (a
-/// card) in order, the lanes beside each other. Returns whether more rows
-/// wait.
-pub async fn run_pending(state: &Shared) -> ApiResult<bool> {
+/// card) in order, the lanes beside each other. A row that cannot be
+/// recorded (a database error) stops its lane, so the later rows of its
+/// card wait for it. `live`: the enabled rules ([`live_rules`]). Returns
+/// whether more rows wait and every lane went through (no error), so a
+/// caller that loops does not spin on a failing row.
+pub async fn run_pending(state: &Shared, live: Arc<HashSet<(String, String)>>) -> ApiResult<bool> {
     let pending: Vec<(String, String)> = state
         .db
         .read(|c| {
@@ -556,25 +579,35 @@ pub async fn run_pending(state: &Shared) -> ApiResult<bool> {
     for (id, lane) in pending {
         lanes.entry(lane).or_default().push(id);
     }
-    let tasks: Vec<JoinHandle<()>> = lanes
+    let tasks: Vec<JoinHandle<bool>> = lanes
         .into_values()
         .map(|ids| {
             let st = state.clone();
+            let live = live.clone();
             tokio::spawn(async move {
                 for id in ids {
-                    if let Err(e) = run_one(&st, &id).await {
-                        warn!(run = %id, "a rule run failed to record: {e}");
+                    if let Err(e) = run_one(&st, &id, &live).await {
+                        // Keep the card's order: its later rows wait for
+                        // this one (the next pass).
+                        warn!(run = %id, "a rule run failed to record; its lane waits: {e}");
+                        return false;
                     }
                 }
+                true
             })
         })
         .collect();
+    let mut clean = true;
     for t in tasks {
-        if let Err(e) = t.await {
-            warn!("a rule lane task ended: {e}");
+        match t.await {
+            Ok(ok) => clean &= ok,
+            Err(e) => {
+                warn!("a rule lane task ended: {e}");
+                clean = false;
+            }
         }
     }
-    Ok(more)
+    Ok(more && clean)
 }
 
 /// What one write of a run did.
@@ -592,7 +625,11 @@ enum Step {
 }
 
 /// Run one pending row to its end: one write for each action.
-pub async fn run_one(state: &Shared, id: &str) -> ApiResult<()> {
+pub async fn run_one(
+    state: &Shared,
+    id: &str,
+    live: &HashSet<(String, String)>,
+) -> ApiResult<()> {
     let row = {
         let id = id.to_owned();
         state.db.read(move |c| get_run(c, &id)).await?
@@ -601,6 +638,7 @@ pub async fn run_one(state: &Shared, id: &str) -> ApiResult<()> {
         return Ok(());
     }
     let label = actor_label(&row.project, &row.rule);
+    let rule_live = live.contains(&(row.project.clone(), row.rule.clone()));
     loop {
         let rid = row.id.clone();
         let cause = row.cause.clone();
@@ -608,7 +646,7 @@ pub async fn run_one(state: &Shared, id: &str) -> ApiResult<()> {
             .db
             .write(label.clone(), move |t| {
                 t.cause = Some(cause);
-                step_once(t, &rid)
+                step_once(t, &rid, rule_live)
             })
             .await;
         let step = match step {
@@ -688,7 +726,7 @@ struct RunCtx {
 }
 
 fn event_at(conn: &Connection, seq: i64) -> ApiResult<Option<StoredEvent>> {
-    Ok(events::list(conn, &EventFilter::default(), seq - 1, 1)?
+    Ok(events::list(conn, &EventFilter::default(), seq.saturating_sub(1), 1)?
         .into_iter()
         .find(|e| e.seq == seq))
 }
@@ -891,10 +929,21 @@ fn perform(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, action: &Action) -> ApiR
 }
 
 /// One write of a run: at the first action, the start checks; then the
-/// next action, with the step counter in the same write.
-fn step_once(t: &mut Tx<'_>, id: &str) -> ApiResult<Step> {
+/// next action, with the step counter in the same write. `rule_live`:
+/// the rule is still stored and enabled; a run that has not started is
+/// skipped when it is not (a run that started goes to its end).
+fn step_once(t: &mut Tx<'_>, id: &str, rule_live: bool) -> ApiResult<Step> {
     let row = get_run(t, id)?;
     if row.state != "pending" {
+        return Ok(Step::Ended);
+    }
+    if row.step == 0 && !rule_live {
+        finish(
+            t,
+            id,
+            "skipped",
+            Some("the rule is disabled or gone since the plan"),
+        )?;
         return Ok(Step::Ended);
     }
     let Some(rule) = row.rule_def.clone() else {
@@ -959,10 +1008,6 @@ fn end_run(t: &Tx<'_>, row: &RunRow) -> ApiResult<()> {
 /// and their runs, until the log after the cursor is read.
 pub async fn pass(state: &Shared, cache: &mut Cache) {
     loop {
-        if let Err(e) = drain_runs(state).await {
-            warn!("the rule engine cannot run its outbox: {e}");
-            return;
-        }
         let projects = match load(&state.db, cache).await {
             Ok(p) => p,
             Err(e) => {
@@ -970,10 +1015,15 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
                 return;
             }
         };
+        let live = Arc::new(live_rules(&projects));
+        if let Err(e) = drain_runs(state, &live).await {
+            warn!("the rule engine cannot run its outbox: {e}");
+            return;
+        }
         match plan_pass(&state.db, projects, Utc::now()).await {
             Ok((_, true)) => {}
             Ok((_, false)) => {
-                if let Err(e) = drain_runs(state).await {
+                if let Err(e) = drain_runs(state, &live).await {
                     warn!("the rule engine cannot run its outbox: {e}");
                 }
                 return;
@@ -986,8 +1036,10 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
     }
 }
 
-async fn drain_runs(state: &Shared) -> ApiResult<()> {
-    while run_pending(state).await? {}
+/// Run the pending rows until none wait, or until a lane stops on an
+/// error (the next pass tries again, after the next wake-up).
+async fn drain_runs(state: &Shared, live: &Arc<HashSet<(String, String)>>) -> ApiResult<()> {
+    while run_pending(state, live.clone()).await? {}
     Ok(())
 }
 
@@ -1051,7 +1103,8 @@ pub fn dry_run(
         project: Some(project.to_owned()),
         ..Default::default()
     };
-    let evs: Vec<StoredEvent> = events::list(conn, &filter, from - 1, MAX_DRY_RUN_EVENTS)?
+    let evs: Vec<StoredEvent> =
+        events::list(conn, &filter, from.saturating_sub(1), MAX_DRY_RUN_EVENTS)?
         .into_iter()
         .filter(|e| e.seq <= to)
         .collect();
