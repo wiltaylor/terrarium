@@ -19,7 +19,8 @@
 //!   occurrence).
 //! - **Drain.** The updater asks for it before it stops the container: no
 //!   agent wakes, and no new turn goes to a running agent (the stream gate
-//!   is closed, `crate::stream_limit`); the running turns end. The drain
+//!   is closed, `crate::stream_limit`); the running turns end. No job of
+//!   the job queue starts, and the running jobs go on (`crate::jobs`). The drain
 //!   lives in memory: the new daemon starts without it, and
 //!   `POST /api/system/update/resume` ends it.
 //! - **Results.** The background task reads the history of the updater
@@ -613,6 +614,9 @@ pub struct DrainInfo {
     pub by: Option<String>,
     /// The agents that run a turn now (`project/name`).
     pub busy: Vec<String>,
+    /// The jobs of the job queue whose run has not ended yet (TER-123):
+    /// no job starts during the drain, and these go on.
+    pub jobs: Vec<String>,
 }
 
 /// The agents that run a turn or start now.
@@ -637,6 +641,7 @@ pub async fn drain_info(state: &Shared) -> DrainInfo {
         since: d.as_ref().map(|d| d.since),
         by: d.map(|d| d.by),
         busy: busy_agents(state).await,
+        jobs: crate::jobs::busy_jobs(state).await,
     }
 }
 
@@ -750,6 +755,8 @@ pub async fn end_drain(state: &Shared) {
         state.supervisor.stream_granted(id);
     }
     crate::lifecycle::wake_with_work(state, None, "drain_end").await;
+    // The jobs that waited in the queue start (TER-123).
+    crate::jobs::kick(state);
 }
 
 // ------------------------------------------------------------ the task

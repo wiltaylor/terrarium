@@ -42,8 +42,11 @@ export function span(ms: number, seconds = true): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
-/** True when the card is done or archived: its ETA shows no countdown. */
-export const etaStopped = (c: Pick<Card, "column" | "archived">) => c.column === "done" || c.archived;
+/**
+ * True when the card is accepted, done, or archived: its ETA shows no countdown (TER-155 D1). The daemon clears the
+ * ETA on each column change, so this only hides an ETA that was set in the column itself.
+ */
+export const etaStopped = (c: Pick<Card, "column" | "archived">) => c.column === "accepted" || c.column === "done" || c.archived;
 
 export interface Countdown {
   /** `1h 12m left`, `overdue 12m`. */
@@ -55,7 +58,7 @@ export interface Countdown {
   title: string;
 }
 
-/** The countdown chip of a card, or `null` for a card with no ETA or a done or archived card. */
+/** The countdown chip of a card, or `null` for a card with no ETA or an accepted, done, or archived card. */
 export function countdown(c: Card, now = Date.now()): Countdown | null {
   if (!c.eta_at || etaStopped(c)) return null;
   const at = Date.parse(c.eta_at);

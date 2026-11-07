@@ -5,7 +5,8 @@
 //! list), the per-card order, the conditions on the current state, and
 //! the column check after a board change.
 //!
-//! Only `card.comment` runs before TER-169; it is the test verb here.
+//! `card.comment` is the test verb here; tests/rules_verbs.rs tests each
+//! verb (TER-169).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -368,7 +369,7 @@ async fn the_dry_run_plans_and_writes_nothing() {
     assert_eq!(acts[1]["verb"], "card.move");
     assert_eq!(acts[1]["args"]["to"], "review");
     assert_eq!(acts[1]["args"]["comment"], "moved by `note`");
-    assert_eq!(acts[1]["implemented"], false);
+    assert_eq!(acts[1]["implemented"], true);
     assert_eq!(plans[1]["rule"], "only-quiet");
     assert_eq!(plans[1]["outcome"], "skipped");
     assert!(
@@ -509,7 +510,7 @@ rule "stops" {
   on = ["test.ping"]
   when "data.n" { eq = "1" }
   card_comment { text = "before" }
-  card_move { to = "review" }
+  card_move { to = "blocked" }
   card_comment { text = "after" }
 }
 "#;
@@ -552,7 +553,7 @@ async fn ordered_actions_per_card_order_and_conditions() {
     assert_eq!(stops[0]["step"], 1);
     let reason = stops[0]["reason"].as_str().unwrap();
     assert!(reason.contains("action 2 (card.move)"), "{reason}");
-    assert!(reason.contains("TER-169"), "{reason}");
+    assert!(reason.contains("needs a comment"), "{reason}");
     assert_eq!(stops[0]["steps"][1]["ok"], false);
     let quiet: Vec<&Value> = r
         .iter()
@@ -768,6 +769,7 @@ async fn job_and_card_conditions_read_the_current_state() {
                     card,
                     kind: JobKind::Validate,
                     batch: Vec::new(),
+                    planned_secs: None,
                     repo: "app".into(),
                     branch: "next".into(),
                     commit: None,

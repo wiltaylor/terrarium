@@ -43,8 +43,9 @@
 //!   with the guards, the conditions on the current state, and the
 //!   rendered actions, and writes nothing.
 //!
-//! The verbs come with TER-169. Until then only `card.comment` runs; each
-//! other verb fails its action with "not implemented yet".
+//! The verbs are in [`crate::rules_verbs`] (TER-169). What a verb cannot
+//! do in its write (the queue tick, a kill, a wake, the close of a bound
+//! agent) runs after the action's commit.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -67,6 +68,7 @@ use crate::api::Shared;
 use crate::db::{Db, Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventFilter, StoredEvent};
+use crate::rules_verbs::{self, Effect};
 use crate::store::schedules::{self, MAX_CHAIN_DEPTH, event_view};
 use crate::store::{board, jobs, rules};
 
@@ -612,10 +614,11 @@ pub async fn run_pending(state: &Shared, live: Arc<HashSet<(String, String)>>) -
 
 /// What one write of a run did.
 enum Step {
-    /// The run ended (or was not pending).
-    Ended,
-    /// An action ran; more may follow.
-    Next,
+    /// The run ended (or was not pending), with the effects of its last
+    /// action.
+    Ended(Vec<Effect>),
+    /// An action ran, with its effects; more may follow.
+    Next(Vec<Effect>),
     /// The action failed: its write rolled back. Record the failure.
     Failed {
         step: i64,
@@ -655,8 +658,11 @@ pub async fn run_one(state: &Shared, id: &str, live: &HashSet<(String, String)>)
             },
         };
         match step {
-            Step::Ended => return Ok(()),
-            Step::Next => {}
+            Step::Ended(fx) => {
+                rules_verbs::apply(state, fx).await;
+                return Ok(());
+            }
+            Step::Next(fx) => rules_verbs::apply(state, fx).await,
             Step::Failed { step, verb, error } => {
                 let rid = row.id.clone();
                 let cause = row.cause.clone();
@@ -712,13 +718,17 @@ fn fail_run(t: &Tx<'_>, id: &str, step: i64, verb: &str, error: &str) -> ApiResu
 }
 
 /// The state that a run reads: the card, the board, the event, the job.
-struct RunCtx {
-    project: String,
-    rule: String,
-    event: Option<StoredEvent>,
-    card: Option<board::Card>,
-    columns: Vec<BoardColumn>,
-    job: Option<jobs::Job>,
+/// Loaded again for each action, so it sees the earlier actions.
+#[derive(Debug, Clone)]
+pub struct RunCtx {
+    pub project: String,
+    pub rule: String,
+    pub event: Option<StoredEvent>,
+    pub card: Option<board::Card>,
+    pub columns: Vec<BoardColumn>,
+    /// The job of a `job` event (`data.id`) or a `job.verdict` event
+    /// (`data.job`), as the store has it now.
+    pub job: Option<jobs::Job>,
 }
 
 fn event_at(conn: &Connection, seq: i64) -> ApiResult<Option<StoredEvent>> {
@@ -727,6 +737,16 @@ fn event_at(conn: &Connection, seq: i64) -> ApiResult<Option<StoredEvent>> {
             .into_iter()
             .find(|e| e.seq == seq),
     )
+}
+
+/// The job ID of a `job` event (`data.id`) or a `job.verdict` event
+/// (`data.job`).
+fn event_job(e: &StoredEvent) -> Option<&str> {
+    match e.kind.as_str() {
+        "job" => e.data["id"].as_str(),
+        "job.verdict" => e.data["job"].as_str(),
+        _ => None,
+    }
 }
 
 fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
@@ -739,12 +759,10 @@ fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
         .into_iter()
         .map(|(name, role)| BoardColumn { name, role })
         .collect();
-    let job = match &event {
-        Some(e) if e.kind == "job" => e.data["id"]
-            .as_str()
-            .and_then(|id| jobs::get(conn, id).ok()),
-        _ => None,
-    };
+    let job = event
+        .as_ref()
+        .and_then(event_job)
+        .and_then(|id| jobs::get(conn, id).ok());
     Ok(RunCtx {
         project: row.project.clone(),
         rule: row.rule.clone(),
@@ -847,7 +865,7 @@ pub fn card_condition_fails(
 }
 
 /// The value of a placeholder (`event.*`, `card.*`, `job.*`, `rule.name`).
-fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
+pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
     if let Some(path) = name.strip_prefix("event.") {
         return ctx.event.as_ref().map(|e| event_view(e).text(path));
     }
@@ -864,8 +882,15 @@ fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
         });
     }
     if let Some(f) = name.strip_prefix("job.") {
-        // The event's job, then the event's own fields (TER-167 adds the
-        // verdict fields to the event).
+        // A `job.verdict` event says what the job was for its card (the
+        // outcome of a card that conflicted in a batch, its worker): its
+        // own fields first. Then the event's job, then the event's fields.
+        if let Some(e) = ctx.event.as_ref().filter(|e| e.kind == "job.verdict") {
+            let key = if f == "id" { "job" } else { f };
+            if let Some(v) = e.data.get(key).filter(|v| !v.is_null()) {
+                return Some(value_text(v));
+            }
+        }
         if let Some(j) = &ctx.job {
             let v = match f {
                 "id" => Some(j.id.clone()),
@@ -895,35 +920,42 @@ pub struct Done {
     pub detail: Value,
 }
 
-/// The verbs that run today. TER-169 adds the others.
-pub const IMPLEMENTED: &[&str] = &["card.comment"];
+/// Whether `verb` runs: each verb of the schema does since TER-169.
+pub fn implemented(verb: &str) -> bool {
+    rules_file::VERBS.iter().any(|v| v.name == verb)
+}
 
-/// Run one action as `actor`, in the run's write.
-fn perform(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, action: &Action) -> ApiResult<Done> {
-    let text = |key: &str| {
-        action
-            .args
-            .get(key)
-            .and_then(Value::as_str)
-            .map(|s| rules_file::render(s, &|n| lookup(ctx, n), true))
+/// Run `action` of rule `rule` of `project` as `actor`, on the state of
+/// event `event_seq` and `card`, in the caller's write, as the engine
+/// runs one action, without the effects after the commit. For tests
+/// that run a verb as another actor.
+pub fn try_verb(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    project: &str,
+    rule: &str,
+    event_seq: i64,
+    card: Option<&str>,
+    action: &Action,
+) -> ApiResult<Done> {
+    let row = RunRow {
+        id: String::new(),
+        project: project.to_owned(),
+        rule: rule.to_owned(),
+        rule_hash: String::new(),
+        event_seq,
+        card: card.map(str::to_owned),
+        state: "pending".into(),
+        step: 0,
+        steps: Vec::new(),
+        reason: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+        rule_def: None,
+        cause: Value::Null,
     };
-    match action.verb.as_str() {
-        "card.comment" => {
-            let card = ctx
-                .card
-                .as_ref()
-                .ok_or_else(|| ApiError::invalid("card.comment needs an event with a card"))?;
-            let body = text("text").unwrap_or_default();
-            board::add_comment(t, actor, &card.id, &body)?;
-            Ok(Done {
-                changed: true,
-                detail: json!({"card": card.id, "text": body}),
-            })
-        }
-        other => Err(ApiError::invalid(format!(
-            "verb `{other}` is not implemented yet (TER-169)"
-        ))),
-    }
+    let ctx = load_ctx(t, &row)?;
+    Ok(rules_verbs::perform(t, actor, &ctx, action)?.0)
 }
 
 /// One write of a run: at the first action, the start checks; then the
@@ -933,7 +965,7 @@ fn perform(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, action: &Action) -> ApiR
 fn step_once(t: &mut Tx<'_>, id: &str, rule_live: bool) -> ApiResult<Step> {
     let row = get_run(t, id)?;
     if row.state != "pending" {
-        return Ok(Step::Ended);
+        return Ok(Step::Ended(Vec::new()));
     }
     if row.step == 0 && !rule_live {
         finish(
@@ -942,29 +974,29 @@ fn step_once(t: &mut Tx<'_>, id: &str, rule_live: bool) -> ApiResult<Step> {
             "skipped",
             Some("the rule is disabled or gone since the plan"),
         )?;
-        return Ok(Step::Ended);
+        return Ok(Step::Ended(Vec::new()));
     }
     let Some(rule) = row.rule_def.clone() else {
         finish(t, id, "failed", Some("the planned rule does not read"))?;
-        return Ok(Step::Ended);
+        return Ok(Step::Ended(Vec::new()));
     };
     let ctx = load_ctx(t, &row)?;
     if row.step == 0
         && let Err((failed, why)) = check_start(&rule, &row, &ctx)
     {
         finish(t, id, if failed { "failed" } else { "skipped" }, Some(&why))?;
-        return Ok(Step::Ended);
+        return Ok(Step::Ended(Vec::new()));
     }
     let Some(action) = usize::try_from(row.step)
         .ok()
         .and_then(|i| rule.actions.get(i))
     else {
         end_run(t, &row)?;
-        return Ok(Step::Ended);
+        return Ok(Step::Ended(Vec::new()));
     };
     let actor = rule_actor(&row.project, &row.rule);
-    match perform(t, &actor, &ctx, action) {
-        Ok(done) => {
+    match rules_verbs::perform(t, &actor, &ctx, action) {
+        Ok((done, effects)) => {
             let mut steps = row.steps.clone();
             steps.push(
                 json!({"verb": action.verb, "ok": true, "changed": done.changed,
@@ -977,9 +1009,9 @@ fn step_once(t: &mut Tx<'_>, id: &str, rule_live: bool) -> ApiResult<Step> {
             let row = get_run(t, id)?;
             if usize::try_from(row.step).unwrap_or(usize::MAX) >= rule.actions.len() {
                 end_run(t, &row)?;
-                return Ok(Step::Ended);
+                return Ok(Step::Ended(effects));
             }
-            Ok(Step::Next)
+            Ok(Step::Next(effects))
         }
         // Roll the action's write back; the caller records the failure.
         Err(e) => Err(ApiError::internal(ACTION_FAILED).with_details(json!({
@@ -1161,12 +1193,9 @@ pub fn dry_run(
     Ok((evs.len(), out))
 }
 
-/// The arguments whose text an agent reads: filled as quoted data.
-const QUOTED_ARGS: &[&str] = &["text", "comment", "subject", "body", "turn"];
-
 fn planned_action(a: &Action, ctx: &RunCtx) -> Value {
     let fill = |key: &str, v: &Value| -> Value {
-        let quoted = QUOTED_ARGS.contains(&key);
+        let quoted = rules_verbs::quoted(&a.verb, key);
         let one = |s: &str| Value::String(rules_file::render(s, &|n| lookup(ctx, n), quoted));
         match v {
             Value::String(s) => one(s),
@@ -1187,6 +1216,6 @@ fn planned_action(a: &Action, ctx: &RunCtx) -> Value {
     json!({
         "verb": a.verb,
         "args": args,
-        "implemented": IMPLEMENTED.contains(&a.verb.as_str()),
+        "implemented": implemented(&a.verb),
     })
 }

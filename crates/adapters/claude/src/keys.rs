@@ -13,6 +13,7 @@ pub const ESC: &[u8] = b"\x1b";
 
 /// Submit a turn: bracketed paste, then CR (not LF; a bare LF adds a new
 /// line and does not submit). Newlines inside the paste stay in the prompt.
+/// The runner writes the CR on its own, [`SUBMIT_PAUSE`] after the paste.
 ///
 /// The paste markers are removed from `text` first. A turn can carry mail,
 /// which is untrusted input, and a stray end marker would end the paste
@@ -21,6 +22,15 @@ pub fn type_turn(text: &str) -> Vec<u8> {
     let clean = text.replace(PASTE_START, "").replace(PASTE_END, "");
     bracketed_paste(&escape(&clean))
 }
+
+/// The pause between the paste of a turn and its CR. A CR in the same
+/// burst as a long paste is lost: the paste stays in the input box as
+/// "[Pasted text #N +L lines]" and the turn does not submit (TER-194, seen
+/// twice on vmlab/vml-99 with 38-line wake-up turns). The spike that
+/// captured the big paste sent its CR in a later write
+/// (`tests/fixtures/screens/typing.txt`, "T4"). 0.3 s as the exit pause of
+/// Codex.
+pub const SUBMIT_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// The turn as plain text (D3): Claude Code runs a text that starts with `/` as a slash command (`/plan`
 /// enters plan mode) and a text that starts with `!` in bash mode. A turn that starts with one of them

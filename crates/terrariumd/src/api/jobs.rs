@@ -10,16 +10,19 @@
 //!   now such as `7d`; default 7 days).
 //! - `GET /api/jobs/{id}`, `DELETE /api/jobs/{id}` (cancel; a running job
 //!   is killed).
-//! - `POST /api/cards/{id}/validate` {commit?, repo?, branch?, comment?}:
+//! - `POST /api/cards/{id}/validate` {commit?, repo?, branch?, comment?, eta?}:
 //!   the card's assignee or a project admin. In one write: the labels
 //!   `by:<agent>` and `validation:queued`, the move to `validating`, and a
 //!   queued validate job. The worker stays assigned while the card
 //!   validates; the daemon clears the name on the final move.
-//! - `POST /api/cards/{id}/merge` {repo?, branch?}: a project admin. A
+//! - `POST /api/cards/{id}/merge` {repo?, branch?, eta?}: a project admin. A
 //!   queued merge job; the card stays where it is until the job ends.
-//! - `POST /api/merges` {cards, repo?} (TER-112): a project admin. One
+//! - `POST /api/merges` {cards, repo?, eta?} (TER-112): a project admin. One
 //!   merge job for the cards of one project, merged in the given order and
 //!   validated once. One card is the same as `POST /api/cards/{id}/merge`.
+//! - `eta` (TER-155 D2) is a planned duration such as `2h`, not a time.
+//!   The job's cards have no ETA while it is queued; when it starts, each
+//!   gets the start plus the duration. No `eta`, no ETA.
 //! - `GET /api/job-hosts` (any actor): the host caps (TER-97) and the
 //!   running jobs per host. `PUT /api/job-hosts/{host}` {heavy_jobs}
 //!   (sysadmin or the operator): set the cap of a host; `DELETE`: no cap.
@@ -388,6 +391,10 @@ struct ValidateBody {
     /// Added to the move comment.
     #[serde(default)]
     comment: Option<String>,
+    /// The planned duration (`2h`, TER-155 D2): the card's ETA is the job
+    /// start plus it. Not a time. Without it, the job sets no ETA.
+    #[serde(default)]
+    eta: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -397,6 +404,9 @@ struct BatchBody {
     cards: Vec<String>,
     #[serde(default)]
     repo: Option<String>,
+    /// The planned duration, as for a validate.
+    #[serde(default)]
+    eta: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -406,11 +416,23 @@ struct MergeBody {
     repo: Option<String>,
     #[serde(default)]
     branch: Option<String>,
+    /// The planned duration, as for a validate.
+    #[serde(default)]
+    eta: Option<String>,
+}
+
+/// The planned duration of a body's `eta`: `None` without one.
+fn planned(eta: Option<&str>) -> ApiResult<Option<i64>> {
+    eta.map(jobs::planned_secs).transpose()
 }
 
 /// The repo of a job: the given one, the card's, or the project's only
 /// repo.
-fn repo_of(t: &rusqlite::Connection, card: &Card, given: Option<String>) -> ApiResult<String> {
+pub(crate) fn repo_of(
+    t: &rusqlite::Connection,
+    card: &Card,
+    given: Option<String>,
+) -> ApiResult<String> {
     if let Some(r) = given.or_else(|| card.repo.clone()) {
         if repos::find_by_name(t, &card.project, &r)?.is_none() {
             return Err(ApiError::invalid(format!(
@@ -440,7 +462,7 @@ fn repo_of(t: &rusqlite::Connection, card: &Card, given: Option<String>) -> ApiR
 
 /// The branch of a job: the given one, the card's, or the card ID in
 /// lower case.
-fn branch_of(card: &Card, given: Option<String>) -> ApiResult<String> {
+pub(crate) fn branch_of(card: &Card, given: Option<String>) -> ApiResult<String> {
     let b = given
         .or_else(|| card.branch.clone())
         .unwrap_or_else(|| card.id.to_lowercase());
@@ -448,7 +470,7 @@ fn branch_of(card: &Card, given: Option<String>) -> ApiResult<String> {
     Ok(b)
 }
 
-fn enabled(def: &DeliveryDef, project: &str) -> ApiResult<()> {
+pub(crate) fn enabled(def: &DeliveryDef, project: &str) -> ApiResult<()> {
     if def.enabled() {
         return Ok(());
     }
@@ -492,7 +514,7 @@ fn queued_answer(
 /// the card as the operator (to `validating`, then on with its result),
 /// so a job would take a held card out of the blocked column. This holds
 /// for the operator too: the operator releases the card first.
-fn not_held(card: &Card) -> ApiResult<()> {
+pub(crate) fn not_held(card: &Card) -> ApiResult<()> {
     if github_gate::is_held(&card.title, &card.labels) {
         return Err(ApiError::forbidden(format!(
             "{} is held by the GitHub author gate: no validate or merge job for it until the \
@@ -505,7 +527,7 @@ fn not_held(card: &Card) -> ApiResult<()> {
 
 /// Who may queue a validation of a card: its assignee or a project
 /// admin. Never for a held card ([`not_held`]).
-fn may_validate(actor: &Actor, card: &Card) -> ApiResult<()> {
+pub(crate) fn may_validate(actor: &Actor, card: &Card) -> ApiResult<()> {
     policy::read_project(actor, &card.project)?;
     not_held(card)?;
     if card.assignee.as_deref() == Some(actor.address().as_str()) {
@@ -559,6 +581,7 @@ async fn validate(
     if let Some(c) = &b.commit {
         rt::check_commit(c)?;
     }
+    let planned_secs = planned(b.eta.as_deref())?;
     // Read and check first; the remote check runs outside the write.
     let card_id = board::normalise_id(&id);
     let (a, given_repo, given_branch) = (actor.clone(), b.repo.clone(), b.branch.clone());
@@ -614,6 +637,7 @@ async fn validate(
                     commit: b.commit.clone(),
                     by_agent: by.clone(),
                     batch: Vec::new(),
+                    planned_secs,
                 },
             )?;
             let (add, remove) = job_labels(&card.labels, by.as_deref());
@@ -667,6 +691,7 @@ async fn merge(
     Path(id): Path<String>,
     ApiJson(b): ApiJson<MergeBody>,
 ) -> ApiResult<Response> {
+    let planned_secs = planned(b.eta.as_deref())?;
     rt::prepare_hosts(&state.db, None).await?;
     let job = state
         .db
@@ -697,6 +722,7 @@ async fn merge(
                     commit: None,
                     by_agent: rt::by_agent_of(&card.labels),
                     batch: Vec::new(),
+                    planned_secs,
                 },
             )?;
             let patch = CardPatch {
@@ -743,6 +769,7 @@ async fn merge_batch(
             jobs::BATCH_MAX
         )));
     }
+    let planned_secs = planned(b.eta.as_deref())?;
     let job = state
         .db
         .write(actor.label(), move |t| {
@@ -812,6 +839,7 @@ async fn merge_batch(
                     commit: None,
                     by_agent: first.by_agent.clone(),
                     batch: if batch.len() > 1 { batch.clone() } else { Vec::new() },
+                    planned_secs,
                 },
             )?;
             let names: Vec<&str> = batch.iter().map(|c| c.card.as_str()).collect();

@@ -2038,7 +2038,7 @@ The updater uses two hidden commands in the terrarium container (the
 operator on the daemon's own socket):
 
 ```
-terrarium admin update drain [--wait <s>]      no new turns; wait up to <s> s (600) for the running turns
+terrarium admin update drain [--wait <s>]      no new turns or jobs; wait up to <s> s (600) for the running turns and jobs
 terrarium admin update resume                  end the drain
 ```
 
