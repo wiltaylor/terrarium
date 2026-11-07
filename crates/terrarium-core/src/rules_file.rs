@@ -162,6 +162,12 @@ pub const VERBS: &[Verb] = &[
         required: &[],
     },
     Verb {
+        kind: "job_fix",
+        name: "job.fix",
+        args: &[("to", Arg::Column), ("labels", Arg::List)],
+        required: &[],
+    },
+    Verb {
         kind: "agent_park",
         name: "agent.park",
         args: &[],

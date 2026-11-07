@@ -1,0 +1,928 @@
+//! The verbs of the board rules (TER-162 D6, TER-169, docs/api.md §19.9).
+//!
+//! The engine ([`crate::rules_engine`]) runs each verb in its own write,
+//! as the rule actor (`rule:<project>/<rule>`, `project_admin` of its
+//! project only). Each verb goes through the store functions that the API
+//! uses, so the store's checks hold for it as for a lead: the project
+//! gate, the board invariants (WIP limits, dependencies, the blocked
+//! comment), and the job queue rules (a merge needs `project_admin`, one
+//! open job per card).
+//!
+//! - **Held cards.** No verb acts on a card that the GitHub author gate
+//!   holds (TER-85): the run's card, or a card of the event's job for a
+//!   `job.*` verb. Only the operator releases it.
+//! - **No-ops.** A verb whose precondition does not hold changes nothing
+//!   and reports `changed: false` (a card not in `from`, a label it has, a
+//!   job that is not red, a rerun that runs already). A run of only no-ops
+//!   ends as `noop`.
+//! - **Once per job.** `job.verdict` comes once for each card of a batch,
+//!   so a rule on it runs once per card. `job.rerun`, `job.split` and
+//!   `job.fix` act once for a job; the later runs are no-ops.
+//! - **After the commit.** What cannot run in a database write runs after
+//!   the action's commit ([`Effect`]): the queue tick, the kill of a
+//!   cancelled running job, the owner's queue and the wake of an unparked
+//!   agent, and the close of a bound agent (`agent.end`). A daemon stop
+//!   between the commit and the effect loses the effect: the queue ticks
+//!   every few seconds, the spawn timer runs the queued unparks and ends
+//!   the agent of a finished card.
+
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
+use terrarium_core::AgentId;
+use terrarium_core::rules_file::{self, Action};
+use terrarium_core::turn_tag::{self, SystemKind, TurnSource};
+use tracing::warn;
+
+use crate::actor::Actor;
+use crate::api::Shared;
+use crate::api::jobs as api_jobs;
+use crate::db::Tx;
+use crate::error::{ApiError, ApiResult};
+use crate::policy;
+use crate::rules_engine::{Done, RunCtx, lookup};
+use crate::store::board::{self, Card, CardPatch, NewCard, NewLink};
+use crate::store::jobs::{self, BatchCard, Job, JobKind, JobState, NewJob};
+use crate::store::mail::{self, Address};
+use crate::store::spawns::{self, Bound};
+
+/// The arguments whose text an agent reads: their placeholders are filled
+/// as quoted data (one line, in backticks). `card.prepend` is the
+/// exception: its text goes into the card body as it is, so a failure
+/// block keeps its lines (the card body is data to an agent already).
+pub const QUOTED_ARGS: &[&str] = &["text", "comment", "subject", "body", "turn"];
+
+/// Whether the placeholders of argument `key` of `verb` are quoted.
+pub fn quoted(verb: &str, key: &str) -> bool {
+    QUOTED_ARGS.contains(&key) && verb != "card.prepend"
+}
+
+/// The label of the fix card of a red merge job (`job.fix`).
+pub fn fix_label(job: &str) -> String {
+    format!("merge-fix:{job}")
+}
+
+/// What runs after the commit of an action.
+#[derive(Debug, Clone)]
+pub enum Effect {
+    /// Start a queue tick (a job was queued, cancelled, or split).
+    Kick,
+    /// Kill the run of a cancelled job that was running.
+    Kill(String),
+    /// Run the queued unparks of an owner.
+    RetryOwner(String),
+    /// Wake an unparked agent.
+    Wake(String),
+    /// Close the bound agent of an object.
+    End {
+        bound: Bound,
+        outcome: &'static str,
+        result: String,
+    },
+}
+
+/// Run the effects of an action, in order, after its commit.
+pub async fn apply(state: &Shared, effects: Vec<Effect>) {
+    for e in effects {
+        match e {
+            Effect::Kick => crate::jobs::kick(state),
+            Effect::Kill(id) => crate::jobs::kill(&id),
+            Effect::RetryOwner(owner) => crate::bound::retry_owner(state, &owner).await,
+            Effect::Wake(id) => {
+                if let Ok(a) = id.parse::<AgentId>() {
+                    crate::lifecycle::wake_soon(state, a, "rule unpark");
+                }
+            }
+            Effect::End {
+                bound,
+                outcome,
+                result,
+            } => {
+                if let Err(e) = crate::bound::end(state, &bound, outcome, result, true).await {
+                    warn!(bound = %bound.text(), "a rule cannot close the bound agent: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// The arguments of one action, filled from the run's state.
+struct Args<'a> {
+    action: &'a Action,
+    ctx: &'a RunCtx,
+}
+
+impl Args<'_> {
+    /// The argument as written, without templates (a column, a word).
+    fn raw(&self, key: &str) -> Option<&str> {
+        self.action.args.get(key).and_then(Value::as_str)
+    }
+
+    /// The text of `key` with its placeholders filled.
+    fn text(&self, key: &str) -> Option<String> {
+        let q = quoted(&self.action.verb, key);
+        self.raw(key)
+            .map(|s| rules_file::render(s, &|n| lookup(self.ctx, n), q))
+    }
+
+    /// The texts of a list argument, filled, trimmed, without the empty
+    /// ones.
+    fn list(&self, key: &str) -> Vec<String> {
+        let items: Vec<&str> = match self.action.args.get(key) {
+            Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+            Some(Value::String(s)) => vec![s.as_str()],
+            _ => Vec::new(),
+        };
+        items
+            .into_iter()
+            .map(|s| {
+                rules_file::render(s, &|n| lookup(self.ctx, n), false)
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// The column names of a column or column list argument.
+    fn columns(&self, key: &str) -> ApiResult<Vec<String>> {
+        let refs: Vec<&str> = match self.action.args.get(key) {
+            Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+            Some(Value::String(s)) => vec![s.as_str()],
+            _ => Vec::new(),
+        };
+        refs.into_iter().map(|r| column_name(self.ctx, r)).collect()
+    }
+
+    fn count(&self, key: &str) -> Option<i64> {
+        self.action.args.get(key).and_then(Value::as_i64)
+    }
+}
+
+fn column_name(ctx: &RunCtx, reference: &str) -> ApiResult<String> {
+    rules_file::resolve_column(&ctx.columns, reference)
+        .map(|c| c.name.clone())
+        .ok_or_else(|| {
+            ApiError::invalid(format!(
+                "column `{reference}` is not on the board of project `{}`",
+                ctx.project
+            ))
+        })
+}
+
+fn changed(detail: Value) -> Done {
+    Done {
+        changed: true,
+        detail,
+    }
+}
+
+fn noop(detail: Value) -> Done {
+    Done {
+        changed: false,
+        detail,
+    }
+}
+
+fn the_card<'a>(ctx: &'a RunCtx, verb: &str) -> ApiResult<&'a Card> {
+    ctx.card
+        .as_ref()
+        .ok_or_else(|| ApiError::invalid(format!("{verb} needs an event with a card")))
+}
+
+fn the_job<'a>(ctx: &'a RunCtx, verb: &str) -> ApiResult<&'a Job> {
+    ctx.job.as_ref().ok_or_else(|| {
+        ApiError::invalid(format!(
+            "{verb} needs a `job` or `job.verdict` event whose job is in the store"
+        ))
+    })
+}
+
+/// The GitHub author gate (TER-85): no verb acts on a held card. The
+/// run's card, and for a `job.*` verb each card of the event's job.
+fn refuse_held(conn: &Connection, ctx: &RunCtx, verb: &str) -> ApiResult<()> {
+    let mut cards: Vec<String> = ctx.card.iter().map(|c| c.id.clone()).collect();
+    if verb.starts_with("job.")
+        && let Some(j) = &ctx.job
+    {
+        for c in j.cards() {
+            if !cards.contains(&c.card) {
+                cards.push(c.card);
+            }
+        }
+    }
+    for c in cards {
+        match board::is_held(conn, &c) {
+            Ok(true) => {
+                return Err(ApiError::forbidden(format!(
+                    "{c} is held by the GitHub author gate: no rule verb acts on it until the \
+                     operator releases it"
+                )));
+            }
+            Ok(false) => {}
+            // A card that is gone holds nothing.
+            Err(e) if e.code.status().is_client_error() => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Run `action` as `actor` in the run's write. Returns what it did and
+/// the effects to run after the commit.
+pub fn perform(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    action: &Action,
+) -> ApiResult<(Done, Vec<Effect>)> {
+    let verb = action.verb.as_str();
+    refuse_held(t, ctx, verb)?;
+    let a = Args { action, ctx };
+    let mut effects = Vec::new();
+    let done = match verb {
+        "card.move" => card_move(t, actor, ctx, &a)?,
+        "card.label" => card_label(t, actor, ctx, &a)?,
+        "card.comment" => {
+            let card = the_card(ctx, verb)?;
+            let body = a.text("text").unwrap_or_default();
+            board::add_comment(t, actor, &card.id, &body)?;
+            changed(json!({"card": card.id, "text": body}))
+        }
+        "card.assign" => card_assign(t, actor, ctx, &a)?,
+        "card.prepend" => card_prepend(t, actor, ctx, &a)?,
+        "mail" => send_mail(t, actor, ctx, &a)?,
+        "job.queue" => job_queue(t, actor, ctx, &a, &mut effects)?,
+        "job.cancel" => job_cancel(t, actor, ctx, &mut effects)?,
+        "job.rerun" => job_rerun(t, actor, ctx, &a, &mut effects)?,
+        "job.split" => job_split(t, actor, ctx, &mut effects)?,
+        "job.fix" => job_fix(t, actor, ctx, &a)?,
+        "agent.park" | "agent.unpark" | "agent.end" => {
+            agent_verb(t, actor, ctx, &a, &mut effects)?
+        }
+        other => return Err(ApiError::invalid(format!("unknown verb `{other}`"))),
+    };
+    Ok((done, effects))
+}
+
+// ---------------------------------------------------------- card verbs
+
+fn card_move(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
+    let card = the_card(ctx, "card.move")?;
+    let to = column_name(ctx, a.raw("to").unwrap_or_default())?;
+    let from = a.columns("from")?;
+    if !from.is_empty() && !from.contains(&card.column) {
+        return Ok(noop(json!({
+            "card": card.id, "column": card.column, "to": to,
+            "reason": format!("{} is in {}, not in {}", card.id, card.column, from.join(", ")),
+        })));
+    }
+    if card.column == to {
+        return Ok(noop(json!({
+            "card": card.id, "column": card.column,
+            "reason": format!("{} is in {to} already", card.id),
+        })));
+    }
+    let position = (a.raw("position") == Some("top")).then_some(0);
+    let comment = a.text("comment");
+    board::move_card(t, actor, &card.id, &to, position, comment.as_deref())?;
+    Ok(changed(
+        json!({"card": card.id, "from": card.column, "to": to}),
+    ))
+}
+
+fn card_label(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
+    let card = the_card(ctx, "card.label")?;
+    let add: Vec<String> = a
+        .list("add")
+        .into_iter()
+        .filter(|l| !card.labels.contains(l))
+        .collect();
+    let want = a.list("add");
+    let remove: Vec<String> = a
+        .list("remove")
+        .into_iter()
+        .filter(|l| card.labels.contains(l) && !want.contains(l))
+        .collect();
+    if add.is_empty() && remove.is_empty() {
+        return Ok(noop(json!({
+            "card": card.id, "labels": card.labels,
+            "reason": "the labels are as asked already",
+        })));
+    }
+    let patch = CardPatch {
+        add_labels: add.clone(),
+        remove_labels: remove.clone(),
+        ..CardPatch::default()
+    };
+    board::update_card(t, actor, &card.id, patch)?;
+    Ok(changed(
+        json!({"card": card.id, "added": add, "removed": remove}),
+    ))
+}
+
+fn card_assign(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
+    let card = the_card(ctx, "card.assign")?;
+    let raw = a.raw("who").unwrap_or_default().trim();
+    let who = a.text("who").unwrap_or_default().trim().to_owned();
+    let who = if raw == "none" {
+        None
+    } else if who.is_empty() {
+        // A placeholder without a value (no `by:` label) does not
+        // unassign: only `none` does.
+        return Err(ApiError::invalid(format!(
+            "card.assign: `{raw}` is empty for {}",
+            card.id
+        )));
+    } else {
+        Some(who)
+    };
+    let after = board::assign_card(t, actor, &card.id, who.as_deref())?;
+    let detail = json!({"card": card.id, "assignee": after.assignee_name.clone().or(after.assignee.clone()),
+                        "previous": card.assignee_name.clone().or(card.assignee.clone())});
+    Ok(if after.assignee == card.assignee {
+        noop(detail)
+    } else {
+        changed(detail)
+    })
+}
+
+fn card_prepend(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
+    let card = the_card(ctx, "card.prepend")?;
+    let text = a.text("text").unwrap_or_default();
+    if text.trim().is_empty() {
+        return Ok(noop(
+            json!({"card": card.id, "reason": "the text is empty"}),
+        ));
+    }
+    if card.body.starts_with(&text) {
+        return Ok(noop(
+            json!({"card": card.id, "reason": "the body starts with the text already"}),
+        ));
+    }
+    let body = if card.body.is_empty() {
+        text.clone()
+    } else if text.ends_with('\n') {
+        format!("{text}{}", card.body)
+    } else {
+        format!("{text}\n\n{}", card.body)
+    };
+    let patch = CardPatch {
+        body: Some(body),
+        ..CardPatch::default()
+    };
+    board::update_card(t, actor, &card.id, patch)?;
+    Ok(changed(
+        json!({"card": card.id, "chars": text.chars().count()}),
+    ))
+}
+
+// ------------------------------------------------------------------ mail
+
+/// Mail from the project inbox, as the mail of a schedule. A recipient
+/// whose placeholder has no value is left out; none at all is a no-op.
+fn send_mail(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
+    policy::admin_project(
+        actor,
+        &ctx.project,
+        &format!("sending mail as project:{}", ctx.project),
+    )?;
+    let to = a.list("to");
+    if to.is_empty() {
+        return Ok(noop(json!({"reason": "no recipient"})));
+    }
+    let subject = a.text("subject").unwrap_or_default();
+    let body = a
+        .text("body")
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_else(|| subject.clone());
+    let from = Address::Project(ctx.project.clone());
+    let mut sent = Vec::new();
+    for who in &to {
+        let addr = mail::resolve(t, who, Some(&ctx.project))?;
+        if matches!(addr, Address::System) {
+            return Err(ApiError::invalid("mail cannot go to `system`"));
+        }
+        let m =
+            crate::api::mail::send_checked(t, actor, &from, &addr, &subject, &body, None)?;
+        sent.push(json!({"id": m.id, "to": addr.key()}));
+    }
+    Ok(changed(json!({"messages": sent, "subject": subject})))
+}
+
+// ------------------------------------------------------------- job verbs
+
+/// The worker of a card's job: its `by:<agent>` label, else its agent
+/// assignee.
+fn worker_of(card: &Card) -> Option<String> {
+    crate::jobs::by_agent_of(&card.labels).or_else(|| {
+        card.assignee
+            .as_ref()
+            .filter(|a| a.as_str() != "operator")
+            .and(card.assignee_name.clone())
+    })
+}
+
+fn open_job(conn: &Connection, card: &str) -> ApiResult<Option<Job>> {
+    jobs::open_of_card(conn, card)
+}
+
+fn job_queue(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    a: &Args<'_>,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
+    let kind = a.raw("kind").unwrap_or_default();
+    if kind == "batch" {
+        return queue_batch(t, actor, ctx, a, effects);
+    }
+    let card = the_card(ctx, "job.queue")?;
+    let kind = match kind {
+        "validate" => {
+            api_jobs::may_validate(actor, card)?;
+            JobKind::Validate
+        }
+        "merge" => {
+            policy::admin_project(actor, &card.project, "queueing a merge onto next")?;
+            api_jobs::not_held(card)?;
+            JobKind::Merge
+        }
+        other => {
+            return Err(ApiError::invalid(format!(
+                "job.queue: unknown kind `{other}`"
+            )));
+        }
+    };
+    if card.archived {
+        return Err(ApiError::conflict(format!("card {} is archived", card.id)));
+    }
+    let def = jobs::delivery(t, &card.project)?;
+    api_jobs::enabled(&def, &card.project)?;
+    let repo = api_jobs::repo_of(t, card, None)?;
+    if kind == JobKind::Merge && !def.next_repos.contains(&repo) {
+        return Err(ApiError::conflict(format!(
+            "repo `{repo}` has no `next` branch in the queue config: add it to `next_repos`"
+        )));
+    }
+    let branch = api_jobs::branch_of(card, None)?;
+    if let Some(open) = open_job(t, &card.id)? {
+        return Ok(noop(json!({
+            "card": card.id, "job": open.id,
+            "reason": format!("{} has a {} job {} that is {}", card.id, open.kind.as_str(),
+                              open.id, open.state.as_str()),
+        })));
+    }
+    let job = jobs::create(
+        t,
+        NewJob {
+            project: card.project.clone(),
+            card: card.id.clone(),
+            kind,
+            repo,
+            branch,
+            commit: None,
+            by_agent: worker_of(card),
+            batch: Vec::new(),
+        },
+    )?;
+    effects.push(Effect::Kick);
+    Ok(changed(
+        json!({"job": job.id, "kind": job.kind, "card": card.id}),
+    ))
+}
+
+/// One merge job for the cards of column `from` in board order, at most
+/// `limit` (and [`jobs::BATCH_MAX`]). A card that is held or has an open
+/// job is left out.
+fn queue_batch(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    a: &Args<'_>,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
+    let project = ctx.project.clone();
+    policy::admin_project(actor, &project, "queueing a merge onto next")?;
+    let from = column_name(ctx, a.raw("from").unwrap_or_default())?;
+    let limit = a
+        .count("limit")
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(jobs::BATCH_MAX)
+        .min(jobs::BATCH_MAX);
+    let def = jobs::delivery(t, &project)?;
+    api_jobs::enabled(&def, &project)?;
+    let board = board::get_board(t, &project)?;
+    let mut left_out = Vec::new();
+    let mut picked: Vec<&Card> = Vec::new();
+    for c in board.cards.iter().filter(|c| c.column == from) {
+        if picked.len() >= limit {
+            break;
+        }
+        if api_jobs::not_held(c).is_err() {
+            left_out.push(json!({"card": c.id, "reason": "held"}));
+            continue;
+        }
+        if let Some(j) = open_job(t, &c.id)? {
+            left_out.push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
+            continue;
+        }
+        picked.push(c);
+    }
+    if picked.is_empty() {
+        return Ok(noop(json!({
+            "column": from, "left_out": left_out,
+            "reason": format!("no card to merge in {from}"),
+        })));
+    }
+    let mut repo: Option<String> = None;
+    let mut batch = Vec::new();
+    for c in &picked {
+        let r = api_jobs::repo_of(t, c, None)?;
+        match &repo {
+            Some(have) if *have != r => {
+                return Err(ApiError::invalid(format!(
+                    "card {} is in repo `{r}`, the batch in `{have}`: a batch is one repo",
+                    c.id
+                )));
+            }
+            _ => repo = Some(r),
+        }
+        batch.push(BatchCard {
+            card: c.id.clone(),
+            branch: api_jobs::branch_of(c, None)?,
+            by_agent: crate::jobs::by_agent_of(&c.labels),
+            outcome: None,
+            note: None,
+        });
+    }
+    let repo = repo.unwrap_or_default();
+    if !def.next_repos.contains(&repo) {
+        return Err(ApiError::conflict(format!(
+            "repo `{repo}` has no `next` branch in the queue config: add it to `next_repos`"
+        )));
+    }
+    let first = batch[0].clone();
+    let names: Vec<String> = batch.iter().map(|c| c.card.clone()).collect();
+    let job = jobs::create(
+        t,
+        NewJob {
+            project: project.clone(),
+            card: first.card.clone(),
+            kind: JobKind::Merge,
+            repo,
+            branch: first.branch.clone(),
+            commit: None,
+            by_agent: first.by_agent.clone(),
+            batch: if batch.len() > 1 { batch } else { Vec::new() },
+        },
+    )?;
+    effects.push(Effect::Kick);
+    Ok(changed(
+        json!({"job": job.id, "kind": "merge", "cards": names, "left_out": left_out}),
+    ))
+}
+
+/// Cancel the event's job, else the open job of the run's card.
+fn job_cancel(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
+    policy::admin_project(actor, &ctx.project, "cancelling another agent's job")?;
+    let job = match (&ctx.job, &ctx.card) {
+        (Some(j), _) => Some(j.clone()),
+        (None, Some(c)) => open_job(t, &c.id)?,
+        (None, None) => None,
+    };
+    let Some(job) = job.filter(|j| j.state.is_open()) else {
+        return Ok(noop(json!({"reason": "no open job"})));
+    };
+    let was_running = job.state == JobState::Running;
+    let j = jobs::cancel(t, &job.id)?;
+    crate::jobs::emit_verdicts(t, &j)?;
+    if was_running {
+        effects.push(Effect::Kill(j.id.clone()));
+    }
+    effects.push(Effect::Kick);
+    Ok(changed(json!({"job": j.id, "was": job.state})))
+}
+
+/// The cards of a job that did not conflict.
+fn merged(j: &Job) -> Vec<BatchCard> {
+    j.cards()
+        .into_iter()
+        .filter(|c| c.outcome.as_deref() != Some("conflict"))
+        .collect()
+}
+
+/// A later attempt of `j` (its rerun), if one is queued or ran.
+fn rerun_of(conn: &Connection, j: &Job) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM jobs
+              WHERE project = ?1 AND kind = ?2 AND repo = ?3 AND created_at = ?4
+                AND split_path = ?5 AND coalesce(parent, '') = coalesce(?6, '')
+                AND attempt > ?7 AND id <> ?8
+              ORDER BY attempt LIMIT 1",
+            params![
+                j.project,
+                j.kind.as_str(),
+                j.repo,
+                j.created_at,
+                j.split_path,
+                j.parent,
+                j.attempt,
+                j.id
+            ],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// A card of `cards` that has an open job: no new job for it.
+fn busy(conn: &Connection, cards: &[BatchCard]) -> ApiResult<()> {
+    for c in cards {
+        if let Some(open) = open_job(conn, &c.card)? {
+            return Err(ApiError::conflict(format!(
+                "card {} has a {} job {} that is {} already",
+                c.card,
+                open.kind.as_str(),
+                open.id,
+                open.state.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Queue the event's failed job once more (not a conflict), while its
+/// attempt is under `max_attempts`. A batch runs again with the cards
+/// that did not conflict.
+fn job_rerun(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    a: &Args<'_>,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
+    let j = the_job(ctx, "job.rerun")?;
+    policy::admin_project(actor, &j.project, "running a job again")?;
+    let max = a.count("max_attempts").unwrap_or(2);
+    let why = if j.state != JobState::Failed {
+        Some(format!("job {} is {}", j.id, j.state.as_str()))
+    } else if j.outcome.as_deref() == Some("conflict") {
+        Some(format!("job {} is a conflict: a conflict never runs again", j.id))
+    } else if j.attempt >= max {
+        Some(format!("job {} is attempt {} of {max}", j.id, j.attempt))
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        return Ok(noop(json!({"job": j.id, "reason": why})));
+    }
+    let cards = merged(j);
+    if cards.is_empty() {
+        return Ok(noop(
+            json!({"job": j.id, "reason": "every card of the job conflicted"}),
+        ));
+    }
+    if let Some(next) = rerun_of(t, j)? {
+        return Ok(noop(json!({
+            "job": j.id, "next": next,
+            "reason": format!("job {next} runs job {} again already", j.id),
+        })));
+    }
+    busy(t, &cards)?;
+    let batch = (!j.batch.is_empty()).then_some(cards.as_slice());
+    let next = jobs::rerun(t, j, batch)?;
+    effects.push(Effect::Kick);
+    Ok(changed(
+        json!({"job": j.id, "next": next.id, "attempt": next.attempt}),
+    ))
+}
+
+/// Split the event's red batch (two or more cards that merged) in halves.
+fn job_split(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
+    let j = the_job(ctx, "job.split")?;
+    policy::admin_project(actor, &j.project, "splitting a merge batch")?;
+    if j.state != JobState::Failed || j.outcome.as_deref() != Some("red") {
+        return Ok(noop(json!({
+            "job": j.id,
+            "reason": format!("job {} is {} ({}), not red", j.id, j.state.as_str(),
+                              j.outcome.as_deref().unwrap_or("none")),
+        })));
+    }
+    let cards = merged(j);
+    if cards.len() < 2 {
+        return Ok(noop(json!({
+            "job": j.id,
+            "reason": format!("job {} has {} merged card(s); a split needs two or more",
+                              j.id, cards.len()),
+        })));
+    }
+    let child: Option<String> = t
+        .query_row(
+            "SELECT id FROM jobs WHERE parent = ?1 ORDER BY split_path LIMIT 1",
+            [&j.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(c) = child {
+        return Ok(noop(json!({
+            "job": j.id, "half": c,
+            "reason": format!("job {} is split already", j.id),
+        })));
+    }
+    busy(t, &cards)?;
+    let (left, right) = jobs::split(t, j, &cards)?;
+    effects.push(Effect::Kick);
+    let names = |x: &Job| x.cards().into_iter().map(|c| c.card).collect::<Vec<_>>();
+    Ok(changed(json!({
+        "job": j.id,
+        "left": {"job": left.id, "cards": names(&left)},
+        "right": {"job": right.id, "cards": names(&right)},
+    })))
+}
+
+/// Open one fix card for the event's failed merge job (MEM-84): a red
+/// merge group gets a fix before a split.
+fn job_fix(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
+    let j = the_job(ctx, "job.fix")?;
+    policy::admin_project(actor, &j.project, "opening a fix card for a merge job")?;
+    if j.kind != JobKind::Merge || j.state != JobState::Failed {
+        return Ok(noop(json!({
+            "job": j.id,
+            "reason": format!("job {} is a {} job that is {}, not a failed merge", j.id,
+                              j.kind.as_str(), j.state.as_str()),
+        })));
+    }
+    let label = fix_label(&j.id);
+    if let Some(open) = board::find_open_by_label(t, &j.project, &label)? {
+        return Ok(noop(json!({
+            "job": j.id, "card": open,
+            "reason": format!("{open} is the fix card of job {} already", j.id),
+        })));
+    }
+    let column = match a.raw("to") {
+        Some(r) => Some(column_name(ctx, r)?),
+        None => rules_file::resolve_column(&ctx.columns, "@ready").map(|c| c.name.clone()),
+    };
+    let cards: Vec<String> = j.cards().into_iter().map(|c| c.card).collect();
+    let mut labels = vec![label.clone()];
+    for l in a.list("labels") {
+        if !labels.contains(&l) {
+            labels.push(l);
+        }
+    }
+    let body = format!(
+        "The merge job {} of repo `{}` failed (outcome {}, attempt {}). The cards of the group, in merge order: {}.\n\n\
+         Fix the failure on a branch from `next` with the cards of the group merged, run the failing tests, \
+         and queue the group again with this card first.\n\n{}",
+        j.id,
+        j.repo,
+        j.outcome.as_deref().unwrap_or("-"),
+        j.attempt,
+        cards.join(" "),
+        crate::jobs::failure_block(j)
+    );
+    let card = board::create_card(
+        t,
+        actor,
+        &j.project,
+        NewCard {
+            title: Some(format!(
+                "Fix the red merge group of job {} ({} cards)",
+                j.id,
+                cards.len()
+            )),
+            body: Some(body),
+            labels,
+            repo: Some(j.repo.clone()),
+            ..NewCard::default()
+        },
+    )?;
+    if let Some(col) = &column
+        && *col != card.column
+    {
+        board::move_card(t, actor, &card.id, col, None, None)?;
+    }
+    for c in &cards {
+        let link = NewLink {
+            kind: "card".into(),
+            reference: c.clone(),
+        };
+        match board::add_link(t, actor, &card.id, &link) {
+            Ok(_) => {}
+            Err(e) if e.code.status().is_client_error() => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let at = board::get_card(t, &card.id)?.column;
+    Ok(changed(
+        json!({"job": j.id, "card": card.id, "column": at, "cards": cards}),
+    ))
+}
+
+// ----------------------------------------------------------- agent verbs
+
+/// `agent.park`, `agent.unpark`, `agent.end` on the open agent bound to
+/// the run's card. No bound agent: a no-op.
+fn agent_verb(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    ctx: &RunCtx,
+    a: &Args<'_>,
+    effects: &mut Vec<Effect>,
+) -> ApiResult<Done> {
+    let verb = a.action.verb.as_str();
+    let card = the_card(ctx, verb)?;
+    policy::admin_project(actor, &card.project, "acting on the bound agent of a card")?;
+    let bound = Bound::new(crate::bound::KIND_CARD, &card.id);
+    let Some(sp) = spawns::open_bound(t, &bound)? else {
+        return Ok(noop(
+            json!({"card": card.id, "reason": format!("{} has no bound agent", card.id)}),
+        ));
+    };
+    let detail = |extra: &str| json!({"card": card.id, "agent": sp.name, "result": extra});
+    match verb {
+        "agent.park" => {
+            let reason = format!("rule {}", ctx.rule);
+            Ok(match crate::bound::park_tx(t, &sp.id, &reason)? {
+                Some(owner) => {
+                    effects.push(Effect::RetryOwner(owner));
+                    changed(detail("parked"))
+                }
+                None => noop(detail("parked already")),
+            })
+        }
+        "agent.unpark" => {
+            if sp.parked_at.is_none() {
+                return Ok(noop(detail("not parked")));
+            }
+            let turn = unpark_turn(ctx, card, a);
+            let (r, owner) = crate::bound::unpark_tx(t, &sp.id, Some(turn.as_str()), "rule")?;
+            Ok(match r {
+                crate::bound::Unparked::Woken => {
+                    effects.push(Effect::Wake(sp.id.clone()));
+                    changed(detail("woken"))
+                }
+                crate::bound::Unparked::Queued => {
+                    effects.push(Effect::RetryOwner(owner));
+                    changed(detail("queued"))
+                }
+                crate::bound::Unparked::Refused => changed(detail("refused")),
+                crate::bound::Unparked::Nothing => noop(detail("nothing")),
+            })
+        }
+        _ => {
+            let outcome = match a.raw("outcome") {
+                Some("cancelled") => spawns::CANCELLED,
+                _ => spawns::DONE,
+            };
+            effects.push(Effect::End {
+                bound,
+                outcome,
+                result: format!("the rule {} ended it ({outcome})", ctx.rule),
+            });
+            Ok(changed(detail(outcome)))
+        }
+    }
+}
+
+/// The turn of an unpark: the rule's `turn` (its values quoted), else the
+/// return turn of the card move of the event, else a plain return turn.
+fn unpark_turn(ctx: &RunCtx, card: &Card, a: &Args<'_>) -> String {
+    if let Some(text) = a.text("turn").filter(|s| !s.trim().is_empty()) {
+        return turn_tag::render(
+            &TurnSource::System {
+                kind: SystemKind::Card,
+                detail: Some(card.id.clone()),
+            },
+            &text,
+        );
+    }
+    match &ctx.event {
+        Some(e) if e.kind == "card" && e.data["change"] == "moved" => {
+            crate::bound::return_turn(card, e)
+        }
+        _ => {
+            let working = ctx
+                .columns
+                .iter()
+                .any(|c| c.name == card.column && c.role.as_deref() == Some(board::WORKING));
+            crate::bound::return_text(
+                card,
+                &format!("the rule {} unparked it", ctx.rule),
+                None,
+                working,
+            )
+        }
+    }
+}
