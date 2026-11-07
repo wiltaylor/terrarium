@@ -93,7 +93,7 @@ export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
 }
 
-/** The combined status of the runs of a version or a card: failed when one failed; passed when one passed; empty when all are empty; null for no runs. */
+/** The combined status of the runs of a label or a card: failed when one failed; passed when one passed; empty when all are empty; null for no runs. */
 export function combinedStatus(runs: readonly Pick<TestRunSummary, "status">[]): TestRunStatus | null {
   if (!runs.length) return null;
   if (runs.some((r) => r.status === "failed")) return "failed";
@@ -108,7 +108,7 @@ export function sumCounts(runs: readonly Pick<TestRunSummary, "counts">[]): Test
   return out;
 }
 
-/** The newest run of each name, newest first: the runs that tell the state of a version or a card. */
+/** The newest run of each name, newest first: the runs that tell the state of a label or a card. */
 export function latestByName<R extends Pick<TestRunSummary, "name" | "created_at">>(runs: readonly R[]): R[] {
   const seen = new Map<string, R>();
   for (const r of runs) {

@@ -1184,7 +1184,7 @@ export const EVENT_KINDS = [
   // The project DB (docs/api.md §27): `data: {change, project, type, id, revision}`.
   "db.type",
   "db.record",
-  // A test run (docs/api.md, test runs): `{change, project, id, name, counts, cards, versions}`.
+  // A test run (docs/api.md, test runs): `{change, project, id, name, counts, cards, labels}`.
   "test_run",
   // Monitors (docs/api.md §30): each result, and a change of status `{project, monitor, monitor_id, from, to, value?, unit?, message?}`.
   "monitor.result",
@@ -1210,14 +1210,6 @@ export const EVENT_KINDS = [
   "artifact.linked",
   "artifact.deleted",
   "artifact.pruned",
-  "version.created",
-  "version.updated",
-  "version.submitted",
-  "version.approved",
-  "version.rejected",
-  "version.released",
-  "version.archived",
-  "version.unarchived",
   // docs/api.md §16.7.
   "usage.sample",
   "quota.sample",
@@ -1907,8 +1899,9 @@ export interface MemoryQuery {
 export type PageStatus = "draft" | "ready_for_review" | "reviewed";
 
 export interface WikiLink {
+  /** A link stored before TER-58 can be `version`. */
   kind: "page" | "card" | "memory" | "artifact" | "version" | string;
-  /** `project/path`, a card ID, `project/MEM-n`, `project/ART-n`, or `project/<version>`. */
+  /** `project/path`, a card ID, `project/MEM-n`, `project/ART-n`, or (before TER-58) `project/<version>`. */
   target: string;
 }
 
@@ -2048,7 +2041,8 @@ export interface DbQueryResult {
 
 // ----- Artifacts (§15.2, docs/api.md §12) -----
 
-export type ArtifactLinkKind = "page" | "version" | "card";
+/** `label`: a label such as `version:1.4.0` (TER-58). Version objects are removed. */
+export type ArtifactLinkKind = "page" | "card" | "label";
 
 /** One pinned conversation (`GET /api/pins`, docs/api.md §6.11). Oldest pin first. */
 export interface Pin {
@@ -2125,7 +2119,7 @@ export interface ArtifactUrl {
 
 export interface ArtifactAttach {
   kind: ArtifactLinkKind;
-  /** A page key, a version key, or a card ID of the same project. */
+  /** A page key, a card ID of the same project, or a label (`version:1.4.0`). */
   ref: string;
 }
 
@@ -2144,80 +2138,6 @@ export interface ArtifactUsage {
   used_bytes: number;
   quota_bytes: number;
   max_file_bytes: number;
-}
-
-// ----- Versions (§15.3, docs/api.md §13) -----
-
-export type VersionStatus = "draft" | "in_review" | "approved" | "rejected" | "released";
-
-export interface VersionReview {
-  id?: string;
-  author: string;
-  author_name?: string;
-  decision: "submitted" | "approved" | "rejected" | "released";
-  comment: string;
-  created_at: string;
-}
-
-export interface Version {
-  id: string;
-  project: string;
-  name: string;
-  status: VersionStatus;
-  notes: string;
-  repo?: string;
-  git_ref?: string;
-  thread_id?: string;
-  created_by: string;
-  created_by_name?: string;
-  created_at: string;
-  updated_at?: string;
-  submitted_at?: string;
-  submitted_by?: string;
-  decided_at?: string;
-  decided_by?: string;
-  released_at?: string;
-  /** An archived version keeps its status and reviews; it has no row on the board and is not in the default list. An older daemon sends none. */
-  archived?: boolean;
-  archived_at?: string;
-  archived_by?: string;
-  /** The dashboard page of the version: a path, `/p/<project>/versions/<id>`, or an absolute URL when the daemon has `TERRARIUM_PUBLIC_URL`. The dashboard redirects it to the board (`?version=<id>`). */
-  url?: string;
-  cards: { id: string; title: string; column: string }[];
-  artifacts: { id: string; uid: string; name: string; kind: Artifact["kind"]; content_type: string; size: number }[];
-  reviews: VersionReview[];
-}
-
-export interface NewVersion {
-  name: string;
-  notes?: string;
-  repo?: string;
-  git_ref?: string;
-  cards?: string[];
-  artifacts?: string[];
-}
-
-export interface VersionPatch {
-  name?: string;
-  notes?: string;
-  repo?: string;
-  git_ref?: string;
-  cards?: string[];
-  artifacts?: string[];
-  add_cards?: string[];
-  remove_cards?: string[];
-  add_artifacts?: string[];
-  remove_artifacts?: string[];
-}
-
-export interface VersionCompare {
-  version: string;
-  to: string;
-  since?: string;
-  until?: string;
-  cards: { added: string[]; removed: string[]; landed: string[] };
-  artifacts: { added: string[]; removed: string[] };
-  pages: { id: string; path: string; from_rev?: number; to_rev: number }[];
 }
 
 // ----- Subscriptions and usage (docs/api.md §16) -----
@@ -4032,7 +3952,8 @@ export interface TestRunSummary {
   notes: string[];
   /** The linked card IDs. */
   cards: string[];
-  versions: { id: string; name: string }[];
+  /** The linked labels, such as `version:1.4.0` (TER-58). */
+  labels: string[];
   created_by: string;
   created_by_name: string;
   created_at: string;
@@ -4082,7 +4003,8 @@ export interface TestRunCaseQuery {
 
 export interface TestRunListQuery {
   card?: string;
-  version?: string;
+  /** A label, such as `version:1.4.0`. */
+  label?: string;
   name?: string;
   status?: TestRunStatus;
   limit?: number;
@@ -4112,12 +4034,12 @@ export interface TestCompare {
   removed_tests: TestCaseDiff[];
 }
 
-/** `PATCH /api/test-runs/{id}/links`. A card is its ID; a version is its name or ID. */
+/** `PATCH /api/test-runs/{id}/links`. A card is its ID; a label is free text (`version:1.4.0`). */
 export interface TestRunLinksPatch {
   add_cards?: string[];
   remove_cards?: string[];
-  add_versions?: string[];
-  remove_versions?: string[];
+  add_labels?: string[];
+  remove_labels?: string[];
 }
 
 /** `Card.tests`: the latest linked run. */

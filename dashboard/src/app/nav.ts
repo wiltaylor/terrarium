@@ -143,12 +143,12 @@ export const PROJECT_LOGS_TABS = [
  *   General tab for the Repos item of the project (/p/:project/repos); the
  *   General tab keeps its path.
  * - The project Artifacts page is a tab of the board screen (BOARD_TABS).
- * - The Versions tab of the board is gone: the Cards tab manages versions
- *   (version lanes, the Version modal, the toolbar version menu). The daemon
- *   puts `/p/<project>/versions/<id>` in `Version.url` and in the review
- *   mail, so the old paths, and the paths of the old tab, redirect in one
- *   hop to `/p/<project>/board?version=<id>`, which opens the
- *   version.
+ * - Version objects are gone (TER-58): a version is the card label
+ *   `version:<name>`, and the Cards tab filters and groups by it
+ *   (`?version=<name>&group=version`). Old mail and bookmarks can have
+ *   `/p/<project>/versions/<id>` or a path of the old Versions tab, so
+ *   these paths redirect in one hop to the board. The old version ID
+ *   names no label, so it does not go along.
  * - The project Schedules page is a tab of the board screen (BOARD_TABS).
  * - The Tests tab of the board shows the test runs. A short link
  *   `/p/<project>/tests[/<id>]` goes to the tab.
@@ -181,9 +181,9 @@ export const MOVED_ROUTES = [
   { path: "/p/:project/templates", to: "/p/:project/settings/templates" },
   { path: "/p/:project/settings", to: "/p/:project/settings/general" },
   { path: "/p/:project/versions", to: "/p/:project/board" },
-  { path: "/p/:project/versions/:id", to: "/p/:project/board?version=:id" },
+  { path: "/p/:project/versions/:id", to: "/p/:project/board" },
   { path: "/p/:project/board/versions", to: "/p/:project/board" },
-  { path: "/p/:project/board/versions/:id", to: "/p/:project/board?version=:id" },
+  { path: "/p/:project/board/versions/:id", to: "/p/:project/board" },
   { path: "/p/:project/artifacts", to: "/p/:project/board/artifacts" },
   { path: "/p/:project/artifacts/:id", to: "/p/:project/board/artifacts/:id" },
   { path: "/p/:project/schedules", to: "/p/:project/board/schedules" },
