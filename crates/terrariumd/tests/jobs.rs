@@ -2019,12 +2019,14 @@ async fn a_cancelled_merge_job_does_not_push() {
     assert_eq!(r.status, 201, "{}", r.body);
     let ran = bins.path().join("ran");
     let work_dir = bins.path().join("jobs");
+    // The tree is the slot's (TER-190): the recipe logs its job ID.
+    let recipe = format!("echo \"$TERRARIUM_JOB_ID\" >> '{}'; test -f OK", ran.display());
     let r = lab
         .td
         .put(
             "/api/projects/p/delivery",
             json!({"target": "p-ibox", "slots": 1, "next_repos": ["app"],
-                   "recipe": format!("echo \"$PWD\" >> '{}'; test -f OK", ran.display()),
+                   "recipe": recipe,
                    "work_dir": work_dir.display().to_string()}),
         )
         .await;
