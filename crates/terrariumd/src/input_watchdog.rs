@@ -63,7 +63,10 @@ pub fn notify(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     t.emit(
         EventDraft::new(
             "input_watchdog",
-            format!("{}: unsubmitted text in the input box; leads mailed", a.name),
+            format!(
+                "{}: unsubmitted text in the input box; leads mailed",
+                a.name
+            ),
             json!({
                 "reason": INPUT_PENDING_REASON,
                 "mailed": to.iter().map(Address::key).collect::<Vec<_>>(),

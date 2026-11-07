@@ -377,7 +377,8 @@ mod tests {
     #[test]
     fn typed_text_is_pending_input() {
         let all = sections(&fixture("typing.txt"));
-        let pending = |n: &str| screen_state(&all.iter().find(|(x, _)| x == n).expect(n).1).input_pending();
+        let pending =
+            |n: &str| screen_state(&all.iter().find(|(x, _)| x == n).expect(n).1).input_pending();
         assert!(pending("typed-after-LF"));
         for n in [
             "idle-start",
