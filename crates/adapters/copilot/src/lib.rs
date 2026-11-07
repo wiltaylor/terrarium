@@ -301,6 +301,15 @@ impl Adapter for CopilotAdapter {
         keys::type_turn(text)
     }
 
+    /// The CR of a turn goes 0.3 s after the paste (TER-208).
+    fn turn_submit_pause(&self) -> std::time::Duration {
+        keys::SUBMIT_PAUSE
+    }
+
+    fn input_pending(&self, screen: &Screen) -> bool {
+        screen::input_pending(screen)
+    }
+
     fn answer(&self, _request_id: &str, answer: &Answer) -> Vec<u8> {
         keys::answer(answer)
     }
@@ -444,6 +453,8 @@ mod tests {
         let a: &dyn Adapter = &CopilotAdapter::default();
         assert_eq!(a.answer("r", &Answer::Choice(1)), b"\x1b[B\r".to_vec());
         assert_eq!(a.type_turn("hi"), b"\x1b[200~hi\x1b[201~\r".to_vec());
+        // TER-208: the CR of a turn goes out on its own, after a pause.
+        assert!(!a.turn_submit_pause().is_zero());
         assert!(a.clear_input_keys().starts_with(&[0x15, 0x7f]));
         assert_eq!(a.exit_keys(), b"/exit\r".to_vec());
         let ev = a.hook_event(&HookPayload {

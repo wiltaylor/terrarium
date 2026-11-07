@@ -274,6 +274,15 @@ impl Adapter for PiAdapter {
         keys::type_turn(text)
     }
 
+    /// The CR of a turn goes 0.3 s after the paste (TER-208).
+    fn turn_submit_pause(&self) -> std::time::Duration {
+        keys::SUBMIT_PAUSE
+    }
+
+    fn input_pending(&self, screen: &Screen) -> bool {
+        screen::input_pending(screen)
+    }
+
     fn answer(&self, _request_id: &str, answer: &Answer) -> Vec<u8> {
         keys::answer(answer)
     }
@@ -406,6 +415,8 @@ mod tests {
             b"\x1b[B\x1b[B\r".to_vec()
         );
         assert_eq!(a.type_turn("hi"), b"\x1b[200~hi\x1b[201~\r".to_vec());
+        // TER-208: the CR of a turn goes out on its own, after a pause.
+        assert!(!a.turn_submit_pause().is_zero());
         assert_eq!(a.clear_input_keys(), b"\x03".to_vec());
         assert_eq!(a.exit_keys(), b"/quit\r".to_vec());
     }

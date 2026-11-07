@@ -196,6 +196,13 @@ impl TestDaemon {
         })
         .await
         .unwrap();
+        // TER-216: the job queue takes up the running jobs of the last
+        // daemon in the background after the start, and puts them back in
+        // the queue as lost (TER-211). A test that starts a job before that
+        // write would see it requeued, so wait for it here, once for all.
+        tokio::time::timeout(Duration::from_secs(90), daemon.state.job_queue.recovered())
+            .await
+            .expect("the job queue takes up the jobs of the last daemon");
         self.daemon = Some(daemon);
     }
 
