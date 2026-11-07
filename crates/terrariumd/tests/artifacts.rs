@@ -429,30 +429,58 @@ async fn per_file_limit_and_project_quota() {
 #[tokio::test]
 async fn attach_and_prune_keep_the_right_things() {
     let td = setup().await;
-    // ART-1 unattached; ART-2 on a released version; ART-3 embedded in a
-    // live page; ART-4 embedded in a page that is deleted; ART-5 on a card.
-    for (i, n) in ["loose", "release", "embedded", "dead-page", "card"]
+    // ART-1 unattached; ART-2 on a version from before TER-58 (an old
+    // row); ART-3 embedded in a live page; ART-4 embedded in a page that is
+    // deleted; ART-5 on a card; ART-6 on a label.
+    for (i, n) in ["loose", "release", "embedded", "dead-page", "card", "label"]
         .iter()
         .enumerate()
     {
         upload(&td, "proj/lead", n, format!("data {i}").as_bytes()).await;
     }
-    td.post_as(
-        "proj/lead",
-        "/api/projects/proj/versions",
-        json!({"name": "v1.0.0", "artifacts": ["ART-2"]}),
-    )
-    .await
-    .ok();
-    td.post_empty_as("proj/lead", "/api/versions/v1.0.0/submit")
-        .await
-        .ok();
-    td.post_empty("/api/versions/proj%2Fv1.0.0/approve")
-        .await
-        .ok();
-    td.post_empty_as("proj/lead", "/api/versions/v1.0.0/release")
-        .await
-        .ok();
+    {
+        let db = rusqlite::Connection::open(td.state.join("terrarium.db")).unwrap();
+        db.execute_batch(
+            "INSERT INTO versions (id, project, name, status, created_by, created_at, updated_at)
+               VALUES ('01OLDVERSION', 'proj', 'v1.0.0', 'released', 'operator', '2026-01-01', '2026-01-01');
+             INSERT INTO version_artifacts (version, artifact, created_by, created_at)
+               SELECT '01OLDVERSION', pk, 'operator', '2026-01-01' FROM artifacts
+               WHERE project = 'proj' AND num = 2;",
+        )
+        .unwrap();
+    }
+    let r = td
+        .post_as(
+            "proj/w1",
+            "/api/artifacts/ART-6/links",
+            json!({"kind": "label", "ref": " version:1.0.0 "}),
+        )
+        .await;
+    assert_eq!(
+        r.ok()["links"],
+        json!([{"kind": "label", "ref": "version:1.0.0",
+                "created_by": r.ok()["links"][0]["created_by"],
+                "created_at": r.ok()["links"][0]["created_at"]}])
+    );
+    // The old version link is not shown, and no new one can be made.
+    let a2 = td.get("/api/artifacts/proj%2FART-2").await;
+    assert_eq!(a2.ok()["links"], json!([]));
+    let e = td
+        .post_as(
+            "proj/lead",
+            "/api/artifacts/ART-1/links",
+            json!({"kind": "version", "ref": "v1.0.0"}),
+        )
+        .await;
+    e.err(422, "invalid");
+    assert!(
+        e.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("version:<X.Y.Z>"),
+        "{}",
+        e.body
+    );
     td.post_as(
         "proj/w1",
         "/api/projects/proj/wiki",
@@ -497,22 +525,6 @@ async fn attach_and_prune_keep_the_right_things() {
         )
         .await;
     assert_eq!(r.status.as_u16(), 204);
-    // An artifact on a released version cannot be deleted or re-attached.
-    td.req(
-        Method::DELETE,
-        "/api/artifacts/ART-2",
-        None,
-        Some("proj/lead"),
-    )
-    .await
-    .err(409, "conflict");
-    td.post_as(
-        "proj/lead",
-        "/api/artifacts/ART-1/links",
-        json!({"kind": "version", "ref": "v1.0.0"}),
-    )
-    .await
-    .err(409, "conflict");
 
     // Only a sysadmin or the operator prunes.
     td.post_as("proj/lead", "/api/artifacts/prune", json!({}))
@@ -538,7 +550,7 @@ async fn attach_and_prune_keep_the_right_things() {
         )
         .await;
     assert_eq!(keys(r.ok(), "warned"), Vec::<String>::new());
-    assert_eq!(r.ok()["kept"], 5);
+    assert_eq!(r.ok()["kept"], 6);
     // Dry run past the age: it says what it would warn, and changes nothing.
     let r = td
         .post("/api/artifacts/prune", json!({"as_of": at(day * 40)}))
@@ -578,11 +590,11 @@ async fn attach_and_prune_keep_the_right_things() {
         )
         .await;
     assert_eq!(keys(r.ok(), "pruned"), ["proj/ART-1", "proj/ART-4"]);
-    assert_eq!(r.ok()["kept"], 3);
+    assert_eq!(r.ok()["kept"], 4);
     td.get("/api/artifacts/proj%2FART-1")
         .await
         .err(404, "not_found");
-    for k in ["ART-2", "ART-3", "ART-5"] {
+    for k in ["ART-2", "ART-3", "ART-5", "ART-6"] {
         td.get(&format!("/api/artifacts/proj%2F{k}")).await.ok();
     }
     assert!(!td.state.join("artifacts").join(sha1).exists());

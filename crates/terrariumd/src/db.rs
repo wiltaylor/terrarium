@@ -2218,6 +2218,33 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE projects ADD COLUMN github_authors TEXT;
     ALTER TABLE questions ADD COLUMN hold_card TEXT;
     "#,
+    // 80: labels on test runs and artifacts (TER-58). Versions are card
+    // labels (`version:vnext`, `version:<X.Y.Z>`), so a run or an
+    // artifact links to a label in place of a version object. A label is
+    // free text. The version tables of migrations 3, 49, and 50
+    // (`versions`, `version_cards`, `version_artifacts`, `version_reviews`,
+    // `test_run_versions`) are no longer read or written, except that the
+    // artifact prune still counts `version_artifacts`. They keep their
+    // rows; a later version drops them. Self-contained: when another
+    // branch takes this number, move this entry to the end of the list.
+    r#"
+    CREATE TABLE test_run_labels (
+        run        INTEGER NOT NULL REFERENCES test_runs(pk) ON DELETE CASCADE,
+        label      TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run, label)
+    );
+    CREATE INDEX test_run_labels_label ON test_run_labels(label, run);
+    CREATE TABLE artifact_labels (
+        artifact   INTEGER NOT NULL REFERENCES artifacts(pk) ON DELETE CASCADE,
+        label      TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (artifact, label)
+    );
+    CREATE INDEX artifact_labels_label ON artifact_labels(label, artifact);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -2903,6 +2930,8 @@ mod tests {
             "test_cases",
             "test_run_cards",
             "test_run_versions",
+            "test_run_labels",
+            "artifact_labels",
             "spawns",
             "monitors",
             "webhook_deliveries",
@@ -2921,6 +2950,41 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(n, 1, "table {table}");
+        }
+    }
+
+    /// TER-58: migration 80 adds the label tables and keeps the rows of
+    /// the version tables.
+    #[test]
+    fn migration_80_keeps_the_version_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..79] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 79).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 't', 't');
+             INSERT INTO versions (id, project, name, status, created_by, created_at, updated_at)
+               VALUES ('V1', 'p', 'v1.0.0', 'released', 'operator', 't', 't');
+             INSERT INTO version_reviews (id, version, author, decision, created_at)
+               VALUES ('R1', 'V1', 'operator', 'approved', 't');",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 79);
+        let n: i64 = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM versions WHERE status = 'released')
+                      + (SELECT count(*) FROM version_reviews)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        for table in ["test_run_labels", "artifact_labels"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table}");
         }
     }
 

@@ -1902,7 +1902,7 @@ async fn a_stale_wiki_edit_prints_the_diff() {
 }
 
 #[tokio::test]
-async fn artifacts_and_versions() {
+async fn artifacts_and_labels() {
     let dir = std::env::temp_dir().join(format!("terrarium-push-{}", ulid::Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("report.html");
@@ -1955,156 +1955,46 @@ async fn artifacts_and_versions() {
     )
     .await;
 
-    ok(
-        true,
-        &["version", "new", "v1", "--notes", "n", "--repo", "terrarium", "--ref", "abc", "--card", "TER-1"],
-        vec![(201, json!({}))],
-        vec![(
-            Post,
-            "/api/projects/terra/versions",
-            vec![],
-            Some(json!({"name": "v1", "notes": "n", "repo": "terrarium", "git_ref": "abc", "cards": ["TER-1"]})),
-        )],
-    )
-    .await;
-    ok(
-        true,
-        &["version", "ls"],
-        vec![],
-        vec![req(Get, "/api/projects/terra/versions")],
-    )
-    .await;
-    ok(
-        true,
-        &["version", "ls", "--archived"],
-        vec![],
-        vec![(
-            Get,
-            "/api/projects/terra/versions",
-            vec![("archived", "true")],
-            None,
-        )],
-    )
-    .await;
+    // TER-58: the version subcommands are gone. Each exits 2 with an
+    // error that names card labels, and sends no request.
+    for args in [
+        &["version", "new", "v1", "--card", "TER-1"][..],
+        &["version", "ls", "--all"],
+        &["version", "submit", "v1"],
+        &["version", "wait", "v1", "--timeout", "20"],
+        &["version", "approve", "v1", "-m", "ok"],
+    ] {
+        let r = exec(true, args, vec![], None).await;
+        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
+        let e = r.result.unwrap_err();
+        assert_eq!(exit_code_of(&e), 2, "{args:?}");
+        assert!(e.to_string().contains("card labels"), "{args:?}: {e}");
+    }
+    // The hidden --version flags of artifact push and ls name --label.
+    for args in [
+        &["artifact", "push", "x.txt", "--version", "v1"][..],
+        &["artifact", "ls", "--version", "v1"],
+    ] {
+        let r = exec(true, args, vec![], None).await;
+        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
+        let e = r.result.unwrap_err();
+        assert!(e.to_string().contains("--label version:"), "{args:?}: {e}");
+    }
+    // `artifact ls --label` keeps the artifacts with that label.
     let out = ok(
         true,
-        &["version", "ls", "--all"],
+        &["artifact", "ls", "--label", "version:1.0.0"],
         vec![(
             200,
-            json!([{"name": "v1", "status": "draft", "archived": true}]),
+            json!([
+                {"id": "ART-1", "name": "a", "links": [{"kind": "label", "ref": "version:1.0.0"}]},
+                {"id": "ART-2", "name": "b", "links": [{"kind": "label", "ref": "version:vnext"}]}
+            ]),
         )],
-        vec![(
-            Get,
-            "/api/projects/terra/versions",
-            vec![("archived", "all")],
-            None,
-        )],
+        vec![req(Get, "/api/projects/terra/artifacts")],
     )
     .await;
-    assert!(out.contains("ARCHIVED"), "{out}");
-    assert!(Cli::try_parse_from(["terrarium", "version", "ls", "--all", "--archived"]).is_err());
-    for (action, path) in [
-        ("archive", "/api/versions/terra%2Fv1/archive"),
-        ("unarchive", "/api/versions/terra%2Fv1/unarchive"),
-    ] {
-        let out = ok(
-            true,
-            &["version", action, "v1"],
-            vec![(200, json!({"name": "v1", "status": "approved"}))],
-            vec![req(Post, path)],
-        )
-        .await;
-        assert!(out.contains(&format!("{action}d v1 [approved]")), "{out}");
-    }
-    ok(
-        true,
-        &["version", "show", "v1"],
-        vec![(200, json!({}))],
-        vec![req(Get, "/api/versions/terra%2Fv1")],
-    )
-    .await;
-    ok(
-        true,
-        &["version", "attach", "v1", "ART-1"],
-        vec![(201, json!({}))],
-        vec![(
-            Post,
-            "/api/artifacts/ART-1/links",
-            vec![],
-            Some(json!({"kind": "version", "ref": "v1"})),
-        )],
-    )
-    .await;
-    for (action, path) in [
-        ("submit", "/api/versions/terra%2Fv1/submit"),
-        ("release", "/api/versions/terra%2Fv1/release"),
-    ] {
-        ok(
-            true,
-            &["version", action, "v1"],
-            vec![(200, json!({}))],
-            vec![(Post, path, vec![], Some(json!({})))],
-        )
-        .await;
-    }
-    ok(
-        false,
-        &["-p", "terra", "version", "reject", "v1", "-m", "no"],
-        vec![(200, json!({}))],
-        vec![(
-            Post,
-            "/api/versions/terra%2Fv1/reject",
-            vec![],
-            Some(json!({"comment": "no"})),
-        )],
-    )
-    .await;
-    let out = ok(
-        true,
-        &["version", "wait", "v1", "--timeout", "20"],
-        vec![
-            (200, json!([])),
-            (200, json!({"name": "v1", "status": "in_review"})),
-            (200, json!([{"name": "v1", "status": "approved"}])),
-        ],
-        vec![
-            (
-                Get,
-                "/api/projects/terra/versions",
-                vec![("name", "v1"), ("status", "approved"), ("wait", "20")],
-                None,
-            ),
-            req(Get, "/api/versions/terra%2Fv1"),
-            (
-                Get,
-                "/api/projects/terra/versions",
-                vec![("name", "v1"), ("status", "approved"), ("wait", "20")],
-                None,
-            ),
-        ],
-    )
-    .await;
-    assert!(out.starts_with("v1  [approved]"), "{out}");
-    // A rejection ends the wait too.
-    let out = ok(
-        true,
-        &["version", "wait", "v1", "--timeout", "100"],
-        vec![
-            (200, json!([])),
-            (200, json!({"name": "v1", "status": "rejected"})),
-        ],
-        vec![
-            (
-                Get,
-                "/api/projects/terra/versions",
-                vec![("name", "v1"), ("status", "approved"), ("wait", "30")],
-                None,
-            ),
-            req(Get, "/api/versions/terra%2Fv1"),
-        ],
-    )
-    .await;
-    assert!(out.starts_with("v1  [rejected]"), "{out}");
+    assert!(out.contains("ART-1") && !out.contains("ART-2"), "{out}");
 }
 
 #[tokio::test]
@@ -2912,18 +2802,15 @@ async fn artifact_push_attaches_to_page_card_and_version() {
             "plans/x",
             "--card",
             "TER-1",
-            "--version",
-            "v1",
+            "--label",
+            "version:1.0.0",
         ],
         vec![
             (201, art.clone()),
+            (201, json!({"links": [{"kind": "page"}, {"kind": "label"}]})),
             (
                 201,
-                json!({"links": [{"kind": "page"}, {"kind": "version"}]}),
-            ),
-            (
-                201,
-                json!({"links": [{"kind": "page"}, {"kind": "version"}, {"kind": "card"}]}),
+                json!({"links": [{"kind": "page"}, {"kind": "label"}, {"kind": "card"}]}),
             ),
         ],
         None,
@@ -2940,7 +2827,7 @@ async fn artifact_push_attaches_to_page_card_and_version() {
     assert_eq!(r.reqs[1].path, "/api/artifacts/terra%2FART-2/links");
     assert_eq!(
         r.reqs[1].body,
-        Some(json!({"kind": "version", "ref": "v1"}))
+        Some(json!({"kind": "label", "ref": "version:1.0.0"}))
     );
     assert_eq!(r.reqs[2].path, "/api/artifacts/terra%2FART-2/links");
     assert_eq!(
@@ -8350,7 +8237,7 @@ async fn test_runs() {
         "id": "01RUN", "name": "unit", "format": "junit", "tool": "cargo-nextest",
         "status": "failed", "duration_ms": 5321,
         "counts": {"passed": 120, "failed": 2, "errored": 1, "skipped": 0, "total": 123},
-        "cards": ["TER-1"], "versions": [{"id": "01V", "name": "v1"}], "notes": [],
+        "cards": ["TER-1"], "labels": ["version:1.0.0"], "notes": [],
         "url": "/p/terra/board/tests/01RUN"
     });
     let args = [
@@ -8363,8 +8250,8 @@ async fn test_runs() {
         "TER-1",
         "--card",
         "TER-2",
-        "--version",
-        "v1",
+        "--label",
+        "version:1.0.0",
         "--commit",
         "abc",
         "--branch",
@@ -8381,7 +8268,7 @@ async fn test_runs() {
             vec![],
             Some(json!({
                 "file_name": "junit.xml", "format": "auto", "content": "<testsuites/>",
-                "name": "unit", "cards": ["TER-1", "TER-2"], "versions": ["v1"],
+                "name": "unit", "cards": ["TER-1", "TER-2"], "labels": ["version:1.0.0"],
                 "commit": "abc", "branch": "main"
             })),
         )],
@@ -8394,7 +8281,7 @@ async fn test_runs() {
         r.out
     );
     assert!(
-        r.out.contains("linked: cards TER-1  versions v1"),
+        r.out.contains("linked: cards TER-1  labels version:1.0.0"),
         "{}",
         r.out
     );
@@ -8520,33 +8407,45 @@ async fn test_runs() {
             "01RUN",
             "--card",
             "TER-3",
-            "--version",
-            "v2",
+            "--label",
+            "version:2.0.0",
         ],
         vec![(
             200,
-            json!({"id": "01RUN", "cards": ["TER-3"], "versions": []}),
+            json!({"id": "01RUN", "cards": ["TER-3"], "labels": []}),
         )],
         vec![(
             Patch,
             "/api/test-runs/01RUN/links",
             vec![],
-            Some(json!({"add_cards": ["TER-3"], "add_versions": ["v2"]})),
+            Some(json!({"add_cards": ["TER-3"], "add_labels": ["version:2.0.0"]})),
         )],
     )
     .await;
     ok(
         true,
         &["test", "unlink", "01RUN", "--card", "TER-3"],
-        vec![(200, json!({"id": "01RUN", "cards": [], "versions": []}))],
+        vec![(200, json!({"id": "01RUN", "cards": [], "labels": []}))],
         vec![(
             Patch,
             "/api/test-runs/01RUN/links",
             vec![],
-            Some(json!({"remove_cards": ["TER-3"], "remove_versions": []})),
+            Some(json!({"remove_cards": ["TER-3"], "remove_labels": []})),
         )],
     )
     .await;
+    // TER-58: --version names --label and sends nothing.
+    for args in [
+        &["test", "push", "x.xml", "--version", "v1"][..],
+        &["test", "ls", "--version", "v1"],
+        &["test", "link", "01RUN", "--version", "v1"],
+        &["test", "unlink", "01RUN", "--version", "v1"],
+    ] {
+        let r = exec(true, args, vec![], None).await;
+        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
+        let e = r.result.unwrap_err();
+        assert!(e.to_string().contains("--label version:"), "{args:?}: {e}");
+    }
     let r = exec(true, &["test", "link", "01RUN"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), 2);
     ok(

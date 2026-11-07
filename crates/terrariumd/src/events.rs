@@ -99,14 +99,7 @@ impl EventDraft {
 /// no agent, so they show in `GET /api/agents/{id}/events`. Mail and card
 /// events name their subject (the recipient, the assignee) on their own:
 /// the push listener reads that as the agent to point at.
-const ACTOR_ATTRIBUTED: &[&str] = &[
-    "wiki.",
-    "artifact.",
-    "memory.",
-    "version.",
-    "db.",
-    "test_run",
-];
+const ACTOR_ATTRIBUTED: &[&str] = &["wiki.", "artifact.", "memory.", "db.", "test_run"];
 
 /// Name the acting agent on a draft of an [`ACTOR_ATTRIBUTED`] kind.
 fn attribute_actor(conn: &Connection, actor: &str, d: &mut EventDraft) -> ApiResult<()> {

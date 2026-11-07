@@ -707,16 +707,6 @@ impl WebConfig {
         format!("{}{path}", self.mail_base())
     }
 
-    /// A dashboard link for an API answer: absolute when
-    /// [`Self::public_url`] is set, else the path alone (the dashboard
-    /// resolves it against its own origin).
-    pub fn page_url(&self, path: &str) -> String {
-        match &self.public_url {
-            Some(base) => format!("{base}{path}"),
-            None => path.to_owned(),
-        }
-    }
-
     /// The origin (`scheme://host[:port]`) of [`Self::public_url`].
     pub fn public_origin(&self) -> Option<String> {
         self.public_url.as_deref().map(origin_of)
@@ -886,7 +876,6 @@ mod tests {
         );
         let d = WebConfig::default();
         assert_eq!(d.dashboard_link("/x"), "http://localhost:8080/x");
-        assert_eq!(d.page_url("/x"), "/x");
         assert!(!d.ws_query_token);
         let defaults = Settings::try_parse_from(["terrariumd"]).unwrap().web();
         assert_eq!(defaults.session_ttl.as_secs(), 30 * 86_400);

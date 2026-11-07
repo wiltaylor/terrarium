@@ -1031,10 +1031,10 @@ pub fn inside_project(p: &str, reach: &Reach) -> ApiResult<()> {
     }
 }
 
-// ---- memory graph, wiki, artifacts, versions (PLAN §14, §15) ----
+// ---- memory graph, wiki, artifacts (PLAN §14, §15) ----
 //
 // Every member reads and writes its own project's memories, pages,
-// artifacts, and versions. The checks below are the exceptions.
+// and artifacts. The checks below are the exceptions.
 
 /// Edit the title, body, or sources of a memory: its author, or an admin of
 /// the project. Anyone may add tags and links.
@@ -1151,30 +1151,6 @@ pub fn delete_test_run(actor: &Actor, project: &str, creator: &str) -> ApiResult
 /// Prune artifacts by the retention rule.
 pub fn prune_artifacts(actor: &Actor) -> ApiResult<()> {
     sysadmin(actor, "pruning artifacts")
-}
-
-/// Edit or submit a version: its creator, or an admin.
-pub fn edit_version(actor: &Actor, project: &str, creator: &str, name: &str) -> ApiResult<()> {
-    if actor.address() == creator || is_admin_of(actor, project) {
-        return Ok(());
-    }
-    Err(ApiError::forbidden(format!(
-        "version `{name}` is not yours; only its creator, a project admin, or the operator changes it"
-    )))
-}
-
-/// Approve or reject a version: the user decides, so only the operator.
-pub fn decide_version(actor: &Actor) -> ApiResult<()> {
-    if actor.is_operator() {
-        Ok(())
-    } else {
-        Err(deny("approving or rejecting a version", "the operator"))
-    }
-}
-
-/// Release an approved version.
-pub fn release_version(actor: &Actor, project: &str) -> ApiResult<()> {
-    admin_project(actor, project, "releasing a version")
 }
 
 #[cfg(test)]
@@ -1542,10 +1518,6 @@ mod tests {
         assert!(admin_wiki(&member, "p", "x").is_err());
         assert!(review_page(&member, "p", Some("me")).is_ok());
         assert!(review_page(&member, "p", Some("other")).is_err());
-        assert!(decide_version(&admin).is_err());
-        assert!(decide_version(&Actor::Operator).is_ok());
-        assert!(release_version(&member, "p").is_err());
-        assert!(release_version(&admin, "p").is_ok());
         assert!(prune_artifacts(&admin).is_err());
     }
 

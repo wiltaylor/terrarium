@@ -1,19 +1,19 @@
 //! Test runs (PLAN §15.5, docs/api.md §29): uploaded test result files,
 //! parsed into suites and cases ([`crate::test_results`]), linked to cards
-//! and versions.
+//! and labels (a version label like `version:1.4.0`, TER-58).
 //!
 //! - Members of the project and its agents upload and read runs. Another
 //!   project's agent needs sysadmin.
 //! - A link to a card follows the card's edit rights (its assignee or
-//!   creator, or an admin; not archived; a done card only for an admin). A
-//!   link to a version follows the version's edit rights (its creator or
-//!   an admin, in draft or after a rejection). Unlinking needs the same.
+//!   creator, or an admin; not archived; a done card only for an admin).
+//!   Unlinking needs the same. A label is free text: whoever may upload
+//!   to the project links and unlinks it.
 //! - The creator, a project admin, sysadmin, or the operator deletes a
 //!   run; a delete by another actor is audited.
 //! - Known secret values are redacted in the file before the parse, so
 //!   the cases and the stored original file never hold them.
 //! - Events `test_run` {change, project, id, name, counts, cards,
-//!   versions}. Nothing moves a card because of a result.
+//!   labels}. Nothing moves a card because of a result.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -28,7 +28,7 @@ use crate::error::{ApiError, ApiResult, Code};
 use crate::events::EventDraft;
 use crate::policy;
 use crate::store::memory::name_of;
-use crate::store::{Paged, board, projects, versions};
+use crate::store::{self, Paged, board, projects};
 use crate::test_results::{self, Counts, Format, ParseError, ParsedRun, Status, clean_line};
 
 /// The default number of cases on a page of a run.
@@ -39,13 +39,6 @@ pub const CASES_MAX: usize = 5000;
 pub const COMPARE_MAX: usize = 1000;
 
 // ---- shapes ----
-
-/// A version that a run links to.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VersionRef {
-    pub id: String,
-    pub name: String,
-}
 
 /// A run without its cases: the list item and the answer of a write.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,7 +59,8 @@ pub struct TestRunSummary {
     pub raw_size: i64,
     pub notes: Vec<String>,
     pub cards: Vec<String>,
-    pub versions: Vec<VersionRef>,
+    /// The labels of the run, such as `version:1.4.0`.
+    pub labels: Vec<String>,
     pub created_by: String,
     pub created_by_name: String,
     pub created_at: String,
@@ -164,7 +158,7 @@ pub struct NewRun {
     pub name: Option<String>,
     pub file_name: Option<String>,
     pub cards: Vec<String>,
-    pub versions: Vec<String>,
+    pub labels: Vec<String>,
     pub commit: Option<String>,
     pub branch: Option<String>,
 }
@@ -295,17 +289,10 @@ fn render(conn: &Connection, row: RunRow) -> ApiResult<TestRunSummary> {
     let cards = stmt
         .query_map([row.pk], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut stmt = conn.prepare(
-        "SELECT v.id, v.name FROM test_run_versions l JOIN versions v ON v.id = l.version
-         WHERE l.run = ?1 ORDER BY l.created_at, v.name",
-    )?;
-    let versions = stmt
-        .query_map([row.pk], |r| {
-            Ok(VersionRef {
-                id: r.get(0)?,
-                name: r.get(1)?,
-            })
-        })?
+    let mut stmt = conn
+        .prepare("SELECT label FROM test_run_labels WHERE run = ?1 ORDER BY created_at, label")?;
+    let labels = stmt
+        .query_map([row.pk], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(TestRunSummary {
         status: row.counts.status().to_owned(),
@@ -325,7 +312,7 @@ fn render(conn: &Connection, row: RunRow) -> ApiResult<TestRunSummary> {
         raw_size: row.raw_size,
         notes: row.notes,
         cards,
-        versions,
+        labels,
         created_by: row.created_by,
         created_at: row.created_at,
     })
@@ -417,7 +404,7 @@ fn emit(t: &mut Tx<'_>, s: &TestRunSummary, change: &str) -> ApiResult<()> {
                 "name": s.name,
                 "counts": s.counts,
                 "cards": s.cards,
-                "versions": s.versions.iter().map(|v| v.name.clone()).collect::<Vec<_>>(),
+                "labels": s.labels,
             }),
         )
         .project(s.project.clone()),
@@ -446,21 +433,21 @@ fn unlink_card(t: &mut Tx<'_>, actor: &Actor, run: &RunRow, card: &str) -> ApiRe
     Ok(())
 }
 
-fn link_version(t: &mut Tx<'_>, actor: &Actor, run: &RunRow, key: &str) -> ApiResult<()> {
-    let v = versions::check_test_link(t, actor, key, &run.project)?;
+fn link_label(t: &mut Tx<'_>, actor: &Actor, run: &RunRow, raw: &str) -> ApiResult<()> {
+    let label = store::link_label(raw)?;
     t.execute(
-        "INSERT OR IGNORE INTO test_run_versions (run, version, created_by, created_at)
+        "INSERT OR IGNORE INTO test_run_labels (run, label, created_by, created_at)
          VALUES (?1, ?2, ?3, ?4)",
-        params![run.pk, v, actor.address(), now()],
+        params![run.pk, label, actor.address(), now()],
     )?;
     Ok(())
 }
 
-fn unlink_version(t: &mut Tx<'_>, actor: &Actor, run: &RunRow, key: &str) -> ApiResult<()> {
-    let v = versions::check_test_link(t, actor, key, &run.project)?;
+fn unlink_label(t: &mut Tx<'_>, run: &RunRow, raw: &str) -> ApiResult<()> {
+    let label = store::link_label(raw)?;
     t.execute(
-        "DELETE FROM test_run_versions WHERE run = ?1 AND version = ?2",
-        params![run.pk, v],
+        "DELETE FROM test_run_labels WHERE run = ?1 AND label = ?2",
+        params![run.pk, label],
     )?;
     Ok(())
 }
@@ -562,8 +549,8 @@ pub fn create(
     for c in &n.cards {
         link_card(t, actor, &row, c)?;
     }
-    for v in &n.versions {
-        link_version(t, actor, &row, v)?;
+    for l in &n.labels {
+        link_label(t, actor, &row, l)?;
     }
     let s = render(t, row)?;
     emit(t, &s, "created")?;
@@ -579,9 +566,9 @@ pub struct LinksPatch {
     #[serde(default)]
     pub remove_cards: Vec<String>,
     #[serde(default)]
-    pub add_versions: Vec<String>,
+    pub add_labels: Vec<String>,
     #[serde(default)]
-    pub remove_versions: Vec<String>,
+    pub remove_labels: Vec<String>,
 }
 
 pub fn update_links(
@@ -593,10 +580,10 @@ pub fn update_links(
     let row = find_for(t, actor, id)?;
     policy::write_test_runs(actor, &row.project)?;
     let total =
-        p.add_cards.len() + p.remove_cards.len() + p.add_versions.len() + p.remove_versions.len();
+        p.add_cards.len() + p.remove_cards.len() + p.add_labels.len() + p.remove_labels.len();
     if total == 0 {
         return Err(ApiError::invalid(
-            "give add_cards, remove_cards, add_versions, or remove_versions",
+            "give add_cards, remove_cards, add_labels, or remove_labels",
         ));
     }
     for c in &p.add_cards {
@@ -605,14 +592,14 @@ pub fn update_links(
     for c in &p.remove_cards {
         unlink_card(t, actor, &row, c)?;
     }
-    for v in &p.add_versions {
-        link_version(t, actor, &row, v)?;
+    for l in &p.add_labels {
+        link_label(t, actor, &row, l)?;
     }
-    for v in &p.remove_versions {
-        unlink_version(t, actor, &row, v)?;
+    for l in &p.remove_labels {
+        unlink_label(t, &row, l)?;
     }
     let s = render(t, row)?;
-    let change = if p.add_cards.is_empty() && p.add_versions.is_empty() {
+    let change = if p.add_cards.is_empty() && p.add_labels.is_empty() {
         "unlinked"
     } else {
         "linked"
@@ -648,7 +635,7 @@ pub fn delete(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
 #[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub card: Option<String>,
-    pub version: Option<String>,
+    pub label: Option<String>,
     pub name: Option<String>,
     /// `passed`, `failed`, or `empty`.
     pub status: Option<String>,
@@ -672,20 +659,9 @@ pub fn list(
         sql.push_str(" AND r.pk IN (SELECT run FROM test_run_cards WHERE card = ?)");
         args.push(board::normalise_id(c).into());
     }
-    if let Some(v) = q
-        .version
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let row = versions::find(conn, v, Some(project))?;
-        if row.project != project {
-            return Err(ApiError::not_found(format!(
-                "project `{project}` has no version `{v}`"
-            )));
-        }
-        sql.push_str(" AND r.pk IN (SELECT run FROM test_run_versions WHERE version = ?)");
-        args.push(row.id.into());
+    if let Some(l) = q.label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        sql.push_str(" AND r.pk IN (SELECT run FROM test_run_labels WHERE label = ?)");
+        args.push(l.to_owned().into());
     }
     if let Some(n) = q.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         sql.push_str(" AND r.name = ?");
