@@ -539,10 +539,27 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
         }
         CardCmd::Link {
             id,
+            inbox_thread: Some(th),
+            ..
+        } => {
+            let v = ctx
+                .api
+                .post(
+                    &format!("/api/threads/{}/cards", encode(th)),
+                    Some(json!({"card": id})),
+                )
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!("linked {id} to Inbox thread {}", field(v, "id")));
+            })
+        }
+        CardCmd::Link {
+            id,
             thread,
             branch,
             card,
             link_url,
+            inbox_thread: None,
         } => {
             let (kind, r) = match (thread, branch, card, link_url) {
                 (Some(t), ..) => ("thread", t),
@@ -551,7 +568,7 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                 (.., Some(u)) => ("url", u),
                 _ => {
                     return Err(CliError::usage(
-                        "give --thread, --branch, --card, or --link-url",
+                        "give --thread, --inbox-thread, --branch, --card, or --link-url",
                     ));
                 }
             };
@@ -608,6 +625,7 @@ async fn new(ctx: &Ctx, a: &CardNewArgs) -> anyhow::Result<()> {
     set_opt(&mut b, "branch", a.branch.clone());
     set_opt(&mut b, "from_mail", a.from_mail.clone());
     set_opt(&mut b, "github_author", a.github_author.clone());
+    set_opt(&mut b, "inbox_thread", a.inbox_thread.clone());
     set_opt(&mut b, "comment", ctx.opt_text(a.comment.as_deref())?);
     set_opt(
         &mut b,

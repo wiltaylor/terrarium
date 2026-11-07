@@ -2306,6 +2306,24 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE thread_messages_keep;
     CREATE INDEX thread_messages_thread ON thread_messages(thread, at);
     "#,
+    // 82: the cards that an Inbox thread tracks (TER-146, TER-144 D2,
+    // `crate::store::threads::link_card`): a card of any project, linked
+    // by the lead (`card new --inbox-thread`, `card link --inbox-thread`)
+    // or by the thread agent (`thread track --card`). `project` is the
+    // card's project at the link. A link gives no read access.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE thread_cards (
+        thread    TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        project   TEXT NOT NULL,
+        card      TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+        linked_by TEXT NOT NULL,
+        linked_at TEXT NOT NULL,
+        PRIMARY KEY (thread, card)
+    );
+    CREATE INDEX thread_cards_card ON thread_cards(card);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

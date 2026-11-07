@@ -18,6 +18,10 @@
 //!   stays set while the thread tracks: an operator post wakes the agent
 //!   (`waiting_agent`), and the agent's reply puts the thread back into
 //!   `tracking`, not `waiting_operator`.
+//! - Linked cards (TER-146, TER-144 D2, [`link_card`]): cards of any
+//!   project that the thread tracks (`thread_cards`). The linker reads the
+//!   thread and the card's project; a link gives no read access to the
+//!   card or the thread. `GET /api/threads/{id}` lists them (`cards`).
 //! - No register and no conflict check between threads (D36).
 //! - Events `thread` {change, id, scope, status}, and an `inbox` event for
 //!   the item `inbox-thread:<id>`.
@@ -105,6 +109,18 @@ pub struct ThreadMessage {
     pub at: String,
 }
 
+/// A card that the thread tracks (TER-146, [`link_card`]). Only the IDs:
+/// a reader of the thread need not read the card's project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadCard {
+    pub project: String,
+    pub card: String,
+    /// `operator` or an agent ULID.
+    pub linked_by: String,
+    pub linked_by_name: String,
+    pub linked_at: String,
+}
+
 /// The operator's overall response: the approval record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Response {
@@ -151,6 +167,9 @@ pub struct Thread {
     /// The questions of the thread; absent in a list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub questions: Option<Vec<Question>>,
+    /// The linked cards, the oldest link first (TER-146); absent in a list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cards: Option<Vec<ThreadCard>>,
     pub response: Option<Response>,
     pub handoff: Option<Handoff>,
     /// In a list: the number of messages.
@@ -268,6 +287,7 @@ fn row(conn: &Connection, r: &Row<'_>) -> rusqlite::Result<Thread> {
         status: ThreadStatus::parse(&status).unwrap_or(ThreadStatus::Closed),
         messages: None,
         questions: None,
+        cards: None,
         response: response.and_then(|s| serde_json::from_str(&s).ok()),
         handoff: handoff.and_then(|s| serde_json::from_str(&s).ok()),
         message_count: None,
@@ -301,7 +321,91 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Thread> {
     let mut th = get_bare(conn, id)?;
     th.messages = Some(messages(conn, &th.id)?);
     th.questions = Some(questions_of(conn, &th.id)?);
+    th.cards = Some(cards_of(conn, &th.id)?);
     Ok(th)
+}
+
+/// A thread that `actor` may read; else `404`: the operator, an agent
+/// that reads all (sysadmin, architect), and the opener, the attached agent
+/// and the report-to lead.
+pub fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
+    match actor {
+        Actor::Operator => Ok(th),
+        Actor::Agent(a) if a.reads_all() || th.involves(&a.id) => Ok(th),
+        Actor::Agent(_) => Err(ApiError::not_found(format!("no thread `{}`", th.id))),
+    }
+}
+
+/// The linked cards of thread `thread`, the oldest link first.
+fn cards_of(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadCard>> {
+    let mut st = conn.prepare(
+        "SELECT project, card, linked_by, linked_at FROM thread_cards WHERE thread = ?1
+         ORDER BY linked_at, rowid",
+    )?;
+    let rows = st
+        .query_map([thread], |r| {
+            let by: String = r.get(2)?;
+            Ok(ThreadCard {
+                project: r.get(0)?,
+                card: r.get(1)?,
+                linked_by_name: name_of(conn, &by),
+                linked_by: by,
+                linked_at: r.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Link card `card` (`<project>:<card>` or `<card>`) to thread `id` for
+/// `actor` (TER-146, TER-144 D2). `actor` must read the thread (else `404`)
+/// and the card's project (else `403`); the link gives neither. A closed
+/// thread is `409 conflict`; a card that is not in the named project is
+/// `404`. A card that is linked already stays as it is. Emits a `thread`
+/// event `card_linked`, which wakes no agent. The thread with its cards.
+pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResult<Thread> {
+    let th = readable(actor, get_bare(t, id)?)?;
+    not_closed(&th, "a card link")?;
+    let (want, key) = match card.trim().split_once(':') {
+        Some((p, c)) => (Some(p.trim()), c.trim()),
+        None => (None, card.trim()),
+    };
+    if key.is_empty() || want == Some("") {
+        return Err(ApiError::invalid(format!(
+            "bad card `{card}`: use <project>:<card> or <card>, such as terrarium:TER-42"
+        )));
+    }
+    let c = board::get_card(t, key)?;
+    if want.is_some_and(|p| p != c.project) {
+        return Err(ApiError::not_found(format!(
+            "no card `{}` in project `{}`",
+            c.id,
+            want.unwrap_or_default()
+        )));
+    }
+    policy::read_project(actor, &c.project).map_err(|e| {
+        ApiError::forbidden(format!(
+            "linking card {} to thread {}: {}",
+            c.id, th.id, e.message
+        ))
+    })?;
+    let at = now();
+    let by = actor.address();
+    let n = t.execute(
+        "INSERT OR IGNORE INTO thread_cards (thread, project, card, linked_by, linked_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![th.id, c.project, c.id, by, at],
+    )?;
+    if n > 0 {
+        t.audit(
+            "thread.card_link",
+            &th.id,
+            th.project(),
+            json!({"by": by, "card": c.id, "project": c.project}),
+        )?;
+        emit(t, &th, "card_linked")?;
+    }
+    get(t, &th.id)
 }
 
 fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {

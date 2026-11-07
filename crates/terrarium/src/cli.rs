@@ -1351,11 +1351,16 @@ pub enum CardCmd {
         )]
         body: Option<String>,
     },
-    /// Link a mail thread, branch, card, or URL
+    /// Link a mail thread, branch, card, or URL; or link the card to an
+    /// Inbox thread that tracks it (`--inbox-thread`)
     Link {
         id: String,
         #[arg(long, group = "link")]
         thread: Option<String>,
+        /// An Inbox thread that tracks the card (you must read the thread
+        /// and the card's project)
+        #[arg(long, group = "link", value_name = "THREAD")]
+        inbox_thread: Option<String>,
         #[arg(long, group = "link")]
         branch: Option<String>,
         #[arg(long, group = "link")]
@@ -1459,6 +1464,10 @@ pub struct CardNewArgs {
     /// `github_authors` list holds the card for the operator
     #[arg(long, value_name = "LOGIN")]
     pub github_author: Option<String>,
+    /// Link the new card to this Inbox thread, which tracks it (you must
+    /// read the thread)
+    #[arg(long, value_name = "THREAD")]
+    pub inbox_thread: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2529,7 +2538,13 @@ pub enum ThreadCmd {
     },
     /// Move your thread into tracking after the handoff (the attached
     /// agent): the daemon stops you, and an operator message wakes you
-    Track { id: String },
+    Track {
+        id: String,
+        /// Link a card that the thread tracks first: `<project>:<card>`
+        /// (repeat for more)
+        #[arg(long = "card", value_name = "PROJECT:CARD")]
+        cards: Vec<String>,
+    },
     /// List the threads: the open ones (an agent: its own)
     Ls {
         /// waiting_operator, waiting_agent, tracking, closed, open, or all

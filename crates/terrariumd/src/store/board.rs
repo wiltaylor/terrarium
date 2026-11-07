@@ -1465,6 +1465,10 @@ pub struct NewCard {
     /// against GitHub.
     #[serde(default)]
     pub github_author: Option<String>,
+    /// An Inbox thread that tracks the new card (TER-146, TER-144 D2,
+    /// [`crate::store::threads::link_card`]): the creator must read it.
+    #[serde(default)]
+    pub inbox_thread: Option<String>,
 }
 
 fn set_deps(t: &mut Tx<'_>, card: &str, wanted: &[String]) -> ApiResult<()> {
@@ -1597,6 +1601,9 @@ pub fn create_card(
         ],
     )?;
     set_deps(t, &id, &new.depends_on)?;
+    if let Some(th) = new.inbox_thread.as_deref().filter(|s| !s.trim().is_empty()) {
+        crate::store::threads::link_card(t, actor, th, &id)?;
+    }
     if let Some(thread) = &thread {
         t.execute(
             "INSERT INTO card_links (card, kind, ref, created_by, created_at)

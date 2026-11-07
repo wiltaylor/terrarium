@@ -886,6 +886,7 @@ terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
                    [--assignee a] [--repo r] [--branch b] [-m comment] [--eta 2h30m]
                    [--github-author login]   the issue author of a GitHub card (api.md §8.3)
+                   [--inbox-thread <thread>] an Inbox thread that tracks the card (api.md §6.13)
 terrarium card new --from-mail <message id> [...]
 terrarium card edit <id> [--title t] [-b body] [--label l|none]... [--depends-on id|none]...
                     [--repo r|none] [--branch b|none]
@@ -894,7 +895,7 @@ terrarium card move <id> <column> [--position n] [-m comment] [--eta 2h30m]
 terrarium card eta <id> (<duration | time> | --clear)
 terrarium card assign <id> <agent | operator | me | none>
 terrarium card comment <id> (<text | -> | -b text | - | -m text)
-terrarium card link <id> (--thread T | --branch b | --card id | --link-url u)
+terrarium card link <id> (--thread T | --inbox-thread T | --branch b | --card id | --link-url u)
 terrarium card rm <id>                        archives the card
 terrarium card events <id>
 terrarium card wait [--mine] [--timeout 300]
@@ -1681,7 +1682,7 @@ terrarium thread ask <id> "<summary>" --bundle (--item "<text>"... | --items-fil
 terrarium thread respond <id> -m <text|->
 terrarium thread close <id> [--handoff <text|->] [--link <kind>:<ref>]...
 terrarium thread close <id> --confirm
-terrarium thread track <id>
+terrarium thread track <id> [--card <project>:<card>]...
 terrarium thread ls [--status waiting_operator|waiting_agent|tracking|closed|open|all] [--scope global|<project>]
 terrarium thread show <id>
 ```
@@ -1715,6 +1716,15 @@ terrarium thread show <id>
   (parked), and the thread gets no reminder and no stale close. An
   operator message wakes the agent; its reply with `post` puts the thread
   back into tracking. An open question in the thread is a conflict (exit 1).
+  Each `--card` links a card of any project that the thread tracks
+  (TER-146), in the same write: a card in a project that you do not read
+  is refused (exit 3), and then nothing changes.
+- Linked cards (api.md §6.13 "Linked cards"): the lead links a new card
+  with `card new --inbox-thread <id>`, and an existing card with `card
+  link <card> --inbox-thread <id>` (`linked <card> to Inbox thread
+  <id>`). The linker reads the thread and the card's project; a link gives
+  no read access. `thread show` prints one line for each linked card:
+  `card <project>:<card> linked by <name> at <time>`.
 - `ls` lists the threads (an agent: the ones it opened, is attached to,
   or reports from; a sysadmin or an architect: all): `ID`, `STATUS`, `SCOPE`, `AGENT`, `MSGS`, `OPEN_Q`,
   `LAST`, `TOPIC`. `show` prints the fields, then each message, the
