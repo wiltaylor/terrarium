@@ -1422,9 +1422,7 @@ async fn a_fleet_upsert_that_keeps_template_grants_needs_the_right_to_grant_them
         .agent("fx", "lead", json!({"roles": ["project_admin"]}))
         .await;
     let lead = lead["id"].as_str().unwrap().to_owned();
-    let sys = td
-        .agent("fx", "sys", json!({"roles": ["sysadmin"]}))
-        .await;
+    let sys = td.agent("fx", "sys", json!({"roles": ["sysadmin"]})).await;
     let sys = sys["id"].as_str().unwrap().to_owned();
     let r = td
         .put(
@@ -1439,13 +1437,19 @@ async fn a_fleet_upsert_that_keeps_template_grants_needs_the_right_to_grant_them
              name = \"tg\"\nharness = \"claude\"\n{extra}"
         )
     };
-    let kept = |model: &str| fleet(&format!("model = \"{model}\"\ngrants = [\"global/gk:read\"]\n"));
+    let kept = |model: &str| {
+        fleet(&format!(
+            "model = \"{model}\"\ngrants = [\"global/gk:read\"]\n"
+        ))
+    };
     td.post("/api/fleet/apply", body(&kept("m1"))).await.ok();
     let t = fx_template(&td).await;
     assert_eq!(t["grants_by"], "operator", "{t}");
 
     // The project_admin changes the model and keeps the grant: 403.
-    let r = td.post_as(&lead, "/api/fleet/apply", body(&kept("m2"))).await;
+    let r = td
+        .post_as(&lead, "/api/fleet/apply", body(&kept("m2")))
+        .await;
     r.err(403, "forbidden");
     let m = r.body["error"]["message"].as_str().unwrap();
     assert!(m.contains("the grant `global/gk:read`"), "{}", r.body);
