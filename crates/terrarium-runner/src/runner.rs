@@ -1182,12 +1182,18 @@ impl Inner {
             {
                 turn.attempts += 1;
                 let pause = self.adapter.turn_submit_pause();
-                let mut writes =
-                    terrarium_core::adapter::exit_key_writes(&self.adapter.type_turn(&turn.text), pause)
-                        .into_iter();
+                let mut writes = terrarium_core::adapter::exit_key_writes(
+                    &self.adapter.type_turn(&turn.text),
+                    pause,
+                )
+                .into_iter();
                 let text = writes.next().unwrap_or_default();
                 let submit = writes.next().map(|cr| (now + pause, cr));
-                let wait = if submit.is_some() { pause } else { Duration::ZERO };
+                let wait = if submit.is_some() {
+                    pause
+                } else {
+                    Duration::ZERO
+                };
                 state.in_flight = Some(InFlight {
                     turn,
                     deadline: now + wait + self.config.submit_timeout,

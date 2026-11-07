@@ -348,7 +348,12 @@ mod tests {
         };
         assert!(pending("T4 big paste"));
         assert!(pending("T5 after plain text with LF"));
-        for prefix in ["T1 after startup", "T6 second", "T7 question shown", "working-5"] {
+        for prefix in [
+            "T1 after startup",
+            "T6 second",
+            "T7 question shown",
+            "working-5",
+        ] {
             assert!(!pending(prefix), "{prefix}");
         }
         let (_, lines) = all
