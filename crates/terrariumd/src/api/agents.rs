@@ -88,7 +88,8 @@ pub(super) fn file_managed(a: &AgentView) -> ApiError {
 struct ListQuery {
     project: Option<String>,
     /// `ephemeral`: the ephemeral agents too (PLAN §18, "Ephemeral
-    /// agents"). Default: without them.
+    /// agents"). `card`: only the card agents among them (TER-75), those
+    /// bound to a card or the assignee of a card. Default: without them.
     include: Option<String>,
 }
 
@@ -105,10 +106,18 @@ async fn list(
     if let Some(p) = &project {
         policy::read_project(&actor, p)?;
     }
-    let ephemeral = q
+    let parts: Vec<&str> = q
         .include
         .as_deref()
-        .is_some_and(|i| i.split(',').any(|p| p.trim() == "ephemeral"));
+        .map(|i| i.split(',').map(str::trim).collect())
+        .unwrap_or_default();
+    let ephemeral = if parts.contains(&"ephemeral") {
+        agents::Ephemeral::All
+    } else if parts.contains(&"card") {
+        agents::Ephemeral::Card
+    } else {
+        agents::Ephemeral::None
+    };
     let mut rows = state
         .db
         .read(move |c| agents::list_with(c, project.as_deref(), &page, ephemeral))

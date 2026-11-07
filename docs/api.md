@@ -1993,7 +1993,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `waiting_on` | What the agent waits on, in one short line: the summaries of the oldest 3 open waits and a count of the others. Absent when the agent has no open wait. |
 | `session` | The harness session ID of the current session, when known. |
 | `harness_version` | The harness version that the live agent runs: the version dir in the tools dir that its launch resolved (§4, `POST /api/harnesses/{name}/update`). It stays until the next start, also after an update. Absent when the agent does not run, or when the version is not known. |
-| `current_card` | The card the agent has in the `working` column of its board (§8.1), if any. |
+| `current_card` | The card the agent has in the `working` column of its board (§8.1), if any. For an ephemeral agent, else its bound card, else the newest open card that it is the assignee of (TER-75). |
 | `source` | `file`, `api`, or `fleet:<name>` (§18.1). |
 | `template` | The agent template that the create copied: `{"id", "name", "project", "revision"}` (§21). Absent when the create named none. For display only. |
 | `ephemeral`, `owner`, `spawn` | An ephemeral agent (§6.10): `true`, the owner (an agent ULID or `operator`), and `{"owner_name", "template", "task", "spawned_at", "deadline_at"}`. Absent for other agents. |
@@ -3456,7 +3456,11 @@ leaves it out.
 
 **The lists.** `GET /api/agents` and `GET /api/projects/{name}/agents`
 leave the ephemeral agents out. `GET /api/agents?include=ephemeral` lists
-them too. They are not peers in the prompt of other agents. The events,
+them too. `GET /api/agents?include=card` lists only the card agents among
+them (TER-75): those bound to an open card, and those that are the
+assignee of a card that is not archived. `terrarium agent ls` asks with
+`include=card` by default, and with `include=ephemeral` for
+`--ephemeral`, also with `--all-projects`. They are not peers in the prompt of other agents. The events,
 the mail, the audit rows, and the session links of the logs show them as
 for any agent.
 
@@ -4158,6 +4162,9 @@ A card:
 ```
 
 - `assignee`, `assignee_name`, `repo`, `branch` are absent when not set.
+- `agent`, `agent_name`: the card agent (TER-75), the open ephemeral
+  agent bound to the card (§6.10). It stays while the card waits and
+  the assignee is cleared. Absent when none.
 - `eta_at` is when the work is expected to be done (RFC 3339, UTC,
   milliseconds). `eta_set_at` is when the ETA was set, and `eta_set_by` (an
   address) and `eta_set_by_name` say who set it. The four fields are absent
@@ -10750,6 +10757,7 @@ start with `Job queue:`.
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
 | `POST /api/merges`                 | a project admin                       | `{cards, repo?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
+| `GET /api/projects/{name}/jobs/stats` | members                            | `?since=`: an RFC 3339 time, or a duration back from now such as `7d` (the default); anything else is `400`. The jobs created at or after `since` (a rerun keeps the `created_at` of its first try): `{project, since, jobs, first_attempt, validate, merge, reruns, conflicts, errors, cancelled, open, splits, failed_steps: [{step, failed}], failed_targets: [{target, failed, first_attempt}], untargeted_test_fails}`. Each of `first_attempt`, `validate`, `merge`, and `reruns` is `{ended, passed, failed, pass_rate}`; `pass_rate` is `passed / ended` from 0 to 1, `null` with none ended. A first attempt is attempt 1 and no split half; a `conflict` counts in `conflicts`, not in `ended`. A job with outcome `error` could not run (host agent offline, prepare step failed, push to `next` failed): first attempts and reruns with it count in `errors`, not in `ended`, so an outage does not lower the rate. Split halves count in `splits` only. `failed_targets` (most first) come from the `error: N targets failed:` lines of the failed jobs' output tails, all attempts; `failed_steps` from the first ``error: recipe `<step>` failed`` line, or `timeout`. `untargeted_test_fails` counts the failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
 | `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels. A batch merge: the creator or a project admin only, as it holds the cards of several workers; every card of the batch loses the job labels |
 

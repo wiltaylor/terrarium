@@ -2459,8 +2459,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     },
 
     agents: {
-      // The ephemeral agents only with `?include=ephemeral` (docs/api.md §6.10).
-      list: (proj, o = {}) => reply(() => w.agents.filter((a) => (!proj || a.project === proj) && (o.ephemeral || !a.ephemeral)).sort((a, b) => a.id.localeCompare(b.id)).map(withSkills)),
+      // The ephemeral agents only with `?include=ephemeral` (docs/api.md §6.10), the card agents among them with `?include=card` (TER-75).
+      list: (proj, o = {}) => reply(() => w.agents.filter((a) => (!proj || a.project === proj) && (o.ephemeral || !a.ephemeral || (o.card && !!a.current_card))).sort((a, b) => a.id.localeCompare(b.id)).map(withSkills)),
       get: (id) =>
         reply(() => {
           const a = withSkills(agent(id));
