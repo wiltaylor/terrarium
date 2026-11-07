@@ -170,8 +170,10 @@ pub struct Card {
     pub created_at: String,
     pub updated_at: String,
     pub archived: bool,
-    /// When the work is expected to be done (RFC 3339, UTC). It stays
-    /// when the card moves to `done` or is archived.
+    /// When the work is expected to be done (RFC 3339, UTC). Every move
+    /// to another column clears it (TER-155 D1). A job with a planned
+    /// duration sets it when the job starts (D2). It stays when the card
+    /// is archived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta_at: Option<String>,
     /// When the ETA was set.
@@ -1336,11 +1338,16 @@ fn apply_move(
         params![to.id, at, card.id],
     )?;
     // `done_at` is when the card moved to `done`; another column clears it.
-    // A move to another column ends the idle mark (TER-67).
+    // A move to another column ends the idle mark (TER-67) and clears the
+    // ETA (TER-155 D1): an ETA is for the work of one column. The `moved`
+    // event keeps the old ETA.
     t.execute(
         "UPDATE cards SET column_id = ?2, position = ?3, updated_at = ?4,
             done_at = CASE WHEN ?5 THEN done_at WHEN ?6 THEN ?4 ELSE NULL END,
-            idle_since = CASE WHEN ?5 THEN idle_since ELSE NULL END
+            idle_since = CASE WHEN ?5 THEN idle_since ELSE NULL END,
+            eta_at = CASE WHEN ?5 THEN eta_at ELSE NULL END,
+            eta_set_at = CASE WHEN ?5 THEN eta_set_at ELSE NULL END,
+            eta_set_by = CASE WHEN ?5 THEN eta_set_by ELSE NULL END
          WHERE id = ?1",
         params![card.id, to.id, at, now(), same, to.name == DONE],
     )?;
@@ -1358,7 +1365,8 @@ fn apply_move(
         &moved,
         "moved",
         json!({"from": card.column, "to": to.name, "from_role": card.column_role,
-               "to_role": to.role, "comment": comment, "assignee": moved.assignee}),
+               "to_role": to.role, "comment": comment, "assignee": moved.assignee,
+               "previous_eta_at": card.eta_at}),
     )?;
     if card.column == DONE {
         t.audit(
@@ -1967,10 +1975,47 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
         assign_card(t, actor, &card.id, who.as_deref())?;
     }
     // Last, so that an assignment in the same patch gives the right to it.
+    // A duration for a card with an open job is the job's planned
+    // duration (TER-155 D2): the ETA starts when the job runs.
     if let Some(eta) = &p.eta_at {
-        set_eta(t, actor, &card.id, eta.as_deref())?;
+        let planned = eta
+            .as_deref()
+            .filter(|v| chrono::DateTime::parse_from_rfc3339(v.trim()).is_err())
+            .and_then(|v| terrarium_core::eta::parse_duration(v).ok());
+        match (planned, crate::store::jobs::open_of_card(t, &card.id)?) {
+            (Some(d), Some(job)) => plan_job(t, actor, &card.id, &job, d.num_seconds())?,
+            _ => {
+                set_eta(t, actor, &card.id, eta.as_deref())?;
+            }
+        }
     }
     get_card(t, &card.id)
+}
+
+/// An ETA duration for a card with an open job: the job's planned
+/// duration (TER-155 D2). The rights are those of [`set_eta`].
+fn plan_job(
+    t: &mut Tx<'_>,
+    actor: &Actor,
+    id: &str,
+    job: &crate::store::jobs::Job,
+    secs: i64,
+) -> ApiResult<()> {
+    let card = find_row(t, id)?;
+    policy::write_project(actor, &card.project)?;
+    not_archived(&card)?;
+    may_edit(actor, &card)?;
+    let previous = job.planned_secs;
+    crate::store::jobs::set_planned(t, job, secs, &actor.label())?;
+    if !owns(actor, &card) {
+        t.audit(
+            "card.eta",
+            &card.id,
+            Some(&card.project),
+            json!({"job": job.id, "planned_secs": secs, "previous_planned_secs": previous}),
+        )?;
+    }
+    Ok(())
 }
 
 /// The GitHub author gate (TER-85) on an agent's edit: a held card stays
@@ -2008,7 +2053,7 @@ fn gate_edit(
 /// Set the ETA of a card, or clear it with `None` (PLAN §13). The value is
 /// an RFC 3339 time or a duration from now (`terrarium_core::eta`): in
 /// the future and at most 30 days away. The rights are those of an edit.
-/// A done card keeps its ETA and takes no new one; an admin can clear it.
+/// A done card takes no new ETA (the move to `done` cleared it).
 /// A change to the ETA of a card that is not the actor's is audited, as a
 /// reassignment is.
 pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> ApiResult<Card> {
@@ -2058,6 +2103,40 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
         json!({"eta_at": at, "previous": card.eta_at}),
     )?;
     get_card(t, &card.id)
+}
+
+/// Set or clear the ETA of a card for its job (TER-155 D2), as the
+/// daemon: `at` is the job start plus the planned duration, or `None`
+/// while the job waits in the queue. `by` is the actor label of the
+/// actor that queued the job; it becomes `eta_set_by`. A card that is
+/// gone, archived, or done is left alone. No write when nothing changes.
+pub fn set_job_eta(t: &mut Tx<'_>, id: &str, at: Option<&str>, by: &str) -> ApiResult<()> {
+    let card = match find_row(t, id) {
+        Ok(c) => c,
+        Err(e) if e.code == Code::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if card.archived || card.column == DONE || card.eta_at.as_deref() == at {
+        return Ok(());
+    }
+    let stamp = now();
+    let by = by.strip_prefix("agent:").unwrap_or(by);
+    let (set_at, set_by) = match at {
+        Some(_) => (Some(stamp.as_str()), Some(by)),
+        None => (None, None),
+    };
+    t.execute(
+        "UPDATE cards SET eta_at = ?2, eta_set_at = ?3, eta_set_by = ?4, updated_at = ?5
+         WHERE id = ?1",
+        params![card.id, at, set_at, set_by, stamp],
+    )?;
+    let row = find_row(t, &card.id)?;
+    card_event(
+        t,
+        &row,
+        "eta",
+        json!({"eta_at": at, "previous": card.eta_at, "job": true}),
+    )
 }
 
 /// Archive a card. It leaves the board; its history stays.

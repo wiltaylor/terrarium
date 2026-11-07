@@ -768,6 +768,7 @@ async fn job_and_card_conditions_read_the_current_state() {
                     card,
                     kind: JobKind::Validate,
                     batch: Vec::new(),
+                    planned_secs: None,
                     repo: "app".into(),
                     branch: "next".into(),
                     commit: None,

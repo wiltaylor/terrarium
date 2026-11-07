@@ -2428,7 +2428,17 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE agent_templates ADD COLUMN grants_by TEXT;
     "#,
-    // 88: the slot of a running job (TER-190, `crate::jobs`). `jobs.slot`
+    // 88: the planned duration of a job (TER-156, TER-155 D2).
+    // `jobs.planned_secs` is the duration that the agent gave when it
+    // queued the job (`--eta`); NULL: none. When the job starts, its
+    // cards get `eta_at` = start + planned duration. A rerun and a split
+    // keep it.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE jobs ADD COLUMN planned_secs INTEGER;
+    "#,
+    // 89: the slot of a running job (TER-190, `crate::jobs`). `jobs.slot`
     // is `1` to the project's `slots` for a validate job and `0` for a
     // merge; NULL for a queued job and for a job started before this
     // migration. Each slot has one persistent work tree on the target.

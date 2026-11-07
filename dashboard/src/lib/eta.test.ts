@@ -69,7 +69,8 @@ describe("countdown", () => {
     expect(countdown(card({ eta_at: at(30) }), NOW)!.progress).toBeNull();
   });
 
-  it("stops on done and archived cards, and without an ETA", () => {
+  it("stops on accepted, done, and archived cards, and without an ETA", () => {
+    expect(countdown(card({ eta_at: at(30), column: "accepted" }), NOW)).toBeNull();
     expect(countdown(card({ eta_at: at(30), column: "done" }), NOW)).toBeNull();
     expect(countdown(card({ eta_at: at(30), archived: true }), NOW)).toBeNull();
     expect(countdown(card(), NOW)).toBeNull();

@@ -6,7 +6,7 @@
 use serde_json::{Value, json};
 
 use super::{print_object, print_table};
-use crate::api::query;
+use crate::api::{CliError, query};
 use crate::cli::{DeliveryCmd, DeliverySetArgs, JobCmd};
 use crate::commands::projects::project_path;
 use crate::ctx::Ctx;
@@ -305,13 +305,16 @@ pub async fn validate(
     repo: &Option<String>,
     branch: &Option<String>,
     comment: &Option<String>,
+    eta: &Option<String>,
 ) -> anyhow::Result<()> {
+    let eta = planned(eta)?;
     let mut body = json!({});
     for (k, v) in [
         ("commit", commit),
         ("repo", repo),
         ("branch", branch),
         ("comment", comment),
+        ("eta", &eta),
     ] {
         if let Some(v) = v {
             body[k] = json!(v);
@@ -330,9 +333,11 @@ pub async fn merge(
     card_path: &str,
     repo: &Option<String>,
     branch: &Option<String>,
+    eta: &Option<String>,
 ) -> anyhow::Result<()> {
+    let eta = planned(eta)?;
     let mut body = json!({});
-    for (k, v) in [("repo", repo), ("branch", branch)] {
+    for (k, v) in [("repo", repo), ("branch", branch), ("eta", &eta)] {
         if let Some(v) = v {
             body[k] = json!(v);
         }
@@ -350,7 +355,9 @@ pub async fn merge_batch(
     ids: &[String],
     repo: &Option<String>,
     branch: &Option<String>,
+    eta: &Option<String>,
 ) -> anyhow::Result<()> {
+    let eta = planned(eta)?;
     if branch.is_some() {
         anyhow::bail!(
             "--branch takes one card; a batch merges the branch of each card (set it with `card edit --branch`)"
@@ -359,6 +366,9 @@ pub async fn merge_batch(
     let mut body = json!({"cards": ids});
     if let Some(r) = repo {
         body["repo"] = json!(r);
+    }
+    if let Some(e) = eta {
+        body["eta"] = json!(e);
     }
     let v = ctx.api.post("/api/merges", Some(body)).await?;
     ctx.emit(&v, |c, v| {
@@ -376,6 +386,27 @@ pub async fn merge_batch(
         ));
         c.line("The daemon moves each card on the result: merged cards to accepted, a failing card to the top of ready.");
     })
+}
+
+/// Check the planned duration of a job here, for a usage error before the
+/// call (TER-155 D2): a duration such as `2h`, not a time, at most the ETA
+/// limit. The daemon checks it again.
+fn planned(eta: &Option<String>) -> anyhow::Result<Option<String>> {
+    let Some(v) = eta else {
+        return Ok(None);
+    };
+    let d = terrarium_core::eta::parse_duration(v).map_err(|e| {
+        CliError::usage(format!(
+            "--eta: {e}; a job takes a duration from its start, not a time"
+        ))
+    })?;
+    if d > chrono::Duration::days(terrarium_core::eta::MAX_DAYS) {
+        return Err(CliError::usage(format!(
+            "--eta `{v}`: at most {} days",
+            terrarium_core::eta::MAX_DAYS
+        )));
+    }
+    Ok(Some(v.trim().to_owned()))
 }
 
 fn queued_line(c: &Ctx, v: &Value) {
