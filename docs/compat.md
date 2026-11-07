@@ -97,7 +97,7 @@ subscription (OAuth). Docker 29.8.0. Model for all turns: `haiku`.
 | System prompt on resume | **The first prompt is frozen.** `--resume` with a new `--append-system-prompt` still sends the old prompt. Add `--system-prompt-snapshot off` to send the new one. | verified | 4 |
 | User `CLAUDE.md` | `$CLAUDE_CONFIG_DIR/CLAUDE.md` loads by default. `--setting-sources ""` stops it. | verified | 4 |
 | Prompt ready | About 1.9 to 2.7 s after spawn. Use the screen detector below. | verified | 1, 5 |
-| Submit a turn | Bracketed paste, then CR. CR can follow the paste end at once. Newlines in the paste stay in the prompt. | verified | 5 |
+| Submit a turn | Bracketed paste, then CR. Newlines in the paste stay in the prompt. A CR right after a short paste submitted, but a CR in the same write as a long paste is lost: the paste stays in the box as `[Pasted text #N +L lines]` (TER-194). The adapter writes the CR on its own 0.3 s after the paste (`turn_submit_pause`), and the runner presses CR again when the box still holds text 1 s later. | verified | 5 |
 | Large paste | 80 lines (5807 chars) show as `[Pasted text #1 +80 lines]` in the box. The hook `prompt` has the full text. | verified | 5 |
 | Bare LF | LF (`\n`) outside a paste adds a new line. It does not submit. | verified | 5 |
 | Type while busy | The text is queued ("Press up to edit queued messages"). `UserPromptSubmit` fires at once (0.27 s). The queued text joins the running turn. Only **one** `Stop` fires for both prompts. | verified | 5 |
@@ -612,7 +612,7 @@ copies only `~/.codex/auth.json` into a temp `CODEX_HOME`.
 | `AGENTS.md` | Loaded from the workspace as a `user` message. Works beside `developer_instructions`. | verified | 4 |
 | Prompt on resume | **Frozen.** `codex resume` with a changed `developer_instructions` sent the old text. The new text is not in the session file. | verified | 4 |
 | Adapter default (2026-10-26) | An agent with no `system_prompt` gets `developer_instructions` (append; the Codex base prompt stays). An agent with a `system_prompt` gets `model_instructions_file` (replace). Before this date the adapter always replaced. An agent made before keeps its frozen session until the prompt hash changes. Replace verified live 2026-10-27 (gpt-5.6-luna: the reply followed the system prompt and named the Terrarium mail command). | verified | 4 |
-| Submit a turn | Bracketed paste, then CR at once. Newlines stay in the prompt. | verified | 5 |
+| Submit a turn | Bracketed paste, then CR. Newlines stay in the prompt. A CR right after a short paste submitted. No spike sent a long paste, and Codex keeps `/exit` in the composer when its CR comes in the same write ("Clean exit"). Since TER-208 the adapter writes the CR on its own 0.3 s after the paste (`turn_submit_pause`), as for Claude Code, and the runner presses CR again when the composer still holds text 1 s later. | verified (short paste) | 5 |
 | Bare LF | Adds a new line. It does not submit. | verified | 5 |
 | Type while busy | The text **steers** the running turn: the same `turn_id`, one `Stop` for both prompts. `UserPromptSubmit` for the second prompt came 4.5 s after its CR, at the next model request. | verified | 5 |
 | Auth status | `codex login status`: stderr `Logged in using ChatGPT`, exit 0. No login: `Not logged in`, exit 1. **stdout is empty in both cases.** A reader of stdout alone sees no login. Seen again in the container (codex-cli 0.160.0, 2026-10-25) after `codex login --device-auth`, the same with and without `CODEX_HOME` set (fixture `crates/adapters/codex/tests/fixtures/auth/login-status.json`). | verified | 7 |
@@ -868,7 +868,7 @@ is in the system keychain, so no file is copied.
 | `SYSTEM.md` | Replaces the whole prompt (111 chars, no default text). Sentinel answered. | verified | 4 |
 | Prompt on resume | The extension reads the files at each start. `--resume` with a changed `SYSTEM.md` used the new text (a second `system.message` record). | verified | 4 |
 | Both files, empty files | Read from the installed package 0.1.2 (`dist/prompts.js`, 2026-10-26); the replace path verified live 2026-10-27 (claude-haiku-4.5 followed `SYSTEM.md` and named the Terrarium mail command): a file that is missing or only white space counts as absent. With a non-empty `SYSTEM.md` the mode is `replace`; a non-empty `APPEND_SYSTEM.md` then goes after it, joined by a blank line. With only `APPEND_SYSTEM.md` the mode is `append`. With neither, the extension does not load. The adapter writes exactly one of the two files with text (the other is empty), so the mode follows the agent's `system_prompt` (PLAN §8). | verified | 4 |
-| Submit a turn | Bracketed paste, then CR at once. Newlines stay. The screen showed the paste only after more than 0.2 s. | verified | 5 |
+| Submit a turn | Bracketed paste, then CR. Newlines stay. The screen showed the paste only after more than 0.2 s. A CR right after a short paste submitted. No spike sent a long paste. Since TER-208 the adapter writes the CR on its own 0.3 s after the paste (`turn_submit_pause`), as for Claude Code, and the runner presses CR again when the box still holds text 1 s later. | verified (short paste) | 5 |
 | Bare LF | Adds a new line. It does not submit. | verified | 5 |
 | Type while busy | Enter **steers**: the text joins the running work, and **no** `UserPromptSubmit` fires for it. The footer offers "ctrl+q enqueue" for a queued message. | verified | 5 |
 | Answer a question | `ask_user` shows a list: "↑/↓ select · enter accept · ctrl+d decline · esc cancel". Down (`ESC [B`) then CR picked option 2. | verified | 5 |
@@ -1093,7 +1093,7 @@ token (see "Auth"). Spikes are in `spikes/pi/`. Each spike uses a temp
 | `--system-prompt` | Replaces the whole default prompt. pi adds only "Current working directory: …". | verified | 4 |
 | `--append-system-prompt` | Appends. The file form (a path) works. | verified | 4 |
 | Prompt on resume | Not frozen. The prompt is built at each start, so a changed `--append-system-prompt` applied on the next start with the same `--session-id`. | verified | 4 |
-| Submit a turn | Bracketed paste, then CR at once. Newlines stay. | verified | 5 |
+| Submit a turn | Bracketed paste, then CR. Newlines stay. A CR right after a short paste submitted. No spike sent a long paste. Since TER-208 the adapter writes the CR on its own 0.3 s after the paste (`turn_submit_pause`), as for Claude Code, and the runner presses CR again when the editor still holds text 1 s later. | verified (short paste) | 5 |
 | Bare LF | Adds a new line. It does not submit. | verified | 5 |
 | Type while busy | Enter steers. `input` fires at once with `streaming_behavior` = `steer`. One `agent_settled` for both. | verified | 5 |
 | Auth status | `pi auth check --provider <p> --json --no-refresh`: `{"status":"ready","provider":"…","authType":"oauth" or "api_key"}` exit 0, or `{"status":"not_ready",…,"reason":"credentials_not_configured"}` exit 1. Without `--json`: `ready`. | verified | 7 |
@@ -1346,7 +1346,8 @@ starts with `[`, so the escape applies only to an untagged turn.
 the daemon types starts with a tag line (`[User]`, `[Agent:...]`,
 `[Mailbox:...]`, `[System:...]`). A mail turn is a bracketed paste of several lines, with
 body lines that start with `> `. The tests check the bytes that each
-adapter types (`type_turn`: one bracketed paste, then CR) and that each
+adapter types (`type_turn`: one bracketed paste, then CR; the runner
+writes the CR on its own after `turn_submit_pause`) and that each
 parser reads a tagged turn from its fixture (`crates/terrariumd/tests/turn_tags.rs`).
 No live run checked these points yet:
 
