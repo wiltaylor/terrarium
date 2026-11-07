@@ -10949,11 +10949,32 @@ its processes are gone, and no two jobs use one tree at once. The job
 row has `slot` while it runs. The step checks out the commit with
 `git checkout -f` and removes every file that the commit does not track,
 ignored ones too, except `target/` at the root (`git clean -ffdx -e
-/target`). It resets `.git/config` and removes `.git/info` and
-`.git/hooks` first, and prunes old commits with `git gc --auto`. A dir
-that is no repo, or a tree that git cannot fetch into or check out, is
-made new once: all but `target/` is removed. No tree is removed after a
-job. A recipe that wants a clean build removes `target/` itself.
+/target`). It prunes old commits with `git gc --auto`. A dir that is no
+repo, a `.git` that is no plain dir or holds a symlink, or a tree that
+git cannot fetch into or check out, is made new once: all but `target/`
+is removed. No tree is removed after a job. A recipe that wants a clean
+build removes `target/` itself.
+
+The git state that a recipe leaves in the tree does not reach the next
+job's checkout (TER-190 review). Before the fetch the step resets
+`.git/config` and removes `.git/info` (with `grafts`), `.git/hooks`,
+`.git/commondir`, `.git/shallow`, the alternates, the commit-graph, the
+multi-pack-index and every `refs/replace/` ref, and git runs with
+`GIT_NO_REPLACE_OBJECTS=1`. After the checkout the step hashes the work
+tree again (a new index from the tree, `git add -A` but `target/`,
+`git write-tree`) and compares it with the tree of the commit in the
+daemon's repo, as it does `HEAD^{tree}`. On a miss all of the slot is
+removed, `target/` too, and the step runs once more in a new tree. A
+second miss fails the job (`error`, "refused: the checkout of ... is not
+its tree") and removes the slot.
+
+A lost job (one that ran when the daemon stopped) whose kill does not confirm that its
+processes ended (the kill failed or left processes, the target has no
+job PID files, the job ran on another host, or the delivery target is
+gone) marks its slot before the slot is free. The next job of that slot
+removes all of the tree first, `target/` too, and then clears the mark.
+The step moves the old tree aside before it removes it, so processes
+that still run there write into the old tree, not into the new one.
 
 The recipe can change its clone: make commits, move HEAD, delete refs, or
 write `.git/config` (for example `url.<base>.insteadOf`). None of that

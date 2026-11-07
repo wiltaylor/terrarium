@@ -2947,6 +2947,76 @@ async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot() {
     let _ = lr.wait();
 }
 
+/// TER-190 review, finding 2: a lost running job ran on another host than
+/// the delivery target's now, so its kill cannot confirm that its
+/// processes ended. Its slot is marked, and the next job of the slot (the
+/// requeued job itself) gets a new tree: the old tree goes, `target/`
+/// too. The mark then goes, and the job after it keeps `target/` again.
+#[tokio::test]
+async fn a_lost_job_without_a_confirmed_kill_gets_its_slot_wiped() {
+    use terrariumd::store::jobs;
+    let lab = lab(1).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let wd = lab._dirs.path().join("jobs");
+    let slot = wd.join("p/slot-1");
+    std::fs::create_dir_all(slot.join("target")).unwrap();
+    std::fs::write(slot.join("target/stale"), "of the lost job").unwrap();
+    lab.branch("ter-w1", "next", &[("OK", "1")]);
+    let card = lab.card("lost-run", "ter-w1").await;
+    let run_id = ulid::Ulid::new().to_string();
+    let at = (chrono::Utc::now() - chrono::Duration::minutes(5))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (rid, rcard) = (run_id.clone(), card.clone());
+    state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt,
+                                   created_by, created_at, started_at, host, slot)
+                 VALUES (?1, 'p', ?2, 'validate', 'app', 'ter-w1', 'running', 1, 't', ?3, ?3,
+                         'elsewhere', 1)",
+                rusqlite::params![rid, rcard, at],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let recovery = terrariumd::jobs::recover_lost(&state).await;
+    tokio::time::timeout(DEADLINE, recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    let jobs = lab.until_idle().await;
+    let j = jobs.iter().find(|j| j["id"] == run_id.as_str()).unwrap();
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(j["slot"], 1, "{j:#}");
+    assert!(!slot.join("target/stale").exists(), "the slot was not wiped");
+    let pending = state
+        .db
+        .read(|c| jobs::slot_wipe_pending(c, "p", 1))
+        .await
+        .unwrap();
+    assert!(!pending, "the wipe mark is left");
+
+    // The next job of the slot reuses its tree as before.
+    std::fs::create_dir_all(slot.join("target")).unwrap();
+    std::fs::write(slot.join("target/kept"), "built").unwrap();
+    let head = lab.branch("ter-w2", "next", &[("OK", "2")]);
+    let id = lab.card("next", "ter-w2").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    assert!(jobs.iter().all(|j| j["state"] == "passed"), "{jobs:#?}");
+    assert!(slot.join("target/kept").exists(), "a second wipe ran");
+}
+
 /// Set the delivery of `p`: `target`, one slot, a recipe that sleeps on
 /// a branch with `SLOW`.
 async fn deliver_to(lab: &Lab, target: &str) {

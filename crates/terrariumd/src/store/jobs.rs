@@ -1493,6 +1493,38 @@ fn requeue_with(t: &mut Tx<'_>, id: &str, tail: &str) -> ApiResult<Option<Job>> 
     Ok(Some(job))
 }
 
+/// Mark slot `slot` of `project` for a wipe (TER-190 review, finding 2):
+/// the kill of lost job `job` did not confirm that its processes ended, so
+/// they may still write into the slot's tree. The next job of the slot
+/// makes all of its tree new, `target/` too ([`crate::jobs`]).
+pub fn mark_slot_wipe(t: &mut Tx<'_>, project: &str, slot: i64, job: &str) -> ApiResult<()> {
+    t.execute(
+        "INSERT INTO job_slot_wipes (project, slot, job, marked_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (project, slot) DO UPDATE SET job = ?3, marked_at = ?4",
+        params![project, slot, job, now()],
+    )?;
+    Ok(())
+}
+
+/// Is slot `slot` of `project` marked for a wipe ([`mark_slot_wipe`])?
+pub fn slot_wipe_pending(conn: &Connection, project: &str, slot: i64) -> ApiResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM job_slot_wipes WHERE project = ?1 AND slot = ?2",
+        params![project, slot],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// The slot's tree is new: its wipe mark goes.
+pub fn clear_slot_wipe(t: &mut Tx<'_>, project: &str, slot: i64) -> ApiResult<()> {
+    t.execute(
+        "DELETE FROM job_slot_wipes WHERE project = ?1 AND slot = ?2",
+        params![project, slot],
+    )?;
+    Ok(())
+}
+
 /// Cancel an open job.
 pub fn cancel(t: &mut Tx<'_>, id: &str) -> ApiResult<Job> {
     let job = get(t, id)?;
