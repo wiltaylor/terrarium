@@ -792,18 +792,12 @@ async fn a_queued_unpark_runs_at_once_when_the_owner_has_room() {
     .ok();
     // D comes back: it queues behind A, and the queue runs at once.
     mv(&td, &d, "ready", None).await;
-    let start = std::time::Instant::now();
-    loop {
-        let (ra, rd) = (spawn_row(&td, &ea).await, spawn_row(&td, &ed).await);
-        if ra["parked_at"].is_null() && rd["parked_at"].is_null() {
-            break;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "the queue did not run: {ra} {rd}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // Without the run after the queue, it waits for the next tick (1 h).
+    until("the queue runs: A and D unparked", || async {
+        spawn_row(&td, &ea).await["parked_at"].is_null()
+            && spawn_row(&td, &ed).await["parked_at"].is_null()
+    })
+    .await;
     td.wait_status(&ea, "idle").await;
     td.wait_status(&ed, "idle").await;
 }
