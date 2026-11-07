@@ -1228,7 +1228,6 @@ struct TimerRule {
     rule: String,
     from: String,
     limit: Option<usize>,
-    min_cards: i64,
     wait: i64,
 }
 
@@ -1241,7 +1240,7 @@ fn timer_rules(projects: &[ProjectRules]) -> Vec<TimerRule> {
                 if a.args.get("kind").and_then(Value::as_str) != Some("batch") {
                     continue;
                 }
-                let (Some(min_cards), Some(wait), Some(from)) = (
+                let (Some(_min_cards), Some(wait), Some(from)) = (
                     arg("min_cards"),
                     arg("max_wait_minutes"),
                     a.args.get("from").and_then(Value::as_str),
@@ -1253,7 +1252,6 @@ fn timer_rules(projects: &[ProjectRules]) -> Vec<TimerRule> {
                     rule: r.name.clone(),
                     from: from.to_owned(),
                     limit: arg("limit").and_then(|n| usize::try_from(n).ok()),
-                    min_cards,
                     wait,
                 });
             }
@@ -1263,10 +1261,12 @@ fn timer_rules(projects: &[ProjectRules]) -> Vec<TimerRule> {
 }
 
 /// Write a `rule.timer` event ([`TIMER_KIND`]) for each batch rule of
-/// `projects` whose wait ended: cards wait in its `from` column, fewer
-/// than `min_cards`, and the first one came `max_wait_minutes` before
-/// `now` or earlier. The event plans a run of that rule only (no card),
-/// and the verb checks the time again. `fired` holds the due time of
+/// `projects` whose wait ended: cards wait in its `from` column, and the
+/// first one came `max_wait_minutes` before `now` or earlier. That holds
+/// also when `min_cards` or more wait: no card move ran the batch then
+/// (a hold released in place), or its run failed (TER-227). The event
+/// plans a run of that rule only (no card), and the verb checks the time
+/// again. `fired` holds the due time of
 /// each timer written, so one wait writes one event (a restart may write
 /// it once more; the verb is then a no-op or queues the batch, as it
 /// should). Returns the events written.
@@ -1304,8 +1304,7 @@ pub async fn fire_timers(
         else {
             continue;
         };
-        if due > now || usize::try_from(t.min_cards).is_ok_and(|m| pick.waiting >= m) {
-            // Not yet; or enough cards wait, and their move ran the rule.
+        if due > now {
             continue;
         }
         let due = schedules::stamp(due);
