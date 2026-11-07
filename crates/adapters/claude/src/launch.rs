@@ -465,7 +465,9 @@ mod tests {
         for user in [
             None,
             Some(json!({"attribution": true, "includeCoAuthoredBy": true})),
-            Some(json!({"attribution": {"commit": "Co-Authored-By: X <x@y>", "pr": "by X", "sessionUrl": false}})),
+            Some(
+                json!({"attribution": {"commit": "Co-Authored-By: X <x@y>", "pr": "by X", "sessionUrl": false}}),
+            ),
         ] {
             let s = settings(user.clone());
             assert_eq!(s["attribution"]["commit"], "", "{user:?}");
