@@ -439,7 +439,7 @@ async fn only_a_thread_that_tracks_wakes_on_its_cards() {
     lab.track(&e2, &t2).await;
     lab.parked(&e2).await;
     let r = lab.td.delete(&format!("/api/cards/{a}")).await;
-    assert!(r.status < 300, "{} {}", r.status, r.body);
+    assert!(r.status.is_success(), "{} {}", r.status, r.body);
     lab.mv(&b, "review", None).await;
     assert_eq!(lab.wakes(&t2).await, ["review"]);
     let turn = lab

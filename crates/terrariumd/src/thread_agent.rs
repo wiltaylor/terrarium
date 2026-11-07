@@ -212,6 +212,21 @@ pub fn message_turn(thread: &str, kind: &str, text: &str, again: bool) -> String
     }
 }
 
+/// The most characters of a card comment in a wake turn.
+const MAX_COMMENT: usize = 600;
+
+/// `text` cut to at most `max` characters, with its line breaks, and `…`
+/// when it was cut.
+fn clipped(text: &str, max: usize) -> String {
+    let t = text.trim();
+    if t.chars().count() <= max {
+        return t.to_owned();
+    }
+    let mut out: String = t.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
 /// The turn of a wake by the linked cards (TER-148, TER-144 D4, D5):
 /// `reason` ([`threads::WAKE_BLOCKED`] or [`threads::WAKE_REVIEW`]), and
 /// the linked cards as they are now. Only the cards whose project the
@@ -252,7 +267,7 @@ pub fn cards_turn(
         if let (true, Some(m)) = (blocked && !c.archived, &c.last_comment) {
             text.push_str(&format!(
                 "\n  Its last comment, quoted:\n{}",
-                quoted(&crate::store::questions::short(m, 600))
+                quoted(&clipped(m, MAX_COMMENT))
             ));
         }
     }
