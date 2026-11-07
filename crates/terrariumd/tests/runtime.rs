@@ -56,6 +56,9 @@ struct FakeAdapter {
     exit_keys: Mutex<Vec<u8>>,
     /// `exit_key_pause`: the pause before the CR of the exit keys.
     exit_pause: Mutex<Duration>,
+    /// `waits_for_startup_hook`, as pi says: the agent stays `starting`
+    /// until the `SessionStart` hook.
+    startup_hook: std::sync::atomic::AtomicBool,
 }
 
 impl FakeAdapter {
@@ -97,6 +100,12 @@ impl Adapter for FakeAdapter {
     }
     fn exit_key_pause(&self) -> Duration {
         *self.exit_pause.lock().unwrap()
+    }
+    fn waits_for_startup_hook(&self) -> bool {
+        self.startup_hook.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn is_startup_hook(&self, hook: &HookPayload) -> bool {
+        hook.hook == "SessionStart"
     }
     fn hook_event(&self, hook: &HookPayload) -> Vec<Event> {
         match hook.hook.as_str() {
@@ -3064,9 +3073,15 @@ async fn a_wake_keeps_the_session_id_that_a_reader_has() {
     td.wait_status(&id, "stopped").await;
 
     // The harness holds its SessionStart hook until the gate file exists.
+    // As with pi, the startup ends at that hook: the queued turn waits for
+    // it. A turn typed before the gate is dropped, and its retries can run
+    // out while the reads below take long on a loaded machine.
     let gate = td.dir.path().join("startup-gate");
     td.adapter
         .set_env("FAKE_TUI_STARTUP_GATE", &gate.display().to_string());
+    td.adapter
+        .startup_hook
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let r = td
         .post(
             &format!("/api/agents/{id}/send"),
