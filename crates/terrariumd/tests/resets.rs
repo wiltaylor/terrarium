@@ -570,7 +570,11 @@ async fn an_unsupported_compaction_is_refused_before_the_write() {
 #[tokio::test]
 async fn a_queued_compaction_that_cannot_run_is_dropped_with_a_trace() {
     let (td, lead, w) = setup().await;
-    tune(&td, Duration::from_millis(400));
+    // A time limit longer than the test: a short one could end the silent
+    // compaction before the second request (it took over 400 ms on a
+    // loaded machine), and that request then starts instead of queuing.
+    // The test ends the compaction itself, as its time limit does.
+    tune(&td, Duration::from_secs(600));
     start_with_a_turn(&td, &w).await;
     td.sup.set_compact(aid(&w), FakeCompact::Silent);
     let path = format!("/api/agents/{w}/compact");
@@ -581,6 +585,7 @@ async fn a_queued_compaction_that_cannot_run_is_dropped_with_a_trace() {
     assert_eq!(r.body["reset"]["state"], "queued", "{}", r.body);
     // When the silent compaction ends, the harness cannot compact any more.
     td.sup.refuse_compact(HarnessId::Claude);
+    assert!(td.sup.time_out_compaction(aid(&w)));
     let dropped = || async {
         events(&td, &w, "agent.reset")
             .await
