@@ -19,8 +19,9 @@
 //!   rest (never in a turn), with the status reason `parked`. Open waits,
 //!   leases, and grants stay. A parked agent holds no place in the
 //!   owner's `spawn.max_concurrent` once it is stopped; until then its
-//!   harness runs and it holds its place (TER-111). Its stop runs the
-//!   owner's queued unparks ([`on_stopped`]).
+//!   harness runs and it holds its place (TER-111), so its own unpark
+//!   needs no free place. Its stop runs the owner's queued unparks
+//!   ([`on_stopped`]).
 //! - **Unpark** ([`unpark`]): the object came back. The daemon queues the
 //!   turn that says why. When the owner has a place in its
 //!   `spawn.max_concurrent`, the park ends and the agent wakes: a start
@@ -55,8 +56,9 @@
 //! An event that the driver misses (a lag of the event hub, or a daemon
 //! that was down) is repaired by [`reconcile`] at the driver's start and
 //! after each lag: a parked agent whose card is out of the wait columns
-//! unparks, and a running agent whose card is in one parks (TER-111). A
-//! missed end is the spawn timer's ([`finished_object`]).
+//! unparks, and a running agent whose card moved into one after the
+//! spawn parks (TER-111). A missed end is the spawn timer's
+//! ([`finished_object`]).
 //!
 //! The unpark turn is `[System:card <id>]` with the move, then the move
 //! comment and the top of the card body (where the job queue and the
@@ -197,7 +199,8 @@ fn other_worker(conn: &rusqlite::Connection, sp: &spawns::Spawn) -> ApiResult<Op
 }
 
 /// Refuse the unpark of the parked `sp` whose object has the worker
-/// `other`: drop its queued unpark, write `agent.unpark_refused`.
+/// `other`: drop its queued unpark and the return turns that wait for it
+/// (a queued unpark queued its turn already), write `agent.unpark_refused`.
 fn refuse(
     t: &mut crate::db::Tx<'_>,
     sp: &spawns::Spawn,
@@ -205,6 +208,14 @@ fn refuse(
     cause: &str,
 ) -> ApiResult<()> {
     spawns::unqueue_unpark(t, &sp.id)?;
+    if let Some(card_id) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:")) {
+        let prefix = return_prefix(card_id);
+        for q in crate::store::agents::queued_turns(t, &sp.id)? {
+            if q.text.starts_with(&prefix) {
+                crate::store::agents::remove_queued_turn(t, &sp.id, q.id)?;
+            }
+        }
+    }
     let who = crate::store::agents::display_name(t, other)?.unwrap_or_else(|| other.to_owned());
     t.emit(
         EventDraft::new(
@@ -300,10 +311,15 @@ pub async fn unpark(
                 };
                 return Ok((r, sp.owner));
             }
+            // A parked agent whose harness still runs holds its place:
+            // its unpark takes no new place, so it needs no room and
+            // waits behind no one (review round 2).
             let ahead = spawns::queued_unparks(t, &sp.owner)?
                 .iter()
                 .any(|other| *other != sp.id);
-            if ahead || !owner_has_room(t, &sp.owner)? {
+            if !spawns::holds_place(t, &sp.id)?
+                && (ahead || !owner_has_room(t, &sp.owner)?)
+            {
                 if spawns::queue_unpark(t, &sp.id)? {
                     t.emit(
                         EventDraft::new(
@@ -362,8 +378,10 @@ pub async fn retry_owner(state: &Shared, owner: &str) {
                     refuse(t, &sp, &other, "place freed")?;
                     continue;
                 }
-                if !owner_has_room(t, &key)? {
-                    break;
+                // One that still holds its place needs no room. The room
+                // only shrinks in this loop, so a skip keeps the order.
+                if !spawns::holds_place(t, &id)? && !owner_has_room(t, &key)? {
+                    continue;
                 }
                 if end_park(t, &sp, "place freed")? {
                     woken.push(id);
@@ -526,6 +544,11 @@ fn return_turn(card: &board::Card, ev: &StoredEvent) -> String {
     )
 }
 
+/// The start of each return turn of the card `card_id` ([`return_text`]).
+fn return_prefix(card_id: &str) -> String {
+    format!("[System:card {card_id}] Your card {card_id} came back:")
+}
+
 /// The unpark turn: the card came back (`how`: `moved review -> ready`),
 /// with the move `comment`, if any, and the top of the card body.
 fn return_text(card: &board::Card, how: &str, comment: Option<&str>, working: bool) -> String {
@@ -615,17 +638,26 @@ async fn handle(state: &Shared, ev: StoredEvent) {
 }
 
 /// What [`reconcile`] does to a card-bound agent whose card is in
-/// `column`, with the agent `parked` or not and an unpark `queued` or not
-/// (TER-111). A parked agent outside the wait columns unparks, a running
-/// agent in a wait column parks. A queued unpark runs from the queue, and
-/// a finished card is the spawn timer's ([`finished_object`]).
-pub fn reconcile_action(column: &str, parked: bool, queued: bool) -> Option<Action> {
+/// `column`, with the agent `parked` or not, an unpark `queued` or not,
+/// and the card `moved_since` the spawn or not (TER-111). A parked agent
+/// outside the wait columns unparks. A running agent in a wait column
+/// parks only when the card moved after the spawn: as the event rule
+/// ([`on_move`]), it parks on a move into a wait column, not an agent
+/// bound to a card that waited already (a reviewer, review round 2). A
+/// queued unpark runs from the queue, and a finished card is the spawn
+/// timer's ([`finished_object`]).
+pub fn reconcile_action(
+    column: &str,
+    parked: bool,
+    queued: bool,
+    moved_since: bool,
+) -> Option<Action> {
     if column == board::DONE {
         return None;
     }
     let waits = WAIT_COLUMNS.contains(&column);
     match (parked, waits) {
-        (false, true) => Some(Action::Park(format!("card in {column}"))),
+        (false, true) if moved_since => Some(Action::Park(format!("card in {column}"))),
         (true, false) if !queued => Some(Action::Unpark),
         _ => None,
     }
@@ -648,7 +680,12 @@ pub async fn reconcile(state: &Shared) -> usize {
                     continue;
                 };
                 match board::get_card(c, card_id) {
-                    Ok(card) if !card.archived => out.push((sp, card)),
+                    Ok(card) if !card.archived => {
+                        // RFC 3339 UTC with milliseconds on both sides.
+                        let moved_since = board::last_moved_at(c, card_id)?
+                            .is_some_and(|at| at > sp.spawned_at);
+                        out.push((sp, card, moved_since));
+                    }
                     Ok(_) => {}
                     Err(e) if e.code.status().is_client_error() => {}
                     Err(e) => return Err(e),
@@ -665,11 +702,12 @@ pub async fn reconcile(state: &Shared) -> usize {
         }
     };
     let mut n = 0;
-    for (sp, card) in rows {
+    for (sp, card, moved_since) in rows {
         let action = reconcile_action(
             &card.column,
             sp.parked_at.is_some(),
             sp.unpark_queued_at.is_some(),
+            moved_since,
         );
         let r = match action {
             Some(Action::Park(reason)) => {
@@ -796,21 +834,29 @@ mod tests {
 
     #[test]
     fn reconcile_repairs_a_missed_park_or_unpark() {
-        // A missed park: running while the card waits.
+        // A missed park: running while the card moved into a wait column.
         for col in WAIT_COLUMNS {
-            assert_eq!(reconcile_action(col, false, false), park(col));
-            assert_eq!(reconcile_action(col, true, false), None);
+            assert_eq!(reconcile_action(col, false, false, true), park(col));
+            assert_eq!(reconcile_action(col, true, false, true), None);
+            // Bound to a card that waited already (no move since the
+            // spawn): the event rule would not park it, nor does this.
+            assert_eq!(reconcile_action(col, false, false, false), None);
         }
         // A missed unpark: parked while the card is back.
         for col in ["backlog", "ready", "in_progress", "blocked"] {
-            assert_eq!(reconcile_action(col, true, false), Some(Action::Unpark));
-            assert_eq!(reconcile_action(col, false, false), None);
-            // A queued unpark runs from the queue, not again.
-            assert_eq!(reconcile_action(col, true, true), None);
+            for moved in [true, false] {
+                assert_eq!(
+                    reconcile_action(col, true, false, moved),
+                    Some(Action::Unpark)
+                );
+                assert_eq!(reconcile_action(col, false, false, moved), None);
+                // A queued unpark runs from the queue, not again.
+                assert_eq!(reconcile_action(col, true, true, moved), None);
+            }
         }
         // A finished card is the spawn timer's.
-        assert_eq!(reconcile_action("done", false, false), None);
-        assert_eq!(reconcile_action("done", true, false), None);
+        assert_eq!(reconcile_action("done", false, false, true), None);
+        assert_eq!(reconcile_action("done", true, false, true), None);
     }
 
     #[test]
@@ -831,6 +877,8 @@ mod tests {
                    "comment": "Job queue: failed again.", "to_role": null}),
         );
         let t = return_turn(&card, &e);
+        // A refused unpark finds its stale return turns by this start.
+        assert!(t.starts_with(&return_prefix("TER-1")), "{t}");
         assert!(
             t.starts_with(
                 "[System:card TER-1] Your card TER-1 came back: moved validating -> ready."

@@ -573,22 +573,67 @@ fn return_turns(td: &TestDaemon, eph: &str, card: &str) -> Vec<String> {
         .collect()
 }
 
+/// Move `card` to the column `to` as an event that the driver missed: the
+/// card and the event log change, but the hub never sends the event.
+async fn hidden_move(td: &TestDaemon, card: &str, to: &str) {
+    let (card, to) = (card.to_owned(), to.to_owned());
+    state(td)
+        .db
+        .write("system", move |t| {
+            let from: String = t.query_row(
+                "SELECT bc.name FROM cards c JOIN board_columns bc ON bc.id = c.column_id
+                 WHERE c.id = ?1",
+                [&card],
+                |r| r.get(0),
+            )?;
+            t.execute(
+                "UPDATE cards SET column_id = (SELECT bc.id FROM board_columns bc
+                     JOIN cards c ON c.project = bc.project WHERE c.id = ?1 AND bc.name = ?2)
+                 WHERE id = ?1",
+                rusqlite::params![card, to],
+            )?;
+            terrariumd::events::insert(
+                t,
+                "system",
+                terrariumd::events::EventDraft::new(
+                    "card",
+                    format!("{card} moved {from} -> {to} by operator"),
+                    json!({"change": "moved", "from": from, "to": to}),
+                )
+                .card(card.clone())
+                .project("p"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 /// TER-111 (A1): an event that the driver missed is repaired by the
 /// reconcile (it runs at the driver's start and after a lag). A running
-/// agent whose card waits parks; a parked agent whose card is back
-/// unparks in its own session, with a return turn.
+/// agent whose card moved into a wait column parks; a parked agent whose
+/// card is back unparks in its own session, with a return turn. An agent
+/// bound to a card that waited already is left alone, as the event rule
+/// leaves it (review round 2).
 #[tokio::test]
 async fn reconcile_repairs_a_missed_park_and_unpark() {
     let (td, lead) = setup().await;
     let s = state(&td);
-    // A missed park: the card is in review, and no move reached the driver.
+    // Bound to a card in review (a reviewer): no move since the spawn,
+    // so no missed park.
     let a = card(&td, "p", "review").await;
     let ea = id(&spawn_bound(&td, &lead, "w-claude", &a).await.body);
     td.wait_status(&ea, "idle").await;
+    assert_eq!(terrariumd::bound::reconcile(&s).await, 0);
+    assert!(spawn_row(&td, &ea).await["parked_at"].is_null());
+    // A missed park: the card moves on to accepted, and the driver does
+    // not see the move.
+    hidden_move(&td, &a, "accepted").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(spawn_row(&td, &ea).await["parked_at"].is_null());
     assert_eq!(terrariumd::bound::reconcile(&s).await, 1);
     parked(&td, &ea).await;
-    assert_eq!(spawn_row(&td, &ea).await["park_reason"], "card in review");
+    assert_eq!(spawn_row(&td, &ea).await["park_reason"], "card in accepted");
     // In line now: a second reconcile does nothing.
     assert_eq!(terrariumd::bound::reconcile(&s).await, 0);
     td.post(&format!("/api/agents/{ea}/cancel"), json!({}))
@@ -670,6 +715,19 @@ async fn an_unpark_is_refused_when_another_agent_has_the_card() {
         .ok()
         .clone();
     assert!(!ev.as_array().unwrap().is_empty(), "{ev}");
+    // The return turn that the queued unpark queued goes with it, so a
+    // later unpark does not deliver it (review round 2).
+    let key = ea.clone();
+    let waiting = state(&td)
+        .db
+        .read(move |c| terrariumd::store::agents::queued_turns(c, &key))
+        .await
+        .unwrap();
+    let card_tag = format!("[System:card {a}]");
+    assert!(
+        !waiting.iter().any(|q| q.text.starts_with(&card_tag)),
+        "{waiting:?}"
+    );
     // B parks: a place frees, but A stays parked, with no turn.
     mv(&td, &b, "validating", None).await;
     parked(&td, &eb).await;
@@ -800,4 +858,74 @@ async fn a_queued_unpark_runs_at_once_when_the_owner_has_room() {
     .await;
     td.wait_status(&ea, "idle").await;
     td.wait_status(&ed, "idle").await;
+}
+
+/// TER-111 review round 2: a parked agent whose harness still runs holds
+/// its place, so when its card comes back it unparks at once, with no
+/// queue and no stop and resume.
+#[tokio::test]
+async fn a_parked_agent_that_still_runs_unparks_in_its_own_place() {
+    let (td, lead) = setup().await;
+    let s = state(&td);
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    // A wake on the way keeps the parked agent running (max_concurrent 1).
+    let hold = terrariumd::lifecycle::WakeGuard::take(&s.lifecycle, eph.parse().unwrap()).unwrap();
+    mv(&td, &c, "review", None).await;
+    let key = eph.clone();
+    until("the park", || async {
+        spawn_row(&td, &key).await["parked_at"].is_string()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(agent(&td, &eph).await["status"], "idle");
+    // The card comes back while the agent still runs.
+    mv(&td, &c, "ready", Some("Review: changes.")).await;
+    let key = eph.clone();
+    until("the unpark", || async {
+        spawn_row(&td, &key).await["parked_at"].is_null()
+    })
+    .await;
+    let sp = spawn_row(&td, &eph).await;
+    assert!(sp["unpark_queued_at"].is_null(), "{sp}");
+    let ev = td
+        .get(&format!("/api/agents/{eph}/events?kind=agent.unpark_queued"))
+        .await
+        .ok()
+        .clone();
+    assert!(ev.as_array().unwrap().is_empty(), "{ev}");
+    drop(hold);
+    until("the return turn", || async {
+        !return_turns(&td, &eph, &c).is_empty()
+    })
+    .await;
+    td.wait_status(&eph, "idle").await;
+    // Never stopped: the first session, not resumed.
+    let a = agent(&td, &eph).await;
+    assert_ne!(a["status_reason"], "parked", "{a}");
+    let ss = sessions(&td, &eph).await;
+    assert_eq!(ss.len(), 1, "{ss:?}");
+    assert_eq!(ss[0]["resumes"], 0, "{ss:?}");
+}
+
+/// TER-111 review round 2: the driver runs the reconcile at its start, so
+/// a move that it missed while the daemon was down is repaired.
+#[tokio::test]
+async fn the_driver_reconciles_at_its_start() {
+    let (mut td, lead) = setup().await;
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    hidden_move(&td, &c, "review").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(spawn_row(&td, &eph).await["parked_at"].is_null());
+    td.boot(None, None).await;
+    fast(&td);
+    let key = eph.clone();
+    until("the park at the start", || async {
+        spawn_row(&td, &key).await["parked_at"].is_string()
+    })
+    .await;
+    assert_eq!(spawn_row(&td, &eph).await["park_reason"], "card in review");
 }

@@ -301,14 +301,34 @@ pub fn info(conn: &Connection, id: &str) -> ApiResult<Option<SpawnInfo>> {
 /// holds no place (TER-74).
 pub fn running_count(conn: &Connection, owner: &str) -> ApiResult<usize> {
     let n: i64 = conn.query_row(
-        "SELECT count(*) FROM spawns s LEFT JOIN agents a ON a.id = s.id
-         WHERE s.owner = ?1 AND s.finished_at IS NULL
-           AND (s.parked_at IS NULL
-                OR (a.status IS NOT NULL AND a.status NOT IN ('stopped', 'error')))",
+        &format!(
+            "SELECT count(*) FROM spawns s LEFT JOIN agents a ON a.id = s.id
+             WHERE s.owner = ?1 AND {HOLDS_PLACE}"
+        ),
         [owner],
         |r| r.get(0),
     )?;
     Ok(usize::try_from(n).unwrap_or(0))
+}
+
+/// The condition of a spawn `s` (joined to its agent `a`) that holds a
+/// place of its owner ([`running_count`]).
+const HOLDS_PLACE: &str = "s.finished_at IS NULL
+    AND (s.parked_at IS NULL
+         OR (a.status IS NOT NULL AND a.status NOT IN ('stopped', 'error')))";
+
+/// True when the spawn `id` holds a place of its owner now
+/// ([`running_count`]): a parked agent whose harness still runs does, so
+/// its unpark needs no free place (TER-111 review round 2).
+pub fn holds_place(conn: &Connection, id: &str) -> ApiResult<bool> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM spawns s LEFT JOIN agents a ON a.id = s.id
+             WHERE s.id = ?1 AND {HOLDS_PLACE})"
+        ),
+        [id],
+        |r| r.get(0),
+    )?)
 }
 
 /// The spawns of `owner` since `since` (RFC 3339).
