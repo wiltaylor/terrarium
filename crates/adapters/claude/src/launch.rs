@@ -451,6 +451,31 @@ mod tests {
         );
     }
 
+    /// TER-127: the commit and PR attribution stay off whatever the user
+    /// file says, so Claude Code adds no co-author reminder to the context.
+    #[test]
+    fn a_user_file_cannot_turn_the_attribution_on() {
+        let opts = ClaudeOptions::default();
+        let settings = |user: Option<Value>| -> Value {
+            let mut agent = test_agent(None);
+            agent.harness_settings = user;
+            let spec = build(&opts, &agent, SessionStart::Fresh("x"), None, false);
+            serde_json::from_str(value_after(&spec, "--settings").expect("settings")).expect("json")
+        };
+        for user in [
+            None,
+            Some(json!({"attribution": true, "includeCoAuthoredBy": true})),
+            Some(json!({"attribution": {"commit": "Co-Authored-By: X <x@y>", "pr": "by X", "sessionUrl": false}})),
+        ] {
+            let s = settings(user.clone());
+            assert_eq!(s["attribution"]["commit"], "", "{user:?}");
+            assert_eq!(s["attribution"]["pr"], "", "{user:?}");
+        }
+        // Other keys of the user's attribution object stay.
+        let s = settings(Some(json!({"attribution": {"sessionUrl": false}})));
+        assert_eq!(s["attribution"]["sessionUrl"], false);
+    }
+
     /// PLAN §8.6: an agent with no skill has no skill tool and no plugin;
     /// an agent with skills gets its plugin dir and the tool, whatever
     /// the user file says. The bundled skills stay off, and no
