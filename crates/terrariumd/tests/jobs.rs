@@ -245,8 +245,8 @@ async fn cards_carry_their_job_state_and_assignee_status() {
     // Jobs queued in the same millisecond keep the queue order of their
     // IDs, so the places are 1, 2, and 3 in some order.
     let mut places = Vec::new();
-    for i in 1..=3 {
-        let c = card(&ids[i]);
+    for id in &ids[1..=3] {
+        let c = card(id);
         assert_eq!(c["job"]["state"], "queued", "{c:#?}");
         assert_eq!(c["job"]["queued"], 3);
         places.push(c["job"]["place"].as_i64().unwrap());
