@@ -45,6 +45,9 @@ DAEMON_TESTS = {
     "card_reminder": "terrariumd::calendar::tick(&s)",
     "spawns": "terrariumd::spawn::prompt_info()",
     "hosts": "terrariumd::hosts::serve(s)",
+    "accounts": "terrariumd::accounts::write_credential(s)",
+    # Scans the sources of every crate; it names no terrariumd module.
+    "no_token_endpoint": "const FORBIDDEN: &[&str] = &[];\n",
 }
 COMMON = "terrariumd::settings::Settings\nterrariumd::start(x)\nterrariumd::supervisor::Fake"
 
@@ -116,13 +119,13 @@ class Samples(unittest.TestCase):
         p = plan("crates/terrariumd/src/jobs.rs", "crates/terrariumd/src/store/jobs.rs")
         self.assertFalse(p.full)
         self.assertEqual(p.whole, set())
-        self.assertEqual(p.daemon_targets, {"jobs"})
+        self.assertEqual(p.daemon_targets, {"jobs", "no_token_endpoint"})
         self.assertEqual(p.clippy(), ["terrariumd"])
         self.assertEqual(affected.commands(p), [
             ["just", "ci::fmt-check"],
             ["cargo", "clippy", "-p", "terrariumd", "--all-targets", "--", "-D", "warnings"],
             ["cargo", "test", "-p", "terrariumd", "--lib", "--bins", "--test", "jobs",
-             "--no-fail-fast"],
+             "--test", "no_token_endpoint", "--no-fail-fast"],
         ])
 
     def test_a_terrarium_core_change_runs_it_and_every_reverse_dep(self):
@@ -182,12 +185,56 @@ class Rules(unittest.TestCase):
 
     def test_a_module_named_by_tests_runs_those_targets(self):
         self.assertEqual(plan("crates/terrariumd/src/calendar/mod.rs").daemon_targets,
-                         {"calendar", "card_reminder"})
-        self.assertEqual(plan("crates/terrariumd/src/hosts.rs").daemon_targets, {"hosts", "jobs"})
+                         {"calendar", "card_reminder", "no_token_endpoint"})
+        self.assertEqual(plan("crates/terrariumd/src/hosts.rs").daemon_targets,
+                         {"hosts", "jobs", "no_token_endpoint"})
 
     def test_a_plural_target_name_matches(self):
-        self.assertEqual(plan("crates/terrariumd/src/spawn.rs").daemon_targets, {"spawns"})
-        self.assertEqual(plan("crates/terrariumd/src/api/board.rs").daemon_targets, {"board"})
+        self.assertEqual(plan("crates/terrariumd/src/spawn.rs").daemon_targets,
+                         {"spawns", "no_token_endpoint"})
+        self.assertEqual(plan("crates/terrariumd/src/api/board.rs").daemon_targets,
+                         {"board", "no_token_endpoint"})
+
+    def test_a_terrariumd_module_change_runs_the_guard(self):
+        # (a) TER-179: src/accounts.rs names targets that do not scan the crates.
+        p = plan("crates/terrariumd/src/accounts.rs")
+        self.assertFalse(p.full)
+        self.assertEqual(p.daemon_targets, {"accounts", "no_token_endpoint"})
+        self.assertEqual(p.whole, set())
+        self.assertIn("--test", affected.commands(p)[-1])
+        self.assertIn("no_token_endpoint", affected.commands(p)[-1])
+
+    def test_a_src_change_of_another_crate_runs_only_the_guard(self):
+        # (b) TER-179: terrariumd does not depend on these crates, so terrariumd
+        # is in the plan with the guard target alone.
+        for f, crate in [("crates/terrarium/src/cli.rs", "terrarium"),
+                         ("crates/terrarium-compat/src/lib.rs", "terrarium-compat")]:
+            with self.subTest(f=f):
+                p = plan(f)
+                self.assertFalse(p.full)
+                self.assertEqual(p.whole, {crate})
+                self.assertEqual(p.daemon_targets, {"no_token_endpoint"})
+                self.assertEqual(p.clippy(), sorted({crate, "terrariumd"}))
+                self.assertEqual(affected.commands(p)[-1], [
+                    "cargo", "test", "-p", "terrariumd", "--lib", "--bins",
+                    "--test", "no_token_endpoint", "--no-fail-fast"])
+
+    def test_a_non_src_change_of_another_crate_does_not_run_the_guard(self):
+        for f in ["crates/terrarium/tests/cli.rs", "crates/terrarium/README.md",
+                  "crates/terrarium/Cargo.toml.bak"]:
+            with self.subTest(f=f):
+                p = plan(f)
+                self.assertEqual(p.whole, {"terrarium"})
+                self.assertIsNone(p.daemon_targets)
+
+    def test_the_guard_needs_the_target_on_disk(self):
+        # Without the target, a src change runs all of terrariumd's targets.
+        crates = affected.workspace(metadata(), ROOT)
+        del crates["terrariumd"].tests["no_token_endpoint"]
+        p = affected.plan(["crates/terrarium/src/cli.rs"], crates, read=read,
+                          common=["crates/terrariumd/tests/common/mod.rs"], embedded={})
+        self.assertIn("terrariumd", p.whole)
+        self.assertIsNone(p.daemon_targets)
 
     def test_shared_and_unmatched_modules_run_all_targets(self):
         for f in ["lib.rs", "main.rs", "db.rs", "error.rs", "policy.rs", "api/mod.rs",
@@ -211,7 +258,7 @@ class Rules(unittest.TestCase):
     def test_a_leaf_crate_runs_alone(self):
         p = plan("crates/terrarium/src/main.rs")
         self.assertEqual(p.whole, {"terrarium"})
-        self.assertIsNone(p.daemon_targets)
+        self.assertEqual(p.daemon_targets, {"no_token_endpoint"})
 
     def test_files_outside_crates_map_to_their_readers(self):
         # terrariumd tests render the prompts under defaults/: a Markdown
@@ -256,7 +303,7 @@ class Rules(unittest.TestCase):
     def test_targets_join_across_files(self):
         p = plan("crates/terrariumd/src/jobs.rs", "crates/terrariumd/tests/board.rs",
                  "dashboard/x.ts")
-        self.assertEqual(p.daemon_targets, {"jobs", "board"})
+        self.assertEqual(p.daemon_targets, {"jobs", "board", "no_token_endpoint"})
         self.assertTrue(p.dashboard)
 
 
@@ -326,7 +373,7 @@ class Cli(unittest.TestCase):
 
     def test_plan_json_shape(self):
         d = plan("crates/terrariumd/src/jobs.rs").to_dict()
-        self.assertEqual(json.loads(json.dumps(d))["daemon_targets"], ["jobs"])
+        self.assertEqual(json.loads(json.dumps(d))["daemon_targets"], ["jobs", "no_token_endpoint"])
 
 
 if __name__ == "__main__":
