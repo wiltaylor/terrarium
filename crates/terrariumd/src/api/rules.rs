@@ -77,10 +77,7 @@ async fn put(
 ) -> ApiResult<Json<Rules>> {
     policy::admin_project(&actor, &name, "editing the board rules")?;
     let project = name.clone();
-    let ctx = state
-        .db
-        .read(move |c| rules::context(c, &project))
-        .await?;
+    let ctx = state.db.read(move |c| rules::context(c, &project)).await?;
     let set = rules::check(body.text.clone(), ctx.clone()).await?;
     let r = state
         .db

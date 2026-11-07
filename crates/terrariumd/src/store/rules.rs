@@ -367,7 +367,14 @@ pub fn store_file(t: &mut Tx<'_>, plan: &FilePlan, set: &RuleSet) -> ApiResult<V
             file_path(project)
         )]);
     }
-    store(t, project, &plan.text, &plan.hash, set.rules.len(), SOURCE_FILE)?;
+    store(
+        t,
+        project,
+        &plan.text,
+        &plan.hash,
+        set.rules.len(),
+        SOURCE_FILE,
+    )?;
     t.audit(
         "rules.file",
         project,

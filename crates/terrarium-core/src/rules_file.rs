@@ -353,9 +353,7 @@ fn non_literal(e: &ast::Expr) -> Option<&'static str> {
         E::ListLit { elements, .. } => elements.iter().find_map(non_literal),
         E::Call { .. } => Some("a function call"),
         E::Function(_) => Some("a function"),
-        E::Identifier(..) | E::SelfKw(_) | E::ParentKw(_) | E::Member { .. } => {
-            Some("a reference")
-        }
+        E::Identifier(..) | E::SelfKw(_) | E::ParentKw(_) | E::Member { .. } => Some("a reference"),
         E::InterpolatedString { .. } => Some("an interpolated string"),
         E::Binary { .. } | E::Unary { .. } => Some("an operator"),
         _ => Some("a computed value"),
@@ -1011,7 +1009,9 @@ rule "validate-pass" {
         let e = errors(&rule("  let x = 1\n  job_cancel {}"));
         assert!(e.contains("a `let` binding"), "{e}");
         // A lambda, a reference, an operator, an interpolation.
-        let e = errors(&rule("  description = fn(i: i64) -> i64 { i }\n  job_cancel {}"));
+        let e = errors(&rule(
+            "  description = fn(i: i64) -> i64 { i }\n  job_cancel {}",
+        ));
         assert!(e.contains("a function is not allowed"), "{e}");
         let e = errors(&rule("  description = name\n  job_cancel {}"));
         assert!(e.contains("a reference is not allowed"), "{e}");
@@ -1038,10 +1038,20 @@ rule "validate-pass" {
         // Not the order of the schema: grouping by kind would fail here.
         let text = "rule \"r\" {\n  on = [\"card\"]\n  agent_end { outcome = \"done\" }\n  card_move { to = \"review\" }\n  card_label { add = [\"a\"] }\n  card_move { to = \"done\" }\n  card_comment { text = \"x\" }\n}\n";
         let set = parse(text, "rules.wcl", &board()).expect("good file");
-        let verbs: Vec<&str> = set.rules[0].actions.iter().map(|a| a.verb.as_str()).collect();
+        let verbs: Vec<&str> = set.rules[0]
+            .actions
+            .iter()
+            .map(|a| a.verb.as_str())
+            .collect();
         assert_eq!(
             verbs,
-            vec!["agent.end", "card.move", "card.label", "card.move", "card.comment"]
+            vec![
+                "agent.end",
+                "card.move",
+                "card.label",
+                "card.move",
+                "card.comment"
+            ]
         );
         assert_eq!(set.rules[0].actions[1].args["to"], "review");
         assert_eq!(set.rules[0].actions[3].args["to"], "done");

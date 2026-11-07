@@ -88,7 +88,10 @@ async fn put_get_check_delete_with_audit() {
     let hash = body["hash"].as_str().unwrap().to_owned();
     let r = td.get("/api/projects/terra/rules").await;
     assert_eq!(r.ok()["hash"], hash);
-    assert_eq!(verbs_of(&r.body), ["card.assign", "card.move", "card.label"]);
+    assert_eq!(
+        verbs_of(&r.body),
+        ["card.assign", "card.move", "card.label"]
+    );
 
     // The audit row names the rules and the hashes.
     let rows = audit_rows(&td, "rules.put").await;
@@ -368,7 +371,10 @@ async fn a_rules_file_loads_at_start_and_at_reload() {
     assert_eq!(rows.len(), 3, "{rows:?}");
     assert_eq!(rows[0]["detail"]["file"], Value::Null);
     assert_eq!(rows[0]["detail"]["source"], "api");
-    assert_eq!(rows[0]["detail"]["previous_file"], "projects/filed.rules.wcl");
+    assert_eq!(
+        rows[0]["detail"]["previous_file"],
+        "projects/filed.rules.wcl"
+    );
     assert_eq!(rows[0]["detail"]["hash"], r.body["hash"]);
     // A second reload writes no second row.
     td.post_empty("/api/reload").await.ok();
@@ -390,7 +396,8 @@ async fn a_rules_file_loads_at_start_and_at_reload() {
 #[tokio::test]
 async fn a_broken_file_at_start_does_not_stop_a_good_project() {
     // A file that does not check (a function call) next to a good one.
-    let broken = "rule \"r\" {\n  on = [\"job\"]\n  description = upper(\"x\")\n  job_cancel {}\n}\n";
+    let broken =
+        "rule \"r\" {\n  on = [\"job\"]\n  description = upper(\"x\")\n  job_cancel {}\n}\n";
     let td = TestDaemon::with_config(|c| {
         write(c, "projects/good.toml", "description = \"x\"\n");
         write(c, "projects/good.rules.wcl", GOOD);
@@ -401,7 +408,10 @@ async fn a_broken_file_at_start_does_not_stop_a_good_project() {
     // The daemon is up, the good project has its rules.
     let r = td.get("/api/projects/good/rules").await;
     assert_eq!(r.ok()["source"], "file");
-    assert_eq!(verbs_of(&r.body), ["card.assign", "card.move", "card.label"]);
+    assert_eq!(
+        verbs_of(&r.body),
+        ["card.assign", "card.move", "card.label"]
+    );
     // The broken project has none, and only the good file has an audit row.
     let r = td.get("/api/projects/broken/rules").await;
     assert_eq!(r.ok()["exists"], false);
