@@ -106,6 +106,12 @@ export function seedThreads(now: number, agents: Agent[]): { threads: MockThread
       status: "waiting_agent",
       updated_at: ago(30),
       messages: [msg(3, shopLead, "How many retries should the payment call get?", 110), msg(4, "operator", "Three, with a backoff. Write it up as a card.", 30)],
+      // Linked cards (TER-146) of two projects: the mini kanban and the n/m chip (TER-147).
+      cards: [
+        { project: "webshop", card: "WEB-4", linked_by: shopLead.id, linked_by_name: `${shopLead.project}/${shopLead.name}`, linked_at: ago(29) },
+        { project: "webshop", card: "WEB-1", linked_by: shopLead.id, linked_by_name: `${shopLead.project}/${shopLead.name}`, linked_at: ago(28) },
+        { project: "terrarium", card: "TER-16", linked_by: "operator", linked_by_name: "operator", linked_at: ago(27) },
+      ],
     },
     {
       ...base(3, "Rename the runner crate", "terrarium", worker, lead, 60 * 26),
@@ -156,11 +162,14 @@ export function createThreadMock(c: ThreadMockContext) {
   const row = (id: string): MockThread => rows().find((t) => t.id === id) ?? fail(404, "not_found", `no thread \`${id}\``);
   const project = (t: Pick<Thread, "scope">) => (t.scope === GLOBAL ? null : t.scope);
 
-  const full = (t: MockThread): Thread => ({ ...t, messages: t.messages.map((m) => ({ ...m })), questions: questionsOf(t.id) });
-  const listed = (t: MockThread): Thread => {
-    const { messages, ...rest } = t;
+  /** The linked cards (TER-146): the mock caller is the operator, who reads every project. */
+  const cardsOf = (t: MockThread) => (t.cards ?? []).map((x) => ({ ...x }));
+  const full = (t: MockThread): Thread => ({ ...t, messages: t.messages.map((m) => ({ ...m })), questions: questionsOf(t.id), cards: cardsOf(t) });
+  /** A row of the list; an Inbox item has no `cards`, as in the daemon. */
+  const listed = (t: MockThread, withCards = true): Thread => {
+    const { messages, cards: _cards, ...rest } = t;
     const last = [t.updated_at, ...messages.map((m) => m.at)].sort().at(-1)!;
-    return { ...rest, message_count: messages.length, open_questions: openQuestions(t.id).length, last_at: last };
+    return { ...rest, ...(withCards ? { cards: cardsOf(t) } : {}), message_count: messages.length, open_questions: openQuestions(t.id).length, last_at: last };
   };
   const itemOpen = (t: MockThread) => t.status === "waiting_operator" || (t.status !== "closed" && openQuestions(t.id).length > 0);
   const item = (t: MockThread): InboxItem => {
@@ -174,7 +183,7 @@ export function createThreadMock(c: ThreadMockContext) {
       critical: open && oq.some((q) => q.priority === "critical"),
       project: project(t),
       at: t.created_at,
-      thread: listed(t),
+      thread: listed(t, false),
     };
   };
 
@@ -220,7 +229,7 @@ export function createThreadMock(c: ThreadMockContext) {
         if (!["open", "all", "waiting_operator", "waiting_agent", "tracking", "closed"].includes(st)) fail(422, "invalid", `bad status \`${st}\`: use waiting_operator, waiting_agent, tracking, closed, open, or all`);
         return rows()
           .filter((t) => (st === "all" ? true : st === "open" ? t.status !== "closed" : t.status === st) && (!q.scope || t.scope === q.scope))
-          .map(listed)
+          .map((t) => listed(t))
           .sort((a, b) => Number(b.status === "waiting_operator") - Number(a.status === "waiting_operator") || b.last_at!.localeCompare(a.last_at!) || b.id.localeCompare(a.id))
           .slice(0, LIST_MAX);
       }),

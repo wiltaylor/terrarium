@@ -21,7 +21,8 @@
 //! - Linked cards (TER-146, TER-144 D2, [`link_card`]): cards of any
 //!   project that the thread tracks (`thread_cards`). The linker reads the
 //!   thread and the card's project; a link gives no read access to the
-//!   card or the thread. `GET /api/threads/{id}` lists them (`cards`).
+//!   card or the thread. `GET /api/threads/{id}` and the list show them
+//!   (`cards`, [`list_for`]), only those of a project the reader reads.
 //! - Wake rules (TER-148, TER-144 D4, [`on_card_moved`]): in a thread that
 //!   tracks, a linked card that goes to the blocked column, or a move that
 //!   leaves all linked cards in review or later, wakes the agent (the
@@ -175,7 +176,8 @@ pub struct Thread {
     /// The questions of the thread; absent in a list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub questions: Option<Vec<Question>>,
-    /// The linked cards, the oldest link first (TER-146); absent in a list.
+    /// The linked cards, the oldest link first (TER-146), also in a list
+    /// (TER-147: the n/m chip); absent in the Inbox items.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cards: Option<Vec<ThreadCard>>,
     pub response: Option<Response>,
@@ -735,6 +737,20 @@ fn list_unbounded(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
         w(a).cmp(&w(b)).then_with(|| b.last_at.cmp(&a.last_at))
     });
     Ok(out)
+}
+
+/// [`list`] for `actor`: each thread with its linked cards whose project
+/// `actor` may read ([`visible`]), for the n/m chip of the Threads list
+/// (TER-147). A list never shows a card of a project that `actor` cannot
+/// read.
+pub fn list_for(conn: &Connection, f: &Filter, actor: &Actor) -> ApiResult<Vec<Thread>> {
+    list(conn, f)?
+        .into_iter()
+        .map(|mut th| {
+            th.cards = Some(cards_of(conn, &th.id)?);
+            Ok(visible(actor, th))
+        })
+        .collect()
 }
 
 /// Every thread that is not closed, and the closed ones with `closed_too`,

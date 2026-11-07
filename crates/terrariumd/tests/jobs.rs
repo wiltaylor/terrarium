@@ -96,6 +96,16 @@ async fn host_caps_accept_names_ids_and_ssh_aliases() {
 async fn host_counts_respect_the_readers_project() {
     use terrariumd::store::jobs::{self, JobKind, NewJob};
     let td = TestDaemon::start().await;
+    // TER-211: the queue takes up the running jobs of the last daemon in
+    // the background after the start, and puts them back in the queue as
+    // lost. A job that the test starts before that write would be one of
+    // them, and `running` would be 1.
+    tokio::time::timeout(
+        DEADLINE,
+        td.daemon.as_ref().unwrap().state.job_queue.recovered(),
+    )
+    .await
+    .expect("the job queue takes up the jobs of the last daemon");
     for project in ["p", "q"] {
         td.project(project).await;
         let card = td
