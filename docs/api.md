@@ -4195,7 +4195,9 @@ A board:
 ```
 
 A new board has the columns `backlog`, `ready`, `in_progress` (role
-`working`), `review`, `blocked` (role `blocked`), `done`. `count` excludes
+`working`), `validating` (role `validating`), `review` (role `review`),
+`merge_queue` (role `merge_queue`), `accepted` (role `accepted`), `blocked`
+(role `blocked`), `done`. `count` excludes
 archived cards. The columns are configurable (§8.3, "Columns"):
 
 - `name` is the ID of the column: a lower-case letter, then at most 31
@@ -4203,11 +4205,18 @@ archived cards. The columns are configurable (§8.3, "Columns"):
   rule stays valid.
 - `title` is the display label: the stored title (at most 40 characters),
   else the name with spaces for the underscores.
-- `role` is `working` or `blocked`, or absent. Exactly one column has the
-  role `working`: `card claim` moves a card there, and a card with unmet
-  dependencies cannot enter it. At most one column has the role `blocked`:
-  a move there needs a comment and mails a notice. The rules of §8.2 follow
+- `role` is `working`, `blocked`, `validating`, `review`, `merge_queue`, or
+  `accepted`, or absent. Exactly one column has the role `working`:
+  `card claim` moves a card there, and a card with unmet dependencies cannot
+  enter it. At most one column has each other role. The role `blocked` needs
+  a comment on a move there and mails a notice. The rules of §8.2 follow
   the roles, not the names.
+- The job queue finds its columns by role: a validate job holds a card in
+  the column with the role `validating`, a validate pass goes to the column
+  with the role `review`, and a merge pass goes to the column with the role
+  `accepted`. With no column that has the role, the daemon uses the column
+  with the name `validating`, `review`, or `accepted`. A column that has
+  the role wins over a column with the same name.
 - `backlog` is always the first column and `done` always the last. Neither
   can be removed, renamed, or moved, and neither takes a WIP limit or a
   role. Both can have a title.
@@ -4219,7 +4228,10 @@ archived cards. The columns are configurable (§8.3, "Columns"):
   `422 invalid`, and the message names the columns.
 - Migration 48 gives each existing board the roles (`in_progress` working,
   `blocked` blocked), puts `backlog` first and `done` last, and clears a
-  WIP limit on `backlog` and `done`.
+  WIP limit on `backlog` and `done`. Migration 82 lets the column take the
+  roles `validating`, `review`, `merge_queue`, and `accepted`. It gives no
+  existing column those roles: an existing board keeps its names and uses
+  the name fallback until an admin sets the roles.
 
 ### 8.2 Rules (PLAN §13)
 
@@ -10546,6 +10558,24 @@ validate or a merge is a `409 conflict` that says how to set it.
   and pushes `next` when it passes. `batch` in the job lists the cards
   (`[{card, branch, by_agent?, outcome?, note?}]`); `card`, `branch`, and
   `by_agent` are those of the first card. See 35.3 for the results.
+
+The recipe gets this env (TER-100), and no credential:
+
+| variable                  | value                                                                 |
+|---------------------------|-----------------------------------------------------------------------|
+| `TERRARIUM_JOB_KIND`      | `validate` or `merge`                                                 |
+| `TERRARIUM_JOB_ID`        | the job ID                                                            |
+| `TERRARIUM_HEAD`          | the tested commit: the card commit, or the merge commit               |
+| `TERRARIUM_BASE`          | the base of the change: for a validate job the merge-base of the card commit and `next`, for a merge job `next` before the merge |
+| `TERRARIUM_CHANGED_FILES` | the absolute path of a file in the clone (`.git/terrarium/changed-files`) with the paths that differ between the base and the head, one per line (`git diff --name-only --no-renames`, so a rename lists both paths) |
+
+The prepare step fetches `next` for a validate job too. When the repo has
+no `next`, or the commit has no merge-base with it, `TERRARIUM_BASE` and
+`TERRARIUM_CHANGED_FILES` are not set, and a recipe that selects tests
+must run all of them. The terrarium repo's recipe for this is `just
+ci::validate-affected`: a validate job runs the checks that its changed
+files reach (the rules are in `scripts/affected.py`), and a merge job runs
+the full `just ci::validate`.
 
 Jobs start first in, first out across all projects. A job starts when:
 

@@ -639,12 +639,14 @@ async fn validate(
             {
                 note = format!("{c}\n\n{note}");
             }
-            if card.column != rt::COL_VALIDATING {
+            let validating =
+                board::role_name(t, &card.project, board::VALIDATING, rt::COL_VALIDATING)?;
+            if card.column != validating {
                 board::move_card(
                     t,
                     &Actor::Operator,
                     &card.id,
-                    rt::COL_VALIDATING,
+                    &validating,
                     None,
                     Some(&note),
                 )?;

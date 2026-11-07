@@ -22,6 +22,37 @@ validate:
 	just ci::scripts-test
 	just ci::dashboard-check
 
+# The gate of a queue job (TER-100): a validate job runs only the checks that its changed files can reach (scripts/affected.py; the rules are in its header). A merge job, or a job without a list of changed files, runs the full `ci::validate`. Reads TERRARIUM_JOB_KIND and TERRARIUM_CHANGED_FILES from the job (docs/api.md 35.2)
+[group('ci')]
+validate-affected: require-uv
+	#!/usr/bin/env bash
+	set -euo pipefail
+	export RUSTUP_TOOLCHAIN=1.97.1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+	kind=${TERRARIUM_JOB_KIND:-}
+	list=${TERRARIUM_CHANGED_FILES:-}
+	if [ "$kind" = merge ]; then
+		echo "validate-affected: a merge job runs the full suite"
+		exec just ci::validate
+	fi
+	if [ -z "$list" ] || [ ! -f "$list" ]; then
+		echo "validate-affected: no list of changed files, the full suite runs"
+		exec just ci::validate
+	fi
+	uv run python scripts/affected.py --files "$list" --run
+
+# Print the plan of `validate-affected` without running it: the changed files of TERRARIUM_CHANGED_FILES, else the diff of HEAD against its merge-base with `base`
+[group('ci')]
+affected base='origin/next': require-uv
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [ -n "${TERRARIUM_CHANGED_FILES:-}" ]; then
+		exec uv run python scripts/affected.py --files "$TERRARIUM_CHANGED_FILES"
+	fi
+	f=$(mktemp)
+	trap 'rm -f "$f"' EXIT
+	git diff --name-only --no-renames "$(git merge-base HEAD {{quote(base)}})" HEAD > "$f"
+	uv run python scripts/affected.py --files "$f"
+
 # Check Rust formatting without changing files
 [group('ci')]
 fmt-check: require-cargo
