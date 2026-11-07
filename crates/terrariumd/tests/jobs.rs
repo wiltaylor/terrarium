@@ -1378,7 +1378,10 @@ case "$1" in
   exec) shift
     while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;; *) break ;; esac; done
     shift
-    ( exec setsid "$@" ) &
+    # An async list gets /dev/null on stdin: keep the real one (`-i`, the
+    # bundle of a job) on fd 3 and hand it on.
+    exec 3<&0
+    ( exec setsid "$@" <&3 3<&- ) &
     wait $! ;;
 esac
 "#,
