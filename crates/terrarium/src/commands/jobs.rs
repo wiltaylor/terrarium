@@ -165,7 +165,10 @@ fn print_stats(c: &Ctx, v: &Value) {
         field(v, "open"),
         field(v, "splits")
     ));
-    let steps = v["failed_steps"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let steps = v["failed_steps"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
     if !steps.is_empty() {
         let list: Vec<String> = steps
             .iter()

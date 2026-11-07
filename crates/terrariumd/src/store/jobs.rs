@@ -1675,7 +1675,8 @@ mod tests {
         let lint = "error: could not compile\nerror: recipe `lint` failed on line 33 with exit code 101\nerror: recipe `validate` failed with exit code 101\n";
         assert!(failed_targets(lint).is_empty());
         assert_eq!(failed_step(lint).as_deref(), Some("lint"));
-        let killed = "     Running tests/card_sessions.rs\n[exit code None, signal Some(9), timeout]\n";
+        let killed =
+            "     Running tests/card_sessions.rs\n[exit code None, signal Some(9), timeout]\n";
         assert_eq!(failed_step(killed).as_deref(), Some("timeout"));
         assert_eq!(failed_step("ok"), None);
     }
@@ -1685,18 +1686,74 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
         #[allow(clippy::type_complexity)]
-        let rows: &[(&str, &str, &str, &str, i64, Option<&str>, Option<&str>, Option<&str>)] = &[
+        let rows: &[(
+            &str,
+            &str,
+            &str,
+            &str,
+            i64,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+        )] = &[
             // (id, project, kind, state, attempt, outcome, tail, parent)
             ("a1", "p", "validate", "passed", 1, None, None, None),
-            ("a2", "p", "validate", "failed", 1, Some("red"), Some(RED_TAIL), None),
+            (
+                "a2",
+                "p",
+                "validate",
+                "failed",
+                1,
+                Some("red"),
+                Some(RED_TAIL),
+                None,
+            ),
             ("a2r", "p", "validate", "passed", 2, None, None, None),
-            ("a3", "p", "merge", "failed", 1, Some("conflict"), None, None),
+            (
+                "a3",
+                "p",
+                "merge",
+                "failed",
+                1,
+                Some("conflict"),
+                None,
+                None,
+            ),
             ("a4", "p", "merge", "passed", 1, None, None, None),
-            ("a5", "p", "merge", "failed", 1, Some("red"), Some("error: 1 target failed:\n    `-p terrariumd --test displays`\nerror: recipe `test` failed\n"), None),
-            ("a5s", "p", "merge", "failed", 1, Some("red"), Some(RED_TAIL), Some("a5")),
+            (
+                "a5",
+                "p",
+                "merge",
+                "failed",
+                1,
+                Some("red"),
+                Some(
+                    "error: 1 target failed:\n    `-p terrariumd --test displays`\nerror: recipe `test` failed\n",
+                ),
+                None,
+            ),
+            (
+                "a5s",
+                "p",
+                "merge",
+                "failed",
+                1,
+                Some("red"),
+                Some(RED_TAIL),
+                Some("a5"),
+            ),
             ("a6", "p", "validate", "cancelled", 1, None, None, None),
             ("a7", "p", "validate", "queued", 1, None, None, None),
-            ("q1", "q", "validate", "failed", 1, Some("red"), Some(RED_TAIL), None),
+            (
+                "q1",
+                "q",
+                "validate",
+                "failed",
+                1,
+                Some("red"),
+                Some(RED_TAIL),
+                None,
+            ),
         ];
         for (id, project, kind, state, attempt, outcome, tail, parent) in rows {
             conn.execute(
