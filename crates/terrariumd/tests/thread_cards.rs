@@ -148,7 +148,11 @@ async fn the_lead_links_a_new_and_an_existing_card() {
     // A second link of the same card keeps one row.
     let r = lab
         .td
-        .post_as(&lab.lead, &lab.link_path(), json!({"card": format!("p:{c2}")}))
+        .post_as(
+            &lab.lead,
+            &lab.link_path(),
+            json!({"card": format!("p:{c2}")}),
+        )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(lab.cards().await, [format!("p:{c1}"), format!("p:{c2}")]);
@@ -183,7 +187,11 @@ async fn the_agent_links_cards_of_two_projects_as_it_tracks() {
     // The architect reads all: it links a card of `q` to the `p` thread.
     let r = lab
         .td
-        .post_as(&lab.architect, &lab.link_path(), json!({"card": format!("q:{qc}")}))
+        .post_as(
+            &lab.architect,
+            &lab.link_path(),
+            json!({"card": format!("q:{qc}")}),
+        )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
 
@@ -202,10 +210,7 @@ async fn the_agent_links_cards_of_two_projects_as_it_tracks() {
 
     // The operator links a card of any project too.
     let qc2 = lab.card("q", "Second q card").await;
-    let r = lab
-        .td
-        .post(&lab.link_path(), json!({"card": qc2}))
-        .await;
+    let r = lab.td.post(&lab.link_path(), json!({"card": qc2})).await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.body["cards"][2]["project"], "q");
     assert_eq!(r.body["cards"][2]["linked_by"], "operator");
@@ -245,7 +250,11 @@ async fn a_link_needs_the_read_rights_and_gives_none() {
 
     // The lead of `p` reads the thread but not project `q`: 403.
     lab.td
-        .post_as(&lab.lead, &lab.link_path(), json!({"card": format!("q:{qc}")}))
+        .post_as(
+            &lab.lead,
+            &lab.link_path(),
+            json!({"card": format!("q:{qc}")}),
+        )
         .await
         .err(403, "forbidden");
 

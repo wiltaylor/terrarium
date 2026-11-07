@@ -9925,7 +9925,13 @@ async fn thread_commands() {
     let out = ok(
         true,
         &[
-            "thread", "track", "T1", "--card", "terra:TER-2", "--card", "ops:OPS-3",
+            "thread",
+            "track",
+            "T1",
+            "--card",
+            "terra:TER-2",
+            "--card",
+            "ops:OPS-3",
         ],
         vec![(200, json!({"id": "T1", "status": "tracking"}))],
         vec![(
