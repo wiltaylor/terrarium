@@ -718,11 +718,7 @@ async fn delivery_at_start_and_while_running() {
     );
     let plan = cards_dir(&ws, &c1).join("plan.txt");
     wait_for("the new file", || plan.exists()).await;
-    let mail = mail_subjects(&td).await;
-    assert!(
-        mail.contains(&format!("{c1}: file plan.txt added")),
-        "{mail:?}"
-    );
+    wait_for_mail(&td, &format!("{c1}: file plan.txt added")).await;
     // A replace.
     attach(&td, &c1, None, "plan.txt", b"plan v2", true).await;
     wait_for("the new version", || {
@@ -732,15 +728,8 @@ async fn delivery_at_start_and_while_running() {
     // A remove.
     td.delete(&format!("/api/cards/{c1}/files/plan.txt")).await;
     wait_for("the removed file", || !plan.exists()).await;
-    let mail = mail_subjects(&td).await;
-    assert!(
-        mail.contains(&format!("{c1}: file plan.txt replaced")),
-        "{mail:?}"
-    );
-    assert!(
-        mail.contains(&format!("{c1}: file plan.txt removed")),
-        "{mail:?}"
-    );
+    wait_for_mail(&td, &format!("{c1}: file plan.txt replaced")).await;
+    wait_for_mail(&td, &format!("{c1}: file plan.txt removed")).await;
 
     // An assignment of a card with files: delivered, with a notice.
     attach(&td, &c2, None, "brief.md", b"brief", false).await;
@@ -752,8 +741,7 @@ async fn delivery_at_start_and_while_running() {
     .ok();
     let brief = cards_dir(&ws, &c2).join("brief.md");
     wait_for("the assigned card", || brief.exists()).await;
-    let mail = mail_subjects(&td).await;
-    assert!(mail.contains(&format!("{c2}: card files")), "{mail:?}");
+    wait_for_mail(&td, &format!("{c2}: card files")).await;
     // The agent's own file: delivered, no notice.
     let before = mail_subjects(&td).await.len();
     let r = attach(&td, &c2, Some("p/w1"), "mine.md", b"mine", false).await;
@@ -789,6 +777,23 @@ async fn delivery_at_start_and_while_running() {
         .await
         .ok();
     wait_for("the done card goes", || !cards_dir(&ws, &c1).exists()).await;
+}
+
+/// Wait until `p/w1` has a mail with this subject. The delivery writes the
+/// files first and mails the notice after it (TER-188).
+async fn wait_for_mail(td: &TestDaemon, subject: &str) {
+    let start = std::time::Instant::now();
+    loop {
+        let mail = mail_subjects(td).await;
+        if mail.iter().any(|s| s == subject) {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "timed out: the mail {subject:?} in {mail:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn mail_subjects(td: &TestDaemon) -> Vec<String> {
