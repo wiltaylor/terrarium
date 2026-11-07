@@ -902,7 +902,9 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
         // of changed files.
         let next = "+refs/heads/next:refs/remotes/job/next".to_owned();
         base = match repo.fetch(&[next]) {
-            Ok(()) => repo.merge_base(&head, "refs/remotes/job/next").unwrap_or(None),
+            Ok(()) => repo
+                .merge_base(&head, "refs/remotes/job/next")
+                .unwrap_or(None),
             Err(_) => None,
         };
         head
