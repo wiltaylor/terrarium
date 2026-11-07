@@ -4123,9 +4123,7 @@ mod tests {
         .unwrap();
         migrate(&mut conn).unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT name, role FROM board_columns WHERE project = 'p' ORDER BY position",
-            )
+            .prepare("SELECT name, role FROM board_columns WHERE project = 'p' ORDER BY position")
             .unwrap();
         let rows: Vec<(String, Option<String>)> = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))

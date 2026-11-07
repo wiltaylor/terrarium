@@ -589,7 +589,14 @@ async fn validate(
             let validating =
                 board::role_name(t, &card.project, board::VALIDATING, rt::COL_VALIDATING)?;
             if card.column != validating {
-                board::move_card(t, &Actor::Operator, &card.id, &validating, None, Some(&note))?;
+                board::move_card(
+                    t,
+                    &Actor::Operator,
+                    &card.id,
+                    &validating,
+                    None,
+                    Some(&note),
+                )?;
             } else {
                 board::add_comment(t, &Actor::Operator, &card.id, &note)?;
             }
