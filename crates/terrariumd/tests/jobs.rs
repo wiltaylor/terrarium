@@ -243,17 +243,22 @@ async fn cards_carry_their_job_state_and_assignee_status() {
     assert!(running["job"].get("place").is_none());
     assert!(running["job"].get("queued").is_none());
     // Jobs queued in the same millisecond keep the queue order of their
-    // IDs, so the places are 1, 2, and 3 in some order.
+    // IDs, so the two validations are 1 and 2 of 2 in some order. The
+    // merge has its own lane (TER-159), so it is 1 of 1.
     let mut places = Vec::new();
-    for id in &ids[1..=3] {
+    for id in &ids[1..=2] {
         let c = card(id);
         assert_eq!(c["job"]["state"], "queued", "{c:#?}");
-        assert_eq!(c["job"]["queued"], 3);
+        assert_eq!(c["job"]["queued"], 2);
         places.push(c["job"]["place"].as_i64().unwrap());
     }
     places.sort_unstable();
-    assert_eq!(places, [1, 2, 3]);
-    assert_eq!(card(&ids[3])["job"]["kind"], "merge");
+    assert_eq!(places, [1, 2]);
+    let merge = card(&ids[3]);
+    assert_eq!(merge["job"]["kind"], "merge");
+    assert_eq!(merge["job"]["state"], "queued", "{merge:#?}");
+    assert_eq!(merge["job"]["place"], 1);
+    assert_eq!(merge["job"]["queued"], 1);
     let none = card(&ids[4]);
     assert!(none.get("job").is_none(), "{none:#?}");
     let w = td.get("/api/agents/p%2Fw").await.ok().clone();

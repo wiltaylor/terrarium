@@ -4187,8 +4187,9 @@ A card:
 - `job` is the open (queued or running) job of the card (§35,
   TER-158): `{"id","kind","state","place","queued"}`. `kind` is `validate`
   or `merge`, `state` is `queued` or `running`. A queued job has `place`
-  (its place among the queued jobs of the project, 1 starts next) and
-  `queued` (the count of queued jobs in the project). It is absent when
+  (its place among the queued jobs of the project in its lane, 1 starts
+  next) and `queued` (the count of queued jobs of the project in that
+  lane). Validate and merge jobs have their own lanes. It is absent when
   the card has no open job. The board tile reads its state chip from it,
   not from the `validation:*` labels.
 - `assignee_status` is the stored status of the assignee agent (`working`,
