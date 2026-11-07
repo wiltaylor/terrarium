@@ -740,8 +740,10 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name() {
                 {"name": "backlog"}, {"name": "ready"},
                 {"name": "in_progress", "role": "working"},
                 {"name": "checking", "rename_from": "validating", "role": "validating"},
-                {"name": "review"}, {"name": "qa", "role": "review"},
-                {"name": "accepted"},
+                // A column that omits `role` keeps its old role: the default
+                // board gives `review` the role `review`, so say null.
+                {"name": "review", "role": null}, {"name": "qa", "role": "review"},
+                {"name": "accepted", "role": null},
                 {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
         )
         .await;
