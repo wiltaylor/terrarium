@@ -64,7 +64,8 @@ pub const VALIDATING: &str = "validating";
 /// by this role, else by the name `review`.
 pub const REVIEW: &str = "review";
 /// The role of the column where cards wait for the batch merge. The daemon
-/// does not move cards there yet.
+/// moves no card there: the opt-in merge queue rules do (TER-172,
+/// `rules_file::MERGE_QUEUE_RULES`).
 pub const MERGE_QUEUE: &str = "merge_queue";
 /// The role of the column where a merge pass goes. The daemon finds it by
 /// this role, else by the name `accepted`.
