@@ -708,7 +708,7 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         .filter(|b| check_commit(b).is_ok())
         .map(String::as_str);
     let recipe_cmd = RemoteCmd {
-        argv: vec!["sh".into(), "-c".into(), recipe],
+        argv: vec!["sh".into(), "-c".into(), recipe_script(recipe, base)],
         cwd: Some(x.dir.to_owned()),
         env: recipe_env(job, x.dir, &head, base),
         timeout_secs: Some(timeout),
@@ -779,6 +779,17 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
 /// The file of the changed paths in a job clone, relative to its root
 /// (written by [`PREPARE_SCRIPT`]).
 pub const CHANGED_FILES: &str = ".git/terrarium/changed-files";
+
+/// The recipe as its shell runs it. Without a base the recipe must not see
+/// a `TERRARIUM_BASE` or `TERRARIUM_CHANGED_FILES` from the target's own
+/// env (for example a daemon test that runs inside a validate job), so the
+/// script unsets both first. With a base, [`recipe_env`] sets both.
+fn recipe_script(recipe: String, base: Option<&str>) -> String {
+    if base.is_some() {
+        return recipe;
+    }
+    format!("unset TERRARIUM_BASE TERRARIUM_CHANGED_FILES\n{recipe}")
+}
 
 /// The env of the recipe (TER-100, docs/api.md 35.2): the job kind and
 /// ID, the tested head, and with a base, the base and the absolute path
@@ -1458,6 +1469,24 @@ const CLEAN_SCRIPT: &str =
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// TER-100 review round 2: without a base, a list from the outer env
+    /// does not reach the recipe. With a base, the recipe runs as given.
+    #[test]
+    fn a_recipe_without_a_base_sees_no_inherited_list() {
+        let script = recipe_script(
+            "echo \"${TERRARIUM_BASE-unset} ${TERRARIUM_CHANGED_FILES-unset}\"".into(),
+            None,
+        );
+        let out = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("TERRARIUM_BASE", "abc")
+            .env("TERRARIUM_CHANGED_FILES", "/tmp/outer")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "unset unset\n");
+        assert_eq!(recipe_script("just x".into(), Some("abc")), "just x");
+    }
 
     /// Review of TER-71, major 1: ssh in the git steps reads no config
     /// file, keeps its host keys and the key file in the job's 0700 dir,
