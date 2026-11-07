@@ -10,13 +10,56 @@ Run: uv run python -m unittest discover -s scripts -p 'test_*.py'
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 TEXT = (REPO / ".github/workflows/ci.yml").read_text()
 DOCKERFILE = (REPO / "docker/Dockerfile").read_text()
+
+
+def calc_script() -> str:
+    """The run script of the `calc` step of the version job."""
+    lines = TEXT.splitlines()
+    start = lines.index("      - id: calc")
+    run = lines.index("        run: |", start)
+    body = []
+    for line in lines[run + 1 :]:
+        if line.strip() and not line.startswith("          "):
+            break
+        body.append(line)
+    return textwrap.dedent("\n".join(body))
+
+
+def git(cwd, *args):
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def make_history(path, steps):
+    """steps: ("tag", name) or (subject, [trailer, ...]) in order, from an init commit."""
+    git(path, "init", "-q", "-b", "main")
+    git(path, "commit", "-q", "--allow-empty", "-m", "chore: init")
+    for step in steps:
+        if step[0] == "tag":
+            git(path, "tag", step[1])
+            continue
+        subject, trailers = step
+        args = ["commit", "-q", "--allow-empty", "-m", subject]
+        if trailers:
+            # One paragraph: git reads trailers from the last paragraph only.
+            args += ["-m", "\n".join(trailers)]
+        git(path, *args)
 
 
 def yaml_doc():
@@ -99,6 +142,74 @@ class Release(unittest.TestCase):
                 if "run" in step:
                     with self.subTest(job=name, step=step.get("name")):
                         self.assertNotIn("${{", step["run"])
+
+
+class VersionCalc(unittest.TestCase):
+    """Runs the `calc` step of the version job on a throwaway repo."""
+
+    def calc(self, steps):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp, "repo")
+            repo.mkdir()
+            make_history(repo, steps)
+            out = Path(tmp, "output")
+            summary = Path(tmp, "summary")
+            env = {
+                "PATH": os.environ["PATH"],
+                "HOME": tmp,
+                "GITHUB_OUTPUT": str(out),
+                "GITHUB_STEP_SUMMARY": str(summary),
+            }
+            proc = subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", calc_script()],
+                cwd=repo,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            values = dict(line.split("=", 1) for line in out.read_text().splitlines())
+            return values
+
+    def test_release_after_alpha_promotes_it(self):
+        values = self.calc(
+            [("tag", "v0.5.0-alpha"), ("fix: a", []), ("feat: b", ["release: true"])]
+        )
+        self.assertEqual(values["version"], "0.5.0")
+        self.assertEqual(values["prerelease"], "false")
+        self.assertEqual(values["do_release"], "true")
+
+    def test_release_after_full_release_bumps(self):
+        values = self.calc([("tag", "v0.5.0"), ("fix: a", []), ("fix: b", ["release: true"])])
+        self.assertEqual(values["version"], "0.5.1")
+        self.assertEqual(values["prerelease"], "false")
+
+    def test_prerelease_after_alpha_bumps_as_before(self):
+        values = self.calc([("tag", "v0.5.0-alpha"), ("fix: a", ["pre-release: true"])])
+        self.assertEqual(values["version"], "0.5.1-alpha")
+        self.assertEqual(values["prerelease"], "true")
+
+    def test_bump_trailer_after_alpha_still_bumps(self):
+        values = self.calc(
+            [("tag", "v0.5.0-alpha"), ("fix: a", ["release: true", "bump: minor"])]
+        )
+        self.assertEqual(values["version"], "0.6.0")
+        self.assertEqual(values["prerelease"], "false")
+
+    def test_existing_stable_tag_blocks_promotion(self):
+        # The nearest tag is the alpha, but v0.5.0 exists: no promotion, so the
+        # release bumps from 0.5.0 instead of tagging an existing version.
+        values = self.calc(
+            [("tag", "v0.5.0"), ("fix: a", []), ("tag", "v0.5.0-alpha"), ("fix: b", ["release: true"])]
+        )
+        self.assertEqual(values["version"], "0.5.1")
+
+    def test_release_and_prerelease_trailers_keep_the_prerelease(self):
+        values = self.calc(
+            [("tag", "v0.5.0-alpha"), ("fix: a", ["release: true", "pre-release: true"])]
+        )
+        self.assertEqual(values["version"], "0.5.1-alpha")
+        self.assertEqual(values["prerelease"], "true")
 
 
 if __name__ == "__main__":

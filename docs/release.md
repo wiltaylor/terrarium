@@ -54,6 +54,12 @@ trailer:
 | `pre-release: true` | A pre-release `X.Y.Z-alpha`. The image gets `:pre`. |
 | `bump: major\|minor\|patch` | Optional. It overrides the bump that CI finds in the conventional-commit subjects since the last `v*` tag. |
 
+A `release: true` commit on top of the last tag `vX.Y.Z-alpha` promotes that
+pre-release: the version is `X.Y.Z` with no bump. A `bump:` trailer on the same
+commit still bumps. A release also bumps when `vX.Y.Z` already exists. With a
+`pre-release: true` trailer too, the commit stays a pre-release. The last tag
+`vX.Y.Z` (a full release) gives the normal bump.
+
 With no trailer, CI runs only the tests. Example:
 
 ```sh
