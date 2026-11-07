@@ -341,6 +341,9 @@ struct Lab {
     lead: String,
     /// The worker `p/w1`.
     w1: String,
+    /// The options of the host agent `lab1`, and its task.
+    client_opts: ClientOptions,
+    client: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -399,7 +402,7 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
         instances_dir: dirs.path().join("instances"),
         repos_dir: dirs.path().join("repos"),
     };
-    tokio::spawn(Client::new(o).run());
+    let client = tokio::spawn(Client::new(o.clone()).run());
     let start = Instant::now();
     while td.get("/api/hosts/lab1").await.body["online"] != true {
         assert!(start.elapsed() < DEADLINE, "lab1 never came online");
@@ -489,10 +492,37 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
         work,
         lead,
         w1,
+        client_opts: o,
+        client: std::sync::Mutex::new(Some(client)),
     }
 }
 
 impl Lab {
+    /// Wait until `/api/hosts/lab1` shows `online` as `on`.
+    async fn until_online(&self, on: bool) {
+        let start = Instant::now();
+        while self.td.get("/api/hosts/lab1").await.body["online"] != on {
+            assert!(start.elapsed() < DEADLINE, "lab1 online never became {on}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Stop the host agent `lab1`, as a daemon restart leaves it: not
+    /// connected to the daemon.
+    async fn agent_down(&self) {
+        if let Some(c) = self.client.lock().unwrap().take() {
+            c.abort();
+        }
+        self.until_online(false).await;
+    }
+
+    /// Start the host agent `lab1` again.
+    async fn agent_up(&self) {
+        let c = tokio::spawn(Client::new(self.client_opts.clone()).run());
+        *self.client.lock().unwrap() = Some(c);
+        self.until_online(true).await;
+    }
+
     /// Make branch `name` from `base` with `files`, push it, and return
     /// its head.
     fn branch(&self, name: &str, base: &str, files: &[(&str, &str)]) -> String {
@@ -1867,4 +1897,137 @@ async fn a_merge_that_fails_without_a_conflict_drops_only_that_card() {
         next_merges(&lab),
         ["Merge ter-u1 onto next", "Merge ter-u3 onto next"]
     );
+}
+
+// ------------------------------------------------------------- TER-123
+
+/// A process group that a job run of the last daemon left on this
+/// machine: a shell that ignores `TERM` with a child. Its job PID file
+/// holds the PID and the start time, as the wrapper writes them.
+fn orphan(job: &str) -> (std::process::Child, u32) {
+    use std::os::unix::process::CommandExt;
+    let dir = tempfile::tempdir().unwrap();
+    let child_file = dir.path().join("child");
+    let leader = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "trap '' TERM; sleep 300 & echo $! > \"$1\"; wait",
+            "orphan",
+        ])
+        .arg(&child_file)
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pid = leader.id();
+    let start = Instant::now();
+    let child = loop {
+        if let Some(c) = std::fs::read_to_string(&child_file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+        {
+            break c;
+        }
+        assert!(start.elapsed() < DEADLINE, "the orphan wrote no child");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let st = stat.rsplit(") ").next().unwrap().split_whitespace().nth(19).unwrap().to_owned();
+    std::fs::write(
+        terrariumd::run_kill::job_pidfile(job),
+        format!("{pid} {st}\n"),
+    )
+    .unwrap();
+    (leader, child)
+}
+
+/// TER-123 review, blocker 1 and major 3: after a daemon restart, a job
+/// that was running and one cancelled while it drained left their
+/// processes on a docker target (through host agent `lab1`). The host
+/// agent connects only after the start. The recovery waits for it, kills
+/// both process groups, and fails the running job. Until then both jobs
+/// keep their slots: a validation queued meanwhile (two slots) does not
+/// start, also not on a tick.
+#[tokio::test]
+async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots() {
+    let (lab, _bins, children) = docker_lab(2, 600).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let cr = lab.card("lost-run", "ter-l1").await;
+    let cc = lab.card("lost-cancel", "ter-l2").await;
+    let run_id = ulid::Ulid::new().to_string();
+    let cancel_id = ulid::Ulid::new().to_string();
+    let now = chrono::Utc::now();
+    let at = |mins: i64| {
+        (now - chrono::Duration::minutes(mins))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    let rows = [
+        (run_id.clone(), cr.clone(), "running", at(5), None),
+        (cancel_id.clone(), cc.clone(), "cancelled", at(5), Some(at(1))),
+    ];
+    state
+        .db
+        .write("operator", move |t| {
+            for (id, card, st, started, ended) in rows {
+                t.execute(
+                    "INSERT INTO jobs (id, project, card, kind, repo, branch, state, created_by,
+                                       created_at, started_at, ended_at)
+                     VALUES (?1, 'p', ?2, 'validate', 'app', 'b', ?3, 't', ?4, ?4, ?5)",
+                    rusqlite::params![id, card, st, started, ended],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (mut lr, run_child) = orphan(&run_id);
+    let (mut lc, cancel_child) = orphan(&cancel_id);
+
+    // The restart: the host agent is not connected yet.
+    lab.agent_down().await;
+    let recovery = terrariumd::jobs::recover_lost(&state).await;
+    let h = lab.branch("ter-l3", "next", &[("OK", "1")]);
+    let c = lab.card("queued", "ter-l3").await;
+    let r = lab
+        .td
+        .post_as(&lab.w1, &format!("/api/cards/{c}/validate"), json!({"commit": h}))
+        .await;
+    let queued = r.ok()["job"]["id"].as_str().unwrap().to_owned();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    terrariumd::jobs::tick(&state).await.unwrap();
+    for (p, what) in [(lr.id(), "running"), (run_child, "running child"),
+                      (lc.id(), "cancelled"), (cancel_child, "cancelled child")] {
+        assert!(alive(p), "the {what} orphan {p} is gone before the host agent is back");
+    }
+    let q = lab.td.get(&format!("/api/jobs/{queued}")).await.ok().clone();
+    assert_eq!(q["state"], "queued", "a job took a slot of a lost job: {q}");
+    let j = lab.td.get(&format!("/api/jobs/{run_id}")).await.ok().clone();
+    assert_eq!(j["state"], "running", "{j}");
+
+    lab.agent_up().await;
+    tokio::time::timeout(DEADLINE, recovery).await.unwrap().unwrap();
+    for p in [lr.id(), run_child, lc.id(), cancel_child] {
+        assert!(!alive(p), "the orphan {p} outlived the recovery");
+    }
+    let j = lab.td.get(&format!("/api/jobs/{run_id}")).await.ok().clone();
+    assert_eq!(j["state"], "failed", "{j}");
+    assert!(j["tail"].as_str().unwrap_or("").contains("the run is lost"), "{j}");
+    for id in [&run_id, &cancel_id] {
+        let f = terrariumd::run_kill::job_pidfile(id);
+        assert!(!Path::new(&f).exists(), "{f} is left");
+    }
+    // Now the slots are free: the queued validation starts. End it.
+    until_not(&lab, &queued, "queued").await;
+    let r = lab.td.delete(&format!("/api/jobs/{queued}")).await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    if let Ok(text) = std::fs::read_to_string(&children) {
+        for p in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+            let start = Instant::now();
+            while alive(p) {
+                assert!(start.elapsed() < DEADLINE, "the child {p} outlived its job");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    let _ = lr.wait();
+    let _ = lc.wait();
 }

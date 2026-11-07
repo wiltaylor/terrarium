@@ -1117,23 +1117,16 @@ pub fn cancel(t: &mut Tx<'_>, id: &str) -> ApiResult<Job> {
     Ok(job)
 }
 
-/// Fail each job that was running when the daemon stopped: its run is
-/// lost. Returns the jobs.
-pub fn fail_lost(t: &mut Tx<'_>) -> ApiResult<Vec<Job>> {
-    let lost = running(t)?;
-    let mut out = Vec::new();
-    for j in lost {
-        let end = JobEnd {
-            passed: false,
-            outcome: Some("error".into()),
-            tail: Some("the daemon restarted while the job ran; the run is lost".into()),
-            ..JobEnd::default()
-        };
-        if let Some(j) = finish(t, &j.id, &end)? {
-            out.push(j);
-        }
-    }
-    Ok(out)
+/// Fail job `id`, which was running when the last daemon stopped: its
+/// run is lost. `None` when it is not running (any more).
+pub fn fail_lost(t: &mut Tx<'_>, id: &str) -> ApiResult<Option<Job>> {
+    let end = JobEnd {
+        passed: false,
+        outcome: Some("error".into()),
+        tail: Some("the daemon restarted while the job ran; the run is lost".into()),
+        ..JobEnd::default()
+    };
+    finish(t, id, &end)
 }
 
 /// The queue config of a project. The default (no queue) when none is set.

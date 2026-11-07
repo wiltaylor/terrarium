@@ -57,10 +57,12 @@
 //!   and goes through the rerun rule. Before that, and before the first
 //!   tick, the new daemon ends what still runs of them on their targets
 //!   (TER-123): each step of a job writes its PID to the same file
-//!   ([`crate::run_kill::job_pidfile`]), and [`kill_lost_runs`] runs the
+//!   ([`crate::run_kill::job_pidfile`]), and [`recover_lost`] runs the
 //!   kill of [`crate::run_kill`] on that file, for the running jobs and
 //!   for the jobs cancelled in the last [`DRAIN_WINDOW_HOURS`] (they may
-//!   still have been draining).
+//!   still have been draining). Their slots stay taken until the kill
+//!   ended, and the kill waits for a host agent that has not connected
+//!   yet.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -189,9 +191,9 @@ pub fn kill(job: &str) {
     }
 }
 
-/// Start the queue: end what still runs on the targets of the jobs that
-/// the last daemon left running ([`kill_lost_runs`]), fail those jobs,
-/// then tick.
+/// Start the queue: take up the jobs that the last daemon left
+/// ([`recover_lost`]), then tick. The kills of their runs go on in the
+/// background, while their slots stay taken.
 pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
@@ -199,17 +201,7 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             if let Err(e) = prepare_hosts(&state.db, None).await {
                 warn!("cannot initialize stored job host keys: {e}");
             }
-            kill_lost_runs(&state).await;
-            match state.db.write("system", jobs::fail_lost).await {
-                Ok(lost) => {
-                    for j in lost {
-                        if let Err(e) = after_end(&state, &j).await {
-                            warn!(job = %j.id, "cannot handle a lost job: {e}");
-                        }
-                    }
-                }
-                Err(e) => warn!("cannot fail the lost jobs: {e}"),
-            }
+            drop(recover_lost(&state).await);
         }
         loop {
             let Some(state) = weak.upgrade() else { break };
@@ -222,35 +214,73 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
     })
 }
 
+/// A job that the last daemon left, found by [`recover_lost`].
+struct Lost {
+    job: Job,
+    /// Still `running` in the database (else cancelled in the drain
+    /// window).
+    running: bool,
+    /// The delivery target of its project, when it is a target of that
+    /// project.
+    def: Option<terrarium_core::config::TargetDef>,
+    /// A cancelled job is in [`Live::runs`] while its kill runs, so its
+    /// slot is not free (TER-123).
+    live: Option<LiveRun>,
+}
+
 /// TER-123: end the processes that the jobs of the last daemon left on
-/// their targets, before those jobs end and their slots count as free.
-/// For each running job, and each job cancelled in the last
-/// [`DRAIN_WINDOW_HOURS`], run the kill of [`crate::run_kill`] on the PID
-/// file of its steps ([`crate::run_kill::job_pidfile`]) on the delivery
-/// target of its project. The kills run at the same time, each bounded by
-/// the timeout of the kill command. A target that cannot be reached, or
-/// that is not a `host`, `docker`, or `ssh` target, is logged and the job
-/// ends anyway.
-async fn kill_lost_runs(state: &Shared) {
+/// their targets, before their slots count as free.
+///
+/// The jobs are the running ones, and the ones cancelled in the last
+/// [`DRAIN_WINDOW_HOURS`] (they may still have been draining). Jobs of
+/// this daemon (in [`Live::runs`]) are not among them. They are found in
+/// one write, so a tick (a write too) sees them in order: a running job
+/// keeps its slot by its state, and a cancelled one is put in
+/// [`Live::runs`] in the same write.
+///
+/// Then, in the returned task, for each job at the same time: the kill of
+/// [`crate::run_kill`] runs on the PID file of its steps
+/// ([`crate::run_kill::job_pidfile`]) on the delivery target of its
+/// project. It waits for a host agent that has not connected to this
+/// daemon yet ([`crate::run_kill::HOST_WAIT_SECS`]) and is bounded by the
+/// timeout of the kill command. Then a running job fails (the run is
+/// lost), a cancelled one leaves [`Live::runs`], and a tick follows. A
+/// kill that fails is logged, and the job ends anyway.
+pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
     let since = (chrono::Utc::now() - chrono::Duration::hours(DRAIN_WINDOW_HOURS))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let found = state
         .db
-        .read(move |c| {
-            let mut out = Vec::new();
-            for j in jobs::running(c)?
+        .write("system", move |t| {
+            let ours: HashSet<String> = live().runs.iter().cloned().collect();
+            let lost = jobs::running(t)?
                 .into_iter()
-                .chain(jobs::cancelled_since(c, &since)?)
-            {
-                let Some(target) = jobs::delivery(c, &j.project)?.target else {
-                    continue;
-                };
-                match targets::get(c, &target) {
-                    Ok(row) if row.def.project.as_ref().is_none_or(|p| *p == j.project) => {
-                        out.push((j, row.def));
+                .map(|j| (j, true))
+                .chain(jobs::cancelled_since(t, &since)?.into_iter().map(|j| (j, false)))
+                .filter(|(j, _)| !ours.contains(&j.id))
+                .collect::<Vec<_>>();
+            let mut out = Vec::new();
+            for (job, running) in lost {
+                let target = jobs::delivery(t, &job.project)?.target;
+                let def = match target.as_deref().map(|n| targets::get(t, n)) {
+                    Some(Ok(row))
+                        if row.def.project.as_ref().is_none_or(|p| *p == job.project) =>
+                    {
+                        Some(row.def)
                     }
-                    _ => warn!(job = %j.id, delivery_target = %target, "cannot kill a lost job run: no such target of its project"),
-                }
+                    _ => {
+                        warn!(job = %job.id, delivery_target = ?target,
+                            "cannot kill a lost job run: no such target of its project");
+                        None
+                    }
+                };
+                let live = (!running).then(|| LiveRun::new(&job.id));
+                out.push(Lost {
+                    job,
+                    running,
+                    def,
+                    live,
+                });
             }
             Ok(out)
         })
@@ -258,38 +288,65 @@ async fn kill_lost_runs(state: &Shared) {
     let found = match found {
         Ok(f) => f,
         Err(e) => {
-            warn!("cannot read the lost job runs: {e}");
-            return;
+            warn!("cannot read the lost jobs: {e}");
+            Vec::new()
         }
     };
-    let kills = found.into_iter().filter_map(|(j, def)| {
-        if !crate::run_kill::kind_wraps(&def) {
-            debug!(job = %j.id, "a lost job run on a target without PID files");
-            return None;
-        }
-        let holder = Some(format!("{}/jobs", j.project));
-        Some(async move {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let ends = found.into_iter().map(|l| end_lost(&state, l));
+        futures_util::future::join_all(ends).await;
+    })
+}
+
+/// Kill what still runs of lost job `l` on its target, then end it: see
+/// [`recover_lost`].
+async fn end_lost(state: &Shared, l: Lost) {
+    let Lost {
+        job,
+        running,
+        def,
+        live,
+    } = l;
+    match def {
+        Some(def) if crate::run_kill::kind_wraps(&def) => {
             let r = crate::run_kill::kill_file(
                 state,
                 &def,
-                holder,
-                &crate::run_kill::job_pidfile(&j.id),
+                Some(format!("{}/jobs", job.project)),
+                &crate::run_kill::job_pidfile(&job.id),
             )
             .await;
-            (j.id, r)
-        })
-    });
-    for (job, r) in futures_util::future::join_all(kills).await {
-        if r.get("error").is_some() {
-            warn!(%job, report = %r, "cannot kill a lost job run on its target");
-        } else if r["left"].as_array().is_some_and(|l| !l.is_empty()) {
-            warn!(%job, report = %r, "the kill of a lost job run left processes on the target");
-        } else if r["pid"].is_null() {
-            debug!(%job, "a lost job run had no PID file on its target");
-        } else {
-            info!(%job, report = %r, "killed a lost job run on its target");
+            let id = &job.id;
+            if r.get("error").is_some() {
+                warn!(job = %id, report = %r, "cannot kill a lost job run on its target");
+            } else if r["left"].as_array().is_some_and(|l| !l.is_empty()) {
+                warn!(job = %id, report = %r, "the kill of a lost job run left processes on the target");
+            } else if !r["stale"].is_null() {
+                info!(job = %id, report = %r, "the PID file of a lost job run was stale");
+            } else if r["pid"].is_null() {
+                debug!(job = %id, "a lost job run had no PID file on its target");
+            } else {
+                info!(job = %id, report = %r, "killed a lost job run on its target");
+            }
+        }
+        Some(_) => debug!(job = %job.id, "a lost job run on a target without PID files"),
+        None => {}
+    }
+    if running {
+        let id = job.id.clone();
+        match state.db.write("system", move |t| jobs::fail_lost(t, &id)).await {
+            Ok(Some(j)) => {
+                if let Err(e) = after_end(state, &j).await {
+                    warn!(job = %j.id, "cannot handle a lost job: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => warn!(job = %job.id, "cannot fail a lost job: {e}"),
         }
     }
+    drop(live);
+    kick(state);
 }
 
 /// Start a tick now, in the background.
