@@ -8303,7 +8303,7 @@ ends the agent of a finished card.
 
 | Method and path | Body | Answer |
 |---|---|---|
-| `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. No rules and no `text`: `404`. |
+| `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. The stored rules of a project with `board_flow = rules` include the pack (§19.12). No rules, no pack, and no `text`: `404`. |
 | `GET /api/projects/{name}/rules/runs?rule=&limit=` | | `200`, `{runs: [{id, project, rule, rule_hash, event_seq, card?, state, step, steps, reason?, created_at, updated_at}]}`, newest first (`limit` 1 to 500, default 100). `state` is `pending`, `done`, `noop`, `failed`, or `skipped`; `step` the next action (pending) or the actions run; `steps` one `{verb, ok, changed?, detail?, error?}` for each action run. The project keeps its newest 500 finished runs, and every run of the last hour (the rate limits count them). |
 
 Both: whoever reads the project.
@@ -8428,6 +8428,86 @@ the engine. A job that ended under `rules` but whose events the engine
 had not run yet (a window of about one pass) then gets no flow from
 either side: its cards keep their column and job labels. Switch while the
 queue is idle, or move and relabel those cards by hand.
+
+### 19.12 Migration, lint, and the rule tools
+
+TER-171. These endpoints help a project move to `board_flow = rules`
+(§19.11) and show what its rules do. The CLI is `terrarium rule`
+(docs/cli.md), and the dashboard has a Rules tab beside Schedules on the
+board screen.
+
+**The migration.** The pack names columns by role (`@review`,
+`@accepted`, `@ready`), and its bound agent rules name the wait columns
+(`validating`, `review`, `accepted`). A board can lack some of them. On
+such a board a run of the pack fails (§19.9). The migration maps the pack
+to the board's columns:
+
+- A `card_move` to a column that the board lacks becomes a `card_comment`
+  with the move's `comment`. With no comment the move is dropped. The
+  coded flow wrote a comment when such a move failed. Example: on a board
+  with no `accepted` column, `merge-pass` takes the labels off, writes
+  the end comment, and unassigns the card. The card stays where it is.
+- A name in a `when` on `data.to` or `data.from` that the board lacks maps
+  to the column with that role, else it goes from the list. Example: with
+  `code_review` (role `review`), `agent-park` parks on `code_review`. An
+  `eq` on a missing name turns the rule off. An `ne` on a missing name is
+  dropped (it always holds).
+- A column that a `card_move.from`, an `if_card`, or another verb names
+  and the board lacks goes from the list. A verb with no column left is
+  dropped.
+- A rule with no verb left, or one that can never match, is turned off:
+  `rule "<name>" { description = "Off for this board: ..."  enabled = false }`.
+
+Each changed pack rule becomes an override (a rule with the pack rule's
+name, §19.11) at the end of the project's `rules.wcl`, with the reasons
+in its `description`. A pack rule that `rules.wcl` replaces already stays
+as it is (`kept`). A second migration of the same board changes nothing.
+
+**The lint.** It reads the rules that the engine runs: the pack with the
+project's own rules for `board_flow = rules`, else only its own rules.
+Rules that are off count for nothing. It finds two problems:
+
+- `missing_column`: a rule names a column that the board lacks. Each run
+  of the rule fails.
+- `stuck_column`: a rule moves cards into a column (a `card_move`, or the
+  new card of a `job_fix`), and no rule moves a card out of it. A rule
+  moves a card out of column C when it has a `card_move` to another
+  column of the board, with no `from` or a `from` that holds C, and no
+  `if_card` that rules out C. A person must then move each such card on.
+  The column `done` and the column with the role `blocked` are left out:
+  a card stops there by design.
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `GET /api/projects/{name}/rules/effective` | | `200`, `{project, board_flow, exists, hash?, source?, rules: [...]}`. `rules` is the rules that the engine runs, in its order. Each rule has the fields of §19.8, `origin` (`pack`, `override`: a rule of `rules.wcl` with a pack name, or `own`), and `wcl` (the rule as WCL text). |
+| `POST /api/projects/{name}/rules/lint` | `{text?}` | `200`, `{project, board_flow, source: "stored" or "text", findings: [{code, column, rules, message}]}`. With `text`, the text is checked as the `rules.wcl` first (`422` as §19.8). |
+| `POST /api/projects/{name}/rules/migrate` | `{apply?, base_hash?}` | `200`, `{project, applied, board_flow, changed, text, hash?, changes: [{rule, change, reasons}], findings}`. `change` is `mapped`, `disabled`, or `kept`. `text` is the new `rules.wcl` (the old text, then the overrides). `findings` is the lint of the rules after the migration, with the pack. Without `apply` it writes nothing. With `apply`, one write stores the text (when it changed) and sets `board_flow = rules`, with the audit row `rules.migrate` (`{board_flow, previous_board_flow, hash, changes}`) and `rules.put` for the text. |
+| `POST /api/projects/{name}/rules/{rule}/enable` | | `200`, `{project, rule, enabled, changed, hash?}`. |
+| `POST /api/projects/{name}/rules/{rule}/disable` | | The same. |
+
+`enable` and `disable` edit the text of `rules.wcl` and keep the rest of
+the text as it is. A rule of the file gets its `enabled` field set (or a
+new `enabled = false` line after its `{`). A pack rule that the file does
+not name gets `rule "<name>" { enabled = false }` at the end. To enable a
+pack rule that the file turns off with that short form, the short form is
+removed, so the pack rule runs again. A rule that is already so changes
+nothing (`changed: false`). An unknown rule is `404`. A short form of a
+rule that is not in the pack is `409`: edit the file.
+
+Rights: `effective`, `lint`, and a `migrate` without `apply` are for
+whoever reads the project. A `migrate` with `apply`, `enable`, and
+`disable` are for the operator, a project admin, or a sysadmin, as a put
+of the rules (§19.8). The writes go through the put of §19.8: a stale
+`base_hash` is `409 conflict` (`migrate` takes the hash read now when
+`base_hash` is absent), a board change during the check is `409
+conflict`, and the rules of a file are `409 file_managed`. For a project
+whose rules come from a file, run the migration without `apply`, put
+`text` into `projects/<project>.rules.wcl`, and set `board_flow =
+"rules"` in the project file.
+
+The dry run of §19.9 without `text` plans the pack too when the project
+runs it (`board_flow = rules`). Such a project with no `rules.wcl` plans
+the pack alone (before TER-171 it was `404`).
 
 ## 20. Event sources and ingest
 

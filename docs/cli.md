@@ -1818,6 +1818,34 @@ terrarium schedule redeliver <id> <delivery>  send a delivery again (a copy, due
 terrarium schedule test <id> [--event-json <file|->]   run the action once as a test for a sample event; exit 1 on no match or a failure
 ```
 
+### Board rules
+
+`rule` has the alias `rules`. A board rule reacts to an event of the log
+and runs verbs on the board ([api.md §19.8](api.md#198-board-rules)).
+With `board_flow = rules` the built-in pack runs the card flow
+(§19.11). The project is `--project`, else the agent's own.
+
+```
+terrarium rule ls                             the rules that run, in order: pack, override, or own; on or off; events; verbs
+terrarium rule show <rule>                    the rule as WCL, and its last 5 runs
+terrarium rule check [<file|->]               lint the stored rules (or check and lint a rules.wcl text); exit 1 on a finding
+terrarium rule test (--seq <n> | --from <n> [--to <n>]) [--file <file|->]   a dry run on events of the log; writes nothing
+terrarium rule log [--rule <name>] [--limit 20]   the runs, newest first
+terrarium rule enable|disable <rule>          switch a rule of rules.wcl, or a pack rule, on or off
+terrarium rule migrate [--apply] [--text]     map the pack to the board; --apply stores rules.wcl and sets board_flow rules
+```
+
+- `check` finds a column that a rule names and the board lacks
+  (`missing_column`), and a column that rules move cards into and no rule
+  moves out of (`stuck_column`, [api.md §19.12](api.md#1912-migration-lint-and-the-rule-tools)).
+- `migrate` without `--apply` prints what changes and the lint after it.
+  `--text` prints the whole new `rules.wcl`. `--apply` needs
+  project_admin. For rules from a file, put the text into
+  `projects/<project>.rules.wcl` and set `board_flow = "rules"` in the
+  project file.
+- `disable` of a pack rule writes `rule "<name>" { enabled = false }` into
+  `rules.wcl`. `enable` takes it out again.
+
 - `<id>` is the ULID, `project/name`, or a name in your project.
 - `--owner` (docs/api.md §19.6): `actor` (the default) runs the schedule as
   you; `project` gives its rights to the project (project_admin;

@@ -4602,3 +4602,104 @@ export interface Tool {
   grants?: ToolGrant[];
 }
 
+
+// ---- Board rules (docs/api.md §19.8, §19.9, §19.12, TER-171) ----
+
+/** Who runs the card flow of a project (§19.11). */
+export type BoardFlow = "code" | "rules";
+
+/** One verb of a rule: `card.move`, `card.label`, ... with its arguments. */
+export interface RuleAction {
+  verb: string;
+  args?: Record<string, unknown>;
+}
+
+/** One rule that runs (`GET /api/projects/{name}/rules/effective`). */
+export interface EffectiveRule {
+  name: string;
+  description?: string;
+  enabled: boolean;
+  /** Event kind globs. */
+  on: string[];
+  when?: { path: string; op: string; value: unknown }[];
+  if_card?: Record<string, unknown>[];
+  if_job?: Record<string, unknown>[];
+  max_per_hour?: number;
+  actions: RuleAction[];
+  line: number;
+  /** `pack` (the built-in pack), `override` (a rule of rules.wcl with a pack name), or `own`. */
+  origin: "pack" | "override" | "own";
+  /** The rule as WCL. */
+  wcl: string;
+}
+
+export interface EffectiveRules {
+  project: string;
+  board_flow: BoardFlow;
+  /** The project has a rules.wcl. */
+  exists: boolean;
+  hash?: string | null;
+  source?: "api" | "file" | null;
+  rules: EffectiveRule[];
+}
+
+/** One finding of the lint (§19.12). */
+export interface RuleFinding {
+  code: "missing_column" | "stuck_column";
+  column: string;
+  rules: string[];
+  message: string;
+}
+
+export interface RulesLint {
+  project: string;
+  board_flow: BoardFlow;
+  source: "stored" | "text";
+  findings: RuleFinding[];
+}
+
+/** One run of a rule (§19.9 run log). */
+export interface RuleRun {
+  id: string;
+  project: string;
+  rule: string;
+  rule_hash: string;
+  event_seq: number;
+  card?: string | null;
+  state: "pending" | "done" | "noop" | "failed" | "skipped";
+  step: number;
+  steps: { verb: string; ok: boolean; changed?: boolean; detail?: unknown; error?: string }[];
+  reason?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RuleToggle {
+  project: string;
+  rule: string;
+  enabled: boolean;
+  /** False: the rule was so already, rules.wcl did not change. */
+  changed: boolean;
+  hash?: string | null;
+}
+
+/** What the migration does with one pack rule. */
+export interface RuleChange {
+  rule: string;
+  change: "mapped" | "disabled" | "kept";
+  reasons: string[];
+}
+
+/** `POST /api/projects/{name}/rules/migrate`. */
+export interface RulesMigration {
+  project: string;
+  applied: boolean;
+  board_flow: BoardFlow;
+  /** The text of rules.wcl changes. */
+  changed: boolean;
+  /** The new rules.wcl. */
+  text: string;
+  hash?: string | null;
+  changes: RuleChange[];
+  findings: RuleFinding[];
+}

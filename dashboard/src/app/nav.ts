@@ -32,6 +32,8 @@ export const BOARD_TABS = [
   { path: "tests", label: "Tests" },
   // The schedules and triggers of the project; the page keeps its own `?tab=triggers` sub-tab.
   { path: "schedules", label: "Schedules" },
+  // The board rules of the project (docs/api.md §19.12): the rules that run, the lint, the runs, and the switch to rules.
+  { path: "rules", label: "Rules" },
 ] as const;
 
 /** The tabs of the knowledge screen, in order. Each is a route under /p/:project/knowledge. */

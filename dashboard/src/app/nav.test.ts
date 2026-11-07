@@ -258,12 +258,13 @@ describe("navigation", () => {
     }
   });
 
-  it("has Board with the tabs Cards, Artifacts, Tests, Schedules, each with a route; Cards is the index route at /p/:project/board", () => {
+  it("has Board with the tabs Cards, Artifacts, Tests, Schedules, Rules, each with a route; Cards is the index route at /p/:project/board", () => {
     expect(BOARD_TABS).toEqual([
       { path: "", label: "Cards" },
       { path: "artifacts", label: "Artifacts" },
       { path: "tests", label: "Tests" },
       { path: "schedules", label: "Schedules" },
+      { path: "rules", label: "Rules" },
     ]);
     expect(app).toMatch(/<Route path="\/p\/:project\/board" component=\{BoardScreen\}>/);
     const start = app.indexOf('<Route path="/p/:project/board"');
@@ -273,6 +274,7 @@ describe("navigation", () => {
     expect(app).not.toMatch(/VersionsPage/);
     expect(block).toMatch(/path="\/artifacts\/:id\?" component=\{ArtifactsPage\}/);
     expect(block).toMatch(/path="\/schedules" component=\{SchedulesPage\}/);
+    expect(block).toMatch(/path="\/rules" component=\{RulesPage\}/);
     expect(block).toMatch(/path="\/tests" component=\{TestRunsPage\}/);
     expect(block).toMatch(/path="\/tests\/:id" component=\{TestRunPage\}/);
     expect(movedTo("/p/terrarium/tests")).toBe("/p/terrarium/board/tests");
@@ -280,7 +282,7 @@ describe("navigation", () => {
     for (const gone of ["versions", "artifacts", "wiki", "memory"]) expect(app).not.toMatch(new RegExp(`path="/p/:project/${gone}[^"]*" component=`));
     // The Cards tab and its `?card=` links keep the path.
     expect(movedTo("/p/terrarium/board")).toBeUndefined();
-    for (const now of ["/p/terrarium/board/artifacts/ART-2", "/p/terrarium/board/schedules", "/p/terrarium/board/tests", "/p/terrarium/board/tests/01JBTRUN1"]) expect(movedTo(now)).toBeUndefined();
+    for (const now of ["/p/terrarium/board/artifacts/ART-2", "/p/terrarium/board/schedules", "/p/terrarium/board/rules", "/p/terrarium/board/tests", "/p/terrarium/board/tests/01JBTRUN1"]) expect(movedTo(now)).toBeUndefined();
   });
 
   it("has Knowledge with the tabs Wiki, Memory, and DB, each with a route; /p/:project/knowledge opens the Wiki tab", () => {
