@@ -7,7 +7,7 @@
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Thread } from "../../api/types";
 import { Empty, ErrorBanner } from "../../components/ui";
-import { api, events } from "../../stores";
+import { api, events, inbox } from "../../stores";
 import { ThreadRow } from "./ThreadRow";
 import { inThreadsView, sortThreads, threadListStatus, type ThreadsViewId } from "./threads";
 
@@ -52,7 +52,7 @@ export function ThreadsView(props: { view: ThreadsViewId; project: string; now: 
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
       <Show when={list().length} fallback={<Empty>{loading() ? "Loading…" : EMPTY[props.view]}</Empty>}>
         <div class="stack" aria-label="Threads">
-          <For each={list()}>{(t) => <ThreadRow thread={t} now={props.now} />}</For>
+          <For each={list()}>{(t) => <ThreadRow thread={t} now={props.now} onChange={() => (void reload(), void inbox.refresh())} />}</For>
         </div>
       </Show>
     </div>

@@ -1,6 +1,6 @@
 // Small parts of the test run views: the stacked counts bar, the status chip,
-// the run row, and the list of the runs linked to a card or a version (the card
-// drawer and the Version modal). Every status shows as an icon and a word, not
+// the run row, the chip of a linked label, and the list of the runs linked to a
+// card (the card drawer). Every status shows as an icon and a word, not
 // as a colour only.
 
 import { A } from "@solidjs/router";
@@ -9,10 +9,24 @@ import type { CardTests, TestCounts, TestRunStatus, TestRunSummary } from "../..
 import { ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { api, events } from "../../stores";
+import { labelHref } from "../board/versionLabels";
 import { barSegments, CASE_ICON, chipText, combinedStatus, countsText, latestByName, STATUS_TONE, sumCounts, testDuration } from "./model";
 
 /** The page of a run. */
 export const runHref = (project: string, id: string) => `/p/${encodeURIComponent(project)}/board/tests/${encodeURIComponent(id)}`;
+
+/** The chip of a label that a run links to. A version label opens the board filtered by that version. */
+export function LabelChip(props: { project: string; label: string }) {
+  return (
+    <Show when={labelHref(props.project, props.label)} fallback={<span class="chip info">{props.label}</span>}>
+      {(href) => (
+        <A class="chip info" href={href()} title={`Open the cards of ${props.label}`}>
+          {props.label}
+        </A>
+      )}
+    </Show>
+  );
+}
 
 const RUN_ICON: Record<TestRunStatus, string> = { passed: CASE_ICON.passed, failed: CASE_ICON.failed, empty: CASE_ICON.skipped };
 
@@ -70,11 +84,11 @@ export function RunLine(props: { run: TestRunSummary }) {
 }
 
 /**
- * The test runs linked to a card or to a version, newest first, with the
+ * The test runs linked to a card, newest first, with the
  * combined status of the newest run of each name. It loads again on a
  * `test_run` event of the project.
  */
-export function LinkedRuns(props: { project: string; card?: string; version?: string; title?: string }) {
+export function LinkedRuns(props: { project: string; card?: string; title?: string }) {
   const [runs, setRuns] = createSignal<TestRunSummary[]>([]);
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
@@ -82,7 +96,7 @@ export function LinkedRuns(props: { project: string; card?: string; version?: st
   const reload = async () => {
     const mine = ++gen;
     try {
-      const page = await api.testRuns.list(props.project, { card: props.card, version: props.version, limit: 50 });
+      const page = await api.testRuns.list(props.project, { card: props.card, limit: 50 });
       if (mine !== gen) return;
       setRuns(page.items);
       setError(null);
@@ -94,7 +108,7 @@ export function LinkedRuns(props: { project: string; card?: string; version?: st
   };
   createEffect(
     on(
-      () => [props.project, props.card, props.version],
+      () => [props.project, props.card],
       () => {
         setRuns([]);
         setLoaded(false);

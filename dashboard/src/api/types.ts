@@ -1184,8 +1184,10 @@ export const EVENT_KINDS = [
   // The project DB (docs/api.md §27): `data: {change, project, type, id, revision}`.
   "db.type",
   "db.record",
-  // A test run (docs/api.md, test runs): `{change, project, id, name, counts, cards, versions}`.
+  // A test run (docs/api.md, test runs): `{change, project, id, name, counts, cards, labels}`.
   "test_run",
+  // The job queue (docs/api.md §35): a job queued, started, or ended `{change, project, id, card, kind, state, attempt, outcome, cards?}`.
+  "job",
   // Monitors (docs/api.md §30): each result, and a change of status `{project, monitor, monitor_id, from, to, value?, unit?, message?}`.
   "monitor.result",
   "monitor.status",
@@ -1210,14 +1212,6 @@ export const EVENT_KINDS = [
   "artifact.linked",
   "artifact.deleted",
   "artifact.pruned",
-  "version.created",
-  "version.updated",
-  "version.submitted",
-  "version.approved",
-  "version.rejected",
-  "version.released",
-  "version.archived",
-  "version.unarchived",
   // docs/api.md §16.7.
   "usage.sample",
   "quota.sample",
@@ -1585,7 +1579,14 @@ export interface Thread {
   updated_at: string;
   closed_at: string | null;
   closed_by: string | null;
+  /** The close that the attached agent proposes (TER-95): the handoff that the operator confirms. `null`: none. Absent on a daemon before 0.3.0. */
+  close_proposal?: ThreadHandoff | null;
+  /** Why a closed thread closed. Absent on a daemon before 0.3.0. */
+  close_reason?: ThreadCloseReason | null;
 }
+
+/** `confirmed`: the operator confirmed the agent's proposal; `operator`: the operator closed it; `stale`: untouched; `failed_start`: its agent did not start. */
+export type ThreadCloseReason = "confirmed" | "operator" | "stale" | "failed_start";
 
 /** `POST /api/threads`. `agent`: a ULID or `project/name`, until TER-92 spawns it from the template. */
 export interface NewThread {
@@ -1602,15 +1603,16 @@ export interface ThreadQuery {
   scope?: string;
 }
 
-/** `POST /api/threads/{id}/close`: the handoff. */
+/** `POST /api/threads/{id}/close`: the handoff, or `confirm` (TER-95): close with the agent's proposed handoff; no `summary` or `links` with it. */
 export interface ThreadClose {
   summary?: string;
   links?: ThreadLink[];
+  confirm?: boolean;
 }
 
 /** `data` of a `thread` event. */
 export interface ThreadEventData {
-  change: "opened" | "message" | "response" | "question" | "tracking" | "closed";
+  change: "opened" | "message" | "response" | "question" | "tracking" | "close_proposed" | "closed";
   id: string;
   scope: string;
   status: ThreadStatus;
@@ -1760,14 +1762,27 @@ export interface Card {
   tests?: CardTests;
   /** The idle mark (docs/api.md §6.2 "Idle alert", TER-67): the assignee rests with no wait since this time, past the project's idle alert, and the leads were told. */
   idle_since?: string | null;
+  /** The open (queued or running) job of the card (docs/api.md §8, TER-158). Absent when the card has no open job. */
+  job?: CardJob;
+  /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
+  assignee_status?: string;
+}
+
+/** The open job of a card: the tile reads its state chip from it, not from labels. */
+export interface CardJob {
+  id: string;
+  kind: "validate" | "merge";
+  state: "queued" | "running";
+  /** A queued job: its place among the queued jobs of the project (1 starts next). */
+  place?: number;
+  /** A queued job: the count of queued jobs in the project. */
+  queued?: number;
 }
 
 /** A card of `GET /api/cards` (docs/api.md §8, TER-43): a card in the working or research column of a board, with its column kind and the status of its assignee agent. */
 export interface ActiveCard extends Card {
   /** `working` (the column with that role), `research`, or another column that the query named. */
   column_kind: string;
-  /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
-  assignee_status?: string;
   /** A card in the blocked column (TER-51): when it moved there. */
   blocked_since?: string;
   /** A card in the blocked column: the comment of that move, or the newest comment without one. */
@@ -1912,8 +1927,9 @@ export interface MemoryQuery {
 export type PageStatus = "draft" | "ready_for_review" | "reviewed";
 
 export interface WikiLink {
+  /** A link stored before TER-58 can be `version`. */
   kind: "page" | "card" | "memory" | "artifact" | "version" | string;
-  /** `project/path`, a card ID, `project/MEM-n`, `project/ART-n`, or `project/<version>`. */
+  /** `project/path`, a card ID, `project/MEM-n`, `project/ART-n`, or (before TER-58) `project/<version>`. */
   target: string;
 }
 
@@ -2053,7 +2069,8 @@ export interface DbQueryResult {
 
 // ----- Artifacts (§15.2, docs/api.md §12) -----
 
-export type ArtifactLinkKind = "page" | "version" | "card";
+/** `label`: a label such as `version:1.4.0` (TER-58). Version objects are removed. */
+export type ArtifactLinkKind = "page" | "card" | "label";
 
 /** One pinned conversation (`GET /api/pins`, docs/api.md §6.11). Oldest pin first. */
 export interface Pin {
@@ -2130,7 +2147,7 @@ export interface ArtifactUrl {
 
 export interface ArtifactAttach {
   kind: ArtifactLinkKind;
-  /** A page key, a version key, or a card ID of the same project. */
+  /** A page key, a card ID of the same project, or a label (`version:1.4.0`). */
   ref: string;
 }
 
@@ -2149,80 +2166,6 @@ export interface ArtifactUsage {
   used_bytes: number;
   quota_bytes: number;
   max_file_bytes: number;
-}
-
-// ----- Versions (§15.3, docs/api.md §13) -----
-
-export type VersionStatus = "draft" | "in_review" | "approved" | "rejected" | "released";
-
-export interface VersionReview {
-  id?: string;
-  author: string;
-  author_name?: string;
-  decision: "submitted" | "approved" | "rejected" | "released";
-  comment: string;
-  created_at: string;
-}
-
-export interface Version {
-  id: string;
-  project: string;
-  name: string;
-  status: VersionStatus;
-  notes: string;
-  repo?: string;
-  git_ref?: string;
-  thread_id?: string;
-  created_by: string;
-  created_by_name?: string;
-  created_at: string;
-  updated_at?: string;
-  submitted_at?: string;
-  submitted_by?: string;
-  decided_at?: string;
-  decided_by?: string;
-  released_at?: string;
-  /** An archived version keeps its status and reviews; it has no row on the board and is not in the default list. An older daemon sends none. */
-  archived?: boolean;
-  archived_at?: string;
-  archived_by?: string;
-  /** The dashboard page of the version: a path, `/p/<project>/versions/<id>`, or an absolute URL when the daemon has `TERRARIUM_PUBLIC_URL`. The dashboard redirects it to the board (`?version=<id>`). */
-  url?: string;
-  cards: { id: string; title: string; column: string }[];
-  artifacts: { id: string; uid: string; name: string; kind: Artifact["kind"]; content_type: string; size: number }[];
-  reviews: VersionReview[];
-}
-
-export interface NewVersion {
-  name: string;
-  notes?: string;
-  repo?: string;
-  git_ref?: string;
-  cards?: string[];
-  artifacts?: string[];
-}
-
-export interface VersionPatch {
-  name?: string;
-  notes?: string;
-  repo?: string;
-  git_ref?: string;
-  cards?: string[];
-  artifacts?: string[];
-  add_cards?: string[];
-  remove_cards?: string[];
-  add_artifacts?: string[];
-  remove_artifacts?: string[];
-}
-
-export interface VersionCompare {
-  version: string;
-  to: string;
-  since?: string;
-  until?: string;
-  cards: { added: string[]; removed: string[]; landed: string[] };
-  artifacts: { added: string[]; removed: string[] };
-  pages: { id: string; path: string; from_rev?: number; to_rev: number }[];
 }
 
 // ----- Subscriptions and usage (docs/api.md §16) -----
@@ -3166,12 +3109,17 @@ export interface PasswordChange {
 /**
  * When a schedule fires. `cron`: a 5-field expression in `tz` (an IANA
  * zone, default `UTC`). `interval`: a duration such as `15m`, `1h`, or
- * `1h30m`. `at`: once, at an RFC 3339 time.
+ * `1h30m`. `at`: once, at an RFC 3339 time. `manual`: a project action
+ * (TER-53, docs/api.md §19.10): no time and no event; a button runs it.
  */
-export type ScheduleSpec = { kind: "cron"; expr: string; tz: string } | { kind: "interval"; every: string } | { kind: "at"; at: string } | TriggerSpec;
+export type ScheduleSpec = { kind: "cron"; expr: string; tz: string } | { kind: "interval"; every: string } | { kind: "at"; at: string } | TriggerSpec | ManualSpec;
 export type ScheduleSpecKind = ScheduleSpec["kind"];
-/** The specs of a time schedule; `on` is a trigger. */
-export type TimeSpec = Exclude<ScheduleSpec, TriggerSpec>;
+/** The spec of a project action. */
+export interface ManualSpec {
+  kind: "manual";
+}
+/** The specs of a time schedule; `on` is a trigger, `manual` a project action. */
+export type TimeSpec = Exclude<ScheduleSpec, TriggerSpec | ManualSpec>;
 
 /** The compare of a `match` rule. `in` takes a list. */
 export type MatchOp = "eq" | "ne" | "glob" | "in";
@@ -3367,7 +3315,7 @@ export interface Schedule {
   owner?: ItemOwner;
   /** The actor the runs of an actor-owned schedule act as; the daemon checks its rights at each run. */
   run_as: string;
-  /** Null when disabled, or when a one-shot `at` schedule has run. */
+  /** Null when disabled, when a one-shot `at` schedule has run, and always for a trigger and a project action. */
   next_run_at: string | null;
   last_run: ScheduleLastRun | null;
   runs_count: number;
@@ -3401,8 +3349,8 @@ export type SchedulePatch = Partial<Omit<NewSchedule, "project">>;
 export interface ScheduleQuery {
   project?: string;
   enabled?: boolean;
-  /** `time`: only the time schedules; `trigger`: only the triggers (spec `on`). */
-  kind?: "time" | "trigger";
+  /** `time`: only the time schedules; `trigger`: only the triggers (spec `on`); `action`: only the project actions (spec `manual`). */
+  kind?: "time" | "trigger" | "action";
 }
 
 /** `cron` is the timer (each time spec); `event` is a trigger run. */
@@ -4041,7 +3989,8 @@ export interface TestRunSummary {
   notes: string[];
   /** The linked card IDs. */
   cards: string[];
-  versions: { id: string; name: string }[];
+  /** The linked labels, such as `version:1.4.0` (TER-58). */
+  labels: string[];
   created_by: string;
   created_by_name: string;
   created_at: string;
@@ -4091,7 +4040,8 @@ export interface TestRunCaseQuery {
 
 export interface TestRunListQuery {
   card?: string;
-  version?: string;
+  /** A label, such as `version:1.4.0`. */
+  label?: string;
   name?: string;
   status?: TestRunStatus;
   limit?: number;
@@ -4121,12 +4071,12 @@ export interface TestCompare {
   removed_tests: TestCaseDiff[];
 }
 
-/** `PATCH /api/test-runs/{id}/links`. A card is its ID; a version is its name or ID. */
+/** `PATCH /api/test-runs/{id}/links`. A card is its ID; a label is free text (`version:1.4.0`). */
 export interface TestRunLinksPatch {
   add_cards?: string[];
   remove_cards?: string[];
-  add_versions?: string[];
-  remove_versions?: string[];
+  add_labels?: string[];
+  remove_labels?: string[];
 }
 
 /** `Card.tests`: the latest linked run. */

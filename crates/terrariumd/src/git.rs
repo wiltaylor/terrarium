@@ -722,6 +722,17 @@ pub fn config_allowed(key: &str, value: &str) -> bool {
 
 /// The env and `-c` values of one checkout, and the run dir that holds the
 /// one-shot helper files (removed on drop).
+/// The end of one command of [`Runner::spawn_wait_status`].
+struct Waited {
+    stdout: Vec<u8>,
+    /// The stdout cap was full: git was stopped.
+    over: bool,
+    /// `None` when git was stopped at the cap.
+    status: Option<std::process::ExitStatus>,
+    /// The last lines of stderr.
+    stderr: String,
+}
+
 struct Runner {
     config: Vec<String>,
     env: Vec<(String, String)>,
@@ -886,6 +897,13 @@ impl Runner {
         cap: Option<usize>,
         deadline: Instant,
     ) -> Result<(Vec<u8>, bool), GitError> {
+        let cmd = self.command(cwd, args);
+        self.spawn_wait(cmd, name, progress, cap, deadline)
+    }
+
+    /// The git command of [`Runner::exec`]: the overrides, the env, no
+    /// stdin.
+    fn command(&self, cwd: Option<&Path>, args: &[&str]) -> Command {
         let mut cmd = Command::new("git");
         for kv in &self.config {
             cmd.arg("-c").arg(kv);
@@ -899,7 +917,7 @@ impl Runner {
         }
         cmd.envs(self.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
-        self.spawn_wait(cmd, name, progress, cap, deadline)
+        cmd
     }
 
     /// Run `cmd` (git, or `bwrap` around git) until `deadline`, as
@@ -907,12 +925,36 @@ impl Runner {
     /// env, and stdin.
     fn spawn_wait(
         &self,
-        mut cmd: Command,
+        cmd: Command,
         name: &str,
         progress: &mut dyn FnMut(&str),
         cap: Option<usize>,
         deadline: Instant,
     ) -> Result<(Vec<u8>, bool), GitError> {
+        let r = self.spawn_wait_status(cmd, progress, cap, deadline)?;
+        if let Some(status) = r.status
+            && !status.success()
+        {
+            return Err(GitError::Failed {
+                command: name.to_owned(),
+                status: status
+                    .code()
+                    .map_or_else(|| "signal".to_owned(), |c| format!("exit {c}")),
+                stderr: r.stderr,
+            });
+        }
+        Ok((r.stdout, r.over))
+    }
+
+    /// [`Runner::spawn_wait`] that does not fail on an exit code: the
+    /// caller reads the status. `status` is `None` when the cap was full.
+    fn spawn_wait_status(
+        &self,
+        mut cmd: Command,
+        progress: &mut dyn FnMut(&str),
+        cap: Option<usize>,
+        deadline: Instant,
+    ) -> Result<Waited, GitError> {
         use std::os::unix::process::CommandExt;
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1017,21 +1059,21 @@ impl Runner {
             on_line(l, &mut tail);
         }
         let (out, full) = out_thread.join().unwrap_or_default();
+        let stderr = tail.into_iter().collect::<Vec<_>>().join("\n");
         if over || full {
-            return Ok((out, true));
-        }
-        if let Some(status) = status
-            && !status.success()
-        {
-            return Err(GitError::Failed {
-                command: name.to_owned(),
-                status: status
-                    .code()
-                    .map_or_else(|| "signal".to_owned(), |c| format!("exit {c}")),
-                stderr: tail.into_iter().collect::<Vec<_>>().join("\n"),
+            return Ok(Waited {
+                stdout: out,
+                over: true,
+                status: None,
+                stderr,
             });
         }
-        Ok((out, false))
+        Ok(Waited {
+            stdout: out,
+            over: false,
+            status,
+            stderr,
+        })
     }
 
     fn quiet(&self, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
@@ -2350,6 +2392,241 @@ pub async fn clone_or_update_async(
     .map_err(|e| GitError::Io(format!("the git task failed: {e}")))?
 }
 
+/// The head of `branch` on the remote `c.url`, read with `git ls-remote`
+/// and the secret of `c` (TER-103: in the daemon, not on a target).
+/// `None`: the remote has no such branch. Blocking.
+pub fn ls_remote(c: &Checkout, branch: &str) -> Result<Option<String>, GitError> {
+    check_url(&c.url, &c.deny_local_under)?;
+    check_branch(branch)?;
+    let r = Runner::new(c)?;
+    let refname = format!("refs/heads/{branch}");
+    let out = r.git(
+        None,
+        &[
+            "ls-remote",
+            "--upload-pack=git-upload-pack",
+            "--",
+            c.url.as_str(),
+            refname.as_str(),
+        ],
+        &mut |_| {},
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .find(|(_, r)| *r == refname)
+        .map(|(sha, _)| sha.to_owned()))
+}
+
+/// What a merge onto the head of a [`JobRepo`] gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeStep {
+    /// The new head: a merge commit, or the old head when the branch was
+    /// in it already.
+    Merged(String),
+    /// The branch conflicts; the files with a conflict.
+    Conflict(Vec<String>),
+    /// The merge failed without a conflict (for example unrelated
+    /// histories); git's message.
+    Failed(String),
+}
+
+/// The repo of the daemon for the steps of one queue job that hold the
+/// repo credential (TER-103, docs/api.md §35): a bare repo at `c.dest` in
+/// the daemon's state dir, which no target, sandbox, or recipe can reach.
+/// It fetches with the secret, merges without a work tree (`git
+/// merge-tree`, so no checkout, filter, or hook runs), writes the bundle
+/// that the target clones from, and pushes the recorded commit. Only
+/// [`JobRepo::fetch`] and [`JobRepo::push`] get the secret. Blocking.
+pub struct JobRepo {
+    c: Checkout,
+}
+
+impl JobRepo {
+    /// A new, empty bare repo at `c.dest` (an old one there is removed),
+    /// in a 0700 parent dir.
+    pub fn create(c: Checkout) -> Result<Self, GitError> {
+        use std::os::unix::fs::PermissionsExt;
+        check_url(&c.url, &c.deny_local_under)?;
+        let parent = c
+            .dest
+            .parent()
+            .ok_or_else(|| io("the job repo path has no parent"))?;
+        std::fs::create_dir_all(parent).map_err(io)?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
+        if std::fs::symlink_metadata(&c.dest).is_ok() {
+            std::fs::remove_dir_all(&c.dest).map_err(io)?;
+        }
+        let me = Self { c };
+        let dest = me.c.dest.to_string_lossy().into_owned();
+        me.runner(false)?.git(
+            None,
+            &["init", "-q", "--bare", "--template=", dest.as_str()],
+            &mut |_| {},
+        )?;
+        Ok(me)
+    }
+
+    /// The path of the bare repo.
+    pub fn path(&self) -> &Path {
+        &self.c.dest
+    }
+
+    /// A runner with a new deadline; with the secret only for `secret`.
+    fn runner(&self, secret: bool) -> Result<Runner, GitError> {
+        if secret {
+            return Runner::new(&self.c);
+        }
+        Runner::new(&Checkout {
+            secret: None,
+            ..self.c.clone()
+        })
+    }
+
+    fn local(&self, args: &[&str]) -> Result<String, GitError> {
+        self.runner(false)?.quiet(&self.c.dest, args)
+    }
+
+    /// Fetch `specs` (`+refs/heads/x:refs/y`) from `c.url`, with the secret.
+    pub fn fetch(&self, specs: &[String]) -> Result<(), GitError> {
+        let mut args = vec![
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--upload-pack=git-upload-pack",
+            "--",
+            self.c.url.as_str(),
+        ];
+        args.extend(specs.iter().map(String::as_str));
+        self.runner(true)?
+            .git(Some(&self.c.dest), &args, &mut |_| {})
+            .map(|_| ())
+    }
+
+    /// The commit that `rev` names, if any.
+    pub fn commit_of(&self, rev: &str) -> Result<Option<String>, GitError> {
+        let spec = format!("{rev}^{{commit}}");
+        match self.local(&["rev-parse", "--verify", "-q", "--end-of-options", &spec]) {
+            Ok(s) => Ok(Some(s.trim().to_owned()).filter(|s| !s.is_empty())),
+            Err(GitError::Failed { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Is `a` an ancestor of `b` (or `b` itself)?
+    pub fn is_ancestor(&self, a: &str, b: &str) -> Result<bool, GitError> {
+        match self.local(&["merge-base", "--is-ancestor", a, b]) {
+            Ok(_) => Ok(true),
+            Err(GitError::Failed { status, .. }) if status == "exit 1" => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The merge-base of `a` and `b`, if they have one.
+    pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>, GitError> {
+        match self.local(&["merge-base", "--end-of-options", a, b]) {
+            Ok(s) => Ok(Some(s.trim().to_owned()).filter(|s| !s.is_empty())),
+            Err(GitError::Failed { status, .. }) if status == "exit 1" => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Point `refname` at `sha`.
+    pub fn set_ref(&self, refname: &str, sha: &str) -> Result<(), GitError> {
+        self.local(&["update-ref", refname, sha]).map(|_| ())
+    }
+
+    /// Merge `other` onto `head` with a merge commit (as `merge --no-ff`
+    /// would) with `message`. No work tree: `git merge-tree --write-tree`
+    /// makes the tree, `git commit-tree` the commit.
+    pub fn merge(&self, head: &str, other: &str, message: &str) -> Result<MergeStep, GitError> {
+        if self.is_ancestor(other, head)? {
+            return Ok(MergeStep::Merged(head.to_owned()));
+        }
+        let r = self.runner(false)?;
+        let cmd = r.command(
+            Some(&self.c.dest),
+            &[
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "--no-messages",
+                head,
+                other,
+            ],
+        );
+        let w = r.spawn_wait_status(cmd, &mut |_| {}, None, r.deadline)?;
+        let out = String::from_utf8_lossy(&w.stdout).into_owned();
+        let mut lines = out.lines();
+        let tree = lines.next().unwrap_or("").trim().to_owned();
+        match w.status.and_then(|s| s.code()) {
+            Some(0) if !tree.is_empty() => {}
+            Some(1) => {
+                let mut files: Vec<String> = lines
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                files.dedup();
+                return Ok(MergeStep::Conflict(files));
+            }
+            _ => {
+                let msg = if w.stderr.trim().is_empty() {
+                    out.trim().to_owned()
+                } else {
+                    w.stderr.trim().to_owned()
+                };
+                return Ok(MergeStep::Failed(msg));
+            }
+        }
+        let sha = self.local(&[
+            "-c",
+            "user.name=terrarium",
+            "-c",
+            "user.email=terrarium@localhost",
+            "commit-tree",
+            &tree,
+            "-p",
+            head,
+            "-p",
+            other,
+            "-m",
+            message,
+        ])?;
+        Ok(MergeStep::Merged(sha.trim().to_owned()))
+    }
+
+    /// Write a bundle of `refname` (with its whole history) to `out`.
+    pub fn bundle(&self, refname: &str, out: &Path) -> Result<(), GitError> {
+        let o = out.to_string_lossy().into_owned();
+        self.local(&["bundle", "create", "-q", o.as_str(), refname])
+            .map(|_| ())
+    }
+
+    /// Push the commit `sha` to `refs/heads/<branch>` of `c.url`, with the
+    /// secret. Not forced: a remote branch that moved fails the push.
+    pub fn push(&self, sha: &str, branch: &str) -> Result<(), GitError> {
+        check_branch(branch)?;
+        let spec = format!("{sha}:refs/heads/{branch}");
+        self.runner(true)?
+            .git(
+                Some(&self.c.dest),
+                &[
+                    "push",
+                    "--quiet",
+                    "--no-verify",
+                    "--receive-pack=git-receive-pack",
+                    "--",
+                    self.c.url.as_str(),
+                    spec.as_str(),
+                ],
+                &mut |_| {},
+            )
+            .map(|_| ())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -3205,5 +3482,105 @@ mod tests {
         let run = r._run.as_ref().unwrap().path().to_owned();
         drop(r);
         assert!(!run.exists(), "the run dir is removed");
+    }
+
+    /// TER-103: the daemon's job repo fetches, merges without a work tree
+    /// (clean, conflict with the files, already merged, unrelated
+    /// histories), bundles the job ref, pushes a commit, and reads a
+    /// remote head.
+    #[test]
+    fn a_job_repo_merges_bundles_and_pushes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let origin = bare_repo(dir);
+        sh(
+            &dir.join("src"),
+            "git push -q ../origin.git main:next && \
+             git checkout -q -b clean && echo b > b.txt && git add b.txt && git commit -q -m b && \
+             git push -q ../origin.git clean && \
+             git checkout -q main && git checkout -q -b c1 && echo x > a.txt && git commit -qam x && \
+             git push -q ../origin.git c1 && \
+             git checkout -q main && git checkout -q -b c2 && echo y > a.txt && git commit -qam y && \
+             git push -q ../origin.git c2 && \
+             git checkout -q --orphan lone && git rm -rq --cached . && echo z > z.txt && \
+             git add z.txt && git commit -q -m lone && git push -q ../origin.git lone",
+        );
+        let c = checkout(dir, &origin, &dir.join("daemon/jobs/p/J1.git"));
+        assert_eq!(
+            ls_remote(&c, "clean").unwrap(),
+            Some(git_out(&origin, &["rev-parse", "clean"]))
+        );
+        assert_eq!(ls_remote(&c, "nope").unwrap(), None);
+
+        let r = JobRepo::create(c).unwrap();
+        let specs: Vec<String> = ["next", "clean", "c1", "c2", "lone"]
+            .iter()
+            .map(|b| format!("+refs/heads/{b}:refs/remotes/job/{b}"))
+            .collect();
+        r.fetch(&specs).unwrap();
+        let next = r.commit_of("refs/remotes/job/next").unwrap().unwrap();
+        assert_eq!(r.commit_of("refs/remotes/job/nope").unwrap(), None);
+
+        let MergeStep::Merged(m1) = r
+            .merge(&next, "refs/remotes/job/clean", "Merge clean onto next")
+            .unwrap()
+        else {
+            panic!("clean did not merge")
+        };
+        assert_ne!(m1, next);
+        let parents = git_out(r.path(), &["rev-list", "--parents", "-n", "1", &m1]);
+        assert_eq!(parents.split_whitespace().count(), 3, "{parents}");
+        assert_eq!(
+            git_out(r.path(), &["log", "-1", "--format=%s %an", &m1]),
+            "Merge clean onto next terrarium"
+        );
+        let MergeStep::Merged(m2) = r
+            .merge(&m1, "refs/remotes/job/c1", "Merge c1 onto next")
+            .unwrap()
+        else {
+            panic!("c1 did not merge")
+        };
+        // c2 changes the line that c1 changed.
+        assert_eq!(
+            r.merge(&m2, "refs/remotes/job/c2", "Merge c2 onto next")
+                .unwrap(),
+            MergeStep::Conflict(vec!["a.txt".into()])
+        );
+        // A branch that is in the head already gives the head.
+        assert_eq!(
+            r.merge(&m2, "refs/remotes/job/clean", "again").unwrap(),
+            MergeStep::Merged(m2.clone())
+        );
+        match r.merge(&m2, "refs/remotes/job/lone", "lone").unwrap() {
+            MergeStep::Failed(msg) => assert!(msg.contains("unrelated"), "{msg}"),
+            other => panic!("unrelated histories merged: {other:?}"),
+        }
+
+        r.set_ref("refs/job/merge", &m2).unwrap();
+        let bundle = dir.join("daemon/jobs/p/J1.bundle");
+        r.bundle("refs/job/merge", &bundle).unwrap();
+        let heads = Command::new("git")
+            .args(["bundle", "list-heads"])
+            .arg(&bundle)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&heads.stdout).trim(),
+            format!("{m2} refs/job/merge")
+        );
+
+        r.push(&m2, "next").unwrap();
+        assert_eq!(git_out(&origin, &["rev-parse", "next"]), m2);
+        // Not forced: a commit that is not ahead of `next` is refused.
+        assert!(r.push(&next, "next").is_err());
+        assert_eq!(git_out(&origin, &["rev-parse", "next"]), m2);
+        // The job repo is in a 0700 dir.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("daemon/jobs/p"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 }

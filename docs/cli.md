@@ -878,7 +878,7 @@ stay as they are. `--no-mark` leaves my messages unread. With an ID,
 ```
 terrarium board                               the board, grouped by column
 terrarium board columns [--from-file f.json | -]
-terrarium board column add <name> [--title t] [--wip N] [--role working|blocked] [--after c | --before c]
+terrarium board column add <name> [--title t] [--wip N] [--role r] [--after c | --before c]
 terrarium board column set <name> [--title t] [--wip N | --no-wip] [--role r | --no-role] [--rename new]
 terrarium board column rm <name>
 terrarium board column move <name> (--after c | --before c)

@@ -3,13 +3,17 @@
 // (`?tab=monitors`) that manages them. "Edit dashboard" edits a draft of the
 // layout: add a block, change it, move it (drag, or the up and down
 // buttons), remove it, then save. The page loads again on each
-// `monitor.result` and `dashboard.updated` event of the project.
+// `monitor.result` and `dashboard.updated` event of the project. The
+// project actions (TER-53) are buttons above the blocks; they load again on
+// each `schedule` event of the project.
 
 import { useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { DashboardBlock, DashboardView, Monitor } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
 import { api, events } from "../../stores";
+import { ActionButtons } from "../actions/ActionButtons";
+import { projectActions } from "../actions/model";
 import { BlockDialog } from "./BlockDialog";
 import { BlockView } from "./blocks";
 import { layoutProblems, moveBlock, SIZES, STATE_META, stateCounts, type BlockState } from "./model";
@@ -33,19 +37,36 @@ export default function DashboardPage() {
   // The series of a block load again when the last result of its monitor changes.
   const versions = createMemo(() => Object.fromEntries((view.latest?.monitors ?? []).map((m) => [m.id, Date.parse(m.last?.at ?? "") || 0])));
   const monitorOf = (id?: string) => view.latest?.monitors.find((m) => m.id === id);
+  // The project actions. A failed list hides the buttons; the blocks stay.
+  const [actions, { refetch: refetchActions }] = createResource(
+    () => params.project,
+    async (p) => {
+      try {
+        return await api.schedules.list({ project: p, kind: "action" });
+      } catch {
+        return [];
+      }
+    },
+  );
 
   // ----- live updates -----
   onMount(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
+    let ta: ReturnType<typeof setTimeout> | undefined;
     const off = events.on((e) => {
       if (e.project !== params.project) return;
+      if (e.kind === "schedule") {
+        clearTimeout(ta);
+        ta = setTimeout(() => void refetchActions(), 400);
+        return;
+      }
       if (e.kind !== "monitor.result" && e.kind !== "dashboard.updated") return;
       // A save of this page's draft must not drop the draft of another editor: only reload when not editing.
       if (e.kind === "dashboard.updated" && draft()) return;
       clearTimeout(t);
       t = setTimeout(() => void refetch(), 400);
     });
-    onCleanup(() => (off(), clearTimeout(t)));
+    onCleanup(() => (off(), clearTimeout(t), clearTimeout(ta)));
   });
 
   // ----- edit mode -----
@@ -104,6 +125,12 @@ export default function DashboardPage() {
       </PageHead>
       <Tabs tabs={TABS} active={tab()} onChange={(t) => setSearch({ tab: t === "monitors" ? "monitors" : undefined })} />
       <ErrorBanner error={error() ?? view.error} onDismiss={() => setError(null)} />
+      <Show when={tab() === "blocks" && projectActions(actions.latest ?? [], params.project).length > 0}>
+        <div class="dash-actions row small" aria-label="Actions">
+          <span class="muted">Actions</span>
+          <ActionButtons actions={projectActions(actions.latest ?? [], params.project)} />
+        </div>
+      </Show>
       <Show when={view.latest}>
         <p class="dash-summary small" aria-live="polite">
           <Show when={summary().length} fallback={<span class="muted">No monitors yet.</span>}>

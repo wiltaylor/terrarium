@@ -34,7 +34,7 @@ import { defaultTitle } from "../../features/board/columns";
 import { checkColumnEdits } from "./boardColumns";
 import { limitsInfo, limitsKindError, resolveLimits } from "../../lib/limits";
 import { mockChanges, mockCommit, mockCommits, mockFile, mockList, mockTrees } from "./repoTrees";
-import type { Question, Thread } from "../types";
+import type { Question, Thread, ThreadLink } from "../types";
 import type {
   Agent,
   QueuedTurn,
@@ -100,7 +100,6 @@ import type {
   UsagePoint,
   UsageQuery,
   UsageTotals,
-  Version,
   WikiPage,
   ResetPending,
   ResetResult,
@@ -285,6 +284,8 @@ export interface MockSim {
   threadPost(id: string, text: string): Thread;
   /** The attached agent of an Inbox thread asks a question or a bundle in it. */
   threadAsk(id: string, q: Pick<Question, "text"> & Partial<Question>): Question;
+  /** The attached agent of an Inbox thread proposes its close with a handoff (TER-95). */
+  threadPropose(id: string, body?: { summary?: string; links?: ThreadLink[] }): Thread;
 }
 
 /** The audit name of a terminal key, as the daemon gives it (docs/api.md §6.5); 422 for a key it refuses. */
@@ -594,25 +595,6 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     return named[0] ?? notFound(`agent \`${key}\``);
   };
   const cardById = (id: string) => find(w.cards, (c) => c.id.toUpperCase() === id.toUpperCase(), `card ${id}`);
-  const version = (id: string) => find(w.versions, (v) => v.id === id || `${v.project}/${v.name}` === id || v.name === id, `version \`${id}\``);
-  /** Archive or unarchive a version (store/versions.rs set_archived): no change, no event. */
-  const setArchived = (v: Version, archived: boolean): Version => {
-    if (!!v.archived === archived) return v;
-    if (archived) {
-      v.archived = true;
-      v.archived_at = iso();
-      v.archived_by = "operator";
-    } else {
-      v.archived = false;
-      delete v.archived_at;
-      delete v.archived_by;
-    }
-    v.updated_at = iso();
-    const change = archived ? "archived" : "unarchived";
-    audit(archived ? "version.archive" : "version.unarchive", `${v.project}/${v.name}`, v.project, { version_id: v.id });
-    emit({ kind: `version.${change}` as AgentEvent["kind"], actor: "operator", project: v.project, summary: `version ${v.name} ${change}`, data: { version_id: v.id, name: v.name, status: v.status, archived } });
-    return v;
-  };
   const sub = (name: string) => find(w.subscriptions, (s) => s.name === name, `subscription ${name}`);
 
   // ----- addresses (docs/api.md §2.3) -----
@@ -873,7 +855,6 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     audit,
     project: (name) => project(name),
     cards: () => w.cards,
-    versions: () => w.versions,
     agentId: (name) => w.agents.find((a) => a.project === "terrarium" && a.name === name)?.id ?? "operator",
     now: now(),
   });
@@ -1577,7 +1558,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const addArtifact = (proj: string, name: string, content_type: string, size: number, kind: Artifact["kind"], attach?: ArtifactAttach): Artifact => {
     project(proj);
     const n = Math.max(0, ...w.artifacts.filter((x) => x.project === proj).map((x) => Number(x.id.split("-")[1]) || 0)) + 1;
-    const links: Artifact["links"] = attach ? [{ kind: attach.kind, ref: attach.ref, created_by: "operator", created_at: iso() }] : [];
+    const links: Artifact["links"] = attach ? [{ ...linkOf(attach.kind, attach.ref), created_by: "operator", created_at: iso() }] : [];
     const a: Artifact = {
       id: `ART-${n}`, key: `${proj}/ART-${n}`, uid: ulid("art"), project: proj, name, content_type, size, sha256: "0".repeat(64), kind,
       renders: kind === "bundle" || /^(image|text)\//.test(content_type) || content_type === "application/pdf",
@@ -2067,7 +2048,6 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     pg.links = [...body.matchAll(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)].map((m) => {
       const t = m[1]!;
       if (/^[A-Z][A-Z0-9]*-\d+$/.test(t)) return t.startsWith("MEM-") ? { kind: "memory", target: `${pg.project}/${t}` } : { kind: "card", target: t };
-      if (/^v\d/.test(t)) return { kind: "version", target: `${pg.project}/${t}` };
       if (t.startsWith("project:")) return { kind: "page", target: t.slice(8) };
       return { kind: "page", target: `${pg.project}/${t}` };
     });
@@ -2090,7 +2070,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const wikiEvent = (kind: AgentEvent["kind"], pg: WikiPage, summary: string, extra: Record<string, unknown> = {}) =>
     emit({ kind, actor: "operator", project: pg.project, summary, data: { page_id: pg.id, path: pg.path, title: pg.title, rev: pg.rev, ...extra } });
 
-  // ----- artifacts and versions (docs/api.md §12, §13) -----
+  // ----- artifacts (docs/api.md §12) -----
   const artNo = (id: string) => Number(id.split("-")[1]) || 0;
   const artifact = (key: string): Artifact => {
     const hit = w.artifacts.find((a) => a.uid === key || a.key === key);
@@ -2103,13 +2083,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     ...a,
     embedded_in: w.pages.filter((p) => p.project === a.project && !p.deleted_at && new RegExp(`artifact[:\\s]+${a.id}\\b`).test(p.body)).map((p) => `${p.project}/${p.path}`),
   });
-  const cardRef = (id: string) => {
-    const c = cardById(id);
-    return { id: c.id, title: c.title, column: c.column };
-  };
-  const artRef = (id: string) => {
-    const a = artifact(id);
-    return { id: a.id, uid: a.uid, name: a.name, kind: a.kind, content_type: a.content_type, size: a.size };
+  /** The link of an artifact (store/artifacts.rs link_row): a page, a card, or a label. A version is `422` since TER-58. */
+  const linkOf = (kind: string, ref: string): { kind: ArtifactLinkKind; ref: string } => {
+    if (kind === "version") fail(422, "invalid", "version objects are removed (TER-58): link a version label, kind `label` with ref `version:<X.Y.Z>`");
+    if (kind !== "page" && kind !== "card" && kind !== "label") fail(422, "invalid", `bad link kind \`${kind}\`: use page, card, or label`);
+    const r = kind === "label" ? ref.trim() : ref;
+    if (kind === "label" && (!r || [...r].length > 200)) fail(422, "invalid", `bad label \`${r}\`: use 1-200 characters, no control characters`);
+    return { kind, ref: r };
   };
 
   const derivePrefix = (name: string) => {
@@ -3373,15 +3353,15 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       remove: (id) =>
         reply(() => {
           const a = artifact(id);
-          if (a.links.some((l) => l.kind === "version" && w.versions.find((v) => v.id === l.ref)?.status === "released")) fail(409, "conflict", `${a.id} is on a released version`);
           w.artifacts = w.artifacts.filter((x) => x !== a);
           emit({ kind: "artifact.deleted", actor: "operator", project: a.project, summary: `operator deleted ${a.id}`, data: { artifact_id: a.id, key: a.key, uid: a.uid, name: a.name, kind: a.kind } });
         }),
       link: (id, kind, ref) =>
         reply(() => {
           const a = artifact(id);
-          const label = kind === "version" ? w.versions.find((v) => v.id === ref || v.name === ref)?.name : kind === "page" ? w.pages.find((p) => p.id === ref || p.path === ref)?.path : undefined;
-          a.links.push({ kind, ref, ...(label ? { label } : {}), created_by: "operator", created_at: iso() });
+          const l = linkOf(kind, ref);
+          const label = l.kind === "page" ? w.pages.find((p) => p.id === ref || p.path === ref)?.path : undefined;
+          if (!a.links.some((x) => x.kind === l.kind && x.ref === l.ref)) a.links.push({ ...l, ...(label ? { label } : {}), created_by: "operator", created_at: iso() });
           emit({ kind: "artifact.linked", actor: "operator", project: a.project, summary: `operator attached ${a.id} to ${kind} ${ref}`, data: { artifact_id: a.id, key: a.key, uid: a.uid, name: a.name, kind: a.kind, link_kind: kind, ref } });
           return artView(a);
         }),
@@ -3398,108 +3378,6 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           const m = /^data:[^,]*,(.*)$/s.exec(url);
           return m ? decodeURIComponent(m[1]!) : "";
-        }),
-    },
-
-    versions: {
-      list: (proj, q = {}) =>
-        reply(() => {
-          project(proj);
-          const archived = q.archived ?? "false";
-          if (!["true", "false", "all"].includes(archived)) fail(400, "bad_request", `bad archived \`${archived}\`: use true, false, or all`);
-          return w.versions
-            .filter((v) => v.project === proj && (!q.status || v.status === q.status) && (!q.name || v.name === q.name) && (archived === "all" || (archived === "true") === !!v.archived))
-            .sort((a, b) => b.created_at.localeCompare(a.created_at));
-        }),
-      create: (proj, v) =>
-        reply(() => {
-          project(proj);
-          if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(v.name)) fail(422, "invalid", `\`${v.name}\` is not a valid version name`);
-          if (w.versions.some((x) => x.project === proj && x.name === v.name)) fail(409, "conflict", `version \`${v.name}\` exists`);
-          const id = ulid("ver");
-          const ver: Version = {
-            id, project: proj, name: v.name, notes: v.notes ?? "", status: "draft", archived: false, ...(v.git_ref ? { git_ref: v.git_ref } : {}), ...(v.repo ? { repo: v.repo } : {}),
-            cards: (v.cards ?? []).map(cardRef), artifacts: (v.artifacts ?? []).map(artRef), reviews: [],
-            created_by: "operator", created_by_name: "operator", created_at: iso(), updated_at: iso(), url: `/p/${proj}/versions/${id}`,
-          };
-          w.versions.push(ver);
-          emit({ kind: "version.created", actor: "operator", project: proj, summary: `operator created version ${v.name}`, data: { version_id: id, name: v.name, status: "draft" } });
-          return ver;
-        }),
-      get: (id) => reply(() => version(id)),
-      update: (id, patch) =>
-        reply(() => {
-          const v = version(id);
-          if (v.status !== "draft" && v.status !== "rejected") fail(409, "conflict", `version ${v.name} is ${v.status}; edits happen in draft and rejected only`);
-          if (patch.name !== undefined) v.name = patch.name;
-          if (patch.notes !== undefined) v.notes = patch.notes;
-          if (patch.git_ref !== undefined) v.git_ref = patch.git_ref || undefined;
-          if (patch.repo !== undefined) v.repo = patch.repo || undefined;
-          let cards = v.cards.map((c) => c.id);
-          if (patch.cards) cards = patch.cards;
-          cards = [...new Set([...cards, ...(patch.add_cards ?? [])])].filter((c) => !(patch.remove_cards ?? []).includes(c));
-          v.cards = cards.map(cardRef);
-          let arts = v.artifacts.map((a) => a.id);
-          if (patch.artifacts) arts = patch.artifacts;
-          arts = [...new Set([...arts, ...(patch.add_artifacts ?? [])])].filter((a) => !(patch.remove_artifacts ?? []).includes(a));
-          v.artifacts = arts.map(artRef);
-          v.updated_at = iso();
-          emit({ kind: "version.updated", actor: "operator", project: v.project, summary: `operator edited version ${v.name}`, data: { version_id: v.id, name: v.name, status: v.status, fields: Object.keys(patch) } });
-          return v;
-        }),
-      transition: (id, action, comment) =>
-        reply(() => {
-          const v = version(id);
-          const allowed: Record<typeof action, Version["status"][]> = {
-            submit: ["draft", "rejected"],
-            approve: ["in_review"],
-            reject: ["in_review"],
-            release: ["approved"],
-          };
-          if (!allowed[action].includes(v.status)) fail(409, "conflict", `cannot ${action} a version that is ${v.status}`);
-          if (action === "reject" && !comment?.trim()) fail(422, "comment_required", "a rejection needs a comment");
-          const next = { submit: "in_review", approve: "approved", reject: "rejected", release: "released" } as const;
-          const decision = { submit: "submitted", approve: "approved", reject: "rejected", release: "released" } as const;
-          v.status = next[action];
-          if (action === "submit") {
-            v.submitted_at = iso();
-            v.submitted_by = "operator";
-            if (!v.thread_id) v.thread_id = sendMail("operator", `project:${v.project}`, `Version ${v.name} is ready for review`, `${v.notes}\n\n${comment ?? ""}`).thread_id;
-          }
-          if (action === "approve" || action === "reject") {
-            v.decided_at = iso();
-            v.decided_by = "operator";
-            audit(`version.${action}`, v.id, v.project, { name: v.name, comment: comment ?? null });
-          }
-          if (action === "release") {
-            v.released_at = iso();
-            audit("version.release", v.id, v.project, { name: v.name });
-          }
-          v.reviews.push({ id: ulid("rev"), author: "operator", author_name: "operator", decision: decision[action], comment: comment ?? "", created_at: iso() });
-          v.updated_at = iso();
-          emit({ kind: `version.${decision[action]}` as AgentEvent["kind"], actor: "operator", project: v.project, summary: `operator ${decision[action]} ${v.name}`, data: { version_id: v.id, name: v.name, status: v.status, comment: comment ?? null } });
-          return v;
-        }),
-      archive: (id) => reply(() => setArchived(version(id), true)),
-      unarchive: (id) => reply(() => setArchived(version(id), false)),
-      compare: (id, to) =>
-        reply(() => {
-          const a = version(id);
-          const b = version(to);
-          const ac = a.cards.map((c) => c.id);
-          const bc = b.cards.map((c) => c.id);
-          const aa = a.artifacts.map((x) => x.id);
-          const ba = b.artifacts.map((x) => x.id);
-          const times = [a.released_at ?? a.submitted_at ?? iso(), b.released_at ?? b.submitted_at ?? iso()].sort();
-          return {
-            version: a.name,
-            to: b.name,
-            since: times[0],
-            until: times[1],
-            cards: { added: ac.filter((c) => !bc.includes(c)), removed: bc.filter((c) => !ac.includes(c)), landed: w.cards.filter((c) => c.project === a.project && c.column === "done").map((c) => c.id) },
-            artifacts: { added: aa.filter((x) => !ba.includes(x)), removed: ba.filter((x) => !aa.includes(x)) },
-            pages: w.pages.filter((p) => p.project === a.project && !p.deleted_at && p.updated_at >= times[0]! && p.updated_at <= times[1]!).map((p) => ({ id: p.id, path: p.path, from_rev: Math.max(1, p.rev - 1), to_rev: p.rev })),
-          };
         }),
     },
 
@@ -4304,6 +4182,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     setWindow,
     threadPost: (id, text) => threadMock.agentPost(id, text),
     threadAsk: (id, q) => threadMock.agentAsk(id, q),
+    threadPropose: (id, body) => threadMock.agentPropose(id, body),
     offerLogins: () => {
       for (const d of detected()) {
         const { suggested, ...login } = d;

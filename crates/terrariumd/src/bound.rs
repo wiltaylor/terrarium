@@ -18,7 +18,10 @@
 //!   mail and turns wait, and the idle pass stops it as soon as it is at
 //!   rest (never in a turn), with the status reason `parked`. Open waits,
 //!   leases, and grants stay. A parked agent holds no place in the
-//!   owner's `spawn.max_concurrent`.
+//!   owner's `spawn.max_concurrent` once it is stopped; until then its
+//!   harness runs and it holds its place (TER-111), so its own unpark
+//!   needs no free place. Its stop runs the owner's queued unparks
+//!   ([`on_stopped`]).
 //! - **Unpark** ([`unpark`]): the object came back. The daemon queues the
 //!   turn that says why. When the owner has a place in its
 //!   `spawn.max_concurrent`, the park ends and the agent wakes: a start
@@ -26,8 +29,12 @@
 //!   workspace, `resumes` + 1), on every harness. When the owner runs its
 //!   limit (or older unparks of the owner wait), the unpark waits
 //!   (`unpark_queued_at`, the event `agent.unpark_queued`), first in,
-//!   first out; [`retry_owner`] runs them when an agent of the owner parks
-//!   or finishes, and in each pass of the spawn timer.
+//!   first out; [`retry_owner`] runs them right after the queue, when an
+//!   agent of the owner parks, stops parked, or finishes, and in each pass
+//!   of the spawn timer. A card-bound agent unparks only while its card
+//!   has no assignee or the agent is the assignee: when another agent
+//!   claimed the card, the unpark is refused (`agent.unpark_refused`) and
+//!   a queued one is dropped, so two agents never work one card (TER-111).
 //! - **End** ([`end`]): the object is finished. The agent closes as with
 //!   `agent done` (`crate::spawn::close`): the owner gets the result, the
 //!   sessions go to the archive, the workspace to the trash.
@@ -45,6 +52,13 @@
 //!
 //! The wait columns are names, not roles: a board without them never
 //! parks its bound agents.
+//!
+//! An event that the driver misses (a lag of the event hub, or a daemon
+//! that was down) is repaired by [`reconcile`] at the driver's start and
+//! after each lag: a parked agent whose card is out of the wait columns
+//! unparks, and a running agent whose card moved into one after the
+//! spawn parks (TER-111). A missed end is the spawn timer's
+//! ([`finished_object`]).
 //!
 //! The unpark turn is `[System:card <id>]` with the move, then the move
 //! comment and the top of the card body (where the job queue and the
@@ -160,8 +174,65 @@ pub enum Unparked {
     Woken,
     /// The owner runs its `spawn.max_concurrent`: the unpark waits.
     Queued,
+    /// The object has another worker (a card assigned to another agent,
+    /// TER-111): the agent stays parked, a queued unpark is dropped, and
+    /// no turn is queued.
+    Refused,
     /// Not parked and no turn, or finished: nothing changed.
     Nothing,
+}
+
+/// The other worker of the object of `sp`, if any (TER-111): the
+/// assignee of its card when that is not the agent itself. While one
+/// works the card, the bound agent stays parked, so two agents never
+/// work one card. Other kinds have none.
+fn other_worker(conn: &rusqlite::Connection, sp: &spawns::Spawn) -> ApiResult<Option<String>> {
+    let Some(card_id) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:")) else {
+        return Ok(None);
+    };
+    Ok(match board::get_card(conn, card_id) {
+        Ok(c) => c.assignee.filter(|a| *a != sp.id),
+        // A card that is gone: the spawn timer ends the agent.
+        Err(e) if e.code.status().is_client_error() => None,
+        Err(e) => return Err(e),
+    })
+}
+
+/// Refuse the unpark of the parked `sp` whose object has the worker
+/// `other`: drop its queued unpark and the return turns that wait for it
+/// (a queued unpark queued its turn already), write `agent.unpark_refused`.
+fn refuse(
+    t: &mut crate::db::Tx<'_>,
+    sp: &spawns::Spawn,
+    other: &str,
+    cause: &str,
+) -> ApiResult<()> {
+    spawns::unqueue_unpark(t, &sp.id)?;
+    if let Some(card_id) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:")) {
+        let prefix = return_prefix(card_id);
+        for q in crate::store::agents::queued_turns(t, &sp.id)? {
+            if q.text.starts_with(&prefix) {
+                crate::store::agents::remove_queued_turn(t, &sp.id, q.id)?;
+            }
+        }
+    }
+    let who = crate::store::agents::display_name(t, other)?.unwrap_or_else(|| other.to_owned());
+    t.emit(
+        EventDraft::new(
+            "agent.unpark_refused",
+            format!(
+                "{}: stays parked ({cause}); {} works its {} now",
+                sp.name,
+                who,
+                sp.bound.as_deref().unwrap_or("object")
+            ),
+            json!({"spawn_id": sp.id, "name": sp.name, "bound": sp.bound, "cause": cause,
+                   "assignee": other}),
+        )
+        .agent(sp.id.clone(), sp.name.clone())
+        .project(sp.project.clone()),
+    )?;
+    Ok(())
 }
 
 /// The `spawn.max_concurrent` of `owner`, if it has one: `None` for the
@@ -205,7 +276,9 @@ fn end_park(t: &mut crate::db::Tx<'_>, sp: &spawns::Spawn, cause: &str) -> ApiRe
 /// Unpark the ephemeral agent `id`: queue `turn` (if any), then end
 /// the park and wake it with resume, or, when its owner runs its
 /// `spawn.max_concurrent` or older unparks of the owner wait, keep it
-/// parked with the unpark queued ([`retry_owner`] runs it later).
+/// parked with the unpark queued ([`retry_owner`] runs it at once, and
+/// later). When another agent works its object, the agent stays parked
+/// ([`Unparked::Refused`]).
 pub async fn unpark(
     state: &Shared,
     id: &str,
@@ -218,23 +291,33 @@ pub async fn unpark(
         .write("system", move |t| {
             let sp = spawns::get(t, &key)?;
             if !sp.running() {
-                return Ok(Unparked::Nothing);
+                return Ok((Unparked::Nothing, sp.owner));
+            }
+            if sp.parked_at.is_some()
+                && let Some(other) = other_worker(t, &sp)?
+            {
+                refuse(t, &sp, &other, cause)?;
+                return Ok((Unparked::Refused, sp.owner));
             }
             if let Some(turn) = &turn {
                 crate::store::transcripts::record_turn(t, &key, turn)?;
                 crate::store::agents::queue_turn(t, &key, turn)?;
             }
             if sp.parked_at.is_none() {
-                return Ok(if turn.is_some() {
+                let r = if turn.is_some() {
                     Unparked::Woken
                 } else {
                     Unparked::Nothing
-                });
+                };
+                return Ok((r, sp.owner));
             }
+            // A parked agent whose harness still runs holds its place:
+            // its unpark takes no new place, so it needs no room and
+            // waits behind no one (review round 2).
             let ahead = spawns::queued_unparks(t, &sp.owner)?
                 .iter()
                 .any(|other| *other != sp.id);
-            if ahead || !owner_has_room(t, &sp.owner)? {
+            if !spawns::holds_place(t, &sp.id)? && (ahead || !owner_has_room(t, &sp.owner)?) {
                 if spawns::queue_unpark(t, &sp.id)? {
                     t.emit(
                         EventDraft::new(
@@ -250,12 +333,13 @@ pub async fn unpark(
                         .project(sp.project.clone()),
                     )?;
                 }
-                return Ok(Unparked::Queued);
+                return Ok((Unparked::Queued, sp.owner));
             }
             end_park(t, &sp, cause)?;
-            Ok(Unparked::Woken)
+            Ok((Unparked::Woken, sp.owner))
         })
         .await?;
+    let (done, owner) = done;
     match done {
         Unparked::Woken => {
             if let Ok(a) = id.parse::<AgentId>() {
@@ -263,7 +347,15 @@ pub async fn unpark(
                 crate::lifecycle::wake_soon(state, a, cause);
             }
         }
-        Unparked::Queued => info!(agent = %id, %cause, "the unpark waits for a place of the owner"),
+        Unparked::Queued => {
+            info!(agent = %id, %cause, "the unpark waits for a place of the owner");
+            // TER-111 (R2-3): the queue runs at once when the owner has
+            // room (an older unpark that waits, while a place is free).
+            retry_owner(state, &owner).await;
+        }
+        Unparked::Refused => {
+            info!(agent = %id, %cause, "another agent works the object; the agent stays parked");
+        }
         Unparked::Nothing => {}
     }
     Ok(done)
@@ -278,10 +370,17 @@ pub async fn retry_owner(state: &Shared, owner: &str) {
         .write("system", move |t| {
             let mut woken = Vec::new();
             for id in spawns::queued_unparks(t, &key)? {
-                if !owner_has_room(t, &key)? {
-                    break;
-                }
                 let sp = spawns::get(t, &id)?;
+                // Another agent took the object while the unpark waited.
+                if let Some(other) = other_worker(t, &sp)? {
+                    refuse(t, &sp, &other, "place freed")?;
+                    continue;
+                }
+                // One that still holds its place needs no room. The room
+                // only shrinks in this loop, so a skip keeps the order.
+                if !spawns::holds_place(t, &id)? && !owner_has_room(t, &key)? {
+                    continue;
+                }
                 if end_park(t, &sp, "place freed")? {
                     woken.push(id);
                 }
@@ -299,6 +398,24 @@ pub async fn retry_owner(state: &Shared, owner: &str) {
             }
         }
         Err(e) => warn!(owner, "cannot run the queued unparks: {e}"),
+    }
+}
+
+/// The agent `id` stopped (the supervisor event pump). A parked agent
+/// held its owner's place until now ([`spawns::running_count`],
+/// TER-111): run the owner's queued unparks.
+pub async fn on_stopped(state: &Shared, id: AgentId) {
+    let key = id.to_string();
+    let owner = state
+        .db
+        .read(move |c| spawns::find(c, &key))
+        .await
+        .ok()
+        .flatten()
+        .filter(|sp| sp.running() && sp.parked_at.is_some())
+        .map(|sp| sp.owner);
+    if let Some(owner) = owner {
+        retry_owner(state, &owner).await;
     }
 }
 
@@ -416,19 +533,28 @@ fn data_block(what: &str, text: &str) -> String {
 /// card body are data: quoted, between markers.
 fn return_turn(card: &board::Card, ev: &StoredEvent) -> String {
     let s = |k: &str| ev.data.get(k).and_then(Value::as_str).unwrap_or("?");
+    let comment = ev.data.get("comment").and_then(Value::as_str);
+    return_text(
+        card,
+        &format!("moved {} -> {}", s("from"), s("to")),
+        comment,
+        s("to_role") == board::WORKING,
+    )
+}
+
+/// The start of each return turn of the card `card_id` ([`return_text`]).
+fn return_prefix(card_id: &str) -> String {
+    format!("[System:card {card_id}] Your card {card_id} came back:")
+}
+
+/// The unpark turn: the card came back (`how`: `moved review -> ready`),
+/// with the move `comment`, if any, and the top of the card body.
+fn return_text(card: &board::Card, how: &str, comment: Option<&str>, working: bool) -> String {
     let mut text = format!(
-        "Your card {} came back: moved {} -> {}. You run again in your own session and \
-         workspace.",
+        "Your card {} came back: {how}. You run again in your own session and workspace.",
         card.id,
-        s("from"),
-        s("to")
     );
-    if let Some(c) = ev
-        .data
-        .get("comment")
-        .and_then(Value::as_str)
-        .filter(|c| !c.trim().is_empty())
-    {
+    if let Some(c) = comment.filter(|c| !c.trim().is_empty()) {
         text.push_str(&format!("\n\n{}", data_block("MOVE COMMENT", c.trim())));
     }
     let body = card.body.trim();
@@ -444,7 +570,7 @@ fn return_turn(card: &board::Card, ev: &StoredEvent) -> String {
             data_block("CARD BODY", &cut)
         ));
     }
-    let next = if s("to_role") == board::WORKING {
+    let next = if working {
         "Fix the failure, push, and send the card on as before."
     } else {
         "Claim the card again (`terrarium card claim <id>`) when the working column has room, \
@@ -509,18 +635,124 @@ async fn handle(state: &Shared, ev: StoredEvent) {
     }
 }
 
+/// What [`reconcile`] does to a card-bound agent whose card is in
+/// `column`, with the agent `parked` or not, an unpark `queued` or not,
+/// and the card `moved_since` the spawn or not (TER-111). A parked agent
+/// outside the wait columns unparks. A running agent in a wait column
+/// parks only when the card moved after the spawn: as the event rule
+/// ([`on_move`]), it parks on a move into a wait column, not an agent
+/// bound to a card that waited already (a reviewer, review round 2). A
+/// queued unpark runs from the queue, and a finished card is the spawn
+/// timer's ([`finished_object`]).
+pub fn reconcile_action(
+    column: &str,
+    parked: bool,
+    queued: bool,
+    moved_since: bool,
+) -> Option<Action> {
+    if column == board::DONE {
+        return None;
+    }
+    let waits = WAIT_COLUMNS.contains(&column);
+    match (parked, waits) {
+        (false, true) if moved_since => Some(Action::Park(format!("card in {column}"))),
+        (true, false) if !queued => Some(Action::Unpark),
+        _ => None,
+    }
+}
+
+/// Bring each card-bound agent in line with its card, for the events that
+/// the driver missed (TER-111): a lag of the event hub, or a daemon that
+/// was down. See [`reconcile_action`]. An unpark gets a return turn and
+/// follows the rules of [`unpark`]. Returns the number of agents that it
+/// parked or unparked. The driver runs it at its start and after a lag,
+/// in its own loop, so it never runs at the same time as an event.
+pub async fn reconcile(state: &Shared) -> usize {
+    let read = state
+        .db
+        .read(|c| {
+            let mut out = Vec::new();
+            for sp in spawns::open(c)? {
+                let Some(card_id) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:"))
+                else {
+                    continue;
+                };
+                match board::get_card(c, card_id) {
+                    Ok(card) if !card.archived => {
+                        // RFC 3339 UTC with milliseconds on both sides.
+                        let moved_since =
+                            board::last_moved_at(c, card_id)?.is_some_and(|at| at > sp.spawned_at);
+                        out.push((sp, card, moved_since));
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.code.status().is_client_error() => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(out)
+        })
+        .await;
+    let rows = match read {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("cannot read the bound agents to reconcile: {e}");
+            return 0;
+        }
+    };
+    let mut n = 0;
+    for (sp, card, moved_since) in rows {
+        let action = reconcile_action(
+            &card.column,
+            sp.parked_at.is_some(),
+            sp.unpark_queued_at.is_some(),
+            moved_since,
+        );
+        let r = match action {
+            Some(Action::Park(reason)) => {
+                info!(agent = %sp.id, card = %card.id, "reconcile: the card waits; park");
+                park(state, &sp.id, &reason).await.map(usize::from)
+            }
+            Some(Action::Unpark) => {
+                info!(agent = %sp.id, card = %card.id, "reconcile: the card came back; unpark");
+                let working = card.assignee.as_deref() == Some(sp.id.as_str());
+                let turn = return_text(
+                    &card,
+                    &format!("it is in {} now", card.column),
+                    None,
+                    working,
+                );
+                unpark(state, &sp.id, Some(turn), "card returned")
+                    .await
+                    .map(|u| usize::from(matches!(u, Unparked::Woken | Unparked::Queued)))
+            }
+            _ => Ok(0),
+        };
+        match r {
+            Ok(k) => n += k,
+            Err(e) => warn!(agent = %sp.id, "cannot reconcile a bound agent: {e}"),
+        }
+    }
+    n
+}
+
 /// The driver: park, unpark, and end the agents bound to cards on card
 /// and job events, and the agents of threads on thread events
-/// ([`crate::thread_agent::handle`]). One event at a time, in order.
+/// ([`crate::thread_agent::handle`]). One event at a time, in order. At
+/// its start and after a lag it runs [`reconcile`] first.
 pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let mut rx = state.db.hub().subscribe();
     let state = state.clone();
     tokio::spawn(async move {
+        let n = reconcile(&state).await;
+        if n > 0 {
+            info!("the bound agent driver reconciled {n} agent(s) at its start");
+        }
         loop {
             let ev = match rx.recv().await {
                 Ok(ev) => ev,
                 Err(RecvError::Lagged(n)) => {
-                    warn!("the bound agent driver missed {n} events");
+                    warn!("the bound agent driver missed {n} events; reconciling");
+                    reconcile(&state).await;
                     continue;
                 }
                 Err(RecvError::Closed) => return,
@@ -599,6 +831,33 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_repairs_a_missed_park_or_unpark() {
+        // A missed park: running while the card moved into a wait column.
+        for col in WAIT_COLUMNS {
+            assert_eq!(reconcile_action(col, false, false, true), park(col));
+            assert_eq!(reconcile_action(col, true, false, true), None);
+            // Bound to a card that waited already (no move since the
+            // spawn): the event rule would not park it, nor does this.
+            assert_eq!(reconcile_action(col, false, false, false), None);
+        }
+        // A missed unpark: parked while the card is back.
+        for col in ["backlog", "ready", "in_progress", "blocked"] {
+            for moved in [true, false] {
+                assert_eq!(
+                    reconcile_action(col, true, false, moved),
+                    Some(Action::Unpark)
+                );
+                assert_eq!(reconcile_action(col, false, false, moved), None);
+                // A queued unpark runs from the queue, not again.
+                assert_eq!(reconcile_action(col, true, true, moved), None);
+            }
+        }
+        // A finished card is the spawn timer's.
+        assert_eq!(reconcile_action("done", false, false, true), None);
+        assert_eq!(reconcile_action("done", true, false, true), None);
+    }
+
+    #[test]
     fn the_turn_quotes_the_card_text_as_data() {
         let card: board::Card = serde_json::from_value(json!({
             "id": "TER-1", "project": "p", "column": "ready", "position": 0,
@@ -616,6 +875,8 @@ mod tests {
                    "comment": "Job queue: failed again.", "to_role": null}),
         );
         let t = return_turn(&card, &e);
+        // A refused unpark finds its stale return turns by this start.
+        assert!(t.starts_with(&return_prefix("TER-1")), "{t}");
         assert!(
             t.starts_with(
                 "[System:card TER-1] Your card TER-1 came back: moved validating -> ready."

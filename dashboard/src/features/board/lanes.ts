@@ -1,56 +1,39 @@
-// The version lanes of the Cards tab: pure helpers. No Solid imports.
+// The lanes of the Cards tab: pure helpers. No Solid imports.
 //
-// The board has one horizontal lane for each version of the project that is not archived, and a last
-// lane "No version". Each lane shows every column. A card in several versions shows in
-// each of their lanes. A card that is only in archived versions goes to "No version". The WIP limits and the
-// column counts stay per column, over all lanes.
+// The board shows one plain lane with every card, or, grouped by version
+// (`?group=version`), one horizontal lane for each version label on the
+// board's cards (versionLabels.ts: vnext first, then the newest release) and a
+// last lane "No version". Each lane shows every column. A card with several
+// version labels shows in each of their lanes. The WIP limits and the column
+// counts stay per column, over all lanes.
 
-import type { Card, Version, VersionPatch, VersionStatus } from "../../api/types";
+import type { Card } from "../../api/types";
+import { boardVersions, cardVersions, versionLabel } from "./versionLabels";
 
-/** The lane of the cards that are in no version (that is not archived). A version ID is a ULID, never this word. */
+/** The lane of the cards with no version label. A version lane key starts with `version:`, so it is never this word. */
 export const NO_VERSION_LANE = "none";
 
-/** The order of the lanes by status; then the newest version first. */
-export const LANE_STATUS_ORDER: Record<VersionStatus, number> = { draft: 0, in_review: 1, approved: 2, released: 3, rejected: 4 };
-
-/** An empty lane of these statuses still shows: a card can go into it. */
-const SHOW_EMPTY: readonly VersionStatus[] = ["draft", "in_review", "approved"];
-
-/** A version takes card changes in these statuses only (store/versions.rs `editable`). */
-export const CARD_EDIT_STATUSES: readonly VersionStatus[] = ["draft", "rejected"];
-export const takesCards = (v: Pick<Version, "status">) => CARD_EDIT_STATUSES.includes(v.status);
+/** The one lane of the board that is not grouped. */
+export const ALL_LANE = "all";
 
 export interface Lane {
-  /** The version ID, or NO_VERSION_LANE. */
+  /** The version label (`version:1.4.0`), NO_VERSION_LANE, or ALL_LANE. */
   key: string;
-  version?: Version;
+  /** The version name of a version lane (`1.4.0`). */
+  version?: string;
   /** The cards of the lane that are on the board. */
   cards: Card[];
 }
 
-/** The versions that have a lane, in lane order. */
-export function laneVersions(versions: readonly Version[]): Version[] {
-  return versions
-    .filter((v) => !v.archived)
-    .slice()
-    .sort((a, b) => LANE_STATUS_ORDER[a.status] - LANE_STATUS_ORDER[b.status] || b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
-}
-
 /**
- * The lanes of the board. An empty lane of a released or rejected version is hidden; an empty lane of a draft,
- * in-review, or approved version shows. The "No version" lane is always last and always shows.
+ * The lanes of the board. Not grouped: one lane ALL_LANE with every card.
+ * Grouped: a lane for each version label on the cards, in version order, and
+ * "No version" last. "No version" always shows: a card can go into it.
  */
-export function buildLanes(versions: readonly Version[], cards: readonly Card[]): Lane[] {
-  const byId = new Map(cards.map((c) => [c.id, c]));
-  const lanes: Lane[] = [];
-  const placed = new Set<string>();
-  for (const v of laneVersions(versions)) {
-    const ids = new Set(v.cards.map((c) => c.id));
-    const mine = [...ids].map((id) => byId.get(id)).filter((c): c is Card => !!c);
-    for (const c of mine) placed.add(c.id);
-    if (mine.length || SHOW_EMPTY.includes(v.status)) lanes.push({ key: v.id, version: v, cards: mine });
-  }
-  lanes.push({ key: NO_VERSION_LANE, cards: cards.filter((c) => !placed.has(c.id)) });
+export function buildLanes(cards: readonly Card[], grouped: boolean): Lane[] {
+  if (!grouped) return [{ key: ALL_LANE, cards: [...cards] }];
+  const lanes: Lane[] = boardVersions(cards).map((v) => ({ key: versionLabel(v), version: v, cards: cards.filter((c) => cardVersions(c.labels).includes(v)) }));
+  lanes.push({ key: NO_VERSION_LANE, cards: cards.filter((c) => cardVersions(c.labels).length === 0) });
   return lanes;
 }
 
@@ -59,41 +42,22 @@ export function laneCells(lane: Lane, column: string): Card[] {
   return lane.cards.filter((c) => c.column === column).sort((a, b) => a.position - b.position);
 }
 
-/** The other lane versions of a card, for the "also in" note. */
-export function alsoIn(cardId: string, laneKey: string, versions: readonly Version[]): Version[] {
-  return laneVersions(versions).filter((v) => v.id !== laneKey && v.cards.some((c) => c.id === cardId));
+/** The other version names of a card, for the "also in" note of a version lane. None in the plain lane. */
+export function alsoIn(card: Pick<Card, "labels">, laneKey: string): string[] {
+  if (laneKey === ALL_LANE) return [];
+  return cardVersions(card.labels).filter((v) => versionLabel(v) !== laneKey);
 }
 
-/** What a drag from one lane into another does to the versions of the card. */
-export interface LaneMove {
-  /** The version that loses the card (the source lane), or none from "No version". */
-  remove?: Version;
-  /** The version that gets the card (the target lane), or none into "No version". */
-  add?: Version;
-  /** The card is in other lane versions too: they keep it, so the page asks first. */
-  others: Version[];
-  /** Why the move cannot be done, or null. */
-  refused: string | null;
-}
-
-export function laneMove(cardId: string, fromLane: string, toLane: string, versions: readonly Version[]): LaneMove {
-  const find = (k: string) => (k === NO_VERSION_LANE ? undefined : versions.find((v) => v.id === k));
-  const remove = find(fromLane);
-  const add = find(toLane);
-  const others = alsoIn(cardId, fromLane, versions).filter((v) => v.id !== toLane);
-  let refused: string | null = null;
-  for (const v of [remove, add]) {
-    if (v && !takesCards(v)) refused = `Version ${v.name} is ${v.status.replace("_", " ")}: its cards change only in draft or after a rejection.`;
-  }
-  return { ...(remove ? { remove } : {}), ...(add ? { add } : {}), others, refused };
-}
-
-/** The `PATCH /api/versions/{id}` calls of a drag between lanes, in order: the remove first, then the add. */
-export function laneMovePatches(cardId: string, m: LaneMove): { version: string; patch: VersionPatch }[] {
-  const out: { version: string; patch: VersionPatch }[] = [];
-  if (m.remove) out.push({ version: m.remove.id, patch: { remove_cards: [cardId] } });
-  if (m.add) out.push({ version: m.add.id, patch: { add_cards: [cardId] } });
-  return out;
+/**
+ * The labels of a card after a drag from one lane into another: the label of
+ * the source lane goes, the label of the target lane comes. "No version" has
+ * no label. Null when the labels do not change.
+ */
+export function laneMoveLabels(labels: readonly string[], fromLane: string, toLane: string): string[] | null {
+  if (fromLane === toLane || fromLane === ALL_LANE || toLane === ALL_LANE) return null;
+  let out = labels.filter((l) => l !== fromLane);
+  if (toLane !== NO_VERSION_LANE && !out.includes(toLane)) out = [...out, toLane];
+  return out.length === labels.length && out.every((l, i) => l === labels[i]) ? null : out;
 }
 
 /**
@@ -128,16 +92,5 @@ export const toggleCollapsed = (s: LaneState, key: string): LaneState => ({
   collapsed: s.collapsed.includes(key) ? s.collapsed.filter((k) => k !== key) : [...s.collapsed, key],
 });
 
-/** The versions of the toolbar menu: those with a lane, then (with the toggle) the archived ones, newest first. */
-export function menuVersions(versions: readonly Version[], showArchived: boolean): { active: Version[]; archived: Version[] } {
-  return {
-    active: laneVersions(versions),
-    archived: showArchived ? versions.filter((v) => v.archived).sort((a, b) => b.created_at.localeCompare(a.created_at)) : [],
-  };
-}
-
-/** True when the board has no version lane: only "No version", which then shows as a plain board (no lane head). */
-export const onlyNoVersion = (lanes: readonly Lane[]) => lanes.every((l) => l.key === NO_VERSION_LANE);
-
-/** Find a version by ID or by name (a wikilink has the name). */
-export const findVersion = (versions: readonly Version[], key: string | undefined) => (key ? (versions.find((v) => v.id === key) ?? versions.find((v) => v.name === key)) : undefined);
+/** True for the board that is not grouped: one lane, with no lane head. */
+export const isPlain = (lanes: readonly Lane[]) => lanes.length === 1 && lanes[0]!.key === ALL_LANE;

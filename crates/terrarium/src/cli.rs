@@ -1186,8 +1186,16 @@ pub enum BoardCmd {
 }
 
 /// A column role: `working` is where `card claim` moves a card; a move to
-/// `blocked` needs a comment.
-pub const COLUMN_ROLES: [&str; 2] = ["working", "blocked"];
+/// `blocked` needs a comment; `validating`, `review`, `merge_queue`, and
+/// `accepted` are where the job queue puts a card (see the daemon).
+pub const COLUMN_ROLES: [&str; 6] = [
+    "working",
+    "blocked",
+    "validating",
+    "review",
+    "merge_queue",
+    "accepted",
+];
 
 #[derive(Debug, Subcommand)]
 pub enum ColumnCmd {
@@ -1201,7 +1209,7 @@ pub enum ColumnCmd {
         /// The most cards the column holds
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
         wip: Option<u32>,
-        /// `working` or `blocked`; the column that had the role loses it
+        /// One of the column roles; the column that had the role loses it
         #[arg(long, value_parser = COLUMN_ROLES)]
         role: Option<String>,
         #[arg(long, value_name = "COLUMN", conflicts_with = "before")]
@@ -1220,7 +1228,7 @@ pub enum ColumnCmd {
         /// Remove the WIP limit
         #[arg(long)]
         no_wip: bool,
-        /// `working` or `blocked`; the column that had the role loses it
+        /// One of the column roles; the column that had the role loses it
         #[arg(long, value_parser = COLUMN_ROLES, conflicts_with = "no_role")]
         role: Option<String>,
         /// Remove the role
@@ -3622,16 +3630,19 @@ pub enum ScheduleCmd {
         #[arg(long = "disabled")]
         disabled_only: bool,
         /// Only the triggers (spec `on`)
-        #[arg(long, conflicts_with = "time")]
+        #[arg(long, conflicts_with_all = ["time", "actions"])]
         triggers: bool,
         /// Only the time schedules (cron, interval, at)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "actions")]
         time: bool,
+        /// Only the project actions (spec `manual`: a button runs them)
+        #[arg(long)]
+        actions: bool,
     },
     /// Show one schedule: a ULID, `project/name`, or a name
     Show { schedule: String },
-    /// Make a schedule: one time spec (or `--on` for a trigger) and one
-    /// action
+    /// Make a schedule: one time spec (or `--on` for a trigger, or
+    /// `--manual` for a project action) and one action
     New {
         name: String,
         /// Who owns it: `actor` (the default: it runs as you), `project`
@@ -3700,13 +3711,17 @@ pub enum ScheduleCmd {
 #[derive(Debug, Args)]
 pub struct ScheduleArgs {
     /// A five-field cron expression, for example "*/15 * * * *", or @hourly, @daily
-    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json"])]
+    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json", "manual"])]
     pub cron: Option<String>,
+    /// A project action: no time and no event; it runs only on demand
+    /// (`schedule run`, or its button on the project dashboard and Home)
+    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json"])]
+    pub manual: bool,
     /// An interval: 90s, 30m, 2h, 1d, or 1h30m (60 s or more)
-    #[arg(long, conflicts_with_all = ["at", "on", "spec_json"])]
+    #[arg(long, conflicts_with_all = ["at", "on", "spec_json", "manual"])]
     pub every: Option<String>,
     /// One run at an RFC 3339 time, or `+30m` from now
-    #[arg(long, conflicts_with_all = ["on", "spec_json"])]
+    #[arg(long, conflicts_with_all = ["on", "spec_json", "manual"])]
     pub at: Option<String>,
     /// A trigger: run on each event of these kinds (globs, for example
     /// ci.run.failed or 'ci.job.*'; repeat or separate with commas)
