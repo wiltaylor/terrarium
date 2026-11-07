@@ -741,6 +741,11 @@ async fn validate_replaces_stale_validation_and_by_labels() {
         )
         .await
         .ok();
+    // The seed is on the card before the validate, or the test proves nothing.
+    let seeded = lab.card_of(&id).await;
+    let l = labels(&seeded);
+    assert!(l.contains(&"by:w9".to_owned()), "{seeded}");
+    assert!(l.contains(&"validation:running".to_owned()), "{seeded}");
     let r = lab
         .td
         .post_as(
@@ -776,6 +781,56 @@ async fn validate_replaces_stale_validation_and_by_labels() {
     assert!(c["assignee"].is_null(), "{c}");
     assert!(validation_of(&c).is_empty(), "{c}");
     assert_eq!(by_of(&c), ["by:w1"], "{c}");
+}
+
+/// TER-107: a project admin who queues another agent's card keeps the
+/// card's worker in `by:`. The job and the final mail go to that worker.
+#[tokio::test]
+async fn an_admin_validate_keeps_the_workers_by_label() {
+    let lab = lab(2).await;
+    let head = lab.branch("ter-admin", "next", &[("OK", "yes\n")]);
+    let id = lab.card("admin queues", "ter-admin").await;
+    // The worker's `by:` and a stale validation label, then the admin queues.
+    lab.td
+        .patch(
+            &format!("/api/cards/{id}"),
+            json!({"add_labels": ["by:w1", "validation:running"]}),
+        )
+        .await
+        .ok();
+    let seeded = lab.card_of(&id).await;
+    assert!(labels(&seeded).contains(&"by:w1".to_owned()), "{seeded}");
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["by_agent"], "w1", "{}", r.body);
+    let by_of = |c: &Value| -> Vec<String> {
+        labels(c)
+            .into_iter()
+            .filter(|l| l.starts_with("by:"))
+            .collect()
+    };
+    let c = lab.card_of(&id).await;
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+    let validation = labels(&c)
+        .into_iter()
+        .filter(|l| l.starts_with("validation:"))
+        .count();
+    assert_eq!(validation, 1, "{c}");
+    let c = lab
+        .until_card(&id, "review", |c| c["column"] == "review")
+        .await;
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+    assert!(
+        !labels(&c).iter().any(|l| l.contains("lead")),
+        "the admin is not a worker label: {c}"
+    );
 }
 
 #[tokio::test]

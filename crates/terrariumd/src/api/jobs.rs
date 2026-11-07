@@ -488,16 +488,28 @@ fn may_validate(actor: &Actor, card: &Card) -> ApiResult<()> {
     )
 }
 
+/// The worker of a validate, the name in its `by:<agent>` label and the
+/// `by_agent` of the job (the final mail goes to it, docs/api.md 35.3). The
+/// worker is the card's assignee when it queues. A project admin who queues
+/// another agent's card keeps the card's `by:` label, so the worker does
+/// not change. A card with no `by:` label gets the queuing agent.
+fn validate_by(actor: &Actor, card: &Card) -> Option<String> {
+    let me = actor.agent();
+    match me {
+        Some(a) if card.assignee.as_deref() == Some(actor.address().as_str()) => {
+            Some(a.name.clone())
+        }
+        _ => rt::by_agent_of(&card.labels).or_else(|| me.map(|a| a.name.clone())),
+    }
+}
+
 /// The labels of a validate: one `validation:*` label (`validation:queued`)
 /// and one `by:<agent>` label. Every `validation:*` and `by:*` label that
 /// the card has goes, so a stale one does not stay beside the new one. The
-/// `by:` label is the agent that queues, else the card's first `by:` label.
-/// Returns the labels to add and the labels to remove.
+/// `by` name is the worker, see [`validate_by`]. Returns the labels to add
+/// and the labels to remove.
 fn job_labels(labels: &[String], by: Option<&str>) -> (Vec<String>, Vec<String>) {
-    let keep = by
-        .map(str::to_owned)
-        .or_else(|| rt::by_agent_of(labels))
-        .map(|n| format!("by:{n}"));
+    let keep = by.map(|n| format!("by:{n}"));
     let remove = labels
         .iter()
         .filter(|l| l.starts_with("validation:") || l.starts_with("by:"))
@@ -561,10 +573,7 @@ async fn validate(
         .write(actor.label(), move |t| {
             let card = board::get_card(t, &card.id)?;
             may_validate(&actor, &card)?;
-            let by = actor
-                .agent()
-                .map(|a| a.name.clone())
-                .or_else(|| rt::by_agent_of(&card.labels));
+            let by = validate_by(&actor, &card);
             let job = jobs::create(
                 t,
                 NewJob {
