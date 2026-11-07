@@ -507,10 +507,16 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
             repo,
             branch,
             comment,
-        } => super::jobs::validate(ctx, &card_path(id), commit, repo, branch, comment).await,
-        CardCmd::Merge { ids, repo, branch } => match ids.as_slice() {
-            [id] => super::jobs::merge(ctx, &card_path(id), repo, branch).await,
-            _ => super::jobs::merge_batch(ctx, ids, repo, branch).await,
+            eta,
+        } => super::jobs::validate(ctx, &card_path(id), commit, repo, branch, comment, eta).await,
+        CardCmd::Merge {
+            ids,
+            repo,
+            branch,
+            eta,
+        } => match ids.as_slice() {
+            [id] => super::jobs::merge(ctx, &card_path(id), repo, branch, eta).await,
+            _ => super::jobs::merge_batch(ctx, ids, repo, branch, eta).await,
         },
         CardCmd::Assign { id, agent } => {
             let who = match agent.as_str() {

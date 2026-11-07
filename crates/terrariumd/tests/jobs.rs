@@ -122,6 +122,7 @@ async fn host_counts_respect_the_readers_project() {
                         card,
                         kind: JobKind::Validate,
                         batch: Vec::new(),
+                        planned_secs: None,
                         repo: "app".into(),
                         branch: "next".into(),
                         commit: None,
@@ -212,6 +213,7 @@ async fn cards_carry_their_job_state_and_assignee_status() {
                             JobKind::Validate
                         },
                         batch: Vec::new(),
+                        planned_secs: None,
                         repo: "app".into(),
                         branch: format!("b{i}"),
                         commit: None,
@@ -272,6 +274,186 @@ async fn cards_carry_their_job_state_and_assignee_status() {
     assert_eq!(one["assignee_status"], w["status"]);
 }
 
+/// The seconds from `from` to `to` (RFC 3339).
+fn secs_between(from: &Value, to: &Value) -> i64 {
+    let t = |v: &Value| chrono::DateTime::parse_from_rfc3339(v.as_str().unwrap()).unwrap();
+    (t(to) - t(from)).num_seconds()
+}
+
+/// TER-155 D2: the ETA of a job starts when the job runs. A queued job's
+/// card has no ETA; the start sets `eta_at` = start + planned duration; a
+/// rerun clears it and its start sets it again; a job with no duration
+/// sets no ETA. A duration given for a card with an open job is the job's
+/// planned duration.
+#[tokio::test]
+async fn a_jobs_eta_starts_when_the_job_runs() {
+    use terrariumd::store::jobs::{self, JobEnd, JobKind, NewJob};
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let w = td.agent("p", "w", json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let label = format!("agent:{w}");
+    let mut ids = Vec::new();
+    for title in ["planned", "none", "later"] {
+        let id = td
+            .post("/api/projects/p/cards", json!({"title": title}))
+            .await
+            .ok()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        td.post_empty_as("p/w", &format!("/api/cards/{id}/claim"))
+            .await
+            .ok();
+        td.patch_as("p/w", &format!("/api/cards/{id}"), json!({"eta_at": "3h"}))
+            .await
+            .ok();
+        ids.push(id);
+    }
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    let create = |card: String, planned_secs: Option<i64>| {
+        let (db, label) = (db.clone(), label.clone());
+        async move {
+            db.write(&label, move |t| {
+                jobs::create(
+                    t,
+                    NewJob {
+                        project: "p".into(),
+                        card,
+                        kind: JobKind::Validate,
+                        repo: "app".into(),
+                        branch: "b".into(),
+                        commit: None,
+                        by_agent: Some("w".into()),
+                        batch: Vec::new(),
+                        planned_secs,
+                    },
+                )
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let card = |id: String| {
+        let td = &td;
+        async move { td.get(&format!("/api/cards/{id}")).await.ok().clone() }
+    };
+
+    // Queued with a planned duration: the old ETA goes, none until the start.
+    let j = create(ids[0].clone(), Some(1200)).await;
+    assert_eq!(j.planned_secs, Some(1200));
+    let c = card(ids[0].clone()).await;
+    assert!(c.get("eta_at").is_none(), "{c:#}");
+    assert_eq!(c["job"]["planned_secs"], 1200, "{c:#}");
+    // The start: start + 20m, set by the actor that queued it.
+    let jid = j.id.clone();
+    let started = db
+        .write("system", move |t| {
+            assert!(jobs::start(t, &jid, "machine")?);
+            jobs::get(t, &jid)
+        })
+        .await
+        .unwrap();
+    let c = card(ids[0].clone()).await;
+    let start = json!(started.started_at.clone().unwrap());
+    assert_eq!(secs_between(&start, &c["eta_at"]), 1200, "{c:#}");
+    assert_eq!(c["eta_set_by_name"], "p/w", "{c:#}");
+    let ev = td
+        .get(&format!("/api/cards/{}/events", ids[0]))
+        .await
+        .ok()
+        .clone();
+    assert!(
+        ev.as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["data"]["change"] == "eta" && e["data"]["job"] == true),
+        "{ev:#}"
+    );
+    // A failure and its rerun: the rerun keeps the duration, the queue
+    // clears the ETA, and the rerun's start sets it again.
+    let jid = j.id.clone();
+    let rerun = db
+        .write("system", move |t| {
+            let failed = jobs::finish(t, &jid, &JobEnd::default())?.unwrap();
+            jobs::rerun(t, &failed, None)
+        })
+        .await
+        .unwrap();
+    assert_eq!(rerun.planned_secs, Some(1200));
+    let c = card(ids[0].clone()).await;
+    assert!(c.get("eta_at").is_none(), "the rerun waits: {c:#}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let rid = rerun.id.clone();
+    let restarted = db
+        .write("system", move |t| {
+            assert!(jobs::start(t, &rid, "machine")?);
+            jobs::get(t, &rid)
+        })
+        .await
+        .unwrap();
+    let c = card(ids[0].clone()).await;
+    let restart = json!(restarted.started_at.clone().unwrap());
+    assert_eq!(secs_between(&restart, &c["eta_at"]), 1200, "{c:#}");
+    assert!(restarted.started_at > started.started_at);
+
+    // No duration: the job leaves the card's ETA alone and sets none.
+    let j = create(ids[1].clone(), None).await;
+    let before = card(ids[1].clone()).await["eta_at"].clone();
+    assert!(before.is_string());
+    let jid = j.id.clone();
+    db.write("system", move |t| jobs::start(t, &jid, "machine"))
+        .await
+        .unwrap();
+    let c = card(ids[1].clone()).await;
+    assert_eq!(c["eta_at"], before, "{c:#}");
+    assert!(c["job"].get("planned_secs").is_none(), "{c:#}");
+
+    // A duration given while the job is queued is its planned duration:
+    // no ETA yet. A time is an ETA as before.
+    let j = create(ids[2].clone(), None).await;
+    let path = format!("/api/cards/{}", ids[2]);
+    let c = td
+        .patch_as("p/w", &path, json!({"eta_at": "45m"}))
+        .await
+        .ok()
+        .clone();
+    assert!(c.get("eta_at").is_none(), "{c:#}");
+    assert_eq!(c["job"]["planned_secs"], 2700, "{c:#}");
+    let jid = j.id.clone();
+    let started = db
+        .write("system", move |t| {
+            jobs::start(t, &jid, "machine")?;
+            jobs::get(t, &jid)
+        })
+        .await
+        .unwrap();
+    let c = card(ids[2].clone()).await;
+    let start = json!(started.started_at.clone().unwrap());
+    assert_eq!(secs_between(&start, &c["eta_at"]), 2700, "{c:#}");
+    // While it runs, a new duration counts from the start.
+    let c = td
+        .patch_as("p/w", &path, json!({"eta_at": "1h"}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(secs_between(&start, &c["eta_at"]), 3600, "{c:#}");
+    let later = (chrono::Utc::now() + chrono::Duration::hours(5)).to_rfc3339();
+    let c = td
+        .patch_as("p/w", &path, json!({"eta_at": later}))
+        .await
+        .ok()
+        .clone();
+    assert!(secs_between(&start, &c["eta_at"]) > 4 * 3600, "{c:#}");
+    // Another member may not set the job's duration.
+    td.agent("p", "w2", json!({})).await;
+    td.patch_as("p/w2", &path, json!({"eta_at": "2h"}))
+        .await
+        .err(403, "forbidden");
+}
+
 #[tokio::test]
 async fn an_ssh_alias_of_a_host_agent_is_one_host() {
     use terrariumd::store::jobs::{self, JobKind, NewJob};
@@ -318,6 +500,7 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
                 card,
                 kind: JobKind::Validate,
                 batch: Vec::new(),
+                planned_secs: None,
                 repo: "app".into(),
                 branch: "next".into(),
                 commit: None,
@@ -443,6 +626,9 @@ struct Lab {
     lead: String,
     /// The worker `p/w1`.
     w1: String,
+    /// The options of the host agent `lab1`, and its task.
+    client_opts: ClientOptions,
+    client: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// The host listener of the daemon.
     hosts_addr: std::net::SocketAddr,
 }
@@ -484,7 +670,8 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
     assert_eq!(r.status, 201, "{}", r.body);
     let token = r.body["token"].as_str().unwrap().to_owned();
     let dirs = tempfile::tempdir().unwrap();
-    connect_host(&td, addr, "lab1", &token, &dirs.path().join("lab1"), docker).await;
+    let (o, client) =
+        connect_host(&td, addr, "lab1", &token, &dirs.path().join("lab1"), docker).await;
     td.project("p").await;
     td.project("q").await;
     // The columns of the delivery process, as on the terrarium board.
@@ -569,12 +756,15 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
         work,
         lead,
         w1,
+        client_opts: o,
+        client: std::sync::Mutex::new(Some(client)),
         hosts_addr: addr,
     }
 }
 
 /// Connect a host agent `name` with `token` to the daemon's host listener
 /// `addr`, and wait until it is online. `dir` holds its instances and repos.
+/// Returns its options and its task, to stop and start it again.
 async fn connect_host(
     td: &TestDaemon,
     addr: std::net::SocketAddr,
@@ -582,7 +772,7 @@ async fn connect_host(
     token: &str,
     dir: &Path,
     docker: Option<&Path>,
-) {
+) -> (ClientOptions, tokio::task::JoinHandle<()>) {
     let mut o = ClientOptions::new(format!("ws://{addr}/hosts/connect"), token, name);
     o.capabilities = HostCapabilities {
         shell: Some("/bin/sh".into()),
@@ -602,15 +792,41 @@ async fn connect_host(
         instances_dir: dir.join("instances"),
         repos_dir: dir.join("repos"),
     };
-    tokio::spawn(Client::new(o).run());
+    let client = tokio::spawn(Client::new(o.clone()).run());
     let start = Instant::now();
     while td.get(&format!("/api/hosts/{name}")).await.body["online"] != true {
         assert!(start.elapsed() < DEADLINE, "{name} never came online");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    (o, client)
 }
 
 impl Lab {
+    /// Wait until `/api/hosts/lab1` shows `online` as `on`.
+    async fn until_online(&self, on: bool) {
+        let start = Instant::now();
+        while self.td.get("/api/hosts/lab1").await.body["online"] != on {
+            assert!(start.elapsed() < DEADLINE, "lab1 online never became {on}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Stop the host agent `lab1`, as a daemon restart leaves it: not
+    /// connected to the daemon.
+    async fn agent_down(&self) {
+        if let Some(c) = self.client.lock().unwrap().take() {
+            c.abort();
+        }
+        self.until_online(false).await;
+    }
+
+    /// Start the host agent `lab1` again.
+    async fn agent_up(&self) {
+        let c = tokio::spawn(Client::new(self.client_opts.clone()).run());
+        *self.client.lock().unwrap() = Some(c);
+        self.until_online(true).await;
+    }
+
     /// Make branch `name` from `base` with `files`, push it, and return
     /// its head.
     fn branch(&self, name: &str, base: &str, files: &[(&str, &str)]) -> String {
@@ -842,6 +1058,60 @@ async fn a_green_validation_moves_the_card_to_review() {
     let j = jobs.iter().find(|j| j["state"] == "passed").unwrap();
     assert_eq!(j["head"].as_str().unwrap(), head);
     assert_eq!(j["exit_code"], 0);
+}
+
+/// TER-155 D2 through the API: `eta` on a validate is a planned duration,
+/// not a time. The card gets its ETA when the job starts, and the move to
+/// `review` clears it again (D1).
+#[tokio::test]
+async fn a_validate_eta_is_a_duration_from_the_job_start() {
+    let lab = lab(2).await;
+    let head = lab.branch("ter-e", "next", &[("OK", "yes\n")]);
+    let id = lab.card("eta", "ter-e").await;
+    let path = format!("/api/cards/{id}/validate");
+    for bad in ["2030-01-01T00:00:00Z", "soon", "31d"] {
+        lab.td
+            .post_as(&lab.w1, &path, json!({"commit": head, "eta": bad}))
+            .await
+            .err(422, "invalid");
+    }
+    assert!(lab.jobs().await.is_empty());
+    let r = lab
+        .td
+        .post_as(&lab.w1, &path, json!({"commit": head, "eta": "20m"}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["planned_secs"], 1200, "{}", r.body);
+    let c = lab
+        .until_card(&id, "review", |c| c["column"] == "review")
+        .await;
+    assert!(c.get("eta_at").is_none(), "the move clears it: {c:#}");
+    let jobs = lab.until_idle().await;
+    let j = jobs.iter().find(|j| j["state"] == "passed").unwrap();
+    let ev = lab
+        .td
+        .get(&format!("/api/cards/{id}/events"))
+        .await
+        .ok()
+        .clone();
+    let ev = ev.as_array().unwrap();
+    let set = ev
+        .iter()
+        .find(|e| e["data"]["change"] == "eta" && e["data"]["job"] == true)
+        .unwrap_or_else(|| panic!("no job ETA: {ev:#?}"));
+    assert_eq!(
+        secs_between(&j["started_at"], &set["data"]["eta_at"]),
+        1200,
+        "{set:#}"
+    );
+    let to_review = ev
+        .iter()
+        .find(|e| e["data"]["change"] == "moved" && e["data"]["to"] == "review")
+        .unwrap();
+    assert_eq!(
+        to_review["data"]["previous_eta_at"], set["data"]["eta_at"],
+        "{to_review:#}"
+    );
 }
 
 /// TER-165: the daemon finds the columns by role. `validating` is renamed
@@ -2249,6 +2519,343 @@ async fn a_merge_that_fails_without_a_conflict_drops_only_that_card() {
     );
 }
 
+// ------------------------------------------------------------- TER-123
+
+/// A process group that a job run of the last daemon left on this
+/// machine: a shell that ignores `TERM` with a child. Its job PID file
+/// holds the PID and the start time, as the wrapper writes them.
+fn orphan(job: &str) -> (std::process::Child, u32) {
+    use std::os::unix::process::CommandExt;
+    let dir = tempfile::tempdir().unwrap();
+    let child_file = dir.path().join("child");
+    let leader = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "trap '' TERM; sleep 300 & echo $! > \"$1\"; wait",
+            "orphan",
+        ])
+        .arg(&child_file)
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pid = leader.id();
+    let start = Instant::now();
+    let child = loop {
+        if let Some(c) = std::fs::read_to_string(&child_file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+        {
+            break c;
+        }
+        assert!(start.elapsed() < DEADLINE, "the orphan wrote no child");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let st = stat
+        .rsplit(") ")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .to_owned();
+    std::fs::write(
+        terrariumd::run_kill::job_pidfile(job),
+        format!("{pid} {st}\n"),
+    )
+    .unwrap();
+    (leader, child)
+}
+
+/// Wait until the kills of lost jobs `ids` started: KILL removes the job
+/// PID file before its first signal.
+async fn until_kills_run(ids: &[&str]) {
+    let start = Instant::now();
+    for id in ids {
+        let f = terrariumd::run_kill::job_pidfile(id);
+        while Path::new(&f).exists() {
+            assert!(start.elapsed() < DEADLINE, "the kill of {id} never started");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+/// TER-123 review, blocker 1 and major 3: after a daemon restart, a job
+/// that was running and one cancelled while it drained left their
+/// processes on a docker target (through host agent `lab1`). The host
+/// agent connects only after the start. The recovery waits for it, kills
+/// both process groups, and puts the running job back in the queue with
+/// its attempt (P5: a restart is not a failure). Until then both jobs
+/// keep their slots: a validation queued meanwhile (two slots) does not
+/// start, also not on a tick.
+#[tokio::test]
+async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots() {
+    let (lab, _bins, children) = docker_lab(2, 600).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    // The running job runs again after its requeue: it needs its branch.
+    lab.branch("ter-l1", "next", &[("OK", "1")]);
+    let cr = lab.card("lost-run", "ter-l1").await;
+    let cc = lab.card("lost-cancel", "ter-l2").await;
+    let run_id = ulid::Ulid::new().to_string();
+    let cancel_id = ulid::Ulid::new().to_string();
+    let now = chrono::Utc::now();
+    let at = |mins: i64| {
+        (now - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    let rows = [
+        (run_id.clone(), cr.clone(), "ter-l1", "running", at(5), None),
+        (
+            cancel_id.clone(),
+            cc.clone(),
+            "b",
+            "cancelled",
+            at(5),
+            Some(at(1)),
+        ),
+    ];
+    state
+        .db
+        .write("operator", move |t| {
+            for (id, card, branch, st, started, ended) in rows {
+                t.execute(
+                    "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt,
+                                       created_by, created_at, started_at, ended_at)
+                     VALUES (?1, 'p', ?2, 'validate', 'app', ?3, ?4, 1, 't', ?5, ?5, ?6)",
+                    rusqlite::params![id, card, branch, st, started, ended],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (mut lr, run_child) = orphan(&run_id);
+    let (mut lc, cancel_child) = orphan(&cancel_id);
+
+    // The restart: the host agent is not connected yet.
+    lab.agent_down().await;
+    let recovery = terrariumd::jobs::recover_lost(&state).await;
+    let h = lab.branch("ter-l3", "next", &[("OK", "1")]);
+    let c = lab.card("queued", "ter-l3").await;
+    // A validation queued meanwhile. The validate API checks the target
+    // and refuses while the host agent is offline, so the row goes in as
+    // the API writes it, and a tick follows as after the API.
+    let queued = ulid::Ulid::new().to_string();
+    let (qid, qcard, qat) = (queued.clone(), c.clone(), at(0));
+    state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state,
+                                   attempt, created_by, created_at)
+                 VALUES (?1, 'p', ?2, 'validate', 'app', 'ter-l3', ?3, 'queued', 1, 't', ?4)",
+                rusqlite::params![qid, qcard, h, qat],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    terrariumd::jobs::tick(&state).await.unwrap();
+    for (p, what) in [
+        (lr.id(), "running"),
+        (run_child, "running child"),
+        (lc.id(), "cancelled"),
+        (cancel_child, "cancelled child"),
+    ] {
+        assert!(
+            alive(p),
+            "the {what} orphan {p} is gone before the host agent is back"
+        );
+    }
+    let q = lab
+        .td
+        .get(&format!("/api/jobs/{queued}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(q["state"], "queued", "a job took a slot of a lost job: {q}");
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{run_id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(j["state"], "running", "{j}");
+
+    // TER-160 holds a queued job while its host agent is offline, so the
+    // check above alone does not prove the slots are held (review 2,
+    // minor 3). Check again with the host agent back, while the kills run:
+    // they removed the PID files, and the orphans ignore `TERM` for the
+    // grace of the kill.
+    lab.agent_up().await;
+    until_kills_run(&[&run_id, &cancel_id]).await;
+    terrariumd::jobs::tick(&state).await.unwrap();
+    let q = lab
+        .td
+        .get(&format!("/api/jobs/{queued}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(
+        q["state"], "queued",
+        "a job took a slot of a lost job while its kill ran: {q}"
+    );
+    for p in [lr.id(), lc.id()] {
+        assert!(alive(p), "the kill of {p} ended before the check");
+    }
+    tokio::time::timeout(DEADLINE, recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    for p in [lr.id(), run_child, lc.id(), cancel_child] {
+        assert!(!alive(p), "the orphan {p} outlived the recovery");
+    }
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{run_id}"))
+        .await
+        .ok()
+        .clone();
+    // P5: requeued, not failed. It may run again already: its tail stays
+    // until it ends, and its recipe runs for minutes.
+    assert!(
+        j["state"] == "queued" || j["state"] == "running",
+        "a lost job is not back in the queue: {j}"
+    );
+    assert_eq!(j["attempt"], 1, "a restart used an attempt: {j}");
+    assert!(
+        j["tail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("waits in the queue again"),
+        "{j}"
+    );
+    let card = lab.td.get(&format!("/api/cards/{cr}")).await.ok().clone();
+    assert_ne!(card["column"], "ready", "a restart moved the card: {card}");
+    // The requeued job writes its own file again when it runs.
+    let f = terrariumd::run_kill::job_pidfile(&cancel_id);
+    assert!(!Path::new(&f).exists(), "{f} is left");
+    // Now the slots are free: the requeued job and the queued validation
+    // start. End them.
+    until_not(&lab, &run_id, "queued").await;
+    until_not(&lab, &queued, "queued").await;
+    for id in [&run_id, &queued] {
+        let r = lab.td.delete(&format!("/api/jobs/{id}")).await;
+        assert_eq!(r.ok()["state"], "cancelled");
+    }
+    if let Ok(text) = std::fs::read_to_string(&children) {
+        for p in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+            let start = Instant::now();
+            while alive(p) {
+                assert!(start.elapsed() < DEADLINE, "the child {p} outlived its job");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    let _ = lr.wait();
+    let _ = lc.wait();
+}
+
+/// TER-123 review 2, major 1: a lost job that is still running gets a
+/// cancel through the API while its kill waits for the host agent. Its
+/// slot stays taken until the kill ended (one slot): a queued validation
+/// does not start while the kill runs, and starts after it.
+#[tokio::test]
+async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot() {
+    let (lab, _bins, children) = docker_lab(1, 600).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let cr = lab.card("lost-run", "ter-m1").await;
+    let run_id = ulid::Ulid::new().to_string();
+    let at = |mins: i64| {
+        (chrono::Utc::now() - chrono::Duration::minutes(mins))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    let (rid, rcard, rat) = (run_id.clone(), cr.clone(), at(5));
+    state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, created_by,
+                                   created_at, started_at)
+                 VALUES (?1, 'p', ?2, 'validate', 'app', 'b', 'running', 't', ?3, ?3)",
+                rusqlite::params![rid, rcard, rat],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (mut lr, run_child) = orphan(&run_id);
+
+    // The restart: the host agent is not connected yet.
+    lab.agent_down().await;
+    let recovery = terrariumd::jobs::recover_lost(&state).await;
+    // The operator cancels the lost job that looks stuck.
+    let r = lab.td.delete(&format!("/api/jobs/{run_id}")).await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    let h = lab.branch("ter-m2", "next", &[("OK", "1")]);
+    let c = lab.card("queued", "ter-m2").await;
+    let queued = ulid::Ulid::new().to_string();
+    let (qid, qcard, qat) = (queued.clone(), c.clone(), at(0));
+    state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state,
+                                   attempt, created_by, created_at)
+                 VALUES (?1, 'p', ?2, 'validate', 'app', 'ter-m2', ?3, 'queued', 1, 't', ?4)",
+                rusqlite::params![qid, qcard, h, qat],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    // The host agent is back and the kill runs: the slot is still taken.
+    lab.agent_up().await;
+    until_kills_run(&[&run_id]).await;
+    terrariumd::jobs::tick(&state).await.unwrap();
+    let q = lab
+        .td
+        .get(&format!("/api/jobs/{queued}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(
+        q["state"], "queued",
+        "a job took the slot of a cancelled lost job while its kill ran: {q}"
+    );
+    assert!(alive(lr.id()), "the kill ended before the check");
+
+    tokio::time::timeout(DEADLINE, recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    for p in [lr.id(), run_child] {
+        assert!(!alive(p), "the orphan {p} outlived the recovery");
+    }
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{run_id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(j["state"], "cancelled", "{j}");
+    // Now the slot is free: the queued validation starts. End it.
+    until_not(&lab, &queued, "queued").await;
+    let r = lab.td.delete(&format!("/api/jobs/{queued}")).await;
+    assert_eq!(r.ok()["state"], "cancelled");
+    if let Ok(text) = std::fs::read_to_string(&children) {
+        for p in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+            let start = Instant::now();
+            while alive(p) {
+                assert!(start.elapsed() < DEADLINE, "the child {p} outlived its job");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    let _ = lr.wait();
+}
+
 /// Set the delivery of `p`: `target`, one slot, a recipe that sleeps on
 /// a branch with `SLOW`.
 async fn deliver_to(lab: &Lab, target: &str) {
@@ -2314,6 +2921,73 @@ async fn job_of(lab: &Lab, id: &str) -> Vec<Value> {
         .into_iter()
         .filter(|j| j["card"] == id)
         .collect()
+}
+
+/// TER-123, P5: a deploy drains the daemon first. During the drain a
+/// queued job does not start (a free slot, a tick too), the running job
+/// goes on and is listed in `drain.jobs`, and the drain waits for it.
+/// The end of the drain starts the queued job.
+#[tokio::test]
+async fn a_drain_starts_no_job_and_lists_the_running_ones() {
+    let lab = lab(2).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let work_dir = lab._dirs.path().join("jobs-drain");
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "if test -f SLOW; then sleep 6; fi; test -f OK",
+                   "slots": 2, "next_repos": ["app"],
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let slow = queue_green(&lab, "ter-d1", "runs into the drain", true).await;
+    let start = Instant::now();
+    let running = loop {
+        let j = job_of(&lab, &slow).await;
+        if j.first().is_some_and(|j| j["state"] == "running") {
+            break j[0]["id"].as_str().unwrap().to_owned();
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the slow job never started: {j:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let r = lab.td.post_empty("/api/system/update/drain").await;
+    let d = r.ok().clone();
+    assert_eq!(d["on"], true, "{d}");
+    assert_eq!(d["jobs"], json!([running]), "{d}");
+
+    // A free slot, a queued job, a tick: it does not start.
+    let fast = queue_green(&lab, "ter-d2", "queued in the drain", false).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    terrariumd::jobs::tick(&state).await.unwrap();
+    let j = job_of(&lab, &fast).await;
+    assert_eq!(
+        j[0]["state"], "queued",
+        "a job started during the drain: {j:?}"
+    );
+    assert_eq!(j[0]["attempt"], 1, "{j:?}");
+
+    // The running job goes on to its end; then the drain lists no job.
+    lab.until_card(&slow, "review", |c| c["column"] == "review")
+        .await;
+    let v = lab.td.get("/api/system/update").await.ok().clone();
+    assert_eq!(v["drain"]["jobs"], json!([]), "{v}");
+    let j = job_of(&lab, &fast).await;
+    assert_eq!(
+        j[0]["state"], "queued",
+        "a job started during the drain: {j:?}"
+    );
+
+    // The end of the drain starts it.
+    let r = lab.td.post_empty("/api/system/update/resume").await;
+    assert_eq!(r.ok()["on"], false);
+    lab.until_card(&fast, "review", |c| c["column"] == "review")
+        .await;
 }
 
 /// TER-160: the host agent of the target is offline when the queue picks

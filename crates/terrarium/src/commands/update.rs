@@ -59,23 +59,26 @@ pub async fn update(ctx: &Ctx, cmd: &UpdateCmd) -> anyhow::Result<()> {
     }
 }
 
-/// Start the drain, then wait for the running turns, at most `wait`. The
-/// end of the wait is no error: the turns that still run end with the
-/// stop, and resume after the start.
+/// Start the drain, then wait for the running turns and jobs, at most
+/// `wait`. The end of the wait is no error: the turns that still run end
+/// with the stop, and resume after the start; the jobs that still run
+/// are killed and queued again by the new daemon (TER-123).
 async fn drain(ctx: &Ctx, wait: Duration) -> anyhow::Result<()> {
     let mut v = ctx.api.post("/api/system/update/drain", None).await?;
     let started = Instant::now();
     loop {
         let busy = v["busy"].as_array().map_or(0, Vec::len);
-        if busy == 0 {
+        let jobs = v["jobs"].as_array().map_or(0, Vec::len);
+        if busy == 0 && jobs == 0 {
             break;
         }
         if started.elapsed() >= wait {
             if !ctx.json {
                 ctx.line(format!(
-                    "{busy} agent(s) still run a turn after {}s: {}",
+                    "{busy} agent(s) still run a turn and {jobs} job(s) still run after {}s: {}; {}",
                     wait.as_secs(),
-                    field(&v, "busy")
+                    field(&v, "busy"),
+                    field(&v, "jobs")
                 ));
             }
             v["timed_out"] = Value::Bool(true);
@@ -88,7 +91,7 @@ async fn drain(ctx: &Ctx, wait: Duration) -> anyhow::Result<()> {
     v["waited_s"] = json!(started.elapsed().as_secs());
     ctx.emit(&v, |c, v| {
         c.line(format!(
-            "drained: no new turns; waited {}s for the running turns",
+            "drained: no new turns or jobs; waited {}s for the running turns and jobs",
             field(v, "waited_s")
         ));
     })
@@ -165,9 +168,10 @@ fn print_status(c: &Ctx, v: &Value) {
     }
     if v["drain"]["on"].as_bool() == Some(true) {
         c.line(format!(
-            "drain:     on since {} (busy: {})",
+            "drain:     on since {} (busy: {}; jobs: {})",
             field(&v["drain"], "since"),
-            field(&v["drain"], "busy")
+            field(&v["drain"], "busy"),
+            field(&v["drain"], "jobs")
         ));
     }
     let r = &v["last_result"];

@@ -19,6 +19,11 @@
 //!   queue sorts on the path after `created_at` and `attempt`.
 //! - The one rerun of a failed job is a new row with `attempt` 2 and the
 //!   `created_at` of the first try, so it goes to the front of the queue.
+//! - The planned duration of a job (TER-155 D2, `planned_secs`): the
+//!   agent gives it when it queues the job. A queued job's cards have no
+//!   ETA; when the job starts, each card gets `eta_at` = start + planned
+//!   duration. A rerun, a split, and a job back in the queue clear the ETA
+//!   again, and their start sets it again. No duration, no ETA.
 //! - Events `job` {change, project, id, card, kind, state, attempt, outcome,
 //!   cards?} (`cards`: the cards of a batch).
 
@@ -33,7 +38,7 @@ use terrarium_core::config::{DeliveryDef, TargetDef};
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::events::EventDraft;
-use crate::store::{hosts, targets};
+use crate::store::{board, hosts, targets};
 
 /// The output tail that a job keeps.
 pub const TAIL_MAX: usize = 4000;
@@ -147,6 +152,10 @@ pub struct Job {
     /// split. The queue sorts on it, so the halves run in merge order.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub split_path: String,
+    /// The planned duration in seconds (TER-155 D2): the cards' ETA is
+    /// the start plus this. `None`: the job sets no ETA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_secs: Option<i64>,
 }
 
 /// A card of a batch merge.
@@ -194,6 +203,8 @@ pub struct NewJob {
     /// The cards of a batch merge, in order; empty for one card. The first
     /// is the job's `card`.
     pub batch: Vec<BatchCard>,
+    /// The planned duration in seconds; `None`: no ETA when it starts.
+    pub planned_secs: Option<i64>,
 }
 
 /// The end of a job.
@@ -211,7 +222,7 @@ pub struct JobEnd {
 
 const COLS: &str = "id, project, card, kind, repo, branch, commit_sha, state, attempt, outcome,
                     exit_code, tail, head, by_agent, created_by, created_at, started_at, ended_at,
-                    host, batch, parent, split_path";
+                    host, batch, parent, split_path, planned_secs";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
     let kind: String = r.get(3)?;
@@ -243,6 +254,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
         batch,
         parent: r.get(20)?,
         split_path: r.get(21)?,
+        planned_secs: r.get(22)?,
     })
 }
 
@@ -534,6 +546,25 @@ pub fn running(conn: &Connection) -> ApiResult<Vec<Job>> {
         "SELECT {COLS} FROM jobs WHERE state = 'running' ORDER BY started_at"
     ))?;
     let mut rows = st.query_map([], row)?.collect::<Result<Vec<_>, _>>()?;
+    for job in &mut rows {
+        if let Some(host) = &job.host {
+            job.host = Some(canonical_key(conn, host)?);
+        }
+    }
+    Ok(rows)
+}
+
+/// The jobs that ran and got a cancel at `since` or later, in all
+/// projects. A cancelled job drains until the kill of its step ended
+/// (TER-115), so after a daemon restart these may still have processes
+/// on their target (TER-123).
+pub fn cancelled_since(conn: &Connection, since: &str) -> ApiResult<Vec<Job>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {COLS} FROM jobs
+         WHERE state = 'cancelled' AND started_at IS NOT NULL AND ended_at >= ?1
+         ORDER BY started_at"
+    ))?;
+    let mut rows = st.query_map([since], row)?.collect::<Result<Vec<_>, _>>()?;
     for job in &mut rows {
         if let Some(host) = &job.host {
             job.host = Some(canonical_key(conn, host)?);
@@ -899,7 +930,7 @@ pub fn startable(
 
 /// The host key of the delivery target of `def`. A target that is gone
 /// keeps its name as the key; the job then fails when it runs.
-fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
+pub fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
     let target = def.target.clone().unwrap_or_default();
     let key = match targets::get(conn, &target) {
         Ok(row) => row
@@ -1070,13 +1101,15 @@ struct Insert<'a> {
     split_path: &'a str,
     created_by: &'a str,
     created_at: &'a str,
+    planned_secs: Option<i64>,
 }
 
 fn insert(t: &mut Tx<'_>, i: Insert<'_>) -> ApiResult<Job> {
     t.execute(
         "INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state, attempt,
-                           by_agent, created_by, created_at, batch, parent, split_path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                           by_agent, created_by, created_at, batch, parent, split_path,
+                           planned_secs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             i.id,
             i.project,
@@ -1091,10 +1124,83 @@ fn insert(t: &mut Tx<'_>, i: Insert<'_>) -> ApiResult<Job> {
             i.created_at,
             batch_text(i.batch)?,
             i.parent,
-            i.split_path
+            i.split_path,
+            i.planned_secs
         ],
     )?;
-    get(t, &i.id)
+    let job = get(t, &i.id)?;
+    // A queued job's cards have no ETA: it starts when the job runs.
+    queued_eta(t, &job)?;
+    Ok(job)
+}
+
+/// The most planned duration of a job: the ETA limit
+/// (`terrarium_core::eta::MAX_DAYS`).
+pub const PLANNED_MAX_SECS: i64 = terrarium_core::eta::MAX_DAYS * 86_400;
+
+/// Parse the planned duration of a job (TER-155 D2): a duration such as
+/// `45m` or `2h30m`, not a time, at most [`PLANNED_MAX_SECS`].
+pub fn planned_secs(v: &str) -> ApiResult<i64> {
+    let d = terrarium_core::eta::parse_duration(v).map_err(|e| {
+        ApiError::invalid(format!(
+            "bad eta: {e}; a job takes a duration from its start, not a time"
+        ))
+    })?;
+    let secs = d.num_seconds();
+    if secs > PLANNED_MAX_SECS {
+        return Err(ApiError::invalid(format!(
+            "bad eta `{}`: at most {} days",
+            v.trim(),
+            terrarium_core::eta::MAX_DAYS
+        )));
+    }
+    Ok(secs)
+}
+
+/// Set the planned duration of an open job (TER-155 D2): an ETA duration
+/// given for a card while its job is open. A queued job's cards keep no
+/// ETA; a running job's cards get its start plus `secs`. `by` is the
+/// actor label of the writer. The caller checks the rights.
+pub fn set_planned(t: &mut Tx<'_>, job: &Job, secs: i64, by: &str) -> ApiResult<Job> {
+    if !(1..=PLANNED_MAX_SECS).contains(&secs) {
+        return Err(ApiError::invalid(format!(
+            "bad eta: a planned duration is more than zero and at most {} days",
+            terrarium_core::eta::MAX_DAYS
+        )));
+    }
+    t.execute(
+        "UPDATE jobs SET planned_secs = ?2 WHERE id = ?1",
+        params![job.id, secs],
+    )?;
+    let job = get(t, &job.id)?;
+    let eta = match (job.state, job.started_at.as_deref()) {
+        (JobState::Running, Some(s)) => started_eta(&job, s),
+        _ => None,
+    };
+    for c in job.cards() {
+        board::set_job_eta(t, &c.card, eta.as_deref(), by)?;
+    }
+    Ok(job)
+}
+
+/// Clear the ETA of the cards of a queued job that has a planned duration.
+fn queued_eta(t: &mut Tx<'_>, job: &Job) -> ApiResult<()> {
+    if job.planned_secs.is_none() {
+        return Ok(());
+    }
+    for c in job.cards() {
+        board::set_job_eta(t, &c.card, None, &job.created_by)?;
+    }
+    Ok(())
+}
+
+/// The ETA of the cards of a job that started at `started` (RFC 3339):
+/// the start plus the planned duration. `None` without a duration.
+pub fn started_eta(job: &Job, started: &str) -> Option<String> {
+    let secs = job.planned_secs?;
+    let at = chrono::DateTime::parse_from_rfc3339(started).ok()?;
+    let eta = at.with_timezone(&chrono::Utc) + chrono::Duration::seconds(secs);
+    Some(crate::time_param::stored(eta))
 }
 
 /// Queue a job. A card has at most one open job. A batch (two or more
@@ -1162,6 +1268,7 @@ pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
             split_path: "",
             created_by: &actor,
             created_at: &at,
+            planned_secs: n.planned_secs,
         },
     )?;
     let mut detail = json!({"card": job.card, "kind": job.kind, "repo": job.repo,
@@ -1198,6 +1305,7 @@ pub fn rerun(t: &mut Tx<'_>, failed: &Job, cards: Option<&[BatchCard]>) -> ApiRe
             split_path: &failed.split_path,
             created_by: &failed.created_by,
             created_at: &failed.created_at,
+            planned_secs: failed.planned_secs,
         },
     )?;
     emit(t, &job, "queued")?;
@@ -1248,6 +1356,7 @@ pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, 
                 split_path: &path,
                 created_by: &red.created_by,
                 created_at: &red.created_at,
+                planned_secs: red.planned_secs,
             },
         )?;
         emit(t, &job, "queued")?;
@@ -1274,6 +1383,12 @@ pub fn start(t: &mut Tx<'_>, id: &str, host: &str) -> ApiResult<bool> {
         return Ok(false);
     }
     let job = get(t, id)?;
+    // The ETA starts when the job runs (TER-155 D2).
+    if let Some(eta) = job.started_at.as_deref().and_then(|s| started_eta(&job, s)) {
+        for c in job.cards() {
+            board::set_job_eta(t, &c.card, Some(&eta), &job.created_by)?;
+        }
+    }
     emit(t, &job, "started")?;
     Ok(true)
 }
@@ -1317,15 +1432,32 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
 /// (`created_at`), and `tail` says why it waits. `None` when the job is
 /// not running (a cancel came first).
 pub fn requeue(t: &mut Tx<'_>, id: &str, why: &str) -> ApiResult<Option<Job>> {
+    requeue_with(t, id, &format!("waits for its host: {why}"))
+}
+
+/// The tail of a job that [`requeue_lost`] put back.
+pub const LOST_TAIL: &str =
+    "the daemon restarted while the job ran; the run is lost, and the job waits in the queue again";
+
+/// Put job `id` back in the queue: it was running when the last daemon
+/// stopped, so its run is lost (TER-123, P5). As [`requeue`]: it keeps its
+/// attempt and its place, and `tail` says why. `None` when it is not
+/// running (any more).
+pub fn requeue_lost(t: &mut Tx<'_>, id: &str) -> ApiResult<Option<Job>> {
+    requeue_with(t, id, LOST_TAIL)
+}
+
+fn requeue_with(t: &mut Tx<'_>, id: &str, tail: &str) -> ApiResult<Option<Job>> {
     let n = t.execute(
         "UPDATE jobs SET state = 'queued', started_at = NULL, host = NULL, tail = ?2
          WHERE id = ?1 AND state = 'running'",
-        params![id, clip_tail(&format!("waits for its host: {why}"))],
+        params![id, clip_tail(tail)],
     )?;
     if n == 0 {
         return Ok(None);
     }
     let job = get(t, id)?;
+    queued_eta(t, &job)?;
     emit(t, &job, "requeued")?;
     Ok(Some(job))
 }
@@ -1352,25 +1484,6 @@ pub fn cancel(t: &mut Tx<'_>, id: &str) -> ApiResult<Job> {
     )?;
     emit(t, &job, "cancelled")?;
     Ok(job)
-}
-
-/// Fail each job that was running when the daemon stopped: its run is
-/// lost. Returns the jobs.
-pub fn fail_lost(t: &mut Tx<'_>) -> ApiResult<Vec<Job>> {
-    let lost = running(t)?;
-    let mut out = Vec::new();
-    for j in lost {
-        let end = JobEnd {
-            passed: false,
-            outcome: Some("error".into()),
-            tail: Some("the daemon restarted while the job ran; the run is lost".into()),
-            ..JobEnd::default()
-        };
-        if let Some(j) = finish(t, &j.id, &end)? {
-            out.push(j);
-        }
-    }
-    Ok(out)
 }
 
 /// The queue config of a project. The default (no queue) when none is set.
@@ -1441,6 +1554,10 @@ pub struct CardJob {
     /// A queued job: the count of queued jobs in its project and lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued: Option<i64>,
+    /// The planned duration in seconds (TER-155 D2): the card's ETA
+    /// starts when the job runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_secs: Option<i64>,
 }
 
 /// The open job of a card with its queue place. `None`: no open job.
@@ -1465,6 +1582,7 @@ pub fn card_job(conn: &Connection, card: &str) -> ApiResult<Option<CardJob>> {
         state: job.state,
         place,
         queued,
+        planned_secs: job.planned_secs,
     }))
 }
 
@@ -1500,6 +1618,85 @@ pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
 mod tests {
     use super::*;
 
+    /// TER-123: only jobs that started and got their cancel at `since` or
+    /// later count as maybe draining.
+    #[test]
+    fn cancelled_since_takes_recent_cancels_of_started_jobs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        for (id, state, started, ended) in [
+            (
+                "J1",
+                "cancelled",
+                Some("2026-11-07T05:00:00.000Z"),
+                "2026-11-07T05:40:00.000Z",
+            ),
+            (
+                "J2",
+                "cancelled",
+                Some("2026-11-07T04:00:00.000Z"),
+                "2026-11-07T04:10:00.000Z",
+            ),
+            ("J3", "cancelled", None, "2026-11-07T05:41:00.000Z"),
+            (
+                "J4",
+                "failed",
+                Some("2026-11-07T05:00:00.000Z"),
+                "2026-11-07T05:42:00.000Z",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, created_by,
+                                   created_at, started_at, ended_at)
+                 VALUES (?1, 'p', 'C', 'validate', 'app', 'b', ?2, 't', 't', ?3, ?4)",
+                params![id, state, started, ended],
+            )
+            .unwrap();
+        }
+        let got: Vec<String> = cancelled_since(&conn, "2026-11-07T05:00:00.000Z")
+            .unwrap()
+            .into_iter()
+            .map(|j| j.id)
+            .collect();
+        assert_eq!(got, ["J1"]);
+    }
+
+    /// TER-123, P5: a job lost to a restart goes back to the queue with
+    /// its attempt and its place; a job that is not running stays as it is.
+    #[tokio::test]
+    async fn a_lost_job_is_requeued_without_using_an_attempt() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        for (id, state) in [("J1", "running"), ("J2", "cancelled")] {
+            c.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt,
+                                   created_by, created_at, started_at, host)
+                 VALUES (?1, 'p', 'C', 'validate', 'app', 'b', ?2, 1, 't',
+                         '2026-11-07T05:00:00.000Z', '2026-11-07T05:01:00.000Z', 'h')",
+                params![id, state],
+            )
+            .unwrap();
+        }
+        let db = crate::db::Db::new(c, crate::events::EventHub::default());
+        let j = db
+            .write("system", |t| requeue_lost(t, "J1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(j.state, JobState::Queued);
+        assert_eq!(j.attempt, 1);
+        assert_eq!(j.created_at, "2026-11-07T05:00:00.000Z");
+        assert_eq!(j.started_at, None);
+        assert_eq!(j.host, None);
+        assert_eq!(j.tail.as_deref(), Some(LOST_TAIL));
+        let again = db.write("system", |t| requeue_lost(t, "J1")).await.unwrap();
+        assert!(again.is_none(), "a queued job is not requeued again");
+        let cancelled = db.write("system", |t| requeue_lost(t, "J2")).await.unwrap();
+        assert!(cancelled.is_none(), "a cancel stays a cancel");
+        let j2 = db.read(|c| get(c, "J2")).await.unwrap();
+        assert_eq!(j2.state, JobState::Cancelled);
+    }
+
     fn job(id: &str, project: &str, kind: JobKind, repo: &str, at: &str) -> Job {
         Job {
             id: id.into(),
@@ -1524,6 +1721,7 @@ mod tests {
             batch: Vec::new(),
             parent: None,
             split_path: String::new(),
+            planned_secs: None,
         }
     }
 

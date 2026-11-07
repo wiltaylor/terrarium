@@ -1777,6 +1777,8 @@ export interface CardJob {
   place?: number;
   /** A queued job: the count of queued jobs in the project. */
   queued?: number;
+  /** The planned duration in seconds (TER-155 D2): the card's ETA is the job start plus it. */
+  planned_secs?: number;
 }
 
 /** A card of `GET /api/cards` (docs/api.md §8, TER-43): a card in the working or research column of a board, with its column kind and the status of its assignee agent. */

@@ -58,8 +58,20 @@
 //!   (not red) runs the batch once more.
 //! - The labels `validation:queued` and `validation:running` follow the
 //!   job, so the board shows it.
-//! - A daemon restart loses the runs: each running job fails (`error`)
-//!   and goes through the rerun rule.
+//! - A daemon restart loses the runs (TER-123). The new daemon ends what
+//!   still runs of them on their targets, then puts each running job back
+//!   in the queue with its attempt and its place ([`jobs::requeue_lost`]):
+//!   a restart is not a failure. Each step of a job writes its PID to the same file
+//!   ([`crate::run_kill::job_pidfile`]), and [`recover_lost`] runs the
+//!   kill of [`crate::run_kill`] on that file, for the running jobs and
+//!   for the jobs cancelled in the last [`DRAIN_WINDOW_HOURS`] (they may
+//!   still have been draining). Their slots stay taken until the kill
+//!   ended, and the kill waits for a host agent that has not connected
+//!   yet.
+//! - A deploy drains the daemon first (`POST /api/system/update/drain`):
+//!   while it drains, no job starts, and the running ones go on. The drain
+//!   lists them ([`busy_jobs`]) and waits for them; one that still runs at
+//!   the stop is killed and put back by the next daemon (above).
 //! - A host that cannot be reached is not a failure (TER-160). A job whose
 //!   target's host agent is offline is not started: it stays queued. A job
 //!   whose target could not be reached before its recipe started (the host
@@ -82,7 +94,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use terrarium_core::config::{DeliveryDef, TargetDef, TargetKind};
 
@@ -123,6 +135,9 @@ const STEP_MAX: usize = 64 * 1024;
 const RECIPE_MAX: usize = 1024 * 1024;
 /// The time limit of a prepare, push, or cleanup step.
 const STEP_TIMEOUT: u64 = 900;
+/// How long before a daemon start a cancelled job may have been still
+/// draining: its kill at the start then runs again (TER-123).
+pub const DRAIN_WINDOW_HOURS: i64 = 1;
 /// How long a job waits for its host before the queue notes it on the
 /// cards (TER-160).
 pub const LONG_WAIT: Duration = Duration::from_secs(30 * 60);
@@ -215,11 +230,12 @@ pub fn kill(job: &str) {
     }
 }
 
-/// Start the queue: fail the jobs that the last daemon left running, then
-/// tick.
+/// Start the queue: take up the jobs that the last daemon left
+/// ([`recover_lost`]), then tick. The kills of their runs go on in the
+/// background, while their slots stay taken.
 pub fn spawn(state: &Shared) -> JoinHandle<()> {
     // The daemon's job repos of the last daemon: its jobs are lost (they
-    // fail below), so none of these is in use. Before any tick.
+    // start again from the queue below), so none of these is in use. Before any tick.
     let stale = state.state_dir.join(JOBS_DIR);
     if let Err(e) = std::fs::remove_dir_all(&stale)
         && e.kind() != std::io::ErrorKind::NotFound
@@ -232,16 +248,7 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             if let Err(e) = prepare_hosts(&state.db, None).await {
                 warn!("cannot initialize stored job host keys: {e}");
             }
-            match state.db.write("system", jobs::fail_lost).await {
-                Ok(lost) => {
-                    for j in lost {
-                        if let Err(e) = after_end(&state, &j).await {
-                            warn!(job = %j.id, "cannot handle a lost job: {e}");
-                        }
-                    }
-                }
-                Err(e) => warn!("cannot fail the lost jobs: {e}"),
-            }
+            drop(recover_lost(&state).await);
         }
         loop {
             let Some(state) = weak.upgrade() else { break };
@@ -252,6 +259,174 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             tokio::time::sleep(TICK).await;
         }
     })
+}
+
+/// A job that the last daemon left, found by [`recover_lost`].
+struct Lost {
+    job: Job,
+    /// Still `running` in the database (else cancelled in the drain
+    /// window).
+    running: bool,
+    /// The delivery target of its project, when it is a target of that
+    /// project.
+    def: Option<terrarium_core::config::TargetDef>,
+    /// The job is in [`Live::runs`] while its kill runs, so its slot is
+    /// not free, also after a cancel of a running one (TER-123).
+    live: LiveRun,
+}
+
+/// TER-123: end the processes that the jobs of the last daemon left on
+/// their targets, before their slots count as free.
+///
+/// The jobs are the running ones, and the ones cancelled in the last
+/// [`DRAIN_WINDOW_HOURS`] (they may still have been draining). Jobs of
+/// this daemon (in [`Live::runs`]) are not among them. They are found in
+/// one write, so a tick (a write too) sees them in order: a running job
+/// keeps its slot by its state, and each one is put in [`Live::runs`] in
+/// the same write, so a cancel during its kill does not free its slot.
+///
+/// Then, in the returned task, for each job at the same time: the kill of
+/// [`crate::run_kill`] runs on the PID file of its steps
+/// ([`crate::run_kill::job_pidfile`]) on the delivery target of its
+/// project. It waits for a host agent that has not connected to this
+/// daemon yet ([`crate::run_kill::HOST_WAIT_SECS`]) and is bounded by the
+/// timeout of the kill command. Then a running job goes back to the
+/// queue with its attempt (the run is lost), each leaves [`Live::runs`],
+/// and a tick follows. A kill that fails is logged, and the job goes on
+/// anyway.
+pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
+    let since = (chrono::Utc::now() - chrono::Duration::hours(DRAIN_WINDOW_HOURS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let found = state
+        .db
+        .write("system", move |t| {
+            let ours: HashSet<String> = live().runs.iter().cloned().collect();
+            let lost = jobs::running(t)?
+                .into_iter()
+                .map(|j| (j, true))
+                .chain(
+                    jobs::cancelled_since(t, &since)?
+                        .into_iter()
+                        .map(|j| (j, false)),
+                )
+                .filter(|(j, _)| !ours.contains(&j.id))
+                .collect::<Vec<_>>();
+            let mut out = Vec::new();
+            for (job, running) in lost {
+                let delivery = jobs::delivery(t, &job.project)?;
+                let target = delivery.target.clone();
+                let def = match target.as_deref().map(|n| targets::get(t, n)) {
+                    Some(Ok(row)) if row.def.project.as_ref().is_none_or(|p| *p == job.project) => {
+                        Some(row.def)
+                    }
+                    _ => {
+                        warn!(job = %job.id, delivery_target = ?target,
+                            "cannot kill a lost job run: no such target of its project");
+                        None
+                    }
+                };
+                // The kill goes to the current delivery target. When the
+                // job ran on another host, the kill misses its processes
+                // (it cannot hit others: the PID file is per job).
+                if def.is_some()
+                    && let Some(ran_on) = job.host.as_deref()
+                {
+                    let now_on = jobs::host_of(t, &delivery);
+                    if ran_on != now_on {
+                        warn!(job = %job.id, ran_on, delivery_host = %now_on,
+                            "a lost job ran on another host than its delivery target now; its kill may miss");
+                    }
+                }
+                // Every lost job is in [`Live::runs`] while its kill runs:
+                // a running one that gets a cancel meanwhile keeps its
+                // slot as a draining job (TER-123 review 2, major 1).
+                let live = LiveRun::new(&job.id);
+                out.push(Lost {
+                    job,
+                    running,
+                    def,
+                    live,
+                });
+            }
+            Ok(out)
+        })
+        .await;
+    let found = match found {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("cannot read the lost jobs: {e}");
+            Vec::new()
+        }
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let ends = found.into_iter().map(|l| end_lost(&state, l));
+        futures_util::future::join_all(ends).await;
+    })
+}
+
+/// Kill what still runs of lost job `l` on its target, then end it: see
+/// [`recover_lost`].
+async fn end_lost(state: &Shared, l: Lost) {
+    let Lost {
+        job,
+        running,
+        def,
+        live,
+    } = l;
+    match def {
+        Some(def) if crate::run_kill::kind_wraps(&def) => {
+            let r = crate::run_kill::kill_file(
+                state,
+                &def,
+                Some(format!("{}/jobs", job.project)),
+                &crate::run_kill::job_pidfile(&job.id),
+            )
+            .await;
+            let id = &job.id;
+            if r.get("error").is_some() {
+                warn!(job = %id, report = %r, "cannot kill a lost job run on its target");
+            } else if r["left"].as_array().is_some_and(|l| !l.is_empty()) {
+                warn!(job = %id, report = %r, "the kill of a lost job run left processes on the target");
+            } else if !r["stale"].is_null() {
+                info!(job = %id, report = %r, "the PID file of a lost job run was stale");
+            } else if r["pid"].is_null() {
+                debug!(job = %id, "a lost job run had no PID file on its target");
+            } else {
+                info!(job = %id, report = %r, "killed a lost job run on its target");
+            }
+        }
+        Some(_) => debug!(job = %job.id, "a lost job run on a target without PID files"),
+        None => {}
+    }
+    if running {
+        // P5: the run is lost, not failed. The job goes back to the queue
+        // with its attempt and its place, as TER-160 does for a host that
+        // could not be reached.
+        let id = job.id.clone();
+        let cards = job.cards();
+        let back = state
+            .db
+            .write("system", move |t| {
+                let j = jobs::requeue_lost(t, &id)?;
+                if j.is_some() {
+                    for c in &cards {
+                        set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
+                    }
+                }
+                Ok(j)
+            })
+            .await;
+        match back {
+            Ok(Some(j)) => {
+                info!(job = %j.id, attempt = j.attempt, "a lost job waits in the queue again")
+            }
+            Ok(None) => debug!(job = %job.id, "a lost job was cancelled during its kill"),
+            Err(e) => warn!(job = %job.id, "cannot put a lost job back in the queue: {e}"),
+        }
+    }
+    drop(live);
+    kick(state);
 }
 
 /// The checks of a job queue config before it is written, by `PUT
@@ -289,6 +464,32 @@ pub fn check_delivery(
         }
     }
     Ok(())
+}
+
+/// The jobs of this daemon whose run has not ended yet: the running ones,
+/// and the cancelled ones that still drain (TER-123, P5). A deploy waits
+/// for them in its drain.
+pub async fn busy_jobs(state: &Shared) -> Vec<String> {
+    let live: Vec<String> = live().runs.iter().cloned().collect();
+    let got = state
+        .db
+        .read(move |c| {
+            let mut out: Vec<String> = jobs::running(c)?.into_iter().map(|j| j.id).collect();
+            for id in live {
+                // A job of another daemon in the same process (the tests)
+                // is not in this database.
+                if !out.contains(&id) && jobs::get(c, &id).is_ok() {
+                    out.push(id);
+                }
+            }
+            out.sort();
+            Ok(out)
+        })
+        .await;
+    got.unwrap_or_else(|e| {
+        warn!("cannot read the busy jobs: {e}");
+        Vec::new()
+    })
 }
 
 /// Start a tick now, in the background.
@@ -399,6 +600,9 @@ fn note_long_waits(t: &mut Tx<'_>) -> ApiResult<()> {
 /// or whose ssh target waits for its next try, stays queued (TER-160).
 pub async fn tick(state: &Shared) -> ApiResult<()> {
     prepare_hosts(&state.db, None).await?;
+    // A deploy drains the daemon first: no job starts, and the running
+    // ones go on (TER-123, P5). The end of the drain kicks the queue.
+    let drain = state.self_update.draining();
     // The live runs are read and added in the write, so two ticks and a
     // cancel (all writes) see them in order.
     let st = state.clone();
@@ -407,7 +611,12 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
         .write("system", move |t| {
             let draining: Vec<String> = live().runs.iter().cloned().collect();
             let mut out = Vec::new();
-            for (j, host, def) in jobs::startable(t, &draining)? {
+            let picks = if drain {
+                Vec::new()
+            } else {
+                jobs::startable(t, &draining)?
+            };
+            for (j, host, def) in picks {
                 if let Some(why) = host_down(t, &st, &def) {
                     hold(&j.id, why, None);
                     continue;
@@ -601,7 +810,8 @@ async fn step(
     max: usize,
     input: Option<Vec<u8>>,
 ) -> ApiResult<Collected> {
-    let (running, report) = crate::run_kill::start(state, def, cmd)?;
+    let pidfile = crate::run_kill::job_pidfile(job);
+    let (running, report) = crate::run_kill::start_named(state, def, cmd, pidfile)?;
     set_control(job, Some(running.ctl.clone()));
     // A kill between the check in [`StepCtx::run`] and set_control found
     // the old control or none: kill this step now.
@@ -2160,6 +2370,7 @@ mod tests {
             batch: vec![],
             parent: None,
             split_path: String::new(),
+            planned_secs: None,
         }
     }
 
@@ -2312,6 +2523,7 @@ mod tests {
                         commit: None,
                         by_agent: Some("w1".into()),
                         batch: cards.clone(),
+                        planned_secs: None,
                     },
                 )?;
                 assert!(jobs::start(t, &j.id, "h")?);
