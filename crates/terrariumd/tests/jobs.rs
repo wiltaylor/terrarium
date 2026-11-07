@@ -3369,7 +3369,7 @@ async fn a_lost_host_agent_session_reruns_the_whole_batch() {
         &lab,
         &format!(
             "test -f OK && test -f s1 && test -f s2 && echo run >> '{m}/runs' && \
-             if test -f '{m}/ran'; then exit 0; fi; touch '{m}/ran'; sleep 60"
+             if test -f '{m}/ran'; then exit 0; fi; echo $$ > '{m}/pid'; touch '{m}/ran'; sleep 60"
         ),
     )
     .await;
@@ -3392,8 +3392,15 @@ async fn a_lost_host_agent_session_reruns_the_whole_batch() {
         assert!(start.elapsed() < DEADLINE, "the recipe never started");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let pid: u32 = std::fs::read_to_string(marks.path().join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    eprintln!("TER196 recipe running at {:?}", start.elapsed());
     lab.agent_down().await;
     lab.agent_up().await;
+    eprintln!("TER196 host agent back at {:?}", start.elapsed());
 
     for c in [&c1, &c2] {
         let card = lab
@@ -3406,6 +3413,9 @@ async fn a_lost_host_agent_session_reruns_the_whole_batch() {
             "{card}"
         );
     }
+    eprintln!("TER196 cards accepted at {:?}", start.elapsed());
+    // The lost run's processes got the kill of a lost run.
+    assert!(!alive(pid), "the lost run {pid} outlived its rerun");
     let jobs = lab.until_idle().await;
     assert_eq!(jobs.len(), 1, "the batch did not split: {jobs:#?}");
     let j = lab
