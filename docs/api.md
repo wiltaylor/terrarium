@@ -1932,7 +1932,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `waiting_on` | What the agent waits on, in one short line: the summaries of the oldest 3 open waits and a count of the others. Absent when the agent has no open wait. |
 | `session` | The harness session ID of the current session, when known. |
 | `harness_version` | The harness version that the live agent runs: the version dir in the tools dir that its launch resolved (§4, `POST /api/harnesses/{name}/update`). It stays until the next start, also after an update. Absent when the agent does not run, or when the version is not known. |
-| `current_card` | The card the agent has in the `working` column of its board (§8.1), if any. |
+| `current_card` | The card the agent has in the `working` column of its board (§8.1), if any. For an ephemeral agent, else its bound card, else the newest open card that it is the assignee of (TER-75). |
 | `source` | `file`, `api`, or `fleet:<name>` (§18.1). |
 | `template` | The agent template that the create copied: `{"id", "name", "project", "revision"}` (§21). Absent when the create named none. For display only. |
 | `ephemeral`, `owner`, `spawn` | An ephemeral agent (§6.10): `true`, the owner (an agent ULID or `operator`), and `{"owner_name", "template", "task", "spawned_at", "deadline_at"}`. Absent for other agents. |
@@ -3390,7 +3390,11 @@ leaves it out.
 
 **The lists.** `GET /api/agents` and `GET /api/projects/{name}/agents`
 leave the ephemeral agents out. `GET /api/agents?include=ephemeral` lists
-them too. They are not peers in the prompt of other agents. The events,
+them too. `GET /api/agents?include=card` lists only the card agents among
+them (TER-75): those bound to an open card, and those that are the
+assignee of a card that is not archived. `terrarium agent ls` asks with
+`include=card` by default, and with `include=ephemeral` for
+`--ephemeral`, also with `--all-projects`. They are not peers in the prompt of other agents. The events,
 the mail, the audit rows, and the session links of the logs show them as
 for any agent.
 
@@ -4076,6 +4080,9 @@ A card:
 ```
 
 - `assignee`, `assignee_name`, `repo`, `branch` are absent when not set.
+- `agent`, `agent_name`: the card agent (TER-75), the open ephemeral
+  agent bound to the card (§6.10). It stays while the card waits and
+  the assignee is cleared. Absent when none.
 - `eta_at` is when the work is expected to be done (RFC 3339, UTC,
   milliseconds). `eta_set_at` is when the ETA was set, and `eta_set_by` (an
   address) and `eta_set_by_name` say who set it. The four fields are absent
