@@ -23,6 +23,14 @@
 //!   thread and the card's project; a link gives no read access to the
 //!   card or the thread. `GET /api/threads/{id}` and the list show them
 //!   (`cards`, [`list_for`]), only those of a project the reader reads.
+//! - Wake rules (TER-148, TER-144 D4, [`on_card_moved`]): in a thread that
+//!   tracks, a linked card that goes to the blocked column, or a move that
+//!   leaves all linked cards in review or later, wakes the agent (the
+//!   `thread` event `cards`). A thread in `tracking` goes to
+//!   `waiting_agent` and back to `tracking` on the agent's reply.
+//! - The overall response can be sent again (TER-148, D10): the newest
+//!   replaces `response`, and each stays in the conversation as a message
+//!   of kind `response`.
 //! - No register and no conflict check between threads (D36).
 //! - Events `thread` {change, id, scope, status}, and an `inbox` event for
 //!   the item `inbox-thread:<id>`.
@@ -440,6 +448,183 @@ pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResu
         emit(t, &th, "card_linked")?;
     }
     Ok(visible(actor, get(t, &th.id)?))
+}
+
+/// The wake reason of a linked card that went to the blocked column
+/// (TER-148, TER-144 D4).
+pub const WAKE_BLOCKED: &str = "blocked";
+/// The wake reason of a move that left all linked cards of a thread in
+/// review or later (TER-148, TER-144 D4).
+pub const WAKE_REVIEW: &str = "review";
+
+/// The state of a linked card now, for the wake turn of the thread agent
+/// (TER-148). Read from the card live.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkedState {
+    pub project: String,
+    pub card: String,
+    pub title: String,
+    pub column: String,
+    pub role: Option<String>,
+    pub archived: bool,
+    /// In review or later on its board ([`review_or_later`]).
+    pub review_or_later: bool,
+    /// The newest comment of the card, if any.
+    pub last_comment: Option<String>,
+}
+
+/// Whether column `column` of the board `cols` (`(name, role)` in board
+/// order) is in review or later: the column with the role `review` (else
+/// the column named `review`) and every column after it, never the column
+/// with the role `blocked`. A board with neither counts only `done`. The
+/// same rule as the n/m chip of the dashboard (TER-147).
+pub fn review_or_later(cols: &[(String, Option<String>)], column: &str) -> bool {
+    let review = cols
+        .iter()
+        .position(|(_, r)| r.as_deref() == Some(board::REVIEW))
+        .or_else(|| cols.iter().position(|(n, _)| n == board::REVIEW));
+    let Some(at) = cols.iter().position(|(n, _)| n == column) else {
+        return false;
+    };
+    if cols[at].1.as_deref() == Some(board::BLOCKED) {
+        return false;
+    }
+    match review {
+        Some(r) => at >= r,
+        None => column == board::DONE,
+    }
+}
+
+/// The linked cards of thread `thread` as they are now, the oldest link
+/// first. A linked card that is gone is left out.
+pub fn linked_states(conn: &Connection, thread: &str) -> ApiResult<Vec<LinkedState>> {
+    let mut st = conn.prepare(
+        "SELECT c.project, c.id, c.title, k.name, k.role, c.archived,
+                (SELECT body FROM card_comments m WHERE m.card = c.id
+                  ORDER BY m.created_at DESC, m.id DESC LIMIT 1)
+         FROM thread_cards tc
+         JOIN cards c ON c.id = tc.card
+         JOIN board_columns k ON k.id = c.column_id
+         WHERE tc.thread = ?1
+         ORDER BY tc.linked_at, tc.rowid",
+    )?;
+    let rows = st
+        .query_map([thread], |r| {
+            Ok(LinkedState {
+                project: r.get(0)?,
+                card: r.get(1)?,
+                title: r.get(2)?,
+                column: r.get(3)?,
+                role: r.get(4)?,
+                archived: r.get::<_, i64>(5)? != 0,
+                review_or_later: false,
+                last_comment: r.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut boards: std::collections::HashMap<String, Vec<(String, Option<String>)>> =
+        std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for mut s in rows {
+        if !boards.contains_key(&s.project) {
+            let cols = board::column_roles(conn, &s.project)?;
+            boards.insert(s.project.clone(), cols);
+        }
+        let cols = boards.get(&s.project).map(Vec::as_slice).unwrap_or(&[]);
+        s.review_or_later = review_or_later(cols, &s.column);
+        out.push(s);
+    }
+    Ok(out)
+}
+
+/// True when thread `thread` links at least one card that is not archived,
+/// and each of them is in review or later.
+fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
+    let live: Vec<LinkedState> = linked_states(conn, thread)?
+        .into_iter()
+        .filter(|s| !s.archived)
+        .collect();
+    Ok(!live.is_empty() && live.iter().all(|s| s.review_or_later))
+}
+
+/// Card `card` of `project` moved from column `from` to column `to` (role
+/// `to_role`): wake the agent of each open thread that tracks
+/// (`tracking_at`) and links the card (TER-148, TER-144 D4), in the
+/// transaction of the move:
+///
+/// - a move into the column with the role `blocked` wakes it with the
+///   reason [`WAKE_BLOCKED`];
+/// - a move from a column before review into review or later
+///   ([`review_or_later`]) that leaves every linked card that is not
+///   archived in review or later wakes it with [`WAKE_REVIEW`]. A move
+///   between two columns of review or later does not wake it again.
+///
+/// The wake ([`wake`]) emits the `thread` event `cards`; the thread agent
+/// driver gives the agent a `[Thread:<id>]` turn with the linked cards
+/// ([`crate::thread_agent`]).
+pub fn on_card_moved(
+    t: &mut Tx<'_>,
+    card: &str,
+    project: &str,
+    from: &str,
+    to: &str,
+    to_role: Option<&str>,
+) -> ApiResult<()> {
+    let ids: Vec<String> = {
+        let mut st = t.prepare(
+            "SELECT th.id FROM thread_cards tc JOIN threads th ON th.id = tc.thread
+             WHERE tc.card = ?1 AND th.status != 'closed' AND th.tracking_at IS NOT NULL
+             ORDER BY th.id",
+        )?;
+        st.query_map([card], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let reason = if to_role == Some(board::BLOCKED) {
+        WAKE_BLOCKED
+    } else {
+        let cols = board::column_roles(t, project)?;
+        if review_or_later(&cols, to) && !review_or_later(&cols, from) {
+            WAKE_REVIEW
+        } else {
+            return Ok(());
+        }
+    };
+    for id in ids {
+        if reason == WAKE_REVIEW && !all_review_or_later(t, &id)? {
+            continue;
+        }
+        wake(t, &id, reason)?;
+    }
+    Ok(())
+}
+
+/// Wake the agent of the thread `id` that tracks, for `reason`
+/// ([`WAKE_BLOCKED`], [`WAKE_REVIEW`]). A thread in `tracking` goes to
+/// `waiting_agent`; `tracking_at` stays, so the agent's reply puts it back
+/// into tracking ([`post`]). A thread that waits on the operator (an open
+/// question) or on the agent keeps its status. The `thread` event `cards`
+/// carries only the reason, not the card: a reader of the thread's events
+/// need not read the card's project (TER-146).
+fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
+    let th = get_bare(t, id)?;
+    let at = now();
+    let status = if th.status == ThreadStatus::Tracking {
+        ThreadStatus::WaitingAgent
+    } else {
+        th.status
+    };
+    set_status(t, &th.id, status, &at)?;
+    let th = get_bare(t, &th.id)?;
+    t.audit(
+        "thread.card_wake",
+        &th.id,
+        th.project(),
+        json!({"reason": reason}),
+    )?;
+    emit_with(t, &th, "cards", json!({"reason": reason}))
 }
 
 fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
@@ -1230,4 +1415,61 @@ fn emit_with(t: &mut Tx<'_>, th: &Thread, change: &str, extra: Value) -> ApiResu
         _ => "updated",
     };
     crate::store::inbox::emit(t, &th.item_id(), "thread", inbox_change, th.project())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cols(spec: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        spec.iter()
+            .map(|(n, r)| ((*n).to_owned(), r.map(str::to_owned)))
+            .collect()
+    }
+
+    #[test]
+    fn review_or_later_follows_the_review_column() {
+        let d = cols(&board::DEFAULT_COLUMNS);
+        for c in ["review", "merge_queue", "accepted", "done"] {
+            assert!(review_or_later(&d, c), "{c}");
+        }
+        // The blocked column is after review on the default board, and
+        // never counts.
+        for c in [
+            "backlog",
+            "ready",
+            "in_progress",
+            "validating",
+            "blocked",
+            "nope",
+        ] {
+            assert!(!review_or_later(&d, c), "{c}");
+        }
+        // A column named review with no role.
+        let named = cols(&[
+            ("backlog", None),
+            ("doing", Some("working")),
+            ("review", None),
+            ("done", None),
+        ]);
+        assert!(review_or_later(&named, "review"));
+        assert!(!review_or_later(&named, "doing"));
+        // The role wins over the name.
+        let role = cols(&[
+            ("backlog", None),
+            ("doing", Some("working")),
+            ("check", Some("review")),
+            ("review", None),
+            ("done", None),
+        ]);
+        assert!(review_or_later(&role, "check"));
+        // No review column: only done.
+        let none = cols(&[
+            ("backlog", None),
+            ("doing", Some("working")),
+            ("done", None),
+        ]);
+        assert!(review_or_later(&none, "done"));
+        assert!(!review_or_later(&none, "doing"));
+    }
 }

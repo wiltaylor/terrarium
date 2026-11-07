@@ -3841,6 +3841,47 @@ in the audit log when it cannot read the card's project. A link also
 writes a `thread` event `card_linked`, which does not change the status
 and wakes no agent. There is no unlink.
 
+**Wake rules** (TER-148, TER-144 D4 and D5). In a thread that tracks (not
+closed, `tracking_at` set), a move of a linked card wakes the agent, in
+the transaction of the move:
+
+- a move into the column with the role `blocked` (reason `blocked`);
+- a move from a column before review into review or later that leaves
+  every linked card that is not archived in review or later (reason
+  `review`). Review or later is the column with the role `review` (else
+  the column named `review`) and each column after it on that card's
+  board, never the column with the role `blocked`; a board with neither
+  counts only `done` (the rule of the n/m chip, TER-147). A move between
+  two columns of review or later does not wake it again.
+
+A thread in `tracking` goes to `waiting_agent`; `tracking_at` stays, so
+the agent's reply puts it back into `tracking`. A thread that waits on
+the operator (an open question) keeps its status. The wake writes the
+audit row `thread.card_wake` (`reason`) and the `thread` event `cards`
+with `reason` and no card, so that a reader of the thread's events does
+not learn a card of a project it cannot read. The agent gets a
+`[Thread:<id>]` turn with the linked cards as they are then (project,
+ID, column, title, and the last comment of a blocked card, quoted as
+data); a card of a project that the agent cannot read is only counted.
+On `blocked` the turn asks the agent to tell the operator what is stuck.
+On `review` it asks the agent to post what changed, the pre-release and
+the test steps, and to ask `works` or `found an issue`. On `works` the
+agent proposes the close. On `found an issue` it mails its report-to lead
+for a bug card linked to the same thread (`card new --inbox-thread`),
+and moves the thread into tracking again: the bug card's move to review
+wakes it again.
+
+**Extra requirements** (TER-148, TER-144 D10). The overall response can
+be sent again: the newest replaces `response`, each stays in `messages`
+as kind `response`, and each writes `thread.respond`. The turn of a
+response that follows an earlier one says that it replaces it. When the
+operator asks for more than the response covers, the agent says in the
+thread whether it is in scope or new scope, asks with options, waits for
+a new overall response, and hands the new work off with that response
+quoted; new cards link to the same thread, and the lead decides whether
+it amends a card or makes a follow-up. The first turn of the agent
+carries these rules.
+
 **Close** (TER-95, wiki `inbox-threads` §5). The attached agent hands off
 its work, asks in the thread whether anything more is needed, and then
 proposes the close: `POST .../close` by the agent sets `close_proposal`
@@ -3944,7 +3985,9 @@ of that project (A2). Only the daemon binds to a thread: a spawn with
   `waiting_operator` parks the agent (`park_reason` `thread waits on the
   operator`): the idle pass stops it when it is at rest, and mail does not
   wake it. The move into tracking, and its reply in a thread that tracks,
-  park it too (`thread is tracking`).
+  park it too (`thread is tracking`). In a thread that tracks, a linked
+  card that goes to blocked, or all linked cards in review or later, wake
+  it with a `[Thread:<id>]` turn (TER-148, "Wake rules" above).
 - **Restart.** An operator message or response, or the settling of the
   last open question (`waiting_agent`), unparks it: it starts again in the
   same session row and harness session (`resumes` + 1) on every harness.
@@ -4041,10 +4084,12 @@ reads its thread with `GET /api/threads/{id}`.
 
 Events: `thread` `{change, id, scope, status}`, with `change` one of
 `opened`, `agent`, `message`, `response`, `question`, `close_proposed`,
-`reminded`, `closed`; and an `inbox` event for the item. Audit rows:
-`thread.open`, `thread.agent`, `thread.respond`, `thread.propose_close`,
-`thread.remind`, `thread.close` (with `reason`, `session`, and the
-commented `cards`).
+`reminded`, `tracking`, `card_linked`, `cards` (a wake by the linked
+cards, with `reason`), `closed`; and an `inbox` event for the item. Audit
+rows: `thread.open`, `thread.agent`, `thread.respond`,
+`thread.propose_close`, `thread.remind`, `thread.track`,
+`thread.card_link`, `thread.card_wake`, `thread.close` (with `reason`,
+`session`, and the commented `cards`).
 
 ## 7. Mail
 
@@ -4773,7 +4818,7 @@ Kinds:
 | `host.update_failed` | `{host, host_id, failed, running}`: the self-update to `failed` did not start, and the host agent runs `running` again. One time for each version while the daemon runs. The audit entry is `host.update_failed`. |
 | `event_source` | `{change, source, name, key, kind, enabled}` after a change of an event source (§20). |
 | `system_prompt` | `{change, name, path}` after a write through the API of the system prompt library (§28). `change` is `created`, `updated`, or `deleted`. An edit of a file by hand gives no event. |
-| `test_run` | `{change, project, id, name, counts, cards, versions}` after a change of a test run (§29). `change` is `created`, `linked`, `unlinked`, or `deleted`. `cards` are card IDs and `versions` are version names. |
+| `test_run` | `{change, project, id, name, counts, cards, labels}` after a change of a test run (§29). `change` is `created`, `linked`, `unlinked`, or `deleted`. `cards` are card IDs and `labels` are labels, such as `version:1.4.0`. |
 | `monitor.result` | `{project, monitor, monitor_id, status, value, unit, message, error, at, duration_ms, result_id}` for each result of a monitor (§30.3). |
 | `monitor.status` | `{project, monitor, monitor_id, from, to, value, unit, message, error}` when the status of a monitor changes; `from` is `null` for the first result (§30.3). |
 | `dashboard.updated` | `{project, blocks}` after a save of the dashboard layout (§30.4). |
@@ -5096,11 +5141,11 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `GET /api/projects/{name}/artifacts` | | `200` artifacts newest first, cursor: number |
+| `GET /api/projects/{name}/artifacts?label=&limit=&cursor=` | | `200` artifacts newest first, cursor: number; `label` keeps the artifacts with that exact label |
 | `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact |
 | `GET /api/projects/{name}/artifacts/usage` | | `200 {"project", "count", "used_bytes", "quota_bytes", "max_file_bytes"}` |
 | `GET /api/artifacts/{id}` | | `200` artifact |
-| `DELETE /api/artifacts/{id}` | | `204`; the author or an admin |
+| `DELETE /api/artifacts/{id}` | | `204`; the author or an admin; `409` on a released version from before TER-58 |
 | `POST /api/artifacts/{id}/links` | `{"kind": "page" \| "card" \| "label", "ref"}` | `201` artifact |
 | `POST /api/artifacts/{id}/url` | none, or `{"ttl"?}` | `200 {"url", "exp", "expires_at"}` |
 | `POST /api/artifacts/prune` | `{"dry_run"?, "as_of"?}` | `200` prune report; sysadmin or operator |
@@ -5111,6 +5156,11 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
   `422 invalid` with a message that names `label`.
 - An admin delete of another author's artifact writes `artifact.delete`. The
   blob goes when no artifact uses it.
+- An artifact on a `released` version from before TER-58 (an old
+  `version_artifacts` row) is not deleted: `409 conflict`, also for its
+  author, an admin, or the operator. The rows stay read only until a later
+  version drops the tables (TER-128). A label link does not block a
+  delete.
 
 ### 12.4 Serving: `GET /a/{uid}/{path}`
 
@@ -8135,19 +8185,43 @@ rule "note-review" {
 `if_card` (on the run's card; a rule with one runs only for events with a
 card): `column` (in one of these), `not_column`, `has_labels` (every
 one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
-of a `job` event, `data.id`; a rule with one runs only for `job` events):
-`state` (`queued`, `running`, `passed`, `failed`, `cancelled`) and
-`outcome` (`red`, `conflict`, `error`, `none`). Every field that is set
-must hold; every block must hold.
+of a `job` event, `data.id`, or of a `job.verdict` event, `data.job`; a
+rule with one runs only for those events): `state` (`queued`, `running`,
+`passed`, `failed`, `cancelled`), `outcome` (`red`, `conflict`, `error`,
+`none`), and the booleans `split` (the job is a half of a split batch),
+`batch` (two or more cards of the job merged, did not conflict), `rerun`
+(a rerun of the job is queued or ran), and `halves` (the job was split).
+Every field that is set must hold; every block must hold.
 
 Templates are filled when the action runs, from the event, the current
 card, the event's job (of a `job` event, `data.id`, or a `job.verdict`
 event, `data.job`; the fields of a `job.verdict` event come first, so
 `{{job.outcome}}` and `{{job.by_agent}}` are the card's), and the rule.
 In a text that an agent reads (`text`, `comment`, `subject`, `body`,
-`turn`) each value is quoted data (one line, in backticks), as in a
-trigger mail (§19.4). The `text` of `card_prepend` is the exception: it
-goes into the card body with its lines, so a failure block stays whole.
+`turn`, `reason`, `result`) each value is quoted data (one line, in
+backticks), as in a trigger mail (§19.4). The `text` of `card_prepend` is
+the exception: it goes into the card body with its lines, so a failure
+block stays whole. The values that the daemon makes are never quoted:
+`card.id`, `card.project`, `card.column`, `job.id`, `job.kind`,
+`job.state`, `job.outcome`, `job.attempt`, `rule.name`, and the texts of
+the job queue below except `job.failure_block` (TER-170). Each is one
+line of daemon fields (a branch name has no space and no `[`), so none
+can hold a tag. The engine fills the unquoted `job.*` values from the
+stored job, never from event data: any event source can write a
+`job.verdict`. `job.failure_block` holds the tail of the job output,
+untrusted text: it is quoted data in a comment, a mail, or a turn, and
+only `card_prepend` writes it as it is.
+
+The texts of the job queue, as the coded flow writes them (§19.11):
+`job.queue_comment` (the comment of a queued job on the run's card),
+`job.end_comment` and `job.failure_block` (of an ended job),
+`job.rerun_comment` (the job runs again; empty without a rerun),
+`job.split_comment` (the batch split; empty without halves),
+`job.fail_comment` (the final failure: `failed again`, `failed (red alone
+after its batch was red)`, or `left the batch on a conflict`),
+`job.fail_mail` (the body of the mail to the worker), `job.next_jobs`
+(the rerun, or the two halves), and `job.branch` and `job.by_agent` (the
+run's card's, in a batch).
 
 Verbs (TER-169). Each verb goes through the store functions of the API
 as the rule actor, so the same checks hold. A verb whose precondition
@@ -8158,7 +8232,8 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
   the top. The board invariants hold (a move to the blocked column needs
   a `comment`).
 - `card_label`: add and remove labels; a label whose placeholder is empty
-  is left out. No change: a no-op.
+  is left out. `remove` takes globs (`by:*`); a label that `add` names
+  stays. No change: a no-op.
 - `card_comment`: a comment on the run's card.
 - `card_assign`: assign the run's card to `who` (an agent name or a
   template), or unassign it with `none`. A template that fills to nothing
@@ -8180,25 +8255,35 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
   the card verbs on the `job` event.
 - `job_cancel`: cancel the event's job, else the open job of the run's
   card, and write its `job.verdict` (`cancelled`); a running job is
-  killed. No open job: a no-op.
+  killed. As the API cancel, with `board_flow = code` it takes the
+  `validation:*` labels off the job's cards (with `rules` the pack does
+  it on the verdict). No open job: a no-op.
 - `job_rerun`: queue the event's failed job once more at the front
   (attempt + 1; a batch with the cards that did not conflict), while its
   attempt is under `max_attempts` (default 2). A conflict, a job that did
-  not fail, or a job that runs again already: a no-op.
+  not fail, a job that runs again already, or a card of it with an open
+  job (the coded flow split the batch already): a no-op.
 - `job_split`: split the event's red batch (two or more cards that
   merged) in two halves, the left half first. A job that is not red, has
-  fewer than two merged cards, or was split already: a no-op.
-- `job_fix`: open one fix card for the event's failed merge job: in `to`
+  fewer than two merged cards, was split already, or has a card with an
+  open job: a no-op. `after_fixes`: only when the group had at least that
+  many fix cards of earlier jobs (below).
+- `job_fix`: open one fix card for the event's red merge job: in `to`
   (default `@ready`), with the label `merge-fix:<job>` and `labels`, a
   `card` link to each card of the job, and the failure block in its body.
-  An open card with that label: a no-op. The fix card is how a red merge
-  group gets a fix before a split; the rule does not spawn the agent for
-  it.
+  A job that is not red (a conflict, an error, a cancelled or cut run),
+  an open card with that label, or a group that had `max` fix cards of
+  earlier jobs: a no-op. The fix cards of a group are the cards with a
+  `merge-fix:` label of another job that link to a card of the job, done
+  and archived ones too. The fix card is how a red merge group gets a fix
+  before a split (MEM-84); the rule does not spawn the agent for it.
 - `agent_park`, `agent_unpark`, `agent_end`: act on the open agent bound
   to the run's card (§6.10). No bound agent: a no-op. `agent_unpark`
   acts only on a parked agent; its turn is `turn` (its values quoted),
   else the return turn of the card move of the event, else a plain return
-  turn. `agent_end` closes the agent with `outcome` as `agent done` does.
+  turn. `agent_park` takes a `reason` (default `rule <name>`).
+  `agent_end` closes the agent with `outcome` as `agent done` does, with
+  `result` for the owner (default `the rule <name> ended it`).
 
 Once per job: `job.verdict` comes once for each card of a batch, so a
 rule on it runs once per card; `job_rerun`, `job_split` and `job_fix`
@@ -8262,6 +8347,87 @@ terrarium schedule new deploy-staging --project terra --manual \
 terrarium schedule ls --actions
 terrarium schedule run terra/deploy-staging
 ```
+
+### 19.11 The board flow and the built-in pack
+
+Who runs the card flow of the job queue and of the bound agents is a
+setting of each project (TER-170): `board_flow`, `code` (the default) or
+`rules`. A project admin sets it with `PATCH /api/projects/{name}`
+`{"board_flow": "rules"}` (audited as `project.update`), or the project
+file with `board_flow = "rules"` (a fleet file too). `GET
+/api/projects/{name}` shows it, with `board_flow_at`, the time of the last
+switch.
+
+- `code`: the daemon moves, labels, and comments the cards of the job
+  queue (§35), and parks, unparks, and ends the bound agents (§6.10), as
+  before. The rules of the project's `rules.wcl` run beside it.
+- `rules`: the job queue (`card validate`, `card merge`, `POST
+  /api/merges`, a cancel, the start, a requeue, and the end of a job) and
+  the bound agent driver only write their events (`job`, `job.verdict`,
+  `card`). The engine (§19.9) runs the built-in pack "delivery" on them,
+  then the project's own rules. An event from before the switch starts no
+  run of the pack. The `comment` of a validate goes on the card as the
+  actor's own comment.
+
+The pack has no rule for a queued validate job: the operator removed the
+validating column and `card validate` for card work (2026-11-07). With
+`rules`, `card validate` queues the job (`201`) and the card stays where
+it is, without a job label; on a pass the pack moves it to `@review`. A
+project that still validates copies the opt-in rules of
+`crates/terrarium-core/src/rules.validate.wcl` (`validate-queued`,
+`validate-queued-note`, `validate-queued-move`: one `validation:queued`
+and one `by:<worker>` label, the queue comment, the move to
+`@validating`) into its `rules.wcl`; its board needs a `validating`
+column. (With `code`, a validate on a board without that column fails in
+one write.)
+
+The pack (`crates/terrarium-core/src/rules.default.wcl`) does what the
+coded flow does, with the same labels, moves, comments, mails, and
+parks; its texts come from the code of the coded flow (§19.9 templates).
+Its rules, in order:
+
+| Rule | On | Does |
+|---|---|---|
+| `merge-queued` | a new merge job | `validation:queued` and the queue comment on each card; no move |
+| `job-started`, `job-requeued` | a job starts, or waits again | `validation:queued` <-> `validation:running` |
+| `validate-pass`, `merge-pass` | a passed verdict | labels off, move to `@review` or `@accepted` with the end comment, unassign |
+| `job-rerun-error`, `job-rerun-red`, `job-rerun-note` | an `error` verdict, or a `red` one of a job that is not a split half and not a group of two or more merged cards | `job_rerun` (attempt 2), then labels back to queued and the rerun comment |
+| `merge-red-group`, `merge-red-split-note`, `merge-red-fix-note` | a red merge with two or more merged cards | `job_fix` (at most 3 fix cards), then `job_split` after 3; the split comment, or the labels off and a note of the fix card |
+| `job-fail-conflict`, `job-fail-red`, `job-fail-error` | a final failure | labels off, the failure block on the body, the top of `@ready` with the comment, unassign, a mail to the worker |
+| `job-cancelled` | a cancelled verdict | labels off |
+| `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `accepted` (names, as §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
+
+One change from the coded flow, by the operator's rule of 2026-11-07
+(MEM-84): a red merge group gets a fix card first, and splits in halves
+only after three fix cards. The fix cards of a group are the cards with a
+`merge-fix:` label of an earlier job whose linked cards (fix cards left
+out) include every card of this job: those of its reruns and of the group
+it was split from count, those of another group that shared a card do
+not. Set another number with your own `merge-red-group` rule. The pack
+does not spawn the fix agent or queue the group again (TER-181).
+
+A rule of the project's `rules.wcl` with the name of a pack rule
+replaces it. A rule with only `enabled = false` (no `on`, no verb) turns
+it off:
+
+```wcl
+rule "agent-park" { enabled = false }
+```
+
+Other differences from the coded flow: the author of a comment is the
+rule actor (`rule:<project>/<rule>`), not `system`; the mail to the
+worker comes from `project:<project>`, not `system`; a column that the
+pack names and the board lacks fails the rule run (the coded flow wrote
+a comment); a batch merge ends the bound agent of each card, not only
+the first; and the pack acts a moment after the event (§19.9), so the
+queue can start the next queued job before a rule splits or reruns the
+one that ended (the order of the merges after a split can differ).
+
+A switch back from `rules` to `code` drops the pack at the next pass of
+the engine. A job that ended under `rules` but whose events the engine
+had not run yet (a window of about one pass) then gets no flow from
+either side: its cards keep their column and job labels. Switch while the
+queue is idle, or move and relabel those cards by hand.
 
 ## 20. Event sources and ingest
 
@@ -9475,7 +9641,7 @@ A run (the list items, and the answer of an upload and a link change):
  "status":"failed","counts":{"passed":120,"failed":2,"errored":1,"skipped":3,"total":126},
  "duration_ms":5321,"started_at":"2026-11-02T01:02:03Z","commit":"abc123","branch":"main",
  "file_name":"junit.xml","raw_size":12345,"notes":[],
- "cards":["DEMO-12"],"versions":[{"id":"01JB6…","name":"v1.2.0"}],
+ "cards":["DEMO-12"],"labels":["version:1.2.0"],
  "created_by":"01M5PA0T…","created_by_name":"demo/worker",
  "created_at":"2026-11-02T01:03:00.000Z","url":"/p/demo/board/tests/01JB7…"}
 ```
@@ -9488,7 +9654,7 @@ A run (the list items, and the answer of an upload and a link change):
 | `commit`, `branch` | From the upload. `null` when not given. |
 | `file_name`, `raw_size` | The name and the size in bytes of the original file. |
 | `notes` | Notes of the parse, for example `3 texts were cut to 64 KiB`. Usually empty. |
-| `cards`, `versions` | The links. |
+| `cards`, `labels` | The links: card IDs, and labels as strings, in the order they were linked. |
 | `url` | The dashboard page of the run. |
 
 A suite:
