@@ -193,10 +193,7 @@ impl Lab {
         if let Some(c) = comment {
             body["comment"] = json!(c);
         }
-        let r = self
-            .td
-            .post(&format!("/api/cards/{card}/move"), body)
-            .await;
+        let r = self.td.post(&format!("/api/cards/{card}/move"), body).await;
         assert_eq!(r.status, 200, "{}", r.body);
     }
 
@@ -307,8 +304,14 @@ async fn a_thread_with_cards_of_two_projects_wakes_and_closes_after_works() {
     assert_eq!(th["status"], "waiting_agent", "{th:#}");
     assert!(th["tracking_at"].is_string(), "{th:#}");
     let turn = lab.nth_prompt(&eph, &blocked, 1).await;
-    assert!(turn.contains(&format!("- q:{qc} [blocked (blocked)] Cache in q")), "{turn}");
-    assert!(turn.contains(&format!("- p:{pc} [in_progress] Cache in p")), "{turn}");
+    assert!(
+        turn.contains(&format!("- q:{qc} [blocked (blocked)] Cache in q")),
+        "{turn}"
+    );
+    assert!(
+        turn.contains(&format!("- p:{pc} [in_progress] Cache in p")),
+        "{turn}"
+    );
     assert!(turn.contains("> Need the cache host."), "{turn}");
     assert!(turn.contains("is tracking"), "{turn}");
     lab.td.wait_status(&eph, "idle").await;
@@ -339,8 +342,12 @@ async fn a_thread_with_cards_of_two_projects_wakes_and_closes_after_works() {
 
     // The test loop (D5): the agent posts the test steps and asks; the
     // operator found an issue.
-    lab.post_as(&eph, &tid, "Shipped in 0.6.0-alpha. Test: open the cache page.")
-        .await;
+    lab.post_as(
+        &eph,
+        &tid,
+        "Shipped in 0.6.0-alpha. Test: open the cache page.",
+    )
+    .await;
     lab.parked(&eph).await;
     lab.ask_works(&eph, &tid, "found an issue").await;
     // The lead makes a bug card on the same thread; the agent tracks again.
@@ -362,7 +369,10 @@ async fn a_thread_with_cards_of_two_projects_wakes_and_closes_after_works() {
     lab.mv(&bug, "review", None).await;
     assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
     let turn = lab.nth_prompt(&eph, &review, 2).await;
-    assert!(turn.contains(&format!("- p:{bug} [review] Cache page is empty")), "{turn}");
+    assert!(
+        turn.contains(&format!("- p:{bug} [review] Cache page is empty")),
+        "{turn}"
+    );
     assert!(turn.contains(&format!("- p:{pc} [merge_queue]")), "{turn}");
     lab.td.wait_status(&eph, "idle").await;
     assert_eq!(lab.wakes(&tid).await, ["blocked", "review", "review"]);
@@ -414,7 +424,10 @@ async fn only_a_thread_that_tracks_wakes_on_its_cards() {
     lab.mv(&pc, "review", None).await;
     assert!(lab.wakes(&tid).await.is_empty());
     assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
-    assert!(lab.prompts(&eph, &format!("[Thread:{tid}] All cards")).is_empty());
+    assert!(
+        lab.prompts(&eph, &format!("[Thread:{tid}] All cards"))
+            .is_empty()
+    );
 
     // A thread that tracks with an archived card and a card in review:
     // the archived card does not count.
@@ -432,7 +445,10 @@ async fn only_a_thread_that_tracks_wakes_on_its_cards() {
     let turn = lab
         .nth_prompt(&e2, &format!("[Thread:{t2}] {REVIEW_TURN}"), 1)
         .await;
-    assert!(turn.contains(&format!("- p:{a} [archived] Dropped")), "{turn}");
+    assert!(
+        turn.contains(&format!("- p:{a} [archived] Dropped")),
+        "{turn}"
+    );
 }
 
 #[tokio::test]

@@ -1419,7 +1419,14 @@ mod tests {
         }
         // The blocked column is after review on the default board, and
         // never counts.
-        for c in ["backlog", "ready", "in_progress", "validating", "blocked", "nope"] {
+        for c in [
+            "backlog",
+            "ready",
+            "in_progress",
+            "validating",
+            "blocked",
+            "nope",
+        ] {
             assert!(!review_or_later(&d, c), "{c}");
         }
         // A column named review with no role.
@@ -1441,7 +1448,11 @@ mod tests {
         ]);
         assert!(review_or_later(&role, "check"));
         // No review column: only done.
-        let none = cols(&[("backlog", None), ("doing", Some("working")), ("done", None)]);
+        let none = cols(&[
+            ("backlog", None),
+            ("doing", Some("working")),
+            ("done", None),
+        ]);
         assert!(review_or_later(&none, "done"));
         assert!(!review_or_later(&none, "doing"));
     }

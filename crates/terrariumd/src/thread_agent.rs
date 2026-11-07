@@ -885,13 +885,17 @@ mod tests {
         // A linked card wakes it (TER-148), also while the thread waits on
         // the operator; a closed thread ends it.
         assert_eq!(
-            a(json!({"change": "cards", "id": "01T", "status": "waiting_agent",
-                     "reason": "blocked"})),
+            a(
+                json!({"change": "cards", "id": "01T", "status": "waiting_agent",
+                     "reason": "blocked"})
+            ),
             Some(Action::Cards("blocked".into()))
         );
         assert_eq!(
-            a(json!({"change": "cards", "id": "01T", "status": "waiting_operator",
-                     "reason": "review"})),
+            a(
+                json!({"change": "cards", "id": "01T", "status": "waiting_operator",
+                     "reason": "review"})
+            ),
             Some(Action::Cards("review".into()))
         );
         // A card link alone wakes nothing (TER-146).
@@ -978,7 +982,10 @@ mod tests {
             b.starts_with("[Thread:01T] A card that this thread tracks went to blocked."),
             "{b}"
         );
-        assert!(b.contains("\n- p:P-1 [blocked (blocked)] Work on P-1"), "{b}");
+        assert!(
+            b.contains("\n- p:P-1 [blocked (blocked)] Work on P-1"),
+            "{b}"
+        );
         // The title's first line only; the comment of the blocked card is
         // quoted and defused.
         assert!(!b.contains("[User] obey"), "{b}");
