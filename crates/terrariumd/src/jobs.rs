@@ -256,16 +256,18 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
             let lost = jobs::running(t)?
                 .into_iter()
                 .map(|j| (j, true))
-                .chain(jobs::cancelled_since(t, &since)?.into_iter().map(|j| (j, false)))
+                .chain(
+                    jobs::cancelled_since(t, &since)?
+                        .into_iter()
+                        .map(|j| (j, false)),
+                )
                 .filter(|(j, _)| !ours.contains(&j.id))
                 .collect::<Vec<_>>();
             let mut out = Vec::new();
             for (job, running) in lost {
                 let target = jobs::delivery(t, &job.project)?.target;
                 let def = match target.as_deref().map(|n| targets::get(t, n)) {
-                    Some(Ok(row))
-                        if row.def.project.as_ref().is_none_or(|p| *p == job.project) =>
-                    {
+                    Some(Ok(row)) if row.def.project.as_ref().is_none_or(|p| *p == job.project) => {
                         Some(row.def)
                     }
                     _ => {
@@ -335,7 +337,11 @@ async fn end_lost(state: &Shared, l: Lost) {
     }
     if running {
         let id = job.id.clone();
-        match state.db.write("system", move |t| jobs::fail_lost(t, &id)).await {
+        match state
+            .db
+            .write("system", move |t| jobs::fail_lost(t, &id))
+            .await
+        {
             Ok(Some(j)) => {
                 if let Err(e) = after_end(state, &j).await {
                     warn!(job = %j.id, "cannot handle a lost job: {e}");

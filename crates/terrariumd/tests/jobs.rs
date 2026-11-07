@@ -1931,7 +1931,14 @@ fn orphan(job: &str) -> (std::process::Child, u32) {
         std::thread::sleep(Duration::from_millis(20));
     };
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-    let st = stat.rsplit(") ").next().unwrap().split_whitespace().nth(19).unwrap().to_owned();
+    let st = stat
+        .rsplit(") ")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .to_owned();
     std::fs::write(
         terrariumd::run_kill::job_pidfile(job),
         format!("{pid} {st}\n"),
@@ -1957,12 +1964,17 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots()
     let cancel_id = ulid::Ulid::new().to_string();
     let now = chrono::Utc::now();
     let at = |mins: i64| {
-        (now - chrono::Duration::minutes(mins))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        (now - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     };
     let rows = [
         (run_id.clone(), cr.clone(), "running", at(5), None),
-        (cancel_id.clone(), cc.clone(), "cancelled", at(5), Some(at(1))),
+        (
+            cancel_id.clone(),
+            cc.clone(),
+            "cancelled",
+            at(5),
+            Some(at(1)),
+        ),
     ];
     state
         .db
@@ -1989,28 +2001,60 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots()
     let c = lab.card("queued", "ter-l3").await;
     let r = lab
         .td
-        .post_as(&lab.w1, &format!("/api/cards/{c}/validate"), json!({"commit": h}))
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{c}/validate"),
+            json!({"commit": h}),
+        )
         .await;
     let queued = r.ok()["job"]["id"].as_str().unwrap().to_owned();
     tokio::time::sleep(Duration::from_millis(1500)).await;
     terrariumd::jobs::tick(&state).await.unwrap();
-    for (p, what) in [(lr.id(), "running"), (run_child, "running child"),
-                      (lc.id(), "cancelled"), (cancel_child, "cancelled child")] {
-        assert!(alive(p), "the {what} orphan {p} is gone before the host agent is back");
+    for (p, what) in [
+        (lr.id(), "running"),
+        (run_child, "running child"),
+        (lc.id(), "cancelled"),
+        (cancel_child, "cancelled child"),
+    ] {
+        assert!(
+            alive(p),
+            "the {what} orphan {p} is gone before the host agent is back"
+        );
     }
-    let q = lab.td.get(&format!("/api/jobs/{queued}")).await.ok().clone();
+    let q = lab
+        .td
+        .get(&format!("/api/jobs/{queued}"))
+        .await
+        .ok()
+        .clone();
     assert_eq!(q["state"], "queued", "a job took a slot of a lost job: {q}");
-    let j = lab.td.get(&format!("/api/jobs/{run_id}")).await.ok().clone();
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{run_id}"))
+        .await
+        .ok()
+        .clone();
     assert_eq!(j["state"], "running", "{j}");
 
     lab.agent_up().await;
-    tokio::time::timeout(DEADLINE, recovery).await.unwrap().unwrap();
+    tokio::time::timeout(DEADLINE, recovery)
+        .await
+        .unwrap()
+        .unwrap();
     for p in [lr.id(), run_child, lc.id(), cancel_child] {
         assert!(!alive(p), "the orphan {p} outlived the recovery");
     }
-    let j = lab.td.get(&format!("/api/jobs/{run_id}")).await.ok().clone();
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{run_id}"))
+        .await
+        .ok()
+        .clone();
     assert_eq!(j["state"], "failed", "{j}");
-    assert!(j["tail"].as_str().unwrap_or("").contains("the run is lost"), "{j}");
+    assert!(
+        j["tail"].as_str().unwrap_or("").contains("the run is lost"),
+        "{j}"
+    );
     for id in [&run_id, &cancel_id] {
         let f = terrariumd::run_kill::job_pidfile(id);
         assert!(!Path::new(&f).exists(), "{f} is left");

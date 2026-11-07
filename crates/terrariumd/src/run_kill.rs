@@ -749,7 +749,8 @@ mod tests {
         let pidfile = job_pidfile(&job);
         assert_eq!(pidfile, format!("/tmp/terrarium-run-job-{job}.pid"));
         assert_eq!(job_pidfile("a/../b c"), "/tmp/terrarium-run-job-abc.pid");
-        let (run, report) = start_with_file(starter.clone(), &cmd, 1, pidfile.clone(), true).unwrap();
+        let (run, report) =
+            start_with_file(starter.clone(), &cmd, 1, pidfile.clone(), true).unwrap();
         let child = read_pid(&child_file).await;
         assert!(alive(child));
         // The daemon is gone: its run and the report are never used again.
@@ -866,10 +867,7 @@ mod tests {
             Err(crate::hosts::HostError::Offline("lab1".into()).into())
         };
         let r = kill_file_with(never, None, &pidfile, 1, Duration::from_secs(2)).await;
-        assert!(
-            r["error"].as_str().unwrap().contains("offline"),
-            "{r}"
-        );
+        assert!(r["error"].as_str().unwrap().contains("offline"), "{r}");
     }
 
     /// TER-123 review, major 2: a job step that ends by itself removes its
@@ -899,7 +897,10 @@ mod tests {
         let written = std::fs::read_to_string(&copy).unwrap();
         let fields: Vec<&str> = written.split_whitespace().collect();
         assert_eq!(fields.len(), 2, "no start time in {written:?}");
-        assert!(fields.iter().all(|f| f.parse::<u64>().is_ok()), "{written:?}");
+        assert!(
+            fields.iter().all(|f| f.parse::<u64>().is_ok()),
+            "{written:?}"
+        );
         assert!(!Path::new(&pidfile).exists(), "the step left its PID file");
 
         // An unrelated process group: its leader got the PID of the file.
