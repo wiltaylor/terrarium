@@ -187,17 +187,33 @@ async fn dry_run(
             (rules::check(text, ctx).await?, "text")
         }
         None => {
-            let r = state.db.read(move |c| rules::get(c, &project)).await?;
-            if !r.exists {
+            let (r, flow) = state
+                .db
+                .read(move |c| {
+                    Ok((
+                        rules::get(c, &project)?,
+                        crate::store::projects::board_flow(c, &project)?,
+                    ))
+                })
+                .await?;
+            let pack = flow == terrarium_core::config::BoardFlow::Rules;
+            if !r.exists && !pack {
                 return Err(ApiError::not_found(format!(
                     "project `{name}` has no rules; give a `text` to plan"
                 )));
             }
             let r = rules::with_rules(r).await?;
-            (
-                terrarium_core::rules_file::RuleSet { rules: r.rules },
-                "stored",
-            )
+            let own = terrarium_core::rules_file::RuleSet { rules: r.rules };
+            // A project with `board_flow = rules` runs the pack with its
+            // own rules (TER-171): plan what the engine runs.
+            if pack {
+                (
+                    rules_file::with_pack(rules_file::default_pack(), &own),
+                    "stored",
+                )
+            } else {
+                (own, "stored")
+            }
         }
     };
     let p = name.clone();

@@ -848,6 +848,18 @@ pub fn clear_job_labels(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     Ok(())
 }
 
+/// The label and the queue comment of a new merge job on each of its
+/// cards, as the API's queue writes them with `board_flow = code`
+/// (`card merge`, `POST /api/merges`). A rule's `job.queue` uses it, so a
+/// job that a rule queues looks the same (TER-172).
+pub fn mark_queued(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    for c in j.cards() {
+        set_labels(t, &c.card, &[LABEL_QUEUED], &[])?;
+        board::add_comment(t, &Actor::Operator, &c.card, &queue_comment(j, &c.card))?;
+    }
+    Ok(())
+}
+
 /// Add and take away card labels, keeping the others. A card that is gone
 /// or archived is left alone.
 fn set_labels(t: &mut Tx<'_>, card: &str, add: &[&str], remove: &[&str]) -> ApiResult<()> {

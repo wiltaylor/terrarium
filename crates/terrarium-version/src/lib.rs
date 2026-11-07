@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn this_build_is_consistent() {
         assert!(FULL.starts_with(VERSION));
-        assert!(LONG.starts_with(FULL));
+        assert_eq!(LONG, format!("{FULL}\nbuilt {BUILD_TIME}"));
         assert_eq!(this().git_ref.unwrap_or(UNKNOWN), GIT_REF);
         assert_eq!(this().dirty, DIRTY);
         assert!(BUILD_TIME.ends_with('Z'));

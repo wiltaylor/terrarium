@@ -8067,8 +8067,10 @@ any number of `if_card` and `if_job` conditions on the current state
 `card_move` (`to`, `from?`, `comment?`, `position?` `top` or `bottom`),
 `card_label` (`add?`, `remove?`), `card_comment` (`text`), `card_assign`
 (`who`), `card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
-`job_queue` (`kind` `validate`, `merge`, or `batch`; `from` and `limit?`
-for a batch), `job_cancel`, `job_rerun` (`max_attempts?`), `job_split`,
+`job_queue` (`kind` `validate`, `merge`, or `batch`; `from`, `limit?`,
+`min_cards?`, and `max_wait_minutes?` for a batch only;
+`max_wait_minutes` needs `min_cards`, and `min_cards` is at most
+`limit`), `job_cancel`, `job_rerun` (`max_attempts?`), `job_split`,
 `job_fix` (`to?`, `labels?`), `agent_park`, `agent_unpark` (`turn?`), and
 `agent_end` (`outcome` `done` or `cancelled`).
 
@@ -8249,11 +8251,19 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
   its repo and branch (the card's, else its ID in lower case), with the
   API's checks (the queue is set, a merge needs `project_admin` and a
   repo in `next_repos`). `batch` queues one merge of the cards of column
-  `from` in board order, at most `limit` (and 32); a held card or one
-  with an open job is left out (`left_out` in the detail). A card with an
-  open job, or no card to merge: a no-op. The labels, the comment and the
-  move of the API's queue are not part of the verb: a rule does them with
-  the card verbs on the `job` event.
+  `from` in board order, at most `limit` (absent: all; the daemon has no
+  batch limit of its own, TER-162 D9); a held card or one with an open
+  job is left out (`left_out` in the detail). With `min_cards` the batch
+  goes only when that many cards wait (held cards and cards with a job
+  do not count), or, with `max_wait_minutes`, when the first of them came
+  into the column that many minutes ago (its newest move, else its
+  creation); until then the verb is a no-op whose detail has `waiting`,
+  `due` (the time the wait ends), and the reason. A card with an open
+  job, or no card to merge: a no-op. The move of a card is not part of
+  the verb: a rule does it with `card_move` on the `job` event. With
+  `board_flow = code` a merge or a batch that the verb queues gets the
+  `validation:queued` label and the queue comment on each card, as from
+  the API; with `rules` the pack writes them on the `job` event.
 - `job_cancel`: cancel the event's job, else the open job of the run's
   card, and write its `job.verdict` (`cancelled`); a running job is
   killed. As the API cancel, with `board_flow = code` it takes the
@@ -8286,6 +8296,16 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
   `agent_end` closes the agent with `outcome` as `agent done` does, with
   `result` for the owner (default `the rule <name> ended it`).
 
+Timers (TER-172): the engine checks the batch rules (`job_queue` of kind
+`batch` with `min_cards` and `max_wait_minutes`) about every 10 seconds.
+When cards wait in the rule's `from` column, fewer than `min_cards`, and
+the first came `max_wait_minutes` ago, it writes one `rule.timer` event
+(actor `system`, `data: {rule, due, waiting}`) for that wait. A
+`rule.timer` event plans a run of the rule it names only, without a card;
+`on` and `when` do not apply to it, and a rule with an `if_card` does not
+run for it. The verb checks the time again. A daemon restart may write
+the timer of the same wait once more; the second run is then a no-op.
+
 Once per job: `job.verdict` comes once for each card of a batch, so a
 rule on it runs once per card; `job_rerun`, `job_split` and `job_fix`
 act once for a job and the later runs are no-ops.
@@ -8304,7 +8324,7 @@ ends the agent of a finished card.
 
 | Method and path | Body | Answer |
 |---|---|---|
-| `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. No rules and no `text`: `404`. |
+| `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. The stored rules of a project with `board_flow = rules` include the pack (§19.12). No rules, no pack, and no `text`: `404`. |
 | `GET /api/projects/{name}/rules/runs?rule=&limit=` | | `200`, `{runs: [{id, project, rule, rule_hash, event_seq, card?, state, step, steps, reason?, created_at, updated_at}]}`, newest first (`limit` 1 to 500, default 100). `state` is `pending`, `done`, `noop`, `failed`, or `skipped`; `step` the next action (pending) or the actions run; `steps` one `{verb, ok, changed?, detail?, error?}` for each action run. The project keeps its newest 500 finished runs, and every run of the last hour (the rate limits count them). |
 
 Both: whoever reads the project.
@@ -8424,11 +8444,108 @@ the first; and the pack acts a moment after the event (§19.9), so the
 queue can start the next queued job before a rule splits or reruns the
 one that ended (the order of the merges after a split can differ).
 
+The merge queue column (TER-172, TER-162 D8, D9) is a set of opt-in
+rules, not part of the pack, because a board without that column would
+fail each run. A project copies the rules of
+`crates/terrarium-core/src/rules.merge_queue.wcl` into its `rules.wcl`;
+they work with either board flow, and need a `merge_queue` column (role
+or name) and a `review` column:
+
+| Rule | On | Does |
+|---|---|---|
+| `merge-queue-move` | a new merge job (`card merge`, `POST /api/merges`, or the batch rule) | each card to `@merge_queue` (a card there already stays) |
+| `merge-queue-cancel` | a cancelled merge verdict | the card from `@merge_queue` back to `@review` |
+| `merge-queue-batch` | a card moved to the `merge_queue` role column, and its timer | one batch merge of the cards that wait in `@merge_queue`, in board order: `limit = 8`, `min_cards = 8`, `max_wait_minutes = 30` (8 cards wait, or 30 minutes after the first one) |
+
+The pass (`@accepted`), the red result (the top of `@ready`), and the
+labels and comments stay with the flow of the project. Change the three
+numbers of `merge-queue-batch` to change the batch.
+
 A switch back from `rules` to `code` drops the pack at the next pass of
 the engine. A job that ended under `rules` but whose events the engine
 had not run yet (a window of about one pass) then gets no flow from
 either side: its cards keep their column and job labels. Switch while the
 queue is idle, or move and relabel those cards by hand.
+
+### 19.12 Migration, lint, and the rule tools
+
+TER-171. These endpoints help a project move to `board_flow = rules`
+(§19.11) and show what its rules do. The CLI is `terrarium rule`
+(docs/cli.md), and the dashboard has a Rules tab beside Schedules on the
+board screen.
+
+**The migration.** The pack names columns by role (`@review`,
+`@accepted`, `@ready`), and its bound agent rules name the wait columns
+(`validating`, `review`, `accepted`). A board can lack some of them. On
+such a board a run of the pack fails (§19.9). The migration maps the pack
+to the board's columns:
+
+- A `card_move` to a column that the board lacks becomes a `card_comment`
+  with the move's `comment`. With no comment the move is dropped. The
+  coded flow wrote a comment when such a move failed. Example: on a board
+  with no `accepted` column, `merge-pass` takes the labels off, writes
+  the end comment, and unassigns the card. The card stays where it is.
+- A name in a `when` on `data.to` or `data.from` that the board lacks maps
+  to the column with that role, else it goes from the list. Example: with
+  `code_review` (role `review`), `agent-park` parks on `code_review`. An
+  `eq` on a missing name turns the rule off. An `ne` on a missing name is
+  dropped (it always holds).
+- A column that a `card_move.from`, an `if_card`, or another verb names
+  and the board lacks goes from the list. A verb with no column left is
+  dropped.
+- A rule with no verb left, or one that can never match, is turned off:
+  `rule "<name>" { description = "Off for this board: ..."  enabled = false }`.
+
+Each changed pack rule becomes an override (a rule with the pack rule's
+name, §19.11) at the end of the project's `rules.wcl`, with the reasons
+in its `description`. A pack rule that `rules.wcl` replaces already stays
+as it is (`kept`). A second migration of the same board changes nothing.
+
+**The lint.** It reads the rules that the engine runs: the pack with the
+project's own rules for `board_flow = rules`, else only its own rules.
+Rules that are off count for nothing. It finds two problems:
+
+- `missing_column`: a rule names a column that the board lacks. Each run
+  of the rule fails.
+- `stuck_column`: a rule moves cards into a column (a `card_move`, or the
+  new card of a `job_fix`), and no rule moves a card out of it. A rule
+  moves a card out of column C when it has a `card_move` to another
+  column of the board, with no `from` or a `from` that holds C, and no
+  `if_card` that rules out C. A person must then move each such card on.
+  The column `done` and the column with the role `blocked` are left out:
+  a card stops there by design.
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `GET /api/projects/{name}/rules/effective` | | `200`, `{project, board_flow, exists, hash?, source?, rules: [...]}`. `rules` is the rules that the engine runs, in its order. Each rule has the fields of §19.8, `origin` (`pack`, `override`: a rule of `rules.wcl` with a pack name, or `own`), and `wcl` (the rule as WCL text). |
+| `POST /api/projects/{name}/rules/lint` | `{text?}` | `200`, `{project, board_flow, source: "stored" or "text", findings: [{code, column, rules, message}]}`. With `text`, the text is checked as the `rules.wcl` first (`422` as §19.8). |
+| `POST /api/projects/{name}/rules/migrate` | `{apply?, base_hash?}` | `200`, `{project, applied, board_flow, changed, text, hash?, changes: [{rule, change, reasons}], findings}`. `change` is `mapped`, `disabled`, or `kept`. `text` is the new `rules.wcl` (the old text, then the overrides). `findings` is the lint of the rules after the migration, with the pack. Without `apply` it writes nothing. With `apply`, one write stores the text (when it changed) and sets `board_flow = rules`, with the audit row `rules.migrate` (`{board_flow, previous_board_flow, hash, changes}`) and `rules.put` for the text. |
+| `POST /api/projects/{name}/rules/{rule}/enable` | | `200`, `{project, rule, enabled, changed, hash?}`. |
+| `POST /api/projects/{name}/rules/{rule}/disable` | | The same. |
+
+`enable` and `disable` edit the text of `rules.wcl` and keep the rest of
+the text as it is. A rule of the file gets its `enabled` field set (or a
+new `enabled = false` line after its `{`). A pack rule that the file does
+not name gets `rule "<name>" { enabled = false }` at the end. To enable a
+pack rule that the file turns off with that short form, the short form is
+removed, so the pack rule runs again. A rule that is already so changes
+nothing (`changed: false`). An unknown rule is `404`. A short form of a
+rule that is not in the pack is `409`: edit the file.
+
+Rights: `effective`, `lint`, and a `migrate` without `apply` are for
+whoever reads the project. A `migrate` with `apply`, `enable`, and
+`disable` are for the operator, a project admin, or a sysadmin, as a put
+of the rules (§19.8). The writes go through the put of §19.8: a stale
+`base_hash` is `409 conflict` (`migrate` takes the hash read now when
+`base_hash` is absent), a board change during the check is `409
+conflict`, and the rules of a file are `409 file_managed`. For a project
+whose rules come from a file, run the migration without `apply`, put
+`text` into `projects/<project>.rules.wcl`, and set `board_flow =
+"rules"` in the project file.
+
+The dry run of §19.9 without `text` plans the pack too when the project
+runs it (`board_flow = rules`). Such a project with no `rules.wcl` plans
+the pack alone (before TER-171 it was `404`).
 
 ## 20. Event sources and ingest
 
@@ -11383,7 +11500,7 @@ start with `Job queue:`.
 |------------------------------------|---------------------------------------|------|
 | `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?, eta?}`. `eta` is the planned duration (§35.5). The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?}`. `eta` is the planned duration (§35.5). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
-| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
+| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of one or more cards, in this order (no limit of the daemon; the batch rule of the merge queue sets its own, §19.11). All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/projects/{name}/jobs/stats` | members                            | `?since=`: an RFC 3339 time, or a duration back from now such as `7d` (the default); anything else is `400`. The jobs created at or after `since` (a rerun keeps the `created_at` of its first try): `{project, since, jobs, first_attempt, validate, merge, reruns, conflicts, errors, cancelled, open, splits, failed_steps: [{step, failed}], failed_targets: [{target, failed, first_attempt}], untargeted_test_fails}`. Each of `first_attempt`, `validate`, `merge`, and `reruns` is `{ended, passed, failed, pass_rate}`; `pass_rate` is `passed / ended` from 0 to 1, `null` with none ended. A first attempt is attempt 1 and no split half; a `conflict` counts in `conflicts`, not in `ended`. A job with outcome `error` could not run (host agent offline, prepare step failed, push to `next` failed): first attempts and reruns with it count in `errors`, not in `ended`, so an outage does not lower the rate. Split halves count in `splits` only. `failed_targets` (most first) come from the `error: N targets failed:` lines of the failed jobs' output tails, all attempts; `failed_steps` from the first ``error: recipe `<step>` failed`` line, or `timeout`. `untargeted_test_fails` counts the failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |

@@ -239,7 +239,12 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
             (true, None) => "yes".to_owned(),
             (false, _) => "no".to_owned(),
         };
-        writeln!(out, "terrarium-host {}", terrarium_version::LONG)?;
+        writeln!(
+            out,
+            "terrarium-host {} (built {})",
+            terrarium_version::FULL,
+            terrarium_version::BUILD_TIME
+        )?;
         writeln!(out, "name:       {}", cfg.resolve_name())?;
         writeln!(
             out,
