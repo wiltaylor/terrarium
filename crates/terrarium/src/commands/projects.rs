@@ -106,6 +106,18 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
                     "idle alert: {}",
                     p["idle_alert"].as_str().unwrap_or("15m (default)")
                 ));
+                let authors: Vec<&str> = p["github_authors"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                c.line(format!(
+                    "github authors: {}",
+                    if authors.is_empty() {
+                        "none (no gate)".to_owned()
+                    } else {
+                        authors.join(", ")
+                    }
+                ));
                 c.line("\nagents:");
                 print_table(c, &agent_rows(as_items(&v["agents"])), AGENT_COLS, "  none");
                 c.line("\nrepos:");
@@ -196,6 +208,8 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
             description,
             prefix,
             idle_alert,
+            github_author,
+            github_authors_clear,
         } => {
             let name = ctx.project_or(name.as_deref()).await?;
             let mut body = json!({});
@@ -205,6 +219,11 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
                 Some("default") => body["idle_alert"] = Value::Null,
                 Some(v) => body["idle_alert"] = v.into(),
                 None => {}
+            }
+            if *github_authors_clear {
+                body["github_authors"] = json!([]);
+            } else if !github_author.is_empty() {
+                body["github_authors"] = json!(github_author);
             }
             let p = ctx.api.patch(&project_path(&name), body).await?;
             ctx.emit(&p, |c, p| {

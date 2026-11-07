@@ -9,7 +9,7 @@ use super::{
 };
 use crate::api::{CliError, query};
 use crate::cli::{AgentCmd, AgentNewArgs, AgentSetArgs, AnswerArgs, RoleCmd, RolesCmd, StatusCmd};
-use crate::commands::projects::{AGENT_COLS, agent_rows, project_path};
+use crate::commands::projects::{AGENT_COLS, agent_rows};
 use crate::commands::system::{as_items, show_events};
 use crate::ctx::Ctx;
 use crate::output::field;
@@ -252,14 +252,18 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
 }
 
 async fn ls(ctx: &Ctx, all_projects: bool, ephemeral: bool) -> anyhow::Result<()> {
-    let include = ephemeral.then(|| "ephemeral".to_owned());
+    // The card agents always show (TER-75), all ephemeral agents on ask.
+    let include = Some(if ephemeral { "ephemeral" } else { "card" }.to_owned());
     let items = if all_projects && ctx.is_agent() && ctx.project.is_none() {
         // The daemon defaults an agent to its own project. Ask for each
-        // project the agent can see.
+        // project the agent can see, with the same `include`.
         let mut out = Vec::new();
         for p in ctx.api.list("/api/projects", vec![], None).await? {
-            let path = format!("{}/agents", project_path(&field(&p, "name")));
-            out.extend(ctx.api.list(&path, vec![], None).await?);
+            let q = query([
+                ("project", Some(field(&p, "name"))),
+                ("include", include.clone()),
+            ]);
+            out.extend(ctx.api.list("/api/agents", q, None).await?);
         }
         out
     } else {

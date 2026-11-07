@@ -29,7 +29,10 @@
 //!   object waits is parked. The wake refuses it, and the idle pass stops
 //!   it as soon as it is at rest (no idle time), with the reason
 //!   `parked`. A live exec session or an open `process` wait keeps it
-//!   running; queued work does not (it waits for the unpark).
+//!   running; queued work does not (it waits for the unpark). The stop
+//!   checks the park again while it holds the wake (TER-111), and the
+//!   agent holds its place in the owner's `spawn.max_concurrent` until it
+//!   is stopped.
 //! - **Auto compact.** With `compact_on_idle` (else
 //!   `TERRARIUM_COMPACT_ON_IDLE`, default off), an agent at its idle stop
 //!   compacts its session first, and then stops. An agent with no idle
@@ -593,8 +596,28 @@ async fn idle_stop(state: &Shared, id: AgentId) {
 }
 
 /// Stop the parked bound agent `id` (TER-74), as an idle stop with the
-/// reason `parked`.
-async fn park_stop(state: &Shared, id: AgentId) {
+/// reason `parked`. Public for the tests.
+///
+/// TER-111 (R2-1): the idle pass read the parked agents a while ago, so
+/// an unpark may have landed since. The stop holds the wake of the agent
+/// ([`WakeGuard`]) and checks the park again first: an agent that was
+/// unparked runs on, and a wake on the way skips the stop. An unpark
+/// that lands during the stop finds the wake held (`Woke::Busy`), so the
+/// agent wakes after the stop.
+pub async fn park_stop(state: &Shared, id: AgentId) {
+    let Some(wake) = WakeGuard::take(&state.lifecycle, id) else {
+        return;
+    };
+    let key = id.to_string();
+    let still = state
+        .db
+        .read(move |c| crate::store::spawns::is_parked(c, &key))
+        .await
+        .unwrap_or(false);
+    if !still {
+        debug!(agent = %id, "the agent was unparked; no park stop");
+        return;
+    }
     guard(&state.lifecycle.resting).remove(&id);
     state.lifecycle.expect_stop(id, REASON_PARKED);
     info!(agent = %id, "the bound agent is parked and at rest; stopping it");
@@ -605,6 +628,19 @@ async fn park_stop(state: &Shared, id: AgentId) {
     {
         state.lifecycle.forget_stop(id);
         debug!(agent = %id, "the park did not stop the agent: {e}");
+    }
+    drop(wake);
+    let key = id.to_string();
+    let unparked = state
+        .db
+        .read(move |c| crate::store::spawns::find(c, &key))
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|sp| sp.running() && sp.parked_at.is_none());
+    if unparked {
+        info!(agent = %id, "an unpark landed during the park stop; waking the agent");
+        wake_soon(state, id, "unpark");
     }
 }
 

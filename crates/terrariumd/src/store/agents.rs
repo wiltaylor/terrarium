@@ -25,6 +25,9 @@ pub struct AgentView {
     /// `fleet:<name>` (owned by a fleet).
     pub source: String,
     /// The card the agent has in the `working` column of its board, if any.
+    /// For an ephemeral agent (TER-75), else its bound card, else the
+    /// newest open card that it is the assignee of, so a card agent shows
+    /// its card while the card waits in another column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_card: Option<String>,
     /// The template that the create copied (docs/api.md §21), if any.
@@ -232,9 +235,35 @@ fn complete(conn: &Connection, mut v: AgentView) -> ApiResult<AgentView> {
     v.queued = queued_count(conn, &id)?;
     if v.ephemeral {
         v.spawn = crate::store::spawns::info(conn, &id)?;
+        if v.current_card.is_none() {
+            v.current_card = ephemeral_card(conn, &id, v.spawn.as_ref())?;
+        }
     }
     v.spawned_running = crate::store::spawns::running_count(conn, &id)?;
     Ok(v)
+}
+
+/// The card of ephemeral agent `id` outside the `working` column (TER-75):
+/// its bound card, else the newest open card that it is the assignee of.
+fn ephemeral_card(
+    conn: &Connection,
+    id: &str,
+    spawn: Option<&crate::store::spawns::SpawnInfo>,
+) -> ApiResult<Option<String>> {
+    let bound = spawn
+        .and_then(|s| s.bound.as_deref())
+        .and_then(|b| b.strip_prefix("card:"));
+    if let Some(card) = bound {
+        return Ok(Some(card.to_owned()));
+    }
+    Ok(conn
+        .query_row(
+            "SELECT id FROM cards WHERE assignee = ?1 AND archived = 0
+             ORDER BY updated_at DESC LIMIT 1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// The work that waits for agent `id` (PLAN §18): its queued turns, its
@@ -603,22 +632,39 @@ pub fn actor_for(conn: &Connection, key: &str) -> ApiResult<Option<AgentActor>> 
 
 /// Agents ordered by ID, optionally of one project.
 pub fn list(conn: &Connection, project: Option<&str>, page: &Page) -> ApiResult<Paged<AgentView>> {
-    list_with(conn, project, page, false)
+    list_with(conn, project, page, Ephemeral::None)
 }
 
-/// [`list`], with the ephemeral agents (PLAN §18, "Ephemeral agents")
-/// when `ephemeral` is true. [`list`] leaves them out: they are not
-/// peers, not in the address book, and not in the project's counts.
+/// Which ephemeral agents (PLAN §18, "Ephemeral agents") a list shows.
+/// [`list`] leaves them out: they are not peers, not in the address book,
+/// and not in the project's counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ephemeral {
+    /// None of them.
+    #[default]
+    None,
+    /// The card agents (TER-75): those bound to a card, and those that are
+    /// the assignee of a card that is not archived.
+    Card,
+    /// All of them.
+    All,
+}
+
+/// [`list`], with the ephemeral agents that `ephemeral` names.
 pub fn list_with(
     conn: &Connection,
     project: Option<&str>,
     page: &Page,
-    ephemeral: bool,
+    ephemeral: Ephemeral,
 ) -> ApiResult<Paged<AgentView>> {
     let limit = page.limit();
     let mut stmt = conn.prepare(
         "SELECT * FROM agents WHERE id > ?1 AND (?2 IS NULL OR project = ?2)
-           AND (?4 OR owner IS NULL)
+           AND (owner IS NULL OR ?4
+                OR (?5 AND (EXISTS (SELECT 1 FROM spawns s WHERE s.id = agents.id
+                                      AND s.bound_kind = 'card' AND s.finished_at IS NULL)
+                            OR EXISTS (SELECT 1 FROM cards c WHERE c.assignee = agents.id
+                                         AND c.archived = 0))))
          ORDER BY id LIMIT ?3",
     )?;
     let rows = stmt
@@ -627,7 +673,8 @@ pub fn list_with(
                 page.cursor().unwrap_or(""),
                 project,
                 (limit + 1) as i64,
-                ephemeral
+                ephemeral == Ephemeral::All,
+                ephemeral == Ephemeral::Card
             ],
             base_row,
         )?
