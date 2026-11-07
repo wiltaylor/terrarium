@@ -30,6 +30,7 @@ pub mod harness_versions;
 pub mod hosts;
 pub mod idle_alert;
 pub mod ingest;
+pub mod input_watchdog;
 pub mod jobs;
 pub mod leases;
 pub mod lifecycle;
@@ -901,6 +902,13 @@ fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
             return apply_status(t, &id, *status, reason.as_deref());
         }
         SupervisorEventKind::Harness(Event::StatusChanged { to, reason, .. }) => {
+            // The runner's input-box watchdog: mail the leads (TER-208).
+            // A failed mail must not lose the status change.
+            if input_watchdog::is_stuck(*to, reason.as_deref())
+                && let Err(e) = input_watchdog::notify(t, &id)
+            {
+                warn!(agent = %id, "cannot mail the leads about the input box: {e}");
+            }
             // The runner's first record is `stopped -> starting` ("spawned
             // <program>"), but the supervisor has already set `starting`.
             // A change to the status the agent already has is no change: it
