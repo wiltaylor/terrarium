@@ -628,10 +628,7 @@ async fn a_turn_that_cannot_start_the_agent_mails_the_owner() {
     let run = td.post_empty(&format!("/api/schedules/{sid}/run")).await;
     let run = run.ok();
     assert_eq!(run["status"], "failed", "{run}");
-    assert!(
-        run["error"].as_str().unwrap().contains("paused"),
-        "{run}"
-    );
+    assert!(run["error"].as_str().unwrap().contains("paused"), "{run}");
     assert_eq!(run["output"]["delivery"], "queued");
     let a = td.get(&format!("/api/agents/{worker}")).await;
     assert_eq!(a.ok()["status"], "stopped");
