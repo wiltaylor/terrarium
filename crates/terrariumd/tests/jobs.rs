@@ -1250,14 +1250,7 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
         "Merge ter-m3 onto next"
     );
     // The daemon removed its repo of the job.
-    let state_jobs = lab
-        .td
-        .daemon
-        .as_ref()
-        .unwrap()
-        .state
-        .state_dir
-        .join("jobs");
+    let state_jobs = lab.td.daemon.as_ref().unwrap().state.state_dir.join("jobs");
     let left: Vec<_> = std::fs::read_dir(state_jobs.join("p"))
         .map(|d| d.flatten().map(|e| e.file_name()).collect())
         .unwrap_or_default();

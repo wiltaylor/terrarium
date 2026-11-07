@@ -1425,8 +1425,7 @@ res ok "$sha"
 "#;
 
 /// The end: `dir`. Remove the clone and a bundle that is left.
-const CLEAN_SCRIPT: &str =
-    r#"case "$1" in /*/*) rm -rf -- "$1" "$1.bundle" ;; *) exit 2 ;; esac"#;
+const CLEAN_SCRIPT: &str = r#"case "$1" in /*/*) rm -rf -- "$1" "$1.bundle" ;; *) exit 2 ;; esac"#;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -1565,12 +1564,10 @@ mod tests {
 
     #[test]
     fn batch_conflicts_are_marked_by_index() {
-        let found: HashMap<usize, String> = [
-            (1, "README\nsrc/a.rs".to_owned()),
-            (3, "b.txt".to_owned()),
-        ]
-        .into_iter()
-        .collect();
+        let found: HashMap<usize, String> =
+            [(1, "README\nsrc/a.rs".to_owned()), (3, "b.txt".to_owned())]
+                .into_iter()
+                .collect();
         let card = |c: &str| BatchCard {
             card: c.into(),
             branch: c.to_lowercase(),
