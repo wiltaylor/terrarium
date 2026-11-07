@@ -7478,7 +7478,7 @@ The actions:
 | `action` | Meaning |
 |---|---|
 | `{"type": "mail", "to": "<agent>\|project:<p>\|operator", "subject", "body", "thread"?}` | Send mail through the normal send path (§7) as `run_as`. The scope rules of §7.1 and the loop guard apply. With `thread`, each run posts on that thread, and the loop guard counts the messages. A bare agent name resolves in the schedule's project. An empty `subject` becomes `schedule <name>`. |
-| `{"type": "turn", "agent", "text", "start_if_stopped"?: false}` | Type a turn, as `POST /api/agents/{id}/send` (§6.2). When the agent does not run, the run is `skipped: agent not running`. With `start_if_stopped`, the run starts the agent, waits until it is ready (at most 120 s), then types the turn. |
+| `{"type": "turn", "agent", "text", "start_if_stopped"?: false}` | Type a turn, as `POST /api/agents/{id}/send` (§6.2). A stopped agent (for example after its idle stop) gets the turn as a send gives it: the turn waits in its queue and a wake starts the agent. The run waits until the agent is ready (at most 120 s, up to 3 wakes) and is `ok`, `woke <agent> and sent the turn`. When the agent does not start (paused, parked, in `error`, held, a disabled subscription, the self-update drain, or not ready in time), the run is `failed` with the reason, the turn stays in the queue for the next wake, and `system` mails the owner of the schedule (the `run_as` agent, the project inbox, or the operator). With `start_if_stopped`, the run first starts the agent as `POST /api/agents/{id}/start` does (a start also ends a usage-limit hold), waits until it is ready (at most 120 s), then types the turn. |
 | `{"type": "exec", "target", "cmd": ["make", "test"], "cwd"?, "timeout_secs"?}` | Run a command on a target through the executor (§17.4), as `run_as`, with the same policy, leases, and `target.exec` audit row as any exec. `timeout_secs` is 300 by default, 3600 at most. |
 | `{"type": "agent", "agent", "verb": "start\|stop\|restart"}` | The agent verb of §6.2, as `run_as`. |
 | `{"type": "probe", "subscription"}` | Run the quota probe of the subscription (§16.3). |
@@ -7603,8 +7603,7 @@ that is gone, the run is `skipped` with the reason, and
 `consecutive_skips` goes up by 1. At 3, the daemon disables the schedule,
 writes `disabled_reason`, and mails the operator from `system` ("Schedule
 `<project>/<name>` disabled"). Any other end of a run sets the count to 0.
-A skip for another reason (`still running`, `agent not running`) does not
-count.
+A skip for another reason (`still running`) does not count.
 
 **Safety.**
 
