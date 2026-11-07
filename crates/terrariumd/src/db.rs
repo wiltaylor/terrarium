@@ -2245,7 +2245,30 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX artifact_labels_label ON artifact_labels(label, artifact);
     "#,
-    // 81: the thread status `tracking` (TER-145, `crate::store::threads`):
+    // 81: the `run` grant level (TER-142, `crate::secrets::grants`). The
+    // CHECK of `secret_grants.level` takes `run`, so the table is built
+    // again. `targets` is the JSON array of the targets of a `run` grant;
+    // NULL for `use` and `read`. No table refers to `secret_grants`.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE secret_grants_v81 (
+        secret_id  TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+        grantee    TEXT NOT NULL,
+        level      TEXT NOT NULL CHECK (level IN ('use', 'run', 'read')),
+        env        TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        targets    TEXT,
+        PRIMARY KEY (secret_id, grantee)
+    );
+    INSERT INTO secret_grants_v81 (secret_id, grantee, level, env, created_by, created_at)
+        SELECT secret_id, grantee, level, env, created_by, created_at FROM secret_grants;
+    DROP TABLE secret_grants;
+    ALTER TABLE secret_grants_v81 RENAME TO secret_grants;
+    CREATE INDEX secret_grants_grantee ON secret_grants(grantee);
+    "#,
+    // 82: the thread status `tracking` (TER-145, `crate::store::threads`):
     // the agent tracks handed-off work, parked, with no stale close.
     // `tracking_at` is the time the agent moved the thread into tracking;
     // it stays set while an operator post wakes the agent. The CHECK of
@@ -2306,7 +2329,7 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE thread_messages_keep;
     CREATE INDEX thread_messages_thread ON thread_messages(thread, at);
     "#,
-    // 82: the cards that an Inbox thread tracks (TER-146, TER-144 D2,
+    // 83: the cards that an Inbox thread tracks (TER-146, TER-144 D2,
     // `crate::store::threads::link_card`): a card of any project, linked
     // by the lead (`card new --inbox-thread`, `card link --inbox-thread`)
     // or by the thread agent (`thread track --card`). `project` is the
@@ -3067,10 +3090,10 @@ mod tests {
         }
     }
 
-    /// Migration 81 keeps the threads and their messages in order, and
+    /// Migration 82 keeps the threads and their messages in order, and
     /// takes the status `tracking`. Found by its content.
     #[test]
-    fn migration_81_keeps_threads_and_takes_tracking() {
+    fn migration_82_keeps_threads_and_takes_tracking() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         let n = MIGRATIONS
@@ -3132,6 +3155,78 @@ mod tests {
             .query_row("SELECT count(*) FROM thread_messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    /// TER-142: the rebuild of `secret_grants` keeps each grant, and the
+    /// new table takes the level `run` with its `targets`.
+    #[test]
+    fn migration_of_the_run_level_keeps_the_grants() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let at = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("secret_grants_v81"))
+            .unwrap();
+        for m in &MIGRATIONS[..at] {
+            conn.execute_batch(m).unwrap();
+        }
+        conn.pragma_update(None, "user_version", at).unwrap();
+        conn.execute_batch(
+            "INSERT INTO secrets (id, scope, name, kind, created_at, updated_at, created_by)
+               VALUES ('S1', 'global', 'k', 'api_key', 't', 't', 'operator');
+             INSERT INTO secret_grants (secret_id, grantee, level, env, created_by, created_at)
+               VALUES ('S1', 'project:p', 'read', 'K', 'operator', 't'),
+                      ('S1', 'agent:A1', 'use', NULL, 'operator', 't');",
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO secret_grants (secret_id, grantee, level, created_by, created_at)
+                 VALUES ('S1', 'agent:A2', 'run', 'operator', 't')",
+                [],
+            )
+            .is_err()
+        );
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - at);
+        let rows: Vec<(String, String, Option<String>)> = conn
+            .prepare("SELECT grantee, level, env FROM secret_grants ORDER BY grantee")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("agent:A1".to_owned(), "use".to_owned(), None),
+                (
+                    "project:p".to_owned(),
+                    "read".to_owned(),
+                    Some("K".to_owned())
+                ),
+            ]
+        );
+        conn.execute(
+            "INSERT INTO secret_grants (secret_id, grantee, level, created_by, created_at, targets)
+             VALUES ('S1', 'agent:A2', 'run', 'operator', 't', '[\"box\"]')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO secret_grants (secret_id, grantee, level, created_by, created_at)
+                 VALUES ('S1', 'agent:A3', 'write', 'operator', 't')",
+                [],
+            )
+            .is_err()
+        );
+        // The cascade from the secret still holds.
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute("DELETE FROM secrets WHERE id = 'S1'", [])
+            .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM secret_grants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]

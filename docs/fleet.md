@@ -56,6 +56,14 @@ default_branch = "main"
 [projects.checkout]
 on_agent_create = ["terrarium"]
 
+[projects.delivery]              # optional: the job queue of the project (TER-87)
+target = "buildbox"
+recipe = "just ci::validate"
+slots = 2                        # optional, default 2
+next_repos = ["terrarium"]       # optional: the repos with a `next` branch
+work_dir = "/tmp/terrarium-jobs" # optional
+timeout_secs = 3600              # optional
+
 [[projects.agents]]              # an AgentDef without `project`, plus `start`
 name = "lead"
 prompt = "project-lead"
@@ -122,6 +130,14 @@ Rules:
 - Target names are one namespace across projects. Agent names are unique in
   a project.
 - `checkout.on_agent_create` names repos of the same project.
+- `delivery` is the config of `PUT /api/projects/{name}/delivery`, with
+  the same checks at the apply: `target` is a target of the project (one
+  of the file is fine), or a global target only for a sysadmin or the
+  operator. `next_repos` names repos of the project, and `slots` is 1 or
+  more. `fleet export` writes it when the project has a config. A plan
+  shows a change as the `delivery` field of the project. Without the
+  table the apply leaves the config as it is. A file that drops a table
+  that the fleet applied before clears the config (no queue).
 - `policy.targets` names global targets and targets of the agent's own
   project.
 - `policy` takes `targets`, `mail_to`, `cross_project`, `calendar_write`,
@@ -253,6 +269,7 @@ PLAN §10 applies to each object of the plan:
 |---|---|
 | A new project | sysadmin or the operator |
 | A change to a project | project_admin of the project |
+| A change to a project's `delivery` | project_admin of the project, and for a global `target` sysadmin or the operator (as `PUT /api/projects/{name}/delivery`) |
 | An agent (create, update, delete, start) | project_admin of its project |
 | A role on an agent | the rule of `role grant`: sysadmin needs the operator |
 | An agent's `policy`: a new global target, a new `cross_project` entry, or a new `mail_to` entry in another project | sysadmin or the operator |

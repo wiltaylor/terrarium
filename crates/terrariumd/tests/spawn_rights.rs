@@ -292,6 +292,98 @@ async fn grants_stay_within_the_owner_level_and_end_with_the_child() {
     assert!(g.iter().all(|x| x["grantee"] != key), "{g:?}");
 }
 
+/// TER-142: `:run` on a spawn. The owner check is `use` < `run` < `read`.
+/// A `run` grant of the child never goes past the owner's targets: the
+/// owner's run targets (all, or a subset), or for an owner with `read`
+/// the targets that it names and may use.
+#[tokio::test]
+async fn run_grants_stay_within_the_owner_targets() {
+    let (td, _lead, w) = setup().await;
+    // `w` reads openai (no target limit) and holds db at `run` on box
+    // and p-pbox.
+    let r = td
+        .post(
+            "/api/secrets/p/db/grants",
+            json!({"grantee": "agent:p/w", "level": "run", "targets": ["p-pbox", "box"]}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["targets"], json!(["box", "p-pbox"]));
+
+    // `:run` with no targets: the owner's run targets.
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["db:run"]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child = id(&r.body);
+    let g = grants_of(&td, "p/db").await;
+    let mine: Vec<&Value> = g
+        .iter()
+        .filter(|x| x["grantee"] == format!("agent:{child}"))
+        .collect();
+    assert_eq!(mine.len(), 1, "{g:?}");
+    assert_eq!(mine[0]["level"], "run");
+    assert_eq!(mine[0]["targets"], json!(["box", "p-pbox"]));
+    assert!(mine[0].get("env").is_none(), "{g:?}");
+    // A subset is fine; a target past the owner's run targets is 403.
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["db:run=box"]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["db:run=box,other"]})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("`other`"), "{}", r.body);
+    // `run` does not give `read`.
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["db:read"]})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("level `read`"), "{}", r.body);
+    // `use` does not give `run`.
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["gh:run=box"]})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("level `run`"), "{}", r.body);
+
+    // An owner with `read` names the targets, each one it may use.
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["openai:run"]})).await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["openai:run=other"]})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("`other`"), "{}", r.body);
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["openai:run=box"]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child = id(&r.body);
+    let g = grants_of(&td, "global/openai").await;
+    let mine: Vec<&Value> = g
+        .iter()
+        .filter(|x| x["grantee"] == format!("agent:{child}"))
+        .collect();
+    assert_eq!(mine[0]["level"], "run");
+    assert_eq!(mine[0]["targets"], json!(["box"]));
+    // A `run` grant keeps no env var name.
+    assert!(mine[0].get("env").is_none(), "{g:?}");
+
+    // The operator as owner: any existing target that the project reaches.
+    let r = td
+        .post(
+            "/api/agents/operator/spawn",
+            json!({"template": "worker", "task": "t", "project": "p",
+                   "grants": ["db:run=other"]}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = td
+        .post(
+            "/api/agents/operator/spawn",
+            json!({"template": "worker", "task": "t", "project": "p",
+                   "grants": ["db:run"]}),
+        )
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    let r = td
+        .post(
+            "/api/agents/operator/spawn",
+            json!({"template": "worker", "task": "t", "project": "p",
+                   "grants": ["db:run=nope"]}),
+        )
+        .await;
+    assert_eq!(r.status, 404, "{}", r.body);
+}
+
 /// The operator as owner holds every right: any target and secret that
 /// the project can reach.
 #[tokio::test]
