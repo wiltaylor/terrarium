@@ -2245,6 +2245,67 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX artifact_labels_label ON artifact_labels(label, artifact);
     "#,
+    // 81: the thread status `tracking` (TER-145, `crate::store::threads`):
+    // the agent tracks handed-off work, parked, with no stale close.
+    // `tracking_at` is the time the agent moved the thread into tracking;
+    // it stays set while an operator post wakes the agent. The CHECK of
+    // `threads.status` takes `tracking`, so the table is made again.
+    // `thread_messages` refers to `threads` with ON DELETE CASCADE, so its
+    // rows are kept in a plain copy over the drop and put back. The test
+    // finds this entry by the name `threads_tracking`. Self-contained:
+    // when another branch takes this number, move this entry to the end
+    // of the list.
+    r#"
+    CREATE TABLE thread_messages_keep AS SELECT * FROM thread_messages ORDER BY rowid;
+    DROP TABLE thread_messages;
+    CREATE TABLE threads_tracking (
+        id             TEXT PRIMARY KEY,
+        topic          TEXT NOT NULL,
+        scope          TEXT NOT NULL,
+        template       TEXT,
+        opened_by      TEXT NOT NULL,
+        agent          TEXT,
+        report_to      TEXT,
+        status         TEXT NOT NULL
+            CHECK (status IN ('waiting_operator', 'waiting_agent', 'tracking', 'closed')),
+        response       TEXT,
+        handoff        TEXT,
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL,
+        closed_at      TEXT,
+        closed_by      TEXT,
+        close_proposal TEXT,
+        close_reason   TEXT,
+        session_id     TEXT,
+        reminded_at    TEXT,
+        tracking_at    TEXT
+    );
+    INSERT INTO threads_tracking (id, topic, scope, template, opened_by, agent, report_to,
+                                  status, response, handoff, created_at, updated_at,
+                                  closed_at, closed_by, close_proposal, close_reason,
+                                  session_id, reminded_at)
+        SELECT id, topic, scope, template, opened_by, agent, report_to, status, response,
+               handoff, created_at, updated_at, closed_at, closed_by, close_proposal,
+               close_reason, session_id, reminded_at
+        FROM threads;
+    DROP TABLE threads;
+    ALTER TABLE threads_tracking RENAME TO threads;
+    CREATE INDEX threads_status ON threads(status, updated_at);
+    CREATE INDEX threads_agent ON threads(agent);
+    CREATE INDEX threads_report_to ON threads(report_to);
+    CREATE TABLE thread_messages (
+        id      TEXT PRIMARY KEY,
+        thread  TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        author  TEXT NOT NULL,
+        kind    TEXT NOT NULL CHECK (kind IN ('message', 'response')),
+        text    TEXT NOT NULL,
+        at      TEXT NOT NULL
+    );
+    INSERT INTO thread_messages (id, thread, author, kind, text, at)
+        SELECT id, thread, author, kind, text, at FROM thread_messages_keep ORDER BY rowid;
+    DROP TABLE thread_messages_keep;
+    CREATE INDEX thread_messages_thread ON thread_messages(thread, at);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -2986,6 +3047,73 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 0, "{table}");
         }
+    }
+
+    /// Migration 81 keeps the threads and their messages in order, and
+    /// takes the status `tracking`. Found by its content.
+    #[test]
+    fn migration_81_keeps_threads_and_takes_tracking() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("threads_tracking"))
+            .unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO threads (id, topic, scope, opened_by, status, created_at, updated_at,
+                                  reminded_at, close_proposal)
+               VALUES ('T1', 'Cache', 'global', 'operator', 'waiting_operator', 't', 'u',
+                       'r', '{}');
+             INSERT INTO thread_messages (id, thread, author, kind, text, at)
+               VALUES ('M2', 'T1', 'operator', 'message', 'first', 'a');
+             INSERT INTO thread_messages (id, thread, author, kind, text, at)
+               VALUES ('M1', 'T1', 'A1', 'message', 'second', 'a');",
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE threads SET status = 'tracking'", [])
+                .is_err()
+        );
+        migrate(&mut conn).unwrap();
+        let row: (String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT status, reminded_at, close_proposal, tracking_at FROM threads",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            ("waiting_operator".into(), "r".into(), "{}".into(), None)
+        );
+        let texts: Vec<String> = conn
+            .prepare("SELECT text FROM thread_messages WHERE thread = 'T1' ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(texts, ["first", "second"]);
+        conn.execute(
+            "UPDATE threads SET status = 'tracking', tracking_at = 'v'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE threads SET status = 'bogus'", [])
+                .is_err()
+        );
+        // The cascade from threads still works.
+        conn.execute("DELETE FROM threads WHERE id = 'T1'", [])
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM thread_messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

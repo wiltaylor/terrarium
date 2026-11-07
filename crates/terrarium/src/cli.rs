@@ -2527,9 +2527,12 @@ pub enum ThreadCmd {
         #[arg(long = "link", value_name = "KIND:REF")]
         links: Vec<String>,
     },
+    /// Move your thread into tracking after the handoff (the attached
+    /// agent): the daemon stops you, and an operator message wakes you
+    Track { id: String },
     /// List the threads: the open ones (an agent: its own)
     Ls {
-        /// waiting_operator, waiting_agent, closed, open, or all
+        /// waiting_operator, waiting_agent, tracking, closed, open, or all
         #[arg(long)]
         status: Option<String>,
         /// `global` or a project

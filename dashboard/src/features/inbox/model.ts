@@ -4,6 +4,7 @@
 // keep a list in the same order after a local change, and give the tabs and
 // the badge.
 
+import type { ThreadsViewId } from "./threads";
 import type { AgentEvent, InboxCounts, InboxItem, InboxKind, InboxStatus, InboxWatch, Message, Question, QuestionPriority } from "../../api/types";
 
 /** The kind tabs of the Inbox page. `all` sends no `kind`. */
@@ -26,13 +27,21 @@ export type InboxTab = (typeof INBOX_TABS)[number]["id"] | "watch";
  */
 export const STATUS_TABS = [
   { id: "open", label: "Open" },
+  { id: "tracking", label: "Tracking" },
   { id: "done", label: "Done" },
   { id: "asked", label: "Asked" },
 ] as const;
 export type InboxStatusTab = (typeof STATUS_TABS)[number]["id"];
 
-/** The status tab of `?status=`, and of an older `?tab=watch` link (the Asked kind tab of 0.1.0). */
+/** The status tabs of a kind tab: Tracking (TER-145, the threads whose agent tracks handed-off work) only on the Threads tab. */
+export const statusTabsFor = (tab: string | undefined) => STATUS_TABS.filter((t) => t.id !== "tracking" || tab === "thread");
+
+/** The list of the Threads tab under a status tab: Open, Tracking, or Done (Asked shows no thread list). */
+export const threadsViewOf = (s: InboxStatusTab): ThreadsViewId => (s === "tracking" ? "tracking" : s === "done" ? "done" : "open");
+
+/** The status tab of `?status=`, and of an older `?tab=watch` link (the Asked kind tab of 0.1.0). Tracking only with the Threads tab. */
 export function statusTabOf(status: string | undefined, tab: string | undefined): InboxStatusTab {
+  if (status === "tracking" && tab === "thread") return "tracking";
   if (status === "done") return "done";
   if (status === "asked" || tab === "watch") return "asked";
   return "open";
@@ -46,6 +55,8 @@ export function inboxQuery(tab: InboxTab, status: InboxStatusTab, project: strin
   // Asked: the open watches, whatever the kind tab. The daemon's `open`
   // includes them; Open filters them out (`matchesTabs`).
   if (status === "asked") return { status: "open", kind: "watch", ...p };
+  // Tracking is a tab of the thread list (`GET /api/threads`); as Inbox items these threads are not open.
+  if (status === "tracking") return { status: "done", kind: "thread", ...p };
   return { status, ...(tab === "all" ? {} : { kind: tab }), ...p };
 }
 

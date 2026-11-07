@@ -9888,6 +9888,15 @@ async fn thread_commands() {
 
     let out = ok(
         true,
+        &["thread", "track", "T1"],
+        vec![(200, json!({"id": "T1", "status": "tracking"}))],
+        vec![(Post, "/api/threads/T1/track", vec![], None)],
+    )
+    .await;
+    assert_eq!(out, "thread T1 is tracking.\n");
+
+    let out = ok(
+        true,
         &[
             "thread",
             "close",
