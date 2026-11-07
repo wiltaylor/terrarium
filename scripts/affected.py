@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""The affected tests of a change (TER-100): the plan of `just ci::validate-affected`.
+
+A validate job of the queue gives its recipe the changed paths
+(`TERRARIUM_CHANGED_FILES`, docs/api.md 35.2). This script maps them to the
+checks that can reach them, and prints the plan or runs it. A merge job runs
+the full suite (`just ci::validate`), not this plan.
+
+The rules, first match per path:
+
+1. Full suite: no list of changed files, or any path that changes the build
+   or the gate: `Cargo.toml` (any), `Cargo.lock`, `build.rs`,
+   `rust-toolchain*`, `.cargo/`, `clippy.toml`, `rustfmt.toml`, `deny.toml`,
+   `justfile`, `.just/`, `.github/`, this script. A path outside the known
+   areas below is also the full suite.
+2. No tests: `docs/`, a Markdown file, `LICENSE`.
+3. `dashboard/`: `ci::dashboard-check` only. `scripts/`: `ci::scripts-test`
+   only.
+4. A file under `crates/<crate>/`: that crate and its reverse dependencies
+   in the workspace (path dependencies of any kind: normal, dev, build), as
+   whole crates. Except terrariumd, rule 5. A reverse dependency is always
+   tested whole.
+5. terrariumd, at the test-target level:
+   - `src/<module>` (`src/api/<x>` and `src/store/<x>` count as module
+     `<x>`): the lib and bin unit tests, plus the test targets
+     `tests/<module>.rs` (also `<module>s.rs`), plus each `tests/*.rs` that
+     names `terrariumd::<module>`, `terrariumd::api::<module>`, or
+     `terrariumd::store::<module>`.
+   - All targets when the module is shared by every test (`lib.rs`,
+     `main.rs`, `db`, `error`, `policy`, `api/mod.rs`, `store/mod.rs`, and
+     each module that `tests/common` names), or when no target matches.
+   - `tests/<t>.rs`: only that target. `tests/common/`, `tests/fixtures/`,
+     or another file of the crate: all targets.
+6. Files outside `crates/` that the crates read: `defaults/` is terrariumd,
+   `examples/` is terrarium-core and terrariumd, `harnesses.toml` is
+   terrarium-core and the scripts tests (each with its reverse
+   dependencies, whole).
+
+Every plan runs `ci::fmt-check`, and clippy (`--all-targets -D warnings`) on
+the affected crates. The known gap: a change that breaks a test target that
+the rules do not pick shows up in the full suite of the merge batch.
+
+Usage: affected.py [--files FILE] [--run] [--json]. Without `--files`, the
+file named by `TERRARIUM_CHANGED_FILES`. Run it in the repo root.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+DAEMON = "terrariumd"
+
+# Rule 1: a path that changes the build or the gate.
+FULL_NAMES = {"Cargo.toml", "Cargo.lock", "build.rs", "clippy.toml", ".clippy.toml",
+              "rustfmt.toml", ".rustfmt.toml", "deny.toml", "justfile"}
+FULL_PREFIXES = (".cargo/", ".just/", ".github/", "rust-toolchain", "scripts/affected.py")
+# Rule 2.
+NO_TEST_PREFIXES = ("docs/",)
+NO_TEST_NAMES = {"LICENSE"}
+# Rule 6: paths outside crates/ and the crates that read them.
+OUTSIDE = {
+    "defaults/": ["terrariumd"],
+    "examples/": ["terrarium-core", "terrariumd"],
+    "harnesses.toml": ["terrarium-core"],
+}
+# Rule 5: terrariumd modules that every test target reaches.
+DAEMON_SHARED = {"lib", "main", "db", "error", "policy", "api", "store"}
+
+
+@dataclass
+class Crate:
+    name: str
+    # The crate dir, relative to the repo root, with a trailing slash.
+    dir: str
+    # The names of the workspace crates it depends on (any kind).
+    deps: set[str] = field(default_factory=set)
+    # The integration test targets: name -> path relative to the repo root.
+    tests: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class Plan:
+    full: bool = False
+    reasons: list[str] = field(default_factory=list)
+    # Crates tested whole.
+    whole: set[str] = field(default_factory=set)
+    # terrariumd test targets, when terrariumd is not tested whole. None:
+    # terrariumd is not in the plan.
+    daemon_targets: set[str] | None = None
+    scripts: bool = False
+    dashboard: bool = False
+
+    def clippy(self) -> list[str]:
+        crates = set(self.whole)
+        if self.daemon_targets is not None:
+            crates.add(DAEMON)
+        return sorted(crates)
+
+    def to_dict(self) -> dict:
+        return {
+            "full": self.full,
+            "reasons": self.reasons,
+            "whole": sorted(self.whole),
+            "daemon_targets": None if self.daemon_targets is None else sorted(self.daemon_targets),
+            "clippy": self.clippy(),
+            "scripts": self.scripts,
+            "dashboard": self.dashboard,
+        }
+
+
+def workspace(metadata: dict, root: Path) -> dict[str, Crate]:
+    """The workspace crates from `cargo metadata --no-deps` output."""
+    root = root.resolve()
+    members = set(metadata.get("workspace_members", []))
+    crates: dict[str, Crate] = {}
+    for p in metadata["packages"]:
+        if members and p["id"] not in members:
+            continue
+        cdir = Path(p["manifest_path"]).resolve().parent
+        rel = cdir.relative_to(root).as_posix() + "/"
+        c = Crate(name=p["name"], dir=rel)
+        for t in p.get("targets", []):
+            if "test" in t.get("kind", []):
+                c.tests[t["name"]] = Path(t["src_path"]).resolve().relative_to(root).as_posix()
+        crates[c.name] = c
+        c.deps = {d["name"] for d in p.get("dependencies", []) if d.get("path")}
+    for c in crates.values():
+        c.deps = {d for d in c.deps if d in crates and d != c.name}
+    return crates
+
+
+def reverse_deps(crates: dict[str, Crate], names: set[str]) -> set[str]:
+    """The crates in `names` and every workspace crate that depends on one."""
+    out = set(names)
+    grew = True
+    while grew:
+        grew = False
+        for c in crates.values():
+            if c.name not in out and c.deps & out:
+                out.add(c.name)
+                grew = True
+    return out
+
+
+def crate_of(crates: dict[str, Crate], path: str) -> Crate | None:
+    best = None
+    for c in crates.values():
+        if path.startswith(c.dir) and (best is None or len(c.dir) > len(best.dir)):
+            best = c
+    return best
+
+
+def module_of(rel: str) -> str | None:
+    """The module of a path under terrariumd's `src/` (rule 5)."""
+    parts = rel.split("/")
+    if parts[0] in ("api", "store") and len(parts) >= 2:
+        leaf = parts[1]
+        if leaf == "mod.rs" and len(parts) == 2:
+            return parts[0]
+        return leaf.removesuffix(".rs")
+    return parts[0].removesuffix(".rs")
+
+
+def daemon_refs(text: str) -> set[str]:
+    """The modules that a test file names: `terrariumd::<m>`, and
+    `terrariumd::api::<m>` or `terrariumd::store::<m>` as `<m>`."""
+    out = set()
+    for m in re.finditer(r"terrariumd::([a-z_][a-z0-9_]*)(?:::([a-z_][a-z0-9_]*))?", text):
+        top, sub = m.group(1), m.group(2)
+        out.add(top)
+        if top in ("api", "store") and sub:
+            out.add(sub)
+    return out
+
+
+def daemon_targets_for(module: str, tests: dict[str, str], refs: dict[str, set[str]],
+                       shared: set[str]) -> set[str] | None:
+    """The terrariumd test targets of a module, or None for all."""
+    if module in shared:
+        return None
+    hit = {t for t in tests if t in (module, module + "s")}
+    hit |= {t for t, r in refs.items() if module in r}
+    return hit or None
+
+
+def plan(changed: list[str] | None, crates: dict[str, Crate],
+         read=lambda p: Path(p).read_text(encoding="utf-8", errors="replace"),
+         common: list[str] | None = None) -> Plan:
+    """The plan for `changed` (paths relative to the repo root; None: no list).
+    `read` reads a file of the repo, `common` lists the files of
+    terrariumd's tests/common (default: found on disk)."""
+    pl = Plan()
+    if changed is None:
+        pl.full = True
+        pl.reasons.append("no list of changed files")
+        return pl
+    whole: set[str] = set()
+    daemon: set[str] | None = None
+    daemon_all = False
+    daemon_seen = False
+    refs: dict[str, set[str]] | None = None
+    shared: set[str] = set()
+    dc = crates.get(DAEMON)
+
+    def daemon_index():
+        # The modules each terrariumd test target names, and the modules
+        # that every target reaches through tests/common.
+        nonlocal refs, shared
+        if refs is None:
+            refs = {}
+            for t, p in dc.tests.items():
+                try:
+                    refs[t] = daemon_refs(read(p))
+                except OSError:
+                    refs[t] = set()
+            names = set()
+            files = common if common is not None else [
+                p.as_posix() for p in sorted(Path(dc.dir, "tests", "common").glob("**/*.rs"))]
+            for p in files:
+                names |= daemon_refs(read(p))
+            # `terrariumd::start` is in lib.rs.
+            shared = DAEMON_SHARED | (names - {"api", "store", "start"})
+        return refs
+
+    for path in changed:
+        path = path.strip()
+        if not path:
+            continue
+        name = path.rsplit("/", 1)[-1]
+        if name in FULL_NAMES or path.startswith(FULL_PREFIXES):
+            pl.full = True
+            pl.reasons.append(f"{path}: changes the build or the gate")
+            continue
+        if path.startswith(NO_TEST_PREFIXES) or name in NO_TEST_NAMES or path.endswith(".md"):
+            continue
+        if path.startswith("dashboard/"):
+            pl.dashboard = True
+            continue
+        if path.startswith("scripts/"):
+            pl.scripts = True
+            continue
+        outside = next((v for k, v in OUTSIDE.items() if path == k or path.startswith(k)), None)
+        if outside is not None:
+            if path == "harnesses.toml":
+                pl.scripts = True
+            for n in outside:
+                if n == DAEMON and dc is not None:
+                    daemon_seen = True
+                    daemon_all = True
+                else:
+                    whole.add(n)
+            continue
+        c = crate_of(crates, path) if path.startswith("crates/") else None
+        if c is None:
+            pl.full = True
+            pl.reasons.append(f"{path}: outside the known areas")
+            continue
+        if c.name != DAEMON or dc is None:
+            whole.add(c.name)
+            continue
+        daemon_seen = True
+        rel = path[len(c.dir):]
+        if rel.startswith("src/"):
+            daemon_index()
+            m = module_of(rel[len("src/"):])
+            got = daemon_targets_for(m, dc.tests, refs, shared) if m else None
+            if got is None:
+                daemon_all = True
+            else:
+                daemon = (daemon or set()) | got
+        elif rel.startswith("tests/") and rel.count("/") == 1 and rel.endswith(".rs"):
+            t = rel[len("tests/"):-3]
+            if t in dc.tests:
+                daemon = (daemon or set()) | {t}
+            else:
+                daemon_all = True
+        else:
+            daemon_all = True
+
+    if pl.full:
+        return pl
+    # Changed crates and their reverse dependencies are tested whole. When
+    # terrariumd is one of them, it is tested whole too (all targets).
+    tested = reverse_deps(crates, whole & crates.keys())
+    if dc is not None and DAEMON in tested:
+        daemon_seen = daemon_all = True
+    if dc is not None and daemon_seen:
+        tested |= reverse_deps(crates, {DAEMON}) - {DAEMON}
+        if daemon_all:
+            tested.add(DAEMON)
+        else:
+            pl.daemon_targets = daemon or set()
+    pl.whole = tested
+    return pl
+
+
+def commands(pl: Plan) -> list[list[str]]:
+    """The commands of a plan, in the order of `ci::validate`."""
+    if pl.full:
+        return [["just", "ci::validate"]]
+    cmds = [["just", "ci::fmt-check"]]
+    clippy = pl.clippy()
+    if clippy:
+        cmd = ["cargo", "clippy"]
+        for c in clippy:
+            cmd += ["-p", c]
+        cmds.append(cmd + ["--all-targets", "--", "-D", "warnings"])
+    whole = sorted(pl.whole)
+    if whole:
+        cmd = ["cargo", "test"]
+        for c in whole:
+            cmd += ["-p", c]
+        cmds.append(cmd + ["--no-fail-fast"])
+    if pl.daemon_targets is not None:
+        cmd = ["cargo", "test", "-p", DAEMON, "--lib", "--bins"]
+        for t in sorted(pl.daemon_targets):
+            cmd += ["--test", t]
+        cmds.append(cmd + ["--no-fail-fast"])
+    if pl.scripts:
+        cmds.append(["just", "ci::scripts-test"])
+    if pl.dashboard:
+        cmds.append(["just", "ci::dashboard-check"])
+    return cmds
+
+
+def read_changed(path: str | None) -> list[str] | None:
+    if not path:
+        return None
+    try:
+        return [line for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return None
+
+
+def run(cmds: list[list[str]]) -> int:
+    results = os.environ.get("RESULTS_DIR")
+    for cmd in cmds:
+        print("+ " + " ".join(cmd), flush=True)
+        if cmd[:2] == ["cargo", "test"] and results:
+            os.makedirs(results, exist_ok=True)
+            env = dict(os.environ, RUSTC_BOOTSTRAP="1")
+            full = cmd + ["--", "-Z", "unstable-options", "--format", "json", "--report-time"]
+            with open(os.path.join(results, "rust.json"), "ab") as out:
+                code = subprocess.call(full, stdout=out, env=env)
+        else:
+            code = subprocess.call(cmd)
+        if code != 0:
+            print(f"affected: `{' '.join(cmd)}` failed with exit code {code}", file=sys.stderr)
+            return code
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--files", help="the file of changed paths (default: $TERRARIUM_CHANGED_FILES)")
+    ap.add_argument("--run", action="store_true", help="run the plan")
+    ap.add_argument("--json", action="store_true", help="print the plan as JSON")
+    a = ap.parse_args(argv)
+    changed = read_changed(a.files or os.environ.get("TERRARIUM_CHANGED_FILES"))
+    if changed is None:
+        crates: dict[str, Crate] = {}
+    else:
+        meta = subprocess.run(["cargo", "metadata", "--no-deps", "--format-version", "1"],
+                              check=True, capture_output=True, text=True).stdout
+        crates = workspace(json.loads(meta), Path.cwd())
+    pl = plan(changed, crates)
+    cmds = commands(pl)
+    if a.json:
+        print(json.dumps(dict(pl.to_dict(), commands=cmds), indent=2))
+    else:
+        n = "no list" if changed is None else f"{len(changed)} changed files"
+        print(f"affected: {n}; " + ("full suite: " + "; ".join(pl.reasons[:5]) if pl.full else "affected set"))
+        for c in cmds:
+            print("  " + " ".join(c))
+    if a.run:
+        if os.environ.get("RESULTS_DIR"):
+            # rust.json is appended per cargo test call: start empty.
+            p = Path(os.environ["RESULTS_DIR"], "rust.json")
+            if p.exists() and not pl.full:
+                p.unlink()
+        return run(cmds)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
