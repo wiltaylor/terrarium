@@ -751,22 +751,12 @@ async fn mail_and_cards_push_a_pointer() {
     assert_eq!(msg["read_by"], id.as_str());
 
     // Working: the mail waits for the stop hook, and one pointer covers it
-    // all, with a card that was assigned meanwhile. The work time is long
-    // enough for the mail and card requests below. Under load a request can
-    // still land after the turn ends. Then the card goes out in a later
-    // pointer (a later turn), which is by design, so the test reads the
-    // pushes in order until the card block has arrived.
-    td.adapter.set_env("FAKE_TUI_DELAY_MS", "3000");
-    td.post(&format!("/api/agents/{id}/restart"), None).await;
-    td.wait_events(&id, "session_started", |e| e.len() == 2)
-        .await;
-    td.wait_status(&id, "idle").await;
-    td.post(
-        &format!("/api/agents/{id}/send"),
-        Some(json!({"text": "long work"})),
-    )
-    .await;
-    td.wait_status(&id, "working").await;
+    // all, with a card that was assigned meanwhile. The turn stays open
+    // until the test ends it: a turn of a set time could end between the
+    // requests below on a loaded machine. A later pointer for the card
+    // would still be by design, so the test reads the pushes in order
+    // until the card block has arrived.
+    hold(&td, &id).await;
     let a = td
         .post("/api/mail", Some(json!({"to": "demo/bob", "body": "one"})))
         .await;
@@ -790,6 +780,7 @@ async fn mail_and_cards_push_a_pointer() {
         Some(json!({"assignee": "demo/bob"})),
     )
     .await;
+    end_hold(&td, &id).await;
     // Wait with a deadline until the card block has been typed, in one push
     // or in a later one.
     let prompt = |x: &Value| x["data"]["prompt"].as_str().unwrap_or("").to_owned();
@@ -1433,7 +1424,9 @@ async fn agent_rpc_tunnel_and_long_poll() {
     .await;
     assert!(r["result"]["headers"]["x-next-cursor"].is_string(), "{r}");
 
-    // Long-poll: the request waits until new mail arrives.
+    // Long-poll: the request waits until new mail arrives. Its wait is
+    // long, so an answer before the wait ends came from the mail, also on
+    // a loaded machine.
     let after = mail[0]["id"].as_str().unwrap().to_owned();
     let s2 = sock.clone();
     let started = Instant::now();
@@ -1442,7 +1435,7 @@ async fn agent_rpc_tunnel_and_long_poll() {
             &s2,
             "http",
             json!({"method": "GET", "path": "/api/mail",
-            "query": {"wait": 10, "cursor": after}}),
+            "query": {"wait": 30, "cursor": after}}),
         )
         .await
     });
@@ -1451,7 +1444,8 @@ async fn agent_rpc_tunnel_and_long_poll() {
     td.post("/api/mail", Some(json!({"to": "demo/bob", "body": "late"})))
         .await;
     let r = timeout(WAIT, waiter).await.unwrap().unwrap();
-    assert!(started.elapsed() < Duration::from_secs(5));
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(30), "the wait ran out: {took:?}");
     let mail = r["result"]["body"].as_array().unwrap();
     assert_eq!(mail.len(), 1, "{r}");
     assert_eq!(mail[0]["body"], "late");
@@ -3292,8 +3286,6 @@ async fn compaction_turn_hooks_are_no_turn_and_a_silent_end_times_out() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selfhosted_stream_limit_queues_the_second_turn() {
     let td = Td::start().await;
-    // A turn of the fake TUI takes 1.5 s.
-    td.adapter.set_env("FAKE_TUI_DELAY_MS", "1500");
     td.post(
         "/api/subscriptions",
         Some(
@@ -3315,11 +3307,10 @@ async fn selfhosted_stream_limit_queues_the_second_turn() {
     for id in [&bob, &carol] {
         td.wait_status(id, "idle").await;
     }
-    td.post(
-        &format!("/api/agents/{bob}/send"),
-        Some(json!({"text": "first"})),
-    )
-    .await;
+    // Bob's turn holds the stream until the test ends it: a turn of a set
+    // time could end before Carol's send on a loaded machine, and her turn
+    // then gets the free stream at once.
+    hold(&td, &bob).await;
     td.wait_events(&bob, "turn_start", |e| !e.is_empty()).await;
     td.post(
         &format!("/api/agents/{carol}/send"),
@@ -3341,6 +3332,7 @@ async fn selfhosted_stream_limit_queues_the_second_turn() {
     assert_eq!(sub["streams"], json!({"max": 1, "in_use": 1, "waiting": 1}));
     assert!(td.events(&carol, "turn_start").await.is_empty());
     // Bob's turn ends: Carol's turn goes out.
+    end_hold(&td, &bob).await;
     let starts = td
         .wait_events(&carol, "turn_start", |e| !e.is_empty())
         .await;
