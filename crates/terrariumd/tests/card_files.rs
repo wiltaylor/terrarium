@@ -115,8 +115,11 @@ async fn card(td: &TestDaemon, project: &str, agent: Option<&str>, title: &str) 
     r.ok()["id"].as_str().unwrap().to_owned()
 }
 
+/// Poll until `f` holds. A deadline, not a count of tries: on a loaded
+/// machine a delivery at an agent start can take seconds.
 async fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
-    for _ in 0..300 {
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(60) {
         if f() {
             return;
         }
@@ -656,14 +659,16 @@ async fn delivery_at_start_and_while_running() {
     .await
     .ok();
     let f = cards_dir(&ws, &c1).join("spec.md");
-    wait_for("the delivery at start", || f.exists()).await;
+    // One sync writes the files, then `index.md`: wait for the index too.
+    let index_path = cards_dir(&ws, &c1).join("index.md");
+    wait_for("the delivery at start", || f.exists() && index_path.exists()).await;
     assert_eq!(std::fs::read(&f).unwrap(), b"# one");
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
         std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
         0o444
     );
-    let index = std::fs::read_to_string(cards_dir(&ws, &c1).join("index.md")).unwrap();
+    let index = std::fs::read_to_string(&index_path).unwrap();
     assert!(index.contains(&format!("# {c1}: First")), "{index}");
     assert!(index.contains("| spec.md | 1 |"), "{index}");
     wait_for("the stale card dir goes", || {
