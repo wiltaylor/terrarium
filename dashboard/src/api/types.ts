@@ -1731,6 +1731,9 @@ export interface Card {
   assignee?: string;
   /** Readable: `project/agent` or `operator`. */
   assignee_name?: string;
+  /** The card agent (TER-75): the ULID of the open ephemeral agent bound to the card. It stays while the card waits. */
+  agent?: string;
+  agent_name?: string;
   labels: string[];
   repo?: string;
   branch?: string;
@@ -3717,11 +3720,13 @@ export interface ConfigSecretChange {
   /** Only on a grant that needs the operator. */
   approval?: ConfigGrantApproval;
   /** A grant: the level that the file gives. */
-  level?: "use" | "read";
+  level?: GrantLevel;
   /** A grant: the env var that the file gives. */
   env?: string;
+  /** A `run` grant: the targets that the file gives. */
+  targets?: string[];
   /** A grant that changes a stored grant: the stored one. */
-  was?: { level: "use" | "read"; env?: string };
+  was?: { level: GrantLevel; env?: string; targets?: string[] };
 }
 
 /** The secrets import of a pulled export (PLAN §16b.5). */
@@ -3904,8 +3909,8 @@ export interface SystemPromptUpdate {
 export type SecretKind = "api_key" | "token" | "github_token" | "login" | "ssh_key" | "generic";
 export const SECRET_KINDS: readonly SecretKind[] = ["api_key", "token", "github_token", "login", "ssh_key", "generic"];
 
-/** docs/api.md §5.2 "Grants": `use` gives the brokers only; `read` also gives the env var and `terrarium secret get`. */
-export type GrantLevel = "use" | "read";
+/** docs/api.md §5.2 "Grants": `use` gives the brokers only; `run` also gives the value in `terrarium run` on the grant's `targets` (TER-142); `read` also gives the env var and `terrarium secret get`. */
+export type GrantLevel = "use" | "run" | "read";
 
 /** The secret shape of docs/api.md §5.2. `fields` holds the plain fields only. */
 export interface Secret {
@@ -3966,6 +3971,8 @@ export interface SecretGrant {
   grantee_label: string;
   level: GrantLevel;
   env?: string;
+  /** The targets of a `run` grant. */
+  targets?: string[];
   created_by: string;
   created_at: string;
 }

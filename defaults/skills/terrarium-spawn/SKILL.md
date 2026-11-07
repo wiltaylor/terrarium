@@ -68,8 +68,22 @@ terrarium agent spawn <template> --task-file - < task.md
 - `--target <name>` (repeat for more) gives it a target that you may use:
   one in your policy, or one that you hold by a lease (it gets a lease
   that ends no later than yours). An exclusive lease cannot be shared.
-- `--grant <secret>[:use|:read]` (repeat for more) gives it a secret that
-  you hold, at most at your level. A `read` grant keeps your env var.
+- `--grant <secret>[:use|:run|:read]` (repeat for more) gives it a secret
+  that you hold, at most at your level (`use` < `run` < `read`). A `read`
+  grant keeps your env var.
+- Prefer `:run` when the child only needs the value inside a command on a
+  target, for example a deploy key. `--grant deploy:run` gives your own
+  run targets, and `--grant deploy:run=prod-1,prod-2` a subset of them.
+  When you hold `read`, name the targets: each must be a target that you
+  may use. The child then runs `terrarium run prod-1 -e
+  DEPLOY_KEY=@secret:deploy -- ./deploy.sh`: the daemon puts the value
+  into the env of that command only. The child gets no env var, no
+  `terrarium secret get`, and no other target.
+- The limit of `:run`: the output is redacted, but the command that gets
+  the value can still leak it (encoded, written to a file, sent
+  elsewhere). `:run` stops accidental exposure in transcripts, logs, and
+  command lines. It does not stop a hostile agent. Give it only to a
+  child that may use the value on those targets.
 - A template with no account uses your account and pool.
 - A target or secret that you do not hold fails with `403` and its name.
   The leases and grants end when the ephemeral agent finishes.

@@ -823,6 +823,113 @@ async fn a_green_validation_moves_the_card_to_review() {
     assert_eq!(j["exit_code"], 0);
 }
 
+/// TER-107: a validate leaves one `validation:*` label and one `by:` label,
+/// even when the card already has stale ones.
+#[tokio::test]
+async fn validate_replaces_stale_validation_and_by_labels() {
+    let lab = lab(2).await;
+    let head = lab.branch("ter-labels", "next", &[("OK", "yes\n")]);
+    let id = lab.card("stale labels", "ter-labels").await;
+    // Stale labels: another worker's `by:` and two `validation:` labels.
+    lab.td
+        .patch(
+            &format!("/api/cards/{id}"),
+            json!({"add_labels": ["by:w9", "validation:running", "validation:queued"]}),
+        )
+        .await
+        .ok();
+    // The seed is on the card before the validate, or the test proves nothing.
+    let seeded = lab.card_of(&id).await;
+    let l = labels(&seeded);
+    assert!(l.contains(&"by:w9".to_owned()), "{seeded}");
+    assert!(l.contains(&"validation:running".to_owned()), "{seeded}");
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let by_of = |c: &Value| -> Vec<String> {
+        labels(c)
+            .into_iter()
+            .filter(|l| l.starts_with("by:"))
+            .collect()
+    };
+    let validation_of = |c: &Value| -> Vec<String> {
+        labels(c)
+            .into_iter()
+            .filter(|l| l.starts_with("validation:"))
+            .collect()
+    };
+    // At once: still w1's, one by:w1, and one validation label (queued or
+    // already running, the job may start at once).
+    let c = lab.card_of(&id).await;
+    assert_eq!(c["column"], "validating");
+    assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+    assert_eq!(validation_of(&c).len(), 1, "{c}");
+    // The pass: no validation label, the assignee cleared, one by:w1.
+    let c = lab
+        .until_card(&id, "review", |c| c["column"] == "review")
+        .await;
+    assert!(c["assignee"].is_null(), "{c}");
+    assert!(validation_of(&c).is_empty(), "{c}");
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+}
+
+/// TER-107: a project admin who queues another agent's card keeps the
+/// card's worker in `by:`. The job and the final mail go to that worker.
+#[tokio::test]
+async fn an_admin_validate_keeps_the_workers_by_label() {
+    let lab = lab(2).await;
+    let head = lab.branch("ter-admin", "next", &[("OK", "yes\n")]);
+    let id = lab.card("admin queues", "ter-admin").await;
+    // The worker's `by:` and a stale validation label, then the admin queues.
+    lab.td
+        .patch(
+            &format!("/api/cards/{id}"),
+            json!({"add_labels": ["by:w1", "validation:running"]}),
+        )
+        .await
+        .ok();
+    let seeded = lab.card_of(&id).await;
+    assert!(labels(&seeded).contains(&"by:w1".to_owned()), "{seeded}");
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["by_agent"], "w1", "{}", r.body);
+    let by_of = |c: &Value| -> Vec<String> {
+        labels(c)
+            .into_iter()
+            .filter(|l| l.starts_with("by:"))
+            .collect()
+    };
+    let c = lab.card_of(&id).await;
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+    let validation = labels(&c)
+        .into_iter()
+        .filter(|l| l.starts_with("validation:"))
+        .count();
+    assert_eq!(validation, 1, "{c}");
+    let c = lab
+        .until_card(&id, "review", |c| c["column"] == "review")
+        .await;
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+    assert!(
+        !labels(&c).iter().any(|l| l.contains("lead")),
+        "the admin is not a worker label: {c}"
+    );
+}
+
 #[tokio::test]
 async fn a_red_validation_runs_twice_then_goes_to_the_top_of_ready() {
     let lab = lab(2).await;
@@ -894,6 +1001,73 @@ async fn a_red_validation_runs_twice_then_goes_to_the_top_of_ready() {
         assert!(start.elapsed() < DEADLINE, "no mail to w1: {mail:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// TER-135: the stats give the first-attempt pass rate, the reruns, and
+/// the failed test targets from the output tail.
+#[tokio::test]
+async fn the_stats_give_the_first_attempt_pass_rate_and_the_failed_targets() {
+    let lab = lab(2).await;
+    set_recipe(
+        &lab,
+        "test -f OK || { printf 'error: 1 target failed:\\n    `-p app --test flaky`\\n'; exit 101; }",
+    )
+    .await;
+    let green = lab.branch("ter-g", "next", &[("OK", "yes\n")]);
+    let red = lab.branch("ter-r", "next", &[("other", "x\n")]);
+    for (title, branch, head) in [("green", "ter-g", &green), ("red", "ter-r", &red)] {
+        let id = lab.card(title, branch).await;
+        let r = lab
+            .td
+            .post_as(
+                &lab.w1,
+                &format!("/api/cards/{id}/validate"),
+                json!({"commit": head}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    // The green job, and the red job with its one rerun.
+    let start = Instant::now();
+    while lab.until_idle().await.len() < 3 {
+        assert!(start.elapsed() < DEADLINE, "no rerun");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    lab.until_idle().await;
+    let r = lab
+        .td
+        .get_as(&lab.w1, "/api/projects/p/jobs/stats?since=1h")
+        .await;
+    let s = r.ok();
+    assert_eq!(s["jobs"], 3, "{s}");
+    assert_eq!(s["first_attempt"]["ended"], 2, "{s}");
+    assert_eq!(s["first_attempt"]["passed"], 1, "{s}");
+    assert_eq!(s["first_attempt"]["pass_rate"], 0.5, "{s}");
+    assert_eq!(s["validate"]["ended"], 2, "{s}");
+    assert_eq!(s["reruns"]["ended"], 1, "{s}");
+    assert_eq!(s["reruns"]["passed"], 0, "{s}");
+    assert_eq!(s["errors"], 0, "{s}");
+    assert_eq!(s["untargeted_test_fails"], 0, "{s}");
+    assert_eq!(
+        s["failed_targets"],
+        json!([{"target": "-p app --test flaky", "failed": 2, "first_attempt": 1}]),
+        "{s}"
+    );
+    // The default window is 7 days. A time in the future has no jobs.
+    assert_eq!(
+        lab.td.get("/api/projects/p/jobs/stats").await.ok()["jobs"],
+        3
+    );
+    let r = lab
+        .td
+        .get("/api/projects/p/jobs/stats?since=2999-01-01T00:00:00Z")
+        .await;
+    assert_eq!(r.ok()["jobs"], 0);
+    assert!(r.ok()["first_attempt"]["pass_rate"].is_null());
+    lab.td
+        .get("/api/projects/p/jobs/stats?since=soon")
+        .await
+        .err(400, "bad_request");
 }
 
 #[tokio::test]
@@ -1321,59 +1495,74 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
     );
 }
 
-/// Review of TER-71, major 2: a merge job runs alone in its project. With 2
-/// slots, a validate job runs, then the merge (queued second) waits for it,
-/// and a validate job queued after the merge waits for the merge.
+/// TER-159: merges have their own lane. With 1 slot, a validate job queued
+/// after a merge starts beside it and passes while the merge runs, and a
+/// second merge waits for the first.
 #[tokio::test]
-async fn a_merge_job_runs_alone_in_its_project() {
-    let lab = lab(2).await;
+async fn a_validation_passes_while_a_merge_runs() {
+    let lab = lab(1).await;
     lab.td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "p-box", "recipe": "test -f OK && sleep 1", "slots": 2,
+            json!({"target": "p-box", "recipe": "test -f OK && sleep 2", "slots": 1,
                    "next_repos": ["app"],
                    "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
         )
         .await
         .ok();
-    let h1 = lab.branch("ter-a1", "next", &[("OK", "1")]);
-    lab.branch("ter-a2", "next", &[("OK", "2")]);
-    let h3 = lab.branch("ter-a3", "next", &[("OK", "3")]);
-    let c1 = lab.card("a1", "ter-a1").await;
-    let c2 = lab.card("a2", "ter-a2").await;
-    let c3 = lab.card("a3", "ter-a3").await;
+    lab.branch("ter-m1", "next", &[("OK", "1")]);
+    let hv = lab.branch("ter-v", "next", &[("OK", "2")]);
+    // Its own file: it merges onto the `next` of the first merge, which
+    // holds `OK`.
+    lab.branch("ter-m2", "next", &[("M2", "3")]);
+    let cm1 = lab.card("m1", "ter-m1").await;
+    let cv = lab.card("v", "ter-v").await;
+    let cm2 = lab.card("m2", "ter-m2").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{cm1}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["queue"]["slots"], 1, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{cm2}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    // Behind the first merge, queued or running.
+    let q = &r.body["queue"];
+    assert_eq!(
+        q["position"].as_i64().unwrap() + q["running"].as_i64().unwrap(),
+        2,
+        "{}",
+        r.body
+    );
     let r = lab
         .td
         .post_as(
             &lab.w1,
-            &format!("/api/cards/{c1}/validate"),
-            json!({"commit": h1}),
+            &format!("/api/cards/{cv}/validate"),
+            json!({"commit": hv}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    let r = lab
-        .td
-        .post_as(&lab.lead, &format!("/api/cards/{c2}/merge"), json!({}))
-        .await;
-    assert_eq!(r.status, 201, "{}", r.body);
-    let r = lab
-        .td
-        .post_as(
-            &lab.w1,
-            &format!("/api/cards/{c3}/validate"),
-            json!({"commit": h3}),
-        )
-        .await;
-    assert_eq!(r.status, 201, "{}", r.body);
+    // The merges do not count against the one slot.
+    assert_eq!(r.body["queue"]["position"], 1, "{}", r.body);
+    assert_eq!(r.body["queue"]["running"], 0, "{}", r.body);
     let jobs = lab.until_idle().await;
     let of = |c: &str| jobs.iter().find(|j| j["card"] == c).unwrap().clone();
-    let (v1, m, v3) = (of(&c1), of(&c2), of(&c3));
-    for j in [&v1, &m, &v3] {
+    let (m1, v, m2) = (of(&cm1), of(&cv), of(&cm2));
+    for j in [&m1, &v, &m2] {
         assert_eq!(j["state"], "passed", "{jobs:#?}");
     }
     let t = |j: &Value, k: &str| j[k].as_str().unwrap().to_owned();
-    assert!(t(&m, "started_at") >= t(&v1, "ended_at"), "{jobs:#?}");
-    assert!(t(&v3, "started_at") >= t(&m, "ended_at"), "{jobs:#?}");
+    // The validate job ran while a merge ran.
+    let overlaps = |m: &Value| {
+        t(&v, "started_at") < t(m, "ended_at") && t(m, "started_at") < t(&v, "ended_at")
+    };
+    assert!(overlaps(&m1) || overlaps(&m2), "{jobs:#?}");
+    // One merge at a time, in order.
+    assert!(t(&m2, "started_at") >= t(&m1, "ended_at"), "{jobs:#?}");
 }
 
 // ------------------------------------------------------------- TER-115
@@ -1949,4 +2138,83 @@ async fn a_merge_that_fails_without_a_conflict_drops_only_that_card() {
         next_merges(&lab),
         ["Merge ter-u1 onto next", "Merge ter-u3 onto next"]
     );
+}
+
+/// Validate the card on `branch` with the current recipe and wait for
+/// the end of its job.
+async fn validate_card(lab: &Lab, branch: &str, head: &str) -> Value {
+    let id = lab.card(branch, branch).await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    jobs.into_iter().find(|j| j["card"] == id.as_str()).unwrap()
+}
+
+/// TER-100: the recipe gets the job kind, the head, the base, and the
+/// file of the changed paths. A validate job diffs against the merge-base
+/// with `next` (a later change on `next` is not in the list), a merge job
+/// against `next` before the merge. Without `next`, no base and no list.
+#[tokio::test]
+async fn the_recipe_gets_the_job_kind_and_the_changed_files() {
+    let lab = lab(2).await;
+    let out = lab._dirs.path().join("env");
+    std::fs::create_dir_all(&out).unwrap();
+    let recipe = format!(
+        "test -f OK && f='{}/'\"$TERRARIUM_JOB_KIND-$TERRARIUM_JOB_ID\" \
+         && printf 'kind=%s\\nhead=%s\\nbase=%s\\nfiles=%s\\n' \"$TERRARIUM_JOB_KIND\" \
+            \"$TERRARIUM_HEAD\" \"${{TERRARIUM_BASE-unset}}\" \"${{TERRARIUM_CHANGED_FILES-unset}}\" > \"$f\" \
+         && if [ -n \"${{TERRARIUM_CHANGED_FILES:-}}\" ]; then cat \"$TERRARIUM_CHANGED_FILES\" >> \"$f\"; fi",
+        out.display()
+    );
+    set_recipe(&lab, &recipe).await;
+    let fork = git(&lab.origin, &["rev-parse", "next"]);
+    let head = lab.branch("ter-env", "next", &[("OK", "yes\n"), ("a.rs", "a\n")]);
+    // `next` moves after the fork: its change is not the card's.
+    lab.branch("ter-other", "next", &[("other", "x\n")]);
+    git(&lab.work, &["push", "-q", "origin", "ter-other:next"]);
+    let moved = git(&lab.origin, &["rev-parse", "next"]);
+    let read = |job: &Value| {
+        let name = format!(
+            "{}-{}",
+            job["kind"].as_str().unwrap(),
+            job["id"].as_str().unwrap()
+        );
+        std::fs::read_to_string(out.join(name)).unwrap()
+    };
+
+    let job = validate_card(&lab, "ter-env", &head).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let text = read(&job);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "kind=validate", "{text}");
+    assert_eq!(lines[1], format!("head={head}"), "{text}");
+    assert_eq!(lines[2], format!("base={fork}"), "{text}");
+    assert!(
+        lines[3].starts_with("files=/") && lines[3].ends_with("/.git/terrarium/changed-files"),
+        "{text}"
+    );
+    assert_eq!(lines[4..], ["OK", "a.rs"], "{text}");
+
+    let job = merge_with_recipe(&lab, "ter-env2", &recipe).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let text = read(&job);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "kind=merge", "{text}");
+    assert_eq!(lines[2], format!("base={moved}"), "{text}");
+    assert_eq!(lines[4..], ["OK"], "{text}");
+
+    // No `next`: the job runs, without a base and a list.
+    git(&lab.work, &["push", "-q", "origin", ":next"]);
+    let job = validate_card(&lab, "ter-env", &head).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let text = read(&job);
+    assert!(text.contains("base=unset\nfiles=unset\n"), "{text}");
+    assert_eq!(text.lines().count(), 4, "{text}");
 }

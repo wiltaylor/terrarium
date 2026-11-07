@@ -24,6 +24,7 @@ import { buildLanes, columnIndex, findVersion, laneCells, type LaneMove, laneMov
 import { NewVersionModal, VersionModal } from "./VersionModal";
 import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_QUERY } from "./phone";
 import { VERSION_CHIP, versionsByCard } from "./versions";
+import { cardAgentName } from "./cardAgent";
 import { agents, api, events } from "../../stores";
 
 export function BoardPage() {
@@ -703,6 +704,13 @@ function KCard(props: {
           <span>{owner()?.name ?? props.card.assignee_name ?? props.card.assignee}</span>
           <Show when={owner()}>{(a) => <HoldBadge agentId={a().id} />}</Show>
         </div>
+      </Show>
+      <Show when={cardAgentName(props.card)}>
+        {(n) => (
+          <div class="small muted kcard-agent" title={`Card agent: the ephemeral agent bound to ${props.card.id}`}>
+            agent {n()}
+          </div>
+        )}
       </Show>
     </article>
   );
