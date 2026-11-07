@@ -270,6 +270,11 @@ pub fn normalize(spec: &Spec) -> ApiResult<Spec> {
             "policy.cross_project entry `{bad}` must be `project/agent` or `project/*`"
         )));
     }
+    // The syntax of each grant (TER-88). Who may use them is checked at
+    // the spawn or the create, against its caller.
+    for g in agent_template::grants_of(&n).map_err(spec_error)? {
+        crate::spawn_rights::parse_grant(&g).map_err(|e| spec_error(e.message))?;
+    }
     Ok(n)
 }
 

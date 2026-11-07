@@ -1459,6 +1459,11 @@ pub fn apply(
             }
             None => {
                 let v = agents::create_from(t, &a.def, state_dir, &source, template.as_ref())?;
+                // The template's secret grants (TER-88), as for
+                // `POST /api/agents`.
+                if let Some(tref) = &template {
+                    crate::spawn_rights::grant_at_create(t, actor, &v, tref)?;
+                }
                 let id = v.agent.id.to_string();
                 out.created_agents.push((id.clone(), a.def.project.clone()));
                 id

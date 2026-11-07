@@ -235,7 +235,14 @@ async fn create(
                 def.subscription.as_deref(),
                 &def.subscription_pool,
             )?;
-            agents::create_from(t, &def, &state_dir, projects::SOURCE_API, template.as_ref())
+            let v =
+                agents::create_from(t, &def, &state_dir, projects::SOURCE_API, template.as_ref())?;
+            // The template's secret grants (TER-88): each needs the
+            // caller's right to grant that secret.
+            if let Some(tref) = &template {
+                crate::spawn_rights::grant_at_create(t, &who, &v, tref)?;
+            }
+            Ok(v)
         })
         .await?;
     // PLAN §9: clone `checkout.on_agent_create` into the workspace before

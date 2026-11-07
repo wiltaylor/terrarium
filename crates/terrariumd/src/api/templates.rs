@@ -488,6 +488,13 @@ pub async fn create_body(
             "an agent create takes no `tools`: grant a tool with `terrarium tool grant`, or use a template whose tools a sysadmin set",
         ));
     }
+    // The secret grants of an agent come from its template or from a
+    // grant, never from the create body (TER-88).
+    if body.contains_key(agent_template::GRANTS_KEY) {
+        return Err(ApiError::invalid(
+            "an agent create takes no `grants`: grant a secret with `terrarium secret grant`, or use a template with `grants`",
+        ));
+    }
     let key = match body.remove("template") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if s.trim().is_empty() => None,
