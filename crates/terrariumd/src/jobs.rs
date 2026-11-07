@@ -3220,7 +3220,10 @@ mod tests {
             )),
             "{tail}"
         );
-        assert!(tail.contains("error lost: gone") && tail.ends_with("output"), "{tail}");
+        assert!(
+            tail.contains("error lost: gone") && tail.ends_with("output"),
+            "{tail}"
+        );
         assert!(matches!(
             lost_or_red(&job, "again".into(), end()),
             Ran::Lost(_)
