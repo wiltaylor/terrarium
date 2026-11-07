@@ -60,6 +60,14 @@
 //!   job, so the board shows it.
 //! - A daemon restart loses the runs: each running job fails (`error`)
 //!   and goes through the rerun rule.
+//! - A host that cannot be reached is not a failure (TER-160). A job whose
+//!   target's host agent is offline is not started: it stays queued. A job
+//!   whose target could not be reached before its recipe started (the host
+//!   agent went away, or the ssh connect was refused or timed out) goes
+//!   back to the queue ([`jobs::requeue`]); an ssh target is tried again
+//!   after [`RETRY`]. Neither uses an attempt or moves a card. After
+//!   [`LONG_WAIT`] the queue notes the wait on the cards, once per job and
+//!   daemon run. A failure after the recipe started stays a failure.
 //! - Each end and each cancel emits one `job.verdict` event per card
 //!   (TER-167): `passed`, `red`, `conflict`, `cancelled`, or `error`, with
 //!   the end comment and the failure block. It is written in the same
@@ -67,15 +75,16 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use terrarium_core::config::DeliveryDef;
+use terrarium_core::config::{DeliveryDef, TargetDef, TargetKind};
 
 use crate::actor::Actor;
 use crate::api::Shared;
@@ -114,6 +123,12 @@ const STEP_MAX: usize = 64 * 1024;
 const RECIPE_MAX: usize = 1024 * 1024;
 /// The time limit of a prepare, push, or cleanup step.
 const STEP_TIMEOUT: u64 = 900;
+/// How long a job waits for its host before the queue notes it on the
+/// cards (TER-160).
+pub const LONG_WAIT: Duration = Duration::from_secs(30 * 60);
+/// How long a job whose ssh target could not be reached waits before the
+/// next try (TER-160).
+pub const RETRY: Duration = Duration::from_secs(60);
 /// The size of one stdin chunk of a step (the bundle of a job).
 const STDIN_CHUNK: usize = 64 * 1024;
 /// The dir of the daemon's job repos, in the state dir (TER-103).
@@ -286,19 +301,124 @@ pub fn kick(state: &Shared) {
     });
 }
 
+/// A queued job that waits for its host (TER-160).
+struct Wait {
+    /// The first time that the host could not be reached.
+    since: Instant,
+    /// No try before this time (an ssh target that could not be reached).
+    retry: Option<Instant>,
+    /// The cards have the [`LONG_WAIT`] note.
+    noted: bool,
+    why: String,
+}
+
+/// The jobs that wait for their host, by job ID.
+fn waits() -> MutexGuard<'static, HashMap<String, Wait>> {
+    static W: OnceLock<Mutex<HashMap<String, Wait>>> = OnceLock::new();
+    W.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
+
+/// Note that job `id` waits for its host, and the time of its next try.
+fn hold(id: &str, why: String, retry: Option<Instant>) {
+    let now = Instant::now();
+    let mut w = waits();
+    let e = w.entry(id.to_owned()).or_insert_with(|| Wait {
+        since: now,
+        retry: None,
+        noted: false,
+        why: String::new(),
+    });
+    e.why = why;
+    e.retry = retry;
+}
+
+/// Why the host of `def`'s target is down now: its host agent is offline.
+/// `None` for an ssh target (only a try tells) and for a target that is
+/// gone (the job then fails when it runs).
+fn host_down(conn: &rusqlite::Connection, state: &Shared, def: &DeliveryDef) -> Option<String> {
+    let name = def.target.as_deref()?;
+    let row = targets::get(conn, name).ok()?;
+    agent_down(state, name, &row.def)
+}
+
+/// [`host_down`] of a target that is read.
+fn agent_down(state: &Shared, name: &str, def: &TargetDef) -> Option<String> {
+    if def.kind == TargetKind::Ssh {
+        return None;
+    }
+    let host = def.host.as_deref()?;
+    (!state.executor.hosts.is_online(host))
+        .then(|| format!("the host agent `{host}` of target `{name}` is offline"))
+}
+
+/// Note each job that waited [`LONG_WAIT`] for its host on its cards, once.
+/// Forget the jobs of this database that are no longer queued or running.
+fn note_long_waits(t: &mut Tx<'_>) -> ApiResult<()> {
+    let ids: Vec<(String, bool, String, u64)> = waits()
+        .iter()
+        .map(|(id, w)| {
+            (
+                id.clone(),
+                !w.noted && w.since.elapsed() >= LONG_WAIT,
+                w.why.clone(),
+                w.since.elapsed().as_secs() / 60,
+            )
+        })
+        .collect();
+    for (id, due, why, mins) in ids {
+        // A job of another daemon in the same process (the tests) is not
+        // in this database.
+        let Ok(j) = jobs::get(t, &id) else { continue };
+        if !j.state.is_open() {
+            waits().remove(&id);
+            continue;
+        }
+        if !due || j.state != jobs::JobState::Queued {
+            continue;
+        }
+        let note = format!(
+            "Job queue: {} job {} has waited {mins} min for its host: {why}. It uses no attempt, the card stays here, and the job starts when the host is back.",
+            j.kind.as_str(),
+            j.id
+        );
+        for c in j.cards() {
+            comment(t, &c.card, &note)?;
+        }
+        if let Some(w) = waits().get_mut(&id) {
+            w.noted = true;
+        }
+    }
+    Ok(())
+}
+
 /// Start each queued job that has a place: on its host (the host cap,
 /// across projects) and in its project (the slots). One write for all
-/// projects, so the host counts hold.
+/// projects, so the host counts hold. A job whose host agent is offline,
+/// or whose ssh target waits for its next try, stays queued (TER-160).
 pub async fn tick(state: &Shared) -> ApiResult<()> {
     prepare_hosts(&state.db, None).await?;
     // The live runs are read and added in the write, so two ticks and a
     // cancel (all writes) see them in order.
+    let st = state.clone();
     let started = state
         .db
         .write("system", move |t| {
             let draining: Vec<String> = live().runs.iter().cloned().collect();
             let mut out = Vec::new();
             for (j, host, def) in jobs::startable(t, &draining)? {
+                if let Some(why) = host_down(t, &st, &def) {
+                    hold(&j.id, why, None);
+                    continue;
+                }
+                let later = waits()
+                    .get(&j.id)
+                    .and_then(|w| w.retry)
+                    .is_some_and(|r| r > Instant::now());
+                if later {
+                    continue;
+                }
                 if jobs::start(t, &j.id, &host)? {
                     let run = LiveRun::new(&j.id);
                     for c in j.cards() {
@@ -307,14 +427,24 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
                     out.push((jobs::get(t, &j.id)?, def, run));
                 }
             }
+            note_long_waits(t)?;
             Ok(out)
         })
         .await?;
     for (job, def, live_run) in started {
         let state = state.clone();
         tokio::spawn(async move {
-            let end = run(&state, &job, &def).await;
+            let end = match run(&state, &job, &def).await {
+                Ran::End(end) => end,
+                Ran::Wait { why, ssh } => {
+                    set_control(&job.id, None);
+                    requeue(&state, &job, why, ssh).await;
+                    drop(live_run);
+                    return;
+                }
+            };
             set_control(&job.id, None);
+            waits().remove(&job.id);
             let id = job.id.clone();
             let ended = state
                 .db
@@ -498,15 +628,98 @@ async fn step(
     Ok(c)
 }
 
-/// Run a job to its end. Never fails: an error is a failed end.
-async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> JobEnd {
-    match run_inner(state, job, def).await {
-        Ok(end) => end,
-        Err(e) => error_end(format!("the job could not run: {}", e.message)),
+/// How a run of a job ended.
+enum Ran {
+    /// The job ran: a pass or a failure.
+    End(JobEnd),
+    /// The target could not be reached before the recipe started
+    /// (TER-160): not a failure. `ssh`: an ssh target, tried again after
+    /// [`RETRY`].
+    Wait { why: String, ssh: bool },
+}
+
+/// Put a job that could not reach its host back in the queue: no attempt,
+/// no card move (TER-160).
+async fn requeue(state: &Shared, job: &Job, why: String, ssh: bool) {
+    let retry = ssh.then(|| Instant::now() + RETRY);
+    hold(&job.id, why.clone(), retry);
+    let id = job.id.clone();
+    let cards = job.cards();
+    let back = state
+        .db
+        .write("system", move |t| {
+            let j = jobs::requeue(t, &id, &why)?;
+            if j.is_some() {
+                for c in &cards {
+                    set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
+                }
+            }
+            Ok(j)
+        })
+        .await;
+    match back {
+        Ok(Some(j)) => debug!(job = %j.id, "the job waits for its host"),
+        Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
+        Err(e) => warn!(job = %job.id, "cannot put a job back in the queue: {e}"),
     }
 }
 
-async fn run_inner(state: &Shared, job: &Job, def: &DeliveryDef) -> ApiResult<JobEnd> {
+/// Run a job to its end. Never fails: an error is a failed end, or a
+/// wait when the target could not be reached before the recipe started.
+async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> Ran {
+    let recipe = AtomicBool::new(false);
+    let end = match run_inner(state, job, def, &recipe).await {
+        Ok(end) => end,
+        Err(e) => error_end(format!("the job could not run: {}", e.message)),
+    };
+    if end.passed || end.outcome.as_deref() != Some("error") || recipe.load(Ordering::SeqCst) {
+        return Ran::End(end);
+    }
+    match unreachable(state, def, &end).await {
+        Some((why, ssh)) => Ran::Wait { why, ssh },
+        None => Ran::End(end),
+    }
+}
+
+/// Why the target of `def` could not be reached, for an error end before
+/// the recipe started: its host agent is offline now, or the ssh client
+/// could not connect to the target (exit code 255 and its connect error).
+/// `true` with an ssh target.
+async fn unreachable(state: &Shared, def: &DeliveryDef, end: &JobEnd) -> Option<(String, bool)> {
+    let name = def.target.clone()?;
+    let n = name.clone();
+    let row = state.db.read(move |c| targets::get(c, &n)).await.ok()?;
+    if row.def.kind != TargetKind::Ssh {
+        return agent_down(state, &name, &row.def).map(|w| (w, false));
+    }
+    if end.exit_code != Some(255) {
+        return None;
+    }
+    let host = jobs::address_key(row.def.address.as_deref()?);
+    ssh_connect_error(end.tail.as_deref()?, &host)
+        .map(|l| (format!("target `{name}` could not be reached: {l}"), true))
+}
+
+/// The line of `text` in which the ssh client says that it could not
+/// connect to `host` (lower case): refused, timed out, no route, or a
+/// name that does not resolve. Not a line about another host, such as the
+/// git remote of the prepare step.
+fn ssh_connect_error<'a>(text: &'a str, host: &str) -> Option<&'a str> {
+    text.lines().map(str::trim).find(|l| {
+        let low = l.to_lowercase();
+        low.starts_with(&format!("ssh: connect to host {host} port "))
+            || low.starts_with(&format!("ssh: could not resolve hostname {host}:"))
+            || (low.starts_with(&format!("connection to {host} port "))
+                && low.contains("timed out"))
+    })
+}
+
+async fn run_inner(
+    state: &Shared,
+    job: &Job,
+    def: &DeliveryDef,
+    recipe_started: &AtomicBool,
+) -> ApiResult<JobEnd> {
     let target = def
         .target
         .clone()
@@ -583,6 +796,7 @@ async fn run_inner(state: &Shared, job: &Job, def: &DeliveryDef) -> ApiResult<Jo
         bundle: local.with_extension("bundle"),
         holder: holder.clone(),
         ionice,
+        recipe_started,
     };
     let result = steps(&ctx, recipe, def.timeout_secs()).await;
     let clean = RemoteCmd {
@@ -684,9 +898,10 @@ async fn has_ionice(
     match step(state, &job.id, def, &probe, STEP_MAX, None).await {
         Ok(c) => {
             let ok = c.end.as_ref().is_some_and(End::success);
-            // Keep only an answer: an exit code. An error, a signal, or a
-            // timeout is checked again on the next job.
-            if matches!(c.end, Some(End::Exit { code: Some(_), .. })) {
+            // Keep only an answer: an exit code. An error, a signal, a
+            // timeout, or 255 (an ssh client that could not connect,
+            // TER-160) is checked again on the next job.
+            if matches!(c.end, Some(End::Exit { code: Some(code), .. }) if code != 255) {
                 let mut m = match ionice_of().lock() {
                     Ok(m) => m,
                     Err(p) => p.into_inner(),
@@ -716,6 +931,9 @@ struct StepCtx<'a> {
     holder: Option<String>,
     /// The target has a working `ionice` ([`has_ionice`]).
     ionice: bool,
+    /// Set when the recipe step started: a failure after it is a failure,
+    /// also when the host is gone then (TER-160).
+    recipe_started: &'a AtomicBool,
 }
 
 impl StepCtx<'_> {
@@ -970,7 +1188,9 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         holder: x.holder.clone(),
         ..RemoteCmd::default()
     };
+    // An error here is a recipe that did not start: no session.
     let c = x.run(&recipe_cmd, RECIPE_MAX, None).await?;
+    x.recipe_started.store(true, Ordering::SeqCst);
     let ok = c.end.as_ref().is_some_and(End::success);
     let mut tail = format!(
         "{}\n[{}]\n[run as: {} sh -c <recipe>]",
@@ -1767,6 +1987,32 @@ mod tests {
         assert_eq!(r["outcome"], "ok");
         assert_eq!(r["head"], "abc");
         assert!(result_line(b"nothing").is_empty());
+    }
+
+    #[test]
+    fn ssh_connect_errors_of_the_target_only() {
+        let tail = "the prepare step failed (exit code Some(255)):\nssh: connect to host 10.3.0.2 port 22: Connection refused\n";
+        assert_eq!(
+            ssh_connect_error(tail, "10.3.0.2"),
+            Some("ssh: connect to host 10.3.0.2 port 22: Connection refused")
+        );
+        assert!(
+            ssh_connect_error(
+                "ssh: Could not resolve hostname CI-Box: Name or service not known",
+                "ci-box"
+            )
+            .is_some()
+        );
+        assert!(ssh_connect_error("Connection to ci-box port 22 timed out", "ci-box").is_some());
+        // The git remote of the prepare step is another host: a failure.
+        assert!(
+            ssh_connect_error(
+                "ssh: connect to host github.com port 22: Connection timed out",
+                "10.3.0.2"
+            )
+            .is_none()
+        );
+        assert!(ssh_connect_error("error: tests failed", "10.3.0.2").is_none());
     }
 
     #[test]
