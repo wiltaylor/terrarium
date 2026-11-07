@@ -205,6 +205,7 @@ async fn the_agent_tracks_and_an_operator_post_wakes_it() {
     let qid = id(&r.body);
     let r = lab.track_as(&eph, &tid).await;
     assert_eq!(r.status, 409, "{}", r.body);
+    lab.parked(&eph, "thread waits on the operator").await;
     lab.td
         .post(
             &format!("/api/questions/{qid}/answer"),
