@@ -518,8 +518,7 @@ async fn validate(
     // The job must test what was pushed: the commit is the head of the
     // branch on the remote.
     if let Some(commit) = &b.commit {
-        let target = def.target.clone().unwrap_or_default();
-        let head = rt::remote_head(&state, &card.project, &repo, &target, &branch).await?;
+        let head = rt::remote_head(&state, &card.project, &repo, &branch).await?;
         match head {
             Some(h) if h.starts_with(&commit.to_lowercase()) => {}
             Some(h) => {

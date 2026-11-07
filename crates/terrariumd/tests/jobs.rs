@@ -1224,6 +1224,46 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
     );
 }
 
+/// TER-103: the target holds no credential and no push repo. The recipe
+/// of a merge finds no `.ssh` or `.push` dir beside its clone, no git
+/// credential env, and no remote in its clone. It deletes the job ref in
+/// its clone, and the merge still pushes the recorded commit: the push
+/// runs from the daemon's repo.
+#[tokio::test]
+async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
+    let lab = lab(2).await;
+    let before = git(&lab.origin, &["rev-parse", "next"]);
+    let recipe = "test -f OK \
+         && ! ls -a .. | grep -E '[.](ssh|push)$' \
+         && ! env | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
+         && test -z \"$(git remote)\" \
+         && test \"$(git rev-parse refs/job/merge)\" = \"$(git rev-parse HEAD)\" \
+         && git update-ref -d refs/job/merge \
+         && rm -rf .git/objects/pack";
+    let job = merge_with_recipe(&lab, "ter-m3", recipe).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    assert_ne!(next, before);
+    assert_eq!(job["head"].as_str().unwrap(), next, "{job:#}");
+    assert_eq!(
+        git(&lab.origin, &["log", "-1", "--format=%s", "next"]),
+        "Merge ter-m3 onto next"
+    );
+    // The daemon removed its repo of the job.
+    let state_jobs = lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .state_dir
+        .join("jobs");
+    let left: Vec<_> = std::fs::read_dir(state_jobs.join("p"))
+        .map(|d| d.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+}
+
 /// TER-159: merges have their own lane. With 1 slot, a validate job queued
 /// after a merge starts beside it and passes while the merge runs, and a
 /// second merge waits for the first.
