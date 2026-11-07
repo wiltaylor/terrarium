@@ -2245,7 +2245,30 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX artifact_labels_label ON artifact_labels(label, artifact);
     "#,
-    // 81: the column roles `validating`, `review`, `merge_queue`, and
+    // 81: the `run` grant level (TER-142, `crate::secrets::grants`). The
+    // CHECK of `secret_grants.level` takes `run`, so the table is built
+    // again. `targets` is the JSON array of the targets of a `run` grant;
+    // NULL for `use` and `read`. No table refers to `secret_grants`.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE secret_grants_v81 (
+        secret_id  TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+        grantee    TEXT NOT NULL,
+        level      TEXT NOT NULL CHECK (level IN ('use', 'run', 'read')),
+        env        TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        targets    TEXT,
+        PRIMARY KEY (secret_id, grantee)
+    );
+    INSERT INTO secret_grants_v81 (secret_id, grantee, level, env, created_by, created_at)
+        SELECT secret_id, grantee, level, env, created_by, created_at FROM secret_grants;
+    DROP TABLE secret_grants;
+    ALTER TABLE secret_grants_v81 RENAME TO secret_grants;
+    CREATE INDEX secret_grants_grantee ON secret_grants(grantee);
+    "#,
+    // 82: the column roles `validating`, `review`, `merge_queue`, and
     // `accepted` (TER-165, `crate::store::board`). The CHECK of
     // `board_columns.role` allows only `working` and `blocked`, and a CHECK
     // cannot change in place. So the column is replaced: add the new one,
@@ -2255,11 +2278,11 @@ const MIGRATIONS: &[&str] = &[
     // another branch takes this number, move this entry to the end of the
     // list.
     r#"
-    ALTER TABLE board_columns ADD COLUMN role_v81 TEXT;
-    UPDATE board_columns SET role_v81 = role;
+    ALTER TABLE board_columns ADD COLUMN role_v82 TEXT;
+    UPDATE board_columns SET role_v82 = role;
     DROP INDEX board_columns_role;
     ALTER TABLE board_columns DROP COLUMN role;
-    ALTER TABLE board_columns RENAME COLUMN role_v81 TO role;
+    ALTER TABLE board_columns RENAME COLUMN role_v82 TO role;
     CREATE UNIQUE INDEX board_columns_role ON board_columns(project, role)
         WHERE role IS NOT NULL;
     "#,
@@ -3004,6 +3027,78 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 0, "{table}");
         }
+    }
+
+    /// TER-142: the rebuild of `secret_grants` keeps each grant, and the
+    /// new table takes the level `run` with its `targets`.
+    #[test]
+    fn migration_of_the_run_level_keeps_the_grants() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let at = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("secret_grants_v81"))
+            .unwrap();
+        for m in &MIGRATIONS[..at] {
+            conn.execute_batch(m).unwrap();
+        }
+        conn.pragma_update(None, "user_version", at).unwrap();
+        conn.execute_batch(
+            "INSERT INTO secrets (id, scope, name, kind, created_at, updated_at, created_by)
+               VALUES ('S1', 'global', 'k', 'api_key', 't', 't', 'operator');
+             INSERT INTO secret_grants (secret_id, grantee, level, env, created_by, created_at)
+               VALUES ('S1', 'project:p', 'read', 'K', 'operator', 't'),
+                      ('S1', 'agent:A1', 'use', NULL, 'operator', 't');",
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO secret_grants (secret_id, grantee, level, created_by, created_at)
+                 VALUES ('S1', 'agent:A2', 'run', 'operator', 't')",
+                [],
+            )
+            .is_err()
+        );
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - at);
+        let rows: Vec<(String, String, Option<String>)> = conn
+            .prepare("SELECT grantee, level, env FROM secret_grants ORDER BY grantee")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("agent:A1".to_owned(), "use".to_owned(), None),
+                (
+                    "project:p".to_owned(),
+                    "read".to_owned(),
+                    Some("K".to_owned())
+                ),
+            ]
+        );
+        conn.execute(
+            "INSERT INTO secret_grants (secret_id, grantee, level, created_by, created_at, targets)
+             VALUES ('S1', 'agent:A2', 'run', 'operator', 't', '[\"box\"]')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO secret_grants (secret_id, grantee, level, created_by, created_at)
+                 VALUES ('S1', 'agent:A3', 'write', 'operator', 't')",
+                [],
+            )
+            .is_err()
+        );
+        // The cascade from the secret still holds.
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute("DELETE FROM secrets WHERE id = 'S1'", [])
+            .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM secret_grants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]
@@ -4096,18 +4191,18 @@ mod tests {
             [],
         );
         assert!(dup.is_err());
-        // The CHECK on the role is gone since migration 81: the store
+        // The CHECK on the role is gone since migration 82: the store
         // refuses an unknown role (tests/board.rs).
     }
 
-    /// Migration 81 (TER-165): the role column takes the job roles. The
+    /// Migration 82 (TER-165): the role column takes the job roles. The
     /// roles of migration 48 stay, and the one-column-per-role index stays.
     #[test]
-    fn migration_81_takes_the_job_roles() {
+    fn migration_82_takes_the_job_roles() {
         let mut conn = Connection::open_in_memory().unwrap();
         let n = MIGRATIONS
             .iter()
-            .position(|m| m.contains("role_v81"))
+            .position(|m| m.contains("role_v82"))
             .unwrap();
         for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
             conn.execute_batch(sql).unwrap();

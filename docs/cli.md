@@ -150,6 +150,7 @@ terrarium project ls
 terrarium project show [name]                 the project, its agents, repos, targets, and target grants
 terrarium project new <name> [-d text] [--prefix TER]      sysadmin
 terrarium project set [name] [-d text] [--prefix P]        project_admin
+terrarium project set [name] [--github-author login]... [--github-authors-clear]   operator only (the GitHub author gate)
 terrarium project rm <name> --confirm         sysadmin
 terrarium project repos [name]
 terrarium project grant <target> --for monitors|schedules       sysadmin (--project p names the project)
@@ -1148,6 +1149,7 @@ terrarium card merge <id> [--repo r] [--branch b]          project_admin
 terrarium card merge <id> <id>... [--repo r]               project_admin
 terrarium job ls [--state queued|running|passed|failed|cancelled]
 terrarium job show <id>
+terrarium job stats [--since 7d]
 terrarium job cancel <id>
 terrarium job hosts
 terrarium job host-cap <host> <n> | --clear                sysadmin
@@ -1186,6 +1188,18 @@ list. `job hosts` shows the caps, the running jobs, the host-agent name,
 and the aliases per host. Jobs run at low
 IO and CPU priority (`ionice -c3 nice -n19`). Builds that you start with
 `terrarium exec` or `terrarium run` are outside the queue.
+
+`job stats` gives the first-attempt pass rate of the project's jobs over a
+window (default 7 days; `--since` takes a duration such as `30d`, an RFC
+3339 time, or `HH:MM` today), per kind and in all. A `conflict` is no
+first attempt: it never ran the recipe. A job that could not run (outcome
+`error`, such as a host agent offline) is no attempt either: it shows as
+`could not run`. It also gives the reruns that
+passed, the counts, the failed recipe steps, and the test targets that
+failed most often. The targets come from the `error: N targets failed:`
+lines of each failed job's output tail. When the tail clip cut that header
+off, the job counts in `test-step fails with no target`. `-p` picks another project, and
+`--json` gives all targets (docs/api.md §35.4).
 
 `project delivery set` keeps the flags that you leave out. `--target ""`
 or `--recipe ""` turns the queue off. `--next-repo` replaces the list.

@@ -778,6 +778,113 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name() {
     assert_ne!(next, head);
 }
 
+/// TER-107: a validate leaves one `validation:*` label and one `by:` label,
+/// even when the card already has stale ones.
+#[tokio::test]
+async fn validate_replaces_stale_validation_and_by_labels() {
+    let lab = lab(2).await;
+    let head = lab.branch("ter-labels", "next", &[("OK", "yes\n")]);
+    let id = lab.card("stale labels", "ter-labels").await;
+    // Stale labels: another worker's `by:` and two `validation:` labels.
+    lab.td
+        .patch(
+            &format!("/api/cards/{id}"),
+            json!({"add_labels": ["by:w9", "validation:running", "validation:queued"]}),
+        )
+        .await
+        .ok();
+    // The seed is on the card before the validate, or the test proves nothing.
+    let seeded = lab.card_of(&id).await;
+    let l = labels(&seeded);
+    assert!(l.contains(&"by:w9".to_owned()), "{seeded}");
+    assert!(l.contains(&"validation:running".to_owned()), "{seeded}");
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let by_of = |c: &Value| -> Vec<String> {
+        labels(c)
+            .into_iter()
+            .filter(|l| l.starts_with("by:"))
+            .collect()
+    };
+    let validation_of = |c: &Value| -> Vec<String> {
+        labels(c)
+            .into_iter()
+            .filter(|l| l.starts_with("validation:"))
+            .collect()
+    };
+    // At once: still w1's, one by:w1, and one validation label (queued or
+    // already running, the job may start at once).
+    let c = lab.card_of(&id).await;
+    assert_eq!(c["column"], "validating");
+    assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+    assert_eq!(validation_of(&c).len(), 1, "{c}");
+    // The pass: no validation label, the assignee cleared, one by:w1.
+    let c = lab
+        .until_card(&id, "review", |c| c["column"] == "review")
+        .await;
+    assert!(c["assignee"].is_null(), "{c}");
+    assert!(validation_of(&c).is_empty(), "{c}");
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+}
+
+/// TER-107: a project admin who queues another agent's card keeps the
+/// card's worker in `by:`. The job and the final mail go to that worker.
+#[tokio::test]
+async fn an_admin_validate_keeps_the_workers_by_label() {
+    let lab = lab(2).await;
+    let head = lab.branch("ter-admin", "next", &[("OK", "yes\n")]);
+    let id = lab.card("admin queues", "ter-admin").await;
+    // The worker's `by:` and a stale validation label, then the admin queues.
+    lab.td
+        .patch(
+            &format!("/api/cards/{id}"),
+            json!({"add_labels": ["by:w1", "validation:running"]}),
+        )
+        .await
+        .ok();
+    let seeded = lab.card_of(&id).await;
+    assert!(labels(&seeded).contains(&"by:w1".to_owned()), "{seeded}");
+    let r = lab
+        .td
+        .post_as(
+            &lab.lead,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["by_agent"], "w1", "{}", r.body);
+    let by_of = |c: &Value| -> Vec<String> {
+        labels(c)
+            .into_iter()
+            .filter(|l| l.starts_with("by:"))
+            .collect()
+    };
+    let c = lab.card_of(&id).await;
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+    let validation = labels(&c)
+        .into_iter()
+        .filter(|l| l.starts_with("validation:"))
+        .count();
+    assert_eq!(validation, 1, "{c}");
+    let c = lab
+        .until_card(&id, "review", |c| c["column"] == "review")
+        .await;
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+    assert!(
+        !labels(&c).iter().any(|l| l.contains("lead")),
+        "the admin is not a worker label: {c}"
+    );
+}
+
 #[tokio::test]
 async fn a_red_validation_runs_twice_then_goes_to_the_top_of_ready() {
     let lab = lab(2).await;
@@ -849,6 +956,73 @@ async fn a_red_validation_runs_twice_then_goes_to_the_top_of_ready() {
         assert!(start.elapsed() < DEADLINE, "no mail to w1: {mail:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// TER-135: the stats give the first-attempt pass rate, the reruns, and
+/// the failed test targets from the output tail.
+#[tokio::test]
+async fn the_stats_give_the_first_attempt_pass_rate_and_the_failed_targets() {
+    let lab = lab(2).await;
+    set_recipe(
+        &lab,
+        "test -f OK || { printf 'error: 1 target failed:\\n    `-p app --test flaky`\\n'; exit 101; }",
+    )
+    .await;
+    let green = lab.branch("ter-g", "next", &[("OK", "yes\n")]);
+    let red = lab.branch("ter-r", "next", &[("other", "x\n")]);
+    for (title, branch, head) in [("green", "ter-g", &green), ("red", "ter-r", &red)] {
+        let id = lab.card(title, branch).await;
+        let r = lab
+            .td
+            .post_as(
+                &lab.w1,
+                &format!("/api/cards/{id}/validate"),
+                json!({"commit": head}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    // The green job, and the red job with its one rerun.
+    let start = Instant::now();
+    while lab.until_idle().await.len() < 3 {
+        assert!(start.elapsed() < DEADLINE, "no rerun");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    lab.until_idle().await;
+    let r = lab
+        .td
+        .get_as(&lab.w1, "/api/projects/p/jobs/stats?since=1h")
+        .await;
+    let s = r.ok();
+    assert_eq!(s["jobs"], 3, "{s}");
+    assert_eq!(s["first_attempt"]["ended"], 2, "{s}");
+    assert_eq!(s["first_attempt"]["passed"], 1, "{s}");
+    assert_eq!(s["first_attempt"]["pass_rate"], 0.5, "{s}");
+    assert_eq!(s["validate"]["ended"], 2, "{s}");
+    assert_eq!(s["reruns"]["ended"], 1, "{s}");
+    assert_eq!(s["reruns"]["passed"], 0, "{s}");
+    assert_eq!(s["errors"], 0, "{s}");
+    assert_eq!(s["untargeted_test_fails"], 0, "{s}");
+    assert_eq!(
+        s["failed_targets"],
+        json!([{"target": "-p app --test flaky", "failed": 2, "first_attempt": 1}]),
+        "{s}"
+    );
+    // The default window is 7 days. A time in the future has no jobs.
+    assert_eq!(
+        lab.td.get("/api/projects/p/jobs/stats").await.ok()["jobs"],
+        3
+    );
+    let r = lab
+        .td
+        .get("/api/projects/p/jobs/stats?since=2999-01-01T00:00:00Z")
+        .await;
+    assert_eq!(r.ok()["jobs"], 0);
+    assert!(r.ok()["first_attempt"]["pass_rate"].is_null());
+    lab.td
+        .get("/api/projects/p/jobs/stats?since=soon")
+        .await
+        .err(400, "bad_request");
 }
 
 #[tokio::test]
