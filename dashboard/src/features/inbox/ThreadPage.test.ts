@@ -298,3 +298,102 @@ describe("the agent's close proposal (TER-114)", () => {
     await waitFor(() => expect(el.textContent).toContain("Row confirm"));
   });
 });
+
+describe("the linked cards of a thread (TER-147)", () => {
+  /** The seeded thread with linked cards: WEB-4 (in progress), WEB-1 (done), TER-16 (review). */
+  const linked = () => api.world.threads!.find((t) => t.topic === "Checkout retries")!;
+  const panel = (el: HTMLElement) => el.querySelector("details[aria-label='Linked cards']") as HTMLDetailsElement | null;
+  const tile = (el: HTMLElement, id: string) => el.querySelector(`a.tracked-tile[data-card='${id}']`) as HTMLAnchorElement | null;
+  const withStatus = async (status: "tracking" | "waiting_agent", fn: () => Promise<void>) => {
+    const t = linked();
+    const old = t.status;
+    t.status = status;
+    try {
+      await fn();
+    } finally {
+      t.status = old;
+    }
+  };
+
+  it("shows a mini kanban, one row per project with its own board columns, folded while the thread does not track", async () => {
+    const { el } = mount(`/inbox/threads/${linked().id}`);
+    await waitFor(() => expect(tile(el, "WEB-4")).not.toBeNull());
+    const p = panel(el)!;
+    expect(p.open).toBe(false);
+    expect(p.dataset.open).toBe("folded");
+    expect(p.querySelector("summary")!.textContent).toContain("3 cards in 2 projects");
+    expect(p.querySelector("summary [data-testid=thread-progress]")!.textContent).toBe("2/3");
+
+    // M2: one row per project, in the order of the first link, each with the columns of its own board in board order.
+    const rows = [...p.querySelectorAll<HTMLElement>("section.tracked-row")];
+    expect(rows.map((r) => r.dataset.project)).toEqual(["webshop", "terrarium"]);
+    const cols = (r: HTMLElement) => [...r.querySelectorAll<HTMLElement>(".tracked-col")];
+    const board = await api.board.get("webshop");
+    expect(cols(rows[0]!).map((c) => c.dataset.column)).toEqual(board.columns.map((c) => c.name));
+    // An empty column is narrow; a column with a linked card is not.
+    const webCol = (name: string) => cols(rows[0]!).find((c) => c.dataset.column === name)!;
+    expect(webCol("backlog").classList.contains("empty")).toBe(true);
+    expect(webCol("in_progress").classList.contains("empty")).toBe(false);
+    expect(webCol("done").querySelector("[data-card='WEB-1']")).not.toBeNull();
+    // Only the linked cards: WEB-5 (blocked) is on the board but not linked.
+    expect(webCol("blocked").querySelector(".tracked-tile")).toBeNull();
+    expect(cols(rows[1]!).find((c) => c.dataset.column === "review")!.querySelector("[data-card='TER-16']")).not.toBeNull();
+
+    // M1: project:ID, title, assignee, ETA, and the state chip; a click opens the card on its board.
+    const t4 = tile(el, "WEB-4")!;
+    expect(t4.textContent).toContain("webshop:WEB-4");
+    expect(t4.querySelector(".title")!.textContent).toBe("Checkout flow");
+    expect(t4.textContent).toContain("shop-lead");
+    expect(t4.querySelector("[role=timer]")!.textContent).toMatch(/left$/);
+    expect(t4.getAttribute("href")).toBe("/p/webshop/board?card=WEB-4");
+    expect(tile(el, "TER-16")!.querySelector(".card-state")!.textContent).toBe("awaiting review");
+    expect(tile(el, "TER-16")!.getAttribute("href")).toBe("/p/terrarium/board?card=TER-16");
+  });
+
+  it("is open at the top while the thread tracks", async () => {
+    await withStatus("tracking", async () => {
+      const { el } = mount(`/inbox/threads/${linked().id}`);
+      await waitFor(() => expect(tile(el, "WEB-4")).not.toBeNull());
+      const p = panel(el)!;
+      expect(p.open).toBe(true);
+      expect(p.dataset.open).toBe("tracking");
+      // Above the conversation.
+      const log = el.querySelector("[aria-label=Conversation]")!;
+      expect(p.compareDocumentPosition(log) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+  });
+
+  it("shows no panel on a thread with no linked card", async () => {
+    const t = api.world.threads!.find((x) => x.topic === "Split the event store by project?")!;
+    const { el } = mount(`/inbox/threads/${t.id}`);
+    await waitFor(() => expect(el.querySelector("h1")?.textContent).toBe(t.topic));
+    expect(panel(el)).toBeNull();
+  });
+
+  it("shows the n/m chip in the Threads list, read live from the boards", async () => {
+    const rowOf = (el: HTMLElement, topic: string) => [...el.querySelectorAll<HTMLElement>("article[aria-label^='Thread ']")].find((r) => r.textContent?.includes(topic));
+    await withStatus("tracking", async () => {
+      let { el } = mount("/inbox?tab=thread&status=tracking");
+      await waitFor(() => expect(rowOf(el, "Checkout retries")?.querySelector("[data-testid=thread-progress]")?.textContent).toBe("2/3"));
+      const chip = rowOf(el, "Checkout retries")!.querySelector("[data-testid=thread-progress]")!;
+      expect(chip.getAttribute("title")).toBe("2 of 3 linked cards are in review or later");
+      expect(chip.classList.contains("ok")).toBe(false);
+
+      // WEB-4 reaches review: the next read of the boards counts it.
+      const web4 = api.world.cards.find((c) => c.id === "WEB-4")!;
+      const old = web4.column;
+      web4.column = "review";
+      try {
+        ({ el } = mount("/inbox?tab=thread&status=tracking"));
+        await waitFor(() => expect(rowOf(el, "Checkout retries")?.querySelector("[data-testid=thread-progress]")?.textContent).toBe("3/3"));
+        expect(rowOf(el, "Checkout retries")!.querySelector("[data-testid=thread-progress]")!.classList.contains("ok")).toBe(true);
+      } finally {
+        web4.column = old;
+      }
+    });
+    // A thread with no linked card has no chip.
+    const { el } = mount("/inbox?tab=thread");
+    await waitFor(() => expect(rowOf(el, "Split the event store by project?")).toBeTruthy());
+    expect(rowOf(el, "Split the event store by project?")!.querySelector("[data-testid=thread-progress]")).toBeNull();
+  });
+});

@@ -162,7 +162,7 @@ async fn the_lead_links_a_new_and_an_existing_card() {
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(lab.cards().await, [format!("p:{c1}"), format!("p:{c2}")]);
 
-    // The thread list has no `cards`: only the thread itself lists them.
+    // The thread list has the `cards` too (TER-147: the n/m chip).
     let list = lab.td.get("/api/threads").await.ok().clone();
     let row = list
         .as_array()
@@ -171,7 +171,8 @@ async fn the_lead_links_a_new_and_an_existing_card() {
         .find(|t| t["id"] == lab.tid.as_str())
         .unwrap()
         .clone();
-    assert!(row.get("cards").is_none(), "{row}");
+    assert_eq!(row["cards"][0]["card"], c1.as_str(), "{row}");
+    assert_eq!(row["cards"][1]["card"], c2.as_str(), "{row}");
 
     // The link is audited.
     let audit = lab
@@ -320,6 +321,22 @@ async fn a_link_needs_the_read_rights_and_gives_none() {
         .clone();
     assert_eq!(th["cards"], json!([]), "{th}");
     assert!(!th.to_string().contains(qc.as_str()), "{th}");
+    // Nor does the thread list (TER-147).
+    let list = lab
+        .td
+        .get_as(&lab.lead, "/api/threads?status=all")
+        .await
+        .ok()
+        .clone();
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == lab.tid.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(row["cards"], json!([]), "{row}");
+    assert!(!list.to_string().contains(qc.as_str()), "{list}");
     // The operator and the architect read `q`: they see it.
     assert_eq!(lab.cards().await, [format!("q:{qc}")]);
     let th = lab

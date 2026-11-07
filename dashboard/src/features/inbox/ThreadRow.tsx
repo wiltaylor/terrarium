@@ -2,16 +2,18 @@
 // Inbox item of kind `thread`. The topic is the opener's words: a text node
 // only. The link opens the chat page. A pending close proposal of the agent
 // shows with Confirm and Decline (TER-95); `onChange` reads the list again
-// after one, and after a 409.
+// after one, and after a 409. With `boards` (the Threads tab), the n/m chip
+// of the linked cards (TER-147).
 
 import { A } from "@solidjs/router";
 import { Show } from "solid-js";
-import type { Thread } from "../../api/types";
+import type { Board, Thread } from "../../api/types";
 import { CloseProposal, isConflict } from "./CloseProposal";
+import { ProgressChip } from "./TrackedCards";
 import { ago } from "../../lib/format";
 import { lastActivity, openQuestionCount, scopeLabel, threadChip, threadHref, waitsOnYou } from "./threads";
 
-export function ThreadRow(props: { thread: Thread; now: number; onChange?: () => void }) {
+export function ThreadRow(props: { thread: Thread; now: number; boards?: Record<string, Board | undefined>; onChange?: () => void }) {
   const t = () => props.thread;
   const chip = () => threadChip(t());
   const open = () => openQuestionCount(t());
@@ -22,6 +24,7 @@ export function ThreadRow(props: { thread: Thread; now: number; onChange?: () =>
         <span class={`chip ${chip().chip}`} data-testid="thread-status">
           {chip().label}
         </span>
+        <Show when={props.boards}>{(b) => <ProgressChip thread={t()} boards={b()} />}</Show>
         <span class="muted">{scopeLabel(t().scope)}</span>
         <Show when={t().agent_name}>
           {(n) => (
