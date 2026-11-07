@@ -1,0 +1,44 @@
+// Opt-in rules for a project that still validates cards (TER-170): the
+// labels, the comment, and the move to validating of a queued validate
+// job, as the coded flow does them. Not in the built-in pack, because the
+// operator removed the validating column and `card validate` for card
+// work (2026-11-07). Copy them into the project's rules.wcl; its board
+// needs a column with the role or the name `validating`.
+
+rule "validate-queued" {
+  description = "A new validate job: one validation label and the worker's by: label."
+  on = ["job"]
+  max_per_hour = 600
+  when "data.change" { eq = "queued" }
+  when "data.kind" { eq = "validate" }
+  when "data.origin" { eq = "queue" }
+  card_label {
+    remove = ["validation:*", "by:*"]
+    add = ["validation:queued", "by:{{job.by_agent}}"]
+  }
+}
+
+rule "validate-queued-note" {
+  description = "A new validate job of a card in validating already: the queue comment."
+  on = ["job"]
+  max_per_hour = 600
+  when "data.change" { eq = "queued" }
+  when "data.kind" { eq = "validate" }
+  when "data.origin" { eq = "queue" }
+  if_card { column = ["@validating"] }
+  card_comment { text = "{{job.queue_comment}}" }
+}
+
+rule "validate-queued-move" {
+  description = "A new validate job: the card moves to validating with the queue comment."
+  on = ["job"]
+  max_per_hour = 600
+  when "data.change" { eq = "queued" }
+  when "data.kind" { eq = "validate" }
+  when "data.origin" { eq = "queue" }
+  if_card { not_column = ["@validating"] }
+  card_move {
+    to = "@validating"
+    comment = "{{job.queue_comment}}"
+  }
+}
