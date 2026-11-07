@@ -38,8 +38,10 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 /// waits it out.
 const WAIT: Duration = Duration::from_secs(45);
 /// The lead nudge rate limit in these tests. Long enough that the requests
-/// a test makes inside one interval fit in it on a loaded machine.
-const LEAD_NUDGE: Duration = Duration::from_secs(4);
+/// a test makes inside one interval fit in it on a loaded machine. 4 s was
+/// too short at a load of 70 to 100: the hub listener handles each card
+/// event after a store read, and a move landed after the flush (TER-141).
+const LEAD_NUDGE: Duration = Duration::from_secs(10);
 
 fn fake_tui() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../terrarium-runner/tests/fake_tui/fake_tui.py")
