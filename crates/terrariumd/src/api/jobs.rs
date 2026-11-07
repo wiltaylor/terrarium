@@ -323,6 +323,7 @@ async fn cancel(
         .db
         .write(actor.label(), move |t| {
             let j = jobs::cancel(t, &jid)?;
+            rt::emit_verdicts(t, &j)?;
             for c in j.cards() {
                 let patch = CardPatch {
                     remove_labels: vec![rt::LABEL_QUEUED.into(), rt::LABEL_RUNNING.into()],

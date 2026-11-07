@@ -10661,3 +10661,15 @@ The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
 Events `job` {change, project, id, card, kind, state, attempt, outcome,
 cards?}; `cards` lists the cards of a batch.
+Events `job.verdict` {project, job, card, kind, verdict, state, outcome,
+attempt, by_agent, repo, branch, parent, batch, end_comment,
+failure_block}: one per card when a job ends or is cancelled, in the same
+write as the card flow above. `verdict` is `passed`, `red`, `conflict`,
+`cancelled`, or `error` (the job could not run, or the daemon restarted).
+In a batch each card has its own event: a card that left the batch is
+`conflict`, the merged cards have the verdict of the batch. `batch` lists
+the cards of a batch job, else `null`. `end_comment` is the `Job queue:`
+line of the end. `failure_block` is the `Validation failed:` block for
+`red`, `conflict`, and `error`, else `null`. The verdict says what the run
+found, not what the queue does next: the rerun and the split stay as
+above.
