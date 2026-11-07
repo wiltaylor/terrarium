@@ -2246,7 +2246,11 @@ mod tests {
         };
         let dir = tmp.path().join("jobs/p/slot-1");
         let d = dir.display().to_string();
-        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &one, "validate", &one], &bundle_of(&one));
+        let (ok, text) = run_plain(
+            RECEIVE_SCRIPT,
+            &[&d, &one, "validate", &one],
+            &bundle_of(&one),
+        );
         assert!(ok, "{text}");
         assert!(dir.join(CHANGED_FILES).exists());
 
@@ -2268,8 +2272,14 @@ mod tests {
         let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &two, "validate", ""], &b2);
         assert!(ok, "{text}");
         assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]), two);
-        assert_eq!(git_in(&dir, &["status", "--porcelain", "--ignored"]), "!! target/");
-        assert_eq!(std::fs::read_to_string(dir.join("README")).unwrap(), "two\n");
+        assert_eq!(
+            git_in(&dir, &["status", "--porcelain", "--ignored"]),
+            "!! target/"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README")).unwrap(),
+            "two\n"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("target/debug/kept")).unwrap(),
             "built"

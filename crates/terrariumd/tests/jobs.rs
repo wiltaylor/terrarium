@@ -1567,10 +1567,7 @@ test -f OK"#;
         heads.push(head);
     }
     let jobs = lab.until_idle().await;
-    assert!(
-        jobs.iter().all(|j| j["state"] == "passed"),
-        "{jobs:#?}"
-    );
+    assert!(jobs.iter().all(|j| j["state"] == "passed"), "{jobs:#?}");
     let mut slots: Vec<i64> = jobs.iter().map(|j| j["slot"].as_i64().unwrap()).collect();
     slots.sort_unstable();
     slots.dedup();
