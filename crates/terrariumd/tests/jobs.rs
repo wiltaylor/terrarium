@@ -3912,13 +3912,14 @@ async fn a_lost_host_agent_session_reruns_the_whole_batch() {
     let lab = lab(2).await;
     let marks = tempfile::tempdir().unwrap();
     let m = marks.path().display().to_string();
-    // Each run counts itself. The first run waits to be lost; the rerun
+    // Each run counts itself. The first run waits to be lost, far longer
+    // than the test: only the kill of the lost run ends it. The rerun
     // passes.
     set_recipe(
         &lab,
         &format!(
             "test -f OK && test -f s1 && test -f s2 && echo run >> '{m}/runs' && \
-             if test -f '{m}/ran'; then exit 0; fi; echo $$ > '{m}/pid'; touch '{m}/ran'; sleep 60"
+             if test -f '{m}/ran'; then exit 0; fi; echo $$ > '{m}/pid'; touch '{m}/ran'; sleep 600"
         ),
     )
     .await;
@@ -3960,8 +3961,14 @@ async fn a_lost_host_agent_session_reruns_the_whole_batch() {
             "{card}"
         );
     }
-    // The lost run's processes got the kill of a lost run.
-    assert!(!alive(pid), "the lost run {pid} outlived its rerun");
+    // The lost run's processes got the kill of a lost run: its recipe
+    // sleeps 600 s, so nothing else ends it by now (review, major 1).
+    if alive(pid) {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .status();
+        panic!("the lost run {pid} outlived its rerun");
+    }
     let jobs = lab.until_idle().await;
     assert_eq!(jobs.len(), 1, "the batch did not split: {jobs:#?}");
     let j = lab
