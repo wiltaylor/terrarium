@@ -13,6 +13,8 @@
 //! - `POST /api/threads/{id}/close`: the operator closes (or, with
 //!   `confirm`, confirms the agent's proposal); the attached agent
 //!   proposes the close (TER-95).
+//! - `POST /api/threads/{id}/track` (the attached agent): move the thread
+//!   into tracking after the handoff (TER-145).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -38,6 +40,7 @@ pub fn routes() -> Router<Shared> {
         .route("/threads/{id}/messages", post(post_message))
         .route("/threads/{id}/respond", post(respond))
         .route("/threads/{id}/close", post(close))
+        .route("/threads/{id}/track", post(track))
 }
 
 /// A thread that the caller may read; else `404`: the operator, an agent
@@ -206,7 +209,7 @@ async fn list(
         Some(s) => (
             Some(ThreadStatus::parse(s).ok_or_else(|| {
                 ApiError::invalid(format!(
-                    "bad status `{s}`: use waiting_operator, waiting_agent, closed, open, or all"
+                    "bad status `{s}`: use waiting_operator, waiting_agent, tracking, closed, open, or all"
                 ))
             })?),
             false,
@@ -349,6 +352,34 @@ async fn close(
                         b.summary.as_deref(),
                         b.links,
                     ),
+                }
+            })
+            .await?,
+    ))
+}
+
+/// The attached agent moves its thread into tracking after the handoff
+/// (TER-145, TER-144 D1). No body.
+async fn track(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Thread>> {
+    let by = actor.address();
+    let label = actor.label();
+    Ok(Json(
+        state
+            .db
+            .write(label, move |t| {
+                let th = readable(&actor, threads::get_bare(t, &id)?)?;
+                match &actor {
+                    Actor::Agent(a) if th.agent.as_deref() == Some(a.id.as_str()) => {
+                        threads::track(t, &th.id, &by)
+                    }
+                    _ => Err(ApiError::forbidden(format!(
+                        "tracking thread {}: only its attached agent moves it into tracking",
+                        th.id
+                    ))),
                 }
             })
             .await?,
