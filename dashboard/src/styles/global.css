@@ -2116,6 +2116,10 @@ a.chip.card-link:hover {
 .thread-question {
   max-width: 85%;
 }
+/* The agent's close proposal (TER-95): it waits on the operator. */
+.thread-proposal {
+  border-color: var(--warn);
+}
 @media (max-width: 760px) {
   .thread-msg,
   .thread-question {
@@ -4220,6 +4224,28 @@ p.warn { color: var(--warn); margin: 0; }
 .active-table .active-group h3 {
   margin: 0;
   font-size: 0.95rem;
+}
+/* Project actions (TER-53): buttons next to the project name on Home, and above the blocks on the dashboard. */
+.active-group-head {
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.action-buttons {
+  gap: 6px;
+  flex-wrap: wrap;
+  font-weight: normal;
+}
+.dash-actions {
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 10px 0 0;
+}
+.action-result {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
 }
 /* Home, Blocked (TER-51): one table for every project group, with fixed column widths, so the columns line up. The
    title and the reason end with an ellipsis; the full text is the tooltip. */

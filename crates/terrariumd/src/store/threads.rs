@@ -12,6 +12,12 @@
 //!   or a question of the agent, `waiting_agent` after a message or a
 //!   response of the operator, or when the last open question of the
 //!   thread is settled. `closed` does not change.
+//! - `tracking` (TER-145, TER-144 D1, D9): the agent handed the work off
+//!   and moved the thread into tracking ([`track`]). Its agent is parked,
+//!   and the reminder and the stale close do not apply. `tracking_at`
+//!   stays set while the thread tracks: an operator post wakes the agent
+//!   (`waiting_agent`), and the agent's reply puts the thread back into
+//!   `tracking`, not `waiting_operator`.
 //! - No register and no conflict check between threads (D36).
 //! - Events `thread` {change, id, scope, status}, and an `inbox` event for
 //!   the item `inbox-thread:<id>`.
@@ -59,6 +65,8 @@ pub const LINK_KINDS: &[&str] = &["card", "mail", "wiki", "memory", "url", "othe
 pub enum ThreadStatus {
     WaitingOperator,
     WaitingAgent,
+    /// The agent tracks handed-off work: parked, no stale close (TER-145).
+    Tracking,
     Closed,
 }
 
@@ -67,6 +75,7 @@ impl ThreadStatus {
         match self {
             Self::WaitingOperator => "waiting_operator",
             Self::WaitingAgent => "waiting_agent",
+            Self::Tracking => "tracking",
             Self::Closed => "closed",
         }
     }
@@ -75,6 +84,7 @@ impl ThreadStatus {
         match s {
             "waiting_operator" => Some(Self::WaitingOperator),
             "waiting_agent" => Some(Self::WaitingAgent),
+            "tracking" => Some(Self::Tracking),
             "closed" => Some(Self::Closed),
             _ => None,
         }
@@ -170,6 +180,11 @@ pub struct Thread {
     /// The last Inbox reminder of the untouched thread.
     #[serde(default)]
     pub reminded_at: Option<String>,
+    /// When the agent moved the thread into tracking ([`track`], TER-145).
+    /// Set while the thread tracks, also while an operator post wakes
+    /// the agent. `None`: the thread does not track.
+    #[serde(default)]
+    pub tracking_at: Option<String>,
 }
 
 /// Why a thread closed.
@@ -268,6 +283,7 @@ fn row(conn: &Connection, r: &Row<'_>) -> rusqlite::Result<Thread> {
         close_reason: r.get("close_reason")?,
         session_id: r.get("session_id")?,
         reminded_at: r.get("reminded_at")?,
+        tracking_at: r.get("tracking_at")?,
     })
 }
 
@@ -615,7 +631,9 @@ fn set_status(t: &mut Tx<'_>, id: &str, status: ThreadStatus, at: &str) -> ApiRe
 }
 
 /// Post a message: by the operator (then the agent must act) or by the
-/// attached agent (then the operator must act).
+/// attached agent (then the operator must act). In a thread that tracks
+/// (`tracking_at`), the agent's message puts it back into `tracking`
+/// (TER-145, D9).
 pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
     not_closed(&th, "a message")?;
@@ -624,6 +642,8 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     let msg = insert_message(t, &th.id, author, "message", &text, &at)?;
     let status = if author == "operator" {
         ThreadStatus::WaitingAgent
+    } else if th.tracking_at.is_some() {
+        ThreadStatus::Tracking
     } else {
         ThreadStatus::WaitingOperator
     };
@@ -670,6 +690,34 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
         "response",
         json!({"message": msg, "author": "operator"}),
     )?;
+    Ok(th)
+}
+
+/// The attached agent `by` moves thread `id` into tracking after its
+/// handoff (TER-145, TER-144 D1): the agent parks, and the reminder and
+/// the stale close do not apply. A close proposal is withdrawn. A thread
+/// with an open question waits on the operator: `409 conflict`.
+pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
+    let th = get_bare(t, id)?;
+    not_closed(&th, "tracking")?;
+    let open = open_questions(t, &th.id)?;
+    if open > 0 {
+        return Err(ApiError::conflict(format!(
+            "thread {} has {open} open question(s): the operator settles them first, or you \
+             retract them; then track it",
+            th.id
+        )));
+    }
+    let at = now();
+    t.execute(
+        "UPDATE threads SET status = 'tracking', tracking_at = ?2, updated_at = ?2,
+                            close_proposal = NULL
+         WHERE id = ?1",
+        params![th.id, at],
+    )?;
+    let th = get(t, &th.id)?;
+    t.audit("thread.track", &th.id, th.project(), json!({"by": by}))?;
+    emit_with(t, &th, "tracking", json!({"author": by}))?;
     Ok(th)
 }
 

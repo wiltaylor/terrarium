@@ -10,23 +10,24 @@ import type { ScopeFilter } from "../../lib/target-scope";
 /** The view: one project (its schedules and the global ones), or every schedule (`null`); and the tab. */
 export interface ScheduleView {
   project: string | null;
-  /** `time`: the time schedules; `trigger`: the triggers (spec `on`). Absent: both. */
+  /** `time`: the time schedules; `trigger`: the triggers (spec `on`); `action`: the project actions (spec `manual`). Absent: all. */
   kind?: ScheduleKind;
 }
 
-/** The two tabs of the page, and the `kind` of `GET /api/schedules`. */
-export type ScheduleKind = "time" | "trigger";
+/** The tabs of the page, and the `kind` of `GET /api/schedules`. */
+export type ScheduleKind = "time" | "trigger" | "action";
 export const SCHEDULE_TABS: readonly { id: ScheduleKind; label: string }[] = [
   { id: "time", label: "Schedules" },
   { id: "trigger", label: "Triggers" },
+  { id: "action", label: "Actions" },
 ];
 
-/** The tab of the URL: `?tab=triggers` is the triggers; anything else is the time schedules. */
-export const tabOf = (tab: string | undefined): ScheduleKind => (tab === "triggers" ? "trigger" : "time");
+/** The tab of the URL: `?tab=triggers` is the triggers, `?tab=actions` the project actions; anything else is the time schedules. */
+export const tabOf = (tab: string | undefined): ScheduleKind => (tab === "triggers" ? "trigger" : tab === "actions" ? "action" : "time");
 /** The `tab` query value of a tab; the time tab has none. */
-export const tabParam = (k: ScheduleKind): string | undefined => (k === "trigger" ? "triggers" : undefined);
+export const tabParam = (k: ScheduleKind): string | undefined => (k === "trigger" ? "triggers" : k === "action" ? "actions" : undefined);
 
-export const scheduleKind = (s: Pick<Schedule, "spec">): ScheduleKind => (s.spec.kind === "on" ? "trigger" : "time");
+export const scheduleKind = (s: Pick<Schedule, "spec">): ScheduleKind => (s.spec.kind === "on" ? "trigger" : s.spec.kind === "manual" ? "action" : "time");
 
 export interface ScheduleListState {
   items: Schedule[];

@@ -559,7 +559,8 @@ pub fn host_key(name: &str, def: &TargetDef) -> String {
     name.to_owned()
 }
 
-fn address_key(a: &str) -> String {
+/// The host part of an ssh address: no user, no port, lower case.
+pub fn address_key(a: &str) -> String {
     let a = a.rsplit_once('@').map_or(a, |(_, h)| h);
     if let Ok(ip) = a.parse::<std::net::IpAddr>() {
         return ip.to_string();
@@ -1308,6 +1309,24 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
     }
     let job = get(t, id)?;
     emit(t, &job, "ended")?;
+    Ok(Some(job))
+}
+
+/// Put a running job back in the queue: its target could not be reached
+/// before the recipe started (TER-160). It keeps its attempt and its place
+/// (`created_at`), and `tail` says why it waits. `None` when the job is
+/// not running (a cancel came first).
+pub fn requeue(t: &mut Tx<'_>, id: &str, why: &str) -> ApiResult<Option<Job>> {
+    let n = t.execute(
+        "UPDATE jobs SET state = 'queued', started_at = NULL, host = NULL, tail = ?2
+         WHERE id = ?1 AND state = 'running'",
+        params![id, clip_tail(&format!("waits for its host: {why}"))],
+    )?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let job = get(t, id)?;
+    emit(t, &job, "requeued")?;
     Ok(Some(job))
 }
 
