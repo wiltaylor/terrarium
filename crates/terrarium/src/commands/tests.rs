@@ -198,6 +198,108 @@ async fn daemon_and_system() {
     assert!(out.contains("roles: sysadmin,project_admin"), "{out}");
 }
 
+/// TER-140: the operator sets the GitHub author gate with `project set`.
+/// The list replaces the whole list, `--github-authors-clear` sends `[]`,
+/// the two flags do not combine, and `project show` lists the logins.
+#[tokio::test]
+async fn project_set_github_authors() {
+    ok(
+        false,
+        &[
+            "project",
+            "set",
+            "ops",
+            "--github-author",
+            "wiltaylor",
+            "--github-author",
+            "wiltaylor-daf",
+        ],
+        vec![(200, json!({"name": "ops"}))],
+        vec![(
+            Patch,
+            "/api/projects/ops",
+            vec![],
+            Some(json!({"github_authors": ["wiltaylor", "wiltaylor-daf"]})),
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &["project", "set", "ops", "--github-authors-clear"],
+        vec![(200, json!({"name": "ops"}))],
+        vec![(
+            Patch,
+            "/api/projects/ops",
+            vec![],
+            Some(json!({"github_authors": []})),
+        )],
+    )
+    .await;
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "project",
+            "set",
+            "ops",
+            "--github-author",
+            "wiltaylor",
+            "--github-authors-clear",
+        ])
+        .is_err(),
+        "the two flags conflict"
+    );
+    let out = ok(
+        false,
+        &["project", "show", "ops"],
+        vec![
+            (
+                200,
+                json!({"name": "ops", "card_prefix": "OPS", "source": "api",
+                       "github_authors": ["wiltaylor", "wiltaylor-daf"]}),
+            ),
+            (200, json!([])),
+            (200, json!([])),
+            (200, json!([])),
+            (200, json!({})),
+        ],
+        vec![
+            req(Get, "/api/projects/ops"),
+            req(Get, "/api/projects/ops/agents"),
+            req(Get, "/api/projects/ops/repos"),
+            req(Get, "/api/projects/ops/targets"),
+            req(Get, "/api/projects/ops/target-grants"),
+        ],
+    )
+    .await;
+    assert!(
+        out.contains("github authors: wiltaylor, wiltaylor-daf"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["project", "show", "ops"],
+        vec![
+            (
+                200,
+                json!({"name": "ops", "card_prefix": "OPS", "source": "api"}),
+            ),
+            (200, json!([])),
+            (200, json!([])),
+            (200, json!([])),
+            (200, json!({})),
+        ],
+        vec![
+            req(Get, "/api/projects/ops"),
+            req(Get, "/api/projects/ops/agents"),
+            req(Get, "/api/projects/ops/repos"),
+            req(Get, "/api/projects/ops/targets"),
+            req(Get, "/api/projects/ops/target-grants"),
+        ],
+    )
+    .await;
+    assert!(out.contains("github authors: none (no gate)"), "{out}");
+}
+
 #[tokio::test]
 async fn projects_and_repos() {
     ok(

@@ -150,6 +150,7 @@ terrarium project ls
 terrarium project show [name]                 the project, its agents, repos, targets, and target grants
 terrarium project new <name> [-d text] [--prefix TER]      sysadmin
 terrarium project set [name] [-d text] [--prefix P]        project_admin
+terrarium project set [name] [--github-author login]... [--github-authors-clear]   operator only (the GitHub author gate)
 terrarium project rm <name> --confirm         sysadmin
 terrarium project repos [name]
 terrarium project grant <target> --for monitors|schedules       sysadmin (--project p names the project)
