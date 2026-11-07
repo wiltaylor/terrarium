@@ -10544,7 +10544,7 @@ or the operator) read and set the config. The body is a JSON object:
 |----------------|-----------------------------------------------------------------|-----------------------|
 | `target`       | the target that runs the jobs                                   | none: no queue        |
 | `recipe`       | the command, run with `sh -c` in the root of the clone          | none: no queue        |
-| `slots`        | the most jobs that run at the same time                         | 2                     |
+| `slots`        | the most validate jobs that run at the same time                | 2                     |
 | `next_repos`   | the repos (by name) that have a `next` branch for merge jobs    | none                  |
 | `work_dir`     | the dir on the target for the job clones                        | `/tmp/terrarium-jobs` |
 | `timeout_secs` | the most time the recipe may run                                | 3600                  |
@@ -10570,13 +10570,19 @@ validate or a merge is a `409 conflict` that says how to set it.
 Jobs start first in, first out across all projects. A job starts when:
 
 1. its host is under its cap (the host cap, below), and
-2. its project has fewer than `slots` jobs running.
+2. for a validate job, its project has fewer than `slots` validate jobs
+   running.
 
-A merge job runs alone in its project: it starts only when no other job of
-the project runs, no job behind it starts first, and no job starts while
-it runs (see "Limits" below). Otherwise a job that must wait does not hold
-back a later job that may start. A card has at most one queued or running
-job.
+Merge jobs have their own lane (TER-159). At most one merge job of a
+project runs at a time, and the merges of a project start first in,
+first out among themselves, so `next` moves one merge at a time. A merge
+does not take one of the project's `slots`: validate jobs start beside a
+running or queued merge, up to the slots, and never wait behind a merge.
+The host cap counts the merge. Otherwise a job that must wait does not
+hold back a later job that may start. A card has at most one queued or
+running job. The `queue` answer of a validate or merge call gives the
+place and the running count in the job's own lane; a merge gives
+`slots: 1`.
 
 A job is three runs on the target, and a merge job has one more. The
 prepare run (clone, checkout, merge) and the push run get the repo
@@ -10614,14 +10620,16 @@ the files of the credential runs. It can leave a background process
 behind, or, while it runs next to another job of the project, write that
 job's push repo or read its key file. Any worker can start such a recipe
 with `card validate` on its own branch, so the exposure is any worker at
-the next merge, not only the merging card. A merge job runs alone in its
-project to shrink this, but a validate job still fetches with the
+the next merge, not only the merging card. Validate jobs run beside a
+merge (TER-159; before, a merge ran alone in its project), so a recipe
+that runs at the same time on the same target can reach the merge's push
+credential while the merge runs, and a validate job fetches with the
 credential while other recipes of the project run. Two more paths of the
-same kind: the recipes of another project on a shared global target (the
-merge-alone rule keeps apart only the jobs of one project), and an agent
-with exec on the delivery target, which can reach `<clone>.ssh/key` or
-the push repo with no recipe at all. The full fix (each recipe as its own
-user, or the credential runs on a host that runs no recipe) is TER-103.
+same kind: the recipes of another project on a shared global target, and
+an agent with exec on the delivery target, which can reach
+`<clone>.ssh/key` or the push repo with no recipe at all. The fix (each
+recipe as its own user, or the credential runs on a host that runs no
+recipe) is TER-103.
 
 The known hosts of the git runs are the repo host keys that the daemon's
 own git trusts (GitHub's published keys and the recorded ones), not the
@@ -10716,9 +10724,9 @@ A batch merge:
 - The order holds over nested splits: `split_path` in the job adds `0`
   for a left half and `1` for a right half to the path of its parent,
   and the queue sorts on it after `created_at` and `attempt`. So the left
-  half and all its splits run before the right half. A merge runs alone
-  in its project, so the right half merges onto a `next` that holds the
-  cards of the left half that passed.
+  half and all its splits run before the right half. One merge of a
+  project runs at a time, so the right half merges onto a `next` that
+  holds the cards of the left half that passed.
 - A card that a split leaves alone and that is red fails without the
   rerun: the red batch was its first red. A batch that ends with one
   merged card and red follows the rule of one card.

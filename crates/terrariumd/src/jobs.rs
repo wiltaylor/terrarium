@@ -4,8 +4,8 @@
 //! - A tick (each [`TICK`], and at once after a queue or an end) starts
 //!   the queued jobs that have a place: first in, first out across
 //!   projects, at most the host cap of the target's host (TER-97), then
-//!   at most the project's `slots`; a merge job runs alone in its
-//!   project. The pick and the start are one write, so two ticks cannot
+//!   at most the project's `slots` validate jobs; merge jobs have their
+//!   own lane, one at a time per project (TER-159). The pick and the start are one write, so two ticks cannot
 //!   overfill the slots.
 //! - A job is three commands on the project's target, each its own run:
 //!   1. prepare, with the repo credential in its env: a fresh clone in
