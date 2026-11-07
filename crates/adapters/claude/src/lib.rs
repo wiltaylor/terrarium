@@ -284,6 +284,14 @@ impl Adapter for ClaudeAdapter {
         keys::type_turn(text)
     }
 
+    fn turn_submit_pause(&self) -> std::time::Duration {
+        keys::SUBMIT_PAUSE
+    }
+
+    fn input_pending(&self, screen: &Screen) -> bool {
+        screen::input_pending(screen)
+    }
+
     fn answer(&self, _request_id: &str, answer: &Answer) -> Vec<u8> {
         keys::answer(answer)
     }
@@ -504,6 +512,8 @@ mod tests {
         let a: &dyn Adapter = &ClaudeAdapter::default();
         assert_eq!(a.answer("r", &Answer::Choice(1)), b"\x1b[B\r".to_vec());
         assert_eq!(a.type_turn("hi"), b"\x1b[200~hi\x1b[201~\r".to_vec());
+        // TER-194: the CR of a turn goes out on its own, after a pause.
+        assert!(!a.turn_submit_pause().is_zero());
         // Regression: the stop path needs the exit keys, else it kills.
         assert_eq!(a.exit_keys(), b"/exit\r".to_vec());
     }

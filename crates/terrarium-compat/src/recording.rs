@@ -130,6 +130,14 @@ impl Adapter for RecordingAdapter {
         self.inner.type_turn(text)
     }
 
+    fn turn_submit_pause(&self) -> Duration {
+        self.inner.turn_submit_pause()
+    }
+
+    fn input_pending(&self, screen: &Screen) -> bool {
+        self.inner.input_pending(screen)
+    }
+
     fn answer(&self, request_id: &str, answer: &Answer) -> Vec<u8> {
         self.inner.answer(request_id, answer)
     }

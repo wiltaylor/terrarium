@@ -124,6 +124,26 @@ pub trait Adapter: Send + Sync {
         bracketed_paste(text)
     }
 
+    /// The pause between the text of a turn and its final CR. With a pause,
+    /// the runner writes [`Adapter::type_turn`] without the CR, waits this
+    /// long, and then writes the CR on its own ([`exit_key_writes`]). A
+    /// harness that drops a CR that comes in the same burst as a long paste
+    /// needs it: Claude Code keeps the paste as "[Pasted text #N +L lines]"
+    /// in its input box and does not submit it (TER-194). The default is
+    /// zero: one write.
+    fn turn_submit_pause(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    /// True when the input box of the harness holds text, and a CR would
+    /// submit it: not busy, and no dialog. The runner presses CR again
+    /// when a typed turn still sits in the input box, and warns when an
+    /// idle agent keeps text in its input box, because no turn can go out
+    /// then. The default is false: the adapter cannot tell.
+    fn input_pending(&self, _screen: &Screen) -> bool {
+        false
+    }
+
     /// Keystrokes that type `text` as-is and press Enter, for a leader's
     /// raw send (`POST /api/agents/{id}/send` with `raw: true`): a slash
     /// command or a bang command runs. No bracketed paste and no escape

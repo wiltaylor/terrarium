@@ -428,7 +428,11 @@ fn planned(eta: Option<&str>) -> ApiResult<Option<i64>> {
 
 /// The repo of a job: the given one, the card's, or the project's only
 /// repo.
-fn repo_of(t: &rusqlite::Connection, card: &Card, given: Option<String>) -> ApiResult<String> {
+pub(crate) fn repo_of(
+    t: &rusqlite::Connection,
+    card: &Card,
+    given: Option<String>,
+) -> ApiResult<String> {
     if let Some(r) = given.or_else(|| card.repo.clone()) {
         if repos::find_by_name(t, &card.project, &r)?.is_none() {
             return Err(ApiError::invalid(format!(
@@ -458,7 +462,7 @@ fn repo_of(t: &rusqlite::Connection, card: &Card, given: Option<String>) -> ApiR
 
 /// The branch of a job: the given one, the card's, or the card ID in
 /// lower case.
-fn branch_of(card: &Card, given: Option<String>) -> ApiResult<String> {
+pub(crate) fn branch_of(card: &Card, given: Option<String>) -> ApiResult<String> {
     let b = given
         .or_else(|| card.branch.clone())
         .unwrap_or_else(|| card.id.to_lowercase());
@@ -466,7 +470,7 @@ fn branch_of(card: &Card, given: Option<String>) -> ApiResult<String> {
     Ok(b)
 }
 
-fn enabled(def: &DeliveryDef, project: &str) -> ApiResult<()> {
+pub(crate) fn enabled(def: &DeliveryDef, project: &str) -> ApiResult<()> {
     if def.enabled() {
         return Ok(());
     }
@@ -510,7 +514,7 @@ fn queued_answer(
 /// the card as the operator (to `validating`, then on with its result),
 /// so a job would take a held card out of the blocked column. This holds
 /// for the operator too: the operator releases the card first.
-fn not_held(card: &Card) -> ApiResult<()> {
+pub(crate) fn not_held(card: &Card) -> ApiResult<()> {
     if github_gate::is_held(&card.title, &card.labels) {
         return Err(ApiError::forbidden(format!(
             "{} is held by the GitHub author gate: no validate or merge job for it until the \
@@ -523,7 +527,7 @@ fn not_held(card: &Card) -> ApiResult<()> {
 
 /// Who may queue a validation of a card: its assignee or a project
 /// admin. Never for a held card ([`not_held`]).
-fn may_validate(actor: &Actor, card: &Card) -> ApiResult<()> {
+pub(crate) fn may_validate(actor: &Actor, card: &Card) -> ApiResult<()> {
     policy::read_project(actor, &card.project)?;
     not_held(card)?;
     if card.assignee.as_deref() == Some(actor.address().as_str()) {

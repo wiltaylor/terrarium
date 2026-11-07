@@ -1721,7 +1721,7 @@ fn end_comment(j: &Job, verdict: &str) -> String {
 }
 
 /// The "Validation failed" block at the top of a card body.
-fn failure_block(j: &Job) -> String {
+pub(crate) fn failure_block(j: &Job) -> String {
     let tail: String = j
         .tail
         .as_deref()
