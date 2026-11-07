@@ -441,7 +441,7 @@ pub fn create(t: &mut Tx<'_>, new: &NewTemplate, repo: Option<&Path>) -> ApiResu
     }
     let id = ulid::Ulid::new().to_string();
     let at = now();
-    let grants_by = grants_by_of(t, None, &spec);
+    let grants_by = grants_by_of(t, &spec);
     t.execute(
         "INSERT INTO agent_templates (id, name, project, scope, description, spec, revision,
                                       created_by, source, created_at, updated_at, grants_by)
@@ -472,18 +472,18 @@ pub fn create(t: &mut Tx<'_>, new: &NewTemplate, repo: Option<&Path>) -> ApiResu
 }
 
 /// The `grants_by` of a template after a write of `spec` (TER-88): the
-/// writer (`t.actor`) when the write sets or changes `grants`, the old
-/// value when they stay the same, `None` with no grants.
-fn grants_by_of(t: &Tx<'_>, before: Option<&Template>, spec: &Spec) -> Option<String> {
-    let new = agent_template::grants_of(spec).unwrap_or_default();
-    if new.is_empty() {
-        return None;
-    }
-    match before {
-        Some(b) if agent_template::grants_of(&b.spec).unwrap_or_default() == new => {
-            b.grants_by.clone()
-        }
-        _ => Some(t.actor.clone()),
+/// writer (`t.actor`) on every write of a spec with `grants`, `None` with
+/// no grants. A write that keeps the grants list also changes the prompt,
+/// the tools, or the policy that the grants run with, so its writer must
+/// have the right to grant them ([`crate::spawn_rights::check_template_write`]).
+fn grants_by_of(t: &Tx<'_>, spec: &Spec) -> Option<String> {
+    if agent_template::grants_of(spec)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        None
+    } else {
+        Some(t.actor.clone())
     }
 }
 
@@ -505,21 +505,29 @@ pub struct TemplatePatch {
     pub source: Option<String>,
 }
 
-/// Change a template, and stage its file in `repo` (a rename moves the
-/// file). A change of the name, the description, or the spec adds 1 to
-/// `revision`; an equal value is no change.
-pub fn update(
-    t: &mut Tx<'_>,
-    id: &str,
-    p: &TemplatePatch,
-    repo: Option<&Path>,
-) -> ApiResult<Template> {
-    let before = get(t, id)?;
+/// The values of a template after a patch, as [`update`] writes them.
+struct Planned {
+    name: String,
+    description: String,
+    spec: Spec,
+    source: String,
+    /// The name, the description, or the spec changes.
+    changed: bool,
+}
+
+impl Planned {
+    /// [`update`] writes the row: a value or the source changes.
+    fn writes(&self, before: &Template) -> bool {
+        self.changed || self.source != before.source
+    }
+}
+
+fn plan_update(conn: &Connection, before: &Template, p: &TemplatePatch) -> ApiResult<Planned> {
     let name = match &p.name {
         Some(n) if *n != before.name => {
             check_name("template", n)
                 .map_err(|e| crate::store::schedules::field_error("name", e.message))?;
-            if find_in(t, before.project.as_deref(), n)?.is_some() {
+            if find_in(conn, before.project.as_deref(), n)?.is_some() {
                 return Err(ApiError::conflict(format!(
                     "template `{n}` exists in {}",
                     scope_words(before.project.as_deref())
@@ -530,7 +538,7 @@ pub fn update(
         _ => before.name.clone(),
     };
     let spec = match &p.spec {
-        Some(s) => checked(t, s)?,
+        Some(s) => checked(conn, s)?,
         None => before.spec.clone(),
     };
     let description = p
@@ -539,10 +547,47 @@ pub fn update(
         .unwrap_or_else(|| before.description.clone());
     let changed = name != before.name || spec != before.spec || description != before.description;
     let source = p.source.clone().unwrap_or_else(|| before.source.clone());
-    if !changed && source == before.source {
+    Ok(Planned {
+        name,
+        description,
+        spec,
+        source,
+        changed,
+    })
+}
+
+/// The spec that [`update`] would write for `p`, or `None` when it would
+/// write nothing (each value and the source stay the same). The callers
+/// check the template grants of that spec before the write (TER-88): any
+/// write makes the writer the template's `grants_by`.
+pub fn would_write(conn: &Connection, id: &str, p: &TemplatePatch) -> ApiResult<Option<Spec>> {
+    let before = get(conn, id)?;
+    let plan = plan_update(conn, &before, p)?;
+    Ok(plan.writes(&before).then_some(plan.spec))
+}
+
+/// Change a template, and stage its file in `repo` (a rename moves the
+/// file). A change of the name, the description, or the spec adds 1 to
+/// `revision`; an equal value is no change.
+pub fn update(
+    t: &mut Tx<'_>,
+    id: &str,
+    p: &TemplatePatch,
+    repo: Option<&Path>,
+) -> ApiResult<Template> {
+    let before = get(t, id)?;
+    let plan = plan_update(t, &before, p)?;
+    if !plan.writes(&before) {
         return Ok(before);
     }
-    let grants_by = grants_by_of(t, Some(&before), &spec);
+    let Planned {
+        name,
+        description,
+        spec,
+        source,
+        changed,
+    } = plan;
+    let grants_by = grants_by_of(t, &spec);
     t.execute(
         "UPDATE agent_templates SET name = ?2, description = ?3, spec = ?4,
                 revision = revision + ?5, source = ?6, updated_at = ?7, grants_by = ?8
@@ -593,6 +638,30 @@ pub fn delete(t: &mut Tx<'_>, id: &str, repo: Option<&Path>) -> ApiResult<()> {
     Ok(())
 }
 
+/// The change that [`upsert_def`] makes to a template that exists.
+fn def_patch(def: &TemplateDef, source: &str) -> TemplatePatch {
+    TemplatePatch {
+        name: None,
+        description: Some(def.description.clone().unwrap_or_default()),
+        spec: Some(def.spec.clone()),
+        source: Some(source.to_owned()),
+    }
+}
+
+/// The spec that [`upsert_def`] would write, or `None` when it would write
+/// nothing (see [`would_write`]).
+pub fn upsert_would_write(
+    conn: &Connection,
+    project: Option<&str>,
+    def: &TemplateDef,
+    source: &str,
+) -> ApiResult<Option<Spec>> {
+    match find_in(conn, project, &def.name)? {
+        Some(have) => would_write(conn, &have.id, &def_patch(def, source)),
+        None => Ok(Some(def.spec.clone())),
+    }
+}
+
 /// Write the template of a project file or a fleet: make it, or change
 /// it to the file values and give it `source`.
 pub fn upsert_def(
@@ -604,17 +673,7 @@ pub fn upsert_def(
     repo: Option<&Path>,
 ) -> ApiResult<Template> {
     match find_in(t, project, &def.name)? {
-        Some(have) => update(
-            t,
-            &have.id,
-            &TemplatePatch {
-                name: None,
-                description: Some(def.description.clone().unwrap_or_default()),
-                spec: Some(def.spec.clone()),
-                source: Some(source.to_owned()),
-            },
-            repo,
-        ),
+        Some(have) => update(t, &have.id, &def_patch(def, source), repo),
         None => create(
             t,
             &NewTemplate {

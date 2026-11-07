@@ -683,11 +683,12 @@ async fn a_create_from_a_template_needs_the_right_to_grant_its_secrets() {
 }
 
 /// TER-88 review: writing grants into a template needs the right to grant
-/// each secret (`policy::grant_secret`), at the create and at a PATCH that
-/// changes them. A project_admin may put a secret of its project into a
-/// template of its project, not a global secret. A grant with no scope
-/// counts as the secret that it names now. A PATCH that keeps the grants
-/// checks nothing; one that drops them is fine.
+/// each secret (`policy::grant_secret`), at the create and at any PATCH
+/// of a template with grants (round 2 finding 1). A project_admin may put
+/// a secret of its project into a template of its project, not a global
+/// secret. A grant with no scope counts as the secret that it names now.
+/// A PATCH that changes nothing checks nothing; one that drops all the
+/// grants is fine. The writer becomes `grants_by`.
 #[tokio::test]
 async fn writing_template_grants_needs_the_right_to_grant_them() {
     let (td, lead, _w) = setup().await;
@@ -723,42 +724,82 @@ async fn writing_template_grants_needs_the_right_to_grant_them() {
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["grants_by"], format!("agent:{lead}"), "{}", r.body);
 
-    // The operator's template with a global grant: the project_admin may
-    // change other fields, and drop the grants, but not change them.
+    // The operator's template with a global grant: any write by the
+    // project_admin that keeps a grant is refused and names the grant (a
+    // new prompt would run with the operator's secret). A write that
+    // changes nothing is fine. One that drops all the grants is fine.
     let r = td
-        .post("/api/templates", new("op", json!(["global/openai:read"])))
+        .post(
+            "/api/templates",
+            json!({"name": "op", "project": "p", "description": "d0",
+                   "spec": {"harness": "claude", "prompt": "worker",
+                            "grants": ["global/openai:read"]}}),
+        )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["grants_by"], "operator", "{}", r.body);
     let tid = id(&r.body);
     let path = format!("/api/templates/{tid}");
-    let r = td.patch_as(&lead, &path, json!({"description": "d"})).await;
+    let same = json!({"harness": "claude", "prompt": "worker",
+                      "grants": ["global/openai:read"]});
+    for patch in [
+        json!({"spec": {"harness": "claude", "prompt": "mine",
+                        "grants": ["global/openai:read"]}}),
+        json!({"description": "d"}),
+        json!({"name": "op2"}),
+        json!({"spec": {"harness": "claude", "prompt": "worker",
+                        "grants": ["global/openai:use"]}}),
+    ] {
+        let r = td.patch_as(&lead, &path, patch.clone()).await;
+        assert_eq!(r.status, 403, "{patch}: {}", r.body);
+        assert!(
+            message(&r).contains("the grant `global/openai:"),
+            "{}",
+            r.body
+        );
+        assert!(message(&r).contains("secret `global/openai`"), "{}", r.body);
+        let shown = td.get(&path).await;
+        let shown = shown.ok();
+        assert_eq!(shown["spec"]["prompt"], "worker", "{shown}");
+        assert_eq!(
+            shown["spec"]["grants"],
+            json!(["global/openai:read"]),
+            "{shown}"
+        );
+        assert_eq!(shown["name"], "op", "{shown}");
+        assert_eq!(shown["description"], "d0", "{shown}");
+        assert_eq!(shown["grants_by"], "operator", "{shown}");
+    }
+    // The same values: no write, nothing to check.
+    let r = td
+        .patch_as(&lead, &path, json!({"description": "d0", "spec": same}))
+        .await;
     assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["grants_by"], "operator", "{}", r.body);
+    // A sysadmin may change the prompt; it becomes grants_by.
+    let sys = id(&td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await);
     let r = td
         .patch_as(
-            &lead,
+            &sys,
             &path,
-            json!({"spec": {"harness": "claude", "model": "m",
+            json!({"spec": {"harness": "claude", "prompt": "sysworker",
                             "grants": ["global/openai:read"]}}),
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    assert_eq!(r.body["grants_by"], "operator", "{}", r.body);
+    assert_eq!(r.body["grants_by"], format!("agent:{sys}"), "{}", r.body);
+    assert_eq!(r.body["spec"]["prompt"], "sysworker", "{}", r.body);
+    // The project_admin's new prompt that also drops all the grants.
     let r = td
         .patch_as(
             &lead,
             &path,
-            json!({"spec": {"harness": "claude", "grants": ["global/openai:use"]}}),
+            json!({"spec": {"harness": "claude", "prompt": "mine"}}),
         )
         .await;
-    assert_eq!(r.status, 403, "{}", r.body);
-    assert!(message(&r).contains("secret `global/openai`"), "{}", r.body);
-    let shown = td.get(&path).await;
-    assert_eq!(shown.ok()["spec"]["grants"], json!(["global/openai:read"]));
-    let r = td
-        .patch_as(&lead, &path, json!({"spec": {"harness": "claude"}}))
-        .await;
     assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["spec"]["prompt"], "mine", "{}", r.body);
+    assert!(r.body["spec"].get("grants").is_none(), "{}", r.body);
     assert!(r.body.get("grants_by").is_none(), "{}", r.body);
 }
 

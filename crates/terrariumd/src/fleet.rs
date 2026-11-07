@@ -1495,16 +1495,16 @@ pub fn apply(
         record_project(t, &name, &p.def, p.delivery.is_some())?;
     }
     for (p, d) in f.all_templates() {
-        // Grants on a template need the right to grant each secret
-        // (TER-88), as for `POST /api/templates` and its PATCH.
-        let old = templates::find_in(t, p, &d.name)?.map(|x| x.spec);
+        // Any write to a template with grants needs the right to grant
+        // each secret (TER-88), as for `POST /api/templates` and its
+        // PATCH. An upsert that changes nothing checks nothing.
+        let written = templates::upsert_would_write(t, p, d, &source)?;
         crate::spawn_rights::check_template_write(
             t,
             actor,
             p,
             &terrarium_core::fleet::template_key(p, &d.name),
-            old.as_ref(),
-            &d.spec,
+            written.as_ref(),
         )?;
         let live = templates::upsert_def(t, p, d, &source, &actor.label(), repo)?;
         record(

@@ -1394,3 +1394,86 @@ template = "mine"
     );
     assert!(secret_grants_to(&td, "global/gk", &old).await.is_empty());
 }
+
+/// The template `fx/tg`.
+async fn fx_template(td: &TestDaemon) -> Value {
+    td.get("/api/templates?project=fx")
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "tg")
+        .cloned()
+        .unwrap()
+}
+
+/// TER-88 round 2 finding 1: a fleet upsert of a template with grants
+/// needs the right to grant each secret, also when it keeps the grants
+/// list. A project_admin may not change the model of the operator's
+/// template with a global grant; an apply that changes nothing, and one
+/// that drops all the grants, pass. A sysadmin's change passes and makes
+/// it `grants_by`.
+#[tokio::test]
+async fn a_fleet_upsert_that_keeps_template_grants_needs_the_right_to_grant_them() {
+    let td = TestDaemon::start().await;
+    td.project("fx").await;
+    let lead = td
+        .agent("fx", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let lead = lead["id"].as_str().unwrap().to_owned();
+    let sys = td
+        .agent("fx", "sys", json!({"roles": ["sysadmin"]}))
+        .await;
+    let sys = sys["id"].as_str().unwrap().to_owned();
+    let r = td
+        .put(
+            "/api/secrets/global/gk",
+            json!({"kind": "api_key", "fields": {"value": "fleet-grant-value-7Hd4"}}),
+        )
+        .await;
+    assert!(r.status.is_success(), "{}", r.body);
+    let fleet = |extra: &str| {
+        format!(
+            "name = \"fx\"\n[[projects]]\nname = \"fx\"\n[[projects.templates]]\n\
+             name = \"tg\"\nharness = \"claude\"\n{extra}"
+        )
+    };
+    let kept = |model: &str| fleet(&format!("model = \"{model}\"\ngrants = [\"global/gk:read\"]\n"));
+    td.post("/api/fleet/apply", body(&kept("m1"))).await.ok();
+    let t = fx_template(&td).await;
+    assert_eq!(t["grants_by"], "operator", "{t}");
+
+    // The project_admin changes the model and keeps the grant: 403.
+    let r = td.post_as(&lead, "/api/fleet/apply", body(&kept("m2"))).await;
+    r.err(403, "forbidden");
+    let m = r.body["error"]["message"].as_str().unwrap();
+    assert!(m.contains("the grant `global/gk:read`"), "{}", r.body);
+    assert!(m.contains("secret `global/gk`"), "{}", r.body);
+    let t = fx_template(&td).await;
+    assert_eq!(t["spec"]["model"], "m1", "{t}");
+    assert_eq!(t["grants_by"], "operator", "{t}");
+
+    // The same values: no write, nothing to check.
+    td.post_as(&lead, "/api/fleet/apply", body(&kept("m1")))
+        .await
+        .ok();
+    assert_eq!(fx_template(&td).await["grants_by"], "operator");
+
+    // A sysadmin changes the model: it becomes grants_by.
+    td.post_as(&sys, "/api/fleet/apply", body(&kept("m3")))
+        .await
+        .ok();
+    let t = fx_template(&td).await;
+    assert_eq!(t["spec"]["model"], "m3", "{t}");
+    assert_eq!(t["grants_by"], format!("agent:{sys}"), "{t}");
+
+    // The project_admin changes the model and drops the grants: fine.
+    td.post_as(&lead, "/api/fleet/apply", body(&fleet("model = \"m4\"\n")))
+        .await
+        .ok();
+    let t = fx_template(&td).await;
+    assert_eq!(t["spec"]["model"], "m4", "{t}");
+    assert!(t["spec"].get("grants").is_none(), "{t}");
+    assert!(t.get("grants_by").is_none(), "{t}");
+}

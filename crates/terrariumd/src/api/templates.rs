@@ -219,8 +219,7 @@ async fn create(
                 &who,
                 new.project.as_deref(),
                 &key,
-                None,
-                &new.spec,
+                Some(&new.spec),
             )?;
             templates::create(t, &new, repo.as_deref())
         })
@@ -295,18 +294,20 @@ async fn update(
         .write(actor.label(), move |tx| {
             if let Some(spec) = &patch.spec {
                 templates::check_subscription(tx, spec)?;
-                // A change of the grants needs the right to grant each
-                // secret (TER-88), checked against the row as it is now.
-                let now = templates::get(tx, &t.id)?;
-                crate::spawn_rights::check_template_write(
-                    tx,
-                    &who,
-                    now.project.as_deref(),
-                    &now.key(),
-                    Some(&now.spec),
-                    spec,
-                )?;
             }
+            // Any write to a template with grants needs the right to grant
+            // each secret (TER-88), checked against the row as it is now:
+            // a change of the prompt, the tools, or the policy changes
+            // what the grants run with.
+            let now = templates::get(tx, &t.id)?;
+            let written = templates::would_write(tx, &t.id, &patch)?;
+            crate::spawn_rights::check_template_write(
+                tx,
+                &who,
+                now.project.as_deref(),
+                &now.key(),
+                written.as_ref(),
+            )?;
             if let Some(tools) = &tools {
                 crate::store::tools::check_template_tools(tx, project.as_deref(), tools)?;
             }

@@ -23,9 +23,9 @@
 //!   of the body replaces the template's grant of the same secret
 //!   ([`check_spawn_grants`]). A create from a template (not a spawn) has
 //!   no owner: each grant needs the caller's right to grant the secret
-//!   ([`check_create_grants`]). Writing grants into a template needs the
-//!   right to grant each secret ([`check_template_write`]), and a spawn or
-//!   a create checks again that the one who set them still has it.
+//!   ([`check_create_grants`]). Any write to a template with grants needs
+//!   the right to grant each secret ([`check_template_write`]), and a spawn
+//!   or a create checks again that the last writer still has it.
 //! - **Pool**: a template with no `subscription` and no
 //!   `subscription_pool` takes the owner's account and pool when the owner
 //!   runs the same harness, so the quota switch covers the child.
@@ -281,32 +281,33 @@ fn in_template(key: &str) -> impl Fn(ApiError) -> ApiError + '_ {
     }
 }
 
-/// Check that `actor` may write the grants of `new` into a template of
-/// `project` (`None`: a global template) named `key` (TER-88): the right
-/// to grant each secret ([`crate::policy::grant_secret`]): the operator or
-/// a sysadmin for any secret, a project_admin for a secret of its own
-/// project. A write that keeps the grants of `old` checks nothing. A write
-/// that sets or changes them checks each one, because the writer becomes
-/// the template's `grants_by`. A grant with no scope counts as the secret
+/// Check that `actor` may write a template of `project` (`None`: a global
+/// template) named `key` whose spec after the write is `written` (TER-88):
+/// the right to grant each secret of its grants
+/// ([`crate::policy::grant_secret`]): the operator or a sysadmin for any
+/// secret, a project_admin for a secret of its own project. `written` is
+/// `None` when the write changes nothing (see
+/// [`crate::store::templates::would_write`]): that checks nothing. Any
+/// other write of a spec with grants checks each one, also when the
+/// grants list stays the same: the write can change the prompt, the
+/// tools, the targets, or the policy that the grants run with, and the
+/// writer becomes the template's `grants_by`. A write that drops all the
+/// grants is always allowed. A grant with no scope counts as the secret
 /// that it names now (the project's, else the global one); with no such
 /// secret, as a secret of the template's project. A refusal is `403` and
-/// names the secret.
+/// names the grant and the secret.
 pub fn check_template_write(
     conn: &Connection,
     actor: &Actor,
     project: Option<&str>,
     key: &str,
-    old: Option<&terrarium_core::agent_template::Spec>,
-    new: &terrarium_core::agent_template::Spec,
+    written: Option<&terrarium_core::agent_template::Spec>,
 ) -> ApiResult<()> {
     use terrarium_core::agent_template::grants_of;
-    let want = grants_of(new).map_err(ApiError::invalid)?;
-    let had = old
-        .map(|o| grants_of(o).unwrap_or_default())
-        .unwrap_or_default();
-    if want.is_empty() || want == had {
+    let Some(new) = written else {
         return Ok(());
-    }
+    };
+    let want = grants_of(new).map_err(ApiError::invalid)?;
     for g in &want {
         let ask = parse_grant(g)?;
         let scope = match (&ask.scope, project) {
@@ -324,8 +325,9 @@ pub fn check_template_write(
         };
         crate::policy::grant_secret(actor, &scope).map_err(|e| {
             ApiError::forbidden(format!(
-                "template `{key}`: the grant `{g}` gives secret `{scope}/{}`; setting it needs \
-                 the right to grant that secret ({})",
+                "template `{key}`: the grant `{g}` gives secret `{scope}/{}`; a write to a \
+                 template with this grant needs the right to grant that secret, or must drop \
+                 all the grants ({})",
                 ask.name, e.message
             ))
         })?;
