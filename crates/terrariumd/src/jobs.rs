@@ -1208,9 +1208,12 @@ async fn run_inner(
         ionice,
         recipe_started,
         recipe_lost,
-        ssh_host: (row.def.kind == TargetKind::Ssh)
-            .then(|| row.def.address.as_deref().map(jobs::address_key))
-            .flatten(),
+        ssh_host: row
+            .def
+            .address
+            .as_deref()
+            .filter(|_| row.def.kind == TargetKind::Ssh)
+            .map(jobs::address_key),
         slot,
         wipe,
     };
