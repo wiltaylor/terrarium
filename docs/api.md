@@ -7997,8 +7997,8 @@ any number of `if_card` and `if_job` conditions on the current state
 (`who`), `card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
 `job_queue` (`kind` `validate`, `merge`, or `batch`; `from` and `limit?`
 for a batch), `job_cancel`, `job_rerun` (`max_attempts?`), `job_split`,
-`agent_park`, `agent_unpark` (`turn?`), and `agent_end` (`outcome` `done`
-or `cancelled`).
+`job_fix` (`to?`, `labels?`), `agent_park`, `agent_unpark` (`turn?`), and
+`agent_end` (`outcome` `done` or `cancelled`).
 
 The checks beyond the schema:
 
@@ -8120,12 +8120,80 @@ of a `job` event, `data.id`; a rule with one runs only for `job` events):
 must hold; every block must hold.
 
 Templates are filled when the action runs, from the event, the current
-card, the event's job, and the rule. In a text that an agent reads
-(`text`, `comment`, `subject`, `body`, `turn`) each value is quoted
-data (one line, in backticks), as in a trigger mail (§19.4).
+card, the event's job (of a `job` event, `data.id`, or a `job.verdict`
+event, `data.job`; the fields of a `job.verdict` event come first, so
+`{{job.outcome}}` and `{{job.by_agent}}` are the card's), and the rule.
+In a text that an agent reads (`text`, `comment`, `subject`, `body`,
+`turn`) each value is quoted data (one line, in backticks), as in a
+trigger mail (§19.4). The `text` of `card_prepend` is the exception: it
+goes into the card body with its lines, so a failure block stays whole.
 
-Verbs: only `card_comment` runs in this version. Every other verb fails
-its action with ``verb `card.move` is not implemented yet`` (TER-169).
+Verbs (TER-169). Each verb goes through the store functions of the API
+as the rule actor, so the same checks hold. A verb whose precondition
+does not hold changes nothing (a no-op, `changed: false` in `steps`).
+
+- `card_move`: move the run's card to `to`. A card not in `from` (when
+  given), or in `to` already, is a no-op. `position = "top"` puts it at
+  the top. The board invariants hold (a move to the blocked column needs
+  a `comment`).
+- `card_label`: add and remove labels; a label whose placeholder is empty
+  is left out. No change: a no-op.
+- `card_comment`: a comment on the run's card.
+- `card_assign`: assign the run's card to `who` (an agent name or a
+  template), or unassign it with `none`. A template that fills to nothing
+  fails the action (only `none` unassigns). The same assignee: a no-op.
+- `card_prepend`: put `text` at the top of the card body. A body that
+  starts with the text already: a no-op.
+- `mail`: mail from `project:<project>` to each of `to` (`operator`,
+  `project:<name>`, or an agent; one whose placeholder is empty is left
+  out). The body defaults to the subject. A rule notifies the operator
+  with `to = ["operator"]`.
+- `job_queue`: `validate` or `merge` queues a job for the run's card, of
+  its repo and branch (the card's, else its ID in lower case), with the
+  API's checks (the queue is set, a merge needs `project_admin` and a
+  repo in `next_repos`). `batch` queues one merge of the cards of column
+  `from` in board order, at most `limit` (and 32); a held card or one
+  with an open job is left out (`left_out` in the detail). A card with an
+  open job, or no card to merge: a no-op. The labels, the comment and the
+  move of the API's queue are not part of the verb: a rule does them with
+  the card verbs on the `job` event.
+- `job_cancel`: cancel the event's job, else the open job of the run's
+  card, and write its `job.verdict` (`cancelled`); a running job is
+  killed. No open job: a no-op.
+- `job_rerun`: queue the event's failed job once more at the front
+  (attempt + 1; a batch with the cards that did not conflict), while its
+  attempt is under `max_attempts` (default 2). A conflict, a job that did
+  not fail, or a job that runs again already: a no-op.
+- `job_split`: split the event's red batch (two or more cards that
+  merged) in two halves, the left half first. A job that is not red, has
+  fewer than two merged cards, or was split already: a no-op.
+- `job_fix`: open one fix card for the event's failed merge job: in `to`
+  (default `@ready`), with the label `merge-fix:<job>` and `labels`, a
+  `card` link to each card of the job, and the failure block in its body.
+  An open card with that label: a no-op. The fix card is how a red merge
+  group gets a fix before a split; the rule does not spawn the agent for
+  it.
+- `agent_park`, `agent_unpark`, `agent_end`: act on the open agent bound
+  to the run's card (§6.10). No bound agent: a no-op. `agent_unpark`
+  acts only on a parked agent; its turn is `turn` (its values quoted),
+  else the return turn of the card move of the event, else a plain return
+  turn. `agent_end` closes the agent with `outcome` as `agent done` does.
+
+Once per job: `job.verdict` comes once for each card of a batch, so a
+rule on it runs once per card; `job_rerun`, `job_split` and `job_fix`
+act once for a job and the later runs are no-ops.
+
+Held cards: no verb acts on a card that the GitHub author gate holds
+(§13): the run's card, and for a `job_*` verb each card of the event's
+job. The action fails with the reason.
+
+After the commit: what a database write cannot do runs after the
+action's write commits: the queue tick (`job_queue`, `job_cancel`,
+`job_rerun`, `job_split`), the kill of a cancelled running job, the wake
+or the owner's queue of an unparked agent, and the close of `agent_end`.
+A daemon stop between the commit and that step loses the step: the queue
+ticks every few seconds, and the spawn timer runs the queued unparks and
+ends the agent of a finished card.
 
 | Method and path | Body | Answer |
 |---|---|---|
