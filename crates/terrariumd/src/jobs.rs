@@ -1699,7 +1699,9 @@ pub fn queue_comment(j: &Job, card: &str) -> String {
             j.id,
             j.repo,
             j.branch,
-            j.commit.as_deref().unwrap_or("the branch head at the start")
+            j.commit
+                .as_deref()
+                .unwrap_or("the branch head at the start")
         ),
         JobKind::Merge if j.batch.is_empty() => format!(
             "Job queue: merge job {} queued: {} onto next of {}.",

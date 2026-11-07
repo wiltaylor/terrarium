@@ -840,7 +840,11 @@ async fn merge_batch(
                     branch: first.branch.clone(),
                     commit: None,
                     by_agent: first.by_agent.clone(),
-                    batch: if batch.len() > 1 { batch.clone() } else { Vec::new() },
+                    batch: if batch.len() > 1 {
+                        batch.clone()
+                    } else {
+                        Vec::new()
+                    },
                     planned_secs,
                 },
             )?;
@@ -851,7 +855,12 @@ async fn merge_batch(
                     ..CardPatch::default()
                 };
                 board::update_card(t, &Actor::Operator, &c.card, patch)?;
-                board::add_comment(t, &Actor::Operator, &c.card, &rt::queue_comment(&job, &c.card))?;
+                board::add_comment(
+                    t,
+                    &Actor::Operator,
+                    &c.card,
+                    &rt::queue_comment(&job, &c.card),
+                )?;
             }
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;

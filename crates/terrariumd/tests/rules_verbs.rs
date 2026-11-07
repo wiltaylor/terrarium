@@ -1255,3 +1255,108 @@ async fn a_red_group_gets_fix_cards_then_splits() {
         .unwrap();
     assert!(fix_of_second.is_none(), "one fix card in all");
 }
+
+const OVERRIDE: &str = r#"rule "job-cancelled" { enabled = false }
+rule "mine" {
+  on = ["job.verdict"]
+  when "data.verdict" { eq = "cancelled" }
+  card_comment { text = "mine {{job.id}}" }
+}
+"#;
+
+/// TER-170: `board_flow` is a project admin's switch with an audit row.
+/// With `rules` the engine runs the built-in pack: a rule of `rules.wcl`
+/// with a pack rule's name turns it off, and the project's own rules run
+/// after the pack. Back to `code`, the code acts and the pack runs no more.
+#[tokio::test]
+async fn the_board_flow_switch_runs_the_pack_with_overrides() {
+    let td = queue_lab().await;
+    let w1 = td.agent("p", "w1", json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let lead = td
+        .agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(td.get("/api/projects/p").await.ok()["board_flow"], "code");
+    td.patch_as(&w1, "/api/projects/p", json!({"board_flow": "rules"}))
+        .await
+        .err(403, "forbidden");
+    let r = td
+        .patch_as(&lead, "/api/projects/p", json!({"board_flow": "sideways"}))
+        .await;
+    assert!(r.status.is_client_error(), "{}", r.body);
+    let r = td
+        .patch_as(&lead, "/api/projects/p", json!({"board_flow": "rules"}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["board_flow"], "rules");
+    assert!(r.body["board_flow_at"].is_string(), "{}", r.body);
+    let audit = td.get("/api/audit?action=project.update&order=desc").await;
+    assert_eq!(
+        audit.ok()[0]["detail"]["board_flow"],
+        "rules",
+        "{}",
+        audit.body
+    );
+    put_rules(&td, "p", OVERRIDE).await;
+
+    // A merge job and its cancel, through the API: the pack labels and
+    // comments the queue; `job-cancelled` is off, so the label stays, and
+    // the project's own rule runs.
+    let a = new_card(&td, "p", json!({"title": "a", "column": "review"})).await;
+    let r = td
+        .post_as(&lead, &format!("/api/cards/{a}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job = r.body["job"]["id"].as_str().unwrap().to_owned();
+    settle(&td).await;
+    let c = card(&td, &a).await;
+    assert_eq!(c["labels"], json!(["validation:queued"]), "{c}");
+    assert!(
+        bodies(&c)[0].starts_with(&format!("Job queue: merge job {job} queued")),
+        "{c}"
+    );
+    td.delete(&format!("/api/jobs/{job}")).await.ok();
+    settle(&td).await;
+    let c = card(&td, &a).await;
+    assert_eq!(
+        c["labels"],
+        json!(["validation:queued"]),
+        "the pack rule is off: {c}"
+    );
+    assert!(bodies(&c).contains(&format!("mine {job}")), "{c}");
+    assert!(runs_of(&td, "p", "job-cancelled").await.is_empty());
+    assert_eq!(runs_of(&td, "p", "merge-queued").await.len(), 1);
+
+    // Back to the code: the cancel clears the labels in code, and the
+    // pack runs no more.
+    td.patch_as(
+        &lead,
+        &format!("/api/cards/{a}"),
+        json!({"remove_labels": ["validation:queued"]}),
+    )
+    .await
+    .ok();
+    let r = td
+        .patch_as(&lead, "/api/projects/p", json!({"board_flow": "code"}))
+        .await;
+    assert_eq!(r.body["board_flow"], "code", "{}", r.body);
+    let r = td
+        .post_as(&lead, &format!("/api/cards/{a}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job = r.body["job"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(card(&td, &a).await["labels"], json!(["validation:queued"]));
+    td.delete(&format!("/api/jobs/{job}")).await.ok();
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["labels"], json!([]));
+    assert_eq!(
+        runs_of(&td, "p", "merge-queued").await.len(),
+        1,
+        "the pack runs no more"
+    );
+}

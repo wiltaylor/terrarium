@@ -364,7 +364,7 @@ pub fn decide(
     {
         return Ok(Vec::new());
     }
-    if !rule.if_job.is_empty() && e.kind != "job" {
+    if !rule.if_job.is_empty() && event_job(e).is_none() {
         return Ok(Vec::new());
     }
     let cards = event_cards(e);
@@ -911,10 +911,25 @@ fn check_start(rule: &Rule, row: &RunRow, ctx: &RunCtx) -> Result<(), (bool, Str
             .filter(|c| c.outcome.as_deref() != Some("conflict"))
             .count();
         let flags = [
-            ("split", cond.split, job.parent.is_some(), "a half of a split batch"),
-            ("batch", cond.batch, merged >= 2, "a batch of two or more merged cards"),
+            (
+                "split",
+                cond.split,
+                job.parent.is_some(),
+                "a half of a split batch",
+            ),
+            (
+                "batch",
+                cond.batch,
+                merged >= 2,
+                "a batch of two or more merged cards",
+            ),
             ("rerun", cond.rerun, ctx.rerun.is_some(), "run again"),
-            ("halves", cond.halves, !ctx.halves.is_empty(), "split in halves"),
+            (
+                "halves",
+                cond.halves,
+                !ctx.halves.is_empty(),
+                "split in halves",
+            ),
         ];
         for (name, want, have, what) in flags {
             if let Some(want) = want
@@ -1009,7 +1024,12 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
                 match (&ctx.rerun, ctx.halves.as_slice()) {
                     (Some(r), _) => Some(r.id.clone()),
                     (None, []) => None,
-                    (None, h) => Some(h.iter().map(|x| x.id.as_str()).collect::<Vec<_>>().join(" ")),
+                    (None, h) => Some(
+                        h.iter()
+                            .map(|x| x.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ),
                 }
             };
             // The texts of the coded flow (TER-170), from its own code.

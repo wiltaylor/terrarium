@@ -1684,11 +1684,19 @@ rule "mine" {
         assert_eq!(set.rules.len(), pack.rules.len() + 1);
         let names: Vec<&str> = set.rules.iter().map(|r| r.name.as_str()).collect();
         let pack_names: Vec<&str> = pack.rules.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(&names[..pack_names.len()], &pack_names[..], "the pack order stays");
+        assert_eq!(
+            &names[..pack_names.len()],
+            &pack_names[..],
+            "the pack order stays"
+        );
         assert_eq!(names.last(), Some(&"mine"));
         let started = set.rules.iter().find(|r| r.name == "job-started").unwrap();
         assert!(!started.enabled);
-        let pass = set.rules.iter().find(|r| r.name == "validate-pass").unwrap();
+        let pass = set
+            .rules
+            .iter()
+            .find(|r| r.name == "validate-pass")
+            .unwrap();
         assert_eq!(pass.actions.len(), 1);
         assert_eq!(pass.actions[0].verb, "card.comment");
         // An enabled rule still needs `on` and a verb.

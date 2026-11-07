@@ -126,7 +126,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
         {
             report.projects.updated.push(def.name.clone());
         }
-                // Repos: the file list replaces the file repos, and takes over API
+        // Repos: the file list replaces the file repos, and takes over API
         // repos with the same name.
         t.execute(
             "DELETE FROM repos WHERE project = ?1 AND source = 'file'",

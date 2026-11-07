@@ -8339,8 +8339,10 @@ Other differences from the coded flow: the author of a comment is the
 rule actor (`rule:<project>/<rule>`), not `system`; the mail to the
 worker comes from `project:<project>`, not `system`; a column that the
 pack names and the board lacks fails the rule run (the coded flow wrote
-a comment); and a batch merge ends the bound agent of each card, not only
-the first.
+a comment); a batch merge ends the bound agent of each card, not only
+the first; and the pack acts a moment after the event (§19.9), so the
+queue can start the next queued job before a rule splits or reruns the
+one that ended (the order of the merges after a split can differ).
 
 ## 20. Event sources and ingest
 

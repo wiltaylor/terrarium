@@ -631,7 +631,6 @@ fn merged(j: &Job) -> Vec<BatchCard> {
         .collect()
 }
 
-
 /// Why no new job runs for `cards`: a card that has an open job already
 /// (the coded flow split the batch, or someone queued it again). The verb
 /// is then a no-op, not a failure.

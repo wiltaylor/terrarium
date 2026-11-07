@@ -2,6 +2,13 @@
 //! runs the jobs on this machine, against a bare git repo as the remote.
 //! The recipe is a stand-in (`test -f OK`), as the lead asked: the real
 //! one (`just ci::validate`) comes with TER-69.
+//!
+//! The tests of the card flow run twice ([`both_flows!`], TER-170): with
+//! `board_flow = code` (the daemon's code) and with `board_flow = rules`
+//! (the built-in rule pack). They check the same card states, labels,
+//! comments, and mails; the rule engine acts a moment after the event, so
+//! each check polls. [`the_two_flows_leave_the_same_board`] compares the
+//! two boards of one scenario field by field.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -17,6 +24,23 @@ use terrarium_host::{Client, ClientOptions};
 /// How long a poll waits before the test fails. A bound for a hung test
 /// only: each poll returns as soon as its state is there.
 const DEADLINE: Duration = Duration::from_secs(90);
+
+/// Run the test `$name(flow)` once with each board flow (TER-170): the
+/// tests `$name::code` and `$name::rules`.
+macro_rules! both_flows {
+    ($name:ident) => {
+        mod $name {
+            #[tokio::test]
+            async fn code() {
+                super::$name("code").await;
+            }
+            #[tokio::test]
+            async fn rules() {
+                super::$name("rules").await;
+            }
+        }
+    };
+}
 
 #[tokio::test]
 async fn host_caps_accept_names_ids_and_ssh_aliases() {
@@ -631,6 +655,8 @@ struct Lab {
     client: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// The host listener of the daemon.
     hosts_addr: std::net::SocketAddr,
+    /// The board flow of project `p`: `code` or `rules` (TER-170).
+    flow: &'static str,
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -659,8 +685,17 @@ async fn lab(slots: u32) -> Lab {
     lab_with(slots, None).await
 }
 
+/// [`lab`] with the board flow `flow` (`code` or `rules`) for project `p`.
+async fn lab_flow(slots: u32, flow: &'static str) -> Lab {
+    lab_impl(slots, None, flow).await
+}
+
 /// [`lab`] with a `docker` binary for the host agent.
 async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
+    lab_impl(slots, docker, "code").await
+}
+
+async fn lab_impl(slots: u32, docker: Option<&Path>, flow: &'static str) -> Lab {
     let td = TestDaemon::start().await;
     let state = td.daemon.as_ref().unwrap().state.clone();
     let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
@@ -749,6 +784,13 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
+    if flow != "code" {
+        let r = td
+            .patch("/api/projects/p", json!({"board_flow": flow}))
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["board_flow"], flow, "{}", r.body);
+    }
     Lab {
         td,
         _dirs: dirs,
@@ -759,6 +801,7 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
         client_opts: o,
         client: std::sync::Mutex::new(Some(client)),
         hosts_addr: addr,
+        flow,
     }
 }
 
@@ -862,18 +905,31 @@ impl Lab {
         self.td.get(&format!("/api/cards/{id}")).await.ok().clone()
     }
 
-    /// Poll the card until `f` holds.
+    /// Poll the card until `f` holds. With `board_flow = rules` the rule
+    /// engine then settles, so the later actions of the run that made `f`
+    /// true (an unassign after a move) are there too.
     async fn until_card(&self, id: &str, what: &str, f: impl Fn(&Value) -> bool) -> Value {
         let start = Instant::now();
         loop {
             let c = self.card_of(id).await;
             if f(&c) {
-                return c;
+                if self.flow == "code" {
+                    return c;
+                }
+                self.settle().await;
+                return self.card_of(id).await;
             }
-            assert!(
-                start.elapsed() < DEADLINE,
-                "card {id} never got {what}; last {c}"
-            );
+            if start.elapsed() >= DEADLINE {
+                let runs = self.td.get("/api/projects/p/rules/runs?limit=200").await;
+                let runs: Vec<Value> = runs.body["runs"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| r["state"] != "noop" && r["card"] == id)
+                    .collect();
+                panic!("card {id} never got {what}; last {c}\nrule runs: {runs:#?}");
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -883,6 +939,57 @@ impl Lab {
             .as_array()
             .unwrap()
             .clone()
+    }
+
+    /// Wait until the rule engine read the whole log and ran each planned
+    /// run (TER-170). With `board_flow = code` it has nothing to run.
+    async fn settle(&self) {
+        let db = self.td.daemon.as_ref().unwrap().state.db.clone();
+        let start = Instant::now();
+        let mut quiet = 0;
+        loop {
+            let (cursor, last, pending) = db
+                .read(|c| {
+                    let cursor = terrariumd::rules_engine::cursor(c)?.unwrap_or(0);
+                    let last = terrariumd::events::last_seq(c)?;
+                    let pending: i64 = c.query_row(
+                        "SELECT count(*) FROM rule_runs WHERE state = 'pending'",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                    Ok((cursor, last, pending))
+                })
+                .await
+                .unwrap();
+            if cursor >= last && pending == 0 {
+                quiet += 1;
+                if quiet >= 3 {
+                    return;
+                }
+            } else {
+                quiet = 0;
+            }
+            assert!(
+                start.elapsed() < DEADLINE,
+                "the rule engine did not settle: {cursor} {last} {pending}"
+            );
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    }
+
+    /// The rule runs of project `p` that failed: none in a good flow.
+    async fn failed_rule_runs(&self) -> Vec<Value> {
+        let r = self.td.get("/api/projects/p/rules/runs?limit=500").await;
+        if r.status == 404 {
+            return Vec::new();
+        }
+        r.ok()["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["state"] == "failed")
+            .cloned()
+            .collect()
     }
 
     async fn until_idle(&self) -> Vec<Value> {
@@ -995,9 +1102,9 @@ async fn the_config_is_checked_and_audited() {
     );
 }
 
-#[tokio::test]
-async fn a_green_validation_moves_the_card_to_review() {
-    let lab = lab(2).await;
+both_flows!(a_green_validation_moves_the_card_to_review);
+async fn a_green_validation_moves_the_card_to_review(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     let head = lab.branch("ter-a", "next", &[("OK", "yes\n")]);
     let id = lab.card("green", "ter-a").await;
     // A commit that is not the head of the pushed branch is refused.
@@ -1035,9 +1142,10 @@ async fn a_green_validation_moves_the_card_to_review() {
     assert_eq!(r.body["job"]["kind"], "validate");
     assert_eq!(r.body["queue"]["position"], 1, "{}", r.body);
     assert_eq!(r.body["queue"]["slots"], 2);
-    // At once: validating, still w1's, by:w1 and a job label.
-    let c = lab.card_of(&id).await;
-    assert_eq!(c["column"], "validating");
+    // Validating, still w1's, by:w1 and a job label.
+    let c = lab
+        .until_card(&id, "validating", |c| c["column"] == "validating")
+        .await;
     assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
     let l = labels(&c);
     assert!(l.contains(&"by:w1".to_owned()), "{l:?}");
@@ -1058,6 +1166,8 @@ async fn a_green_validation_moves_the_card_to_review() {
     let j = jobs.iter().find(|j| j["state"] == "passed").unwrap();
     assert_eq!(j["head"].as_str().unwrap(), head);
     assert_eq!(j["exit_code"], 0);
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
 /// TER-155 D2 through the API: `eta` on a validate is a planned duration,
@@ -1114,12 +1224,12 @@ async fn a_validate_eta_is_a_duration_from_the_job_start() {
     );
 }
 
+both_flows!(the_job_queue_finds_its_columns_by_role_then_by_name);
 /// TER-165: the daemon finds the columns by role. `validating` is renamed
 /// and keeps its role. `review` has no role and `qa` has it, so the role
 /// wins over the name. `accepted` has no role, so its name is the fallback.
-#[tokio::test]
-async fn the_job_queue_finds_its_columns_by_role_then_by_name() {
-    let lab = lab(2).await;
+async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     let r = lab
         .td
         .patch(
@@ -1148,8 +1258,8 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name() {
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    let c = lab.card_of(&a).await;
-    assert_eq!(c["column"], "checking", "{c}");
+    lab.until_card(&a, "checking", |c| c["column"] == "checking")
+        .await;
     lab.until_card(&a, "qa", |c| c["column"] == "qa").await;
     // A merge pass: the name `accepted` is the fallback.
     let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
@@ -1164,13 +1274,15 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name() {
         .await;
     let next = git(&lab.origin, &["rev-parse", "next"]);
     assert_ne!(next, head);
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
+both_flows!(validate_replaces_stale_validation_and_by_labels);
 /// TER-107: a validate leaves one `validation:*` label and one `by:` label,
 /// even when the card already has stale ones.
-#[tokio::test]
-async fn validate_replaces_stale_validation_and_by_labels() {
-    let lab = lab(2).await;
+async fn validate_replaces_stale_validation_and_by_labels(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     let head = lab.branch("ter-labels", "next", &[("OK", "yes\n")]);
     let id = lab.card("stale labels", "ter-labels").await;
     // Stale labels: another worker's `by:` and two `validation:` labels.
@@ -1207,10 +1319,11 @@ async fn validate_replaces_stale_validation_and_by_labels() {
             .filter(|l| l.starts_with("validation:"))
             .collect()
     };
-    // At once: still w1's, one by:w1, and one validation label (queued or
-    // already running, the job may start at once).
-    let c = lab.card_of(&id).await;
-    assert_eq!(c["column"], "validating");
+    // Still w1's, one by:w1, and one validation label (queued or already
+    // running, the job may start at once).
+    let c = lab
+        .until_card(&id, "validating", |c| c["column"] == "validating")
+        .await;
     assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
     assert_eq!(by_of(&c), ["by:w1"], "{c}");
     assert_eq!(validation_of(&c).len(), 1, "{c}");
@@ -1223,11 +1336,11 @@ async fn validate_replaces_stale_validation_and_by_labels() {
     assert_eq!(by_of(&c), ["by:w1"], "{c}");
 }
 
+both_flows!(an_admin_validate_keeps_the_workers_by_label);
 /// TER-107: a project admin who queues another agent's card keeps the
 /// card's worker in `by:`. The job and the final mail go to that worker.
-#[tokio::test]
-async fn an_admin_validate_keeps_the_workers_by_label() {
-    let lab = lab(2).await;
+async fn an_admin_validate_keeps_the_workers_by_label(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     let head = lab.branch("ter-admin", "next", &[("OK", "yes\n")]);
     let id = lab.card("admin queues", "ter-admin").await;
     // The worker's `by:` and a stale validation label, then the admin queues.
@@ -1256,7 +1369,9 @@ async fn an_admin_validate_keeps_the_workers_by_label() {
             .filter(|l| l.starts_with("by:"))
             .collect()
     };
-    let c = lab.card_of(&id).await;
+    let c = lab
+        .until_card(&id, "validating", |c| c["column"] == "validating")
+        .await;
     assert_eq!(by_of(&c), ["by:w1"], "{c}");
     let validation = labels(&c)
         .into_iter()
@@ -1273,9 +1388,9 @@ async fn an_admin_validate_keeps_the_workers_by_label() {
     );
 }
 
-#[tokio::test]
-async fn a_red_validation_runs_twice_then_goes_to_the_top_of_ready() {
-    let lab = lab(2).await;
+both_flows!(a_red_validation_runs_twice_then_goes_to_the_top_of_ready);
+async fn a_red_validation_runs_twice_then_goes_to_the_top_of_ready(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     // No OK file: the recipe fails.
     let head = lab.branch("ter-b", "next", &[("other", "x\n")]);
     let first = lab
@@ -1344,6 +1459,16 @@ async fn a_red_validation_runs_twice_then_goes_to_the_top_of_ready() {
         assert!(start.elapsed() < DEADLINE, "no mail to w1: {mail:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let c = lab.card_of(&id).await;
+    let text = comments(&c);
+    assert!(text.contains("It runs once more as job"), "{text}");
+    assert!(text.contains("(attempt 2) failed again"), "{text}");
+    assert!(
+        !labels(&c).iter().any(|l| l.starts_with("validation:")),
+        "{c}"
+    );
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
 /// TER-135: the stats give the first-attempt pass rate, the reruns, and
@@ -1413,9 +1538,9 @@ async fn the_stats_give_the_first_attempt_pass_rate_and_the_failed_targets() {
         .err(400, "bad_request");
 }
 
-#[tokio::test]
-async fn a_merge_validates_and_pushes_next() {
-    let lab = lab(2).await;
+both_flows!(a_merge_validates_and_pushes_next);
+async fn a_merge_validates_and_pushes_next(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
     let id = lab.card("merge me", "ter-c").await;
     // Only an admin queues a merge.
@@ -1439,11 +1564,22 @@ async fn a_merge_validates_and_pushes_next() {
     assert_eq!(parents.split_whitespace().count(), 3, "{parents}");
     let jobs = lab.until_idle().await;
     assert_eq!(jobs[0]["head"].as_str().unwrap(), next);
+    let c = lab
+        .until_card(&id, "no job label", |c| {
+            !labels(c).iter().any(|l| l.starts_with("validation:"))
+        })
+        .await;
+    assert!(c["assignee"].is_null(), "{c}");
+    let text = comments(&c);
+    assert!(text.contains("Job queue: merge job"), "{text}");
+    assert!(text.contains("passed"), "{text}");
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
-#[tokio::test]
-async fn a_conflict_is_not_resolved_and_not_rerun() {
-    let lab = lab(2).await;
+both_flows!(a_conflict_is_not_resolved_and_not_rerun);
+async fn a_conflict_is_not_resolved_and_not_rerun(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     // Two branches change the same line of README.
     lab.branch("ter-d1", "next", &[("README", "d1\n"), ("OK", "y\n")]);
     git(&lab.work, &["push", "-q", "origin", "ter-d1:next"]);
@@ -1467,6 +1603,8 @@ async fn a_conflict_is_not_resolved_and_not_rerun() {
     assert_eq!(jobs[0]["outcome"], "conflict");
     // `next` did not move.
     assert_eq!(git(&lab.origin, &["rev-parse", "next"]), before);
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
 #[tokio::test]
@@ -1530,9 +1668,9 @@ async fn jobs_keep_to_the_slots_in_order() {
     }
 }
 
-#[tokio::test]
-async fn a_cancel_ends_a_queued_job() {
-    let lab = lab(1).await;
+both_flows!(a_cancel_ends_a_queued_job);
+async fn a_cancel_ends_a_queued_job(flow: &'static str) {
+    let lab = lab_flow(1, flow).await;
     lab.td
         .put(
             "/api/projects/p/delivery",
@@ -1584,9 +1722,16 @@ async fn a_cancel_ends_a_queued_job() {
     let jobs = lab.until_idle().await;
     assert!(jobs.iter().all(|j| j["state"] == "cancelled"), "{jobs:?}");
     // The cards stay where they are, without the job labels.
-    let c = lab.card_of(&c2).await;
-    assert_eq!(c["column"], "validating");
-    assert!(!labels(&c).iter().any(|l| l.starts_with("validation:")));
+    lab.settle().await;
+    for id in [&c1, &c2] {
+        let c = lab.card_of(id).await;
+        assert_eq!(c["column"], "validating");
+        assert!(
+            !labels(&c).iter().any(|l| l.starts_with("validation:")),
+            "{c}"
+        );
+    }
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
 /// TER-97: the host cap counts the jobs of all projects on one host. `p`
@@ -2243,12 +2388,12 @@ fn next_merges(lab: &Lab) -> Vec<String> {
         .collect()
 }
 
+both_flows!(a_green_batch_of_three_merges_in_one_job);
 /// TER-112: one merge job takes three cards, merges them onto `next` in
 /// the given order, validates once, pushes `next`, and moves each card to
 /// `accepted`.
-#[tokio::test]
-async fn a_green_batch_of_three_merges_in_one_job() {
-    let lab = lab(2).await;
+async fn a_green_batch_of_three_merges_in_one_job(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     set_recipe(
         &lab,
         "test -f OK && test -f g1 && test -f g2 && test -f g3 && sleep 1",
@@ -2323,12 +2468,11 @@ async fn a_green_batch_of_three_merges_in_one_job() {
         .err(409, "conflict");
     // Each card shows the job, unless the job has ended already.
     for c in &cards {
-        let card = lab.card_of(c).await;
-        let l = labels(&card);
-        assert!(
-            l.iter().any(|l| l.starts_with("validation:")) || card["column"] == "accepted",
-            "{c}: {l:?}"
-        );
+        lab.until_card(c, "a job label", |card| {
+            labels(card).iter().any(|l| l.starts_with("validation:"))
+                || card["column"] == "accepted"
+        })
+        .await;
     }
     for c in &cards {
         let card = lab
@@ -2354,9 +2498,13 @@ async fn a_green_batch_of_three_merges_in_one_job() {
             "Merge ter-g3 onto next"
         ]
     );
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
-/// TER-112: a red batch splits in halves until it finds the failing card.
+/// TER-112, with `board_flow = code`: a red batch splits in halves until
+/// it finds the failing card. (The rule pack gives a red group fix cards
+/// first: [`a_red_batch_gets_fix_cards_then_splits_with_the_rule_pack`].)
 /// The failing card goes to the top of `ready` with the failure block,
 /// and the other cards merge, in order. The bad card is in the left half,
 /// so the left half splits again and its halves must still run before
@@ -2434,12 +2582,347 @@ async fn a_red_batch_finds_the_failing_card_and_the_others_merge() {
     assert!(comments(&c1v).contains("The batch splits"), "{c1v}");
 }
 
+/// The cards of project `p` with the label `label`.
+async fn cards_with_label(lab: &Lab, label: &str) -> Vec<Value> {
+    lab.td.get("/api/projects/p/board").await.ok()["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| labels(c).iter().any(|l| l == label))
+        .cloned()
+        .collect()
+}
+
+/// Wait until job `id` is in a final state; returns it.
+async fn until_ended(lab: &Lab, id: &str) -> Value {
+    let start = Instant::now();
+    loop {
+        let j = lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+        if ["passed", "failed", "cancelled"].contains(&j["state"].as_str().unwrap_or("")) {
+            return j;
+        }
+        assert!(start.elapsed() < DEADLINE, "job {id} never ended: {j}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// TER-170, MEM-84: with the rule pack a red merge group gets a fix card
+/// (in `ready`, linked to its cards, with the failure block) and no split;
+/// the lead queues the group again. After three fix cards the fourth red
+/// splits the group, and the bisection finds the failing card as the
+/// coded flow does.
+#[tokio::test]
+async fn a_red_batch_gets_fix_cards_then_splits_with_the_rule_pack() {
+    let lab = lab_flow(2, "rules").await;
+    set_recipe(&lab, "test -f OK && test ! -f BAD").await;
+    let h1 = lab.branch("ter-r1", "next", &[("OK", "yes\n"), ("r1", "1")]);
+    lab.branch("ter-r2", "next", &[("OK", "yes\n"), ("BAD", "2")]);
+    let h3 = lab.branch("ter-r3", "next", &[("OK", "yes\n"), ("r3", "3")]);
+    let h4 = lab.branch("ter-r4", "next", &[("OK", "yes\n"), ("r4", "4")]);
+    let c1 = lab.card("r1", "ter-r1").await;
+    let c2 = lab.card("r2", "ter-r2").await;
+    let c3 = lab.card("r3", "ter-r3").await;
+    let c4 = lab.card("r4", "ter-r4").await;
+    let group = [c1.clone(), c2.clone(), c3.clone(), c4.clone()];
+    for round in 1..=4 {
+        let r = lab
+            .td
+            .post_as(&lab.lead, "/api/merges", json!({"cards": group}))
+            .await;
+        assert_eq!(r.status, 201, "round {round}: {}", r.body);
+        let job = r.body["job"]["id"].as_str().unwrap().to_owned();
+        let j = until_ended(&lab, &job).await;
+        assert_eq!(j["outcome"], "red", "{j}");
+        lab.settle().await;
+        if round == 4 {
+            break;
+        }
+        // A fix card for the job, and no split.
+        let fix = cards_with_label(&lab, &format!("merge-fix:{job}")).await;
+        assert_eq!(fix.len(), 1, "round {round}: {fix:?}");
+        assert_eq!(fix[0]["column"], "ready", "{}", fix[0]);
+        let fix = lab.card_of(fix[0]["id"].as_str().unwrap()).await;
+        let mut links: Vec<&str> = fix["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|l| l["kind"] == "card")
+            .map(|l| l["ref"].as_str().unwrap())
+            .collect();
+        links.sort_unstable();
+        let mut want: Vec<&str> = group.iter().map(String::as_str).collect();
+        want.sort_unstable();
+        assert_eq!(links, want);
+        assert!(
+            fix["body"].as_str().unwrap().contains("Validation failed"),
+            "{fix}"
+        );
+        let jobs = lab.jobs().await;
+        assert_eq!(jobs.len(), round, "no split, no rerun: {jobs:#?}");
+        for c in &group {
+            let card = lab.card_of(c).await;
+            assert_eq!(card["column"], "backlog", "{card}");
+            assert!(
+                !labels(&card).iter().any(|l| l.starts_with("validation:")),
+                "{card}"
+            );
+            assert!(
+                comments(&card).contains(&format!("fix card (label merge-fix:{job})")),
+                "{card}"
+            );
+        }
+    }
+    // The fourth red splits: the bisection finds r2.
+    let bad = lab
+        .until_card(&c2, "ready", |c| c["column"] == "ready")
+        .await;
+    let body = bad["body"].as_str().unwrap();
+    assert!(body.starts_with("Validation failed: "), "{body}");
+    assert!(body.contains("outcome red"), "{body}");
+    assert!(
+        comments(&bad).contains("failed (red alone after its batch was red)"),
+        "{bad}"
+    );
+    for c in [&c1, &c3, &c4] {
+        lab.until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+    }
+    let jobs = lab.until_idle().await;
+    // Four red runs of the group; then [r1 r2] red, [r1] green, [r2]
+    // red, and [r3 r4] green.
+    assert_eq!(jobs.len(), 8, "{jobs:#?}");
+    lab.settle().await;
+    let fixes: usize = {
+        let board = lab.td.get("/api/projects/p/board").await.ok().clone();
+        board["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| labels(c).iter().any(|l| l.starts_with("merge-fix:")))
+            .count()
+    };
+    assert_eq!(fixes, 3, "three fix cards, then the split");
+    for h in [&h1, &h3, &h4] {
+        git(&lab.origin, &["merge-base", "--is-ancestor", h, "next"]);
+    }
+    // The same merges as the coded flow. Their order can differ: the rule
+    // splits the left half a moment after the job ends, and the queue may
+    // start the right half first (the rule engine runs after the event).
+    let mut merges = next_merges(&lab);
+    merges.sort();
+    assert_eq!(
+        merges,
+        [
+            "Merge ter-r1 onto next",
+            "Merge ter-r3 onto next",
+            "Merge ter-r4 onto next"
+        ]
+    );
+    assert!(comments(&lab.card_of(&c1).await).contains("The batch splits"));
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
+}
+
+/// One scenario of the card flow on a fresh lab with `flow`, and the
+/// board, the jobs, and the mails to the worker after it, with the IDs,
+/// the commits, the times, and the paths made neutral. Each step waits
+/// for the one before, so the two flows see the same order.
+async fn flow_scenario(flow: &'static str) -> Value {
+    let lab = lab_flow(2, flow).await;
+    set_recipe(&lab, "test -f OK && { test ! -f SLOW || sleep 30; }").await;
+    let first = lab
+        .td
+        .post(
+            "/api/projects/p/cards",
+            json!({"title": "first in ready", "column": "ready"}),
+        )
+        .await
+        .ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let validate = |id: String, head: String| {
+        let lab = &lab;
+        async move {
+            let r = lab
+                .td
+                .post_as(
+                    &lab.w1,
+                    &format!("/api/cards/{id}/validate"),
+                    json!({"commit": head}),
+                )
+                .await;
+            assert_eq!(r.status, 201, "{}", r.body);
+            r.body["job"]["id"].as_str().unwrap().to_owned()
+        }
+    };
+    // A green validate, then a red one (it runs twice).
+    let head = lab.branch("ter-a", "next", &[("OK", "yes\n")]);
+    let a = lab.card("green", "ter-a").await;
+    validate(a.clone(), head).await;
+    lab.until_card(&a, "review", |c| c["column"] == "review")
+        .await;
+    let head = lab.branch("ter-b", "next", &[("other", "x\n")]);
+    let b = lab.card("red", "ter-b").await;
+    validate(b.clone(), head).await;
+    lab.until_card(&b, "ready", |c| c["column"] == "ready")
+        .await;
+    lab.until_idle().await;
+    lab.settle().await;
+    // A green merge, then a merge that conflicts.
+    lab.branch("ter-c", "next", &[("OK", "yes\n"), ("c", "c")]);
+    let c = lab.card("merge", "ter-c").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{c}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    lab.until_card(&c, "accepted", |c| c["column"] == "accepted")
+        .await;
+    lab.until_idle().await;
+    lab.settle().await;
+    lab.branch("ter-d1", "next", &[("README", "d1\n"), ("OK", "y\n")]);
+    git(&lab.work, &["push", "-q", "origin", "ter-d1:next"]);
+    lab.branch("ter-d2", "main", &[("README", "d2\n"), ("OK", "y\n")]);
+    let d = lab.card("conflict", "ter-d2").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{d}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    lab.until_card(&d, "ready", |c| c["column"] == "ready")
+        .await;
+    lab.until_idle().await;
+    lab.settle().await;
+    // A validate that is cancelled while it runs.
+    let head = lab.branch("ter-e", "next", &[("OK", "yes\n"), ("SLOW", "1")]);
+    let e = lab.card("cancel", "ter-e").await;
+    let job = validate(e.clone(), head).await;
+    let start = Instant::now();
+    while lab.td.get(&format!("/api/jobs/{job}")).await.ok()["state"] != "running" {
+        assert!(start.elapsed() < DEADLINE, "the job never started");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    lab.settle().await;
+    lab.td.delete(&format!("/api/jobs/{job}")).await.ok();
+    lab.until_idle().await;
+    lab.settle().await;
+    // A batch of three: the second conflicts with the first.
+    lab.branch("ter-f1", "next", &[("README", "f1\n"), ("OK", "y\n")]);
+    lab.branch("ter-f2", "next", &[("README", "f2\n"), ("OK", "y\n")]);
+    lab.branch("ter-f3", "next", &[("f3", "3"), ("OK", "y\n")]);
+    let f1 = lab.card("f1", "ter-f1").await;
+    let f2 = lab.card("f2", "ter-f2").await;
+    let f3 = lab.card("f3", "ter-f3").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [f1, f2, f3]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    lab.until_card(&f2, "ready", |c| c["column"] == "ready")
+        .await;
+    lab.until_card(&f3, "accepted", |c| c["column"] == "accepted")
+        .await;
+    lab.until_idle().await;
+    // The mail to the worker of the red card.
+    let start = Instant::now();
+    while lab.td.mail_of(&lab.w1).await.is_empty() {
+        assert!(start.elapsed() < DEADLINE, "no mail to w1");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new(), "{flow}");
+
+    let dir = lab._dirs.path().display().to_string();
+    let ulid = regex::Regex::new(r"\b[0-9A-HJKMNP-TV-Z]{26}\b").unwrap();
+    let sha = regex::Regex::new(r"\b[0-9a-f]{7,40}\b").unwrap();
+    let time = regex::Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})")
+        .unwrap();
+    let neutral = |text: &str| -> String {
+        let t = text.replace(&dir, "<DIR>");
+        let t = time.replace_all(&t, "<TIME>");
+        let t = ulid.replace_all(&t, "<ID>");
+        sha.replace_all(&t, "<SHA>").into_owned()
+    };
+    let board = lab.td.get("/api/projects/p/board").await.ok().clone();
+    let mut cards = Vec::new();
+    for id in [&first, &a, &b, &c, &d, &e, &f1, &f2, &f3] {
+        let card = lab.card_of(id).await;
+        let position = board["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["column"] == card["column"])
+            .position(|x| x["id"] == id.as_str());
+        let mut l = labels(&card);
+        l.sort();
+        let notes: Vec<String> = card["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| neutral(c["body"].as_str().unwrap_or("")))
+            .collect();
+        cards.push(json!({
+            "id": id, "column": card["column"], "position": position, "labels": l,
+            "assignee": card["assignee_name"], "body": neutral(card["body"].as_str().unwrap_or("")),
+            "comments": notes,
+        }));
+    }
+    let mut jobs: Vec<Value> = lab
+        .jobs()
+        .await
+        .iter()
+        .map(|j| {
+            json!({"card": j["card"], "kind": j["kind"], "state": j["state"],
+                   "outcome": j["outcome"], "attempt": j["attempt"],
+                   "split_path": j["split_path"]})
+        })
+        .collect();
+    jobs.sort_by_key(|j| j.to_string());
+    let mails: Vec<Value> = lab
+        .td
+        .mail_of(&lab.w1)
+        .await
+        .iter()
+        .map(|m| {
+            json!({"subject": neutral(m["subject"].as_str().unwrap_or("")),
+                   "body": neutral(m["body"].as_str().unwrap_or(""))})
+        })
+        .collect();
+    json!({"cards": cards, "jobs": jobs, "mails": mails})
+}
+
+/// TER-170 acceptance: one scenario (a green and a red validate, a green
+/// and a conflicting merge, a cancel while it runs, a batch with a
+/// conflict) leaves the same board with `board_flow = code` and with
+/// `board_flow = rules`: the columns, the positions, the labels, the
+/// assignees, the bodies, the comment texts in order, the jobs, and the
+/// mails to the worker (subject and body). Not compared, by design: the
+/// author of a comment (`system` against `rule:p/<rule>`) and the sender
+/// of the mail (`system` against `project:p`).
+#[tokio::test]
+async fn the_two_flows_leave_the_same_board() {
+    let code = flow_scenario("code").await;
+    let rules = flow_scenario("rules").await;
+    for (c, r) in code["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(rules["cards"].as_array().unwrap())
+    {
+        assert_eq!(c, r, "the card differs:\ncode:  {c:#}\nrules: {r:#}");
+    }
+    assert_eq!(code["jobs"], rules["jobs"]);
+    assert_eq!(code["mails"], rules["mails"]);
+    assert!(!code["mails"].as_array().unwrap().is_empty());
+    assert_eq!(code, rules);
+}
+
+both_flows!(a_conflict_in_a_batch_drops_only_that_card);
 /// TER-112: a card of a batch that conflicts with the cards before it
 /// leaves the batch at once (a conflict is never resolved or rerun); the
 /// others validate and merge in the same job.
-#[tokio::test]
-async fn a_conflict_in_a_batch_drops_only_that_card() {
-    let lab = lab(2).await;
+async fn a_conflict_in_a_batch_drops_only_that_card(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     lab.branch("ter-k1", "next", &[("README", "k1\n"), ("OK", "y\n")]);
     lab.branch("ter-k2", "next", &[("README", "k2\n"), ("OK", "y\n")]);
     let h3 = lab.branch("ter-k3", "next", &[("k3", "3"), ("OK", "y\n")]);
@@ -2471,14 +2954,20 @@ async fn a_conflict_in_a_batch_drops_only_that_card() {
         next_merges(&lab),
         ["Merge ter-k1 onto next", "Merge ter-k3 onto next"]
     );
+    assert!(
+        comments(&lab.card_of(&c2).await).contains("left the batch on a conflict"),
+        "{k2}"
+    );
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
+both_flows!(a_merge_that_fails_without_a_conflict_drops_only_that_card);
 /// TER-112 review F4: a branch whose merge fails without a conflict (an
 /// unrelated history) leaves the batch alone; the others merge in the same
 /// job.
-#[tokio::test]
-async fn a_merge_that_fails_without_a_conflict_drops_only_that_card() {
-    let lab = lab(2).await;
+async fn a_merge_that_fails_without_a_conflict_drops_only_that_card(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     let h1 = lab.branch("ter-u1", "next", &[("u1", "1"), ("OK", "y\n")]);
     // An orphan branch: no history in common with `next`.
     git(&lab.work, &["checkout", "-q", "--orphan", "ter-u2"]);
@@ -2517,6 +3006,8 @@ async fn a_merge_that_fails_without_a_conflict_drops_only_that_card() {
         next_merges(&lab),
         ["Merge ter-u1 onto next", "Merge ter-u3 onto next"]
     );
+    lab.settle().await;
+    assert_eq!(lab.failed_rule_runs().await, Vec::<Value>::new());
 }
 
 // ------------------------------------------------------------- TER-123
