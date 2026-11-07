@@ -1099,7 +1099,8 @@ Markdown that embeds the artifact in a page (PLAN §15.1):
 a bundle or an HTML file, and `[name](artifact:ART-n)` for other files. Then
 it prints a signed preview URL. The URL expires (by default after 5
 minutes), so a page must use the embed, not the URL. `artifact ls --label`
-keeps the artifacts with a `label` link of that label (the CLI filters).
+lists the artifacts with a `label` link of that label: the daemon filters
+(`?label=`, TER-129), and the CLI filters again for a daemon from before.
 
 ### Test runs
 
@@ -2376,7 +2377,7 @@ line of `card ls --unassigned --column ready` is the top card of `ready`.
 - `artifact push --note` is accepted, but the daemon does not store notes
   yet. The CLI says so on stderr.
 - `artifact ls` sends `--page` and `--card` as query filters. The daemon
-  does not filter on them yet. `--label` is filtered by the CLI.
+  does not filter on them yet. It filters on `--label`.
 - `test push` sends the whole file in one request. Through the tunnel
   (agent mode), the 4 MiB line limit of the runner applies, so a result
   file larger than about 3 MiB fails there.
