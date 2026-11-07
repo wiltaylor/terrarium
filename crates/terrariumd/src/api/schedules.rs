@@ -518,7 +518,7 @@ async fn may_send(state: &Shared, actor: &Actor, s: &Schedule) -> ApiResult<()> 
 }
 
 /// A disabled project action does not run: not by run-now, a test run, or
-/// a webhook redeliver (docs/api.md §19.8). A disabled time schedule or
+/// a webhook redeliver (docs/api.md §19.10). A disabled time schedule or
 /// trigger still runs now, as before.
 fn action_off(s: &Schedule) -> ApiResult<()> {
     if s.spec.is_manual() && !s.enabled {

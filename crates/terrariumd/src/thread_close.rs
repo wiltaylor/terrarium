@@ -6,7 +6,8 @@
 //! response, a question, a close proposal. A reminder does not count, and
 //! a thread gets a new reminder only after new activity. The agent costs
 //! nothing meanwhile: it is parked. The stale close ends it as each close
-//! does ([`crate::thread_agent`]).
+//! does ([`crate::thread_agent`]). A thread that tracks (`tracking`,
+//! TER-145) gets neither: only `waiting_operator` counts as untouched.
 //!
 //! Both times are settings (`TERRARIUM_THREAD_REMINDER`,
 //! `TERRARIUM_THREAD_STALE`); `0` turns one off. [`sweep`] runs on the
@@ -105,7 +106,7 @@ pub fn text(d: Duration) -> String {
 }
 
 /// The open threads that wait on the operator with no activity since
-/// before `before`. With `unreminded`, only those with no reminder since
+/// before `before`. A thread that tracks is not one of them (TER-145). With `unreminded`, only those with no reminder since
 /// their last activity.
 fn untouched(conn: &Connection, before: &str, unreminded: bool) -> ApiResult<Vec<String>> {
     let mut st = conn.prepare(

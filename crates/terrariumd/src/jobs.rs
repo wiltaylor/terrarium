@@ -7,33 +7,36 @@
 //!   at most the project's `slots` validate jobs; merge jobs have their
 //!   own lane, one at a time per project (TER-159). The pick and the start are one write, so two ticks cannot
 //!   overfill the slots.
-//! - A job is three commands on the project's target, each its own run:
-//!   1. prepare, with the repo credential in its env: a fresh clone in
-//!      `<work_dir>/<project>/<job>`. A validate job checks out the card
-//!      commit. A merge job checks out `next` and merges the card branch
-//!      with `--no-ff`; a conflict ends the job (never resolved, never
-//!      rerun). A batch merge (TER-112) merges its card branches in
-//!      order; a card that conflicts, or whose merge fails otherwise
-//!      (unrelated histories), leaves the batch (its merge is aborted or
-//!      reset) and the others go on. When none merges, the job ends as
-//!      a conflict.
-//!   2. the recipe (`sh -c <recipe>` in the clone), without any
-//!      credential: it runs the repo's code. Its env names the job kind
-//!      and, when `next` gives a base, the file of the changed paths
-//!      (TER-100, [`recipe_env`]).
-//!   3. a merge job only, when the recipe passed: push the merge commit
-//!      to `next`. The recipe may have changed the clone (new commits, a
-//!      moved HEAD, its `.git/config`), so the push never runs there:
-//!      - without any credential: a fresh bare repo `<clone>.push`
-//!        fetches exactly the merge commit that step 1 recorded, over
-//!        `file://`. A commit that is gone fails the job.
-//!      - with the credential: push that commit ID from the fresh repo
-//!        to `next`. Not forced: when `next` moved, the push fails.
+//! - The repo credential never goes to the target (TER-103). The steps
+//!   that need it run in the daemon, which runs no recipe, in a bare repo
+//!   of the job at `<state>/jobs/<project>/<job>.git` ([`git::JobRepo`]).
+//!   The target runs only steps without any credential. A job is:
+//!   1. prepare, in the daemon, with the credential: fetch the card
+//!      branch (validate) or `next` and the card branches (merge). A
+//!      validate job takes the card commit. A merge job merges each card
+//!      branch onto `next` with a merge commit (`git merge-tree`, no work
+//!      tree); a conflict ends the job (never resolved, never rerun). A
+//!      batch merge (TER-112) merges its card branches in order; a card
+//!      that conflicts, or whose merge fails otherwise (unrelated
+//!      histories), leaves the batch and the others go on. When none
+//!      merges, the job ends as a conflict. The commit is recorded as
+//!      `refs/job/head` or `refs/job/merge`, and goes into a bundle.
+//!   2. on the target: the bundle goes in on stdin, and a fresh clone in
+//!      `<work_dir>/<project>/<job>` is made from it and checked against
+//!      the recorded commit. With a base, the clone also gets the file of
+//!      the changed paths (TER-100). Then the recipe (`sh -c <recipe>` in
+//!      the clone) runs: the repo's code, with no credential and no
+//!      remote. Its env names the job kind and, when `next` gives a base,
+//!      the file of the changed paths ([`recipe_env`]).
+//!   3. a merge job only, when the recipe passed, in the daemon, with the
+//!      credential: push the recorded commit from the daemon's repo to
+//!      `next`. Not forced: when `next` moved, the push fails. The recipe
+//!      never had that repo, so nothing it did reaches the push.
 //!
-//!
-//!   Each step runs as `ionice -c3 nice -n19 <argv>` (`nice` only on a
-//!   target without `ionice`), so jobs do not starve their host.
-//!   Then the clone and the push repo are removed.
+//!   Each step on the target runs as `ionice -c3 nice -n19 <argv>`
+//!   (`nice` only on a target without `ionice`), so jobs do not starve
+//!   their host. Then the clone on the target and the daemon's repo are
+//!   removed.
 //! - A step that hits its timeout, or a cancel, ends the process group and
 //!   the session of the step on the target (`TERM`, then `KILL`), through
 //!   [`crate::run_kill`]: killing the `ssh` or `docker exec` client alone
@@ -65,8 +68,13 @@
 //!   after [`RETRY`]. Neither uses an attempt or moves a card. After
 //!   [`LONG_WAIT`] the queue notes the wait on the cards, once per job and
 //!   daemon run. A failure after the recipe started stays a failure.
+//! - Each end and each cancel emits one `job.verdict` event per card
+//!   (TER-167): `passed`, `red`, `conflict`, `cancelled`, or `error`, with
+//!   the end comment and the failure block. It is written in the same
+//!   write as the card flow above, which it does not change.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -82,9 +90,11 @@ use crate::actor::Actor;
 use crate::api::Shared;
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
+use crate::events::EventDraft;
 use crate::executor::{self, Collected, Control, End, RemoteCmd};
+use crate::git;
 use crate::policy;
-use crate::secrets;
+use crate::secrets::{self, RunDirs};
 use crate::store::board::{self, CardPatch};
 use crate::store::jobs::{self, BatchCard, Job, JobEnd, JobKind};
 use crate::store::mail::{self, Address, Outgoing};
@@ -96,11 +106,14 @@ pub const TICK: Duration = Duration::from_secs(5);
 pub const LABEL_QUEUED: &str = "validation:queued";
 /// The label of a card whose job runs.
 pub const LABEL_RUNNING: &str = "validation:running";
-/// The column of a card whose job is open.
+/// The name of the column of a card whose job is open, used when no column
+/// has the role `validating` (see `board::role_name`).
 pub const COL_VALIDATING: &str = "validating";
-/// Where a validate pass goes.
+/// The name of the column where a validate pass goes, used when no column
+/// has the role `review`.
 pub const COL_REVIEW: &str = "review";
-/// Where a merge pass goes.
+/// The name of the column where a merge pass goes, used when no column has
+/// the role `accepted`.
 pub const COL_ACCEPTED: &str = "accepted";
 /// Where a failure goes, at the top.
 pub const COL_READY: &str = "ready";
@@ -116,6 +129,10 @@ pub const LONG_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How long a job whose ssh target could not be reached waits before the
 /// next try (TER-160).
 pub const RETRY: Duration = Duration::from_secs(60);
+/// The size of one stdin chunk of a step (the bundle of a job).
+const STDIN_CHUNK: usize = 64 * 1024;
+/// The dir of the daemon's job repos, in the state dir (TER-103).
+const JOBS_DIR: &str = "jobs";
 
 /// The controls of the running jobs, by job ID, for a cancel. The job IDs
 /// are ULIDs, so one map serves every daemon in a process (the tests).
@@ -201,6 +218,14 @@ pub fn kill(job: &str) {
 /// Start the queue: fail the jobs that the last daemon left running, then
 /// tick.
 pub fn spawn(state: &Shared) -> JoinHandle<()> {
+    // The daemon's job repos of the last daemon: its jobs are lost (they
+    // fail below), so none of these is in use. Before any tick.
+    let stale = state.state_dir.join(JOBS_DIR);
+    if let Err(e) = std::fs::remove_dir_all(&stale)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(dir = %stale.display(), "cannot remove the old job repos: {e}");
+    }
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         if let Some(state) = weak.upgrade() {
@@ -574,6 +599,7 @@ async fn step(
     def: &terrarium_core::config::TargetDef,
     cmd: &RemoteCmd,
     max: usize,
+    input: Option<Vec<u8>>,
 ) -> ApiResult<Collected> {
     let (running, report) = crate::run_kill::start(state, def, cmd)?;
     set_control(job, Some(running.ctl.clone()));
@@ -581,6 +607,14 @@ async fn step(
     // the old control or none: kill this step now.
     if killed(job) {
         let _ = running.ctl.send(Control::Kill);
+    }
+    // The input goes in chunks, then the end of stdin. Without input,
+    // stdin stays open and unused, as before.
+    if let Some(data) = input {
+        for chunk in data.chunks(STDIN_CHUNK) {
+            let _ = running.ctl.send(Control::Stdin(chunk.to_vec()));
+        }
+        let _ = running.ctl.send(Control::Eof);
     }
     let mut c = running.collect(max).await;
     let kill = match report {
@@ -713,7 +747,6 @@ async fn run_inner(
         )));
     }
     let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
-    let secret = secret.as_ref().map(|(_, s)| s);
     let dir = format!(
         "{}/{}/{}",
         def.work_dir().trim_end_matches('/'),
@@ -724,18 +757,45 @@ async fn run_inner(
     if let Some(c) = &job.commit {
         check_commit(c)?;
     }
+    // The daemon's repo of the job (TER-103): the credential steps run
+    // there, never on the target.
+    let local = job_repo_dir(state, &job.project, &job.id);
+    let checkout = git::Checkout {
+        url: repo.url.clone(),
+        dest: local.clone(),
+        branch: None,
+        depth: None,
+        secret: secret.map(|(_, s)| s),
+        store: RunDirs::new(&state.state_dir),
+        deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
+        timeout: Duration::from_secs(STEP_TIMEOUT),
+        hooks: git::Hooks::default(),
+        origin: git::Origin::default(),
+        fetch_from: None,
+    };
+    let made = tokio::task::spawn_blocking(move || git::JobRepo::create(checkout))
+        .await
+        .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?;
+    let job_repo = match made {
+        Ok(r) => Arc::new(r),
+        Err(e) => {
+            remove_job_repo(local).await;
+            return Err(ApiError::conflict(format!(
+                "cannot make the job repo in the daemon: {e}"
+            )));
+        }
+    };
     let holder = Some(format!("{}/jobs", job.project));
     let ionice = has_ionice(state, job, &target, &row.def, holder.clone()).await;
     let ctx = StepCtx {
         state,
         job,
         def: &row.def,
-        url: &repo.url,
         dir: &dir,
-        secret,
+        repo: job_repo,
+        bundle: local.with_extension("bundle"),
         holder: holder.clone(),
         ionice,
-        known_hosts: executor::git_known_hosts(state),
         recipe_started,
     };
     let result = steps(&ctx, recipe, def.timeout_secs()).await;
@@ -751,12 +811,41 @@ async fn run_inner(
         holder,
         ..RemoteCmd::default()
     };
-    match step(state, &job.id, &row.def, &clean, STEP_MAX).await {
+    match step(state, &job.id, &row.def, &clean, STEP_MAX, None).await {
         Ok(c) if c.end.as_ref().is_some_and(End::success) => {}
         Ok(c) => warn!(job = %job.id, "cannot remove the job clone: {}", end_text(c.end.as_ref())),
         Err(e) => warn!(job = %job.id, "cannot remove the job clone: {e}"),
     }
+    drop(ctx);
+    remove_job_repo(local).await;
     result
+}
+
+/// The daemon's repo of a job: `<state>/jobs/<project>/<job>.git`, and its
+/// bundle beside it (`.bundle`).
+fn job_repo_dir(state: &Shared, project: &str, job: &str) -> PathBuf {
+    state
+        .state_dir
+        .join(JOBS_DIR)
+        .join(project)
+        .join(format!("{job}.git"))
+}
+
+/// Remove the daemon's repo of a job and its bundle.
+async fn remove_job_repo(dir: PathBuf) {
+    let r = tokio::task::spawn_blocking(move || {
+        let _ = std::fs::remove_file(dir.with_extension("bundle"));
+        match std::fs::remove_dir_all(&dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    })
+    .await;
+    match r {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!("cannot remove the job repo in the daemon: {e}"),
+        Err(e) => warn!("cannot remove the job repo in the daemon: {e}"),
+    }
 }
 
 /// The command that the steps of a job run under (TER-97): the idle IO
@@ -806,7 +895,7 @@ async fn has_ionice(
         holder,
         ..RemoteCmd::default()
     };
-    match step(state, &job.id, def, &probe, STEP_MAX).await {
+    match step(state, &job.id, def, &probe, STEP_MAX, None).await {
         Ok(c) => {
             let ok = c.end.as_ref().is_some_and(End::success);
             // Keep only an answer: an exit code. An error, a signal, a
@@ -833,62 +922,47 @@ struct StepCtx<'a> {
     state: &'a Shared,
     job: &'a Job,
     def: &'a terrarium_core::config::TargetDef,
-    url: &'a str,
     dir: &'a str,
-    secret: Option<&'a crate::secrets::Secret>,
+    /// The daemon's repo of the job: the only place that gets the repo
+    /// credential (TER-103).
+    repo: Arc<git::JobRepo>,
+    /// Where the daemon writes the bundle for the target.
+    bundle: PathBuf,
     holder: Option<String>,
     /// The target has a working `ionice` ([`has_ionice`]).
     ionice: bool,
-    /// The daemon's known hosts ([`executor::git_known_hosts`]).
-    known_hosts: Option<String>,
     /// Set when the recipe step started: a failure after it is a failure,
     /// also when the host is gone then (TER-160).
     recipe_started: &'a AtomicBool,
 }
 
 impl StepCtx<'_> {
-    /// A git step with the credential in its env.
-    fn git_cmd(&self, script: &str, args: &[&str]) -> RemoteCmd {
+    /// A git step on the target, without any credential.
+    fn plain_cmd(&self, script: &str, args: &[&str]) -> RemoteCmd {
         let mut argv = vec![
             "sh".to_owned(),
             "-c".to_owned(),
-            format!("{GIT_PRELUDE}{script}"),
+            format!("{PLAIN_PRELUDE}{script}"),
             "sh".to_owned(),
         ];
         argv.extend(args.iter().map(|a| (*a).to_owned()));
-        let mut env = executor::checkout_env(self.secret);
-        if let Some(k) = &self.known_hosts {
-            env.insert("TERRARIUM_GIT_KNOWN_HOSTS".into(), k.clone());
-        }
-        // The key file and the host keys go in a 0700 dir of the job, not
-        // in /tmp. A path that the shell would split gets a temp dir.
-        let ssh_dir = format!("{}.ssh", self.dir);
-        if ssh_dir
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
-        {
-            env.insert("TERRARIUM_GIT_SSH_DIR".into(), ssh_dir);
-        }
         RemoteCmd {
             argv,
-            env,
             timeout_secs: Some(STEP_TIMEOUT),
             holder: self.holder.clone(),
             ..RemoteCmd::default()
         }
     }
 
-    /// A git step without the credential.
-    fn plain_cmd(&self, script: &str, args: &[&str]) -> RemoteCmd {
-        RemoteCmd {
-            env: Default::default(),
-            ..self.git_cmd(script, args)
-        }
-    }
-
-    /// Run a step at low IO and CPU priority ([`low_priority`]). A job
-    /// that got a [`kill`] starts no more steps.
-    async fn run(&self, cmd: &RemoteCmd, max: usize) -> ApiResult<Collected> {
+    /// Run a step at low IO and CPU priority ([`low_priority`]), with
+    /// `input` on its stdin. A job that got a [`kill`] starts no more
+    /// steps.
+    async fn run(
+        &self,
+        cmd: &RemoteCmd,
+        max: usize,
+        input: Option<Vec<u8>>,
+    ) -> ApiResult<Collected> {
         if killed(&self.job.id) {
             return Err(ApiError::conflict("the job was cancelled"));
         }
@@ -896,69 +970,212 @@ impl StepCtx<'_> {
             argv: low_priority(cmd.argv.clone(), self.ionice),
             ..cmd.clone()
         };
-        step(self.state, &self.job.id, self.def, &cmd, max).await
+        step(self.state, &self.job.id, self.def, &cmd, max, input).await
+    }
+
+    /// Run `f` on the daemon's repo of the job, on the blocking pool. A
+    /// job that got a [`kill`] starts no more steps.
+    async fn daemon<T, F>(&self, f: F) -> ApiResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&git::JobRepo) -> T + Send + 'static,
+    {
+        if killed(&self.job.id) {
+            return Err(ApiError::conflict("the job was cancelled"));
+        }
+        let repo = self.repo.clone();
+        tokio::task::spawn_blocking(move || f(&repo))
+            .await
+            .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))
     }
 }
 
-/// Prepare, run the recipe, and push `next` for a merge.
-async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEnd> {
-    let job = x.job;
-    let mut args: Vec<&str> = vec![
-        x.url,
-        x.dir,
-        job.kind.as_str(),
-        &job.branch,
-        job.commit.as_deref().unwrap_or(""),
-    ];
-    // The other branches of a batch, in order, after the first.
-    let cards = job.cards();
-    if job.kind == JobKind::Merge {
-        for c in cards.iter().skip(1) {
-            check_ref(&c.branch)?;
-            args.push(&c.branch);
-        }
+/// What the daemon's prepare step gave.
+enum Prepared {
+    /// The commit to test, in the bundle; the batch with its conflicts
+    /// marked.
+    Ready {
+        head: String,
+        batch: Option<Vec<BatchCard>>,
+        /// The base of the changed files (TER-100), an ancestor of `head`.
+        base: Option<String>,
+    },
+    /// The job ends here.
+    End(JobEnd),
+}
+
+/// The ref of the job's commit in the bundle and in the target's clone.
+fn job_ref(kind: JobKind) -> &'static str {
+    if kind == JobKind::Merge {
+        "refs/job/merge"
+    } else {
+        "refs/job/head"
     }
-    let prep = x.git_cmd(PREPARE_SCRIPT, &args);
-    let c = x.run(&prep, STEP_MAX).await?;
-    let r = result_line(&c.stdout);
-    // The batch with the cards that conflicted marked.
-    let batch = (!job.batch.is_empty()).then(|| mark_conflicts(&job.batch, &c.stdout));
-    let head = match r.get("outcome").map(String::as_str) {
-        Some("ok") => r.get("head").cloned().filter(|h| !h.is_empty()),
-        Some("conflict") => {
+}
+
+/// Step 1, in the daemon, with the repo credential (TER-103): fetch, check
+/// out or merge, record the commit as [`job_ref`], and write the bundle.
+/// Blocking.
+fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared {
+    let failed = |what: String| {
+        Prepared::End(JobEnd {
+            passed: false,
+            outcome: Some("error".into()),
+            tail: Some(format!("the prepare step failed: {what}")),
+            ..JobEnd::default()
+        })
+    };
+    let refname = job_ref(job.kind);
+    let mut batch = None;
+    // The base of the changed files (TER-100): `next` before the merge for
+    // a merge, the merge-base of the commit and `next` for a validate.
+    let base;
+    let head = if job.kind == JobKind::Merge {
+        // The branches of the merge, in order: the job's, then the rest of
+        // a batch.
+        let mut branches = vec![job.branch.clone()];
+        branches.extend(job.cards().iter().skip(1).map(|c| c.branch.clone()));
+        let mut specs = vec!["+refs/heads/next:refs/remotes/job/next".to_owned()];
+        specs.extend(
+            branches
+                .iter()
+                .enumerate()
+                .map(|(i, b)| format!("+refs/heads/{b}:refs/remotes/job/card{i}")),
+        );
+        if let Err(e) = repo.fetch(&specs) {
+            return failed(format!(
+                "cannot fetch next and {} (does the repo have a next branch?): {e}",
+                branches.join(" ")
+            ));
+        }
+        let mut cur = match repo.commit_of("refs/remotes/job/next") {
+            Ok(Some(c)) => c,
+            Ok(None) => return failed("the repo has no next branch".into()),
+            Err(e) => return failed(e.to_string()),
+        };
+        base = Some(cur.clone());
+        // A branch that conflicts, or whose merge fails otherwise, leaves
+        // the merge; the next branch merges onto the ones before it.
+        let mut left: HashMap<usize, String> = HashMap::new();
+        let mut merged = 0;
+        for (i, b) in branches.iter().enumerate() {
+            let other = format!("refs/remotes/job/card{i}");
+            match repo.merge(&cur, &other, &format!("Merge {b} onto next")) {
+                Ok(git::MergeStep::Merged(c)) => {
+                    cur = c;
+                    merged += 1;
+                }
+                Ok(git::MergeStep::Conflict(files)) => {
+                    left.insert(i, files.join("\n"));
+                }
+                Ok(git::MergeStep::Failed(msg)) => {
+                    left.insert(i, format!("the merge failed without a conflict:\n{msg}"));
+                }
+                Err(e) => return failed(format!("cannot merge {b}: {e}")),
+            }
+        }
+        if !job.batch.is_empty() {
+            batch = Some(mark_conflicts(&job.batch, &left));
+        }
+        if merged == 0 {
             let what = if job.batch.is_empty() {
                 format!("the branch `{}` does", job.branch)
             } else {
                 "none of the branches of the batch does".to_owned()
             };
-            return Ok(JobEnd {
+            let mut files: Vec<(usize, String)> = left.into_iter().collect();
+            files.sort();
+            let files: Vec<String> = files.into_iter().map(|(_, f)| f).collect();
+            return Prepared::End(JobEnd {
                 passed: false,
                 outcome: Some("conflict".into()),
-                exit_code: exit_code(c.end.as_ref()),
                 tail: Some(format!(
                     "{what} not merge onto `next` without conflicts; the queue does not resolve them. Files:\n{}",
-                    output_of(&c)
+                    files.join("\n")
                 )),
-                head: None,
                 batch,
+                ..JobEnd::default()
             });
         }
-        _ => None,
+        cur
+    } else {
+        let spec = format!("+refs/heads/{}:refs/remotes/job/card", job.branch);
+        if let Err(e) = repo.fetch(&[spec]) {
+            return failed(format!("cannot fetch {}: {e}", job.branch));
+        }
+        let tip = match repo.commit_of("refs/remotes/job/card") {
+            Ok(Some(c)) => c,
+            Ok(None) => return failed(format!("cannot fetch {}", job.branch)),
+            Err(e) => return failed(e.to_string()),
+        };
+        let head = match &job.commit {
+            None => tip,
+            Some(commit) => match repo.commit_of(commit) {
+                Ok(Some(c)) if repo.is_ancestor(&c, &tip).unwrap_or(false) => c,
+                Ok(_) => return failed(format!("commit {commit} is not on {}", job.branch)),
+                Err(e) => return failed(e.to_string()),
+            },
+        };
+        // A repo without `next` is no error: the recipe then gets no list
+        // of changed files.
+        let next = "+refs/heads/next:refs/remotes/job/next".to_owned();
+        base = match repo.fetch(&[next]) {
+            Ok(()) => repo
+                .merge_base(&head, "refs/remotes/job/next")
+                .unwrap_or(None),
+            Err(_) => None,
+        };
+        head
     };
-    let Some(head) = head else {
+    if let Err(e) = repo
+        .set_ref(refname, &head)
+        .and_then(|()| repo.bundle(refname, bundle))
+    {
+        return failed(format!("cannot write the bundle: {e}"));
+    }
+    Prepared::Ready { head, batch, base }
+}
+
+/// Prepare in the daemon, clone on the target from the bundle, run the
+/// recipe there, and push `next` from the daemon for a merge.
+async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEnd> {
+    let job = x.job;
+    if job.kind == JobKind::Merge {
+        for c in job.cards().iter().skip(1) {
+            check_ref(&c.branch)?;
+        }
+    }
+    let (j, bundle) = (job.clone(), x.bundle.clone());
+    let (head, batch, base) = match x.daemon(move |r| prepare(r, &j, &bundle)).await? {
+        Prepared::Ready { head, batch, base } => (head, batch, base),
+        Prepared::End(end) => return Ok(end),
+    };
+    check_commit(&head)?;
+    // Step 2, on the target and without any credential: a clone from the
+    // bundle, at the recorded commit.
+    let b = x.bundle.clone();
+    let data = tokio::fs::read(&b)
+        .await
+        .map_err(|e| ApiError::internal(format!("cannot read the job bundle: {e}")))?;
+    let _ = tokio::fs::remove_file(&b).await;
+    let base = base.filter(|b| check_commit(b).is_ok()).unwrap_or_default();
+    let receive = x.plain_cmd(RECEIVE_SCRIPT, &[x.dir, &head, job.kind.as_str(), &base]);
+    let c = x.run(&receive, STEP_MAX, Some(data)).await?;
+    if result_line(&c.stdout).get("outcome").map(String::as_str) != Some("ok") {
         return Ok(JobEnd {
             passed: false,
             outcome: Some("error".into()),
             exit_code: exit_code(c.end.as_ref()),
             tail: Some(format!(
-                "the prepare step failed ({}):\n{}",
+                "the clone on the target failed ({}):\n{}",
                 end_text(c.end.as_ref()),
                 output_of(&c)
             )),
             head: None,
             batch,
         });
-    };
+    }
+    let r = result_line(&c.stdout);
     let base = r
         .get("base")
         .filter(|b| check_commit(b).is_ok())
@@ -972,7 +1189,7 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         ..RemoteCmd::default()
     };
     // An error here is a recipe that did not start: no session.
-    let c = x.run(&recipe_cmd, RECIPE_MAX).await?;
+    let c = x.run(&recipe_cmd, RECIPE_MAX, None).await?;
     x.recipe_started.store(true, Ordering::SeqCst);
     let ok = c.end.as_ref().is_some_and(End::success);
     let mut tail = format!(
@@ -995,47 +1212,36 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
     if !ok || job.kind != JobKind::Merge {
         return Ok(result);
     }
-    // The push never runs in the clone that the recipe ran in: a fresh
-    // repo gets the recorded merge commit, and only that commit goes out.
-    check_commit(&head)?;
-    let push_dir = format!("{}.push", x.dir);
-    let collect = x.plain_cmd(COLLECT_SCRIPT, &[x.dir, &push_dir, &head]);
-    let c = x.run(&collect, STEP_MAX).await?;
-    if result_line(&c.stdout).get("outcome").map(String::as_str) != Some("ok") {
-        return Ok(JobEnd {
+    // Step 3, in the daemon, with the credential: push the recorded merge
+    // commit from the daemon's repo. The recipe never had that repo, so
+    // nothing it did to its clone reaches the push.
+    let h = head.clone();
+    let pushed = x
+        .daemon(move |r| match r.commit_of("refs/job/merge") {
+            Ok(Some(c)) if c == h => r.push(&h, "next"),
+            Ok(_) => Err(git::GitError::Refused(format!(
+                "the job repo does not hold the merge commit {h}"
+            ))),
+            Err(e) => Err(e),
+        })
+        .await?;
+    match pushed {
+        Ok(()) => Ok(result),
+        Err(e) => Ok(JobEnd {
             passed: false,
             outcome: Some("error".into()),
-            exit_code: exit_code(c.end.as_ref()),
             tail: Some(format!(
-                "the recipe passed, but the merge commit {head} could not be taken from the job clone ({}); did the recipe change the clone?\n{}",
-                end_text(c.end.as_ref()),
-                output_of(&c)
+                "the recipe passed, but the push to `next` failed; did `next` move?\n{e}"
             )),
             head: Some(head),
             batch,
-        });
+            ..JobEnd::default()
+        }),
     }
-    let push = x.git_cmd(PUSH_SCRIPT, &[x.url, &push_dir, &head]);
-    let c = x.run(&push, STEP_MAX).await?;
-    if result_line(&c.stdout).get("outcome").map(String::as_str) == Some("ok") {
-        return Ok(result);
-    }
-    Ok(JobEnd {
-        passed: false,
-        outcome: Some("error".into()),
-        exit_code: exit_code(c.end.as_ref()),
-        tail: Some(format!(
-            "the recipe passed, but the push to `next` failed ({}); did `next` move?\n{}",
-            end_text(c.end.as_ref()),
-            output_of(&c)
-        )),
-        head: Some(head),
-        batch,
-    })
 }
 
 /// The file of the changed paths in a job clone, relative to its root
-/// (written by [`PREPARE_SCRIPT`]).
+/// (written by [`RECEIVE_SCRIPT`]).
 pub const CHANGED_FILES: &str = ".git/terrarium/changed-files";
 
 /// The recipe as its shell runs it. Without a base the recipe must not see
@@ -1067,36 +1273,9 @@ fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<
     env
 }
 
-/// The conflicts that the prepare step of a batch printed: each
-/// `TERRARIUM_CONFLICT <index>` line, then the conflicting files, by the
-/// index of the branch in the batch.
-fn conflicts(stdout: &[u8]) -> HashMap<usize, String> {
-    let text = String::from_utf8_lossy(stdout);
-    let mut out: HashMap<usize, String> = HashMap::new();
-    let mut at: Option<usize> = None;
-    for line in text.lines() {
-        if let Some(i) = line.strip_prefix("TERRARIUM_CONFLICT\t") {
-            at = i.trim().parse().ok();
-            if let Some(i) = at {
-                out.entry(i).or_default();
-            }
-        } else if line.starts_with("TERRARIUM_") {
-            at = None;
-        } else if let Some(i) = at {
-            let files = out.entry(i).or_default();
-            if !files.is_empty() {
-                files.push('\n');
-            }
-            files.push_str(line);
-        }
-    }
-    out
-}
-
-/// The batch with each card that conflicted marked `conflict`, with its
-/// files.
-fn mark_conflicts(batch: &[BatchCard], stdout: &[u8]) -> Vec<BatchCard> {
-    let found = conflicts(stdout);
+/// The batch with each card that left the merge (by its index in the
+/// batch) marked `conflict`, with its files or the reason.
+fn mark_conflicts(batch: &[BatchCard], found: &HashMap<usize, String>) -> Vec<BatchCard> {
     batch
         .iter()
         .enumerate()
@@ -1135,58 +1314,46 @@ fn batch_summary(batch: &[BatchCard]) -> String {
 }
 
 /// The head commit of `branch` of `repo` on its remote, read with `git
-/// ls-remote` on the project's delivery target (the daemon may not reach
-/// the forge itself). `None`: the branch is not on the remote.
+/// ls-remote` in the daemon (TER-103: the repo credential never goes to a
+/// target). `None`: the branch is not on the remote.
 pub async fn remote_head(
     state: &Shared,
     project: &str,
     repo_name: &str,
-    target: &str,
     branch: &str,
 ) -> ApiResult<Option<String>> {
     check_ref(branch)?;
-    let (p, r, tn) = (project.to_owned(), repo_name.to_owned(), target.to_owned());
-    let (repo, row) = state
+    let (p, r) = (project.to_owned(), repo_name.to_owned());
+    let repo = state
         .db
         .read(move |c| {
-            let repo = repos::find_by_name(c, &p, &r)?
-                .ok_or_else(|| ApiError::not_found(format!("no repo `{r}` in `{p}`")))?;
-            Ok((repo, targets::get(c, &tn)?))
+            repos::find_by_name(c, &p, &r)?
+                .ok_or_else(|| ApiError::not_found(format!("no repo `{r}` in `{p}`")))
         })
         .await?;
     let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
-    let cmd = RemoteCmd {
-        argv: vec![
-            "sh".into(),
-            "-c".into(),
-            format!("{GIT_PRELUDE}{LS_REMOTE_SCRIPT}"),
-            "sh".into(),
-            repo.url.clone(),
-            branch.to_owned(),
-        ],
-        env: {
-            let mut env = executor::checkout_env(secret.as_ref().map(|(_, s)| s));
-            if let Some(k) = executor::git_known_hosts(state) {
-                env.insert("TERRARIUM_GIT_KNOWN_HOSTS".into(), k);
-            }
-            env
-        },
-        timeout_secs: Some(120),
-        holder: Some(format!("{project}/jobs")),
-        ..RemoteCmd::default()
+    let c = git::Checkout {
+        url: repo.url.clone(),
+        dest: state.state_dir.join(JOBS_DIR),
+        branch: None,
+        depth: None,
+        secret: secret.map(|(_, s)| s),
+        store: RunDirs::new(&state.state_dir),
+        deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
+        timeout: Duration::from_secs(120),
+        hooks: git::Hooks::default(),
+        origin: git::Origin::default(),
+        fetch_from: None,
     };
-    let c = executor::start_cmd(state, &row.def, &cmd)?
-        .collect(STEP_MAX)
-        .await;
-    let r = result_line(&c.stdout);
-    match r.get("outcome").map(String::as_str) {
-        Some("ok") => Ok(r.get("head").cloned().filter(|h| !h.is_empty())),
-        _ => Err(ApiError::conflict(format!(
-            "cannot read branch `{branch}` of `{repo_name}` on target `{target}` ({}): {}",
-            end_text(c.end.as_ref()),
-            output_of(&c).trim()
-        ))),
-    }
+    let b = branch.to_owned();
+    tokio::task::spawn_blocking(move || git::ls_remote(&c, &b))
+        .await
+        .map_err(|e| ApiError::internal(format!("the git task failed: {e}")))?
+        .map_err(|e| {
+            ApiError::conflict(format!(
+                "cannot read branch `{branch}` of `{repo_name}` on its remote: {e}"
+            ))
+        })
 }
 
 /// A branch name that git and the scripts take.
@@ -1286,17 +1453,97 @@ fn failure_block(j: &Job) -> String {
 /// What happens after a job ends: the card move, or the rerun.
 async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
     let j = j.clone();
-    state
-        .db
-        .write("system", move |t| {
-            if j.batch.is_empty() {
-                single_end(t, &j)
-            } else {
-                batch_end(t, &j)
-            }
-        })
-        .await?;
+    state.db.write("system", move |t| on_end(t, &j)).await?;
     kick(state);
+    Ok(())
+}
+
+/// The end of a job in one write: a `job.verdict` event for each card,
+/// then the coded card flow (the move, the rerun, or the split).
+fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    emit_verdicts(t, j)?;
+    if j.batch.is_empty() {
+        single_end(t, j)
+    } else {
+        batch_end(t, j)
+    }
+}
+
+/// The verdict of a job for one card (TER-167): `passed`, `red`,
+/// `conflict`, `cancelled`, or `error`. `j` is the card's view
+/// ([`card_view`] for a batch).
+fn verdict_of(j: &Job) -> &'static str {
+    if j.state == jobs::JobState::Cancelled {
+        return "cancelled";
+    }
+    match j.outcome.as_deref() {
+        Some("conflict") => "conflict",
+        _ if j.state == jobs::JobState::Passed => "passed",
+        Some("red") => "red",
+        _ => "error",
+    }
+}
+
+/// The `job.verdict` event data of each card of an ended or cancelled
+/// job, in card order (TER-167). It says what the run found for the card,
+/// not what the queue does next: the rerun and the split stay in the
+/// coded flow until the board rules take them over.
+fn verdicts(j: &Job) -> Vec<Value> {
+    let views: Vec<Job> = if j.batch.is_empty() {
+        vec![j.clone()]
+    } else {
+        j.batch.iter().map(|c| card_view(j, c)).collect()
+    };
+    let batch: Option<Vec<&str>> =
+        (!j.batch.is_empty()).then(|| j.batch.iter().map(|c| c.card.as_str()).collect());
+    views
+        .iter()
+        .map(|v| {
+            let verdict = verdict_of(v);
+            let word = match verdict {
+                "passed" => "passed",
+                "cancelled" => "was cancelled",
+                _ => "failed",
+            };
+            let failure = matches!(verdict, "red" | "conflict" | "error").then(|| failure_block(v));
+            serde_json::json!({
+                "project": v.project,
+                "job": v.id,
+                "card": v.card,
+                "kind": v.kind,
+                "verdict": verdict,
+                "state": v.state,
+                "outcome": v.outcome,
+                "attempt": v.attempt,
+                "by_agent": v.by_agent,
+                "repo": v.repo,
+                "branch": v.branch,
+                "parent": v.parent,
+                "batch": batch,
+                "end_comment": end_comment(v, word),
+                "failure_block": failure,
+            })
+        })
+        .collect()
+}
+
+/// Emit one `job.verdict` event for each card of an ended or cancelled
+/// job (TER-167), in the write of the end or the cancel.
+pub fn emit_verdicts(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    for data in verdicts(j) {
+        let card = data["card"].as_str().unwrap_or_default().to_owned();
+        let summary = format!(
+            "{} job {} for {card}: {}",
+            j.kind.as_str(),
+            j.id,
+            data["verdict"].as_str().unwrap_or_default()
+        );
+        t.emit(
+            EventDraft::new("job.verdict", summary, data)
+                .project(j.project.clone())
+                .card(card),
+        )?;
+    }
     Ok(())
 }
 
@@ -1417,11 +1664,11 @@ fn card_view(j: &Job, c: &BatchCard) -> Job {
 fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
     let to = match j.kind {
-        JobKind::Validate => COL_REVIEW,
-        JobKind::Merge => COL_ACCEPTED,
+        JobKind::Validate => board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?,
+        JobKind::Merge => board::role_name(t, &j.project, board::ACCEPTED, COL_ACCEPTED)?,
     };
     let note = end_comment(j, "passed");
-    move_or_comment(t, &j.card, to, None, &note)?;
+    move_or_comment(t, &j.card, &to, None, &note)?;
     unassign(t, &j.card)
 }
 
@@ -1536,138 +1783,59 @@ pub fn view(def: &DeliveryDef, list: &[Job]) -> Value {
     })
 }
 
-/// The git setup that each credential step shares: no user or system
-/// config, no hooks, no prompts, the credential only from the env.
-/// Copied from [`executor::CHECKOUT_SCRIPT`]'s preamble.
-const GIT_PRELUDE: &str = r#"set -u
+/// The git setup of the steps on the target. They hold no credential
+/// (TER-103): no user or system config, no hooks, no prompts, and only
+/// the file transport (the bundle).
+const PLAIN_PRELUDE: &str = r#"set -u
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
   GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_NAMESPACE GIT_CREDENTIAL_HELPER \
   GIT_TEMPLATE_DIR GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_EDITOR GIT_PROXY_COMMAND \
-  GIT_SSH GIT_SSH_VARIANT GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+  GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS=false SSH_ASKPASS=false LC_ALL=C
-# ssh reads no config file (`-F /dev/null`: a planted ~/.ssh/config
-# cannot redirect the host or run a ProxyCommand), and keeps its host keys
-# and the key file in a 0700 dir of its own: TERRARIUM_GIT_SSH_DIR (the
-# job's dir), else a new temp dir. TERRARIUM_GIT_KNOWN_HOSTS seeds the
-# known hosts (the daemon's).
-sshdir=${TERRARIUM_GIT_SSH_DIR:-}
-sshtmp=
-if [ -n "$sshdir" ]; then
-  mkdir -p -m 700 -- "$sshdir" && chmod 700 -- "$sshdir" || { echo "cannot make $sshdir"; exit 2; }
-else
-  sshdir=$(mktemp -d) || exit 2
-  sshtmp=$sshdir
-fi
-printf '%s\n' "${TERRARIUM_GIT_KNOWN_HOSTS:-}" > "$sshdir/known_hosts"
-unset TERRARIUM_GIT_KNOWN_HOSTS TERRARIUM_GIT_SSH_DIR
-sshbase="ssh -F /dev/null -o UserKnownHostsFile=$sshdir/known_hosts -o GlobalKnownHostsFile=/dev/null -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-export GIT_SSH_COMMAND="$sshbase"
-helper=
-keyfile=
-trap 'if [ -n "$keyfile" ]; then rm -f "$keyfile"; fi; if [ -n "$sshtmp" ]; then rm -rf "$sshtmp"; fi' EXIT
-if [ -n "${TERRARIUM_GIT_PASSWORD:-}" ]; then
-  helper='!f() { test "$1" = get || exit 0; echo "username=$TERRARIUM_GIT_USERNAME"; echo "password=$TERRARIUM_GIT_PASSWORD"; }; f'
-fi
-if [ -n "${TERRARIUM_GIT_SSH_KEY:-}" ]; then
-  keyfile=$sshdir/key
-  (umask 077 && printf '%s\n' "$TERRARIUM_GIT_SSH_KEY" > "$keyfile")
-  export GIT_SSH_COMMAND="$sshbase -i $keyfile -o IdentitiesOnly=yes"
-fi
-unset TERRARIUM_GIT_SSH_KEY
 G() {
   git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.untrackedCache=false \
-    -c credential.helper= -c protocol.allow=never -c protocol.https.allow=always \
-    -c protocol.http.allow=always -c protocol.ssh.allow=always -c protocol.file.allow=always \
-    -c protocol.git.allow=never -c protocol.ext.allow=never -c protocol.fd.allow=never \
-    -c protocol.ftp.allow=never -c protocol.ftps.allow=never -c fetch.recurseSubmodules=false \
-    -c submodule.recurse=false -c gc.auto=0 -c maintenance.auto=false \
-    -c merge.verifySignatures=false -c advice.detachedHead=false -c core.pager=cat \
+    -c credential.helper= -c protocol.allow=never -c protocol.file.allow=always \
+    -c fetch.recurseSubmodules=false -c submodule.recurse=false -c gc.auto=0 \
+    -c maintenance.auto=false -c advice.detachedHead=false -c core.pager=cat \
     -c user.name=terrarium -c user.email=terrarium@localhost -c commit.gpgsign=false "$@"
-}
-g() {
-  if [ -n "$helper" ]; then G -c "credential.helper=$helper" "$@"; else G "$@"; fi
-}
-forget() {
-  unset TERRARIUM_GIT_PASSWORD TERRARIUM_GIT_USERNAME
-  helper=
-  if [ -n "$keyfile" ]; then rm -f "$keyfile"; fi
-  keyfile=
-  export GIT_SSH_COMMAND="$sshbase"
 }
 res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 "#;
 
-/// Step 1: `url dir kind branch commit [branch...]` (the other branches of
-/// a batch merge, in order). Prints `TERRARIUM_CONFLICT <index>` and the
-/// files for each branch that conflicts, then `outcome=ok head=<sha>
-/// base=<sha or empty>`, `outcome=conflict`, or `outcome=error`. With a
-/// base, the changed files are in [`CHANGED_FILES`] of the clone.
-const PREPARE_SCRIPT: &str = r#"url=$1; dir=$2; kind=$3; branch=$4; commit=$5
-shift 5
-case "$dir" in /*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
-rm -rf -- "$dir" && mkdir -p -- "$dir" && G -C "$dir" init -q || { forget; res error; exit 2; }
+/// Step 2 on the target, without any credential: `dir sha kind base`,
+/// the bundle of the daemon on stdin. Writes it to `<dir>.bundle`, makes a
+/// fresh clone at `dir` from it, checks that the job ref is the commit
+/// `sha`, and checks it out (`next` for a merge, detached for a
+/// validate). With a base (an ancestor of `sha`, so in the bundle), it
+/// writes the changed files to [`CHANGED_FILES`] (TER-100). Prints
+/// `outcome=ok head=<sha> base=<sha or empty>` or `outcome=error`.
+const RECEIVE_SCRIPT: &str = r#"dir=$1; sha=$2; kind=$3; base=${4:-}
+case "$dir" in /*/*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
+case "$sha" in *[!0-9a-f]*|'') echo "bad commit"; res error; exit 2 ;; esac
+case "$base" in *[!0-9a-f]*) echo "bad base"; res error; exit 2 ;; esac
+b=$dir.bundle
+if [ "$kind" = merge ]; then r=refs/job/merge; else r=refs/job/head; fi
+rm -rf -- "$dir" "$b" && mkdir -p -- "$dir" || { echo "cannot make $dir"; res error; exit 2; }
+if ! cat > "$b"; then rm -f -- "$b"; echo "cannot write the bundle"; res error; exit 2; fi
+if ! { G -C "$dir" init -q && G -C "$dir" fetch -q --no-tags -- "$b" "+$r:$r"; }; then
+  rm -f -- "$b"; echo "cannot read the bundle"; res error; exit 2
+fi
+rm -f -- "$b"
+got=$(G -C "$dir" rev-parse --verify -q "$r^{commit}")
+if [ "$got" != "$sha" ]; then echo "the bundle holds ${got:-nothing}, not $sha"; res error; exit 2; fi
 if [ "$kind" = merge ]; then
-  # The branches of the merge, in order: the job's, then the rest of a
-  # batch. The daemon checked each name (no space, no glob character).
-  set -- "$branch" "$@"
-  specs="+refs/heads/next:refs/remotes/job/next"
-  i=0
-  for b in "$@"; do specs="$specs +refs/heads/$b:refs/remotes/job/card$i"; i=$((i + 1)); done
-  set -f
-  # shellcheck disable=SC2086
-  if ! g -C "$dir" fetch -q -- "$url" $specs; then
-    forget; echo "cannot fetch next and $* (does the repo have a next branch?)"; res error; exit 2
-  fi
-  set +f
-  forget
-  G -C "$dir" checkout -q -B next refs/remotes/job/next || { res error; exit 2; }
-  # A branch that conflicts leaves the merge: its merge is aborted, and
-  # the next branch merges onto the ones before it.
-  i=0; merged=0
-  for b in "$@"; do
-    if out=$(G -C "$dir" merge -q --no-ff --no-edit -m "Merge $b onto next" "refs/remotes/job/card$i" 2>&1); then
-      merged=$((merged + 1))
-    else
-      printf 'TERRARIUM_CONFLICT\t%s\n' "$i"
-      G -C "$dir" diff --name-only --diff-filter=U
-      # A merge that fails without a conflict (for example unrelated
-      # histories) leaves no merge to abort: say why, and reset the tree,
-      # so that only this branch leaves the merge.
-      if ! G -C "$dir" merge --abort 2>/dev/null; then
-        printf 'the merge failed without a conflict:\n%s\n' "$out"
-        G -C "$dir" reset -q --hard HEAD || { res error; exit 2; }
-      fi
-    fi
-    i=$((i + 1))
-  done
-  if [ "$merged" = 0 ]; then res conflict; exit 0; fi
-  G -C "$dir" update-ref refs/job/merge HEAD || { res error; exit 2; }
+  G -C "$dir" checkout -q -B next "$sha" || { res error; exit 2; }
 else
-  if ! g -C "$dir" fetch -q -- "$url" "+refs/heads/$branch:refs/remotes/job/card"; then
-    forget; echo "cannot fetch $branch"; res error; exit 2
-  fi
-  # `next` gives the base of the changed files. A repo without it is no
-  # error: the recipe then gets no list of changed files.
-  g -C "$dir" fetch -q -- "$url" "+refs/heads/next:refs/remotes/job/next" > /dev/null 2>&1 || true
-  forget
-  if [ -n "$commit" ]; then
-    if ! G -C "$dir" merge-base --is-ancestor "$commit" refs/remotes/job/card 2>/dev/null; then
-      echo "commit $commit is not on $branch"; res error; exit 2
-    fi
-    G -C "$dir" checkout -q --detach "$commit" || { res error; exit 2; }
-  else
-    G -C "$dir" checkout -q --detach refs/remotes/job/card || { res error; exit 2; }
-  fi
+  G -C "$dir" checkout -q --detach "$sha" || { res error; exit 2; }
 fi
 # The changed files for the recipe (TER-100): the paths that differ
 # between the base and HEAD, one per line, in .git/terrarium/changed-files.
-# The base of a merge is `next` before the merge, of a validate the
-# merge-base of the commit and `next`. No base: no file, and `base=`.
-if [ "$kind" = merge ]; then
-  base=$(G -C "$dir" rev-parse -q --verify "refs/remotes/job/next^{commit}" 2>/dev/null) || base=
-else
-  base=$(G -C "$dir" merge-base HEAD refs/remotes/job/next 2>/dev/null) || base=
+# The daemon gives the base: `next` before the merge for a merge, the
+# merge-base of the commit and `next` for a validate. No base, or one that
+# is not in the clone: no file, and `base=`.
+if [ -n "$base" ] && ! G -C "$dir" merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
+  base=
 fi
 if [ -n "$base" ]; then
   mkdir -p -- "$dir/.git/terrarium" \
@@ -1675,53 +1843,11 @@ if [ -n "$base" ]; then
       > "$dir/.git/terrarium/changed-files" \
     || { rm -f -- "$dir/.git/terrarium/changed-files"; base=; }
 fi
-printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$(G -C "$dir" rev-parse HEAD)" "$base"
+printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 "#;
 
-/// `url branch`: the head of the branch on the remote (empty when the
-/// remote has no such branch).
-const LS_REMOTE_SCRIPT: &str = r#"url=$1; branch=$2
-if out=$(g ls-remote -- "$url" "refs/heads/$branch"); then
-  forget; res ok "$(printf '%s\n' "$out" | awk 'NR==1 {print $1}')"
-else
-  forget; res error; exit 2
-fi
-"#;
-
-/// Step 3a, without the credential: `dir push sha`. A fresh bare repo at
-/// `push` fetches `refs/job/merge` (made in step 1, before the recipe ran)
-/// from the job clone over `file://`, and must find exactly the merge
-/// commit `sha` that step 1 recorded. The fetch checks the object IDs, so
-/// the content is the validated merge whatever the recipe did to the
-/// clone; a moved or deleted ref fails the job. Nothing of the clone's
-/// config reaches step 3b.
-const COLLECT_SCRIPT: &str = r#"dir=$1; push=$2; sha=$3
-case "$sha" in *[!0-9a-f]*|'') echo "bad merge commit"; res error; exit 2 ;; esac
-case "$push" in /*/*) ;; *) echo "the push dir is not absolute"; res error; exit 2 ;; esac
-rm -rf -- "$push" && G init -q --bare --template= "$push" || { echo "cannot make the push repo"; res error; exit 2; }
-if ! G -C "$push" fetch -q --no-tags -- "file://$dir/.git" "+refs/job/merge:refs/heads/merge"; then
-  echo "refs/job/merge is not in the job clone any more"; res error; exit 2
-fi
-if [ "$(G -C "$push" rev-parse --verify -q "refs/heads/merge^{commit}")" != "$sha" ]; then
-  echo "refs/job/merge of the job clone is not the merge commit $sha"; res error; exit 2
-fi
-res ok "$sha"
-"#;
-
-/// Step 3b: `url push sha`. Push exactly the merge commit `sha` to `next`
-/// from the fresh repo of step 3a, not forced. The push repo must still
-/// hold `sha` as `refs/heads/merge`.
-const PUSH_SCRIPT: &str = r#"url=$1; push=$2; sha=$3
-case "$sha" in *[!0-9a-f]*|'') forget; echo "bad merge commit"; res error; exit 2 ;; esac
-if [ "$(G -C "$push" rev-parse --verify -q "refs/heads/merge^{commit}")" != "$sha" ]; then
-  forget; echo "the push repo does not hold the merge commit $sha"; res error; exit 2
-fi
-if g -C "$push" push -q -- "$url" "$sha:refs/heads/next"; then forget; res ok; else forget; res error; exit 2; fi
-"#;
-
-/// The end: `dir`. Remove the clone, the push repo, and the ssh dir.
-const CLEAN_SCRIPT: &str =
-    r#"case "$1" in /*/*) rm -rf -- "$1" "$1.push" "$1.ssh" ;; *) exit 2 ;; esac"#;
+/// The end: `dir`. Remove the clone and a bundle that is left.
+const CLEAN_SCRIPT: &str = r#"case "$1" in /*/*) rm -rf -- "$1" "$1.bundle" ;; *) exit 2 ;; esac"#;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -1746,73 +1872,98 @@ mod tests {
         assert_eq!(recipe_script("just x".into(), Some("abc")), "just x");
     }
 
-    /// Review of TER-71, major 1: ssh in the git steps reads no config
-    /// file, keeps its host keys and the key file in the job's 0700 dir,
-    /// and `forget` removes the key. ssh finds `~/.ssh/config` through the
-    /// passwd home, not `$HOME`, so a test cannot plant one without
-    /// touching the real file; `ssh -G` prints the config that a
-    /// connection would use instead.
-    #[test]
-    fn ssh_reads_no_config_and_keeps_the_key_in_the_job_dir() {
-        if std::process::Command::new("ssh")
-            .arg("-V")
-            .output()
-            .is_err()
-        {
-            eprintln!("no ssh on this machine: skipped");
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("job.ssh");
-        let d = dir.display().to_string();
-        let script = format!(
-            "{GIT_PRELUDE}{}",
-            r#"ls -ld "$sshdir" | cut -c1-10
-ls -l "$keyfile" | cut -c1-10
-cat "$sshdir/known_hosts"
-eval "$GIT_SSH_COMMAND -G forge.example" | grep -E '^(hostname|proxycommand|userknownhostsfile|identityfile) '
-forget
-if [ -e "$sshdir/key" ]; then echo key-left; else echo key-gone; fi
-echo "after: $GIT_SSH_COMMAND"
-"#
-        );
-        let out = std::process::Command::new("sh")
+    /// Run `script` (after [`PLAIN_PRELUDE`]) with `args` and `input` on
+    /// stdin, with an empty env but `PATH`. Returns the exit status and
+    /// stdout.
+    fn run_plain(script: &str, args: &[&str], input: &[u8]) -> (bool, String) {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
             .arg("-c")
-            .arg(script)
+            .arg(format!("{PLAIN_PRELUDE}{script}"))
+            .arg("sh")
+            .args(args)
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap())
-            .env("TERRARIUM_GIT_SSH_DIR", &dir)
-            .env("TERRARIUM_GIT_SSH_KEY", "not a key")
-            .env(
-                "TERRARIUM_GIT_KNOWN_HOSTS",
-                "forge.example ssh-ed25519 AAAAtest",
-            )
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            out.status.success(),
-            "{text}\n{}",
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "drwx------", "{text}");
-        assert_eq!(lines[1], "-rw-------", "{text}");
-        assert_eq!(lines[2], "forge.example ssh-ed25519 AAAAtest", "{text}");
-        assert!(text.contains("hostname forge.example\n"), "{text}");
+        (out.status.success(), text)
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
         assert!(
-            text.contains(&format!("userknownhostsfile {d}/known_hosts")),
-            "{text}"
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
-        assert!(text.contains(&format!("identityfile {d}/key")), "{text}");
-        assert!(
-            !text
-                .lines()
-                .any(|l| l.starts_with("proxycommand ") && l != "proxycommand none"),
-            "{text}"
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// TER-103: the target gets the job's commit as a bundle on stdin, and
+    /// its clone is at that commit, with no remote and no bundle left. A
+    /// bundle of another commit, or a cut one, fails the step.
+    #[test]
+    fn the_target_clones_the_job_commit_from_the_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        git_in(&src, &["init", "-q", "-b", "main"]);
+        std::fs::write(src.join("README"), "one\n").unwrap();
+        git_in(&src, &["add", "."]);
+        git_in(&src, &["commit", "-q", "-m", "one"]);
+        let sha = git_in(&src, &["rev-parse", "HEAD"]);
+        git_in(&src, &["update-ref", "refs/job/merge", &sha]);
+        git_in(&src, &["bundle", "create", "-q", "../b", "refs/job/merge"]);
+        let bundle = std::fs::read(tmp.path().join("b")).unwrap();
+        let dir = tmp.path().join("jobs/p/J1");
+        let d = dir.display().to_string();
+
+        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &sha, "merge"], &bundle);
+        assert!(ok, "{text}");
+        assert_eq!(result_line(text.as_bytes())["head"], sha, "{text}");
+        assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]), sha);
+        assert_eq!(git_in(&dir, &["symbolic-ref", "--short", "HEAD"]), "next");
+        assert_eq!(git_in(&dir, &["remote"]), "", "the clone has no remote");
+        assert!(!tmp.path().join("jobs/p/J1.bundle").exists());
+
+        // The bundle holds another commit than the one the daemon named.
+        let other = "0123456789abcdef0123456789abcdef01234567";
+        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, other, "merge"], &bundle);
+        assert!(!ok, "{text}");
+        assert!(text.contains("not 0123456789abcdef"), "{text}");
+        // A cut bundle.
+        let (ok, text) = run_plain(
+            RECEIVE_SCRIPT,
+            &[&d, &sha, "merge"],
+            &bundle[..bundle.len() / 2],
         );
-        assert!(text.contains("key-gone"), "{text}");
-        assert!(text.contains("after: ssh -F /dev/null "), "{text}");
+        assert!(!ok, "{text}");
+        assert!(text.contains("cannot read the bundle"), "{text}");
+        // A validate job wants refs/job/head.
+        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &sha, "validate"], &bundle);
+        assert!(!ok, "{text}");
+        // A relative dir is refused.
+        let (ok, _) = run_plain(RECEIVE_SCRIPT, &["rel", &sha, "merge"], &bundle);
+        assert!(!ok);
     }
 
     #[test]
@@ -1878,12 +2029,11 @@ echo "after: $GIT_SSH_COMMAND"
     }
 
     #[test]
-    fn batch_conflicts_are_read_by_index() {
-        let out = b"TERRARIUM_CONFLICT\t1\nREADME\nsrc/a.rs\nTERRARIUM_CONFLICT\t3\nb.txt\nTERRARIUM_JOB\toutcome=ok\thead=abc\n";
-        let found = conflicts(out);
-        assert_eq!(found.len(), 2);
-        assert_eq!(found[&1], "README\nsrc/a.rs");
-        assert_eq!(found[&3], "b.txt");
+    fn batch_conflicts_are_marked_by_index() {
+        let found: HashMap<usize, String> =
+            [(1, "README\nsrc/a.rs".to_owned()), (3, "b.txt".to_owned())]
+                .into_iter()
+                .collect();
         let card = |c: &str| BatchCard {
             card: c.into(),
             branch: c.to_lowercase(),
@@ -1892,9 +2042,10 @@ echo "after: $GIT_SSH_COMMAND"
             note: None,
         };
         let batch = vec![card("T-1"), card("T-2"), card("T-3"), card("T-4")];
-        let marked = mark_conflicts(&batch, out);
+        let marked = mark_conflicts(&batch, &found);
         let outcomes: Vec<Option<&str>> = marked.iter().map(|c| c.outcome.as_deref()).collect();
         assert_eq!(outcomes, [None, Some("conflict"), None, Some("conflict")]);
+        assert_eq!(marked[1].note.as_deref(), Some("README\nsrc/a.rs"));
         assert_eq!(
             batch_summary(&marked),
             "batch: merged T-1 T-3; left out on a conflict T-2 T-4"
@@ -1972,6 +2123,233 @@ echo "after: $GIT_SSH_COMMAND"
         })
         .await
         .unwrap();
+    }
+
+    /// A job for the verdict tests: ended at attempt 2 on `C1`.
+    fn ended(kind: JobKind, state: jobs::JobState, outcome: Option<&str>) -> Job {
+        Job {
+            id: "J1".into(),
+            project: "p".into(),
+            card: "C1".into(),
+            kind,
+            repo: "app".into(),
+            branch: "c1".into(),
+            commit: Some("abc1234".into()),
+            state,
+            attempt: 2,
+            outcome: outcome.map(str::to_owned),
+            exit_code: outcome.map(|_| 1),
+            tail: Some("test x ... FAILED".into()),
+            head: None,
+            by_agent: Some("w1".into()),
+            created_by: "agent:lead".into(),
+            created_at: "t0".into(),
+            started_at: Some("t1".into()),
+            ended_at: Some("t2".into()),
+            host: None,
+            batch: vec![],
+            parent: None,
+            split_path: String::new(),
+        }
+    }
+
+    fn batch_card(card: &str, by: &str, outcome: Option<&str>) -> BatchCard {
+        BatchCard {
+            card: card.into(),
+            branch: card.to_lowercase(),
+            by_agent: Some(by.into()),
+            outcome: outcome.map(str::to_owned),
+            note: outcome.map(|_| "src/a.rs".to_owned()),
+        }
+    }
+
+    fn batch(state: jobs::JobState, outcome: Option<&str>, cards: Vec<BatchCard>) -> Job {
+        let mut j = ended(JobKind::Merge, state, outcome);
+        j.card = cards[0].card.clone();
+        j.branch = cards[0].branch.clone();
+        j.by_agent = cards[0].by_agent.clone();
+        j.batch = cards;
+        j
+    }
+
+    fn field<'a>(v: &'a [Value], key: &str) -> Vec<&'a str> {
+        v.iter().map(|d| d[key].as_str().unwrap_or("-")).collect()
+    }
+
+    /// TER-167: a job of one card has one verdict with its kind, attempt,
+    /// worker, end comment, and (for a failure) the failure block.
+    #[test]
+    fn a_single_job_has_one_verdict() {
+        use jobs::JobState::{Cancelled, Failed, Passed};
+        let cases = [
+            (Passed, None, "passed", "passed"),
+            (Failed, Some("red"), "red", "failed"),
+            (Failed, Some("conflict"), "conflict", "failed"),
+            (Failed, Some("error"), "error", "failed"),
+            (Failed, None, "error", "failed"),
+            (Cancelled, None, "cancelled", "was cancelled"),
+        ];
+        for (state, outcome, verdict, word) in cases {
+            let v = verdicts(&ended(JobKind::Validate, state, outcome));
+            assert_eq!(v.len(), 1, "{verdict}");
+            let d = &v[0];
+            assert_eq!(d["verdict"], verdict);
+            assert_eq!(d["project"], "p");
+            assert_eq!(d["job"], "J1");
+            assert_eq!(d["card"], "C1");
+            assert_eq!(d["kind"], "validate");
+            assert_eq!(d["attempt"], 2);
+            assert_eq!(d["by_agent"], "w1");
+            assert_eq!(d["branch"], "c1");
+            assert!(d["batch"].is_null());
+            let comment = d["end_comment"].as_str().unwrap();
+            assert!(
+                comment.starts_with(&format!("Job queue: validate job J1 (attempt 2) {word}.")),
+                "{comment}"
+            );
+            let failure = &d["failure_block"];
+            if matches!(verdict, "passed" | "cancelled") {
+                assert!(failure.is_null(), "{verdict}: {failure}");
+            } else {
+                let f = failure.as_str().unwrap();
+                assert!(
+                    f.starts_with("Validation failed: t2, validate job J1"),
+                    "{f}"
+                );
+                assert!(f.contains("test x ... FAILED"), "{f}");
+            }
+        }
+    }
+
+    /// TER-167: a green batch has a verdict per card, with each card's
+    /// branch and worker. A card that left it on a conflict has its own.
+    #[test]
+    fn a_green_batch_has_a_verdict_per_card() {
+        let j = batch(
+            jobs::JobState::Passed,
+            None,
+            vec![
+                batch_card("C1", "w1", None),
+                batch_card("C2", "w2", Some("conflict")),
+                batch_card("C3", "w3", None),
+            ],
+        );
+        let v = verdicts(&j);
+        assert_eq!(field(&v, "card"), ["C1", "C2", "C3"]);
+        assert_eq!(field(&v, "verdict"), ["passed", "conflict", "passed"]);
+        assert_eq!(field(&v, "by_agent"), ["w1", "w2", "w3"]);
+        assert_eq!(field(&v, "branch"), ["c1", "c2", "c3"]);
+        assert_eq!(field(&v, "kind"), ["merge", "merge", "merge"]);
+        for d in &v {
+            assert_eq!(d["batch"], serde_json::json!(["C1", "C2", "C3"]));
+        }
+        assert!(v[0]["failure_block"].is_null());
+        let f = v[1]["failure_block"].as_str().unwrap();
+        assert!(f.contains("`c2` does not merge onto `next`"), "{f}");
+        assert!(f.contains("src/a.rs"), "{f}");
+    }
+
+    /// TER-167: a red batch and an error give each merged card the verdict
+    /// of the batch; a cancelled batch gives each card `cancelled`.
+    #[test]
+    fn a_red_failed_or_cancelled_batch_has_a_verdict_per_card() {
+        use jobs::JobState::{Cancelled, Failed};
+        let cards = || vec![batch_card("C1", "w1", None), batch_card("C2", "w2", None)];
+        let red = verdicts(&batch(Failed, Some("red"), cards()));
+        assert_eq!(field(&red, "verdict"), ["red", "red"]);
+        assert!(red.iter().all(|d| d["failure_block"].is_string()));
+        let error = verdicts(&batch(Failed, Some("error"), cards()));
+        assert_eq!(field(&error, "verdict"), ["error", "error"]);
+        let all_conflict = verdicts(&batch(
+            Failed,
+            Some("conflict"),
+            vec![
+                batch_card("C1", "w1", Some("conflict")),
+                batch_card("C2", "w2", Some("conflict")),
+            ],
+        ));
+        assert_eq!(field(&all_conflict, "verdict"), ["conflict", "conflict"]);
+        let cancelled = verdicts(&batch(Cancelled, None, cards()));
+        assert_eq!(field(&cancelled, "verdict"), ["cancelled", "cancelled"]);
+        assert!(cancelled.iter().all(|d| d["failure_block"].is_null()));
+    }
+
+    /// TER-167: the end writes the verdict events (kind `job.verdict`, the
+    /// project and the card on the row) in its write, and the coded flow
+    /// still splits a red batch.
+    #[tokio::test]
+    async fn the_end_writes_a_verdict_per_card_and_keeps_the_split() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        let rows = db
+            .write("system", |t| {
+                let cards = vec![
+                    batch_card("C1", "w1", None),
+                    batch_card("C2", "w2", Some("conflict")),
+                    batch_card("C3", "w3", None),
+                ];
+                let j = jobs::create(
+                    t,
+                    jobs::NewJob {
+                        project: "p".into(),
+                        card: "C1".into(),
+                        kind: JobKind::Merge,
+                        repo: "app".into(),
+                        branch: "c1".into(),
+                        commit: None,
+                        by_agent: Some("w1".into()),
+                        batch: cards.clone(),
+                    },
+                )?;
+                assert!(jobs::start(t, &j.id, "h")?);
+                let end = JobEnd {
+                    passed: false,
+                    outcome: Some("red".into()),
+                    exit_code: Some(1),
+                    tail: Some("red".into()),
+                    head: None,
+                    batch: Some(cards),
+                };
+                let j = jobs::finish(t, &j.id, &end)?.unwrap();
+                on_end(t, &j)?;
+                let mut st = t.prepare(
+                    "SELECT project, card, payload FROM events WHERE kind = 'job.verdict' ORDER BY seq",
+                )?;
+                let rows = st
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let open = jobs::list(t, "p", Some(jobs::JobState::Queued))?;
+                Ok((rows, open.len()))
+            })
+            .await
+            .unwrap();
+        let (rows, queued) = rows;
+        let got: Vec<(String, String, String)> = rows
+            .into_iter()
+            .map(|(p, c, d)| {
+                let d: Value = serde_json::from_str(&d).unwrap();
+                (
+                    p.unwrap(),
+                    c.unwrap(),
+                    d["verdict"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        let want = [("C1", "red"), ("C2", "conflict"), ("C3", "red")]
+            .map(|(c, v)| ("p".to_owned(), c.to_owned(), v.to_owned()));
+        assert_eq!(got, want);
+        // The coded flow: C1 and C3 merged and the batch is red, so it
+        // splits into two halves of one card each.
+        assert_eq!(queued, 2);
     }
 
     /// TER-137: the job queue writes its comments and its moves with the

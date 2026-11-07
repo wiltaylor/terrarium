@@ -543,7 +543,7 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
   };
 
   const key = (s: Schedule) => (s.project ? `${s.project}/${s.name}` : s.name);
-  /** A disabled project action does not run: not by run, test, or redeliver (docs/api.md §19.8). */
+  /** A disabled project action does not run: not by run, test, or redeliver (docs/api.md §19.10). */
   const actionOff = (s: Schedule) => {
     if (s.spec.kind === "manual" && !s.enabled) fail(409, "conflict", `action \`${key(s)}\` is disabled; enable it first (terrarium schedule enable ${key(s)})`);
   };

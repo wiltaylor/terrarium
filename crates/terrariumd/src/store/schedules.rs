@@ -1670,13 +1670,15 @@ pub fn event_view(e: &crate::events::StoredEvent) -> template::EventView<'_> {
 }
 
 /// The chain depth of an event: `data.cause.depth` of an event that a
-/// trigger run made (actor `schedule:<id>`), else 0. Only a schedule actor
-/// counts, so a webhook cannot claim a depth.
+/// trigger run (actor `schedule:<id>`) or a board rule run (actor
+/// `rule:<project>/<rule>`, `crate::rules_engine`) made, else 0. Only
+/// those actors count, so a webhook cannot claim a depth. The two engines
+/// share the depth, so a chain through triggers and rules stops too.
 pub fn depth_of(e: &crate::events::StoredEvent) -> u64 {
     if !e
         .actor
         .as_deref()
-        .is_some_and(|a| a.starts_with("schedule:"))
+        .is_some_and(|a| a.starts_with("schedule:") || a.starts_with("rule:"))
     {
         return 0;
     }

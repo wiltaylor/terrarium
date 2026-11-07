@@ -50,7 +50,10 @@ async fn board_shape_and_card_ids() {
             "backlog",
             "ready",
             "in_progress",
+            "validating",
             "review",
+            "merge_queue",
+            "accepted",
             "blocked",
             "done"
         ]
@@ -903,6 +906,73 @@ async fn new_boards_have_roles_and_titles() {
     assert_eq!(col(b, "blocked")["role"], "blocked");
     assert!(col(b, "ready").get("role").is_none());
     assert!(col(b, "backlog").get("role").is_none());
+    // The job queue finds these columns by role (TER-165).
+    assert_eq!(col(b, "validating")["role"], "validating");
+    assert_eq!(col(b, "review")["role"], "review");
+    assert_eq!(col(b, "merge_queue")["role"], "merge_queue");
+    assert_eq!(col(b, "accepted")["role"], "accepted");
+}
+
+/// TER-165: one column per role, a renamed column keeps its role, and the
+/// role alias of a move finds the renamed column.
+#[tokio::test]
+async fn each_job_role_is_on_one_column_and_the_alias_follows_it() {
+    let td = setup().await;
+    // Two columns with one role: refused, for every role but `working`.
+    for role in ["validating", "review", "merge_queue", "accepted", "blocked"] {
+        let r = set_cols(
+            &td,
+            json!([
+                {"name": "backlog"},
+                {"name": "in_progress", "role": "working"},
+                {"name": "first", "role": role},
+                {"name": "second", "role": role},
+                {"name": "done"}
+            ]),
+        )
+        .await;
+        r.err(422, "invalid");
+    }
+    // A role that is not in the list is refused.
+    let r = set_cols(
+        &td,
+        json!([
+            {"name": "backlog"},
+            {"name": "in_progress", "role": "working"},
+            {"name": "qa", "role": "testing"},
+            {"name": "done"}
+        ]),
+    )
+    .await;
+    r.err(422, "invalid");
+    // `validating` is renamed and keeps its role. The name `validating` is
+    // no longer a column, so a move to it reaches the role column.
+    let r = set_cols(
+        &td,
+        json!([
+            {"name": "backlog"},
+            {"name": "ready"},
+            {"name": "in_progress", "role": "working"},
+            {"name": "checking", "rename_from": "validating", "role": "validating"},
+            {"name": "review", "role": "review"},
+            {"name": "merge_queue", "role": "merge_queue"},
+            {"name": "accepted", "role": "accepted"},
+            {"name": "blocked", "role": "blocked"},
+            {"name": "done"}
+        ]),
+    )
+    .await;
+    let b = r.ok();
+    assert_eq!(col(b, "checking")["role"], "validating");
+    let a = card(&td, "proj/w1", json!({"title": "A", "column": "ready"})).await;
+    let r = td
+        .post_as(
+            "proj/lead",
+            &format!("/api/cards/{a}/move"),
+            json!({"column": "validating"}),
+        )
+        .await;
+    assert_eq!(r.ok()["column"], "checking");
 }
 
 #[tokio::test]

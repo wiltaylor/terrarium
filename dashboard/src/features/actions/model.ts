@@ -1,4 +1,4 @@
-// Project actions (TER-53, docs/api.md §19.8): a schedule with the spec
+// Project actions (TER-53, docs/api.md §19.10): a schedule with the spec
 // `manual`. Its button is on the project dashboard and next to the project
 // name in Home 'Work in progress'. A click asks for a confirm first, then
 // runs it (`POST /api/schedules/{id}/run`, which answers when the run ends)

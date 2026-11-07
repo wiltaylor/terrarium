@@ -1518,8 +1518,8 @@ export interface InboxEventData {
 
 // ----- Inbox threads (docs/api.md §6.13) -----
 
-/** Who must act on a thread. */
-export type ThreadStatus = "waiting_operator" | "waiting_agent" | "closed";
+/** Who must act on a thread. `tracking` (TER-145): the agent tracks handed-off work, parked. */
+export type ThreadStatus = "waiting_operator" | "waiting_agent" | "tracking" | "closed";
 
 /** One message of a thread. `text` is Markdown: untrusted data. */
 export interface ThreadMessage {
@@ -1574,6 +1574,8 @@ export interface Thread {
   report_to: string | null;
   report_to_name: string | null;
   status: ThreadStatus;
+  /** When the agent moved the thread into tracking (TER-145); set while it tracks. An older daemon sends none. */
+  tracking_at?: string | null;
   messages?: ThreadMessage[];
   questions?: Question[];
   response: ThreadResponse | null;
@@ -1618,7 +1620,7 @@ export interface ThreadClose {
 
 /** `data` of a `thread` event. */
 export interface ThreadEventData {
-  change: "opened" | "message" | "response" | "question" | "close_proposed" | "closed";
+  change: "opened" | "message" | "response" | "question" | "tracking" | "close_proposed" | "closed";
   id: string;
   scope: string;
   status: ThreadStatus;
@@ -3188,7 +3190,7 @@ export interface PasswordChange {
  * When a schedule fires. `cron`: a 5-field expression in `tz` (an IANA
  * zone, default `UTC`). `interval`: a duration such as `15m`, `1h`, or
  * `1h30m`. `at`: once, at an RFC 3339 time. `manual`: a project action
- * (TER-53, docs/api.md §19.8): no time and no event; a button runs it.
+ * (TER-53, docs/api.md §19.10): no time and no event; a button runs it.
  */
 export type ScheduleSpec = { kind: "cron"; expr: string; tz: string } | { kind: "interval"; every: string } | { kind: "at"; at: string } | TriggerSpec | ManualSpec;
 export type ScheduleSpecKind = ScheduleSpec["kind"];
