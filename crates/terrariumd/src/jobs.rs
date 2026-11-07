@@ -1889,8 +1889,18 @@ mod tests {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(input).unwrap();
+        // A script that exits before it reads stdin (a refused dir) closes
+        // the pipe: the write then fails with EPIPE, and the exit status
+        // decides (TER-188). Write from a thread, so a large input cannot
+        // block on a full pipe while the child blocks on a full stdout.
+        let mut stdin = child.stdin.take().unwrap();
+        let input = input.to_vec();
+        let writer = std::thread::spawn(move || match stdin.write_all(&input) {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            r => r,
+        });
         let out = child.wait_with_output().unwrap();
+        writer.join().unwrap().unwrap();
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
