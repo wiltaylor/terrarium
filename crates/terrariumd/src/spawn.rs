@@ -403,8 +403,9 @@ pub async fn spawn_with(
         .map_err(|e| ApiError::invalid(format!("template `{}`: {e}", template.use_key())))?;
     // The template's grants (TER-88): checked against the owner in the
     // write, with the body's grants.
-    let template_asks = spawn_rights::template_asks(&template.spec)
-        .map_err(|e| ApiError::invalid(format!("template `{}`: {}", template.use_key(), e.message)))?;
+    let template_asks = spawn_rights::template_asks(&template.spec).map_err(|e| {
+        ApiError::invalid(format!("template `{}`: {}", template.use_key(), e.message))
+    })?;
     // No idle stop: an idle ephemeral agent stays until `agent done`, a
     // cancel, its lifetime, or the removal of its owner.
     def.idle_stop = Some(IdleStop::Off);

@@ -520,7 +520,10 @@ async fn template_grants_are_checked_against_the_owner() {
         )
         .await);
     for (s, body) in [
-        ("global/openai", json!({"grantee": "agent:p/o", "level": "read"})),
+        (
+            "global/openai",
+            json!({"grantee": "agent:p/o", "level": "read"}),
+        ),
         ("global/gh", json!({"grantee": "agent:p/o", "level": "use"})),
         (
             "p/db",
