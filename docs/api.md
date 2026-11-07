@@ -3810,9 +3810,12 @@ the `cards` of the thread list only the cards whose project the reader
 may read, so a reader of the thread who cannot read a card's project
 does not see the card, its project, or that it is there; a reader of the
 card does not read the thread. A second link of the same card keeps the
-first. A closed thread is `409 conflict`. A link writes the audit row `thread.card_link` and a
-`thread` event `card_linked`, which does not change the status and wakes
-no agent. There is no unlink.
+first. A closed thread is `409 conflict`. A link writes the audit row
+`thread.card_link` (`by`, `card`, `project`) under the card's project,
+not the thread's, so the admin of the thread's project does not read it
+in the audit log when it cannot read the card's project. A link also
+writes a `thread` event `card_linked`, which does not change the status
+and wakes no agent. There is no unlink.
 
 **Close** (TER-95, wiki `inbox-threads` §5). The attached agent hands off
 its work, asks in the thread whether anything more is needed, and then

@@ -20,6 +20,8 @@ struct Lab {
     arch: String,
     /// `p/w`: a member of `p` that is not in the thread.
     w: String,
+    /// `q/lead`: the project admin of `q`, not in the thread.
+    qlead: String,
     /// `meta/architect`: reads all projects and threads.
     architect: String,
     /// The `p` thread, attached to `p/arch`.
@@ -40,8 +42,9 @@ async fn lab() -> Lab {
     let lead = id(&td
         .agent("p", "lead", json!({"roles": ["project_admin"]}))
         .await);
-    td.agent("q", "lead", json!({"roles": ["project_admin"]}))
-        .await;
+    let qlead = id(&td
+        .agent("q", "lead", json!({"roles": ["project_admin"]}))
+        .await);
     let arch = id(&td.agent("p", "arch", json!({})).await);
     let w = id(&td.agent("p", "w", json!({})).await);
     let architect = id(&td
@@ -61,6 +64,7 @@ async fn lab() -> Lab {
         lead,
         arch,
         w,
+        qlead,
         architect,
         tid,
     }
@@ -325,6 +329,34 @@ async fn a_link_needs_the_read_rights_and_gives_none() {
         .ok()
         .clone();
     assert_eq!(th["cards"][0]["card"], qc.as_str());
+    // The audit row of the link is in project `q`, the card's project.
+    // The lead of `p` (project admin of the thread's project) does not
+    // read it: no row names the `q` card or project `q`. The lead of `q`
+    // reads it.
+    let audit = lab
+        .td
+        .get_as(&lab.lead, "/api/audit?action=thread.card_link")
+        .await
+        .ok()
+        .clone();
+    assert_eq!(audit, json!([]), "{audit}");
+    let audit = lab
+        .td
+        .get_as(&lab.lead, "/api/audit")
+        .await
+        .ok()
+        .clone();
+    assert!(!audit.to_string().contains(qc.as_str()), "{audit}");
+    let audit = lab
+        .td
+        .get_as(&lab.qlead, "/api/audit?action=thread.card_link")
+        .await
+        .ok()
+        .clone();
+    let rows = audit.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{audit}");
+    assert_eq!(rows[0]["project"], "q", "{audit}");
+    assert_eq!(rows[0]["detail"]["card"], qc.as_str(), "{audit}");
     // The answers of the writes filter the same way: the lead links a `p`
     // card and the agent tracks, and each sees only the `p` card.
     let r = lab
@@ -342,6 +374,19 @@ async fn a_link_needs_the_read_rights_and_gives_none() {
     assert_eq!(r.body["cards"].as_array().unwrap().len(), 1, "{}", r.body);
     assert_eq!(r.body["cards"][0]["card"], pc.as_str());
     assert_eq!(lab.cards().await, [format!("q:{qc}"), format!("p:{pc}")]);
+    // The lead of `p` reads the audit row of its own `p` card link, and
+    // still no row of the `q` card.
+    let audit = lab
+        .td
+        .get_as(&lab.lead, "/api/audit?action=thread.card_link")
+        .await
+        .ok()
+        .clone();
+    let rows = audit.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{audit}");
+    assert_eq!(rows[0]["project"], "p", "{audit}");
+    assert_eq!(rows[0]["detail"]["card"], pc.as_str(), "{audit}");
+    assert!(!audit.to_string().contains(qc.as_str()), "{audit}");
     lab.td
         .get_as(&lab.lead, &format!("/api/cards/{qc}"))
         .await

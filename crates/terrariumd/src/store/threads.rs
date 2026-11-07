@@ -374,8 +374,9 @@ fn cards_of(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadCard>> {
 /// does not exist); the link gives neither. A closed thread is `409
 /// conflict`; a card that is not in the named project is `404`; an
 /// archived card is `422 invalid`. A card that is linked already stays as
-/// it is. Emits a `thread` event `card_linked`, which wakes no agent. The
-/// thread with the cards that `actor` may read.
+/// it is. Writes the audit row `thread.card_link` under the card's project.
+/// Emits a `thread` event `card_linked`, which wakes no agent. The thread
+/// with the cards that `actor` may read.
 pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResult<Thread> {
     let th = readable(actor, get_bare(t, id)?)?;
     not_closed(&th, "a card link")?;
@@ -423,10 +424,15 @@ pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResu
         params![th.id, c.project, c.id, by, at],
     )?;
     if n > 0 {
+        // The row is in the card's project, not the thread's: a project
+        // admin reads the audit rows of its own project (`audit_scope`),
+        // and the admin of the thread's project may not read the card's
+        // project. One row only, so that no row names the card where its
+        // project is not readable.
         t.audit(
             "thread.card_link",
             &th.id,
-            th.project(),
+            Some(c.project.as_str()),
             json!({"by": by, "card": c.id, "project": c.project}),
         )?;
         emit(t, &th, "card_linked")?;
