@@ -2116,6 +2116,10 @@ a.chip.card-link:hover {
 .thread-question {
   max-width: 85%;
 }
+/* The agent's close proposal (TER-95): it waits on the operator. */
+.thread-proposal {
+  border-color: var(--warn);
+}
 @media (max-width: 760px) {
   .thread-msg,
   .thread-question {

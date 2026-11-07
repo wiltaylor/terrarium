@@ -34,7 +34,7 @@ import { defaultTitle } from "../../features/board/columns";
 import { checkColumnEdits } from "./boardColumns";
 import { limitsInfo, limitsKindError, resolveLimits } from "../../lib/limits";
 import { mockChanges, mockCommit, mockCommits, mockFile, mockList, mockTrees } from "./repoTrees";
-import type { Question, Thread } from "../types";
+import type { Question, Thread, ThreadLink } from "../types";
 import type {
   Agent,
   QueuedTurn,
@@ -285,6 +285,8 @@ export interface MockSim {
   threadPost(id: string, text: string): Thread;
   /** The attached agent of an Inbox thread asks a question or a bundle in it. */
   threadAsk(id: string, q: Pick<Question, "text"> & Partial<Question>): Question;
+  /** The attached agent of an Inbox thread proposes its close with a handoff (TER-95). */
+  threadPropose(id: string, body?: { summary?: string; links?: ThreadLink[] }): Thread;
 }
 
 /** The audit name of a terminal key, as the daemon gives it (docs/api.md §6.5); 422 for a key it refuses. */
@@ -4304,6 +4306,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     setWindow,
     threadPost: (id, text) => threadMock.agentPost(id, text),
     threadAsk: (id, q) => threadMock.agentAsk(id, q),
+    threadPropose: (id, body) => threadMock.agentPropose(id, body),
     offerLogins: () => {
       for (const d of detected()) {
         const { suggested, ...login } = d;

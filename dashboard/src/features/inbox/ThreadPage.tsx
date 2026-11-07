@@ -1,7 +1,8 @@
 // The chat page of one Inbox thread (docs/api.md §6.13): the messages and
 // the questions of the agent in order, with the questions answerable inline;
 // a message box; the "Send response" box (the overall response, the approval
-// record); and the close with a confirmation and a handoff.
+// record); the agent's close proposal with Confirm and Decline (TER-95); and
+// the close with a confirmation and a handoff.
 //
 // Every text of the thread is untrusted: the messages are Markdown and go
 // through the DOMPurify sink (SafeHtml) only; the topic, the names, the
@@ -11,15 +12,16 @@ import { A, useParams } from "@solidjs/router";
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { ApiError } from "../../api/http";
-import type { Question, Thread, ThreadLink } from "../../api/types";
+import type { Question, Thread } from "../../api/types";
 import { SafeHtml } from "../../components/SafeHtml";
 import { Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
 import { api, events, inbox } from "../../stores";
 import { BundleCard } from "./BundleCard";
+import { CloseProposal, HandoffLinks } from "./CloseProposal";
 import { QuestionCard } from "./QuestionCard";
-import { byOperator, closeBody, openQuestionCount, scopeLabel, THREAD_MESSAGE_MAX, THREAD_RESPONSE_MAX, threadChip, threadText, timeline, type TimelineEntry } from "./threads";
+import { byOperator, closeBody, openQuestionCount, scopeLabel, THREAD_MESSAGE_MAX, THREAD_RESPONSE_MAX, threadChip, threadText, timeline, type TimelineEntry, whoName } from "./threads";
 
 export default function ThreadPage() {
   const params = useParams<{ id: string }>();
@@ -149,6 +151,7 @@ export default function ThreadPage() {
               </Show>
             </div>
             <Show when={!closed()} fallback={<Handoff thread={t()} now={now()} />}>
+              <CloseProposal thread={t()} now={now()} onChanged={changed} onError={conflict} />
               <Composer
                 label="Message"
                 placeholder={t().agent_name ? `A message to ${t().agent_name} (Markdown)` : "A message (Markdown)"}
@@ -309,36 +312,19 @@ function CloseDialog(props: { thread: Thread; onClose: () => void; onClosed: (t:
   );
 }
 
-/** A URL link of a handoff is a link only for http and https. */
-const safeUrl = (l: ThreadLink): string | null => (l.kind === "url" && /^https?:\/\//i.test(l.ref) ? l.ref : null);
-
 /** The handoff of a closed thread. */
 function Handoff(props: { thread: Thread; now: number }) {
   const t = () => props.thread;
   return (
     <section class="card-box stack" style={{ gap: "6px" }} aria-label="Handoff">
       <span class="small muted">
-        Closed by {t().closed_by === "operator" ? "you" : t().closed_by === t().agent ? (t().agent_name ?? t().closed_by) : t().closed_by} {ago(t().closed_at ?? undefined, props.now)}.
+        <Show when={t().close_reason === "confirmed"} fallback={<>Closed by {whoName(t(), t().closed_by)}</>}>
+          You confirmed the close that {whoName(t(), t().handoff?.by ?? null)} proposed
+        </Show>{" "}
+        {ago(t().closed_at ?? undefined, props.now)}.
       </span>
       <Show when={t().handoff?.summary}>{(s) => <p style={{ margin: 0, "white-space": "pre-wrap" }}>{s()}</p>}</Show>
-      <Show when={t().handoff?.links.length}>
-        <ul class="small" style={{ margin: 0 }}>
-          <For each={t().handoff!.links}>
-            {(l) => (
-              <li>
-                <span class="chip">{l.kind}</span>{" "}
-                <Show when={safeUrl(l)} fallback={<span>{l.ref}</span>}>
-                  {(u) => (
-                    <a href={u()} target="_blank" rel="noopener noreferrer">
-                      {l.ref}
-                    </a>
-                  )}
-                </Show>
-              </li>
-            )}
-          </For>
-        </ul>
-      </Show>
+      <HandoffLinks links={t().handoff?.links ?? []} />
     </section>
   );
 }

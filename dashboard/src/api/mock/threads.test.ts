@@ -88,4 +88,36 @@ describe("Inbox threads in the mock", () => {
     await expect(api.threads.close(other.id, { links: [{ kind: "nope" as "card", ref: "x" }] })).rejects.toMatchObject({ status: 422 });
     expect((await api.threads.close(other.id)).handoff).toMatchObject({ summary: "", links: [] });
   });
+
+  it("keeps the agent's close proposal until the operator confirms it or writes on (TER-95)", async () => {
+    const api = mock();
+    const { frames, close } = await listen(api);
+    const t = await api.threads.open({ topic: "Propose", scope: "terrarium", agent: "terrarium/lead", text: "Go." });
+    expect(t.close_proposal).toBeNull();
+    // Confirm with no proposal is a 409; an agent proposal waits on the operator, and a list row has it.
+    await expect(api.threads.close(t.id, { confirm: true })).rejects.toMatchObject({ status: 409 });
+    const lead = api.world.agents.find((a) => a.project === "terrarium" && a.name === "lead")!;
+    const p = api.sim.threadPropose(t.id, { summary: "TER-99 has it.", links: [{ kind: "card", ref: "TER-99" }] });
+    expect(p).toMatchObject({ status: "waiting_operator", close_proposal: { summary: "TER-99 has it.", links: [{ kind: "card", ref: "TER-99" }], by: lead.id } });
+    expect((await api.threads.list()).find((x) => x.id === t.id)!.close_proposal).toMatchObject({ summary: "TER-99 has it." });
+    await wait();
+    expect(frames.find((f) => f.kind === "thread" && f.data.change === "close_proposed")!.data).toMatchObject({ id: t.id, status: "waiting_operator" });
+    // A message, a response, or the answer to the last open question declines it.
+    expect((await api.threads.post(t.id, "One more thing.")).close_proposal).toBeNull();
+    api.sim.threadPropose(t.id, { summary: "Again." });
+    expect((await api.threads.respond(t.id, "Approved.")).close_proposal).toBeNull();
+    const q = api.sim.threadAsk(t.id, { text: "Close?", options: ["Yes", "No"] });
+    api.sim.threadPropose(t.id, { summary: "Asked." });
+    await api.questions.answer(q.id, { option: 1 });
+    expect((await api.threads.get(t.id)).close_proposal).toBeNull();
+    // Confirm closes with the agent's handoff; `confirm` with a summary is a 422.
+    api.sim.threadPropose(t.id, { summary: "Final.", links: [{ kind: "wiki", ref: "plan" }] });
+    await expect(api.threads.close(t.id, { confirm: true, summary: "x" })).rejects.toMatchObject({ status: 422 });
+    const done = await api.threads.close(t.id, { confirm: true });
+    expect(done).toMatchObject({ status: "closed", closed_by: "operator", close_reason: "confirmed", close_proposal: null, handoff: { summary: "Final.", links: [{ kind: "wiki", ref: "plan" }], by: lead.id } });
+    expect(() => api.sim.threadPropose(t.id)).toThrow();
+    const other = await api.threads.open({ topic: "Own close", scope: "webshop" });
+    expect((await api.threads.close(other.id)).close_reason).toBe("operator");
+    close();
+  });
 });
