@@ -121,7 +121,11 @@ pub const VERBS: &[Verb] = &[
     Verb {
         kind: "mail",
         name: "mail",
-        args: &[("to", Arg::List), ("subject", Arg::Text), ("body", Arg::Text)],
+        args: &[
+            ("to", Arg::List),
+            ("subject", Arg::Text),
+            ("body", Arg::Text),
+        ],
         required: &["to", "subject"],
     },
     Verb {
@@ -524,25 +528,20 @@ pub fn parse(text: &str, file: &str, ctx: &Context) -> Result<RuleSet, FileError
     }
     // The schema goes after the text, so the offsets of the text stay.
     let source = format!("{text}\n{SCHEMA}");
-    let doc = match Document::open_at_with_loader(
-        &source,
-        file,
-        None,
-        &Environment::new(),
-        no_files(),
-    ) {
-        Ok(d) => d,
-        Err(e) => {
-            let mut problems: Vec<Problem> = e
-                .syntax_errors()
-                .map(|s| problem_at(text, Some(s.span.offset()), s.message.clone()))
-                .collect();
-            if problems.is_empty() {
-                problems.push(problem_at(text, None, e.to_string()));
+    let doc =
+        match Document::open_at_with_loader(&source, file, None, &Environment::new(), no_files()) {
+            Ok(d) => d,
+            Err(e) => {
+                let mut problems: Vec<Problem> = e
+                    .syntax_errors()
+                    .map(|s| problem_at(text, Some(s.span.offset()), s.message.clone()))
+                    .collect();
+                if problems.is_empty() {
+                    problems.push(problem_at(text, None, e.to_string()));
+                }
+                return Err(fail(problems));
             }
-            return Err(fail(problems));
-        }
-    };
+        };
     let mut problems: Vec<Problem> = doc
         .schema_errors()
         .iter()
@@ -616,10 +615,7 @@ pub fn parse(text: &str, file: &str, ctx: &Context) -> Result<RuleSet, FileError
                     _ => problems.push(problem_at(
                         text,
                         fat,
-                        format!(
-                            "rule `{name}`: `max_per_hour` is 1 to {}",
-                            MAX_PER_HOUR
-                        ),
+                        format!("rule `{name}`: `max_per_hour` is 1 to {}", MAX_PER_HOUR),
                     )),
                 },
                 // The schema check reported any other field.
@@ -875,7 +871,8 @@ rule "validate-pass" {
         let e = errors("import <terrarium/rules.wcl>\n");
         assert!(e.contains("imports are off"), "{e}");
         // An import inside a rule too.
-        let e = errors("rule \"r\" {\n  import \"./x.wcl\"\n  on = [\"card\"]\n  job_cancel {}\n}\n");
+        let e =
+            errors("rule \"r\" {\n  import \"./x.wcl\"\n  on = [\"card\"]\n  job_cancel {}\n}\n");
         assert!(e.contains("imports are off"), "{e}");
     }
 
@@ -891,7 +888,8 @@ rule "validate-pass" {
 
     #[test]
     fn templates_are_checked() {
-        let text = "rule \"r\" {\n  on = [\"card\"]\n  card_comment { text = \"{{job.nope}}\" }\n}\n";
+        let text =
+            "rule \"r\" {\n  on = [\"card\"]\n  card_comment { text = \"{{job.nope}}\" }\n}\n";
         let e = errors(text);
         assert!(e.contains("unknown placeholder `{{job.nope}}`"), "{e}");
         check_template("{{event.data.verdict}} {{card.title}} {{rule.name}}").expect("known");
@@ -913,7 +911,8 @@ rule "validate-pass" {
         // A when with two compares, or a bad path.
         let text = "rule \"r\" {\n  on = [\"card\"]\n  when \"data.to\" { eq = \"a\"  ne = \"b\" }\n  job_cancel {}\n}\n";
         assert!(errors(text).contains("exactly one of"));
-        let text = "rule \"r\" {\n  on = [\"card\"]\n  when \"nope\" { eq = \"a\" }\n  job_cancel {}\n}\n";
+        let text =
+            "rule \"r\" {\n  on = [\"card\"]\n  when \"nope\" { eq = \"a\" }\n  job_cancel {}\n}\n";
         assert!(errors(text).contains("bad path `nope`"));
         // A bad word.
         let text = "rule \"r\" {\n  on = [\"job\"]\n  job_queue { kind = \"deploy\" }\n}\n";

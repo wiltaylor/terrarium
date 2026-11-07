@@ -7804,6 +7804,83 @@ test: true}`. Each test writes the audit row `schedule.test`
             "held": false, "held_reason": null}}
 ```
 
+### 19.8 Board rules
+
+A project has one board rules file, `rules.wcl` (TER-162, TER-166). A
+rule reacts to an event of the log and runs verbs on the board. Nothing
+runs a rule yet: the daemon stores and checks the file. The engine and
+the verbs come in later versions.
+
+The file is WCL. The daemon ships its schema
+(`crates/terrarium-core/src/rules.schema.wcl`, `GET /api/rules/schema`)
+and checks each file against it when it loads the file and on each edit:
+
+```wcl
+rule "validate-pass" {
+  description = "A passed validation goes to review."
+  on = ["job.verdict"]                   // event kind globs
+  when "data.verdict" { eq = "passed" }  // eq, ne, glob, or one_of
+  card_label  { remove = ["validation:running", "validation:queued"] }
+  card_move   { to = "@review"  comment = "{{job.end_comment}}" }
+  card_assign { who = "none" }
+}
+```
+
+A rule has a name (unique in the file), `on`, optional `description`,
+`enabled` (default `true`), `max_per_hour` (1 to 600), any number of
+`when` conditions (all must hold; the paths of a trigger `match`, §19.4),
+and at least one verb. The verbs run in the order of the file:
+`card_move` (`to`, `from?`, `comment?`, `position?` `top` or `bottom`),
+`card_label` (`add?`, `remove?`), `card_comment` (`text`), `card_assign`
+(`who`), `card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
+`job_queue` (`kind` `validate`, `merge`, or `batch`; `from` and `limit?`
+for a batch), `job_cancel`, `job_rerun` (`max_attempts?`), `job_split`,
+`agent_park`, `agent_unpark` (`turn?`), and `agent_end` (`outcome` `done`
+or `cancelled`).
+
+The checks beyond the schema:
+
+- Data only: rule blocks, fields, and `let`. An `import` (imports are
+  off), a `type`, `union`, `symbol_set`, `namespace`, `use`, table,
+  connection, or decorator is `422`.
+- A column (`to`, `from`) is `@<role>`, the column with that role, else
+  the column of that name; or a plain column name. It must be on the
+  project's board.
+- A template names `{{event.<path>}}` (as §19.4), `{{card.<id|title|column|assignee|labels|project>}}`,
+  `{{job.<id|kind|state|outcome|attempt|by_agent|repo|commit|end_comment|failure_block|next_jobs>}}`,
+  or `{{rule.name}}`.
+- At most `TERRARIUM_MAX_RULES_PER_PROJECT` rules (default 50, apart from
+  the schedules cap), and at most 64 KiB.
+
+Each error names the line and the column: ``rules.wcl:3:3: block kind
+'card_frobnicate' is not allowed inside 'rule'``.
+
+The file comes from the API (`source: api`) or from the config dir:
+`projects/<project>.rules.wcl` beside the project file (`source: file`),
+read at the start and at `POST /api/reload`. A file that does not check
+keeps the last good rules, and the reload answer names its errors. When
+the file goes, its rules stay as API rules. The config repo export
+(§25) writes the API rules to `export/rules/<project>.rules.wcl`.
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `GET /api/rules/schema` | | `200`, `{file, schema, verbs: [{kind, verb}], max_rules, max_bytes}`. |
+| `GET /api/projects/{name}/rules` | | `200`, `{project, exists, text, hash?, source?, rules, updated_by?, updated_at?}`. `rules` is the file as read: `{name, description?, enabled, on, when, max_per_hour?, actions: [{verb, args}], line}`. No file: `exists: false`, `text: ""`, `rules: []`. |
+| `PUT /api/projects/{name}/rules` | `{text, base_hash?}` | `200`, the rules. It creates or replaces the file. `base_hash` is the `hash` that the caller read (`""`: no file yet); another current hash is `409 conflict`. |
+| `DELETE /api/projects/{name}/rules?base_hash=` | | `204`. No file: `404`. |
+| `POST /api/projects/{name}/rules/check` | `{text}` | `200`, `{ok: true, rules}`, or `422`. It writes nothing. |
+
+Read and check: whoever reads the project. Put and delete: the operator
+or a project admin of the project (and a sysadmin). Each change writes an
+audit row with the target and the project of the file: `rules.put`
+(`{hash, previous_hash, rules: [names]}`), `rules.delete`
+(`{previous_hash}`), and `rules.file` for a file load
+(`{file, hash, previous_hash, rules}`).
+
+Errors: `422 invalid` with `details.problems: [{line, column, message}]`;
+`409 conflict` for a stale `base_hash`; `409 file_managed` for a put or a
+delete of the rules of a file (edit the file, then `POST /api/reload`).
+
 ## 20. Event sources and ingest
 
 An event source is one webhook sender: `github`, `forgejo`, or `generic`.

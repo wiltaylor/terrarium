@@ -2245,6 +2245,22 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX artifact_labels_label ON artifact_labels(label, artifact);
     "#,
+    // 81: the board rules of a project (TER-166, `crate::store::rules`):
+    // the text of its rules.wcl, the SHA-256 of the text, the number of
+    // rules, and `source` `api` or `file` (projects/<p>.rules.wcl).
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE project_rules (
+        project    TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,
+        text       TEXT NOT NULL,
+        hash       TEXT NOT NULL,
+        rule_count INTEGER NOT NULL DEFAULT 0,
+        source     TEXT NOT NULL DEFAULT 'api' CHECK (source IN ('api', 'file')),
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

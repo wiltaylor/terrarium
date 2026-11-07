@@ -720,6 +720,34 @@ pub async fn apply_definitions(
         })
         .await?;
     report.errors.extend(schedule_errors);
+    // The board rules files (`projects/<p>.rules.wcl`, TER-166), after the
+    // projects and their boards: the check reads the columns.
+    let rules_defs = defs.rules.clone();
+    let rule_errors = state
+        .db
+        .write("system", move |t| {
+            let mut errors = Vec::new();
+            for f in &rules_defs {
+                if store::projects::find(t, &f.project)?.is_none() {
+                    errors.push(format!(
+                        "{}: no project `{}`",
+                        store::rules::file_path(&f.project),
+                        f.project
+                    ));
+                    continue;
+                }
+                errors.extend(store::rules::sync_file(t, &f.project, Some(&f.text))?);
+            }
+            // A rules file that is gone: its rules become API rules.
+            for p in store::rules::file_projects(t)? {
+                if !rules_defs.iter().any(|f| f.project == p) {
+                    store::rules::sync_file(t, &p, None)?;
+                }
+            }
+            Ok(errors)
+        })
+        .await?;
+    report.errors.extend(rule_errors);
     // The template files, before the fleets: a fleet agent may name one.
     match template_files::refresh(state).await {
         Ok(r) => report.errors.extend(r.errors),
