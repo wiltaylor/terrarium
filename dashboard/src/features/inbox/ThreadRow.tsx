@@ -1,14 +1,17 @@
 // One Inbox thread in a list (docs/api.md §6.13): the Threads tab, and an
 // Inbox item of kind `thread`. The topic is the opener's words: a text node
-// only. The link opens the chat page.
+// only. The link opens the chat page. A pending close proposal of the agent
+// shows with Confirm and Decline (TER-95); `onChange` reads the list again
+// after one, and after a 409.
 
 import { A } from "@solidjs/router";
 import { Show } from "solid-js";
 import type { Thread } from "../../api/types";
+import { CloseProposal, isConflict } from "./CloseProposal";
 import { ago } from "../../lib/format";
 import { lastActivity, openQuestionCount, scopeLabel, threadChip, threadHref, waitsOnYou } from "./threads";
 
-export function ThreadRow(props: { thread: Thread; now: number }) {
+export function ThreadRow(props: { thread: Thread; now: number; onChange?: () => void }) {
   const t = () => props.thread;
   const chip = () => threadChip(t());
   const open = () => openQuestionCount(t());
@@ -47,6 +50,7 @@ export function ThreadRow(props: { thread: Thread; now: number }) {
         </Show>
         <Show when={t().report_to_name}>{(n) => <span>reports to {n()}</span>}</Show>
       </div>
+      <CloseProposal thread={t()} now={props.now} onChanged={() => props.onChange?.()} onError={(e) => isConflict(e) && props.onChange?.()} />
     </article>
   );
 }

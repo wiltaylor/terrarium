@@ -1186,6 +1186,8 @@ export const EVENT_KINDS = [
   "db.record",
   // A test run (docs/api.md, test runs): `{change, project, id, name, counts, cards, labels}`.
   "test_run",
+  // The job queue (docs/api.md §35): a job queued, started, or ended `{change, project, id, card, kind, state, attempt, outcome, cards?}`.
+  "job",
   // Monitors (docs/api.md §30): each result, and a change of status `{project, monitor, monitor_id, from, to, value?, unit?, message?}`.
   "monitor.result",
   "monitor.status",
@@ -1508,8 +1510,8 @@ export interface InboxEventData {
 
 // ----- Inbox threads (docs/api.md §6.13) -----
 
-/** Who must act on a thread. */
-export type ThreadStatus = "waiting_operator" | "waiting_agent" | "closed";
+/** Who must act on a thread. `tracking` (TER-145): the agent tracks handed-off work, parked. */
+export type ThreadStatus = "waiting_operator" | "waiting_agent" | "tracking" | "closed";
 
 /** One message of a thread. `text` is Markdown: untrusted data. */
 export interface ThreadMessage {
@@ -1564,6 +1566,8 @@ export interface Thread {
   report_to: string | null;
   report_to_name: string | null;
   status: ThreadStatus;
+  /** When the agent moved the thread into tracking (TER-145); set while it tracks. An older daemon sends none. */
+  tracking_at?: string | null;
   messages?: ThreadMessage[];
   questions?: Question[];
   response: ThreadResponse | null;
@@ -1575,7 +1579,14 @@ export interface Thread {
   updated_at: string;
   closed_at: string | null;
   closed_by: string | null;
+  /** The close that the attached agent proposes (TER-95): the handoff that the operator confirms. `null`: none. Absent on a daemon before 0.3.0. */
+  close_proposal?: ThreadHandoff | null;
+  /** Why a closed thread closed. Absent on a daemon before 0.3.0. */
+  close_reason?: ThreadCloseReason | null;
 }
+
+/** `confirmed`: the operator confirmed the agent's proposal; `operator`: the operator closed it; `stale`: untouched; `failed_start`: its agent did not start. */
+export type ThreadCloseReason = "confirmed" | "operator" | "stale" | "failed_start";
 
 /** `POST /api/threads`. `agent`: a ULID or `project/name`, until TER-92 spawns it from the template. */
 export interface NewThread {
@@ -1592,15 +1603,16 @@ export interface ThreadQuery {
   scope?: string;
 }
 
-/** `POST /api/threads/{id}/close`: the handoff. */
+/** `POST /api/threads/{id}/close`: the handoff, or `confirm` (TER-95): close with the agent's proposed handoff; no `summary` or `links` with it. */
 export interface ThreadClose {
   summary?: string;
   links?: ThreadLink[];
+  confirm?: boolean;
 }
 
 /** `data` of a `thread` event. */
 export interface ThreadEventData {
-  change: "opened" | "message" | "response" | "question" | "closed";
+  change: "opened" | "message" | "response" | "question" | "tracking" | "close_proposed" | "closed";
   id: string;
   scope: string;
   status: ThreadStatus;
@@ -1750,14 +1762,27 @@ export interface Card {
   tests?: CardTests;
   /** The idle mark (docs/api.md §6.2 "Idle alert", TER-67): the assignee rests with no wait since this time, past the project's idle alert, and the leads were told. */
   idle_since?: string | null;
+  /** The open (queued or running) job of the card (docs/api.md §8, TER-158). Absent when the card has no open job. */
+  job?: CardJob;
+  /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
+  assignee_status?: string;
+}
+
+/** The open job of a card: the tile reads its state chip from it, not from labels. */
+export interface CardJob {
+  id: string;
+  kind: "validate" | "merge";
+  state: "queued" | "running";
+  /** A queued job: its place among the queued jobs of the project (1 starts next). */
+  place?: number;
+  /** A queued job: the count of queued jobs in the project. */
+  queued?: number;
 }
 
 /** A card of `GET /api/cards` (docs/api.md §8, TER-43): a card in the working or research column of a board, with its column kind and the status of its assignee agent. */
 export interface ActiveCard extends Card {
   /** `working` (the column with that role), `research`, or another column that the query named. */
   column_kind: string;
-  /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
-  assignee_status?: string;
   /** A card in the blocked column (TER-51): when it moved there. */
   blocked_since?: string;
   /** A card in the blocked column: the comment of that move, or the newest comment without one. */
@@ -3084,12 +3109,17 @@ export interface PasswordChange {
 /**
  * When a schedule fires. `cron`: a 5-field expression in `tz` (an IANA
  * zone, default `UTC`). `interval`: a duration such as `15m`, `1h`, or
- * `1h30m`. `at`: once, at an RFC 3339 time.
+ * `1h30m`. `at`: once, at an RFC 3339 time. `manual`: a project action
+ * (TER-53, docs/api.md §19.10): no time and no event; a button runs it.
  */
-export type ScheduleSpec = { kind: "cron"; expr: string; tz: string } | { kind: "interval"; every: string } | { kind: "at"; at: string } | TriggerSpec;
+export type ScheduleSpec = { kind: "cron"; expr: string; tz: string } | { kind: "interval"; every: string } | { kind: "at"; at: string } | TriggerSpec | ManualSpec;
 export type ScheduleSpecKind = ScheduleSpec["kind"];
-/** The specs of a time schedule; `on` is a trigger. */
-export type TimeSpec = Exclude<ScheduleSpec, TriggerSpec>;
+/** The spec of a project action. */
+export interface ManualSpec {
+  kind: "manual";
+}
+/** The specs of a time schedule; `on` is a trigger, `manual` a project action. */
+export type TimeSpec = Exclude<ScheduleSpec, TriggerSpec | ManualSpec>;
 
 /** The compare of a `match` rule. `in` takes a list. */
 export type MatchOp = "eq" | "ne" | "glob" | "in";
@@ -3285,7 +3315,7 @@ export interface Schedule {
   owner?: ItemOwner;
   /** The actor the runs of an actor-owned schedule act as; the daemon checks its rights at each run. */
   run_as: string;
-  /** Null when disabled, or when a one-shot `at` schedule has run. */
+  /** Null when disabled, when a one-shot `at` schedule has run, and always for a trigger and a project action. */
   next_run_at: string | null;
   last_run: ScheduleLastRun | null;
   runs_count: number;
@@ -3319,8 +3349,8 @@ export type SchedulePatch = Partial<Omit<NewSchedule, "project">>;
 export interface ScheduleQuery {
   project?: string;
   enabled?: boolean;
-  /** `time`: only the time schedules; `trigger`: only the triggers (spec `on`). */
-  kind?: "time" | "trigger";
+  /** `time`: only the time schedules; `trigger`: only the triggers (spec `on`); `action`: only the project actions (spec `manual`). */
+  kind?: "time" | "trigger" | "action";
 }
 
 /** `cron` is the timer (each time spec); `event` is a trigger run. */

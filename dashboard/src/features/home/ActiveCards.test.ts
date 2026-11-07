@@ -8,8 +8,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActiveCard } from "../../api/types";
 
 const active = vi.fn();
+const listSchedules = vi.fn(() => Promise.resolve([] as unknown[]));
 vi.mock("../../stores", () => ({
-  api: { cards: { active } },
+  api: { cards: { active }, schedules: { list: listSchedules } },
   events: { on: () => () => {} },
 }));
 vi.mock("@solidjs/router", () => ({
@@ -28,6 +29,7 @@ afterEach(() => {
   dispose?.();
   document.body.innerHTML = "";
   vi.clearAllMocks();
+  listSchedules.mockImplementation(() => Promise.resolve([]));
 });
 
 const card = (over: Partial<ActiveCard>): ActiveCard =>
@@ -145,5 +147,20 @@ describe("ActiveCards", () => {
     active.mockResolvedValue([]);
     const el = await mount(Date.now());
     await vi.waitFor(() => expect(el.textContent).toContain("No card is in progress or in research."));
+  });
+
+  it("puts the enabled project actions next to the project name (TER-53)", async () => {
+    active.mockResolvedValue([card({ id: "AB-2", project: "abc", title: "Spike" }), card({})]);
+    const action = (name: string, project: string, enabled = true) => ({ id: `id-${name}`, name, project, enabled, spec: { kind: "manual" }, action: { type: "mail", to: "lead", subject: "", body: "" }, run_as: "operator" });
+    listSchedules.mockImplementation(() => Promise.resolve([action("deploy", "terrarium"), action("off", "terrarium", false), action("other", "nowip")]));
+    const el = await mount(Date.parse("2026-11-05T10:00:00Z"));
+    await vi.waitFor(() => expect(el.querySelector("[data-action=deploy]")).not.toBeNull());
+    expect(listSchedules).toHaveBeenCalledWith({ kind: "action" });
+    const terra = [...el.querySelectorAll("tr.active-group")].find((g) => g.querySelector("h3")!.textContent === "terrarium")!;
+    expect([...terra.querySelectorAll("[data-action]")].map((b) => b.getAttribute("data-action"))).toEqual(["deploy"]);
+    const abc = [...el.querySelectorAll("tr.active-group")].find((g) => g.querySelector("h3")!.textContent === "abc")!;
+    expect(abc.querySelector("[data-action]")).toBeNull();
+    // A project with no card in progress has no group, so no button.
+    expect(el.querySelector("[data-action=other]")).toBeNull();
   });
 });

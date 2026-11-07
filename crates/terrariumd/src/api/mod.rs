@@ -28,6 +28,7 @@ mod questions;
 mod records;
 mod repo_trees;
 mod repos;
+mod rules;
 mod schedules;
 mod screen;
 mod secret_grants;
@@ -309,6 +310,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(usage::routes())
         .merge(fleet::routes())
         .merge(schedules::routes())
+        .merge(rules::routes())
         .merge(event_sources::routes())
         .merge(templates::routes())
         .merge(waits::routes())

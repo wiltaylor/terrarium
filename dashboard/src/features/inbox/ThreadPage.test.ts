@@ -214,3 +214,87 @@ describe("the chat page of a thread", () => {
     await waitFor(() => expect(el.textContent).toContain("No such thread."));
   });
 });
+
+describe("the agent's close proposal (TER-114)", () => {
+  const proposal = (root: ParentNode = document) => root.querySelector("section[aria-label='Close proposal']") as HTMLElement | null;
+  const row = (el: HTMLElement, topic: string) => [...el.querySelectorAll("article[aria-label^='Thread ']")].find((r) => r.textContent?.includes(topic)) as HTMLElement | undefined;
+
+  it("shows the proposal on the thread page; Decline is a message, and the thread stays open", async () => {
+    const t = await api.threads.open({ topic: "Proposal declined", scope: "terrarium", agent: "terrarium/lead", text: "Go." });
+    const { el } = mount(`/inbox/threads/${t.id}`);
+    await waitFor(() => expect(el.querySelector("h1")?.textContent).toBe("Proposal declined"));
+    expect(proposal(el)).toBeNull();
+    api.sim.threadPropose(t.id, { summary: "TER-99 has the plan.\n<img src=x onerror=\"window.__xss=2\">", links: [{ kind: "card", ref: "TER-99" }, { kind: "url", ref: "https://example.com/p" }, { kind: "url", ref: "javascript:alert(1)" }] });
+    // The events are off in this test: mount the page again to read the proposal.
+    mount(`/inbox/threads/${t.id}`);
+    await waitFor(() => expect(proposal()).not.toBeNull());
+    const p = proposal()!;
+    expect(status(document.body)).toBe("close proposed");
+    expect(p.textContent).toContain("terrarium/lead proposes to close the thread");
+    expect(p.querySelector("[data-testid=proposal-summary]")!.textContent).toContain("<img src=x");
+    expect(p.querySelector("img")).toBeNull();
+    expect([...p.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual(["https://example.com/p"]);
+    expect(p.textContent).toContain("javascript:alert(1)");
+
+    button("Decline", p)!.click();
+    await waitFor(() => expect(p.querySelector("form[aria-label='Decline the close']")).not.toBeNull());
+    button("Send and decline", p)!.click();
+    await waitFor(() => expect(p.textContent).toContain("Write the message."));
+    setValue("textarea[aria-label='Decline text']", "Not yet: add the rollback to TER-99.", "input", p);
+    button("Send and decline", p)!.click();
+    await waitFor(() => expect(proposal()).toBeNull());
+    expect(status(document.body)).toBe("waiting on the agent");
+    expect(document.querySelector("[aria-label=Conversation]")!.textContent).toContain("Not yet: add the rollback to TER-99.");
+    const after = await api.threads.get(t.id);
+    expect(after).toMatchObject({ status: "waiting_agent", close_proposal: null });
+    expect(after.messages!.at(-1)).toMatchObject({ author: "operator", kind: "message", text: "Not yet: add the rollback to TER-99." });
+  });
+
+  it("confirms the proposal on the thread page: the thread closes with the agent's handoff", async () => {
+    const t = await api.threads.open({ topic: "Proposal confirmed", scope: "terrarium", agent: "terrarium/lead", text: "Go." });
+    api.sim.threadAsk(t.id, { text: "Anything more?", options: ["Yes", "No"] });
+    api.sim.threadPropose(t.id, { summary: "All in TER-100.", links: [{ kind: "card", ref: "TER-100" }] });
+    const { el } = mount(`/inbox/threads/${t.id}`);
+    await waitFor(() => expect(proposal(el)).not.toBeNull());
+    expect(proposal(el)!.querySelector("[data-testid=proposal-retracts]")!.textContent).toBe("A confirm retracts 1 open question.");
+    button("Confirm", proposal(el)!)!.click();
+    await waitFor(() => expect(status(el)).toBe("closed"));
+    expect(proposal(el)).toBeNull();
+    const handoff = el.querySelector("section[aria-label=Handoff]")!;
+    expect(handoff.textContent).toContain("You confirmed the close that terrarium/lead proposed");
+    expect(handoff.textContent).toContain("All in TER-100.");
+    expect(handoff.textContent).toContain("TER-100");
+    expect(el.querySelector("article[aria-label^='Question ']")!.textContent).toContain("retracted");
+    expect(await api.threads.get(t.id)).toMatchObject({ close_reason: "confirmed", closed_by: "operator" });
+  });
+
+  it("shows the proposal in the Threads list, with Confirm and Decline", async () => {
+    const a = await api.threads.open({ topic: "Row confirm", scope: "terrarium", agent: "terrarium/lead", text: "Go." });
+    const b = await api.threads.open({ topic: "Row decline", scope: "terrarium", agent: "terrarium/lead", text: "Go." });
+    api.sim.threadPropose(a.id, { summary: "Row A is done." });
+    api.sim.threadPropose(b.id, { summary: "Row B is done.", links: [{ kind: "wiki", ref: "plan" }] });
+    let { el } = mount("/inbox?tab=thread");
+    await waitFor(() => expect(row(el, "Row confirm")).toBeTruthy());
+    const ra = row(el, "Row confirm")!;
+    expect(ra.classList.contains("waits")).toBe(true);
+    expect(ra.querySelector("[data-testid=thread-status]")!.textContent).toBe("close proposed");
+    expect(proposal(ra)!.textContent).toContain("Row A is done.");
+    expect(proposal(row(el, "Row decline")!)!.textContent).toContain("plan");
+
+    button("Confirm", proposal(ra)!)!.click();
+    await waitFor(() => expect(row(el, "Row confirm")).toBeUndefined());
+    expect((await api.threads.get(a.id)).close_reason).toBe("confirmed");
+
+    const rb = row(el, "Row decline")!;
+    button("Decline", proposal(rb)!)!.click();
+    setValue("textarea[aria-label='Decline text']", "Link the card too.", "input", rb);
+    button("Send and decline", rb)!.click();
+    await waitFor(() => expect(row(el, "Row decline")?.querySelector("section[aria-label='Close proposal']")).toBeNull());
+    expect(row(el, "Row decline")!.querySelector("[data-testid=thread-status]")!.textContent).toBe("waiting on the agent");
+    expect((await api.threads.get(b.id)).close_proposal).toBeNull();
+
+    // The confirmed thread is on the Done tab.
+    ({ el } = mount("/inbox?tab=thread&status=done"));
+    await waitFor(() => expect(el.textContent).toContain("Row confirm"));
+  });
+});

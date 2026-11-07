@@ -2268,6 +2268,137 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE secret_grants_v81 RENAME TO secret_grants;
     CREATE INDEX secret_grants_grantee ON secret_grants(grantee);
     "#,
+    // 82: the column roles `validating`, `review`, `merge_queue`, and
+    // `accepted` (TER-165, `crate::store::board`). The CHECK of
+    // `board_columns.role` allows only `working` and `blocked`, and a CHECK
+    // cannot change in place. So the column is replaced: add the new one,
+    // copy, drop the index and the old column (its CHECK goes with it),
+    // rename, and make the unique index again. The table is not rebuilt,
+    // because `cards` refers to `board_columns`. The store checks the roles. Self-contained: when
+    // another branch takes this number, move this entry to the end of the
+    // list.
+    r#"
+    ALTER TABLE board_columns ADD COLUMN role_v82 TEXT;
+    UPDATE board_columns SET role_v82 = role;
+    DROP INDEX board_columns_role;
+    ALTER TABLE board_columns DROP COLUMN role;
+    ALTER TABLE board_columns RENAME COLUMN role_v82 TO role;
+    CREATE UNIQUE INDEX board_columns_role ON board_columns(project, role)
+        WHERE role IS NOT NULL;
+    "#,
+    // 83: the thread status `tracking` (TER-145, `crate::store::threads`):
+    // the agent tracks handed-off work, parked, with no stale close.
+    // `tracking_at` is the time the agent moved the thread into tracking;
+    // it stays set while an operator post wakes the agent. The CHECK of
+    // `threads.status` takes `tracking`, so the table is made again.
+    // `thread_messages` refers to `threads` with ON DELETE CASCADE, so its
+    // rows are kept in a plain copy over the drop and put back. The test
+    // finds this entry by the name `threads_tracking`. Self-contained:
+    // when another branch takes this number, move this entry to the end
+    // of the list.
+    r#"
+    CREATE TABLE thread_messages_keep AS SELECT * FROM thread_messages ORDER BY rowid;
+    DROP TABLE thread_messages;
+    CREATE TABLE threads_tracking (
+        id             TEXT PRIMARY KEY,
+        topic          TEXT NOT NULL,
+        scope          TEXT NOT NULL,
+        template       TEXT,
+        opened_by      TEXT NOT NULL,
+        agent          TEXT,
+        report_to      TEXT,
+        status         TEXT NOT NULL
+            CHECK (status IN ('waiting_operator', 'waiting_agent', 'tracking', 'closed')),
+        response       TEXT,
+        handoff        TEXT,
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL,
+        closed_at      TEXT,
+        closed_by      TEXT,
+        close_proposal TEXT,
+        close_reason   TEXT,
+        session_id     TEXT,
+        reminded_at    TEXT,
+        tracking_at    TEXT
+    );
+    INSERT INTO threads_tracking (id, topic, scope, template, opened_by, agent, report_to,
+                                  status, response, handoff, created_at, updated_at,
+                                  closed_at, closed_by, close_proposal, close_reason,
+                                  session_id, reminded_at)
+        SELECT id, topic, scope, template, opened_by, agent, report_to, status, response,
+               handoff, created_at, updated_at, closed_at, closed_by, close_proposal,
+               close_reason, session_id, reminded_at
+        FROM threads;
+    DROP TABLE threads;
+    ALTER TABLE threads_tracking RENAME TO threads;
+    CREATE INDEX threads_status ON threads(status, updated_at);
+    CREATE INDEX threads_agent ON threads(agent);
+    CREATE INDEX threads_report_to ON threads(report_to);
+    CREATE TABLE thread_messages (
+        id      TEXT PRIMARY KEY,
+        thread  TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        author  TEXT NOT NULL,
+        kind    TEXT NOT NULL CHECK (kind IN ('message', 'response')),
+        text    TEXT NOT NULL,
+        at      TEXT NOT NULL
+    );
+    INSERT INTO thread_messages (id, thread, author, kind, text, at)
+        SELECT id, thread, author, kind, text, at FROM thread_messages_keep ORDER BY rowid;
+    DROP TABLE thread_messages_keep;
+    CREATE INDEX thread_messages_thread ON thread_messages(thread, at);
+    "#,
+    // 84: the board rules of a project (TER-166, `crate::store::rules`):
+    // the text of its rules.wcl, the SHA-256 of the text, the number of
+    // rules, and `source` `api` or `file` (projects/<p>.rules.wcl).
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE project_rules (
+        project    TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,
+        text       TEXT NOT NULL,
+        hash       TEXT NOT NULL,
+        rule_count INTEGER NOT NULL DEFAULT 0,
+        source     TEXT NOT NULL DEFAULT 'api' CHECK (source IN ('api', 'file')),
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    "#,
+    // 85: the board rule engine (TER-168, `crate::rules_engine`): its own
+    // event cursor, and `rule_runs`, both the action outbox (`pending`
+    // rows, written in the same transaction as the cursor) and the run log
+    // of each rule. `step` is the next action; `steps` the results of the
+    // actions run. `lane` is the card (or `project:<p>`): the rows of one
+    // lane run in order. `rule_json` is the rule as planned.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE rule_cursor (
+        id  INTEGER PRIMARY KEY CHECK (id = 1),
+        seq INTEGER NOT NULL
+    );
+    CREATE TABLE rule_runs (
+        id         TEXT PRIMARY KEY,
+        project    TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        rule       TEXT NOT NULL,
+        rule_hash  TEXT NOT NULL,
+        ord        INTEGER NOT NULL,
+        event_seq  INTEGER NOT NULL,
+        card       TEXT,
+        lane       TEXT NOT NULL,
+        rule_json  TEXT NOT NULL CHECK (json_valid(rule_json)),
+        cause      TEXT NOT NULL CHECK (json_valid(cause)),
+        state      TEXT NOT NULL
+                   CHECK (state IN ('pending', 'done', 'noop', 'failed', 'skipped')),
+        step       INTEGER NOT NULL DEFAULT 0,
+        steps      TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(steps)),
+        reason     TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (project, rule, event_seq, lane)
+    );
+    CREATE INDEX rule_runs_pending ON rule_runs(state, event_seq, ord);
+    CREATE INDEX rule_runs_rule ON rule_runs(project, rule, created_at);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -3081,6 +3212,73 @@ mod tests {
             .query_row("SELECT count(*) FROM secret_grants", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// Migration 83 keeps the threads and their messages in order, and
+    /// takes the status `tracking`. Found by its content.
+    #[test]
+    fn migration_83_keeps_threads_and_takes_tracking() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("threads_tracking"))
+            .unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO threads (id, topic, scope, opened_by, status, created_at, updated_at,
+                                  reminded_at, close_proposal)
+               VALUES ('T1', 'Cache', 'global', 'operator', 'waiting_operator', 't', 'u',
+                       'r', '{}');
+             INSERT INTO thread_messages (id, thread, author, kind, text, at)
+               VALUES ('M2', 'T1', 'operator', 'message', 'first', 'a');
+             INSERT INTO thread_messages (id, thread, author, kind, text, at)
+               VALUES ('M1', 'T1', 'A1', 'message', 'second', 'a');",
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE threads SET status = 'tracking'", [])
+                .is_err()
+        );
+        migrate(&mut conn).unwrap();
+        let row: (String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT status, reminded_at, close_proposal, tracking_at FROM threads",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            ("waiting_operator".into(), "r".into(), "{}".into(), None)
+        );
+        let texts: Vec<String> = conn
+            .prepare("SELECT text FROM thread_messages WHERE thread = 'T1' ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(texts, ["first", "second"]);
+        conn.execute(
+            "UPDATE threads SET status = 'tracking', tracking_at = 'v'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE threads SET status = 'bogus'", [])
+                .is_err()
+        );
+        // The cascade from threads still works.
+        conn.execute("DELETE FROM threads WHERE id = 'T1'", [])
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM thread_messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]
@@ -4173,11 +4371,65 @@ mod tests {
             [],
         );
         assert!(dup.is_err());
-        let bad = conn.execute(
-            "UPDATE board_columns SET role = 'stuck' WHERE name = 'review'",
+        // The CHECK on the role is gone since migration 82: the store
+        // refuses an unknown role (tests/board.rs).
+    }
+
+    /// Migration 82 (TER-165): the role column takes the job roles. The
+    /// roles of migration 48 stay, and the one-column-per-role index stays.
+    #[test]
+    fn migration_82_takes_the_job_roles() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("role_v82"))
+            .unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 't', 't');
+             INSERT INTO boards (project, created_at) VALUES ('p', 't');
+             INSERT INTO board_columns (project, name, position, role) VALUES
+               ('p', 'backlog', 0, NULL), ('p', 'in_progress', 1, 'working'),
+               ('p', 'review', 2, NULL), ('p', 'blocked', 3, 'blocked'), ('p', 'done', 4, NULL);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name, role FROM board_columns WHERE project = 'p' ORDER BY position")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let got: Vec<(&str, Option<&str>)> = rows
+            .iter()
+            .map(|(n, r)| (n.as_str(), r.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("backlog", None),
+                ("in_progress", Some("working")),
+                ("review", None),
+                ("blocked", Some("blocked")),
+                ("done", None),
+            ]
+        );
+        // A job role now fits, and still only one column has it.
+        conn.execute(
+            "UPDATE board_columns SET role = 'validating' WHERE name = 'review'",
+            [],
+        )
+        .unwrap();
+        let dup = conn.execute(
+            "UPDATE board_columns SET role = 'validating' WHERE name = 'done'",
             [],
         );
-        assert!(bad.is_err());
+        assert!(dup.is_err());
     }
 
     /// Migration 51 (ephemeral agents) as the dev stack applied it on

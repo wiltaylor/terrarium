@@ -96,8 +96,9 @@ async fn runs(td: &TestDaemon, sid: &str) -> Vec<Value> {
 
 /// The runs of `sid` once it has `want` of them and none is `running`, then
 /// after a short pause, so a late extra run shows too. The runs of a
-/// trigger start after the pass that moves the cursor, so `settle` alone
-/// does not mean they have a row yet. Returns the last read after the
+/// trigger start after the pass that moves the cursor, and the runs of one
+/// trigger go one after another, so `settle` alone does not mean each run
+/// has a row, or that a row has its output. Returns the last read after the
 /// deadline, so the assertion of the caller shows it.
 async fn settled_runs(td: &TestDaemon, sid: &str, want: usize) -> Vec<Value> {
     let st = state(td);
@@ -543,8 +544,8 @@ async fn the_loop_guard_and_the_chain_depth() {
         total = n;
     }
     // Depth 0 starts both; each depth 1-3 mail starts the other trigger.
-    assert_eq!(runs(&td, &a).await.len(), 4);
-    assert_eq!(runs(&td, &b).await.len(), 4);
+    assert_eq!(settled_runs(&td, &a, 4).await.len(), 4);
+    assert_eq!(settled_runs(&td, &b, 4).await.len(), 4);
     let depth = state(&td)
         .db
         .read(|c| {

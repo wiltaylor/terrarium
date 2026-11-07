@@ -3744,7 +3744,7 @@ There is no register of threads and no conflict check between threads
  "response":null,"handoff":null,
  "created_at":"2026-11-06T09:00:00.000Z","updated_at":"2026-11-06T09:05:00.000Z",
  "closed_at":null,"closed_by":null,"close_proposal":null,"close_reason":null,
- "session_id":null,"reminded_at":null}
+ "session_id":null,"reminded_at":null,"tracking_at":null}
 ```
 
 | Field | Meaning |
@@ -3756,7 +3756,7 @@ There is no register of threads and no conflict check between threads
 | `opened_by`, `opened_by_name` | `operator`, or the ULID and `project/name` of the agent that opened it. |
 | `agent`, `agent_name` | The attached agent: one per thread, or `null` while it has none. The agent that the daemon spawned from `template` (the thread agent, below), or an existing agent that the opener names: of the scope project, or any agent for `global`. |
 | `report_to`, `report_to_name` | The lead that the thread reports to (D34): for `global`, the lead of project `meta`; else the lead of the scope project. The lead of a project is its project_admin agent named `lead`, else its first project_admin by name. Set at the open; it does not change. A scope without a lead is `409 conflict` at the open. |
-| `status` | `waiting_operator`, `waiting_agent`, or `closed` (below). |
+| `status` | `waiting_operator`, `waiting_agent`, `tracking`, or `closed` (below). |
 | `messages` | The conversation, in the order of the writes (two writes in the same millisecond keep their order): `{id, author, author_name, kind, text, at}`. `author` is `operator` or an agent ULID. `kind` is `message`, or `response` for the operator's overall response. `text` is Markdown, at most 32 KiB: untrusted data for every reader. |
 | `questions` | The questions, notices, and bundles of the thread (§6.8), the oldest first. |
 | `response` | The newest overall response of the operator, `{text, by, at}`, or `null`. It is the approval record: the agent quotes it word for word in each card or mail it hands off (D34). Each response is also a message of kind `response`. |
@@ -3766,6 +3766,7 @@ There is no register of threads and no conflict check between threads
 | `close_reason` | On a closed thread: `confirmed` (the operator confirmed the agent's proposal), `operator` (the operator closed it), `stale` (untouched, below), or `failed_start` (its agent did not start). |
 | `session_id` | The session of the thread agent, set at the close: the agent ends and its session is archived (§6.6), so `/sessions/<id>` opens it after the agent is gone. `null` for a named agent, which lives on. |
 | `reminded_at` | The time of the last Inbox reminder of the untouched thread (below), or `null`. |
+| `tracking_at` | When the attached agent moved the thread into tracking (TER-145, below), or `null`. It stays set while an operator post wakes the agent, so that the agent's reply puts the thread back into `tracking`. |
 
 **Status.** A new thread with a first message of the operator is
 `waiting_agent`; with no first message, or opened by an agent, it is
@@ -3775,6 +3776,21 @@ thread, makes it `waiting_operator`. An answer, an acknowledgement, or a
 retract of one of its questions makes it `waiting_agent` when no question
 of the thread is open any more. A closed thread does not change, and each
 write to it is `409 conflict`.
+
+**Tracking** (TER-145, TER-144 D1 and D9). After its handoff the attached
+agent moves the thread into tracking: `POST .../track` (`terrarium thread
+track <id>`) makes it `tracking`, sets `tracking_at`, and withdraws a close
+proposal. The agent parks (`park_reason` `thread is tracking`): no harness
+and no tokens. A thread with an open question is `409 conflict`. A thread
+that tracks gets no reminder and no stale close (below). A message or a
+response of the operator makes it `waiting_agent` and wakes the agent with
+a `[Thread:<id>]` turn that ends with a note that the thread tracks; the
+agent's next message makes it `tracking` again, not `waiting_operator`, and
+parks the agent. A question that the agent asks makes it
+`waiting_operator` as usual; the agent's message after the answer puts it
+back into `tracking`. Only the close ends tracking. The dashboard Inbox
+lists these threads on the Threads tab under Tracking, between Open and
+Done.
 
 **Close** (TER-95, wiki `inbox-threads` §5). The attached agent hands off
 its work, asks in the thread whether anything more is needed, and then
@@ -3821,7 +3837,8 @@ the thread (`closed_by` `system`, `close_reason` `stale`; the handoff says
 so and keeps the summary and the links of a proposal), and mails the
 report-to lead (`Thread <id> closed as stale`, with the topic quoted and
 the session link). The agent costs nothing meanwhile: it is parked. The
-spawn timer checks both on each tick. `off` (or `0`) turns one off.
+spawn timer checks both on each tick. `off` (or `0`) turns one off. A
+thread that is `tracking` is never untouched: it gets neither.
 
 **Rights.**
 
@@ -3832,6 +3849,7 @@ spawn timer checks both on each tick. `off` (or `0`) turns one off.
 | Post a message | The operator and the attached agent. |
 | Respond | The operator. |
 | Close | The operator, at any time. The attached agent proposes the close; the operator confirms it (`confirm`). |
+| Track | The attached agent. Another reader, and the operator, get `403`. |
 
 | Ask a question in a thread | The attached agent, also when it is not a leader: `POST /api/agents/{id}/questions` with `"thread"`. |
 
@@ -3849,11 +3867,12 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | Endpoint | Body or query | Answer |
 |---|---|---|
 | `POST /api/threads` | `{"topic", "scope"?, "template"?, "agent"?, "text"?}`; `scope` defaults to `global` for the operator and to the own project for an agent; `agent` is a ULID or `project/name` | `201` the thread. An agent: `403` without `thread:open`, for another project, or for a template or agent above its rights (A1); `422` with no `template`; `404` for an unknown template |
-| `GET /api/threads` | `?status=waiting_operator\|waiting_agent\|closed\|open\|all` (default `open`: not closed), `?scope=` | `200` the threads without `messages` and `questions`, with `message_count`, `open_questions`, and `last_at`. The ones that wait for the operator first, then the newest activity first. At most 200. |
+| `GET /api/threads` | `?status=waiting_operator\|waiting_agent\|tracking\|closed\|open\|all` (default `open`: not closed), `?scope=` | `200` the threads without `messages` and `questions`, with `message_count`, `open_questions`, and `last_at`. The ones that wait for the operator first, then the newest activity first. At most 200. |
 | `GET /api/threads/{id}` | | `200` the thread |
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
+| `POST /api/threads/{id}/track` | no body | The attached agent: `200` the thread, `tracking`, with `tracking_at`. `409` with an open question |
 
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
 A thread opened with a `template` and no `agent` gets its agent at the
@@ -3873,7 +3892,8 @@ of that project (A2). Only the daemon binds to a thread: a spawn with
 - **Park.** A message or a question of the agent that leaves the thread
   `waiting_operator` parks the agent (`park_reason` `thread waits on the
   operator`): the idle pass stops it when it is at rest, and mail does not
-  wake it.
+  wake it. The move into tracking, and its reply in a thread that tracks,
+  park it too (`thread is tracking`).
 - **Restart.** An operator message or response, or the settling of the
   last open question (`waiting_agent`), unparks it: it starts again in the
   same session row and harness session (`resumes` + 1) on every harness.
@@ -4164,6 +4184,17 @@ A card:
 - `tests` is the latest test run that is linked to the card (§29):
   `{"id","name","status","counts":{"passed","failed","errored","skipped","total"},"created_at"}`.
   It is absent when no run is linked to the card.
+- `job` is the open (queued or running) job of the card (§35,
+  TER-158): `{"id","kind","state","place","queued"}`. `kind` is `validate`
+  or `merge`, `state` is `queued` or `running`. A queued job has `place`
+  (its place among the queued jobs of the project in its lane, 1 starts
+  next) and `queued` (the count of queued jobs of the project in that
+  lane). Validate and merge jobs have their own lanes. It is absent when
+  the card has no open job. The board tile reads its state chip from it,
+  not from the `validation:*` labels.
+- `assignee_status` is the stored status of the assignee agent (`working`,
+  `idle`, `waiting`, `blocked`, `stopped`, ...). It is absent for the
+  operator, no assignee, or a removed agent.
 - `comments[].session` is the session link (§6.6) of the agent that wrote
   the comment: the agent's current session at that time. It is `null` for
   the operator and for a comment from before migration 37. Each path that
@@ -4195,7 +4226,9 @@ A board:
 ```
 
 A new board has the columns `backlog`, `ready`, `in_progress` (role
-`working`), `review`, `blocked` (role `blocked`), `done`. `count` excludes
+`working`), `validating` (role `validating`), `review` (role `review`),
+`merge_queue` (role `merge_queue`), `accepted` (role `accepted`), `blocked`
+(role `blocked`), `done`. `count` excludes
 archived cards. The columns are configurable (§8.3, "Columns"):
 
 - `name` is the ID of the column: a lower-case letter, then at most 31
@@ -4203,11 +4236,18 @@ archived cards. The columns are configurable (§8.3, "Columns"):
   rule stays valid.
 - `title` is the display label: the stored title (at most 40 characters),
   else the name with spaces for the underscores.
-- `role` is `working` or `blocked`, or absent. Exactly one column has the
-  role `working`: `card claim` moves a card there, and a card with unmet
-  dependencies cannot enter it. At most one column has the role `blocked`:
-  a move there needs a comment and mails a notice. The rules of §8.2 follow
+- `role` is `working`, `blocked`, `validating`, `review`, `merge_queue`, or
+  `accepted`, or absent. Exactly one column has the role `working`:
+  `card claim` moves a card there, and a card with unmet dependencies cannot
+  enter it. At most one column has each other role. The role `blocked` needs
+  a comment on a move there and mails a notice. The rules of §8.2 follow
   the roles, not the names.
+- The job queue finds its columns by role: a validate job holds a card in
+  the column with the role `validating`, a validate pass goes to the column
+  with the role `review`, and a merge pass goes to the column with the role
+  `accepted`. With no column that has the role, the daemon uses the column
+  with the name `validating`, `review`, or `accepted`. A column that has
+  the role wins over a column with the same name.
 - `backlog` is always the first column and `done` always the last. Neither
   can be removed, renamed, or moved, and neither takes a WIP limit or a
   role. Both can have a title.
@@ -4219,7 +4259,10 @@ archived cards. The columns are configurable (§8.3, "Columns"):
   `422 invalid`, and the message names the columns.
 - Migration 48 gives each existing board the roles (`in_progress` working,
   `blocked` blocked), puts `backlog` first and `done` last, and clears a
-  WIP limit on `backlog` and `done`.
+  WIP limit on `backlog` and `done`. Migration 82 lets the column take the
+  roles `validating`, `review`, `merge_queue`, and `accepted`. It gives no
+  existing column those roles: an existing board keeps its names and uses
+  the name fallback until an admin sets the roles.
 
 ### 8.2 Rules (PLAN §13)
 
@@ -4394,9 +4437,6 @@ card position; at most 500. Each card is a card with more fields:
 
 - `column_kind`: `working` or `blocked` for the column with that role,
   else the column name in lower case (`research`).
-- `assignee_status`: the stored status of the assignee agent (`working`,
-  `idle`, `waiting`, `blocked`, `stopped`, ...). Absent for the operator,
-  no assignee, or a removed agent.
 - `blocked_since` and `blocked_reason` (TER-51), only for a card in the
   blocked column: when the card moved there and the comment of that move
   (what is needed), from the last `moved` event to the blocked column.
@@ -7252,7 +7292,9 @@ A schedule runs one action on a time spec: mail, a turn, an exec on a
 target, an agent verb, a quota probe, a card on the board, or a webhook (an
 HTTP request, §19.5). A trigger is
 a schedule whose spec is `on`: an event of the log (§9, §20) that matches
-starts its run (§19.4). The daemon runs a schedule as the actor that made
+starts its run (§19.4). A project action is a schedule whose spec is
+`manual`: a person starts each run with its button (§19.10). The daemon
+runs a schedule as the actor that made
 it (`run_as`). Before each run, the daemon checks the rights of that
 actor again. A project- or system-owned schedule has no actor behind it
 (§19.6). PLAN §12b and §12c have the design.
@@ -7296,7 +7338,7 @@ A schedule:
 | `created_by` | `operator` or `agent:<ulid>`. |
 | `owner` | `actor` (the default), `project`, or `system` (§19.6). |
 | `run_as` | The actor of the runs of an actor-owned schedule. It is `created_by`, until a caller changes the `action` or the `owner`, or takes the schedule over: then it is that caller. A project- or system-owned schedule does not use it. |
-| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, and always for a trigger. |
+| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, and always for a trigger and a project action. |
 | `last_run` | `{at, status, summary, run_id}` of the last run, or `null`. |
 | `runs_count` | The runs so far, the skipped runs too. |
 | `source` | `api`, `file` (`[[schedules]]` in `projects/<name>.toml`), or `fleet:<name>` (§18.1). |
@@ -7311,6 +7353,7 @@ The specs:
 | `{"kind": "interval", "every": "30m"}` | A number and a unit (`s`, `m`, `h`, `d`), or a sum, for example `1h30m`. The minimum is 60 s. The runs are at `start + k * every`; a new spec sets a new start. |
 | `{"kind": "at", "at": "2026-11-01T02:00:00Z"}` | One run at an RFC 3339 time in the future. |
 | `{"kind": "on", "kinds": ["ci.run.failed"], "match"?, "dedupe"?, "escalate"?, "max_per_hour"?: 30}` | A trigger: each matching event starts a run. See §19.4. |
+| `{"kind": "manual"}` | A project action: no time and no event. Only `POST .../run` starts a run. See §19.10. |
 
 The actions:
 
@@ -7361,18 +7404,18 @@ A run:
 
 | Method and path | Body | Answer |
 |---|---|---|
-| `GET /api/schedules?project=&enabled=&kind=` | | `200`, a list. With `project`: the project's schedules, and the global ones when the caller may read them. Without: all for the operator and a sysadmin; the caller's project for another agent. `kind=time` gives only the time schedules, `kind=trigger` only the triggers; another value is `400`. |
+| `GET /api/schedules?project=&enabled=&kind=` | | `200`, a list. With `project`: the project's schedules, and the global ones when the caller may read them. Without: all for the operator and a sysadmin; the caller's project for another agent. `kind=time` gives only the time schedules, `kind=trigger` only the triggers, `kind=action` only the project actions (spec `manual`); another value is `400`. |
 | `POST /api/schedules` | `{name, project?, spec, action, enabled?: true, catch_up?: "skip", owner?: "actor"}` | `201`, the schedule. An absent `project` is the agent caller's project (the operator: global). `null` is global. |
 | `GET /api/schedules/{id}` | | `200`, the schedule. `{id}` is a ULID, `project/name` (encode the `/` as `%2F`), or a name. |
 | `PATCH /api/schedules/{id}` | `{name?, spec?, action?, enabled?, catch_up?, owner?}` | `200`, the schedule. A new `action` makes the caller the `run_as`. `owner` moves it (§19.6); `owner: actor` makes the caller the `run_as` (a take-over). |
 | `DELETE /api/schedules/{id}` | | `204`. The runs go with it. |
-| `POST /api/schedules/{id}/run` | | `200`, the run when it ends. It runs as `run_as`, or with the owner's rights (§19.6). |
+| `POST /api/schedules/{id}/run` | | `200`, the run when it ends. It runs as `run_as`, or with the owner's rights (§19.6). A disabled project action is `409` (§19.10); a disabled time schedule still runs. |
 | `POST /api/schedules/{id}/enable` | | `200`, the schedule, with a new `next_run_at`. An enable sets `consecutive_skips` to 0. |
 | `POST /api/schedules/{id}/disable` | | `200`, the schedule. |
 | `GET /api/schedules/{id}/runs?limit=&cursor=` | | `200`, the runs, newest first, with `X-Next-Cursor` (§2.4). |
 | `GET /api/schedules/{id}/deliveries?limit=&cursor=` | | `200`, the webhook deliveries, newest first, with `X-Next-Cursor` (§19.5). The read rights of the schedule. |
-| `POST /api/schedules/{id}/deliveries/{delivery}/redeliver` | | `202`, a new `pending` delivery: a copy of `{delivery}` with `redelivery_of`, due now. The rights of a run-now. A `dropped` row is `422`. |
-| `POST /api/schedules/{id}/test` | none, or `{event?: {kind?, summary?, project?, agent?, actor?, data?}}` | `200`, a test run (§19.7): `{test: true, action, matched, reason?, event?, status?, summary?, output?, error?, delivery?, request?}`. Any action kind. The rights of a run-now; for a webhook, a secret that the caller or `run_as` may not use is `403`. A body that is not this shape is `400`; an empty `event.kind` or an `event.data` that is not an object is `422` (`details.field` `event.kind`, `event.data`). |
+| `POST /api/schedules/{id}/deliveries/{delivery}/redeliver` | | `202`, a new `pending` delivery: a copy of `{delivery}` with `redelivery_of`, due now. The rights of a run-now. A `dropped` row is `422`. A disabled project action is `409` (§19.10). |
+| `POST /api/schedules/{id}/test` | none, or `{event?: {kind?, summary?, project?, agent?, actor?, data?}}` | `200`, a test run (§19.7): `{test: true, action, matched, reason?, event?, status?, summary?, output?, error?, delivery?, request?}`. Any action kind. The rights of a run-now; for a webhook, a secret that the caller or `run_as` may not use is `403`. A body that is not this shape is `400`; an empty `event.kind` or an `event.data` that is not an object is `422` (`details.field` `event.kind`, `event.data`). A disabled project action is `409` (§19.10). |
 
 Errors:
 
@@ -7875,6 +7918,214 @@ test: true}`. Each test writes the audit row `schedule.test`
  "status": "ok", "summary": "mail 01JX... to terra/lead",
  "output": {"message_id": "01JX...", "thread_id": "01JX...", "to": "terra/lead",
             "held": false, "held_reason": null}}
+```
+
+### 19.8 Board rules
+
+A project has one board rules file, `rules.wcl` (TER-162, TER-166). A
+rule reacts to an event of the log and runs verbs on the board. The
+daemon stores and checks the file here; the engine (§19.9) runs it.
+
+The file is WCL. The daemon ships its schema
+(`crates/terrarium-core/src/rules.schema.wcl`, `GET /api/rules/schema`)
+and checks each file against it when it loads the file and on each edit:
+
+```wcl
+rule "validate-pass" {
+  description = "A passed validation goes to review."
+  on = ["job.verdict"]                   // event kind globs
+  when "data.verdict" { eq = "passed" }  // eq, ne, glob, or one_of
+  card_label  { remove = ["validation:running", "validation:queued"] }
+  card_move   { to = "@review"  comment = "{{job.end_comment}}" }
+  card_assign { who = "none" }
+}
+```
+
+A rule has a name (unique in the file), `on`, optional `description`,
+`enabled` (default `true`), `max_per_hour` (1 to 600), any number of
+`when` conditions (all must hold; the paths of a trigger `match`, §19.4),
+any number of `if_card` and `if_job` conditions on the current state
+(§19.9), and at least one verb. The verbs run in the order of the file:
+`card_move` (`to`, `from?`, `comment?`, `position?` `top` or `bottom`),
+`card_label` (`add?`, `remove?`), `card_comment` (`text`), `card_assign`
+(`who`), `card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
+`job_queue` (`kind` `validate`, `merge`, or `batch`; `from` and `limit?`
+for a batch), `job_cancel`, `job_rerun` (`max_attempts?`), `job_split`,
+`agent_park`, `agent_unpark` (`turn?`), and `agent_end` (`outcome` `done`
+or `cancelled`).
+
+The checks beyond the schema:
+
+- Plain data only: rule blocks with quoted labels, and fields whose
+  values are literals (a bool, a number, a quoted text, `none`, or a list
+  of these). A `let`, a function call, a function (lambda), a reference
+  to another value, an operator, an interpolated string (`$"..."`), a
+  record, a field that fills a block slot (`card_move = [...]`), an
+  `import` (imports are off), a `type`, `union`, `symbol_set`,
+  `namespace`, `use`, table, connection, or decorator is `422`. The
+  daemon refuses them before it evaluates the file, so a check costs at
+  most what the 64 KiB of literals cost, and it runs outside the
+  database lock.
+- A column (`to`, `from`) is `@<role>`, the column with that role, else
+  the column of that name; or a plain column name. It must be on the
+  project's board.
+- A template names `{{event.<path>}}` (as §19.4), `{{card.<id|title|column|assignee|labels|project>}}`,
+  `{{job.<id|kind|state|outcome|attempt|by_agent|repo|commit|end_comment|failure_block|next_jobs>}}`,
+  or `{{rule.name}}`.
+- At most `TERRARIUM_MAX_RULES_PER_PROJECT` rules (default 50, apart from
+  the schedules cap), and at most 64 KiB.
+
+Each error names the line and the column: ``rules.wcl:3:3: block kind
+'card_frobnicate' is not allowed inside 'rule'``.
+
+The file comes from the API (`source: api`) or from the config dir:
+`projects/<project>.rules.wcl` beside the project file (`source: file`),
+read at the start and at `POST /api/reload`. A file that does not check
+keeps the last good rules, and the reload answer names its errors. A
+broken file at the start does not stop the start or another project.
+When the file goes, its rules stay as API rules. The config repo export
+(§25) writes the API rules to `export/rules/<project>.rules.wcl`.
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `GET /api/rules/schema` | | `200`, `{file, schema, verbs: [{kind, verb}], max_rules, max_bytes}`. |
+| `GET /api/projects/{name}/rules` | | `200`, `{project, exists, text, hash?, source?, rules, updated_by?, updated_at?}`. `rules` is the file as read: `{name, description?, enabled, on, when, max_per_hour?, actions: [{verb, args}], line}`. No file: `exists: false`, `text: ""`, `rules: []`. |
+| `PUT /api/projects/{name}/rules` | `{text, base_hash?}` | `200`, the rules. It creates or replaces the file. `base_hash` is the `hash` that the caller read (`""`: no file yet); another current hash is `409 conflict`. A board change during the check is `409 conflict` too (send it again). |
+| `DELETE /api/projects/{name}/rules?base_hash=` | | `204`. No file: `404`. |
+| `POST /api/projects/{name}/rules/check` | `{text}` | `200`, `{ok: true, rules}`, or `422`. It writes nothing. |
+
+Read and check: whoever reads the project. Put and delete: the operator,
+a project admin of the project, or a sysadmin. The sysadmin is allowed on
+purpose: the write uses the same right as the other project settings
+(`policy::admin_project`). Each change writes an
+audit row with the target and the project of the file: `rules.put`
+(`{hash, previous_hash, rules: [names]}`), `rules.delete`
+(`{previous_hash}`), and `rules.file` for a file load
+(`{file, source: "file", hash, previous_hash, rules}`) or for a file that
+is gone (`{file: null, previous_file, source: "api", hash,
+previous_hash}`).
+
+Errors: `422 invalid` with `details.problems: [{line, column, message}]`;
+`409 conflict` for a stale `base_hash`; `409 file_managed` for a put or a
+delete of the rules of a file (edit the file, then `POST /api/reload`).
+
+### 19.9 The rule engine
+
+The rule engine (TER-168) runs the stored rules of each project (§19.8)
+on the events of the log.
+
+- Durable cursor. The engine reads the event log after its own cursor;
+  a new event only wakes it. Its first start sets the cursor to the end
+  of the log, so old events start no run. An event from before the rules
+  were last stored starts no run either.
+- Plan. For each event of a project with rules, each enabled rule (in
+  file order) whose `on` and `when` hold plans one run for each card of
+  the event (the event's card, `data.card`, and `data.cards`), or one run
+  without a card. The planned runs (the action outbox) and the new cursor
+  are one write: a crash or restart after it loses no action, and the
+  next start runs the planned runs.
+- Guards, at the plan: a rule does not see the events of its own runs;
+  an event at chain depth 4 (`data.cause.depth`, shared with the
+  triggers of §19.4) starts no run; a rule runs at most `max_per_hour`
+  times in an hour (default 30), and at most 10 times for one card in an
+  hour. A guard records a `skipped` run with the reason.
+- Order. The runs of one card go one after another, in event order and
+  then in rule order. The runs of other cards go beside them. A run that
+  the engine cannot record (a database error) stays pending and holds the
+  later runs of its card until the next pass.
+- Start checks, when a run starts (after the earlier runs of its card):
+  the rule must still be stored and enabled (else the run is `skipped`),
+  each column that the rule names must still be on the board (else the
+  run is `failed`), the card must still exist, and each `if_card` and
+  `if_job` must hold (else the run is `skipped` with the reason). A run
+  acts as its rule was at the plan: an edit of the rule after the plan
+  does not change a planned run, and a run that started goes to its end.
+- Actions. The actions run in the order of the file, each in its own
+  write together with the run's step counter, so a restart goes on at
+  the next action and never repeats a database action. The first action
+  that fails ends the run as `failed`; its changes roll back and the
+  actions after it do not run. A run whose actions all changed nothing
+  ends as `noop`.
+- Actor. The actions act as `rule:<project>/<rule>`: a project admin of
+  the rule's project, nothing more (not the operator, not a sysadmin).
+  The board checks apply to it as to a lead: the project gate, the GitHub
+  author gate (§13, a held card), and the board invariants. The events
+  of its writes carry `actor: "rule:<project>/<rule>"` and
+  `data.cause: {rule: "<project>/<rule>", run, event, depth}`; a comment
+  has that author.
+
+Conditions on the current state:
+
+```wcl
+rule "note-review" {
+  on = ["job"]
+  if_card { column = ["@review"]  lacks_labels = ["hold"]  assigned = false }
+  if_job { state = ["passed"]  outcome = ["none"] }
+  card_comment { text = "{{card.id}} passed job {{job.id}}" }
+}
+```
+
+`if_card` (on the run's card; a rule with one runs only for events with a
+card): `column` (in one of these), `not_column`, `has_labels` (every
+one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
+of a `job` event, `data.id`; a rule with one runs only for `job` events):
+`state` (`queued`, `running`, `passed`, `failed`, `cancelled`) and
+`outcome` (`red`, `conflict`, `error`, `none`). Every field that is set
+must hold; every block must hold.
+
+Templates are filled when the action runs, from the event, the current
+card, the event's job, and the rule. In a text that an agent reads
+(`text`, `comment`, `subject`, `body`, `turn`) each value is quoted
+data (one line, in backticks), as in a trigger mail (§19.4).
+
+Verbs: only `card_comment` runs in this version. Every other verb fails
+its action with ``verb `card.move` is not implemented yet`` (TER-169).
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. No rules and no `text`: `404`. |
+| `GET /api/projects/{name}/rules/runs?rule=&limit=` | | `200`, `{runs: [{id, project, rule, rule_hash, event_seq, card?, state, step, steps, reason?, created_at, updated_at}]}`, newest first (`limit` 1 to 500, default 100). `state` is `pending`, `done`, `noop`, `failed`, or `skipped`; `step` the next action (pending) or the actions run; `steps` one `{verb, ok, changed?, detail?, error?}` for each action run. The project keeps its newest 500 finished runs, and every run of the last hour (the rate limits count them). |
+
+Both: whoever reads the project.
+
+### 19.10 Project actions
+
+A project action (TER-53) is a schedule with the spec `{"kind":
+"manual"}`. It has no time and no event: the timer and the trigger
+engine never start it, and `next_run_at` is always `null`. A person
+starts each run with its button on the project dashboard or next to the
+project name in the Home 'Work in progress' table, or with `terrarium
+schedule run <name>`. The dashboard asks for a confirm first and shows
+the run's status, summary, and error when it ends.
+
+An action takes every action kind of §19.1 (`mail`, `turn`, `agent`,
+`exec`, `probe`, `card`, `webhook`). Its text has no templates: there is
+no event. It counts toward the schedule limit of its project, and it is
+listed with `GET /api/schedules?kind=action` (`terrarium schedule ls
+--actions`). Monitors and pipelines do not take a `manual` spec.
+
+The rules are those of any schedule (§19.3, §19.6):
+
+- Create, change, delete, enable, disable, and run: the operator, a
+  sysadmin, and a project_admin of the project, with the action's reach
+  inside the project. A member reads the actions and cannot run them
+  (`403`).
+- A run acts as `run_as` (an actor-owned action) or with the project's
+  rights (a project-owned action), checked again at each run. The card
+  action of a project-owned action keeps the GitHub author gate (TER-85):
+  a `close` never moves a held card.
+- A disabled action does not run: `POST .../run`, `POST .../test`
+  (§19.7), and `POST .../deliveries/{delivery}/redeliver` are `409`.
+  Enable it first.
+- Each run is a run of §19.1 with `trigger: manual` and the caller as
+  `actor`. It writes the audit row `schedule.run` and the `schedule`
+  events `run_started` and `run_finished`.
+
+```sh
+terrarium schedule new deploy-staging --project terra --manual \
+  --exec build-box --cwd /src/app -- ./deploy.sh staging
+terrarium schedule ls --actions
+terrarium schedule run terra/deploy-staging
 ```
 
 ## 20. Event sources and ingest
@@ -10557,7 +10808,8 @@ The recipe gets this env (TER-100), and no credential:
 | `TERRARIUM_BASE`          | the base of the change: for a validate job the merge-base of the card commit and `next`, for a merge job `next` before the merge |
 | `TERRARIUM_CHANGED_FILES` | the absolute path of a file in the clone (`.git/terrarium/changed-files`) with the paths that differ between the base and the head, one per line (`git diff --name-only --no-renames`, so a rename lists both paths) |
 
-The prepare step fetches `next` for a validate job too. When the repo has
+The prepare step in the daemon fetches `next` for a validate job too, and
+the clone step on the target writes the file from that base. When the repo has
 no `next`, or the commit has no merge-base with it, `TERRARIUM_BASE` and
 `TERRARIUM_CHANGED_FILES` are not set, and a recipe that selects tests
 must run all of them. The terrarium repo's recipe for this is `just
@@ -10582,57 +10834,57 @@ running job. The `queue` answer of a validate or merge call gives the
 place and the running count in the job's own lane; a merge gives
 `slots: 1`.
 
-A job is three runs on the target, and a merge job has one more. The
-prepare run (clone, checkout, merge) and the push run get the repo
-credential in their env. The recipe run gets no credential, because it
-runs the repo's code. Each run of a job runs at low priority: `ionice
--c3 nice -n19 <command>`. The daemon checks one time per target (per
-daemon run) that `ionice -c3` works. Without it, the runs use `nice -n19`
-only. The output tail of the job ends with the wrapper (`[run as: ...]`).
+The repo credential never goes to the target (TER-103). The steps that
+need it run in the daemon, which runs no recipe, in a bare repo of the
+job at `<state>/jobs/<project>/<job>.git` (0700 dir, removed after the
+job, and all of them at daemon start). They use the daemon's own git
+setup (§5.1): no user or system config, no hooks, the token through a
+one-shot helper or the key in a 0700 run dir under
+`<state>/credentials/.run/`, and the daemon's known hosts. A job is:
 
-The recipe can change its clone: make commits, move HEAD, or write
-`.git/config` (for example `url.<base>.insteadOf`). So the push of a merge
-job never runs in that clone, and never pushes what HEAD is after the
-recipe:
+1. Prepare, in the daemon, with the credential: fetch the card branch
+   (validate) or `next` and the card branches (merge). A validate job
+   takes the card commit. A merge job merges each branch onto `next` with
+   a merge commit, without a work tree (`git merge-tree --write-tree`,
+   then `git commit-tree`), so no checkout, filter, or hook runs. The
+   commit is recorded (`refs/job/head`, or `refs/job/merge`) and written
+   to a git bundle.
+2. On the target, with no credential: the bundle goes in on the stdin of
+   the step, a fresh clone in `<work_dir>/<project>/<job>` is made from
+   it, and its job ref must be the recorded commit; else the job fails
+   (`error`). The clone has no remote. Then the recipe runs in the clone.
+3. A merge job only, when the recipe passed, in the daemon, with the
+   credential: push the recorded commit ID from the daemon's repo to
+   `next`. The push is not forced.
 
-1. The prepare run records the merge commit before the recipe runs, and
-   keeps it as `refs/job/merge` in the clone.
-2. A run without any credential makes a fresh bare repo next to the clone
-   and fetches `refs/job/merge` from the clone over `file://`. It must be
-   the recorded commit; else the job fails (`error`).
-3. The push run checks that the fresh repo still holds that commit, and
-   pushes that commit ID to `next` from it.
+The recipe can change its clone: make commits, move HEAD, delete refs, or
+write `.git/config` (for example `url.<base>.insteadOf`). None of that
+reaches the push: the daemon's repo is the only source of the push, and
+no target, sandbox, or recipe can write it. The `ls-remote` check of
+`POST /api/cards/{id}/validate` also runs in the daemon.
 
-ssh in the git runs reads no config file (`-F /dev/null`), so a planted
-`~/.ssh/config` cannot send the push to another host or run a
-`ProxyCommand`. Its known hosts are a file of the job, seeded from the
-repo host keys (below), not `~/.ssh/known_hosts`. The key file is in a 0700
-dir of the job (`<clone>.ssh`), not in `/tmp`. The cleanup removes the
-clone, the push repo, and that dir.
+Each step on the target runs at low priority: `ionice -c3 nice -n19
+<command>`. The daemon checks one time per target (per daemon run) that
+`ionice -c3` works. Without it, the steps use `nice -n19` only. The
+output tail of the job ends with the wrapper (`[run as: ...]`).
+
+The daemon must reach the forge of each repo in `next_repos`, as it does
+for workspace checkouts (§5.1). A forge that only the target reaches does
+not work with the queue.
 
 #### Limits
 
-Every run of a job on a target runs as the same user: the recipe, and
-the runs that hold the credential. So any recipe on the target can reach
-the files of the credential runs. It can leave a background process
-behind, or, while it runs next to another job of the project, write that
-job's push repo or read its key file. Any worker can start such a recipe
-with `card validate` on its own branch, so the exposure is any worker at
-the next merge, not only the merging card. Validate jobs run beside a
-merge (TER-159; before, a merge ran alone in its project), so a recipe
-that runs at the same time on the same target can reach the merge's push
-credential while the merge runs, and a validate job fetches with the
-credential while other recipes of the project run. Two more paths of the
-same kind: the recipes of another project on a shared global target, and
-an agent with exec on the delivery target, which can reach
-`<clone>.ssh/key` or the push repo with no recipe at all. The fix (each
-recipe as its own user, or the credential runs on a host that runs no
-recipe) is TER-103.
-
-The known hosts of the git runs are the repo host keys that the daemon's
-own git trusts (GitHub's published keys and the recorded ones), not the
-host keys of the targets. A forge whose key the daemon has not recorded
-is accepted on first use in each run (`accept-new`).
+The steps on the target run as the target's user (the ssh login user, the
+`docker exec` user, or the host agent's user), as an agent's `exec` does.
+They hold no credential, so a recipe, or an agent with exec on the
+target, finds no key, token, or push repo there, and validate jobs can
+run beside a merge (TER-159). What is left: the recipes of one target
+share a user, so a recipe can change another job's clone on the same
+target, or leave a process that does. That can change the verdict of
+that job, but not what a merge pushes: the push is the commit that the
+daemon recorded before any recipe ran. A host agent must not run as the
+daemon's user on the daemon's machine (§17), or a recipe can read the
+state dir.
 
 #### The host cap
 
@@ -10704,6 +10956,16 @@ one key, the strictest applies until a cap write replaces them.
   `system`.
 - A daemon restart loses the running jobs: they fail (`error`) and follow
   the same rule.
+- A host that cannot be reached is not a failure (TER-160). A job whose
+  target's host agent is offline is not started and stays queued. A job
+  whose target could not be reached before the recipe started (the host
+  agent went away, or the ssh connect was refused, timed out, or the name
+  did not resolve) goes back to the queue with `tail` `waits for its host:
+  <why>` and the event change `requeued`. An ssh target is tried again
+  after 60 s. Neither uses an attempt or moves the card, and the card
+  keeps `validation:queued`. After 30 min of waiting the card gets one
+  comment that says so (once per job in a daemon run). A failure after
+  the recipe started stays a failure.
 
 A batch merge:
 
@@ -10738,7 +11000,7 @@ start with `Job queue:`.
 
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|
-| `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` on the target. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
+| `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
 | `POST /api/merges`                 | a project admin                       | `{cards, repo?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
@@ -10753,3 +11015,15 @@ The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
 Events `job` {change, project, id, card, kind, state, attempt, outcome,
 cards?}; `cards` lists the cards of a batch.
+Events `job.verdict` {project, job, card, kind, verdict, state, outcome,
+attempt, by_agent, repo, branch, parent, batch, end_comment,
+failure_block}: one per card when a job ends or is cancelled, in the same
+write as the card flow above. `verdict` is `passed`, `red`, `conflict`,
+`cancelled`, or `error` (the job could not run, or the daemon restarted).
+In a batch each card has its own event: a card that left the batch is
+`conflict`, the merged cards have the verdict of the batch. `batch` lists
+the cards of a batch job, else `null`. `end_comment` is the `Job queue:`
+line of the end. `failure_block` is the `Validation failed:` block for
+`red`, `conflict`, and `error`, else `null`. The verdict says what the run
+found, not what the queue does next: the rerun and the split stay as
+above.

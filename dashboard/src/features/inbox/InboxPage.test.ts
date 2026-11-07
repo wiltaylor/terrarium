@@ -81,3 +81,21 @@ describe("the Asked status tab (TER-42)", () => {
     expect(el.textContent).toContain("Answered by terrarium/lead");
   });
 });
+
+describe("the Tracking tab of the Threads (TER-145)", () => {
+  it("shows Tracking between Open and Done on the Threads tab only, and lists only the tracking threads", async () => {
+    let el = mount("/inbox?tab=thread");
+    await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Thread ']").length).toBeGreaterThan(0));
+    const tabs = () => [...el.querySelectorAll("[role=tab]")].map((t) => t.textContent?.trim());
+    expect(tabs()).toEqual(["All", "Questions", "Notices", "Mail to you", "System", "Threads", "Open", "Tracking", "Done", "Asked"]);
+    // The mock has no tracking thread: the Tracking list is empty.
+    el = mount("/inbox?tab=thread&status=tracking");
+    await waitFor(() => expect(el.textContent).toContain("No thread tracks work"));
+    expect(el.querySelectorAll("article[aria-label^='Thread ']").length).toBe(0);
+    // Another kind tab has no Tracking tab, and ?status=tracking opens Open there.
+    el = mount("/inbox?tab=question&status=tracking");
+    await waitFor(() => expect(el.textContent).not.toContain("Loading"));
+    expect(tabs()).not.toContain("Tracking");
+    expect([...el.querySelectorAll("[role=tab][aria-selected=true]")].map((t) => t.textContent?.trim())).toEqual(["Questions", "Open"]);
+  });
+});

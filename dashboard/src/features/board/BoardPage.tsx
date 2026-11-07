@@ -3,12 +3,12 @@ import { createEffect, createMemo, createResource, createSignal, For, on, onClea
 import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
-import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
 import type { Card, Column, NewCard, Question } from "../../api/types";
 import { ago, compact } from "../../lib/format";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { idleBadge } from "../../lib/idle";
+import { cardState, type CardState, tileLabels } from "../../lib/cardState";
 import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { CardQuestions } from "./CardQuestions";
@@ -124,9 +124,9 @@ export function BoardPage() {
 
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
   let questionTimer: ReturnType<typeof setTimeout> | undefined;
-  // Live: card, board, and test run events of this project reload the board (a test run changes the test chip of its cards); question events reload the badges.
+  // Live: card, board, test run, and job events of this project reload the board (a test run changes the test chip of its cards; a job changes the state chip and the queue places); question events reload the badges.
   const off = events.on((e) => {
-    if ((e.kind === "card" || e.kind === "board" || e.kind === "test_run") && e.project === params.project && !dragging()) {
+    if ((e.kind === "card" || e.kind === "board" || e.kind === "test_run" || e.kind === "job") && e.project === params.project && !dragging()) {
       clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => void board.reload(), 300);
     }
@@ -458,6 +458,12 @@ function KCard(props: {
   onDragEnd: () => void;
 }) {
   const owner = () => (props.card.assignee ? agents.byId(props.card.assignee) : undefined);
+  // The one state chip (TER-158): the open job, the review column, or the live status of the assignee.
+  const state = () => cardState(props.card, owner()?.status);
+  // An idle assignee with an idle mark: the chip shows the idle time and the alert (lib/idle.ts).
+  const idle = () => idleBadge(props.card, props.now);
+  const stateLabel = (s: CardState) => (s.kind === "idle" && idle() ? idle()!.label : s.label);
+  const stateTitle = (s: CardState) => (s.kind === "idle" && idle() ? idle()!.title : s.title);
   return (
     <article
       class={`kcard${props.dragging ? " dragging" : ""}`}
@@ -486,10 +492,17 @@ function KCard(props: {
               waits on {props.card.blocked_by.length}
             </span>
           </Show>
-          <Show when={idleBadge(props.card, props.now)}>
+          <Show when={state()?.kind !== "idle" && idle()}>
             {(b) => (
               <span class="chip warn idle-badge" title={b().title} aria-label={b().title}>
                 {b().label}
+              </span>
+            )}
+          </Show>
+          <Show when={state()}>
+            {(s) => (
+              <span class={`chip ${s().tone} card-state`} data-state={s().kind} title={stateTitle(s())} aria-label={`${s().label}. ${stateTitle(s())}`}>
+                {stateLabel(s())}
               </span>
             )}
           </Show>
@@ -502,19 +515,12 @@ function KCard(props: {
       <EtaChip card={props.card} now={props.now} />
       <div class="row small">
         <Show when={props.card.tests}>{(t) => <CardTestsChip project={props.card.project} tests={t()} />}</Show>
-        <For each={props.card.labels}>{(l) => <span class="chip">{l}</span>}</For>
+        <For each={tileLabels(props.card.labels)}>{(l) => <span class="chip">{l}</span>}</For>
       </div>
       <Show when={props.card.assignee}>
         <div class="spread small">
           <span>{owner()?.name ?? props.card.assignee_name ?? props.card.assignee}</span>
-          <Show when={owner()}>
-            {(a) => (
-              <>
-                <HoldBadge agentId={a().id} />
-                <StatusBadge agent={a()} />
-              </>
-            )}
-          </Show>
+          <Show when={owner()}>{(a) => <HoldBadge agentId={a().id} />}</Show>
         </div>
       </Show>
       <Show when={cardAgentName(props.card)}>

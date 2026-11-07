@@ -27,6 +27,8 @@ pub mod protocol;
 pub mod providers;
 pub mod redact;
 pub mod role;
+#[cfg(feature = "wcl")]
+pub mod rules_file;
 pub mod schedule;
 pub mod secret_scan;
 pub mod selfhosted;
