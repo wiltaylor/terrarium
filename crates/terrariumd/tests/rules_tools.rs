@@ -469,7 +469,7 @@ async fn the_dry_run_plans_the_pack_of_a_rules_project() {
     assert_eq!(mv.status, 200, "{}", mv.body);
     let seq = state(&td)
         .db
-        .read(|c| terrariumd::events::last_seq(c))
+        .read(terrariumd::events::last_seq)
         .await
         .unwrap();
     let plan = td
