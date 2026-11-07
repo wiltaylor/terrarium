@@ -16,7 +16,8 @@
 //! - `export/`: the schedules, and the projects with their agents,
 //!   targets, and repos, as fleet files ([`export_files`]); and the
 //!   secrets by name in `export/secrets/` (`crate::secrets::export`: the
-//!   names, kinds, plain fields, and grants, never a value). No runtime
+//!   names, kinds, plain fields, and grants, never a value); and the
+//!   board rules of the API in `export/rules/<project>.rules.wcl`. No runtime
 //!   state, and no ID of this instance.
 //! - `skills/`: the skill library (PLAN §8.6, `crate::skills`), one dir
 //!   for each skill, with the file types of
@@ -108,6 +109,7 @@ pub const GITIGNORE: &str = "\
 !/export/**/*.json
 !/export/**/*.yaml
 !/export/**/*.md
+!/export/**/*.wcl
 /templates/**
 !/templates/**/
 !/templates/**/*.wcl
@@ -1020,8 +1022,8 @@ fn is_secrets_file(repo: &Path, p: &Path) -> bool {
 }
 
 /// The files under `export/` that the export writes: the fleet files
-/// (`*.fleet.toml`, at any depth) and the secrets files
-/// (`export/secrets/*.toml`).
+/// (`*.fleet.toml`, at any depth), the board rules files
+/// (`*.rules.wcl`), and the secrets files (`export/secrets/*.toml`).
 fn export_paths(dir: &Path) -> Vec<PathBuf> {
     fn walk(d: &Path, out: &mut Vec<PathBuf>) {
         let secrets = d.file_name().is_some_and(|n| n == "secrets")
@@ -1038,6 +1040,7 @@ fn export_paths(dir: &Path) -> Vec<PathBuf> {
                 walk(&p, out);
             } else if ty.is_file()
                 && (name.ends_with(terrarium_core::fleet::FLEET_SUFFIX)
+                    || name.ends_with(terrarium_core::config::RULES_SUFFIX)
                     || (secrets && name.ends_with(".toml")))
             {
                 out.push(p);
@@ -1161,6 +1164,14 @@ pub fn export_files(conn: &rusqlite::Connection) -> ApiResult<Vec<ExportFile>> {
     }
     for (path, content) in crate::secrets::export::files(conn)? {
         out.push(ExportFile { path, content });
+    }
+    // The board rules of the API (TER-166); the rules of a file are in the
+    // config dir already.
+    for (project, text) in crate::store::rules::of_api(conn)? {
+        out.push(ExportFile {
+            path: format!("{EXPORT_DIR}/rules/{project}.rules.wcl"),
+            content: text,
+        });
     }
     Ok(out)
 }

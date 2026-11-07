@@ -20,7 +20,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::agent_template::{self, TemplateDef};
-use terrarium_core::config::{AgentDef, Policy, ProjectDef, RepoDef, SubscriptionDef, TargetDef};
+use terrarium_core::config::{
+    AgentDef, DeliveryDef, Policy, ProjectDef, RepoDef, SubscriptionDef, TargetDef,
+};
 use terrarium_core::fleet::{self, Fleet, Issue, Kind};
 use terrarium_core::{HarnessId, Role};
 
@@ -33,7 +35,7 @@ use crate::store::agents::{self, AgentPatch, AgentView};
 use crate::store::projects::{
     self, NewProject, NewRepo, ProjectPatch, SOURCE_API, SOURCE_FILE, fleet_source,
 };
-use crate::store::{Page, repos, schedules, subscriptions, targets, templates};
+use crate::store::{Page, jobs, repos, schedules, subscriptions, targets, templates};
 
 /// The `source` word of an object a fleet owns: `fleet:<name>`.
 pub use crate::store::projects::SOURCE_FLEET as SOURCE_PREFIX;
@@ -387,13 +389,15 @@ fn all_repos(conn: &Connection, project: &str) -> ApiResult<Vec<repos::Repo>> {
     }
 }
 
-/// The live state of a project: the repos with the names in `names`, and
-/// the checkout list of the last apply (the store has no checkout list).
+/// The live state of a project: the repos with the names in `names`, the
+/// checkout list of the last apply (the store has no checkout list), and
+/// with `delivery` the job queue config (TER-87).
 fn live_project(
     conn: &Connection,
     p: &projects::Project,
     names: &BTreeSet<String>,
     checkout: &Value,
+    delivery: bool,
 ) -> ApiResult<Value> {
     let mut repos: Vec<Value> = all_repos(conn, &p.name)?
         .into_iter()
@@ -401,21 +405,48 @@ fn live_project(
         .map(|r| live_repo_spec(&r))
         .collect();
     repos.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    Ok(json!({
+    let mut spec = json!({
         "description": p.description,
         "prefix": p.card_prefix,
         "repos": repos,
         "checkout": checkout,
-    }))
+    });
+    if delivery {
+        spec["delivery"] = json!(jobs::delivery(conn, &p.name)?);
+    }
+    Ok(spec)
 }
 
-fn desired_project(def: &ProjectDef, live_prefix: Option<&str>) -> Value {
-    json!({
+/// The desired state of a project. `delivery`: the job queue config that
+/// the apply writes, or `None` when the fleet does not manage it.
+fn desired_project(
+    def: &ProjectDef,
+    live_prefix: Option<&str>,
+    delivery: Option<&DeliveryDef>,
+) -> Value {
+    let mut spec = json!({
         "description": def.description.clone().unwrap_or_default(),
         "prefix": def.prefix.as_deref().or(live_prefix),
         "repos": desired_repos(def),
         "checkout": def.checkout.on_agent_create,
-    })
+    });
+    if let Some(d) = delivery {
+        spec["delivery"] = json!(d);
+    }
+    spec
+}
+
+/// The job queue config that a fleet apply writes on a project (TER-87):
+/// the `[projects.delivery]` of the file, or the default (no queue) when
+/// the file drops a table that the fleet applied before. `None`: the
+/// fleet does not manage it, and the apply leaves it as it is.
+fn desired_delivery(p: &fleet::FleetProject, applied: Option<&Value>) -> Option<DeliveryDef> {
+    match &p.delivery {
+        Some(d) => Some(d.clone()),
+        None => applied
+            .is_some_and(|a| a.get("delivery").is_some())
+            .then(DeliveryDef::default),
+    }
 }
 
 fn role_list(roles: &[Role]) -> Vec<Role> {
@@ -717,14 +748,19 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
             );
         }
         let checkout = applied.map_or_else(|| json!([]), |a| a["checkout"].clone());
+        let delivery = desired_delivery(p, applied);
         let live = match &live_row {
             Some(row) => Some(Live {
-                spec: live_project(conn, row, &names, &checkout)?,
+                spec: live_project(conn, row, &names, &checkout, delivery.is_some())?,
                 source: row.source.clone(),
             }),
             None => None,
         };
-        let desired = desired_project(&p.def, live_row.as_ref().map(|r| r.card_prefix.as_str()));
+        let desired = desired_project(
+            &p.def,
+            live_row.as_ref().map(|r| r.card_prefix.as_str()),
+            delivery.as_ref(),
+        );
         entries.push(classify(
             &f.name,
             Kind::Project,
@@ -1414,8 +1450,22 @@ pub fn apply(
             &live_subscription(&live),
         )?;
     }
+    // The job queue configs that change, from the plan, before
+    // `apply_project` records the projects over the last apply.
+    let deliveries: Vec<(&fleet::FleetProject, DeliveryDef)> = f
+        .projects
+        .iter()
+        .filter(|p| {
+            plan.entries.iter().any(|e| {
+                e.kind == Kind::Project
+                    && e.key == p.def.name
+                    && e.changes.iter().any(|c| c.field == "delivery")
+            })
+        })
+        .map(|p| (p, p.delivery.clone().unwrap_or_default()))
+        .collect();
     for p in &f.projects {
-        apply_project(t, &name, &p.def)?;
+        apply_project(t, &name, &p.def, p.delivery.is_some())?;
     }
     for d in f.all_targets() {
         apply_target(t, d)?;
@@ -1429,7 +1479,33 @@ pub fn apply(
             &target_spec(&live.def),
         )?;
     }
+    // The job queue configs (TER-87), after the targets of the file
+    // exist, with the checks of `PUT /api/projects/{name}/delivery`.
+    for (p, def) in deliveries {
+        let project = p.def.name.as_str();
+        policy::admin_project(actor, project, "setting the job queue of a project")?;
+        crate::jobs::check_delivery(t, actor, project, &def)
+            .and_then(|()| jobs::set_delivery(t, project, &def))
+            .map_err(|e| {
+                ApiError::new(
+                    e.code,
+                    format!("projects.{project}.delivery: {}", e.message),
+                )
+            })?;
+        record_project(t, &name, &p.def, p.delivery.is_some())?;
+    }
     for (p, d) in f.all_templates() {
+        // Any write to a template with grants needs the right to grant
+        // each secret (TER-88), as for `POST /api/templates` and its
+        // PATCH. An upsert that changes nothing checks nothing.
+        let written = templates::upsert_would_write(t, p, d, &source)?;
+        crate::spawn_rights::check_template_write(
+            t,
+            actor,
+            p,
+            &terrarium_core::fleet::template_key(p, &d.name),
+            written.as_ref(),
+        )?;
         let live = templates::upsert_def(t, p, d, &source, &actor.label(), repo)?;
         record(
             t,
@@ -1444,10 +1520,11 @@ pub fn apply(
         let key = fleet::agent_key(&a.def);
         // The template is in the store now: the file's own ones were
         // written above.
-        let template = match &a.template {
-            Some(k) => Some(templates::resolve(t, &a.def.project, k)?.reference()),
+        let resolved = match &a.template {
+            Some(k) => Some(templates::resolve(t, &a.def.project, k)?),
             None => None,
         };
+        let template = resolved.as_ref().map(templates::Template::reference);
         let id = match find_agent(t, &a.def.project, &a.def.name)? {
             Some(v) => {
                 apply_agent(t, &v, &a.def)?;
@@ -1459,6 +1536,12 @@ pub fn apply(
             }
             None => {
                 let v = agents::create_from(t, &a.def, state_dir, &source, template.as_ref())?;
+                // The template's secret grants (TER-88), as for
+                // `POST /api/agents`.
+                if let Some(tpl) = &resolved {
+                    let tg = crate::spawn_rights::TemplateGrants::of(tpl, tpl.key())?;
+                    crate::spawn_rights::grant_at_create(t, actor, &v, &tg)?;
+                }
                 let id = v.agent.id.to_string();
                 out.created_agents.push((id.clone(), a.def.project.clone()));
                 id
@@ -1572,7 +1655,12 @@ pub fn apply(
     Ok(out)
 }
 
-fn apply_project(t: &mut Tx<'_>, fleet_name: &str, def: &ProjectDef) -> ApiResult<()> {
+fn apply_project(
+    t: &mut Tx<'_>,
+    fleet_name: &str,
+    def: &ProjectDef,
+    delivery: bool,
+) -> ApiResult<()> {
     let prior = owner(t, Kind::Project, &def.name)?;
     let mut managed: BTreeSet<String> = def.repos.iter().map(|r| r.name.clone()).collect();
     if let Some(o) = &prior {
@@ -1646,9 +1734,21 @@ fn apply_project(t: &mut Tx<'_>, fleet_name: &str, def: &ProjectDef) -> ApiResul
             )?;
         }
     }
+    record_project(t, fleet_name, def, delivery)
+}
+
+/// Record a project as it is now as the state of the last apply. With
+/// `delivery`, the fleet manages its job queue config.
+fn record_project(t: &Tx<'_>, fleet_name: &str, def: &ProjectDef, delivery: bool) -> ApiResult<()> {
     let row = projects::get(t, &def.name)?;
     let names: BTreeSet<String> = def.repos.iter().map(|r| r.name.clone()).collect();
-    let spec = live_project(t, &row, &names, &json!(def.checkout.on_agent_create))?;
+    let spec = live_project(
+        t,
+        &row,
+        &names,
+        &json!(def.checkout.on_agent_create),
+        delivery,
+    )?;
     record(
         t,
         fleet_name,
@@ -1856,6 +1956,8 @@ pub fn export(
         .filter(|s| s.source != SOURCE_FILE)
         .map(|s| s.def())
         .collect();
+    // The job queue config (TER-87), when the project has one.
+    let delivery = Some(jobs::delivery(conn, project)?).filter(|d| *d != DeliveryDef::default());
     let targets = targets::list(conn)?
         .into_iter()
         .filter(|r| r.def.project.as_deref() == Some(project))
@@ -1911,6 +2013,7 @@ pub fn export(
             },
             agents,
             targets,
+            delivery,
         }],
     })
 }

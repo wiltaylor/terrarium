@@ -69,6 +69,9 @@ const FIELDS: &[(&str, Kind)] = &[
     ("new_session_on_prompt_change", Kind::Bool),
     // A template key only: the tools an agent of it gets (sysadmin).
     ("tools", Kind::List),
+    // A template key only: the secret grants an agent of it gets, checked
+    // against the user of the template at the spawn or the create (TER-88).
+    ("grants", Kind::List),
     ("system_prompt", Kind::Text),
 ];
 

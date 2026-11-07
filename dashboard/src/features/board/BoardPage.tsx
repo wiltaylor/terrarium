@@ -3,12 +3,12 @@ import { createEffect, createMemo, createResource, createSignal, For, on, onClea
 import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
-import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
-import type { Card, Column, NewCard, Question, Version } from "../../api/types";
-import { ago, compact, humanize } from "../../lib/format";
+import type { Card, Column, NewCard, Question } from "../../api/types";
+import { ago, compact } from "../../lib/format";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { idleBadge } from "../../lib/idle";
+import { cardState, type CardState, tileLabels } from "../../lib/cardState";
 import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { CardQuestions } from "./CardQuestions";
@@ -20,15 +20,15 @@ import { columnTitle, isBlockedColumn } from "./columns";
 import { ColumnsEditor } from "./ColumnsEditor";
 import { editCardForm, editCardPatch, type EditCardForm } from "./editCard";
 import { LanesBoard } from "./LanesBoard";
-import { buildLanes, columnIndex, findVersion, laneCells, type LaneMove, laneMove, laneMovePatches, laneStateKey, menuVersions, readLaneState, takesCards, toggleCollapsed } from "./lanes";
-import { NewVersionModal, VersionModal } from "./VersionModal";
+import { buildLanes, columnIndex, laneCells, laneMoveLabels, laneStateKey, readLaneState, toggleCollapsed } from "./lanes";
 import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_QUERY } from "./phone";
-import { VERSION_CHIP, versionsByCard } from "./versions";
+import { boardVersions, matchesVersion, NO_VERSION } from "./versionLabels";
+import { cardAgentName } from "./cardAgent";
 import { agents, api, events } from "../../stores";
 
 export function BoardPage() {
   const params = useParams<{ project: string }>();
-  const [search, setSearch] = useSearchParams<{ card?: string; version?: string; col?: string }>();
+  const [search, setSearch] = useSearchParams<{ card?: string; version?: string; group?: string; col?: string }>();
   const board = createBoardStore(api);
   // The card that is in a drag (LanesBoard): no live reload of the board until the drop.
   const [dragging, setDragging] = createSignal<string | null>(null);
@@ -71,33 +71,9 @@ export function BoardPage() {
   createEffect(on(() => params.project, () => void loadQuestions()));
   const badges = () => cardQuestionBadges(questions());
 
-  // The versions of the project: the lanes and the version chips of the cards.
-  // Every version, archived ones too (the toolbar menu lists them); the board shows only those that are not archived.
-  const [allVersions, setVersions] = createSignal<Version[] | undefined>(undefined);
-  const versions = () => allVersions()?.filter((v) => !v.archived);
-  let vGen = 0;
-  const loadVersions = async () => {
-    const mine = ++vGen;
-    try {
-      const rows = await api.versions.list(params.project, { archived: "all" });
-      if (mine === vGen) setVersions(rows);
-    } catch {
-      // A daemon or a caller without versions gets no chips and only the "No version" lane.
-      if (mine === vGen) setVersions([]);
-    }
-  };
-  createEffect(
-    on(
-      () => params.project,
-      () => {
-        setVersions(undefined);
-        void loadVersions();
-      },
-    ),
-  );
-  const byCard = createMemo(() => versionsByCard(versions() ?? []));
-
-  // The Cards tab always shows the version lanes (lanes.ts). An old `?rows=` in the URL has no effect.
+  // The version view (versionLabels.ts, lanes.ts): `?version=<name>` shows only the cards with the label
+  // `version:<name>` (`none`: the cards with no version label); `?group=version` shows a lane for each version
+  // label. Both are in the URL, so a reload and a link keep them. An old `?rows=` in the URL has no effect.
   // localStorage keeps the collapsed lanes of each project.
   const storage = (): Storage | undefined => (typeof localStorage === "undefined" ? undefined : localStorage);
   const [laneState, setLaneState] = createSignal(readLaneState(null));
@@ -110,48 +86,30 @@ export function BoardPage() {
       // A full or blocked storage: the choice lasts for this page only.
     }
   };
-  const [showArchived, setShowArchived] = createSignal(false);
-  const [newVersion, setNewVersion] = createSignal(false);
-  // The open Version modal: `?version=<id or name>`. Its lane opens and scrolls into view.
-  const openVersion = () => findVersion(allVersions() ?? [], search.version);
-  const showVersion = (id: string) => setSearch({ version: id });
-  const closeVersion = () => setSearch({ version: undefined });
-  createEffect(
-    on([() => openVersion()?.id, () => !!board.state.board], ([id, loaded]) => {
-      if (!id || !loaded) return;
-      if (laneState().collapsed.includes(id)) saveLaneState(toggleCollapsed(laneState(), id));
-      requestAnimationFrame(() => document.querySelector(`[data-lane="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" }));
-    }),
-  );
-  const lanes = createMemo(() => buildLanes(versions() ?? [], board.state.board?.cards ?? []));
+  const grouped = () => search.group === "version";
+  const versionFilter = () => search.version?.trim() || undefined;
+  const versionNames = createMemo(() => boardVersions(board.state.board?.cards ?? []));
+  const lanes = createMemo(() => buildLanes(board.state.board?.cards ?? [], grouped()));
   const [laneError, setLaneError] = createSignal<unknown>(null);
-  const [pendingLane, setPendingLane] = createSignal<{ id: string; move: LaneMove; column: string; index: number } | null>(null);
 
-  /** Change the versions of a card for a drag between lanes, then move it to the column of the drop. */
-  const applyLaneMove = async (id: string, m: LaneMove, column: string, index: number) => {
-    try {
-      for (const c of laneMovePatches(id, m)) await api.versions.update(c.version, c.patch);
-      setLaneError(null);
-    } catch (e) {
-      setLaneError(e);
-      await loadVersions();
-      return;
-    }
-    await loadVersions();
-    const card = board.state.board?.cards.find((c) => c.id === id);
-    if (card && card.column !== column) await commitMove(id, column, index);
-  };
-  const onLaneDrop = (id: string, fromLane: string, toLane: string, column: string, cellIndex: number) => {
+  /** A drop: in the same lane it moves the card; into another version lane it changes the card's version label first. */
+  const onLaneDrop = async (id: string, fromLane: string, toLane: string, column: string, cellIndex: number) => {
     const b = board.state.board;
     if (!b) return;
     const lane = lanes().find((l) => l.key === toLane);
     const cell = lane ? laneCells(lane, column).filter((c) => c.id !== id) : [];
     const index = columnIndex(cell, cardsIn(b, column).filter((c) => c.id !== id), cellIndex);
-    if (fromLane === toLane) return void commitMove(id, column, index);
-    const m = laneMove(id, fromLane, toLane, versions() ?? []);
-    if (m.refused) return setLaneError(new Error(m.refused));
-    if (m.others.length) return setPendingLane({ id, move: m, column, index });
-    void applyLaneMove(id, m, column, index);
+    const card = b.cards.find((c) => c.id === id);
+    const labels = card ? laneMoveLabels(card.labels, fromLane, toLane) : null;
+    if (!card || !labels) return void commitMove(id, column, index);
+    try {
+      board.put(await api.cards.update(id, { labels }));
+      setLaneError(null);
+    } catch (e) {
+      setLaneError(e);
+      return;
+    }
+    if (card.column !== column) await commitMove(id, column, index);
   };
 
   // One shared clock for the ETA countdowns: 1 s while a countdown is under an hour, else 30 s; no timer without one.
@@ -166,10 +124,9 @@ export function BoardPage() {
 
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
   let questionTimer: ReturnType<typeof setTimeout> | undefined;
-  let versionTimer: ReturnType<typeof setTimeout> | undefined;
-  // Live: card, board, and test run events of this project reload the board (a test run changes the test chip of its cards); question events reload the badges; version events reload the versions.
+  // Live: card, board, test run, and job events of this project reload the board (a test run changes the test chip of its cards; a job changes the state chip and the queue places); question events reload the badges.
   const off = events.on((e) => {
-    if ((e.kind === "card" || e.kind === "board" || e.kind === "test_run") && e.project === params.project && !dragging()) {
+    if ((e.kind === "card" || e.kind === "board" || e.kind === "test_run" || e.kind === "job") && e.project === params.project && !dragging()) {
       clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => void board.reload(), 300);
     }
@@ -177,22 +134,17 @@ export function BoardPage() {
       clearTimeout(questionTimer);
       questionTimer = setTimeout(() => void loadQuestions(), 300);
     }
-    if (e.kind.startsWith("version.") && e.project === params.project) {
-      clearTimeout(versionTimer);
-      versionTimer = setTimeout(() => void loadVersions(), 300);
-    }
   });
   onCleanup(() => {
     off();
     clearTimeout(reloadTimer);
     clearTimeout(questionTimer);
-    clearTimeout(versionTimer);
   });
 
   const labels = () => [...new Set(board.state.board?.cards.flatMap((c) => c.labels) ?? [])].sort();
   const assignees = () => [...new Set(board.state.board?.cards.map((c) => c.assignee_name ?? c.assignee).filter((a): a is string => !!a) ?? [])].sort();
   const visible = (c: Card) =>
-    (!label() || c.labels.includes(label())) && (!assignee() || (c.assignee_name ?? c.assignee) === assignee());
+    (!label() || c.labels.includes(label())) && (!assignee() || (c.assignee_name ?? c.assignee) === assignee()) && matchesVersion(c.labels, versionFilter());
 
   const boardColumns = (): Column[] => board.state.board?.columns ?? [];
   const titleOf = (name: string) => columnTitle(boardColumns().find((c) => c.name === name) ?? { name });
@@ -277,14 +229,7 @@ export function BoardPage() {
       </svg>
     </button>
   );
-  const versionMenu = menuVersions;
-  let versionsMenuEl: HTMLDetailsElement | undefined;
-  const openFromMenu = (id: string) => {
-    if (versionsMenuEl) versionsMenuEl.open = false;
-    showVersion(id);
-  };
-
-  const filterCount = () => activeFilterCount({ label: label(), assignee: assignee() });
+  const filterCount = () => activeFilterCount({ label: label(), assignee: assignee(), version: versionFilter() ?? "" });
 
   return (
     <div class="board-page">
@@ -314,52 +259,19 @@ export function BoardPage() {
             <option value="">Any assignee</option>
             <For each={assignees()}>{(a) => <option value={a}>{a}</option>}</For>
           </select>
-        </div>
-        <button type="button" aria-haspopup="dialog" onClick={() => setNewVersion(true)}>
-          + Version
-        </button>
-        <details class="menu versions-menu" ref={versionsMenuEl}>
-          <summary class="button">Versions</summary>
-          <div class="menu-panel" role="menu" aria-label="Versions">
-            <For each={versionMenu(allVersions() ?? [], showArchived()).active} fallback={<p class="muted small">No versions.</p>}>
-              {(v) => (
-                <button type="button" role="menuitem" class="menu-item" onClick={() => openFromMenu(v.id)}>
-                  <span>{v.name}</span> <span class={`chip ${VERSION_CHIP[v.status]}`}>{humanize(v.status)}</span>
-                </button>
-              )}
+          <select value={versionFilter() ?? ""} onChange={(e) => setSearch({ version: e.currentTarget.value || undefined })} aria-label="Filter by version">
+            <option value="">Any version</option>
+            {/* A version in the URL that no card has (any more) stays selectable, so the select shows the filter. */}
+            <For each={[...versionNames(), ...(versionFilter() && versionFilter() !== NO_VERSION && !versionNames().includes(versionFilter()!) ? [versionFilter()!] : [])]}>
+              {(v) => <option value={v}>{v}</option>}
             </For>
-            <label class="row small menu-toggle">
-              <input type="checkbox" checked={showArchived()} onChange={(e) => setShowArchived(e.currentTarget.checked)} />
-              Show archived versions
-            </label>
-            <Show when={showArchived()}>
-              <For each={versionMenu(allVersions() ?? [], true).archived} fallback={<p class="muted small">No archived versions.</p>}>
-                {(v) => (
-                  <div class="row menu-item archived">
-                    <button type="button" role="menuitem" class="link" onClick={() => openFromMenu(v.id)}>
-                      {v.name}
-                    </button>
-                    <span class={`chip ${VERSION_CHIP[v.status]}`}>{humanize(v.status)}</span>
-                    <button
-                      type="button"
-                      class="small"
-                      onClick={async () => {
-                        try {
-                          await api.versions.unarchive(v.id);
-                          await loadVersions();
-                        } catch (e) {
-                          setLaneError(e);
-                        }
-                      }}
-                    >
-                      Unarchive
-                    </button>
-                  </div>
-                )}
-              </For>
-            </Show>
-          </div>
-        </details>
+            <option value={NO_VERSION}>No version</option>
+          </select>
+        </div>
+        <label class="row small board-group">
+          <input type="checkbox" checked={grouped()} onChange={(e) => setSearch({ group: e.currentTarget.checked ? "version" : undefined })} />
+          Group by version
+        </label>
         <button type="button" ref={editColumnsButton} aria-haspopup="dialog" disabled={!board.state.board} onClick={() => setEditColumns(true)}>
           Edit columns
         </button>
@@ -395,15 +307,13 @@ export function BoardPage() {
             <LanesBoard
               board={b()}
               lanes={lanes()}
-              versions={versions() ?? []}
               phone={phone()}
               collapsed={laneState().collapsed}
               onToggle={(key) => saveLaneState(toggleCollapsed(laneState(), key))}
               visible={visible}
               addColumn={newCardColumn(columnNames())}
               addButton={addCardButton}
-              onOpenVersion={showVersion}
-              onDrop={onLaneDrop}
+              onDrop={(...a) => void onLaneDrop(...a)}
               boardRef={(el) => (boardEl = el)}
               onScroll={onBoardScroll}
               card={(card, lane, drag, also) => (
@@ -411,12 +321,10 @@ export function BoardPage() {
                   card={card}
                   now={now()}
                   questions={badges().get(card.id)}
-                  versions={byCard().get(card.id) ?? []}
-                  onVersion={showVersion}
                   hidden={!visible(card)}
                   dragging={drag.dragging}
                   draggable={drag.draggable}
-                  note={also.length ? `also in ${also.map((v) => v.name).join(", ")}` : undefined}
+                  note={also.length ? `also in ${also.join(", ")}` : undefined}
                   lane={lane.key}
                   onOpen={() => setSearch({ card: card.id })}
                   onDragStart={(e) => {
@@ -431,59 +339,6 @@ export function BoardPage() {
               )}
             />
           </>
-        )}
-      </Show>
-
-      <Show when={pendingLane()}>
-        {(p) => (
-          <Modal title={`Move ${p().id}`} onClose={() => setPendingLane(null)}>
-            <p style={{ margin: 0 }}>
-              {p().id} is also in {p().move.others.map((v) => v.name).join(", ")}. {p().move.remove ? `It leaves ${p().move.remove!.name}` : "It stays where it is"}
-              {p().move.add ? ` and goes into ${p().move.add!.name}` : ""}. The other versions keep it.
-            </p>
-            <div class="row">
-              <button
-                class="primary"
-                onClick={() => {
-                  const { id, move, column, index } = p();
-                  setPendingLane(null);
-                  void applyLaneMove(id, move, column, index);
-                }}
-              >
-                Move
-              </button>
-              <button onClick={() => setPendingLane(null)}>Cancel</button>
-            </div>
-          </Modal>
-        )}
-      </Show>
-
-      <Show when={newVersion()}>
-        <NewVersionModal
-          project={params.project}
-          cards={board.state.board?.cards ?? []}
-          onClose={() => setNewVersion(false)}
-          onCreated={async (v) => {
-            setNewVersion(false);
-            await loadVersions();
-            showVersion(v.id);
-          }}
-        />
-      </Show>
-
-      <Show when={openVersion()}>
-        {(v) => (
-          <VersionModal
-            version={v()}
-            all={allVersions() ?? []}
-            cards={board.state.board?.cards ?? []}
-            onChanged={() => void loadVersions()}
-            onOpenCard={(id) => {
-              closeVersion();
-              setSearch({ card: id });
-            }}
-            onClose={closeVersion}
-          />
         )}
       </Show>
 
@@ -544,17 +399,6 @@ export function BoardPage() {
             card={c()}
             now={now()}
             columns={boardColumns()}
-            versions={versions() ?? []}
-            onVersion={async (versionId, on) => {
-              try {
-                await api.versions.update(versionId, on ? { add_cards: [c().id] } : { remove_cards: [c().id] });
-                setLaneError(null);
-              } catch (e) {
-                setLaneError(e);
-              }
-              await loadVersions();
-            }}
-            onOpenVersion={showVersion}
             linkable={linkable(questions(), params.project)}
             onQuestionsChanged={() => void loadQuestions()}
             onClose={() => setSearch({ card: undefined })}
@@ -601,11 +445,7 @@ function KCard(props: {
   card: Card;
   now: number;
   questions?: CardQuestionBadge;
-  /** The versions that have the card. */
-  versions: Version[];
-  /** A click on a version chip: open that version. */
-  onVersion: (id: string) => void;
-  /** A line under the title, for example "also in v0.2.0" in a version lane. */
+  /** A line under the title, for example "also in 1.4.0" in a version lane. */
   note?: string;
   /** The version lane of the card. */
   lane?: string;
@@ -618,6 +458,12 @@ function KCard(props: {
   onDragEnd: () => void;
 }) {
   const owner = () => (props.card.assignee ? agents.byId(props.card.assignee) : undefined);
+  // The one state chip (TER-158): the open job, the review column, or the live status of the assignee.
+  const state = () => cardState(props.card, owner()?.status);
+  // An idle assignee with an idle mark: the chip shows the idle time and the alert (lib/idle.ts).
+  const idle = () => idleBadge(props.card, props.now);
+  const stateLabel = (s: CardState) => (s.kind === "idle" && idle() ? idle()!.label : s.label);
+  const stateTitle = (s: CardState) => (s.kind === "idle" && idle() ? idle()!.title : s.title);
   return (
     <article
       class={`kcard${props.dragging ? " dragging" : ""}`}
@@ -646,10 +492,17 @@ function KCard(props: {
               waits on {props.card.blocked_by.length}
             </span>
           </Show>
-          <Show when={idleBadge(props.card, props.now)}>
+          <Show when={state()?.kind !== "idle" && idle()}>
             {(b) => (
               <span class="chip warn idle-badge" title={b().title} aria-label={b().title}>
                 {b().label}
+              </span>
+            )}
+          </Show>
+          <Show when={state()}>
+            {(s) => (
+              <span class={`chip ${s().tone} card-state`} data-state={s().kind} title={stateTitle(s())} aria-label={`${s().label}. ${stateTitle(s())}`}>
+                {stateLabel(s())}
               </span>
             )}
           </Show>
@@ -662,41 +515,20 @@ function KCard(props: {
       <EtaChip card={props.card} now={props.now} />
       <div class="row small">
         <Show when={props.card.tests}>{(t) => <CardTestsChip project={props.card.project} tests={t()} />}</Show>
-        <For each={props.card.labels}>{(l) => <span class="chip">{l}</span>}</For>
+        <For each={tileLabels(props.card.labels)}>{(l) => <span class="chip">{l}</span>}</For>
       </div>
-      <Show when={props.versions.length}>
-        <div class="row small kcard-versions">
-          <For each={props.versions}>
-            {(v) => (
-              <button
-                type="button"
-                class={`chip version-chip ${VERSION_CHIP[v.status]}`}
-                title={`In version ${v.name} (${humanize(v.status)}). Open the version.`}
-                // A click opens the version; it does not open the card.
-                onClick={(e) => {
-                  e.stopPropagation();
-                  props.onVersion(v.id);
-                }}
-                onKeyDown={(e) => e.stopPropagation()}
-              >
-                {v.name}
-              </button>
-            )}
-          </For>
-        </div>
-      </Show>
       <Show when={props.card.assignee}>
         <div class="spread small">
           <span>{owner()?.name ?? props.card.assignee_name ?? props.card.assignee}</span>
-          <Show when={owner()}>
-            {(a) => (
-              <>
-                <HoldBadge agentId={a().id} />
-                <StatusBadge agent={a()} />
-              </>
-            )}
-          </Show>
+          <Show when={owner()}>{(a) => <HoldBadge agentId={a().id} />}</Show>
         </div>
+      </Show>
+      <Show when={cardAgentName(props.card)}>
+        {(n) => (
+          <div class="small muted kcard-agent" title={`Card agent: the ephemeral agent bound to ${props.card.id}`}>
+            agent {n()}
+          </div>
+        )}
       </Show>
     </article>
   );
@@ -865,10 +697,6 @@ function CardDrawer(props: {
   card: Card;
   now: number;
   columns: Column[];
-  /** The versions that are not archived: the Versions field adds the card to one or removes it. */
-  versions: Version[];
-  onVersion: (versionId: string, on: boolean) => Promise<void>;
-  onOpenVersion: (versionId: string) => void;
   linkable: Question[];
   onQuestionsChanged: () => void;
   onClose: () => void;
@@ -1000,25 +828,6 @@ function CardDrawer(props: {
           </select>
         </label>
       </div>
-
-      {/* The versions of the card. On a phone this moves a card between version lanes (no drag and drop there). */}
-      <fieldset class="drawer-versions">
-        <legend class="small">Versions</legend>
-        <For each={props.versions} fallback={<span class="muted small">No versions.</span>}>
-          {(v) => {
-            const inIt = () => v.cards.some((x) => x.id === props.card.id);
-            return (
-              <label class="row small" title={takesCards(v) ? undefined : `Version ${v.name} is ${humanize(v.status)}: its cards change only in draft or after a rejection.`}>
-                <input type="checkbox" checked={inIt()} disabled={!takesCards(v)} onChange={(e) => void props.onVersion(v.id, e.currentTarget.checked)} />
-                <button type="button" class="link" onClick={() => props.onOpenVersion(v.id)}>
-                  {v.name}
-                </button>
-                <span class={`chip ${VERSION_CHIP[v.status]}`}>{humanize(v.status)}</span>
-              </label>
-            );
-          }}
-        </For>
-      </fieldset>
 
       <dl class="kv">
         <dt>Labels</dt>

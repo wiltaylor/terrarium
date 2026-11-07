@@ -12,6 +12,16 @@
 //!   or a question of the agent, `waiting_agent` after a message or a
 //!   response of the operator, or when the last open question of the
 //!   thread is settled. `closed` does not change.
+//! - `tracking` (TER-145, TER-144 D1, D9): the agent handed the work off
+//!   and moved the thread into tracking ([`track`]). Its agent is parked,
+//!   and the reminder and the stale close do not apply. `tracking_at`
+//!   stays set while the thread tracks: an operator post wakes the agent
+//!   (`waiting_agent`), and the agent's reply puts the thread back into
+//!   `tracking`, not `waiting_operator`.
+//! - Linked cards (TER-146, TER-144 D2, [`link_card`]): cards of any
+//!   project that the thread tracks (`thread_cards`). The linker reads the
+//!   thread and the card's project; a link gives no read access to the
+//!   card or the thread. `GET /api/threads/{id}` lists them (`cards`).
 //! - No register and no conflict check between threads (D36).
 //! - Events `thread` {change, id, scope, status}, and an `inbox` event for
 //!   the item `inbox-thread:<id>`.
@@ -59,6 +69,8 @@ pub const LINK_KINDS: &[&str] = &["card", "mail", "wiki", "memory", "url", "othe
 pub enum ThreadStatus {
     WaitingOperator,
     WaitingAgent,
+    /// The agent tracks handed-off work: parked, no stale close (TER-145).
+    Tracking,
     Closed,
 }
 
@@ -67,6 +79,7 @@ impl ThreadStatus {
         match self {
             Self::WaitingOperator => "waiting_operator",
             Self::WaitingAgent => "waiting_agent",
+            Self::Tracking => "tracking",
             Self::Closed => "closed",
         }
     }
@@ -75,6 +88,7 @@ impl ThreadStatus {
         match s {
             "waiting_operator" => Some(Self::WaitingOperator),
             "waiting_agent" => Some(Self::WaitingAgent),
+            "tracking" => Some(Self::Tracking),
             "closed" => Some(Self::Closed),
             _ => None,
         }
@@ -93,6 +107,18 @@ pub struct ThreadMessage {
     /// Markdown: untrusted data for every reader.
     pub text: String,
     pub at: String,
+}
+
+/// A card that the thread tracks (TER-146, [`link_card`]). Only the IDs:
+/// a reader of the thread need not read the card's project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadCard {
+    pub project: String,
+    pub card: String,
+    /// `operator` or an agent ULID.
+    pub linked_by: String,
+    pub linked_by_name: String,
+    pub linked_at: String,
 }
 
 /// The operator's overall response: the approval record.
@@ -141,6 +167,9 @@ pub struct Thread {
     /// The questions of the thread; absent in a list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub questions: Option<Vec<Question>>,
+    /// The linked cards, the oldest link first (TER-146); absent in a list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cards: Option<Vec<ThreadCard>>,
     pub response: Option<Response>,
     pub handoff: Option<Handoff>,
     /// In a list: the number of messages.
@@ -170,6 +199,11 @@ pub struct Thread {
     /// The last Inbox reminder of the untouched thread.
     #[serde(default)]
     pub reminded_at: Option<String>,
+    /// When the agent moved the thread into tracking ([`track`], TER-145).
+    /// Set while the thread tracks, also while an operator post wakes
+    /// the agent. `None`: the thread does not track.
+    #[serde(default)]
+    pub tracking_at: Option<String>,
 }
 
 /// Why a thread closed.
@@ -253,6 +287,7 @@ fn row(conn: &Connection, r: &Row<'_>) -> rusqlite::Result<Thread> {
         status: ThreadStatus::parse(&status).unwrap_or(ThreadStatus::Closed),
         messages: None,
         questions: None,
+        cards: None,
         response: response.and_then(|s| serde_json::from_str(&s).ok()),
         handoff: handoff.and_then(|s| serde_json::from_str(&s).ok()),
         message_count: None,
@@ -268,6 +303,7 @@ fn row(conn: &Connection, r: &Row<'_>) -> rusqlite::Result<Thread> {
         close_reason: r.get("close_reason")?,
         session_id: r.get("session_id")?,
         reminded_at: r.get("reminded_at")?,
+        tracking_at: r.get("tracking_at")?,
     })
 }
 
@@ -285,7 +321,123 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Thread> {
     let mut th = get_bare(conn, id)?;
     th.messages = Some(messages(conn, &th.id)?);
     th.questions = Some(questions_of(conn, &th.id)?);
+    th.cards = Some(cards_of(conn, &th.id)?);
     Ok(th)
+}
+
+/// A thread that `actor` may read; else `404`: the operator, an agent
+/// that reads all (sysadmin, architect), and the opener, the attached agent
+/// and the report-to lead. Its `cards` are only those that `actor` may
+/// read ([`visible`]).
+pub fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
+    match actor {
+        Actor::Operator => Ok(th),
+        Actor::Agent(a) if a.reads_all() || th.involves(&a.id) => Ok(visible(actor, th)),
+        Actor::Agent(_) => Err(ApiError::not_found(format!("no thread `{}`", th.id))),
+    }
+}
+
+/// Thread `th` with only the linked cards whose project `actor` may read
+/// (TER-146): a link never shows a card, or its project, to a reader of
+/// the thread who cannot read that project.
+pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
+    if let Some(cards) = th.cards.as_mut() {
+        cards.retain(|c| policy::read_project(actor, &c.project).is_ok());
+    }
+    th
+}
+
+/// The linked cards of thread `thread`, the oldest link first.
+fn cards_of(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadCard>> {
+    let mut st = conn.prepare(
+        "SELECT project, card, linked_by, linked_at FROM thread_cards WHERE thread = ?1
+         ORDER BY linked_at, rowid",
+    )?;
+    let rows = st
+        .query_map([thread], |r| {
+            let by: String = r.get(2)?;
+            Ok(ThreadCard {
+                project: r.get(0)?,
+                card: r.get(1)?,
+                linked_by_name: name_of(conn, &by),
+                linked_by: by,
+                linked_at: r.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Link card `card` (`<project>:<card>` or `<card>`) to thread `id` for
+/// `actor` (TER-146, TER-144 D2). `actor` must read the thread (else `404`)
+/// and the card's project (else `404`, the same answer as for a card that
+/// does not exist); the link gives neither. A closed thread is `409
+/// conflict`; a card that is not in the named project is `404`; an
+/// archived card is `422 invalid`. A card that is linked already stays as
+/// it is. Writes the audit row `thread.card_link` under the card's project.
+/// Emits a `thread` event `card_linked`, which wakes no agent. The thread
+/// with the cards that `actor` may read.
+pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResult<Thread> {
+    let th = readable(actor, get_bare(t, id)?)?;
+    not_closed(&th, "a card link")?;
+    let (want, key) = match card.trim().split_once(':') {
+        Some((p, c)) => (Some(p.trim()), c.trim()),
+        None => (None, card.trim()),
+    };
+    if key.is_empty() || want == Some("") {
+        return Err(ApiError::invalid(format!(
+            "bad card `{card}`: use <project>:<card> or <card>, such as terrarium:TER-42"
+        )));
+    }
+    // The project read right comes before the card is loaded, and its
+    // refusal is the `404` of a missing card: a reader of the thread does
+    // not learn that a card exists in a project it cannot read, nor which
+    // project that is.
+    let key = board::normalise_id(key);
+    let missing = || ApiError::not_found(format!("no card `{key}`"));
+    let (project, archived): (String, bool) = t
+        .query_row(
+            "SELECT project, archived FROM cards WHERE id = ?1",
+            [&key],
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+        )
+        .optional()?
+        .ok_or_else(missing)?;
+    policy::read_project(actor, &project).map_err(|_| missing())?;
+    if want.is_some_and(|p| p != project) {
+        return Err(ApiError::not_found(format!(
+            "no card `{key}` in project `{}`",
+            want.unwrap_or_default()
+        )));
+    }
+    if archived {
+        return Err(ApiError::invalid(format!(
+            "card {key} is archived: an archived card is not linked to a thread"
+        )));
+    }
+    let c = board::get_card(t, &key)?;
+    let at = now();
+    let by = actor.address();
+    let n = t.execute(
+        "INSERT OR IGNORE INTO thread_cards (thread, project, card, linked_by, linked_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![th.id, c.project, c.id, by, at],
+    )?;
+    if n > 0 {
+        // The row is in the card's project, not the thread's: a project
+        // admin reads the audit rows of its own project (`audit_scope`),
+        // and the admin of the thread's project may not read the card's
+        // project. One row only, so that no row names the card where its
+        // project is not readable.
+        t.audit(
+            "thread.card_link",
+            &th.id,
+            Some(c.project.as_str()),
+            json!({"by": by, "card": c.id, "project": c.project}),
+        )?;
+        emit(t, &th, "card_linked")?;
+    }
+    Ok(visible(actor, get(t, &th.id)?))
 }
 
 fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
@@ -615,7 +767,9 @@ fn set_status(t: &mut Tx<'_>, id: &str, status: ThreadStatus, at: &str) -> ApiRe
 }
 
 /// Post a message: by the operator (then the agent must act) or by the
-/// attached agent (then the operator must act).
+/// attached agent (then the operator must act). In a thread that tracks
+/// (`tracking_at`), the agent's message puts it back into `tracking`
+/// (TER-145, D9).
 pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
     not_closed(&th, "a message")?;
@@ -624,6 +778,8 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     let msg = insert_message(t, &th.id, author, "message", &text, &at)?;
     let status = if author == "operator" {
         ThreadStatus::WaitingAgent
+    } else if th.tracking_at.is_some() {
+        ThreadStatus::Tracking
     } else {
         ThreadStatus::WaitingOperator
     };
@@ -670,6 +826,34 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
         "response",
         json!({"message": msg, "author": "operator"}),
     )?;
+    Ok(th)
+}
+
+/// The attached agent `by` moves thread `id` into tracking after its
+/// handoff (TER-145, TER-144 D1): the agent parks, and the reminder and
+/// the stale close do not apply. A close proposal is withdrawn. A thread
+/// with an open question waits on the operator: `409 conflict`.
+pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
+    let th = get_bare(t, id)?;
+    not_closed(&th, "tracking")?;
+    let open = open_questions(t, &th.id)?;
+    if open > 0 {
+        return Err(ApiError::conflict(format!(
+            "thread {} has {open} open question(s): the operator settles them first, or you \
+             retract them; then track it",
+            th.id
+        )));
+    }
+    let at = now();
+    t.execute(
+        "UPDATE threads SET status = 'tracking', tracking_at = ?2, updated_at = ?2,
+                            close_proposal = NULL
+         WHERE id = ?1",
+        params![th.id, at],
+    )?;
+    let th = get(t, &th.id)?;
+    t.audit("thread.track", &th.id, th.project(), json!({"by": by}))?;
+    emit_with(t, &th, "tracking", json!({"author": by}))?;
     Ok(th)
 }
 

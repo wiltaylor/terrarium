@@ -292,6 +292,98 @@ async fn grants_stay_within_the_owner_level_and_end_with_the_child() {
     assert!(g.iter().all(|x| x["grantee"] != key), "{g:?}");
 }
 
+/// TER-142: `:run` on a spawn. The owner check is `use` < `run` < `read`.
+/// A `run` grant of the child never goes past the owner's targets: the
+/// owner's run targets (all, or a subset), or for an owner with `read`
+/// the targets that it names and may use.
+#[tokio::test]
+async fn run_grants_stay_within_the_owner_targets() {
+    let (td, _lead, w) = setup().await;
+    // `w` reads openai (no target limit) and holds db at `run` on box
+    // and p-pbox.
+    let r = td
+        .post(
+            "/api/secrets/p/db/grants",
+            json!({"grantee": "agent:p/w", "level": "run", "targets": ["p-pbox", "box"]}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["targets"], json!(["box", "p-pbox"]));
+
+    // `:run` with no targets: the owner's run targets.
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["db:run"]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child = id(&r.body);
+    let g = grants_of(&td, "p/db").await;
+    let mine: Vec<&Value> = g
+        .iter()
+        .filter(|x| x["grantee"] == format!("agent:{child}"))
+        .collect();
+    assert_eq!(mine.len(), 1, "{g:?}");
+    assert_eq!(mine[0]["level"], "run");
+    assert_eq!(mine[0]["targets"], json!(["box", "p-pbox"]));
+    assert!(mine[0].get("env").is_none(), "{g:?}");
+    // A subset is fine; a target past the owner's run targets is 403.
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["db:run=box"]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["db:run=box,other"]})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("`other`"), "{}", r.body);
+    // `run` does not give `read`.
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["db:read"]})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("level `read`"), "{}", r.body);
+    // `use` does not give `run`.
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["gh:run=box"]})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("level `run`"), "{}", r.body);
+
+    // An owner with `read` names the targets, each one it may use.
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["openai:run"]})).await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["openai:run=other"]})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("`other`"), "{}", r.body);
+    let r = spawn_as(&td, &w, &w, json!({"grants": ["openai:run=box"]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child = id(&r.body);
+    let g = grants_of(&td, "global/openai").await;
+    let mine: Vec<&Value> = g
+        .iter()
+        .filter(|x| x["grantee"] == format!("agent:{child}"))
+        .collect();
+    assert_eq!(mine[0]["level"], "run");
+    assert_eq!(mine[0]["targets"], json!(["box"]));
+    // A `run` grant keeps no env var name.
+    assert!(mine[0].get("env").is_none(), "{g:?}");
+
+    // The operator as owner: any existing target that the project reaches.
+    let r = td
+        .post(
+            "/api/agents/operator/spawn",
+            json!({"template": "worker", "task": "t", "project": "p",
+                   "grants": ["db:run=other"]}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = td
+        .post(
+            "/api/agents/operator/spawn",
+            json!({"template": "worker", "task": "t", "project": "p",
+                   "grants": ["db:run"]}),
+        )
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    let r = td
+        .post(
+            "/api/agents/operator/spawn",
+            json!({"template": "worker", "task": "t", "project": "p",
+                   "grants": ["db:run=nope"]}),
+        )
+        .await;
+    assert_eq!(r.status, 404, "{}", r.body);
+}
+
 /// The operator as owner holds every right: any target and secret that
 /// the project can reach.
 #[tokio::test]
@@ -387,4 +479,489 @@ async fn a_spawn_gives_no_thread_open_past_the_owner() {
     let r = spawn_as(&td, &lead, &w, json!({})).await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_ne!(r.body["agent"]["policy"]["thread_open"], true, "{}", r.body);
+}
+
+/// The grants of `secret` to the agent `child`.
+async fn grants_to(td: &TestDaemon, secret: &str, child: &str) -> Vec<Value> {
+    let key = format!("agent:{child}");
+    grants_of(td, secret)
+        .await
+        .into_iter()
+        .filter(|x| x["grantee"] == key)
+        .collect()
+}
+
+async fn template(td: &TestDaemon, name: &str, grants: Value) {
+    let r = td
+        .post(
+            "/api/templates",
+            json!({"name": name, "project": "p",
+                   "spec": {"harness": "claude", "grants": grants}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+}
+
+/// TER-88: the `grants` of a template go through the owner check of a
+/// spawn, as the body's grants do, with the `run` level and its targets
+/// (TER-142). A refusal is 403, names the template and the secret, and
+/// makes no agent. A body grant of a secret replaces the template's.
+#[tokio::test]
+async fn template_grants_are_checked_against_the_owner() {
+    let (td, _lead, _w) = setup().await;
+    let o = id(&td
+        .agent(
+            "p",
+            "o",
+            json!({"policy": {"targets": ["box"],
+                              "spawn": {"templates": ["granted", "over", "missing",
+                                                      "runs", "runs-past"],
+                                        "max_concurrent": 8}}}),
+        )
+        .await);
+    for (s, body) in [
+        (
+            "global/openai",
+            json!({"grantee": "agent:p/o", "level": "read"}),
+        ),
+        ("global/gh", json!({"grantee": "agent:p/o", "level": "use"})),
+        (
+            "p/db",
+            json!({"grantee": "agent:p/o", "level": "run", "targets": ["box"]}),
+        ),
+    ] {
+        let r = td.post(&format!("/api/secrets/{s}/grants"), body).await;
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    template(&td, "granted", json!(["openai", "global/gh:use"])).await;
+    template(&td, "over", json!(["gh:read"])).await;
+    template(&td, "missing", json!(["other-secret"])).await;
+    template(&td, "runs", json!(["db:run"])).await;
+    template(&td, "runs-past", json!(["db:run=other"])).await;
+
+    let r = spawn_as(&td, &o, &o, json!({"template": "granted"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child = id(&r.body);
+    let g = grants_to(&td, "global/openai", &child).await;
+    assert_eq!(g.len(), 1, "{g:?}");
+    assert_eq!(g[0]["level"], "read");
+    let g = grants_to(&td, "global/gh", &child).await;
+    assert_eq!(g[0]["level"], "use");
+    // The audit row of each grant names the template.
+    let audit = td
+        .get("/api/audit?action=secret.grant")
+        .await
+        .body
+        .to_string();
+    assert!(audit.contains("\"template\":\"granted\""), "{audit}");
+    assert!(!audit.contains(KEY) && !audit.contains(TOKEN));
+
+    // A level past the owner's, and a secret that the owner does not hold.
+    let before = grants_of(&td, "global/gh").await.len();
+    let r = spawn_as(&td, &o, &o, json!({"template": "over"})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("template `over`"), "{}", r.body);
+    assert!(message(&r).contains("global/gh"), "{}", r.body);
+    assert!(message(&r).contains("level `read`"), "{}", r.body);
+    assert_eq!(grants_of(&td, "global/gh").await.len(), before);
+    let r = spawn_as(&td, &o, &o, json!({"template": "missing"})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("secret `other-secret`"), "{}", r.body);
+    // The body asks for a lower level: it replaces the template's grant.
+    let r = spawn_as(
+        &td,
+        &o,
+        &o,
+        json!({"template": "over", "grants": ["gh:use"]}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let g = grants_to(&td, "global/gh", &id(&r.body)).await;
+    assert_eq!(g.len(), 1, "{g:?}");
+    assert_eq!(g[0]["level"], "use");
+
+    // `:run` on a template: the owner's run targets, never past them.
+    let r = spawn_as(&td, &o, &o, json!({"template": "runs"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let g = grants_to(&td, "p/db", &id(&r.body)).await;
+    assert_eq!(g[0]["level"], "run");
+    assert_eq!(g[0]["targets"], json!(["box"]));
+    let r = spawn_as(&td, &o, &o, json!({"template": "runs-past"})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("template `runs-past`"), "{}", r.body);
+    assert!(message(&r).contains("`other`"), "{}", r.body);
+
+    // The operator as owner: a `run` grant with no targets has nothing to
+    // take them from.
+    let r = td
+        .post(
+            "/api/agents/operator/spawn",
+            json!({"template": "runs", "task": "t", "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+}
+
+/// TER-88: a create from a template with grants (not a spawn) needs the
+/// caller's right to grant each secret: a project_admin for a secret of
+/// its project, a sysadmin or the operator for a global one. A refusal is
+/// 403 with the secret named, and makes no agent. A create body takes no
+/// `grants`, and a template grant must parse.
+#[tokio::test]
+async fn a_create_from_a_template_needs_the_right_to_grant_its_secrets() {
+    let (td, lead, _w) = setup().await;
+    template(&td, "tdb", json!(["db:run=p-pbox"])).await;
+    template(&td, "tglobal", json!(["gh"])).await;
+    template(&td, "trun", json!(["db:run"])).await;
+
+    let r = td
+        .post_as(
+            &lead,
+            "/api/agents",
+            json!({"name": "c1", "project": "p", "template": "tdb"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let g = grants_to(&td, "p/db", &id(&r.body)).await;
+    assert_eq!(g.len(), 1, "{g:?}");
+    assert_eq!(g[0]["level"], "run");
+    assert_eq!(g[0]["targets"], json!(["p-pbox"]));
+    let audit = td
+        .get("/api/audit?action=secret.grant")
+        .await
+        .body
+        .to_string();
+    assert!(audit.contains("\"template\":\"p/tdb\""), "{audit}");
+
+    // A global secret: the project_admin may not grant it.
+    let before = grants_of(&td, "global/gh").await.len();
+    let r = td
+        .post_as(
+            &lead,
+            "/api/agents",
+            json!({"name": "c2", "project": "p", "template": "tglobal"}),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("secret `global/gh`"), "{}", r.body);
+    assert_eq!(grants_of(&td, "global/gh").await.len(), before);
+    // No agent `c2` was made: the operator creates it now.
+    let r = td
+        .post(
+            "/api/agents",
+            json!({"name": "c2", "project": "p", "template": "tglobal"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let g = grants_to(&td, "global/gh", &id(&r.body)).await;
+    assert_eq!(g[0]["level"], "use");
+
+    // A `run` grant with no targets has no owner to take them from.
+    let r = td
+        .post(
+            "/api/agents",
+            json!({"name": "c3", "project": "p", "template": "trun"}),
+        )
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    // The body takes no grants; a template grant must parse.
+    let r = td
+        .post(
+            "/api/agents",
+            json!({"name": "c4", "project": "p", "template": "tdb", "grants": ["gh"]}),
+        )
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    let r = td
+        .post(
+            "/api/templates",
+            json!({"name": "bad", "project": "p",
+                   "spec": {"harness": "claude", "grants": ["db:write"]}}),
+        )
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+}
+
+/// TER-88 review: writing grants into a template needs the right to grant
+/// each secret (`policy::grant_secret`), at the create and at any PATCH
+/// of a template with grants (round 2 finding 1). A project_admin may put
+/// a secret of its project into a template of its project, not a global
+/// secret. A grant with no scope counts as the secret that it names now.
+/// A PATCH that changes nothing checks nothing; one that drops all the
+/// grants is fine. The writer becomes `grants_by`.
+#[tokio::test]
+async fn writing_template_grants_needs_the_right_to_grant_them() {
+    let (td, lead, _w) = setup().await;
+    let new = |name: &str, grants: Value| {
+        json!({"name": name, "project": "p",
+               "spec": {"harness": "claude", "grants": grants}})
+    };
+    // A global secret, scoped or by its name only: refused, no template.
+    for (name, grants) in [
+        ("tg1", json!(["global/openai:read"])),
+        ("tg2", json!(["gh"])),
+    ] {
+        let r = td.post_as(&lead, "/api/templates", new(name, grants)).await;
+        assert_eq!(r.status, 403, "{}", r.body);
+        assert!(message(&r).contains("template `p/"), "{}", r.body);
+        let secret = if name == "tg1" {
+            "global/openai"
+        } else {
+            "global/gh"
+        };
+        assert!(
+            message(&r).contains(&format!("secret `{secret}`")),
+            "{}",
+            r.body
+        );
+        let list = td.get("/api/templates?project=p").await.body.to_string();
+        assert!(!list.contains(&format!("\"{name}\"")), "{list}");
+    }
+    // A secret of its own project: fine.
+    let r = td
+        .post_as(&lead, "/api/templates", new("tp", json!(["db:run=p-pbox"])))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["grants_by"], format!("agent:{lead}"), "{}", r.body);
+
+    // The operator's template with a global grant: any write by the
+    // project_admin that keeps a grant is refused and names the grant (a
+    // new prompt would run with the operator's secret). A write that
+    // changes nothing is fine. One that drops all the grants is fine.
+    let r = td
+        .post(
+            "/api/templates",
+            json!({"name": "op", "project": "p", "description": "d0",
+                   "spec": {"harness": "claude", "prompt": "worker",
+                            "grants": ["global/openai:read"]}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["grants_by"], "operator", "{}", r.body);
+    let tid = id(&r.body);
+    let path = format!("/api/templates/{tid}");
+    let same = json!({"harness": "claude", "prompt": "worker",
+                      "grants": ["global/openai:read"]});
+    for patch in [
+        json!({"spec": {"harness": "claude", "prompt": "mine",
+                        "grants": ["global/openai:read"]}}),
+        json!({"description": "d"}),
+        json!({"name": "op2"}),
+        json!({"spec": {"harness": "claude", "prompt": "worker",
+                        "grants": ["global/openai:use"]}}),
+    ] {
+        let r = td.patch_as(&lead, &path, patch.clone()).await;
+        assert_eq!(r.status, 403, "{patch}: {}", r.body);
+        assert!(
+            message(&r).contains("the grant `global/openai:"),
+            "{}",
+            r.body
+        );
+        assert!(message(&r).contains("secret `global/openai`"), "{}", r.body);
+        let shown = td.get(&path).await;
+        let shown = shown.ok();
+        assert_eq!(shown["spec"]["prompt"], "worker", "{shown}");
+        assert_eq!(
+            shown["spec"]["grants"],
+            json!(["global/openai:read"]),
+            "{shown}"
+        );
+        assert_eq!(shown["name"], "op", "{shown}");
+        assert_eq!(shown["description"], "d0", "{shown}");
+        assert_eq!(shown["grants_by"], "operator", "{shown}");
+    }
+    // The same values: no write, nothing to check.
+    let r = td
+        .patch_as(&lead, &path, json!({"description": "d0", "spec": same}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["grants_by"], "operator", "{}", r.body);
+    // A sysadmin may change the prompt; it becomes grants_by.
+    let sys = id(&td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await);
+    let r = td
+        .patch_as(
+            &sys,
+            &path,
+            json!({"spec": {"harness": "claude", "prompt": "sysworker",
+                            "grants": ["global/openai:read"]}}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["grants_by"], format!("agent:{sys}"), "{}", r.body);
+    assert_eq!(r.body["spec"]["prompt"], "sysworker", "{}", r.body);
+    // The project_admin's new prompt that also drops all the grants.
+    let r = td
+        .patch_as(
+            &lead,
+            &path,
+            json!({"spec": {"harness": "claude", "prompt": "mine"}}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["spec"]["prompt"], "mine", "{}", r.body);
+    assert!(r.body["spec"].get("grants").is_none(), "{}", r.body);
+    assert!(r.body.get("grants_by").is_none(), "{}", r.body);
+}
+
+/// TER-88 review: a spawn and a create check again that the one who set
+/// a template's grants may grant each secret now. A sysadmin agent sets a
+/// global grant; once it lost the role, the template gives the grant to
+/// no one, also when the owner holds the secret and the creator is the
+/// operator.
+#[tokio::test]
+async fn a_spawn_checks_again_who_set_the_template_grants() {
+    let (td, _lead, _w) = setup().await;
+    let sys = id(&td.agent("p", "sys", json!({"roles": ["sysadmin"]})).await);
+    let o = id(&td
+        .agent(
+            "p",
+            "o",
+            json!({"policy": {"spawn": {"templates": ["bysys"], "max_concurrent": 8}}}),
+        )
+        .await);
+    let r = td
+        .post(
+            "/api/secrets/global/openai/grants",
+            json!({"grantee": "agent:p/o", "level": "read"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = td
+        .post_as(
+            &sys,
+            "/api/templates",
+            json!({"name": "bysys", "project": "p",
+                   "spec": {"harness": "claude", "grants": ["global/openai:read"]}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = spawn_as(&td, &o, &o, json!({"template": "bysys"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(grants_to(&td, "global/openai", &id(&r.body)).await.len(), 1);
+
+    let r = td
+        .put(&format!("/api/agents/{sys}/roles"), json!({"roles": []}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let before = grants_of(&td, "global/openai").await.len();
+    let r = spawn_as(&td, &o, &o, json!({"template": "bysys"})).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("template `bysys`"), "{}", r.body);
+    assert!(message(&r).contains("secret `global/openai`"), "{}", r.body);
+    assert!(message(&r).contains(&format!("agent:{sys}")), "{}", r.body);
+    let r = td
+        .post(
+            "/api/agents",
+            json!({"name": "c1", "project": "p", "template": "bysys"}),
+        )
+        .await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(message(&r).contains("secret `global/openai`"), "{}", r.body);
+    assert_eq!(grants_of(&td, "global/openai").await.len(), before);
+    let r = td.get("/api/agents/p%2Fc1").await;
+    assert_eq!(r.status, 404, "{}", r.body);
+}
+
+/// TER-88 review: grants are given at the spawn only. A later change of
+/// the template's grants does not change the grants of a running child.
+#[tokio::test]
+async fn a_template_edit_does_not_change_a_running_childs_grants() {
+    let (td, _lead, _w) = setup().await;
+    let o = id(&td
+        .agent(
+            "p",
+            "o",
+            json!({"policy": {"spawn": {"templates": ["edited"], "max_concurrent": 8}}}),
+        )
+        .await);
+    for s in ["global/openai", "global/gh"] {
+        let r = td
+            .post(
+                &format!("/api/secrets/{s}/grants"),
+                json!({"grantee": "agent:p/o", "level": "read"}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    let r = td
+        .post(
+            "/api/templates",
+            json!({"name": "edited", "project": "p",
+                   "spec": {"harness": "claude", "grants": ["openai:read"]}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let path = format!("/api/templates/{}", id(&r.body));
+    let r = spawn_as(&td, &o, &o, json!({"template": "edited"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child = id(&r.body);
+
+    for grants in [json!(["openai:use", "gh:read"]), json!([])] {
+        let r = td
+            .patch(
+                &path,
+                json!({"spec": {"harness": "claude", "grants": grants}}),
+            )
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        let g = grants_to(&td, "global/openai", &child).await;
+        assert_eq!(g.len(), 1, "{g:?}");
+        assert_eq!(g[0]["level"], "read");
+        assert!(grants_to(&td, "global/gh", &child).await.is_empty());
+    }
+}
+
+/// TER-88 review: a body grant replaces the template's grant of the same
+/// secret, compared by the resolved secret. A template `gh` that resolves
+/// to the project's `p/gh` stays next to a body `global/gh`.
+#[tokio::test]
+async fn a_body_grant_replaces_only_the_same_resolved_secret() {
+    let (td, _lead, _w) = setup().await;
+    let r = td
+        .put(
+            "/api/secrets/p/gh",
+            json!({"kind": "api_key", "fields": {"value": KEY}}),
+        )
+        .await;
+    assert!(r.status.is_success(), "{}", r.body);
+    let o = id(&td
+        .agent(
+            "p",
+            "o",
+            json!({"policy": {"spawn": {"templates": ["tgh"], "max_concurrent": 8}}}),
+        )
+        .await);
+    for s in ["p/gh", "global/gh"] {
+        let r = td
+            .post(
+                &format!("/api/secrets/{s}/grants"),
+                json!({"grantee": "agent:p/o", "level": "use"}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+    }
+    template(&td, "tgh", json!(["gh:use"])).await;
+    let r = spawn_as(
+        &td,
+        &o,
+        &o,
+        json!({"template": "tgh", "grants": ["global/gh:use"]}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child = id(&r.body);
+    assert_eq!(grants_to(&td, "p/gh", &child).await.len(), 1);
+    assert_eq!(grants_to(&td, "global/gh", &child).await.len(), 1);
+    // The same secret in the body: one grant, the body's.
+    let r = spawn_as(
+        &td,
+        &o,
+        &o,
+        json!({"template": "tgh", "grants": ["p/gh:use"]}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let child = id(&r.body);
+    assert_eq!(grants_to(&td, "p/gh", &child).await.len(), 1);
+    assert!(grants_to(&td, "global/gh", &child).await.is_empty());
 }

@@ -1,7 +1,7 @@
 // The pure helpers of the Inbox threads (docs/api.md §6.13).
 import { describe, expect, it } from "vitest";
 import type { Question, Thread, ThreadMessage } from "../../api/types";
-import { closeBody, newThreadBody, sortThreads, threadChip, threadHref, threadText, THREAD_MESSAGE_MAX, THREAD_SUMMARY_MAX, timeline, waitsOnYou } from "./threads";
+import { closeBody, inThreadsView, newThreadBody, pendingProposal, safeUrl, sortThreads, threadChip, threadListStatus, threadHref, threadText, THREAD_MESSAGE_MAX, THREAD_SUMMARY_MAX, timeline, waitsOnYou, whoName } from "./threads";
 
 const thread = (over: Partial<Thread> = {}): Thread => ({
   id: "T1",
@@ -35,7 +35,34 @@ describe("Inbox threads", () => {
     expect(threadChip(thread({ status: "waiting_operator" }))).toEqual({ label: "waiting on you", chip: "warn" });
     expect(threadChip(thread())).toEqual({ label: "waiting on the agent", chip: "info" });
     expect(threadChip(thread({ status: "closed" })).label).toBe("closed");
+    expect(threadChip(thread({ status: "tracking" }))).toEqual({ label: "tracking", chip: "" });
+    // A question in a thread that tracks still waits on the operator.
+    expect(threadChip(thread({ status: "tracking", open_questions: 1 })).label).toBe("waiting on you");
     expect(threadHref("01M7/x")).toBe("/inbox/threads/01M7%2Fx");
+  });
+
+  it("shows the agent's close proposal only on an open thread, with its own chip (TER-95)", () => {
+    const p = { summary: "Done.", links: [], by: "A1", at: "2026-11-06T09:00:00.000Z" };
+    expect(pendingProposal(thread({ status: "waiting_operator", close_proposal: p }))).toEqual(p);
+    expect(pendingProposal(thread({ status: "closed", close_proposal: p }))).toBeNull();
+    expect(pendingProposal(thread())).toBeNull();
+    expect(threadChip(thread({ status: "waiting_operator", close_proposal: p }))).toEqual({ label: "close proposed", chip: "warn" });
+    const t = thread({ agent: "A1", agent_name: "meta/architect" });
+    expect([whoName(t, "A1"), whoName(t, "operator"), whoName(t, "system"), whoName(t, null)]).toEqual(["meta/architect", "you", "system", "unknown"]);
+    expect(safeUrl({ kind: "url", ref: "https://x.example" })).toBe("https://x.example");
+    expect(safeUrl({ kind: "url", ref: "javascript:alert(1)" })).toBeNull();
+    expect(safeUrl({ kind: "other", ref: "https://x.example" })).toBeNull();
+  });
+
+  it("lists the tracking threads under Tracking only (TER-145)", () => {
+    expect(threadListStatus("open")).toBe("open");
+    expect(threadListStatus("tracking")).toBe("tracking");
+    expect(threadListStatus("done")).toBe("closed");
+    const rows = (["waiting_operator", "waiting_agent", "tracking", "closed"] as const).map((status) => thread({ id: status, status }));
+    const ids = (v: "open" | "tracking" | "done") => rows.filter((t) => inThreadsView(v, t)).map((t) => t.id);
+    expect(ids("open")).toEqual(["waiting_operator", "waiting_agent"]);
+    expect(ids("tracking")).toEqual(["tracking"]);
+    expect(ids("done")).toEqual(["closed"]);
   });
 
   it("sorts the ones that wait on the operator first, then the newest activity", () => {

@@ -42,5 +42,6 @@ describe("filter count", () => {
     expect(activeFilterCount({ label: "", assignee: "" })).toBe(0);
     expect(activeFilterCount({ label: "api", assignee: "" })).toBe(1);
     expect(activeFilterCount({ label: "api", assignee: "lead" })).toBe(2);
+    expect(activeFilterCount({ label: "api", assignee: "lead", version: "vnext" })).toBe(3);
   });
 });

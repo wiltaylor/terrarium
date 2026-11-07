@@ -9,6 +9,8 @@ import type { Artifact } from "../../api/types";
 import { bundlePaths, buildTar } from "../../lib/tar";
 import { ago, bytes } from "../../lib/format";
 import { api } from "../../stores";
+import { attachTarget } from "./attach";
+import { labelHref } from "../board/versionLabels";
 
 export default function ArtifactsPage() {
   const params = useParams<{ project: string; id?: string }>();
@@ -78,7 +80,12 @@ export default function ArtifactsPage() {
                   <For each={a().links}>
                     {(l) => (
                       <span class="chip" style={{ "margin-right": "4px" }}>
-                        {l.kind}:{l.label ?? l.ref}
+                        {/* A label link shows the label itself (`version:1.4.0`); a version label opens the board filtered by it. */}
+                        <Show when={l.kind === "label"} fallback={`${l.kind}:${l.label ?? l.ref}`}>
+                          <Show when={labelHref(a().project, l.ref)} fallback={l.ref}>
+                            {(href) => <A href={href()}>{l.ref}</A>}
+                          </Show>
+                        </Show>
                       </span>
                     )}
                   </For>
@@ -128,10 +135,10 @@ function UploadModal(props: { project: string; onClose: () => void; onDone: (a: 
     form.set("name", fileName);
     form.set("kind", kind);
     // docs/api.md §12.2: `attach_kind` and `attach_ref` (or `attach` as JSON).
-    const m = /^(page|version|card):(.+)$/.exec(attach().trim());
-    if (m) {
-      form.set("attach_kind", m[1]!);
-      form.set("attach_ref", m[2]!.trim());
+    const t = attachTarget(attach());
+    if (t) {
+      form.set("attach_kind", t.kind);
+      form.set("attach_ref", t.ref);
     }
     return api.artifacts.upload(props.project, form);
   };
@@ -196,7 +203,7 @@ function UploadModal(props: { project: string; onClose: () => void; onDone: (a: 
           <input value={name()} onInput={(e) => setName(e.currentTarget.value)} />
         </label>
         <label>
-          Attach to (optional): page:&lt;path&gt;, version:&lt;name&gt;, or card:&lt;id&gt;
+          Attach to (optional): page:&lt;path&gt;, card:&lt;id&gt;, label:&lt;label&gt;, or version:&lt;name&gt; (the label version:&lt;name&gt;)
           <input value={attach()} onInput={(e) => setAttach(e.currentTarget.value)} placeholder="card:TER-12" />
         </label>
         <Show when={progress()}>

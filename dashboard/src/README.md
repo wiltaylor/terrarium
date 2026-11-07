@@ -274,7 +274,7 @@ The project items are Board, Repos, Logs, Knowledge, and Agents.
 The **Board** item (`features/board/BoardScreen.tsx`) has a tab for each of
 Cards, Artifacts, Tests, and Schedules (`BOARD_TABS`). The Cards tab is the board
 at `/p/<project>/board`, so a `?card=` link keeps its path. The Cards tab
-manages the versions too (version rows, the Version modal); there is no
+filters and groups the cards by their version label; there is no
 Versions tab. The other tabs are under `/p/<project>/board/artifacts`,
 `/p/<project>/board/tests`, and `/p/<project>/board/schedules`. The
 Schedules tab keeps its Schedules and Triggers sub-tabs (`?tab=triggers`).
@@ -581,6 +581,12 @@ PLAN §18). The pure model is `features/agents/spawn.ts`; the views are in
   health dots, the counts of the project cards, and the mail address book
   have no ephemeral agents. The store does not upsert one, and the events
   of an agent that a refresh did not bring ask for no more refreshes.
+- **Card agents** (TER-75). The project agents page lists the card agents
+  below the agents (`api.agents.list(project, { card: true })`, the
+  ephemeral ones of `?include=card`), each with its card. A card tile
+  names its bound agent (`agent_name`) when it is not the assignee
+  (`features/board/cardAgent.ts`). In the mock, `lead-worker-3` works
+  `TER-13`.
 - **Spawned tab.** The agent page has a **Spawned** tab, with the count
   of running ones in its label (`spawned_running`). The table
   (`GET /api/agents/{id}/spawned`) shows the running rows first: a status
@@ -951,15 +957,15 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/pipelines` | Pipelines: each CI/CD pipeline with the state of its newest run, the last poll, on/off, Refresh, Edit, Delete; a row opens the recent runs, a run opens its steps; the dialog (GitHub Actions or a script) has a Test poll; see "Pipelines". | `GET`, `POST .../pipelines`, `POST .../pipelines/test`, `PATCH`, `DELETE /api/pipelines/{id}`, `POST .../refresh`, `GET .../runs`, `GET .../runs/{run}` |
 | `/p/:project/calendar` | Calendar: the project's events and the global ones in a month grid, a week, or an agenda; an occurrence opens the event (Edit, Remove, Skip); the dialog makes or changes an event; see "Calendar". | `GET .../calendar`, `POST .../calendar/events`, `GET`, `PATCH`, `DELETE /api/calendar/events/{id}`, `POST .../skip`, `GET`, `POST`, `DELETE .../calendar/watches` |
 | `/calendar` | The combined calendar of every project and the global calendar (the operator). | `GET /api/calendar`, `GET /api/calendar/global`, `POST /api/calendar/global/events` |
-| `/p/:project/board` | Board, Cards tab: drag and drop, New card dialog (the "+" of the backlog column), Edit columns dialog, ETA countdowns, question badges, version chips, the version lanes and the Version modal (`?version=<id>`), "+ Version", the Versions menu, card drawer with its questions and versions (see "The board") | `GET .../board`, `PATCH .../board`, `GET .../versions?archived=all`, `POST .../versions`, `PATCH /api/versions/{id}`, `POST /api/versions/{id}/submit\|approve\|reject\|release\|archive\|unarchive`, `compare`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
-| `/p/:project/versions/:id?`, `/p/:project/board/versions/:id?` | Gone: redirect in one hop to `/p/:project/board`, with `?version=<id>` when the path has an ID (`app/nav.ts` `MOVED_ROUTES`). The Version modal opens. The redirect adds the old query (`withQuery`). The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. | none |
-| `/p/:project/board/tests`, `/p/:project/board/tests/:id` | Board, Tests tab: the test runs (filters, counts bar, links) and one run (counts, compare with the previous run, suites and cases, Failed only, search, output, Download original, link and unlink, delete); see "Test runs" | `GET .../test-runs?card=&version=&name=&status=&cursor=`, `GET /api/test-runs/{id}?status=&q=&cursor=`, `GET .../compare?with=previous`, `GET .../raw`, `PATCH .../links`, `DELETE /api/test-runs/{id}` |
+| `/p/:project/board` | Board, Cards tab: drag and drop, New card dialog (the "+" of the backlog column), Edit columns dialog, ETA countdowns, question badges, the version filter (`?version=<name>`) and the version lanes (`?group=version`), card drawer with its questions (see "The board") | `GET .../board`, `PATCH .../board`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
+| `/p/:project/versions/:id?`, `/p/:project/board/versions/:id?` | Gone: redirect in one hop to `/p/:project/board` (`app/nav.ts` `MOVED_ROUTES`). Version objects are removed (TER-58), so the old version ID does not go along. The redirect adds the old query (`withQuery`). Old mail can still link `/p/<project>/versions/<id>`. | none |
+| `/p/:project/board/tests`, `/p/:project/board/tests/:id` | Board, Tests tab: the test runs (filters, counts bar, links) and one run (counts, compare with the previous run, suites and cases, Failed only, search, output, Download original, link and unlink, delete); see "Test runs" | `GET .../test-runs?card=&label=&name=&status=&cursor=`, `GET /api/test-runs/{id}?status=&q=&cursor=`, `GET .../compare?with=previous`, `GET .../raw`, `PATCH .../links`, `DELETE /api/test-runs/{id}` |
 | `/p/:project/board/artifacts/:id?` | Board, Artifacts tab: artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/knowledge/wiki/*path` | Knowledge, Wiki tab: page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
 | `/p/:project/knowledge/memory` | Knowledge, Memory tab: memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
 | `/p/:project/knowledge/db` | Knowledge, DB tab: the record types, New type | `GET`, `POST .../db/types` |
 | `/p/:project/knowledge/db/:type` | The records of a type: query box, table, record dialog, schema editor | `GET .../db/query`, `.../db/records`, `PATCH`, `DELETE .../db/types/{type}` |
-| `/p/:project/artifacts/:id?`, `/p/:project/wiki/*path`, `/p/:project/memory`, `/p/:project/knowledge` | Gone: redirect to the Board and Knowledge tabs (`app/nav.ts` `MOVED_ROUTES`). The wiki redirect keeps the page path, and each redirect keeps the query. The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. `/p/:project/knowledge` opens the Wiki tab. | none |
+| `/p/:project/artifacts/:id?`, `/p/:project/wiki/*path`, `/p/:project/memory`, `/p/:project/knowledge` | Gone: redirect to the Board and Knowledge tabs (`app/nav.ts` `MOVED_ROUTES`). The wiki redirect keeps the page path, and each redirect keeps the query. `/p/:project/knowledge` opens the Wiki tab. | none |
 | `/p/:project/schedules` | Gone: redirects to `/p/:project/board/schedules` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query (`?open=`, `?tab=triggers`). | none |
 | `/p/:project/spend` | Gone: redirects to `/` (`app/nav.ts` `MOVED_ROUTES`). The daemon's budget alert mail still links it. | none |
 | `/p/:project/board/schedules` | Board, Schedules tab: schedules of the project and the global ones, scope filter, run history, run now, enable, create, edit, delete | `GET /api/schedules?project=`, `POST /api/schedules`, `PATCH`, `DELETE /api/schedules/{id}`, `POST .../run\|enable\|disable`, `GET .../runs?limit=&cursor=` (docs/api.md §19) |
@@ -982,7 +988,11 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/dev/xss` | Mock only: the hostile payloads of `lib/xss-payloads.ts`, rendered | none |
 
 Artifact upload sends a multipart form: `file`, `name`, `kind`, and
-`attach_kind` with `attach_ref`. A folder goes up as one `bundle`: the
+`attach_kind` with `attach_ref` (`features/artifacts/attach.ts`): the
+"Attach to" text `page:<path>`, `card:<id>`, or `label:<label>`; since
+TER-58 `version:<name>` attaches the label `version:<name>`. A label link
+shows the label, and a version label opens the board with that version
+filter. A folder goes up as one `bundle`: the
 browser builds a tar (`lib/tar.ts`) from the folder pick.
 
 The Targets and Hosts pages end with a footer that names the calls that are
@@ -1171,53 +1181,38 @@ until cards leave. The column headers show the titles. A move to the
 column with the role `blocked` asks for a comment. On a phone, the dialog
 fills the screen.
 
-**Versions.** The board reads every version of the project once
-(`GET /api/projects/{name}/versions?archived=all`), and a `version.*`
-event of the project reads them again after 300 ms. The board shows the
-versions that are not archived. A card is in a version when
-`Version.cards` has it; a card can be in several versions
-(`features/board/versions.ts`). Each card shows a chip for each of its
-versions, with the name in the status colour. A click on a chip opens the
-Version modal. The toolbar has no Version filter: the lanes show the
-versions.
+**Versions.** A version is a card label (TER-58): `version:vnext` for
+the open version, `version:X.Y.Z` for a release. There are no version
+objects. A card can have several version labels, or none
+(`features/board/versionLabels.ts`). The labels show as chips on the card,
+with the other labels, and the drawer edits them in the Labels field.
 
-**Version lanes.** The Cards tab always shows the cards in version rows
-("lanes") (`features/board/lanes.ts`, `LanesBoard.tsx`). An old `?rows=`
-in the URL has no effect. localStorage keeps the collapsed rows of each
-project (`terrarium.board.lanes.<project>`); the page ignores an old
-`rows` value in it. The board has one row for each version that is not
-archived: draft, in review, approved, released, rejected, then the newest
-first. An empty released or rejected row does not show. The last row is
-"No version": the cards in no version, and the cards that are only in
-archived versions. A project with no version row shows only "No
-version", with no row head: it looks like a plain board. Each row has
-all the columns, under one row of column heads. A row head has a chevron (collapse), the version name (opens the
-Version modal), the status, and the card count. A card in several
-versions shows in each of their rows, with "also in <name>". The WIP
-limits and the counts of the column heads are for the whole column; each
-cell shows its own count, muted. A drag inside a row moves the card as
-before. A drag into another row removes the card from the version of the
-old row and adds it to the version of the new row (`PATCH
-/api/versions/{id}` with `remove_cards`, then `add_cards`), then moves it
-to the column of the drop. A card in more versions asks first. A version
-in review, approved, or released takes no card change, so the board
-refuses that drag with a message. `?version=<id>` opens the Version
-modal, and the row of the version opens and scrolls into view. On a
-phone, each column holds the rows as sections that collapse, and the
-**Versions** field of the card drawer adds the card to a version or
-removes it.
+**Version filter.** The Filters row has a **version** select: Any version,
+each version on the board's cards (vnext first, then the releases newest
+first, a pre-release after its release, then other names A to Z), and No
+version (the cards with no version label). The choice is in the URL
+(`?version=<name>`, `?version=none`), so a reload and a link keep it. A
+version in the URL that no card has stays in the select. The filter counts
+in the Filters badge of a phone.
 
-**The Version modal** (`features/board/VersionModal.tsx`) opens from a row
-head, a version chip, the Versions menu, and `?version=<id>`
-(a version ID or name). It shows the status, the notes, the repo and ref,
-the review actions (Approve and Reject with a comment, Submit for review,
-Release), **Archive** or **Unarchive**, the cards (with **Add cards**, a
-card picker, and × to remove a card, in draft and rejected only), the
-comparison with the version before, the artifacts, and the reviews. On a
-phone it fills the screen. **+ Version** opens it in create mode: name,
-notes, repo, ref, and the cards to include. The **Versions** menu lists
-each version that is not archived; **Show archived versions** adds the
-archived ones, each with **Unarchive**. An archived version has no row.
+**Version lanes.** **Group by version** (`?group=version`) shows the cards
+in version rows ("lanes") (`features/board/lanes.ts`, `LanesBoard.tsx`):
+one row for each version label on the board's cards, in the order of the
+filter, and a last row "No version". Without it, the board has one plain
+lane with no row head. An old `?rows=` in the URL has no effect.
+localStorage keeps the collapsed rows of each project
+(`terrarium.board.lanes.<project>`); the page ignores an old `rows` value
+in it. Each row has all the columns, under one row of column heads. A row
+head has a chevron (collapse), the version name, and the card count. A card
+with several version labels shows in each of their rows, with "also in
+<name>". The WIP limits and the counts of the column heads are for the
+whole column; each cell shows its own count, muted. A drag inside a row
+moves the card as before. A drag into another row changes the card's
+labels: the label of the old row goes, the label of the new row comes
+(none for "No version") (`PATCH /api/cards/{id}` with `labels`), then the
+card moves to the column of the drop. On a phone, each column holds the
+rows as sections that collapse, and the Labels field of the card drawer
+changes the version.
 
 **ETAs.** A card with an `eta_at` (docs/api.md §8) shows a countdown chip
 below its title: "34m 05s left" under an hour, "1h 12m left" above, and
@@ -1257,9 +1252,8 @@ again. The pure helpers are in `features/board/questions.ts`
 shows a chip with the latest run (`Card.tests`): "✓ 120 passed",
 "✗ 3 failed" (failed plus errored), or "– no tests", as a colour and as
 text. A click opens the run, not the card. A `test_run` event of the
-project reloads the board. The card drawer has a **Tests** section, and
-the Version modal has one too (`features/tests/parts.tsx` `LinkedRuns`,
-`GET .../test-runs?card=<id>` or `?version=<id>`). It lists the linked runs,
+project reloads the board. The card drawer has a **Tests** section
+(`features/tests/parts.tsx` `LinkedRuns`, `GET .../test-runs?card=<id>`). It lists the linked runs,
 newest first, and a combined status of the newest run of each name: failed
 when one failed, else passed, else empty. A failed run on a card in review
 changes nothing on the board: no card moves.
@@ -1273,14 +1267,15 @@ parses JUnit XML, TRX, CTRF, libtest JSON, Vitest and Jest JSON, and TAP.
 - **The list** (`TestRunsPage.tsx`, `/p/<project>/board/tests`): newest
   first, with the status (icon and word), the name, the format and tool,
   who pushed it and when, the branch and the commit, the duration, the
-  counts as a stacked bar and as text, and the linked cards and versions.
-  The filters (name, status, card, version) are in the URL
-  (`?name=&status=&card=&version=`). **Load more** reads the next page. A
+  counts as a stacked bar and as text, and the linked cards and labels. A
+  version label (`version:1.4.0`) opens the board with that version filter.
+  The filters (name, status, card, label) are in the URL
+  (`?name=&status=&card=&label=`). **Load more** reads the next page. A
   `test_run` event of the project reloads the list.
 - **The run** (`TestRunPage.tsx`, `/p/<project>/board/tests/<id>`): the
   big counts (passed, failed, errored, skipped) with an icon each, the
   duration, the format, the tool, the file, the commit, the branch, and the
-  linked cards and versions (unlink with ×, link a card by ID). **Compare
+  linked cards and labels (unlink with ×, link a card by ID). **Compare
   with the previous run** reads `GET /api/test-runs/{id}/compare?with=previous`
   and shows Newly failing and Fixed open at the top, then Still failing,
   New tests, and Removed tests. The suites are groups that open and close,
@@ -1307,7 +1302,7 @@ See `docs/security-review.md` F3, F4, and F5.
 
 ### Untrusted HTML (F3)
 
-- Wiki pages, version notes, and markdown artifacts come from agents.
+- Wiki pages and markdown artifacts come from agents.
   `lib/markdown.ts` escapes raw HTML and allows only safe URL schemes. Tests
   cover this.
 - DOMPurify (`lib/sanitize.ts`, pinned in `package.json`) runs after the

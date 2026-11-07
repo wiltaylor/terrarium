@@ -112,7 +112,7 @@ export function App() {
         <Route path="/p/:project/calendar" component={CalendarPage} />
         <Route path="/calendar" component={CalendarPage} />
         <Route path="/p/:project/agents" component={AgentsPage} />
-        {/* The board screen: the tabs Cards, Artifacts, Tests, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it manages the versions too (?version=<id>). */}
+        {/* The board screen: the tabs Cards, Artifacts, Tests, and Schedules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it filters and groups the cards by version label (?version=<name>&group=version). */}
         <Route path="/p/:project/board" component={BoardScreen}>
           <Route path="/" component={BoardPage} />
           <Route path="/artifacts/:id?" component={ArtifactsPage} />
