@@ -7,14 +7,18 @@
 //! - `GET /api/threads[?status=&scope=]`: the operator and an agent that
 //!   reads all (sysadmin, architect) see all; another agent sees the
 //!   threads it opened, is attached to, or is the report-to lead of.
-//! - `GET /api/threads/{id}`: the thread with its messages and questions.
+//! - `GET /api/threads/{id}`: the thread with its messages and questions,
+//!   and the linked cards whose project the reader may read (TER-146).
 //! - `POST /api/threads/{id}/messages` (the operator, the attached agent).
 //! - `POST /api/threads/{id}/respond` (the operator): the overall response.
 //! - `POST /api/threads/{id}/close`: the operator closes (or, with
 //!   `confirm`, confirms the agent's proposal); the attached agent
 //!   proposes the close (TER-95).
 //! - `POST /api/threads/{id}/track` (the attached agent): move the thread
-//!   into tracking after the handoff (TER-145).
+//!   into tracking after the handoff (TER-145), and link the `cards` of
+//!   the body first (TER-146).
+//! - `POST /api/threads/{id}/cards`: link a card of any project (TER-146,
+//!   TER-144 D2). A reader of the thread who reads the card's project.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -30,7 +34,7 @@ use terrarium_core::model::Agent;
 use crate::actor::{Actor, AgentActor};
 use crate::error::{ApiError, ApiResult};
 use crate::policy;
-use crate::store::threads::{self, Filter, Link, NewThread, Thread, ThreadStatus};
+use crate::store::threads::{self, Filter, Link, NewThread, Thread, ThreadStatus, readable};
 use crate::store::{agents, templates};
 
 pub fn routes() -> Router<Shared> {
@@ -41,17 +45,7 @@ pub fn routes() -> Router<Shared> {
         .route("/threads/{id}/respond", post(respond))
         .route("/threads/{id}/close", post(close))
         .route("/threads/{id}/track", post(track))
-}
-
-/// A thread that the caller may read; else `404`: the operator, an agent
-/// that reads all (sysadmin, architect), and the opener, the attached agent
-/// and the report-to lead.
-fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
-    match actor {
-        Actor::Operator => Ok(th),
-        Actor::Agent(a) if a.reads_all() || th.involves(&a.id) => Ok(th),
-        Actor::Agent(_) => Err(ApiError::not_found(format!("no thread `{}`", th.id))),
-    }
+        .route("/threads/{id}/cards", post(link_card))
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,7 +257,7 @@ async fn post_message(
                     th.id
                 )));
             }
-            threads::post(t, &th.id, &author, &b.text)
+            threads::post(t, &th.id, &author, &b.text).map(|th| threads::visible(&actor, th))
         })
         .await?;
     Ok((StatusCode::CREATED, Json(th)).into_response())
@@ -353,18 +347,41 @@ async fn close(
                         b.links,
                     ),
                 }
+                .map(|th| threads::visible(&actor, th))
             })
             .await?,
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackBody {
+    /// Cards to link first (TER-146): `<project>:<card>` or `<card>`.
+    #[serde(default)]
+    cards: Vec<String>,
+}
+
 /// The attached agent moves its thread into tracking after the handoff
-/// (TER-145, TER-144 D1). No body.
+/// (TER-145, TER-144 D1). The body is optional: `{"cards"}` links those
+/// cards in the same write (TER-146, D2); one refused card refuses all.
 async fn track(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> ApiResult<Json<Thread>> {
+    let b: TrackBody = if body.iter().all(u8::is_ascii_whitespace) {
+        TrackBody::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
+    };
+    if b.cards.len() > threads::MAX_LINKS {
+        return Err(ApiError::invalid(format!(
+            "`cards` has {} cards; the most is {}",
+            b.cards.len(),
+            threads::MAX_LINKS
+        )));
+    }
     let by = actor.address();
     let label = actor.label();
     Ok(Json(
@@ -374,7 +391,10 @@ async fn track(
                 let th = readable(&actor, threads::get_bare(t, &id)?)?;
                 match &actor {
                     Actor::Agent(a) if th.agent.as_deref() == Some(a.id.as_str()) => {
-                        threads::track(t, &th.id, &by)
+                        for c in &b.cards {
+                            threads::link_card(t, &actor, &th.id, c)?;
+                        }
+                        threads::track(t, &th.id, &by).map(|th| threads::visible(&actor, th))
                     }
                     _ => Err(ApiError::forbidden(format!(
                         "tracking thread {}: only its attached agent moves it into tracking",
@@ -382,6 +402,32 @@ async fn track(
                     ))),
                 }
             })
+            .await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CardBody {
+    /// `<project>:<card>` or `<card>`.
+    card: String,
+}
+
+/// Link a card of any project to the thread (TER-146, TER-144 D2): the
+/// lead after `card new`, or any reader of the thread who reads the card's
+/// project. `200` the thread with its `cards`, also when the card was
+/// linked already.
+async fn link_card(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(b): ApiJson<CardBody>,
+) -> ApiResult<Json<Thread>> {
+    let label = actor.label();
+    Ok(Json(
+        state
+            .db
+            .write(label, move |t| threads::link_card(t, &actor, &id, &b.card))
             .await?,
     ))
 }

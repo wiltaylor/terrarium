@@ -1400,6 +1400,19 @@ async fn board_and_cards() {
         )],
     )
     .await;
+    // TER-146: the new card is linked to an Inbox thread.
+    ok(
+        true,
+        &["card", "new", "T", "--inbox-thread", "01TH"],
+        vec![(201, json!({}))],
+        vec![(
+            Post,
+            "/api/projects/terra/cards",
+            vec![],
+            Some(json!({"title": "T", "inbox_thread": "01TH"})),
+        )],
+    )
+    .await;
     ok(
         false,
         &["card", "edit", "TER-1", "--title", "T", "--repo", "none"],
@@ -1565,6 +1578,20 @@ async fn board_and_cards() {
         )],
     )
     .await;
+    // TER-146: an Inbox thread tracks an existing card.
+    let out = ok(
+        false,
+        &["card", "link", "TER-1", "--inbox-thread", "01TH"],
+        vec![(200, json!({"id": "01TH"}))],
+        vec![(
+            Post,
+            "/api/threads/01TH/cards",
+            vec![],
+            Some(json!({"card": "TER-1"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "linked TER-1 to Inbox thread 01TH\n");
     ok(
         false,
         &["card", "rm", "TER-1"],
@@ -10063,6 +10090,28 @@ async fn thread_commands() {
     )
     .await;
     assert_eq!(out, "thread T1 is tracking.\n");
+    // TER-146: the agent links cards of any project as it tracks.
+    let out = ok(
+        true,
+        &[
+            "thread",
+            "track",
+            "T1",
+            "--card",
+            "terra:TER-2",
+            "--card",
+            "ops:OPS-3",
+        ],
+        vec![(200, json!({"id": "T1", "status": "tracking"}))],
+        vec![(
+            Post,
+            "/api/threads/T1/track",
+            vec![],
+            Some(json!({"cards": ["terra:TER-2", "ops:OPS-3"]})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "thread T1 is tracking.\n");
 
     let out = ok(
         true,
@@ -10127,7 +10176,9 @@ async fn thread_commands() {
         "questions": [{"id": "Q1", "kind": "question", "status": "answered", "text": "Keep blocked?"}],
         "response": {"text": "Approved: five.", "by": "operator", "at": "2026-11-06T09:05:00.000Z"},
         "handoff": {"summary": "Cards cut.", "by": "operator", "at": "2026-11-06T09:10:00.000Z",
-                    "links": [{"kind": "card", "ref": "TER-1"}]}});
+                    "links": [{"kind": "card", "ref": "TER-1"}]},
+        "cards": [{"project": "ops", "card": "OPS-3", "linked_by": "operator",
+                   "linked_by_name": "operator", "linked_at": "2026-11-06T09:11:00.000Z"}]});
     let out = ok(
         true,
         &["thread", "show", "T1"],
@@ -10150,5 +10201,9 @@ async fn thread_commands() {
         "{out}"
     );
     assert!(out.contains("link card: TER-1"), "{out}");
+    assert!(
+        out.contains("card ops:OPS-3 linked by operator at 2026-11-06T09:11:00.000Z"),
+        "{out}"
+    );
     assert!(!out.contains("messages "), "{out}");
 }

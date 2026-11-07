@@ -3783,6 +3783,7 @@ There is no register of threads and no conflict check between threads
 | `session_id` | The session of the thread agent, set at the close: the agent ends and its session is archived (§6.6), so `/sessions/<id>` opens it after the agent is gone. `null` for a named agent, which lives on. |
 | `reminded_at` | The time of the last Inbox reminder of the untouched thread (below), or `null`. |
 | `tracking_at` | When the attached agent moved the thread into tracking (TER-145, below), or `null`. It stays set while an operator post wakes the agent, so that the agent's reply puts the thread back into `tracking`. |
+| `cards` | The linked cards (TER-146, below) whose project the reader may read, the oldest link first: `{project, card, linked_by, linked_by_name, linked_at}`. Only in `GET /api/threads/{id}` and the answers of the writes, not in the list. |
 
 **Status.** A new thread with a first message of the operator is
 `waiting_agent`; with no first message, or opened by an agent, it is
@@ -3807,6 +3808,30 @@ parks the agent. A question that the agent asks makes it
 back into `tracking`. Only the close ends tracking. The dashboard Inbox
 lists these threads on the Threads tab under Tracking, between Open and
 Done.
+
+**Linked cards** (TER-146, TER-144 D2). A thread tracks cards of any
+project (table `thread_cards`: thread, project, card). The lead links a
+new card with `inbox_thread` on the card create (§8, `terrarium card new
+--inbox-thread <id>`) and an existing card with `POST .../cards`
+(`terrarium card link <card> --inbox-thread <id>`). The attached agent
+links cards with `POST .../track` and `cards` (`terrarium thread track
+<id> --card <project>:<card>`): the links and the move into tracking are
+one write, and one refused card refuses all. A card is
+`<project>:<card>` or `<card>`; a card that is not in the named project
+is `404`. The linker must read the thread (else `404`) and the card's
+project (else `404`, the same answer as for a card that does not exist,
+so that a refusal does not tell that the card exists or name its
+project). An archived card is `422 invalid`. A link gives no read access:
+the `cards` of the thread list only the cards whose project the reader
+may read, so a reader of the thread who cannot read a card's project
+does not see the card, its project, or that it is there; a reader of the
+card does not read the thread. A second link of the same card keeps the
+first. A closed thread is `409 conflict`. A link writes the audit row
+`thread.card_link` (`by`, `card`, `project`) under the card's project,
+not the thread's, so the admin of the thread's project does not read it
+in the audit log when it cannot read the card's project. A link also
+writes a `thread` event `card_linked`, which does not change the status
+and wakes no agent. There is no unlink.
 
 **Close** (TER-95, wiki `inbox-threads` §5). The attached agent hands off
 its work, asks in the thread whether anything more is needed, and then
@@ -3866,6 +3891,7 @@ thread that is `tracking` is never untouched: it gets neither.
 | Respond | The operator. |
 | Close | The operator, at any time. The attached agent proposes the close; the operator confirms it (`confirm`). |
 | Track | The attached agent. Another reader, and the operator, get `403`. |
+| Link a card | A reader of the thread who reads the card's project: the operator, an agent that reads all, and the opener, the attached agent, and the report-to lead for the cards of their own project. |
 
 | Ask a question in a thread | The attached agent, also when it is not a leader: `POST /api/agents/{id}/questions` with `"thread"`. |
 
@@ -3888,7 +3914,8 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
-| `POST /api/threads/{id}/track` | no body | The attached agent: `200` the thread, `tracking`, with `tracking_at`. `409` with an open question |
+| `POST /api/threads/{id}/track` | no body, or `{"cards"}`: at most 50 cards to link first (TER-146) | The attached agent: `200` the thread, `tracking`, with `tracking_at` and `cards`. `409` with an open question; `404` or `422` for a card (below), and nothing changes |
+| `POST /api/threads/{id}/cards` | `{"card"}`: `<project>:<card>` or `<card>` | `200` the thread with `cards`, also when the card was linked already. `404` without the read right on the thread, for a card that does not exist or is not in the named project, and without the read right on the card's project; `422` for an archived card; `409` on a closed thread |
 
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
 A thread opened with a `template` and no `agent` gets its agent at the
@@ -4377,7 +4404,7 @@ supply:
 ```json
 {"title":"Ship the parser","body":"","column":"backlog","assignee":"worker","labels":["parser"],
  "repo":"terrarium","branch":"feat/parser","depends_on":["TER-1"],"from_mail":null,"comment":null,
- "eta_at":"2h30m","github_author":null}
+ "eta_at":"2h30m","github_author":null,"inbox_thread":null}
 ```
 
 - `column` defaults to `backlog`. Another column follows the move rules, so
@@ -4391,6 +4418,9 @@ supply:
   assignment.
 - `github_author` is the GitHub login of the issue author of a GitHub card,
   for the GitHub author gate (below).
+- `inbox_thread` is an Inbox thread that tracks the new card (TER-146,
+  §6.13 "Linked cards"). The caller must read the thread: else `404`, and
+  no card is made.
 
 **GitHub author gate** (TER-85). It applies when the project has a
 `github_authors` list (§5). Without a list there is no gate. A GitHub card
