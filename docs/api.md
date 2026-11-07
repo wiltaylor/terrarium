@@ -10547,6 +10547,24 @@ validate or a merge is a `409 conflict` that says how to set it.
   (`[{card, branch, by_agent?, outcome?, note?}]`); `card`, `branch`, and
   `by_agent` are those of the first card. See 35.3 for the results.
 
+The recipe gets this env (TER-100), and no credential:
+
+| variable                  | value                                                                 |
+|---------------------------|-----------------------------------------------------------------------|
+| `TERRARIUM_JOB_KIND`      | `validate` or `merge`                                                 |
+| `TERRARIUM_JOB_ID`        | the job ID                                                            |
+| `TERRARIUM_HEAD`          | the tested commit: the card commit, or the merge commit               |
+| `TERRARIUM_BASE`          | the base of the change: for a validate job the merge-base of the card commit and `next`, for a merge job `next` before the merge |
+| `TERRARIUM_CHANGED_FILES` | the absolute path of a file in the clone (`.git/terrarium/changed-files`) with the paths that differ between the base and the head, one per line (`git diff --name-only --no-renames`, so a rename lists both paths) |
+
+The prepare step fetches `next` for a validate job too. When the repo has
+no `next`, or the commit has no merge-base with it, `TERRARIUM_BASE` and
+`TERRARIUM_CHANGED_FILES` are not set, and a recipe that selects tests
+must run all of them. The terrarium repo's recipe for this is `just
+ci::validate-affected`: a validate job runs the checks that its changed
+files reach (the rules are in `scripts/affected.py`), and a merge job runs
+the full `just ci::validate`.
+
 Jobs start first in, first out across all projects. A job starts when:
 
 1. its host is under its cap (the host cap, below), and
