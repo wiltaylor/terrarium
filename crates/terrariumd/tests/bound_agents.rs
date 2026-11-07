@@ -851,6 +851,76 @@ async fn an_unpark_is_refused_when_another_agent_has_the_card(flow: &str) {
     assert!(return_turns(&td, &eb, &b).is_empty());
 }
 
+/// TER-163: a card that goes back into a wait column while its unpark
+/// waits for a place drops the queued unpark and its return turn. When a
+/// place frees, the agent stays parked.
+#[tokio::test]
+async fn a_re_park_drops_a_queued_unpark() {
+    let (td, lead) = setup().await;
+    let a = card(&td, "p", "in_progress").await;
+    let b = card(&td, "p", "in_progress").await;
+    let ea = id(&spawn_bound(&td, &lead, "w-claude", &a).await.body);
+    td.wait_status(&ea, "idle").await;
+    mv(&td, &a, "review", None).await;
+    parked(&td, &ea).await;
+    // B takes the lead's one place.
+    let eb = id(&spawn_bound(&td, &lead, "w-claude", &b).await.body);
+    td.wait_status(&eb, "idle").await;
+    // A comes back while B runs: the unpark waits.
+    mv(&td, &a, "ready", Some("Review: changes.")).await;
+    let key = ea.clone();
+    until("the queued unpark", || async {
+        spawn_row(&td, &key).await["unpark_queued_at"].is_string()
+    })
+    .await;
+    // A goes back to review before a place frees: the unpark is dropped.
+    mv(&td, &a, "review", None).await;
+    let key = ea.clone();
+    until("the dropped unpark", || async {
+        spawn_row(&td, &key).await["unpark_queued_at"].is_null()
+    })
+    .await;
+    let ev = td
+        .get(&format!(
+            "/api/agents/{ea}/events?kind=agent.unpark_dropped"
+        ))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(ev.as_array().unwrap().len(), 1, "{ev}");
+    let key = ea.clone();
+    let waiting = state(&td)
+        .db
+        .read(move |c| terrariumd::store::agents::queued_turns(c, &key))
+        .await
+        .unwrap();
+    let card_tag = format!("[System:card {a}]");
+    assert!(
+        !waiting.iter().any(|q| q.text.starts_with(&card_tag)),
+        "{waiting:?}"
+    );
+    // B parks: a place frees, but A stays parked, with no turn.
+    mv(&td, &b, "validating", None).await;
+    parked(&td, &eb).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let sp = spawn_row(&td, &ea).await;
+    assert!(sp["parked_at"].is_string(), "{sp}");
+    assert_eq!(agent(&td, &ea).await["status"], "stopped");
+    assert!(return_turns(&td, &ea, &a).is_empty());
+    // A comes back again: it unparks with one return turn, the new one.
+    mv(&td, &a, "ready", Some("Second round.")).await;
+    td.wait_status(&ea, "idle").await;
+    let key = ea.clone();
+    let card_id = a.clone();
+    until("the return turn of A", || async {
+        !return_turns(&td, &key, &card_id).is_empty()
+    })
+    .await;
+    let turns = return_turns(&td, &ea, &a);
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert!(turns[0].contains("Second round."), "{turns:?}");
+}
+
 /// TER-111 (R2-1): the park stop checks the park again. An agent that
 /// was unparked after the idle pass read the parked agents runs on.
 #[tokio::test]

@@ -35,6 +35,9 @@
 //!   has no assignee or the agent is the assignee: when another agent
 //!   claimed the card, the unpark is refused (`agent.unpark_refused`) and
 //!   a queued one is dropped, so two agents never work one card (TER-111).
+//!   A card that moves into a wait column again while its unpark waits
+//!   drops the unpark and its return turn (`agent.unpark_dropped`,
+//!   TER-163).
 //! - **End** ([`end`]): the object is finished. The agent closes as with
 //!   `agent done` (`crate::spawn::close`): the owner gets the result, the
 //!   sessions go to the archive, the workspace to the trash.
@@ -156,10 +159,34 @@ pub async fn park(state: &Shared, id: &str, reason: &str) -> ApiResult<bool> {
 
 /// The write of a [`park`]: mark the agent `id` parked and write
 /// `agent.parked`. Returns its owner, or `None` when it is parked already
-/// or finished. The caller runs [`after_park`] after the commit (the
-/// board rule verb `agent.park` writes this in its own action write).
+/// or finished. A card-bound agent that is parked already drops its
+/// queued unpark and the return turns that wait for it: its card waits
+/// again, so a later free place must not wake it (TER-163). The caller
+/// runs [`after_park`] after the commit (the board rule verb `agent.park`
+/// writes this in its own action write).
 pub fn park_tx(t: &mut crate::db::Tx<'_>, id: &str, reason: &str) -> ApiResult<Option<String>> {
     if !spawns::set_parked(t, id, reason)? {
+        if let Some(sp) = spawns::find(t, id)?
+            && sp.running()
+            && sp.unpark_queued_at.is_some()
+            && let Some(card_id) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:"))
+        {
+            spawns::unqueue_unpark(t, &sp.id)?;
+            drop_return_turns(t, &sp.id, card_id)?;
+            t.emit(
+                EventDraft::new(
+                    "agent.unpark_dropped",
+                    format!(
+                        "{}: stays parked ({reason}); its queued unpark is dropped",
+                        sp.name
+                    ),
+                    json!({"spawn_id": sp.id, "name": sp.name, "bound": sp.bound,
+                           "reason": reason}),
+                )
+                .agent(sp.id.clone(), sp.name.clone())
+                .project(sp.project.clone()),
+            )?;
+        }
         return Ok(None);
     }
     let sp = spawns::get(t, id)?;
@@ -226,12 +253,7 @@ fn refuse(
 ) -> ApiResult<()> {
     spawns::unqueue_unpark(t, &sp.id)?;
     if let Some(card_id) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:")) {
-        let prefix = return_prefix(card_id);
-        for q in crate::store::agents::queued_turns(t, &sp.id)? {
-            if q.text.starts_with(&prefix) {
-                crate::store::agents::remove_queued_turn(t, &sp.id, q.id)?;
-            }
-        }
+        drop_return_turns(t, &sp.id, card_id)?;
     }
     let who = crate::store::agents::display_name(t, other)?.unwrap_or_else(|| other.to_owned());
     t.emit(
@@ -249,6 +271,18 @@ fn refuse(
         .agent(sp.id.clone(), sp.name.clone())
         .project(sp.project.clone()),
     )?;
+    Ok(())
+}
+
+/// Remove the queued return turns of the card `card_id` from the agent
+/// `id`: a queued unpark queued its turn already.
+fn drop_return_turns(t: &mut crate::db::Tx<'_>, id: &str, card_id: &str) -> ApiResult<()> {
+    let prefix = return_prefix(card_id);
+    for q in crate::store::agents::queued_turns(t, id)? {
+        if q.text.starts_with(&prefix) {
+            crate::store::agents::remove_queued_turn(t, id, q.id)?;
+        }
+    }
     Ok(())
 }
 
