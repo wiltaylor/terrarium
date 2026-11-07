@@ -1,42 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { Card, Version } from "../../api/types";
-import {
-  alsoIn,
-  buildLanes,
-  columnIndex,
-  findVersion,
-  laneCells,
-  laneMove,
-  laneMovePatches,
-  laneVersions,
-  menuVersions,
-  NO_VERSION_LANE,
-  onlyNoVersion,
-  readLaneState,
-  toggleCollapsed,
-} from "./lanes";
+import type { Card } from "../../api/types";
+import { ALL_LANE, alsoIn, buildLanes, columnIndex, isPlain, laneCells, laneMoveLabels, NO_VERSION_LANE, readLaneState, toggleCollapsed } from "./lanes";
 
-const v = (id: string, status: Version["status"], cards: string[], created_at: string, over: Partial<Version> = {}): Version => ({
-  id,
-  project: "p",
-  name: id.toLowerCase(),
-  status,
-  notes: "",
-  created_by: "operator",
-  created_at,
-  cards: cards.map((c) => ({ id: c, title: c, column: "x" })),
-  artifacts: [],
-  reviews: [],
-  ...over,
-});
-const card = (id: string, column = "ready", position = 0): Card => ({
+const card = (id: string, labels: string[] = [], column = "ready", position = 0): Card => ({
   id,
   project: "p",
   column,
   position,
   title: id,
   body: "",
-  labels: [],
+  labels,
   depends_on: [],
   blocked_by: [],
   comments: [],
@@ -47,64 +20,58 @@ const card = (id: string, column = "ready", position = 0): Card => ({
   archived: false,
 });
 
-const versions = [
-  v("REL", "released", ["P-1"], "2026-10-01"),
-  v("REJ", "rejected", [], "2026-10-02"),
-  v("APP", "approved", [], "2026-10-03"),
-  v("DRAFT_OLD", "draft", ["P-2"], "2026-10-04"),
-  v("DRAFT_NEW", "draft", ["P-2", "P-3"], "2026-10-05"),
-  v("REVIEW", "in_review", ["P-4"], "2026-10-06"),
-  v("ARCH", "draft", ["P-5", "P-1"], "2026-10-07", { archived: true }),
+const cards = [
+  card("P-1", ["version:0.9.0"], "done", 0),
+  card("P-2", ["feature", "version:vnext", "version:1.0.0"], "ready", 1),
+  card("P-3", ["version:vnext"], "done", 2),
+  card("P-4", ["version:1.0.0-rc.1"], "ready", 3),
+  card("P-5", ["bug"], "done", 4),
+  card("P-6", [], "ready", 5),
 ];
-const cards = ["P-1", "P-2", "P-3", "P-4", "P-5", "P-6"].map((id, i) => card(id, i % 2 ? "ready" : "done", i));
 
-describe("version lanes", () => {
-  it("orders the lanes by status, then the newest first, with no archived version", () => {
-    expect(laneVersions(versions).map((x) => x.id)).toEqual(["DRAFT_NEW", "DRAFT_OLD", "REVIEW", "APP", "REL", "REJ"]);
+describe("lanes", () => {
+  it("shows one plain lane with every card when the board is not grouped", () => {
+    const lanes = buildLanes(cards, false);
+    expect(lanes.map((l) => l.key)).toEqual([ALL_LANE]);
+    expect(lanes[0]!.cards).toHaveLength(cards.length);
+    expect(isPlain(lanes)).toBe(true);
+    expect(alsoIn(cards[1]!, ALL_LANE)).toEqual([]);
   });
 
-  it("builds the lanes: empty released and rejected lanes hide; archived-only cards have no version", () => {
-    const lanes = buildLanes(versions, cards);
-    expect(lanes.map((l) => l.key)).toEqual(["DRAFT_NEW", "DRAFT_OLD", "REVIEW", "APP", "REL", NO_VERSION_LANE]);
+  it("groups the cards by version label: vnext first, the newest release next, No version last", () => {
+    const lanes = buildLanes(cards, true);
+    expect(lanes.map((l) => l.key)).toEqual(["version:vnext", "version:1.0.0", "version:1.0.0-rc.1", "version:0.9.0", NO_VERSION_LANE]);
+    expect(lanes[0]!.version).toBe("vnext");
+    expect(isPlain(lanes)).toBe(false);
     const of = (k: string) => lanes.find((l) => l.key === k)!.cards.map((c) => c.id);
-    // A card in two versions is in both lanes.
-    expect(of("DRAFT_NEW")).toEqual(["P-2", "P-3"]);
-    expect(of("DRAFT_OLD")).toEqual(["P-2"]);
-    // An empty approved lane shows; an empty rejected lane hides.
-    expect(of("APP")).toEqual([]);
-    // P-5 is only in an archived version; P-6 is in none.
+    // A card with two version labels is in both lanes.
+    expect(of("version:vnext")).toEqual(["P-2", "P-3"]);
+    expect(of("version:1.0.0")).toEqual(["P-2"]);
     expect(of(NO_VERSION_LANE)).toEqual(["P-5", "P-6"]);
     expect(laneCells(lanes[0]!, "ready").map((c) => c.id)).toEqual(["P-2"]);
-    expect(alsoIn("P-2", "DRAFT_NEW", versions).map((x) => x.id)).toEqual(["DRAFT_OLD"]);
-    expect(alsoIn("P-1", "REL", versions)).toEqual([]);
+    expect(alsoIn(cards[1]!, "version:vnext")).toEqual(["1.0.0"]);
+    expect(alsoIn(cards[2]!, "version:vnext")).toEqual([]);
   });
 
-  it("says what a drag between lanes does", () => {
-    // From one draft to another: remove and add; the card is in no other lane version.
-    expect(laneMove("P-3", "DRAFT_NEW", "DRAFT_OLD", versions)).toMatchObject({ remove: { id: "DRAFT_NEW" }, add: { id: "DRAFT_OLD" }, others: [], refused: null });
-    // A card in two versions: the page asks first.
-    expect(laneMove("P-2", "DRAFT_NEW", NO_VERSION_LANE, versions).others.map((x) => x.id)).toEqual(["DRAFT_OLD"]);
-    expect(laneMove("P-2", "DRAFT_NEW", NO_VERSION_LANE, versions).add).toBeUndefined();
-    // Into a draft from "No version": add only.
-    const m = laneMove("P-6", NO_VERSION_LANE, "DRAFT_NEW", versions);
-    expect(m.remove).toBeUndefined();
-    expect(m.add?.id).toBe("DRAFT_NEW");
-    // A version in review, approved, or released takes no card change.
-    expect(laneMove("P-4", "REVIEW", "DRAFT_NEW", versions).refused).toMatch(/in review/);
-    expect(laneMove("P-6", NO_VERSION_LANE, "APP", versions).refused).toMatch(/approved/);
+  it("keeps the No version lane on a board with no version label", () => {
+    const lanes = buildLanes([card("A"), card("B", ["bug"])], true);
+    expect(lanes.map((l) => l.key)).toEqual([NO_VERSION_LANE]);
+    expect(lanes[0]!.cards).toHaveLength(2);
   });
 
-  it("makes the version calls of a drag between lanes: remove, then add", () => {
-    expect(laneMovePatches("P-3", laneMove("P-3", "DRAFT_NEW", "DRAFT_OLD", versions))).toEqual([
-      { version: "DRAFT_NEW", patch: { remove_cards: ["P-3"] } },
-      { version: "DRAFT_OLD", patch: { add_cards: ["P-3"] } },
-    ]);
-    expect(laneMovePatches("P-2", laneMove("P-2", "DRAFT_NEW", NO_VERSION_LANE, versions))).toEqual([{ version: "DRAFT_NEW", patch: { remove_cards: ["P-2"] } }]);
-    expect(laneMovePatches("P-6", laneMove("P-6", NO_VERSION_LANE, "DRAFT_OLD", versions))).toEqual([{ version: "DRAFT_OLD", patch: { add_cards: ["P-6"] } }]);
+  it("changes the version labels of a card on a drag between lanes", () => {
+    expect(laneMoveLabels(["feature", "version:vnext"], "version:vnext", "version:1.0.0")).toEqual(["feature", "version:1.0.0"]);
+    expect(laneMoveLabels(["version:vnext", "version:1.0.0"], "version:1.0.0", NO_VERSION_LANE)).toEqual(["version:vnext"]);
+    expect(laneMoveLabels(["bug"], NO_VERSION_LANE, "version:vnext")).toEqual(["bug", "version:vnext"]);
+    // Into a lane whose label the card has already: only the source label goes.
+    expect(laneMoveLabels(["version:vnext", "version:1.0.0"], "version:vnext", "version:1.0.0")).toEqual(["version:1.0.0"]);
+    // No change: the same lane, or the plain board.
+    expect(laneMoveLabels(["version:vnext"], "version:vnext", "version:vnext")).toBeNull();
+    expect(laneMoveLabels([], ALL_LANE, ALL_LANE)).toBeNull();
   });
 
   it("maps a drop in a lane cell to the column index", () => {
-    const col = [card("A", "r", 0), card("B", "r", 1), card("C", "r", 2), card("D", "r", 3)];
+    const col = [card("A", [], "r", 0), card("B", [], "r", 1), card("C", [], "r", 2), card("D", [], "r", 3)];
     const cell = [col[1]!, col[3]!];
     expect(columnIndex(cell, col, 0)).toBe(1);
     expect(columnIndex(cell, col, 1)).toBe(3);
@@ -119,23 +86,5 @@ describe("version lanes", () => {
     expect(s).toEqual({ collapsed: ["A"] });
     expect(toggleCollapsed(s, "A").collapsed).toEqual([]);
     expect(toggleCollapsed(s, "B").collapsed).toEqual(["A", "B"]);
-  });
-
-  it("shows a board with no version lane as a plain board", () => {
-    const none = buildLanes([], cards);
-    expect(none.map((l) => l.key)).toEqual([NO_VERSION_LANE]);
-    expect(none[0]!.cards).toHaveLength(cards.length);
-    expect(onlyNoVersion(none)).toBe(true);
-    // Only archived versions, or only an empty released one: still no version lane.
-    expect(onlyNoVersion(buildLanes([versions[6]!, v("OLD", "released", [], "2026-09-01")], cards))).toBe(true);
-    expect(onlyNoVersion(buildLanes(versions, cards))).toBe(false);
-  });
-
-  it("lists the versions of the toolbar menu and finds a version by ID or name", () => {
-    expect(menuVersions(versions, false).archived).toEqual([]);
-    expect(menuVersions(versions, true).archived.map((x) => x.id)).toEqual(["ARCH"]);
-    expect(findVersion(versions, "review")?.id).toBe("REVIEW");
-    expect(findVersion(versions, "REL")?.id).toBe("REL");
-    expect(findVersion(versions, undefined)).toBeUndefined();
   });
 });

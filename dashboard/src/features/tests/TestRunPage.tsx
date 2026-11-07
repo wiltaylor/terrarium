@@ -13,6 +13,7 @@ import { ago, bytes } from "../../lib/format";
 import { api } from "../../stores";
 import { CASE_ICON, caseDetails, compareSections, countsText, defaultFailedOnly, failing, groupBySuite, shortCommit, STATUS_TONE, testDuration } from "./model";
 import { CountsBar, runHref, RunStatusChip } from "./parts";
+import { labelHref } from "../board/versionLabels";
 
 export default function TestRunPage() {
   const params = useParams<{ project: string; id: string }>();
@@ -113,7 +114,7 @@ export default function TestRunPage() {
   const links = async (patch: Parameters<typeof api.testRuns.links>[1]) => {
     try {
       const s = await api.testRuns.links(params.id, patch);
-      setRun((r) => (r ? { ...r, cards: s.cards, versions: s.versions } : r));
+      setRun((r) => (r ? { ...r, cards: s.cards, labels: s.labels } : r));
       return true;
     } catch (e) {
       setError(e);
@@ -192,11 +193,13 @@ export default function TestRunPage() {
                       </span>
                     )}
                   </For>
-                  <For each={r().versions}>
-                    {(v) => (
+                  <For each={r().labels}>
+                    {(l) => (
                       <span class="chip info">
-                        <A href={`/p/${p()}/board?version=${encodeURIComponent(v.id)}`}>{v.name}</A>
-                        <button type="button" class="ghost small" aria-label={`Unlink ${v.name}`} title={`Unlink ${v.name}`} onClick={() => void links({ remove_versions: [v.id] })}>
+                        <Show when={labelHref(r().project, l)} fallback={l}>
+                          {(href) => <A href={href()}>{l}</A>}
+                        </Show>
+                        <button type="button" class="ghost small" aria-label={`Unlink ${l}`} title={`Unlink ${l}`} onClick={() => void links({ remove_labels: [l] })}>
                           ×
                         </button>
                       </span>

@@ -1,15 +1,13 @@
-// The Cards tab (lanes.ts): one lane for each version that is not archived, and a last lane "No version". On a wide screen the lanes are rows of one grid, under one row of
-// column heads. On a phone (one column at a time) each column holds the lanes as sections that collapse; a
-// phone has no drag and drop, so the Versions field of the card drawer moves a card between lanes. A board
-// with no version lane shows the "No version" lane with no lane head, as a plain board.
+// The Cards tab (lanes.ts): one plain lane, or, grouped by version, one lane for each version label and a last
+// lane "No version". On a wide screen the lanes are rows of one grid, under one row of column heads. On a phone
+// (one column at a time) each column holds the lanes as sections that collapse; a phone has no drag and drop, so
+// the Labels field of the card drawer moves a card between lanes. The plain lane has no lane head.
 
 import { createSignal, For, type JSX, Show } from "solid-js";
-import type { Board, Card, Column, Version } from "../../api/types";
+import type { Board, Card, Column } from "../../api/types";
 import { cardsIn } from "../../stores/board";
 import { columnTitle, overLimit } from "./columns";
-import { alsoIn, type Lane, laneCells, NO_VERSION_LANE, onlyNoVersion } from "./lanes";
-import { VERSION_CHIP } from "./versions";
-import { humanize } from "../../lib/format";
+import { alsoIn, isPlain, type Lane, laneCells, NO_VERSION_LANE } from "./lanes";
 
 export interface LaneDrag {
   draggable: boolean;
@@ -23,7 +21,6 @@ type Drop = { lane: string; column: string; index: number };
 export function LanesBoard(props: {
   board: Board;
   lanes: Lane[];
-  versions: Version[];
   phone: boolean;
   collapsed: string[];
   onToggle: (laneKey: string) => void;
@@ -31,8 +28,8 @@ export function LanesBoard(props: {
   /** The column with the "+" (new card) button. */
   addColumn?: string;
   addButton: (col: Column) => JSX.Element;
-  card: (c: Card, lane: Lane, drag: LaneDrag, also: Version[]) => JSX.Element;
-  onOpenVersion: (id: string) => void;
+  /** `also`: the other version names of the card, in a version lane. */
+  card: (c: Card, lane: Lane, drag: LaneDrag, also: string[]) => JSX.Element;
   /** A drop: `index` is the place in the lane cell, without the dragged card. */
   onDrop: (cardId: string, fromLane: string, toLane: string, column: string, index: number) => void;
   boardRef?: (el: HTMLDivElement) => void;
@@ -49,10 +46,10 @@ export function LanesBoard(props: {
     });
     return i < 0 ? cards.length : i;
   };
-  // Only "No version": no lane head, and the lane cannot collapse.
-  const plain = () => onlyNoVersion(props.lanes);
+  // The board that is not grouped: no lane head, and the lane cannot collapse.
+  const plain = () => isPlain(props.lanes);
   const isCollapsed = (key: string) => !plain() && props.collapsed.includes(key);
-  const laneName = (l: Lane) => l.version?.name ?? "No version";
+  const laneName = (l: Lane) => l.version ?? (l.key === NO_VERSION_LANE ? "No version" : "Cards");
   const visibleCount = (l: Lane) => l.cards.filter(props.visible).length;
 
   /** One cell: the cards of a lane in a column, with the drop handlers. */
@@ -112,7 +109,7 @@ export function LanesBoard(props: {
                     setDrop(null);
                   },
                 },
-                alsoIn(c.id, p.lane.key, props.versions),
+                alsoIn(c, p.lane.key),
               )}
             </>
           )}
@@ -124,7 +121,7 @@ export function LanesBoard(props: {
     );
   };
 
-  /** The head of a lane: the collapse chevron, the version (opens its modal), the status, and the card count. */
+  /** The head of a lane: the collapse chevron, the version, and the card count. */
   const LaneHead = (p: { lane: Lane }) => (
     <div class="lane-head" data-lane-head={p.lane.key}>
       <button
@@ -136,16 +133,9 @@ export function LanesBoard(props: {
       >
         {isCollapsed(p.lane.key) ? "▸" : "▾"}
       </button>
-      <Show when={p.lane.version} fallback={<span class="lane-name muted">No version</span>}>
-        {(v) => (
-          <>
-            <button type="button" class="link lane-name" title={`Open version ${v().name}`} onClick={() => props.onOpenVersion(v().id)}>
-              {v().name}
-            </button>
-            <span class={`chip ${VERSION_CHIP[v().status]}`}>{humanize(v().status)}</span>
-          </>
-        )}
-      </Show>
+      <span class="lane-name" classList={{ muted: !p.lane.version }} title={p.lane.version ? `The cards with the label ${p.lane.key}` : "The cards with no version label"}>
+        {laneName(p.lane)}
+      </span>
       <span class="muted small">{visibleCount(p.lane) === 1 ? "1 card" : `${visibleCount(p.lane)} cards`}</span>
     </div>
   );
@@ -195,7 +185,7 @@ export function LanesBoard(props: {
         </div>
       }
     >
-      <div class="lanes" style={{ "--lane-cols": String(props.board.columns.length) }} role="grid" aria-label="Cards by version">
+      <div class="lanes" style={{ "--lane-cols": String(props.board.columns.length) }} role="grid" aria-label={plain() ? "Cards" : "Cards by version"}>
         <div class="lanes-heads">
           <For each={props.board.columns}>{(col) => <ColumnHead col={col} />}</For>
         </div>

@@ -34,7 +34,6 @@ import type {
   Session,
   Subscription,
   Target,
-  Version,
   Question,
   Wait,
   Watch,
@@ -63,7 +62,6 @@ export interface MockWorld {
   revisions: Record<string, (Revision & { body: string })[]>;
   artifacts: Artifact[];
   artifactBodies: Record<string, string>;
-  versions: Version[];
   subscriptions: Subscription[];
   /** Quota samples, oldest first (docs/api.md §16.3 `.../quota`). */
   quota: QuotaSample[];
@@ -650,7 +648,6 @@ type:bug sevrity=high
     "ART-5": "data:application/pdf;base64,JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL01lZGlhQm94WzAgMCAzMDAgMTQ0XS9QYXJlbnQgMiAwIFIvUmVzb3VyY2VzPDwvRm9udDw8L0YxIDQgMCBSPj4+Pi9Db250ZW50cyA1IDAgUj4+ZW5kb2JqCjQgMCBvYmo8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+PmVuZG9iago1IDAgb2JqPDwvTGVuZ3RoIDQ0Pj5zdHJlYW0KQlQgL0YxIDE4IFRmIDIwIDcwIFRkIChNb2NrIFBERikgVGogRVQKZW5kc3RyZWFtCmVuZG9iagp0cmFpbGVyPDwvUm9vdCAxIDAgUj4+CiUlRU9G",
   };
 
-  const versions: Version[] = [];
   const art = (n: number, name: string, content_type: string, links: Artifact["links"], min: number, kind: Artifact["kind"] = "file", embedded_in: string[] = []): Artifact => ({
     id: `ART-${n}`,
     key: `terrarium/ART-${n}`,
@@ -671,63 +668,24 @@ type:bug sevrity=high
 
   const artifacts: Artifact[] = [
     art(1, "dashboard.png", "image/png", [], 40, "file", ["terrarium/reports/phase-1"]),
-    art(2, "test-output.txt", "text/plain; charset=utf-8", [{ kind: "version", ref: fakeUlid("ver", 1), label: "v0.1.0" }], 41, "file", ["terrarium/reports/phase-1"]),
+    art(2, "test-output.txt", "text/plain; charset=utf-8", [{ kind: "label", ref: "version:0.1.0" }], 41, "file", ["terrarium/reports/phase-1"]),
     art(3, "coverage", "text/html; charset=utf-8", [], 42, "bundle", ["terrarium/reports/phase-1"]),
-    art(4, "release-notes.md", "text/markdown; charset=utf-8", [{ kind: "version", ref: fakeUlid("ver", 1), label: "v0.1.0" }], 50),
+    art(4, "release-notes.md", "text/markdown; charset=utf-8", [{ kind: "label", ref: "version:0.1.0" }], 50),
     art(5, "spec.pdf", "application/pdf", [], 60 * 3),
   ];
 
-  const cardRef = (id: string) => {
-    const c = cards.find((x) => x.id === id)!;
-    return { id: c.id, title: c.title, column: c.column };
+  // Versions are card labels (TER-58): `version:vnext` for the open version, `version:X.Y.Z` for a release.
+  // TER-11 is in 0.0.1 and 0.1.0: a card can have several version labels (a lane for each on the board).
+  const versionLabels: Record<string, string[]> = {
+    "TER-10": ["version:0.0.1"],
+    "TER-11": ["version:0.0.1", "version:0.1.0"],
+    "TER-12": ["version:0.1.0"],
+    "TER-16": ["version:0.1.0"],
+    "TER-13": ["version:vnext"],
+    "TER-17": ["version:vnext"],
+    "WEB-1": ["version:vnext"],
   };
-  const artRef = (id: string) => {
-    const a = artifacts.find((x) => x.id === id)!;
-    return { id: a.id, uid: a.uid, name: a.name, kind: a.kind, content_type: a.content_type, size: a.size };
-  };
-  const shopLead = who("shop-lead");
-  versions.push(
-    {
-      id: fakeUlid("ver", 0), project: "terrarium", name: "v0.0.1", status: "released", notes: "Empty daemon in Docker.",
-      cards: ["TER-10", "TER-11"].map(cardRef), artifacts: [],
-      reviews: [
-        { id: fakeUlid("rev", 1), author: lead.addr, author_name: lead.label, decision: "submitted", comment: "", created_at: ago(60 * 24 * 2.5) },
-        { id: fakeUlid("rev", 2), author: "operator", author_name: "operator", decision: "approved", comment: "Ship it.", created_at: ago(60 * 24 * 2) },
-      ],
-      created_by: lead.addr, created_by_name: lead.label, created_at: ago(60 * 24 * 3), submitted_at: ago(60 * 24 * 2.5), submitted_by: lead.addr,
-      decided_at: ago(60 * 24 * 2), decided_by: "operator", released_at: ago(60 * 24 * 2), git_ref: "v0.0.1",
-      url: `/p/terrarium/versions/${fakeUlid("ver", 0)}`,
-    },
-    {
-      id: fakeUlid("ver", 1), project: "terrarium", name: "v0.1.0", status: "in_review", notes: "Phase 1: one Claude agent end to end. See [[reports/phase-1]].",
-      // TER-11 is in v0.0.1 too: a card can be in several versions (two chips on the board).
-      cards: ["TER-11", "TER-12", "TER-16"].map(cardRef), artifacts: ["ART-2", "ART-4"].map(artRef),
-      reviews: [{ id: fakeUlid("rev", 3), author: lead.addr, author_name: lead.label, decision: "submitted", comment: "Please look.", created_at: ago(50) }],
-      created_by: lead.addr, created_by_name: lead.label, created_at: ago(60 * 2), submitted_at: ago(50), submitted_by: lead.addr, git_ref: "main@4f2a9c1",
-      url: `/p/terrarium/versions/${fakeUlid("ver", 1)}`,
-    },
-    {
-      // A draft: the board's version rows have a lane that takes cards.
-      id: fakeUlid("ver", 3), project: "terrarium", name: "v0.1.1", status: "draft", notes: "Phase 2: Codex and the board rows.",
-      cards: ["TER-13", "TER-17"].map(cardRef), artifacts: [], reviews: [],
-      created_by: lead.addr, created_by_name: lead.label, created_at: ago(30), git_ref: "main",
-      url: `/p/terrarium/versions/${fakeUlid("ver", 3)}`,
-    },
-    {
-      // Archived: no lane on the board, and not in the default list.
-      id: fakeUlid("ver", 4), project: "terrarium", name: "spike-pty", status: "rejected", notes: "A PTY spike that we did not keep.",
-      cards: ["TER-10"].map(cardRef), artifacts: [],
-      reviews: [{ id: fakeUlid("rev", 4), author: "operator", author_name: "operator", decision: "rejected", comment: "Not the way.", created_at: ago(60 * 24 * 4) }],
-      created_by: lead.addr, created_by_name: lead.label, created_at: ago(60 * 24 * 5), decided_at: ago(60 * 24 * 4), decided_by: "operator",
-      archived: true, archived_at: ago(60 * 24 * 3), archived_by: "operator",
-      url: `/p/terrarium/versions/${fakeUlid("ver", 4)}`,
-    },
-    {
-      id: fakeUlid("ver", 2), project: "webshop", name: "demo-2026-10-31", status: "draft", notes: "Demo build for Halloween.",
-      cards: ["WEB-1"].map(cardRef), artifacts: [], reviews: [], created_by: shopLead.addr, created_by_name: shopLead.label, created_at: ago(60 * 6),
-      url: `/p/webshop/versions/${fakeUlid("ver", 2)}`,
-    },
-  );
+  for (const c of cards) for (const l of versionLabels[c.id] ?? []) if (!c.labels.includes(l)) c.labels.push(l);
 
   const win = (window: string, used_pct: number, resets: number, readMin = 1) => ({ window, used_pct, resets_at: ahead(resets), at: ago(readMin) });
   const subBase = { source: "api" as const, created_at: ago(60 * 24 * 9), updated_at: ago(60), has_api_key: false, held_agents: 0, agents: [] };
@@ -850,7 +808,7 @@ type:bug sevrity=high
   const mail: Message[] = [
     msg(fakeUlid("msg", 1), fakeUlid("th", 6), "runner-dev", "operator", "Mock: hostile mail body", `This body must show as text. ${hostile}`, "read", 90, readBy("operator")),
     msg(fakeUlid("msg", 2), fakeUlid("th", 3), "shop-lead", "project:terrarium", "bug: terrarium card ls ignores --column", "Running `terrarium card ls --column ready` lists every card. Seen from webshop.", "delivered", 70),
-    msg(fakeUlid("msg", 3), fakeUlid("th", 2), "lead", "operator", "v0.1.0 ready for review", "Version v0.1.0 is in review. Open Versions in the dashboard.", "delivered", 50),
+    msg(fakeUlid("msg", 3), fakeUlid("th", 2), "lead", "operator", "0.1.0 ready for review", "The cards with the label version:0.1.0 are in review. The board shows them with the version filter 0.1.0.", "delivered", 50),
     msg(fakeUlid("msg", 4), fakeUlid("th", 4), "runner-dev", "lead", "PTY resize approach", "Going with SIGWINCH via portable-pty. Shout if you disagree.", "replied", 45, readBy("lead")),
     // A loop: seven agent replies with no operator input. The seventh is held,
     // and the daemon tells the operator (docs/api.md §6.2, limit 6).
@@ -963,7 +921,7 @@ type:bug sevrity=high
   const world: MockWorld = {
     schedules: sched.schedules, scheduleRuns: sched.runs, webhookDeliveries: sched.deliveries, eventSources: seedEventSources(now), eventSourceSecrets: {}, templates: seedTemplates(now),
     projects, repos, agents, sessions, removedAgents: [], pins: [], transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
-    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, heldMail: [fakeUlid("msg", 11)], targets, hostSnapshots, leases, ...waitSeed, hosts, hostTokens, audit, seq,
+    cards, memories, links, pages, revisions, artifacts, artifactBodies, subscriptions, quota, usage, holds: [], apiKeys, mail, heldMail: [fakeUlid("msg", 11)], targets, hostSnapshots, leases, ...waitSeed, hosts, hostTokens, audit, seq,
   };
   // Ephemeral agents of terrarium/lead (./spawns.ts).
   seedSpawns(world, now);

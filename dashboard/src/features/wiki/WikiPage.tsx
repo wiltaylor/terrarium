@@ -55,7 +55,6 @@ export default function WikiPage() {
 
   const [tree, { refetch: refetchTree }] = createResource(() => ({ p: params.project, q: q() }), (k) => api.wiki.tree(k.p, k.q ? { q: k.q } : {}));
   const [allPages, { refetch: refetchAll }] = createResource(() => params.project, (p) => api.wiki.tree(p));
-  const [versions] = createResource(() => params.project, (p) => api.versions.list(p).catch(() => []));
   const [artifacts] = createResource(() => params.project, (p) => api.artifacts.list(p).catch((): Artifact[] => []));
   // The page key is `project/path` (docs/api.md §11.1).
   const [page, { mutate: setPage }] = createResource(
@@ -85,7 +84,6 @@ export default function WikiPage() {
     return renderWiki(p.body, {
       project: params.project,
       pages: new Set((allPages() ?? []).map((x) => x.path)),
-      versions: new Set((versions() ?? []).map((v) => v.name)),
       cardPrefixes: new Set(Object.keys(prefixes)),
       prefixProject: prefixes,
       artifactUrl: (id) => artifactUrls()?.[id],

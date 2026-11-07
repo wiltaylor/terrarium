@@ -13,6 +13,10 @@ use terrariumd::api::Shared;
 use terrariumd::events::{EventDraft, EventFilter};
 use terrariumd::store::schedules;
 
+/// The deadline of the waits for the trigger engine. Only a failing test
+/// waits it out.
+const WAIT: Duration = Duration::from_secs(60);
+
 fn state(td: &TestDaemon) -> Shared {
     td.daemon.as_ref().unwrap().state.clone()
 }
@@ -48,7 +52,10 @@ fn ci(repo: &str, branch: &str) -> Value {
 /// the runs it started can end.
 async fn settle(td: &TestDaemon, seq: i64) {
     let st = state(td);
-    for _ in 0..500 {
+    // A deadline, not a count of tries: each read is slow on a loaded
+    // machine.
+    let start = std::time::Instant::now();
+    while start.elapsed() < WAIT {
         let at = st
             .db
             .read(|c| Ok(schedules::cursor(c)?.unwrap_or(0)))
@@ -89,12 +96,15 @@ async fn runs(td: &TestDaemon, sid: &str) -> Vec<Value> {
 
 /// The runs of `sid` once it has `want` of them and none is `running`, then
 /// after a short pause, so a late extra run shows too. The runs of a
-/// trigger start after the pass that moves the cursor, so `settle` alone
-/// does not mean they have a row yet. Returns the last read after 5 s.
+/// trigger start after the pass that moves the cursor, and the runs of one
+/// trigger go one after another, so `settle` alone does not mean each run
+/// has a row, or that a row has its output. Returns the last read after the
+/// deadline, so the assertion of the caller shows it.
 async fn settled_runs(td: &TestDaemon, sid: &str, want: usize) -> Vec<Value> {
     let st = state(td);
     let owned = sid.to_owned();
-    for _ in 0..250 {
+    let start = std::time::Instant::now();
+    while start.elapsed() < WAIT {
         let s = owned.clone();
         let running: i64 = st
             .db
@@ -183,7 +193,7 @@ async fn a_ci_failure_mails_the_agent_with_the_event_as_quoted_data() {
     let last = emit(&td, "ops", "ci.run.failed", ci("ops/infra", "main")).await;
     settle(&td, last).await;
 
-    let rs = runs(&td, &sid).await;
+    let rs = settled_runs(&td, &sid, 1).await;
     assert_eq!(rs.len(), 1, "{rs:?}");
     let run = &rs[0];
     assert_eq!(run["status"], "ok", "{run}");
@@ -191,7 +201,7 @@ async fn a_ci_failure_mails_the_agent_with_the_event_as_quoted_data() {
     assert_eq!(run["event_seq"], seq);
     assert_eq!(run["event"]["kind"], "ci.run.failed");
     assert_eq!(run["actor"], SOURCE);
-    let global_runs = runs(&td, &gid).await;
+    let global_runs = settled_runs(&td, &gid, 3).await;
     assert_eq!(
         global_runs.len(),
         3,
@@ -445,11 +455,11 @@ async fn dedupe_escalation_reset_and_the_rate_limit() {
     settle(&td, s).await;
 
     // Dedupe: one run per repo:branch in the window.
-    let d = runs(&td, &dd).await;
+    let d = settled_runs(&td, &dd, 2).await;
     assert_eq!(d.len(), 2, "{d:?}");
     // Rate: two runs in the hour, then `skipped: rate limit`. The engine
     // writes a skip in its pass, before the runs start: sort by event.
-    let mut r = runs(&td, &rate).await;
+    let mut r = settled_runs(&td, &rate, 3).await;
     r.sort_by_key(|r| r["event_seq"].as_i64());
     let st: Vec<&str> = r.iter().map(|r| r["status"].as_str().unwrap()).collect();
     assert_eq!(st, ["ok", "ok", "skipped"], "{r:?}");
@@ -459,7 +469,7 @@ async fn dedupe_escalation_reset_and_the_rate_limit() {
 
     // Escalation: 1 runs the action; 2 mails the operator once; 3 is
     // quiet; a success resets; the next failure runs the action again.
-    let e = runs(&td, &esc).await;
+    let e = settled_runs(&td, &esc, 2).await;
     assert_eq!(e.len(), 2, "{e:?}");
     assert_eq!(e[0]["status"], "ok");
     assert!(e[0]["summary"].as_str().unwrap().starts_with("mail "));
@@ -471,7 +481,11 @@ async fn dedupe_escalation_reset_and_the_rate_limit() {
     assert_eq!(e[1]["output"]["to"], "operator");
     let s = emit(&td, "terra", "ci.run.failed", ci("wil/terrarium", "main")).await;
     settle(&td, s).await;
-    assert_eq!(runs(&td, &esc).await.len(), 2, "one mail for each streak");
+    assert_eq!(
+        settled_runs(&td, &esc, 2).await.len(),
+        2,
+        "one mail for each streak"
+    );
     emit(
         &td,
         "terra",
@@ -481,7 +495,7 @@ async fn dedupe_escalation_reset_and_the_rate_limit() {
     .await;
     let s = emit(&td, "terra", "ci.run.failed", ci("wil/terrarium", "main")).await;
     settle(&td, s).await;
-    let e = runs(&td, &esc).await;
+    let e = settled_runs(&td, &esc, 3).await;
     assert_eq!(e.len(), 3, "{e:?}");
     assert!(e[2]["summary"].as_str().unwrap().starts_with("mail "));
 }
@@ -530,8 +544,8 @@ async fn the_loop_guard_and_the_chain_depth() {
         total = n;
     }
     // Depth 0 starts both; each depth 1-3 mail starts the other trigger.
-    assert_eq!(runs(&td, &a).await.len(), 4);
-    assert_eq!(runs(&td, &b).await.len(), 4);
+    assert_eq!(settled_runs(&td, &a, 4).await.len(), 4);
+    assert_eq!(settled_runs(&td, &b, 4).await.len(), 4);
     let depth = state(&td)
         .db
         .read(|c| {
@@ -636,7 +650,7 @@ async fn card_actions_open_comment_and_close() {
     emit(&td, "terra", "ci.run.failed", ci("wil/terrarium", "main")).await;
     let s = emit(&td, "terra", "ci.run.failed", ci("wil/terrarium", "main")).await;
     settle(&td, s).await;
-    let o = runs(&td, &open).await;
+    let o = settled_runs(&td, &open, 2).await;
     assert_eq!(o.len(), 2, "{o:?}");
     assert_eq!(o[0]["output"]["op"], "open", "{o:?}");
     assert_eq!(o[1]["output"]["op"], "comment");
@@ -664,7 +678,7 @@ async fn card_actions_open_comment_and_close() {
     )
     .await;
     settle(&td, s).await;
-    let c = runs(&td, &close).await;
+    let c = settled_runs(&td, &close, 1).await;
     assert_eq!(c[0]["status"], "ok", "{c:?}");
     assert_eq!(c[0]["output"]["card"], card_id.as_str());
     let card = td.get(&format!("/api/cards/{card_id}")).await;
@@ -678,13 +692,13 @@ async fn card_actions_open_comment_and_close() {
     )
     .await;
     settle(&td, s).await;
-    let c = runs(&td, &close).await;
-    assert_eq!(c[1]["status"], "ok");
+    let c = settled_runs(&td, &close, 2).await;
+    assert_eq!(c[1]["status"], "ok", "{c:?}");
     assert!(c[1]["output"]["card"].is_null());
     let s = emit(&td, "terra", "ci.run.failed", ci("wil/terrarium", "main")).await;
     settle(&td, s).await;
-    let o = runs(&td, &open).await;
-    assert_eq!(o[2]["output"]["op"], "open");
+    let o = settled_runs(&td, &open, 3).await;
+    assert_eq!(o[2]["output"]["op"], "open", "{o:?}");
     assert_ne!(o[2]["output"]["card"], card_id.as_str());
 }
 

@@ -170,6 +170,108 @@ async fn host_counts_respect_the_readers_project() {
 /// TER-105: an SSH target on an address of a host agent's machine counts
 /// on the host agent: `job-hosts` shows one host, and its cap holds across
 /// the host-agent target and the SSH target.
+/// TER-158 (D4): each card of the board and of `GET /api/cards/{id}` has
+/// its open job (kind, state, and for a queued job its place n of m) and
+/// the status of its assignee agent, so the tile does not read labels.
+#[tokio::test]
+async fn cards_carry_their_job_state_and_assignee_status() {
+    use terrariumd::store::jobs::{self, JobKind, NewJob};
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.agent("p", "w", json!({})).await;
+    let mut ids = Vec::new();
+    for title in ["running", "first", "second", "merge", "none"] {
+        let id = td
+            .post("/api/projects/p/cards", json!({"title": title}))
+            .await
+            .ok()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        ids.push(id);
+    }
+    td.post_empty_as("p/w", &format!("/api/cards/{}/claim", ids[4]))
+        .await
+        .ok();
+    let cards = ids.clone();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("operator", move |t| {
+            for (i, card) in cards.iter().take(4).enumerate() {
+                let j = jobs::create(
+                    t,
+                    NewJob {
+                        project: "p".into(),
+                        card: card.clone(),
+                        kind: if i == 3 {
+                            JobKind::Merge
+                        } else {
+                            JobKind::Validate
+                        },
+                        batch: Vec::new(),
+                        repo: "app".into(),
+                        branch: format!("b{i}"),
+                        commit: None,
+                        by_agent: None,
+                    },
+                )?;
+                if i == 0 {
+                    jobs::start(t, &j.id, "machine")?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let board = td.get("/api/projects/p/board").await.ok().clone();
+    let card = |id: &str| {
+        board["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let running = card(&ids[0]);
+    assert_eq!(running["job"]["state"], "running", "{running:#?}");
+    assert_eq!(running["job"]["kind"], "validate");
+    assert!(running["job"].get("place").is_none());
+    assert!(running["job"].get("queued").is_none());
+    // Jobs queued in the same millisecond keep the queue order of their
+    // IDs, so the two validations are 1 and 2 of 2 in some order. The
+    // merge has its own lane (TER-159), so it is 1 of 1.
+    let mut places = Vec::new();
+    for id in &ids[1..=2] {
+        let c = card(id);
+        assert_eq!(c["job"]["state"], "queued", "{c:#?}");
+        assert_eq!(c["job"]["queued"], 2);
+        places.push(c["job"]["place"].as_i64().unwrap());
+    }
+    places.sort_unstable();
+    assert_eq!(places, [1, 2]);
+    let merge = card(&ids[3]);
+    assert_eq!(merge["job"]["kind"], "merge");
+    assert_eq!(merge["job"]["state"], "queued", "{merge:#?}");
+    assert_eq!(merge["job"]["place"], 1);
+    assert_eq!(merge["job"]["queued"], 1);
+    let none = card(&ids[4]);
+    assert!(none.get("job").is_none(), "{none:#?}");
+    let w = td.get("/api/agents/p%2Fw").await.ok().clone();
+    assert_eq!(none["assignee_status"], w["status"]);
+    assert!(card(&ids[0]).get("assignee_status").is_none());
+
+    // One card has the same fields.
+    let one = td.get(&format!("/api/cards/{}", ids[1])).await.ok().clone();
+    assert_eq!(one["job"], card(&ids[1])["job"]);
+    let one = td.get(&format!("/api/cards/{}", ids[4])).await.ok().clone();
+    assert_eq!(one["assignee_status"], w["status"]);
+}
+
 #[tokio::test]
 async fn an_ssh_alias_of_a_host_agent_is_one_host() {
     use terrariumd::store::jobs::{self, JobKind, NewJob};
@@ -341,6 +443,8 @@ struct Lab {
     lead: String,
     /// The worker `p/w1`.
     w1: String,
+    /// The host listener of the daemon.
+    hosts_addr: std::net::SocketAddr,
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -379,32 +483,8 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
     let r = td.post("/api/hosts", json!({"name": "lab1"})).await;
     assert_eq!(r.status, 201, "{}", r.body);
     let token = r.body["token"].as_str().unwrap().to_owned();
-    let mut o = ClientOptions::new(format!("ws://{addr}/hosts/connect"), &token, "lab1");
-    o.capabilities = HostCapabilities {
-        shell: Some("/bin/sh".into()),
-        ..Default::default()
-    };
-    if let Some(d) = docker {
-        o.capabilities.docker = terrarium_core::protocol::ToolCapability {
-            present: true,
-            version: Some("29.8.0".into()),
-        };
-        o.docker_bin = d.display().to_string();
-    }
-    o.backoff_min = Duration::from_millis(50);
-    o.backoff_max = Duration::from_millis(200);
     let dirs = tempfile::tempdir().unwrap();
-    o.paths = terrarium_host::HostPaths {
-        work_dir: td.state.with_file_name("work"),
-        instances_dir: dirs.path().join("instances"),
-        repos_dir: dirs.path().join("repos"),
-    };
-    tokio::spawn(Client::new(o).run());
-    let start = Instant::now();
-    while td.get("/api/hosts/lab1").await.body["online"] != true {
-        assert!(start.elapsed() < DEADLINE, "lab1 never came online");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    connect_host(&td, addr, "lab1", &token, &dirs.path().join("lab1"), docker).await;
     td.project("p").await;
     td.project("q").await;
     // The columns of the delivery process, as on the terrarium board.
@@ -489,6 +569,44 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
         work,
         lead,
         w1,
+        hosts_addr: addr,
+    }
+}
+
+/// Connect a host agent `name` with `token` to the daemon's host listener
+/// `addr`, and wait until it is online. `dir` holds its instances and repos.
+async fn connect_host(
+    td: &TestDaemon,
+    addr: std::net::SocketAddr,
+    name: &str,
+    token: &str,
+    dir: &Path,
+    docker: Option<&Path>,
+) {
+    let mut o = ClientOptions::new(format!("ws://{addr}/hosts/connect"), token, name);
+    o.capabilities = HostCapabilities {
+        shell: Some("/bin/sh".into()),
+        ..Default::default()
+    };
+    if let Some(d) = docker {
+        o.capabilities.docker = terrarium_core::protocol::ToolCapability {
+            present: true,
+            version: Some("29.8.0".into()),
+        };
+        o.docker_bin = d.display().to_string();
+    }
+    o.backoff_min = Duration::from_millis(50);
+    o.backoff_max = Duration::from_millis(200);
+    o.paths = terrarium_host::HostPaths {
+        work_dir: td.state.with_file_name("work"),
+        instances_dir: dir.join("instances"),
+        repos_dir: dir.join("repos"),
+    };
+    tokio::spawn(Client::new(o).run());
+    let start = Instant::now();
+    while td.get(&format!("/api/hosts/{name}")).await.body["online"] != true {
+        assert!(start.elapsed() < DEADLINE, "{name} never came online");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -724,6 +842,58 @@ async fn a_green_validation_moves_the_card_to_review() {
     let j = jobs.iter().find(|j| j["state"] == "passed").unwrap();
     assert_eq!(j["head"].as_str().unwrap(), head);
     assert_eq!(j["exit_code"], 0);
+}
+
+/// TER-165: the daemon finds the columns by role. `validating` is renamed
+/// and keeps its role. `review` has no role and `qa` has it, so the role
+/// wins over the name. `accepted` has no role, so its name is the fallback.
+#[tokio::test]
+async fn the_job_queue_finds_its_columns_by_role_then_by_name() {
+    let lab = lab(2).await;
+    let r = lab
+        .td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"},
+                {"name": "checking", "rename_from": "validating", "role": "validating"},
+                // A column that omits `role` keeps its old role: the default
+                // board gives `review` the role `review`, so say null.
+                {"name": "review", "role": null}, {"name": "qa", "role": "review"},
+                {"name": "accepted", "role": null},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // A validate pass: the card is in the role column, then in `qa`.
+    let head = lab.branch("ter-a", "next", &[("OK", "yes\n")]);
+    let a = lab.card("by role", "ter-a").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{a}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let c = lab.card_of(&a).await;
+    assert_eq!(c["column"], "checking", "{c}");
+    lab.until_card(&a, "qa", |c| c["column"] == "qa").await;
+    // A merge pass: the name `accepted` is the fallback.
+    let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
+    let b = lab.card("by name", "ter-c").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{b}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["kind"], "merge");
+    lab.until_card(&b, "accepted", |c| c["column"] == "accepted")
+        .await;
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    assert_ne!(next, head);
 }
 
 /// TER-107: a validate leaves one `validation:*` label and one `by:` label,
@@ -1398,6 +1568,39 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
     );
 }
 
+/// TER-103: the target holds no credential and no push repo. The recipe
+/// of a merge finds no `.ssh` or `.push` dir beside its clone, no git
+/// credential env, and no remote in its clone. It deletes the job ref in
+/// its clone, and the merge still pushes the recorded commit: the push
+/// runs from the daemon's repo.
+#[tokio::test]
+async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
+    let lab = lab(2).await;
+    let before = git(&lab.origin, &["rev-parse", "next"]);
+    let recipe = "test -f OK \
+         && ! ls -a .. | grep -E '[.](ssh|push)$' \
+         && ! env | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
+         && test -z \"$(git remote)\" \
+         && test \"$(git rev-parse refs/job/merge)\" = \"$(git rev-parse HEAD)\" \
+         && git update-ref -d refs/job/merge \
+         && rm -rf .git/objects/pack";
+    let job = merge_with_recipe(&lab, "ter-m3", recipe).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    assert_ne!(next, before);
+    assert_eq!(job["head"].as_str().unwrap(), next, "{job:#}");
+    assert_eq!(
+        git(&lab.origin, &["log", "-1", "--format=%s", "next"]),
+        "Merge ter-m3 onto next"
+    );
+    // The daemon removed its repo of the job.
+    let state_jobs = lab.td.daemon.as_ref().unwrap().state.state_dir.join("jobs");
+    let left: Vec<_> = std::fs::read_dir(state_jobs.join("p"))
+        .map(|d| d.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+}
+
 /// TER-159: merges have their own lane. With 1 slot, a validate job queued
 /// after a merge starts beside it and passes while the merge runs, and a
 /// second merge waits for the first.
@@ -1512,7 +1715,10 @@ case "$1" in
   exec) shift
     while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;; *) break ;; esac; done
     shift
-    ( exec setsid "$@" ) &
+    # An async list gets /dev/null on stdin: keep the real one (`-i`, the
+    # bundle of a job) on fd 3 and hand it on.
+    exec 3<&0
+    ( exec setsid "$@" <&3 3<&- ) &
     wait $! ;;
 esac
 "#,
@@ -2041,4 +2247,259 @@ async fn a_merge_that_fails_without_a_conflict_drops_only_that_card() {
         next_merges(&lab),
         ["Merge ter-u1 onto next", "Merge ter-u3 onto next"]
     );
+}
+
+/// Set the delivery of `p`: `target`, one slot, a recipe that sleeps on
+/// a branch with `SLOW`.
+async fn deliver_to(lab: &Lab, target: &str) {
+    let work_dir = lab._dirs.path().join(format!("jobs-{target}"));
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": target, "recipe": "if test -f SLOW; then sleep 8; fi; test -f OK",
+                   "slots": 1, "next_repos": ["app"],
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// Queue a validation of a branch with `OK` (and `SLOW` when `slow`) on
+/// card `title`, as `w1`. Returns the card.
+async fn queue_green(lab: &Lab, branch: &str, title: &str, slow: bool) -> String {
+    let mut files = vec![("OK", "yes\n")];
+    if slow {
+        files.push(("SLOW", "yes\n"));
+    }
+    let head = lab.branch(branch, "next", &files);
+    let id = lab.card(title, branch).await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    id
+}
+
+/// Queue a job for a card while the target `p-box` is up, behind a slow
+/// job in the one slot, then point the delivery at `target`: the card's
+/// job is picked for `target` when the slow job ends. The validate call
+/// reads the branch head on the target, so a job is only queued while its
+/// target is up (as in TER-160: queued before the outage). Returns the
+/// card.
+async fn queue_for(lab: &Lab, target: &str) -> String {
+    deliver_to(lab, "p-box").await;
+    let blocker = queue_green(lab, "ter-slow", "slow blocker", true).await;
+    let start = Instant::now();
+    while !lab.jobs().await.iter().any(|j| j["state"] == "running") {
+        assert!(start.elapsed() < DEADLINE, "the blocker never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let id = queue_green(lab, "ter-wait", "waits for its host", false).await;
+    deliver_to(lab, target).await;
+    lab.until_card(&blocker, "review", |c| c["column"] == "review")
+        .await;
+    id
+}
+
+/// The job of card `id`.
+async fn job_of(lab: &Lab, id: &str) -> Vec<Value> {
+    lab.jobs()
+        .await
+        .into_iter()
+        .filter(|j| j["card"] == id)
+        .collect()
+}
+
+/// TER-160: the host agent of the target is offline when the queue picks
+/// the job. The job stays queued with no attempt used and the card does
+/// not move; the job starts once the host agent connects, and passes.
+#[tokio::test]
+async fn a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects() {
+    let lab = lab(2).await;
+    let td = &lab.td;
+    let r = td.post("/api/hosts", json!({"name": "lab2"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let token = r.body["token"].as_str().unwrap().to_owned();
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "p-off", "kind": "host", "host": "lab2", "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let id = queue_for(&lab, "p-off").await;
+    // More than two ticks of the queue (5 s each).
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let jobs = job_of(&lab, &id).await;
+    assert_eq!(jobs.len(), 1, "no rerun, no second job: {jobs:?}");
+    assert_eq!(jobs[0]["state"], "queued", "{jobs:?}");
+    assert_eq!(jobs[0]["attempt"], 1, "{jobs:?}");
+    assert!(jobs[0]["started_at"].is_null(), "{jobs:?}");
+    let c = lab.card_of(&id).await;
+    assert_eq!(c["column"], "validating", "{c}");
+    assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
+    assert!(labels(&c).contains(&"validation:queued".to_owned()), "{c}");
+    assert!(
+        !c["body"].as_str().unwrap().contains("Validation failed"),
+        "{c}"
+    );
+    // The host agent connects: the job starts and passes.
+    connect_host(
+        td,
+        lab.hosts_addr,
+        "lab2",
+        &token,
+        &lab._dirs.path().join("lab2"),
+        None,
+    )
+    .await;
+    lab.until_card(&id, "review", |c| c["column"] == "review")
+        .await;
+    lab.until_idle().await;
+    let jobs = job_of(&lab, &id).await;
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert_eq!(jobs[0]["state"], "passed", "{jobs:?}");
+    assert_eq!(jobs[0]["attempt"], 1, "{jobs:?}");
+}
+
+/// TER-160: an ssh target that refuses the connection before the recipe
+/// starts. The job goes back to the queue with no attempt used, the tail
+/// says why it waits, and the card does not move.
+#[tokio::test]
+async fn a_refused_ssh_connect_puts_the_job_back_in_the_queue() {
+    let lab = lab(2).await;
+    let td = &lab.td;
+    // Port 1 on the loopback: nothing listens, the connect is refused.
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "p-ssh", "kind": "ssh", "address": "ci@127.0.0.1", "port": 1,
+                   "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let id = queue_for(&lab, "p-ssh").await;
+    let start = Instant::now();
+    let job = loop {
+        let jobs = job_of(&lab, &id).await;
+        assert_eq!(jobs.len(), 1, "no rerun, no second job: {jobs:?}");
+        let j = jobs[0].clone();
+        assert_ne!(j["state"], "failed", "{j}");
+        let jid = j["id"].as_str().unwrap();
+        let full = td.get(&format!("/api/jobs/{jid}")).await.ok().clone();
+        if full["state"] == "queued"
+            && full["tail"]
+                .as_str()
+                .is_some_and(|t| t.contains("waits for its host"))
+        {
+            break full;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the job never went back: {full}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let tail = job["tail"].as_str().unwrap();
+    assert!(tail.contains("Connection refused"), "{tail}");
+    assert_eq!(job["attempt"], 1, "{job}");
+    assert!(job["started_at"].is_null(), "{job}");
+    let c = lab.card_of(&id).await;
+    assert_eq!(c["column"], "validating", "{c}");
+    assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
+    let l = labels(&c);
+    assert!(l.contains(&"validation:queued".to_owned()), "{l:?}");
+    assert!(!l.contains(&"validation:running".to_owned()), "{l:?}");
+    // It waits for its next try: still queued and no attempt used after a
+    // tick of the queue.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let jobs = job_of(&lab, &id).await;
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert_eq!(jobs[0]["state"], "queued", "{jobs:?}");
+    assert_eq!(jobs[0]["attempt"], 1, "{jobs:?}");
+}
+
+/// Validate the card on `branch` with the current recipe and wait for
+/// the end of its job.
+async fn validate_card(lab: &Lab, branch: &str, head: &str) -> Value {
+    let id = lab.card(branch, branch).await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    jobs.into_iter().find(|j| j["card"] == id.as_str()).unwrap()
+}
+
+/// TER-100: the recipe gets the job kind, the head, the base, and the
+/// file of the changed paths. A validate job diffs against the merge-base
+/// with `next` (a later change on `next` is not in the list), a merge job
+/// against `next` before the merge. Without `next`, no base and no list.
+#[tokio::test]
+async fn the_recipe_gets_the_job_kind_and_the_changed_files() {
+    let lab = lab(2).await;
+    let out = lab._dirs.path().join("env");
+    std::fs::create_dir_all(&out).unwrap();
+    let recipe = format!(
+        "test -f OK && f='{}/'\"$TERRARIUM_JOB_KIND-$TERRARIUM_JOB_ID\" \
+         && printf 'kind=%s\\nhead=%s\\nbase=%s\\nfiles=%s\\n' \"$TERRARIUM_JOB_KIND\" \
+            \"$TERRARIUM_HEAD\" \"${{TERRARIUM_BASE-unset}}\" \"${{TERRARIUM_CHANGED_FILES-unset}}\" > \"$f\" \
+         && if [ -n \"${{TERRARIUM_CHANGED_FILES:-}}\" ]; then cat \"$TERRARIUM_CHANGED_FILES\" >> \"$f\"; fi",
+        out.display()
+    );
+    set_recipe(&lab, &recipe).await;
+    let fork = git(&lab.origin, &["rev-parse", "next"]);
+    let head = lab.branch("ter-env", "next", &[("OK", "yes\n"), ("a.rs", "a\n")]);
+    // `next` moves after the fork: its change is not the card's.
+    lab.branch("ter-other", "next", &[("other", "x\n")]);
+    git(&lab.work, &["push", "-q", "origin", "ter-other:next"]);
+    let moved = git(&lab.origin, &["rev-parse", "next"]);
+    let read = |job: &Value| {
+        let name = format!(
+            "{}-{}",
+            job["kind"].as_str().unwrap(),
+            job["id"].as_str().unwrap()
+        );
+        std::fs::read_to_string(out.join(name)).unwrap()
+    };
+
+    let job = validate_card(&lab, "ter-env", &head).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let text = read(&job);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "kind=validate", "{text}");
+    assert_eq!(lines[1], format!("head={head}"), "{text}");
+    assert_eq!(lines[2], format!("base={fork}"), "{text}");
+    assert!(
+        lines[3].starts_with("files=/") && lines[3].ends_with("/.git/terrarium/changed-files"),
+        "{text}"
+    );
+    assert_eq!(lines[4..], ["OK", "a.rs"], "{text}");
+
+    let job = merge_with_recipe(&lab, "ter-env2", &recipe).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let text = read(&job);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "kind=merge", "{text}");
+    assert_eq!(lines[2], format!("base={moved}"), "{text}");
+    assert_eq!(lines[4..], ["OK"], "{text}");
+
+    // No `next`: the job runs, without a base and a list.
+    git(&lab.work, &["push", "-q", "origin", ":next"]);
+    let job = validate_card(&lab, "ter-env", &head).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let text = read(&job);
+    assert!(text.contains("base=unset\nfiles=unset\n"), "{text}");
+    assert_eq!(text.lines().count(), 4, "{text}");
 }

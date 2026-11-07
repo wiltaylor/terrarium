@@ -285,6 +285,16 @@ pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
                 ));
             })
         }
+        ThreadCmd::Track { id } => {
+            let v = ctx.api.post(&format!("{}/track", path(id)), None).await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "thread {} is {}.",
+                    field(v, "id"),
+                    field(v, "status")
+                ));
+            })
+        }
         ThreadCmd::Ls { status, scope } => {
             let q = query([("status", status.clone()), ("scope", scope.clone())]);
             let v = ctx.api.get("/api/threads", q).await?;
