@@ -4,7 +4,34 @@ Instructions for agents that work in this repo.
 
 ## Validation
 
-One command gates a card:
+The worker validates its card before review. The merge queue runs the full
+suite once per batch. There is no `validating` column and no `terrarium card
+validate` for card work (operator, 2026-11-07).
+
+### The card check: the affected tests
+
+Run the checks that your changed files can reach, on a clean checkout of your
+pushed commit:
+
+```sh
+just ci::affected            # print the plan for HEAD against origin/next
+TERRARIUM_CHANGED_FILES=<file with the changed paths> just ci::validate-affected
+```
+
+`ci::validate-affected` runs `scripts/affected.py`: fmt, clippy on the changed
+crates, the test targets that the changed files can reach (with their reverse
+dependencies), the dashboard checks only when `dashboard/` changed, and the
+scripts tests only when `scripts/` changed. A change to `Cargo.toml`,
+`Cargo.lock`, a `build.rs`, the justfile or the CI files runs the full suite.
+The rules are in the header of `scripts/affected.py`.
+
+Write the changed paths with:
+
+```sh
+git diff --name-only --no-renames "$(git merge-base origin/next HEAD)" HEAD > /tmp/changed.txt
+```
+
+### The full suite
 
 ```sh
 just ci::validate
@@ -19,28 +46,23 @@ It runs, in this order, the same parts as the GitHub CI `check` job
 4. `ci::scripts-test`: the Python tests under `scripts/`
 5. `ci::dashboard-check`: `npm run check`, then the dashboard unit tests (`npm run test -- --run`) in `dashboard/`
 
+The merge queue (a batch merge job) runs it on the merged result. Run it
+yourself only when your change touches the build (see above).
+
 When `RESULTS_DIR` is set to an absolute path, `ci::test` also writes libtest
 JSON to `$RESULTS_DIR/rust.json`, and `ci::dashboard-check` writes JUnit XML to
 `$RESULTS_DIR/dashboard.xml`. Without `RESULTS_DIR` the output is the plain console output.
 
-The recipe sets `RUSTUP_TOOLCHAIN=1.97.1` (the toolchain CI pins) and the
+The recipes set `RUSTUP_TOOLCHAIN=1.97.1` (the toolchain CI pins) and the
 CI cargo env: `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`,
-`CARGO_PROFILE_TEST_DEBUG=0`. It fails wherever GitHub CI fails for these parts.
-It does not run the release, image, or version jobs, and it does not run `ci::compat`.
+`CARGO_PROFILE_TEST_DEBUG=0`. They do not run the release, image, or version
+jobs, and they do not run `ci::compat`.
 
-### Target and slots
+### Target
 
 - Target: `terrarium-helios-build`
-- Slot count: N=2. At most two validation runs are active on the target at once.
-  Do not start a third run. Keep other builds on the target filtered
-  (`-p <crate> --test <name>`) while two validations run.
-
-### Load and reruns
-
-A failure counts as load, not as a fail, when it is in tests that the card does
-not touch and the rerun either passes or fails in a different set of tests. The
-card then goes to review with both runs attached, and the lead decides. Do not
-edit unrelated tests to make a run pass.
+- At most one heavy run of yours at a time. Run builds under
+  `ionice -c3 nice -n19` with your own `CARGO_TARGET_DIR`.
 
 ### Run it on a clean checkout of a pushed commit
 
@@ -54,21 +76,25 @@ Validate the pushed commit, not your working tree:
    ```
 
 3. Check that the checkout HEAD is the pushed commit.
-4. Run the recipe there, as a named run. `RESULTS_DIR` is in the shared
-   workspace, so the sandbox CLI can read the files:
+4. Run the check there, as a named run:
 
    ```sh
-   terrarium run terrarium-helios-build --name <name> -- sh -c 'cd /src/<agent>-<card> && RESULTS_DIR=/work/terrarium/<agent>/results/<card-id> just ci::validate'
+   terrarium run terrarium-helios-build --name <name> -- sh -c 'cd /src/<agent>-<card> && git diff --name-only --no-renames "$(git merge-base origin/next HEAD)" HEAD > /tmp/<card>-changed.txt && TERRARIUM_CHANGED_FILES=/tmp/<card>-changed.txt ionice -c3 nice -n19 just ci::validate-affected'
    ```
 
-5. Push the results from the sandbox:
+5. Push the results with `terrarium test push <file> --card <card-id>`.
 
-   ```sh
-   terrarium test push /work/terrarium/<agent>/results/<card-id>/rust.json --card <card-id>
-   terrarium test push /work/terrarium/<agent>/results/<card-id>/dashboard.xml --card <card-id>
-   ```
+### Load and reruns
 
-A run takes 40 to 75 minutes on the build target under load.
+A failure counts as load, not as a fail, when it is in tests that the card does
+not touch and the rerun either passes or fails in a different set of tests. Say
+so in the move comment with both runs. Do not edit unrelated tests to make a
+run pass.
+
+### Packaged defaults
+
+A change to a file under `defaults/` needs `just defaults::manifest`, and the
+updated `defaults/manifest.json` committed with it.
 
 ## Branches
 
@@ -83,9 +109,12 @@ git checkout -b <card-id-lowercase> origin/next
 
 1. Claim the card: `terrarium card claim <id> --eta <duration>`. This moves it to in progress.
 2. Branch from `next` (see above). Commit with a conventional subject, and push the branch.
-3. Run the validation (see above) on a clean checkout of the pushed commit.
-4. Move the card to `validating` with the commit hash in the comment.
-5. Review: the card moves to `review`, and a reviewer checks the evidence.
-6. Accepted: the card moves to `accepted`.
+3. Run the card check (see above) on a clean checkout of the pushed commit.
+4. Move the card to `review` with the command, the commit hash and the pass
+   count in the comment, and clear your name.
+5. The lead (or a review agent) reviews; an accepted card goes to `merge_queue`.
+6. The merge queue merges the cards of the column as one batch and runs the
+   full suite; a green batch moves its cards to `accepted`.
 
 Never push to `main` or `next` directly, and never force-push a branch.
+Never add a Co-Authored-By or other co-author trailer to a commit.

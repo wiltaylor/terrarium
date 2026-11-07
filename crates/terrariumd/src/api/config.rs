@@ -104,13 +104,20 @@ async fn log(
     Ok(Json(blocking(r, move |r| r.log(limit)).await?))
 }
 
-/// Write `export/` from the store, unless a pulled export waits (then
-/// only with `force`). The answer is the export paths written.
+/// Write `export/` from the store. While a pulled export waits, only the
+/// files that are not in the repo yet (`force`: all of them), so the
+/// pulled files stay for `pull --apply` and each project of this instance
+/// still reaches `export/` (TER-193). The answer is the export paths
+/// written.
 async fn refresh_export(state: &Shared, r: &ConfigRepo, force: bool) -> ApiResult<Vec<String>> {
-    if r.state().export_pending && !force {
-        return Ok(Vec::new());
-    }
     let files = state.db.read(repo::export_files).await?;
+    if r.state().export_pending && !force {
+        return blocking(r.clone(), move |r| {
+            r.ensure()?;
+            r.write_export_new(&files)
+        })
+        .await;
+    }
     let paths = files.iter().map(|f| f.path.clone()).collect();
     blocking(r.clone(), move |r| {
         r.ensure()?;

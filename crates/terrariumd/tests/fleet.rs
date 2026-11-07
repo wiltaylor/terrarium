@@ -954,6 +954,61 @@ async fn export_keeps_the_spawn_policy_and_rights() {
         .err(403, "forbidden");
 }
 
+/// TER-193: a lead made from a global template keeps its spawn policy,
+/// `thread_open`, and `calendar_write` through an export: the entry names
+/// the template and sets the policy keys over it, so export then plan
+/// shows no change, and an apply keeps the rights.
+#[tokio::test]
+async fn export_of_a_template_agent_keeps_the_spawn_policy_and_rights() {
+    let td = TestDaemon::start().await;
+    td.project("tp").await;
+    td.post(
+        "/api/templates",
+        json!({"name": "lead-tpl", "spec": {"harness": "claude", "roles": ["project_admin"],
+                                            "policy": {"mail_to": ["*"]}}}),
+    )
+    .await
+    .ok();
+    let spawn = json!({
+        "templates": ["card-impl"],
+        "max_concurrent": 4,
+        "bound": true,
+        "max_bound_lifetime": "3d",
+    });
+    let lead = td
+        .post(
+            "/api/agents",
+            json!({"name": "lead", "project": "tp", "template": "global:lead-tpl",
+                   "policy": {"targets": [], "spawn": spawn, "thread_open": true,
+                              "calendar_write": true}}),
+        )
+        .await;
+    assert_eq!(lead.ok()["policy"]["spawn"], spawn, "{}", lead.body);
+
+    let e = td.get("/api/fleet/export?project=tp").await;
+    let content = e.ok()["content"].as_str().unwrap().to_owned();
+    assert!(
+        content.contains("template = \"global:lead-tpl\""),
+        "{content}"
+    );
+    assert!(
+        content.contains("[projects.agents.policy.spawn]"),
+        "{content}"
+    );
+    assert!(content.contains("thread_open = true"), "{content}");
+    assert!(content.contains("calendar_write = true"), "{content}");
+    let plan = td.post("/api/fleet/plan", body(&content)).await;
+    assert_eq!(plan.ok()["summary"]["update"], 0, "{}", plan.body);
+    let a = entry(&plan.body, "agent", "tp/lead");
+    assert_eq!(a["action"], "unchanged", "{a}");
+
+    td.post("/api/fleet/apply", body(&content)).await.ok();
+    let l = agent_by_key(&td, "tp/lead").await;
+    assert_eq!(l["policy"]["spawn"], spawn, "{l}");
+    assert_eq!(l["policy"]["thread_open"], true);
+    assert_eq!(l["policy"]["calendar_write"], true);
+}
+
 #[tokio::test]
 async fn the_lists_show_the_fleet_source_and_a_file_object_stays_file() {
     let mut td = TestDaemon::with_config(|c| {

@@ -48,6 +48,7 @@ pub mod quota_policy;
 pub mod repo_browse;
 pub mod reset;
 pub mod rules_engine;
+pub mod rules_verbs;
 pub mod run_kill;
 pub mod runner_supervisor;
 pub mod sandbox;

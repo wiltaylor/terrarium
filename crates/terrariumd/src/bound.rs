@@ -139,31 +139,42 @@ pub async fn park(state: &Shared, id: &str, reason: &str) -> ApiResult<bool> {
     let (key, why) = (id.to_owned(), reason.to_owned());
     let parked = state
         .db
-        .write("system", move |t| {
-            if !spawns::set_parked(t, &key, &why)? {
-                return Ok(None);
-            }
-            let sp = spawns::get(t, &key)?;
-            t.emit(
-                EventDraft::new(
-                    "agent.parked",
-                    format!("{}: parked ({why})", sp.name),
-                    json!({"spawn_id": sp.id, "name": sp.name, "bound": sp.bound,
-                           "reason": why}),
-                )
-                .agent(sp.id.clone(), sp.name.clone())
-                .project(sp.project.clone()),
-            )?;
-            Ok(Some(sp.owner))
-        })
+        .write("system", move |t| park_tx(t, &key, &why))
         .await?;
     let Some(owner) = parked else {
         return Ok(false);
     };
-    info!(agent = %id, %reason, "parked a bound agent");
-    // The park frees a place of the owner: a waiting unpark may run.
-    retry_owner(state, &owner).await;
+    after_park(state, id, reason, &owner).await;
     Ok(true)
+}
+
+/// The write of a [`park`]: mark the agent `id` parked and write
+/// `agent.parked`. Returns its owner, or `None` when it is parked already
+/// or finished. The caller runs [`after_park`] after the commit (the
+/// board rule verb `agent.park` writes this in its own action write).
+pub fn park_tx(t: &mut crate::db::Tx<'_>, id: &str, reason: &str) -> ApiResult<Option<String>> {
+    if !spawns::set_parked(t, id, reason)? {
+        return Ok(None);
+    }
+    let sp = spawns::get(t, id)?;
+    t.emit(
+        EventDraft::new(
+            "agent.parked",
+            format!("{}: parked ({reason})", sp.name),
+            json!({"spawn_id": sp.id, "name": sp.name, "bound": sp.bound,
+                   "reason": reason}),
+        )
+        .agent(sp.id.clone(), sp.name.clone())
+        .project(sp.project.clone()),
+    )?;
+    Ok(Some(sp.owner))
+}
+
+/// After the commit of a [`park_tx`] that parked `id`: the park frees a
+/// place of `owner`, so a waiting unpark may run.
+pub async fn after_park(state: &Shared, id: &str, reason: &str, owner: &str) {
+    info!(agent = %id, %reason, "parked a bound agent");
+    retry_owner(state, owner).await;
 }
 
 /// The result of an [`unpark`].
@@ -286,60 +297,85 @@ pub async fn unpark(
     cause: &'static str,
 ) -> ApiResult<Unparked> {
     let key = id.to_owned();
-    let done = state
+    let (done, owner) = state
         .db
         .write("system", move |t| {
-            let sp = spawns::get(t, &key)?;
-            if !sp.running() {
-                return Ok((Unparked::Nothing, sp.owner));
-            }
-            if sp.parked_at.is_some()
-                && let Some(other) = other_worker(t, &sp)?
-            {
-                refuse(t, &sp, &other, cause)?;
-                return Ok((Unparked::Refused, sp.owner));
-            }
-            if let Some(turn) = &turn {
-                crate::store::transcripts::record_turn(t, &key, turn)?;
-                crate::store::agents::queue_turn(t, &key, turn)?;
-            }
-            if sp.parked_at.is_none() {
-                let r = if turn.is_some() {
-                    Unparked::Woken
-                } else {
-                    Unparked::Nothing
-                };
-                return Ok((r, sp.owner));
-            }
-            // A parked agent whose harness still runs holds its place:
-            // its unpark takes no new place, so it needs no room and
-            // waits behind no one (review round 2).
-            let ahead = spawns::queued_unparks(t, &sp.owner)?
-                .iter()
-                .any(|other| *other != sp.id);
-            if !spawns::holds_place(t, &sp.id)? && (ahead || !owner_has_room(t, &sp.owner)?) {
-                if spawns::queue_unpark(t, &sp.id)? {
-                    t.emit(
-                        EventDraft::new(
-                            "agent.unpark_queued",
-                            format!(
-                                "{}: unpark queued ({cause}); its owner is at its limit",
-                                sp.name
-                            ),
-                            json!({"spawn_id": sp.id, "name": sp.name, "bound": sp.bound,
-                                   "cause": cause, "owner": sp.owner_name}),
-                        )
-                        .agent(sp.id.clone(), sp.name.clone())
-                        .project(sp.project.clone()),
-                    )?;
-                }
-                return Ok((Unparked::Queued, sp.owner));
-            }
-            end_park(t, &sp, cause)?;
-            Ok((Unparked::Woken, sp.owner))
+            unpark_tx(t, &key, turn.as_deref(), cause)
         })
         .await?;
-    let (done, owner) = done;
+    after_unpark(state, id, done, &owner, cause).await;
+    Ok(done)
+}
+
+/// The write of an [`unpark`]: queue `turn`, then end the park, queue
+/// the unpark, or refuse it. Returns the result and the agent's owner.
+/// The caller runs [`after_unpark`] after the commit (the board rule verb
+/// `agent.unpark` writes this in its own action write).
+pub fn unpark_tx(
+    t: &mut crate::db::Tx<'_>,
+    id: &str,
+    turn: Option<&str>,
+    cause: &str,
+) -> ApiResult<(Unparked, String)> {
+    let sp = spawns::get(t, id)?;
+    if !sp.running() {
+        return Ok((Unparked::Nothing, sp.owner));
+    }
+    if sp.parked_at.is_some()
+        && let Some(other) = other_worker(t, &sp)?
+    {
+        refuse(t, &sp, &other, cause)?;
+        return Ok((Unparked::Refused, sp.owner));
+    }
+    if let Some(turn) = turn {
+        crate::store::transcripts::record_turn(t, id, turn)?;
+        crate::store::agents::queue_turn(t, id, turn)?;
+    }
+    if sp.parked_at.is_none() {
+        let r = if turn.is_some() {
+            Unparked::Woken
+        } else {
+            Unparked::Nothing
+        };
+        return Ok((r, sp.owner));
+    }
+    // A parked agent whose harness still runs holds its place: its unpark
+    // takes no new place, so it needs no room and waits behind no one
+    // (review round 2).
+    let ahead = spawns::queued_unparks(t, &sp.owner)?
+        .iter()
+        .any(|other| *other != sp.id);
+    if !spawns::holds_place(t, &sp.id)? && (ahead || !owner_has_room(t, &sp.owner)?) {
+        if spawns::queue_unpark(t, &sp.id)? {
+            t.emit(
+                EventDraft::new(
+                    "agent.unpark_queued",
+                    format!(
+                        "{}: unpark queued ({cause}); its owner is at its limit",
+                        sp.name
+                    ),
+                    json!({"spawn_id": sp.id, "name": sp.name, "bound": sp.bound,
+                           "cause": cause, "owner": sp.owner_name}),
+                )
+                .agent(sp.id.clone(), sp.name.clone())
+                .project(sp.project.clone()),
+            )?;
+        }
+        return Ok((Unparked::Queued, sp.owner));
+    }
+    end_park(t, &sp, cause)?;
+    Ok((Unparked::Woken, sp.owner))
+}
+
+/// After the commit of an [`unpark_tx`] of `id`: wake the agent, or run
+/// the owner's queue.
+pub async fn after_unpark(
+    state: &Shared,
+    id: &str,
+    done: Unparked,
+    owner: &str,
+    cause: &'static str,
+) {
     match done {
         Unparked::Woken => {
             if let Ok(a) = id.parse::<AgentId>() {
@@ -351,14 +387,13 @@ pub async fn unpark(
             info!(agent = %id, %cause, "the unpark waits for a place of the owner");
             // TER-111 (R2-3): the queue runs at once when the owner has
             // room (an older unpark that waits, while a place is free).
-            retry_owner(state, &owner).await;
+            retry_owner(state, owner).await;
         }
         Unparked::Refused => {
             info!(agent = %id, %cause, "another agent works the object; the agent stays parked");
         }
         Unparked::Nothing => {}
     }
-    Ok(done)
 }
 
 /// Run the queued unparks of `owner`, first in, first out, while it has
@@ -531,7 +566,7 @@ fn data_block(what: &str, text: &str) -> String {
 
 /// The unpark turn of a card that came back. The move comment and the
 /// card body are data: quoted, between markers.
-fn return_turn(card: &board::Card, ev: &StoredEvent) -> String {
+pub(crate) fn return_turn(card: &board::Card, ev: &StoredEvent) -> String {
     let s = |k: &str| ev.data.get(k).and_then(Value::as_str).unwrap_or("?");
     let comment = ev.data.get("comment").and_then(Value::as_str);
     return_text(
@@ -549,7 +584,12 @@ fn return_prefix(card_id: &str) -> String {
 
 /// The unpark turn: the card came back (`how`: `moved review -> ready`),
 /// with the move `comment`, if any, and the top of the card body.
-fn return_text(card: &board::Card, how: &str, comment: Option<&str>, working: bool) -> String {
+pub(crate) fn return_text(
+    card: &board::Card,
+    how: &str,
+    comment: Option<&str>,
+    working: bool,
+) -> String {
     let mut text = format!(
         "Your card {} came back: {how}. You run again in your own session and workspace.",
         card.id,
