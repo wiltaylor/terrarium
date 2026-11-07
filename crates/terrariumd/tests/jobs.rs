@@ -1999,15 +1999,24 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots()
     let recovery = terrariumd::jobs::recover_lost(&state).await;
     let h = lab.branch("ter-l3", "next", &[("OK", "1")]);
     let c = lab.card("queued", "ter-l3").await;
-    let r = lab
-        .td
-        .post_as(
-            &lab.w1,
-            &format!("/api/cards/{c}/validate"),
-            json!({"commit": h}),
-        )
-        .await;
-    let queued = r.ok()["job"]["id"].as_str().unwrap().to_owned();
+    // A validation queued meanwhile. The validate API checks the target
+    // and refuses while the host agent is offline, so the row goes in as
+    // the API writes it, and a tick follows as after the API.
+    let queued = ulid::Ulid::new().to_string();
+    let (qid, qcard, qat) = (queued.clone(), c.clone(), at(0));
+    state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, commit_sha, state,
+                                   attempt, created_by, created_at)
+                 VALUES (?1, 'p', ?2, 'validate', 'app', 'ter-l3', ?3, 'queued', 1, 't', ?4)",
+                rusqlite::params![qid, qcard, h, qat],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(1500)).await;
     terrariumd::jobs::tick(&state).await.unwrap();
     for (p, what) in [
