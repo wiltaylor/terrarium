@@ -1,12 +1,15 @@
 """Tests for scripts/affected.py: the affected set of a change (TER-100)."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("affected", HERE / "affected.py")
@@ -74,8 +77,24 @@ def read(path):
 CRATES = affected.workspace(metadata(), ROOT)
 
 
-def plan(*files):
-    return affected.plan(list(files), CRATES, read=read, common=["crates/terrariumd/tests/common/mod.rs"])
+# The crate sources that embed files from outside their crate, as in the repo.
+SOURCES = {
+    "crates/terrariumd/src/api/install.rs":
+        'const SCRIPT: &str = include_str!("../../../../scripts/install-host.sh");\n'
+        'const UNIT: &str = include_str!("../../../terrarium-host/terrarium-host.service");\n',
+    "crates/terrariumd/src/probes/zai.rs":
+        'const F: &str = include_str!("../../tests/fixtures/probes/zai.json");\n',
+    "crates/terrarium-core/src/fleet.rs":
+        'const EXAMPLE: &str = include_str!("../../../examples/fleet/terrarium.fleet.toml");\n',
+    "crates/terrarium/src/main.rs": 'include_bytes!(concat!("a", "b"))\n',
+}
+EMBEDDED = affected.embeds(CRATES, SOURCES)
+
+
+def plan(*files, embedded=None):
+    return affected.plan(list(files), CRATES, read=read,
+                         common=["crates/terrariumd/tests/common/mod.rs"],
+                         embedded=EMBEDDED if embedded is None else embedded)
 
 
 class Graph(unittest.TestCase):
@@ -147,8 +166,14 @@ class Rules(unittest.TestCase):
         self.assertIn("docker/Dockerfile", p.reasons[0])
 
     def test_docs_run_only_fmt(self):
-        p = plan("docs/api.md", "README.md", "LICENSE", "crates/terrariumd/NOTES.md")
+        p = plan("docs/api.md", "README.md", "LICENSE", "spikes/x/NOTES.md", "docker/README.md")
         self.assertEqual(affected.commands(p), [["just", "ci::fmt-check"]])
+
+    def test_markdown_in_an_area_follows_the_area(self):
+        p = plan("crates/terrarium/README.md")
+        self.assertEqual(p.whole, {"terrarium"})
+        self.assertTrue(plan("dashboard/README.md").dashboard)
+        self.assertTrue(plan("scripts/README.md").scripts)
 
     def test_scripts_run_scripts_test(self):
         p = plan("scripts/deploy.py")
@@ -189,9 +214,13 @@ class Rules(unittest.TestCase):
         self.assertIsNone(p.daemon_targets)
 
     def test_files_outside_crates_map_to_their_readers(self):
-        p = plan("defaults/prompts/default.md")
-        # A Markdown file is docs, wherever it is.
-        self.assertEqual(p.whole, set())
+        # terrariumd tests render the prompts under defaults/: a Markdown
+        # file there runs all terrariumd targets.
+        for f in ["defaults/prompts/default.md", "defaults/skills/x/SKILL.md"]:
+            with self.subTest(f=f):
+                p = plan(f)
+                self.assertEqual(p.whole, {"terrariumd"})
+                self.assertIsNone(p.daemon_targets)
         p = plan("defaults/harness/claude.json")
         self.assertEqual(p.whole, {"terrariumd"})
         p = plan("examples/fleet/terrarium.fleet.toml")
@@ -199,6 +228,30 @@ class Rules(unittest.TestCase):
         p = plan("harnesses.toml")
         self.assertIn("terrarium-core", p.whole)
         self.assertTrue(p.scripts)
+
+    def test_embeds_finds_files_from_outside_the_crate(self):
+        self.assertEqual(EMBEDDED, {
+            "scripts/install-host.sh": {"crates/terrariumd/src/api/install.rs"},
+            "crates/terrarium-host/terrarium-host.service": {"crates/terrariumd/src/api/install.rs"},
+            "examples/fleet/terrarium.fleet.toml": {"crates/terrarium-core/src/fleet.rs"},
+        })
+
+    def test_an_embedded_script_runs_scripts_test_and_its_embedder(self):
+        p = plan("scripts/install-host.sh")
+        self.assertTrue(p.scripts)
+        # src/api/install.rs is module `install`: no target matches, so all.
+        self.assertIn("terrariumd", p.whole)
+        self.assertIsNone(p.daemon_targets)
+        self.assertIn(["just", "ci::scripts-test"], affected.commands(p))
+        self.assertIn("terrariumd", p.clippy())
+        # Without the embed, a scripts change runs only the scripts tests.
+        p = plan("scripts/install-host.sh", embedded={})
+        self.assertEqual(p.whole, set())
+
+    def test_an_embedded_file_of_another_crate_runs_the_embedder(self):
+        p = plan("crates/terrarium-host/terrarium-host.service")
+        self.assertIn("terrarium-host", p.whole)
+        self.assertIn("terrariumd", p.whole)
 
     def test_targets_join_across_files(self):
         p = plan("crates/terrariumd/src/jobs.rs", "crates/terrariumd/tests/board.rs",
@@ -215,6 +268,61 @@ class Cli(unittest.TestCase):
             self.assertEqual(affected.read_changed(f), ["a.rs", "b.rs"])
             self.assertIsNone(affected.read_changed(os.path.join(d, "missing")))
             self.assertIsNone(affected.read_changed(None))
+
+    def test_run_stops_at_the_first_failure(self):
+        calls = []
+
+        def call(cmd, **kw):
+            calls.append(cmd)
+            return 3 if cmd[:2] == ["just", "ci::scripts-test"] else 0
+
+        cmds = [["just", "ci::fmt-check"], ["just", "ci::scripts-test"], ["just", "ci::dashboard-check"]]
+        with mock.patch.object(affected.subprocess, "call", call), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RESULTS_DIR", None)
+            self.assertEqual(affected.run(cmds), 3)
+        self.assertEqual(calls, cmds[:2])
+
+    def test_run_appends_libtest_json_to_results_dir(self):
+        seen = []
+
+        def call(cmd, stdout=None, env=None):
+            seen.append((cmd, env.get("RUSTC_BOOTSTRAP") if env else None))
+            if stdout is not None:
+                stdout.write(b'{"type":"suite"}\n')
+            return 0
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(affected.subprocess, "call", call), \
+                mock.patch.dict(os.environ, {"RESULTS_DIR": d}):
+            cmds = [["just", "ci::fmt-check"],
+                    ["cargo", "test", "-p", "terrarium", "--no-fail-fast"],
+                    ["cargo", "test", "-p", "terrariumd", "--lib", "--bins", "--no-fail-fast"]]
+            self.assertEqual(affected.run(cmds), 0)
+            self.assertEqual(Path(d, "rust.json").read_bytes().count(b"\n"), 2)
+        self.assertEqual(seen[0], (["just", "ci::fmt-check"], None))
+        self.assertEqual(seen[1][0][-7:], ["--no-fail-fast", "--", "-Z", "unstable-options",
+                                           "--format", "json", "--report-time"])
+        self.assertEqual(seen[1][1], "1")
+
+    def test_main_run_starts_rust_json_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            changed = Path(d, "changed")
+            changed.write_text("docs/api.md\n")
+            results = Path(d, "results")
+            results.mkdir()
+            Path(results, "rust.json").write_text("stale\n")
+            calls = []
+            meta = json.dumps({"packages": [], "workspace_members": []})
+            with mock.patch.object(affected.subprocess, "run",
+                                   return_value=mock.Mock(stdout=meta)), \
+                    mock.patch.object(affected.subprocess, "call",
+                                      lambda cmd, **kw: calls.append(cmd) or 0), \
+                    mock.patch.dict(os.environ, {"RESULTS_DIR": str(results)}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(affected.main(["--files", str(changed), "--run"]), 0)
+            self.assertFalse(Path(results, "rust.json").exists())
+            self.assertEqual(calls, [["just", "ci::fmt-check"]])
 
     def test_plan_json_shape(self):
         d = plan("crates/terrariumd/src/jobs.rs").to_dict()

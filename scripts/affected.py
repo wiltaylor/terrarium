@@ -6,6 +6,11 @@ A validate job of the queue gives its recipe the changed paths
 checks that can reach them, and prints the plan or runs it. A merge job runs
 the full suite (`just ci::validate`), not this plan.
 
+A file that a crate source embeds with `include_str!` or `include_bytes!`
+from outside that crate (for example `scripts/install-host.sh` in
+terrariumd's `src/api/install.rs`) also counts as a change to each source
+that embeds it, before the rules below apply to the file itself.
+
 The rules, first match per path:
 
 1. Full suite: no list of changed files, or any path that changes the build
@@ -13,9 +18,9 @@ The rules, first match per path:
    `rust-toolchain*`, `.cargo/`, `clippy.toml`, `rustfmt.toml`, `deny.toml`,
    `justfile`, `.just/`, `.github/`, this script. A path outside the known
    areas below is also the full suite.
-2. No tests: `docs/`, a Markdown file, `LICENSE`.
+2. No tests: `docs/`, `LICENSE`.
 3. `dashboard/`: `ci::dashboard-check` only. `scripts/`: `ci::scripts-test`
-   only.
+   only (plus the embedding sources above).
 4. A file under `crates/<crate>/`: that crate and its reverse dependencies
    in the workspace (path dependencies of any kind: normal, dev, build), as
    whole crates. Except terrariumd, rule 5. A reverse dependency is always
@@ -34,7 +39,12 @@ The rules, first match per path:
 6. Files outside `crates/` that the crates read: `defaults/` is terrariumd,
    `examples/` is terrarium-core and terrariumd, `harnesses.toml` is
    terrarium-core and the scripts tests (each with its reverse
-   dependencies, whole).
+   dependencies, whole). Markdown files count here too: terrariumd tests
+   render the prompts under `defaults/`.
+7. No tests: a Markdown file outside the areas above (top level,
+   `spikes/`, `docker/`, `config/`, `fleets/`). A Markdown file under
+   `crates/`, `defaults/`, `examples/`, `dashboard/`, or `scripts/` follows
+   the rule of its area.
 
 Every plan runs `ci::fmt-check`, and clippy (`--all-targets -D warnings`) on
 the affected crates. The known gap: a change that breaks a test target that
@@ -49,6 +59,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -70,6 +81,8 @@ OUTSIDE = {
     "examples/": ["terrarium-core", "terrariumd"],
     "harnesses.toml": ["terrarium-core"],
 }
+# A literal `include_str!("...")` or `include_bytes!("...")`.
+INCLUDE = re.compile(r'include_(?:str|bytes)!\(\s*"([^"]+)"\s*\)')
 # Rule 5: terrariumd modules that every test target reaches.
 DAEMON_SHARED = {"lib", "main", "db", "error", "policy", "api", "store"}
 
@@ -136,6 +149,38 @@ def workspace(metadata: dict, root: Path) -> dict[str, Crate]:
     return crates
 
 
+def embeds(crates: dict[str, Crate], files: dict[str, str]) -> dict[str, set[str]]:
+    """The files that a crate source embeds from outside its crate:
+    embedded path -> the sources that embed it. `files` maps each crate
+    source (relative to the repo root) to its text."""
+    out: dict[str, set[str]] = {}
+    for src, text in files.items():
+        c = crate_of(crates, src)
+        if c is None:
+            continue
+        base = posixpath.dirname(src)
+        for m in INCLUDE.finditer(text):
+            target = posixpath.normpath(posixpath.join(base, m.group(1)))
+            if target.startswith("../") or target.startswith(c.dir):
+                continue
+            out.setdefault(target, set()).add(src)
+    return out
+
+
+def crate_sources(crates: dict[str, Crate]) -> dict[str, str]:
+    """The `.rs` files of the workspace crates on disk, with their text."""
+    out = {}
+    for c in crates.values():
+        for p in sorted(Path(c.dir).glob("**/*.rs")):
+            if "target" in p.parts:
+                continue
+            try:
+                out[p.as_posix()] = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+    return out
+
+
 def reverse_deps(crates: dict[str, Crate], names: set[str]) -> set[str]:
     """The crates in `names` and every workspace crate that depends on one."""
     out = set(names)
@@ -192,10 +237,13 @@ def daemon_targets_for(module: str, tests: dict[str, str], refs: dict[str, set[s
 
 def plan(changed: list[str] | None, crates: dict[str, Crate],
          read=lambda p: Path(p).read_text(encoding="utf-8", errors="replace"),
-         common: list[str] | None = None) -> Plan:
+         common: list[str] | None = None,
+         embedded: dict[str, set[str]] | None = None) -> Plan:
     """The plan for `changed` (paths relative to the repo root; None: no list).
     `read` reads a file of the repo, `common` lists the files of
-    terrariumd's tests/common (default: found on disk)."""
+    terrariumd's tests/common (default: found on disk), `embedded` maps an
+    embedded file to the sources that embed it (default: `embeds` over the
+    crate sources on disk)."""
     pl = Plan()
     if changed is None:
         pl.full = True
@@ -208,6 +256,14 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
     refs: dict[str, set[str]] | None = None
     shared: set[str] = set()
     dc = crates.get(DAEMON)
+    if embedded is None:
+        embedded = embeds(crates, crate_sources(crates))
+    # An embedded file also changes each source that embeds it.
+    paths = [p.strip() for p in changed]
+    for p in list(paths):
+        for src in sorted(embedded.get(p, ())):
+            if src not in paths:
+                paths.append(src)
 
     def daemon_index():
         # The modules each terrariumd test target names, and the modules
@@ -229,8 +285,7 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
             shared = DAEMON_SHARED | (names - {"api", "store", "start"})
         return refs
 
-    for path in changed:
-        path = path.strip()
+    for path in paths:
         if not path:
             continue
         name = path.rsplit("/", 1)[-1]
@@ -238,7 +293,7 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
             pl.full = True
             pl.reasons.append(f"{path}: changes the build or the gate")
             continue
-        if path.startswith(NO_TEST_PREFIXES) or name in NO_TEST_NAMES or path.endswith(".md"):
+        if path.startswith(NO_TEST_PREFIXES) or name in NO_TEST_NAMES:
             continue
         if path.startswith("dashboard/"):
             pl.dashboard = True
@@ -258,6 +313,9 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
                     whole.add(n)
             continue
         c = crate_of(crates, path) if path.startswith("crates/") else None
+        if c is None and path.endswith(".md") and not path.startswith("crates/"):
+            # Rule 7: a Markdown file that no crate reads.
+            continue
         if c is None:
             pl.full = True
             pl.reasons.append(f"{path}: outside the known areas")
