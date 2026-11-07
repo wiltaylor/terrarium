@@ -5,9 +5,10 @@
 //!   a card commit) or `merge` (merge a card branch onto `next`, run the
 //!   recipe on the result, push `next` when it is green).
 //! - Jobs start first in, first out across projects, at most the host
-//!   cap on one host (TER-97, `job_hosts`), and at most `slots` running
-//!   at a time per project. A merge job runs alone in its project: no
-//!   other job of the project runs with it (TER-71 review, R1).
+//!   cap on one host (TER-97, `job_hosts`), and at most `slots` validate
+//!   jobs running at a time per project. Merge jobs have their own lane
+//!   (TER-159): one at a time per project, first in, first out, beside
+//!   the validate jobs and outside the slots.
 //! - A card has at most one job that is queued or running, also as a
 //!   card of a batch.
 //! - A merge job can merge several cards in order (TER-112, `batch`): one
@@ -528,13 +529,16 @@ pub struct QueueOf {
 /// The queued jobs that may start now, with the host each one takes a
 /// place on, in all projects: first in, first out across projects. A
 /// job starts when (1) its host is under its cap (`caps`; a host without
-/// one has no cap), and (2) its project is under its `slots`. A merge job
-/// runs alone in its project (TER-71 review, R1: the recipes of a target
-/// run as one user): it starts only when no other job of the project runs
-/// or starts, and once the pick reaches it (started or not) or while it
-/// runs, no other job of its project starts. A job that must wait does not
-/// hold back the jobs of other projects behind it. A project missing from
-/// `queues` has no queue, and its jobs wait.
+/// one has no cap), and (2) for a validate job, its project runs fewer
+/// validate jobs than its `slots`. Merge jobs have their own lane
+/// (TER-159): at most one merge of a project runs at a time, merges start
+/// first in, first out among themselves (once the pick reaches a merge,
+/// started or not, no later merge of its project starts), and a merge
+/// does not take one of the project's slots, so validate jobs start
+/// beside it and never wait behind it. The host cap counts every job. A
+/// job that must wait does not hold back the jobs of other projects
+/// behind it. A project missing from `queues` has no queue, and its jobs
+/// wait.
 pub fn pick(
     queued: Vec<Job>,
     running: &[Job],
@@ -542,9 +546,10 @@ pub fn pick(
     caps: &HashMap<String, usize>,
 ) -> Vec<(Job, String)> {
     let mut on_host: HashMap<String, usize> = HashMap::new();
-    let mut in_project: HashMap<String, usize> = HashMap::new();
-    // The projects where no more job may start in this pick.
-    let mut closed: HashSet<String> = HashSet::new();
+    // The validate jobs that run or start, per project.
+    let mut validating: HashMap<String, usize> = HashMap::new();
+    // The projects where no more merge may start in this pick.
+    let mut merging: HashSet<String> = HashSet::new();
     for j in running {
         let host = j
             .host
@@ -553,9 +558,11 @@ pub fn pick(
         if let Some(h) = host {
             *on_host.entry(h).or_default() += 1;
         }
-        *in_project.entry(j.project.clone()).or_default() += 1;
-        if j.kind == JobKind::Merge {
-            closed.insert(j.project.clone());
+        match j.kind {
+            JobKind::Merge => {
+                merging.insert(j.project.clone());
+            }
+            JobKind::Validate => *validating.entry(j.project.clone()).or_default() += 1,
         }
     }
     let mut out = Vec::new();
@@ -563,25 +570,24 @@ pub fn pick(
         let Some(q) = queues.get(&j.project) else {
             continue;
         };
-        if closed.contains(&j.project) {
-            continue;
-        }
         let merge = j.kind == JobKind::Merge;
-        if merge {
-            // The jobs behind a merge wait for it, whether it starts now
-            // or not.
-            closed.insert(j.project.clone());
+        if merge && !merging.insert(j.project.clone()) {
+            // A merge of the project runs, or an older one comes first,
+            // whether it starts now or not.
+            continue;
         }
         let used = on_host.get(&q.host).copied().unwrap_or(0);
         if caps.get(&q.host).is_some_and(|cap| used >= *cap) {
             continue;
         }
-        let busy = in_project.get(&j.project).copied().unwrap_or(0);
-        if (merge && busy > 0) || busy >= q.slots {
-            continue;
+        if !merge {
+            let busy = validating.get(&j.project).copied().unwrap_or(0);
+            if busy >= q.slots {
+                continue;
+            }
+            *validating.entry(j.project.clone()).or_default() += 1;
         }
         *on_host.entry(q.host.clone()).or_default() += 1;
-        *in_project.entry(j.project.clone()).or_default() += 1;
         out.push((j, q.host.clone()));
     }
     out
@@ -981,8 +987,8 @@ fn clean(cards: Vec<BatchCard>) -> Vec<BatchCard> {
 /// queued at the front with `parent` set to the red job. The left half
 /// and all the splits below it run before the right half: their
 /// `split_path` (the red job's, then `0` or `1`) sorts first at the same
-/// `created_at` (TER-112 review, F1). A merge runs alone in its project,
-/// so the right half merges onto `next` with the left half in it. A half
+/// `created_at` (TER-112 review, F1). One merge of a project runs at a
+/// time, so the right half merges onto `next` with the left half in it. A half
 /// of one card is a job of one card.
 pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, Job)> {
     if cards.len() < 2 {
@@ -1170,10 +1176,11 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
 }
 
 /// Where a queued job stands: its place among the queued jobs of its
-/// project (1 starts next), and the running count.
+/// project and its lane (1 starts next), and the running count of that
+/// lane. Validate and merge jobs have their own lanes ([`pick`]).
 pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
     let ahead: i64 = conn.query_row(
-        "SELECT count(*) FROM jobs WHERE project = ?1 AND state = 'queued'
+        "SELECT count(*) FROM jobs WHERE project = ?1 AND kind = ?6 AND state = 'queued'
            AND (created_at < ?2 OR (created_at = ?2 AND attempt > ?4)
                 OR (created_at = ?2 AND attempt = ?4
                     AND (split_path < ?5 OR (split_path = ?5 AND id < ?3))))",
@@ -1182,13 +1189,14 @@ pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
             job.created_at,
             job.id,
             job.attempt,
-            job.split_path
+            job.split_path,
+            job.kind.as_str()
         ],
         |r| r.get(0),
     )?;
     let running: i64 = conn.query_row(
-        "SELECT count(*) FROM jobs WHERE project = ?1 AND state = 'running'",
-        [&job.project],
+        "SELECT count(*) FROM jobs WHERE project = ?1 AND kind = ?2 AND state = 'running'",
+        params![job.project, job.kind.as_str()],
         |r| r.get(0),
     )?;
     Ok((ahead + 1, running))
@@ -1306,42 +1314,73 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_runs_alone_in_its_project() {
-        let q = queues(&[("a", 4, "h"), ("b", 4, "h")]);
+    fn validations_start_beside_a_merge() {
+        let q = queues(&[("a", 2, "h"), ("b", 2, "h")]);
         let none = HashMap::new();
-        // A merge starts when nothing of its project runs or starts, and
-        // the jobs behind it in its project wait. Project b goes on.
+        // A merge at the front does not hold back the validate jobs of its
+        // project, and does not take one of its 2 slots.
         let queued = vec![
             job("1", "a", JobKind::Merge, "app", "t1"),
             job("2", "a", JobKind::Validate, "app", "t2"),
-            job("3", "b", JobKind::Validate, "app", "t3"),
-            job("4", "a", JobKind::Merge, "lib", "t4"),
-            job("5", "b", JobKind::Merge, "app", "t5"),
-        ];
-        assert_eq!(ids(&pick(queued, &[], &q, &none)), ["1", "3"]);
-        // A job of `a` runs: the merge waits, and so does the job behind it.
-        let run = [running(job("0", "a", JobKind::Validate, "r", "t0"), "h")];
-        let queued = vec![
-            job("1", "a", JobKind::Merge, "app", "t1"),
-            job("2", "a", JobKind::Validate, "app", "t2"),
-            job("3", "b", JobKind::Validate, "app", "t3"),
-        ];
-        assert_eq!(ids(&pick(queued.clone(), &run, &q, &none)), ["3"]);
-        // A validate job before the merge in the same pick: the merge waits.
-        let queued = vec![
-            job("1", "a", JobKind::Validate, "app", "t1"),
-            job("2", "a", JobKind::Merge, "app", "t2"),
             job("3", "a", JobKind::Validate, "app", "t3"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+            job("5", "b", JobKind::Validate, "app", "t5"),
         ];
-        assert_eq!(ids(&pick(queued, &[], &q, &none)), ["1"]);
-        // A merge of `a` runs: nothing else of `a` starts.
+        assert_eq!(ids(&pick(queued, &[], &q, &none)), ["1", "2", "3", "5"]);
+        // A merge of `a` runs: two validate jobs of `a` start beside it.
         let run = [running(job("0", "a", JobKind::Merge, "app", "t0"), "h")];
         let queued = vec![
             job("2", "a", JobKind::Validate, "app", "t2"),
-            job("3", "b", JobKind::Validate, "app", "t3"),
+            job("3", "a", JobKind::Validate, "app", "t3"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+        ];
+        assert_eq!(ids(&pick(queued, &run, &q, &none)), ["2", "3"]);
+        // Both slots run validate jobs: a merge still starts.
+        let run = [
+            running(job("8", "a", JobKind::Validate, "app", "t0"), "h"),
+            running(job("9", "a", JobKind::Validate, "app", "t0"), "h"),
+        ];
+        let queued = vec![
+            job("2", "a", JobKind::Validate, "app", "t2"),
+            job("3", "a", JobKind::Merge, "app", "t3"),
         ];
         assert_eq!(ids(&pick(queued, &run, &q, &none)), ["3"]);
-        // A merge that waits for the host cap holds back its project.
+    }
+
+    #[test]
+    fn one_merge_at_a_time_per_project_in_order() {
+        let q = queues(&[("a", 4, "h"), ("b", 4, "h")]);
+        let none = HashMap::new();
+        // The second merge of `a` waits for the first; `b` has its own lane.
+        let queued = vec![
+            job("1", "a", JobKind::Merge, "app", "t1"),
+            job("2", "a", JobKind::Merge, "lib", "t2"),
+            job("3", "b", JobKind::Merge, "app", "t3"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+        ];
+        assert_eq!(ids(&pick(queued, &[], &q, &none)), ["1", "3", "4"]);
+        // A merge of `a` runs: the next merge waits.
+        let run = [running(job("0", "a", JobKind::Merge, "app", "t0"), "h")];
+        let queued = vec![
+            job("2", "a", JobKind::Merge, "lib", "t2"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+        ];
+        assert_eq!(ids(&pick(queued, &run, &q, &none)), ["4"]);
+    }
+
+    #[test]
+    fn the_host_cap_counts_a_merge() {
+        let q = queues(&[("a", 4, "h"), ("b", 4, "h")]);
+        let caps = HashMap::from([("h".to_owned(), 2)]);
+        // A running merge takes a place on the host.
+        let run = [running(job("0", "a", JobKind::Merge, "app", "t0"), "h")];
+        let queued = vec![
+            job("1", "a", JobKind::Validate, "app", "t1"),
+            job("2", "b", JobKind::Validate, "app", "t2"),
+        ];
+        assert_eq!(ids(&pick(queued, &run, &q, &caps)), ["1"]);
+        // A merge that waits for the host cap holds back the later merges
+        // of its project, not its validate jobs or other projects.
         let caps = HashMap::from([("h".to_owned(), 1)]);
         let run = [running(job("0", "b", JobKind::Validate, "r", "t0"), "h")];
         let queued = vec![
@@ -1349,6 +1388,14 @@ mod tests {
             job("2", "a", JobKind::Validate, "app", "t2"),
         ];
         assert!(pick(queued, &run, &q, &caps).is_empty());
+        let q = queues(&[("a", 4, "h"), ("b", 4, "z")]);
+        let caps = HashMap::from([("h".to_owned(), 0)]);
+        let queued = vec![
+            job("1", "a", JobKind::Merge, "app", "t1"),
+            job("2", "a", JobKind::Merge, "lib", "t2"),
+            job("3", "b", JobKind::Merge, "app", "t3"),
+        ];
+        assert_eq!(ids(&pick(queued, &[], &q, &caps)), ["3"]);
     }
 
     #[test]
