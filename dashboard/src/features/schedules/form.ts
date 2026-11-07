@@ -257,7 +257,8 @@ export function formFromSchedule(s: Schedule): ScheduleForm {
   if (s.spec.kind === "cron") Object.assign(f, { expr: s.spec.expr, tz: s.spec.tz || "UTC" }, presetOf(s.spec.expr));
   else if (s.spec.kind === "interval") f.every = s.spec.every;
   else if (s.spec.kind === "at") f.at = localInput(s.spec.at);
-  else Object.assign(f, triggerFieldsFromSpec(s.spec));
+  else if (s.spec.kind === "on") Object.assign(f, triggerFieldsFromSpec(s.spec));
+  // A project action (`manual`) has no spec fields.
   const a = s.action;
   if (a.type === "mail") Object.assign(f, { mailTo: a.to, mailSubject: a.subject, mailBody: a.body });
   else if (a.type === "turn") Object.assign(f, { agent: a.agent, text: a.text, startIfStopped: !!a.start_if_stopped });
@@ -282,6 +283,7 @@ function buildSpec(f: ScheduleForm): Built<ScheduleSpec> {
     if (parseEvery(f.every) === null) return { error: "The interval is a duration such as 15m, 1h, or 1h30m.", field: "every" };
     return { value: { kind: "interval", every: f.every.trim() } };
   }
+  if (f.specKind === "manual") return { value: { kind: "manual" } };
   const at = new Date(f.at);
   if (!f.at || Number.isNaN(at.getTime())) return { error: "Choose the date and time.", field: "at" };
   return { value: { kind: "at", at: at.toISOString() } };

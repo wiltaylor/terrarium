@@ -7179,7 +7179,9 @@ A schedule runs one action on a time spec: mail, a turn, an exec on a
 target, an agent verb, a quota probe, a card on the board, or a webhook (an
 HTTP request, §19.5). A trigger is
 a schedule whose spec is `on`: an event of the log (§9, §20) that matches
-starts its run (§19.4). The daemon runs a schedule as the actor that made
+starts its run (§19.4). A project action is a schedule whose spec is
+`manual`: a person starts each run with its button (§19.8). The daemon
+runs a schedule as the actor that made
 it (`run_as`). Before each run, the daemon checks the rights of that
 actor again. A project- or system-owned schedule has no actor behind it
 (§19.6). PLAN §12b and §12c have the design.
@@ -7223,7 +7225,7 @@ A schedule:
 | `created_by` | `operator` or `agent:<ulid>`. |
 | `owner` | `actor` (the default), `project`, or `system` (§19.6). |
 | `run_as` | The actor of the runs of an actor-owned schedule. It is `created_by`, until a caller changes the `action` or the `owner`, or takes the schedule over: then it is that caller. A project- or system-owned schedule does not use it. |
-| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, and always for a trigger. |
+| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, and always for a trigger and a project action. |
 | `last_run` | `{at, status, summary, run_id}` of the last run, or `null`. |
 | `runs_count` | The runs so far, the skipped runs too. |
 | `source` | `api`, `file` (`[[schedules]]` in `projects/<name>.toml`), or `fleet:<name>` (§18.1). |
@@ -7238,6 +7240,7 @@ The specs:
 | `{"kind": "interval", "every": "30m"}` | A number and a unit (`s`, `m`, `h`, `d`), or a sum, for example `1h30m`. The minimum is 60 s. The runs are at `start + k * every`; a new spec sets a new start. |
 | `{"kind": "at", "at": "2026-11-01T02:00:00Z"}` | One run at an RFC 3339 time in the future. |
 | `{"kind": "on", "kinds": ["ci.run.failed"], "match"?, "dedupe"?, "escalate"?, "max_per_hour"?: 30}` | A trigger: each matching event starts a run. See §19.4. |
+| `{"kind": "manual"}` | A project action: no time and no event. Only `POST .../run` starts a run. See §19.8. |
 
 The actions:
 
@@ -7288,18 +7291,18 @@ A run:
 
 | Method and path | Body | Answer |
 |---|---|---|
-| `GET /api/schedules?project=&enabled=&kind=` | | `200`, a list. With `project`: the project's schedules, and the global ones when the caller may read them. Without: all for the operator and a sysadmin; the caller's project for another agent. `kind=time` gives only the time schedules, `kind=trigger` only the triggers; another value is `400`. |
+| `GET /api/schedules?project=&enabled=&kind=` | | `200`, a list. With `project`: the project's schedules, and the global ones when the caller may read them. Without: all for the operator and a sysadmin; the caller's project for another agent. `kind=time` gives only the time schedules, `kind=trigger` only the triggers, `kind=action` only the project actions (spec `manual`); another value is `400`. |
 | `POST /api/schedules` | `{name, project?, spec, action, enabled?: true, catch_up?: "skip", owner?: "actor"}` | `201`, the schedule. An absent `project` is the agent caller's project (the operator: global). `null` is global. |
 | `GET /api/schedules/{id}` | | `200`, the schedule. `{id}` is a ULID, `project/name` (encode the `/` as `%2F`), or a name. |
 | `PATCH /api/schedules/{id}` | `{name?, spec?, action?, enabled?, catch_up?, owner?}` | `200`, the schedule. A new `action` makes the caller the `run_as`. `owner` moves it (§19.6); `owner: actor` makes the caller the `run_as` (a take-over). |
 | `DELETE /api/schedules/{id}` | | `204`. The runs go with it. |
-| `POST /api/schedules/{id}/run` | | `200`, the run when it ends. It runs as `run_as`, or with the owner's rights (§19.6). |
+| `POST /api/schedules/{id}/run` | | `200`, the run when it ends. It runs as `run_as`, or with the owner's rights (§19.6). A disabled project action is `409` (§19.8); a disabled time schedule still runs. |
 | `POST /api/schedules/{id}/enable` | | `200`, the schedule, with a new `next_run_at`. An enable sets `consecutive_skips` to 0. |
 | `POST /api/schedules/{id}/disable` | | `200`, the schedule. |
 | `GET /api/schedules/{id}/runs?limit=&cursor=` | | `200`, the runs, newest first, with `X-Next-Cursor` (§2.4). |
 | `GET /api/schedules/{id}/deliveries?limit=&cursor=` | | `200`, the webhook deliveries, newest first, with `X-Next-Cursor` (§19.5). The read rights of the schedule. |
-| `POST /api/schedules/{id}/deliveries/{delivery}/redeliver` | | `202`, a new `pending` delivery: a copy of `{delivery}` with `redelivery_of`, due now. The rights of a run-now. A `dropped` row is `422`. |
-| `POST /api/schedules/{id}/test` | none, or `{event?: {kind?, summary?, project?, agent?, actor?, data?}}` | `200`, a test run (§19.7): `{test: true, action, matched, reason?, event?, status?, summary?, output?, error?, delivery?, request?}`. Any action kind. The rights of a run-now; for a webhook, a secret that the caller or `run_as` may not use is `403`. A body that is not this shape is `400`; an empty `event.kind` or an `event.data` that is not an object is `422` (`details.field` `event.kind`, `event.data`). |
+| `POST /api/schedules/{id}/deliveries/{delivery}/redeliver` | | `202`, a new `pending` delivery: a copy of `{delivery}` with `redelivery_of`, due now. The rights of a run-now. A `dropped` row is `422`. A disabled project action is `409` (§19.8). |
+| `POST /api/schedules/{id}/test` | none, or `{event?: {kind?, summary?, project?, agent?, actor?, data?}}` | `200`, a test run (§19.7): `{test: true, action, matched, reason?, event?, status?, summary?, output?, error?, delivery?, request?}`. Any action kind. The rights of a run-now; for a webhook, a secret that the caller or `run_as` may not use is `403`. A body that is not this shape is `400`; an empty `event.kind` or an `event.data` that is not an object is `422` (`details.field` `event.kind`, `event.data`). A disabled project action is `409` (§19.8). |
 
 Errors:
 
@@ -7802,6 +7805,46 @@ test: true}`. Each test writes the audit row `schedule.test`
  "status": "ok", "summary": "mail 01JX... to terra/lead",
  "output": {"message_id": "01JX...", "thread_id": "01JX...", "to": "terra/lead",
             "held": false, "held_reason": null}}
+```
+
+### 19.8 Project actions
+
+A project action (TER-53) is a schedule with the spec `{"kind":
+"manual"}`. It has no time and no event: the timer and the trigger
+engine never start it, and `next_run_at` is always `null`. A person
+starts each run with its button on the project dashboard or next to the
+project name in the Home 'Work in progress' table, or with `terrarium
+schedule run <name>`. The dashboard asks for a confirm first and shows
+the run's status, summary, and error when it ends.
+
+An action takes every action kind of §19.1 (`mail`, `turn`, `agent`,
+`exec`, `probe`, `card`, `webhook`). Its text has no templates: there is
+no event. It counts toward the schedule limit of its project, and it is
+listed with `GET /api/schedules?kind=action` (`terrarium schedule ls
+--actions`). Monitors and pipelines do not take a `manual` spec.
+
+The rules are those of any schedule (§19.3, §19.6):
+
+- Create, change, delete, enable, disable, and run: the operator, a
+  sysadmin, and a project_admin of the project, with the action's reach
+  inside the project. A member reads the actions and cannot run them
+  (`403`).
+- A run acts as `run_as` (an actor-owned action) or with the project's
+  rights (a project-owned action), checked again at each run. The card
+  action of a project-owned action keeps the GitHub author gate (TER-85):
+  a `close` never moves a held card.
+- A disabled action does not run: `POST .../run`, `POST .../test`
+  (§19.7), and `POST .../deliveries/{delivery}/redeliver` are `409`.
+  Enable it first.
+- Each run is a run of §19.1 with `trigger: manual` and the caller as
+  `actor`. It writes the audit row `schedule.run` and the `schedule`
+  events `run_started` and `run_finished`.
+
+```sh
+terrarium schedule new deploy-staging --project terra --manual \
+  --exec build-box --cwd /src/app -- ./deploy.sh staging
+terrarium schedule ls --actions
+terrarium schedule run terra/deploy-staging
 ```
 
 ## 20. Event sources and ingest
