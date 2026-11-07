@@ -514,7 +514,7 @@ async fn delivery_fails_after_one_retry() {
 /// vmlab/vml-99 (TER-194).
 fn long_turn() -> String {
     let mut text = String::from("[Mailbox:lead] Subject: TER-1 (thread T, message M)\n");
-    for i in 1..38 {
+    for i in 1..37 {
         text.push_str(&format!("> line {i:02} of the mail body\n"));
     }
     text.push_str("Act on the result./exit");
@@ -550,7 +550,7 @@ async fn a_long_paste_submits_with_the_submit_pause() {
     let seen = until_status(&mut h.events, AgentStatus::Idle).await;
     assert!(
         seen.iter()
-            .any(|e| matches!(e, Event::TurnStart { prompt: Some(p) } if p.contains("line 37"))),
+            .any(|e| matches!(e, Event::TurnStart { prompt: Some(p) } if p.contains("line 36"))),
         "{seen:?}"
     );
     until_screen(&h, "done: ").await;
