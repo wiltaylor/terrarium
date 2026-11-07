@@ -1785,7 +1785,10 @@ echo "after: $GIT_SSH_COMMAND"
                 assert!(failure.is_null(), "{verdict}: {failure}");
             } else {
                 let f = failure.as_str().unwrap();
-                assert!(f.starts_with("Validation failed: t2, validate job J1"), "{f}");
+                assert!(
+                    f.starts_with("Validation failed: t2, validate job J1"),
+                    "{f}"
+                );
                 assert!(f.contains("test x ... FAILED"), "{f}");
             }
         }
@@ -1824,12 +1827,7 @@ echo "after: $GIT_SSH_COMMAND"
     #[test]
     fn a_red_failed_or_cancelled_batch_has_a_verdict_per_card() {
         use jobs::JobState::{Cancelled, Failed};
-        let cards = || {
-            vec![
-                batch_card("C1", "w1", None),
-                batch_card("C2", "w2", None),
-            ]
-        };
+        let cards = || vec![batch_card("C1", "w1", None), batch_card("C2", "w2", None)];
         let red = verdicts(&batch(Failed, Some("red"), cards()));
         assert_eq!(field(&red, "verdict"), ["red", "red"]);
         assert!(red.iter().all(|d| d["failure_block"].is_string()));
