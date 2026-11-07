@@ -1155,7 +1155,7 @@ async fn fleet_template_grants_need_the_right_to_grant_them() {
                 json!({"kind": "api_key", "fields": {"value": "fleet-grant-value-9Xq2"}}),
             )
             .await;
-        assert!(r.status < 300, "{}", r.body);
+        assert!(r.status.is_success(), "{}", r.body);
     }
     let r = td
         .post(

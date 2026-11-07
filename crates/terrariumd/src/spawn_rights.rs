@@ -253,9 +253,8 @@ pub struct TemplateGrants {
 impl TemplateGrants {
     /// The grants of `tpl`, named `key` in the messages.
     pub fn of(tpl: &crate::store::templates::Template, key: String) -> ApiResult<Self> {
-        let asks = template_asks(&tpl.spec).map_err(|e| {
-            ApiError::invalid(format!("template `{key}`: {}", e.message))
-        })?;
+        let asks = template_asks(&tpl.spec)
+            .map_err(|e| ApiError::invalid(format!("template `{key}`: {}", e.message)))?;
         Ok(Self {
             key,
             asks,
@@ -302,7 +301,9 @@ pub fn check_template_write(
 ) -> ApiResult<()> {
     use terrarium_core::agent_template::grants_of;
     let want = grants_of(new).map_err(ApiError::invalid)?;
-    let had = old.map(|o| grants_of(o).unwrap_or_default()).unwrap_or_default();
+    let had = old
+        .map(|o| grants_of(o).unwrap_or_default())
+        .unwrap_or_default();
     if want.is_empty() || want == had {
         return Ok(());
     }

@@ -703,8 +703,16 @@ async fn writing_template_grants_needs_the_right_to_grant_them() {
         let r = td.post_as(&lead, "/api/templates", new(name, grants)).await;
         assert_eq!(r.status, 403, "{}", r.body);
         assert!(message(&r).contains("template `p/"), "{}", r.body);
-        let secret = if name == "tg1" { "global/openai" } else { "global/gh" };
-        assert!(message(&r).contains(&format!("secret `{secret}`")), "{}", r.body);
+        let secret = if name == "tg1" {
+            "global/openai"
+        } else {
+            "global/gh"
+        };
+        assert!(
+            message(&r).contains(&format!("secret `{secret}`")),
+            "{}",
+            r.body
+        );
         let list = td.get("/api/templates?project=p").await.body.to_string();
         assert!(!list.contains(&format!("\"{name}\"")), "{list}");
     }
@@ -724,9 +732,7 @@ async fn writing_template_grants_needs_the_right_to_grant_them() {
     assert_eq!(r.body["grants_by"], "operator", "{}", r.body);
     let tid = id(&r.body);
     let path = format!("/api/templates/{tid}");
-    let r = td
-        .patch_as(&lead, &path, json!({"description": "d"}))
-        .await;
+    let r = td.patch_as(&lead, &path, json!({"description": "d"})).await;
     assert_eq!(r.status, 200, "{}", r.body);
     let r = td
         .patch_as(
@@ -876,7 +882,7 @@ async fn a_body_grant_replaces_only_the_same_resolved_secret() {
             json!({"kind": "api_key", "fields": {"value": KEY}}),
         )
         .await;
-    assert!(r.status < 300, "{}", r.body);
+    assert!(r.status.is_success(), "{}", r.body);
     let o = id(&td
         .agent(
             "p",
