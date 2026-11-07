@@ -8931,9 +8931,9 @@ and templates that select it:
 
 The results of a test run (PLAN §15.5). An agent or the operator uploads
 a standard test result file. The daemon reads the file and keeps the run
-and each test case. A run links to cards and to versions. The operator
-reads the runs on the Tests tab of the Board screen, on the card drawer,
-and in the Version modal. The code is in
+and each test case. A run links to cards and to labels, such as the
+version label `version:1.4.0` (TER-58). The operator reads the runs on the
+Tests tab of the Board screen and on the card drawer. The code is in
 `crates/terrariumd/src/test_results/` (the parsers) and
 `crates/terrariumd/src/store/test_runs.rs`.
 
