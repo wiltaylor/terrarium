@@ -3617,8 +3617,10 @@ The close result names the cause, then the last assistant message of the
 agent. The lifecycle timer also closes a bound agent whose card is done,
 archived, or gone. The events `agent.parked` (`{spawn_id, name, bound,
 reason}`), `agent.unpark_queued` (`{spawn_id, name, bound, cause,
-owner}`), and `agent.unparked` (`{spawn_id, name, bound, cause}`) are on
-the bound agent. The wait columns are names: a board without them never
+owner}`), `agent.unpark_dropped` (`{spawn_id, name, bound, reason}`: the
+card moved into a wait column again while its unpark waited, so the
+unpark and its return turn are dropped), and `agent.unparked`
+(`{spawn_id, name, bound, cause}`) are on the bound agent. The wait columns are names: a board without them never
 parks its bound agents.
 
 **Finish.** Only these end an ephemeral agent:
