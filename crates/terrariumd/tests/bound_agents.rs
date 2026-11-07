@@ -897,7 +897,10 @@ async fn a_parked_agent_that_still_runs_unparks_in_its_own_place() {
         .ok()
         .clone();
     assert!(ev.as_array().unwrap().is_empty(), "{ev}");
+    // The hold stands for a wake on the way: the unpark's wake found it
+    // busy, and the wake on the way gives the queued turn when it ends.
     drop(hold);
+    terrariumd::lifecycle::wake(&s, eph.parse().unwrap(), "test").await;
     until("the return turn", || async {
         !return_turns(&td, &eph, &c).is_empty()
     })
