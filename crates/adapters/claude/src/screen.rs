@@ -157,6 +157,22 @@ pub fn screen_hint(screen: &Screen) -> ScreenHint {
     screen_state(&screen_lines(screen)).hint()
 }
 
+impl ScreenState {
+    /// The input box holds text that a CR would submit: not busy, and no
+    /// dialog. A long paste shows as "[Pasted text #N +L lines]" (TER-194).
+    pub fn input_pending(&self) -> bool {
+        self.input_box
+            && !self.busy
+            && self.dialog.is_none()
+            && self.input_text.as_deref().is_some_and(|t| !t.is_empty())
+    }
+}
+
+/// [`ScreenState::input_pending`] for a parsed screen.
+pub fn input_pending(screen: &Screen) -> bool {
+    screen_state(&screen_lines(screen)).input_pending()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +331,34 @@ mod tests {
         let st = screen_state(lines);
         assert_eq!(st.hint(), ScreenHint::Busy);
         assert!(st.input_text.expect("text").contains("queued"));
+    }
+
+    /// TER-194: a long paste that did not submit stays in the box as
+    /// "[Pasted text #N +L lines]". The box then holds pending input. An
+    /// empty box, a busy screen, and a dialog do not.
+    #[test]
+    fn unsubmitted_paste_is_pending_input() {
+        let all = sections(&fixture("typing.txt"));
+        let pending = |prefix: &str| {
+            let (_, lines) = all
+                .iter()
+                .find(|(n, _)| n.starts_with(prefix))
+                .expect(prefix);
+            screen_state(lines).input_pending()
+        };
+        assert!(pending("T4 big paste"));
+        assert!(pending("T5 after plain text with LF"));
+        for prefix in ["T1 after startup", "T6 second", "T7 question shown", "working-5"] {
+            assert!(!pending(prefix), "{prefix}");
+        }
+        let (_, lines) = all
+            .iter()
+            .find(|(n, _)| n.starts_with("T4 big paste"))
+            .expect("T4");
+        let rows = u16::try_from(lines.len()).expect("rows");
+        let mut parser = vt100::Parser::new(rows, 120, 0);
+        parser.process(lines.join("\r\n").as_bytes());
+        assert!(input_pending(parser.screen()));
     }
 
     #[test]

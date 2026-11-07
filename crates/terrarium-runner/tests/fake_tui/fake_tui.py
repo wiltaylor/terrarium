@@ -55,6 +55,13 @@ Env:
                        the text stays unsubmitted: the text stays in the
                        line, as in the Codex composer. Other lines submit
                        on any CR.
+  FAKE_TUI_PASTE_NEEDS_PAUSE  when "1", read the terminal in cbreak mode,
+                       as Claude Code with a long paste (TER-194): a
+                       bracketed paste shows as `> [Pasted text #N +L
+                       lines]`, and a CR that comes less than 100 ms after
+                       the end of the paste is lost (the paste stays in
+                       the line). A later CR submits it. Ctrl-U empties
+                       the line
   FAKE_TUI_INPUT_LOG   a path; with FAKE_TUI_SLASH_NEEDS_PAUSE, append one
                        line for each read of the terminal: the bytes as
                        hex. ICRNL is off then, so a CR stays a CR.
@@ -88,20 +95,33 @@ NO_SUBMIT_HOOK = os.environ.get("FAKE_TUI_NO_SUBMIT_HOOK") == "1"
 SUBMIT_GATE = os.environ.get("FAKE_TUI_SUBMIT_GATE")
 STARTUP_GATE = os.environ.get("FAKE_TUI_STARTUP_GATE")
 SLASH_NEEDS_PAUSE = os.environ.get("FAKE_TUI_SLASH_NEEDS_PAUSE") == "1"
+PASTE_NEEDS_PAUSE = os.environ.get("FAKE_TUI_PASTE_NEEDS_PAUSE") == "1"
+CBREAK = SLASH_NEEDS_PAUSE or PASTE_NEEDS_PAUSE
+# The number of pastes so far, for the `[Pasted text #N ...]` marker.
+PASTES = [0]
 INPUT_LOG = os.environ.get("FAKE_TUI_INPUT_LOG")
 COMPACT = os.environ.get("FAKE_TUI_COMPACT", "")
 # The smallest gap between a slash command and its CR that submits it.
 SLASH_PAUSE = 0.1
 
 
+def in_paste(buf):
+    """True while a bracketed paste in `buf` has not ended."""
+    start = buf.rfind(b"\x1b[200~")
+    return start >= 0 and buf.find(b"\x1b[201~", start) < 0
+
+
 def read_line():
     """One line of input. With FAKE_TUI_SLASH_NEEDS_PAUSE, a slash command
-    submits only on a CR that comes SLASH_PAUSE after the last other byte."""
-    if not SLASH_NEEDS_PAUSE:
+    submits only on a CR that comes SLASH_PAUSE after the last other byte.
+    With FAKE_TUI_PASTE_NEEDS_PAUSE, a CR that comes less than SLASH_PAUSE
+    after the end of a paste is lost."""
+    if not CBREAK:
         return sys.stdin.readline()
     fd = sys.stdin.fileno()
     buf = b""
     last = time.monotonic()
+    pasted_at = None
     while True:
         chunk = os.read(fd, 1024)
         if INPUT_LOG:
@@ -112,15 +132,35 @@ def read_line():
         now = time.monotonic()
         for b in chunk:
             c = bytes([b])
-            if c in (b"\r", b"\n"):
+            if PASTE_NEEDS_PAUSE and c == b"\x15":
+                buf = b""
+                pasted_at = None
+                out("\r\x1b[K> ")
+                continue
+            if c in (b"\r", b"\n") and not (PASTE_NEEDS_PAUSE and in_paste(buf)):
                 text = buf.replace(b"\x1b[200~", b"").replace(b"\x1b[201~", b"")
-                if text.strip().startswith(b"/") and now - last < SLASH_PAUSE:
+                if (
+                    SLASH_NEEDS_PAUSE
+                    and text.strip().startswith(b"/")
+                    and now - last < SLASH_PAUSE
+                ):
                     # A burst: keep the text, as Codex keeps it in the
                     # composer.
                     continue
+                if PASTE_NEEDS_PAUSE and pasted_at is not None and now - pasted_at < SLASH_PAUSE:
+                    # The CR came with the paste: Claude Code loses it.
+                    continue
+                if PASTE_NEEDS_PAUSE:
+                    out("\n")
                 return (buf + b"\n").decode(errors="replace")
             buf += c
             last = now
+            if PASTE_NEEDS_PAUSE and buf.endswith(b"\x1b[201~"):
+                pasted_at = now
+                PASTES[0] += 1
+                text = buf.replace(b"\x1b[200~", b"").replace(b"\x1b[201~", b"")
+                lines = text.count(b"\n") + 1
+                out(f"\r\x1b[K> [Pasted text #{PASTES[0]} +{lines} lines]")
 
 
 def hook(name, payload):
@@ -185,7 +225,7 @@ def main():
     if os.environ.get("FAKE_TUI_IGNORE_HUP") == "1":
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
     watch_parent()
-    if SLASH_NEEDS_PAUSE:
+    if CBREAK:
         import tty
 
         # No line discipline: the TUI sees each write when it comes. With

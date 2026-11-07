@@ -40,5 +40,7 @@ pub use process::{ExitRecord, StoppedBy, live_runner_pid, read_exit_record, read
 pub use protocol::{BoxFuture, Message, NoHandler, RequestContext, RequestHandler, RpcError};
 pub use ready::{DefaultReadyDetector, ReadyDetector};
 pub use remote::{ConnectOptions, LOST_SIGNAL, RemoteRunner, SpawnOptions};
-pub use runner::{Delivery, ExitStatus, OutputChunk, Runner, ScreenSnapshot};
+pub use runner::{
+    Delivery, ExitStatus, MAX_RESUBMITS, OutputChunk, RESUBMIT_AFTER, Runner, ScreenSnapshot,
+};
 pub use spec::{AdapterKind, AdapterOptions, ReadyDetectorSpec, RunnerSpec};
