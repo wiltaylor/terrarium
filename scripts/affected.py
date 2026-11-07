@@ -36,6 +36,11 @@ The rules, first match per path:
      each module that `tests/common` names), or when no target matches.
    - `tests/<t>.rs`: only that target. `tests/common/`, `tests/fixtures/`,
      or another file of the crate: all targets.
+   - Guard (TER-179): any changed `crates/<crate>/src/**/*.rs`, in any crate,
+     also runs terrariumd's `no_token_endpoint` target. That test scans the
+     `src/` of every crate, so it reaches a change that no target names
+     (rule 4 for crates other than terrariumd: terrariumd is then in the plan
+     with that target alone).
 6. Files outside `crates/` that the crates read: `defaults/` is terrariumd,
    `examples/` is terrarium-core and terrariumd, `harnesses.toml` is
    terrarium-core and the scripts tests (each with its reverse
@@ -85,6 +90,8 @@ OUTSIDE = {
 INCLUDE = re.compile(r'include_(?:str|bytes)!\(\s*"([^"]+)"\s*\)')
 # Rule 5: terrariumd modules that every test target reaches.
 DAEMON_SHARED = {"lib", "main", "db", "error", "policy", "api", "store"}
+# The terrariumd target that scans the sources of every crate (TER-179).
+GUARD_TARGET = "no_token_endpoint"
 
 
 @dataclass
@@ -253,6 +260,7 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
     daemon: set[str] | None = None
     daemon_all = False
     daemon_seen = False
+    guard = False
     refs: dict[str, set[str]] | None = None
     shared: set[str] = set()
     dc = crates.get(DAEMON)
@@ -320,6 +328,8 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
             pl.full = True
             pl.reasons.append(f"{path}: outside the known areas")
             continue
+        if path.endswith(".rs") and path[len(c.dir):].startswith("src/"):
+            guard = True
         if c.name != DAEMON or dc is None:
             whole.add(c.name)
             continue
@@ -344,6 +354,14 @@ def plan(changed: list[str] | None, crates: dict[str, Crate],
 
     if pl.full:
         return pl
+    # The guard (TER-179): a crate source change runs the target that scans
+    # every crate's sources. A missing target runs all of terrariumd's.
+    if guard and dc is not None:
+        daemon_seen = True
+        if GUARD_TARGET in dc.tests:
+            daemon = (daemon or set()) | {GUARD_TARGET}
+        else:
+            daemon_all = True
     # Changed crates and their reverse dependencies are tested whole. When
     # terrariumd is one of them, it is tested whole too (all targets).
     tested = reverse_deps(crates, whole & crates.keys())

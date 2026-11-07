@@ -787,6 +787,21 @@ fn blocked_info(conn: &Connection, card: &Card) -> ApiResult<(String, Option<Str
     })
 }
 
+/// When the card `id` last moved to another column (its newest `moved`
+/// event), if it ever did.
+pub fn last_moved_at(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT at FROM events
+              WHERE card = ?1 AND kind = 'card'
+                AND json_extract(payload, '$.change') = 'moved'
+              ORDER BY seq DESC LIMIT 1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// The most cards of [`active_cards`].
 pub const ACTIVE_MAX: usize = 500;
 
