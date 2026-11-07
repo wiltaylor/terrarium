@@ -1336,10 +1336,26 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
 /// (`created_at`), and `tail` says why it waits. `None` when the job is
 /// not running (a cancel came first).
 pub fn requeue(t: &mut Tx<'_>, id: &str, why: &str) -> ApiResult<Option<Job>> {
+    requeue_with(t, id, &format!("waits for its host: {why}"))
+}
+
+/// The tail of a job that [`requeue_lost`] put back.
+pub const LOST_TAIL: &str =
+    "the daemon restarted while the job ran; the run is lost, and the job waits in the queue again";
+
+/// Put job `id` back in the queue: it was running when the last daemon
+/// stopped, so its run is lost (TER-123, P5). As [`requeue`]: it keeps its
+/// attempt and its place, and `tail` says why. `None` when it is not
+/// running (any more).
+pub fn requeue_lost(t: &mut Tx<'_>, id: &str) -> ApiResult<Option<Job>> {
+    requeue_with(t, id, LOST_TAIL)
+}
+
+fn requeue_with(t: &mut Tx<'_>, id: &str, tail: &str) -> ApiResult<Option<Job>> {
     let n = t.execute(
         "UPDATE jobs SET state = 'queued', started_at = NULL, host = NULL, tail = ?2
          WHERE id = ?1 AND state = 'running'",
-        params![id, clip_tail(&format!("waits for its host: {why}"))],
+        params![id, clip_tail(tail)],
     )?;
     if n == 0 {
         return Ok(None);
@@ -1371,18 +1387,6 @@ pub fn cancel(t: &mut Tx<'_>, id: &str) -> ApiResult<Job> {
     )?;
     emit(t, &job, "cancelled")?;
     Ok(job)
-}
-
-/// Fail job `id`, which was running when the last daemon stopped: its
-/// run is lost. `None` when it is not running (any more).
-pub fn fail_lost(t: &mut Tx<'_>, id: &str) -> ApiResult<Option<Job>> {
-    let end = JobEnd {
-        passed: false,
-        outcome: Some("error".into()),
-        tail: Some("the daemon restarted while the job ran; the run is lost".into()),
-        ..JobEnd::default()
-    };
-    finish(t, id, &end)
 }
 
 /// The queue config of a project. The default (no queue) when none is set.
@@ -1553,6 +1557,42 @@ mod tests {
             .map(|j| j.id)
             .collect();
         assert_eq!(got, ["J1"]);
+    }
+
+    /// TER-123, P5: a job lost to a restart goes back to the queue with
+    /// its attempt and its place; a job that is not running stays as it is.
+    #[tokio::test]
+    async fn a_lost_job_is_requeued_without_using_an_attempt() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        for (id, state) in [("J1", "running"), ("J2", "cancelled")] {
+            c.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt,
+                                   created_by, created_at, started_at, host)
+                 VALUES (?1, 'p', 'C', 'validate', 'app', 'b', ?2, 1, 't',
+                         '2026-11-07T05:00:00.000Z', '2026-11-07T05:01:00.000Z', 'h')",
+                params![id, state],
+            )
+            .unwrap();
+        }
+        let db = crate::db::Db::new(c, crate::events::EventHub::default());
+        let j = db
+            .write("system", |t| requeue_lost(t, "J1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(j.state, JobState::Queued);
+        assert_eq!(j.attempt, 1);
+        assert_eq!(j.created_at, "2026-11-07T05:00:00.000Z");
+        assert_eq!(j.started_at, None);
+        assert_eq!(j.host, None);
+        assert_eq!(j.tail.as_deref(), Some(LOST_TAIL));
+        let again = db.write("system", |t| requeue_lost(t, "J1")).await.unwrap();
+        assert!(again.is_none(), "a queued job is not requeued again");
+        let cancelled = db.write("system", |t| requeue_lost(t, "J2")).await.unwrap();
+        assert!(cancelled.is_none(), "a cancel stays a cancel");
+        let j2 = db.read(|c| get(c, "J2")).await.unwrap();
+        assert_eq!(j2.state, JobState::Cancelled);
     }
 
     fn job(id: &str, project: &str, kind: JobKind, repo: &str, at: &str) -> Job {

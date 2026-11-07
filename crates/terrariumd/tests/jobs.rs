@@ -2347,13 +2347,16 @@ async fn until_kills_run(ids: &[&str]) {
 /// that was running and one cancelled while it drained left their
 /// processes on a docker target (through host agent `lab1`). The host
 /// agent connects only after the start. The recovery waits for it, kills
-/// both process groups, and fails the running job. Until then both jobs
+/// both process groups, and puts the running job back in the queue with
+/// its attempt (P5: a restart is not a failure). Until then both jobs
 /// keep their slots: a validation queued meanwhile (two slots) does not
 /// start, also not on a tick.
 #[tokio::test]
 async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots() {
     let (lab, _bins, children) = docker_lab(2, 600).await;
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    // The running job runs again after its requeue: it needs its branch.
+    lab.branch("ter-l1", "next", &[("OK", "1")]);
     let cr = lab.card("lost-run", "ter-l1").await;
     let cc = lab.card("lost-cancel", "ter-l2").await;
     let run_id = ulid::Ulid::new().to_string();
@@ -2363,10 +2366,11 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots()
         (now - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     };
     let rows = [
-        (run_id.clone(), cr.clone(), "running", at(5), None),
+        (run_id.clone(), cr.clone(), "ter-l1", "running", at(5), None),
         (
             cancel_id.clone(),
             cc.clone(),
+            "b",
             "cancelled",
             at(5),
             Some(at(1)),
@@ -2375,12 +2379,12 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots()
     state
         .db
         .write("operator", move |t| {
-            for (id, card, st, started, ended) in rows {
+            for (id, card, branch, st, started, ended) in rows {
                 t.execute(
-                    "INSERT INTO jobs (id, project, card, kind, repo, branch, state, created_by,
-                                       created_at, started_at, ended_at)
-                     VALUES (?1, 'p', ?2, 'validate', 'app', 'b', ?3, 't', ?4, ?4, ?5)",
-                    rusqlite::params![id, card, st, started, ended],
+                    "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt,
+                                       created_by, created_at, started_at, ended_at)
+                     VALUES (?1, 'p', ?2, 'validate', 'app', ?3, ?4, 1, 't', ?5, ?5, ?6)",
+                    rusqlite::params![id, card, branch, st, started, ended],
                 )?;
             }
             Ok(())
@@ -2475,19 +2479,33 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots()
         .await
         .ok()
         .clone();
-    assert_eq!(j["state"], "failed", "{j}");
+    // P5: requeued, not failed. It may run again already: its tail stays
+    // until it ends, and its recipe runs for minutes.
     assert!(
-        j["tail"].as_str().unwrap_or("").contains("the run is lost"),
+        j["state"] == "queued" || j["state"] == "running",
+        "a lost job is not back in the queue: {j}"
+    );
+    assert_eq!(j["attempt"], 1, "a restart used an attempt: {j}");
+    assert!(
+        j["tail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("waits in the queue again"),
         "{j}"
     );
-    for id in [&run_id, &cancel_id] {
-        let f = terrariumd::run_kill::job_pidfile(id);
-        assert!(!Path::new(&f).exists(), "{f} is left");
-    }
-    // Now the slots are free: the queued validation starts. End it.
+    let card = lab.td.get(&format!("/api/cards/{cr}")).await.ok().clone();
+    assert_ne!(card["column"], "ready", "a restart moved the card: {card}");
+    // The requeued job writes its own file again when it runs.
+    let f = terrariumd::run_kill::job_pidfile(&cancel_id);
+    assert!(!Path::new(&f).exists(), "{f} is left");
+    // Now the slots are free: the requeued job and the queued validation
+    // start. End them.
+    until_not(&lab, &run_id, "queued").await;
     until_not(&lab, &queued, "queued").await;
-    let r = lab.td.delete(&format!("/api/jobs/{queued}")).await;
-    assert_eq!(r.ok()["state"], "cancelled");
+    for id in [&run_id, &queued] {
+        let r = lab.td.delete(&format!("/api/jobs/{id}")).await;
+        assert_eq!(r.ok()["state"], "cancelled");
+    }
     if let Ok(text) = std::fs::read_to_string(&children) {
         for p in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
             let start = Instant::now();
@@ -2666,6 +2684,64 @@ async fn job_of(lab: &Lab, id: &str) -> Vec<Value> {
         .into_iter()
         .filter(|j| j["card"] == id)
         .collect()
+}
+
+/// TER-123, P5: a deploy drains the daemon first. During the drain a
+/// queued job does not start (a free slot, a tick too), the running job
+/// goes on and is listed in `drain.jobs`, and the drain waits for it.
+/// The end of the drain starts the queued job.
+#[tokio::test]
+async fn a_drain_starts_no_job_and_lists_the_running_ones() {
+    let lab = lab(2).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let work_dir = lab._dirs.path().join("jobs-drain");
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": "if test -f SLOW; then sleep 6; fi; test -f OK",
+                   "slots": 2, "next_repos": ["app"],
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let slow = queue_green(&lab, "ter-d1", "runs into the drain", true).await;
+    let start = Instant::now();
+    let running = loop {
+        let j = job_of(&lab, &slow).await;
+        if j.first().is_some_and(|j| j["state"] == "running") {
+            break j[0]["id"].as_str().unwrap().to_owned();
+        }
+        assert!(start.elapsed() < DEADLINE, "the slow job never started: {j:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let r = lab.td.post_empty("/api/system/update/drain").await;
+    let d = r.ok().clone();
+    assert_eq!(d["on"], true, "{d}");
+    assert_eq!(d["jobs"], json!([running]), "{d}");
+
+    // A free slot, a queued job, a tick: it does not start.
+    let fast = queue_green(&lab, "ter-d2", "queued in the drain", false).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    terrariumd::jobs::tick(&state).await.unwrap();
+    let j = job_of(&lab, &fast).await;
+    assert_eq!(j[0]["state"], "queued", "a job started during the drain: {j:?}");
+    assert_eq!(j[0]["attempt"], 1, "{j:?}");
+
+    // The running job goes on to its end; then the drain lists no job.
+    lab.until_card(&slow, "review", |c| c["column"] == "review")
+        .await;
+    let v = lab.td.get("/api/system/update").await.ok().clone();
+    assert_eq!(v["drain"]["jobs"], json!([]), "{v}");
+    let j = job_of(&lab, &fast).await;
+    assert_eq!(j[0]["state"], "queued", "a job started during the drain: {j:?}");
+
+    // The end of the drain starts it.
+    let r = lab.td.post_empty("/api/system/update/resume").await;
+    assert_eq!(r.ok()["on"], false);
+    lab.until_card(&fast, "review", |c| c["column"] == "review")
+        .await;
 }
 
 /// TER-160: the host agent of the target is offline when the queue picks

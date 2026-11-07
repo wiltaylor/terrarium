@@ -10720,7 +10720,12 @@ The updater drains the daemon before it stops the container. The drain:
 - lets the running turns end. `terrarium admin update drain --wait <s>`
   waits until no agent is `working` or `starting`, at most `<s>` seconds.
   A turn that still runs then ends with the stop; the agent resumes its
-  session in the new daemon, as after any restart.
+  session in the new daemon, as after any restart;
+- starts no job of the job queue: queued jobs stay queued, and running
+  jobs go on (`drain.jobs` lists them). `terrarium admin update drain`
+  also waits for them, in the same `<s>` seconds. A job that still runs
+  at the stop is killed on its target by the new daemon and put back in
+  the queue with its attempt and its place (TER-123).
 
 The drain lives in memory. The new daemon starts without it, and the queued
 work goes out at its start. `POST /api/system/update/resume` (or the
@@ -10769,7 +10774,7 @@ the daemon's own Unix socket in the container).
             "error":null,"status":{"...": "§34.6"}},
  "last_result":{"...": "a run"},
  "maintenance":{"key":"<event>@<start>","event":"<ulid>","title":"...","start":"...","end":"..."},
- "drain":{"on":false,"since":null,"by":null,"busy":[]}}
+ "drain":{"on":false,"since":null,"by":null,"busy":[],"jobs":[]}}
 ```
 
 - `latest` is the newest release of the channel (semver order; no
@@ -10801,7 +10806,7 @@ Answers `202` with `{run}`. No previous switch: the run fails at once
 
 #### `POST /api/system/update/drain`, `POST /api/system/update/resume`
 
-The operator only. Answer `{on, since, by, busy}`. The drain writes the
+The operator only. Answer `{on, since, by, busy, jobs}`. The drain writes the
 audit row `system.drain`.
 
 ### 34.8 Mail
