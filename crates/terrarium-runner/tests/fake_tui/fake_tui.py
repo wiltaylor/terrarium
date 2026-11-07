@@ -20,6 +20,11 @@ Commands:
   /question   submit, send a Notification hook, wait for one answer line
   /flood N    submit, print N numbered lines of 64 bytes, then Stop
   /abort      die of SIGABRT, with no hooks
+  /leave-blink  with FAKE_TUI_PASTE_NEEDS_PAUSE: a normal turn, then the
+              next prompt holds a paste (`left`, `behind`) that nobody
+              typed. A CR submits it, Ctrl-U empties it. Until the next
+              input, the line is drawn again every 300 ms, and for 50 ms
+              it shows an empty `> ` (a redraw)
   /compact    as Claude Code: no UserPromptSubmit. Send PreCompact
               (trigger "manual"), print `compacting...`, wait the work time,
               send PostCompact, and print `compacted`
@@ -61,9 +66,9 @@ Env:
                        lines]`, and a CR that comes less than 100 ms after
                        the end of the paste is lost (the paste stays in
                        the line). A later CR submits it. Ctrl-U empties
-                       the line. `done:` shows only the first line of a
-                       turn and its line count, so the screen does not
-                       scroll
+                       the line. A read of only Esc does nothing.
+                       `done:` shows only the first line of a turn and
+                       its line count, so the screen does not scroll
   FAKE_TUI_INPUT_LOG   a path; with FAKE_TUI_SLASH_NEEDS_PAUSE, append one
                        line for each read of the terminal: the bytes as
                        hex. ICRNL is off then, so a CR stays a CR.
@@ -103,6 +108,8 @@ CBREAK = SLASH_NEEDS_PAUSE or PASTE_NEEDS_PAUSE
 PASTES = [0]
 INPUT_LOG = os.environ.get("FAKE_TUI_INPUT_LOG")
 COMPACT = os.environ.get("FAKE_TUI_COMPACT", "")
+# The paste that /leave-blink puts in the next prompt.
+PREFILL = [None]
 # The smallest gap between a slash command and its CR that submits it.
 SLASH_PAUSE = 0.1
 
@@ -124,14 +131,38 @@ def read_line():
     buf = b""
     last = time.monotonic()
     pasted_at = None
+    blink = None
+    if PREFILL[0] is not None:
+        buf, PREFILL[0] = PREFILL[0], None
+        PASTES[0] += 1
+        lines = buf.count(b"\n") + 1
+        marker = f"\r\x1b[K> [Pasted text #{PASTES[0]} +{lines} lines]"
+        out(marker)
+        blink = threading.Event()
+
+        def redraw(stop=blink, marker=marker):
+            while not stop.wait(0.3):
+                out("\r\x1b[K> ")
+                time.sleep(0.05)
+                out(marker)
+
+        blinker = threading.Thread(target=redraw, daemon=True)
+        blinker.start()
     while True:
         chunk = os.read(fd, 1024)
+        if blink is not None:
+            blink.set()
+            blinker.join()
+            blink = None
         if INPUT_LOG:
             with open(INPUT_LOG, "a") as f:
                 f.write(chunk.hex() + "\n")
         if not chunk:
             return buf.decode(errors="replace")
         now = time.monotonic()
+        if PASTE_NEEDS_PAUSE and chunk == b"\x1b":
+            # An Esc with no dialog open (the fake adapter's Deny).
+            continue
         for b in chunk:
             c = bytes([b])
             if PASTE_NEEDS_PAUSE and c == b"\x15":
@@ -318,6 +349,9 @@ def main():
         elif text.startswith("/flood "):
             for i in range(int(text.split()[1])):
                 out(f"flood {i:06d} " + "x" * 50 + "\n")
+        elif text == "/leave-blink" and PASTE_NEEDS_PAUSE:
+            time.sleep(DELAY)
+            PREFILL[0] = b"\x1b[200~left\nbehind\x1b[201~"
         elif text == "/question":
             hook("Notification", {"message": "Allow the tool?"})
             out("Allow the tool? [y/n] ")

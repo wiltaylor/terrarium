@@ -4249,7 +4249,9 @@ impl Supervisor for RunnerSupervisor {
             let runner = self
                 .runner(agent)
                 .ok_or(SupervisorError::NotRunning(agent))?;
-            runner.write(&bytes).await.map_err(|e| match e {
+            // `agent keys` is a person at the terminal: the input-box
+            // watchdog does not flag the text it leaves (TER-224).
+            runner.write_person(&bytes).await.map_err(|e| match e {
                 terrarium_runner::RunnerError::Exited
                 | terrarium_runner::RunnerError::Disconnected => SupervisorError::NotRunning(agent),
                 e => other(e),
@@ -4363,7 +4365,9 @@ impl Supervisor for RunnerSupervisor {
                         },
                         input = in_rx.recv() => match input {
                             Some(PtyInput::Bytes(b)) => {
-                                if let Err(e) = runner.write(&b).await {
+                                // A person types: the input-box watchdog
+                                // does not flag the text (TER-224).
+                                if let Err(e) = runner.write_person(&b).await {
                                     debug!("PTY input: {e}");
                                 }
                             }

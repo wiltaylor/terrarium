@@ -198,6 +198,18 @@ pub const RESUBMIT_AFTER: Duration = Duration::from_secs(1);
 /// empties the input box and types the turn again.
 pub const MAX_RESUBMITS: u32 = 2;
 
+/// Text that shows in the input box this soon after a write of a person
+/// ([`Runner::write_person`]: the terminal of the agent, or `agent keys`)
+/// is the text of that person, not a lost turn: the watchdog does not flag it
+/// (TER-224). It covers the redraw of the harness and the runner's tick.
+pub const PERSON_INPUT_SLACK: Duration = Duration::from_secs(2);
+
+/// The input box of an agent that the watchdog blocked must read empty
+/// this long before the agent goes back to `idle`. A redraw that hides the
+/// text for a frame does not unblock it, so one stuck box gives one flag
+/// and one mail (TER-224).
+pub const INPUT_CLEAR_DEBOUNCE: Duration = Duration::from_secs(1);
+
 struct State {
     status: AgentStatus,
     block: Option<Block>,
@@ -227,6 +239,11 @@ struct State {
     /// input box ([`Adapter::input_pending`]), and whether the runner
     /// flagged it. No turn can go out while the box holds text.
     pending_input: Option<(Instant, bool)>,
+    /// The last write of a person ([`Runner::write_person`]).
+    person_write: Option<Instant>,
+    /// Since when the input box of the agent that the watchdog blocked
+    /// reads empty ([`INPUT_CLEAR_DEBOUNCE`]).
+    input_cleared: Option<Instant>,
 }
 
 pub(crate) struct Inner {
@@ -349,6 +366,8 @@ impl Runner {
                 spawned: now,
                 interrupt: None,
                 pending_input: None,
+                person_write: None,
+                input_cleared: None,
             }),
             status_tx: watch::Sender::new(AgentStatus::Starting),
             exit_tx: watch::Sender::new(None),
@@ -486,6 +505,15 @@ impl Runner {
             return Err(RunnerError::Exited);
         }
         self.inner.write_bytes(bytes.to_vec()).await
+    }
+
+    /// [`Runner::write`] of the keys of a person: the terminal of the
+    /// agent, or `agent keys`. Text that they leave in the input box is
+    /// theirs, and the watchdog does not flag it ([`PERSON_INPUT_SLACK`],
+    /// TER-224).
+    pub async fn write_person(&self, bytes: &[u8]) -> Result<()> {
+        lock(&self.inner.state).person_write = Some(Instant::now());
+        self.write(bytes).await
     }
 
     /// Change the PTY size and the parsed screen size.
@@ -755,6 +783,10 @@ impl Inner {
         let mut state = lock(&self.state);
         if state.status == AgentStatus::Blocked {
             state.block = None;
+            // A new watch of the input box: text that is still there gets
+            // flagged again after `submit_timeout` (TER-224).
+            state.pending_input = None;
+            state.input_cleared = None;
             let to = if state.turn_open {
                 AgentStatus::Working
             } else {
@@ -1210,21 +1242,31 @@ impl Inner {
             // The watchdog: an idle agent with text left in its input box
             // takes no turn, and nothing wakes it (TER-194). Flag it once:
             // a warning, and `blocked` with INPUT_PENDING_REASON, so the
-            // daemon mails the leads (TER-208). An empty box makes the
-            // agent idle again.
+            // daemon mails the leads (TER-208). Text that a person typed
+            // is not flagged. A box that stays empty for
+            // INPUT_CLEAR_DEBOUNCE makes the agent idle again (TER-224).
             if state.block == Some(Block::Input) {
-                if !pending && state.status == AgentStatus::Blocked {
-                    state.block = None;
-                    state.pending_input = None;
-                    self.transition(
-                        &mut state,
-                        AgentStatus::Idle,
-                        "no unsubmitted text in the input box",
-                    );
+                if pending {
+                    state.input_cleared = None;
+                } else if state.status == AgentStatus::Blocked {
+                    let cleared = *state.input_cleared.get_or_insert(now);
+                    if now.duration_since(cleared) >= INPUT_CLEAR_DEBOUNCE {
+                        state.block = None;
+                        state.pending_input = None;
+                        state.input_cleared = None;
+                        self.transition(
+                            &mut state,
+                            AgentStatus::Idle,
+                            "no unsubmitted text in the input box",
+                        );
+                    }
                 }
             } else if pending && state.in_flight.is_none() && state.status == AgentStatus::Idle {
                 let (since, flagged) = *state.pending_input.get_or_insert((now, false));
-                if !flagged && now.duration_since(since) >= self.config.submit_timeout {
+                let typed = state
+                    .person_write
+                    .is_some_and(|w| w + PERSON_INPUT_SLACK >= since);
+                if !flagged && !typed && now.duration_since(since) >= self.config.submit_timeout {
                     state.pending_input = Some((since, true));
                     let secs = now.duration_since(since).as_secs();
                     tracing::warn!("unsubmitted text in the input box for {secs} s");
@@ -1236,6 +1278,7 @@ impl Inner {
                         ),
                     });
                     state.block = Some(Block::Input);
+                    state.input_cleared = None;
                     self.transition(
                         &mut state,
                         AgentStatus::Blocked,

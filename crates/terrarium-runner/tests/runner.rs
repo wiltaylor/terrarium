@@ -112,7 +112,9 @@ impl Adapter for FakeAdapter {
     fn answer(&self, _request_id: &str, answer: &Answer) -> Vec<u8> {
         match answer {
             Answer::Allow => b"y\r".to_vec(),
-            Answer::Deny => b"n\r".to_vec(),
+            // Esc, as a cancel: the fake TUI in paste mode ignores it, so
+            // the text in its input box stays (TER-224).
+            Answer::Deny => b"\x1b".to_vec(),
             Answer::Choice(_) => Vec::new(),
         }
     }
@@ -698,6 +700,134 @@ async fn an_emptied_input_box_unblocks_the_agent() {
     until_screen(&h, "done: after").await;
     h.runner.kill().expect("kill");
     h.runner.wait().await;
+}
+
+/// The `blocked` status changes in the events file of the runner.
+fn blocked_reasons(path: &Path) -> Vec<Option<String>> {
+    read_events(path)
+        .iter()
+        .filter_map(|r| match &r.event {
+            Event::StatusChanged {
+                to: AgentStatus::Blocked,
+                reason,
+                ..
+            } => Some(reason.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// TER-224: text that a person types at the terminal of an idle agent
+/// ([`Runner::write_person`]) is not flagged, also long after
+/// `submit_timeout`. When the box is empty again, a turn goes out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_typed_by_a_person_is_not_flagged() {
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_PASTE_NEEDS_PAUSE", "1")]),
+        submit: ms(500),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    h.runner
+        .write_person(b"\x1b[200~typed\nby hand\x1b[201~")
+        .await
+        .expect("paste");
+    until_screen(&h, "[Pasted text #1 +2 lines]").await;
+    tokio::time::sleep(ms(2_000)).await;
+    assert_eq!(h.runner.status(), AgentStatus::Idle);
+    h.runner.write_person(b"\x15").await.expect("ctrl-u");
+    let d = h.runner.type_turn("after");
+    timeout(wait(), d.wait())
+        .await
+        .expect("time")
+        .expect("the turn submits");
+    until_screen(&h, "done: after").await;
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+    let all = read_events(h.runner.events_path());
+    assert!(
+        !all.iter()
+            .any(|r| matches!(&r.event, Event::Warning { message } if message.contains("unsubmitted"))),
+        "{all:?}"
+    );
+    assert_eq!(blocked_reasons(h.runner.events_path()), Vec::<Option<String>>::new());
+}
+
+/// TER-224: a redraw that hides the stuck text for a frame (the fake TUI
+/// shows an empty prompt for 50 ms every 300 ms) does not unblock the
+/// agent. One stuck box gives one flag, so the daemon sends one mail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redraw_does_not_unblock_the_agent() {
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_PASTE_NEEDS_PAUSE", "1")]),
+        submit: ms(500),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    let d = h.runner.type_turn("/leave-blink");
+    timeout(wait(), d.wait())
+        .await
+        .expect("time")
+        .expect("the turn submits");
+    until_status(&mut h.events, AgentStatus::Blocked).await;
+    // Ten redraws, each shorter than INPUT_CLEAR_DEBOUNCE.
+    tokio::time::sleep(ms(3_000)).await;
+    assert_eq!(h.runner.status(), AgentStatus::Blocked);
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+    let all = read_events(h.runner.events_path());
+    assert!(
+        !all.iter().any(|r| matches!(&r.event, Event::StatusChanged {
+            reason: Some(r),
+            ..
+        } if r.contains("no unsubmitted text"))),
+        "{all:?}"
+    );
+    assert_eq!(
+        blocked_reasons(h.runner.events_path()),
+        vec![Some(
+            terrarium_core::adapter::INPUT_PENDING_REASON.to_owned()
+        )]
+    );
+}
+
+/// TER-224: an answer that unblocks the agent that the watchdog blocked,
+/// while the text stays in the box, starts a new watch: the watchdog flags
+/// the box again after `submit_timeout`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_watchdog_flags_the_box_again_after_an_answer() {
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_PASTE_NEEDS_PAUSE", "1")]),
+        submit: ms(500),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    h.runner
+        .write(b"\x1b[200~left\nbehind\x1b[201~")
+        .await
+        .expect("paste");
+    until_status(&mut h.events, AgentStatus::Blocked).await;
+    h.runner.answer("q1", &Answer::Deny).await.expect("answer");
+    let seen = until_status(&mut h.events, AgentStatus::Idle).await;
+    assert!(
+        seen.iter().any(|e| matches!(e, Event::StatusChanged {
+            to: AgentStatus::Idle,
+            reason: Some(r),
+            ..
+        } if r == "answered")),
+        "{seen:?}"
+    );
+    until_status(&mut h.events, AgentStatus::Blocked).await;
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+    let reason = Some(terrarium_core::adapter::INPUT_PENDING_REASON.to_owned());
+    assert_eq!(
+        blocked_reasons(h.runner.events_path()),
+        vec![reason.clone(), reason]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
