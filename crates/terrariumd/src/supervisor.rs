@@ -942,6 +942,19 @@ mod fake {
             self.lock().agents.entry(agent).or_default().compact = mode;
         }
 
+        /// End the open compaction of `agent` as its time limit does (no
+        /// end signal came), so a test of a `Silent` compaction picks the
+        /// moment instead of racing a short limit. False when none is
+        /// open. For tests.
+        pub fn time_out_compaction(&self, agent: AgentId) -> bool {
+            let end = CompactEnd {
+                ok: false,
+                reason: Some("no end of the compaction".into()),
+                work: false,
+            };
+            self.end_compaction(agent, None, end).is_some()
+        }
+
         /// The fake cannot compact agents of `harness`. For tests.
         pub fn refuse_compact(&self, harness: HarnessId) {
             self.lock().no_compact.insert(harness);
