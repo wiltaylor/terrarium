@@ -913,6 +913,9 @@ mod tests {
         let pid = other.id();
         let real = start_time(pid);
         let wrong = (real.parse::<u64>().unwrap() + 1).to_string();
+        // Not under /tmp/terrarium-run-*.pid: the WRAP clean-up of a run of
+        // a test beside this one would remove a stale file there first.
+        let pidfile = dir.path().join("stale.pid").display().to_string();
         std::fs::write(&pidfile, format!("{pid} {wrong}\n")).unwrap();
         let r = kill_file_with(ssh.clone(), None, &pidfile, 1, Duration::ZERO).await;
         assert!(r.get("error").is_none(), "{r}");
