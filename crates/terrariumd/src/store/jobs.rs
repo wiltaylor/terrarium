@@ -1365,11 +1365,7 @@ pub fn start(t: &mut Tx<'_>, id: &str, host: &str) -> ApiResult<bool> {
     }
     let job = get(t, id)?;
     // The ETA starts when the job runs (TER-155 D2).
-    if let Some(eta) = job
-        .started_at
-        .as_deref()
-        .and_then(|s| started_eta(&job, s))
-    {
+    if let Some(eta) = job.started_at.as_deref().and_then(|s| started_eta(&job, s)) {
         for c in job.cards() {
             board::set_job_eta(t, &c.card, Some(&eta), &job.created_by)?;
         }
