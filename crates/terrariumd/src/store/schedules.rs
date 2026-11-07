@@ -256,6 +256,8 @@ pub fn validate_spec(spec: &ScheduleSpec, now: DateTime<Utc>) -> ApiResult<()> {
             escalate.as_ref(),
             *max_per_hour,
         )?,
+        // A project action: nothing to check.
+        ScheduleSpec::Manual {} => {}
     }
     Ok(())
 }
@@ -427,6 +429,8 @@ pub fn next_after_min(
         ScheduleSpec::At { at } => Ok(parse_time(at).filter(|t| *t > after)),
         // A trigger has no time: an event starts its runs.
         ScheduleSpec::On { .. } => Ok(None),
+        // A project action has no time: a person starts each run.
+        ScheduleSpec::Manual {} => Ok(None),
     }
 }
 
@@ -627,9 +631,30 @@ pub struct ListFilter {
     /// The projects a caller may read; `None` means all.
     pub projects: Option<Vec<String>>,
     pub enabled: Option<bool>,
-    /// `Some(true)`: only triggers (spec `on`); `Some(false)`: only time
-    /// schedules.
-    pub trigger: Option<bool>,
+    /// Only one group of specs. `None`: all.
+    pub group: Option<SpecGroup>,
+}
+
+/// The groups of a list filter (`kind=` of `GET /api/schedules`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecGroup {
+    /// `cron`, `interval`, and `at`.
+    Time,
+    /// `on`.
+    Trigger,
+    /// `manual`: the project actions (TER-53).
+    Action,
+}
+
+impl SpecGroup {
+    /// The group of a spec.
+    pub fn of(spec: &ScheduleSpec) -> Self {
+        match spec {
+            ScheduleSpec::On { .. } => Self::Trigger,
+            ScheduleSpec::Manual {} => Self::Action,
+            _ => Self::Time,
+        }
+    }
 }
 
 /// Schedules, global first, then by project and name.
@@ -643,7 +668,7 @@ pub fn list(conn: &Connection, f: &ListFilter) -> ApiResult<Vec<Schedule>> {
             (Some(p), None) => f.projects.as_ref().is_none_or(|ps| ps.contains(p)),
         })
         .filter(|s| f.enabled.is_none_or(|e| e == s.enabled))
-        .filter(|s| f.trigger.is_none_or(|t| t == s.spec.is_trigger()))
+        .filter(|s| f.group.is_none_or(|g| g == SpecGroup::of(&s.spec)))
         .collect())
 }
 
