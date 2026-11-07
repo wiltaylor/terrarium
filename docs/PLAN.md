@@ -2273,7 +2273,10 @@ age are pruned, with a warning in the audit log a day before.
 > `version:<X.Y.Z>`. Test runs and artifacts link to the label
 > (`--label`). The operator reviews a result through `terrarium question
 > ask`. The version API, CLI, and events are gone; the tables keep their
-> rows until a later version drops them. The text below is the old design.
+> rows until a later version drops them. A link of the kind `version` is
+> `422 invalid` and names `label`. An artifact on an old `released`
+> version stays: the prune keeps it, and a delete is `409 conflict`
+> (TER-129). The text below is the old design.
 
 A version is a named point in a project's life that the user can review:
 `v0.3.0`, `demo-2026-10-31`, `perf-fix-candidate`. It gathers notes, the
@@ -2403,9 +2406,11 @@ tool wrote, and the operator reads each test case in the dashboard.
   It has suites, and each suite has cases with a status, a duration, a
   message, a trace, and the output. The daemon keeps the original file
   for a download (migration 50: `test_runs`, `test_cases`, and the link
-  tables to cards and versions).
-- **Links.** A run links to cards and to versions (many to many), with
-  the edit rights of the card and of the version. A card on the board
+  tables to cards and versions; migration 80: `test_run_labels`, which
+  replaces the version links, TER-58).
+- **Links.** A run links to cards and to labels, such as the version
+  label `version:1.4.0` (many to many, TER-58), with the edit rights of
+  the card, and for a label the right to upload runs. A card on the board
   shows a chip for its latest run (`✓ 120 passed`, `✗ 3 failed`): colour
   and text. The card drawer lists the runs of the card, and the Version
   modal lists the runs of the version with a combined status.

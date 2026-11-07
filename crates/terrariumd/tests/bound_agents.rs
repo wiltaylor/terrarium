@@ -4,6 +4,11 @@
 //! session with the failure block as the turn (claude, codex, pi), and the
 //! close on a merge, on `done`, and on an archive. No harness and no model
 //! turn runs.
+//!
+//! The tests of the card driver run twice ([`both_flows!`], TER-170): with
+//! `board_flow = code` (`crate::bound`) and with `board_flow = rules` (the
+//! rules `agent-*` of the built-in pack), with the same parks, unparks,
+//! turns, and ends.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -38,6 +43,23 @@ fn fast(td: &TestDaemon) {
     });
 }
 
+/// Run the test `$name(flow)` once with each board flow (TER-170): the
+/// tests `$name::code` and `$name::rules`.
+macro_rules! both_flows {
+    ($name:ident) => {
+        mod $name {
+            #[tokio::test]
+            async fn code() {
+                super::$name("code").await;
+            }
+            #[tokio::test]
+            async fn rules() {
+                super::$name("rules").await;
+            }
+        }
+    };
+}
+
 fn id(v: &Value) -> String {
     v["id"].as_str().unwrap().to_owned()
 }
@@ -59,6 +81,11 @@ async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl Fn
 /// `w-codex`, `w-pi`, a lead that may spawn and bind them (lifetime 1 s,
 /// one at a time), and project `q`.
 async fn setup() -> (TestDaemon, String) {
+    setup_flow("code").await
+}
+
+/// [`setup`] with the board flow `flow` (`code` or `rules`) for `p`.
+async fn setup_flow(flow: &str) -> (TestDaemon, String) {
     let td = TestDaemon::start().await;
     fast(&td);
     td.project("p").await;
@@ -92,6 +119,12 @@ async fn setup() -> (TestDaemon, String) {
                                         "max_lifetime": "1s", "bound": true}}}),
         )
         .await);
+    if flow != "code" {
+        let r = td
+            .patch("/api/projects/p", json!({"board_flow": flow}))
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
     (td, lead)
 }
 
@@ -259,8 +292,8 @@ async fn a_bound_agent_outlives_the_lifetime_and_a_parked_one_holds_no_place() {
 /// The whole path on one harness: park on validating, no wake on mail,
 /// unpark on the return to ready in the same session with the failure
 /// block, park again on review, and close on the merge.
-async fn round_trip(harness: &str) {
-    let (td, lead) = setup().await;
+async fn round_trip(harness: &str, flow: &str) {
+    let (td, lead) = setup_flow(flow).await;
     let c = card(&td, "p", "in_progress").await;
     let r = spawn_bound(&td, &lead, &format!("w-{harness}"), &c).await;
     assert_eq!(r.status, 201, "{}", r.body);
@@ -374,24 +407,30 @@ async fn round_trip(harness: &str) {
 
 #[tokio::test]
 async fn round_trip_claude() {
-    round_trip("claude").await;
+    round_trip("claude", "code").await;
 }
 
 #[tokio::test]
 async fn round_trip_codex() {
-    round_trip("codex").await;
+    round_trip("codex", "code").await;
 }
 
 #[tokio::test]
 async fn round_trip_pi() {
-    round_trip("pi").await;
+    round_trip("pi", "code").await;
 }
 
+/// The round trip with the rule pack (TER-170).
+#[tokio::test]
+async fn round_trip_claude_rules() {
+    round_trip("claude", "rules").await;
+}
+
+both_flows!(done_and_archive_close);
 /// A return to the working column unparks too; `done` and an archive
 /// close.
-#[tokio::test]
-async fn done_and_archive_close() {
-    let (td, lead) = setup().await;
+async fn done_and_archive_close(flow: &str) {
+    let (td, lead) = setup_flow(flow).await;
     let s = state(&td);
     s.lifecycle.spawns.set_tuning(terrariumd::spawn::Tuning {
         done_delay: Duration::from_millis(50),
@@ -537,12 +576,12 @@ async fn binding_is_a_right_with_the_policy_cap() {
     );
 }
 
+both_flows!(an_unpark_waits_for_a_place_of_the_owner);
 /// An unpark respects `spawn.max_concurrent` (review round 2): with the
 /// owner at its limit, a returned card's agent stays parked with the
 /// unpark queued, and starts (with its turn) when a place frees.
-#[tokio::test]
-async fn an_unpark_waits_for_a_place_of_the_owner() {
-    let (td, lead) = setup().await;
+async fn an_unpark_waits_for_a_place_of_the_owner(flow: &str) {
+    let (td, lead) = setup_flow(flow).await;
     let a = card(&td, "p", "in_progress").await;
     let b = card(&td, "p", "in_progress").await;
     let ea = id(&spawn_bound(&td, &lead, "w-claude", &a).await.body);
@@ -603,11 +642,11 @@ async fn an_unpark_waits_for_a_place_of_the_owner() {
     td.wait_status(&eb, "idle").await;
 }
 
+both_flows!(a_move_between_other_columns_does_not_park);
 /// A move between two columns that are not wait columns does not park
 /// (review round 2).
-#[tokio::test]
-async fn a_move_between_other_columns_does_not_park() {
-    let (td, lead) = setup().await;
+async fn a_move_between_other_columns_does_not_park(flow: &str) {
+    let (td, lead) = setup_flow(flow).await;
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
     td.wait_status(&eph, "idle").await;
@@ -735,12 +774,12 @@ async fn reconcile_repairs_a_missed_park_and_unpark() {
     assert_eq!(terrariumd::bound::reconcile(&s).await, 0);
 }
 
+both_flows!(an_unpark_is_refused_when_another_agent_has_the_card);
 /// TER-111 (A2): the bound agent does not unpark when another agent
 /// works its card, so two agents never work one card. The unpark that
 /// waited for a place is dropped too.
-#[tokio::test]
-async fn an_unpark_is_refused_when_another_agent_has_the_card() {
-    let (td, lead) = setup().await;
+async fn an_unpark_is_refused_when_another_agent_has_the_card(flow: &str) {
+    let (td, lead) = setup_flow(flow).await;
     let w = worker(&td, "w").await;
     let a = card(&td, "p", "in_progress").await;
     let b = card(&td, "p", "in_progress").await;
@@ -1064,4 +1103,21 @@ async fn the_driver_reconciles_at_its_start() {
     })
     .await;
     assert_eq!(spawn_row(&td, &eph).await["park_reason"], "card in review");
+}
+
+/// TER-170 review, minor 6: with `board_flow = rules` the reconcile leaves
+/// the cards of the project alone (it returns 0), and a move that the hub
+/// never sent still parks the agent: the rule engine reads the event log
+/// from its own cursor, so the rule `agent-park` sees it.
+#[tokio::test]
+async fn with_the_rule_pack_the_engine_not_the_reconcile_repairs_a_missed_move() {
+    let (td, lead) = setup_flow("rules").await;
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    hidden_move(&td, &c, "review").await;
+    assert_eq!(terrariumd::bound::reconcile(&state(&td)).await, 0);
+    parked(&td, &eph).await;
+    let sp = spawn_row(&td, &eph).await;
+    assert_eq!(sp["park_reason"], "card in review", "{sp}");
 }

@@ -15,6 +15,8 @@
 //!   operator and the card's creator.
 //! - `done` is terminal for members. On `done`, every linked mail thread gets
 //!   a notice, and dependent cards that are now free raise `unblocked`.
+//! - A move of a card that an Inbox thread tracks can wake the thread's
+//!   agent ([`crate::store::threads::on_card_moved`], TER-148).
 
 use std::collections::{HashMap, HashSet};
 
@@ -1367,6 +1369,16 @@ fn apply_move(
         json!({"from": card.column, "to": to.name, "from_role": card.column_role,
                "to_role": to.role, "comment": comment, "assignee": moved.assignee,
                "previous_eta_at": card.eta_at}),
+    )?;
+    // A thread that tracks this card wakes its agent on a move to blocked,
+    // and when all its cards are in review or later (TER-148).
+    crate::store::threads::on_card_moved(
+        t,
+        &card.id,
+        &card.project,
+        &card.column,
+        &to.name,
+        to.role.as_deref(),
     )?;
     if card.column == DONE {
         t.audit(

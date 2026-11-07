@@ -4,6 +4,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use terrarium_core::config::BoardFlow;
+
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::store::{Page, Paged, board, check_name};
@@ -41,6 +43,12 @@ pub struct Project {
     /// GitHub logins whose issues count as work. Empty: no gate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub github_authors: Vec<String>,
+    /// Who runs the card flow (TER-170): `code` or `rules`.
+    #[serde(default)]
+    pub board_flow: BoardFlow,
+    /// The time of the last switch of `board_flow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_flow_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -58,6 +66,8 @@ fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
             .get::<_, Option<String>>("github_authors")?
             .map(|g| crate::store::json_col(&g))
             .unwrap_or_default(),
+        board_flow: BoardFlow::parse(r.get::<_, Option<String>>("board_flow")?.as_deref()),
+        board_flow_at: r.get("board_flow_at")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -236,6 +246,9 @@ pub struct ProjectPatch {
     /// ends the gate. Only the operator sets it; the API layer checks.
     #[serde(default)]
     pub github_authors: Option<Vec<String>>,
+    /// Who runs the card flow (TER-170): `code` or `rules`.
+    #[serde(default)]
+    pub board_flow: Option<BoardFlow>,
 }
 
 /// Change a project. The card prefix may change only while the project has
@@ -283,6 +296,9 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
     if let Some(list) = &patch.github_authors {
         set_github_authors(t, name, list)?;
     }
+    if let Some(flow) = patch.board_flow {
+        set_board_flow(t, name, flow)?;
+    }
     t.execute(
         "UPDATE projects SET updated_at = ?2 WHERE name = ?1",
         params![name, now()],
@@ -292,7 +308,8 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
         name,
         Some(name),
         json!({"description": patch.description, "card_prefix": patch.card_prefix,
-               "idle_alert": patch.idle_alert, "github_authors": patch.github_authors}),
+               "idle_alert": patch.idle_alert, "github_authors": patch.github_authors,
+               "board_flow": patch.board_flow}),
     )?;
     get(t, name)
 }
@@ -306,6 +323,41 @@ pub fn set_github_authors(t: &mut Tx<'_>, name: &str, list: &[String]) -> ApiRes
         params![name, crate::store::github_gate::authors_col(&list)],
     )?;
     Ok(())
+}
+
+/// Who runs the card flow of `project` (TER-170). A project that is gone
+/// is `code`.
+pub fn board_flow(conn: &Connection, project: &str) -> ApiResult<BoardFlow> {
+    let raw: Option<Option<String>> = conn
+        .query_row(
+            "SELECT board_flow FROM projects WHERE name = ?1",
+            [project],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(BoardFlow::parse(raw.flatten().as_deref()))
+}
+
+/// Does the board rules run the card flow of `project` (`board_flow =
+/// rules`)? Then the job queue and the bound agent driver only emit their
+/// events, and the built-in pack acts on them.
+pub fn rules_flow(conn: &Connection, project: &str) -> ApiResult<bool> {
+    Ok(board_flow(conn, project)? == BoardFlow::Rules)
+}
+
+/// Set who runs the card flow of a project. A change writes the time of
+/// the switch (`board_flow_at`): the built-in pack does not act on the
+/// events before it. The caller checks the rights and writes the audit.
+pub fn set_board_flow(t: &mut Tx<'_>, name: &str, flow: BoardFlow) -> ApiResult<bool> {
+    if board_flow(t, name)? == flow {
+        return Ok(false);
+    }
+    let stored = (flow == BoardFlow::Rules).then_some(flow.as_str());
+    t.execute(
+        "UPDATE projects SET board_flow = ?2, board_flow_at = ?3 WHERE name = ?1",
+        params![name, stored, now()],
+    )?;
+    Ok(true)
 }
 
 /// Delete a project with its board and repos. The caller checks that no

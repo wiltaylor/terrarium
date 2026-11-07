@@ -462,6 +462,24 @@ async fn attach_and_prune_keep_the_right_things() {
                 "created_by": r.ok()["links"][0]["created_by"],
                 "created_at": r.ok()["links"][0]["created_at"]}])
     );
+    // `?label=` lists only the artifacts with that exact label (TER-129).
+    let ids = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let l = td
+        .get("/api/projects/proj/artifacts?label=version%3A1.0.0")
+        .await;
+    assert_eq!(ids(l.ok()), ["ART-6"]);
+    let l = td
+        .get("/api/projects/proj/artifacts?label=version%3A1.0")
+        .await;
+    assert_eq!(ids(l.ok()), Vec::<String>::new());
+    let l = td.get("/api/projects/proj/artifacts?label=").await;
+    assert_eq!(ids(l.ok()).len(), 6);
     // The old version link is not shown, and no new one can be made.
     let a2 = td.get("/api/artifacts/proj%2FART-2").await;
     assert_eq!(a2.ok()["links"], json!([]));
@@ -602,6 +620,36 @@ async fn attach_and_prune_keep_the_right_things() {
     assert_eq!(audit.ok().as_array().unwrap().len(), 2);
     let ev = td.get("/api/events?kind=artifact.pruned").await;
     assert_eq!(ev.ok().as_array().unwrap().len(), 2);
+
+    // An artifact of a released version from before TER-58 is not deleted,
+    // also not by its author (TER-129). An artifact on a label is.
+    let e = td
+        .req(
+            Method::DELETE,
+            "/api/artifacts/ART-2",
+            None,
+            Some("proj/lead"),
+        )
+        .await;
+    e.err(409, "conflict");
+    assert!(
+        e.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("released version `v1.0.0`"),
+        "{}",
+        e.body
+    );
+    td.get("/api/artifacts/proj%2FART-2").await.ok();
+    let r = td
+        .req(
+            Method::DELETE,
+            "/api/artifacts/ART-6",
+            None,
+            Some("proj/lead"),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 204);
 }
 
 async fn oneshot(app: axum::Router, uri: &str, headers: &[(&str, &str)]) -> Raw {
