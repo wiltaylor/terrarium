@@ -1264,8 +1264,9 @@ pub enum CardCmd {
         eta: Option<String>,
     },
     /// Queue a validation of the card's pushed commit: moves the card to
-    /// `validating`, clears the assignee, adds `by:<you>`. Then take your
-    /// next card; the daemon moves this one on the result
+    /// `validating`, keeps you assigned, sets one `validation:*` label and
+    /// one `by:<you>` label. Then take your next card; the daemon moves
+    /// this one on the result and clears the assignee
     Validate {
         id: String,
         /// The pushed commit: it must be the head of the branch on the
