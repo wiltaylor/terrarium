@@ -3833,6 +3833,47 @@ in the audit log when it cannot read the card's project. A link also
 writes a `thread` event `card_linked`, which does not change the status
 and wakes no agent. There is no unlink.
 
+**Wake rules** (TER-148, TER-144 D4 and D5). In a thread that tracks (not
+closed, `tracking_at` set), a move of a linked card wakes the agent, in
+the transaction of the move:
+
+- a move into the column with the role `blocked` (reason `blocked`);
+- a move from a column before review into review or later that leaves
+  every linked card that is not archived in review or later (reason
+  `review`). Review or later is the column with the role `review` (else
+  the column named `review`) and each column after it on that card's
+  board, never the column with the role `blocked`; a board with neither
+  counts only `done` (the rule of the n/m chip, TER-147). A move between
+  two columns of review or later does not wake it again.
+
+A thread in `tracking` goes to `waiting_agent`; `tracking_at` stays, so
+the agent's reply puts it back into `tracking`. A thread that waits on
+the operator (an open question) keeps its status. The wake writes the
+audit row `thread.card_wake` (`reason`) and the `thread` event `cards`
+with `reason` and no card, so that a reader of the thread's events does
+not learn a card of a project it cannot read. The agent gets a
+`[Thread:<id>]` turn with the linked cards as they are then (project,
+ID, column, title, and the last comment of a blocked card, quoted as
+data); a card of a project that the agent cannot read is only counted.
+On `blocked` the turn asks the agent to tell the operator what is stuck.
+On `review` it asks the agent to post what changed, the pre-release and
+the test steps, and to ask `works` or `found an issue`. On `works` the
+agent proposes the close. On `found an issue` it mails its report-to lead
+for a bug card linked to the same thread (`card new --inbox-thread`),
+and moves the thread into tracking again: the bug card's move to review
+wakes it again.
+
+**Extra requirements** (TER-148, TER-144 D10). The overall response can
+be sent again: the newest replaces `response`, each stays in `messages`
+as kind `response`, and each writes `thread.respond`. The turn of a
+response that follows an earlier one says that it replaces it. When the
+operator asks for more than the response covers, the agent says in the
+thread whether it is in scope or new scope, asks with options, waits for
+a new overall response, and hands the new work off with that response
+quoted; new cards link to the same thread, and the lead decides whether
+it amends a card or makes a follow-up. The first turn of the agent
+carries these rules.
+
 **Close** (TER-95, wiki `inbox-threads` §5). The attached agent hands off
 its work, asks in the thread whether anything more is needed, and then
 proposes the close: `POST .../close` by the agent sets `close_proposal`
@@ -3936,7 +3977,9 @@ of that project (A2). Only the daemon binds to a thread: a spawn with
   `waiting_operator` parks the agent (`park_reason` `thread waits on the
   operator`): the idle pass stops it when it is at rest, and mail does not
   wake it. The move into tracking, and its reply in a thread that tracks,
-  park it too (`thread is tracking`).
+  park it too (`thread is tracking`). In a thread that tracks, a linked
+  card that goes to blocked, or all linked cards in review or later, wake
+  it with a `[Thread:<id>]` turn (TER-148, "Wake rules" above).
 - **Restart.** An operator message or response, or the settling of the
   last open question (`waiting_agent`), unparks it: it starts again in the
   same session row and harness session (`resumes` + 1) on every harness.
@@ -4033,10 +4076,12 @@ reads its thread with `GET /api/threads/{id}`.
 
 Events: `thread` `{change, id, scope, status}`, with `change` one of
 `opened`, `agent`, `message`, `response`, `question`, `close_proposed`,
-`reminded`, `closed`; and an `inbox` event for the item. Audit rows:
-`thread.open`, `thread.agent`, `thread.respond`, `thread.propose_close`,
-`thread.remind`, `thread.close` (with `reason`, `session`, and the
-commented `cards`).
+`reminded`, `tracking`, `card_linked`, `cards` (a wake by the linked
+cards, with `reason`), `closed`; and an `inbox` event for the item. Audit
+rows: `thread.open`, `thread.agent`, `thread.respond`,
+`thread.propose_close`, `thread.remind`, `thread.track`,
+`thread.card_link`, `thread.card_wake`, `thread.close` (with `reason`,
+`session`, and the commented `cards`).
 
 ## 7. Mail
 
