@@ -51,6 +51,7 @@ type Rule {
   @children("job_cancel") job_cancel: list<JobCancel>
   @children("job_rerun") job_rerun: list<JobRerun>
   @children("job_split") job_split: list<JobSplit>
+  @children("job_fix") job_fix: list<JobFix>
   @children("agent_park") agent_park: list<AgentPark>
   @children("agent_unpark") agent_unpark: list<AgentUnpark>
   @children("agent_end") agent_end: list<AgentEnd>
@@ -158,6 +159,16 @@ type JobRerun {
 // Split a red batch of the event in halves.
 @block("job_split")
 type JobSplit {}
+
+// Open one fix card for the red merge job of the event: in the column
+// `to` (absent: `@ready`), with the label `merge-fix:<job>` and the
+// `labels`, a link to each card of the job, and the failure block in its
+// body. Nothing when an open card has that label already.
+@block("job_fix")
+type JobFix {
+  to: utf8?
+  labels: list<utf8>?
+}
 
 @block("agent_park")
 type AgentPark {}

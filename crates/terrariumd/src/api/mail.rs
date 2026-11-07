@@ -154,7 +154,7 @@ fn sender(t: &Tx<'_>, actor: &Actor, from: Option<&str>) -> ApiResult<Address> {
 }
 
 /// Write a message after the §12 scope checks.
-pub(super) fn send_checked(
+pub(crate) fn send_checked(
     t: &mut Tx<'_>,
     actor: &Actor,
     from: &Address,
