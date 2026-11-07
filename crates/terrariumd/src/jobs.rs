@@ -635,7 +635,8 @@ fn ssh_connect_error<'a>(text: &'a str, host: &str) -> Option<&'a str> {
         let low = l.to_lowercase();
         low.starts_with(&format!("ssh: connect to host {host} port "))
             || low.starts_with(&format!("ssh: could not resolve hostname {host}:"))
-            || (low.starts_with(&format!("connection to {host} port ")) && low.contains("timed out"))
+            || (low.starts_with(&format!("connection to {host} port "))
+                && low.contains("timed out"))
     })
 }
 
@@ -1730,14 +1731,20 @@ echo "after: $GIT_SSH_COMMAND"
             Some("ssh: connect to host 10.3.0.2 port 22: Connection refused")
         );
         assert!(
-            ssh_connect_error("ssh: Could not resolve hostname CI-Box: Name or service not known", "ci-box")
-                .is_some()
+            ssh_connect_error(
+                "ssh: Could not resolve hostname CI-Box: Name or service not known",
+                "ci-box"
+            )
+            .is_some()
         );
         assert!(ssh_connect_error("Connection to ci-box port 22 timed out", "ci-box").is_some());
         // The git remote of the prepare step is another host: a failure.
         assert!(
-            ssh_connect_error("ssh: connect to host github.com port 22: Connection timed out", "10.3.0.2")
-                .is_none()
+            ssh_connect_error(
+                "ssh: connect to host github.com port 22: Connection timed out",
+                "10.3.0.2"
+            )
+            .is_none()
         );
         assert!(ssh_connect_error("error: tests failed", "10.3.0.2").is_none());
     }
