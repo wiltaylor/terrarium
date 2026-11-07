@@ -341,6 +341,8 @@ struct Lab {
     lead: String,
     /// The worker `p/w1`.
     w1: String,
+    /// The host listener of the daemon.
+    hosts_addr: std::net::SocketAddr,
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -379,32 +381,8 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
     let r = td.post("/api/hosts", json!({"name": "lab1"})).await;
     assert_eq!(r.status, 201, "{}", r.body);
     let token = r.body["token"].as_str().unwrap().to_owned();
-    let mut o = ClientOptions::new(format!("ws://{addr}/hosts/connect"), &token, "lab1");
-    o.capabilities = HostCapabilities {
-        shell: Some("/bin/sh".into()),
-        ..Default::default()
-    };
-    if let Some(d) = docker {
-        o.capabilities.docker = terrarium_core::protocol::ToolCapability {
-            present: true,
-            version: Some("29.8.0".into()),
-        };
-        o.docker_bin = d.display().to_string();
-    }
-    o.backoff_min = Duration::from_millis(50);
-    o.backoff_max = Duration::from_millis(200);
     let dirs = tempfile::tempdir().unwrap();
-    o.paths = terrarium_host::HostPaths {
-        work_dir: td.state.with_file_name("work"),
-        instances_dir: dirs.path().join("instances"),
-        repos_dir: dirs.path().join("repos"),
-    };
-    tokio::spawn(Client::new(o).run());
-    let start = Instant::now();
-    while td.get("/api/hosts/lab1").await.body["online"] != true {
-        assert!(start.elapsed() < DEADLINE, "lab1 never came online");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    connect_host(&td, addr, "lab1", &token, &dirs.path().join("lab1"), docker).await;
     td.project("p").await;
     td.project("q").await;
     // The columns of the delivery process, as on the terrarium board.
@@ -489,6 +467,44 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
         work,
         lead,
         w1,
+        hosts_addr: addr,
+    }
+}
+
+/// Connect a host agent `name` with `token` to the daemon's host listener
+/// `addr`, and wait until it is online. `dir` holds its instances and repos.
+async fn connect_host(
+    td: &TestDaemon,
+    addr: std::net::SocketAddr,
+    name: &str,
+    token: &str,
+    dir: &Path,
+    docker: Option<&Path>,
+) {
+    let mut o = ClientOptions::new(format!("ws://{addr}/hosts/connect"), token, name);
+    o.capabilities = HostCapabilities {
+        shell: Some("/bin/sh".into()),
+        ..Default::default()
+    };
+    if let Some(d) = docker {
+        o.capabilities.docker = terrarium_core::protocol::ToolCapability {
+            present: true,
+            version: Some("29.8.0".into()),
+        };
+        o.docker_bin = d.display().to_string();
+    }
+    o.backoff_min = Duration::from_millis(50);
+    o.backoff_max = Duration::from_millis(200);
+    o.paths = terrarium_host::HostPaths {
+        work_dir: td.state.with_file_name("work"),
+        instances_dir: dir.join("instances"),
+        repos_dir: dir.join("repos"),
+    };
+    tokio::spawn(Client::new(o).run());
+    let start = Instant::now();
+    while td.get(&format!("/api/hosts/{name}")).await.body["online"] != true {
+        assert!(start.elapsed() < DEADLINE, "{name} never came online");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -2041,4 +2057,180 @@ async fn a_merge_that_fails_without_a_conflict_drops_only_that_card() {
         next_merges(&lab),
         ["Merge ter-u1 onto next", "Merge ter-u3 onto next"]
     );
+}
+
+/// Set the delivery of `p`: `target`, one slot, a recipe that sleeps on
+/// a branch with `SLOW`.
+async fn deliver_to(lab: &Lab, target: &str) {
+    let work_dir = lab._dirs.path().join(format!("jobs-{target}"));
+    let r = lab
+        .td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": target, "recipe": "if test -f SLOW; then sleep 8; fi; test -f OK",
+                   "slots": 1, "next_repos": ["app"],
+                   "work_dir": work_dir.display().to_string()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// Queue a validation of a branch with `OK` (and `SLOW` when `slow`) on
+/// card `title`, as `w1`. Returns the card.
+async fn queue_green(lab: &Lab, branch: &str, title: &str, slow: bool) -> String {
+    let mut files = vec![("OK", "yes\n")];
+    if slow {
+        files.push(("SLOW", "yes\n"));
+    }
+    let head = lab.branch(branch, "next", &files);
+    let id = lab.card(title, branch).await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    id
+}
+
+/// Queue a job for a card while the target `p-box` is up, behind a slow
+/// job in the one slot, then point the delivery at `target`: the card's
+/// job is picked for `target` when the slow job ends. The validate call
+/// reads the branch head on the target, so a job is only queued while its
+/// target is up (as in TER-160: queued before the outage). Returns the
+/// card.
+async fn queue_for(lab: &Lab, target: &str) -> String {
+    deliver_to(lab, "p-box").await;
+    let blocker = queue_green(lab, "ter-slow", "slow blocker", true).await;
+    let start = Instant::now();
+    while !lab.jobs().await.iter().any(|j| j["state"] == "running") {
+        assert!(start.elapsed() < DEADLINE, "the blocker never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let id = queue_green(lab, "ter-wait", "waits for its host", false).await;
+    deliver_to(lab, target).await;
+    lab.until_card(&blocker, "review", |c| c["column"] == "review")
+        .await;
+    id
+}
+
+/// The job of card `id`.
+async fn job_of(lab: &Lab, id: &str) -> Vec<Value> {
+    lab.jobs()
+        .await
+        .into_iter()
+        .filter(|j| j["card"] == id)
+        .collect()
+}
+
+/// TER-160: the host agent of the target is offline when the queue picks
+/// the job. The job stays queued with no attempt used and the card does
+/// not move; the job starts once the host agent connects, and passes.
+#[tokio::test]
+async fn a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects() {
+    let lab = lab(2).await;
+    let td = &lab.td;
+    let r = td.post("/api/hosts", json!({"name": "lab2"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let token = r.body["token"].as_str().unwrap().to_owned();
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "p-off", "kind": "host", "host": "lab2", "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let id = queue_for(&lab, "p-off").await;
+    // More than two ticks of the queue (5 s each).
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let jobs = job_of(&lab, &id).await;
+    assert_eq!(jobs.len(), 1, "no rerun, no second job: {jobs:?}");
+    assert_eq!(jobs[0]["state"], "queued", "{jobs:?}");
+    assert_eq!(jobs[0]["attempt"], 1, "{jobs:?}");
+    assert!(jobs[0]["started_at"].is_null(), "{jobs:?}");
+    let c = lab.card_of(&id).await;
+    assert_eq!(c["column"], "validating", "{c}");
+    assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
+    assert!(labels(&c).contains(&"validation:queued".to_owned()), "{c}");
+    assert!(
+        !c["body"].as_str().unwrap().contains("Validation failed"),
+        "{c}"
+    );
+    // The host agent connects: the job starts and passes.
+    connect_host(
+        td,
+        lab.hosts_addr,
+        "lab2",
+        &token,
+        &lab._dirs.path().join("lab2"),
+        None,
+    )
+    .await;
+    lab.until_card(&id, "review", |c| c["column"] == "review")
+        .await;
+    lab.until_idle().await;
+    let jobs = job_of(&lab, &id).await;
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert_eq!(jobs[0]["state"], "passed", "{jobs:?}");
+    assert_eq!(jobs[0]["attempt"], 1, "{jobs:?}");
+}
+
+/// TER-160: an ssh target that refuses the connection before the recipe
+/// starts. The job goes back to the queue with no attempt used, the tail
+/// says why it waits, and the card does not move.
+#[tokio::test]
+async fn a_refused_ssh_connect_puts_the_job_back_in_the_queue() {
+    let lab = lab(2).await;
+    let td = &lab.td;
+    // Port 1 on the loopback: nothing listens, the connect is refused.
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "p-ssh", "kind": "ssh", "address": "ci@127.0.0.1", "port": 1,
+                   "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let id = queue_for(&lab, "p-ssh").await;
+    let start = Instant::now();
+    let job = loop {
+        let jobs = job_of(&lab, &id).await;
+        assert_eq!(jobs.len(), 1, "no rerun, no second job: {jobs:?}");
+        let j = jobs[0].clone();
+        assert_ne!(j["state"], "failed", "{j}");
+        let jid = j["id"].as_str().unwrap();
+        let full = td.get(&format!("/api/jobs/{jid}")).await.ok().clone();
+        if full["state"] == "queued"
+            && full["tail"]
+                .as_str()
+                .is_some_and(|t| t.contains("waits for its host"))
+        {
+            break full;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the job never went back: {full}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let tail = job["tail"].as_str().unwrap();
+    assert!(tail.contains("Connection refused"), "{tail}");
+    assert_eq!(job["attempt"], 1, "{job}");
+    assert!(job["started_at"].is_null(), "{job}");
+    let c = lab.card_of(&id).await;
+    assert_eq!(c["column"], "validating", "{c}");
+    assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
+    let l = labels(&c);
+    assert!(l.contains(&"validation:queued".to_owned()), "{l:?}");
+    assert!(!l.contains(&"validation:running".to_owned()), "{l:?}");
+    // It waits for its next try: still queued and no attempt used after a
+    // tick of the queue.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let jobs = job_of(&lab, &id).await;
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert_eq!(jobs[0]["state"], "queued", "{jobs:?}");
+    assert_eq!(jobs[0]["attempt"], 1, "{jobs:?}");
 }
