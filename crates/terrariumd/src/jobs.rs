@@ -422,12 +422,16 @@ async fn end_lost(state: &Shared, l: Lost) {
         let (project, id) = (job.project.clone(), job.id.clone());
         let marked = state
             .db
-            .write("system", move |t| jobs::mark_slot_wipe(t, &project, slot, &id))
+            .write("system", move |t| {
+                jobs::mark_slot_wipe(t, &project, slot, &id)
+            })
             .await;
         match marked {
             Ok(()) => warn!(job = %job.id, slot,
                 "the kill of a lost job run did not confirm its end; its slot's tree is made new before the next job"),
-            Err(e) => warn!(job = %job.id, slot, "cannot mark the slot of a lost job for a wipe: {e}"),
+            Err(e) => {
+                warn!(job = %job.id, slot, "cannot mark the slot of a lost job for a wipe: {e}")
+            }
         }
     }
     if running {
@@ -1416,8 +1420,16 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
     let h = head.clone();
     let tree = match x.daemon(move |r| r.tree_of(&h)).await? {
         Ok(Some(t)) if check_commit(&t).is_ok() => t,
-        Ok(_) => return Err(ApiError::internal(format!("no tree of {head} in the job repo"))),
-        Err(e) => return Err(ApiError::internal(format!("cannot read the tree of {head}: {e}"))),
+        Ok(_) => {
+            return Err(ApiError::internal(format!(
+                "no tree of {head} in the job repo"
+            )));
+        }
+        Err(e) => {
+            return Err(ApiError::internal(format!(
+                "cannot read the tree of {head}: {e}"
+            )));
+        }
     };
     // Step 2, on the target and without any credential: a clone from the
     // bundle, at the recorded commit.
@@ -2483,7 +2495,10 @@ mod tests {
 
         fn bundle(&self, sha: &str) -> Vec<u8> {
             git_in(&self.src, &["update-ref", "refs/job/head", sha]);
-            git_in(&self.src, &["bundle", "create", "-q", "../b", "refs/job/head"]);
+            git_in(
+                &self.src,
+                &["bundle", "create", "-q", "../b", "refs/job/head"],
+            );
             std::fs::read(self.tmp.path().join("b")).unwrap()
         }
 
@@ -2526,20 +2541,37 @@ mod tests {
         assert_eq!(git_in(&dir, &["cat-file", "-p", &lib]), "evil");
         git_in(&dir, &["pack-refs", "--all"]);
         let readme2 = git_in(&s.src, &["rev-parse", "HEAD:README"]);
-        git_in(&dir, &["update-ref", &format!("refs/replace/{readme2}"), &evil]);
+        git_in(
+            &dir,
+            &["update-ref", &format!("refs/replace/{readme2}"), &evil],
+        );
         let common = s.tmp.path().join("common.git");
         git_in(
             s.tmp.path(),
-            &["clone", "-q", "--bare", &dir.display().to_string(), "common.git"],
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                &dir.display().to_string(),
+                "common.git",
+            ],
         );
         let pwned = s.tmp.path().join("pwned");
         git_in(
             &common,
-            &["config", "filter.x.smudge", &format!("touch {}; cat", pwned.display())],
+            &[
+                "config",
+                "filter.x.smudge",
+                &format!("touch {}; cat", pwned.display()),
+            ],
         );
         std::fs::create_dir_all(common.join("info")).unwrap();
         std::fs::write(common.join("info/attributes"), "* filter=x\n").unwrap();
-        std::fs::write(dir.join(".git/commondir"), format!("{}\n", common.display())).unwrap();
+        std::fs::write(
+            dir.join(".git/commondir"),
+            format!("{}\n", common.display()),
+        )
+        .unwrap();
         std::fs::write(dir.join(".git/shallow"), format!("{one}\n")).unwrap();
         std::fs::create_dir_all(dir.join(".git/info")).unwrap();
         std::fs::write(dir.join(".git/info/grafts"), format!("{one}\n")).unwrap();
@@ -2624,7 +2656,10 @@ mod tests {
         assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]), one);
         assert!(!dir.join("target/debug/kept").exists(), "target/ is kept");
         late.wait().unwrap();
-        assert!(!dir.join("target/late").exists(), "the late writer reached the new tree");
+        assert!(
+            !dir.join("target/late").exists(),
+            "the late writer reached the new tree"
+        );
         assert_eq!(git_in(&dir, &["status", "--porcelain", "--ignored"]), "");
     }
 
@@ -2634,10 +2669,22 @@ mod tests {
     fn only_a_clean_kill_on_the_jobs_host_confirms_its_end() {
         let killed = serde_json::json!({"pid": 12, "left": []});
         assert!(kill_confirmed(true, Some(&killed)));
-        assert!(kill_confirmed(true, Some(&serde_json::json!({"pid": null}))));
-        assert!(kill_confirmed(true, Some(&serde_json::json!({"stale": "x"}))));
-        assert!(!kill_confirmed(true, Some(&serde_json::json!({"error": "offline"}))));
-        assert!(!kill_confirmed(true, Some(&serde_json::json!({"pid": 12, "left": [13]}))));
+        assert!(kill_confirmed(
+            true,
+            Some(&serde_json::json!({"pid": null}))
+        ));
+        assert!(kill_confirmed(
+            true,
+            Some(&serde_json::json!({"stale": "x"}))
+        ));
+        assert!(!kill_confirmed(
+            true,
+            Some(&serde_json::json!({"error": "offline"}))
+        ));
+        assert!(!kill_confirmed(
+            true,
+            Some(&serde_json::json!({"pid": 12, "left": [13]}))
+        ));
         // A target without PID files, another host, or no target.
         assert!(!kill_confirmed(false, Some(&killed)));
         assert!(!kill_confirmed(true, None));

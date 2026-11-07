@@ -2990,7 +2990,10 @@ async fn a_lost_job_without_a_confirmed_kill_gets_its_slot_wiped() {
     let j = jobs.iter().find(|j| j["id"] == run_id.as_str()).unwrap();
     assert_eq!(j["state"], "passed", "{j:#}");
     assert_eq!(j["slot"], 1, "{j:#}");
-    assert!(!slot.join("target/stale").exists(), "the slot was not wiped");
+    assert!(
+        !slot.join("target/stale").exists(),
+        "the slot was not wiped"
+    );
     let pending = state
         .db
         .read(|c| jobs::slot_wipe_pending(c, "p", 1))
