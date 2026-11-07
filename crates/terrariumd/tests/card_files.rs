@@ -678,8 +678,13 @@ async fn delivery_at_start_and_while_running() {
         !cards_dir(&ws, "P-99").exists()
     })
     .await;
-    let exclude = std::fs::read_to_string(ws.join(".git/info/exclude")).unwrap();
-    assert!(exclude.contains("/.terrarium/"), "{exclude}");
+    // The sync adds the git exclude after it writes the index: wait for it
+    // too (TER-188: a slow runner read it before the sync was done).
+    let exclude_path = ws.join(".git/info/exclude");
+    wait_for("the git exclude of the card files", || {
+        std::fs::read_to_string(&exclude_path).is_ok_and(|t| t.contains("/.terrarium/"))
+    })
+    .await;
     td.wait_status(&id, "idle").await;
 
     // A file of a stopped agent waits for its next start: no delivery, no
