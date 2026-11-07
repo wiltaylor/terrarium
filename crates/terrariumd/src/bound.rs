@@ -299,7 +299,9 @@ pub async fn unpark(
     let key = id.to_owned();
     let (done, owner) = state
         .db
-        .write("system", move |t| unpark_tx(t, &key, turn.as_deref(), cause))
+        .write("system", move |t| {
+            unpark_tx(t, &key, turn.as_deref(), cause)
+        })
         .await?;
     after_unpark(state, id, done, &owner, cause).await;
     Ok(done)
@@ -582,7 +584,12 @@ fn return_prefix(card_id: &str) -> String {
 
 /// The unpark turn: the card came back (`how`: `moved review -> ready`),
 /// with the move `comment`, if any, and the top of the card body.
-pub(crate) fn return_text(card: &board::Card, how: &str, comment: Option<&str>, working: bool) -> String {
+pub(crate) fn return_text(
+    card: &board::Card,
+    how: &str,
+    comment: Option<&str>,
+    working: bool,
+) -> String {
     let mut text = format!(
         "Your card {} came back: {how}. You run again in your own session and workspace.",
         card.id,

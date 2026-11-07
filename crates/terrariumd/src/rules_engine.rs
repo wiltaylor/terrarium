@@ -68,8 +68,8 @@ use crate::api::Shared;
 use crate::db::{Db, Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventFilter, StoredEvent};
-use crate::store::schedules::{self, MAX_CHAIN_DEPTH, event_view};
 use crate::rules_verbs::{self, Effect};
+use crate::store::schedules::{self, MAX_CHAIN_DEPTH, event_view};
 use crate::store::{board, jobs, rules};
 
 /// The most events that one [`plan_pass`] reads.

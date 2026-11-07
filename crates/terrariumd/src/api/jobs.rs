@@ -410,7 +410,11 @@ struct MergeBody {
 
 /// The repo of a job: the given one, the card's, or the project's only
 /// repo.
-pub(crate) fn repo_of(t: &rusqlite::Connection, card: &Card, given: Option<String>) -> ApiResult<String> {
+pub(crate) fn repo_of(
+    t: &rusqlite::Connection,
+    card: &Card,
+    given: Option<String>,
+) -> ApiResult<String> {
     if let Some(r) = given.or_else(|| card.repo.clone()) {
         if repos::find_by_name(t, &card.project, &r)?.is_none() {
             return Err(ApiError::invalid(format!(

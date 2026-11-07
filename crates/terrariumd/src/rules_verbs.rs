@@ -256,9 +256,7 @@ pub fn perform(
         "job.rerun" => job_rerun(t, actor, ctx, &a, &mut effects)?,
         "job.split" => job_split(t, actor, ctx, &mut effects)?,
         "job.fix" => job_fix(t, actor, ctx, &a)?,
-        "agent.park" | "agent.unpark" | "agent.end" => {
-            agent_verb(t, actor, ctx, &a, &mut effects)?
-        }
+        "agent.park" | "agent.unpark" | "agent.end" => agent_verb(t, actor, ctx, &a, &mut effects)?,
         other => return Err(ApiError::invalid(format!("unknown verb `{other}`"))),
     };
     Ok((done, effects))
@@ -402,8 +400,7 @@ fn send_mail(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiRe
         if matches!(addr, Address::System) {
             return Err(ApiError::invalid("mail cannot go to `system`"));
         }
-        let m =
-            crate::api::mail::send_checked(t, actor, &from, &addr, &subject, &body, None)?;
+        let m = crate::api::mail::send_checked(t, actor, &from, &addr, &subject, &body, None)?;
         sent.push(json!({"id": m.id, "to": addr.key()}));
     }
     Ok(changed(json!({"messages": sent, "subject": subject})))
@@ -673,7 +670,10 @@ fn job_rerun(
     let why = if j.state != JobState::Failed {
         Some(format!("job {} is {}", j.id, j.state.as_str()))
     } else if j.outcome.as_deref() == Some("conflict") {
-        Some(format!("job {} is a conflict: a conflict never runs again", j.id))
+        Some(format!(
+            "job {} is a conflict: a conflict never runs again",
+            j.id
+        ))
     } else if j.attempt >= max {
         Some(format!("job {} is attempt {} of {max}", j.id, j.attempt))
     } else {

@@ -111,7 +111,9 @@ async fn put_rules(td: &TestDaemon, project: &str, text: &str) {
 }
 
 async fn new_card(td: &TestDaemon, project: &str, body: Value) -> String {
-    let r = td.post(&format!("/api/projects/{project}/cards"), body).await;
+    let r = td
+        .post(&format!("/api/projects/{project}/cards"), body)
+        .await;
     assert_eq!(r.status, 201, "{}", r.body);
     r.body["id"].as_str().unwrap().to_owned()
 }
@@ -405,7 +407,7 @@ async fn card_assign_gives_frees_and_refuses_an_empty_name() {
 
     ping(&td, "p", &a, 1).await;
     settle(&td).await;
-    assert_eq!(card(&td, &a).await["assignee_name"], "w1");
+    assert_eq!(card(&td, &a).await["assignee_name"], "p/w1");
     ping(&td, "p", &a, 1).await;
     settle(&td).await;
     assert_eq!(
@@ -422,7 +424,7 @@ async fn card_assign_gives_frees_and_refuses_an_empty_name() {
         e[0]["reason"].as_str().unwrap().contains("is empty"),
         "{e:?}"
     );
-    assert_eq!(card(&td, &a).await["assignee_name"], "w1");
+    assert_eq!(card(&td, &a).await["assignee_name"], "p/w1");
 
     ping(&td, "p", &a, 2).await;
     settle(&td).await;
@@ -779,7 +781,10 @@ async fn job_fix_opens_one_fix_card_for_a_red_merge_group() {
     let c = card(&td, &fix).await;
     assert_eq!(c["column"], "ready");
     let labels: Vec<String> = serde_json::from_value(c["labels"].clone()).unwrap();
-    assert!(labels.contains(&format!("merge-fix:{}", red.id)), "{labels:?}");
+    assert!(
+        labels.contains(&format!("merge-fix:{}", red.id)),
+        "{labels:?}"
+    );
     assert!(labels.contains(&"fix".to_owned()), "{labels:?}");
     let mut links: Vec<&str> = c["links"]
         .as_array()
