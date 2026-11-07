@@ -1186,6 +1186,8 @@ export const EVENT_KINDS = [
   "db.record",
   // A test run (docs/api.md, test runs): `{change, project, id, name, counts, cards, versions}`.
   "test_run",
+  // The job queue (docs/api.md §35): a job queued, started, or ended `{change, project, id, card, kind, state, attempt, outcome, cards?}`.
+  "job",
   // Monitors (docs/api.md §30): each result, and a change of status `{project, monitor, monitor_id, from, to, value?, unit?, message?}`.
   "monitor.result",
   "monitor.status",
@@ -1768,14 +1770,27 @@ export interface Card {
   tests?: CardTests;
   /** The idle mark (docs/api.md §6.2 "Idle alert", TER-67): the assignee rests with no wait since this time, past the project's idle alert, and the leads were told. */
   idle_since?: string | null;
+  /** The open (queued or running) job of the card (docs/api.md §8, TER-158). Absent when the card has no open job. */
+  job?: CardJob;
+  /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
+  assignee_status?: string;
+}
+
+/** The open job of a card: the tile reads its state chip from it, not from labels. */
+export interface CardJob {
+  id: string;
+  kind: "validate" | "merge";
+  state: "queued" | "running";
+  /** A queued job: its place among the queued jobs of the project (1 starts next). */
+  place?: number;
+  /** A queued job: the count of queued jobs in the project. */
+  queued?: number;
 }
 
 /** A card of `GET /api/cards` (docs/api.md §8, TER-43): a card in the working or research column of a board, with its column kind and the status of its assignee agent. */
 export interface ActiveCard extends Card {
   /** `working` (the column with that role), `research`, or another column that the query named. */
   column_kind: string;
-  /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
-  assignee_status?: string;
   /** A card in the blocked column (TER-51): when it moved there. */
   blocked_since?: string;
   /** A card in the blocked column: the comment of that move, or the newest comment without one. */
