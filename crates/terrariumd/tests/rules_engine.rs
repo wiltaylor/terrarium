@@ -404,6 +404,13 @@ async fn the_dry_run_plans_and_writes_nothing() {
     );
 }
 
+/// A board write on a card as an actor.
+type CardWrite = fn(
+    &mut terrariumd::db::Tx<'_>,
+    &terrariumd::actor::Actor,
+    &str,
+) -> terrariumd::error::ApiResult<board::Card>;
+
 #[tokio::test]
 async fn the_rule_actor_is_a_project_admin_of_its_project_only() {
     let td = TestDaemon::start().await;
@@ -425,7 +432,7 @@ async fn the_rule_actor_is_a_project_admin_of_its_project_only() {
     assert!(!actor.agent().unwrap().is_sysadmin());
 
     let st = state(&td);
-    let try_as = |card: String, f: fn(&mut terrariumd::db::Tx<'_>, &terrariumd::actor::Actor, &str) -> terrariumd::error::ApiResult<board::Card>| {
+    let try_as = |card: String, f: CardWrite| {
         let st = st.clone();
         async move {
             st.db
