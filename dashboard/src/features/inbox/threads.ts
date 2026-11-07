@@ -1,7 +1,7 @@
 // Inbox threads (docs/api.md §6.13): pure helpers for the Threads view of the
 // Inbox and the chat page of one thread. No Solid imports.
 
-import type { NewThread, Question, Thread, ThreadClose, ThreadLink, ThreadLinkKind, ThreadMessage } from "../../api/types";
+import type { NewThread, Question, Thread, ThreadClose, ThreadHandoff, ThreadLink, ThreadLinkKind, ThreadMessage } from "../../api/types";
 
 /** The limits of the daemon (store/threads.rs). Texts count bytes; the topic and a link count characters. */
 export const THREAD_TOPIC_MAX = 200;
@@ -21,9 +21,13 @@ export const openQuestionCount = (t: Pick<Thread, "questions" | "open_questions"
 /** Does the thread wait for the operator? It is `waiting_operator`, or it is not closed and has an open question (as the Inbox item). */
 export const waitsOnYou = (t: Pick<Thread, "status" | "questions" | "open_questions">): boolean => t.status === "waiting_operator" || (t.status !== "closed" && openQuestionCount(t) > 0);
 
+/** The agent's close proposal that waits for the operator (TER-95), or `null`: none, or the thread is closed. */
+export const pendingProposal = (t: Pick<Thread, "status" | "close_proposal">): ThreadHandoff | null => (t.status === "closed" ? null : (t.close_proposal ?? null));
+
 /** The status chip of a thread. */
-export function threadChip(t: Pick<Thread, "status" | "questions" | "open_questions">): { label: string; chip: string } {
+export function threadChip(t: Pick<Thread, "status" | "questions" | "open_questions" | "close_proposal">): { label: string; chip: string } {
   if (t.status === "closed") return { label: "closed", chip: "" };
+  if (pendingProposal(t)) return { label: "close proposed", chip: "warn" };
   if (waitsOnYou(t)) return { label: "waiting on you", chip: "warn" };
   return { label: "waiting on the agent", chip: "info" };
 }
@@ -129,6 +133,12 @@ export function closeBody(summary: string, links: string): { body: ThreadClose }
   if (parsed.length) body.links = parsed;
   return { body };
 }
+
+/** The name of an author or a `by`: `operator` is "you"; the attached agent is its name. */
+export const whoName = (t: Pick<Thread, "agent" | "agent_name">, by: string | null): string => (by === "operator" ? "you" : by && by === t.agent ? (t.agent_name ?? by) : (by ?? "unknown"));
+
+/** A URL link of a handoff is a link only for http and https. */
+export const safeUrl = (l: ThreadLink): string | null => (l.kind === "url" && /^https?:\/\//i.test(l.ref) ? l.ref : null);
 
 /** Is the author the operator? */
 export const byOperator = (m: Pick<ThreadMessage, "author">): boolean => m.author === "operator";
