@@ -731,10 +731,7 @@ pub fn list(conn: &Connection, project: &str, q: &ListQuery) -> ApiResult<Paged<
          ORDER BY num DESC LIMIT ?3",
     )?;
     let rows = stmt
-        .query_map(
-            params![project, before, (limit + 1) as i64, label],
-            art_row,
-        )?
+        .query_map(params![project, before, (limit + 1) as i64, label], art_row)?
         .collect::<Result<Vec<_>, _>>()?;
     let mut items = Vec::new();
     for r in rows {
