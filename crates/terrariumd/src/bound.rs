@@ -317,9 +317,7 @@ pub async fn unpark(
             let ahead = spawns::queued_unparks(t, &sp.owner)?
                 .iter()
                 .any(|other| *other != sp.id);
-            if !spawns::holds_place(t, &sp.id)?
-                && (ahead || !owner_has_room(t, &sp.owner)?)
-            {
+            if !spawns::holds_place(t, &sp.id)? && (ahead || !owner_has_room(t, &sp.owner)?) {
                 if spawns::queue_unpark(t, &sp.id)? {
                     t.emit(
                         EventDraft::new(
@@ -682,8 +680,8 @@ pub async fn reconcile(state: &Shared) -> usize {
                 match board::get_card(c, card_id) {
                     Ok(card) if !card.archived => {
                         // RFC 3339 UTC with milliseconds on both sides.
-                        let moved_since = board::last_moved_at(c, card_id)?
-                            .is_some_and(|at| at > sp.spawned_at);
+                        let moved_since =
+                            board::last_moved_at(c, card_id)?.is_some_and(|at| at > sp.spawned_at);
                         out.push((sp, card, moved_since));
                     }
                     Ok(_) => {}

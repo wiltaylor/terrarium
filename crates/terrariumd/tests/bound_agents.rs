@@ -890,7 +890,9 @@ async fn a_parked_agent_that_still_runs_unparks_in_its_own_place() {
     let sp = spawn_row(&td, &eph).await;
     assert!(sp["unpark_queued_at"].is_null(), "{sp}");
     let ev = td
-        .get(&format!("/api/agents/{eph}/events?kind=agent.unpark_queued"))
+        .get(&format!(
+            "/api/agents/{eph}/events?kind=agent.unpark_queued"
+        ))
         .await
         .ok()
         .clone();
