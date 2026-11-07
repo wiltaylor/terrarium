@@ -971,9 +971,25 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
             // An idle stop and a pause give the `stopped` status their
             // reason (`crate::lifecycle`).
             let ev = state.lifecycle.with_stop_reason(ev);
+            let ended = matches!(
+                &ev.kind,
+                SupervisorEventKind::Status {
+                    status: AgentStatus::Stopped | AgentStatus::Error,
+                    ..
+                } | SupervisorEventKind::Harness(Event::StatusChanged {
+                    to: AgentStatus::Stopped | AgentStatus::Error,
+                    ..
+                })
+            )
+            .then_some(ev.agent);
             let result = state.db.write("system", move |t| record(t, &ev)).await;
             if let Err(e) = result {
                 warn!("cannot record a supervisor event: {e}");
+            }
+            // A parked agent that stops frees its owner's place (TER-111).
+            if let Some(agent) = ended {
+                let state = state.clone();
+                tokio::spawn(async move { bound::on_stopped(&state, agent).await });
             }
         }
     })
