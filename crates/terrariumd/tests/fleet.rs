@@ -1228,16 +1228,12 @@ template = "mine"
     // An agent that exists, linked to a template with grants: no grant.
     let old = td.agent("side", "old", json!({})).await;
     let old = old["id"].as_str().unwrap().to_owned();
-    let relink = r#"
-name = "g4"
-[[projects]]
-name = "side"
-[[projects.agents]]
-name = "old"
-harness = "claude"
-template = "tg"
-"#;
-    td.post("/api/fleet/apply", body(relink)).await.ok();
+    // The project belongs to fleet `g3` now: the operator applies it
+    // again with the agent `old` added.
+    let relink = format!(
+        "{mine}\n[[projects.agents]]\nname = \"old\"\nharness = \"claude\"\ntemplate = \"tg\"\n"
+    );
+    td.post("/api/fleet/apply", body(&relink)).await.ok();
     assert_eq!(
         agent_by_key(&td, "side/old").await["template"]["name"],
         "tg"
