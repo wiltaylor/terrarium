@@ -340,12 +340,7 @@ async fn a_link_needs_the_read_rights_and_gives_none() {
         .ok()
         .clone();
     assert_eq!(audit, json!([]), "{audit}");
-    let audit = lab
-        .td
-        .get_as(&lab.lead, "/api/audit")
-        .await
-        .ok()
-        .clone();
+    let audit = lab.td.get_as(&lab.lead, "/api/audit").await.ok().clone();
     assert!(!audit.to_string().contains(qc.as_str()), "{audit}");
     let audit = lab
         .td
