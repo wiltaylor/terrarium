@@ -3617,8 +3617,10 @@ The close result names the cause, then the last assistant message of the
 agent. The lifecycle timer also closes a bound agent whose card is done,
 archived, or gone. The events `agent.parked` (`{spawn_id, name, bound,
 reason}`), `agent.unpark_queued` (`{spawn_id, name, bound, cause,
-owner}`), and `agent.unparked` (`{spawn_id, name, bound, cause}`) are on
-the bound agent. The wait columns are names: a board without them never
+owner}`), `agent.unpark_dropped` (`{spawn_id, name, bound, reason}`: the
+card moved into a wait column again while its unpark waited, so the
+unpark and its return turn are dropped), and `agent.unparked`
+(`{spawn_id, name, bound, cause}`) are on the bound agent. The wait columns are names: a board without them never
 parks its bound agents.
 
 **Finish.** Only these end an ephemeral agent:
@@ -3783,7 +3785,7 @@ There is no register of threads and no conflict check between threads
 | `session_id` | The session of the thread agent, set at the close: the agent ends and its session is archived (§6.6), so `/sessions/<id>` opens it after the agent is gone. `null` for a named agent, which lives on. |
 | `reminded_at` | The time of the last Inbox reminder of the untouched thread (below), or `null`. |
 | `tracking_at` | When the attached agent moved the thread into tracking (TER-145, below), or `null`. It stays set while an operator post wakes the agent, so that the agent's reply puts the thread back into `tracking`. |
-| `cards` | The linked cards (TER-146, below) whose project the reader may read, the oldest link first: `{project, card, linked_by, linked_by_name, linked_at}`. Only in `GET /api/threads/{id}` and the answers of the writes, not in the list. |
+| `cards` | The linked cards (TER-146, below) whose project the reader may read, the oldest link first: `{project, card, linked_by, linked_by_name, linked_at}`. In `GET /api/threads/{id}`, the answers of the writes, and the list (TER-147: the dashboard reads the cards and their boards for the n/m chip of the Threads list), with the same filter. |
 
 **Status.** A new thread with a first message of the operator is
 `waiting_agent`; with no first message, or opened by an agent, it is
@@ -3826,12 +3828,59 @@ the `cards` of the thread list only the cards whose project the reader
 may read, so a reader of the thread who cannot read a card's project
 does not see the card, its project, or that it is there; a reader of the
 card does not read the thread. A second link of the same card keeps the
-first. A closed thread is `409 conflict`. A link writes the audit row
+first. A closed thread is `409 conflict`. The dashboard shows the
+linked cards on the thread page as a mini kanban (TER-147): one row per
+project with that project's board columns in board order, open while
+the thread tracks and folded otherwise, and an n/m chip in the Threads
+list: the cards in the column with the role `review` or a later column
+(not the column with the role `blocked`) of all linked cards that the
+reader may read. A link writes the audit row
 `thread.card_link` (`by`, `card`, `project`) under the card's project,
 not the thread's, so the admin of the thread's project does not read it
 in the audit log when it cannot read the card's project. A link also
 writes a `thread` event `card_linked`, which does not change the status
 and wakes no agent. There is no unlink.
+
+**Wake rules** (TER-148, TER-144 D4 and D5). In a thread that tracks (not
+closed, `tracking_at` set), a move of a linked card wakes the agent, in
+the transaction of the move:
+
+- a move into the column with the role `blocked` (reason `blocked`);
+- a move from a column before review into review or later that leaves
+  every linked card that is not archived in review or later (reason
+  `review`). Review or later is the column with the role `review` (else
+  the column named `review`) and each column after it on that card's
+  board, never the column with the role `blocked`; a board with neither
+  counts only `done` (the rule of the n/m chip, TER-147). A move between
+  two columns of review or later does not wake it again.
+
+A thread in `tracking` goes to `waiting_agent`; `tracking_at` stays, so
+the agent's reply puts it back into `tracking`. A thread that waits on
+the operator (an open question) keeps its status. The wake writes the
+audit row `thread.card_wake` (`reason`) and the `thread` event `cards`
+with `reason` and no card, so that a reader of the thread's events does
+not learn a card of a project it cannot read. The agent gets a
+`[Thread:<id>]` turn with the linked cards as they are then (project,
+ID, column, title, and the last comment of a blocked card, quoted as
+data); a card of a project that the agent cannot read is only counted.
+On `blocked` the turn asks the agent to tell the operator what is stuck.
+On `review` it asks the agent to post what changed, the pre-release and
+the test steps, and to ask `works` or `found an issue`. On `works` the
+agent proposes the close. On `found an issue` it mails its report-to lead
+for a bug card linked to the same thread (`card new --inbox-thread`),
+and moves the thread into tracking again: the bug card's move to review
+wakes it again.
+
+**Extra requirements** (TER-148, TER-144 D10). The overall response can
+be sent again: the newest replaces `response`, each stays in `messages`
+as kind `response`, and each writes `thread.respond`. The turn of a
+response that follows an earlier one says that it replaces it. When the
+operator asks for more than the response covers, the agent says in the
+thread whether it is in scope or new scope, asks with options, waits for
+a new overall response, and hands the new work off with that response
+quoted; new cards link to the same thread, and the lead decides whether
+it amends a card or makes a follow-up. The first turn of the agent
+carries these rules.
 
 **Close** (TER-95, wiki `inbox-threads` §5). The attached agent hands off
 its work, asks in the thread whether anything more is needed, and then
@@ -3936,7 +3985,9 @@ of that project (A2). Only the daemon binds to a thread: a spawn with
   `waiting_operator` parks the agent (`park_reason` `thread waits on the
   operator`): the idle pass stops it when it is at rest, and mail does not
   wake it. The move into tracking, and its reply in a thread that tracks,
-  park it too (`thread is tracking`).
+  park it too (`thread is tracking`). In a thread that tracks, a linked
+  card that goes to blocked, or all linked cards in review or later, wake
+  it with a `[Thread:<id>]` turn (TER-148, "Wake rules" above).
 - **Restart.** An operator message or response, or the settling of the
   last open question (`waiting_agent`), unparks it: it starts again in the
   same session row and harness session (`resumes` + 1) on every harness.
@@ -4033,10 +4084,12 @@ reads its thread with `GET /api/threads/{id}`.
 
 Events: `thread` `{change, id, scope, status}`, with `change` one of
 `opened`, `agent`, `message`, `response`, `question`, `close_proposed`,
-`reminded`, `closed`; and an `inbox` event for the item. Audit rows:
-`thread.open`, `thread.agent`, `thread.respond`, `thread.propose_close`,
-`thread.remind`, `thread.close` (with `reason`, `session`, and the
-commented `cards`).
+`reminded`, `tracking`, `card_linked`, `cards` (a wake by the linked
+cards, with `reason`), `closed`; and an `inbox` event for the item. Audit
+rows: `thread.open`, `thread.agent`, `thread.respond`,
+`thread.propose_close`, `thread.remind`, `thread.track`,
+`thread.card_link`, `thread.card_wake`, `thread.close` (with `reason`,
+`session`, and the commented `cards`).
 
 ## 7. Mail
 
@@ -8803,7 +8856,7 @@ Status:
 | `ahead`, `behind` | Against the remote branch at the last fetch. |
 | `merging`, `conflicts` | A merge stopped on a conflict and waits: edit the files and commit, or abort. |
 | `pending_defaults` | New defaults that wait as `<file>.new` (§25.3). |
-| `export_pending` | A pull brought `export/` changes that are not applied. Until they are, a commit does not write `export/` from this instance. |
+| `export_pending` | A pull brought `export/` changes that are not applied. Until they are, a commit writes only the export files that are not in the repo yet: it changes and removes no pulled file. |
 | `auto_sync` | `TERRARIUM_CONFIG_SYNC`: `off`, `pull`, or `sync`. |
 
 A scan block is `422 invalid` with the findings:
@@ -8836,8 +8889,10 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
 ### 25.3 Rules
 
 - **Commit.** The daemon writes `export/` from the store first (unless
-  `export` is `false`, or `export_pending` is set and `force_export` is
-  not), stages every change that the `.gitignore` allows, and scans each
+  `export` is `false`; while `export_pending` is set and `force_export` is
+  not, only the files that are not in the repo yet, so a pulled file
+  stays for `pull --apply` and each project still gets its file), stages
+  every change that the `.gitignore` allows, and scans each
   staged file. A finding blocks the commit, unstages the files, and is
   `422`. During a merge, a file that still has conflict markers is `409`.
 - **Export.** One fleet file per project,

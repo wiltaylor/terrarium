@@ -218,7 +218,12 @@ async fn list(
             .filter(|a| !a.reads_all())
             .map(|a| a.id.clone()),
     };
-    Ok(Json(state.db.read(move |c| threads::list(c, &f)).await?))
+    Ok(Json(
+        state
+            .db
+            .read(move |c| threads::list_for(c, &f, &actor))
+            .await?,
+    ))
 }
 
 async fn show(

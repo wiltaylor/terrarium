@@ -314,10 +314,24 @@ fn full(def: &AgentDef) -> Spec {
     m.insert("system_prompt".into(), to(&def.system_prompt));
     m.insert("persona".into(), to(&def.persona));
     m.insert("roles".into(), to(&def.roles));
+    // Each policy field (TER-193: the export of an agent of a template
+    // dropped `spawn`, `calendar_write`, and `thread_open`). The pattern
+    // names every field, so a new one does not build until it is here.
+    let crate::config::Policy {
+        targets,
+        mail_to,
+        cross_project,
+        spawn,
+        calendar_write,
+        thread_open,
+    } = &def.policy;
     let mut p = Map::new();
-    p.insert("targets".into(), to(&def.policy.targets));
-    p.insert("mail_to".into(), to(&def.policy.mail_to));
-    p.insert("cross_project".into(), to(&def.policy.cross_project));
+    p.insert("targets".into(), to(targets));
+    p.insert("mail_to".into(), to(mail_to));
+    p.insert("cross_project".into(), to(cross_project));
+    p.insert("spawn".into(), to(spawn));
+    p.insert("calendar_write".into(), Value::Bool(*calendar_write));
+    p.insert("thread_open".into(), Value::Bool(*thread_open));
     m.insert("policy".into(), Value::Object(p));
     m.insert("restart".into(), to(&def.restart));
     m.insert("idle_stop".into(), to(&def.idle_stop));
@@ -357,6 +371,11 @@ pub fn overrides_for(def: &AgentDef, spec: &Spec) -> Option<Spec> {
                 .filter(|(pk, pv)| h.get(pk.as_str()) != Some(pv))
                 .map(|(pk, pv)| (pk.clone(), pv.clone()))
                 .collect();
+            // The template sets a policy key (`spawn`) that the agent does
+            // not have: a file has no `null` to drop it.
+            if diff.values().any(Value::is_null) {
+                return None;
+            }
             out.insert(k.clone(), Value::Object(diff));
         } else {
             out.insert(k.clone(), v.clone());
@@ -598,6 +617,40 @@ mod tests {
                 ..def.policy.clone()
             }
         );
+    }
+
+    /// TER-193: the overrides carry each policy field (`spawn` with its
+    /// bound fields, `calendar_write`, `thread_open`), so an agent of a
+    /// template keeps its spawn rights through an export.
+    #[test]
+    fn overrides_carry_the_spawn_policy_and_rights() {
+        let t = spec(json!({"harness": "claude", "roles": ["project_admin"],
+                            "policy": {"targets": ["a"]}}));
+        let mut def = to_def(&t, "lead", "p").unwrap();
+        def.policy.spawn = Some(Box::new(crate::config::SpawnPolicy {
+            templates: vec!["card-impl".into()],
+            max_concurrent: 4,
+            bound: true,
+            max_bound_lifetime: Some("3d".into()),
+            ..Default::default()
+        }));
+        def.policy.thread_open = true;
+        def.policy.calendar_write = true;
+        let o = overrides_for(&def, &t).unwrap();
+        assert_eq!(
+            Value::Object(o.clone()),
+            json!({"policy": {
+                "spawn": {"templates": ["card-impl"], "max_concurrent": 4,
+                          "bound": true, "max_bound_lifetime": "3d"},
+                "calendar_write": true, "thread_open": true}})
+        );
+        // As a fleet entry reads it: the template, then the entry's keys
+        // (a template itself has no spawn rights, so not `to_def`).
+        let mut m = merge(&t, &o);
+        m.insert("name".into(), json!("lead"));
+        m.insert("project".into(), json!("p"));
+        let back: AgentDef = serde_json::from_value(Value::Object(m)).unwrap();
+        assert_eq!(back, def);
     }
 
     #[test]
