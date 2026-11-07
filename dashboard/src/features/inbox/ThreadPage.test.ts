@@ -392,8 +392,9 @@ describe("the linked cards of a thread (TER-147)", () => {
       }
     });
     // A thread with no linked card has no chip.
+    await api.threads.open({ topic: "No cards here", scope: "terrarium", agent: "terrarium/lead", text: "Go." });
     const { el } = mount("/inbox?tab=thread");
-    await waitFor(() => expect(rowOf(el, "Split the event store by project?")).toBeTruthy());
-    expect(rowOf(el, "Split the event store by project?")!.querySelector("[data-testid=thread-progress]")).toBeNull();
+    await waitFor(() => expect(rowOf(el, "No cards here")).toBeTruthy());
+    expect(rowOf(el, "No cards here")!.querySelector("[data-testid=thread-progress]")).toBeNull();
   });
 });
