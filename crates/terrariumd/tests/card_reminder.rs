@@ -244,8 +244,11 @@ async fn no_reminder_without_a_turn_a_card_in_progress_or_with_it_off() {
     a_turn(&td, &w, "two").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(reminders(&td, &w).is_empty());
-    // On again, but the card went to review: nothing in progress.
-    state(&td).lifecycle.reminders.set_default(true);
+    // On again, but the card went to review: nothing in progress. The
+    // move comes first: the check of the idle after "two" runs in the
+    // lifecycle, and under load it can still run after the 300 ms above
+    // (TER-110). With the card out of the working column, a late check
+    // finds no card either way.
     td.post_as(
         "p/w1",
         &format!("/api/cards/{c}/move"),
@@ -253,6 +256,7 @@ async fn no_reminder_without_a_turn_a_card_in_progress_or_with_it_off() {
     )
     .await
     .ok();
+    state(&td).lifecycle.reminders.set_default(true);
     a_turn(&td, &w, "three").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(reminders(&td, &w).is_empty());

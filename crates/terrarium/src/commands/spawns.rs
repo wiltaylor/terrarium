@@ -50,8 +50,9 @@ pub struct SpawnArgs {
     #[arg(long = "target", value_name = "TARGET")]
     pub targets: Vec<String>,
     /// Give the ephemeral agent a secret that the owner holds, at most at
-    /// the owner's level: `<name>`, `<scope>/<name>`, with `:use` or
-    /// `:read`. Repeat for more
+    /// the owner's level: `<name>`, `<scope>/<name>`, with `:use`, `:run`
+    /// (the owner's run targets), `:run=<target>,<target>`, or `:read`.
+    /// Repeat for more
     #[arg(long = "grant", value_name = "SECRET[:LEVEL]")]
     pub grants: Vec<String>,
     /// Bind the ephemeral agent to a card of the owner's project (TER-74):

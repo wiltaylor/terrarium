@@ -222,12 +222,12 @@ export function seedSpawns(w: MockWorld, now: number): void {
   const id = (n: number) => `01JB0EPH${String(n).padStart(18, "0")}`;
   const sid = (n: number) => `01JB0EPHSES${String(n).padStart(15, "0")}`;
   const xss = `<img src=x onerror="window.__xss=1"> [x](javascript:window.__xss=1)`;
-  type Seed = { n: number; name: string; template: string; harness: Agent["harness"]; task: string; started: number; finished?: number; outcome?: SpawnOutcome; result?: string; status?: AgentStatus };
+  type Seed = { n: number; name: string; template: string; harness: Agent["harness"]; task: string; started: number; finished?: number; outcome?: SpawnOutcome; result?: string; status?: AgentStatus; card?: string };
   const seeds: Seed[] = [
     { n: 1, name: "lead-reviewer-1", template: "reviewer", harness: "codex", task: "Review the diff of TER-12 for the runner socket changes.", started: 300, finished: 290, outcome: "cancelled" },
     { n: 2, name: "lead-worker-1", template: "global:worker", harness: "claude", task: "Find every caller of `apply_status` and list the ones that skip the wait refresh.", started: 240, finished: 120, outcome: "timeout", result: "I found 4 callers so far: lifecycle.rs (wake), api/agents.rs (start), runner_supervisor.rs (two). Still checking executor.rs." },
     { n: 3, name: "lead-worker-2", template: "global:worker", harness: "claude", task: "Run the flaky runner tests 20 times and report which ones fail.\nUse `cargo test -p terrarium-runner -- --test-threads 1`.", started: 52, finished: 43, outcome: "done", result: `2 of 20 runs failed, both in pty_resize_keeps_the_screen:\n- run 7: the screen had 23 rows, not 24\n- run 15: the same\nThe other tests passed 20 of 20. Log: /work/terrarium/lead-worker-2/flaky.log (in the trash now). ${xss}` },
-    { n: 4, name: "lead-worker-3", template: "global:worker", harness: "claude", task: "Write the CHANGELOG entry for the spawn feature from docs/PLAN.md §18.", started: 12, status: "working" },
+    { n: 4, name: "lead-worker-3", template: "global:worker", harness: "claude", task: "Write the CHANGELOG entry for the spawn feature from docs/PLAN.md §18.", started: 12, status: "working", card: "TER-13" },
     { n: 5, name: "lead-reviewer-2", template: "reviewer", harness: "codex", task: "Check that docs/api.md §6.10 matches crates/terrariumd/src/api/spawns.rs.", started: 5, status: "idle" },
   ];
   w.spawns ??= [];
@@ -261,6 +261,9 @@ export function seedSpawns(w: MockWorld, now: number): void {
       duration_secs: Math.round((s.finished === undefined ? s.started : s.started - s.finished) * 60),
     };
     w.spawns.push(row);
+    // A card agent (TER-75): the card names it.
+    const bound = s.card && !s.finished ? w.cards.find((c) => c.id === s.card) : undefined;
+    if (bound) Object.assign(bound, { agent: agentId, agent_name: s.name });
     if (s.finished) {
       w.removedAgents.push({ id: agentId, project: "terrarium", name: s.name, harness: s.harness });
     } else {
@@ -281,6 +284,7 @@ export function seedSpawns(w: MockWorld, now: number): void {
         source: "api",
         session: session.harness_session_id,
         ephemeral: true,
+        ...(s.card ? { current_card: s.card } : {}),
         owner: lead.id,
         spawn: { owner_name: "lead", template: s.template, task: s.task, spawned_at: ago(s.started), deadline_at: deadline },
         created_at: ago(s.started),
