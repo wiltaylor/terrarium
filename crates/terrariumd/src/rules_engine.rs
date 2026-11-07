@@ -625,11 +625,7 @@ enum Step {
 }
 
 /// Run one pending row to its end: one write for each action.
-pub async fn run_one(
-    state: &Shared,
-    id: &str,
-    live: &HashSet<(String, String)>,
-) -> ApiResult<()> {
+pub async fn run_one(state: &Shared, id: &str, live: &HashSet<(String, String)>) -> ApiResult<()> {
     let row = {
         let id = id.to_owned();
         state.db.read(move |c| get_run(c, &id)).await?
@@ -726,9 +722,11 @@ struct RunCtx {
 }
 
 fn event_at(conn: &Connection, seq: i64) -> ApiResult<Option<StoredEvent>> {
-    Ok(events::list(conn, &EventFilter::default(), seq.saturating_sub(1), 1)?
-        .into_iter()
-        .find(|e| e.seq == seq))
+    Ok(
+        events::list(conn, &EventFilter::default(), seq.saturating_sub(1), 1)?
+            .into_iter()
+            .find(|e| e.seq == seq),
+    )
 }
 
 fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
@@ -1105,9 +1103,9 @@ pub fn dry_run(
     };
     let evs: Vec<StoredEvent> =
         events::list(conn, &filter, from.saturating_sub(1), MAX_DRY_RUN_EVENTS)?
-        .into_iter()
-        .filter(|e| e.seq <= to)
-        .collect();
+            .into_iter()
+            .filter(|e| e.seq <= to)
+            .collect();
     let mut out = Vec::new();
     for e in &evs {
         for rule in &set.rules {

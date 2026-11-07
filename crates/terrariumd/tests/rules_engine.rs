@@ -741,7 +741,12 @@ async fn job_and_card_conditions_read_the_current_state() {
     let reason_of = |card: &str| {
         r.iter()
             .find(|r| r["rule"] == "backlog-only" && r["card"] == card)
-            .map(|r| (r["state"].clone(), r["reason"].as_str().unwrap_or("").to_owned()))
+            .map(|r| {
+                (
+                    r["state"].clone(),
+                    r["reason"].as_str().unwrap_or("").to_owned(),
+                )
+            })
             .unwrap()
     };
     let (s, why) = reason_of(&b);
