@@ -72,6 +72,7 @@ use crate::api::Shared;
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
 use crate::executor::{self, Collected, Control, End, RemoteCmd};
+use crate::policy;
 use crate::secrets;
 use crate::store::board::{self, CardPatch};
 use crate::store::jobs::{self, BatchCard, Job, JobEnd, JobKind};
@@ -209,6 +210,43 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             tokio::time::sleep(TICK).await;
         }
     })
+}
+
+/// The checks of a job queue config before it is written, by `PUT
+/// /api/projects/{name}/delivery` and by a fleet apply (TER-87). The
+/// recipe runs on the target: a target of this project, or a global one
+/// only when a sysadmin or the operator sets it, and one that may run
+/// commands. Each of `next_repos` is a repo of the project.
+pub fn check_delivery(
+    conn: &rusqlite::Connection,
+    actor: &Actor,
+    project: &str,
+    def: &DeliveryDef,
+) -> ApiResult<()> {
+    if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty()) {
+        let row = targets::get(conn, target)?;
+        match &row.def.project {
+            Some(p) if p == project => {}
+            Some(p) => {
+                return Err(ApiError::forbidden(format!(
+                    "target `{target}` belongs to project `{p}`; the job queue of `{project}` uses its own targets"
+                )));
+            }
+            None => policy::sysadmin(
+                actor,
+                &format!("running the job queue of `{project}` on the global target `{target}`"),
+            )?,
+        }
+        executor::no_exec(&row.def)?;
+    }
+    for r in &def.next_repos {
+        if repos::find_by_name(conn, project, r)?.is_none() {
+            return Err(ApiError::invalid(format!(
+                "`next_repos` names `{r}`, which is not a repo of `{project}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Start a tick now, in the background.
