@@ -2514,6 +2514,16 @@ impl JobRepo {
         }
     }
 
+    /// The tree of commit `rev`, if any.
+    pub fn tree_of(&self, rev: &str) -> Result<Option<String>, GitError> {
+        let spec = format!("{rev}^{{tree}}");
+        match self.local(&["rev-parse", "--verify", "-q", "--end-of-options", &spec]) {
+            Ok(s) => Ok(Some(s.trim().to_owned()).filter(|s| !s.is_empty())),
+            Err(GitError::Failed { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Is `a` an ancestor of `b` (or `b` itself)?
     pub fn is_ancestor(&self, a: &str, b: &str) -> Result<bool, GitError> {
         match self.local(&["merge-base", "--is-ancestor", a, b]) {

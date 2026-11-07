@@ -156,7 +156,17 @@ pub struct Job {
     /// the start plus this. `None`: the job sets no ETA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_secs: Option<i64>,
+    /// The slot that a running job took (TER-190): `1` to the project's
+    /// `slots` for a validate job, [`MERGE_SLOT`] for a merge. Set when it
+    /// starts, cleared when it goes back to the queue. Each slot has one
+    /// work tree on the target, which no two jobs use at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<i64>,
 }
+
+/// The slot of the merge lane (TER-159, TER-190): one merge at a time per
+/// project, in a work tree of its own, apart from the validate slots.
+pub const MERGE_SLOT: i64 = 0;
 
 /// A card of a batch merge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,7 +232,7 @@ pub struct JobEnd {
 
 const COLS: &str = "id, project, card, kind, repo, branch, commit_sha, state, attempt, outcome,
                     exit_code, tail, head, by_agent, created_by, created_at, started_at, ended_at,
-                    host, batch, parent, split_path, planned_secs";
+                    host, batch, parent, split_path, planned_secs, slot";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
     let kind: String = r.get(3)?;
@@ -255,6 +265,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Job> {
         parent: r.get(20)?,
         split_path: r.get(21)?,
         planned_secs: r.get(22)?,
+        slot: r.get(23)?,
     })
 }
 
@@ -803,6 +814,11 @@ pub struct QueueOf {
 /// job that must wait does not hold back the jobs of other projects
 /// behind it. A project missing from `queues` has no queue, and its jobs
 /// wait.
+///
+/// Each picked job gets its slot in [`Job::slot`] (TER-190): a merge
+/// [`MERGE_SLOT`], a validate job the lowest slot from `1` to `slots` that
+/// no running job of its project holds. A validate job with no free slot
+/// (the project's `slots` went down while higher slots run) waits.
 pub fn pick(
     queued: Vec<Job>,
     running: &[Job],
@@ -814,6 +830,8 @@ pub fn pick(
     let mut validating: HashMap<String, usize> = HashMap::new();
     // The projects where no more merge may start in this pick.
     let mut merging: HashSet<String> = HashSet::new();
+    // The validate slots that are held, per project.
+    let mut held: HashMap<String, HashSet<i64>> = HashMap::new();
     for j in running {
         let host = j
             .host
@@ -826,11 +844,16 @@ pub fn pick(
             JobKind::Merge => {
                 merging.insert(j.project.clone());
             }
-            JobKind::Validate => *validating.entry(j.project.clone()).or_default() += 1,
+            JobKind::Validate => {
+                *validating.entry(j.project.clone()).or_default() += 1;
+                if let Some(s) = j.slot {
+                    held.entry(j.project.clone()).or_default().insert(s);
+                }
+            }
         }
     }
     let mut out = Vec::new();
-    for j in queued {
+    for mut j in queued {
         let Some(q) = queues.get(&j.project) else {
             continue;
         };
@@ -844,11 +867,19 @@ pub fn pick(
         if caps.get(&q.host).is_some_and(|cap| used >= *cap) {
             continue;
         }
-        if !merge {
+        if merge {
+            j.slot = Some(MERGE_SLOT);
+        } else {
             let busy = validating.get(&j.project).copied().unwrap_or(0);
             if busy >= q.slots {
                 continue;
             }
+            let taken = held.entry(j.project.clone()).or_default();
+            let Some(free) = (1..=q.slots as i64).find(|s| !taken.contains(s)) else {
+                continue;
+            };
+            taken.insert(free);
+            j.slot = Some(free);
             *validating.entry(j.project.clone()).or_default() += 1;
         }
         *on_host.entry(q.host.clone()).or_default() += 1;
@@ -1415,13 +1446,13 @@ pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, 
     Ok((left, right))
 }
 
-/// Mark a queued job as running on `host`. False when it is no longer queued (a
-/// cancel came first).
-pub fn start(t: &mut Tx<'_>, id: &str, host: &str) -> ApiResult<bool> {
+/// Mark a queued job as running on `host`, in `slot` ([`pick`]). False
+/// when it is no longer queued (a cancel came first).
+pub fn start(t: &mut Tx<'_>, id: &str, host: &str, slot: Option<i64>) -> ApiResult<bool> {
     let n = t.execute(
-        "UPDATE jobs SET state = 'running', started_at = ?2, host = ?3
+        "UPDATE jobs SET state = 'running', started_at = ?2, host = ?3, slot = ?4
          WHERE id = ?1 AND state = 'queued'",
-        params![id, now(), host],
+        params![id, now(), host, slot],
     )?;
     if n == 0 {
         return Ok(false);
@@ -1493,7 +1524,7 @@ pub fn requeue_lost(t: &mut Tx<'_>, id: &str) -> ApiResult<Option<Job>> {
 
 fn requeue_with(t: &mut Tx<'_>, id: &str, tail: &str) -> ApiResult<Option<Job>> {
     let n = t.execute(
-        "UPDATE jobs SET state = 'queued', started_at = NULL, host = NULL, tail = ?2
+        "UPDATE jobs SET state = 'queued', started_at = NULL, host = NULL, slot = NULL, tail = ?2
          WHERE id = ?1 AND state = 'running'",
         params![id, clip_tail(tail)],
     )?;
@@ -1504,6 +1535,38 @@ fn requeue_with(t: &mut Tx<'_>, id: &str, tail: &str) -> ApiResult<Option<Job>> 
     queued_eta(t, &job)?;
     emit(t, &job, "requeued")?;
     Ok(Some(job))
+}
+
+/// Mark slot `slot` of `project` for a wipe (TER-190 review, finding 2):
+/// the kill of lost job `job` did not confirm that its processes ended, so
+/// they may still write into the slot's tree. The next job of the slot
+/// makes all of its tree new, `target/` too ([`crate::jobs`]).
+pub fn mark_slot_wipe(t: &mut Tx<'_>, project: &str, slot: i64, job: &str) -> ApiResult<()> {
+    t.execute(
+        "INSERT INTO job_slot_wipes (project, slot, job, marked_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (project, slot) DO UPDATE SET job = ?3, marked_at = ?4",
+        params![project, slot, job, now()],
+    )?;
+    Ok(())
+}
+
+/// Is slot `slot` of `project` marked for a wipe ([`mark_slot_wipe`])?
+pub fn slot_wipe_pending(conn: &Connection, project: &str, slot: i64) -> ApiResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM job_slot_wipes WHERE project = ?1 AND slot = ?2",
+        params![project, slot],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// The slot's tree is new: its wipe mark goes.
+pub fn clear_slot_wipe(t: &mut Tx<'_>, project: &str, slot: i64) -> ApiResult<()> {
+    t.execute(
+        "DELETE FROM job_slot_wipes WHERE project = ?1 AND slot = ?2",
+        params![project, slot],
+    )?;
+    Ok(())
 }
 
 /// Cancel an open job.
@@ -1766,6 +1829,7 @@ mod tests {
             parent: None,
             split_path: String::new(),
             planned_secs: None,
+            slot: None,
         }
     }
 
@@ -1880,6 +1944,49 @@ mod tests {
             job("3", "a", JobKind::Merge, "app", "t3"),
         ];
         assert_eq!(ids(&pick(queued, &run, &q, &none)), ["3"]);
+    }
+
+    /// TER-190: a picked job gets a slot that no running job of its
+    /// project holds (a cancelled job that drains is in `running`); slots
+    /// of other projects do not count; a merge gets [`MERGE_SLOT`].
+    #[test]
+    fn each_job_gets_a_free_slot_of_its_project() {
+        let q = queues(&[("a", 3, "h"), ("b", 3, "h")]);
+        let none = HashMap::new();
+        let slot = |id: &str, project: &str, s: i64| {
+            let mut j = running(job(id, project, JobKind::Validate, "app", "t0"), "h");
+            j.slot = Some(s);
+            j
+        };
+        let run = [slot("8", "a", 2), slot("9", "b", 1)];
+        let queued = vec![
+            job("1", "a", JobKind::Validate, "app", "t1"),
+            job("2", "a", JobKind::Merge, "app", "t2"),
+            job("3", "a", JobKind::Validate, "app", "t3"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+            job("5", "b", JobKind::Validate, "app", "t5"),
+        ];
+        let picked = pick(queued, &run, &q, &none);
+        let got: Vec<(&str, Option<i64>)> = picked
+            .iter()
+            .map(|(j, _)| (j.id.as_str(), j.slot))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("1", Some(1)),
+                ("2", Some(MERGE_SLOT)),
+                ("3", Some(3)),
+                ("5", Some(2))
+            ]
+        );
+        // The slots went down from 3 to 2 while slot 3 runs: one more job
+        // may run, and it gets slot 1.
+        let q = queues(&[("a", 2, "h")]);
+        let run = [slot("8", "a", 3)];
+        let queued = vec![job("1", "a", JobKind::Validate, "app", "t1")];
+        let p = pick(queued, &run, &q, &none);
+        assert_eq!(p[0].0.slot, Some(1));
     }
 
     #[test]
