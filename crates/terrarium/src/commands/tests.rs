@@ -10214,3 +10214,226 @@ async fn thread_commands() {
     );
     assert!(!out.contains("messages "), "{out}");
 }
+
+/// `rule` (docs/api.md §19.12, TER-171): every command, the requests and
+/// the output.
+#[tokio::test]
+async fn rules_every_command() {
+    let eff = json!({"project": "terra", "board_flow": "rules", "exists": true, "rules": [
+        {"name": "merge-pass", "origin": "override", "enabled": true, "on": ["job.verdict"],
+         "when": [{"path": "data.verdict", "op": "eq", "value": "passed"}],
+         "actions": [{"verb": "card.label"}, {"verb": "card.comment"}],
+         "description": "Mapped to this board.",
+         "wcl": "rule \"merge-pass\" {\n  on = [\"job.verdict\"]\n}\n", "line": 4},
+        {"name": "agent-park", "origin": "pack", "enabled": false, "on": ["card"],
+         "actions": [{"verb": "agent.park"}], "wcl": "rule \"agent-park\" {}\n", "line": 1}
+    ]});
+    // ls: the agent's own project.
+    let out = ok(
+        true,
+        &["rule", "ls"],
+        vec![(200, eff.clone())],
+        vec![req(Get, "/api/projects/terra/rules/effective")],
+    )
+    .await;
+    assert!(out.contains("board_flow rules"), "{out}");
+    assert!(out.contains("merge-pass"), "{out}");
+    assert!(out.contains("override"), "{out}");
+    assert!(out.contains("job.verdict (1 when)"), "{out}");
+    assert!(out.contains("card.label, card.comment"), "{out}");
+    // show: the WCL and the last runs.
+    let runs = json!({"runs": [{"id": "01RUN", "rule": "merge-pass", "event_seq": 9,
+        "card": "TER-1", "state": "done", "step": 2, "created_at": "2026-11-07T10:00:00.000Z"}]});
+    let out = ok(
+        false,
+        &["-p", "terra", "rules", "show", "merge-pass"],
+        vec![(200, eff.clone()), (200, runs.clone())],
+        vec![
+            req(Get, "/api/projects/terra/rules/effective"),
+            (
+                Get,
+                "/api/projects/terra/rules/runs",
+                vec![("rule", "merge-pass"), ("limit", "5")],
+                None,
+            ),
+        ],
+    )
+    .await;
+    assert!(out.contains("rule merge-pass  (override, enabled yes)"), "{out}");
+    assert!(out.contains("rule \"merge-pass\" {"), "{out}");
+    assert!(out.contains("01RUN"), "{out}");
+    // show of an unknown rule: a usage error, one request.
+    let r = exec(
+        false,
+        &["-p", "terra", "rule", "show", "nope"],
+        vec![(200, eff.clone())],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    // check: the stored rules, clean.
+    let out = ok(
+        false,
+        &["-p", "terra", "rule", "check"],
+        vec![(200, json!({"findings": []}))],
+        vec![(
+            Post,
+            "/api/projects/terra/rules/lint",
+            vec![],
+            Some(json!({})),
+        )],
+    )
+    .await;
+    assert!(out.contains("lint: no findings"), "{out}");
+    // check of stdin with a finding: exit 1, the finding printed.
+    let r = exec(
+        false,
+        &["-p", "terra", "rule", "check", "-"],
+        vec![(
+            200,
+            json!({"findings": [{"code": "stuck_column", "column": "validating",
+                "rules": ["in"], "message": "no rule moves a card out"}]}),
+        )],
+        Some("rule \"in\" {}\n"),
+    )
+    .await;
+    check(
+        &["rule", "check", "-"],
+        &r.reqs,
+        &[(
+            Post,
+            "/api/projects/terra/rules/lint",
+            vec![],
+            Some(json!({"text": "rule \"in\" {}\n"})),
+        )],
+    );
+    assert!(
+        r.out
+            .contains("lint: stuck_column validating: no rule moves a card out"),
+        "{}",
+        r.out
+    );
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), 1);
+    // test: one event, and a range with a file.
+    let plan = json!({"source": "stored", "events": 1, "plans": [
+        {"event": 9, "kind": "job.verdict", "rule": "merge-pass", "card": "TER-1",
+         "outcome": "run", "actions": [{"verb": "card.label"}, {"verb": "card.comment"}]},
+        {"event": 9, "kind": "job.verdict", "rule": "job-rerun-red", "card": "TER-1",
+         "outcome": "skipped", "reason": "if_job 1 does not hold"}]});
+    let out = ok(
+        false,
+        &["-p", "terra", "rule", "test", "--seq", "9"],
+        vec![(200, plan.clone())],
+        vec![(
+            Post,
+            "/api/projects/terra/rules/dry-run",
+            vec![],
+            Some(json!({"seq": 9})),
+        )],
+    )
+    .await;
+    assert!(out.contains("1 events, 2 planned runs"), "{out}");
+    assert!(out.contains("if_job 1 does not hold"), "{out}");
+    ok_in(
+        false,
+        &[
+            "-p", "terra", "rule", "test", "--from", "3", "--to", "8", "--file", "-",
+        ],
+        vec![(200, plan)],
+        Some("rule \"x\" {}"),
+        vec![(
+            Post,
+            "/api/projects/terra/rules/dry-run",
+            vec![],
+            Some(json!({"from": 3, "to": 8, "text": "rule \"x\" {}"})),
+        )],
+    )
+    .await;
+    let r = exec(false, &["-p", "terra", "rule", "test"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    // log.
+    let out = ok(
+        false,
+        &["-p", "terra", "rule", "log", "--rule", "merge-pass", "--limit", "3"],
+        vec![(200, runs)],
+        vec![(
+            Get,
+            "/api/projects/terra/rules/runs",
+            vec![("rule", "merge-pass"), ("limit", "3")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("2026-11-07 10:00"), "{out}");
+    // enable and disable.
+    let out = ok(
+        false,
+        &["-p", "terra", "rule", "disable", "agent-park"],
+        vec![(200, json!({"changed": true}))],
+        vec![(
+            Post,
+            "/api/projects/terra/rules/agent-park/disable",
+            vec![],
+            Some(json!({})),
+        )],
+    )
+    .await;
+    assert!(out.contains("rule agent-park: off (rules.wcl changed)"), "{out}");
+    let out = ok(
+        false,
+        &["-p", "terra", "rule", "enable", "agent-park"],
+        vec![(200, json!({"changed": false}))],
+        vec![(
+            Post,
+            "/api/projects/terra/rules/agent-park/enable",
+            vec![],
+            Some(json!({})),
+        )],
+    )
+    .await;
+    assert!(out.contains("rule agent-park: on already"), "{out}");
+    // migrate: the plan, then --apply with the text.
+    let mig = json!({"project": "terra", "applied": false, "board_flow": "code", "changed": true,
+        "text": "rule \"merge-pass\" {}\n",
+        "changes": [{"rule": "merge-pass", "change": "mapped",
+                     "reasons": ["the board has no column `@accepted`: the move becomes its comment"]}],
+        "findings": []});
+    let out = ok(
+        false,
+        &["-p", "terra", "rule", "migrate"],
+        vec![(200, mig.clone())],
+        vec![(
+            Post,
+            "/api/projects/terra/rules/migrate",
+            vec![],
+            Some(json!({"apply": false})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("mapped merge-pass: the board has no column `@accepted`"),
+        "{out}"
+    );
+    assert!(out.contains("not applied: run with --apply"), "{out}");
+    assert!(!out.contains("--- rules.wcl ---"), "{out}");
+    let mut done = mig.clone();
+    done["applied"] = json!(true);
+    done["board_flow"] = json!("rules");
+    let out = ok(
+        false,
+        &["-p", "terra", "rule", "migrate", "--apply", "--text"],
+        vec![(200, done)],
+        vec![(
+            Post,
+            "/api/projects/terra/rules/migrate",
+            vec![],
+            Some(json!({"apply": true})),
+        )],
+    )
+    .await;
+    assert!(out.contains("--- rules.wcl ---\nrule \"merge-pass\" {}\n"), "{out}");
+    assert!(
+        out.contains("applied: project terra runs board_flow rules (rules.wcl changed)"),
+        "{out}"
+    );
+}
