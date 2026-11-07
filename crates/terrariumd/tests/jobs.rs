@@ -742,6 +742,58 @@ async fn a_green_validation_moves_the_card_to_review() {
     assert_eq!(j["exit_code"], 0);
 }
 
+/// TER-165: the daemon finds the columns by role. `validating` is renamed
+/// and keeps its role. `review` has no role and `qa` has it, so the role
+/// wins over the name. `accepted` has no role, so its name is the fallback.
+#[tokio::test]
+async fn the_job_queue_finds_its_columns_by_role_then_by_name() {
+    let lab = lab(2).await;
+    let r = lab
+        .td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"},
+                {"name": "checking", "rename_from": "validating", "role": "validating"},
+                // A column that omits `role` keeps its old role: the default
+                // board gives `review` the role `review`, so say null.
+                {"name": "review", "role": null}, {"name": "qa", "role": "review"},
+                {"name": "accepted", "role": null},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // A validate pass: the card is in the role column, then in `qa`.
+    let head = lab.branch("ter-a", "next", &[("OK", "yes\n")]);
+    let a = lab.card("by role", "ter-a").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{a}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let c = lab.card_of(&a).await;
+    assert_eq!(c["column"], "checking", "{c}");
+    lab.until_card(&a, "qa", |c| c["column"] == "qa").await;
+    // A merge pass: the name `accepted` is the fallback.
+    let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
+    let b = lab.card("by name", "ter-c").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{b}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["kind"], "merge");
+    lab.until_card(&b, "accepted", |c| c["column"] == "accepted")
+        .await;
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    assert_ne!(next, head);
+}
+
 /// TER-107: a validate leaves one `validation:*` label and one `by:` label,
 /// even when the card already has stale ones.
 #[tokio::test]
@@ -1414,6 +1466,39 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
     );
 }
 
+/// TER-103: the target holds no credential and no push repo. The recipe
+/// of a merge finds no `.ssh` or `.push` dir beside its clone, no git
+/// credential env, and no remote in its clone. It deletes the job ref in
+/// its clone, and the merge still pushes the recorded commit: the push
+/// runs from the daemon's repo.
+#[tokio::test]
+async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
+    let lab = lab(2).await;
+    let before = git(&lab.origin, &["rev-parse", "next"]);
+    let recipe = "test -f OK \
+         && ! ls -a .. | grep -E '[.](ssh|push)$' \
+         && ! env | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
+         && test -z \"$(git remote)\" \
+         && test \"$(git rev-parse refs/job/merge)\" = \"$(git rev-parse HEAD)\" \
+         && git update-ref -d refs/job/merge \
+         && rm -rf .git/objects/pack";
+    let job = merge_with_recipe(&lab, "ter-m3", recipe).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    assert_ne!(next, before);
+    assert_eq!(job["head"].as_str().unwrap(), next, "{job:#}");
+    assert_eq!(
+        git(&lab.origin, &["log", "-1", "--format=%s", "next"]),
+        "Merge ter-m3 onto next"
+    );
+    // The daemon removed its repo of the job.
+    let state_jobs = lab.td.daemon.as_ref().unwrap().state.state_dir.join("jobs");
+    let left: Vec<_> = std::fs::read_dir(state_jobs.join("p"))
+        .map(|d| d.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+}
+
 /// TER-159: merges have their own lane. With 1 slot, a validate job queued
 /// after a merge starts beside it and passes while the merge runs, and a
 /// second merge waits for the first.
@@ -1528,7 +1613,10 @@ case "$1" in
   exec) shift
     while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;; *) break ;; esac; done
     shift
-    ( exec setsid "$@" ) &
+    # An async list gets /dev/null on stdin: keep the real one (`-i`, the
+    # bundle of a job) on fd 3 and hand it on.
+    exec 3<&0
+    ( exec setsid "$@" <&3 3<&- ) &
     wait $! ;;
 esac
 "#,

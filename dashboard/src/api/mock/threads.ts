@@ -211,7 +211,7 @@ export function createThreadMock(c: ThreadMockContext) {
     list: (q = {}) =>
       reply(() => {
         const st = q.status ?? "open";
-        if (!["open", "all", "waiting_operator", "waiting_agent", "closed"].includes(st)) fail(422, "invalid", `bad status \`${st}\`: use waiting_operator, waiting_agent, closed, open, or all`);
+        if (!["open", "all", "waiting_operator", "waiting_agent", "tracking", "closed"].includes(st)) fail(422, "invalid", `bad status \`${st}\`: use waiting_operator, waiting_agent, tracking, closed, open, or all`);
         return rows()
           .filter((t) => (st === "all" ? true : st === "open" ? t.status !== "closed" : t.status === st) && (!q.scope || t.scope === q.scope))
           .map(listed)

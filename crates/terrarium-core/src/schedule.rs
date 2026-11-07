@@ -49,6 +49,10 @@ pub enum ScheduleSpec {
         #[serde(default = "default_max_per_hour")]
         max_per_hour: u32,
     },
+    /// A project action (TER-53): no time and no event. It runs only when a
+    /// person presses its button (`POST /api/schedules/{id}/run`). An empty
+    /// struct, so an unknown field is an error, as for the other kinds.
+    Manual {},
 }
 
 /// The default `max_per_hour` of a trigger.
@@ -63,14 +67,20 @@ fn utc() -> String {
 }
 
 impl ScheduleSpec {
-    /// `cron`, `interval`, `at`, or `on`.
+    /// `cron`, `interval`, `at`, `on`, or `manual`.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Cron { .. } => "cron",
             Self::Interval { .. } => "interval",
             Self::At { .. } => "at",
             Self::On { .. } => "on",
+            Self::Manual {} => "manual",
         }
+    }
+
+    /// Is it a project action (`manual`): run only on demand?
+    pub fn is_manual(&self) -> bool {
+        matches!(self, Self::Manual {})
     }
 
     /// Is it a trigger (`on`)?
@@ -482,6 +492,34 @@ action = { type = "mail", to = "lead", subject = "standup", body = "post your st
         assert!(
             serde_json::from_value::<ScheduleAction>(
                 serde_json::json!({"type": "agent", "agent": "w", "verb": "pause"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_manual_spec_is_a_bare_kind() {
+        let s: ScheduleSpec =
+            serde_json::from_value(serde_json::json!({"kind": "manual"})).unwrap();
+        assert_eq!(s, ScheduleSpec::Manual {});
+        assert!(s.is_manual() && !s.is_trigger());
+        assert_eq!(s.kind(), "manual");
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::json!({"kind": "manual"})
+        );
+        let d: ScheduleDef = toml::from_str(
+            r#"
+name = "deploy"
+spec = { kind = "manual" }
+action = { type = "exec", target = "box", cmd = ["./deploy.sh"] }
+"#,
+        )
+        .unwrap();
+        assert!(d.spec.is_manual());
+        assert!(
+            serde_json::from_value::<ScheduleSpec>(
+                serde_json::json!({"kind": "manual", "at": "x"})
             )
             .is_err()
         );

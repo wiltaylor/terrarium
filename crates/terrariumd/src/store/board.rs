@@ -32,11 +32,14 @@ use crate::store::session_refs::{self, SessionRef};
 use crate::store::{Page, Paged, agents, github_gate, json_col, questions};
 
 /// The columns of a new board, in order, with their roles.
-pub const DEFAULT_COLUMNS: [(&str, Option<&str>); 6] = [
+pub const DEFAULT_COLUMNS: [(&str, Option<&str>); 9] = [
     ("backlog", None),
     ("ready", None),
     ("in_progress", Some(WORKING)),
-    ("review", None),
+    ("validating", Some(VALIDATING)),
+    ("review", Some(REVIEW)),
+    ("merge_queue", Some(MERGE_QUEUE)),
+    ("accepted", Some(ACCEPTED)),
     ("blocked", Some(BLOCKED)),
     ("done", None),
 ];
@@ -52,8 +55,24 @@ pub const WORKING: &str = "working";
 /// The role of the column where a move needs a comment and mails a notice.
 /// Also the alias of that column in a move or a filter.
 pub const BLOCKED: &str = "blocked";
-/// The roles a column can have.
-pub const ROLES: [&str; 2] = [WORKING, BLOCKED];
+/// The role of the column where a validate job holds a card. The daemon
+/// finds it by this role, else by the name `validating`.
+pub const VALIDATING: &str = "validating";
+/// The role of the column where a validate pass goes. The daemon finds it
+/// by this role, else by the name `review`.
+pub const REVIEW: &str = "review";
+/// The role of the column where cards wait for the batch merge. The daemon
+/// does not move cards there yet.
+pub const MERGE_QUEUE: &str = "merge_queue";
+/// The role of the column where a merge pass goes. The daemon finds it by
+/// this role, else by the name `accepted`.
+pub const ACCEPTED: &str = "accepted";
+/// The roles a column can have. At most one column has each role, except
+/// that exactly one has `working`.
+pub const ROLES: [&str; 6] = [WORKING, BLOCKED, VALIDATING, REVIEW, MERGE_QUEUE, ACCEPTED];
+/// The roles that are also a name alias in a move or a filter. A column
+/// with one of these names must have the role of that name.
+const ALIAS_ROLES: [&str; 2] = [WORKING, BLOCKED];
 /// The most characters of a column title.
 pub const TITLE_MAX: usize = 40;
 
@@ -297,6 +316,15 @@ fn column_rows(conn: &Connection, project: &str) -> ApiResult<Vec<ColumnRow>> {
     Ok(rows)
 }
 
+/// The columns of the board of `project` as `(name, role)`, in order. The
+/// rules file check (`crate::store::rules`) reads them.
+pub fn column_roles(conn: &Connection, project: &str) -> ApiResult<Vec<(String, Option<String>)>> {
+    Ok(column_rows(conn, project)?
+        .into_iter()
+        .map(|c| (c.name, c.role))
+        .collect())
+}
+
 fn names_of(cols: &[ColumnRow]) -> String {
     cols.iter()
         .map(|c| match &c.role {
@@ -357,6 +385,23 @@ pub fn role_of(conn: &Connection, project: &str, name: &str) -> ApiResult<Option
         )
         .optional()?
         .flatten())
+}
+
+/// The name of the column that the daemon uses for `role` on the board of
+/// `project`: the column with that role, else the column named `fallback`
+/// (a board that gives no column the role). When neither exists, the
+/// name is `fallback`, so the move that follows fails and says so.
+pub fn role_name(
+    conn: &Connection,
+    project: &str,
+    role: &str,
+    fallback: &str,
+) -> ApiResult<String> {
+    let cols = column_rows(conn, project)?;
+    Ok(cols
+        .into_iter()
+        .find(|c| c.is(role))
+        .map_or_else(|| fallback.to_owned(), |c| c.name))
 }
 
 fn active_count(conn: &Connection, column_id: i64) -> ApiResult<i64> {
@@ -2270,7 +2315,8 @@ fn check_columns(current: &[ColumnRow], specs: &[ColumnSpec]) -> ApiResult<Vec<W
         if let Some(r) = role {
             if !ROLES.contains(&r) {
                 return Err(ApiError::invalid(format!(
-                    "column `{name}`: bad role `{r}`; use working, blocked, or null"
+                    "column `{name}`: bad role `{r}`; use one of {}, or null",
+                    ROLES.join(", ")
                 )));
             }
             if is_fixed(name) {
@@ -2278,7 +2324,7 @@ fn check_columns(current: &[ColumnRow], specs: &[ColumnSpec]) -> ApiResult<Vec<W
             }
         }
         // The aliases `working` and `blocked` must name one column only.
-        if ROLES.contains(&name) && role != Some(name) {
+        if ALIAS_ROLES.contains(&name) && role != Some(name) {
             return Err(ApiError::invalid(format!(
                 "the name `{name}` is kept for the column with the role `{name}`; \
                  give this column the role `{name}`, or another name"
@@ -2305,9 +2351,9 @@ fn check_columns(current: &[ColumnRow], specs: &[ColumnSpec]) -> ApiResult<Vec<W
                  a card there); this list has {n}"
             )));
         }
-        if r == BLOCKED && n > 1 {
+        if r != WORKING && n > 1 {
             return Err(ApiError::invalid(format!(
-                "at most one column can have the role `blocked`; this list has {n}"
+                "at most one column can have the role `{r}`; this list has {n}"
             )));
         }
     }
@@ -2318,7 +2364,8 @@ fn check_columns(current: &[ColumnRow], specs: &[ColumnSpec]) -> ApiResult<Vec<W
 ///
 /// - `backlog` is first and `done` is last. They stay, keep their names,
 ///   and take no WIP limit and no role.
-/// - Exactly one column has the role `working`; at most one has `blocked`.
+/// - Exactly one column has the role `working`; at most one has each other
+///   role.
 /// - A column that is not in the list is removed; it must have no active
 ///   cards (409, with the cards).
 /// - `rename_from` renames a column; its cards stay in it.
