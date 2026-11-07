@@ -4215,8 +4215,9 @@ A card:
 - `eta_at` is when the work is expected to be done (RFC 3339, UTC,
   milliseconds). `eta_set_at` is when the ETA was set, and `eta_set_by` (an
   address) and `eta_set_by_name` say who set it. The four fields are absent
-  when the card has no ETA. They stay when the card moves to `done` or is
-  archived.
+  when the card has no ETA. Every move to another column clears them
+  (TER-155 D1); they stay when the card is archived. A job with a planned
+  duration sets them when it starts (§35.5).
 - `done_at` is when the card last moved to `done`. A move out of `done`
   clears it. It is absent for a card that is not done, and for a card done
   before migration 40.
@@ -4338,11 +4339,23 @@ archived cards. The columns are configurable (§8.3, "Columns"):
   `1d`). The time must be in the future and at most 30 days away; else
   `422 invalid` with a message that says why. `eta_at: null` clears it. The
   rights are those of an edit: the card's own member, a project admin, or
-  the operator. A done card takes no new ETA (`409 conflict`); an admin can
-  clear it. An archived card refuses both (`409 conflict`). A change to
+  the operator. A done card takes no new ETA (`409 conflict`). An
+  archived card refuses both (`409 conflict`). A change to
   the ETA of a card that is not the actor's own is audited as `card.eta`
   (`{eta_at, previous}`). Each change is a `card` event with `change: eta`;
   it does not start a turn.
+- **ETA per column** (TER-155 D1). Every move to another column clears
+  the ETA; a reorder in the column keeps it. The `moved` event has the old
+  ETA in `previous_eta_at`. An `eta_at` in the same patch as the move
+  applies to the new column. The dashboard shows no countdown in
+  `accepted` and `done`.
+- **ETA of a job** (TER-155 D2). A duration for a card with an open
+  (queued or running) job is the job's planned duration, not a time from
+  now: a queued job's cards have no ETA, and a running job's cards get its
+  start plus the duration (§35.5). An RFC 3339 time, or a card with no
+  open job, follows the rule above. A change by an actor that is not the
+  card's own is audited as `card.eta` (`{job, planned_secs,
+  previous_planned_secs}`).
 - **Events.** Every change is a `card` event with the actor (§9).
 
 ### 8.3 Endpoints
@@ -4735,7 +4748,7 @@ Kinds:
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning`, `usage_limit` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). A `usage_limit` (`{message, resets_at?}`) is the provider's refusal of a turn for a usage limit or a rate limit (§16.6). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
 | `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true`, `held_reason`, and `thread_state: "paused"`. A release (§7.4) emits the event again with `released: true`. |
-| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared), `reminded` (`eta_passed`: the daemon reminded the idle assignee to update the card, §6.2 "Card reminder"), `idle` (`idle_since`, `mailed`: the idle alert marked the card and mailed the leads, §6.2 "Idle alert"), or `idle_cleared` (`idle_since`: the mark went). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
+| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`, `previous_eta_at`: the ETA that the move cleared), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared; `job: true` when the job queue set it, §35.5), `reminded` (`eta_passed`: the daemon reminded the idle assignee to update the card, §6.2 "Card reminder"), `idle` (`idle_since`, `mailed`: the idle alert marked the card and mailed the leads, §6.2 "Idle alert"), or `idle_cleared` (`idle_since`: the mark went). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `question_guard` | `{question, mailed}`: a member ended its turn with a question in plain text and reported nothing, so the daemon set `blocked` (reason "asked a question in plain text: ...") and mailed `mailed` (the leads, or `operator`). `question` is the first 200 characters. The actor is `system`. PLAN §8.4. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |
@@ -11063,9 +11076,9 @@ start with `Job queue:`.
 
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|
-| `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
-| `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
-| `POST /api/merges`                 | a project admin                       | `{cards, repo?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
+| `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?, eta?}`. `eta` is the planned duration (§35.5). The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
+| `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?, eta?}`. `eta` is the planned duration (§35.5). The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
+| `POST /api/merges`                 | a project admin                       | `{cards, repo?, eta?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
 | `GET /api/projects/{name}/jobs/stats` | members                            | `?since=`: an RFC 3339 time, or a duration back from now such as `7d` (the default); anything else is `400`. The jobs created at or after `since` (a rerun keeps the `created_at` of its first try): `{project, since, jobs, first_attempt, validate, merge, reruns, conflicts, errors, cancelled, open, splits, failed_steps: [{step, failed}], failed_targets: [{target, failed, first_attempt}], untargeted_test_fails}`. Each of `first_attempt`, `validate`, `merge`, and `reruns` is `{ended, passed, failed, pass_rate}`; `pass_rate` is `passed / ended` from 0 to 1, `null` with none ended. A first attempt is attempt 1 and no split half; a `conflict` counts in `conflicts`, not in `ended`. A job with outcome `error` could not run (host agent offline, prepare step failed, push to `next` failed): first attempts and reruns with it count in `errors`, not in `ended`, so an outage does not lower the rate. Split halves count in `splits` only. `failed_targets` (most first) come from the `error: N targets failed:` lines of the failed jobs' output tails, all attempts; `failed_steps` from the first ``error: recipe `<step>` failed`` line, or `timeout`. `untargeted_test_fails` counts the failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
@@ -11078,6 +11091,29 @@ The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
 Events `job` {change, project, id, card, kind, state, attempt, outcome,
 cards?}; `cards` lists the cards of a batch.
+
+### 35.5 The ETA of a job
+
+TER-155 D2: the ETA of a job starts when the job runs, not when it is
+queued.
+
+- `eta` in a validate or merge body (`card validate --eta`, `card merge
+  --eta`) is a planned duration such as `20m` or `1h30m`: more than zero,
+  at most 30 days. An RFC 3339 time is `422 invalid`. The job stores it as
+  `planned_secs`.
+- While the job is queued, its cards have no ETA (queueing clears it), and
+  the card's `job` gives `place` and `queued` ("queued n of m").
+- When the job starts, each card of the job gets `eta_at` = `started_at`
+  + `planned_secs`, set by the actor that queued the job. The card gets an
+  `eta` event with `job: true`.
+- A rerun, a split half, and a job that goes back to the queue (§35.3)
+  keep `planned_secs`: they clear the ETA again, and their start sets it
+  again.
+- No `eta`: the job sets no ETA, and the card has none while it validates
+  (the move to `validating` cleared it).
+- An ETA duration that is given later for a card with an open job (`card
+  eta`, `card move ... --eta`) sets the job's `planned_secs` (§8.2).
+- The job's end moves the card, and the move clears the ETA (§8.2).
 Events `job.verdict` {project, job, card, kind, verdict, state, outcome,
 attempt, by_agent, repo, branch, parent, batch, end_comment,
 failure_block}: one per card when a job ends or is cancelled, in the same

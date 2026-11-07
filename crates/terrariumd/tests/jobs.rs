@@ -122,6 +122,7 @@ async fn host_counts_respect_the_readers_project() {
                         card,
                         kind: JobKind::Validate,
                         batch: Vec::new(),
+                        planned_secs: None,
                         repo: "app".into(),
                         branch: "next".into(),
                         commit: None,
@@ -212,6 +213,7 @@ async fn cards_carry_their_job_state_and_assignee_status() {
                             JobKind::Validate
                         },
                         batch: Vec::new(),
+                        planned_secs: None,
                         repo: "app".into(),
                         branch: format!("b{i}"),
                         commit: None,
@@ -272,6 +274,186 @@ async fn cards_carry_their_job_state_and_assignee_status() {
     assert_eq!(one["assignee_status"], w["status"]);
 }
 
+/// The seconds from `from` to `to` (RFC 3339).
+fn secs_between(from: &Value, to: &Value) -> i64 {
+    let t = |v: &Value| chrono::DateTime::parse_from_rfc3339(v.as_str().unwrap()).unwrap();
+    (t(to) - t(from)).num_seconds()
+}
+
+/// TER-155 D2: the ETA of a job starts when the job runs. A queued job's
+/// card has no ETA; the start sets `eta_at` = start + planned duration; a
+/// rerun clears it and its start sets it again; a job with no duration
+/// sets no ETA. A duration given for a card with an open job is the job's
+/// planned duration.
+#[tokio::test]
+async fn a_jobs_eta_starts_when_the_job_runs() {
+    use terrariumd::store::jobs::{self, JobEnd, JobKind, NewJob};
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let w = td.agent("p", "w", json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let label = format!("agent:{w}");
+    let mut ids = Vec::new();
+    for title in ["planned", "none", "later"] {
+        let id = td
+            .post("/api/projects/p/cards", json!({"title": title}))
+            .await
+            .ok()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        td.post_empty_as("p/w", &format!("/api/cards/{id}/claim"))
+            .await
+            .ok();
+        td.patch_as("p/w", &format!("/api/cards/{id}"), json!({"eta_at": "3h"}))
+            .await
+            .ok();
+        ids.push(id);
+    }
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    let create = |card: String, planned_secs: Option<i64>| {
+        let (db, label) = (db.clone(), label.clone());
+        async move {
+            db.write(&label, move |t| {
+                jobs::create(
+                    t,
+                    NewJob {
+                        project: "p".into(),
+                        card,
+                        kind: JobKind::Validate,
+                        repo: "app".into(),
+                        branch: "b".into(),
+                        commit: None,
+                        by_agent: Some("w".into()),
+                        batch: Vec::new(),
+                        planned_secs,
+                    },
+                )
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let card = |id: String| {
+        let td = &td;
+        async move { td.get(&format!("/api/cards/{id}")).await.ok().clone() }
+    };
+
+    // Queued with a planned duration: the old ETA goes, none until the start.
+    let j = create(ids[0].clone(), Some(1200)).await;
+    assert_eq!(j.planned_secs, Some(1200));
+    let c = card(ids[0].clone()).await;
+    assert!(c.get("eta_at").is_none(), "{c:#}");
+    assert_eq!(c["job"]["planned_secs"], 1200, "{c:#}");
+    // The start: start + 20m, set by the actor that queued it.
+    let jid = j.id.clone();
+    let started = db
+        .write("system", move |t| {
+            assert!(jobs::start(t, &jid, "machine")?);
+            jobs::get(t, &jid)
+        })
+        .await
+        .unwrap();
+    let c = card(ids[0].clone()).await;
+    let start = json!(started.started_at.clone().unwrap());
+    assert_eq!(secs_between(&start, &c["eta_at"]), 1200, "{c:#}");
+    assert_eq!(c["eta_set_by_name"], "p/w", "{c:#}");
+    let ev = td
+        .get(&format!("/api/cards/{}/events", ids[0]))
+        .await
+        .ok()
+        .clone();
+    assert!(
+        ev.as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["data"]["change"] == "eta" && e["data"]["job"] == true),
+        "{ev:#}"
+    );
+    // A failure and its rerun: the rerun keeps the duration, the queue
+    // clears the ETA, and the rerun's start sets it again.
+    let jid = j.id.clone();
+    let rerun = db
+        .write("system", move |t| {
+            let failed = jobs::finish(t, &jid, &JobEnd::default())?.unwrap();
+            jobs::rerun(t, &failed, None)
+        })
+        .await
+        .unwrap();
+    assert_eq!(rerun.planned_secs, Some(1200));
+    let c = card(ids[0].clone()).await;
+    assert!(c.get("eta_at").is_none(), "the rerun waits: {c:#}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let rid = rerun.id.clone();
+    let restarted = db
+        .write("system", move |t| {
+            assert!(jobs::start(t, &rid, "machine")?);
+            jobs::get(t, &rid)
+        })
+        .await
+        .unwrap();
+    let c = card(ids[0].clone()).await;
+    let restart = json!(restarted.started_at.clone().unwrap());
+    assert_eq!(secs_between(&restart, &c["eta_at"]), 1200, "{c:#}");
+    assert!(restarted.started_at > started.started_at);
+
+    // No duration: the job leaves the card's ETA alone and sets none.
+    let j = create(ids[1].clone(), None).await;
+    let before = card(ids[1].clone()).await["eta_at"].clone();
+    assert!(before.is_string());
+    let jid = j.id.clone();
+    db.write("system", move |t| jobs::start(t, &jid, "machine"))
+        .await
+        .unwrap();
+    let c = card(ids[1].clone()).await;
+    assert_eq!(c["eta_at"], before, "{c:#}");
+    assert!(c["job"].get("planned_secs").is_none(), "{c:#}");
+
+    // A duration given while the job is queued is its planned duration:
+    // no ETA yet. A time is an ETA as before.
+    let j = create(ids[2].clone(), None).await;
+    let path = format!("/api/cards/{}", ids[2]);
+    let c = td
+        .patch_as("p/w", &path, json!({"eta_at": "45m"}))
+        .await
+        .ok()
+        .clone();
+    assert!(c.get("eta_at").is_none(), "{c:#}");
+    assert_eq!(c["job"]["planned_secs"], 2700, "{c:#}");
+    let jid = j.id.clone();
+    let started = db
+        .write("system", move |t| {
+            jobs::start(t, &jid, "machine")?;
+            jobs::get(t, &jid)
+        })
+        .await
+        .unwrap();
+    let c = card(ids[2].clone()).await;
+    let start = json!(started.started_at.clone().unwrap());
+    assert_eq!(secs_between(&start, &c["eta_at"]), 2700, "{c:#}");
+    // While it runs, a new duration counts from the start.
+    let c = td
+        .patch_as("p/w", &path, json!({"eta_at": "1h"}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(secs_between(&start, &c["eta_at"]), 3600, "{c:#}");
+    let later = (chrono::Utc::now() + chrono::Duration::hours(5)).to_rfc3339();
+    let c = td
+        .patch_as("p/w", &path, json!({"eta_at": later}))
+        .await
+        .ok()
+        .clone();
+    assert!(secs_between(&start, &c["eta_at"]) > 4 * 3600, "{c:#}");
+    // Another member may not set the job's duration.
+    td.agent("p", "w2", json!({})).await;
+    td.patch_as("p/w2", &path, json!({"eta_at": "2h"}))
+        .await
+        .err(403, "forbidden");
+}
+
 #[tokio::test]
 async fn an_ssh_alias_of_a_host_agent_is_one_host() {
     use terrariumd::store::jobs::{self, JobKind, NewJob};
@@ -318,6 +500,7 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
                 card,
                 kind: JobKind::Validate,
                 batch: Vec::new(),
+                planned_secs: None,
                 repo: "app".into(),
                 branch: "next".into(),
                 commit: None,
@@ -842,6 +1025,60 @@ async fn a_green_validation_moves_the_card_to_review() {
     let j = jobs.iter().find(|j| j["state"] == "passed").unwrap();
     assert_eq!(j["head"].as_str().unwrap(), head);
     assert_eq!(j["exit_code"], 0);
+}
+
+/// TER-155 D2 through the API: `eta` on a validate is a planned duration,
+/// not a time. The card gets its ETA when the job starts, and the move to
+/// `review` clears it again (D1).
+#[tokio::test]
+async fn a_validate_eta_is_a_duration_from_the_job_start() {
+    let lab = lab(2).await;
+    let head = lab.branch("ter-e", "next", &[("OK", "yes\n")]);
+    let id = lab.card("eta", "ter-e").await;
+    let path = format!("/api/cards/{id}/validate");
+    for bad in ["2030-01-01T00:00:00Z", "soon", "31d"] {
+        lab.td
+            .post_as(&lab.w1, &path, json!({"commit": head, "eta": bad}))
+            .await
+            .err(422, "invalid");
+    }
+    assert!(lab.jobs().await.is_empty());
+    let r = lab
+        .td
+        .post_as(&lab.w1, &path, json!({"commit": head, "eta": "20m"}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["planned_secs"], 1200, "{}", r.body);
+    let c = lab
+        .until_card(&id, "review", |c| c["column"] == "review")
+        .await;
+    assert!(c.get("eta_at").is_none(), "the move clears it: {c:#}");
+    let jobs = lab.until_idle().await;
+    let j = jobs.iter().find(|j| j["state"] == "passed").unwrap();
+    let ev = lab
+        .td
+        .get(&format!("/api/cards/{id}/events"))
+        .await
+        .ok()
+        .clone();
+    let ev = ev.as_array().unwrap();
+    let set = ev
+        .iter()
+        .find(|e| e["data"]["change"] == "eta" && e["data"]["job"] == true)
+        .unwrap_or_else(|| panic!("no job ETA: {ev:#?}"));
+    assert_eq!(
+        secs_between(&j["started_at"], &set["data"]["eta_at"]),
+        1200,
+        "{set:#}"
+    );
+    let to_review = ev
+        .iter()
+        .find(|e| e["data"]["change"] == "moved" && e["data"]["to"] == "review")
+        .unwrap();
+    assert_eq!(
+        to_review["data"]["previous_eta_at"], set["data"]["eta_at"],
+        "{to_review:#}"
+    );
 }
 
 /// TER-165: the daemon finds the columns by role. `validating` is renamed

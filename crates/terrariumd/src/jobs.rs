@@ -2160,6 +2160,7 @@ mod tests {
             batch: vec![],
             parent: None,
             split_path: String::new(),
+            planned_secs: None,
         }
     }
 
@@ -2312,6 +2313,7 @@ mod tests {
                         commit: None,
                         by_agent: Some("w1".into()),
                         batch: cards.clone(),
+                        planned_secs: None,
                     },
                 )?;
                 assert!(jobs::start(t, &j.id, "h")?);
