@@ -15,9 +15,9 @@ pub const BACKSPACE: u8 = 0x7f;
 /// How many lines [`clear_input`] can empty.
 pub const CLEAR_LINES: usize = 64;
 
-/// Submit a turn: bracketed paste, then CR at once (verified). A bare LF
-/// adds a new line and does not submit. Newlines inside the paste stay in
-/// the prompt.
+/// Submit a turn: bracketed paste, then CR. A bare LF adds a new line and
+/// does not submit. Newlines inside the paste stay in the prompt. The
+/// runner writes the CR on its own, [`SUBMIT_PAUSE`] after the paste.
 ///
 /// The paste markers are removed from `text` first. A turn can carry mail,
 /// which is untrusted input, and a stray end marker would end the paste
@@ -26,6 +26,14 @@ pub fn type_turn(text: &str) -> Vec<u8> {
     let clean = text.replace(PASTE_START, "").replace(PASTE_END, "");
     bracketed_paste(&escape(&clean))
 }
+
+/// The pause between the paste of a turn and its CR (TER-208). A CR
+/// right after a short paste submitted in the spikes, but Codex keeps a
+/// CR that comes in the same write as `/exit` in the composer
+/// ([`EXIT_PAUSE`]), and no spike sent a long paste: Claude Code loses
+/// that CR (TER-194). The runner presses CR again when the text stays in
+/// the composer ([`crate::screen::ScreenState::input_pending`]).
+pub const SUBMIT_PAUSE: std::time::Duration = EXIT_PAUSE;
 
 /// The turn as plain text (D3): Codex runs a text that starts with `/` as a slash command (`/plan`
 /// enters Plan mode) and a text that starts with `!` as a shell command. A turn that starts with one of them

@@ -12,7 +12,8 @@ pub const ESC: &[u8] = b"\x1b";
 
 /// Submit a turn: bracketed paste, then CR. Verified: newlines in the
 /// paste stay in the prompt; a bare LF adds a line and does not submit.
-/// Text sent while a turn runs steers that turn (one more `input`).
+/// Text sent while a turn runs steers that turn (one more `input`). The
+/// runner writes the CR on its own, [`SUBMIT_PAUSE`] after the paste.
 ///
 /// The paste markers are removed from `text` first. A turn can carry mail,
 /// which is untrusted input, and a stray end marker would end the paste
@@ -21,6 +22,13 @@ pub fn type_turn(text: &str) -> Vec<u8> {
     let clean = text.replace(PASTE_START, "").replace(PASTE_END, "");
     bracketed_paste(&escape(&clean))
 }
+
+/// The pause between the paste of a turn and its CR (TER-208). The spikes
+/// sent only short pastes. Claude Code loses a CR in the same write as a
+/// long paste (TER-194), so the CR goes in a later write. The runner
+/// presses CR again when the text stays in the editor
+/// ([`crate::screen::ScreenState::input_pending`]).
+pub const SUBMIT_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// The turn as plain text (D3): pi trims the text, then runs `!cmd` as a user shell command and an
 /// exact `/quit`, `/new`, or `/login` as a command
