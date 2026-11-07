@@ -3052,7 +3052,11 @@ mod tests {
             rows,
             [
                 ("agent:A1".to_owned(), "use".to_owned(), None),
-                ("project:p".to_owned(), "read".to_owned(), Some("K".to_owned())),
+                (
+                    "project:p".to_owned(),
+                    "read".to_owned(),
+                    Some("K".to_owned())
+                ),
             ]
         );
         conn.execute(

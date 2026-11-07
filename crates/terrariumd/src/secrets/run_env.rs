@@ -282,7 +282,10 @@ mod tests {
         let got = resolve(&c, &k, AGENT, "p", "box", &refs, &none).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].value.as_str(), VALUE);
-        assert_eq!((got[0].env.as_str(), got[0].field.as_str()), ("DEPLOY", "value"));
+        assert_eq!(
+            (got[0].env.as_str(), got[0].field.as_str()),
+            ("DEPLOY", "value")
+        );
         assert_eq!(got[0].label(), "run/p/deploy");
         assert!(!format!("{got:?}").contains(VALUE));
         let d = got[0].audit_detail(AGENT, "box", "S1", "W1");

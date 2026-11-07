@@ -660,8 +660,7 @@ fn plan_grants(
             }
         };
         let old = stored.get(&key);
-        let same = old
-            .is_some_and(|s| s.level == level && s.env == g.env && s.targets == targets);
+        let same = old.is_some_and(|s| s.level == level && s.env == g.env && s.targets == targets);
         if !same {
             // A grant of a value: new, or wider (S8): a higher level, a
             // `run` target that the stored grant does not name, a new env.
@@ -1370,7 +1369,10 @@ mod tests {
         grants::tests::grant_run(&c, &s, "agent:p/a", &["web", "box"]).unwrap();
         let files = files(&c).unwrap();
         let (_, text) = files.iter().find(|(p, _)| *p == path_of(GLOBAL)).unwrap();
-        assert!(text.contains("level = \"run\"\ntargets = [\"box\", \"web\"]"), "{text}");
+        assert!(
+            text.contains("level = \"run\"\ntargets = [\"box\", \"web\"]"),
+            "{text}"
+        );
         // The same file plans nothing.
         let p = plan(&c, &files, &[]).unwrap();
         assert!(
@@ -1389,17 +1391,19 @@ mod tests {
         let wide = vec![(path_of(GLOBAL), file("targets = [\"box\", \"ci\"]\n"))];
         let p = plan(&c, &wide, &[]).unwrap();
         assert!(p.needs_approval(), "{:?}", p.report);
-        let g = p.report.changes.iter().find(|x| x.action == "grant").unwrap();
+        let g = p
+            .report
+            .changes
+            .iter()
+            .find(|x| x.action == "grant")
+            .unwrap();
         assert_eq!(g.targets, ["box", "ci"]);
         assert_eq!(g.was.as_ref().unwrap().targets, ["box", "web"]);
         let narrow = vec![(path_of(GLOBAL), file("targets = [\"box\"]\n"))];
         let p = plan(&c, &narrow, &[]).unwrap();
         assert!(!p.needs_approval(), "{:?}", p.report);
         run_with(&mut c, &narrow, false);
-        assert_eq!(
-            grants::list(&c, &s).unwrap()[0].targets,
-            ["box".to_owned()]
-        );
+        assert_eq!(grants::list(&c, &s).unwrap()[0].targets, ["box".to_owned()]);
         // No target: skipped with a warning; the stored grant stays.
         let none = vec![(path_of(GLOBAL), file(""))];
         let p = plan(&c, &none, &[]).unwrap();

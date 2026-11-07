@@ -451,9 +451,7 @@ async fn run(
             .db
             .read(move |c| {
                 let use_only = crate::git_proxy::use_only_secrets(c, proxy_on)?;
-                crate::secrets::run_env::resolve(
-                    c, &key, &id, &project, &target, &refs, &use_only,
-                )
+                crate::secrets::run_env::resolve(c, &key, &id, &project, &target, &refs, &use_only)
             })
             .await?
     };
