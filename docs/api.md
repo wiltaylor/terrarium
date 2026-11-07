@@ -3697,7 +3697,7 @@ There is no register of threads and no conflict check between threads
 | `session_id` | The session of the thread agent, set at the close: the agent ends and its session is archived (§6.6), so `/sessions/<id>` opens it after the agent is gone. `null` for a named agent, which lives on. |
 | `reminded_at` | The time of the last Inbox reminder of the untouched thread (below), or `null`. |
 | `tracking_at` | When the attached agent moved the thread into tracking (TER-145, below), or `null`. It stays set while an operator post wakes the agent, so that the agent's reply puts the thread back into `tracking`. |
-| `cards` | The linked cards (TER-146, below), the oldest link first: `{project, card, linked_by, linked_by_name, linked_at}`. Only in `GET /api/threads/{id}` and the answers of the writes, not in the list. |
+| `cards` | The linked cards (TER-146, below) whose project the reader may read, the oldest link first: `{project, card, linked_by, linked_by_name, linked_at}`. Only in `GET /api/threads/{id}` and the answers of the writes, not in the list. |
 
 **Status.** A new thread with a first message of the operator is
 `waiting_agent`; with no first message, or opened by an agent, it is
@@ -3733,11 +3733,14 @@ links cards with `POST .../track` and `cards` (`terrarium thread track
 one write, and one refused card refuses all. A card is
 `<project>:<card>` or `<card>`; a card that is not in the named project
 is `404`. The linker must read the thread (else `404`) and the card's
-project (else `403`). A link gives no read access: a reader of the thread
-sees the project and the ID of each card, and reads the card only with
-the read right of its project; a reader of the card does not read the
-thread. A second link of the same card keeps the first. A closed thread
-is `409 conflict`. A link writes the audit row `thread.card_link` and a
+project (else `404`, the same answer as for a card that does not exist,
+so that a refusal does not tell that the card exists or name its
+project). An archived card is `422 invalid`. A link gives no read access:
+the `cards` of the thread list only the cards whose project the reader
+may read, so a reader of the thread who cannot read a card's project
+does not see the card, its project, or that it is there; a reader of the
+card does not read the thread. A second link of the same card keeps the
+first. A closed thread is `409 conflict`. A link writes the audit row `thread.card_link` and a
 `thread` event `card_linked`, which does not change the status and wakes
 no agent. There is no unlink.
 
@@ -3822,8 +3825,8 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
-| `POST /api/threads/{id}/track` | no body, or `{"cards"}`: at most 50 cards to link first (TER-146) | The attached agent: `200` the thread, `tracking`, with `tracking_at` and `cards`. `409` with an open question; `403` or `404` for a card (below), and nothing changes |
-| `POST /api/threads/{id}/cards` | `{"card"}`: `<project>:<card>` or `<card>` | `200` the thread with `cards`, also when the card was linked already. `404` without the read right on the thread, or for a card not in the named project; `403` without the read right on the card's project; `409` on a closed thread |
+| `POST /api/threads/{id}/track` | no body, or `{"cards"}`: at most 50 cards to link first (TER-146) | The attached agent: `200` the thread, `tracking`, with `tracking_at` and `cards`. `409` with an open question; `404` or `422` for a card (below), and nothing changes |
+| `POST /api/threads/{id}/cards` | `{"card"}`: `<project>:<card>` or `<card>` | `200` the thread with `cards`, also when the card was linked already. `404` without the read right on the thread, for a card that does not exist or is not in the named project, and without the read right on the card's project; `422` for an archived card; `409` on a closed thread |
 
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
 A thread opened with a `template` and no `agent` gets its agent at the

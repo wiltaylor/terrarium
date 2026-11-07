@@ -3,7 +3,8 @@
 //! and an existing one (`POST /api/threads/{id}/cards`), the attached
 //! agent links cards as it tracks (`POST .../track` with `cards`), cards
 //! of two projects, the refusals without the read rights, and the list on
-//! the thread. A link gives no read access.
+//! the thread. A link gives no read access: a reader of the thread sees
+//! only the linked cards whose project it reads.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -248,17 +249,30 @@ async fn a_link_needs_the_read_rights_and_gives_none() {
     let after = lab.td.get("/api/projects/p/cards").await.ok().clone();
     assert_eq!(before, after);
 
-    // The lead of `p` reads the thread but not project `q`: 403.
-    lab.td
-        .post_as(
-            &lab.lead,
-            &lab.link_path(),
-            json!({"card": format!("q:{qc}")}),
-        )
-        .await
-        .err(403, "forbidden");
+    // The lead of `p` reads the thread but not project `q`: the same 404
+    // as for a card that does not exist, with or without the project, so
+    // the refusal does not tell that the card exists or name its project.
+    for card in [format!("q:{qc}"), qc.clone()] {
+        let r = lab
+            .td
+            .post_as(&lab.lead, &lab.link_path(), json!({"card": card}))
+            .await;
+        r.err(404, "not_found");
+        assert_eq!(
+            r.body["error"]["message"],
+            format!("no card `{qc}`"),
+            "{}",
+            r.body
+        );
+    }
+    let r = lab
+        .td
+        .post_as(&lab.lead, &lab.link_path(), json!({"card": "q:Q-999"}))
+        .await;
+    r.err(404, "not_found");
+    assert_eq!(r.body["error"]["message"], "no card `Q-999`", "{}", r.body);
 
-    // The attached agent with a `q` card: 403, and nothing changes; the
+    // The attached agent with a `q` card: 404, and nothing changes; the
     // thread does not track.
     lab.td
         .post_as(
@@ -267,7 +281,7 @@ async fn a_link_needs_the_read_rights_and_gives_none() {
             json!({"cards": [format!("p:{pc}"), format!("q:{qc}")]}),
         )
         .await
-        .err(403, "forbidden");
+        .err(404, "not_found");
     let th = lab.thread().await;
     assert_eq!(th["cards"], json!([]));
     assert_eq!(th["status"], "waiting_agent");
@@ -287,8 +301,9 @@ async fn a_link_needs_the_read_rights_and_gives_none() {
         .await
         .err(422, "invalid");
 
-    // The operator links the `q` card. The lead of `p` sees its ID on the
-    // thread, but the link gives no read access to the card.
+    // The operator links the `q` card. The lead of `p` reads the thread
+    // but not project `q`: the thread does not list the card, and the
+    // link gives no read access to it.
     lab.td
         .post(&lab.link_path(), json!({"card": qc}))
         .await
@@ -299,7 +314,34 @@ async fn a_link_needs_the_read_rights_and_gives_none() {
         .await
         .ok()
         .clone();
+    assert_eq!(th["cards"], json!([]), "{th}");
+    assert!(!th.to_string().contains(qc.as_str()), "{th}");
+    // The operator and the architect read `q`: they see it.
+    assert_eq!(lab.cards().await, [format!("q:{qc}")]);
+    let th = lab
+        .td
+        .get_as(&lab.architect, &format!("/api/threads/{}", lab.tid))
+        .await
+        .ok()
+        .clone();
     assert_eq!(th["cards"][0]["card"], qc.as_str());
+    // The answers of the writes filter the same way: the lead links a `p`
+    // card and the agent tracks, and each sees only the `p` card.
+    let r = lab
+        .td
+        .post_as(&lab.lead, &lab.link_path(), json!({"card": pc}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["cards"].as_array().unwrap().len(), 1, "{}", r.body);
+    assert_eq!(r.body["cards"][0]["card"], pc.as_str());
+    let r = lab
+        .td
+        .post_empty_as(&lab.arch, &format!("/api/threads/{}/track", lab.tid))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["cards"].as_array().unwrap().len(), 1, "{}", r.body);
+    assert_eq!(r.body["cards"][0]["card"], pc.as_str());
+    assert_eq!(lab.cards().await, [format!("q:{qc}"), format!("p:{pc}")]);
     lab.td
         .get_as(&lab.lead, &format!("/api/cards/{qc}"))
         .await
@@ -319,4 +361,27 @@ async fn a_link_needs_the_read_rights_and_gives_none() {
         .post(&lab.link_path(), json!({"card": pc}))
         .await
         .err(409, "conflict");
+}
+
+#[tokio::test]
+async fn an_archived_card_is_not_linked() {
+    let lab = lab().await;
+    let pc = lab.card("p", "Old column").await;
+    let r = lab.td.delete(&format!("/api/cards/{pc}")).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    lab.td
+        .post_as(&lab.lead, &lab.link_path(), json!({"card": pc}))
+        .await
+        .err(422, "invalid");
+    lab.td
+        .post_as(
+            &lab.arch,
+            &format!("/api/threads/{}/track", lab.tid),
+            json!({"cards": [format!("p:{pc}")]}),
+        )
+        .await
+        .err(422, "invalid");
+    let th = lab.thread().await;
+    assert_eq!(th["cards"], json!([]));
+    assert_eq!(th["status"], "waiting_agent");
 }

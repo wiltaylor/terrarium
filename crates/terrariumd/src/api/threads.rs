@@ -7,7 +7,8 @@
 //! - `GET /api/threads[?status=&scope=]`: the operator and an agent that
 //!   reads all (sysadmin, architect) see all; another agent sees the
 //!   threads it opened, is attached to, or is the report-to lead of.
-//! - `GET /api/threads/{id}`: the thread with its messages and questions.
+//! - `GET /api/threads/{id}`: the thread with its messages and questions,
+//!   and the linked cards whose project the reader may read (TER-146).
 //! - `POST /api/threads/{id}/messages` (the operator, the attached agent).
 //! - `POST /api/threads/{id}/respond` (the operator): the overall response.
 //! - `POST /api/threads/{id}/close`: the operator closes (or, with
@@ -256,7 +257,7 @@ async fn post_message(
                     th.id
                 )));
             }
-            threads::post(t, &th.id, &author, &b.text)
+            threads::post(t, &th.id, &author, &b.text).map(|th| threads::visible(&actor, th))
         })
         .await?;
     Ok((StatusCode::CREATED, Json(th)).into_response())
@@ -346,6 +347,7 @@ async fn close(
                         b.links,
                     ),
                 }
+                .map(|th| threads::visible(&actor, th))
             })
             .await?,
     ))
@@ -392,7 +394,7 @@ async fn track(
                         for c in &b.cards {
                             threads::link_card(t, &actor, &th.id, c)?;
                         }
-                        threads::track(t, &th.id, &by)
+                        threads::track(t, &th.id, &by).map(|th| threads::visible(&actor, th))
                     }
                     _ => Err(ApiError::forbidden(format!(
                         "tracking thread {}: only its attached agent moves it into tracking",

@@ -327,13 +327,24 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Thread> {
 
 /// A thread that `actor` may read; else `404`: the operator, an agent
 /// that reads all (sysadmin, architect), and the opener, the attached agent
-/// and the report-to lead.
+/// and the report-to lead. Its `cards` are only those that `actor` may
+/// read ([`visible`]).
 pub fn readable(actor: &Actor, th: Thread) -> ApiResult<Thread> {
     match actor {
         Actor::Operator => Ok(th),
-        Actor::Agent(a) if a.reads_all() || th.involves(&a.id) => Ok(th),
+        Actor::Agent(a) if a.reads_all() || th.involves(&a.id) => Ok(visible(actor, th)),
         Actor::Agent(_) => Err(ApiError::not_found(format!("no thread `{}`", th.id))),
     }
+}
+
+/// Thread `th` with only the linked cards whose project `actor` may read
+/// (TER-146): a link never shows a card, or its project, to a reader of
+/// the thread who cannot read that project.
+pub fn visible(actor: &Actor, mut th: Thread) -> Thread {
+    if let Some(cards) = th.cards.as_mut() {
+        cards.retain(|c| policy::read_project(actor, &c.project).is_ok());
+    }
+    th
 }
 
 /// The linked cards of thread `thread`, the oldest link first.
@@ -359,10 +370,12 @@ fn cards_of(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadCard>> {
 
 /// Link card `card` (`<project>:<card>` or `<card>`) to thread `id` for
 /// `actor` (TER-146, TER-144 D2). `actor` must read the thread (else `404`)
-/// and the card's project (else `403`); the link gives neither. A closed
-/// thread is `409 conflict`; a card that is not in the named project is
-/// `404`. A card that is linked already stays as it is. Emits a `thread`
-/// event `card_linked`, which wakes no agent. The thread with its cards.
+/// and the card's project (else `404`, the same answer as for a card that
+/// does not exist); the link gives neither. A closed thread is `409
+/// conflict`; a card that is not in the named project is `404`; an
+/// archived card is `422 invalid`. A card that is linked already stays as
+/// it is. Emits a `thread` event `card_linked`, which wakes no agent. The
+/// thread with the cards that `actor` may read.
 pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResult<Thread> {
     let th = readable(actor, get_bare(t, id)?)?;
     not_closed(&th, "a card link")?;
@@ -375,20 +388,33 @@ pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResu
             "bad card `{card}`: use <project>:<card> or <card>, such as terrarium:TER-42"
         )));
     }
-    let c = board::get_card(t, key)?;
-    if want.is_some_and(|p| p != c.project) {
+    // The project read right comes before the card is loaded, and its
+    // refusal is the `404` of a missing card: a reader of the thread does
+    // not learn that a card exists in a project it cannot read, nor which
+    // project that is.
+    let key = board::normalise_id(key);
+    let missing = || ApiError::not_found(format!("no card `{key}`"));
+    let (project, archived): (String, bool) = t
+        .query_row(
+            "SELECT project, archived FROM cards WHERE id = ?1",
+            [&key],
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+        )
+        .optional()?
+        .ok_or_else(missing)?;
+    policy::read_project(actor, &project).map_err(|_| missing())?;
+    if want.is_some_and(|p| p != project) {
         return Err(ApiError::not_found(format!(
-            "no card `{}` in project `{}`",
-            c.id,
+            "no card `{key}` in project `{}`",
             want.unwrap_or_default()
         )));
     }
-    policy::read_project(actor, &c.project).map_err(|e| {
-        ApiError::forbidden(format!(
-            "linking card {} to thread {}: {}",
-            c.id, th.id, e.message
-        ))
-    })?;
+    if archived {
+        return Err(ApiError::invalid(format!(
+            "card {key} is archived: an archived card is not linked to a thread"
+        )));
+    }
+    let c = board::get_card(t, &key)?;
     let at = now();
     let by = actor.address();
     let n = t.execute(
@@ -405,7 +431,7 @@ pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResu
         )?;
         emit(t, &th, "card_linked")?;
     }
-    get(t, &th.id)
+    Ok(visible(actor, get(t, &th.id)?))
 }
 
 fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {

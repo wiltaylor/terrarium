@@ -1718,12 +1718,14 @@ terrarium thread show <id>
   back into tracking. An open question in the thread is a conflict (exit 1).
   Each `--card` links a card of any project that the thread tracks
   (TER-146), in the same write: a card in a project that you do not read
-  is refused (exit 3), and then nothing changes.
+  is refused as not found (exit 1), as is an archived card, and then
+  nothing changes.
 - Linked cards (api.md §6.13 "Linked cards"): the lead links a new card
   with `card new --inbox-thread <id>`, and an existing card with `card
   link <card> --inbox-thread <id>` (`linked <card> to Inbox thread
   <id>`). The linker reads the thread and the card's project; a link gives
-  no read access. `thread show` prints one line for each linked card:
+  no read access, and `thread show` lists only the cards whose project
+  you read. It prints one line for each of them:
   `card <project>:<card> linked by <name> at <time>`.
 - `ls` lists the threads (an agent: the ones it opened, is attached to,
   or reports from; a sysadmin or an architect: all): `ID`, `STATUS`, `SCOPE`, `AGENT`, `MSGS`, `OPEN_Q`,
