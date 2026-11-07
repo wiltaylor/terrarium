@@ -10613,6 +10613,16 @@ one key, the strictest applies until a cap write replaces them.
   `system`.
 - A daemon restart loses the running jobs: they fail (`error`) and follow
   the same rule.
+- A host that cannot be reached is not a failure (TER-160). A job whose
+  target's host agent is offline is not started and stays queued. A job
+  whose target could not be reached before the recipe started (the host
+  agent went away, or the ssh connect was refused, timed out, or the name
+  did not resolve) goes back to the queue with `tail` `waits for its host:
+  <why>` and the event change `requeued`. An ssh target is tried again
+  after 60 s. Neither uses an attempt or moves the card, and the card
+  keeps `validation:queued`. After 30 min of waiting the card gets one
+  comment that says so (once per job in a daemon run). A failure after
+  the recipe started stays a failure.
 
 A batch merge:
 
