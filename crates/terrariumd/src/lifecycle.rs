@@ -716,6 +716,22 @@ struct Resting {
 /// each agent in step with the store, compact each agent that is due for
 /// a compaction, and stop each other agent past its idle stop.
 pub async fn idle_pass(state: &Shared) {
+    if let Some(read) = idle_read(state).await {
+        idle_act(state, read).await;
+    }
+}
+
+/// The agents at rest that one idle pass read ([`idle_read`]).
+pub struct IdleRead {
+    now: Instant,
+    at_rest: Vec<Resting>,
+}
+
+/// The first half of [`idle_pass`]: read the agents at rest and keep their
+/// rest clocks in step with the store. `None` when the store read fails.
+/// Public for the tests, which start a turn between this read and
+/// [`idle_act`] (TER-141).
+pub async fn idle_read(state: &Shared) -> Option<IdleRead> {
     let rows = match state
         .db
         .read(|c| {
@@ -744,7 +760,7 @@ pub async fn idle_pass(state: &Shared) {
         Ok(r) => r,
         Err(e) => {
             warn!("the idle stop cannot read the agents: {e}");
-            return;
+            return None;
         }
     };
     let tuning = state.lifecycle.tuning();
@@ -790,6 +806,14 @@ pub async fn idle_pass(state: &Shared) {
         }
         resting.retain(|id, _| seen.contains(id));
     }
+    Some(IdleRead { now, at_rest })
+}
+
+/// The second half of [`idle_pass`]: compact or stop the agents of `read`
+/// that are due. Each stop checks first that the agent still rests as
+/// `read` saw it ([`still_resting`]). Public for the tests.
+pub async fn idle_act(state: &Shared, read: IdleRead) {
+    let IdleRead { now, at_rest } = read;
     // A pending reset (`crate::reset`) comes before the rest.
     let resets: HashSet<AgentId> = state
         .db

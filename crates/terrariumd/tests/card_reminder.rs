@@ -318,6 +318,78 @@ async fn the_reminder_comes_before_the_idle_stop() {
     );
 }
 
+/// For the idle pass tests: agent `w1` idle, its rest past an idle stop of
+/// 1 ms, and a timer that makes no pass of its own (a tick of one hour
+/// from before the agent exists), so the test makes each pass. The first
+/// read starts the rest clock in case the hub listener has not started it
+/// yet.
+async fn idle_pass_setup() -> (TestDaemon, String, terrariumd::api::Shared) {
+    let td = TestDaemon::start().await;
+    let s = state(&td);
+    let tuning = |idle_stop| Tuning {
+        idle_stop,
+        tick: Duration::from_secs(3600),
+        compact_on_idle: false,
+        compact_max_age: CompactMaxAge::Off,
+        compact_wait: Duration::from_secs(5),
+    };
+    s.lifecycle.set_tuning(tuning(IdleStop::Off));
+    td.project("p").await;
+    let w = td.agent("p", "w1", json!({})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    td.post_empty(&format!("/api/agents/{w}/start")).await.ok();
+    td.wait_status(&w, "idle").await;
+    s.lifecycle
+        .set_tuning(tuning(IdleStop::After(Duration::from_millis(1))));
+    terrariumd::lifecycle::idle_read(&s).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (td, w, s)
+}
+
+/// TER-141: the idle pass reads the agents, then awaits the store before
+/// it stops one. A turn that starts after the read and is still on at the
+/// stop keeps the agent running: the stop checks the live status, not the
+/// old read. Without that check the agent stops in its turn, before the
+/// card reminder of its idle.
+#[tokio::test]
+async fn a_turn_after_the_idle_read_is_not_stopped() {
+    let (td, w, s) = idle_pass_setup().await;
+    let read = terrariumd::lifecycle::idle_read(&s).await.unwrap();
+    td.sup.open_turn(aid(&w));
+    terrariumd::lifecycle::idle_act(&s, read).await;
+    assert_eq!(
+        td.sup.status(aid(&w)).await,
+        Some(terrarium_core::AgentStatus::Working),
+        "the idle stop ended a turn that started after its read"
+    );
+}
+
+/// TER-141: a turn that started and ended after the read (here the rest
+/// clock moves, as `touch` moves it) restarts the rest: no stop on the old
+/// read. The next pass, past the idle stop of the new rest, stops the
+/// agent, so the setup does reach the stop.
+#[tokio::test]
+async fn a_rest_clock_that_moved_after_the_idle_read_is_not_stopped() {
+    let (td, w, s) = idle_pass_setup().await;
+    let read = terrariumd::lifecycle::idle_read(&s).await.unwrap();
+    s.lifecycle.touch(&w);
+    terrariumd::lifecycle::idle_act(&s, read).await;
+    assert_eq!(
+        td.sup.status(aid(&w)).await,
+        Some(terrarium_core::AgentStatus::Idle),
+        "the idle stop used a rest clock that moved after its read"
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let read = terrariumd::lifecycle::idle_read(&s).await.unwrap();
+    terrariumd::lifecycle::idle_act(&s, read).await;
+    assert_eq!(
+        td.sup.status(aid(&w)).await,
+        Some(terrarium_core::AgentStatus::Stopped)
+    );
+}
+
 /// TER-50: an agent with a card in progress ends a turn with an open time
 /// wait (`waiting`). The wait ends: `idle` after the turn, but its wake
 /// mail comes after the debounce. No reminder before that mail: the first
