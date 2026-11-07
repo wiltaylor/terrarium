@@ -2268,6 +2268,24 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE secret_grants_v81 RENAME TO secret_grants;
     CREATE INDEX secret_grants_grantee ON secret_grants(grantee);
     "#,
+    // 82: the column roles `validating`, `review`, `merge_queue`, and
+    // `accepted` (TER-165, `crate::store::board`). The CHECK of
+    // `board_columns.role` allows only `working` and `blocked`, and a CHECK
+    // cannot change in place. So the column is replaced: add the new one,
+    // copy, drop the index and the old column (its CHECK goes with it),
+    // rename, and make the unique index again. The table is not rebuilt,
+    // because `cards` refers to `board_columns`. The store checks the roles. Self-contained: when
+    // another branch takes this number, move this entry to the end of the
+    // list.
+    r#"
+    ALTER TABLE board_columns ADD COLUMN role_v82 TEXT;
+    UPDATE board_columns SET role_v82 = role;
+    DROP INDEX board_columns_role;
+    ALTER TABLE board_columns DROP COLUMN role;
+    ALTER TABLE board_columns RENAME COLUMN role_v82 TO role;
+    CREATE UNIQUE INDEX board_columns_role ON board_columns(project, role)
+        WHERE role IS NOT NULL;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -4173,11 +4191,65 @@ mod tests {
             [],
         );
         assert!(dup.is_err());
-        let bad = conn.execute(
-            "UPDATE board_columns SET role = 'stuck' WHERE name = 'review'",
+        // The CHECK on the role is gone since migration 82: the store
+        // refuses an unknown role (tests/board.rs).
+    }
+
+    /// Migration 82 (TER-165): the role column takes the job roles. The
+    /// roles of migration 48 stay, and the one-column-per-role index stays.
+    #[test]
+    fn migration_82_takes_the_job_roles() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("role_v82"))
+            .unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 't', 't');
+             INSERT INTO boards (project, created_at) VALUES ('p', 't');
+             INSERT INTO board_columns (project, name, position, role) VALUES
+               ('p', 'backlog', 0, NULL), ('p', 'in_progress', 1, 'working'),
+               ('p', 'review', 2, NULL), ('p', 'blocked', 3, 'blocked'), ('p', 'done', 4, NULL);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name, role FROM board_columns WHERE project = 'p' ORDER BY position")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let got: Vec<(&str, Option<&str>)> = rows
+            .iter()
+            .map(|(n, r)| (n.as_str(), r.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("backlog", None),
+                ("in_progress", Some("working")),
+                ("review", None),
+                ("blocked", Some("blocked")),
+                ("done", None),
+            ]
+        );
+        // A job role now fits, and still only one column has it.
+        conn.execute(
+            "UPDATE board_columns SET role = 'validating' WHERE name = 'review'",
+            [],
+        )
+        .unwrap();
+        let dup = conn.execute(
+            "UPDATE board_columns SET role = 'validating' WHERE name = 'done'",
             [],
         );
-        assert!(bad.is_err());
+        assert!(dup.is_err());
     }
 
     /// Migration 51 (ephemeral agents) as the dev stack applied it on

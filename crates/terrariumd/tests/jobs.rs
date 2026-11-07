@@ -726,6 +726,58 @@ async fn a_green_validation_moves_the_card_to_review() {
     assert_eq!(j["exit_code"], 0);
 }
 
+/// TER-165: the daemon finds the columns by role. `validating` is renamed
+/// and keeps its role. `review` has no role and `qa` has it, so the role
+/// wins over the name. `accepted` has no role, so its name is the fallback.
+#[tokio::test]
+async fn the_job_queue_finds_its_columns_by_role_then_by_name() {
+    let lab = lab(2).await;
+    let r = lab
+        .td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"},
+                {"name": "checking", "rename_from": "validating", "role": "validating"},
+                // A column that omits `role` keeps its old role: the default
+                // board gives `review` the role `review`, so say null.
+                {"name": "review", "role": null}, {"name": "qa", "role": "review"},
+                {"name": "accepted", "role": null},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // A validate pass: the card is in the role column, then in `qa`.
+    let head = lab.branch("ter-a", "next", &[("OK", "yes\n")]);
+    let a = lab.card("by role", "ter-a").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{a}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let c = lab.card_of(&a).await;
+    assert_eq!(c["column"], "checking", "{c}");
+    lab.until_card(&a, "qa", |c| c["column"] == "qa").await;
+    // A merge pass: the name `accepted` is the fallback.
+    let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
+    let b = lab.card("by name", "ter-c").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{b}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["job"]["kind"], "merge");
+    lab.until_card(&b, "accepted", |c| c["column"] == "accepted")
+        .await;
+    let next = git(&lab.origin, &["rev-parse", "next"]);
+    assert_ne!(next, head);
+}
+
 /// TER-107: a validate leaves one `validation:*` label and one `by:` label,
 /// even when the card already has stale ones.
 #[tokio::test]
@@ -2077,4 +2129,83 @@ async fn a_merge_that_fails_without_a_conflict_drops_only_that_card() {
         next_merges(&lab),
         ["Merge ter-u1 onto next", "Merge ter-u3 onto next"]
     );
+}
+
+/// Validate the card on `branch` with the current recipe and wait for
+/// the end of its job.
+async fn validate_card(lab: &Lab, branch: &str, head: &str) -> Value {
+    let id = lab.card(branch, branch).await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    jobs.into_iter().find(|j| j["card"] == id.as_str()).unwrap()
+}
+
+/// TER-100: the recipe gets the job kind, the head, the base, and the
+/// file of the changed paths. A validate job diffs against the merge-base
+/// with `next` (a later change on `next` is not in the list), a merge job
+/// against `next` before the merge. Without `next`, no base and no list.
+#[tokio::test]
+async fn the_recipe_gets_the_job_kind_and_the_changed_files() {
+    let lab = lab(2).await;
+    let out = lab._dirs.path().join("env");
+    std::fs::create_dir_all(&out).unwrap();
+    let recipe = format!(
+        "test -f OK && f='{}/'\"$TERRARIUM_JOB_KIND-$TERRARIUM_JOB_ID\" \
+         && printf 'kind=%s\\nhead=%s\\nbase=%s\\nfiles=%s\\n' \"$TERRARIUM_JOB_KIND\" \
+            \"$TERRARIUM_HEAD\" \"${{TERRARIUM_BASE-unset}}\" \"${{TERRARIUM_CHANGED_FILES-unset}}\" > \"$f\" \
+         && if [ -n \"${{TERRARIUM_CHANGED_FILES:-}}\" ]; then cat \"$TERRARIUM_CHANGED_FILES\" >> \"$f\"; fi",
+        out.display()
+    );
+    set_recipe(&lab, &recipe).await;
+    let fork = git(&lab.origin, &["rev-parse", "next"]);
+    let head = lab.branch("ter-env", "next", &[("OK", "yes\n"), ("a.rs", "a\n")]);
+    // `next` moves after the fork: its change is not the card's.
+    lab.branch("ter-other", "next", &[("other", "x\n")]);
+    git(&lab.work, &["push", "-q", "origin", "ter-other:next"]);
+    let moved = git(&lab.origin, &["rev-parse", "next"]);
+    let read = |job: &Value| {
+        let name = format!(
+            "{}-{}",
+            job["kind"].as_str().unwrap(),
+            job["id"].as_str().unwrap()
+        );
+        std::fs::read_to_string(out.join(name)).unwrap()
+    };
+
+    let job = validate_card(&lab, "ter-env", &head).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let text = read(&job);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "kind=validate", "{text}");
+    assert_eq!(lines[1], format!("head={head}"), "{text}");
+    assert_eq!(lines[2], format!("base={fork}"), "{text}");
+    assert!(
+        lines[3].starts_with("files=/") && lines[3].ends_with("/.git/terrarium/changed-files"),
+        "{text}"
+    );
+    assert_eq!(lines[4..], ["OK", "a.rs"], "{text}");
+
+    let job = merge_with_recipe(&lab, "ter-env2", &recipe).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let text = read(&job);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "kind=merge", "{text}");
+    assert_eq!(lines[2], format!("base={moved}"), "{text}");
+    assert_eq!(lines[4..], ["OK"], "{text}");
+
+    // No `next`: the job runs, without a base and a list.
+    git(&lab.work, &["push", "-q", "origin", ":next"]);
+    let job = validate_card(&lab, "ter-env", &head).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    let text = read(&job);
+    assert!(text.contains("base=unset\nfiles=unset\n"), "{text}");
+    assert_eq!(text.lines().count(), 4, "{text}");
 }

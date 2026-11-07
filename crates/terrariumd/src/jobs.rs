@@ -23,8 +23,11 @@
 //!      `refs/job/head` or `refs/job/merge`, and goes into a bundle.
 //!   2. on the target: the bundle goes in on stdin, and a fresh clone in
 //!      `<work_dir>/<project>/<job>` is made from it and checked against
-//!      the recorded commit. Then the recipe (`sh -c <recipe>` in the
-//!      clone) runs: the repo's code, with no credential and no remote.
+//!      the recorded commit. With a base, the clone also gets the file of
+//!      the changed paths (TER-100). Then the recipe (`sh -c <recipe>` in
+//!      the clone) runs: the repo's code, with no credential and no
+//!      remote. Its env names the job kind and, when `next` gives a base,
+//!      the file of the changed paths ([`recipe_env`]).
 //!   3. a merge job only, when the recipe passed, in the daemon, with the
 //!      credential: push the recorded commit from the daemon's repo to
 //!      `next`. Not forced: when `next` moved, the push fails. The recipe
@@ -57,8 +60,12 @@
 //!   job, so the board shows it.
 //! - A daemon restart loses the runs: each running job fails (`error`)
 //!   and goes through the rerun rule.
+//! - Each end and each cancel emits one `job.verdict` event per card
+//!   (TER-167): `passed`, `red`, `conflict`, `cancelled`, or `error`, with
+//!   the end comment and the failure block. It is written in the same
+//!   write as the card flow above, which it does not change.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -74,6 +81,7 @@ use crate::actor::Actor;
 use crate::api::Shared;
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
+use crate::events::EventDraft;
 use crate::executor::{self, Collected, Control, End, RemoteCmd};
 use crate::git;
 use crate::policy;
@@ -89,11 +97,14 @@ pub const TICK: Duration = Duration::from_secs(5);
 pub const LABEL_QUEUED: &str = "validation:queued";
 /// The label of a card whose job runs.
 pub const LABEL_RUNNING: &str = "validation:running";
-/// The column of a card whose job is open.
+/// The name of the column of a card whose job is open, used when no column
+/// has the role `validating` (see `board::role_name`).
 pub const COL_VALIDATING: &str = "validating";
-/// Where a validate pass goes.
+/// The name of the column where a validate pass goes, used when no column
+/// has the role `review`.
 pub const COL_REVIEW: &str = "review";
-/// Where a merge pass goes.
+/// The name of the column where a merge pass goes, used when no column has
+/// the role `accepted`.
 pub const COL_ACCEPTED: &str = "accepted";
 /// Where a failure goes, at the top.
 pub const COL_READY: &str = "ready";
@@ -768,6 +779,8 @@ enum Prepared {
     Ready {
         head: String,
         batch: Option<Vec<BatchCard>>,
+        /// The base of the changed files (TER-100), an ancestor of `head`.
+        base: Option<String>,
     },
     /// The job ends here.
     End(JobEnd),
@@ -796,6 +809,9 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
     };
     let refname = job_ref(job.kind);
     let mut batch = None;
+    // The base of the changed files (TER-100): `next` before the merge for
+    // a merge, the merge-base of the commit and `next` for a validate.
+    let base;
     let head = if job.kind == JobKind::Merge {
         // The branches of the merge, in order: the job's, then the rest of
         // a batch.
@@ -819,6 +835,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
             Ok(None) => return failed("the repo has no next branch".into()),
             Err(e) => return failed(e.to_string()),
         };
+        base = Some(cur.clone());
         // A branch that conflicts, or whose merge fails otherwise, leaves
         // the merge; the next branch merges onto the ones before it.
         let mut left: HashMap<usize, String> = HashMap::new();
@@ -873,14 +890,22 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
             Ok(None) => return failed(format!("cannot fetch {}", job.branch)),
             Err(e) => return failed(e.to_string()),
         };
-        match &job.commit {
+        let head = match &job.commit {
             None => tip,
             Some(commit) => match repo.commit_of(commit) {
                 Ok(Some(c)) if repo.is_ancestor(&c, &tip).unwrap_or(false) => c,
                 Ok(_) => return failed(format!("commit {commit} is not on {}", job.branch)),
                 Err(e) => return failed(e.to_string()),
             },
-        }
+        };
+        // A repo without `next` is no error: the recipe then gets no list
+        // of changed files.
+        let next = "+refs/heads/next:refs/remotes/job/next".to_owned();
+        base = match repo.fetch(&[next]) {
+            Ok(()) => repo.merge_base(&head, "refs/remotes/job/next").unwrap_or(None),
+            Err(_) => None,
+        };
+        head
     };
     if let Err(e) = repo
         .set_ref(refname, &head)
@@ -888,7 +913,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
     {
         return failed(format!("cannot write the bundle: {e}"));
     }
-    Prepared::Ready { head, batch }
+    Prepared::Ready { head, batch, base }
 }
 
 /// Prepare in the daemon, clone on the target from the bundle, run the
@@ -901,8 +926,8 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         }
     }
     let (j, bundle) = (job.clone(), x.bundle.clone());
-    let (head, batch) = match x.daemon(move |r| prepare(r, &j, &bundle)).await? {
-        Prepared::Ready { head, batch } => (head, batch),
+    let (head, batch, base) = match x.daemon(move |r| prepare(r, &j, &bundle)).await? {
+        Prepared::Ready { head, batch, base } => (head, batch, base),
         Prepared::End(end) => return Ok(end),
     };
     check_commit(&head)?;
@@ -913,7 +938,8 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         .await
         .map_err(|e| ApiError::internal(format!("cannot read the job bundle: {e}")))?;
     let _ = tokio::fs::remove_file(&b).await;
-    let receive = x.plain_cmd(RECEIVE_SCRIPT, &[x.dir, &head, job.kind.as_str()]);
+    let base = base.filter(|b| check_commit(b).is_ok()).unwrap_or_default();
+    let receive = x.plain_cmd(RECEIVE_SCRIPT, &[x.dir, &head, job.kind.as_str(), &base]);
     let c = x.run(&receive, STEP_MAX, Some(data)).await?;
     if result_line(&c.stdout).get("outcome").map(String::as_str) != Some("ok") {
         return Ok(JobEnd {
@@ -929,9 +955,15 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
             batch,
         });
     }
+    let r = result_line(&c.stdout);
+    let base = r
+        .get("base")
+        .filter(|b| check_commit(b).is_ok())
+        .map(String::as_str);
     let recipe_cmd = RemoteCmd {
-        argv: vec!["sh".into(), "-c".into(), recipe],
+        argv: vec!["sh".into(), "-c".into(), recipe_script(recipe, base)],
         cwd: Some(x.dir.to_owned()),
+        env: recipe_env(job, x.dir, &head, base),
         timeout_secs: Some(timeout),
         holder: x.holder.clone(),
         ..RemoteCmd::default()
@@ -984,6 +1016,39 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
             ..JobEnd::default()
         }),
     }
+}
+
+/// The file of the changed paths in a job clone, relative to its root
+/// (written by [`RECEIVE_SCRIPT`]).
+pub const CHANGED_FILES: &str = ".git/terrarium/changed-files";
+
+/// The recipe as its shell runs it. Without a base the recipe must not see
+/// a `TERRARIUM_BASE` or `TERRARIUM_CHANGED_FILES` from the target's own
+/// env (for example a daemon test that runs inside a validate job), so the
+/// script unsets both first. With a base, [`recipe_env`] sets both.
+fn recipe_script(recipe: String, base: Option<&str>) -> String {
+    if base.is_some() {
+        return recipe;
+    }
+    format!("unset TERRARIUM_BASE TERRARIUM_CHANGED_FILES\n{recipe}")
+}
+
+/// The env of the recipe (TER-100, docs/api.md 35.2): the job kind and
+/// ID, the tested head, and with a base, the base and the absolute path
+/// of the changed files. No credential goes in here.
+fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.insert("TERRARIUM_JOB_KIND".into(), job.kind.as_str().to_owned());
+    env.insert("TERRARIUM_JOB_ID".into(), job.id.clone());
+    env.insert("TERRARIUM_HEAD".into(), head.to_owned());
+    if let Some(b) = base {
+        env.insert("TERRARIUM_BASE".into(), b.to_owned());
+        env.insert(
+            "TERRARIUM_CHANGED_FILES".into(),
+            format!("{}/{CHANGED_FILES}", dir.trim_end_matches('/')),
+        );
+    }
+    env
 }
 
 /// The batch with each card that left the merge (by its index in the
@@ -1166,17 +1231,97 @@ fn failure_block(j: &Job) -> String {
 /// What happens after a job ends: the card move, or the rerun.
 async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
     let j = j.clone();
-    state
-        .db
-        .write("system", move |t| {
-            if j.batch.is_empty() {
-                single_end(t, &j)
-            } else {
-                batch_end(t, &j)
-            }
-        })
-        .await?;
+    state.db.write("system", move |t| on_end(t, &j)).await?;
     kick(state);
+    Ok(())
+}
+
+/// The end of a job in one write: a `job.verdict` event for each card,
+/// then the coded card flow (the move, the rerun, or the split).
+fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    emit_verdicts(t, j)?;
+    if j.batch.is_empty() {
+        single_end(t, j)
+    } else {
+        batch_end(t, j)
+    }
+}
+
+/// The verdict of a job for one card (TER-167): `passed`, `red`,
+/// `conflict`, `cancelled`, or `error`. `j` is the card's view
+/// ([`card_view`] for a batch).
+fn verdict_of(j: &Job) -> &'static str {
+    if j.state == jobs::JobState::Cancelled {
+        return "cancelled";
+    }
+    match j.outcome.as_deref() {
+        Some("conflict") => "conflict",
+        _ if j.state == jobs::JobState::Passed => "passed",
+        Some("red") => "red",
+        _ => "error",
+    }
+}
+
+/// The `job.verdict` event data of each card of an ended or cancelled
+/// job, in card order (TER-167). It says what the run found for the card,
+/// not what the queue does next: the rerun and the split stay in the
+/// coded flow until the board rules take them over.
+fn verdicts(j: &Job) -> Vec<Value> {
+    let views: Vec<Job> = if j.batch.is_empty() {
+        vec![j.clone()]
+    } else {
+        j.batch.iter().map(|c| card_view(j, c)).collect()
+    };
+    let batch: Option<Vec<&str>> =
+        (!j.batch.is_empty()).then(|| j.batch.iter().map(|c| c.card.as_str()).collect());
+    views
+        .iter()
+        .map(|v| {
+            let verdict = verdict_of(v);
+            let word = match verdict {
+                "passed" => "passed",
+                "cancelled" => "was cancelled",
+                _ => "failed",
+            };
+            let failure = matches!(verdict, "red" | "conflict" | "error").then(|| failure_block(v));
+            serde_json::json!({
+                "project": v.project,
+                "job": v.id,
+                "card": v.card,
+                "kind": v.kind,
+                "verdict": verdict,
+                "state": v.state,
+                "outcome": v.outcome,
+                "attempt": v.attempt,
+                "by_agent": v.by_agent,
+                "repo": v.repo,
+                "branch": v.branch,
+                "parent": v.parent,
+                "batch": batch,
+                "end_comment": end_comment(v, word),
+                "failure_block": failure,
+            })
+        })
+        .collect()
+}
+
+/// Emit one `job.verdict` event for each card of an ended or cancelled
+/// job (TER-167), in the write of the end or the cancel.
+pub fn emit_verdicts(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    for data in verdicts(j) {
+        let card = data["card"].as_str().unwrap_or_default().to_owned();
+        let summary = format!(
+            "{} job {} for {card}: {}",
+            j.kind.as_str(),
+            j.id,
+            data["verdict"].as_str().unwrap_or_default()
+        );
+        t.emit(
+            EventDraft::new("job.verdict", summary, data)
+                .project(j.project.clone())
+                .card(card),
+        )?;
+    }
     Ok(())
 }
 
@@ -1297,11 +1442,11 @@ fn card_view(j: &Job, c: &BatchCard) -> Job {
 fn pass_card(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     set_labels(t, &j.card, &[], &[LABEL_RUNNING, LABEL_QUEUED])?;
     let to = match j.kind {
-        JobKind::Validate => COL_REVIEW,
-        JobKind::Merge => COL_ACCEPTED,
+        JobKind::Validate => board::role_name(t, &j.project, board::REVIEW, COL_REVIEW)?,
+        JobKind::Merge => board::role_name(t, &j.project, board::ACCEPTED, COL_ACCEPTED)?,
     };
     let note = end_comment(j, "passed");
-    move_or_comment(t, &j.card, to, None, &note)?;
+    move_or_comment(t, &j.card, &to, None, &note)?;
     unassign(t, &j.card)
 }
 
@@ -1436,14 +1581,17 @@ G() {
 res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 "#;
 
-/// Step 2 on the target, without any credential: `dir sha kind`, the
-/// bundle of the daemon on stdin. Writes it to `<dir>.bundle`, makes a
+/// Step 2 on the target, without any credential: `dir sha kind base`,
+/// the bundle of the daemon on stdin. Writes it to `<dir>.bundle`, makes a
 /// fresh clone at `dir` from it, checks that the job ref is the commit
 /// `sha`, and checks it out (`next` for a merge, detached for a
-/// validate). Prints `outcome=ok head=<sha>` or `outcome=error`.
-const RECEIVE_SCRIPT: &str = r#"dir=$1; sha=$2; kind=$3
+/// validate). With a base (an ancestor of `sha`, so in the bundle), it
+/// writes the changed files to [`CHANGED_FILES`] (TER-100). Prints
+/// `outcome=ok head=<sha> base=<sha or empty>` or `outcome=error`.
+const RECEIVE_SCRIPT: &str = r#"dir=$1; sha=$2; kind=$3; base=${4:-}
 case "$dir" in /*/*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
 case "$sha" in *[!0-9a-f]*|'') echo "bad commit"; res error; exit 2 ;; esac
+case "$base" in *[!0-9a-f]*) echo "bad base"; res error; exit 2 ;; esac
 b=$dir.bundle
 if [ "$kind" = merge ]; then r=refs/job/merge; else r=refs/job/head; fi
 rm -rf -- "$dir" "$b" && mkdir -p -- "$dir" || { echo "cannot make $dir"; res error; exit 2; }
@@ -1459,7 +1607,21 @@ if [ "$kind" = merge ]; then
 else
   G -C "$dir" checkout -q --detach "$sha" || { res error; exit 2; }
 fi
-res ok "$sha"
+# The changed files for the recipe (TER-100): the paths that differ
+# between the base and HEAD, one per line, in .git/terrarium/changed-files.
+# The daemon gives the base: `next` before the merge for a merge, the
+# merge-base of the commit and `next` for a validate. No base, or one that
+# is not in the clone: no file, and `base=`.
+if [ -n "$base" ] && ! G -C "$dir" merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
+  base=
+fi
+if [ -n "$base" ]; then
+  mkdir -p -- "$dir/.git/terrarium" \
+    && G -C "$dir" -c core.quotePath=false diff --no-ext-diff --no-textconv --name-only --no-renames "$base" HEAD \
+      > "$dir/.git/terrarium/changed-files" \
+    || { rm -f -- "$dir/.git/terrarium/changed-files"; base=; }
+fi
+printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 "#;
 
 /// The end: `dir`. Remove the clone and a bundle that is left.
@@ -1469,6 +1631,24 @@ const CLEAN_SCRIPT: &str = r#"case "$1" in /*/*) rm -rf -- "$1" "$1.bundle" ;; *
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// TER-100 review round 2: without a base, a list from the outer env
+    /// does not reach the recipe. With a base, the recipe runs as given.
+    #[test]
+    fn a_recipe_without_a_base_sees_no_inherited_list() {
+        let script = recipe_script(
+            "echo \"${TERRARIUM_BASE-unset} ${TERRARIUM_CHANGED_FILES-unset}\"".into(),
+            None,
+        );
+        let out = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("TERRARIUM_BASE", "abc")
+            .env("TERRARIUM_CHANGED_FILES", "/tmp/outer")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "unset unset\n");
+        assert_eq!(recipe_script("just x".into(), Some("abc")), "just x");
+    }
 
     /// Run `script` (after [`PLAIN_PRELUDE`]) with `args` and `input` on
     /// stdin, with an empty env but `PATH`. Returns the exit status and
@@ -1695,6 +1875,233 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// A job for the verdict tests: ended at attempt 2 on `C1`.
+    fn ended(kind: JobKind, state: jobs::JobState, outcome: Option<&str>) -> Job {
+        Job {
+            id: "J1".into(),
+            project: "p".into(),
+            card: "C1".into(),
+            kind,
+            repo: "app".into(),
+            branch: "c1".into(),
+            commit: Some("abc1234".into()),
+            state,
+            attempt: 2,
+            outcome: outcome.map(str::to_owned),
+            exit_code: outcome.map(|_| 1),
+            tail: Some("test x ... FAILED".into()),
+            head: None,
+            by_agent: Some("w1".into()),
+            created_by: "agent:lead".into(),
+            created_at: "t0".into(),
+            started_at: Some("t1".into()),
+            ended_at: Some("t2".into()),
+            host: None,
+            batch: vec![],
+            parent: None,
+            split_path: String::new(),
+        }
+    }
+
+    fn batch_card(card: &str, by: &str, outcome: Option<&str>) -> BatchCard {
+        BatchCard {
+            card: card.into(),
+            branch: card.to_lowercase(),
+            by_agent: Some(by.into()),
+            outcome: outcome.map(str::to_owned),
+            note: outcome.map(|_| "src/a.rs".to_owned()),
+        }
+    }
+
+    fn batch(state: jobs::JobState, outcome: Option<&str>, cards: Vec<BatchCard>) -> Job {
+        let mut j = ended(JobKind::Merge, state, outcome);
+        j.card = cards[0].card.clone();
+        j.branch = cards[0].branch.clone();
+        j.by_agent = cards[0].by_agent.clone();
+        j.batch = cards;
+        j
+    }
+
+    fn field<'a>(v: &'a [Value], key: &str) -> Vec<&'a str> {
+        v.iter().map(|d| d[key].as_str().unwrap_or("-")).collect()
+    }
+
+    /// TER-167: a job of one card has one verdict with its kind, attempt,
+    /// worker, end comment, and (for a failure) the failure block.
+    #[test]
+    fn a_single_job_has_one_verdict() {
+        use jobs::JobState::{Cancelled, Failed, Passed};
+        let cases = [
+            (Passed, None, "passed", "passed"),
+            (Failed, Some("red"), "red", "failed"),
+            (Failed, Some("conflict"), "conflict", "failed"),
+            (Failed, Some("error"), "error", "failed"),
+            (Failed, None, "error", "failed"),
+            (Cancelled, None, "cancelled", "was cancelled"),
+        ];
+        for (state, outcome, verdict, word) in cases {
+            let v = verdicts(&ended(JobKind::Validate, state, outcome));
+            assert_eq!(v.len(), 1, "{verdict}");
+            let d = &v[0];
+            assert_eq!(d["verdict"], verdict);
+            assert_eq!(d["project"], "p");
+            assert_eq!(d["job"], "J1");
+            assert_eq!(d["card"], "C1");
+            assert_eq!(d["kind"], "validate");
+            assert_eq!(d["attempt"], 2);
+            assert_eq!(d["by_agent"], "w1");
+            assert_eq!(d["branch"], "c1");
+            assert!(d["batch"].is_null());
+            let comment = d["end_comment"].as_str().unwrap();
+            assert!(
+                comment.starts_with(&format!("Job queue: validate job J1 (attempt 2) {word}.")),
+                "{comment}"
+            );
+            let failure = &d["failure_block"];
+            if matches!(verdict, "passed" | "cancelled") {
+                assert!(failure.is_null(), "{verdict}: {failure}");
+            } else {
+                let f = failure.as_str().unwrap();
+                assert!(
+                    f.starts_with("Validation failed: t2, validate job J1"),
+                    "{f}"
+                );
+                assert!(f.contains("test x ... FAILED"), "{f}");
+            }
+        }
+    }
+
+    /// TER-167: a green batch has a verdict per card, with each card's
+    /// branch and worker. A card that left it on a conflict has its own.
+    #[test]
+    fn a_green_batch_has_a_verdict_per_card() {
+        let j = batch(
+            jobs::JobState::Passed,
+            None,
+            vec![
+                batch_card("C1", "w1", None),
+                batch_card("C2", "w2", Some("conflict")),
+                batch_card("C3", "w3", None),
+            ],
+        );
+        let v = verdicts(&j);
+        assert_eq!(field(&v, "card"), ["C1", "C2", "C3"]);
+        assert_eq!(field(&v, "verdict"), ["passed", "conflict", "passed"]);
+        assert_eq!(field(&v, "by_agent"), ["w1", "w2", "w3"]);
+        assert_eq!(field(&v, "branch"), ["c1", "c2", "c3"]);
+        assert_eq!(field(&v, "kind"), ["merge", "merge", "merge"]);
+        for d in &v {
+            assert_eq!(d["batch"], serde_json::json!(["C1", "C2", "C3"]));
+        }
+        assert!(v[0]["failure_block"].is_null());
+        let f = v[1]["failure_block"].as_str().unwrap();
+        assert!(f.contains("`c2` does not merge onto `next`"), "{f}");
+        assert!(f.contains("src/a.rs"), "{f}");
+    }
+
+    /// TER-167: a red batch and an error give each merged card the verdict
+    /// of the batch; a cancelled batch gives each card `cancelled`.
+    #[test]
+    fn a_red_failed_or_cancelled_batch_has_a_verdict_per_card() {
+        use jobs::JobState::{Cancelled, Failed};
+        let cards = || vec![batch_card("C1", "w1", None), batch_card("C2", "w2", None)];
+        let red = verdicts(&batch(Failed, Some("red"), cards()));
+        assert_eq!(field(&red, "verdict"), ["red", "red"]);
+        assert!(red.iter().all(|d| d["failure_block"].is_string()));
+        let error = verdicts(&batch(Failed, Some("error"), cards()));
+        assert_eq!(field(&error, "verdict"), ["error", "error"]);
+        let all_conflict = verdicts(&batch(
+            Failed,
+            Some("conflict"),
+            vec![
+                batch_card("C1", "w1", Some("conflict")),
+                batch_card("C2", "w2", Some("conflict")),
+            ],
+        ));
+        assert_eq!(field(&all_conflict, "verdict"), ["conflict", "conflict"]);
+        let cancelled = verdicts(&batch(Cancelled, None, cards()));
+        assert_eq!(field(&cancelled, "verdict"), ["cancelled", "cancelled"]);
+        assert!(cancelled.iter().all(|d| d["failure_block"].is_null()));
+    }
+
+    /// TER-167: the end writes the verdict events (kind `job.verdict`, the
+    /// project and the card on the row) in its write, and the coded flow
+    /// still splits a red batch.
+    #[tokio::test]
+    async fn the_end_writes_a_verdict_per_card_and_keeps_the_split() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        let rows = db
+            .write("system", |t| {
+                let cards = vec![
+                    batch_card("C1", "w1", None),
+                    batch_card("C2", "w2", Some("conflict")),
+                    batch_card("C3", "w3", None),
+                ];
+                let j = jobs::create(
+                    t,
+                    jobs::NewJob {
+                        project: "p".into(),
+                        card: "C1".into(),
+                        kind: JobKind::Merge,
+                        repo: "app".into(),
+                        branch: "c1".into(),
+                        commit: None,
+                        by_agent: Some("w1".into()),
+                        batch: cards.clone(),
+                    },
+                )?;
+                assert!(jobs::start(t, &j.id, "h")?);
+                let end = JobEnd {
+                    passed: false,
+                    outcome: Some("red".into()),
+                    exit_code: Some(1),
+                    tail: Some("red".into()),
+                    head: None,
+                    batch: Some(cards),
+                };
+                let j = jobs::finish(t, &j.id, &end)?.unwrap();
+                on_end(t, &j)?;
+                let mut st = t.prepare(
+                    "SELECT project, card, payload FROM events WHERE kind = 'job.verdict' ORDER BY seq",
+                )?;
+                let rows = st
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let open = jobs::list(t, "p", Some(jobs::JobState::Queued))?;
+                Ok((rows, open.len()))
+            })
+            .await
+            .unwrap();
+        let (rows, queued) = rows;
+        let got: Vec<(String, String, String)> = rows
+            .into_iter()
+            .map(|(p, c, d)| {
+                let d: Value = serde_json::from_str(&d).unwrap();
+                (
+                    p.unwrap(),
+                    c.unwrap(),
+                    d["verdict"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        let want = [("C1", "red"), ("C2", "conflict"), ("C3", "red")]
+            .map(|(c, v)| ("p".to_owned(), c.to_owned(), v.to_owned()));
+        assert_eq!(got, want);
+        // The coded flow: C1 and C3 merged and the batch is red, so it
+        // splits into two halves of one card each.
+        assert_eq!(queued, 2);
     }
 
     /// TER-137: the job queue writes its comments and its moves with the

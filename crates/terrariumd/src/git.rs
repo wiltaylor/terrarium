@@ -2523,6 +2523,15 @@ impl JobRepo {
         }
     }
 
+    /// The merge-base of `a` and `b`, if they have one.
+    pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>, GitError> {
+        match self.local(&["merge-base", "--end-of-options", a, b]) {
+            Ok(s) => Ok(Some(s.trim().to_owned()).filter(|s| !s.is_empty())),
+            Err(GitError::Failed { status, .. }) if status == "exit 1" => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Point `refname` at `sha`.
     pub fn set_ref(&self, refname: &str, sha: &str) -> Result<(), GitError> {
         self.local(&["update-ref", refname, sha]).map(|_| ())

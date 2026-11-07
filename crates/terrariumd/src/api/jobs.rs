@@ -352,6 +352,7 @@ async fn cancel(
         .db
         .write(actor.label(), move |t| {
             let j = jobs::cancel(t, &jid)?;
+            rt::emit_verdicts(t, &j)?;
             for c in j.cards() {
                 let patch = CardPatch {
                     remove_labels: vec![rt::LABEL_QUEUED.into(), rt::LABEL_RUNNING.into()],
@@ -637,12 +638,14 @@ async fn validate(
             {
                 note = format!("{c}\n\n{note}");
             }
-            if card.column != rt::COL_VALIDATING {
+            let validating =
+                board::role_name(t, &card.project, board::VALIDATING, rt::COL_VALIDATING)?;
+            if card.column != validating {
                 board::move_card(
                     t,
                     &Actor::Operator,
                     &card.id,
-                    rt::COL_VALIDATING,
+                    &validating,
                     None,
                     Some(&note),
                 )?;
