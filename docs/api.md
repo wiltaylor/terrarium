@@ -11461,8 +11461,9 @@ one key, the strictest applies until a cap write replaces them.
   with `tail` `the infrastructure lost the run after the recipe started
   (<why>); ...` and the event change `requeued`. A batch merge reruns
   whole and does not split. The card does not move. A job reruns this
-  way at most 3 times in a row in one daemon run: the next lost run is
-  `red`, and its `tail` starts with `the infrastructure lost the run 4
+  way at most 3 times in a row in one daemon run: the next lost run gets
+  the same kill (and the slot mark), then it is `red`, and its `tail`
+  starts with `the infrastructure lost the run 4
   times in a row, so this run counts as red: <why>`.
 
 A batch merge:

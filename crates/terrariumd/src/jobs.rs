@@ -331,6 +331,9 @@ struct Lost {
     /// Why this daemon lost the run (TER-196). `None`: the last daemon
     /// left it.
     why: Option<String>,
+    /// The red end of a run past [`MAX_LOST_RERUNS`]: after the kill the
+    /// job ends with it instead of going back to the queue.
+    red: Option<JobEnd>,
 }
 
 /// TER-123: end the processes that the jobs of the last daemon left on
@@ -408,6 +411,7 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                     live,
                     other_host,
                     why: None,
+                    red: None,
                 });
             }
             Ok(out)
@@ -438,6 +442,7 @@ async fn end_lost(state: &Shared, l: Lost) {
         live,
         other_host,
         why,
+        red,
     } = l;
     let mut report = None;
     let wraps = def.as_ref().is_some_and(crate::run_kill::kind_wraps);
@@ -488,7 +493,11 @@ async fn end_lost(state: &Shared, l: Lost) {
             }
         }
     }
-    if running {
+    if running && let Some(end) = red {
+        // TER-196 review 2, major 1: a lost run past the cap ends red, but
+        // only after the kill and the slot mark above.
+        finish_job(state, &job.id, end).await;
+    } else if running {
         // P5: the run is lost, not failed. The job goes back to the queue
         // with its attempt and its place, as TER-160 does for a host that
         // could not be reached. TER-196: the same for a run lost to the
@@ -762,34 +771,40 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
                     drop(live_run);
                     return;
                 }
-                Ran::Lost(why) => {
+                Ran::Lost { why, red } => {
                     set_control(&job.id, None);
-                    rerun_lost(&state, job.clone(), why, live_run).await;
+                    rerun_lost(&state, job.clone(), why, red, live_run).await;
                     return;
                 }
             };
             set_control(&job.id, None);
-            waits().remove(&job.id);
-            lost_runs().remove(&job.id);
-            let id = job.id.clone();
-            let ended = state
-                .db
-                .write("system", move |t| jobs::finish(t, &id, &end))
-                .await;
-            match ended {
-                Ok(Some(j)) => {
-                    if let Err(e) = after_end(&state, &j).await {
-                        warn!(job = %j.id, "cannot handle the end of a job: {e}");
-                    }
-                }
-                Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
-                Err(e) => warn!(job = %job.id, "cannot end a job: {e}"),
-            }
+            finish_job(&state, &job.id, end).await;
             drop(live_run);
             kick(&state);
         });
     }
     Ok(())
+}
+
+/// End running job `id` with `end`, then run its card flow
+/// ([`after_end`]). A job that was cancelled meanwhile stays cancelled.
+async fn finish_job(state: &Shared, id: &str, end: JobEnd) {
+    waits().remove(id);
+    lost_runs().remove(id);
+    let jid = id.to_owned();
+    let ended = state
+        .db
+        .write("system", move |t| jobs::finish(t, &jid, &end))
+        .await;
+    match ended {
+        Ok(Some(j)) => {
+            if let Err(e) = after_end(state, &j).await {
+                warn!(job = %j.id, "cannot handle the end of a job: {e}");
+            }
+        }
+        Ok(None) => debug!(job = %id, "the job was cancelled while it ran"),
+        Err(e) => warn!(job = %id, "cannot end a job: {e}"),
+    }
 }
 
 /// Resolve only unpinned names, on the blocking pool and outside DB closures.
@@ -992,15 +1007,23 @@ enum Ran {
     /// [`RETRY`].
     Wait { why: String, ssh: bool },
     /// The recipe started, and its run was lost to the infrastructure
-    /// (TER-196, [`lost_run`]): not a failure.
-    Lost(String),
+    /// (TER-196, [`lost_run`]), with why. It gets the kill of a lost run
+    /// ([`end_lost`]). Then the job reruns, or, past
+    /// [`MAX_LOST_RERUNS`], ends with `red` (TER-196 review 2, major 1).
+    Lost { why: String, red: Option<JobEnd> },
 }
 
 /// Put a job whose recipe run was lost to the infrastructure back in the
 /// queue (TER-196): first the kill of a lost run ends what may still run
 /// of it on the target ([`end_lost`]), then the same job waits again with
 /// its attempt and its place. `live` keeps its slot taken until then.
-async fn rerun_lost(state: &Shared, job: Job, why: String, live: LiveRun) {
+async fn rerun_lost(
+    state: &Shared,
+    job: Job,
+    why: String,
+    red: Option<JobEnd>,
+    live: LiveRun,
+) {
     warn!(job = %job.id, "the run of a job was lost after its recipe started: {why}");
     hold(&job.id, why.clone(), None);
     // As in [`recover_lost`]: the kill goes to the current delivery
@@ -1036,6 +1059,7 @@ async fn rerun_lost(state: &Shared, job: Job, why: String, live: LiveRun) {
             live,
             other_host,
             why: Some(why),
+            red,
         },
     )
     .await;
@@ -1093,9 +1117,10 @@ async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> Ran {
     }
 }
 
-/// A lost run of job `job`: it reruns ([`Ran::Lost`]) up to
-/// [`MAX_LOST_RERUNS`] times in a row. The next lost run is red, with
-/// the reason in its tail, so a run that keeps getting lost ends.
+/// A lost run of job `job`: it reruns ([`Ran::Lost`] without `red`) up
+/// to [`MAX_LOST_RERUNS`] times in a row. The next lost run ends red,
+/// with the reason in its tail, so a run that keeps getting lost ends.
+/// Both get the kill of a lost run first.
 fn lost_or_red(job: &str, why: String, end: JobEnd) -> Ran {
     let n = {
         let mut m = lost_runs();
@@ -1104,18 +1129,22 @@ fn lost_or_red(job: &str, why: String, end: JobEnd) -> Ran {
         *n
     };
     if n <= MAX_LOST_RERUNS {
-        return Ran::Lost(why);
+        return Ran::Lost { why, red: None };
     }
     lost_runs().remove(job);
     let tail = format!(
         "the infrastructure lost the run {n} times in a row, so this run counts as red: {why}\n{}",
         end.tail.as_deref().unwrap_or("")
     );
-    Ran::End(JobEnd {
+    let red = JobEnd {
         outcome: Some("red".into()),
         tail: Some(tail),
         ..end
-    })
+    };
+    Ran::Lost {
+        why,
+        red: Some(red),
+    }
 }
 
 /// Why the target of `def` could not be reached, for an error end before
@@ -1175,6 +1204,13 @@ fn lost_runs() -> MutexGuard<'static, HashMap<String, u32>> {
         Ok(m) => m,
         Err(p) => p.into_inner(),
     }
+}
+
+/// Set the count of lost runs in a row of job `job`. For the tests of the
+/// capped path only: the daemon counts by itself ([`lost_or_red`]).
+#[doc(hidden)]
+pub fn set_lost_runs(job: &str, n: u32) {
+    lost_runs().insert(job.to_owned(), n);
 }
 
 /// Why a recipe run that did not pass was lost to the infrastructure
@@ -2238,6 +2274,9 @@ fn verdicts(j: &Job) -> Vec<Value> {
 /// Emit one `job.verdict` event for each card of an ended or cancelled
 /// job (TER-167), in the write of the end or the cancel.
 pub fn emit_verdicts(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    // Each end and each cancel (API or rule) comes here: the job's count
+    // of lost runs goes (TER-196 review 2, minor 2).
+    lost_runs().remove(&j.id);
     for data in verdicts(j) {
         let card = data["card"].as_str().unwrap_or_default().to_owned();
         let summary = format!(
@@ -3217,10 +3256,13 @@ mod tests {
         };
         for _ in 0..MAX_LOST_RERUNS {
             let r = lost_or_red(&job, "error lost: gone".into(), end());
-            assert!(matches!(r, Ran::Lost(ref w) if w == "error lost: gone"));
+            assert!(matches!(r, Ran::Lost { ref why, red: None } if why == "error lost: gone"));
         }
-        let Ran::End(e) = lost_or_red(&job, "error lost: gone".into(), end()) else {
-            panic!("the run after the cap is no end");
+        // Past the cap: still a lost run, so it gets the kill of a lost
+        // run, but it ends red (review 2, major 1).
+        let Ran::Lost { red: Some(e), .. } = lost_or_red(&job, "error lost: gone".into(), end())
+        else {
+            panic!("the run after the cap has no red end");
         };
         assert!(!e.passed);
         assert_eq!(e.outcome.as_deref(), Some("red"));
@@ -3238,7 +3280,7 @@ mod tests {
         );
         assert!(matches!(
             lost_or_red(&job, "again".into(), end()),
-            Ran::Lost(_)
+            Ran::Lost { red: None, .. }
         ));
         lost_runs().remove(&job);
     }

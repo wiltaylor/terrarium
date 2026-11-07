@@ -3987,3 +3987,121 @@ async fn a_lost_host_agent_session_reruns_the_whole_batch() {
         ["Merge ter-s1 onto next", "Merge ter-s2 onto next"]
     );
 }
+
+/// TER-196 review 2, major 1: a run that the infrastructure lost past
+/// `MAX_LOST_RERUNS` ends red, but only after the kill of a lost run. The
+/// delivery moved to another host while the recipe ran, so that kill
+/// cannot confirm the end, and the slot gets its wipe mark: only the kill
+/// of a lost run writes it.
+#[tokio::test]
+async fn a_lost_run_past_the_cap_ends_red_after_the_kill() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let marks = tempfile::tempdir().unwrap();
+    let m = marks.path().display().to_string();
+    let work_dir = lab._dirs.path().join("jobs").display().to_string();
+    let recipe = format!("echo $$ > '{m}/pid'; touch '{m}/ran'; sleep 600");
+    let deliver = |target: &str| {
+        json!({"target": target, "recipe": recipe, "slots": 1, "next_repos": ["app"],
+               "work_dir": work_dir})
+    };
+    let r = td.put("/api/projects/p/delivery", deliver("p-box")).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // A second host agent, for the move of the delivery.
+    let r = td.post("/api/hosts", json!({"name": "lab2"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let token = r.body["token"].as_str().unwrap().to_owned();
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "p-two", "kind": "host", "host": "lab2", "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    connect_host(
+        td,
+        lab.hosts_addr,
+        "lab2",
+        &token,
+        &lab._dirs.path().join("lab2"),
+        None,
+    )
+    .await;
+    let head = lab.branch("ter-cap", "next", &[("OK", "yes\n")]);
+    let card = lab.card("capped", "ter-cap").await;
+    let r = td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{card}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let ran = marks.path().join("ran");
+    let start = Instant::now();
+    while !ran.exists() {
+        assert!(start.elapsed() < DEADLINE, "the recipe never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let job_id = job_of(&lab, &card).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pid: u32 = std::fs::read_to_string(marks.path().join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // Its last attempt, and its lost runs at the cap: the next lost run
+    // is red, and nothing runs after it.
+    let jid = job_id.clone();
+    state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE jobs SET attempt = 2 WHERE id = ?1",
+                rusqlite::params![jid],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    terrariumd::jobs::set_lost_runs(&job_id, terrariumd::jobs::MAX_LOST_RERUNS);
+    let r = td.put("/api/projects/p/delivery", deliver("p-two")).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    lab.agent_down().await;
+    lab.agent_up().await;
+
+    let start = Instant::now();
+    let j = loop {
+        let j = td.get(&format!("/api/jobs/{job_id}")).await.ok().clone();
+        if j["state"] != "running" && j["state"] != "queued" {
+            break j;
+        }
+        assert!(start.elapsed() < DEADLINE, "the job never ended: {j:#}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(j["state"], "failed", "{j:#}");
+    assert_eq!(j["outcome"], "red", "{j:#}");
+    let tail = j["tail"].as_str().unwrap();
+    let cap = format!(
+        "the infrastructure lost the run {} times in a row",
+        terrariumd::jobs::MAX_LOST_RERUNS + 1
+    );
+    assert!(tail.starts_with(&cap), "{tail}");
+    let pending = state
+        .db
+        .read(|c| terrariumd::store::jobs::slot_wipe_pending(c, "p", 1))
+        .await
+        .unwrap();
+    assert!(pending, "the capped lost run got no kill of a lost run");
+    lab.until_card(&card, "ready", |c| c["column"] == "ready")
+        .await;
+    if alive(pid) {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .status();
+        panic!("the capped lost run {pid} outlived its end");
+    }
+}
