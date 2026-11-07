@@ -142,7 +142,8 @@ async fn put_get_check_delete_with_audit() {
         "{}",
         r.body
     );
-    let unknown_column = "rule \"r\" {\n  on = [\"job\"]\n  card_move { to = \"accepted\" }\n}\n";
+    // A column that no default board has (TER-165 adds `accepted`).
+    let unknown_column = "rule \"r\" {\n  on = [\"job\"]\n  card_move { to = \"shipped\" }\n}\n";
     let r = td
         .put("/api/projects/terra/rules", json!({"text": unknown_column}))
         .await;
@@ -151,7 +152,7 @@ async fn put_get_check_delete_with_audit() {
         r.body["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("unknown column `accepted`"),
+            .contains("unknown column `shipped`"),
         "{}",
         r.body
     );
