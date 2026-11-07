@@ -2438,6 +2438,17 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE jobs ADD COLUMN planned_secs INTEGER;
     "#,
+    // 89: who runs the card flow of a project (TER-170,
+    // `crate::store::projects::board_flow`). `projects.board_flow` is
+    // `rules` (the board rules with the built-in pack) or NULL (`code`,
+    // the daemon's code). `board_flow_at` is the time of the last switch:
+    // an older event starts no run of the built-in pack.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE projects ADD COLUMN board_flow TEXT;
+    ALTER TABLE projects ADD COLUMN board_flow_at TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

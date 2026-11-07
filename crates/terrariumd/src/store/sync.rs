@@ -89,6 +89,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
                             card_prefix: def.prefix.clone(),
                             idle_alert: None,
                             github_authors: None,
+                            board_flow: None,
                         };
                         if let Err(e) = projects::update(t, &def.name, &patch) {
                             report
@@ -116,7 +117,16 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
                 .errors
                 .push(format!("projects/{}.toml: {}", def.name, e.message)),
         }
-        // Repos: the file list replaces the file repos, and takes over API
+        // Who runs the card flow (TER-170): the file sets it when it gives
+        // the key.
+        if let Some(flow) = def.board_flow
+            && projects::set_board_flow(t, &def.name, flow)?
+            && !report.projects.added.contains(&def.name)
+            && !report.projects.updated.contains(&def.name)
+        {
+            report.projects.updated.push(def.name.clone());
+        }
+                // Repos: the file list replaces the file repos, and takes over API
         // repos with the same name.
         t.execute(
             "DELETE FROM repos WHERE project = ?1 AND source = 'file'",

@@ -218,7 +218,8 @@ async fn a_restart_between_plan_and_run_loses_no_action() {
     td.boot(None, None).await;
     settle(&td).await;
     let c = comments(&td, &card).await;
-    let second = format!("second on `{card}` by `note`");
+    // IDs and the rule name are made by the daemon: not quoted (TER-170).
+    let second = format!("second on {card} by note");
     assert_eq!(
         bodies(&c),
         vec!["first `1`", second.as_str(), second.as_str()],
@@ -368,7 +369,7 @@ async fn the_dry_run_plans_and_writes_nothing() {
     assert_eq!(acts[0]["implemented"], true);
     assert_eq!(acts[1]["verb"], "card.move");
     assert_eq!(acts[1]["args"]["to"], "review");
-    assert_eq!(acts[1]["args"]["comment"], "moved by `note`");
+    assert_eq!(acts[1]["args"]["comment"], "moved by note");
     assert_eq!(acts[1]["implemented"], true);
     assert_eq!(plans[1]["rule"], "only-quiet");
     assert_eq!(plans[1]["outcome"], "skipped");
@@ -781,7 +782,7 @@ async fn job_and_card_conditions_read_the_current_state() {
         .unwrap();
     settle(&td).await;
     let ca = comments(&td, &a).await;
-    let want = format!("job `{}`", job.id);
+    let want = format!("job {}", job.id);
     assert_eq!(
         bodies(&ca).iter().filter(|b| **b == want).count(),
         1,

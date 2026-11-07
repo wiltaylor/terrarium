@@ -124,26 +124,73 @@ pub struct Cache {
     sets: HashMap<String, (String, Arc<RuleSet>)>,
 }
 
-/// The rules of every project with a rules file. Each changed file is
-/// parsed off the DB lock, without the column check (the engine checks the
-/// columns when a run starts). A file that does not parse (a stored text
-/// that a later schema refuses) runs nothing and logs a warning.
+/// One project for [`load`]: its rules file (hash, time) and its flow.
+struct LoadRow {
+    project: String,
+    file: Option<(String, String)>,
+    rules_flow: bool,
+    flow_at: Option<String>,
+}
+
+/// The rules of every project with a rules file or with `board_flow =
+/// rules` (TER-170). A project with `rules` runs the built-in pack with its
+/// own rules ([`rules_file::with_pack`]); its runs start with the events
+/// after the switch. Each changed file is parsed off the DB lock, without
+/// the column check (the engine checks the columns when a run starts). A
+/// file that does not parse (a stored text that a later schema refuses)
+/// runs nothing of its own and logs a warning.
 pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
-    let rows: Vec<(String, String, String)> = db
+    let rows: Vec<LoadRow> = db
         .read(|c| {
-            let mut st =
-                c.prepare("SELECT project, hash, updated_at FROM project_rules ORDER BY project")?;
+            let mut st = c.prepare(
+                "SELECT p.name, r.hash, r.updated_at, p.board_flow, p.board_flow_at
+                   FROM projects p LEFT JOIN project_rules r ON r.project = p.name
+                  WHERE r.project IS NOT NULL OR p.board_flow = 'rules'
+                  ORDER BY p.name",
+            )?;
             let rows = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .query_map([], |r| {
+                    let hash: Option<String> = r.get(1)?;
+                    let at: Option<String> = r.get(2)?;
+                    let flow: Option<String> = r.get(3)?;
+                    Ok(LoadRow {
+                        project: r.get(0)?,
+                        file: hash.zip(at),
+                        rules_flow: flow.as_deref() == Some("rules"),
+                        flow_at: r.get(4)?,
+                    })
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
         .await?;
     cache
         .sets
-        .retain(|p, _| rows.iter().any(|(q, _, _)| q == p));
+        .retain(|p, _| rows.iter().any(|r| r.project == *p));
     let mut out = Vec::new();
-    for (project, hash, updated_at) in rows {
+    for row in rows {
+        let LoadRow {
+            project,
+            file,
+            rules_flow,
+            flow_at,
+        } = row;
+        let file_hash = file.as_ref().map_or("-", |(h, _)| h.as_str());
+        let hash = if rules_flow {
+            format!("pack+{file_hash}")
+        } else {
+            file_hash.to_owned()
+        };
+        // An event older than the rules (or than the switch to the
+        // rules) starts no run.
+        let updated_at = [
+            file.as_ref().map(|(_, at)| at.clone()),
+            flow_at.filter(|_| rules_flow),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or_default();
         let cached = cache
             .sets
             .get(&project)
@@ -151,6 +198,16 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
             .map(|(_, s)| s.clone());
         let set = match cached {
             Some(s) => s,
+            None if file.is_none() => {
+                let set = Arc::new(rules_file::with_pack(
+                    rules_file::default_pack(),
+                    &RuleSet::default(),
+                ));
+                cache
+                    .sets
+                    .insert(project.clone(), (hash.clone(), set.clone()));
+                set
+            }
             None => {
                 let p = project.clone();
                 let text: Option<String> = db
@@ -168,13 +225,18 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                     columns: None,
                     max_rules: usize::MAX,
                 };
-                let set = match rules::parse_off(text, rules::file_path(&project), ctx).await? {
-                    Ok(s) => Arc::new(s),
+                let own = match rules::parse_off(text, rules::file_path(&project), ctx).await? {
+                    Ok(s) => s,
                     Err(e) => {
                         warn!(project = %project, "the stored rules do not parse; they run nothing: {e}");
-                        Arc::new(RuleSet::default())
+                        RuleSet::default()
                     }
                 };
+                let set = Arc::new(if rules_flow {
+                    rules_file::with_pack(rules_file::default_pack(), &own)
+                } else {
+                    own
+                });
                 cache
                     .sets
                     .insert(project.clone(), (hash.clone(), set.clone()));
@@ -729,6 +791,23 @@ pub struct RunCtx {
     /// The job of a `job` event (`data.id`) or a `job.verdict` event
     /// (`data.job`), as the store has it now.
     pub job: Option<jobs::Job>,
+    /// The rerun of the job, when one is queued or ran.
+    pub rerun: Option<jobs::Job>,
+    /// The halves of the job, when it was split (left first).
+    pub halves: Vec<jobs::Job>,
+}
+
+impl RunCtx {
+    /// The job as the run's card sees it: the card's branch, worker, and
+    /// conflict in a batch ([`crate::jobs::card_view`]).
+    pub fn job_view(&self) -> Option<jobs::Job> {
+        let j = self.job.as_ref()?;
+        let card = self.card.as_ref().map(|c| c.id.as_str());
+        match j.batch.iter().find(|c| Some(c.card.as_str()) == card) {
+            Some(c) => Some(crate::jobs::card_view(j, c)),
+            None => Some(j.clone()),
+        }
+    }
 }
 
 fn event_at(conn: &Connection, seq: i64) -> ApiResult<Option<StoredEvent>> {
@@ -763,6 +842,13 @@ fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
         .as_ref()
         .and_then(event_job)
         .and_then(|id| jobs::get(conn, id).ok());
+    let (rerun, halves) = match &job {
+        Some(j) => (
+            jobs::rerun_of(conn, j)?.and_then(|id| jobs::get(conn, &id).ok()),
+            jobs::halves_of(conn, &j.id)?,
+        ),
+        None => (None, Vec::new()),
+    };
     Ok(RunCtx {
         project: row.project.clone(),
         rule: row.rule.clone(),
@@ -770,6 +856,8 @@ fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
         card,
         columns,
         job,
+        rerun,
+        halves,
     })
 }
 
@@ -816,6 +904,31 @@ fn check_start(rule: &Rule, row: &RunRow, ctx: &RunCtx) -> Result<(), (bool, Str
                 false,
                 format!("if_job {} does not hold: the outcome is {outcome}", i + 1),
             ));
+        }
+        let merged = job
+            .cards()
+            .iter()
+            .filter(|c| c.outcome.as_deref() != Some("conflict"))
+            .count();
+        let flags = [
+            ("split", cond.split, job.parent.is_some(), "a half of a split batch"),
+            ("batch", cond.batch, merged >= 2, "a batch of two or more merged cards"),
+            ("rerun", cond.rerun, ctx.rerun.is_some(), "run again"),
+            ("halves", cond.halves, !ctx.halves.is_empty(), "split in halves"),
+        ];
+        for (name, want, have, what) in flags {
+            if let Some(want) = want
+                && want != have
+            {
+                return Err((
+                    false,
+                    format!(
+                        "if_job {} does not hold: {name} = {want}, but the job {} {what}",
+                        i + 1,
+                        if have { "is" } else { "is not" }
+                    ),
+                ));
+            }
         }
     }
     Ok(())
@@ -891,19 +1004,41 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
                 return Some(value_text(v));
             }
         }
-        if let Some(j) = &ctx.job {
-            let v = match f {
+        if let (Some(j), Some(v)) = (&ctx.job, ctx.job_view()) {
+            let next = || -> Option<String> {
+                match (&ctx.rerun, ctx.halves.as_slice()) {
+                    (Some(r), _) => Some(r.id.clone()),
+                    (None, []) => None,
+                    (None, h) => Some(h.iter().map(|x| x.id.as_str()).collect::<Vec<_>>().join(" ")),
+                }
+            };
+            // The texts of the coded flow (TER-170), from its own code.
+            let out = match f {
                 "id" => Some(j.id.clone()),
                 "kind" => Some(j.kind.as_str().to_owned()),
                 "state" => Some(j.state.as_str().to_owned()),
-                "outcome" => j.outcome.clone(),
+                "outcome" => v.outcome.clone(),
                 "attempt" => Some(j.attempt.to_string()),
                 "repo" => Some(j.repo.clone()),
                 "commit" => j.commit.clone(),
+                "branch" => Some(v.branch.clone()),
+                "by_agent" => v.by_agent.clone(),
+                "next_jobs" => next(),
+                "queue_comment" => Some(crate::jobs::queue_comment(j, &v.card)),
+                "rerun_comment" => ctx
+                    .rerun
+                    .as_ref()
+                    .map(|r| crate::jobs::rerun_comment(&v, r, !j.batch.is_empty())),
+                "split_comment" => match ctx.halves.as_slice() {
+                    [l, r] => Some(crate::jobs::split_comment(&v, l, r)),
+                    _ => None,
+                },
+                "fail_comment" => Some(crate::jobs::fail_comment(j, &v)),
+                "fail_mail" => Some(crate::jobs::fail_mail(&v)),
                 _ => None,
             };
-            if v.is_some() {
-                return v;
+            if out.is_some() {
+                return out;
             }
         }
         let e = ctx.event.as_ref()?;

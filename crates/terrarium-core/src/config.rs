@@ -955,6 +955,41 @@ pub struct ProjectDef {
     /// error (`fleet::project`), so an agent cannot change it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub github_authors: Vec<String>,
+    /// Who runs the card flow of the job queue and of the bound agents
+    /// (TER-170): the daemon's code (`code`, the default) or the board
+    /// rules with the built-in pack (`rules`). Absent: unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_flow: Option<BoardFlow>,
+}
+
+/// Who runs the card flow of a project (TER-170, docs/api.md §19.10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BoardFlow {
+    /// The daemon's code moves, labels, and comments the cards of the job
+    /// queue, and parks and ends the bound agents.
+    #[default]
+    Code,
+    /// The board rules do it: the built-in pack and the project's
+    /// `rules.wcl`. The code only emits the events.
+    Rules,
+}
+
+impl BoardFlow {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::Rules => "rules",
+        }
+    }
+
+    /// The flow of a stored word; anything else is `code`.
+    pub fn parse(s: Option<&str>) -> Self {
+        match s {
+            Some("rules") => Self::Rules,
+            _ => Self::Code,
+        }
+    }
 }
 
 /// The kind of a target. See PLAN §19.

@@ -1696,10 +1696,16 @@ fn apply_project(
                         card_prefix: prefix,
                         idle_alert: None,
                         github_authors: None,
+                        board_flow: None,
                     },
                 )?;
             }
         }
+    }
+    // Who runs the card flow (TER-170): the fleet sets it when it gives
+    // the key.
+    if let Some(flow) = def.board_flow {
+        projects::set_board_flow(t, &def.name, flow)?;
     }
     // Repos: the file list replaces the repos the fleet applied before,
     // and takes over API repos with the same name. Equal repos stay, so
@@ -2010,6 +2016,8 @@ pub fn export(
                 schedules: project_schedules,
                 templates: project_templates,
                 github_authors: Vec::new(),
+                board_flow: (p.board_flow != terrarium_core::config::BoardFlow::Code)
+                    .then_some(p.board_flow),
             },
             agents,
             targets,

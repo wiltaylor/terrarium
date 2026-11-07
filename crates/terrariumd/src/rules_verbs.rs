@@ -49,7 +49,9 @@ use crate::store::spawns::{self, Bound};
 /// as quoted data (one line, in backticks). `card.prepend` is the
 /// exception: its text goes into the card body as it is, so a failure
 /// block keeps its lines (the card body is data to an agent already).
-pub const QUOTED_ARGS: &[&str] = &["text", "comment", "subject", "body", "turn"];
+pub const QUOTED_ARGS: &[&str] = &[
+    "text", "comment", "subject", "body", "turn", "reason", "result",
+];
 
 /// Whether the placeholders of argument `key` of `verb` are quoted.
 pub fn quoted(verb: &str, key: &str) -> bool {
@@ -125,7 +127,8 @@ impl Args<'_> {
     }
 
     /// The texts of a list argument, filled, trimmed, without the empty
-    /// ones.
+    /// ones. An item with a placeholder that has no value is left out
+    /// (`by:{{job.by_agent}}` without a worker), not kept half filled.
     fn list(&self, key: &str) -> Vec<String> {
         let items: Vec<&str> = match self.action.args.get(key) {
             Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
@@ -134,12 +137,11 @@ impl Args<'_> {
         };
         items
             .into_iter()
-            .map(|s| {
-                rules_file::render(s, &|n| lookup(self.ctx, n), false)
-                    .trim()
-                    .to_owned()
+            .filter_map(|s| {
+                let (v, empty) = rules_file::render_with(s, &|n| lookup(self.ctx, n), false);
+                let v = v.trim().to_owned();
+                (!empty && !v.is_empty()).then_some(v)
             })
-            .filter(|s| !s.is_empty())
             .collect()
     }
 
@@ -254,7 +256,7 @@ pub fn perform(
         "job.queue" => job_queue(t, actor, ctx, &a, &mut effects)?,
         "job.cancel" => job_cancel(t, actor, ctx, &mut effects)?,
         "job.rerun" => job_rerun(t, actor, ctx, &a, &mut effects)?,
-        "job.split" => job_split(t, actor, ctx, &mut effects)?,
+        "job.split" => job_split(t, actor, ctx, &a, &mut effects)?,
         "job.fix" => job_fix(t, actor, ctx, &a)?,
         "agent.park" | "agent.unpark" | "agent.end" => agent_verb(t, actor, ctx, &a, &mut effects)?,
         other => return Err(ApiError::invalid(format!("unknown verb `{other}`"))),
@@ -288,6 +290,7 @@ fn card_move(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiRe
     ))
 }
 
+/// `card.label`: `remove` takes globs (`by:*`); a label of `add` stays.
 fn card_label(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
     let card = the_card(ctx, "card.label")?;
     let add: Vec<String> = a
@@ -296,10 +299,17 @@ fn card_label(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
         .filter(|l| !card.labels.contains(l))
         .collect();
     let want = a.list("add");
-    let remove: Vec<String> = a
-        .list("remove")
-        .into_iter()
-        .filter(|l| card.labels.contains(l) && !want.contains(l))
+    let patterns = a.list("remove");
+    let remove: Vec<String> = card
+        .labels
+        .iter()
+        .filter(|l| {
+            !want.contains(l)
+                && patterns
+                    .iter()
+                    .any(|p| p == *l || (p.contains('*') && terrarium_core::schedule::glob(p, l)))
+        })
+        .cloned()
         .collect();
     if add.is_empty() && remove.is_empty() {
         return Ok(noop(json!({
@@ -601,6 +611,11 @@ fn job_cancel(
     let was_running = job.state == JobState::Running;
     let j = jobs::cancel(t, &job.id)?;
     crate::jobs::emit_verdicts(t, &j)?;
+    // As the API cancel: with `board_flow = code` the labels go now; with
+    // `rules` the rule pack takes them off on the verdict (TER-170).
+    if crate::jobs::code_flow(t, &j.project)? {
+        crate::jobs::clear_job_labels(t, &j)?;
+    }
     if was_running {
         effects.push(Effect::Kill(j.id.clone()));
     }
@@ -616,35 +631,14 @@ fn merged(j: &Job) -> Vec<BatchCard> {
         .collect()
 }
 
-/// A later attempt of `j` (its rerun), if one is queued or ran.
-fn rerun_of(conn: &Connection, j: &Job) -> ApiResult<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT id FROM jobs
-              WHERE project = ?1 AND kind = ?2 AND repo = ?3 AND created_at = ?4
-                AND split_path = ?5 AND coalesce(parent, '') = coalesce(?6, '')
-                AND attempt > ?7 AND id <> ?8
-              ORDER BY attempt LIMIT 1",
-            params![
-                j.project,
-                j.kind.as_str(),
-                j.repo,
-                j.created_at,
-                j.split_path,
-                j.parent,
-                j.attempt,
-                j.id
-            ],
-            |r| r.get(0),
-        )
-        .optional()?)
-}
 
-/// A card of `cards` that has an open job: no new job for it.
-fn busy(conn: &Connection, cards: &[BatchCard]) -> ApiResult<()> {
+/// Why no new job runs for `cards`: a card that has an open job already
+/// (the coded flow split the batch, or someone queued it again). The verb
+/// is then a no-op, not a failure.
+fn busy(conn: &Connection, cards: &[BatchCard]) -> ApiResult<Option<String>> {
     for c in cards {
         if let Some(open) = open_job(conn, &c.card)? {
-            return Err(ApiError::conflict(format!(
+            return Ok(Some(format!(
                 "card {} has a {} job {} that is {} already",
                 c.card,
                 open.kind.as_str(),
@@ -653,7 +647,24 @@ fn busy(conn: &Connection, cards: &[BatchCard]) -> ApiResult<()> {
             )));
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+/// The fix cards of the group of `j` from earlier jobs: the cards with a
+/// `merge-fix:` label of another job that link to a card of `j` (TER-170,
+/// MEM-84). Done and archived ones count: each was an attempt.
+fn earlier_fixes(conn: &Connection, j: &Job) -> ApiResult<i64> {
+    let cards: Vec<String> = j.cards().into_iter().map(|c| c.card).collect();
+    let own = fix_label(&j.id);
+    Ok(conn.query_row(
+        "SELECT count(DISTINCT l.card) FROM card_links l JOIN cards c ON c.id = l.card
+          WHERE l.kind = 'card' AND l.ref IN (SELECT value FROM json_each(?1))
+            AND c.project = ?2
+            AND EXISTS (SELECT 1 FROM json_each(c.labels)
+                         WHERE value LIKE 'merge-fix:%' AND value <> ?3)",
+        params![serde_json::to_string(&cards)?, j.project, own],
+        |r| r.get(0),
+    )?)
 }
 
 /// Queue the event's failed job once more (not a conflict), while its
@@ -690,13 +701,15 @@ fn job_rerun(
             json!({"job": j.id, "reason": "every card of the job conflicted"}),
         ));
     }
-    if let Some(next) = rerun_of(t, j)? {
+    if let Some(next) = jobs::rerun_of(t, j)? {
         return Ok(noop(json!({
             "job": j.id, "next": next,
             "reason": format!("job {next} runs job {} again already", j.id),
         })));
     }
-    busy(t, &cards)?;
+    if let Some(why) = busy(t, &cards)? {
+        return Ok(noop(json!({"job": j.id, "reason": why})));
+    }
     let batch = (!j.batch.is_empty()).then_some(cards.as_slice());
     let next = jobs::rerun(t, j, batch)?;
     effects.push(Effect::Kick);
@@ -706,10 +719,13 @@ fn job_rerun(
 }
 
 /// Split the event's red batch (two or more cards that merged) in halves.
+/// `after_fixes`: only when the group had that many fix cards of earlier
+/// jobs.
 fn job_split(
     t: &mut Tx<'_>,
     actor: &Actor,
     ctx: &RunCtx,
+    a: &Args<'_>,
     effects: &mut Vec<Effect>,
 ) -> ApiResult<Done> {
     let j = the_job(ctx, "job.split")?;
@@ -742,7 +758,18 @@ fn job_split(
             "reason": format!("job {} is split already", j.id),
         })));
     }
-    busy(t, &cards)?;
+    if let Some(after) = a.count("after_fixes") {
+        let had = earlier_fixes(t, j)?;
+        if had < after {
+            return Ok(noop(json!({
+                "job": j.id,
+                "reason": format!("the group had {had} fix card(s); it splits after {after}"),
+            })));
+        }
+    }
+    if let Some(why) = busy(t, &cards)? {
+        return Ok(noop(json!({"job": j.id, "reason": why})));
+    }
     let (left, right) = jobs::split(t, j, &cards)?;
     effects.push(Effect::Kick);
     let names = |x: &Job| x.cards().into_iter().map(|c| c.card).collect::<Vec<_>>();
@@ -758,12 +785,27 @@ fn job_split(
 fn job_fix(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
     let j = the_job(ctx, "job.fix")?;
     policy::admin_project(actor, &j.project, "opening a fix card for a merge job")?;
-    if j.kind != JobKind::Merge || j.state != JobState::Failed {
+    // Only a red merge (its tests failed): a conflict, an error (the job
+    // could not run), or a cut run is not for a fix card (TER-169 review).
+    if j.kind != JobKind::Merge
+        || j.state != JobState::Failed
+        || j.outcome.as_deref() != Some("red")
+    {
         return Ok(noop(json!({
             "job": j.id,
-            "reason": format!("job {} is a {} job that is {}, not a failed merge", j.id,
-                              j.kind.as_str(), j.state.as_str()),
+            "reason": format!("job {} is a {} job that is {} ({}), not a red merge", j.id,
+                              j.kind.as_str(), j.state.as_str(),
+                              j.outcome.as_deref().unwrap_or("none")),
         })));
+    }
+    if let Some(max) = a.count("max") {
+        let had = earlier_fixes(t, j)?;
+        if had >= max {
+            return Ok(noop(json!({
+                "job": j.id,
+                "reason": format!("the group had {had} fix card(s), the most is {max}"),
+            })));
+        }
     }
     let label = fix_label(&j.id);
     if let Some(open) = board::find_open_by_label(t, &j.project, &label)? {
@@ -855,7 +897,10 @@ fn agent_verb(
     let detail = |extra: &str| json!({"card": card.id, "agent": sp.name, "result": extra});
     match verb {
         "agent.park" => {
-            let reason = format!("rule {}", ctx.rule);
+            let reason = a
+                .text("reason")
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or_else(|| format!("rule {}", ctx.rule));
             Ok(match crate::bound::park_tx(t, &sp.id, &reason)? {
                 Some(owner) => {
                     effects.push(Effect::RetryOwner(owner));
@@ -888,10 +933,14 @@ fn agent_verb(
                 Some("cancelled") => spawns::CANCELLED,
                 _ => spawns::DONE,
             };
+            let result = a
+                .text("result")
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or_else(|| format!("the rule {} ended it ({outcome})", ctx.rule));
             effects.push(Effect::End {
                 bound,
                 outcome,
-                result: format!("the rule {} ended it ({outcome})", ctx.rule),
+                result,
             });
             Ok(changed(detail(outcome)))
         }

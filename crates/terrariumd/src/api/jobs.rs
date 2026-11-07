@@ -20,6 +20,11 @@
 //! - `POST /api/merges` {cards, repo?, eta?} (TER-112): a project admin. One
 //!   merge job for the cards of one project, merged in the given order and
 //!   validated once. One card is the same as `POST /api/cards/{id}/merge`.
+//! - With `board_flow = rules` (TER-170) a validate, a merge, a batch,
+//!   and a cancel only queue or cancel the job: its events are all, and
+//!   the board rules (the built-in pack) set the labels, move, and
+//!   comment. The `comment` of a validate goes on the card as the
+//!   actor's own comment.
 //! - `eta` (TER-155 D2) is a planned duration such as `2h`, not a time.
 //!   The job's cards have no ETA while it is queued; when it starts, each
 //!   gets the start plus the duration. No `eta`, no ETA.
@@ -356,16 +361,9 @@ async fn cancel(
         .write(actor.label(), move |t| {
             let j = jobs::cancel(t, &jid)?;
             rt::emit_verdicts(t, &j)?;
-            for c in j.cards() {
-                let patch = CardPatch {
-                    remove_labels: vec![rt::LABEL_QUEUED.into(), rt::LABEL_RUNNING.into()],
-                    ..CardPatch::default()
-                };
-                if let Err(e) = board::update_card(t, &Actor::Operator, &c.card, patch)
-                    && !e.code.status().is_client_error()
-                {
-                    return Err(e);
-                }
+            // With `board_flow = rules` the pack clears them (TER-170).
+            if rt::code_flow(t, &j.project)? {
+                rt::clear_job_labels(t, &j)?;
             }
             Ok(j)
         })
@@ -640,6 +638,22 @@ async fn validate(
                     planned_secs,
                 },
             )?;
+            let given = b
+                .comment
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty());
+            // With `board_flow = rules` the job's `queued` event is all:
+            // the built-in pack labels, moves, and comments (TER-170). The
+            // worker's own comment goes on the card as its own.
+            if !rt::code_flow(t, &card.project)? {
+                if let Some(c) = given {
+                    board::add_comment(t, &actor, &card.id, c)?;
+                }
+                let place = jobs::place(t, &job)?;
+                let room = jobs::host_room(t, &job.project)?;
+                return Ok((job, (place, room)));
+            }
             let (add, remove) = job_labels(&card.labels, by.as_deref());
             let patch = CardPatch {
                 add_labels: add,
@@ -647,19 +661,8 @@ async fn validate(
                 ..CardPatch::default()
             };
             board::update_card(t, &Actor::Operator, &card.id, patch)?;
-            let mut note = format!(
-                "Job queue: validate job {} queued. Repo {repo}, branch {branch}, commit {}.",
-                job.id,
-                b.commit
-                    .as_deref()
-                    .unwrap_or("the branch head at the start")
-            );
-            if let Some(c) = b
-                .comment
-                .as_deref()
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-            {
+            let mut note = rt::queue_comment(&job, &card.id);
+            if let Some(c) = given {
                 note = format!("{c}\n\n{note}");
             }
             let validating =
@@ -725,20 +728,19 @@ async fn merge(
                     planned_secs,
                 },
             )?;
-            let patch = CardPatch {
-                add_labels: vec![rt::LABEL_QUEUED.into()],
-                ..CardPatch::default()
-            };
-            board::update_card(t, &Actor::Operator, &card.id, patch)?;
-            board::add_comment(
-                t,
-                &Actor::Operator,
-                &card.id,
-                &format!(
-                    "Job queue: merge job {} queued: {branch} onto next of {repo}.",
-                    job.id
-                ),
-            )?;
+            if rt::code_flow(t, &card.project)? {
+                let patch = CardPatch {
+                    add_labels: vec![rt::LABEL_QUEUED.into()],
+                    ..CardPatch::default()
+                };
+                board::update_card(t, &Actor::Operator, &card.id, patch)?;
+                board::add_comment(
+                    t,
+                    &Actor::Operator,
+                    &card.id,
+                    &rt::queue_comment(&job, &card.id),
+                )?;
+            }
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
             // Merges have their own lane of one (TER-159).
@@ -842,29 +844,14 @@ async fn merge_batch(
                     planned_secs,
                 },
             )?;
-            let names: Vec<&str> = batch.iter().map(|c| c.card.as_str()).collect();
-            for (i, c) in batch.iter().enumerate() {
+            let code = rt::code_flow(t, &project)?;
+            for c in batch.iter().filter(|_| code) {
                 let patch = CardPatch {
                     add_labels: vec![rt::LABEL_QUEUED.into()],
                     ..CardPatch::default()
                 };
                 board::update_card(t, &Actor::Operator, &c.card, patch)?;
-                let note = if batch.len() > 1 {
-                    format!(
-                        "Job queue: merge job {} queued: {} onto next of {repo}, card {} of {} in the batch {}.",
-                        job.id,
-                        c.branch,
-                        i + 1,
-                        batch.len(),
-                        names.join(" ")
-                    )
-                } else {
-                    format!(
-                        "Job queue: merge job {} queued: {} onto next of {repo}.",
-                        job.id, c.branch
-                    )
-                };
-                board::add_comment(t, &Actor::Operator, &c.card, &note)?;
+                board::add_comment(t, &Actor::Operator, &c.card, &rt::queue_comment(&job, &c.card))?;
             }
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
