@@ -41,6 +41,7 @@ pub mod grants;
 pub mod kinds;
 pub mod migrate;
 pub mod redact;
+pub mod run_env;
 pub mod ssh;
 
 use std::fs::{self, OpenOptions};

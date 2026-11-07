@@ -4,6 +4,10 @@
 //!   operator): the queue config.
 //! - `GET /api/projects/{name}/jobs[?state=]`: the config, the counts, and
 //!   the jobs, newest first.
+//! - `GET /api/projects/{name}/jobs/stats[?since=]` (TER-135): the
+//!   first-attempt pass rate, the counts, and the failed test targets of
+//!   the jobs created since `since` (RFC 3339, or a duration back from
+//!   now such as `7d`; default 7 days).
 //! - `GET /api/jobs/{id}`, `DELETE /api/jobs/{id}` (cancel; a running job
 //!   is killed).
 //! - `POST /api/cards/{id}/validate` {commit?, repo?, branch?, comment?}:
@@ -35,12 +39,11 @@ use terrarium_core::config::DeliveryDef;
 use super::{ApiJson, ApiQuery, Shared};
 use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult};
-use crate::executor;
 use crate::jobs as rt;
 use crate::policy;
 use crate::store::board::{self, Card, CardPatch};
 use crate::store::jobs::{self, Job, JobKind, JobState, NewJob};
-use crate::store::{github_gate, hosts, projects, repos, targets};
+use crate::store::{github_gate, hosts, projects, repos};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -49,6 +52,7 @@ pub fn routes() -> Router<Shared> {
             get(show_delivery).put(set_delivery),
         )
         .route("/projects/{name}/jobs", get(list))
+        .route("/projects/{name}/jobs/stats", get(stats))
         .route("/jobs/{id}", get(show).delete(cancel))
         .route("/cards/{id}/validate", post(validate))
         .route("/cards/{id}/merge", post(merge))
@@ -221,31 +225,7 @@ async fn set_delivery(
         .db
         .write(actor.label(), move |t| {
             projects::get(t, &name)?;
-            // The recipe runs on the target: a target of this project, or a
-            // global one only when a sysadmin or the operator sets it.
-            if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty()) {
-                let row = targets::get(t, target)?;
-                match &row.def.project {
-                    Some(p) if *p == name => {}
-                    Some(p) => {
-                        return Err(ApiError::forbidden(format!(
-                            "target `{target}` belongs to project `{p}`; the job queue of `{name}` uses its own targets"
-                        )));
-                    }
-                    None => policy::sysadmin(
-                        &actor,
-                        &format!("running the job queue of `{name}` on the global target `{target}`"),
-                    )?,
-                }
-                executor::no_exec(&row.def)?;
-            }
-            for r in &def.next_repos {
-                if repos::find_by_name(t, &name, r)?.is_none() {
-                    return Err(ApiError::invalid(format!(
-                        "`next_repos` names `{r}`, which is not a repo of `{name}`"
-                    )));
-                }
-            }
+            rt::check_delivery(t, &actor, &name, &def)?;
             jobs::set_delivery(t, &name, &def)
         })
         .await?;
@@ -284,6 +264,55 @@ async fn list(
         })
         .await?;
     Ok(Json(rt::view(&def, &list)))
+}
+
+/// The default window of the job stats.
+const STATS_WINDOW: &str = "7d";
+
+#[derive(Debug, Default, Deserialize)]
+struct StatsQuery {
+    #[serde(default)]
+    since: Option<String>,
+}
+
+/// The start of the stats window: an RFC 3339 time, or a duration back
+/// from `now` (`7d`, `12h`). The result is in the form of `created_at`.
+fn stats_since(since: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> ApiResult<String> {
+    let s = since
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(STATS_WINDOW);
+    let at = match chrono::DateTime::parse_from_rfc3339(s) {
+        Ok(t) => t.with_timezone(&chrono::Utc),
+        Err(_) => {
+            let d = terrarium_core::eta::parse_duration(s).map_err(|e| {
+                ApiError::bad_request(format!(
+                    "bad since: {e}; give an RFC 3339 time or a duration such as 7d"
+                ))
+            })?;
+            now.checked_sub_signed(d)
+                .ok_or_else(|| ApiError::bad_request(format!("bad since `{s}`: too far back")))?
+        }
+    };
+    Ok(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+async fn stats(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiQuery(q): ApiQuery<StatsQuery>,
+) -> ApiResult<Json<jobs::JobStats>> {
+    policy::read_project(&actor, &name)?;
+    let since = stats_since(q.since.as_deref(), chrono::Utc::now())?;
+    let s = state
+        .db
+        .read(move |c| {
+            projects::get(c, &name)?;
+            jobs::stats(c, &name, &since)
+        })
+        .await?;
+    Ok(Json(s))
 }
 
 async fn find(state: &Shared, actor: &Actor, id: String) -> ApiResult<Job> {
@@ -489,6 +518,38 @@ fn may_validate(actor: &Actor, card: &Card) -> ApiResult<()> {
     )
 }
 
+/// The worker of a validate, the name in its `by:<agent>` label and the
+/// `by_agent` of the job (the final mail goes to it, docs/api.md 35.3). The
+/// worker is the card's assignee when it queues. A project admin who queues
+/// another agent's card keeps the card's `by:` label, so the worker does
+/// not change. A card with no `by:` label gets the queuing agent.
+fn validate_by(actor: &Actor, card: &Card) -> Option<String> {
+    let me = actor.agent();
+    match me {
+        Some(a) if card.assignee.as_deref() == Some(actor.address().as_str()) => {
+            Some(a.name.clone())
+        }
+        _ => rt::by_agent_of(&card.labels).or_else(|| me.map(|a| a.name.clone())),
+    }
+}
+
+/// The labels of a validate: one `validation:*` label (`validation:queued`)
+/// and one `by:<agent>` label. Every `validation:*` and `by:*` label that
+/// the card has goes, so a stale one does not stay beside the new one. The
+/// `by` name is the worker, see [`validate_by`]. Returns the labels to add
+/// and the labels to remove.
+fn job_labels(labels: &[String], by: Option<&str>) -> (Vec<String>, Vec<String>) {
+    let keep = by.map(|n| format!("by:{n}"));
+    let remove = labels
+        .iter()
+        .filter(|l| l.starts_with("validation:") || l.starts_with("by:"))
+        .cloned()
+        .collect();
+    let mut add = vec![rt::LABEL_QUEUED.to_owned()];
+    add.extend(keep);
+    (add, remove)
+}
+
 async fn validate(
     State(state): State<Shared>,
     actor: Actor,
@@ -542,10 +603,7 @@ async fn validate(
         .write(actor.label(), move |t| {
             let card = board::get_card(t, &card.id)?;
             may_validate(&actor, &card)?;
-            let by = actor
-                .agent()
-                .map(|a| a.name.clone())
-                .or_else(|| rt::by_agent_of(&card.labels));
+            let by = validate_by(&actor, &card);
             let job = jobs::create(
                 t,
                 NewJob {
@@ -559,16 +617,10 @@ async fn validate(
                     batch: Vec::new(),
                 },
             )?;
-            let mut add = vec![rt::LABEL_QUEUED.to_owned()];
-            if let Some(n) = &by {
-                let label = format!("by:{n}");
-                if !card.labels.contains(&label) {
-                    add.push(label);
-                }
-            }
+            let (add, remove) = job_labels(&card.labels, by.as_deref());
             let patch = CardPatch {
                 add_labels: add,
-                remove_labels: vec![rt::LABEL_RUNNING.into()],
+                remove_labels: remove,
                 ..CardPatch::default()
             };
             board::update_card(t, &Actor::Operator, &card.id, patch)?;
