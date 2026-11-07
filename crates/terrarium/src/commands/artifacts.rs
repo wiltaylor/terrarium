@@ -257,12 +257,17 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
         } => {
             no_version_flag(version.is_some())?;
             let p = ctx.project_or(None).await?;
-            let q = query([("page", page.clone()), ("card", card.clone())]);
+            let q = query([
+                ("page", page.clone()),
+                ("card", card.clone()),
+                ("label", label.clone()),
+            ]);
             let mut items = ctx
                 .api
                 .list(&format!("{}/artifacts", project_path(&p)), q, None)
                 .await?;
-            // The daemon has no label filter: keep the labelled ones here.
+            // The daemon filters by `label` (TER-129). A daemon from before
+            // ignores it, so keep the labelled ones here too.
             if let Some(l) = label {
                 items.retain(|a| has_label(a, l));
             }

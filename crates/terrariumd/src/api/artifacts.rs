@@ -24,7 +24,6 @@ use super::{ApiJson, ApiQuery, Shared, paged};
 use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
-use crate::store::Page;
 use crate::store::artifacts::{
     self, Artifact, ArtifactCtx, NewArtifactLink, PruneReport, StoredBlob, Upload, Usage,
 };
@@ -323,12 +322,12 @@ async fn list(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
-    ApiQuery(page): ApiQuery<Page>,
+    ApiQuery(q): ApiQuery<artifacts::ListQuery>,
 ) -> ApiResult<Response> {
     policy::read_project(&actor, &name)?;
     let rows = state
         .db
-        .read(move |c| artifacts::list(c, &name, &page))
+        .read(move |c| artifacts::list(c, &name, &q))
         .await?;
     Ok(paged(rows))
 }

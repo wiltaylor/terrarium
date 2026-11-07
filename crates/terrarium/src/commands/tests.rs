@@ -2171,7 +2171,9 @@ async fn artifacts_and_labels() {
         let e = r.result.unwrap_err();
         assert!(e.to_string().contains("--label version:"), "{args:?}: {e}");
     }
-    // `artifact ls --label` keeps the artifacts with that label.
+    // `artifact ls --label` sends `label` to the daemon (TER-129), and keeps
+    // the artifacts with that label also when a daemon from before ignores
+    // it.
     let out = ok(
         true,
         &["artifact", "ls", "--label", "version:1.0.0"],
@@ -2182,7 +2184,12 @@ async fn artifacts_and_labels() {
                 {"id": "ART-2", "name": "b", "links": [{"kind": "label", "ref": "version:vnext"}]}
             ]),
         )],
-        vec![req(Get, "/api/projects/terra/artifacts")],
+        vec![(
+            Get,
+            "/api/projects/terra/artifacts",
+            vec![("label", "version:1.0.0")],
+            None,
+        )],
     )
     .await;
     assert!(out.contains("ART-1") && !out.contains("ART-2"), "{out}");
