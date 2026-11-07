@@ -9,6 +9,11 @@
 //! rules. Each change writes an audit row (`rules.put`, `rules.delete`,
 //! `rules.file`) with the old and the new hash and the rule names.
 //!
+//! No parse runs inside a DB closure: the caller reads the [`Context`]
+//! (the board columns) under the lock, parses with [`parse_off`] on a
+//! blocking thread, then writes with the context it used. The write
+//! compares the context and the hash again under the lock.
+//!
 //! Nothing runs a rule yet: the engine comes with TER-168.
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -81,7 +86,9 @@ impl Rules {
 }
 
 /// What the check of a file needs: the columns of the board and the cap.
+/// The project must exist.
 pub fn context(conn: &Connection, project: &str) -> ApiResult<Context> {
+    projects::get(conn, project)?;
     let columns = board::column_roles(conn, project)?
         .into_iter()
         .map(|(name, role)| BoardColumn { name, role })
@@ -103,11 +110,48 @@ fn file_error(e: &FileError) -> ApiError {
     ApiError::invalid(e.to_string()).with_details(json!({"problems": problems}))
 }
 
-/// Check `text` as the rules file of `project` (which must exist).
-pub fn check(conn: &Connection, project: &str, text: &str) -> ApiResult<RuleSet> {
-    projects::get(conn, project)?;
-    let ctx = context(conn, project)?;
-    rules_file::parse(text, rules_file::FILE_NAME, &ctx).map_err(|e| file_error(&e))
+/// Parse `text` as a rules file named `file` on a blocking thread, outside
+/// any DB closure. The inner `Err` is the file's problems.
+pub async fn parse_off(
+    text: String,
+    file: String,
+    ctx: Context,
+) -> ApiResult<Result<RuleSet, FileError>> {
+    tokio::task::spawn_blocking(move || rules_file::parse(&text, &file, &ctx))
+        .await
+        .map_err(|e| ApiError::internal(format!("rules check: {e}")))
+}
+
+/// Check `text` as the API rules file with `ctx`: `422 invalid` with the
+/// problems. Off the DB lock.
+pub async fn check(text: String, ctx: Context) -> ApiResult<RuleSet> {
+    parse_off(text, rules_file::FILE_NAME.to_owned(), ctx)
+        .await?
+        .map_err(|e| file_error(&e))
+}
+
+/// The rules of `r`, read again from its text without the column check
+/// (a board change after the write does not hide them). Off the DB lock.
+pub async fn with_rules(mut r: Rules) -> ApiResult<Rules> {
+    if !r.exists {
+        return Ok(r);
+    }
+    let ctx = Context {
+        columns: None,
+        max_rules: usize::MAX,
+    };
+    r.rules = parse_off(r.text.clone(), rules_file::FILE_NAME.to_owned(), ctx)
+        .await?
+        .map(|s| s.rules)
+        .unwrap_or_default();
+    Ok(r)
+}
+
+/// The board of `project` changed between the check and the write.
+fn board_changed(project: &str) -> ApiError {
+    ApiError::conflict(format!(
+        "the board of project `{project}` changed during the rules check; send the rules again"
+    ))
 }
 
 struct Row {
@@ -137,28 +181,20 @@ fn row(conn: &Connection, project: &str) -> ApiResult<Option<Row>> {
         .optional()?)
 }
 
-/// The rules of `project` (which must exist). The rules are read again
-/// without the column check: a board change after the write does not
-/// hide them.
+/// The rules row of `project` (which must exist), with `rules` empty:
+/// [`with_rules`] reads them off the DB lock.
 pub fn get(conn: &Connection, project: &str) -> ApiResult<Rules> {
     projects::get(conn, project)?;
     let Some(r) = row(conn, project)? else {
         return Ok(Rules::none(project));
     };
-    let ctx = Context {
-        columns: None,
-        max_rules: usize::MAX,
-    };
-    let rules = rules_file::parse(&r.text, rules_file::FILE_NAME, &ctx)
-        .map(|s| s.rules)
-        .unwrap_or_default();
     Ok(Rules {
         project: project.to_owned(),
         exists: true,
         text: r.text,
         hash: Some(r.hash),
         source: Some(r.source),
-        rules,
+        rules: Vec::new(),
         updated_by: Some(r.updated_by),
         updated_at: Some(r.updated_at),
     })
@@ -186,12 +222,23 @@ fn names(set: &RuleSet) -> Vec<&str> {
     set.rules.iter().map(|r| r.name.as_str()).collect()
 }
 
-/// Write the rules of `project` from the API: check the text, then store
-/// it with an audit row `rules.put`. `base_hash`: the hash the caller
-/// read (`""`: no rules yet); another current hash is `409 conflict`. The
-/// rules of a file are `409 file_managed`.
-pub fn put(t: &mut Tx<'_>, project: &str, text: &str, base_hash: Option<&str>) -> ApiResult<Rules> {
-    let set = check(t, project, text)?;
+/// Write the rules of `project` from the API, with an audit row
+/// `rules.put`. `set` is the text checked with `ctx` ([`check`], off the
+/// lock); a board that no longer matches `ctx` is `409 conflict`.
+/// `base_hash`: the hash the caller read (`""`: no rules yet); another
+/// current hash is `409 conflict`. The rules of a file are `409
+/// file_managed`.
+pub fn put(
+    t: &mut Tx<'_>,
+    project: &str,
+    text: &str,
+    set: RuleSet,
+    ctx: &Context,
+    base_hash: Option<&str>,
+) -> ApiResult<Rules> {
+    if context(t, project)? != *ctx {
+        return Err(board_changed(project));
+    }
     let old = row(t, project)?;
     if old.as_ref().is_some_and(|r| r.source == SOURCE_FILE) {
         return Err(file_managed(project));
@@ -214,7 +261,9 @@ pub fn put(t: &mut Tx<'_>, project: &str, text: &str, base_hash: Option<&str>) -
             "rules": names(&set),
         }),
     )?;
-    get(t, project)
+    let mut r = get(t, project)?;
+    r.rules = set.rules;
+    Ok(r)
 }
 
 fn store(
@@ -269,48 +318,99 @@ pub fn delete(t: &mut Tx<'_>, project: &str, base_hash: Option<&str>) -> ApiResu
     Ok(true)
 }
 
-/// Load the rules file of `project` from the config dir (`text`; `None`:
-/// no file). A changed file that checks becomes the rules (`source =
-/// file`), with an audit row `rules.file`; a file that does not check
-/// keeps the last good rules, and its errors come back (one line each).
-/// No file: rules of a file that is gone become API rules, as for the
-/// schedules of a project file.
-pub fn sync_file(t: &mut Tx<'_>, project: &str, text: Option<&str>) -> ApiResult<Vec<String>> {
-    let old = row(t, project)?;
-    let Some(text) = text else {
-        if old.as_ref().is_some_and(|r| r.source == SOURCE_FILE) {
-            t.execute(
-                "UPDATE project_rules SET source = ?2 WHERE project = ?1",
-                params![project, SOURCE_API],
-            )?;
-        }
-        return Ok(Vec::new());
-    };
+/// A rules file of the config dir that changed: [`plan_file`] reads it
+/// under the lock, [`parse_off`] checks it off the lock, [`store_file`]
+/// writes it.
+#[derive(Debug, Clone)]
+pub struct FilePlan {
+    pub project: String,
+    pub text: String,
+    pub hash: String,
+    /// The context of the check.
+    pub ctx: Context,
+}
+
+/// The plan for the rules file `text` of `project` (which must exist).
+/// `None`: the rules already come from this file, unchanged.
+pub fn plan_file(conn: &Connection, project: &str, text: &str) -> ApiResult<Option<FilePlan>> {
     let hash = crate::defaults::sha256_hex(text.as_bytes());
-    if old
+    if row(conn, project)?
         .as_ref()
         .is_some_and(|r| r.hash == hash && r.source == SOURCE_FILE)
     {
+        return Ok(None);
+    }
+    Ok(Some(FilePlan {
+        project: project.to_owned(),
+        text: text.to_owned(),
+        hash,
+        ctx: context(conn, project)?,
+    }))
+}
+
+/// Store the checked rules file of `plan` (`source = file`) with an audit
+/// row `rules.file`. The hash and the board are compared again under the
+/// lock: the same file already stored writes nothing, and a board that
+/// changed since the check is an error of the reload (one line).
+pub fn store_file(t: &mut Tx<'_>, plan: &FilePlan, set: &RuleSet) -> ApiResult<Vec<String>> {
+    let project = plan.project.as_str();
+    let old = row(t, project)?;
+    if old
+        .as_ref()
+        .is_some_and(|r| r.hash == plan.hash && r.source == SOURCE_FILE)
+    {
         return Ok(Vec::new());
     }
-    let ctx = context(t, project)?;
-    let set = match rules_file::parse(text, &file_path(project), &ctx) {
-        Ok(s) => s,
-        Err(e) => return Ok(e.to_string().lines().map(str::to_owned).collect()),
-    };
-    store(t, project, text, &hash, set.rules.len(), SOURCE_FILE)?;
+    if context(t, project)? != plan.ctx {
+        return Ok(vec![format!(
+            "{}: the board changed during the check; POST /api/reload again",
+            file_path(project)
+        )]);
+    }
+    store(t, project, &plan.text, &plan.hash, set.rules.len(), SOURCE_FILE)?;
     t.audit(
         "rules.file",
         project,
         Some(project),
         json!({
             "file": file_path(project),
-            "hash": hash,
+            "source": SOURCE_FILE,
+            "hash": plan.hash,
             "previous_hash": old.as_ref().map(|r| r.hash.clone()),
-            "rules": names(&set),
+            "rules": names(set),
         }),
     )?;
     Ok(Vec::new())
+}
+
+/// The rules file of `project` is gone from the config dir: its rules stay
+/// as API rules (as for the schedules of a project file), with an audit
+/// row `rules.file` with `file: null` and `source: api`.
+pub fn file_gone(t: &mut Tx<'_>, project: &str) -> ApiResult<()> {
+    let Some(old) = row(t, project)? else {
+        return Ok(());
+    };
+    if old.source != SOURCE_FILE {
+        return Ok(());
+    }
+    t.execute(
+        "UPDATE project_rules SET source = ?2, updated_by = ?3, updated_at = ?4
+          WHERE project = ?1",
+        params![project, SOURCE_API, t.actor, now()],
+    )?;
+    t.audit(
+        "rules.file",
+        project,
+        Some(project),
+        json!({
+            "file": null,
+            "previous_file": file_path(project),
+            "source": SOURCE_API,
+            "hash": old.hash,
+            "previous_hash": old.hash,
+        }),
+    )?;
+    Ok(())
 }
 
 /// The projects whose rules come from a file.

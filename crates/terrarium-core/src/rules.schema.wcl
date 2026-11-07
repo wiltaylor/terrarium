@@ -1,7 +1,8 @@
 // The schema of a project's board rules: `rules.wcl` (TER-162, TER-166).
 //
 // The daemon ships this file and checks each rules file against it when
-// it loads the file and on each edit. A rules file holds data only: no
+// it loads the file and on each edit. A rules file holds plain data only:
+// literal values (no let, call, function, or reference), and no
 // `import`, `type`, `union`, `symbol_set`, `namespace`, or `use`. The
 // daemon also checks what a schema cannot say: the rule names are
 // unique, a rule has at least one verb, the `when` paths, the

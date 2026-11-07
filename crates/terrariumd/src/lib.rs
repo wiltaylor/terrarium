@@ -721,14 +721,16 @@ pub async fn apply_definitions(
         .await?;
     report.errors.extend(schedule_errors);
     // The board rules files (`projects/<p>.rules.wcl`, TER-166), after the
-    // projects and their boards: the check reads the columns.
+    // projects and their boards: the check reads the columns. The parse
+    // runs off the DB lock: plan under the lock, parse, then store.
     let rules_defs = defs.rules.clone();
-    let rule_errors = state
+    let (plans, mut rule_errors) = state
         .db
-        .write("system", move |t| {
+        .read(move |c| {
+            let mut plans = Vec::new();
             let mut errors = Vec::new();
             for f in &rules_defs {
-                if store::projects::find(t, &f.project)?.is_none() {
+                if store::projects::find(c, &f.project)?.is_none() {
                     errors.push(format!(
                         "{}: no project `{}`",
                         store::rules::file_path(&f.project),
@@ -736,17 +738,38 @@ pub async fn apply_definitions(
                     ));
                     continue;
                 }
-                errors.extend(store::rules::sync_file(t, &f.project, Some(&f.text))?);
+                plans.extend(store::rules::plan_file(c, &f.project, &f.text)?);
+            }
+            Ok((plans, errors))
+        })
+        .await?;
+    let mut checked = Vec::new();
+    for plan in plans {
+        let file = store::rules::file_path(&plan.project);
+        match store::rules::parse_off(plan.text.clone(), file, plan.ctx.clone()).await? {
+            Ok(set) => checked.push((plan, set)),
+            // A bad file keeps the last good rules.
+            Err(e) => rule_errors.extend(e.to_string().lines().map(str::to_owned)),
+        }
+    }
+    let present: Vec<String> = defs.rules.iter().map(|f| f.project.clone()).collect();
+    let stored = state
+        .db
+        .write("system", move |t| {
+            let mut errors = Vec::new();
+            for (plan, set) in &checked {
+                errors.extend(store::rules::store_file(t, plan, set)?);
             }
             // A rules file that is gone: its rules become API rules.
             for p in store::rules::file_projects(t)? {
-                if !rules_defs.iter().any(|f| f.project == p) {
-                    store::rules::sync_file(t, &p, None)?;
+                if !present.contains(&p) {
+                    store::rules::file_gone(t, &p)?;
                 }
             }
             Ok(errors)
         })
         .await?;
+    rule_errors.extend(stored);
     report.errors.extend(rule_errors);
     // The template files, before the fleets: a fleet agent may name one.
     match template_files::refresh(state).await {

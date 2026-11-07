@@ -9,10 +9,15 @@
 //! [`parse`] checks a file against it, then checks what a schema cannot
 //! say:
 //!
-//! - The file holds data only: rule blocks, fields, and `let`. An
-//!   `import` (imports are off), a `type`, `union`, `symbol_set`,
-//!   `namespace`, `use`, table, connection, or decorator is refused. The
-//!   document reads no file: its loader refuses each read.
+//! - The file holds plain data only: rule blocks and fields whose values
+//!   are literals (a bool, a number, a text, `none`, or a list of these),
+//!   and quoted block labels. A `let`, a function call, a function, a
+//!   reference, an operator, an interpolated string, a record, a field
+//!   for a block slot (computed children), an `import` (imports are off),
+//!   a `type`, `union`, `symbol_set`, `namespace`, `use`, table,
+//!   connection, or decorator is refused before WCL evaluates anything
+//!   ([`forbidden_items`]). So the evaluation is bounded by the file size.
+//!   The document reads no file: its loader refuses each read.
 //! - The rule names are unique, and a rule has an `on` kind and at least
 //!   one verb.
 //! - Each `when` has one compare, on a known path
@@ -206,7 +211,7 @@ pub struct BoardColumn {
 }
 
 /// What [`parse`] checks a file against, beyond the schema.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Context {
     /// The columns of the project's board. `None`: no column check.
     pub columns: Option<Vec<BoardColumn>>,
@@ -301,7 +306,79 @@ fn no_files() -> FileLoader {
     })
 }
 
-/// The items of the file that a rules file may not hold, as problems.
+/// The block kinds of a rules file. A field of one of these names would
+/// fill a block slot with an expression (computed children), which breaks
+/// the file order of the verbs.
+fn is_block_kind(name: &str) -> bool {
+    name == RULE || name == "rules" || name == WHEN || VERBS.iter().any(|v| v.kind == name)
+}
+
+/// Is `e` a number literal?
+fn is_number(e: &ast::Expr) -> bool {
+    use ast::Expr as E;
+    matches!(
+        e,
+        E::I8(_)
+            | E::I16(_)
+            | E::I32(_)
+            | E::I64(_)
+            | E::I128(_)
+            | E::Isize(_)
+            | E::U8(_)
+            | E::U16(_)
+            | E::U32(_)
+            | E::U64(_)
+            | E::U128(_)
+            | E::Usize(_)
+            | E::F32(_)
+            | E::F64(_)
+    )
+}
+
+/// What in `e` is not plain data, for the error. `None`: `e` is a literal
+/// (a bool, a number, a negative number, a text, `none`, or a list of
+/// these). Nothing else is allowed, so WCL evaluates no call, function,
+/// reference, or operator of a rules file.
+fn non_literal(e: &ast::Expr) -> Option<&'static str> {
+    use ast::Expr as E;
+    match e {
+        E::Bool(_) | E::Utf8(_) | E::Ascii(_) | E::None => None,
+        e if is_number(e) => None,
+        E::Unary {
+            op: ast::UnaryOp::Neg,
+            operand,
+            ..
+        } if is_number(operand) => None,
+        E::Paren { inner, .. } => non_literal(inner),
+        E::ListLit { elements, .. } => elements.iter().find_map(non_literal),
+        E::Call { .. } => Some("a function call"),
+        E::Function(_) => Some("a function"),
+        E::Identifier(..) | E::SelfKw(_) | E::ParentKw(_) | E::Member { .. } => {
+            Some("a reference")
+        }
+        E::InterpolatedString { .. } => Some("an interpolated string"),
+        E::Binary { .. } | E::Unary { .. } => Some("an operator"),
+        _ => Some("a computed value"),
+    }
+}
+
+/// A problem for each value of `e` that is not plain data.
+fn check_literal(text: &str, e: &ast::Expr, at: usize, out: &mut Vec<Problem>) {
+    if let Some(what) = non_literal(e) {
+        out.push(problem_at(
+            text,
+            Some(at),
+            format!(
+                "{what} is not allowed in {FILE_NAME}: a value is a literal \
+                 (a bool, a number, a quoted text, none, or a list of these)"
+            ),
+        ));
+    }
+}
+
+/// The items of the file that a rules file may not hold, as problems. A
+/// rules file holds plain data only (see the module docs): this runs on
+/// the parsed text, before WCL evaluates anything.
 fn forbidden_items(text: &str, items: &[ast::Item], out: &mut Vec<Problem>) {
     for item in items {
         let what = match item {
@@ -313,9 +390,21 @@ fn forbidden_items(text: &str, items: &[ast::Item], out: &mut Vec<Problem>) {
                         format!("a decorator is not allowed in {FILE_NAME}"),
                     ));
                 }
+                if is_block_kind(&f.name) {
+                    out.push(problem_at(
+                        text,
+                        Some(f.span.start),
+                        format!(
+                            "a field `{0}` is not allowed in {FILE_NAME}: write a `{0} {{ ... }}` block",
+                            f.name
+                        ),
+                    ));
+                    continue;
+                }
+                check_literal(text, &f.expr, f.span.start, out);
                 continue;
             }
-            ast::Item::Let(_) => continue,
+            ast::Item::Let(_) => "a `let` binding (a rules file holds plain data only)",
             ast::Item::Block(b) => {
                 if let Some(d) = b.decorators.first() {
                     out.push(problem_at(
@@ -323,6 +412,25 @@ fn forbidden_items(text: &str, items: &[ast::Item], out: &mut Vec<Problem>) {
                         Some(d.span.start),
                         format!("a decorator is not allowed in {FILE_NAME}"),
                     ));
+                }
+                let bad_form = if b.slot_decl.is_some() {
+                    Some("a slot declaration")
+                } else if b.conditional {
+                    Some("a conditional block")
+                } else if !b.kind_ns.is_empty() {
+                    Some("a namespaced block kind")
+                } else {
+                    None
+                };
+                if let Some(what) = bad_form {
+                    out.push(problem_at(
+                        text,
+                        Some(b.span.start),
+                        format!("{what} is not allowed in {FILE_NAME}"),
+                    ));
+                }
+                for l in &b.labels {
+                    check_literal(text, l, b.span.start, out);
                 }
                 forbidden_items(text, &b.items, out);
                 continue;
@@ -884,6 +992,59 @@ rule "validate-pass" {
         assert!(e.contains("symbol_set"), "{e}");
         let e = errors("@schemaless\nrule \"r\" {\n  anything = 1\n}\n");
         assert!(e.contains("decorator"), "{e}");
+    }
+
+    #[test]
+    fn only_plain_data_is_allowed() {
+        let rule = |body: &str| format!("rule \"r\" {{\n  on = [\"card\"]\n{body}\n}}\n");
+        // A function call, at a field and inside a verb.
+        let e = errors(&rule("  description = upper(\"x\")\n  job_cancel {}"));
+        assert!(e.contains("a function call is not allowed"), "{e}");
+        assert!(e.starts_with("rules.wcl:3:"), "{e}");
+        let big = "  card_comment { text = join(map(range(0, 1048576), fn(i: i64) -> utf8 { repeat(\"x\", 67108864) }), \"\") }";
+        let e = errors(&rule(big));
+        assert!(e.contains("a function call is not allowed"), "{e}");
+        // A let, at the top and in a rule.
+        let e = errors(&format!("let x = \"y\"\n{}", rule("  job_cancel {}")));
+        assert!(e.contains("a `let` binding"), "{e}");
+        assert!(e.starts_with("rules.wcl:1:1:"), "{e}");
+        let e = errors(&rule("  let x = 1\n  job_cancel {}"));
+        assert!(e.contains("a `let` binding"), "{e}");
+        // A lambda, a reference, an operator, an interpolation.
+        let e = errors(&rule("  description = fn(i: i64) -> i64 { i }\n  job_cancel {}"));
+        assert!(e.contains("a function is not allowed"), "{e}");
+        let e = errors(&rule("  description = name\n  job_cancel {}"));
+        assert!(e.contains("a reference is not allowed"), "{e}");
+        let e = errors(&rule("  max_per_hour = 2 * 3\n  job_cancel {}"));
+        assert!(e.contains("an operator is not allowed"), "{e}");
+        let e = errors(&rule("  on = [\"a\", upper(\"b\")]\n  job_cancel {}"));
+        assert!(e.contains("a function call is not allowed"), "{e}");
+        // (Refused, or a syntax error: either way an error.)
+        errors(&rule("  card_comment { text = $\"${1 + 1}\" }"));
+        // Computed children: a field for a verb slot, or for the rules.
+        let e = errors(&rule("  card_move = []\n  job_cancel {}"));
+        assert!(e.contains("a field `card_move` is not allowed"), "{e}");
+        let e = errors("rules = []\n");
+        assert!(e.contains("a field `rules` is not allowed"), "{e}");
+        // A computed label.
+        errors("rule upper(\"r\") {\n  on = [\"card\"]\n  job_cancel {}\n}\n");
+        // Literals still read: a negative number fails the range check only.
+        let e = errors(&rule("  max_per_hour = -1\n  job_cancel {}"));
+        assert!(e.contains("`max_per_hour` is 1 to"), "{e}");
+    }
+
+    #[test]
+    fn the_verbs_keep_the_file_order() {
+        // Not the order of the schema: grouping by kind would fail here.
+        let text = "rule \"r\" {\n  on = [\"card\"]\n  agent_end { outcome = \"done\" }\n  card_move { to = \"review\" }\n  card_label { add = [\"a\"] }\n  card_move { to = \"done\" }\n  card_comment { text = \"x\" }\n}\n";
+        let set = parse(text, "rules.wcl", &board()).expect("good file");
+        let verbs: Vec<&str> = set.rules[0].actions.iter().map(|a| a.verb.as_str()).collect();
+        assert_eq!(
+            verbs,
+            vec!["agent.end", "card.move", "card.label", "card.move", "card.comment"]
+        );
+        assert_eq!(set.rules[0].actions[1].args["to"], "review");
+        assert_eq!(set.rules[0].actions[3].args["to"], "done");
     }
 
     #[test]

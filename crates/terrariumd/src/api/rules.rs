@@ -1,10 +1,15 @@
 //! `/api/projects/{name}/rules` and `/api/rules/schema` (docs/api.md
 //! §19.8, TER-166): the board rules file of a project.
 //!
-//! Read: whoever reads the project. Write (put, delete): the operator or a
-//! project admin of the project (`policy::admin_project`, which a
-//! sysadmin passes too). Each write writes an audit row
-//! (`crate::store::rules`). Nothing runs the rules yet.
+//! Read: whoever reads the project. Write (put, delete): the operator, a
+//! project admin of the project, or a sysadmin (`policy::admin_project`,
+//! as for the other project settings; docs/api.md §19.8). Each write
+//! writes an audit row (`crate::store::rules`). Nothing runs the rules
+//! yet.
+//!
+//! The WCL parse of a text never runs inside a DB closure: the handler
+//! reads the context under the lock, parses on a blocking thread
+//! (`rules::check`, `rules::with_rules`), then writes.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -49,7 +54,8 @@ async fn show(
     Path(name): Path<String>,
 ) -> ApiResult<Json<Rules>> {
     policy::read_project(&actor, &name)?;
-    Ok(Json(state.db.read(move |c| rules::get(c, &name)).await?))
+    let r = state.db.read(move |c| rules::get(c, &name)).await?;
+    Ok(Json(rules::with_rules(r).await?))
 }
 
 /// The body of `PUT /api/projects/{name}/rules`.
@@ -70,10 +76,16 @@ async fn put(
     ApiJson(body): ApiJson<PutBody>,
 ) -> ApiResult<Json<Rules>> {
     policy::admin_project(&actor, &name, "editing the board rules")?;
+    let project = name.clone();
+    let ctx = state
+        .db
+        .read(move |c| rules::context(c, &project))
+        .await?;
+    let set = rules::check(body.text.clone(), ctx.clone()).await?;
     let r = state
         .db
         .write(actor.label(), move |t| {
-            rules::put(t, &name, &body.text, body.base_hash.as_deref())
+            rules::put(t, &name, &body.text, set, &ctx, body.base_hash.as_deref())
         })
         .await?;
     Ok(Json(r))
@@ -122,9 +134,7 @@ async fn check(
     ApiJson(body): ApiJson<CheckBody>,
 ) -> ApiResult<Json<Value>> {
     policy::read_project(&actor, &name)?;
-    let set = state
-        .db
-        .read(move |c| rules::check(c, &name, &body.text))
-        .await?;
+    let ctx = state.db.read(move |c| rules::context(c, &name)).await?;
+    let set = rules::check(body.text, ctx).await?;
     Ok(Json(json!({"ok": true, "rules": set.rules})))
 }

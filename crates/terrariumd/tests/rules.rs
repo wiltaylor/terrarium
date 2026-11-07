@@ -11,14 +11,26 @@ use common::{TestDaemon, write};
 use serde_json::{Value, json};
 use terrariumd::config_repo::ConfigRepo;
 
+// The verbs are not in the order of the schema (card_move, card_label,
+// card_assign): a read that grouped them by kind fails the order checks.
 const GOOD: &str = r#"rule "review-pass" {
   on = ["job"]
   when "data.outcome" { eq = "passed" }
-  card_label { remove = ["validation:running"] }
-  card_move { to = "review"  comment = "Job {{job.id}} passed" }
   card_assign { who = "none" }
+  card_move { to = "review"  comment = "Job {{job.id}} passed" }
+  card_label { remove = ["validation:running"] }
 }
 "#;
+
+/// The verbs of the first rule of a rules body.
+fn verbs_of(body: &Value) -> Vec<String> {
+    body["rules"][0]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["verb"].as_str().unwrap().to_owned())
+        .collect()
+}
 
 const OTHER: &str = r#"rule "block-on-fail" {
   on = ["job"]
@@ -72,15 +84,11 @@ async fn put_get_check_delete_with_audit() {
     assert_eq!(body["source"], "api");
     assert_eq!(body["text"], GOOD);
     assert_eq!(body["rules"][0]["name"], "review-pass");
-    let verbs: Vec<&str> = body["rules"][0]["actions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|a| a["verb"].as_str().unwrap())
-        .collect();
-    assert_eq!(verbs, ["card.label", "card.move", "card.assign"]);
+    assert_eq!(verbs_of(&body), ["card.assign", "card.move", "card.label"]);
     let hash = body["hash"].as_str().unwrap().to_owned();
-    assert_eq!(td.get("/api/projects/terra/rules").await.ok()["hash"], hash);
+    let r = td.get("/api/projects/terra/rules").await;
+    assert_eq!(r.ok()["hash"], hash);
+    assert_eq!(verbs_of(&r.body), ["card.assign", "card.move", "card.label"]);
 
     // The audit row names the rules and the hashes.
     let rows = audit_rows(&td, "rules.put").await;
@@ -171,6 +179,35 @@ async fn put_get_check_delete_with_audit() {
     td.post("/api/projects/terra/rules/check", json!({"text": bad}))
         .await
         .err(422, "invalid");
+    // Plain data only: a function call, a let, and a lambda are refused
+    // before WCL evaluates them.
+    for (text, what) in [
+        (
+            "rule \"r\" {\n  on = [\"job\"]\n  card_comment { text = join(map(range(0, 1048576), fn(i: i64) -> utf8 { repeat(\"x\", 67108864) }), \"\") }\n}\n",
+            "a function call is not allowed",
+        ),
+        (
+            "let x = \"review\"\nrule \"r\" {\n  on = [\"job\"]\n  card_move { to = x }\n}\n",
+            "a `let` binding",
+        ),
+        (
+            "rule \"r\" {\n  on = [\"job\"]\n  description = fn(i: i64) -> i64 { i }\n  job_cancel {}\n}\n",
+            "a function is not allowed",
+        ),
+    ] {
+        let r = td
+            .post("/api/projects/terra/rules/check", json!({"text": text}))
+            .await;
+        r.err(422, "invalid");
+        assert!(
+            r.body["error"]["message"].as_str().unwrap().contains(what),
+            "{}",
+            r.body
+        );
+        td.put("/api/projects/terra/rules", json!({"text": text}))
+            .await
+            .err(422, "invalid");
+    }
     assert_eq!(
         td.get("/api/projects/terra/rules").await.ok()["hash"],
         new_hash
@@ -321,12 +358,21 @@ async fn a_rules_file_loads_at_start_and_at_reload() {
     assert_eq!(r.ok()["rules"][0]["name"], "block-on-fail");
     assert_eq!(audit_rows(&td, "rules.file").await.len(), 2);
 
-    // The file goes: the rules stay, as API rules.
+    // The file goes: the rules stay, as API rules, with an audit row.
     std::fs::remove_file(td.config.join("projects/filed.rules.wcl")).unwrap();
     td.post_empty("/api/reload").await.ok();
     let r = td.get("/api/projects/filed/rules").await;
     assert_eq!(r.ok()["source"], "api");
     assert_eq!(r.body["rules"][0]["name"], "block-on-fail");
+    let rows = audit_rows(&td, "rules.file").await;
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[0]["detail"]["file"], Value::Null);
+    assert_eq!(rows[0]["detail"]["source"], "api");
+    assert_eq!(rows[0]["detail"]["previous_file"], "projects/filed.rules.wcl");
+    assert_eq!(rows[0]["detail"]["hash"], r.body["hash"]);
+    // A second reload writes no second row.
+    td.post_empty("/api/reload").await.ok();
+    assert_eq!(audit_rows(&td, "rules.file").await.len(), 3);
     td.put("/api/projects/filed/rules", json!({"text": GOOD}))
         .await
         .ok();
@@ -338,6 +384,38 @@ async fn a_rules_file_loads_at_start_and_at_reload() {
         r.ok()["errors"].to_string().contains("no project `ghost`"),
         "{}",
         r.body
+    );
+}
+
+#[tokio::test]
+async fn a_broken_file_at_start_does_not_stop_a_good_project() {
+    // A file that does not check (a function call) next to a good one.
+    let broken = "rule \"r\" {\n  on = [\"job\"]\n  description = upper(\"x\")\n  job_cancel {}\n}\n";
+    let td = TestDaemon::with_config(|c| {
+        write(c, "projects/good.toml", "description = \"x\"\n");
+        write(c, "projects/good.rules.wcl", GOOD);
+        write(c, "projects/broken.toml", "description = \"y\"\n");
+        write(c, "projects/broken.rules.wcl", broken);
+    })
+    .await;
+    // The daemon is up, the good project has its rules.
+    let r = td.get("/api/projects/good/rules").await;
+    assert_eq!(r.ok()["source"], "file");
+    assert_eq!(verbs_of(&r.body), ["card.assign", "card.move", "card.label"]);
+    // The broken project has none, and only the good file has an audit row.
+    let r = td.get("/api/projects/broken/rules").await;
+    assert_eq!(r.ok()["exists"], false);
+    let rows = audit_rows(&td, "rules.file").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["target"], "good");
+    // The other APIs of the broken project work.
+    td.get("/api/projects/broken").await.ok();
+    // A reload names the broken file at its line.
+    let r = td.post_empty("/api/reload").await;
+    let errors = r.ok()["errors"].to_string();
+    assert!(
+        errors.contains("projects/broken.rules.wcl:3:") && errors.contains("a function call"),
+        "{errors}"
     );
 }
 

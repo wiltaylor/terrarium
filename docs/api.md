@@ -7840,9 +7840,16 @@ or `cancelled`).
 
 The checks beyond the schema:
 
-- Data only: rule blocks, fields, and `let`. An `import` (imports are
-  off), a `type`, `union`, `symbol_set`, `namespace`, `use`, table,
-  connection, or decorator is `422`.
+- Plain data only: rule blocks with quoted labels, and fields whose
+  values are literals (a bool, a number, a quoted text, `none`, or a list
+  of these). A `let`, a function call, a function (lambda), a reference
+  to another value, an operator, an interpolated string (`$"..."`), a
+  record, a field that fills a block slot (`card_move = [...]`), an
+  `import` (imports are off), a `type`, `union`, `symbol_set`,
+  `namespace`, `use`, table, connection, or decorator is `422`. The
+  daemon refuses them before it evaluates the file, so a check costs at
+  most what the 64 KiB of literals cost, and it runs outside the
+  database lock.
 - A column (`to`, `from`) is `@<role>`, the column with that role, else
   the column of that name; or a plain column name. It must be on the
   project's board.
@@ -7858,24 +7865,29 @@ Each error names the line and the column: ``rules.wcl:3:3: block kind
 The file comes from the API (`source: api`) or from the config dir:
 `projects/<project>.rules.wcl` beside the project file (`source: file`),
 read at the start and at `POST /api/reload`. A file that does not check
-keeps the last good rules, and the reload answer names its errors. When
-the file goes, its rules stay as API rules. The config repo export
+keeps the last good rules, and the reload answer names its errors. A
+broken file at the start does not stop the start or another project.
+When the file goes, its rules stay as API rules. The config repo export
 (§25) writes the API rules to `export/rules/<project>.rules.wcl`.
 
 | Method and path | Body | Answer |
 |---|---|---|
 | `GET /api/rules/schema` | | `200`, `{file, schema, verbs: [{kind, verb}], max_rules, max_bytes}`. |
 | `GET /api/projects/{name}/rules` | | `200`, `{project, exists, text, hash?, source?, rules, updated_by?, updated_at?}`. `rules` is the file as read: `{name, description?, enabled, on, when, max_per_hour?, actions: [{verb, args}], line}`. No file: `exists: false`, `text: ""`, `rules: []`. |
-| `PUT /api/projects/{name}/rules` | `{text, base_hash?}` | `200`, the rules. It creates or replaces the file. `base_hash` is the `hash` that the caller read (`""`: no file yet); another current hash is `409 conflict`. |
+| `PUT /api/projects/{name}/rules` | `{text, base_hash?}` | `200`, the rules. It creates or replaces the file. `base_hash` is the `hash` that the caller read (`""`: no file yet); another current hash is `409 conflict`. A board change during the check is `409 conflict` too (send it again). |
 | `DELETE /api/projects/{name}/rules?base_hash=` | | `204`. No file: `404`. |
 | `POST /api/projects/{name}/rules/check` | `{text}` | `200`, `{ok: true, rules}`, or `422`. It writes nothing. |
 
-Read and check: whoever reads the project. Put and delete: the operator
-or a project admin of the project (and a sysadmin). Each change writes an
+Read and check: whoever reads the project. Put and delete: the operator,
+a project admin of the project, or a sysadmin. The sysadmin is allowed on
+purpose: the write uses the same right as the other project settings
+(`policy::admin_project`). Each change writes an
 audit row with the target and the project of the file: `rules.put`
 (`{hash, previous_hash, rules: [names]}`), `rules.delete`
 (`{previous_hash}`), and `rules.file` for a file load
-(`{file, hash, previous_hash, rules}`).
+(`{file, source: "file", hash, previous_hash, rules}`) or for a file that
+is gone (`{file: null, previous_file, source: "api", hash,
+previous_hash}`).
 
 Errors: `422 invalid` with `details.problems: [{line, column, message}]`;
 `409 conflict` for a stale `base_hash`; `409 file_managed` for a put or a
