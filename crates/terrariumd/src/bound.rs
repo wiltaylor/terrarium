@@ -56,6 +56,12 @@
 //! The wait columns are names, not roles: a board without them never
 //! parks its bound agents.
 //!
+//! With `board_flow = rules` (TER-170) the driver and [`reconcile`] leave
+//! the cards of the project alone: the rules `agent-park`, `agent-unpark`,
+//! and `agent-end-*` of the built-in pack do the same through the verbs
+//! `agent.park`, `agent.unpark`, and `agent.end`. The spawn timer still
+//! ends the agent of a finished card ([`finished_object`]).
+//!
 //! An event that the driver misses (a lag of the event hub, or a daemon
 //! that was down) is repaired by [`reconcile`] at the driver's start and
 //! after each lag: a parked agent whose card is out of the wait columns
@@ -665,7 +671,21 @@ async fn handle(state: &Shared, ev: StoredEvent) {
     let Some(card_id) = card_of(&ev) else { return };
     let b = Bound::new(KIND_CARD, &card_id);
     let key = b.clone();
-    let open = match state.db.read(move |c| spawns::open_bound(c, &key)).await {
+    let project = ev.project.clone();
+    let open = match state
+        .db
+        .read(move |c| {
+            // With `board_flow = rules` the board rules park, unpark, and
+            // end the agent (TER-170).
+            if let Some(p) = &project
+                && crate::store::projects::rules_flow(c, p)?
+            {
+                return Ok(None);
+            }
+            spawns::open_bound(c, &key)
+        })
+        .await
+    {
         Ok(Some(sp)) => sp,
         Ok(None) => return,
         Err(e) => {
@@ -752,6 +772,9 @@ pub async fn reconcile(state: &Shared) -> usize {
                     continue;
                 };
                 match board::get_card(c, card_id) {
+                    // With `board_flow = rules` the engine reads the log
+                    // from its own cursor: it misses no event (TER-170).
+                    Ok(card) if crate::store::projects::rules_flow(c, &card.project)? => {}
                     Ok(card) if !card.archived => {
                         // RFC 3339 UTC with milliseconds on both sides.
                         let moved_since =

@@ -8185,19 +8185,43 @@ rule "note-review" {
 `if_card` (on the run's card; a rule with one runs only for events with a
 card): `column` (in one of these), `not_column`, `has_labels` (every
 one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
-of a `job` event, `data.id`; a rule with one runs only for `job` events):
-`state` (`queued`, `running`, `passed`, `failed`, `cancelled`) and
-`outcome` (`red`, `conflict`, `error`, `none`). Every field that is set
-must hold; every block must hold.
+of a `job` event, `data.id`, or of a `job.verdict` event, `data.job`; a
+rule with one runs only for those events): `state` (`queued`, `running`,
+`passed`, `failed`, `cancelled`), `outcome` (`red`, `conflict`, `error`,
+`none`), and the booleans `split` (the job is a half of a split batch),
+`batch` (two or more cards of the job merged, did not conflict), `rerun`
+(a rerun of the job is queued or ran), and `halves` (the job was split).
+Every field that is set must hold; every block must hold.
 
 Templates are filled when the action runs, from the event, the current
 card, the event's job (of a `job` event, `data.id`, or a `job.verdict`
 event, `data.job`; the fields of a `job.verdict` event come first, so
 `{{job.outcome}}` and `{{job.by_agent}}` are the card's), and the rule.
 In a text that an agent reads (`text`, `comment`, `subject`, `body`,
-`turn`) each value is quoted data (one line, in backticks), as in a
-trigger mail (§19.4). The `text` of `card_prepend` is the exception: it
-goes into the card body with its lines, so a failure block stays whole.
+`turn`, `reason`, `result`) each value is quoted data (one line, in
+backticks), as in a trigger mail (§19.4). The `text` of `card_prepend` is
+the exception: it goes into the card body with its lines, so a failure
+block stays whole. The values that the daemon makes are never quoted:
+`card.id`, `card.project`, `card.column`, `job.id`, `job.kind`,
+`job.state`, `job.outcome`, `job.attempt`, `rule.name`, and the texts of
+the job queue below except `job.failure_block` (TER-170). Each is one
+line of daemon fields (a branch name has no space and no `[`), so none
+can hold a tag. The engine fills the unquoted `job.*` values from the
+stored job, never from event data: any event source can write a
+`job.verdict`. `job.failure_block` holds the tail of the job output,
+untrusted text: it is quoted data in a comment, a mail, or a turn, and
+only `card_prepend` writes it as it is.
+
+The texts of the job queue, as the coded flow writes them (§19.11):
+`job.queue_comment` (the comment of a queued job on the run's card),
+`job.end_comment` and `job.failure_block` (of an ended job),
+`job.rerun_comment` (the job runs again; empty without a rerun),
+`job.split_comment` (the batch split; empty without halves),
+`job.fail_comment` (the final failure: `failed again`, `failed (red alone
+after its batch was red)`, or `left the batch on a conflict`),
+`job.fail_mail` (the body of the mail to the worker), `job.next_jobs`
+(the rerun, or the two halves), and `job.branch` and `job.by_agent` (the
+run's card's, in a batch).
 
 Verbs (TER-169). Each verb goes through the store functions of the API
 as the rule actor, so the same checks hold. A verb whose precondition
@@ -8208,7 +8232,8 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
   the top. The board invariants hold (a move to the blocked column needs
   a `comment`).
 - `card_label`: add and remove labels; a label whose placeholder is empty
-  is left out. No change: a no-op.
+  is left out. `remove` takes globs (`by:*`); a label that `add` names
+  stays. No change: a no-op.
 - `card_comment`: a comment on the run's card.
 - `card_assign`: assign the run's card to `who` (an agent name or a
   template), or unassign it with `none`. A template that fills to nothing
@@ -8230,25 +8255,35 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
   the card verbs on the `job` event.
 - `job_cancel`: cancel the event's job, else the open job of the run's
   card, and write its `job.verdict` (`cancelled`); a running job is
-  killed. No open job: a no-op.
+  killed. As the API cancel, with `board_flow = code` it takes the
+  `validation:*` labels off the job's cards (with `rules` the pack does
+  it on the verdict). No open job: a no-op.
 - `job_rerun`: queue the event's failed job once more at the front
   (attempt + 1; a batch with the cards that did not conflict), while its
   attempt is under `max_attempts` (default 2). A conflict, a job that did
-  not fail, or a job that runs again already: a no-op.
+  not fail, a job that runs again already, or a card of it with an open
+  job (the coded flow split the batch already): a no-op.
 - `job_split`: split the event's red batch (two or more cards that
   merged) in two halves, the left half first. A job that is not red, has
-  fewer than two merged cards, or was split already: a no-op.
-- `job_fix`: open one fix card for the event's failed merge job: in `to`
+  fewer than two merged cards, was split already, or has a card with an
+  open job: a no-op. `after_fixes`: only when the group had at least that
+  many fix cards of earlier jobs (below).
+- `job_fix`: open one fix card for the event's red merge job: in `to`
   (default `@ready`), with the label `merge-fix:<job>` and `labels`, a
   `card` link to each card of the job, and the failure block in its body.
-  An open card with that label: a no-op. The fix card is how a red merge
-  group gets a fix before a split; the rule does not spawn the agent for
-  it.
+  A job that is not red (a conflict, an error, a cancelled or cut run),
+  an open card with that label, or a group that had `max` fix cards of
+  earlier jobs: a no-op. The fix cards of a group are the cards with a
+  `merge-fix:` label of another job that link to a card of the job, done
+  and archived ones too. The fix card is how a red merge group gets a fix
+  before a split (MEM-84); the rule does not spawn the agent for it.
 - `agent_park`, `agent_unpark`, `agent_end`: act on the open agent bound
   to the run's card (§6.10). No bound agent: a no-op. `agent_unpark`
   acts only on a parked agent; its turn is `turn` (its values quoted),
   else the return turn of the card move of the event, else a plain return
-  turn. `agent_end` closes the agent with `outcome` as `agent done` does.
+  turn. `agent_park` takes a `reason` (default `rule <name>`).
+  `agent_end` closes the agent with `outcome` as `agent done` does, with
+  `result` for the owner (default `the rule <name> ended it`).
 
 Once per job: `job.verdict` comes once for each card of a batch, so a
 rule on it runs once per card; `job_rerun`, `job_split` and `job_fix`
@@ -8312,6 +8347,87 @@ terrarium schedule new deploy-staging --project terra --manual \
 terrarium schedule ls --actions
 terrarium schedule run terra/deploy-staging
 ```
+
+### 19.11 The board flow and the built-in pack
+
+Who runs the card flow of the job queue and of the bound agents is a
+setting of each project (TER-170): `board_flow`, `code` (the default) or
+`rules`. A project admin sets it with `PATCH /api/projects/{name}`
+`{"board_flow": "rules"}` (audited as `project.update`), or the project
+file with `board_flow = "rules"` (a fleet file too). `GET
+/api/projects/{name}` shows it, with `board_flow_at`, the time of the last
+switch.
+
+- `code`: the daemon moves, labels, and comments the cards of the job
+  queue (§35), and parks, unparks, and ends the bound agents (§6.10), as
+  before. The rules of the project's `rules.wcl` run beside it.
+- `rules`: the job queue (`card validate`, `card merge`, `POST
+  /api/merges`, a cancel, the start, a requeue, and the end of a job) and
+  the bound agent driver only write their events (`job`, `job.verdict`,
+  `card`). The engine (§19.9) runs the built-in pack "delivery" on them,
+  then the project's own rules. An event from before the switch starts no
+  run of the pack. The `comment` of a validate goes on the card as the
+  actor's own comment.
+
+The pack has no rule for a queued validate job: the operator removed the
+validating column and `card validate` for card work (2026-11-07). With
+`rules`, `card validate` queues the job (`201`) and the card stays where
+it is, without a job label; on a pass the pack moves it to `@review`. A
+project that still validates copies the opt-in rules of
+`crates/terrarium-core/src/rules.validate.wcl` (`validate-queued`,
+`validate-queued-note`, `validate-queued-move`: one `validation:queued`
+and one `by:<worker>` label, the queue comment, the move to
+`@validating`) into its `rules.wcl`; its board needs a `validating`
+column. (With `code`, a validate on a board without that column fails in
+one write.)
+
+The pack (`crates/terrarium-core/src/rules.default.wcl`) does what the
+coded flow does, with the same labels, moves, comments, mails, and
+parks; its texts come from the code of the coded flow (§19.9 templates).
+Its rules, in order:
+
+| Rule | On | Does |
+|---|---|---|
+| `merge-queued` | a new merge job | `validation:queued` and the queue comment on each card; no move |
+| `job-started`, `job-requeued` | a job starts, or waits again | `validation:queued` <-> `validation:running` |
+| `validate-pass`, `merge-pass` | a passed verdict | labels off, move to `@review` or `@accepted` with the end comment, unassign |
+| `job-rerun-error`, `job-rerun-red`, `job-rerun-note` | an `error` verdict, or a `red` one of a job that is not a split half and not a group of two or more merged cards | `job_rerun` (attempt 2), then labels back to queued and the rerun comment |
+| `merge-red-group`, `merge-red-split-note`, `merge-red-fix-note` | a red merge with two or more merged cards | `job_fix` (at most 3 fix cards), then `job_split` after 3; the split comment, or the labels off and a note of the fix card |
+| `job-fail-conflict`, `job-fail-red`, `job-fail-error` | a final failure | labels off, the failure block on the body, the top of `@ready` with the comment, unassign, a mail to the worker |
+| `job-cancelled` | a cancelled verdict | labels off |
+| `agent-park`, `agent-unpark`, `agent-end-done`, `agent-end-archived`, `agent-end-merged` | a card move to `validating`, `review`, `accepted` (names, as §6.10); a move elsewhere (not `done`); `done`; an archive; a passed merge | park, unpark with the return turn, end |
+
+One change from the coded flow, by the operator's rule of 2026-11-07
+(MEM-84): a red merge group gets a fix card first, and splits in halves
+only after three fix cards. The fix cards of a group are the cards with a
+`merge-fix:` label of an earlier job whose linked cards (fix cards left
+out) include every card of this job: those of its reruns and of the group
+it was split from count, those of another group that shared a card do
+not. Set another number with your own `merge-red-group` rule. The pack
+does not spawn the fix agent or queue the group again (TER-181).
+
+A rule of the project's `rules.wcl` with the name of a pack rule
+replaces it. A rule with only `enabled = false` (no `on`, no verb) turns
+it off:
+
+```wcl
+rule "agent-park" { enabled = false }
+```
+
+Other differences from the coded flow: the author of a comment is the
+rule actor (`rule:<project>/<rule>`), not `system`; the mail to the
+worker comes from `project:<project>`, not `system`; a column that the
+pack names and the board lacks fails the rule run (the coded flow wrote
+a comment); a batch merge ends the bound agent of each card, not only
+the first; and the pack acts a moment after the event (§19.9), so the
+queue can start the next queued job before a rule splits or reruns the
+one that ended (the order of the merges after a split can differ).
+
+A switch back from `rules` to `code` drops the pack at the next pass of
+the engine. A job that ended under `rules` but whose events the engine
+had not run yet (a window of about one pass) then gets no flow from
+either side: its cards keep their column and job labels. Switch while the
+queue is idle, or move and relabel those cards by hand.
 
 ## 20. Event sources and ingest
 

@@ -98,6 +98,13 @@
 //!   (TER-167): `passed`, `red`, `conflict`, `cancelled`, or `error`, with
 //!   the end comment and the failure block. It is written in the same
 //!   write as the card flow above, which it does not change.
+//! - With `board_flow = rules` (TER-170, [`code_flow`]) the queue runs the
+//!   jobs and emits the `job` and `job.verdict` events only: the labels,
+//!   the moves, the comments, the rerun, the split, and the mail above
+//!   come from the board rules (the built-in pack, `rules.default.wcl`).
+//!   The texts are the same: the pack fills them from [`queue_comment`],
+//!   [`rerun_comment`], [`split_comment`], [`fail_comment`], and
+//!   [`fail_mail`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -493,7 +500,9 @@ async fn end_lost(state: &Shared, l: Lost) {
                     Some(why) => jobs::requeue_infra(t, &id, why)?,
                     None => jobs::requeue_lost(t, &id)?,
                 };
-                if j.is_some() {
+                if let Some(j) = &j
+                    && code_flow(t, &j.project)?
+                {
                     for c in &cards {
                         set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
                     }
@@ -728,8 +737,10 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
                 }
                 if jobs::start(t, &j.id, &host, j.slot)? {
                     let run = LiveRun::new(&j.id);
-                    for c in j.cards() {
-                        set_labels(t, &c.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
+                    if code_flow(t, &j.project)? {
+                        for c in j.cards() {
+                            set_labels(t, &c.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
+                        }
                     }
                     out.push((jobs::get(t, &j.id)?, def, run));
                 }
@@ -816,6 +827,22 @@ async fn prepare_hosts_with(
     .await
     .map_err(|e| ApiError::internal(format!("host resolver failed: {e}")))?;
     db.write("system", move |t| jobs::pin_hosts(t, keys)).await
+}
+
+/// Does the daemon's code run the card flow of `project` (`board_flow =
+/// code`, TER-170)? With `rules` it only emits the job events, and the
+/// board rules set the labels, move, and comment.
+pub fn code_flow(conn: &rusqlite::Connection, project: &str) -> ApiResult<bool> {
+    Ok(!crate::store::projects::rules_flow(conn, project)?)
+}
+
+/// Remove the job labels of the cards of `j` (a cancel), as the operator.
+/// A card that is gone or archived is left alone.
+pub fn clear_job_labels(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    for c in j.cards() {
+        set_labels(t, &c.card, &[], &[LABEL_QUEUED, LABEL_RUNNING])?;
+    }
+    Ok(())
 }
 
 /// Add and take away card labels, keeping the others. A card that is gone
@@ -996,7 +1023,9 @@ async fn requeue(state: &Shared, job: &Job, why: String, ssh: bool) {
         .db
         .write("system", move |t| {
             let j = jobs::requeue(t, &id, &why)?;
-            if j.is_some() {
+            if let Some(j) = &j
+                && code_flow(t, &j.project)?
+            {
                 for c in &cards {
                     set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
                 }
@@ -1927,6 +1956,107 @@ pub(crate) fn failure_block(j: &Job) -> String {
     )
 }
 
+/// The comment of a queued job on `card` (one of its cards): the same
+/// text from the coded flow (`api/jobs.rs`) and from the built-in rule
+/// pack (`job.queue_comment`, TER-170).
+pub fn queue_comment(j: &Job, card: &str) -> String {
+    match j.kind {
+        JobKind::Validate => format!(
+            "Job queue: validate job {} queued. Repo {}, branch {}, commit {}.",
+            j.id,
+            j.repo,
+            j.branch,
+            j.commit
+                .as_deref()
+                .unwrap_or("the branch head at the start")
+        ),
+        JobKind::Merge if j.batch.is_empty() => format!(
+            "Job queue: merge job {} queued: {} onto next of {}.",
+            j.id, j.branch, j.repo
+        ),
+        JobKind::Merge => {
+            let names: Vec<&str> = j.batch.iter().map(|c| c.card.as_str()).collect();
+            let i = j.batch.iter().position(|c| c.card == card).unwrap_or(0);
+            format!(
+                "Job queue: merge job {} queued: {} onto next of {}, card {} of {} in the batch {}.",
+                j.id,
+                j.batch[i].branch,
+                j.repo,
+                i + 1,
+                j.batch.len(),
+                names.join(" ")
+            )
+        }
+    }
+}
+
+/// The comment of a failed job that runs again as `next`. `v` is the
+/// card's view of the failed job ([`card_view`]); `batch`: the failed job
+/// was a batch.
+pub fn rerun_comment(v: &Job, next: &Job, batch: bool) -> String {
+    if batch {
+        format!(
+            "{} It runs once more as job {}.",
+            end_comment(v, "failed"),
+            next.id
+        )
+    } else {
+        format!(
+            "{} It runs once more as job {} (flaky tests).",
+            end_comment(v, "failed"),
+            next.id
+        )
+    }
+}
+
+/// The comment of a red batch that split in `left` and `right`.
+pub fn split_comment(v: &Job, left: &Job, right: &Job) -> String {
+    let names = |x: &Job| {
+        x.cards()
+            .iter()
+            .map(|c| c.card.clone())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    format!(
+        "{} The batch splits to find the failing card: job {} ({}) first, then job {} ({}).",
+        end_comment(v, "failed"),
+        left.id,
+        names(left),
+        right.id,
+        names(right)
+    )
+}
+
+/// The verdict word of the final failure of a card: `j` is the job, `v`
+/// the card's view of it ([`card_view`]).
+pub fn fail_phrase(j: &Job, v: &Job) -> &'static str {
+    if j.batch.is_empty() {
+        // A card split out of a red batch alone was red there already.
+        if j.parent.is_some() && j.outcome.as_deref() == Some("red") {
+            return "failed (red alone after its batch was red)";
+        }
+        return "failed again";
+    }
+    if v.outcome.as_deref() == Some("conflict") {
+        return "left the batch on a conflict";
+    }
+    "failed again"
+}
+
+/// The comment of the final failure of a card ([`fail_phrase`]).
+pub fn fail_comment(j: &Job, v: &Job) -> String {
+    end_comment(v, fail_phrase(j, v))
+}
+
+/// The body of the mail to the worker of a card that failed.
+pub fn fail_mail(v: &Job) -> String {
+    format!(
+        "{}\nThe card is at the top of ready, for you first. The failure block is at the top of the card body.\n",
+        end_comment(v, "failed")
+    )
+}
+
 /// What happens after a job ends: the card move, or the rerun.
 async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
     let j = j.clone();
@@ -1939,6 +2069,10 @@ async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
 /// then the coded card flow (the move, the rerun, or the split).
 fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     emit_verdicts(t, j)?;
+    // With `board_flow = rules` the board rules act on the verdicts.
+    if !code_flow(t, &j.project)? {
+        return Ok(());
+    }
     if j.batch.is_empty() {
         single_end(t, j)
     } else {
@@ -1961,6 +2095,25 @@ fn verdict_of(j: &Job) -> &'static str {
     }
 }
 
+/// The end comment of the verdict of `v` (the card's view of an ended or
+/// cancelled job): `passed`, `was cancelled`, or `failed`. One line: the
+/// fields are the daemon's, and a branch name has no space or `[`
+/// ([`check_ref`]).
+pub fn verdict_comment(v: &Job) -> String {
+    let word = match verdict_of(v) {
+        "passed" => "passed",
+        "cancelled" => "was cancelled",
+        _ => "failed",
+    };
+    end_comment(v, word)
+}
+
+/// The failure block of the verdict of `v`, for a failure only. It holds
+/// the tail of the job output: untrusted text.
+pub fn verdict_failure(v: &Job) -> Option<String> {
+    matches!(verdict_of(v), "red" | "conflict" | "error").then(|| failure_block(v))
+}
+
 /// The `job.verdict` event data of each card of an ended or cancelled
 /// job, in card order (TER-167). It says what the run found for the card,
 /// not what the queue does next: the rerun and the split stay in the
@@ -1977,12 +2130,6 @@ fn verdicts(j: &Job) -> Vec<Value> {
         .iter()
         .map(|v| {
             let verdict = verdict_of(v);
-            let word = match verdict {
-                "passed" => "passed",
-                "cancelled" => "was cancelled",
-                _ => "failed",
-            };
-            let failure = matches!(verdict, "red" | "conflict" | "error").then(|| failure_block(v));
             serde_json::json!({
                 "project": v.project,
                 "job": v.id,
@@ -1997,8 +2144,8 @@ fn verdicts(j: &Job) -> Vec<Value> {
                 "branch": v.branch,
                 "parent": v.parent,
                 "batch": batch,
-                "end_comment": end_comment(v, word),
-                "failure_block": failure,
+                "end_comment": verdict_comment(v),
+                "failure_block": verdict_failure(v),
             })
         })
         .collect()
@@ -2036,19 +2183,9 @@ fn single_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     if j.attempt < 2 && outcome != Some("conflict") && !split_red {
         let next = jobs::rerun(t, j, None)?;
         set_labels(t, &j.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
-        let note = format!(
-            "{} It runs once more as job {} (flaky tests).",
-            end_comment(j, "failed"),
-            next.id
-        );
-        return comment(t, &j.card, &note);
+        return comment(t, &j.card, &rerun_comment(j, &next, false));
     }
-    let verdict = if split_red {
-        "failed (red alone after its batch was red)"
-    } else {
-        "failed again"
-    };
-    fail_card(t, j, verdict)
+    fail_card(t, j, fail_phrase(j, j))
 }
 
 /// The end of a batch merge: the merged cards pass, or the batch splits,
@@ -2060,7 +2197,8 @@ fn batch_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
         .cloned()
         .partition(|c| c.outcome.as_deref() == Some("conflict"));
     for c in &conflicted {
-        fail_card(t, &card_view(j, c), "left the batch on a conflict")?;
+        let v = card_view(j, c);
+        fail_card(t, &v, fail_phrase(j, &v))?;
     }
     if j.state == jobs::JobState::Passed {
         for c in &merged {
@@ -2074,25 +2212,10 @@ fn batch_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
     let red = j.outcome.as_deref() == Some("red");
     if red && merged.len() >= 2 {
         let (left, right) = jobs::split(t, j, &merged)?;
-        let names = |x: &Job| {
-            x.cards()
-                .iter()
-                .map(|c| c.card.clone())
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
         for c in &merged {
             let v = card_view(j, c);
             set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
-            let note = format!(
-                "{} The batch splits to find the failing card: job {} ({}) first, then job {} ({}).",
-                end_comment(&v, "failed"),
-                left.id,
-                names(&left),
-                right.id,
-                names(&right)
-            );
-            comment(t, &c.card, &note)?;
+            comment(t, &c.card, &split_comment(&v, &left, &right))?;
         }
         return Ok(());
     }
@@ -2102,24 +2225,20 @@ fn batch_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
         let next = jobs::rerun(t, j, Some(&merged))?;
         for c in &merged {
             set_labels(t, &c.card, &[LABEL_QUEUED], &[LABEL_RUNNING])?;
-            let note = format!(
-                "{} It runs once more as job {}.",
-                end_comment(&card_view(j, c), "failed"),
-                next.id
-            );
-            comment(t, &c.card, &note)?;
+            comment(t, &c.card, &rerun_comment(&card_view(j, c), &next, true))?;
         }
         return Ok(());
     }
     for c in &merged {
-        fail_card(t, &card_view(j, c), "failed again")?;
+        let v = card_view(j, c);
+        fail_card(t, &v, fail_phrase(j, &v))?;
     }
     Ok(())
 }
 
 /// The job as one card of its batch sees it: the card, its branch, and
 /// its worker. A card that conflicted gets the conflict as its outcome.
-fn card_view(j: &Job, c: &BatchCard) -> Job {
+pub fn card_view(j: &Job, c: &BatchCard) -> Job {
     let mut v = j.clone();
     v.card = c.card.clone();
     v.branch = c.branch.clone();
@@ -2220,10 +2339,7 @@ fn notify_worker(t: &mut Tx<'_>, j: &Job, who: &str) -> ApiResult<()> {
         }
     };
     let subject = format!("{}: validation failed", j.card);
-    let body = format!(
-        "{}\nThe card is at the top of ready, for you first. The failure block is at the top of the card body.\n",
-        end_comment(j, "failed")
-    );
+    let body = fail_mail(j);
     mail::send(
         t,
         Outgoing {

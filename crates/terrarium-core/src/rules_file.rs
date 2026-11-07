@@ -44,6 +44,20 @@ use crate::template_file::{FileError, Problem};
 /// The schema of a rules file, as the daemon ships it.
 pub const SCHEMA: &str = include_str!("rules.schema.wcl");
 
+/// The built-in rule pack "delivery" (TER-170): the flow of the job queue
+/// and of the bound agents as rules, for a project with `board_flow =
+/// "rules"`. See [`default_pack`] and [`with_pack`].
+pub const DEFAULT_PACK: &str = include_str!("rules.default.wcl");
+
+/// The name of the built-in pack in the docs and the errors.
+pub const PACK_FILE: &str = "rules.default.wcl";
+
+/// Opt-in rules for a project that still validates cards (TER-170): the
+/// labels, the comment, and the move to `@validating` of a queued validate
+/// job. Not in the built-in pack (the operator removed the validating
+/// column, 2026-11-07); a project copies them into its `rules.wcl`.
+pub const VALIDATE_RULES: &str = include_str!("rules.validate.wcl");
+
 /// The name of a rules file in the docs and the errors.
 pub const FILE_NAME: &str = "rules.wcl";
 
@@ -159,19 +173,23 @@ pub const VERBS: &[Verb] = &[
     Verb {
         kind: "job_split",
         name: "job.split",
-        args: &[],
+        args: &[("after_fixes", Arg::Count)],
         required: &[],
     },
     Verb {
         kind: "job_fix",
         name: "job.fix",
-        args: &[("to", Arg::Column), ("labels", Arg::List)],
+        args: &[
+            ("to", Arg::Column),
+            ("labels", Arg::List),
+            ("max", Arg::Count),
+        ],
         required: &[],
     },
     Verb {
         kind: "agent_park",
         name: "agent.park",
-        args: &[],
+        args: &[("reason", Arg::Text)],
         required: &[],
     },
     Verb {
@@ -183,7 +201,10 @@ pub const VERBS: &[Verb] = &[
     Verb {
         kind: "agent_end",
         name: "agent.end",
-        args: &[("outcome", Arg::OneOf(&["done", "cancelled"]))],
+        args: &[
+            ("outcome", Arg::OneOf(&["done", "cancelled"])),
+            ("result", Arg::Text),
+        ],
         required: &["outcome"],
     },
 ];
@@ -214,9 +235,48 @@ pub const JOB_FIELDS: &[&str] = &[
     "by_agent",
     "repo",
     "commit",
+    "branch",
     "end_comment",
     "failure_block",
     "next_jobs",
+    "queue_comment",
+    "rerun_comment",
+    "split_comment",
+    "fail_comment",
+    "fail_mail",
+];
+
+/// The placeholders whose values the daemon makes: IDs, and the texts of
+/// the job queue that the coded flow writes as they are (`board_flow =
+/// code`). [`render`] does not quote them, so the built-in pack writes the
+/// same comments and mails as the coded flow. Every other value is quoted
+/// in a text that an agent reads.
+///
+/// Each of these is one line of daemon fields, or a fixed text around one
+/// (`job.fail_mail`): a branch name has no space and no `[`, so none of
+/// them can hold a tag such as `[User]`. The engine fills the `job.*` ones
+/// from the stored job, never from event data (any event source can write
+/// a `job.verdict`). `job.failure_block` is not here: it holds the tail of
+/// the job output, untrusted text, so it is quoted data in a comment, a
+/// mail, or a turn. Only `card_prepend` writes it as it is, into the card
+/// body (which agents read as data).
+pub const RAW_FIELDS: &[&str] = &[
+    "card.id",
+    "card.project",
+    "card.column",
+    "job.id",
+    "job.kind",
+    "job.state",
+    "job.outcome",
+    "job.attempt",
+    "job.end_comment",
+    "job.next_jobs",
+    "job.queue_comment",
+    "job.rerun_comment",
+    "job.split_comment",
+    "job.fail_comment",
+    "job.fail_mail",
+    "rule.name",
 ];
 
 /// One column of the project's board, for the column check.
@@ -284,6 +344,18 @@ pub struct JobCondition {
     /// The job has one of these outcomes ([`JOB_OUTCOMES`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outcome: Vec<String>,
+    /// The job is (or is not) a half of a split batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<bool>,
+    /// Two or more cards of the job merged (did not conflict), or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<bool>,
+    /// A rerun of the job is queued or ran, or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerun: Option<bool>,
+    /// The job was split in halves, or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub halves: Option<bool>,
 }
 
 /// One rule, read.
@@ -317,6 +389,44 @@ pub struct Rule {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuleSet {
     pub rules: Vec<Rule>,
+}
+
+/// The built-in pack, read once. It is checked by a test on every build,
+/// so a failure here is a bug of the daemon: the pack is then empty.
+pub fn default_pack() -> &'static RuleSet {
+    static PACK: std::sync::OnceLock<RuleSet> = std::sync::OnceLock::new();
+    PACK.get_or_init(|| {
+        let ctx = Context {
+            columns: None,
+            max_rules: usize::MAX,
+        };
+        parse(DEFAULT_PACK, PACK_FILE, &ctx).unwrap_or_default()
+    })
+}
+
+/// The rules that a project with the built-in pack runs: the rules of
+/// `pack` in their order, each replaced by the rule of `own` with its
+/// name (a rule with only `enabled = false` turns it off), then the other
+/// rules of `own` in their order.
+pub fn with_pack(pack: &RuleSet, own: &RuleSet) -> RuleSet {
+    let mut rules: Vec<Rule> = pack
+        .rules
+        .iter()
+        .map(|p| {
+            own.rules
+                .iter()
+                .find(|r| r.name == p.name)
+                .cloned()
+                .unwrap_or_else(|| p.clone())
+        })
+        .collect();
+    rules.extend(
+        own.rules
+            .iter()
+            .filter(|r| !pack.rules.iter().any(|p| p.name == r.name))
+            .cloned(),
+    );
+    RuleSet { rules }
 }
 
 /// The line and the column (1-based) of the byte `offset` of `text`.
@@ -680,9 +790,14 @@ fn read_if_card(ctx: &Context, fields: &Map<String, Value>) -> Result<CardCondit
 
 /// Read one `if_job` block.
 fn read_if_job(fields: &Map<String, Value>) -> Result<JobCondition, String> {
+    let flag = |k: &str| fields.get(k).and_then(Value::as_bool);
     let c = JobCondition {
         state: text_list(fields, "state"),
         outcome: text_list(fields, "outcome"),
+        split: flag("split"),
+        batch: flag("batch"),
+        rerun: flag("rerun"),
+        halves: flag("halves"),
     };
     if let Some(s) = c.state.iter().find(|s| !JOB_STATES.contains(&s.as_str())) {
         return Err(format!(
@@ -701,7 +816,7 @@ fn read_if_job(fields: &Map<String, Value>) -> Result<JobCondition, String> {
         ));
     }
     if c == JobCondition::default() {
-        return Err("if_job needs `state` or `outcome`".into());
+        return Err("if_job needs at least one field".into());
     }
     Ok(c)
 }
@@ -748,8 +863,19 @@ pub fn resolve_column<'a>(columns: &'a [BoardColumn], reference: &str) -> Option
 /// replaced by `lookup` of its inner name (`event.kind`, `card.id`,
 /// `job.id`, `rule.name`, ...); `None` is empty. With `quoted`, each
 /// value is quoted data ([`crate::template::quote`]): for text that an
-/// agent reads, since a value can come from an event or a card title.
+/// agent reads, since a value can come from an event or a card title. The
+/// values of [`RAW_FIELDS`] are never quoted: the daemon makes them.
 pub fn render(template: &str, lookup: &dyn Fn(&str) -> Option<String>, quoted: bool) -> String {
+    render_with(template, lookup, quoted).0
+}
+
+/// [`render`], and whether a placeholder of the template had no value.
+pub fn render_with(
+    template: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    quoted: bool,
+) -> (String, bool) {
+    let mut empty = false;
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(open) = rest.find("{{") {
@@ -757,10 +883,12 @@ pub fn render(template: &str, lookup: &dyn Fn(&str) -> Option<String>, quoted: b
         let after = &rest[open + 2..];
         let Some(close) = after.find("}}") else {
             out.push_str(&rest[open..]);
-            return out;
+            return (out, empty);
         };
-        let v = lookup(after[..close].trim()).unwrap_or_default();
-        if quoted {
+        let name = after[..close].trim();
+        let v = lookup(name).unwrap_or_default();
+        empty |= v.is_empty();
+        if quoted && !RAW_FIELDS.contains(&name) {
             out.push_str(&crate::template::quote(&v));
         } else {
             out.push_str(&v);
@@ -768,7 +896,7 @@ pub fn render(template: &str, lookup: &dyn Fn(&str) -> Option<String>, quoted: b
         rest = &after[close + 2..];
     }
     out.push_str(rest);
-    out
+    (out, empty)
 }
 
 /// The fields of a block as JSON, with the offset of each.
@@ -915,7 +1043,7 @@ pub fn parse(text: &str, file: &str, ctx: &Context) -> Result<RuleSet, FileError
                 _ => {}
             }
         }
-        if rule.on.is_empty() {
+        if rule.on.is_empty() && rule.enabled {
             problems.push(problem_at(
                 text,
                 Some(at),
@@ -1020,7 +1148,7 @@ pub fn parse(text: &str, file: &str, ctx: &Context) -> Result<RuleSet, FileError
                 args,
             });
         }
-        if rule.actions.is_empty() {
+        if rule.actions.is_empty() && rule.enabled {
             problems.push(problem_at(
                 text,
                 Some(at),
@@ -1391,7 +1519,7 @@ rule "validate-pass" {
         let e = bad(r#"if_job { outcome = ["green"] }"#);
         assert!(e.contains("if_job.outcome `green`"), "{e}");
         let e = bad("if_job {}");
-        assert!(e.contains("needs `state` or `outcome`"), "{e}");
+        assert!(e.contains("if_job needs at least one field"), "{e}");
         let e = bad(r#"if_card { colour = ["x"] }"#);
         assert!(!e.is_empty(), "an unknown field is a schema error");
         let e = bad(r#"if_card = [1]"#);
@@ -1437,10 +1565,211 @@ rule "validate-pass" {
             ),
             "TER-1 by a`b, ."
         );
+        // An ID that the daemon makes is never quoted (RAW_FIELDS).
         assert_eq!(
             render("{{card.id}} by {{event.actor}}", &lookup, true),
-            "`TER-1` by `a'b`"
+            "TER-1 by `a'b`"
         );
         assert_eq!(render("open {{card.id", &lookup, false), "open {{card.id");
+        assert_eq!(
+            render_with("by:{{job.by_agent}}", &lookup, false),
+            ("by:".to_owned(), true),
+            "an empty placeholder is reported"
+        );
+        assert_eq!(
+            render_with("{{card.id}}", &lookup, false),
+            ("TER-1".to_owned(), false)
+        );
+    }
+
+    /// The columns of a new board (`store::board::DEFAULT_COLUMNS`).
+    fn default_board() -> Context {
+        let cols = [
+            ("backlog", None),
+            ("ready", None),
+            ("in_progress", Some("working")),
+            ("validating", Some("validating")),
+            ("review", Some("review")),
+            ("merge_queue", Some("merge_queue")),
+            ("accepted", Some("accepted")),
+            ("blocked", Some("blocked")),
+            ("done", None),
+        ];
+        Context {
+            columns: Some(
+                cols.iter()
+                    .map(|(n, r)| BoardColumn {
+                        name: (*n).to_owned(),
+                        role: r.map(str::to_owned),
+                    })
+                    .collect(),
+            ),
+            max_rules: DEFAULT_MAX_RULES,
+        }
+    }
+
+    #[test]
+    fn the_default_pack_reads_against_the_default_board() {
+        let set = parse(DEFAULT_PACK, PACK_FILE, &default_board())
+            .unwrap_or_else(|e| panic!("the pack does not read: {e}"));
+        assert_eq!(&set, default_pack(), "default_pack() reads the same file");
+        assert!(set.rules.len() <= DEFAULT_MAX_RULES);
+        let names: Vec<&str> = set.rules.iter().map(|r| r.name.as_str()).collect();
+        for want in [
+            "merge-queued",
+            "job-started",
+            "job-requeued",
+            "validate-pass",
+            "merge-pass",
+            "job-rerun-error",
+            "job-rerun-red",
+            "job-rerun-note",
+            "merge-red-group",
+            "merge-red-split-note",
+            "merge-red-fix-note",
+            "job-fail-conflict",
+            "job-fail-red",
+            "job-fail-error",
+            "job-cancelled",
+            "agent-park",
+            "agent-unpark",
+            "agent-end-done",
+            "agent-end-archived",
+            "agent-end-merged",
+        ] {
+            assert!(names.contains(&want), "no rule `{want}` in {names:?}");
+        }
+        let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
+        // No rule moves a card to validating or labels a queued validate
+        // (no validating column, operator 2026-11-07).
+        assert!(
+            !names.iter().any(|n| n.starts_with("validate-queued")),
+            "{names:?}"
+        );
+        assert!(
+            set.rules
+                .iter()
+                .flat_map(column_refs)
+                .all(|c| c != "@validating" && c != "validating"),
+            "the pack names no validating column"
+        );
+        // The opt-in validate rules read too; their note runs before the
+        // move, so a card that the move puts in validating gets one
+        // comment, not two.
+        let v = parse(VALIDATE_RULES, "rules.validate.wcl", &default_board())
+            .unwrap_or_else(|e| panic!("the validate rules do not read: {e}"));
+        let vn: Vec<&str> = v.rules.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            vn,
+            [
+                "validate-queued",
+                "validate-queued-note",
+                "validate-queued-move"
+            ]
+        );
+        // The rerun decides before its note and before the final failure.
+        assert!(at("job-rerun-red") < at("job-rerun-note"));
+        assert!(at("job-rerun-note") < at("job-fail-red"));
+        assert!(at("merge-red-group") < at("merge-red-split-note"));
+        // Every rule may run often: a busy board needs more than the
+        // default of 30 runs an hour.
+        assert!(set.rules.iter().all(|r| r.max_per_hour == Some(600)));
+        // The red merge group: a fix card first, a split after 3 (MEM-84).
+        let group = set
+            .rules
+            .iter()
+            .find(|r| r.name == "merge-red-group")
+            .unwrap();
+        assert_eq!(group.actions[0].verb, "job.fix");
+        assert_eq!(group.actions[0].args["max"], 3);
+        assert_eq!(group.actions[1].verb, "job.split");
+        assert_eq!(group.actions[1].args["after_fixes"], 3);
+        // No verb of the pack validates a card (no card validate step).
+        assert!(
+            set.rules
+                .iter()
+                .flat_map(|r| &r.actions)
+                .all(|a| a.verb != "job.queue"),
+            "the pack queues no job"
+        );
+    }
+
+    #[test]
+    fn a_project_rule_replaces_or_turns_off_a_pack_rule() {
+        let own = parse(
+            r#"rule "job-started" { enabled = false }
+rule "validate-pass" {
+  on = ["job.verdict"]
+  when "data.verdict" { eq = "passed" }
+  card_comment { text = "passed" }
+}
+rule "mine" {
+  on = ["card"]
+  card_comment { text = "x" }
+}
+"#,
+            "rules.wcl",
+            &default_board(),
+        )
+        .expect("a disabled rule needs no `on` and no verb");
+        assert!(!own.rules[0].enabled);
+        assert!(own.rules[0].on.is_empty() && own.rules[0].actions.is_empty());
+        let pack = default_pack();
+        let set = with_pack(pack, &own);
+        assert_eq!(set.rules.len(), pack.rules.len() + 1);
+        let names: Vec<&str> = set.rules.iter().map(|r| r.name.as_str()).collect();
+        let pack_names: Vec<&str> = pack.rules.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            &names[..pack_names.len()],
+            &pack_names[..],
+            "the pack order stays"
+        );
+        assert_eq!(names.last(), Some(&"mine"));
+        let started = set.rules.iter().find(|r| r.name == "job-started").unwrap();
+        assert!(!started.enabled);
+        let pass = set
+            .rules
+            .iter()
+            .find(|r| r.name == "validate-pass")
+            .unwrap();
+        assert_eq!(pass.actions.len(), 1);
+        assert_eq!(pass.actions[0].verb, "card.comment");
+        // An enabled rule still needs `on` and a verb.
+        let e = errors("rule \"r\" { enabled = true }\n");
+        assert!(e.contains("at least one event kind"), "{e}");
+        assert!(e.contains("at least one verb"), "{e}");
+    }
+
+    #[test]
+    fn job_conditions_on_the_queue() {
+        let set = parse(
+            r#"rule "r" {
+  on = ["job.verdict"]
+  if_job {
+    split = false
+    batch = true
+    rerun = false
+    halves = true
+  }
+  job_fix { max = 3 }
+  job_split { after_fixes = 3 }
+  agent_park { reason = "card in {{card.column}}" }
+  agent_end {
+    outcome = "done"
+    result = "merged ({{job.id}})"
+  }
+}
+"#,
+            "rules.wcl",
+            &board(),
+        )
+        .unwrap();
+        let c = &set.rules[0].if_job[0];
+        assert_eq!(
+            (c.split, c.batch, c.rerun, c.halves),
+            (Some(false), Some(true), Some(false), Some(true))
+        );
+        let e = errors("rule \"r\" {\n  on = [\"job\"]\n  job_fix { max = 0 }\n}\n");
+        assert!(e.contains("1 or more"), "{e}");
     }
 }

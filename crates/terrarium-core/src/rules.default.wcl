@@ -1,0 +1,288 @@
+// The built-in rule pack "delivery" (TER-162 D4, D6, TER-170).
+//
+// A project with `board_flow = "rules"` runs these rules, then the rules
+// of its own rules.wcl. A rule of rules.wcl with the name of a rule here
+// replaces it; a rule with only `enabled = false` turns it off. With
+// `board_flow = "code"` (the default) the daemon runs the same flow in
+// code and this pack does not run.
+//
+// The pack does what the coded flow does (jobs.rs, api/jobs.rs, bound.rs),
+// with the same labels, comments, moves, and mails. One change: a red
+// merge group gets a fix card first and splits only after three fix cards
+// (the operator's rule of 2026-11-07, MEM-84). The texts of the job queue
+// (`job.*_comment`, `job.fail_mail`) come from the code of the coded flow.
+//
+// The rules of one card run in the order of this file.
+//
+// No rule here moves a card to validating or labels a queued validate job:
+// the operator removed the validating column and `card validate` for card
+// work (2026-11-07). A project that still validates adds the rules of
+// rules.validate.wcl to its own rules.wcl.
+
+// ------------------------------------------------------------ the queue
+
+rule "merge-queued" {
+  description = "A new merge job: the label and the queue comment on each card. No move."
+  on = ["job"]
+  max_per_hour = 600
+  when "data.change" { eq = "queued" }
+  when "data.kind" { eq = "merge" }
+  when "data.origin" { eq = "queue" }
+  card_label { add = ["validation:queued"] }
+  card_comment { text = "{{job.queue_comment}}" }
+}
+
+rule "job-started" {
+  description = "A job starts: queued -> running."
+  on = ["job"]
+  max_per_hour = 600
+  when "data.change" { eq = "started" }
+  card_label {
+    remove = ["validation:queued"]
+    add = ["validation:running"]
+  }
+}
+
+rule "job-requeued" {
+  description = "A job waits again (its host was away, or a restart lost its run): running -> queued."
+  on = ["job"]
+  max_per_hour = 600
+  when "data.change" { eq = "requeued" }
+  card_label {
+    remove = ["validation:running"]
+    add = ["validation:queued"]
+  }
+}
+
+// ------------------------------------------------------------ the end
+
+rule "validate-pass" {
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "passed" }
+  when "data.kind" { eq = "validate" }
+  card_label { remove = ["validation:running", "validation:queued"] }
+  card_move {
+    to = "@review"
+    comment = "{{job.end_comment}}"
+  }
+  card_assign { who = "none" }
+}
+
+rule "merge-pass" {
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "passed" }
+  when "data.kind" { eq = "merge" }
+  card_label { remove = ["validation:running", "validation:queued"] }
+  card_move {
+    to = "@accepted"
+    comment = "{{job.end_comment}}"
+  }
+  card_assign { who = "none" }
+}
+
+rule "job-rerun-error" {
+  description = "A job that could not run (not red, not a conflict) runs once more."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "error" }
+  job_rerun { max_attempts = 2 }
+}
+
+rule "job-rerun-red" {
+  description = "A red job of one card runs once more (flaky tests), unless a red batch split it out."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "red" }
+  if_job {
+    split = false
+    batch = false
+  }
+  job_rerun { max_attempts = 2 }
+}
+
+rule "job-rerun-note" {
+  description = "The job of the card runs again: running -> queued, and the comment."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { one_of = ["red", "error"] }
+  if_job { rerun = true }
+  card_label {
+    remove = ["validation:running"]
+    add = ["validation:queued"]
+  }
+  card_comment { text = "{{job.rerun_comment}}" }
+}
+
+rule "merge-red-group" {
+  description = "A red merge group (two or more cards merged): a fix card first, a split after three fix cards (MEM-84)."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "red" }
+  when "data.kind" { eq = "merge" }
+  if_job { batch = true }
+  job_fix { max = 3 }
+  job_split { after_fixes = 3 }
+}
+
+rule "merge-red-split-note" {
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "red" }
+  when "data.kind" { eq = "merge" }
+  if_job {
+    batch = true
+    halves = true
+  }
+  card_label {
+    remove = ["validation:running"]
+    add = ["validation:queued"]
+  }
+  card_comment { text = "{{job.split_comment}}" }
+}
+
+rule "merge-red-fix-note" {
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "red" }
+  when "data.kind" { eq = "merge" }
+  if_job {
+    batch = true
+    halves = false
+  }
+  card_label { remove = ["validation:running", "validation:queued"] }
+  card_comment { text = "{{job.end_comment}} The group gets a fix card (label merge-fix:{{job.id}}): queue the group again with the fix card first." }
+}
+
+rule "job-fail-conflict" {
+  description = "A conflict fails at once: the failure block, the top of ready, a mail to the worker."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "conflict" }
+  card_label { remove = ["validation:running", "validation:queued"] }
+  card_prepend { text = "{{job.failure_block}}" }
+  card_move {
+    to = "@ready"
+    position = "top"
+    comment = "{{job.fail_comment}}"
+  }
+  card_assign { who = "none" }
+  mail {
+    to = ["{{job.by_agent}}"]
+    subject = "{{card.id}}: validation failed"
+    body = "{{job.fail_mail}}"
+  }
+}
+
+rule "job-fail-red" {
+  description = "A red job that does not run again fails."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "red" }
+  if_job {
+    rerun = false
+    batch = false
+  }
+  card_label { remove = ["validation:running", "validation:queued"] }
+  card_prepend { text = "{{job.failure_block}}" }
+  card_move {
+    to = "@ready"
+    position = "top"
+    comment = "{{job.fail_comment}}"
+  }
+  card_assign { who = "none" }
+  mail {
+    to = ["{{job.by_agent}}"]
+    subject = "{{card.id}}: validation failed"
+    body = "{{job.fail_mail}}"
+  }
+}
+
+rule "job-fail-error" {
+  description = "A job that could not run twice fails."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "error" }
+  if_job { rerun = false }
+  card_label { remove = ["validation:running", "validation:queued"] }
+  card_prepend { text = "{{job.failure_block}}" }
+  card_move {
+    to = "@ready"
+    position = "top"
+    comment = "{{job.fail_comment}}"
+  }
+  card_assign { who = "none" }
+  mail {
+    to = ["{{job.by_agent}}"]
+    subject = "{{card.id}}: validation failed"
+    body = "{{job.fail_mail}}"
+  }
+}
+
+rule "job-cancelled" {
+  description = "A cancelled job: the labels go. The card stays where it is."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "cancelled" }
+  card_label { remove = ["validation:running", "validation:queued"] }
+}
+
+// ---------------------------------------------------- the bound agents
+//
+// As bound.rs: the wait columns are names, so a board without them never
+// parks its bound agents.
+
+rule "agent-park" {
+  description = "The card waits on others: its bound agent parks."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { one_of = ["validating", "review", "accepted"] }
+  agent_park { reason = "card in {{card.column}}" }
+}
+
+rule "agent-unpark" {
+  description = "The card came back out of a wait column: its parked agent wakes with the move and the failure block."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { ne = "validating" }
+  when "data.to" { ne = "review" }
+  when "data.to" { ne = "accepted" }
+  when "data.to" { ne = "done" }
+  agent_unpark {}
+}
+
+rule "agent-end-done" {
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to" { eq = "done" }
+  agent_end {
+    outcome = "done"
+    result = "the card moved to done"
+  }
+}
+
+rule "agent-end-archived" {
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "archived" }
+  agent_end {
+    outcome = "cancelled"
+    result = "the card was archived"
+  }
+}
+
+rule "agent-end-merged" {
+  on = ["job"]
+  max_per_hour = 600
+  when "data.change" { eq = "ended" }
+  when "data.kind" { eq = "merge" }
+  when "data.state" { eq = "passed" }
+  agent_end {
+    outcome = "done"
+    result = "the card was merged onto next (job {{job.id}})"
+  }
+}
