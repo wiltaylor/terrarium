@@ -703,9 +703,14 @@ async fn a_park_stop_spares_an_unparked_agent() {
     td.wait_status(&eph, "idle").await;
     // The idle pass saw it parked; the unpark landed before the stop.
     terrariumd::lifecycle::park_stop(&state(&td), eph.parse().unwrap()).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
     let a = agent(&td, &eph).await;
     assert_eq!(a["status"], "idle", "{a}");
+    assert_ne!(a["status_reason"], "parked", "{a}");
+    // Not stopped and woken again: the first session, never resumed.
+    let s = sessions(&td, &eph).await;
+    assert_eq!(s.len(), 1, "{s:?}");
+    assert_eq!(s[0]["resumes"], 0, "{s:?}");
 }
 
 /// TER-111 (R2-2): a parked agent whose harness still runs holds its
