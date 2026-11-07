@@ -176,7 +176,24 @@ struct PendingTurn {
 struct InFlight {
     turn: PendingTurn,
     deadline: Instant,
+    /// The CR of the turn that waits for the adapter's
+    /// [`Adapter::turn_submit_pause`], and when it goes out.
+    submit: Option<(Instant, Vec<u8>)>,
+    /// When the last CR went out (with the text, or on its own).
+    entered: Instant,
+    /// How many times the CR went out again because the text stayed in
+    /// the input box ([`Adapter::input_pending`]).
+    resubmits: u32,
 }
+
+/// When the input box still holds the typed turn this long after its CR,
+/// the runner presses CR again (TER-194). The harness empties the box in
+/// about 30 ms when it takes the turn (`docs/compat.md`).
+pub const RESUBMIT_AFTER: Duration = Duration::from_secs(1);
+
+/// The most CRs that the runner sends again for one typed turn, before it
+/// empties the input box and types the turn again.
+pub const MAX_RESUBMITS: u32 = 2;
 
 struct State {
     status: AgentStatus,
@@ -203,6 +220,10 @@ struct State {
     /// when the harness sends no stop hook (Claude Code sends none on
     /// Esc).
     interrupt: Option<Instant>,
+    /// Since when an idle agent with no turn in flight has text in its
+    /// input box ([`Adapter::input_pending`]), and whether the runner
+    /// warned about it. No turn can go out while the box holds text.
+    pending_input: Option<(Instant, bool)>,
 }
 
 pub(crate) struct Inner {
@@ -324,6 +345,7 @@ impl Runner {
                 startup_done,
                 spawned: now,
                 interrupt: None,
+                pending_input: None,
             }),
             status_tx: watch::Sender::new(AgentStatus::Starting),
             exit_tx: watch::Sender::new(None),
@@ -962,8 +984,9 @@ impl Inner {
         self.wake.notify_one();
     }
 
-    /// The screen hint and prompt-ready answer for the current screen.
-    fn probe(&self, quiet_for: Duration) -> (ScreenHint, bool) {
+    /// The screen hint, the prompt-ready answer, and the pending-input
+    /// answer ([`Adapter::input_pending`]) for the current screen.
+    fn probe(&self, quiet_for: Duration) -> (ScreenHint, bool, bool) {
         let parser = lock(&self.parser);
         let screen = parser.screen();
         let hint = self.adapter.screen_hint(screen);
@@ -972,7 +995,8 @@ impl Inner {
             ScreenHint::Busy | ScreenHint::Question | ScreenHint::NotReady => false,
             ScreenHint::Unknown => self.detector.prompt_ready(screen, quiet_for),
         };
-        (hint, ready)
+        let pending = !ready && self.adapter.input_pending(screen);
+        (hint, ready, pending)
     }
 
     /// The driver task: prompt-ready, stalls, delivery, and timeouts.
@@ -1003,10 +1027,11 @@ impl Inner {
             }
             state.last_output.elapsed()
         };
-        let (hint, ready) = self.probe(quiet_for);
+        let (hint, ready, pending) = self.probe(quiet_for);
 
         let mut to_type = None;
         let mut clear = None;
+        let mut to_submit = None;
         {
             let mut state = lock(&self.state);
             if state.exited {
@@ -1088,9 +1113,37 @@ impl Inner {
                 );
             }
 
+            // The CR of a turn goes out on its own after the paste
+            // ([`Adapter::turn_submit_pause`]).
+            if let Some(f) = state.in_flight.as_mut()
+                && f.submit.as_ref().is_some_and(|(at, _)| now >= *at)
+                && let Some((_, cr)) = f.submit.take()
+            {
+                f.entered = now;
+                to_submit = Some(cr);
+            } else if pending
+                && let Some(f) = state.in_flight.as_mut()
+                && f.submit.is_none()
+                && f.resubmits < MAX_RESUBMITS
+                && now.duration_since(f.entered) >= RESUBMIT_AFTER
+            {
+                // The text sits in the input box: the harness lost the CR.
+                // Press it again, and do not type the text again.
+                f.resubmits += 1;
+                f.entered = now;
+                tracing::debug!(
+                    "turn {} is still in the input box; pressing Enter again ({})",
+                    f.turn.id,
+                    f.resubmits
+                );
+                to_submit = Some(b"\r".to_vec());
+            }
+
             if state.in_flight.as_ref().is_some_and(|f| now >= f.deadline)
                 && let Some(f) = state.in_flight.take()
             {
+                // A CR for the old text must not follow the clear keys.
+                to_submit = None;
                 if f.turn.attempts < self.config.submit_attempts {
                     tracing::debug!(
                         "turn {} got no prompt-submit hook and no busy screen; typing it again",
@@ -1113,6 +1166,11 @@ impl Inner {
                         .turn
                         .tx
                         .send(Err(DeliveryError::NoSubmitHook { attempts }));
+                    // The text of the last attempt can still be in the
+                    // input box. Empty it, or no later turn can go out.
+                    if pending {
+                        clear = Some(self.adapter.clear_input_keys());
+                    }
                 }
             }
 
@@ -1123,12 +1181,47 @@ impl Inner {
                 && let Some(mut turn) = state.queue.pop_front()
             {
                 turn.attempts += 1;
-                let bytes = self.adapter.type_turn(&turn.text);
+                let pause = self.adapter.turn_submit_pause();
+                let mut writes = terrarium_core::adapter::exit_key_writes(
+                    &self.adapter.type_turn(&turn.text),
+                    pause,
+                )
+                .into_iter();
+                let text = writes.next().unwrap_or_default();
+                let submit = writes.next().map(|cr| (now + pause, cr));
+                let wait = if submit.is_some() {
+                    pause
+                } else {
+                    Duration::ZERO
+                };
                 state.in_flight = Some(InFlight {
                     turn,
-                    deadline: now + self.config.submit_timeout,
+                    deadline: now + wait + self.config.submit_timeout,
+                    submit,
+                    entered: now,
+                    resubmits: 0,
                 });
-                to_type = Some(bytes);
+                to_type = Some(text);
+            }
+
+            // The watchdog: an idle agent with text left in its input box
+            // takes no turn, and nothing wakes it (TER-194). Warn once.
+            if pending && state.in_flight.is_none() && state.status == AgentStatus::Idle {
+                let (since, warned) = *state.pending_input.get_or_insert((now, false));
+                if !warned && now.duration_since(since) >= self.config.submit_timeout {
+                    state.pending_input = Some((since, true));
+                    let secs = now.duration_since(since).as_secs();
+                    tracing::warn!("unsubmitted text in the input box for {secs} s");
+                    self.emit(Event::Warning {
+                        message: format!(
+                            "the input box of the idle agent holds unsubmitted text \
+                             (for {secs} s); no turn can go out until it is submitted \
+                             or cleared"
+                        ),
+                    });
+                }
+            } else {
+                state.pending_input = None;
             }
         }
 
@@ -1137,7 +1230,7 @@ impl Inner {
         {
             tracing::debug!("cannot clear the input line: {e}");
         }
-        if let Some(bytes) = to_type
+        if let Some(bytes) = to_type.or(to_submit)
             && let Err(e) = self.write_bytes(bytes).await
         {
             let mut state = lock(&self.state);

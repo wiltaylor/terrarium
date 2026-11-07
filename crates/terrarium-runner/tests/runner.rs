@@ -33,6 +33,8 @@ struct FakeAdapter {
     exit_pause: Duration,
     /// Wait for the `SessionStart` hook before the prompt counts as ready.
     startup_hook: bool,
+    /// The pause between the text of a turn and its CR.
+    submit_pause: Duration,
 }
 
 impl Adapter for FakeAdapter {
@@ -85,6 +87,18 @@ impl Adapter for FakeAdapter {
     }
     fn exit_key_pause(&self) -> Duration {
         self.exit_pause
+    }
+    fn turn_submit_pause(&self) -> Duration {
+        self.submit_pause
+    }
+    /// The paste marker of `FAKE_TUI_PASTE_NEEDS_PAUSE` on the last line.
+    fn input_pending(&self, screen: &terrarium_core::adapter::Screen) -> bool {
+        let contents = screen.contents();
+        contents
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .is_some_and(|l| l.starts_with("> [Pasted text"))
     }
     /// Esc, then a CR in its own write, so the line-mode fake TUI reads a
     /// line that starts with Esc (`/hold` then stops with no Stop hook).
@@ -139,6 +153,7 @@ struct Opts {
     /// Launch with `--session <id>`: the fake TUI sends `SessionStart`.
     session: Option<&'static str>,
     startup_hook_timeout: Option<Duration>,
+    submit_pause: Duration,
 }
 
 impl Default for Opts {
@@ -155,6 +170,7 @@ impl Default for Opts {
             startup_hook: false,
             session: None,
             startup_hook_timeout: None,
+            submit_pause: Duration::ZERO,
         }
     }
 }
@@ -208,6 +224,7 @@ async fn start_with(opts: Opts, handler: Arc<dyn RequestHandler>) -> Harness {
         busy_screen: opts.busy_screen,
         exit_pause: opts.exit_pause,
         startup_hook: opts.startup_hook,
+        submit_pause: opts.submit_pause,
     });
     let runner = Runner::spawn(config, adapter, spec, handler)
         .await
@@ -491,6 +508,137 @@ async fn delivery_fails_after_one_retry() {
     let all = read_events(h.runner.events_path());
     assert!(all.iter().any(|r| matches!(&r.event,
         Event::DeliveryFailed { text, .. } if text == "lost")));
+}
+
+/// A wake-up turn of 38 lines, as the ones that stayed unsubmitted on
+/// vmlab/vml-99 (TER-194).
+fn long_turn() -> String {
+    let mut text = String::from("[Mailbox:lead] Subject: TER-1 (thread T, message M)\n");
+    for i in 1..37 {
+        text.push_str(&format!("> line {i:02} of the mail body\n"));
+    }
+    text.push_str("Act on the result./exit");
+    text
+}
+
+/// TER-194: a harness that loses a CR in the same burst as a long paste
+/// (`FAKE_TUI_PASTE_NEEDS_PAUSE`, as Claude Code). With the adapter's
+/// submit pause, the CR goes out on its own and the turn submits at the
+/// first try: no CR again, no clear keys, no second paste.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_long_paste_submits_with_the_submit_pause() {
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_PASTE_NEEDS_PAUSE", "1")]),
+        submit_pause: ms(300),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    let started = std::time::Instant::now();
+    let d = h.runner.type_turn(long_turn());
+    timeout(wait(), d.wait())
+        .await
+        .expect("time")
+        .expect("the long turn submits");
+    // Faster than the CR again (RESUBMIT_AFTER) and the retry
+    // (submit_timeout).
+    assert!(
+        started.elapsed() < terrarium_runner::RESUBMIT_AFTER,
+        "{:?}",
+        started.elapsed()
+    );
+    let seen = until_status(&mut h.events, AgentStatus::Idle).await;
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, Event::TurnStart { prompt: Some(p) } if p.contains("line 36"))),
+        "{seen:?}"
+    );
+    until_screen(&h, "done: ").await;
+    let text = h.runner.screen().text();
+    assert!(text.contains("[Pasted text #1 +38 lines]"), "{text}");
+    assert!(!text.contains("[Pasted text #2"), "{text}");
+    assert!(!text.contains("cleared"), "{text}");
+}
+
+/// TER-194: the paste and its CR in one write (no submit pause) reproduce
+/// the lost CR: the paste stays in the input line. The runner sees the
+/// text in the input box and presses CR again, without typing the turn
+/// again, long before the retry of `submit_timeout`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lost_enter_after_a_paste_is_pressed_again() {
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_PASTE_NEEDS_PAUSE", "1")]),
+        submit: ms(10_000),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    let started = std::time::Instant::now();
+    let d = h.runner.type_turn(long_turn());
+    timeout(wait(), d.wait())
+        .await
+        .expect("time")
+        .expect("the CR again submits the turn");
+    let took = started.elapsed();
+    assert!(
+        took >= terrarium_runner::RESUBMIT_AFTER && took < Duration::from_secs(10),
+        "{took:?}"
+    );
+    let seen = until_status(&mut h.events, AgentStatus::Idle).await;
+    assert_eq!(
+        seen.iter()
+            .filter(|e| matches!(e, Event::TurnStart { .. }))
+            .count(),
+        1,
+        "{seen:?}"
+    );
+    until_screen(&h, "done: ").await;
+    let text = h.runner.screen().text();
+    assert!(text.contains("[Pasted text #1 +38 lines]"), "{text}");
+    assert!(!text.contains("[Pasted text #2"), "{text}");
+    assert!(!text.contains("cleared"), "{text}");
+}
+
+/// TER-194, the watchdog: text left in the input box of an idle agent (a
+/// paste with no CR) gives one warning after `submit_timeout`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_left_in_the_input_box_gives_a_warning() {
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_PASTE_NEEDS_PAUSE", "1")]),
+        submit: ms(500),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    h.runner
+        .write(b"\x1b[200~left\nbehind\x1b[201~")
+        .await
+        .expect("paste");
+    until_screen(&h, "[Pasted text #1 +2 lines]").await;
+    let message = timeout(wait(), async {
+        loop {
+            let rec = h.events.recv().await.expect("event");
+            if let Event::Warning { message } = rec.event {
+                return message;
+            }
+        }
+    })
+    .await
+    .expect("a warning");
+    assert!(message.contains("unsubmitted text"), "{message}");
+    // A CR submits the text, and the agent works again.
+    h.runner.write(b"\r").await.expect("enter");
+    until_status(&mut h.events, AgentStatus::Working).await;
+    until_status(&mut h.events, AgentStatus::Idle).await;
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+    let all = read_events(h.runner.events_path());
+    assert_eq!(
+        all.iter()
+            .filter(|r| matches!(&r.event, Event::Warning { message } if message.contains("unsubmitted")))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -996,6 +1144,7 @@ async fn spawn_err(config: RunnerConfig, spec: LaunchSpec) -> terrarium_runner::
         busy_screen: false,
         exit_pause: Duration::ZERO,
         startup_hook: false,
+        submit_pause: Duration::ZERO,
     });
     match Runner::spawn(config, adapter, spec, Arc::new(NoHandler)).await {
         Ok(runner) => {

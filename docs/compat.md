@@ -280,7 +280,11 @@ Treat "no input box" as "not ready" too.
 Send a turn:
 
 1. Wait for `ready`.
-2. Write `ESC [200~` + text + `ESC [201~`, then `\r`. No delay is necessary.
+2. Write `ESC [200~` + text + `ESC [201~`, then `\r` in a separate write
+   0.3 s later. For a short text no delay was necessary, but a CR in the
+   same burst as a long paste is lost: the paste stays in the box as
+   `[Pasted text #N +L lines]` (TER-194). The runner presses CR again when
+   the box still holds text 1 s after the CR.
 3. Expect `UserPromptSubmit` within 1 s. It came in 23 to 31 ms.
 4. Expect `Stop` for the end of the turn.
 
