@@ -129,7 +129,7 @@ async fn host_counts_respect_the_readers_project() {
                         by_agent: None,
                     },
                 )?;
-                jobs::start(t, &j.id, "machine")?;
+                jobs::start(t, &j.id, "machine", Some(1))?;
                 jobs::set_host_cap(t, "machine", Some(2))?;
                 Ok(())
             })
@@ -221,7 +221,7 @@ async fn cards_carry_their_job_state_and_assignee_status() {
                     },
                 )?;
                 if i == 0 {
-                    jobs::start(t, &j.id, "machine")?;
+                    jobs::start(t, &j.id, "machine", Some(1))?;
                 }
             }
             Ok(())
@@ -351,7 +351,7 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     let jid = j.id.clone();
     let started = db
         .write("system", move |t| {
-            assert!(jobs::start(t, &jid, "machine")?);
+            assert!(jobs::start(t, &jid, "machine", Some(1))?);
             jobs::get(t, &jid)
         })
         .await
@@ -389,7 +389,7 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     let rid = rerun.id.clone();
     let restarted = db
         .write("system", move |t| {
-            assert!(jobs::start(t, &rid, "machine")?);
+            assert!(jobs::start(t, &rid, "machine", Some(1))?);
             jobs::get(t, &rid)
         })
         .await
@@ -404,7 +404,7 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     let before = card(ids[1].clone()).await["eta_at"].clone();
     assert!(before.is_string());
     let jid = j.id.clone();
-    db.write("system", move |t| jobs::start(t, &jid, "machine"))
+    db.write("system", move |t| jobs::start(t, &jid, "machine", Some(1)))
         .await
         .unwrap();
     let c = card(ids[1].clone()).await;
@@ -425,7 +425,7 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     let jid = j.id.clone();
     let started = db
         .write("system", move |t| {
-            jobs::start(t, &jid, "machine")?;
+            jobs::start(t, &jid, "machine", Some(1))?;
             jobs::get(t, &jid)
         })
         .await
@@ -507,7 +507,7 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
                 by_agent: None,
             },
         )?;
-        jobs::start(t, &j.id, "10.3.0.2")?;
+        jobs::start(t, &j.id, "10.3.0.2", Some(1))?;
         Ok(())
     })
     .await
@@ -1758,6 +1758,92 @@ async fn the_host_cap_holds_across_projects_in_order() {
     assert_eq!(r.ok()["hosts"], json!([]), "{}", r.body);
 }
 
+/// TER-190: each slot has one work tree, `<work_dir>/p/slot-<n>`, kept from
+/// job to job. Four jobs on two slots: each recipe runs in the tree of
+/// its `TERRARIUM_JOB_SLOT`, at its own commit, with no file left from the
+/// job before but `target/`, which keeps what the jobs before wrote. No
+/// two jobs hold one tree at once (`target/busy`), and no dir per job is
+/// made. A merge runs in the tree of slot 0.
+#[tokio::test]
+async fn slots_keep_their_tree_and_never_share_it() {
+    let lab = lab(2).await;
+    let wd = lab._dirs.path().join("jobs");
+    let recipe = r#"set -e
+test "$(basename "$(pwd -P)")" = "slot-$TERRARIUM_JOB_SLOT"
+test ! -e junk
+test "$(git rev-parse HEAD)" = "$TERRARIUM_HEAD"
+mkdir -p target
+mkdir target/busy
+echo "$TERRARIUM_JOB_SLOT $TERRARIUM_HEAD" >> target/log
+echo x > junk
+sleep 1
+test "$(git rev-parse HEAD)" = "$TERRARIUM_HEAD"
+rmdir target/busy
+test -f OK"#;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": recipe, "slots": 2,
+                   "next_repos": ["app"], "work_dir": wd.display().to_string()}),
+        )
+        .await
+        .ok();
+    let mut heads = Vec::new();
+    for n in ["s1", "s2", "s3", "s4"] {
+        let head = lab.branch(&format!("ter-{n}"), "next", &[("OK", n)]);
+        let id = lab.card(n, &format!("ter-{n}")).await;
+        let r = lab
+            .td
+            .post_as(
+                &lab.w1,
+                &format!("/api/cards/{id}/validate"),
+                json!({"commit": head}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        heads.push(head);
+    }
+    let jobs = lab.until_idle().await;
+    assert!(jobs.iter().all(|j| j["state"] == "passed"), "{jobs:#?}");
+    let mut slots: Vec<i64> = jobs.iter().map(|j| j["slot"].as_i64().unwrap()).collect();
+    slots.sort_unstable();
+    slots.dedup();
+    assert_eq!(slots, [1, 2], "{jobs:#?}");
+    // Each tree's target/ kept the lines of all its jobs, of its slot only.
+    let mut seen = Vec::new();
+    let mut most = 0;
+    for s in [1, 2] {
+        let log = std::fs::read_to_string(wd.join(format!("p/slot-{s}/target/log"))).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        most = most.max(lines.len());
+        for l in lines {
+            let (slot, head) = l.split_once(' ').unwrap();
+            assert_eq!(slot, s.to_string(), "{log}");
+            seen.push(head.to_owned());
+        }
+    }
+    assert!(most >= 2, "no tree was used twice");
+    seen.sort();
+    heads.sort();
+    assert_eq!(seen, heads);
+    let mut dirs: Vec<String> = std::fs::read_dir(wd.join("p"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    dirs.sort();
+    assert_eq!(dirs, ["slot-1", "slot-2"]);
+
+    let job = merge_with_recipe(
+        &lab,
+        "ter-s5",
+        "test \"$TERRARIUM_JOB_SLOT\" = 0 && test \"$(basename \"$(pwd -P)\")\" = slot-0 && test -f OK",
+    )
+    .await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    assert_eq!(job["slot"], 0, "{job:#}");
+}
+
 /// Queue a merge of a new card on `branch` with `recipe`, wait for the
 /// end, and return the job.
 async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
@@ -2170,12 +2256,17 @@ async fn a_cancelled_merge_job_does_not_push() {
     assert_eq!(r.status, 201, "{}", r.body);
     let ran = bins.path().join("ran");
     let work_dir = bins.path().join("jobs");
+    // The tree is the slot's (TER-190): the recipe logs its job ID.
+    let recipe = format!(
+        "echo \"$TERRARIUM_JOB_ID\" >> '{}'; test -f OK",
+        ran.display()
+    );
     let r = lab
         .td
         .put(
             "/api/projects/p/delivery",
             json!({"target": "p-ibox", "slots": 1, "next_repos": ["app"],
-                   "recipe": format!("echo \"$PWD\" >> '{}'; test -f OK", ran.display()),
+                   "recipe": recipe,
                    "work_dir": work_dir.display().to_string()}),
         )
         .await;
@@ -2854,6 +2945,79 @@ async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot() {
         }
     }
     let _ = lr.wait();
+}
+
+/// TER-190 review, finding 2: a lost running job ran on another host than
+/// the delivery target's now, so its kill cannot confirm that its
+/// processes ended. Its slot is marked, and the next job of the slot (the
+/// requeued job itself) gets a new tree: the old tree goes, `target/`
+/// too. The mark then goes, and the job after it keeps `target/` again.
+#[tokio::test]
+async fn a_lost_job_without_a_confirmed_kill_gets_its_slot_wiped() {
+    use terrariumd::store::jobs;
+    let lab = lab(1).await;
+    let state = lab.td.daemon.as_ref().unwrap().state.clone();
+    let wd = lab._dirs.path().join("jobs");
+    let slot = wd.join("p/slot-1");
+    std::fs::create_dir_all(slot.join("target")).unwrap();
+    std::fs::write(slot.join("target/stale"), "of the lost job").unwrap();
+    lab.branch("ter-w1", "next", &[("OK", "1")]);
+    let card = lab.card("lost-run", "ter-w1").await;
+    let run_id = ulid::Ulid::new().to_string();
+    let at = (chrono::Utc::now() - chrono::Duration::minutes(5))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (rid, rcard) = (run_id.clone(), card.clone());
+    state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt,
+                                   created_by, created_at, started_at, host, slot)
+                 VALUES (?1, 'p', ?2, 'validate', 'app', 'ter-w1', 'running', 1, 't', ?3, ?3,
+                         'elsewhere', 1)",
+                rusqlite::params![rid, rcard, at],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let recovery = terrariumd::jobs::recover_lost(&state).await;
+    tokio::time::timeout(DEADLINE, recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    let jobs = lab.until_idle().await;
+    let j = jobs.iter().find(|j| j["id"] == run_id.as_str()).unwrap();
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(j["slot"], 1, "{j:#}");
+    assert!(
+        !slot.join("target/stale").exists(),
+        "the slot was not wiped"
+    );
+    let pending = state
+        .db
+        .read(|c| jobs::slot_wipe_pending(c, "p", 1))
+        .await
+        .unwrap();
+    assert!(!pending, "the wipe mark is left");
+
+    // The next job of the slot reuses its tree as before.
+    std::fs::create_dir_all(slot.join("target")).unwrap();
+    std::fs::write(slot.join("target/kept"), "built").unwrap();
+    let head = lab.branch("ter-w2", "next", &[("OK", "2")]);
+    let id = lab.card("next", "ter-w2").await;
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let jobs = lab.until_idle().await;
+    assert!(jobs.iter().all(|j| j["state"] == "passed"), "{jobs:#?}");
+    assert!(slot.join("target/kept").exists(), "a second wipe ran");
 }
 
 /// Set the delivery of `p`: `target`, one slot, a recipe that sleeps on

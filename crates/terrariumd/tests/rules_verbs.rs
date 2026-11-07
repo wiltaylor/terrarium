@@ -242,7 +242,7 @@ async fn fail_job(td: &TestDaemon, job: &Job, outcome: &str) -> Job {
     state(td)
         .db
         .write("system", move |t| {
-            jobs::start(t, &id, "machine")?;
+            jobs::start(t, &id, "machine", None)?;
             let end = JobEnd {
                 passed: false,
                 outcome: Some(outcome),

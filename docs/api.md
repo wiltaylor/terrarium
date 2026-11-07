@@ -10926,7 +10926,7 @@ or the operator) read and set the config. The body is a JSON object:
 | `recipe`       | the command, run with `sh -c` in the root of the clone          | none: no queue        |
 | `slots`        | the most validate jobs that run at the same time                | 2                     |
 | `next_repos`   | the repos (by name) that have a `next` branch for merge jobs    | none                  |
-| `work_dir`     | the dir on the target for the job clones                        | `/tmp/terrarium-jobs` |
+| `work_dir`     | the dir on the target for the work trees of the slots           | `/tmp/terrarium-jobs` |
 | `timeout_secs` | the most time the recipe may run                                | 3600                  |
 
 The target must be a target of the project. A global target needs a
@@ -10954,6 +10954,7 @@ The recipe gets this env (TER-100), and no credential:
 | `TERRARIUM_JOB_KIND`      | `validate` or `merge`                                                 |
 | `TERRARIUM_JOB_ID`        | the job ID                                                            |
 | `TERRARIUM_HEAD`          | the tested commit: the card commit, or the merge commit               |
+| `TERRARIUM_JOB_SLOT`      | the slot of the job (TER-190): `1` to `slots` for a validate job, `0` for a merge |
 | `TERRARIUM_BASE`          | the base of the change: for a validate job the merge-base of the card commit and `next`, for a merge job `next` before the merge |
 | `TERRARIUM_CHANGED_FILES` | the absolute path of a file in the clone (`.git/terrarium/changed-files`) with the paths that differ between the base and the head, one per line (`git diff --name-only --no-renames`, so a rename lists both paths) |
 
@@ -10999,12 +11000,49 @@ one-shot helper or the key in a 0700 run dir under
    commit is recorded (`refs/job/head`, or `refs/job/merge`) and written
    to a git bundle.
 2. On the target, with no credential: the bundle goes in on the stdin of
-   the step, a fresh clone in `<work_dir>/<project>/<job>` is made from
-   it, and its job ref must be the recorded commit; else the job fails
-   (`error`). The clone has no remote. Then the recipe runs in the clone.
+   the step, and the job ref is fetched from it into the work tree of the
+   job's slot (below). The job ref must be the recorded commit; else the
+   job fails (`error`). The tree has no remote. Then the recipe runs in
+   the tree.
 3. A merge job only, when the recipe passed, in the daemon, with the
    credential: push the recorded commit ID from the daemon's repo to
    `next`. The push is not forced.
+
+Each slot has one work tree on the target, `<work_dir>/<project>/slot-<n>`
+(TER-190), kept from job to job, so a build reuses the output of the
+jobs before. A job takes a slot when it starts: the lowest of `1` to
+`slots` that no running job of its project holds, and `0` for a merge,
+so merges have a tree of their own. A cancelled job holds its slot until
+its processes are gone, and no two jobs use one tree at once. The job
+row has `slot` while it runs. The step checks out the commit with
+`git checkout -f` and removes every file that the commit does not track,
+ignored ones too, except `target/` at the root (`git clean -ffdx -e
+/target`). It prunes old commits with `git gc --auto`. A dir that is no
+repo, a `.git` that is no plain dir or holds a symlink, or a tree that
+git cannot fetch into or check out, is made new once: all but `target/`
+is removed. No tree is removed after a job. A recipe that wants a clean
+build removes `target/` itself.
+
+The git state that a recipe leaves in the tree does not reach the next
+job's checkout (TER-190 review). Before the fetch the step resets
+`.git/config` and removes `.git/info` (with `grafts`), `.git/hooks`,
+`.git/commondir`, `.git/shallow`, the alternates, the commit-graph, the
+multi-pack-index and every `refs/replace/` ref, and git runs with
+`GIT_NO_REPLACE_OBJECTS=1`. After the checkout the step hashes the work
+tree again (a new index from the tree, `git add -A` but `target/`,
+`git write-tree`) and compares it with the tree of the commit in the
+daemon's repo, as it does `HEAD^{tree}`. On a miss all of the slot is
+removed, `target/` too, and the step runs once more in a new tree. A
+second miss fails the job (`error`, "refused: the checkout of ... is not
+its tree") and removes the slot.
+
+A lost job (one that ran when the daemon stopped) whose kill does not confirm that its
+processes ended (the kill failed or left processes, the target has no
+job PID files, the job ran on another host, or the delivery target is
+gone) marks its slot before the slot is free. The next job of that slot
+removes all of the tree first, `target/` too, and then clears the mark.
+The step moves the old tree aside before it removes it, so processes
+that still run there write into the old tree, not into the new one.
 
 The recipe can change its clone: make commits, move HEAD, delete refs, or
 write `.git/config` (for example `url.<base>.insteadOf`). None of that
@@ -11029,8 +11067,9 @@ They hold no credential, so a recipe, or an agent with exec on the
 target, finds no key, token, or push repo there, and validate jobs can
 run beside a merge (TER-159). What is left: the recipes of one target
 share a user, so a recipe can change another job's clone on the same
-target, or leave a process that does. That can change the verdict of
-that job, but not what a merge pushes: the push is the commit that the
+target, or leave a process that does. A recipe can also leave files in
+`target/` of its slot's tree for the next job of that slot. That can
+change the verdict of that job, but not what a merge pushes: the push is the commit that the
 daemon recorded before any recipe ran. A host agent must not run as the
 daemon's user on the daemon's machine (§17), or a recipe can read the
 state dir.

@@ -21,13 +21,17 @@
 //!      histories), leaves the batch and the others go on. When none
 //!      merges, the job ends as a conflict. The commit is recorded as
 //!      `refs/job/head` or `refs/job/merge`, and goes into a bundle.
-//!   2. on the target: the bundle goes in on stdin, and a fresh clone in
-//!      `<work_dir>/<project>/<job>` is made from it and checked against
-//!      the recorded commit. With a base, the clone also gets the file of
-//!      the changed paths (TER-100). Then the recipe (`sh -c <recipe>` in
-//!      the clone) runs: the repo's code, with no credential and no
-//!      remote. Its env names the job kind and, when `next` gives a base,
-//!      the file of the changed paths ([`recipe_env`]).
+//!   2. on the target: the bundle goes in on stdin, and the job ref is
+//!      fetched from it into the work tree of the job's slot,
+//!      `<work_dir>/<project>/slot-<n>` (TER-190, [`slot_dir`]), checked
+//!      against the recorded commit, checked out with `-f`, and every
+//!      file it does not track but `target/` is removed. The tree stays
+//!      for the next job of the slot, so builds reuse `target/`. With a
+//!      base, the tree also gets the file of the changed paths (TER-100).
+//!      Then the recipe (`sh -c <recipe>` in the tree) runs: the repo's
+//!      code, with no credential and no remote. Its env names the job
+//!      kind, the slot, and, when `next` gives a base, the file of the
+//!      changed paths ([`recipe_env`]).
 //!   3. a merge job only, when the recipe passed, in the daemon, with the
 //!      credential: push the recorded commit from the daemon's repo to
 //!      `next`. Not forced: when `next` moved, the push fails. The recipe
@@ -35,8 +39,8 @@
 //!
 //!   Each step on the target runs as `ionice -c3 nice -n19 <argv>`
 //!   (`nice` only on a target without `ionice`), so jobs do not starve
-//!   their host. Then the clone on the target and the daemon's repo are
-//!   removed.
+//!   their host. Then the daemon's repo is removed; the slot's tree on
+//!   the target stays.
 //! - A step that hits its timeout, or a cancel, ends the process group and
 //!   the session of the step on the target (`TERM`, then `KILL`), through
 //!   [`crate::run_kill`]: killing the `ssh` or `docker exec` client alone
@@ -273,6 +277,9 @@ struct Lost {
     /// The job is in [`Live::runs`] while its kill runs, so its slot is
     /// not free, also after a cancel of a running one (TER-123).
     live: LiveRun,
+    /// It ran on another host than the delivery target's now: the kill
+    /// may miss its processes.
+    other_host: bool,
 }
 
 /// TER-123: end the processes that the jobs of the last daemon left on
@@ -328,11 +335,13 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                 // The kill goes to the current delivery target. When the
                 // job ran on another host, the kill misses its processes
                 // (it cannot hit others: the PID file is per job).
+                let mut other_host = false;
                 if def.is_some()
                     && let Some(ran_on) = job.host.as_deref()
                 {
                     let now_on = jobs::host_of(t, &delivery);
                     if ran_on != now_on {
+                        other_host = true;
                         warn!(job = %job.id, ran_on, delivery_host = %now_on,
                             "a lost job ran on another host than its delivery target now; its kill may miss");
                     }
@@ -346,6 +355,7 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                     running,
                     def,
                     live,
+                    other_host,
                 });
             }
             Ok(out)
@@ -373,9 +383,12 @@ async fn end_lost(state: &Shared, l: Lost) {
         running,
         def,
         live,
+        other_host,
     } = l;
+    let mut report = None;
+    let wraps = def.as_ref().is_some_and(crate::run_kill::kind_wraps);
     match def {
-        Some(def) if crate::run_kill::kind_wraps(&def) => {
+        Some(def) if wraps => {
             let r = crate::run_kill::kill_file(
                 state,
                 &def,
@@ -395,9 +408,31 @@ async fn end_lost(state: &Shared, l: Lost) {
             } else {
                 info!(job = %id, report = %r, "killed a lost job run on its target");
             }
+            report = Some(r);
         }
         Some(_) => debug!(job = %job.id, "a lost job run on a target without PID files"),
         None => {}
+    }
+    // TER-190 review, finding 2: processes of the run may still write into
+    // the slot's tree. The slot is free below, so the next job of the slot
+    // makes its tree new first. The mark is written before the slot frees.
+    if let Some(slot) = job.slot
+        && !kill_confirmed(wraps && !other_host, report.as_ref())
+    {
+        let (project, id) = (job.project.clone(), job.id.clone());
+        let marked = state
+            .db
+            .write("system", move |t| {
+                jobs::mark_slot_wipe(t, &project, slot, &id)
+            })
+            .await;
+        match marked {
+            Ok(()) => warn!(job = %job.id, slot,
+                "the kill of a lost job run did not confirm its end; its slot's tree is made new before the next job"),
+            Err(e) => {
+                warn!(job = %job.id, slot, "cannot mark the slot of a lost job for a wipe: {e}")
+            }
+        }
     }
     if running {
         // P5: the run is lost, not failed. The job goes back to the queue
@@ -427,6 +462,20 @@ async fn end_lost(state: &Shared, l: Lost) {
     }
     drop(live);
     kick(state);
+}
+
+/// True when the kill of a lost job run shows that none of its processes
+/// is left (TER-190 review, finding 2). `kill_hits`: the target has job
+/// PID files ([`crate::run_kill::kind_wraps`]) and the job ran on the host
+/// that got the kill. `report` is the kill's report
+/// ([`crate::run_kill::kill_file`]). A failed kill, processes left, a
+/// target without PID files, another host, or no target: not confirmed.
+/// No PID file, or a stale one, is a run with no process left.
+fn kill_confirmed(kill_hits: bool, report: Option<&Value>) -> bool {
+    let Some(r) = report.filter(|_| kill_hits) else {
+        return false;
+    };
+    r.get("error").is_none() && !r["left"].as_array().is_some_and(|l| !l.is_empty())
 }
 
 /// The checks of a job queue config before it is written, by `PUT
@@ -628,7 +677,7 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
                 if later {
                     continue;
                 }
-                if jobs::start(t, &j.id, &host)? {
+                if jobs::start(t, &j.id, &host, j.slot)? {
                     let run = LiveRun::new(&j.id);
                     for c in j.cards() {
                         set_labels(t, &c.card, &[LABEL_RUNNING], &[LABEL_QUEUED])?;
@@ -957,12 +1006,10 @@ async fn run_inner(
         )));
     }
     let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
-    let dir = format!(
-        "{}/{}/{}",
-        def.work_dir().trim_end_matches('/'),
-        job.project,
-        job.id
-    );
+    let slot = job
+        .slot
+        .ok_or_else(|| ApiError::internal("the job has no slot"))?;
+    let dir = slot_dir(def, &job.project, slot);
     check_ref(&job.branch)?;
     if let Some(c) = &job.commit {
         check_commit(c)?;
@@ -997,6 +1044,11 @@ async fn run_inner(
     };
     let holder = Some(format!("{}/jobs", job.project));
     let ionice = has_ionice(state, job, &target, &row.def, holder.clone()).await;
+    let project = job.project.clone();
+    let wipe = state
+        .db
+        .read(move |c| jobs::slot_wipe_pending(c, &project, slot))
+        .await?;
     let ctx = StepCtx {
         state,
         job,
@@ -1004,31 +1056,28 @@ async fn run_inner(
         dir: &dir,
         repo: job_repo,
         bundle: local.with_extension("bundle"),
-        holder: holder.clone(),
+        holder,
         ionice,
         recipe_started,
+        slot,
+        wipe,
     };
+    // The slot's tree stays on the target for the next job of the slot
+    // (TER-190): no delete of the tree and its build output per job.
     let result = steps(&ctx, recipe, def.timeout_secs()).await;
-    let clean = RemoteCmd {
-        argv: vec![
-            "sh".into(),
-            "-c".into(),
-            CLEAN_SCRIPT.into(),
-            "sh".into(),
-            dir.clone(),
-        ],
-        timeout_secs: Some(STEP_TIMEOUT),
-        holder,
-        ..RemoteCmd::default()
-    };
-    match step(state, &job.id, &row.def, &clean, STEP_MAX, None).await {
-        Ok(c) if c.end.as_ref().is_some_and(End::success) => {}
-        Ok(c) => warn!(job = %job.id, "cannot remove the job clone: {}", end_text(c.end.as_ref())),
-        Err(e) => warn!(job = %job.id, "cannot remove the job clone: {e}"),
-    }
     drop(ctx);
     remove_job_repo(local).await;
     result
+}
+
+/// The work tree of a slot on the target (TER-190):
+/// `<work_dir>/<project>/slot-<n>`, kept from job to job. Only one running
+/// job holds a slot ([`jobs::pick`]), so no two jobs share a tree.
+pub fn slot_dir(def: &DeliveryDef, project: &str, slot: i64) -> String {
+    format!(
+        "{}/{project}/slot-{slot}",
+        def.work_dir().trim_end_matches('/')
+    )
 }
 
 /// The daemon's repo of a job: `<state>/jobs/<project>/<job>.git`, and its
@@ -1144,6 +1193,11 @@ struct StepCtx<'a> {
     /// Set when the recipe step started: a failure after it is a failure,
     /// also when the host is gone then (TER-160).
     recipe_started: &'a AtomicBool,
+    /// The job's slot ([`jobs::pick`]).
+    slot: i64,
+    /// A lost job may still run in the slot's tree: the receive step makes
+    /// all of it new, `target/` too ([`jobs::mark_slot_wipe`]).
+    wipe: bool,
 }
 
 impl StepCtx<'_> {
@@ -1361,6 +1415,22 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         Prepared::End(end) => return Ok(end),
     };
     check_commit(&head)?;
+    // The tree that the slot's work tree must have (TER-190 review,
+    // finding 1), from the daemon's repo, not from the slot.
+    let h = head.clone();
+    let tree = match x.daemon(move |r| r.tree_of(&h)).await? {
+        Ok(Some(t)) if check_commit(&t).is_ok() => t,
+        Ok(_) => {
+            return Err(ApiError::internal(format!(
+                "no tree of {head} in the job repo"
+            )));
+        }
+        Err(e) => {
+            return Err(ApiError::internal(format!(
+                "cannot read the tree of {head}: {e}"
+            )));
+        }
+    };
     // Step 2, on the target and without any credential: a clone from the
     // bundle, at the recorded commit.
     let b = x.bundle.clone();
@@ -1369,9 +1439,26 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         .map_err(|e| ApiError::internal(format!("cannot read the job bundle: {e}")))?;
     let _ = tokio::fs::remove_file(&b).await;
     let base = base.filter(|b| check_commit(b).is_ok()).unwrap_or_default();
-    let receive = x.plain_cmd(RECEIVE_SCRIPT, &[x.dir, &head, job.kind.as_str(), &base]);
+    let wipe = if x.wipe { "wipe" } else { "" };
+    let receive = x.plain_cmd(
+        RECEIVE_SCRIPT,
+        &[x.dir, &head, job.kind.as_str(), &base, &tree, wipe],
+    );
     let c = x.run(&receive, STEP_MAX, Some(data)).await?;
-    if result_line(&c.stdout).get("outcome").map(String::as_str) != Some("ok") {
+    let received = result_line(&c.stdout).get("outcome").map(String::as_str) == Some("ok");
+    if received && x.wipe {
+        // The slot is new: the mark of the lost job goes (finding 2).
+        let (project, slot) = (job.project.clone(), x.slot);
+        if let Err(e) = x
+            .state
+            .db
+            .write("system", move |t| jobs::clear_slot_wipe(t, &project, slot))
+            .await
+        {
+            warn!(job = %job.id, "cannot clear the wipe mark of slot {slot}: {e}");
+        }
+    }
+    if !received {
         return Ok(JobEnd {
             passed: false,
             outcome: Some("error".into()),
@@ -1466,13 +1553,16 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
 }
 
 /// The env of the recipe (TER-100, docs/api.md 35.2): the job kind and
-/// ID, the tested head, and with a base, the base and the absolute path
+/// ID, the tested head, the slot (TER-190), and with a base, the base and the absolute path
 /// of the changed files. No credential goes in here.
 fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("TERRARIUM_JOB_KIND".into(), job.kind.as_str().to_owned());
     env.insert("TERRARIUM_JOB_ID".into(), job.id.clone());
     env.insert("TERRARIUM_HEAD".into(), head.to_owned());
+    if let Some(s) = job.slot {
+        env.insert("TERRARIUM_JOB_SLOT".into(), s.to_string());
+    }
     if let Some(b) = base {
         env.insert("TERRARIUM_BASE".into(), b.to_owned());
         env.insert(
@@ -1995,16 +2085,19 @@ pub fn view(def: &DeliveryDef, list: &[Job]) -> Value {
 
 /// The git setup of the steps on the target. They hold no credential
 /// (TER-103): no user or system config, no hooks, no prompts, and only
-/// the file transport (the bundle).
+/// the file transport (the bundle). No replace refs, commit-graph or
+/// multi-pack-index either (TER-190 review, finding 1).
 const PLAIN_PRELUDE: &str = r#"set -u
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
   GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_NAMESPACE GIT_CREDENTIAL_HELPER \
   GIT_TEMPLATE_DIR GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_EDITOR GIT_PROXY_COMMAND \
-  GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+  GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM \
+  GIT_COMMON_DIR GIT_REPLACE_REF_BASE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_ATTR_SOURCE
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
-export GIT_ASKPASS=false SSH_ASKPASS=false LC_ALL=C
+export GIT_ASKPASS=false SSH_ASKPASS=false LC_ALL=C GIT_NO_REPLACE_OBJECTS=1
 G() {
   git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.untrackedCache=false \
+    -c core.useReplaceRefs=false -c core.commitGraph=false -c core.multiPackIndex=false \
     -c credential.helper= -c protocol.allow=never -c protocol.file.allow=always \
     -c fetch.recurseSubmodules=false -c submodule.recurse=false -c gc.auto=0 \
     -c maintenance.auto=false -c advice.detachedHead=false -c core.pager=cat \
@@ -2013,51 +2106,157 @@ G() {
 res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 "#;
 
-/// Step 2 on the target, without any credential: `dir sha kind base`,
-/// the bundle of the daemon on stdin. Writes it to `<dir>.bundle`, makes a
-/// fresh clone at `dir` from it, checks that the job ref is the commit
-/// `sha`, and checks it out (`next` for a merge, detached for a
-/// validate). With a base (an ancestor of `sha`, so in the bundle), it
-/// writes the changed files to [`CHANGED_FILES`] (TER-100). Prints
+/// Step 2 on the target, without any credential: `dir sha kind base tree
+/// wipe`, the bundle of the daemon on stdin. `dir` is the work tree of the
+/// job's slot (TER-190), kept from job to job; `tree` is the tree of `sha`
+/// in the daemon's repo. The script writes the bundle to `<dir>.bundle`,
+/// fetches the job ref from it into the tree, checks that the ref is the
+/// commit `sha`, checks it out with `-f` (`next` for a merge, detached for
+/// a validate), and removes every file that the commit does not track,
+/// ignored ones too, except `target/` at the root, so builds reuse it. A
+/// dir that is no repo yet, a `.git` that is no plain dir or holds a
+/// symlink, or a tree that git cannot fetch into or check out, is made new
+/// once: all but `target/` goes, and `git init` runs.
+///
+/// The git state that a recipe can leave does not reach the next job
+/// (TER-190 review, finding 1): `.git/config`, `info` (with `grafts`),
+/// `hooks`, `commondir`, `shallow`, the alternates, the commit-graph, the
+/// multi-pack-index and `refs/replace` are removed each time, and git runs
+/// with `GIT_NO_REPLACE_OBJECTS=1` ([`PLAIN_PRELUDE`]). Then the work tree
+/// is hashed again (a new index from `tree`, `git add -A` but `target/`,
+/// `git write-tree`) and must be `tree`, as `HEAD^{tree}` must. Else all
+/// of the slot goes (`target/` too) and it runs once more in a new tree;
+/// a second miss refuses the job and wipes the slot.
+///
+/// `wipe` (TER-190 review, finding 2): a lost job may still run in the
+/// slot, so all of it goes first, `target/` too. A wipe moves the dir
+/// aside before it removes it, so such processes write into the old dir.
+///
+/// Old commits are pruned by a `git gc --auto` that keeps few packs. With
+/// a base (an ancestor of `sha`, so in the bundle), it writes the changed
+/// files to [`CHANGED_FILES`] (TER-100); else that file is gone. Prints
 /// `outcome=ok head=<sha> base=<sha or empty>` or `outcome=error`.
-const RECEIVE_SCRIPT: &str = r#"dir=$1; sha=$2; kind=$3; base=${4:-}
+const RECEIVE_SCRIPT: &str = r#"dir=$1; sha=$2; kind=$3; base=${4:-}; tree=${5:-}; wipe_first=${6:-}
 case "$dir" in /*/*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
 case "$sha" in *[!0-9a-f]*|'') echo "bad commit"; res error; exit 2 ;; esac
 case "$base" in *[!0-9a-f]*) echo "bad base"; res error; exit 2 ;; esac
+case "$tree" in *[!0-9a-f]*|'') echo "bad tree"; res error; exit 2 ;; esac
 b=$dir.bundle
 if [ "$kind" = merge ]; then r=refs/job/merge; else r=refs/job/head; fi
-rm -rf -- "$dir" "$b" && mkdir -p -- "$dir" || { echo "cannot make $dir"; res error; exit 2; }
+# Git only ever sees this tree: never a repo above it.
+T() { G --git-dir="$dir/.git" --work-tree="$dir" -C "$dir" "$@"; }
+# All of the slot goes, target/ too. It moves aside first: processes that
+# may still run in it write into the old dir, not into the new one.
+wipe() {
+  rm -rf -- "$dir".wiped.* 2>/dev/null
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    mv -- "$dir" "$dir.wiped.$$" || return 1
+    rm -rf -- "$dir.wiped.$$" 2>/dev/null \
+      || echo "cannot remove all of $dir.wiped.$$ now; the next wipe tries again"
+  fi
+  mkdir -p -- "$dir"
+}
+# A link in place of the slot is not followed.
+if [ -L "$dir" ]; then
+  rm -f -- "$dir" || { echo "cannot remove the link $dir"; res error; exit 2; }
+fi
+if [ "$wipe_first" = wipe ]; then
+  echo "a lost job may still run in $dir; making the slot new, target/ too"
+  wipe || { echo "cannot wipe $dir"; res error; exit 2; }
+fi
+mkdir -p -- "$dir" && rm -f -- "$b" || { echo "cannot make $dir"; res error; exit 2; }
 if ! cat > "$b"; then rm -f -- "$b"; echo "cannot write the bundle"; res error; exit 2; fi
-if ! { G -C "$dir" init -q && G -C "$dir" fetch -q --no-tags -- "$b" "+$r:$r"; }; then
-  rm -f -- "$b"; echo "cannot read the bundle"; res error; exit 2
+# All of the tree goes but target/, and git makes a new repo.
+fresh() {
+  find "$dir" -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf -- {} + && T init -q
+}
+# A .git that git can take as it is: a plain dir with no link in it (no
+# gitfile, no objects or refs of another place).
+sane() {
+  [ -d "$dir/.git" ] && [ ! -L "$dir/.git" ] \
+    && [ -z "$(find "$dir/.git" -type l -print 2>/dev/null | head -n 1)" ]
+}
+# Fetch the job ref, check it out with -f, and clean all but target/.
+# 3: the bundle holds another commit (no retry); 1: the tree failed.
+sync() {
+  rm -f -- "$dir/.git/index.lock" "$dir/.git/HEAD.lock" "$dir/.git/config" \
+    "$dir/.git/commondir" "$dir/.git/shallow" "$dir/.git/gitdir" \
+    "$dir/.git/objects/info/alternates" "$dir/.git/objects/info/http-alternates" \
+    "$dir/.git/objects/info/commit-graph" "$dir/.git/objects/pack/multi-pack-index" \
+    "$dir/.git/terrarium/changed-files" "$dir/.git/terrarium/verify-index"
+  rm -rf -- "$dir/.git/info" "$dir/.git/hooks" "$dir/.git/refs/replace" \
+    "$dir/.git/objects/info/commit-graphs" "$dir/.git/worktrees"
+  T init -q && T config core.logAllRefUpdates false || return 1
+  T for-each-ref --format='delete %(refname)' refs/replace/ | T update-ref --stdin || return 1
+  T fetch -q --no-tags -- "$b" "+$r:$r" || return 1
+  got=$(T rev-parse --verify -q "$r^{commit}")
+  if [ "$got" != "$sha" ]; then echo "the bundle holds ${got:-nothing}, not $sha"; return 3; fi
+  if [ "$kind" = merge ]; then
+    T checkout -q -f -B next "$sha" || return 1
+  else
+    T checkout -q -f --detach "$sha" || return 1
+  fi
+  T clean -q -ffdx -e /target || return 1
+}
+# The work tree is the daemon's tree: each file is hashed again into a new
+# index (but target/), so no replace ref, graft or forged object passes.
+verify() {
+  vi=$dir/.git/terrarium/verify-index
+  mkdir -p -- "$dir/.git/terrarium" && rm -f -- "$vi" || return 1
+  # target/ is left out as an ignored path (a pathspec that names an
+  # ignored path fails `git add`).
+  printf '/target/\n' > "$vi.exclude" || return 1
+  GIT_INDEX_FILE=$vi; export GIT_INDEX_FILE
+  w=
+  if T read-tree "$tree" >/dev/null 2>&1 \
+    && T -c core.excludesFile="$vi.exclude" add -A -- . >/dev/null 2>&1; then
+    w=$(T write-tree 2>/dev/null)
+  fi
+  unset GIT_INDEX_FILE
+  rm -f -- "$vi" "$vi.exclude"
+  [ "$w" = "$tree" ] && [ "$(T rev-parse -q --verify 'HEAD^{tree}' 2>/dev/null)" = "$tree" ]
+}
+made=0
+if ! sane || ! T rev-parse -q --verify 'HEAD^{commit}' >/dev/null 2>&1; then
+  fresh || { rm -f -- "$b"; echo "cannot make the repo in $dir"; res error; exit 2; }
+  made=1
+fi
+sync; rc=$?
+if [ "$rc" = 1 ] && [ "$made" = 0 ]; then
+  echo "the tree in $dir failed; making it new"
+  if fresh; then sync; rc=$?; fi
+fi
+if [ "$rc" = 0 ] && ! verify; then
+  echo "the checkout in $dir is not the tree $tree of $sha (git state that a recipe left?); making the slot new, target/ too"
+  rc=4
+  if wipe && fresh; then sync; rc=$?; fi
+  if [ "$rc" = 0 ] && ! verify; then rc=4; fi
 fi
 rm -f -- "$b"
-got=$(G -C "$dir" rev-parse --verify -q "$r^{commit}")
-if [ "$got" != "$sha" ]; then echo "the bundle holds ${got:-nothing}, not $sha"; res error; exit 2; fi
-if [ "$kind" = merge ]; then
-  G -C "$dir" checkout -q -B next "$sha" || { res error; exit 2; }
-else
-  G -C "$dir" checkout -q --detach "$sha" || { res error; exit 2; }
-fi
+case $rc in
+  0) ;;
+  3) res error; exit 2 ;;
+  4) echo "refused: the checkout of $sha is not its tree $tree, also in a new slot tree; the slot is wiped"
+     wipe >/dev/null 2>&1; res error; exit 2 ;;
+  *) echo "cannot read the bundle or check out $sha"; res error; exit 2 ;;
+esac
+T -c gc.auto=1 -c gc.autoPackLimit=4 -c gc.pruneExpire=now -c gc.autoDetach=false gc --auto -q >/dev/null 2>&1 || true
 # The changed files for the recipe (TER-100): the paths that differ
 # between the base and HEAD, one per line, in .git/terrarium/changed-files.
 # The daemon gives the base: `next` before the merge for a merge, the
 # merge-base of the commit and `next` for a validate. No base, or one that
-# is not in the clone: no file, and `base=`.
-if [ -n "$base" ] && ! G -C "$dir" merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
+# is not in the tree: no file, and `base=`.
+if [ -n "$base" ] && ! T merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
   base=
 fi
 if [ -n "$base" ]; then
   mkdir -p -- "$dir/.git/terrarium" \
-    && G -C "$dir" -c core.quotePath=false diff --no-ext-diff --no-textconv --name-only --no-renames "$base" HEAD \
+    && T -c core.quotePath=false diff --no-ext-diff --no-textconv --name-only --no-renames "$base" HEAD \
       > "$dir/.git/terrarium/changed-files" \
     || { rm -f -- "$dir/.git/terrarium/changed-files"; base=; }
 fi
 printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 "#;
-
-/// The end: `dir`. Remove the clone and a bundle that is left.
-const CLEAN_SCRIPT: &str = r#"case "$1" in /*/*) rm -rf -- "$1" "$1.bundle" ;; *) exit 2 ;; esac"#;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -2151,13 +2350,14 @@ mod tests {
         git_in(&src, &["add", "."]);
         git_in(&src, &["commit", "-q", "-m", "one"]);
         let sha = git_in(&src, &["rev-parse", "HEAD"]);
+        let tree = git_in(&src, &["rev-parse", "HEAD^{tree}"]);
         git_in(&src, &["update-ref", "refs/job/merge", &sha]);
         git_in(&src, &["bundle", "create", "-q", "../b", "refs/job/merge"]);
         let bundle = std::fs::read(tmp.path().join("b")).unwrap();
         let dir = tmp.path().join("jobs/p/J1");
         let d = dir.display().to_string();
 
-        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &sha, "merge"], &bundle);
+        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &sha, "merge", "", &tree], &bundle);
         assert!(ok, "{text}");
         assert_eq!(result_line(text.as_bytes())["head"], sha, "{text}");
         assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]), sha);
@@ -2167,23 +2367,332 @@ mod tests {
 
         // The bundle holds another commit than the one the daemon named.
         let other = "0123456789abcdef0123456789abcdef01234567";
-        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, other, "merge"], &bundle);
+        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, other, "merge", "", &tree], &bundle);
         assert!(!ok, "{text}");
         assert!(text.contains("not 0123456789abcdef"), "{text}");
-        // A cut bundle.
+        // A cut bundle, in a new slot's tree. (A tree that has the commit
+        // already does not need the bundle's objects.)
+        let fresh = tmp.path().join("jobs/p/J2").display().to_string();
         let (ok, text) = run_plain(
             RECEIVE_SCRIPT,
-            &[&d, &sha, "merge"],
+            &[&fresh, &sha, "merge", "", &tree],
             &bundle[..bundle.len() / 2],
         );
         assert!(!ok, "{text}");
         assert!(text.contains("cannot read the bundle"), "{text}");
         // A validate job wants refs/job/head.
-        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &sha, "validate"], &bundle);
+        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &sha, "validate", "", &tree], &bundle);
         assert!(!ok, "{text}");
-        // A relative dir is refused.
-        let (ok, _) = run_plain(RECEIVE_SCRIPT, &["rel", &sha, "merge"], &bundle);
+        // A relative dir is refused, and so is a step without a tree.
+        let (ok, _) = run_plain(RECEIVE_SCRIPT, &["rel", &sha, "merge", "", &tree], &bundle);
         assert!(!ok);
+        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &sha, "merge"], &bundle);
+        assert!(!ok && text.contains("bad tree"), "{text}");
+    }
+
+    /// TER-190: the next job of a slot reuses its tree. The tree is then at
+    /// the new commit, the files that commit does not track are gone
+    /// (ignored ones and nested `target/` dirs too) but `target/` at the
+    /// root, a config or a list of changed files that the last job left is
+    /// gone, and a tree that git cannot use is made new, `target/` kept.
+    #[test]
+    fn a_slot_tree_is_reused_and_cleaned_but_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        git_in(&src, &["init", "-q", "-b", "main"]);
+        std::fs::write(src.join("README"), "one\n").unwrap();
+        std::fs::write(src.join(".gitignore"), "target/\n*.o\n").unwrap();
+        git_in(&src, &["add", "."]);
+        git_in(&src, &["commit", "-q", "-m", "one"]);
+        let one = git_in(&src, &["rev-parse", "HEAD"]);
+        let bundle_of = |sha: &str| {
+            git_in(&src, &["update-ref", "refs/job/head", sha]);
+            git_in(&src, &["bundle", "create", "-q", "../b", "refs/job/head"]);
+            std::fs::read(tmp.path().join("b")).unwrap()
+        };
+        let tree_of = |sha: &str| git_in(&src, &["rev-parse", &format!("{sha}^{{tree}}")]);
+        let dir = tmp.path().join("jobs/p/slot-1");
+        let d = dir.display().to_string();
+        let (ok, text) = run_plain(
+            RECEIVE_SCRIPT,
+            &[&d, &one, "validate", &one, &tree_of(&one)],
+            &bundle_of(&one),
+        );
+        assert!(ok, "{text}");
+        assert!(dir.join(CHANGED_FILES).exists());
+
+        // What the first job left.
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join("target/debug/kept"), "built").unwrap();
+        std::fs::write(dir.join("junk"), "x").unwrap();
+        std::fs::write(dir.join("main.o"), "x").unwrap();
+        std::fs::write(dir.join("README"), "changed\n").unwrap();
+        std::fs::create_dir_all(dir.join("sub/target")).unwrap();
+        git_in(&dir, &["config", "alias.st", "status"]);
+
+        std::fs::write(src.join("README"), "two\n").unwrap();
+        std::fs::write(src.join("NEW"), "new\n").unwrap();
+        git_in(&src, &["add", "."]);
+        git_in(&src, &["commit", "-q", "-m", "two"]);
+        let two = git_in(&src, &["rev-parse", "HEAD"]);
+        let t2 = tree_of(&two);
+        let b2 = bundle_of(&two);
+        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &two, "validate", "", &t2], &b2);
+        assert!(ok, "{text}");
+        assert!(!text.contains("making the slot new"), "{text}");
+        assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]), two);
+        assert_eq!(
+            git_in(&dir, &["status", "--porcelain", "--ignored"]),
+            "!! target/"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README")).unwrap(),
+            "two\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("target/debug/kept")).unwrap(),
+            "built"
+        );
+        assert!(!dir.join("junk").exists() && !dir.join("main.o").exists());
+        assert!(!dir.join("sub").exists());
+        assert!(!dir.join(CHANGED_FILES).exists(), "a stale list is left");
+        assert!(!git_in(&dir, &["config", "--list", "--local"]).contains("alias"));
+        assert!(!tmp.path().join("jobs/p/slot-1.bundle").exists());
+
+        // A broken tree is made new; target/ stays.
+        std::fs::remove_dir_all(dir.join(".git/objects")).unwrap();
+        std::fs::write(dir.join("junk"), "x").unwrap();
+        let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &two, "validate", "", &t2], &b2);
+        assert!(ok, "{text}");
+        assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]), two);
+        assert!(dir.join("target/debug/kept").exists());
+        assert!(!dir.join("junk").exists());
+    }
+
+    /// A source repo with `LIB` and `README`, and the bundle of a commit
+    /// as the daemon makes it for a validate job.
+    struct Src {
+        tmp: tempfile::TempDir,
+        src: std::path::PathBuf,
+    }
+
+    impl Src {
+        fn new() -> Src {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = tmp.path().join("src");
+            std::fs::create_dir_all(&src).unwrap();
+            git_in(&src, &["init", "-q", "-b", "main"]);
+            std::fs::write(src.join("LIB"), "lib\n").unwrap();
+            Src { tmp, src }
+        }
+
+        /// Commit `README` with `text`: the commit and its tree.
+        fn commit(&self, text: &str) -> (String, String) {
+            std::fs::write(self.src.join("README"), text).unwrap();
+            git_in(&self.src, &["add", "."]);
+            git_in(&self.src, &["commit", "-q", "-m", text]);
+            (
+                git_in(&self.src, &["rev-parse", "HEAD"]),
+                git_in(&self.src, &["rev-parse", "HEAD^{tree}"]),
+            )
+        }
+
+        fn bundle(&self, sha: &str) -> Vec<u8> {
+            git_in(&self.src, &["update-ref", "refs/job/head", sha]);
+            git_in(
+                &self.src,
+                &["bundle", "create", "-q", "../b", "refs/job/head"],
+            );
+            std::fs::read(self.tmp.path().join("b")).unwrap()
+        }
+
+        fn slot(&self) -> std::path::PathBuf {
+            self.tmp.path().join("jobs/p/slot-1")
+        }
+
+        /// The receive step of a validate job of `sha` with `tree`.
+        fn receive(&self, sha: &str, tree: &str, wipe: &str) -> (bool, String) {
+            let d = self.slot().display().to_string();
+            run_plain(
+                RECEIVE_SCRIPT,
+                &[&d, sha, "validate", "", tree, wipe],
+                &self.bundle(sha),
+            )
+        }
+    }
+
+    /// TER-190 review, finding 1: a recipe plants git state in the slot's
+    /// tree: replace refs (one packed, one loose) for the blobs of `LIB`,
+    /// which the next commit keeps, and of the next `README`; a
+    /// `commondir` to a repo whose config has a smudge filter for every
+    /// file; `shallow`, `info/grafts` and alternates. The next job still
+    /// gets the real tree of its commit, no filter runs, and none of that
+    /// state is left.
+    #[test]
+    fn git_state_that_a_recipe_plants_does_not_reach_the_next_job() {
+        let s = Src::new();
+        let (one, t1) = s.commit("one\n");
+        let (ok, text) = s.receive(&one, &t1, "");
+        assert!(ok, "{text}");
+        let (two, t2) = s.commit("two\n");
+        let dir = s.slot();
+
+        // What the recipe of the first job does.
+        std::fs::write(dir.join("evil"), "evil\n").unwrap();
+        let evil = git_in(&dir, &["hash-object", "-w", "evil"]);
+        let lib = git_in(&dir, &["rev-parse", "HEAD:LIB"]);
+        git_in(&dir, &["replace", &lib, &evil]);
+        assert_eq!(git_in(&dir, &["cat-file", "-p", &lib]), "evil");
+        git_in(&dir, &["pack-refs", "--all"]);
+        let readme2 = git_in(&s.src, &["rev-parse", "HEAD:README"]);
+        git_in(
+            &dir,
+            &["update-ref", &format!("refs/replace/{readme2}"), &evil],
+        );
+        let common = s.tmp.path().join("common.git");
+        git_in(
+            s.tmp.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                &dir.display().to_string(),
+                "common.git",
+            ],
+        );
+        let pwned = s.tmp.path().join("pwned");
+        git_in(
+            &common,
+            &[
+                "config",
+                "filter.x.smudge",
+                &format!("touch {}; cat", pwned.display()),
+            ],
+        );
+        std::fs::create_dir_all(common.join("info")).unwrap();
+        std::fs::write(common.join("info/attributes"), "* filter=x\n").unwrap();
+        std::fs::write(
+            dir.join(".git/commondir"),
+            format!("{}\n", common.display()),
+        )
+        .unwrap();
+        std::fs::write(dir.join(".git/shallow"), format!("{one}\n")).unwrap();
+        std::fs::create_dir_all(dir.join(".git/info")).unwrap();
+        std::fs::write(dir.join(".git/info/grafts"), format!("{one}\n")).unwrap();
+        std::fs::write(
+            dir.join(".git/objects/info/alternates"),
+            format!("{}/objects\n", common.display()),
+        )
+        .unwrap();
+
+        let (ok, text) = s.receive(&two, &t2, "");
+        assert!(ok, "{text}");
+        assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]), two);
+        assert_eq!(std::fs::read_to_string(dir.join("LIB")).unwrap(), "lib\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README")).unwrap(),
+            "two\n"
+        );
+        assert!(!pwned.exists(), "a filter of the recipe ran: {text}");
+        assert_eq!(git_in(&dir, &["for-each-ref", "refs/replace/"]), "");
+        for f in [
+            "commondir",
+            "shallow",
+            "info/grafts",
+            "objects/info/alternates",
+        ] {
+            assert!(!dir.join(".git").join(f).exists(), ".git/{f} is left");
+        }
+        assert_eq!(git_in(&dir, &["status", "--porcelain", "--ignored"]), "");
+    }
+
+    /// TER-190 review, finding 1: a work tree that is not the tree that
+    /// the daemon named is never used. The slot is made new once (all of
+    /// it, `target/` too); a second miss refuses the job and wipes the
+    /// slot. The next job with the right tree works again.
+    #[test]
+    fn a_checkout_that_is_not_the_named_tree_is_refused_and_the_slot_wiped() {
+        let s = Src::new();
+        let (one, t1) = s.commit("one\n");
+        let (ok, text) = s.receive(&one, &t1, "");
+        assert!(ok, "{text}");
+        let dir = s.slot();
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join("target/debug/kept"), "built").unwrap();
+
+        // The empty tree: never the tree of `one`.
+        let empty = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+        let (ok, text) = s.receive(&one, empty, "");
+        assert!(!ok, "{text}");
+        assert!(text.contains("making the slot new"), "{text}");
+        assert!(text.contains("refused"), "{text}");
+        assert_eq!(result_line(text.as_bytes())["outcome"], "error");
+        assert!(!dir.join("target").exists(), "the slot is not wiped");
+        assert!(!dir.join(".git").exists(), "the slot is not wiped");
+
+        let (ok, text) = s.receive(&one, &t1, "");
+        assert!(ok, "{text}");
+        assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]), one);
+    }
+
+    /// TER-190 review, finding 2: with `wipe`, all of the slot goes first,
+    /// `target/` too. A process of a lost job that still runs in the old
+    /// tree writes nothing into the new one.
+    #[test]
+    fn a_wipe_makes_the_slot_new_and_a_late_writer_misses_it() {
+        let s = Src::new();
+        let (one, t1) = s.commit("one\n");
+        let (ok, text) = s.receive(&one, &t1, "");
+        assert!(ok, "{text}");
+        let dir = s.slot();
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join("target/debug/kept"), "built").unwrap();
+        let mut late = std::process::Command::new("sh")
+            .args(["-c", "sleep 1; mkdir -p target; echo late > target/late"])
+            .current_dir(&dir)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let (ok, text) = s.receive(&one, &t1, "wipe");
+        assert!(ok, "{text}");
+        assert!(text.contains("making the slot new"), "{text}");
+        assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]), one);
+        assert!(!dir.join("target/debug/kept").exists(), "target/ is kept");
+        late.wait().unwrap();
+        assert!(
+            !dir.join("target/late").exists(),
+            "the late writer reached the new tree"
+        );
+        assert_eq!(git_in(&dir, &["status", "--porcelain", "--ignored"]), "");
+    }
+
+    /// TER-190 review, finding 2: only a kill that reached the job's host
+    /// and left no process confirms the end of a lost job run.
+    #[test]
+    fn only_a_clean_kill_on_the_jobs_host_confirms_its_end() {
+        let killed = serde_json::json!({"pid": 12, "left": []});
+        assert!(kill_confirmed(true, Some(&killed)));
+        assert!(kill_confirmed(
+            true,
+            Some(&serde_json::json!({"pid": null}))
+        ));
+        assert!(kill_confirmed(
+            true,
+            Some(&serde_json::json!({"stale": "x"}))
+        ));
+        assert!(!kill_confirmed(
+            true,
+            Some(&serde_json::json!({"error": "offline"}))
+        ));
+        assert!(!kill_confirmed(
+            true,
+            Some(&serde_json::json!({"pid": 12, "left": [13]}))
+        ));
+        // A target without PID files, another host, or no target.
+        assert!(!kill_confirmed(false, Some(&killed)));
+        assert!(!kill_confirmed(true, None));
     }
 
     #[test]
@@ -2371,6 +2880,7 @@ mod tests {
             parent: None,
             split_path: String::new(),
             planned_secs: None,
+            slot: None,
         }
     }
 
@@ -2526,7 +3036,7 @@ mod tests {
                         planned_secs: None,
                     },
                 )?;
-                assert!(jobs::start(t, &j.id, "h")?);
+                assert!(jobs::start(t, &j.id, "h", Some(1))?);
                 let end = JobEnd {
                     passed: false,
                     outcome: Some("red".into()),
