@@ -9,15 +9,12 @@ import { Marked, type Tokens } from "marked";
 export type WikiTarget =
   | { kind: "page"; project: string; path: string }
   | { kind: "card"; project: string; id: string }
-  | { kind: "memory"; project: string; id: string }
-  | { kind: "version"; project: string; name: string };
+  | { kind: "memory"; project: string; id: string };
 
 export interface ResolveContext {
   project: string;
   /** Known page paths in the current project, to mark missing links. */
   pages?: Set<string>;
-  /** Known version names in the current project. */
-  versions?: Set<string>;
   /** Card prefixes that exist, for example `TER`, `WEB`. */
   cardPrefixes?: Set<string>;
   /** Map card prefix to its project. */
@@ -26,9 +23,8 @@ export interface ResolveContext {
 
 const CARD_RE = /^([A-Z][A-Z0-9]{1,9})-(\d+)$/;
 const MEM_RE = /^MEM-\d+$/;
-const SEMVER_RE = /^v\d+\.\d+(\.\d+)?([-+].*)?$/;
 
-/** Resolve the inside of `[[...]]` to a target. */
+/** Resolve the inside of `[[...]]` to a target. A version name is a page since TER-58 (versions are card labels), as in the daemon. */
 export function resolveWikilink(raw: string, ctx: ResolveContext): WikiTarget {
   const ref = raw.trim();
   if (ref.startsWith("project:")) {
@@ -42,7 +38,6 @@ export function resolveWikilink(raw: string, ctx: ResolveContext): WikiTarget {
   if (card && (!ctx.cardPrefixes || ctx.cardPrefixes.has(card[1]!))) {
     return { kind: "card", project: ctx.prefixProject?.[card[1]!] ?? ctx.project, id: ref };
   }
-  if (ctx.versions?.has(ref) || SEMVER_RE.test(ref)) return { kind: "version", project: ctx.project, name: ref };
   return { kind: "page", project: ctx.project, path: ref };
 }
 
@@ -55,8 +50,6 @@ export function targetHref(t: WikiTarget): string {
       return `${p}/board?card=${encodeURIComponent(t.id)}`;
     case "memory":
       return `${p}/knowledge/memory?id=${encodeURIComponent(t.id)}`;
-    case "version":
-      return `${p}/board?version=${encodeURIComponent(t.name)}`;
   }
 }
 

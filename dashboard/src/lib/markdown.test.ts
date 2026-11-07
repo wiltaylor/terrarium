@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderWiki, resolveWikilink, safeUrl, splitFrontMatter, targetHref } from "./markdown";
 
-const ctx = { project: "terrarium", pages: new Set(["index", "designs/runner-v2"]), versions: new Set(["demo-2026-10-31"]), cardPrefixes: new Set(["TER", "WEB"]), prefixProject: { TER: "terrarium", WEB: "webshop" } };
+const ctx = { project: "terrarium", pages: new Set(["index", "designs/runner-v2"]), cardPrefixes: new Set(["TER", "WEB"]), prefixProject: { TER: "terrarium", WEB: "webshop" } };
 
 describe("resolveWikilink", () => {
   it("resolves every §15.1 form", () => {
@@ -9,8 +9,8 @@ describe("resolveWikilink", () => {
     expect(resolveWikilink("TER-42", ctx)).toEqual({ kind: "card", project: "terrarium", id: "TER-42" });
     expect(resolveWikilink("WEB-4", ctx)).toEqual({ kind: "card", project: "webshop", id: "WEB-4" });
     expect(resolveWikilink("MEM-17", ctx)).toEqual({ kind: "memory", project: "terrarium", id: "MEM-17" });
-    expect(resolveWikilink("v0.3.0", ctx)).toEqual({ kind: "version", project: "terrarium", name: "v0.3.0" });
-    expect(resolveWikilink("demo-2026-10-31", ctx)).toEqual({ kind: "version", project: "terrarium", name: "demo-2026-10-31" });
+    // A version is a card label since TER-58: `[[v0.3.0]]` is a page, as in the daemon.
+    expect(resolveWikilink("v0.3.0", ctx)).toEqual({ kind: "page", project: "terrarium", path: "v0.3.0" });
     expect(resolveWikilink("project:other/reports/x", ctx)).toEqual({ kind: "page", project: "other", path: "reports/x" });
     expect(resolveWikilink("project:other", ctx)).toEqual({ kind: "page", project: "other", path: "index" });
   });
@@ -23,7 +23,6 @@ describe("resolveWikilink", () => {
     expect(targetHref({ kind: "card", project: "terrarium", id: "TER-1" })).toBe("/p/terrarium/board?card=TER-1");
     expect(targetHref({ kind: "page", project: "a b", path: "x/y z" })).toBe("/p/a%20b/knowledge/wiki/x/y%20z");
     expect(targetHref({ kind: "memory", project: "terrarium", id: "MEM-17" })).toBe("/p/terrarium/knowledge/memory?id=MEM-17");
-    expect(targetHref({ kind: "version", project: "terrarium", name: "v0.1.0" })).toBe("/p/terrarium/board?version=v0.1.0");
   });
 });
 

@@ -6,7 +6,7 @@ import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
 import type { Card, Column, NewCard, Question } from "../../api/types";
-import { ago, compact, humanize } from "../../lib/format";
+import { ago, compact } from "../../lib/format";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { idleBadge } from "../../lib/idle";
 import { cardsIn, createBoardStore } from "../../stores/board";

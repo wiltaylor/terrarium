@@ -269,7 +269,7 @@ describe("navigation", () => {
     const start = app.indexOf('<Route path="/p/:project/board"');
     const block = app.slice(start, app.indexOf("</Route>", start));
     expect(block).toMatch(/path="\/" component=\{BoardPage\}/);
-    // The Cards tab manages the versions: no Versions tab.
+    // Versions are card labels (TER-58): no Versions tab.
     expect(app).not.toMatch(/VersionsPage/);
     expect(block).toMatch(/path="\/artifacts\/:id\?" component=\{ArtifactsPage\}/);
     expect(block).toMatch(/path="\/schedules" component=\{SchedulesPage\}/);
