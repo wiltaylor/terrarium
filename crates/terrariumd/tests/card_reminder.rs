@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use terrarium_core::AgentId;
 use terrarium_core::config::{CompactMaxAge, IdleStop};
 use terrariumd::lifecycle::Tuning;
+use terrariumd::supervisor::{Supervisor, TurnHold};
 
 fn state(td: &TestDaemon) -> terrariumd::api::Shared {
     td.daemon.as_ref().unwrap().state.clone()
@@ -269,20 +270,43 @@ async fn no_reminder_without_a_turn_a_card_in_progress_or_with_it_off() {
 async fn the_reminder_comes_before_the_idle_stop() {
     let (td, w) = setup().await;
     claimed(&td, "One").await;
+    // The agent rested since the setup, and on a loaded machine that rest
+    // can pass the 300 ms before the turn lands: an idle stop would then
+    // come first. A quota hold (`blocked`, not a rest) clears the rest
+    // clock. The turn waits in the hold, and the release makes the agent
+    // `idle` and starts the turn at once.
+    td.sup
+        .hold_turns(
+            aid(&w),
+            Some(TurnHold {
+                until: None,
+                reason: "quota".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    td.wait_status(&w, "blocked").await;
     fast(&td, IdleStop::After(Duration::from_millis(300)));
     td.post(&format!("/api/agents/{w}/send"), json!({"text": "work"}))
         .await
         .ok();
-    // The agent rested since the setup, and on a loaded machine that can
-    // be longer than the 300 ms: an idle stop can then come before the
-    // turn, and the turn wakes the agent again. So the stop alone does
-    // not mean the turn ran. The reminder comes first: an idle stop after
-    // the turn without it leaves the agent stopped, and this wait fails.
+    td.sup.hold_turns(aid(&w), None).await.unwrap();
+    // An idle stop after the turn without the reminder leaves the agent
+    // stopped, and this wait fails.
     until("the reminder", || async { !reminders(&td, &w).is_empty() }).await;
-    until("the idle stop", || async {
-        agent(&td, &w).await["status"] == "stopped"
-    })
-    .await;
+    let start = std::time::Instant::now();
+    loop {
+        let a = agent(&td, &w).await;
+        if a["status"] == "stopped" {
+            break;
+        }
+        assert!(
+            start.elapsed() < common::WAIT,
+            "no idle stop after the reminder: {a}\n{:#?}",
+            td.sup.prompts(aid(&w))
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(agent(&td, &w).await["status_reason"], "idle");
     let prompts = td.sup.prompts(aid(&w));
     assert_eq!(prompts.len(), 2, "{prompts:#?}");
