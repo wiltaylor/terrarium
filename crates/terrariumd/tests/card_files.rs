@@ -661,7 +661,10 @@ async fn delivery_at_start_and_while_running() {
     let f = cards_dir(&ws, &c1).join("spec.md");
     // One sync writes the files, then `index.md`: wait for the index too.
     let index_path = cards_dir(&ws, &c1).join("index.md");
-    wait_for("the delivery at start", || f.exists() && index_path.exists()).await;
+    wait_for("the delivery at start", || {
+        f.exists() && index_path.exists()
+    })
+    .await;
     assert_eq!(std::fs::read(&f).unwrap(), b"# one");
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
