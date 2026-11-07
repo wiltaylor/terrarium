@@ -682,9 +682,23 @@ mod fake {
         /// After `delay`, if nothing restarted or stopped the agent meanwhile,
         /// run `then`.
         fn later(&self, agent: AgentId, epoch: u64, then: impl FnOnce(&Self) + Send + 'static) {
+            self.later_gated(agent, epoch, None, then);
+        }
+
+        /// As [`Self::later`], and not before `gate` fires or drops.
+        fn later_gated(
+            &self,
+            agent: AgentId,
+            epoch: u64,
+            gate: Option<tokio::sync::oneshot::Receiver<()>>,
+            then: impl FnOnce(&Self) + Send + 'static,
+        ) {
             let me = self.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(me.delay).await;
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
                 if me
                     .current(agent)
                     .is_some_and(|(s, e)| e == epoch && s.is_live())
@@ -779,6 +793,17 @@ mod fake {
         }
 
         fn turn(&self, agent: AgentId, prompt: String) -> Result<(), SupervisorError> {
+            self.turn_gated(agent, prompt, None)
+        }
+
+        /// As [`Self::turn`], and the turn does not end before `gate` fires
+        /// or drops.
+        fn turn_gated(
+            &self,
+            agent: AgentId,
+            prompt: String,
+            gate: Option<tokio::sync::oneshot::Receiver<()>>,
+        ) -> Result<(), SupervisorError> {
             let Some((_, epoch)) = self.current(agent).filter(|(s, _)| s.is_live()) else {
                 return Err(SupervisorError::NotRunning(agent));
             };
@@ -792,7 +817,7 @@ mod fake {
                 }),
             );
             self.set_status(agent, AgentStatus::Working, None);
-            self.later(agent, epoch, move |me| {
+            self.later_gated(agent, epoch, gate, move |me| {
                 me.emit(agent, SupervisorEventKind::Harness(Event::TurnEnd));
                 me.set_status(agent, AgentStatus::Idle, None);
                 me.next_early(agent);
@@ -830,7 +855,13 @@ mod fake {
                 "New mail ({} messages). Run `terrarium mail read`.",
                 ids.len()
             );
-            if self.turn(agent, text).is_err() {
+            // The turn ends only after the mail is `delivered`, as with the
+            // real supervisor, where a turn takes far longer than the
+            // write. Mail still `queued` at the idle after the turn counts
+            // as work that wakes the agent, and the card reminder skips
+            // that idle (TER-141).
+            let (written, gate) = tokio::sync::oneshot::channel();
+            if self.turn_gated(agent, text, Some(gate)).is_err() {
                 self.lock().mail.entry(agent).or_default().extend(ids);
                 return;
             }
@@ -849,6 +880,7 @@ mod fake {
                             Ok(())
                         })
                         .await;
+                    let _ = written.send(());
                 });
             }
         }

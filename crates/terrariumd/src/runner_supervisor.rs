@@ -3243,14 +3243,24 @@ impl RunnerSupervisor {
                 }
                 Err(e) => debug!(agent = %id, "the push pointer was not delivered: {e}"),
             }
-            let mut slots = lock(&me.inner.slots);
-            if let Some(slot) = slots.get_mut(&id) {
-                slot.pointer_busy = false;
-                if result.is_err() {
-                    // Keep the items for the next idle.
-                    let newer = std::mem::replace(&mut slot.pointer, pointer);
-                    slot.pointer.merge(newer);
+            {
+                let mut slots = lock(&me.inner.slots);
+                if let Some(slot) = slots.get_mut(&id) {
+                    slot.pointer_busy = false;
+                    if result.is_err() {
+                        // Keep the items for the next idle.
+                        let newer = std::mem::replace(&mut slot.pointer, pointer);
+                        slot.pointer.merge(newer);
+                    }
                 }
+            }
+            // Items that came in meanwhile go out now, if the turn of this
+            // pointer already ended. Its idle may have come before this
+            // end, while the pointer was still busy: then no later idle
+            // pushes them (TER-141). The delivery resolves at the start of
+            // the turn, so a runner that works yet waits for its idle.
+            if result.is_ok() && runner.status() == AgentStatus::Idle {
+                me.maybe_push(id);
             }
         });
     }

@@ -160,6 +160,32 @@ const STDIN_CHUNK: usize = 64 * 1024;
 /// The dir of the daemon's job repos, in the state dir (TER-103).
 const JOBS_DIR: &str = "jobs";
 
+/// The queue state of one daemon (`AppState::job_queue`).
+pub struct Runtime {
+    /// True once [`spawn`] has taken up the jobs of the last daemon
+    /// ([`recover_lost`]). A job that starts before that counts as lost and
+    /// goes back to the queue (TER-211).
+    recovered: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self {
+            recovered: tokio::sync::watch::Sender::new(false),
+        }
+    }
+}
+
+impl Runtime {
+    /// Wait until [`spawn`] has taken up the jobs of the last daemon. From
+    /// then on, the start does not take a running job as lost.
+    pub async fn recovered(&self) {
+        let mut rx = self.recovered.subscribe();
+        // The sender lives as long as `self`, so the wait cannot fail.
+        let _ = rx.wait_for(|done| *done).await;
+    }
+}
+
 /// The controls of the running jobs, by job ID, for a cancel. The job IDs
 /// are ULIDs, so one map serves every daemon in a process (the tests).
 fn controls() -> &'static Mutex<HashMap<String, mpsc::UnboundedSender<Control>>> {
@@ -260,6 +286,7 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
                 warn!("cannot initialize stored job host keys: {e}");
             }
             drop(recover_lost(&state).await);
+            state.job_queue.recovered.send_replace(true);
         }
         loop {
             let Some(state) = weak.upgrade() else { break };

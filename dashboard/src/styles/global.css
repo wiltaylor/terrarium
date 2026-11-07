@@ -2086,6 +2086,56 @@ a.chip.card-link:hover {
 .thread-question {
   max-width: 85%;
 }
+/* The linked cards of a thread (TER-147): a mini kanban, one row per project with its board columns. An empty column is narrow. */
+.tracked-cards > summary {
+  cursor: pointer;
+  list-style-position: inside;
+}
+.tracked-cards[open] > summary {
+  margin-bottom: 8px;
+}
+.tracked-row {
+  display: grid;
+  gap: 4px;
+}
+.tracked-columns {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.tracked-col {
+  flex: 1 1 180px;
+  min-width: 160px;
+  max-width: 260px;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.tracked-col.empty {
+  flex: 0 0 28px;
+  min-width: 28px;
+  max-width: 28px;
+  overflow: hidden;
+}
+.tracked-col.empty .tracked-col-title {
+  writing-mode: vertical-rl;
+  white-space: nowrap;
+}
+a.kcard.tracked-tile {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+a.kcard.tracked-tile:hover {
+  border-color: var(--link);
+}
+.thread-progress {
+  font-variant-numeric: tabular-nums;
+}
 /* The agent's close proposal (TER-95): it waits on the operator. */
 .thread-proposal {
   border-color: var(--warn);

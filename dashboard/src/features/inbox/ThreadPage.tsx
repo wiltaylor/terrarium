@@ -2,7 +2,8 @@
 // the questions of the agent in order, with the questions answerable inline;
 // a message box; the "Send response" box (the overall response, the approval
 // record); the agent's close proposal with Confirm and Decline (TER-95); and
-// the close with a confirmation and a handoff.
+// the close with a confirmation and a handoff. The linked cards (TER-147)
+// are a mini kanban under the title: open while the thread tracks.
 //
 // Every text of the thread is untrusted: the messages are Markdown and go
 // through the DOMPurify sink (SafeHtml) only; the topic, the names, the
@@ -21,6 +22,7 @@ import { api, events, inbox } from "../../stores";
 import { BundleCard } from "./BundleCard";
 import { CloseProposal, HandoffLinks } from "./CloseProposal";
 import { QuestionCard } from "./QuestionCard";
+import { TrackedCards } from "./TrackedCards";
 import { byOperator, closeBody, openQuestionCount, scopeLabel, THREAD_MESSAGE_MAX, THREAD_RESPONSE_MAX, threadChip, threadText, timeline, type TimelineEntry, whoName } from "./threads";
 
 export default function ThreadPage() {
@@ -105,6 +107,7 @@ export default function ThreadPage() {
               </Show>
             </PageHead>
             <ThreadMeta thread={t()} now={now()} />
+            <TrackedCards thread={t()} now={now()} />
             <Show when={t().response}>
               {(r) => (
                 <section class="card-box stack" style={{ gap: "4px" }} aria-label="Your response">
