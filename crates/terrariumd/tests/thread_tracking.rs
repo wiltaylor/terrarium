@@ -235,10 +235,16 @@ async fn the_agent_tracks_and_an_operator_post_wakes_it() {
     assert_eq!(r.body["status"], "tracking", "{}", r.body);
     assert!(r.body["tracking_at"].is_string(), "{}", r.body);
     assert!(r.body["close_proposal"].is_null(), "{}", r.body);
-    lab.parked(&eph, "thread is tracking").await;
+    // The proposal parked it already; the park keeps its first reason.
+    lab.parked(&eph, "thread waits on the operator").await;
 
     // It lists under `tracking`, and is not an open Inbox item.
-    let rows = lab.td.get("/api/threads?status=tracking").await.ok().clone();
+    let rows = lab
+        .td
+        .get("/api/threads?status=tracking")
+        .await
+        .ok()
+        .clone();
     let rows = rows.as_array().unwrap();
     assert!(rows.iter().any(|t| t["id"] == tid.as_str()), "{rows:?}");
     let open = lab
@@ -284,7 +290,9 @@ async fn the_agent_tracks_and_an_operator_post_wakes_it() {
     assert!(lab.spawn_row(&eph).await["parked_at"].is_null());
 
     // Its reply puts the thread back into tracking, not waiting_operator.
-    let th = lab.post_as(&eph, &tid, "Two of three cards are in review.").await;
+    let th = lab
+        .post_as(&eph, &tid, "Two of three cards are in review.")
+        .await;
     assert_eq!(th["status"], "tracking", "{th}");
     lab.parked(&eph, "thread is tracking").await;
 
@@ -310,7 +318,10 @@ async fn the_agent_tracks_and_an_operator_post_wakes_it() {
 
     // The close ends tracking and the agent.
     lab.td
-        .post(&format!("/api/threads/{tid}/close"), json!({"summary": "Done."}))
+        .post(
+            &format!("/api/threads/{tid}/close"),
+            json!({"summary": "Done."}),
+        )
         .await
         .ok();
     until("the close of the agent", || async {
