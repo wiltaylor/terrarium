@@ -21,13 +21,17 @@
 //!      histories), leaves the batch and the others go on. When none
 //!      merges, the job ends as a conflict. The commit is recorded as
 //!      `refs/job/head` or `refs/job/merge`, and goes into a bundle.
-//!   2. on the target: the bundle goes in on stdin, and a fresh clone in
-//!      `<work_dir>/<project>/<job>` is made from it and checked against
-//!      the recorded commit. With a base, the clone also gets the file of
-//!      the changed paths (TER-100). Then the recipe (`sh -c <recipe>` in
-//!      the clone) runs: the repo's code, with no credential and no
-//!      remote. Its env names the job kind and, when `next` gives a base,
-//!      the file of the changed paths ([`recipe_env`]).
+//!   2. on the target: the bundle goes in on stdin, and the job ref is
+//!      fetched from it into the work tree of the job's slot,
+//!      `<work_dir>/<project>/slot-<n>` (TER-190, [`slot_dir`]), checked
+//!      against the recorded commit, checked out with `-f`, and every
+//!      file it does not track but `target/` is removed. The tree stays
+//!      for the next job of the slot, so builds reuse `target/`. With a
+//!      base, the tree also gets the file of the changed paths (TER-100).
+//!      Then the recipe (`sh -c <recipe>` in the tree) runs: the repo's
+//!      code, with no credential and no remote. Its env names the job
+//!      kind, the slot, and, when `next` gives a base, the file of the
+//!      changed paths ([`recipe_env`]).
 //!   3. a merge job only, when the recipe passed, in the daemon, with the
 //!      credential: push the recorded commit from the daemon's repo to
 //!      `next`. Not forced: when `next` moved, the push fails. The recipe
@@ -35,8 +39,8 @@
 //!
 //!   Each step on the target runs as `ionice -c3 nice -n19 <argv>`
 //!   (`nice` only on a target without `ionice`), so jobs do not starve
-//!   their host. Then the clone on the target and the daemon's repo are
-//!   removed.
+//!   their host. Then the daemon's repo is removed; the slot's tree on
+//!   the target stays.
 //! - A step that hits its timeout, or a cancel, ends the process group and
 //!   the session of the step on the target (`TERM`, then `KILL`), through
 //!   [`crate::run_kill`]: killing the `ssh` or `docker exec` client alone
