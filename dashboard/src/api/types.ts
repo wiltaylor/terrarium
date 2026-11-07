@@ -1585,7 +1585,14 @@ export interface Thread {
   updated_at: string;
   closed_at: string | null;
   closed_by: string | null;
+  /** The close that the attached agent proposes (TER-95): the handoff that the operator confirms. `null`: none. Absent on a daemon before 0.3.0. */
+  close_proposal?: ThreadHandoff | null;
+  /** Why a closed thread closed. Absent on a daemon before 0.3.0. */
+  close_reason?: ThreadCloseReason | null;
 }
+
+/** `confirmed`: the operator confirmed the agent's proposal; `operator`: the operator closed it; `stale`: untouched; `failed_start`: its agent did not start. */
+export type ThreadCloseReason = "confirmed" | "operator" | "stale" | "failed_start";
 
 /** `POST /api/threads`. `agent`: a ULID or `project/name`, until TER-92 spawns it from the template. */
 export interface NewThread {
@@ -1602,15 +1609,16 @@ export interface ThreadQuery {
   scope?: string;
 }
 
-/** `POST /api/threads/{id}/close`: the handoff. */
+/** `POST /api/threads/{id}/close`: the handoff, or `confirm` (TER-95): close with the agent's proposed handoff; no `summary` or `links` with it. */
 export interface ThreadClose {
   summary?: string;
   links?: ThreadLink[];
+  confirm?: boolean;
 }
 
 /** `data` of a `thread` event. */
 export interface ThreadEventData {
-  change: "opened" | "message" | "response" | "question" | "tracking" | "closed";
+  change: "opened" | "message" | "response" | "question" | "tracking" | "close_proposed" | "closed";
   id: string;
   scope: string;
   status: ThreadStatus;

@@ -764,7 +764,7 @@ export interface Api {
     post(id: string, text: string): Promise<Thread>;
     /** `POST /api/threads/{id}/respond`: the operator's overall response, the approval record. */
     respond(id: string, text: string): Promise<Thread>;
-    /** `POST /api/threads/{id}/close`: close with a handoff; the open questions of the thread are retracted. */
+    /** `POST /api/threads/{id}/close`: close with a handoff, or with `{confirm: true}` the agent's proposed handoff (TER-95); the open questions of the thread are retracted. */
     close(id: string, body?: ThreadClose): Promise<Thread>;
   };
 

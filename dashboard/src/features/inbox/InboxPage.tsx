@@ -228,7 +228,7 @@ export default function InboxPage() {
                   </Match>
                   <Match when={item.system}>{(s) => <PausedThreadCard system={s()} onChange={systemChanged} />}</Match>
                   <Match when={item.kind === "watch" && item.watch}>{(w) => <WatchCard watch={w()} now={now()} onChange={(next) => watchChanged(item, next)} />}</Match>
-                  <Match when={item.kind === "thread" && item.thread}>{(t) => <ThreadRow thread={t()} now={now()} />}</Match>
+                  <Match when={item.kind === "thread" && item.thread}>{(t) => <ThreadRow thread={t()} now={now()} onChange={systemChanged} />}</Match>
                 </Switch>
               </div>
             )}
