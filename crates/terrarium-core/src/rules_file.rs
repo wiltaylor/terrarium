@@ -683,7 +683,11 @@ fn read_if_job(fields: &Map<String, Value>) -> Result<JobCondition, String> {
             JOB_STATES.join(", ")
         ));
     }
-    if let Some(o) = c.outcome.iter().find(|o| !JOB_OUTCOMES.contains(&o.as_str())) {
+    if let Some(o) = c
+        .outcome
+        .iter()
+        .find(|o| !JOB_OUTCOMES.contains(&o.as_str()))
+    {
         return Err(format!(
             "if_job.outcome `{o}` is not one of {}",
             JOB_OUTCOMES.join(", ")
@@ -1402,7 +1406,10 @@ rule "validate-pass" {
             vec!["@review", "@validating", "ready", "review"]
         );
         let cols = board().columns.unwrap();
-        assert_eq!(resolve_column(&cols, "@working").unwrap().name, "in_progress");
+        assert_eq!(
+            resolve_column(&cols, "@working").unwrap().name,
+            "in_progress"
+        );
         assert_eq!(resolve_column(&cols, "@review").unwrap().name, "review");
         assert_eq!(resolve_column(&cols, "review").unwrap().name, "review");
         assert!(resolve_column(&cols, "@merge_queue").is_none());
@@ -1416,7 +1423,11 @@ rule "validate-pass" {
             _ => None,
         };
         assert_eq!(
-            render("{{card.id}} by {{ event.actor }}, {{job.id}}.", &lookup, false),
+            render(
+                "{{card.id}} by {{ event.actor }}, {{job.id}}.",
+                &lookup,
+                false
+            ),
             "TER-1 by a`b, ."
         );
         assert_eq!(

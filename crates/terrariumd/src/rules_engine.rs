@@ -135,7 +135,9 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
             Ok(rows)
         })
         .await?;
-    cache.sets.retain(|p, _| rows.iter().any(|(q, _, _)| q == p));
+    cache
+        .sets
+        .retain(|p, _| rows.iter().any(|(q, _, _)| q == p));
     let mut out = Vec::new();
     for (project, hash, updated_at) in rows {
         let cached = cache
@@ -169,7 +171,9 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                         Arc::new(RuleSet::default())
                     }
                 };
-                cache.sets.insert(project.clone(), (hash.clone(), set.clone()));
+                cache
+                    .sets
+                    .insert(project.clone(), (hash.clone(), set.clone()));
                 set
             }
         };
@@ -580,7 +584,11 @@ enum Step {
     /// An action ran; more may follow.
     Next,
     /// The action failed: its write rolled back. Record the failure.
-    Failed { step: i64, verb: String, error: String },
+    Failed {
+        step: i64,
+        verb: String,
+        error: String,
+    },
 }
 
 /// Run one pending row to its end: one write for each action.
@@ -766,9 +774,8 @@ pub fn card_condition_fails(
     columns: &[BoardColumn],
 ) -> Option<String> {
     let is_in = |refs: &[String]| {
-        refs.iter().any(|r| {
-            rules_file::resolve_column(columns, r).is_some_and(|c| c.name == card.column)
-        })
+        refs.iter()
+            .any(|r| rules_file::resolve_column(columns, r).is_some_and(|c| c.name == card.column))
     };
     if !cond.column.is_empty() && !is_in(&cond.column) {
         return Some(format!("{} is in {}", card.id, card.column));
@@ -839,11 +846,7 @@ fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
             }
         }
         let e = ctx.event.as_ref()?;
-        return e
-            .data
-            .get(f)
-            .filter(|v| !v.is_null())
-            .map(value_text);
+        return e.data.get(f).filter(|v| !v.is_null()).map(value_text);
     }
     (name == "rule.name").then(|| ctx.rule.clone())
 }
@@ -902,12 +905,7 @@ fn step_once(t: &mut Tx<'_>, id: &str) -> ApiResult<Step> {
     if row.step == 0
         && let Err((failed, why)) = check_start(&rule, &row, &ctx)
     {
-        finish(
-            t,
-            id,
-            if failed { "failed" } else { "skipped" },
-            Some(&why),
-        )?;
+        finish(t, id, if failed { "failed" } else { "skipped" }, Some(&why))?;
         return Ok(Step::Ended);
     }
     let Some(action) = usize::try_from(row.step)
@@ -921,8 +919,10 @@ fn step_once(t: &mut Tx<'_>, id: &str) -> ApiResult<Step> {
     match perform(t, &actor, &ctx, action) {
         Ok(done) => {
             let mut steps = row.steps.clone();
-            steps.push(json!({"verb": action.verb, "ok": true, "changed": done.changed,
-                              "detail": done.detail}));
+            steps.push(
+                json!({"verb": action.verb, "ok": true, "changed": done.changed,
+                              "detail": done.detail}),
+            );
             t.execute(
                 "UPDATE rule_runs SET step = step + 1, steps = ?2, updated_at = ?3 WHERE id = ?1",
                 params![id, Value::Array(steps).to_string(), now()],

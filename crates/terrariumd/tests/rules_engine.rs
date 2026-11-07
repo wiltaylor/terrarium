@@ -78,7 +78,10 @@ async fn settle(td: &TestDaemon) {
         }
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
-    panic!("the rule engine did not settle: {:?}", engine_state(td).await);
+    panic!(
+        "the rule engine did not settle: {:?}",
+        engine_state(td).await
+    );
 }
 
 async fn put_rules(td: &TestDaemon, project: &str, text: &str) {
@@ -101,9 +104,7 @@ async fn new_card(td: &TestDaemon, project: &str, body: Value) -> String {
 
 /// The comments of a card: (author, body), oldest first.
 async fn comments(td: &TestDaemon, card: &str) -> Vec<(String, String)> {
-    td.get(&format!("/api/cards/{card}"))
-        .await
-        .ok()["comments"]
+    td.get(&format!("/api/cards/{card}")).await.ok()["comments"]
         .as_array()
         .unwrap()
         .iter()
@@ -249,9 +250,12 @@ async fn a_loop_between_two_rules_stops_at_the_chain_depth() {
     td.project("terra").await;
     put_rules(&td, "terra", PING_PONG).await;
     let card = new_card(&td, "terra", json!({"title": "c"})).await;
-    td.post(&format!("/api/cards/{card}/comments"), json!({"body": "ping"}))
-        .await
-        .ok();
+    td.post(
+        &format!("/api/cards/{card}/comments"),
+        json!({"body": "ping"}),
+    )
+    .await
+    .ok();
     settle(&td).await;
 
     // The operator's ping (depth 0), then four rule comments (depth 1 to
@@ -528,7 +532,13 @@ async fn ordered_actions_per_card_order_and_conditions() {
     let ca = comments(&td, &a).await;
     assert_eq!(
         bodies(&ca),
-        vec!["first `1`", "second `1`", "before", "first `2`", "second `2`"]
+        vec![
+            "first `1`",
+            "second `1`",
+            "before",
+            "first `2`",
+            "second `2`"
+        ]
     );
     assert_eq!(ca[0].0, "rule:flow/first");
     assert_eq!(ca[2].0, "rule:flow/stops");

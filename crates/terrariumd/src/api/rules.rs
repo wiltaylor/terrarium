@@ -203,9 +203,7 @@ async fn dry_run(
     let p = name.clone();
     let (events, plans) = state
         .db
-        .read(move |c| {
-            crate::rules_engine::dry_run(c, &p, &set, from, to, chrono::Utc::now())
-        })
+        .read(move |c| crate::rules_engine::dry_run(c, &p, &set, from, to, chrono::Utc::now()))
         .await?;
     Ok(Json(json!({
         "project": name,
