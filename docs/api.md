@@ -4771,7 +4771,7 @@ Kinds:
 | `host.update_failed` | `{host, host_id, failed, running}`: the self-update to `failed` did not start, and the host agent runs `running` again. One time for each version while the daemon runs. The audit entry is `host.update_failed`. |
 | `event_source` | `{change, source, name, key, kind, enabled}` after a change of an event source (§20). |
 | `system_prompt` | `{change, name, path}` after a write through the API of the system prompt library (§28). `change` is `created`, `updated`, or `deleted`. An edit of a file by hand gives no event. |
-| `test_run` | `{change, project, id, name, counts, cards, versions}` after a change of a test run (§29). `change` is `created`, `linked`, `unlinked`, or `deleted`. `cards` are card IDs and `versions` are version names. |
+| `test_run` | `{change, project, id, name, counts, cards, labels}` after a change of a test run (§29). `change` is `created`, `linked`, `unlinked`, or `deleted`. `cards` are card IDs and `labels` are labels, such as `version:1.4.0`. |
 | `monitor.result` | `{project, monitor, monitor_id, status, value, unit, message, error, at, duration_ms, result_id}` for each result of a monitor (§30.3). |
 | `monitor.status` | `{project, monitor, monitor_id, from, to, value, unit, message, error}` when the status of a monitor changes; `from` is `null` for the first result (§30.3). |
 | `dashboard.updated` | `{project, blocks}` after a save of the dashboard layout (§30.4). |
@@ -5094,11 +5094,11 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `GET /api/projects/{name}/artifacts` | | `200` artifacts newest first, cursor: number |
+| `GET /api/projects/{name}/artifacts?label=&limit=&cursor=` | | `200` artifacts newest first, cursor: number; `label` keeps the artifacts with that exact label |
 | `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact |
 | `GET /api/projects/{name}/artifacts/usage` | | `200 {"project", "count", "used_bytes", "quota_bytes", "max_file_bytes"}` |
 | `GET /api/artifacts/{id}` | | `200` artifact |
-| `DELETE /api/artifacts/{id}` | | `204`; the author or an admin |
+| `DELETE /api/artifacts/{id}` | | `204`; the author or an admin; `409` on a released version from before TER-58 |
 | `POST /api/artifacts/{id}/links` | `{"kind": "page" \| "card" \| "label", "ref"}` | `201` artifact |
 | `POST /api/artifacts/{id}/url` | none, or `{"ttl"?}` | `200 {"url", "exp", "expires_at"}` |
 | `POST /api/artifacts/prune` | `{"dry_run"?, "as_of"?}` | `200` prune report; sysadmin or operator |
@@ -5109,6 +5109,11 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
   `422 invalid` with a message that names `label`.
 - An admin delete of another author's artifact writes `artifact.delete`. The
   blob goes when no artifact uses it.
+- An artifact on a `released` version from before TER-58 (an old
+  `version_artifacts` row) is not deleted: `409 conflict`, also for its
+  author, an admin, or the operator. The rows stay read only until a later
+  version drops the tables (TER-128). A label link does not block a
+  delete.
 
 ### 12.4 Serving: `GET /a/{uid}/{path}`
 
@@ -9473,7 +9478,7 @@ A run (the list items, and the answer of an upload and a link change):
  "status":"failed","counts":{"passed":120,"failed":2,"errored":1,"skipped":3,"total":126},
  "duration_ms":5321,"started_at":"2026-11-02T01:02:03Z","commit":"abc123","branch":"main",
  "file_name":"junit.xml","raw_size":12345,"notes":[],
- "cards":["DEMO-12"],"versions":[{"id":"01JB6…","name":"v1.2.0"}],
+ "cards":["DEMO-12"],"labels":["version:1.2.0"],
  "created_by":"01M5PA0T…","created_by_name":"demo/worker",
  "created_at":"2026-11-02T01:03:00.000Z","url":"/p/demo/board/tests/01JB7…"}
 ```
@@ -9486,7 +9491,7 @@ A run (the list items, and the answer of an upload and a link change):
 | `commit`, `branch` | From the upload. `null` when not given. |
 | `file_name`, `raw_size` | The name and the size in bytes of the original file. |
 | `notes` | Notes of the parse, for example `3 texts were cut to 64 KiB`. Usually empty. |
-| `cards`, `versions` | The links. |
+| `cards`, `labels` | The links: card IDs, and labels as strings, in the order they were linked. |
 | `url` | The dashboard page of the run. |
 
 A suite:

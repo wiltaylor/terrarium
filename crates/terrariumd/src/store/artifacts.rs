@@ -702,19 +702,39 @@ pub fn get(conn: &Connection, actor: &Actor, key: &str) -> ApiResult<Artifact> {
     render(conn, row)
 }
 
-/// Artifacts of a project, newest first. Cursor: number.
-pub fn list(conn: &Connection, project: &str, page: &Page) -> ApiResult<Paged<Artifact>> {
+/// `GET /api/projects/{name}/artifacts` query: the page, and `label` (the
+/// exact label, such as `version:1.4.0`; TER-129).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ListQuery {
+    pub label: Option<String>,
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+/// Artifacts of a project, newest first. Cursor: number. With `label`, only
+/// the artifacts that have the label.
+pub fn list(conn: &Connection, project: &str, q: &ListQuery) -> ApiResult<Paged<Artifact>> {
     projects::get(conn, project)?;
+    let page = Page {
+        limit: q.limit,
+        cursor: q.cursor.clone(),
+    };
     let limit = page.limit();
     let before: i64 = page
         .cursor()
         .and_then(|c| c.parse().ok())
         .unwrap_or(i64::MAX);
+    let label = q.label.as_deref().map(str::trim).filter(|l| !l.is_empty());
     let mut stmt = conn.prepare(
-        "SELECT * FROM artifacts WHERE project = ?1 AND num < ?2 ORDER BY num DESC LIMIT ?3",
+        "SELECT * FROM artifacts WHERE project = ?1 AND num < ?2
+           AND (?4 IS NULL OR pk IN (SELECT artifact FROM artifact_labels WHERE label = ?4))
+         ORDER BY num DESC LIMIT ?3",
     )?;
     let rows = stmt
-        .query_map(params![project, before, (limit + 1) as i64], art_row)?
+        .query_map(
+            params![project, before, (limit + 1) as i64, label],
+            art_row,
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut items = Vec::new();
     for r in rows {
@@ -948,12 +968,34 @@ pub fn add_link(
     render(t, by_pk(t, row.pk)?)
 }
 
+/// The name of a released version from before TER-58 that the artifact is
+/// on. The old `version_artifacts` and `versions` rows stay read only until a
+/// later version drops the tables (TER-128). Until then an artifact of a
+/// released version cannot be deleted (TER-129).
+fn on_released_version(conn: &Connection, pk: i64) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT v.name FROM version_artifacts va JOIN versions v ON v.id = va.version
+             WHERE va.artifact = ?1 AND v.status = 'released' LIMIT 1",
+            [pk],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// Delete an artifact. Returns the blob to remove when no one else uses it.
 pub fn delete(t: &mut Tx<'_>, actor: &Actor, key: &str) -> ApiResult<(String, String)> {
     let row = find_for(t, actor, key)?;
     // A write: the own project only, also for an architect (TER-47).
     crate::policy::write_project(actor, &row.project)?;
     policy::delete_artifact(actor, &row.project, &row.created_by)?;
+    if let Some(v) = on_released_version(t, row.pk)? {
+        return Err(ApiError::conflict(format!(
+            "{} is attached to released version `{v}` (from before TER-58); \
+             released versions are immutable",
+            short(row.num)
+        )));
+    }
     t.execute("DELETE FROM artifacts WHERE pk = ?1", [row.pk])?;
     if actor.address() != row.created_by {
         t.audit(
