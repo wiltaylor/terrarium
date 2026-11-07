@@ -182,6 +182,7 @@ const TEMPLATE_KEYS: &[&str] = &[
     "default_skills",
     "new_session_on_prompt_change",
     "tools",
+    "grants",
 ];
 
 /// Looks up a template that the fleet file does not declare: the daemon

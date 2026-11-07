@@ -1495,6 +1495,17 @@ pub fn apply(
         record_project(t, &name, &p.def, p.delivery.is_some())?;
     }
     for (p, d) in f.all_templates() {
+        // Any write to a template with grants needs the right to grant
+        // each secret (TER-88), as for `POST /api/templates` and its
+        // PATCH. An upsert that changes nothing checks nothing.
+        let written = templates::upsert_would_write(t, p, d, &source)?;
+        crate::spawn_rights::check_template_write(
+            t,
+            actor,
+            p,
+            &terrarium_core::fleet::template_key(p, &d.name),
+            written.as_ref(),
+        )?;
         let live = templates::upsert_def(t, p, d, &source, &actor.label(), repo)?;
         record(
             t,
@@ -1509,10 +1520,11 @@ pub fn apply(
         let key = fleet::agent_key(&a.def);
         // The template is in the store now: the file's own ones were
         // written above.
-        let template = match &a.template {
-            Some(k) => Some(templates::resolve(t, &a.def.project, k)?.reference()),
+        let resolved = match &a.template {
+            Some(k) => Some(templates::resolve(t, &a.def.project, k)?),
             None => None,
         };
+        let template = resolved.as_ref().map(templates::Template::reference);
         let id = match find_agent(t, &a.def.project, &a.def.name)? {
             Some(v) => {
                 apply_agent(t, &v, &a.def)?;
@@ -1524,6 +1536,12 @@ pub fn apply(
             }
             None => {
                 let v = agents::create_from(t, &a.def, state_dir, &source, template.as_ref())?;
+                // The template's secret grants (TER-88), as for
+                // `POST /api/agents`.
+                if let Some(tpl) = &resolved {
+                    let tg = crate::spawn_rights::TemplateGrants::of(tpl, tpl.key())?;
+                    crate::spawn_rights::grant_at_create(t, actor, &v, &tg)?;
+                }
                 let id = v.agent.id.to_string();
                 out.created_agents.push((id.clone(), a.def.project.clone()));
                 id
