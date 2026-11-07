@@ -2,8 +2,8 @@
 //! project.
 //!
 //! A rule reacts to an event of the log and runs verbs on the board. This
-//! module reads and checks a file. It runs nothing: the rule engine and
-//! the verbs come later (TER-168, TER-169).
+//! module reads and checks a file. It runs nothing: the rule engine
+//! (`terrariumd::rules_engine`, TER-168) runs it; the verbs come with TER-169.
 //!
 //! [`SCHEMA`] is the schema that the daemon ships (`rules.schema.wcl`).
 //! [`parse`] checks a file against it, then checks what a schema cannot
