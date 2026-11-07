@@ -7912,9 +7912,8 @@ test: true}`. Each test writes the audit row `schedule.test`
 ### 19.8 Board rules
 
 A project has one board rules file, `rules.wcl` (TER-162, TER-166). A
-rule reacts to an event of the log and runs verbs on the board. Nothing
-runs a rule yet: the daemon stores and checks the file. The engine and
-the verbs come in later versions.
+rule reacts to an event of the log and runs verbs on the board. The
+daemon stores and checks the file here; the engine (§19.9) runs it.
 
 The file is WCL. The daemon ships its schema
 (`crates/terrarium-core/src/rules.schema.wcl`, `GET /api/rules/schema`)
@@ -7934,7 +7933,8 @@ rule "validate-pass" {
 A rule has a name (unique in the file), `on`, optional `description`,
 `enabled` (default `true`), `max_per_hour` (1 to 600), any number of
 `when` conditions (all must hold; the paths of a trigger `match`, §19.4),
-and at least one verb. The verbs run in the order of the file:
+any number of `if_card` and `if_job` conditions on the current state
+(§19.9), and at least one verb. The verbs run in the order of the file:
 `card_move` (`to`, `from?`, `comment?`, `position?` `top` or `bottom`),
 `card_label` (`add?`, `remove?`), `card_comment` (`text`), `card_assign`
 (`who`), `card_prepend` (`text`), `mail` (`to`, `subject`, `body?`),
@@ -7997,6 +7997,85 @@ previous_hash}`).
 Errors: `422 invalid` with `details.problems: [{line, column, message}]`;
 `409 conflict` for a stale `base_hash`; `409 file_managed` for a put or a
 delete of the rules of a file (edit the file, then `POST /api/reload`).
+
+### 19.9 The rule engine
+
+The rule engine (TER-168) runs the stored rules of each project (§19.8)
+on the events of the log.
+
+- Durable cursor. The engine reads the event log after its own cursor;
+  a new event only wakes it. Its first start sets the cursor to the end
+  of the log, so old events start no run. An event from before the rules
+  were last stored starts no run either.
+- Plan. For each event of a project with rules, each enabled rule (in
+  file order) whose `on` and `when` hold plans one run for each card of
+  the event (the event's card, `data.card`, and `data.cards`), or one run
+  without a card. The planned runs (the action outbox) and the new cursor
+  are one write: a crash or restart after it loses no action, and the
+  next start runs the planned runs.
+- Guards, at the plan: a rule does not see the events of its own runs;
+  an event at chain depth 4 (`data.cause.depth`, shared with the
+  triggers of §19.4) starts no run; a rule runs at most `max_per_hour`
+  times in an hour (default 30), and at most 10 times for one card in an
+  hour. A guard records a `skipped` run with the reason.
+- Order. The runs of one card go one after another, in event order and
+  then in rule order. The runs of other cards go beside them. A run that
+  the engine cannot record (a database error) stays pending and holds the
+  later runs of its card until the next pass.
+- Start checks, when a run starts (after the earlier runs of its card):
+  the rule must still be stored and enabled (else the run is `skipped`),
+  each column that the rule names must still be on the board (else the
+  run is `failed`), the card must still exist, and each `if_card` and
+  `if_job` must hold (else the run is `skipped` with the reason). A run
+  acts as its rule was at the plan: an edit of the rule after the plan
+  does not change a planned run, and a run that started goes to its end.
+- Actions. The actions run in the order of the file, each in its own
+  write together with the run's step counter, so a restart goes on at
+  the next action and never repeats a database action. The first action
+  that fails ends the run as `failed`; its changes roll back and the
+  actions after it do not run. A run whose actions all changed nothing
+  ends as `noop`.
+- Actor. The actions act as `rule:<project>/<rule>`: a project admin of
+  the rule's project, nothing more (not the operator, not a sysadmin).
+  The board checks apply to it as to a lead: the project gate, the GitHub
+  author gate (§13, a held card), and the board invariants. The events
+  of its writes carry `actor: "rule:<project>/<rule>"` and
+  `data.cause: {rule: "<project>/<rule>", run, event, depth}`; a comment
+  has that author.
+
+Conditions on the current state:
+
+```wcl
+rule "note-review" {
+  on = ["job"]
+  if_card { column = ["@review"]  lacks_labels = ["hold"]  assigned = false }
+  if_job { state = ["passed"]  outcome = ["none"] }
+  card_comment { text = "{{card.id}} passed job {{job.id}}" }
+}
+```
+
+`if_card` (on the run's card; a rule with one runs only for events with a
+card): `column` (in one of these), `not_column`, `has_labels` (every
+one), `lacks_labels` (none), `assigned`, `archived`. `if_job` (on the job
+of a `job` event, `data.id`; a rule with one runs only for `job` events):
+`state` (`queued`, `running`, `passed`, `failed`, `cancelled`) and
+`outcome` (`red`, `conflict`, `error`, `none`). Every field that is set
+must hold; every block must hold.
+
+Templates are filled when the action runs, from the event, the current
+card, the event's job, and the rule. In a text that an agent reads
+(`text`, `comment`, `subject`, `body`, `turn`) each value is quoted
+data (one line, in backticks), as in a trigger mail (§19.4).
+
+Verbs: only `card_comment` runs in this version. Every other verb fails
+its action with ``verb `card.move` is not implemented yet`` (TER-169).
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. No rules and no `text`: `404`. |
+| `GET /api/projects/{name}/rules/runs?rule=&limit=` | | `200`, `{runs: [{id, project, rule, rule_hash, event_seq, card?, state, step, steps, reason?, created_at, updated_at}]}`, newest first (`limit` 1 to 500, default 100). `state` is `pending`, `done`, `noop`, `failed`, or `skipped`; `step` the next action (pending) or the actions run; `steps` one `{verb, ok, changed?, detail?, error?}` for each action run. The project keeps its newest 500 finished runs, and every run of the last hour (the rate limits count them). |
+
+Both: whoever reads the project.
 
 ## 20. Event sources and ingest
 

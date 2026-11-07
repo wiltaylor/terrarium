@@ -47,6 +47,7 @@ pub mod quota_notices;
 pub mod quota_policy;
 pub mod repo_browse;
 pub mod reset;
+pub mod rules_engine;
 pub mod run_kill;
 pub mod runner_supervisor;
 pub mod sandbox;
@@ -334,6 +335,9 @@ pub async fn start_with_usage(
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
+    // The board rule engine (TER-168): runs the outbox rows that the last
+    // daemon left pending, then the new events.
+    tasks.push(rules_engine::spawn(state.clone()));
     // The webhook deliveries (docs/api.md §19.5): the pending rows of the
     // old daemon are due again.
     tasks.push(webhooks::spawn(state.clone()));

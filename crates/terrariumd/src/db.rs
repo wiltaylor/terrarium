@@ -2363,6 +2363,42 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     "#,
+    // 85: the board rule engine (TER-168, `crate::rules_engine`): its own
+    // event cursor, and `rule_runs`, both the action outbox (`pending`
+    // rows, written in the same transaction as the cursor) and the run log
+    // of each rule. `step` is the next action; `steps` the results of the
+    // actions run. `lane` is the card (or `project:<p>`): the rows of one
+    // lane run in order. `rule_json` is the rule as planned.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    CREATE TABLE rule_cursor (
+        id  INTEGER PRIMARY KEY CHECK (id = 1),
+        seq INTEGER NOT NULL
+    );
+    CREATE TABLE rule_runs (
+        id         TEXT PRIMARY KEY,
+        project    TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        rule       TEXT NOT NULL,
+        rule_hash  TEXT NOT NULL,
+        ord        INTEGER NOT NULL,
+        event_seq  INTEGER NOT NULL,
+        card       TEXT,
+        lane       TEXT NOT NULL,
+        rule_json  TEXT NOT NULL CHECK (json_valid(rule_json)),
+        cause      TEXT NOT NULL CHECK (json_valid(cause)),
+        state      TEXT NOT NULL
+                   CHECK (state IN ('pending', 'done', 'noop', 'failed', 'skipped')),
+        step       INTEGER NOT NULL DEFAULT 0,
+        steps      TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(steps)),
+        reason     TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (project, rule, event_seq, lane)
+    );
+    CREATE INDEX rule_runs_pending ON rule_runs(state, event_seq, ord);
+    CREATE INDEX rule_runs_rule ON rule_runs(project, rule, created_at);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

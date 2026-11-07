@@ -14,7 +14,7 @@
 //! blocking thread, then writes with the context it used. The write
 //! compares the context and the hash again under the lock.
 //!
-//! Nothing runs a rule yet: the engine comes with TER-168.
+//! The rule engine (`crate::rules_engine`, TER-168) runs the stored rules.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;

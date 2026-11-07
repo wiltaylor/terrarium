@@ -36,6 +36,9 @@ type Rule {
   // The most runs of the rule in one hour.
   max_per_hour: i64?
   @children("when") when: list<When>
+  // Conditions on the current state, checked when a run starts.
+  @children("if_card") if_card: list<IfCard>
+  @children("if_job") if_job: list<IfJob>
 
   // The verbs, run in the order of the file.
   @children("card_move") card_move: list<CardMove>
@@ -62,6 +65,34 @@ type When {
   ne: utf8?
   glob: utf8?
   one_of: list<utf8>?
+}
+
+// A condition on the current state of the run's card, checked when the
+// run starts (after the earlier runs of the same card). Each field that
+// is set must hold. A rule with an `if_card` does not run for an event
+// without a card.
+@block("if_card")
+type IfCard {
+  // In one of these columns (`@<role>` or a column name).
+  column: list<utf8>?
+  // In none of these columns.
+  not_column: list<utf8>?
+  // Has every one of these labels.
+  has_labels: list<utf8>?
+  // Has none of these labels.
+  lacks_labels: list<utf8>?
+  assigned: bool?
+  archived: bool?
+}
+
+// A condition on the current state of the event's job (`data.id` of a
+// `job` event). A rule with an `if_job` does not run for another event.
+// `state`: queued, running, passed, failed, cancelled. `outcome`: red,
+// conflict, error, or none.
+@block("if_job")
+type IfJob {
+  state: list<utf8>?
+  outcome: list<utf8>?
 }
 
 // Move the card of the event. `to` and `from` name a column: `@<role>`
