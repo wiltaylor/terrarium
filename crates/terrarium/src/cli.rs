@@ -155,11 +155,14 @@ pub enum Command {
         #[command(subcommand)]
         command: ArtifactCmd,
     },
-    /// Versions for review. With no subcommand: the build version of this
-    /// CLI and of the daemon, with a warning when their refs differ
+    /// The build version of this CLI and of the daemon, with a warning
+    /// when their refs differ. Versions of a project are card labels
+    /// (`version:vnext`, `version:<X.Y.Z>`), not objects
     Version {
-        #[command(subcommand)]
-        command: Option<VersionCmd>,
+        /// The removed `version new | ls | submit | ...` subcommands
+        /// (TER-58): they exit with an error that names card labels
+        #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        removed: Vec<String>,
     },
     /// Test runs: upload test result files as proof, list, show, compare
     Test {
@@ -1792,7 +1795,7 @@ pub enum DbRecCmd {
 pub enum ArtifactCmd {
     /// Upload a file, or a directory as a static bundle; prints the preview URL
     ///
-    /// `--page`, `--version`, and `--card` go together: the artifact links
+    /// `--page`, `--label`, and `--card` go together: the artifact links
     /// to each one that you give.
     Push {
         path: PathBuf,
@@ -1801,8 +1804,11 @@ pub enum ArtifactCmd {
         /// Link it to this page
         #[arg(long)]
         page: Option<String>,
-        /// Link it to this version
-        #[arg(long)]
+        /// Link it to this label, such as `version:1.4.0` (repeat for more)
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Removed: use `--label version:<X.Y.Z>`
+        #[arg(long, hide = true)]
         version: Option<String>,
         /// Link it to this card
         #[arg(long)]
@@ -1814,7 +1820,11 @@ pub enum ArtifactCmd {
     Ls {
         #[arg(long, group = "attach")]
         page: Option<String>,
+        /// Only the artifacts with this label, such as `version:1.4.0`
         #[arg(long, group = "attach")]
+        label: Option<String>,
+        /// Removed: use `--label version:<X.Y.Z>`
+        #[arg(long, hide = true)]
         version: Option<String>,
         #[arg(long, group = "attach")]
         card: Option<String>,
@@ -1856,8 +1866,12 @@ pub enum TestCmd {
         /// Link the run to this card (repeat for more)
         #[arg(long = "card")]
         cards: Vec<String>,
-        /// Link the run to this version (repeat for more)
-        #[arg(long = "version")]
+        /// Link the run to this label, such as `version:1.4.0` (repeat for
+        /// more)
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Removed: use `--label version:<X.Y.Z>`
+        #[arg(long = "version", hide = true)]
         versions: Vec<String>,
         /// The commit that was tested
         #[arg(long)]
@@ -1873,7 +1887,11 @@ pub enum TestCmd {
     Ls {
         #[arg(long)]
         card: Option<String>,
+        /// Only the runs with this label, such as `version:1.4.0`
         #[arg(long)]
+        label: Option<String>,
+        /// Removed: use `--label version:<X.Y.Z>`
+        #[arg(long, hide = true)]
         version: Option<String>,
         #[arg(long)]
         name: Option<String>,
@@ -1895,20 +1913,28 @@ pub enum TestCmd {
         #[arg(long, default_value = "previous")]
         with: String,
     },
-    /// Link a run to cards and versions
+    /// Link a run to cards and labels
     Link {
         id: String,
         #[arg(long = "card")]
         cards: Vec<String>,
-        #[arg(long = "version")]
+        /// A label, such as `version:1.4.0` (repeat for more)
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Removed: use `--label version:<X.Y.Z>`
+        #[arg(long = "version", hide = true)]
         versions: Vec<String>,
     },
-    /// Unlink a run from cards and versions
+    /// Unlink a run from cards and labels
     Unlink {
         id: String,
         #[arg(long = "card")]
         cards: Vec<String>,
-        #[arg(long = "version")]
+        /// A label, such as `version:1.4.0` (repeat for more)
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Removed: use `--label version:<X.Y.Z>`
+        #[arg(long = "version", hide = true)]
         versions: Vec<String>,
     },
     /// Delete a run (its creator, a project admin, or the operator)
@@ -2308,79 +2334,6 @@ pub enum DashboardCmd {
     Set {
         #[arg(long)]
         from_file: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum VersionCmd {
-    /// Create a version
-    New {
-        name: String,
-        /// The notes, or `-` for stdin
-        #[arg(long)]
-        notes: Option<String>,
-        #[arg(long, requires = "git_ref")]
-        repo: Option<String>,
-        #[arg(long = "ref")]
-        git_ref: Option<String>,
-        #[arg(long = "card")]
-        cards: Vec<String>,
-    },
-    /// List versions; archived versions only with `--archived` or `--all`
-    Ls {
-        /// Only the archived versions
-        #[arg(long, conflicts_with = "all")]
-        archived: bool,
-        /// The archived versions and the others
-        #[arg(long)]
-        all: bool,
-    },
-    /// Show a version
-    Show { name: String },
-    /// Rename a version (draft or rejected): its cards, reviews, and
-    /// artifacts stay with it. At the cut, `vnext` becomes `X.Y.Z`
-    Rename { name: String, new_name: String },
-    /// Add cards to a version (draft or rejected)
-    AddCard {
-        name: String,
-        #[arg(required = true)]
-        cards: Vec<String>,
-    },
-    /// Remove cards from a version (draft or rejected)
-    RmCard {
-        name: String,
-        #[arg(required = true)]
-        cards: Vec<String>,
-    },
-    /// Archive a version: it leaves the board rows and the default list;
-    /// its status and reviews stay (its creator, a project admin, or the
-    /// operator)
-    Archive { name: String },
-    /// Take a version out of the archive
-    Unarchive { name: String },
-    /// Attach an artifact
-    Attach { name: String, artifact: String },
-    /// draft -> in_review; mails the operator
-    Submit { name: String },
-    /// Block until approved or rejected
-    Wait {
-        name: String,
-        #[arg(long, default_value_t = 3600)]
-        timeout: u64,
-    },
-    /// approved -> released (admins)
-    Release { name: String },
-    /// Approve a version (operator)
-    Approve {
-        name: String,
-        #[arg(long, short = 'm')]
-        comment: Option<String>,
-    },
-    /// Reject a version (operator)
-    Reject {
-        name: String,
-        #[arg(long, short = 'm')]
-        comment: Option<String>,
     },
 }
 

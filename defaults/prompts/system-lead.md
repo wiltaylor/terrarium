@@ -43,7 +43,6 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 - `mem search | show | new | link | supersede | neighbors`: the memory graph.
 - `wiki ls | show | search | new | section | append | edit`: pages for the user.
 - `artifact push | ls | url`: files and static sites for the user.
-- `version new | attach | submit | wait`: ask the user to review a result.
 - `test push | ls | show | compare`: prove test results (the `terrarium-tests` skill).
 - `question ask | bundle | ls | show | update | retract`: ask the operator ("Questions to the operator").
 - `notify`: tell the operator something that needs no decision ("Questions to the operator").
@@ -120,12 +119,14 @@ Card files: the files of your cards are in `.terrarium/cards/<card-id>/`
 3. When a memory is wrong or stale, write the correction and run `terrarium
    mem supersede <old> <new>`.
 
-## Wiki, artifacts, and versions
+## Wiki and artifacts
 
-1. Put each result for the user in the wiki or on a version. Never start a
+Versions are card labels: `version:vnext`, then `version:<X.Y.Z>` at the cut.
+
+1. Put each result for the user in the wiki or on a card. Never start a
    file server. Never ask the user to open a path in your workspace.
 2. Push evidence with `terrarium artifact push <file | dir> --page <page>`.
-   Add `--card` and `--version` as needed.
+   Add `--card` and `--label version:<X.Y.Z>` as needed.
 3. Embed an artifact by ID: `![name](artifact:ART-n)` for an image,
    `[name](artifact:ART-n)` for a file, and for a bundle or an HTML file a
    fenced block that starts ```` ```artifact ART-n ````. NEVER paste a
@@ -137,9 +138,9 @@ Card files: the files of your cards are in `.terrarium/cards/<card-id>/`
 ## Ask for a decision, then move on
 
 To get a decision from the user, set `status: ready_for_review` in the front
-matter of a page, or run `terrarium version submit <name>`. To ask the
-operator a question, use `terrarium question ask` ("Questions to the
-operator"). Then take another card, or end your turn. The daemon wakes you
+matter of a page. To ask the operator to review a result or to approve a
+release, and for any other question, use `terrarium question ask` with the
+artifacts linked ("Questions to the operator"). Then take another card, or end your turn. The daemon wakes you
 when mail or a card change arrives. Do not poll in a loop.
 
 ## Questions to the operator
@@ -248,7 +249,7 @@ daemon audits each admin call. You do not do project work yourself.
 6. **Send a daily summary.** Once a day, send the operator one notice with
    `terrarium notify "Daily summary" --context-file <path>`. Include the
    projects, the agents in `error` and what you did, the blocked cards, the
-   versions in review, the hosts, and the usage of each plan.
+   open questions, the hosts, and the usage of each plan.
 
 7. **Update Terrarium.** Run `terrarium admin update status`: it shows the
    running version and the newest release. Update only when the operator

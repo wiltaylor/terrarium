@@ -39,7 +39,6 @@ pub mod threads;
 pub mod tools;
 pub mod transcripts;
 pub mod usage;
-pub mod versions;
 pub mod waits;
 pub mod webhooks;
 pub mod wiki;
@@ -101,6 +100,24 @@ pub fn check_name(kind: &str, name: &str) -> crate::error::ApiResult<()> {
             "bad {kind} name `{name}`: use 1-63 of a-z, 0-9, `-`, `_`, starting with a letter or digit"
         )))
     }
+}
+
+/// A label that a test run or an artifact links to (TER-58), such as a
+/// version label `version:vnext` or `version:1.4.0`. Free text: trimmed,
+/// 1 to 200 characters, no control characters. The daemon does not check
+/// that a card has it.
+pub fn link_label(raw: &str) -> crate::error::ApiResult<String> {
+    let label = raw.trim();
+    if label.is_empty() {
+        return Err(crate::error::ApiError::invalid("a label is empty"));
+    }
+    if label.chars().count() > 200 || label.chars().any(char::is_control) {
+        return Err(crate::error::ApiError::invalid(format!(
+            "bad label `{}`: use 1-200 characters, no control characters",
+            label.escape_debug()
+        )));
+    }
+    Ok(label.to_owned())
 }
 
 /// Parse a JSON column, with a default for bad data.

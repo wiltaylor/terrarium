@@ -68,6 +68,15 @@ start = true                     # start on `fleet apply --start`; work also wak
 
 [projects.agents.policy]
 targets = ["buildbox", "shared-lab"]
+thread_open = true               # optional: the right thread:open (api.md §6.13)
+calendar_write = true            # optional: write the project calendar
+
+[projects.agents.policy.spawn]   # optional: the spawn rights (PLAN §18)
+templates = ["worker"]
+max_concurrent = 2
+max_lifetime = "4h"
+bound = true                     # optional: bind a spawn to a card (TER-74)
+max_bound_lifetime = "3d"
 
 [[projects.targets]]             # a TargetDef without `project`
 name = "buildbox"
@@ -115,6 +124,12 @@ Rules:
 - `checkout.on_agent_create` names repos of the same project.
 - `policy.targets` names global targets and targets of the agent's own
   project.
+- `policy` takes `targets`, `mail_to`, `cross_project`, `calendar_write`,
+  `thread_open`, and the sub-table `spawn` (`templates`, `max_concurrent`,
+  `max_per_day`, `max_lifetime`, `may_spawn_children`, `bound`,
+  `max_bound_lifetime`). `fleet export` writes each of them, so an export
+  plans with no change. A plan names a policy change by key, for example
+  `policy.spawn`.
 - A schedule takes its project from the enclosing `[[projects]]`. Its
   key is `project/name`, and its name is unique in the project. Its
   `spec` must be valid (a five-field cron expression, an interval of 60 s
@@ -241,6 +256,7 @@ PLAN §10 applies to each object of the plan:
 | An agent (create, update, delete, start) | project_admin of its project |
 | A role on an agent | the rule of `role grant`: sysadmin needs the operator |
 | An agent's `policy`: a new global target, a new `cross_project` entry, or a new `mail_to` entry in another project | sysadmin or the operator |
+| An agent's `policy.spawn` or `policy.thread_open` | the rule of `PATCH /api/agents/{id}`: a project_admin changes them on a member of its project, not on itself or an admin, and does not set `may_spawn_children` or `bound`; else sysadmin or the operator |
 | A project target | project_admin of the project |
 | A global target | sysadmin |
 | A subscription | sysadmin |

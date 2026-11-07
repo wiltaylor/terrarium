@@ -1,20 +1,31 @@
-//! `artifact` and `version`: PLAN §15.2, §15.3, and the §17 routes. The
-//! daemon does not serve these routes yet.
+//! `artifact`: PLAN §15.2 and the §17 routes. Versions are card labels
+//! (TER-58): an artifact links to a label such as `version:1.4.0`.
 
 use std::path::Path;
-use std::time::Instant;
 
 use anyhow::Context;
 use serde_json::{Value, json};
 
-use super::{print_table, set_list, set_opt};
+use super::print_table;
 use crate::api::{CliError, query};
-use crate::cli::{ArtifactCmd, VersionCmd};
+use crate::cli::ArtifactCmd;
 use crate::commands::projects::project_path;
 use crate::commands::system::as_items;
-use crate::ctx::{Ctx, Waiter};
-use crate::output::{field, first_field};
+use crate::ctx::Ctx;
+use crate::output::field;
 use crate::transport::encode;
+
+/// The error of a removed `--version` flag (TER-58). The hidden flags go
+/// in the version after.
+pub fn no_version_flag(given: bool) -> anyhow::Result<()> {
+    if given {
+        return Err(CliError::usage(
+            "--version is removed: versions are card labels; use --label version:<X.Y.Z> \
+             (or --label version:vnext)",
+        ));
+    }
+    Ok(())
+}
 
 /// The largest artifact the CLI sends.
 pub const MAX_ARTIFACT: usize = 32 * 1024 * 1024;
@@ -92,16 +103,23 @@ fn tar_dir(dir: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-/// The links of a push, in the order page, version, card.
+/// The links of a push, in the order page, labels, card.
 pub fn attaches_of(
     page: &Option<String>,
-    version: &Option<String>,
+    labels: &[String],
     card: &Option<String>,
 ) -> Vec<(&'static str, String)> {
-    [("page", page), ("version", version), ("card", card)]
-        .into_iter()
-        .filter_map(|(k, v)| v.clone().map(|v| (k, v)))
-        .collect()
+    let mut out: Vec<(&'static str, String)> = page.iter().map(|p| ("page", p.clone())).collect();
+    out.extend(labels.iter().map(|l| ("label", l.clone())));
+    out.extend(card.iter().map(|c| ("card", c.clone())));
+    out
+}
+
+/// The artifact has the label `label` among its links.
+pub fn has_label(a: &Value, label: &str) -> bool {
+    as_items(&a["links"])
+        .iter()
+        .any(|l| l["kind"] == "label" && l["ref"].as_str() == Some(label.trim()))
 }
 
 /// The Markdown that embeds the artifact in a wiki page (PLAN §15.1): an
@@ -175,10 +193,12 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
             path,
             name,
             page,
+            labels,
             version,
             card,
             note,
         } => {
+            no_version_flag(version.is_some())?;
             let p = ctx.project_or(None).await?;
             if note.is_some() {
                 eprintln!(
@@ -186,7 +206,7 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
                 );
             }
             // The upload takes the first link; the others follow it.
-            let mut links = attaches_of(page, version, card).into_iter();
+            let mut links = attaches_of(page, labels, card).into_iter();
             let body = push_body(path, name.as_deref(), links.next())?;
             let mut a = ctx
                 .api
@@ -231,20 +251,22 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
         }
         ArtifactCmd::Ls {
             page,
+            label,
             version,
             card,
         } => {
+            no_version_flag(version.is_some())?;
             let p = ctx.project_or(None).await?;
-            let q = query([
-                ("page", page.clone()),
-                ("version", version.clone()),
-                ("card", card.clone()),
-            ]);
-            let v = Value::Array(
-                ctx.api
-                    .list(&format!("{}/artifacts", project_path(&p)), q, None)
-                    .await?,
-            );
+            let q = query([("page", page.clone()), ("card", card.clone())]);
+            let mut items = ctx
+                .api
+                .list(&format!("{}/artifacts", project_path(&p)), q, None)
+                .await?;
+            // The daemon has no label filter: keep the labelled ones here.
+            if let Some(l) = label {
+                items.retain(|a| has_label(a, l));
+            }
+            let v = Value::Array(items);
             ctx.emit(&v, |c, v| {
                 print_table(
                     c,
@@ -283,275 +305,10 @@ async fn mint_url(ctx: &Ctx, id: &str) -> anyhow::Result<Value> {
         .await
 }
 
-/// `/api/versions/{key}`. The key is `project/name`, encoded as one segment.
-fn version_path(project: &str, name: &str) -> String {
-    format!("/api/versions/{}", encode(&format!("{project}/{name}")))
-}
-
-fn print_version(ctx: &Ctx, v: &Value) {
-    ctx.line(format!(
-        "{}  [{}]  by {}",
-        field(v, "name"),
-        field(v, "status"),
-        first_field(v, &["created_by_name", "created_by"])
-    ));
-    ctx.line(format!(
-        "repo: {}  ref: {}  cards: {}",
-        field(v, "repo"),
-        field(v, "git_ref"),
-        field(v, "cards")
-    ));
-    if let Some(n) = v["notes"].as_str().filter(|n| !n.is_empty()) {
-        ctx.line(n);
-    }
-    let arts = as_items(&v["artifacts"]);
-    if !arts.is_empty() {
-        ctx.line("artifacts:");
-        for a in arts {
-            ctx.line(format!(
-                "  {}  {}",
-                first_field(a, &["id"]),
-                field(a, "name")
-            ));
-        }
-    }
-    for r in as_items(&v["reviews"]) {
-        ctx.line(format!(
-            "review: {} by {}: {}",
-            field(r, "decision"),
-            first_field(r, &["author_name", "author"]),
-            field(r, "comment")
-        ));
-    }
-}
-
-pub async fn version(ctx: &Ctx, cmd: &VersionCmd) -> anyhow::Result<()> {
-    let p = ctx.project_or(None).await?;
-    match cmd {
-        VersionCmd::New {
-            name,
-            notes,
-            repo,
-            git_ref,
-            cards,
-        } => {
-            let mut b = json!({"name": name});
-            set_opt(&mut b, "notes", ctx.opt_text(notes.as_deref())?);
-            set_opt(&mut b, "repo", repo.clone());
-            set_opt(&mut b, "git_ref", git_ref.clone());
-            set_list(&mut b, "cards", cards);
-            let v = ctx
-                .api
-                .post(&format!("{}/versions", project_path(&p)), Some(b))
-                .await?;
-            ctx.emit(&v, |c, v| {
-                c.line(format!(
-                    "created version {} [{}]",
-                    field(v, "name"),
-                    field(v, "status")
-                ));
-            })
-        }
-        VersionCmd::Ls { archived, all } => {
-            let which = if *all {
-                Some("all")
-            } else if *archived {
-                Some("true")
-            } else {
-                None
-            };
-            let q = query([("archived", which.map(str::to_owned))]);
-            let v = Value::Array(
-                ctx.api
-                    .list(&format!("{}/versions", project_path(&p)), q, None)
-                    .await?,
-            );
-            ctx.emit(&v, |c, v| {
-                let mut cols = vec![
-                    ("NAME", "name"),
-                    ("STATUS", "status"),
-                    ("REF", "git_ref"),
-                    ("CREATED", "created_at"),
-                ];
-                if which.is_some() {
-                    cols.push(("ARCHIVED", "archived"));
-                }
-                print_table(c, as_items(v), &cols, "no versions");
-            })
-        }
-        VersionCmd::Archive { name } | VersionCmd::Unarchive { name } => {
-            let action = if matches!(cmd, VersionCmd::Archive { .. }) {
-                "archive"
-            } else {
-                "unarchive"
-            };
-            let v = ctx
-                .api
-                .post(&format!("{}/{action}", version_path(&p, name)), None)
-                .await?;
-            ctx.emit(&v, |c, v| {
-                c.line(format!("{action}d {name} [{}]", field(v, "status")));
-            })
-        }
-        VersionCmd::Show { name } => {
-            let v = ctx.api.get(&version_path(&p, name), vec![]).await?;
-            ctx.emit(&v, print_version)
-        }
-        VersionCmd::Rename { name, new_name } => {
-            let v = ctx
-                .api
-                .patch(&version_path(&p, name), json!({"name": new_name}))
-                .await?;
-            ctx.emit(&v, |c, v| {
-                c.line(format!("renamed version {name} to {}", field(v, "name")));
-            })
-        }
-        VersionCmd::AddCard { name, cards } | VersionCmd::RmCard { name, cards } => {
-            let add = matches!(cmd, VersionCmd::AddCard { .. });
-            let key = if add { "add_cards" } else { "remove_cards" };
-            let v = ctx
-                .api
-                .patch(&version_path(&p, name), json!({ key: cards }))
-                .await?;
-            ctx.emit(&v, |c, v| {
-                c.line(format!(
-                    "{} {} {name}; cards: {}",
-                    if add { "added to" } else { "removed from" },
-                    cards.join(", "),
-                    field(v, "cards")
-                ));
-            })
-        }
-        VersionCmd::Attach { name, artifact } => {
-            let r = ctx
-                .api
-                .post(
-                    &format!("/api/artifacts/{}/links", encode(artifact)),
-                    Some(json!({"kind": "version", "ref": name})),
-                )
-                .await?;
-            ctx.emit(&r, |c, _| c.line(format!("attached {artifact} to {name}")))
-        }
-        VersionCmd::Submit { name } => decide(ctx, &p, name, "submit", None).await,
-        VersionCmd::Release { name } => decide(ctx, &p, name, "release", None).await,
-        VersionCmd::Approve { name, comment } => {
-            decide(ctx, &p, name, "approve", comment.as_deref()).await
-        }
-        VersionCmd::Reject { name, comment } => {
-            decide(ctx, &p, name, "reject", comment.as_deref()).await
-        }
-        VersionCmd::Wait { name, timeout } => {
-            // The list long-polls on one status. Hold on `approved` in short
-            // rounds, and check for a rejection between rounds.
-            let w = Waiter::new(*timeout, ctx.poll_floor);
-            let list = format!("{}/versions", project_path(&p));
-            let path = version_path(&p, name);
-            while let Some(secs) = w.next() {
-                let started = Instant::now();
-                let q = query([
-                    ("name", Some(name.clone())),
-                    ("status", Some("approved".into())),
-                    ("wait", Some(secs.min(VERSION_ROUND).to_string())),
-                ]);
-                let page = ctx.api.page(&list, q).await?;
-                let v = match page.items.into_iter().next() {
-                    Some(v) => v,
-                    None => ctx.api.get(&path, vec![]).await?,
-                };
-                if matches!(
-                    v["status"].as_str(),
-                    Some("approved" | "rejected" | "released")
-                ) {
-                    return ctx.emit(&v, print_version);
-                }
-                w.pause(started).await;
-            }
-            ctx.emit(&json!({"name": name, "status": "timeout"}), |c, _| {
-                c.line(format!("no decision on {name} after {timeout}s"));
-            })
-        }
-    }
-}
-
-/// The longest hold of one `version wait` round, in seconds.
-const VERSION_ROUND: u64 = 30;
-
-async fn decide(
-    ctx: &Ctx,
-    project: &str,
-    name: &str,
-    action: &str,
-    comment: Option<&str>,
-) -> anyhow::Result<()> {
-    let mut b = json!({});
-    set_opt(&mut b, "comment", comment.map(str::to_owned));
-    let v = ctx
-        .api
-        .post(
-            &format!("{}/{action}", version_path(project, name)),
-            Some(b),
-        )
-        .await?;
-    ctx.emit(&v, |c, v| {
-        c.line(format!("{name}: {}", field(v, "status")));
-    })
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-
-    /// TER-36: `version rename`, `add-card`, and `rm-card` send the version
-    /// patch to the version path.
-    #[tokio::test]
-    async fn version_rename_and_cards_send_the_patch() {
-        use crate::transport::Method;
-        use crate::transport::mock::MockTransport;
-        let mock = MockTransport::new();
-        let mut c = Ctx::for_test(std::sync::Arc::new(mock.clone()), None);
-        c.project = Some("proj".into());
-        mock.reply(200, json!({"name": "0.1.0"}))
-            .reply(200, json!({"name": "vnext", "cards": []}))
-            .reply(200, json!({"name": "vnext", "cards": []}));
-        version(
-            &c,
-            &VersionCmd::Rename {
-                name: "vnext".into(),
-                new_name: "0.1.0".into(),
-            },
-        )
-        .await
-        .unwrap();
-        let cards = vec!["TER-1".to_owned(), "TER-2".to_owned()];
-        version(
-            &c,
-            &VersionCmd::AddCard {
-                name: "vnext".into(),
-                cards: cards.clone(),
-            },
-        )
-        .await
-        .unwrap();
-        version(
-            &c,
-            &VersionCmd::RmCard {
-                name: "vnext".into(),
-                cards,
-            },
-        )
-        .await
-        .unwrap();
-        let r = mock.requests();
-        assert_eq!(r.len(), 3);
-        for q in &r {
-            assert_eq!(q.method, Method::Patch);
-            assert_eq!(q.path, "/api/versions/proj%2Fvnext");
-        }
-        assert_eq!(r[0].body, Some(json!({"name": "0.1.0"})));
-        assert_eq!(r[1].body, Some(json!({"add_cards": ["TER-1", "TER-2"]})));
-        assert_eq!(r[2].body, Some(json!({"remove_cards": ["TER-1", "TER-2"]})));
-    }
 
     #[test]
     fn base64_encodes() {
@@ -574,18 +331,39 @@ mod tests {
     fn push_links_to_every_target_given() {
         let s = |v: &str| Some(v.to_owned());
         assert_eq!(
-            attaches_of(&s("plans/x"), &s("v1"), &s("DEM-1")),
+            attaches_of(
+                &s("plans/x"),
+                &["version:1.0.0".to_owned(), "version:vnext".to_owned()],
+                &s("DEM-1")
+            ),
             vec![
                 ("page", "plans/x".to_owned()),
-                ("version", "v1".to_owned()),
+                ("label", "version:1.0.0".to_owned()),
+                ("label", "version:vnext".to_owned()),
                 ("card", "DEM-1".to_owned())
             ]
         );
         assert_eq!(
-            attaches_of(&None, &None, &s("DEM-1")),
+            attaches_of(&None, &[], &s("DEM-1")),
             vec![("card", "DEM-1".to_owned())]
         );
-        assert!(attaches_of(&None, &None, &None).is_empty());
+        assert!(attaches_of(&None, &[], &None).is_empty());
+    }
+
+    #[test]
+    fn the_version_flag_names_label() {
+        assert!(no_version_flag(false).is_ok());
+        let e = no_version_flag(true).unwrap_err().to_string();
+        assert!(e.contains("--label version:"), "{e}");
+    }
+
+    #[test]
+    fn label_filter_reads_the_links() {
+        let a = json!({"links": [{"kind": "card", "ref": "TER-1"},
+                                 {"kind": "label", "ref": "version:1.0.0"}]});
+        assert!(has_label(&a, "version:1.0.0"));
+        assert!(!has_label(&a, "version:vnext"));
+        assert!(!has_label(&a, "TER-1"));
     }
 
     #[test]
