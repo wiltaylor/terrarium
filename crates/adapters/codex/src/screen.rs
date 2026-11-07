@@ -75,6 +75,23 @@ impl ScreenState {
     }
 }
 
+impl ScreenState {
+    /// The composer holds text that a CR would submit: not busy, and no
+    /// dialog. The placeholder does not count when the state comes from
+    /// [`screen_state_of`] (the dim mask).
+    pub fn input_pending(&self) -> bool {
+        self.input_box
+            && !self.busy
+            && self.dialog.is_none()
+            && self.input_text.as_deref().is_some_and(|t| !t.is_empty())
+    }
+}
+
+/// [`ScreenState::input_pending`] for a parsed screen.
+pub fn input_pending(screen: &Screen) -> bool {
+    screen_state_of(screen).input_pending()
+}
+
 /// True when `rest` starts with `word` and the word ends there.
 fn starts_with_word(rest: &str, word: &str) -> bool {
     rest.strip_prefix(word)
@@ -302,6 +319,21 @@ mod tests {
             Some("Also add the word: queued")
         );
         assert_eq!(queued.hint(), ScreenHint::Busy);
+    }
+
+    /// TER-208: typed text that did not submit is pending input. An empty
+    /// composer (the placeholder under the dim mask) and a busy screen are
+    /// not.
+    #[test]
+    fn typed_text_is_pending_input() {
+        let text = sections(&fixture("typing.txt"));
+        let dim = sections(&fixture("typing-dim.txt"));
+        let pending = |label: &str| screen_state(&text[label], Some(&dim[label])).input_pending();
+        assert!(pending("typed-after-LF"));
+        assert!(pending("typed-before-CR"));
+        for label in ["idle-start", "idle-after-T1", "busy-T1", "busy-typed-T4"] {
+            assert!(!pending(label), "{label}");
+        }
     }
 
     #[test]

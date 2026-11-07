@@ -600,7 +600,9 @@ async fn a_lost_enter_after_a_paste_is_pressed_again() {
 }
 
 /// TER-194, the watchdog: text left in the input box of an idle agent (a
-/// paste with no CR) gives one warning after `submit_timeout`.
+/// paste with no CR) gives one warning after `submit_timeout`, and the
+/// agent goes `blocked` with `INPUT_PENDING_REASON` (TER-208), so the
+/// daemon mails its leads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_left_in_the_input_box_gives_a_warning() {
     let mut h = start(Opts {
@@ -626,6 +628,7 @@ async fn text_left_in_the_input_box_gives_a_warning() {
     .await
     .expect("a warning");
     assert!(message.contains("unsubmitted text"), "{message}");
+    until_status(&mut h.events, AgentStatus::Blocked).await;
     // A CR submits the text, and the agent works again.
     h.runner.write(b"\r").await.expect("enter");
     until_status(&mut h.events, AgentStatus::Working).await;
@@ -639,6 +642,62 @@ async fn text_left_in_the_input_box_gives_a_warning() {
             .count(),
         1
     );
+    let blocked: Vec<_> = all
+        .iter()
+        .filter_map(|r| match &r.event {
+            Event::StatusChanged {
+                to: AgentStatus::Blocked,
+                reason,
+                ..
+            } => Some(reason.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        blocked,
+        vec![Some(
+            terrarium_core::adapter::INPUT_PENDING_REASON.to_owned()
+        )]
+    );
+}
+
+/// TER-208: the agent that the watchdog blocked goes idle again when its
+/// input box is emptied (Ctrl-U in the fake TUI), and a queued turn then
+/// goes out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_emptied_input_box_unblocks_the_agent() {
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_PASTE_NEEDS_PAUSE", "1")]),
+        submit: ms(500),
+        submit_pause: ms(300),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    h.runner
+        .write(b"\x1b[200~left\nbehind\x1b[201~")
+        .await
+        .expect("paste");
+    until_screen(&h, "[Pasted text #1 +2 lines]").await;
+    until_status(&mut h.events, AgentStatus::Blocked).await;
+    h.runner.write(b"\x15").await.expect("ctrl-u");
+    let seen = until_status(&mut h.events, AgentStatus::Idle).await;
+    assert!(
+        seen.iter().any(|e| matches!(e, Event::StatusChanged {
+            to: AgentStatus::Idle,
+            reason: Some(r),
+            ..
+        } if r.contains("no unsubmitted text"))),
+        "{seen:?}"
+    );
+    let d = h.runner.type_turn("after");
+    timeout(wait(), d.wait())
+        .await
+        .expect("time")
+        .expect("the turn submits");
+    until_screen(&h, "done: after").await;
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

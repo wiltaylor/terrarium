@@ -111,6 +111,23 @@ impl ScreenState {
     }
 }
 
+impl ScreenState {
+    /// The input box holds text that a CR would submit: not busy, and no
+    /// dialog. Dim placeholder text does not count when the state comes
+    /// from [`state_of`].
+    pub fn input_pending(&self) -> bool {
+        self.input_box
+            && !self.busy
+            && self.dialog.is_none()
+            && self.input_text.as_deref().is_some_and(|t| !t.is_empty())
+    }
+}
+
+/// [`ScreenState::input_pending`] for a parsed screen.
+pub fn input_pending(screen: &Screen) -> bool {
+    state_of(screen).input_pending()
+}
+
 fn is_rule(line: &str) -> bool {
     let t = line.trim();
     t.chars().count() >= 20 && t.chars().all(|c| c == '─')
@@ -349,6 +366,30 @@ mod tests {
         let st = find("dialog-ask-user");
         assert_eq!(st.dialog, Some("↑/↓ select"));
         assert!(!st.input_box);
+    }
+
+    /// TER-208: typed text that did not submit is pending input. An empty
+    /// box, a busy screen, and a dialog are not.
+    #[test]
+    fn typed_text_is_pending_input() {
+        let text = sections(&fixture("typing.txt"));
+        let dim = sections(&fixture("typing-dim.txt"));
+        let pending = |n: &str| {
+            let (_, lines) = text.iter().find(|(x, _)| x == n).expect(n);
+            let (_, dlines) = dim.iter().find(|(x, _)| x == n).expect(n);
+            screen_state(lines, Some(dlines.as_slice())).input_pending()
+        };
+        assert!(pending("typed-after-LF"));
+        for n in [
+            "idle-start",
+            "lag-paste-not-drawn-at-0.2s",
+            "idle-after-T1",
+            "busy-T1",
+            "busy-typed-T4",
+            "dialog-ask-user",
+        ] {
+            assert!(!pending(n), "{n}");
+        }
     }
 
     #[test]

@@ -164,6 +164,9 @@ impl Delivery {
 enum Block {
     Question,
     Stall,
+    /// The idle agent keeps unsubmitted text in its input box
+    /// ([`terrarium_core::adapter::INPUT_PENDING_REASON`]).
+    Input,
 }
 
 struct PendingTurn {
@@ -222,7 +225,7 @@ struct State {
     interrupt: Option<Instant>,
     /// Since when an idle agent with no turn in flight has text in its
     /// input box ([`Adapter::input_pending`]), and whether the runner
-    /// warned about it. No turn can go out while the box holds text.
+    /// flagged it. No turn can go out while the box holds text.
     pending_input: Option<(Instant, bool)>,
 }
 
@@ -1205,10 +1208,23 @@ impl Inner {
             }
 
             // The watchdog: an idle agent with text left in its input box
-            // takes no turn, and nothing wakes it (TER-194). Warn once.
-            if pending && state.in_flight.is_none() && state.status == AgentStatus::Idle {
-                let (since, warned) = *state.pending_input.get_or_insert((now, false));
-                if !warned && now.duration_since(since) >= self.config.submit_timeout {
+            // takes no turn, and nothing wakes it (TER-194). Flag it once:
+            // a warning, and `blocked` with INPUT_PENDING_REASON, so the
+            // daemon mails the leads (TER-208). An empty box makes the
+            // agent idle again.
+            if state.block == Some(Block::Input) {
+                if !pending && state.status == AgentStatus::Blocked {
+                    state.block = None;
+                    state.pending_input = None;
+                    self.transition(
+                        &mut state,
+                        AgentStatus::Idle,
+                        "no unsubmitted text in the input box",
+                    );
+                }
+            } else if pending && state.in_flight.is_none() && state.status == AgentStatus::Idle {
+                let (since, flagged) = *state.pending_input.get_or_insert((now, false));
+                if !flagged && now.duration_since(since) >= self.config.submit_timeout {
                     state.pending_input = Some((since, true));
                     let secs = now.duration_since(since).as_secs();
                     tracing::warn!("unsubmitted text in the input box for {secs} s");
@@ -1219,6 +1235,12 @@ impl Inner {
                              or cleared"
                         ),
                     });
+                    state.block = Some(Block::Input);
+                    self.transition(
+                        &mut state,
+                        AgentStatus::Blocked,
+                        terrarium_core::adapter::INPUT_PENDING_REASON,
+                    );
                 }
             } else {
                 state.pending_input = None;
