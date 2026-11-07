@@ -4091,6 +4091,16 @@ A card:
 - `tests` is the latest test run that is linked to the card (§29):
   `{"id","name","status","counts":{"passed","failed","errored","skipped","total"},"created_at"}`.
   It is absent when no run is linked to the card.
+- `job` is the open (queued or running) job of the card (§35,
+  TER-158): `{"id","kind","state","place","queued"}`. `kind` is `validate`
+  or `merge`, `state` is `queued` or `running`. A queued job has `place`
+  (its place among the queued jobs of the project, 1 starts next) and
+  `queued` (the count of queued jobs in the project). It is absent when
+  the card has no open job. The board tile reads its state chip from it,
+  not from the `validation:*` labels.
+- `assignee_status` is the stored status of the assignee agent (`working`,
+  `idle`, `waiting`, `blocked`, `stopped`, ...). It is absent for the
+  operator, no assignee, or a removed agent.
 - `comments[].session` is the session link (§6.6) of the agent that wrote
   the comment: the agent's current session at that time. It is `null` for
   the operator and for a comment from before migration 37. Each path that
@@ -4321,9 +4331,6 @@ card position; at most 500. Each card is a card with more fields:
 
 - `column_kind`: `working` or `blocked` for the column with that role,
   else the column name in lower case (`research`).
-- `assignee_status`: the stored status of the assignee agent (`working`,
-  `idle`, `waiting`, `blocked`, `stopped`, ...). Absent for the operator,
-  no assignee, or a removed agent.
 - `blocked_since` and `blocked_reason` (TER-51), only for a card in the
   blocked column: when the card moved there and the comment of that move
   (what is needed), from the last `moved` event to the blocked column.

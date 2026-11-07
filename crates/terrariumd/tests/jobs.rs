@@ -170,6 +170,98 @@ async fn host_counts_respect_the_readers_project() {
 /// TER-105: an SSH target on an address of a host agent's machine counts
 /// on the host agent: `job-hosts` shows one host, and its cap holds across
 /// the host-agent target and the SSH target.
+/// TER-158 (D4): each card of the board and of `GET /api/cards/{id}` has
+/// its open job (kind, state, and for a queued job its place n of m) and
+/// the status of its assignee agent, so the tile does not read labels.
+#[tokio::test]
+async fn cards_carry_their_job_state_and_assignee_status() {
+    use terrariumd::store::jobs::{self, JobKind, NewJob};
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.agent("p", "w", json!({})).await;
+    let mut ids = Vec::new();
+    for title in ["running", "first", "second", "merge", "none"] {
+        let id = td
+            .post("/api/projects/p/cards", json!({"title": title}))
+            .await
+            .ok()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        ids.push(id);
+    }
+    td.post_empty_as("p/w", &format!("/api/cards/{}/claim", ids[4]))
+        .await
+        .ok();
+    let cards = ids.clone();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("operator", move |t| {
+            for (i, card) in cards.iter().take(4).enumerate() {
+                let j = jobs::create(
+                    t,
+                    NewJob {
+                        project: "p".into(),
+                        card: card.clone(),
+                        kind: if i == 3 {
+                            JobKind::Merge
+                        } else {
+                            JobKind::Validate
+                        },
+                        batch: Vec::new(),
+                        repo: "app".into(),
+                        branch: format!("b{i}"),
+                        commit: None,
+                        by_agent: None,
+                    },
+                )?;
+                if i == 0 {
+                    jobs::start(t, &j.id, "machine")?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let board = td.get("/api/projects/p/board").await.ok().clone();
+    let card = |id: &str| {
+        board["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let running = card(&ids[0]);
+    assert_eq!(running["job"]["state"], "running", "{running:#?}");
+    assert_eq!(running["job"]["kind"], "validate");
+    assert!(running["job"].get("place").is_none());
+    assert!(running["job"].get("queued").is_none());
+    for (i, place) in [(1, 1), (2, 2), (3, 3)] {
+        let c = card(&ids[i]);
+        assert_eq!(c["job"]["state"], "queued", "{c:#?}");
+        assert_eq!(c["job"]["place"], place);
+        assert_eq!(c["job"]["queued"], 3);
+    }
+    assert_eq!(card(&ids[3])["job"]["kind"], "merge");
+    let none = card(&ids[4]);
+    assert!(none.get("job").is_none(), "{none:#?}");
+    let w = td.get("/api/agents/p%2Fw").await.ok().clone();
+    assert_eq!(none["assignee_status"], w["status"]);
+    assert!(card(&ids[0]).get("assignee_status").is_none());
+
+    // One card has the same fields.
+    let one = td.get(&format!("/api/cards/{}", ids[1])).await.ok().clone();
+    assert_eq!(one["job"], card(&ids[1])["job"]);
+    let one = td.get(&format!("/api/cards/{}", ids[4])).await.ok().clone();
+    assert_eq!(one["assignee_status"], w["status"]);
+}
+
 #[tokio::test]
 async fn an_ssh_alias_of_a_host_agent_is_one_host() {
     use terrariumd::store::jobs::{self, JobKind, NewJob};
