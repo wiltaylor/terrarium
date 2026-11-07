@@ -1,12 +1,12 @@
 import { A, useNavigate, useParams } from "@solidjs/router";
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { LeaseChips } from "../../components/Leases";
 import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { AGENT_STATUSES, roleLabel, type Agent, type AgentStatus } from "../../api/types";
 import { duration } from "../../lib/format";
-import { agents, leases } from "../../stores";
+import { agents, api, events, leases } from "../../stores";
 import { NewAgentDialog } from "./NewAgentDialog";
 
 export function RoleBadges(props: { agent: Agent }) {
@@ -87,6 +87,22 @@ export function AgentsPage() {
   // `paused` is not a status: a paused agent is `stopped` with the pause flag.
   const [status, setStatus] = createSignal<AgentStatus | "paused" | "">("");
   const shown = () => agents.inProject(route.project).filter((a) => !status() || (status() === "paused" ? a.paused : a.status === status()));
+  // The card agents (TER-75): the ephemeral agents bound to a card or assigned
+  // one. The agents store leaves ephemeral agents out, so the page reads them.
+  const [cardAgents, { refetch }] = createResource(
+    () => route.project,
+    async (p) => (await api.agents.list(p, { card: true })).filter((a) => a.ephemeral),
+  );
+  let pending: ReturnType<typeof setTimeout> | undefined;
+  const off = events.on((e) => {
+    if (e.project !== route.project || !(e.kind === "card" || e.kind === "status" || e.kind.startsWith("agent."))) return;
+    clearTimeout(pending);
+    pending = setTimeout(() => void refetch(), 1000);
+  });
+  onCleanup(() => {
+    clearTimeout(pending);
+    off();
+  });
 
   return (
     <>
@@ -96,7 +112,14 @@ export function AgentsPage() {
           <For each={AGENT_STATUSES}>{(s) => <option value={s}>{s}</option>}</For>
           <option value="paused">paused</option>
         </select>
-        <button onClick={() => agents.refresh()}>Refresh</button>
+        <button
+          onClick={() => {
+            void agents.refresh();
+            void refetch();
+          }}
+        >
+          Refresh
+        </button>
         <button class="primary" onClick={() => setCreating(true)}>
           New agent
         </button>
@@ -108,6 +131,12 @@ export function AgentsPage() {
       <Show when={shown().length} fallback={<Empty>{agents.state.loading ? "Loading…" : "No agents match."}</Empty>}>
         <div class="grid">
           <For each={shown()}>{(a) => <AgentCard agent={a} now={now()} />}</For>
+        </div>
+      </Show>
+      <Show when={(cardAgents() ?? []).length}>
+        <h3>Card agents</h3>
+        <div class="grid card-agents">
+          <For each={cardAgents()}>{(a) => <AgentCard agent={a} now={now()} />}</For>
         </div>
       </Show>
     </>

@@ -424,6 +424,67 @@ async fn done_and_archive_close() {
     assert_eq!(spawn_row(&td, &eph).await["outcome"], "cancelled");
 }
 
+/// TER-75: a bound agent is a card agent. `include=card` lists it with
+/// its card, also while it is parked and has no assignee, and the card
+/// names it (`agent`, `agent_name`) until the close.
+#[tokio::test]
+async fn a_bound_agent_shows_with_its_card() {
+    let (td, lead) = setup().await;
+    let a = card(&td, "p", "in_progress").await;
+    let s = spawn_bound(&td, &lead, "w-claude", &a).await;
+    assert_eq!(s.status, 201, "{}", s.body);
+    let eph = id(&s.body);
+    td.wait_status(&eph, "idle").await;
+    let k = td.get(&format!("/api/cards/{a}")).await.ok().clone();
+    assert_eq!(k["agent"], eph.as_str(), "{k}");
+    assert_eq!(k["agent_name"], s.body["name"], "{k}");
+    mv(&td, &a, "review", None).await;
+    parked(&td, &eph).await;
+    let list = td
+        .get("/api/agents?project=p&include=card")
+        .await
+        .ok()
+        .clone();
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == eph.as_str())
+        .cloned()
+        .unwrap_or_else(|| panic!("no card agent in {list}"));
+    assert_eq!(row["current_card"], a.as_str(), "{row}");
+    let board = td.get("/api/projects/p/board").await.ok().clone();
+    let tile = board["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == a.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!(tile["agent_name"], s.body["name"], "{tile}");
+    mv(&td, &a, "done", None).await;
+    let key = eph.clone();
+    until("the close on done", || async {
+        spawn_row(&td, &key).await["finished_at"].is_string()
+    })
+    .await;
+    let k = td.get(&format!("/api/cards/{a}")).await.ok().clone();
+    assert!(k["agent"].is_null(), "{k}");
+    let list = td
+        .get("/api/agents?project=p&include=card")
+        .await
+        .ok()
+        .clone();
+    assert!(
+        !list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == eph.as_str()),
+        "{list}"
+    );
+}
+
 /// The bind right (review round 2): an owner without `spawn.bound` gets
 /// 403; with it, the cap is its `spawn.max_bound_lifetime`. A lead may not
 /// give the right.

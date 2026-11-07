@@ -1,4 +1,5 @@
 //! The job queue of a project (TER-71): `job ls | show | cancel`,
+//! `job stats` (TER-135),
 //! `job hosts | host-cap` (TER-97), `job host-alias` (TER-105),
 //! `project delivery show | set`, and `card validate | merge`.
 
@@ -61,6 +62,21 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
                 print_table(c, items, JOB_COLS, "no jobs");
             })
         }
+        JobCmd::Stats { since } => {
+            let name = ctx.project_or(None).await?;
+            let since = since
+                .as_deref()
+                .map(|s| super::system::parse_since(s, chrono::Local::now()))
+                .transpose()?;
+            let v = ctx
+                .api
+                .get(
+                    &format!("{}/jobs/stats", project_path(&name)),
+                    query([("since", since)]),
+                )
+                .await?;
+            ctx.emit(&v, print_stats)
+        }
         JobCmd::Show { id } => {
             let v = ctx
                 .api
@@ -109,6 +125,86 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
             })
         }
     }
+}
+
+/// The most failed targets that `job stats` prints.
+const STATS_TARGETS: usize = 10;
+
+/// `passed/ended (rate%)` of a first-attempt block.
+fn rate(v: &Value) -> String {
+    let pct = v["pass_rate"]
+        .as_f64()
+        .map_or_else(|| "-".to_owned(), |r| format!("{:.0}%", r * 100.0));
+    format!("{pct} ({}/{})", field(v, "passed"), field(v, "ended"))
+}
+
+fn print_stats(c: &Ctx, v: &Value) {
+    c.line(format!(
+        "jobs of {} since {}: {}",
+        field(v, "project"),
+        field(v, "since"),
+        field(v, "jobs")
+    ));
+    c.line(format!(
+        "first-attempt pass rate: {}",
+        rate(&v["first_attempt"])
+    ));
+    c.line(format!(
+        "  validate {}, merge {}",
+        rate(&v["validate"]),
+        rate(&v["merge"])
+    ));
+    c.line(format!(
+        "reruns passed: {} (a failure the rerun did not repeat)",
+        rate(&v["reruns"])
+    ));
+    c.line(format!(
+        "conflicts {}, could not run {}, cancelled {}, open {}, split halves {}",
+        field(v, "conflicts"),
+        field(v, "errors"),
+        field(v, "cancelled"),
+        field(v, "open"),
+        field(v, "splits")
+    ));
+    let steps = v["failed_steps"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if !steps.is_empty() {
+        let list: Vec<String> = steps
+            .iter()
+            .map(|s| format!("{} {}", field(s, "step"), field(s, "failed")))
+            .collect();
+        c.line(format!("failed steps: {}", list.join(", ")));
+    }
+    let targets = v["failed_targets"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if targets.len() > STATS_TARGETS {
+        c.line(format!(
+            "failed test targets (top {STATS_TARGETS} of {}, --json for all):",
+            targets.len()
+        ));
+    } else {
+        c.line("failed test targets:");
+    }
+    if v["untargeted_test_fails"].as_u64().unwrap_or(0) > 0 {
+        c.line(format!(
+            "test-step fails with no target in the tail (clipped): {}",
+            field(v, "untargeted_test_fails")
+        ));
+    }
+    print_table(
+        c,
+        &targets[..targets.len().min(STATS_TARGETS)],
+        &[
+            ("TARGET", "target"),
+            ("FAILED", "failed"),
+            ("FIRST TRY", "first_attempt"),
+        ],
+        "no failed test targets",
+    );
 }
 
 fn print_hosts(c: &Ctx, v: &Value) {
@@ -294,4 +390,52 @@ fn queued_line(c: &Ctx, v: &Value) {
         field(&v["queue"], "note")
     ));
     c.line("The daemon moves the card on the result. Take your next card.");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::transport::mock::MockTransport;
+
+    #[test]
+    fn stats_print_the_rates_counts_and_top_targets() {
+        let ctx = Ctx::for_test(Arc::new(MockTransport::new()), None);
+        let targets: Vec<Value> = (0..12)
+            .map(|i| {
+                json!({"target": format!("-p app --test t{i:02}"), "failed": 12 - i,
+                            "first_attempt": 1})
+            })
+            .collect();
+        let v = json!({
+            "project": "p", "since": "2026-11-01T00:00:00.000Z", "jobs": 13,
+            "first_attempt": {"ended": 5, "passed": 2, "failed": 3, "pass_rate": 0.4},
+            "validate": {"ended": 3, "passed": 1, "failed": 2, "pass_rate": 1.0 / 3.0},
+            "merge": {"ended": 2, "passed": 1, "failed": 1, "pass_rate": 0.5},
+            "reruns": {"ended": 0, "passed": 0, "failed": 0, "pass_rate": null},
+            "conflicts": 1, "errors": 2, "cancelled": 1, "open": 1, "splits": 1,
+            "failed_steps": [{"step": "test", "failed": 4}],
+            "failed_targets": targets,
+            "untargeted_test_fails": 1,
+        });
+        print_stats(&ctx, &v);
+        let out = ctx.out.captured();
+        assert!(
+            out.contains("jobs of p since 2026-11-01T00:00:00.000Z: 13"),
+            "{out}"
+        );
+        assert!(out.contains("first-attempt pass rate: 40% (2/5)"), "{out}");
+        assert!(out.contains("validate 33% (1/3), merge 50% (1/2)"), "{out}");
+        assert!(out.contains("reruns passed: - (0/0)"), "{out}");
+        assert!(
+            out.contains("conflicts 1, could not run 2, cancelled 1, open 1, split halves 1"),
+            "{out}"
+        );
+        assert!(out.contains("failed steps: test 4"), "{out}");
+        assert!(out.contains("top 10 of 12, --json for all"), "{out}");
+        assert!(out.contains("(clipped): 1"), "{out}");
+        assert!(out.contains("-p app --test t09"), "{out}");
+        assert!(!out.contains("-p app --test t10"), "{out}");
+    }
 }
