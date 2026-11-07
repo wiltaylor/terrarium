@@ -2203,13 +2203,17 @@ sync() {
 verify() {
   vi=$dir/.git/terrarium/verify-index
   mkdir -p -- "$dir/.git/terrarium" && rm -f -- "$vi" || return 1
+  # target/ is left out as an ignored path (a pathspec that names an
+  # ignored path fails `git add`).
+  printf '/target/\n' > "$vi.exclude" || return 1
   GIT_INDEX_FILE=$vi; export GIT_INDEX_FILE
   w=
-  if T read-tree "$tree" >/dev/null 2>&1 && T add -A -- . ':(exclude)target' >/dev/null 2>&1; then
+  if T read-tree "$tree" >/dev/null 2>&1 \
+    && T -c core.excludesFile="$vi.exclude" add -A -- . >/dev/null 2>&1; then
     w=$(T write-tree 2>/dev/null)
   fi
   unset GIT_INDEX_FILE
-  rm -f -- "$vi"
+  rm -f -- "$vi" "$vi.exclude"
   [ "$w" = "$tree" ] && [ "$(T rev-parse -q --verify 'HEAD^{tree}' 2>/dev/null)" = "$tree" ]
 }
 made=0
@@ -2436,6 +2440,7 @@ mod tests {
         let b2 = bundle_of(&two);
         let (ok, text) = run_plain(RECEIVE_SCRIPT, &[&d, &two, "validate", "", &t2], &b2);
         assert!(ok, "{text}");
+        assert!(!text.contains("making the slot new"), "{text}");
         assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]), two);
         assert_eq!(
             git_in(&dir, &["status", "--porcelain", "--ignored"]),
