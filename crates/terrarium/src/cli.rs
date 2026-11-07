@@ -1307,6 +1307,12 @@ pub enum CardCmd {
         /// Added to the move comment
         #[arg(long, short = 'm')]
         comment: Option<String>,
+        /// How long the job will run, such as 20m or 1h (not a time). The
+        /// card shows its queue place while the job waits; when the job
+        /// starts, the ETA is the start plus this, and a rerun starts it
+        /// again. Without it, the card has no ETA while it validates
+        #[arg(long, value_name = "DURATION")]
+        eta: Option<String>,
     },
     /// Queue a merge of the card branch onto `next` (project_admin): the
     /// job merges, validates, and pushes `next` when green. With several
@@ -1325,8 +1331,12 @@ pub enum CardCmd {
         /// in lower case)
         #[arg(long)]
         branch: Option<String>,
+        /// How long the merge job will run, such as 1h (not a time): the
+        /// ETA of each card is the job start plus this. Without it, no ETA
+        #[arg(long, value_name = "DURATION")]
+        eta: Option<String>,
     },
-    /// Move a card to a column
+    /// Move a card to a column. A move to another column clears the ETA
     Move {
         id: String,
         /// A column name, or `working` or `blocked` for the column with
@@ -1337,14 +1347,20 @@ pub enum CardCmd {
         /// The move comment; the blocked column needs one
         #[arg(long, short = 'm')]
         comment: Option<String>,
-        /// Set the ETA too: a duration such as 45m, 2h30m, or 1d
+        /// Set the ETA for the new column: a duration such as 45m, 2h30m,
+        /// or 1d. For a card with a queued or running job (`validating`),
+        /// a duration is the job's planned duration: the ETA starts when
+        /// the job runs
         #[arg(long, value_name = "DURATION|TIME")]
         eta: Option<String>,
     },
-    /// Set when the work is expected to be done, or clear it
+    /// Set when the work is expected to be done, or clear it. A move to
+    /// another column clears it
     Eta {
         id: String,
-        /// A duration from now (45m, 2h30m, 1d) or an RFC 3339 time
+        /// A duration from now (45m, 2h30m, 1d) or an RFC 3339 time. For a
+        /// card with a queued or running job, a duration is the job's
+        /// planned duration: the ETA is the job start plus it
         #[arg(required_unless_present = "clear", conflicts_with = "clear")]
         when: Option<String>,
         /// Remove the ETA

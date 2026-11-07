@@ -826,14 +826,20 @@ async fn eta_set_clear_and_rules() {
     assert_eq!(n, 5);
 }
 
-/// A done card keeps its ETA and gets `done_at`; it takes no new ETA. A
-/// reopen clears `done_at`.
+/// Every move to another column clears the ETA (TER-155 D1); a reorder in
+/// the column keeps it, and the `moved` event has the old ETA. An ETA in
+/// the same patch as the move is for the new column. A done card gets
+/// `done_at` and takes no new ETA; a reopen clears `done_at`.
 #[tokio::test]
-async fn eta_stays_on_done_and_done_at_is_set() {
+async fn eta_clears_on_every_column_change() {
     let td = setup().await;
     let id = card(&td, "proj/w1", json!({"title": "Ship"})).await;
+    let other = card(&td, "proj/w1", json!({"title": "Other"})).await;
     let path = format!("/api/cards/{id}");
     td.post_empty_as("proj/w1", &format!("{path}/claim"))
+        .await
+        .ok();
+    td.post_empty_as("proj/w1", &format!("/api/cards/{other}/claim"))
         .await
         .ok();
     let c = td
@@ -843,6 +849,61 @@ async fn eta_stays_on_done_and_done_at_is_set() {
         .clone();
     assert!(c.get("done_at").is_none());
     let eta = c["eta_at"].clone();
+    assert!(eta.is_string());
+    // A reorder in the column is no column change: the ETA stays.
+    let c = td
+        .post_as(
+            "proj/w1",
+            &format!("{path}/move"),
+            json!({"column": "in_progress", "position": 1}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(c["eta_at"], eta, "{c:#}");
+    // Each move to another column clears it, the who and when too.
+    for col in ["review", "blocked", "accepted"] {
+        td.patch_as("proj/w1", &path, json!({"eta_at": "45m"}))
+            .await
+            .ok();
+        let c = td
+            .post_as(
+                "proj/w1",
+                &format!("{path}/move"),
+                json!({"column": col, "comment": "needs a look"}),
+            )
+            .await
+            .ok()
+            .clone();
+        assert_eq!(c["column"], col);
+        for f in ["eta_at", "eta_set_at", "eta_set_by", "eta_set_by_name"] {
+            assert!(c.get(f).is_none(), "{col}: {f} stays: {c:#}");
+        }
+    }
+    // The `moved` event keeps the ETA that the move cleared.
+    let ev = td.get(&format!("{path}/events")).await.ok().clone();
+    let moved: Vec<&Value> = ev
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["data"]["change"] == "moved")
+        .collect();
+    let last = moved.last().unwrap();
+    assert_eq!(last["data"]["to"], "accepted", "{ev:#}");
+    assert!(last["data"]["previous_eta_at"].is_string(), "{last:#}");
+    // An ETA in the same patch as the move is for the new column.
+    let c = td
+        .patch_as(
+            "proj/w1",
+            &path,
+            json!({"column": "in_progress", "eta_at": "2h"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(c["column"], "in_progress");
+    assert!(c["eta_at"].is_string(), "{c:#}");
+    // Done: the ETA goes, `done_at` comes, and no new ETA is taken.
     let c = td
         .post_as(
             "proj/w1",
@@ -852,7 +913,7 @@ async fn eta_stays_on_done_and_done_at_is_set() {
         .await
         .ok()
         .clone();
-    assert_eq!(c["eta_at"], eta);
+    assert!(c.get("eta_at").is_none(), "{c:#}");
     assert!(c["done_at"].is_string());
     td.patch(&path, json!({"eta_at": "1h"}))
         .await
@@ -863,7 +924,7 @@ async fn eta_stays_on_done_and_done_at_is_set() {
         .ok()
         .clone();
     assert!(c.get("done_at").is_none());
-    assert_eq!(c["eta_at"], eta);
+    assert!(c.get("eta_at").is_none());
     // An archived card takes no ETA.
     td.delete(&path).await;
     td.patch(&path, json!({"eta_at": "1h"}))
