@@ -19,6 +19,7 @@ pub mod pipelines;
 pub mod projects;
 pub mod questions;
 pub mod remote;
+pub mod rules;
 pub mod schedules;
 pub mod screen;
 pub mod secrets;
@@ -131,6 +132,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         }
         Command::Fleet { command } => fleet::fleet(ctx, command).await,
         Command::Schedule { command } => schedules::schedule(ctx, command).await,
+        Command::Rule { command } => rules::rule(ctx, command).await,
         Command::Admin { command } => admin(ctx, command).await,
         Command::Audit(args) => system::audit(ctx, args).await,
         Command::Events(args) => system::events(ctx, args).await,

@@ -101,6 +101,21 @@ pub struct Verb {
     required: &'static [&'static str],
 }
 
+impl Verb {
+    /// The names of the arguments, in the order of the schema.
+    pub fn arg_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.args.iter().map(|(k, _)| *k)
+    }
+
+    /// The names of the arguments that name a column (one or a list).
+    pub fn column_args(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.args
+            .iter()
+            .filter(|(_, a)| matches!(a, Arg::Column | Arg::Columns))
+            .map(|(k, _)| *k)
+    }
+}
+
 /// The verbs, in the order of the schema.
 pub const VERBS: &[Verb] = &[
     Verb {
