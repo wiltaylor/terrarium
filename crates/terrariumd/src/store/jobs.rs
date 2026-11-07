@@ -1434,11 +1434,11 @@ pub struct CardJob {
     pub kind: JobKind,
     /// `queued` or `running`.
     pub state: JobState,
-    /// A queued job: its place among the queued jobs of its project (1
-    /// starts next).
+    /// A queued job: its place among the queued jobs of its project and
+    /// lane (1 starts next).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub place: Option<i64>,
-    /// A queued job: the count of queued jobs in its project.
+    /// A queued job: the count of queued jobs in its project and lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued: Option<i64>,
 }
@@ -1451,8 +1451,8 @@ pub fn card_job(conn: &Connection, card: &str) -> ApiResult<Option<CardJob>> {
     let (place, queued) = if job.state == JobState::Queued {
         let (place, _) = place(conn, &job)?;
         let queued: i64 = conn.query_row(
-            "SELECT count(*) FROM jobs WHERE project = ?1 AND state = 'queued'",
-            [&job.project],
+            "SELECT count(*) FROM jobs WHERE project = ?1 AND kind = ?2 AND state = 'queued'",
+            params![job.project, job.kind.as_str()],
             |r| r.get(0),
         )?;
         (Some(place), Some(queued))
