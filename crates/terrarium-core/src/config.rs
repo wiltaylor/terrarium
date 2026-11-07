@@ -1220,6 +1220,57 @@ pub struct Definitions {
     pub subscriptions: Vec<SubscriptionDef>,
     /// `tools/<name>.toml`: the tool proxies (`crate::tool`).
     pub tools: Vec<crate::tool::ToolDef>,
+    /// `projects/<project>.rules.wcl`: the board rules files (TER-166).
+    /// The daemon checks them (`crate::rules_file`) when it syncs them.
+    pub rules: Vec<RulesFile>,
+}
+
+/// A project's board rules file in the config dir, as text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulesFile {
+    pub project: String,
+    pub text: String,
+}
+
+/// The extension of a rules file in `projects/`.
+pub const RULES_SUFFIX: &str = ".rules.wcl";
+
+/// The rules files in `dir` (`<project>.rules.wcl`), sorted by project.
+fn load_rules(dir: &Path, errors: &mut Vec<Error>) -> Vec<RulesFile> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(source) => {
+            errors.push(Error::Io {
+                path: dir.to_owned(),
+                source,
+            });
+            return Vec::new();
+        }
+    };
+    let mut out: Vec<RulesFile> = Vec::new();
+    for path in entries.filter_map(|e| e.ok().map(|e| e.path())) {
+        let Some(project) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(RULES_SUFFIX))
+            .filter(|p| !p.is_empty())
+        else {
+            continue;
+        };
+        if !path.is_file() {
+            continue;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => out.push(RulesFile {
+                project: project.to_owned(),
+                text,
+            }),
+            Err(source) => errors.push(Error::Io { path, source }),
+        }
+    }
+    out.sort_by(|a, b| a.project.cmp(&b.project));
+    out
 }
 
 impl Definitions {
@@ -1233,6 +1284,7 @@ impl Definitions {
             targets: load_kind(&dir.join("targets"), &mut errors),
             subscriptions: load_kind(&dir.join("subscriptions"), &mut errors),
             tools: load_kind(&dir.join("tools"), &mut errors),
+            rules: load_rules(&dir.join("projects"), &mut errors),
         };
         (defs, errors)
     }

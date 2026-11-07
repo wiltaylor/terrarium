@@ -121,6 +121,8 @@ export function specWords(spec: ScheduleSpec): string {
       return cronWords(spec.expr, spec.tz);
     case "on":
       return `on ${spec.kinds.join(", ")}`;
+    case "manual":
+      return "on demand (a button)";
   }
 }
 
@@ -232,6 +234,7 @@ export function webhookHost(url: string): string {
 export function nextRunWords(s: Pick<Schedule, "enabled" | "next_run_at" | "spec" | "last_run">, now = Date.now()): string {
   if (!s.enabled) return "disabled";
   if (s.spec.kind === "on") return "on each match";
+  if (s.spec.kind === "manual") return "on demand";
   if (!s.next_run_at) return s.spec.kind === "at" && s.last_run ? "done (ran once)" : "not planned";
   const ms = Date.parse(s.next_run_at) - now;
   return ms <= 0 ? "due now" : `in ${duration(ms)}`;

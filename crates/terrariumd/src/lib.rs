@@ -47,6 +47,7 @@ pub mod quota_notices;
 pub mod quota_policy;
 pub mod repo_browse;
 pub mod reset;
+pub mod rules_engine;
 pub mod run_kill;
 pub mod runner_supervisor;
 pub mod sandbox;
@@ -334,6 +335,9 @@ pub async fn start_with_usage(
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
+    // The board rule engine (TER-168): runs the outbox rows that the last
+    // daemon left pending, then the new events.
+    tasks.push(rules_engine::spawn(state.clone()));
     // The webhook deliveries (docs/api.md §19.5): the pending rows of the
     // old daemon are due again.
     tasks.push(webhooks::spawn(state.clone()));
@@ -720,6 +724,57 @@ pub async fn apply_definitions(
         })
         .await?;
     report.errors.extend(schedule_errors);
+    // The board rules files (`projects/<p>.rules.wcl`, TER-166), after the
+    // projects and their boards: the check reads the columns. The parse
+    // runs off the DB lock: plan under the lock, parse, then store.
+    let rules_defs = defs.rules.clone();
+    let (plans, mut rule_errors) = state
+        .db
+        .read(move |c| {
+            let mut plans = Vec::new();
+            let mut errors = Vec::new();
+            for f in &rules_defs {
+                if store::projects::find(c, &f.project)?.is_none() {
+                    errors.push(format!(
+                        "{}: no project `{}`",
+                        store::rules::file_path(&f.project),
+                        f.project
+                    ));
+                    continue;
+                }
+                plans.extend(store::rules::plan_file(c, &f.project, &f.text)?);
+            }
+            Ok((plans, errors))
+        })
+        .await?;
+    let mut checked = Vec::new();
+    for plan in plans {
+        let file = store::rules::file_path(&plan.project);
+        match store::rules::parse_off(plan.text.clone(), file, plan.ctx.clone()).await? {
+            Ok(set) => checked.push((plan, set)),
+            // A bad file keeps the last good rules.
+            Err(e) => rule_errors.extend(e.to_string().lines().map(str::to_owned)),
+        }
+    }
+    let present: Vec<String> = defs.rules.iter().map(|f| f.project.clone()).collect();
+    let stored = state
+        .db
+        .write("system", move |t| {
+            let mut errors = Vec::new();
+            for (plan, set) in &checked {
+                errors.extend(store::rules::store_file(t, plan, set)?);
+            }
+            // A rules file that is gone: its rules become API rules.
+            for p in store::rules::file_projects(t)? {
+                if !present.contains(&p) {
+                    store::rules::file_gone(t, &p)?;
+                }
+            }
+            Ok(errors)
+        })
+        .await?;
+    rule_errors.extend(stored);
+    report.errors.extend(rule_errors);
     // The template files, before the fleets: a fleet agent may name one.
     match template_files::refresh(state).await {
         Ok(r) => report.errors.extend(r.errors),

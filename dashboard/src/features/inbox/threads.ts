@@ -1,7 +1,7 @@
 // Inbox threads (docs/api.md §6.13): pure helpers for the Threads view of the
 // Inbox and the chat page of one thread. No Solid imports.
 
-import type { NewThread, Question, Thread, ThreadClose, ThreadHandoff, ThreadLink, ThreadLinkKind, ThreadMessage } from "../../api/types";
+import type { NewThread, Question, Thread, ThreadClose, ThreadHandoff, ThreadLink, ThreadLinkKind, ThreadMessage, ThreadQuery } from "../../api/types";
 
 /** The limits of the daemon (store/threads.rs). Texts count bytes; the topic and a link count characters. */
 export const THREAD_TOPIC_MAX = 200;
@@ -29,8 +29,22 @@ export function threadChip(t: Pick<Thread, "status" | "questions" | "open_questi
   if (t.status === "closed") return { label: "closed", chip: "" };
   if (pendingProposal(t)) return { label: "close proposed", chip: "warn" };
   if (waitsOnYou(t)) return { label: "waiting on you", chip: "warn" };
+  if (t.status === "tracking") return { label: "tracking", chip: "" };
   return { label: "waiting on the agent", chip: "info" };
 }
+
+/**
+ * The lists of the Threads tab (TER-145): Open has the threads that are not
+ * closed and do not track, Tracking the ones whose agent tracks handed-off
+ * work (parked, no stale close), Done the closed ones.
+ */
+export type ThreadsViewId = "open" | "tracking" | "done";
+
+/** The `status` of `GET /api/threads` for a list. */
+export const threadListStatus = (v: ThreadsViewId): NonNullable<ThreadQuery["status"]> => (v === "done" ? "closed" : v);
+
+/** Does the thread show in the list? The daemon's `open` has the tracking threads too: they show under Tracking only. */
+export const inThreadsView = (v: ThreadsViewId, t: Pick<Thread, "status">): boolean => (v === "open" ? t.status !== "tracking" && t.status !== "closed" : v === "tracking" ? t.status === "tracking" : t.status === "closed");
 
 /** The newest activity of a thread: `last_at` of a list row, else the newest message or change. */
 export const lastActivity = (t: Pick<Thread, "last_at" | "updated_at" | "messages">): string => t.last_at ?? [t.updated_at, ...(t.messages ?? []).map((m) => m.at)].sort().at(-1)!;

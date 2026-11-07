@@ -2,13 +2,16 @@
 // column of every project, with its project, column, agent and live
 // status, and ETA. It reloads on card and agent status events (batched)
 // and each minute. All projects share one table with one column template,
-// so the columns line up across the project groups (TER-52).
+// so the columns line up across the project groups (TER-52). The enabled
+// project actions of each project (TER-53) are buttons next to its name.
 
 import { A } from "@solidjs/router";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { ActiveCard } from "../../api/types";
 import { Empty, ErrorBanner } from "../../components/ui";
 import { api, events } from "../../stores";
+import { ActionButtons } from "../actions/ActionButtons";
+import { actionsByProject } from "../actions/model";
 import { cardHref } from "../inbox/questions";
 import { assigneeText, byProject, columnLabel, etaText, statusTone, summary } from "./active";
 import { idleBadge } from "../../lib/idle";
@@ -17,9 +20,24 @@ import { idleBadge } from "../../lib/idle";
 export function ActiveCards(props: { now: number }) {
   const [tick, setTick] = createSignal(0);
   const [cards] = createResource(tick, () => api.cards.active());
+  // One list for all projects. A failed list shows no buttons; the table stays.
+  const [actionTick, setActionTick] = createSignal(0);
+  const [actions] = createResource(actionTick, async () => {
+    try {
+      return await api.schedules.list({ kind: "action" });
+    } catch {
+      return [];
+    }
+  });
+  const byName = () => actionsByProject(actions.latest ?? []);
   onMount(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
+    let ta: ReturnType<typeof setTimeout> | undefined;
     const off = events.on((e) => {
+      if (e.kind === "schedule") {
+        if (!ta) ta = setTimeout(() => ((ta = undefined), setActionTick((n) => n + 1)), 2_000);
+        return;
+      }
       if (t || (e.kind !== "card" && e.kind !== "status")) return;
       t = setTimeout(() => {
         t = undefined;
@@ -30,6 +48,7 @@ export function ActiveCards(props: { now: number }) {
     onCleanup(() => {
       off();
       clearTimeout(t);
+      clearTimeout(ta);
       clearInterval(every);
     });
   });
@@ -71,9 +90,12 @@ export function ActiveCards(props: { now: number }) {
                 <tbody class="active-project">
                   <tr class="active-group">
                     <th scope="colgroup" colSpan={5}>
-                      <h3>
-                        <A href={`/p/${encodeURIComponent(g.project)}/board`}>{g.project}</A>
-                      </h3>
+                      <div class="active-group-head row">
+                        <h3>
+                          <A href={`/p/${encodeURIComponent(g.project)}/board`}>{g.project}</A>
+                        </h3>
+                        <ActionButtons actions={byName().get(g.project) ?? []} compact />
+                      </div>
                     </th>
                   </tr>
                   <For each={g.cards}>

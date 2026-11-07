@@ -13,7 +13,7 @@ import { api, events, inbox, projects } from "../../stores";
 import { MailItemCard, PausedThreadCard, WatchCard } from "./cards";
 import { AskDialog } from "./AskDialog";
 import { MessageDialog } from "./MessageDialog";
-import { canForward, emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, statusTabOf, type InboxStatusTab, type InboxTab } from "./model";
+import { canForward, emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, statusTabOf, statusTabsFor, threadsViewOf, type InboxStatusTab, type InboxTab } from "./model";
 import { questionItemId } from "./questions";
 import { inboxItemDomId } from "./critical";
 import { BundleCard } from "./BundleCard";
@@ -181,7 +181,7 @@ export default function InboxPage() {
       <Show when={status() !== "asked"}>
         <Tabs tabs={INBOX_TABS} active={tab()} onChange={(t) => setParams({ tab: t === "all" ? undefined : t })} />
       </Show>
-      <Tabs tabs={STATUS_TABS} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s, tab: params.tab === "watch" ? undefined : params.tab })} />
+      <Tabs tabs={statusTabsFor(tab())} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s, tab: params.tab === "watch" ? undefined : params.tab })} />
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
       <Show when={sent()}>
         {(s) => (
@@ -196,7 +196,7 @@ export default function InboxPage() {
         </p>
       </Show>
       <Show when={threadsTab()}>
-        <ThreadsView closed={status() === "done"} project={project()} now={now()} />
+        <ThreadsView view={threadsViewOf(status())} project={project()} now={now()} />
       </Show>
       <Show when={!threadsTab() && list().length} fallback={<Show when={!threadsTab()}><Empty>{loading() ? "Loading…" : emptyText(tab(), status())}</Empty></Show>}>
         <div class="stack" ref={listEl}>

@@ -1,6 +1,7 @@
 // The Threads tab of the Inbox (docs/api.md §6.13): `GET /api/threads`.
-// Open lists the threads that are not closed, the ones that wait on the
-// operator first and marked; Done lists the closed ones. The project filter
+// Open lists the threads that are not closed and do not track, the ones that
+// wait on the operator first and marked; Tracking lists the threads whose
+// agent tracks handed-off work (TER-145); Done lists the closed ones. The project filter
 // of the Inbox is the scope. `thread` and `inbox` events read the list again.
 
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
@@ -8,9 +9,15 @@ import type { Thread } from "../../api/types";
 import { Empty, ErrorBanner } from "../../components/ui";
 import { api, events, inbox } from "../../stores";
 import { ThreadRow } from "./ThreadRow";
-import { sortThreads } from "./threads";
+import { inThreadsView, sortThreads, threadListStatus, type ThreadsViewId } from "./threads";
 
-export function ThreadsView(props: { closed: boolean; project: string; now: number }) {
+const EMPTY: Record<ThreadsViewId, string> = {
+  open: "No open threads. Open one with New thread.",
+  tracking: "No thread tracks work. An agent moves its thread here after the handoff.",
+  done: "No closed threads.",
+};
+
+export function ThreadsView(props: { view: ThreadsViewId; project: string; now: number }) {
   const [list, setList] = createSignal<Thread[]>([]);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<unknown>(null);
@@ -19,9 +26,10 @@ export function ThreadsView(props: { closed: boolean; project: string; now: numb
     const mine = ++gen;
     setLoading(true);
     try {
-      const rows = await api.threads.list({ status: props.closed ? "closed" : "open", ...(props.project ? { scope: props.project } : {}) });
+      const view = props.view;
+      const rows = (await api.threads.list({ status: threadListStatus(view), ...(props.project ? { scope: props.project } : {}) })).filter((t) => inThreadsView(view, t));
       if (mine !== gen) return;
-      setList(props.closed ? rows : sortThreads(rows));
+      setList(view === "done" ? rows : sortThreads(rows));
       setError(null);
     } catch (e) {
       if (mine === gen) setError(e);
@@ -29,7 +37,7 @@ export function ThreadsView(props: { closed: boolean; project: string; now: numb
       if (mine === gen) setLoading(false);
     }
   };
-  createEffect(on([() => props.closed, () => props.project], () => void reload()));
+  createEffect(on([() => props.view, () => props.project], () => void reload()));
   onMount(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
     const off = events.on((e) => {
@@ -42,7 +50,7 @@ export function ThreadsView(props: { closed: boolean; project: string; now: numb
   return (
     <div class="stack">
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
-      <Show when={list().length} fallback={<Empty>{loading() ? "Loading…" : props.closed ? "No closed threads." : "No open threads. Open one with New thread."}</Empty>}>
+      <Show when={list().length} fallback={<Empty>{loading() ? "Loading…" : EMPTY[props.view]}</Empty>}>
         <div class="stack" aria-label="Threads">
           <For each={list()}>{(t) => <ThreadRow thread={t} now={props.now} onChange={() => (void reload(), void inbox.refresh())} />}</For>
         </div>
