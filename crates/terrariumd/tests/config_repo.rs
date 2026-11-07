@@ -506,7 +506,7 @@ async fn a_pulled_export_is_a_plan_until_apply() {
     let remote = bare(tmp.path());
     let url = remote.display().to_string();
     let (a, _) = instance().await;
-    let (b, _) = instance().await;
+    let (b, b_repo) = instance().await;
     for td in [&a, &b] {
         td.put("/api/config/remote", json!({"url": url})).await.ok();
     }
@@ -534,6 +534,28 @@ async fn a_pulled_export_is_a_plan_until_apply() {
         .post("/api/config/commit", json!({"message": "nothing"}))
         .await;
     assert_eq!(c.ok()["export"], json!([]));
+    // TER-193: a project of B still gets its file while the pull waits;
+    // the pulled file stays as pulled.
+    let pulled = std::fs::read_to_string(b_repo.join("export/projects/shared.fleet.toml")).unwrap();
+    b.project("own").await;
+    let c = b
+        .post("/api/config/commit", json!({"message": "own project"}))
+        .await;
+    assert_eq!(
+        c.ok()["export"],
+        json!(["export/projects/own.fleet.toml"]),
+        "{}",
+        c.body
+    );
+    assert!(b_repo.join("export/projects/own.fleet.toml").is_file());
+    assert_eq!(
+        std::fs::read_to_string(b_repo.join("export/projects/shared.fleet.toml")).unwrap(),
+        pulled
+    );
+    let s = b.get("/api/config/status").await;
+    assert_eq!(s.ok()["export_pending"], true);
+    let log = git(&b_repo, &["log", "-1", "--name-only", "--format="]);
+    assert!(log.contains("export/projects/own.fleet.toml"), "{log}");
     let r = b.post("/api/config/pull", json!({"apply": true})).await;
     let body = r.ok().clone();
     assert!(body["export"][0]["applied"].is_object(), "{body}");

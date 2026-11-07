@@ -8803,7 +8803,7 @@ Status:
 | `ahead`, `behind` | Against the remote branch at the last fetch. |
 | `merging`, `conflicts` | A merge stopped on a conflict and waits: edit the files and commit, or abort. |
 | `pending_defaults` | New defaults that wait as `<file>.new` (§25.3). |
-| `export_pending` | A pull brought `export/` changes that are not applied. Until they are, a commit does not write `export/` from this instance. |
+| `export_pending` | A pull brought `export/` changes that are not applied. Until they are, a commit writes only the export files that are not in the repo yet: it changes and removes no pulled file. |
 | `auto_sync` | `TERRARIUM_CONFIG_SYNC`: `off`, `pull`, or `sync`. |
 
 A scan block is `422 invalid` with the findings:
@@ -8836,8 +8836,10 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
 ### 25.3 Rules
 
 - **Commit.** The daemon writes `export/` from the store first (unless
-  `export` is `false`, or `export_pending` is set and `force_export` is
-  not), stages every change that the `.gitignore` allows, and scans each
+  `export` is `false`; while `export_pending` is set and `force_export` is
+  not, only the files that are not in the repo yet, so a pulled file
+  stays for `pull --apply` and each project still gets its file), stages
+  every change that the `.gitignore` allows, and scans each
   staged file. A finding blocks the commit, unstages the files, and is
   `422`. During a merge, a file that still has conflict markers is `409`.
 - **Export.** One fleet file per project,
