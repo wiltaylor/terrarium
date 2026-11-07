@@ -38,6 +38,7 @@ fn spec_text(spec: &Value) -> String {
             }
             t
         }
+        Some("manual") => "manual (action)".to_owned(),
         _ => spec.to_string(),
     }
 }
@@ -413,6 +414,9 @@ fn spec_of(a: &ScheduleArgs) -> anyhow::Result<Option<Value>> {
     if !a.on.is_empty() {
         return trigger_spec(a).map(Some);
     }
+    if a.manual {
+        return Ok(Some(json!({"kind": "manual"})));
+    }
     if !a.matches.is_empty()
         || a.dedupe.is_some()
         || a.escalate.is_some()
@@ -641,6 +645,15 @@ fn catch_up_of(a: &ScheduleArgs) -> anyhow::Result<Option<Value>> {
 }
 
 fn print_saved(ctx: &Ctx, s: &Value, what: &str) {
+    if s["spec"]["kind"] == "manual" {
+        ctx.line(format!(
+            "{what} action {} ({}); run it with `terrarium schedule run {}`",
+            key_of(s),
+            field(s, "id"),
+            key_of(s)
+        ));
+        return;
+    }
     ctx.line(format!(
         "{what} schedule {} ({}); next run {}",
         key_of(s),
@@ -657,6 +670,7 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
             disabled_only,
             triggers,
             time,
+            actions,
         } => {
             let project = if *all { None } else { ctx.project.clone() };
             let state = match (enabled, disabled_only) {
@@ -664,9 +678,10 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
                 (_, true) => Some("false".to_owned()),
                 _ => None,
             };
-            let kind = match (triggers, time) {
-                (true, _) => Some("trigger".to_owned()),
-                (_, true) => Some("time".to_owned()),
+            let kind = match (triggers, time, actions) {
+                (true, _, _) => Some("trigger".to_owned()),
+                (_, true, _) => Some("time".to_owned()),
+                (_, _, true) => Some("action".to_owned()),
                 _ => None,
             };
             let q = query([("project", project), ("enabled", state), ("kind", kind)]);
@@ -684,7 +699,7 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
             let spec = spec_of(args)?.ok_or_else(|| {
                 CliError::usage(
                     "give the time: --cron \"<expr>\", --every <dur>, or --at <time>; \
-                     or a trigger: --on <kind>",
+                     a trigger: --on <kind>; or a project action: --manual",
                 )
             })?;
             let action = action_of(ctx, args)?.ok_or_else(|| {

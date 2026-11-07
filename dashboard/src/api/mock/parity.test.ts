@@ -1973,6 +1973,22 @@ describe("triggers (docs/api.md §19.4)", () => {
     await expect(api.schedules.list({ kind: "weekly" as never })).rejects.toMatchObject({ status: 400 });
   });
 
+  it("lists the project actions with ?kind=action, has no next run for them, and refuses a run of a disabled one with 409 (TER-53)", async () => {
+    const api = mock();
+    const a = await api.schedules.list({ kind: "action" });
+    expect(a.map((s) => s.name).sort()).toEqual(["deploy-staging", "notify-shop"]);
+    expect(a.every((s) => s.spec.kind === "manual" && s.next_run_at === null)).toBe(true);
+    for (const k of ["time", "trigger"] as const) expect((await api.schedules.list({ kind: k })).some((s) => s.spec.kind === "manual")).toBe(false);
+    const made = await api.schedules.create({ name: "act", project: "terrarium", spec: { kind: "manual" }, action: { type: "turn", agent: "terrarium/lead", text: "go" } });
+    expect(made.next_run_at).toBeNull();
+    const off = await api.schedules.disable(made.id);
+    expect(off.next_run_at).toBeNull();
+    await expect(api.schedules.run(made.id)).rejects.toMatchObject({ status: 409, code: "conflict" });
+    await expect(api.schedules.test(made.id)).rejects.toMatchObject({ status: 409, code: "conflict" });
+    const on = await api.schedules.enable(made.id);
+    expect(on.next_run_at).toBeNull();
+  });
+
   it("gives each trigger run its event, and every run event_seq", async () => {
     const api = mock();
     const t = (await api.schedules.list({ kind: "trigger" }))[0]!;
