@@ -127,6 +127,23 @@ impl ScreenState {
     }
 }
 
+impl ScreenState {
+    /// The editor holds text that a CR would submit: not busy, no dialog,
+    /// and pi has not exited.
+    pub fn input_pending(&self) -> bool {
+        self.input_box
+            && !self.busy
+            && !self.exited
+            && self.dialog.is_none()
+            && self.input_text.as_deref().is_some_and(|t| !t.is_empty())
+    }
+}
+
+/// [`ScreenState::input_pending`] for a parsed screen.
+pub fn input_pending(screen: &Screen) -> bool {
+    screen_state(&screen_lines(screen)).input_pending()
+}
+
 fn is_rule(line: &str) -> bool {
     let t = line.trim();
     t.starts_with("──") && t.chars().filter(|&c| c == '─').count() >= 20
@@ -353,6 +370,28 @@ mod tests {
         let idle = get("idle-start");
         assert_eq!(idle.footer_lines, 2);
         assert!(idle.ready && !idle.exited);
+    }
+
+    /// TER-208: typed text that did not submit is pending input. An empty
+    /// editor and a busy screen are not.
+    #[test]
+    fn typed_text_is_pending_input() {
+        let all = sections(&fixture("typing.txt"));
+        let pending =
+            |n: &str| screen_state(&all.iter().find(|(x, _)| x == n).expect(n).1).input_pending();
+        assert!(pending("typed-after-LF"));
+        for n in [
+            "idle-start",
+            "idle-after-ctrl-c-clear",
+            "idle-after-T1",
+            "busy-T1",
+            "busy-typed-T4",
+        ] {
+            assert!(!pending(n), "{n}");
+        }
+        let text = fixture("screen-startup-in-progress.txt");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(screen_state(&lines).input_pending());
     }
 
     fn screen(above: &[&str], top: &str, inner: &[&str]) -> Vec<String> {

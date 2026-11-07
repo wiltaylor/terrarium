@@ -137,9 +137,10 @@ pub trait Adapter: Send + Sync {
 
     /// True when the input box of the harness holds text, and a CR would
     /// submit it: not busy, and no dialog. The runner presses CR again
-    /// when a typed turn still sits in the input box, and warns when an
-    /// idle agent keeps text in its input box, because no turn can go out
-    /// then. The default is false: the adapter cannot tell.
+    /// when a typed turn still sits in the input box. An idle agent that
+    /// keeps text in its input box takes no turn: the runner marks it
+    /// `blocked` with [`INPUT_PENDING_REASON`], and the daemon mails its
+    /// leads. The default is false: the adapter cannot tell.
     fn input_pending(&self, _screen: &Screen) -> bool {
         false
     }
@@ -243,6 +244,13 @@ pub fn exit_key_writes(keys: &[u8], pause: Duration) -> Vec<Vec<u8>> {
 
 /// Ctrl-U: kill the line before the cursor.
 pub const CTRL_U: u8 = 0x15;
+
+/// The reason of the `blocked` status that the runner sets when an idle
+/// agent keeps unsubmitted text in its input box for the submit timeout
+/// ([`Adapter::input_pending`], TER-194, TER-208). No turn can go out
+/// then. The daemon mails the leads of the agent when a status change has
+/// this reason.
+pub const INPUT_PENDING_REASON: &str = "unsubmitted text in the input box";
 
 /// Esc, the interrupt key of the harness TUIs.
 pub const ESC: u8 = 0x1b;

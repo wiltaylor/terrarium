@@ -17,10 +17,11 @@ pub const BACKSPACE: u8 = 0x7f;
 /// The number of lines that [`clear_input`] removes.
 pub const CLEAR_LINES: usize = 256;
 
-/// Submit a turn: bracketed paste, then CR at once (verified; a bare LF
-/// adds a new line and does not submit). Newlines in the paste stay. The
-/// screen draws the paste late (more than 0.2 s), but the CR right after
-/// it still submits the full text.
+/// Submit a turn: bracketed paste, then CR (a bare LF adds a new line and
+/// does not submit). Newlines in the paste stay. The screen draws the
+/// paste late (more than 0.2 s), but a CR right after a short paste still
+/// submitted the full text. The runner writes the CR on its own,
+/// [`SUBMIT_PAUSE`] after the paste.
 ///
 /// The paste markers are removed from `text` first. A turn can carry mail,
 /// which is untrusted input, and a stray end marker would end the paste
@@ -29,6 +30,13 @@ pub fn type_turn(text: &str) -> Vec<u8> {
     let clean = text.replace(PASTE_START, "").replace(PASTE_END, "");
     bracketed_paste(&escape(&clean))
 }
+
+/// The pause between the paste of a turn and its CR (TER-208). The spikes
+/// sent only short pastes. Claude Code loses a CR in the same write as a
+/// long paste (TER-194), and Copilot draws a paste late, so the CR goes
+/// in a later write. The runner presses CR again when the text stays in
+/// the box ([`crate::screen::ScreenState::input_pending`]).
+pub const SUBMIT_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// The turn as plain text (D3): Copilot runs a text that starts with `/` as a slash command (`/plan`,
 /// `/autopilot`, `/delegate`), a text that starts with `!` as a shell
