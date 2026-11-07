@@ -43,14 +43,37 @@ fn id(v: &Value) -> String {
     v["id"].as_str().unwrap().to_owned()
 }
 
+/// The longest wait of [`until`]. A deadline, not a count of tries: on a
+/// loaded machine each GET is slow (TER-108, TER-109). Only a failing
+/// test waits it out.
+const UNTIL: Duration = Duration::from_secs(30);
+
 async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
-    for _ in 0..400 {
-        if f().await {
-            return;
-        }
+    let start = std::time::Instant::now();
+    while !f().await {
+        assert!(start.elapsed() < UNTIL, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("timed out waiting for {what}");
+}
+
+/// Wait until agent `a` is `idle` after its first turn (the task of an
+/// ephemeral agent), with the deadline of [`until`]. The idle right after
+/// the start comes before that turn.
+async fn idle_after_a_turn(td: &TestDaemon, a: &str) {
+    let aid: AgentId = a.parse().unwrap();
+    until("idle after the first turn", || async {
+        !td.sup.prompts(aid).is_empty()
+            && td.get(&format!("/api/agents/{a}")).await.body["status"] == "idle"
+    })
+    .await;
+}
+
+/// Wait until agent `a` has `status`, with the deadline of [`until`].
+async fn status_is(td: &TestDaemon, a: &str, status: &str) {
+    until(&format!("{a} {status}"), || async {
+        td.get(&format!("/api/agents/{a}")).await.body["status"] == status
+    })
+    .await;
 }
 
 /// A project `p` with the templates `worker` (project) and `helper`
@@ -494,18 +517,32 @@ async fn an_idle_ephemeral_agent_stays_until_its_lifetime() {
         compact_max_age: CompactMaxAge::Off,
         compact_wait: Duration::from_secs(5),
     });
+    // The lifetime counts from the spawn, and under load the start alone
+    // took up to 16 s (TER-108). So the lifetime is long while the test
+    // checks that the agent stays, and the test then ends it: it moves the
+    // deadline to now, which the spawn timer reads on each tick.
     td.patch(
         &format!("/api/agents/{w}"),
-        json!({"policy": {"spawn": {"templates": ["worker"], "max_lifetime": "2s"}}}),
+        json!({"policy": {"spawn": {"templates": ["worker"], "max_lifetime": "1h"}}}),
     )
     .await
     .ok();
     let eph = id(&spawn_ok(&td, &w, "Think").await);
-    td.wait_status(&eph, "idle").await;
+    idle_after_a_turn(&td, &eph).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
     let a = td.get(&format!("/api/agents/{eph}")).await.ok().clone();
     assert_eq!(a["status"], "idle", "{a}");
     assert!(spawn_row(&td, &eph).await["finished_at"].is_null());
+    let (key, now) = (eph.clone(), terrariumd::waits::from_now(Duration::ZERO));
+    s.db.write("operator", move |t| {
+        t.execute(
+            "UPDATE spawns SET deadline_at = ?2 WHERE id = ?1",
+            [&key, &now],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     let sp = finished(&td, &eph).await;
     assert_eq!(sp["outcome"], "timeout");
     let mail = system_mail(&td, &w).await;
@@ -623,11 +660,13 @@ async fn owner_removal_cascades() {
 async fn a_stop_of_the_owner_leaves_them() {
     let (td, _lead, w) = setup().await;
     td.post_empty(&format!("/api/agents/{w}/start")).await.ok();
-    td.wait_status(&w, "idle").await;
+    status_is(&td, &w, "idle").await;
     let eph = id(&spawn_ok(&td, &w, "x").await);
-    td.wait_status(&eph, "idle").await;
+    // Idle after its task turn: the check below then sees no turn end
+    // (TER-109).
+    idle_after_a_turn(&td, &eph).await;
     td.post_empty(&format!("/api/agents/{w}/stop")).await.ok();
-    td.wait_status(&w, "stopped").await;
+    status_is(&td, &w, "stopped").await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     let a = td.get(&format!("/api/agents/{eph}")).await.ok().clone();
     assert_eq!(a["status"], "idle");
