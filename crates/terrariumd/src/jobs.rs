@@ -1612,4 +1612,86 @@ echo "after: $GIT_SSH_COMMAND"
         .await
         .unwrap();
     }
+
+    /// TER-137: the job queue writes its comments and its moves with the
+    /// rights of the operator, but the author of each comment is `system`,
+    /// and the audit and event rows say `system`. An operator write keeps
+    /// `operator`.
+    #[tokio::test]
+    async fn queue_comment_and_move_show_system_author() {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        let db = crate::db::Db::new(c, crate::events::EventHub::default());
+        let card = db
+            .write("operator", |t| {
+                crate::store::projects::create(
+                    t,
+                    &crate::store::projects::NewProject {
+                        name: "p".into(),
+                        ..Default::default()
+                    },
+                    crate::store::projects::SOURCE_API,
+                )?;
+                let c = board::create_card(
+                    t,
+                    &Actor::Operator,
+                    "p",
+                    serde_json::from_value(serde_json::json!({"title": "T"})).unwrap(),
+                )?;
+                Ok(c.id)
+            })
+            .await
+            .unwrap();
+        // The queue's result: a move with its note, then a plain comment.
+        let id = card.clone();
+        db.write("system", move |t| {
+            move_or_comment(t, &id, COL_REVIEW, None, "Job queue: the note.")
+        })
+        .await
+        .unwrap();
+        let id = card.clone();
+        db.write("system", move |t| comment(t, &id, "Job queue: a comment."))
+            .await
+            .unwrap();
+        let id = card.clone();
+        db.write("operator", move |t| {
+            board::add_comment(t, &Actor::Operator, &id, "By hand.").map(|_| ())
+        })
+        .await
+        .unwrap();
+
+        let (column, rows, moved) = db
+            .read({
+                let id = card.clone();
+                move |c| {
+                    let column = board::get_card(c, &id)?.column;
+                    let mut stmt =
+                        c.prepare("SELECT author, body FROM card_comments WHERE card = ?1")?;
+                    let rows: Vec<(String, String)> = stmt
+                        .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<Result<_, _>>()?;
+                    let moved: (String, String) = c.query_row(
+                        "SELECT actor, summary FROM events
+                         WHERE card = ?1 AND kind = 'card' AND summary LIKE '%moved%'",
+                        [&id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    Ok((column, rows, moved))
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(column, COL_REVIEW);
+        let author_of = |body: &str| {
+            rows.iter()
+                .find(|(_, b)| b == body)
+                .map(|(a, _)| a.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(author_of("Job queue: the note."), "system");
+        assert_eq!(author_of("Job queue: a comment."), "system");
+        assert_eq!(author_of("By hand."), "operator");
+        assert_eq!(moved.0, "system");
+        assert!(moved.1.ends_with("by system"), "{}", moved.1);
+    }
 }

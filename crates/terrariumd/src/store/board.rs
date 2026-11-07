@@ -875,6 +875,19 @@ fn actor_display(t: &Tx<'_>) -> ApiResult<String> {
     }
 }
 
+/// The author that a comment or a blocked notice of `actor` shows in `t`.
+/// The daemon writes some board changes with the rights of the operator:
+/// the job queue, and a schedule that the project or the system owns. Their
+/// transaction is labelled `system` or `schedule:<id>`, not `operator`, so
+/// they show `system`. The rights are the operator's either way: this
+/// changes the author only.
+fn author_of(t: &Tx<'_>, actor: &Actor) -> String {
+    match actor {
+        Actor::Operator if t.actor != "operator" => "system".to_owned(),
+        _ => actor.address(),
+    }
+}
+
 /// Write a comment, redacted (PLAN §16b.6). Each comment comes here.
 /// The comment of an agent links to the agent's current session (PLAN
 /// §13), so the operator can read the work behind it.
@@ -914,7 +927,8 @@ fn notify_blocked(t: &mut Tx<'_>, actor: &Actor, card: &CardRow, comment: &str) 
         to.push(Address::Agent { id, name, project });
     }
     let me = actor.address();
-    let by = name_of(t, &me)?;
+    let author = author_of(t, actor);
+    let by = name_of(t, &author)?;
     let subject = format!("{} blocked: {}", card.id, card.title);
     let body = format!(
         "Card {} \"{}\" moved to {} (the blocked column) by {by}.\n\nComment:\n{comment}\n\nRun `terrarium card show {}`.",
@@ -1252,7 +1266,8 @@ fn apply_move(
         params![card.id, to.id, at, now(), same, to.name == DONE],
     )?;
     if let Some(c) = comment {
-        insert_comment(t, &card.id, &actor.address(), c)?;
+        let author = author_of(t, actor);
+        insert_comment(t, &card.id, &author, c)?;
     }
     let moved = find_row(t, &card.id)?;
     if same {
@@ -1614,7 +1629,8 @@ pub fn create_card(
     if let Some(agent) = &held_for {
         hold(t, actor, agent, &row, new.github_author.as_deref())?;
         if let Some(c) = new.comment.as_deref().filter(|c| !c.trim().is_empty()) {
-            insert_comment(t, &id, &actor.address(), c.trim())?;
+            let author = author_of(t, actor);
+            insert_comment(t, &id, &author, c.trim())?;
         }
         return get_card(t, &id);
     }
@@ -1634,7 +1650,8 @@ pub fn create_card(
         check_move(t, actor, &row, &to, new.comment.as_deref())?;
         apply_move(t, actor, &row, &to, None, new.comment.as_deref())?;
     } else if let Some(c) = new.comment.as_deref().filter(|c| !c.trim().is_empty()) {
-        insert_comment(t, &id, &actor.address(), c.trim())?;
+        let author = author_of(t, actor);
+        insert_comment(t, &id, &author, c.trim())?;
     }
     if let Some(who) = &new.assignee {
         assign_card(t, actor, &id, Some(who))?;
@@ -1991,7 +2008,8 @@ pub fn add_comment(t: &mut Tx<'_>, actor: &Actor, id: &str, body: &str) -> ApiRe
     if body.is_empty() {
         return Err(ApiError::invalid("the comment is empty"));
     }
-    insert_comment(t, &card.id, &actor.address(), body)?;
+    let author = author_of(t, actor);
+    insert_comment(t, &card.id, &author, body)?;
     touch(t, &card.id)?;
     card_event(t, &card, "commented", json!({"comment": body}))?;
     get_card(t, &card.id)
