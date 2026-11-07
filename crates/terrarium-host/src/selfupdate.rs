@@ -713,8 +713,7 @@ mod tests {
 
     /// The `--version` output of the 0.5.0 release, which the 0.2.0 host
     /// agent on helios refused (TER-195).
-    const OUTPUT_0_5_0: &str =
-        "terrarium-host 0.5.0-alpha+c7ac041 (built 2026-11-07T11:04:01Z)\n";
+    const OUTPUT_0_5_0: &str = "terrarium-host 0.5.0-alpha+c7ac041 (built 2026-11-07T11:04:01Z)\n";
 
     #[test]
     fn the_version_is_the_word_after_the_program_name() {
