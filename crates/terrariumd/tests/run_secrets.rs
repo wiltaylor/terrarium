@@ -245,7 +245,10 @@ async fn a_run_grant_injects_on_its_target_and_redacts_everywhere() {
         .iter()
         .filter_map(|r| r["detail"]["env"].as_str())
         .collect();
-    assert!(names.contains(&"DEPLOY") && names.contains(&"DB_PW"), "{names:?}");
+    assert!(
+        names.contains(&"DEPLOY") && names.contains(&"DB_PW"),
+        "{names:?}"
+    );
     let all = lab.td.get("/api/audit?limit=500").await;
     clean("the audit", &all.body.to_string());
     let exec = lab.td.get("/api/audit?action=target.exec").await;
@@ -284,7 +287,12 @@ async fn a_run_grant_injects_on_its_target_and_redacts_everywhere() {
     // The agent's list shows the level and the targets, no value.
     let r = lab
         .td
-        .req(hyper::Method::GET, "/api/agent/secrets", None, Some(&lab.w1))
+        .req(
+            hyper::Method::GET,
+            "/api/agent/secrets",
+            None,
+            Some(&lab.w1),
+        )
         .await;
     let deploy = r
         .ok()
@@ -331,11 +339,8 @@ async fn the_grant_is_checked_at_each_run() {
     assert_eq!(r.status, 204, "{}", r.body);
     assert_eq!(lab.run("box", &s, env.clone()).await.status, 404);
     // Down to `use`: refused too.
-    lab.grant(
-        "deploy",
-        json!({"grantee": "agent:p/w1", "level": "use"}),
-    )
-    .await;
+    lab.grant("deploy", json!({"grantee": "agent:p/w1", "level": "use"}))
+        .await;
     assert_eq!(lab.run("box", &s, env).await.status, 403);
 }
 
@@ -354,9 +359,8 @@ async fn a_run_grant_names_existing_targets() {
     assert_eq!(r.status, 404, "{}", r.body);
     let r = post(json!({"grantee": "agent:p/w1", "level": "read", "targets": ["box"]})).await;
     assert_eq!(r.status, 422, "{}", r.body);
-    let r = post(json!({"grantee": "agent:p/w1", "level": "run", "targets": ["box"],
-                        "env": "DEPLOY"}))
-    .await;
+    let r = post(json!({"grantee": "agent:p/w1", "level": "run", "targets": ["box"], "env": "DEPLOY"}))
+        .await;
     assert_eq!(r.status, 422, "{}", r.body);
     let r = post(json!({"grantee": "agent:p/w1", "level": "run", "targets": ["box"]})).await;
     assert_eq!(r.status, 201, "{}", r.body);

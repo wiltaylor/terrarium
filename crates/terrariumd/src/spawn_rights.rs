@@ -360,8 +360,8 @@ fn run_targets(
     let id = v.agent.id.to_string();
     let leased = leases::active_of(conn, &id)?;
     for t in &want {
-        let usable = v.agent.policy.targets.iter().any(|p| p == t)
-            || leased.iter().any(|l| l.target == *t);
+        let usable =
+            v.agent.policy.targets.iter().any(|p| p == t) || leased.iter().any(|l| l.target == *t);
         if !usable {
             return Err(ApiError::forbidden(format!(
                 "spawning with secret `{}/{}` at level `run` on target `{t}` needs the owner's \
