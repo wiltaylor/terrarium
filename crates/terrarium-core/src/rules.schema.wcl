@@ -1,0 +1,144 @@
+// The schema of a project's board rules: `rules.wcl` (TER-162, TER-166).
+//
+// The daemon ships this file and checks each rules file against it when
+// it loads the file and on each edit. A rules file holds plain data only:
+// literal values (no let, call, function, or reference), and no
+// `import`, `type`, `union`, `symbol_set`, `namespace`, or `use`. The
+// daemon also checks what a schema cannot say: the rule names are
+// unique, a rule has at least one verb, the `when` paths, the
+// `{{...}}` templates, and the columns (`@<role>` or a column name of
+// the project's board).
+//
+// A rule reacts to an event of the log (`on`, kind globs) when every
+// `when` holds, and runs its verbs in the order of the file:
+//
+//   rule "validate-pass" {
+//     on = ["job.verdict"]
+//     when "data.verdict" { eq = "passed" }
+//     card_label  { remove = ["validation:running", "validation:queued"] }
+//     card_move   { to = "@review"  comment = "{{job.end_comment}}" }
+//     card_assign { who = "none" }
+//   }
+
+@document
+type Rules {
+  @children("rule") rules: list<Rule>
+}
+
+@block("rule")
+type Rule {
+  @inline(0) name: utf8
+  description: utf8?
+  // Absent: true.
+  enabled: bool?
+  // Event kind globs, for example `card` or `job.*`.
+  on: list<utf8>
+  // The most runs of the rule in one hour.
+  max_per_hour: i64?
+  @children("when") when: list<When>
+
+  // The verbs, run in the order of the file.
+  @children("card_move") card_move: list<CardMove>
+  @children("card_label") card_label: list<CardLabel>
+  @children("card_comment") card_comment: list<CardComment>
+  @children("card_assign") card_assign: list<CardAssign>
+  @children("card_prepend") card_prepend: list<CardPrepend>
+  @children("mail") mail: list<Mail>
+  @children("job_queue") job_queue: list<JobQueue>
+  @children("job_cancel") job_cancel: list<JobCancel>
+  @children("job_rerun") job_rerun: list<JobRerun>
+  @children("job_split") job_split: list<JobSplit>
+  @children("agent_park") agent_park: list<AgentPark>
+  @children("agent_unpark") agent_unpark: list<AgentUnpark>
+  @children("agent_end") agent_end: list<AgentEnd>
+}
+
+// One condition on the event: `project`, `kind`, `actor`, `summary`, or
+// `data.<dotted path>`, with exactly one of the compares.
+@block("when")
+type When {
+  @inline(0) path: utf8
+  eq: utf8?
+  ne: utf8?
+  glob: utf8?
+  one_of: list<utf8>?
+}
+
+// Move the card of the event. `to` and `from` name a column: `@<role>`
+// or a column name. `from`: only when the card is in one of them.
+// `position`: `top` or `bottom` (absent: bottom).
+@block("card_move")
+type CardMove {
+  to: utf8
+  from: list<utf8>?
+  comment: utf8?
+  position: utf8?
+}
+
+@block("card_label")
+type CardLabel {
+  add: list<utf8>?
+  remove: list<utf8>?
+}
+
+@block("card_comment")
+type CardComment {
+  text: utf8
+}
+
+// `who`: an agent name, a template, or `none`.
+@block("card_assign")
+type CardAssign {
+  who: utf8
+}
+
+// Put text at the top of the card body.
+@block("card_prepend")
+type CardPrepend {
+  text: utf8
+}
+
+@block("mail")
+type Mail {
+  to: list<utf8>
+  subject: utf8
+  body: utf8?
+}
+
+// `kind`: `validate`, `merge`, or `batch`. A batch takes the cards of the
+// column `from` in board order, at most `limit`.
+@block("job_queue")
+type JobQueue {
+  kind: utf8
+  from: utf8?
+  limit: i64?
+}
+
+@block("job_cancel")
+type JobCancel {}
+
+// Queue the job of the event again, while its attempt is under
+// `max_attempts` (absent: 2).
+@block("job_rerun")
+type JobRerun {
+  max_attempts: i64?
+}
+
+// Split a red batch of the event in halves.
+@block("job_split")
+type JobSplit {}
+
+@block("agent_park")
+type AgentPark {}
+
+// `turn`: the text of the turn that wakes the agent.
+@block("agent_unpark")
+type AgentUnpark {
+  turn: utf8?
+}
+
+// `outcome`: `done` or `cancelled`.
+@block("agent_end")
+type AgentEnd {
+  outcome: utf8
+}

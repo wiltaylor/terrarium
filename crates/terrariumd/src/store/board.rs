@@ -316,6 +316,15 @@ fn column_rows(conn: &Connection, project: &str) -> ApiResult<Vec<ColumnRow>> {
     Ok(rows)
 }
 
+/// The columns of the board of `project` as `(name, role)`, in order. The
+/// rules file check (`crate::store::rules`) reads them.
+pub fn column_roles(conn: &Connection, project: &str) -> ApiResult<Vec<(String, Option<String>)>> {
+    Ok(column_rows(conn, project)?
+        .into_iter()
+        .map(|c| (c.name, c.role))
+        .collect())
+}
+
 fn names_of(cols: &[ColumnRow]) -> String {
     cols.iter()
         .map(|c| match &c.role {
