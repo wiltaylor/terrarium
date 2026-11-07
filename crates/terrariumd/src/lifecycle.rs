@@ -842,11 +842,26 @@ pub async fn idle_pass(state: &Shared) {
                 }
             }
         }
-        if !stop_due || keeps_running(state, r.id).await {
+        if !stop_due || keeps_running(state, r.id).await || !still_resting(state, &r).await {
             continue;
         }
         idle_stop(state, r.id).await;
     }
+}
+
+/// True when agent `r` still rests as the pass read it: its rest clock
+/// did not move, and its live status is at rest. The pass reads the
+/// agents first and awaits the store after that. A turn that started and
+/// ended in those reads moves the clock, and a turn that still runs shows
+/// in the live status. A stop on the old read would end that turn, or
+/// come before the card reminder of its idle (TER-141).
+async fn still_resting(state: &Shared, r: &Resting) -> bool {
+    let same = guard(&state.lifecycle.resting).get(&r.id) == Some(&r.since);
+    same && state
+        .supervisor
+        .status(r.id)
+        .await
+        .is_some_and(AgentStatus::is_resting)
 }
 
 /// Why agent `r` must compact now, if it must (PLAN §18, "Auto

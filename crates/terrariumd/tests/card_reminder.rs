@@ -273,6 +273,12 @@ async fn the_reminder_comes_before_the_idle_stop() {
     td.post(&format!("/api/agents/{w}/send"), json!({"text": "work"}))
         .await
         .ok();
+    // The agent rested since the setup, and on a loaded machine that can
+    // be longer than the 300 ms: an idle stop can then come before the
+    // turn, and the turn wakes the agent again. So the stop alone does
+    // not mean the turn ran. The reminder comes first: an idle stop after
+    // the turn without it leaves the agent stopped, and this wait fails.
+    until("the reminder", || async { !reminders(&td, &w).is_empty() }).await;
     until("the idle stop", || async {
         agent(&td, &w).await["status"] == "stopped"
     })
@@ -304,7 +310,10 @@ async fn no_reminder_before_the_wake_mail_of_a_wait_that_ended() {
     });
     td.sup.set_mail_push(true);
     let c = claimed(&td, "Build").await;
-    let at = (chrono::Utc::now() + chrono::Duration::milliseconds(1500))
+    // Due in an hour: the test makes it due once the turn ended in
+    // `waiting`. A wait due soon could end before the turn on a loaded
+    // machine, and the turn then ends in `idle`.
+    let at = (chrono::Utc::now() + chrono::Duration::hours(1))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let wait = td
         .post_as(
@@ -329,6 +338,17 @@ async fn no_reminder_before_the_wake_mail_of_a_wait_that_ended() {
     .await;
     let before = td.sup.prompts(aid(&w)).len();
     assert!(reminders(&td, &w).is_empty());
+    let id = wid.clone();
+    st.db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE waits SET due_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     until("the wait ends", || async {
         td.get(&format!("/api/waits/{wid}")).await.body["state"] == "resolved"
     })
