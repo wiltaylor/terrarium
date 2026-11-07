@@ -25,6 +25,11 @@
 //! grantee = "agent:web/lead"
 //! level = "read"
 //! env = "GH_TOKEN"
+//!
+//! [[secret.grant]]
+//! grantee = "agent:web/deployer"
+//! level = "run"
+//! targets = ["prod-1", "prod-2"]
 //! ```
 //!
 //! A grantee is `agent:<project>/<name>` or `project:<name>`, never an
@@ -46,7 +51,8 @@
 //! - The grants of each secret in the file match the file. A grant to an
 //!   agent or a project that does not exist yet is skipped with a warning;
 //!   the next import adds it.
-//! - A new grant, or a wider one (`use` to `read`, a new or changed `env`),
+//! - A new grant, or a wider one (a higher level, a new `run` target, a
+//!   new or changed `env`),
 //!   of a secret that has a value waits for the operator (S8): the plan
 //!   shows it with `"approval": "needed"`, and an apply holds it
 //!   (`"approval": "held"`) unless the operator approves the grants
@@ -128,6 +134,9 @@ pub struct GrantEntry {
     pub level: Option<Level>,
     #[serde(default)]
     pub env: Option<String>,
+    /// The targets of a `run` grant (TER-142).
+    #[serde(default)]
+    pub targets: Vec<String>,
 }
 
 // ---- Export ----
@@ -211,6 +220,10 @@ fn render(conn: &Connection, scope: &str, secrets: &[SecretInfo]) -> ApiResult<S
             if let Some(env) = &g.env {
                 out.push_str(&format!("env = {}\n", quote(env)));
             }
+            if !g.targets.is_empty() {
+                let ts: Vec<String> = g.targets.iter().map(|t| quote(t)).collect();
+                out.push_str(&format!("targets = [{}]\n", ts.join(", ")));
+            }
         }
     }
     Ok(out)
@@ -248,12 +261,15 @@ pub struct Change {
     /// operator approved it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval: Option<String>,
-    /// A grant: the level that the file gives (`use` or `read`).
+    /// A grant: the level that the file gives (`use`, `run`, or `read`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<Level>,
     /// A grant: the env var that the file gives.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    /// A `run` grant: the targets that the file gives.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
     /// A grant that changes a stored grant: the stored one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub was: Option<GrantWas>,
@@ -265,6 +281,8 @@ pub struct GrantWas {
     pub level: Level,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
 }
 
 /// The `approval` of a grant that waits for the operator, in a plan.
@@ -307,6 +325,7 @@ enum Op {
         grantee: String,
         level: Level,
         env: Option<String>,
+        targets: Vec<String>,
         /// A new or wider grant of a secret with a value: the operator
         /// approves it (S8).
         approval: bool,
@@ -335,6 +354,7 @@ impl Plan {
             approval: None,
             level: None,
             env: None,
+            targets: Vec::new(),
             was: None,
         });
     }
@@ -629,14 +649,29 @@ fn plan_grants(
                 continue;
             }
         }
+        let targets = match grants::check_run_targets(level, &g.targets) {
+            Ok(t) => t,
+            Err(err) => {
+                p.warn(format!(
+                    "secret `{label}`: the grant to `{}` is skipped: {}",
+                    g.grantee, err.message
+                ));
+                continue;
+            }
+        };
         let old = stored.get(&key);
-        let same = old.is_some_and(|s| s.level == level && s.env == g.env);
+        let same = old
+            .is_some_and(|s| s.level == level && s.env == g.env && s.targets == targets);
         if !same {
-            // A grant of a value: new, or wider (S8).
+            // A grant of a value: new, or wider (S8): a higher level, a
+            // `run` target that the stored grant does not name, a new env.
             let wider = match old {
                 None => true,
                 Some(s) => {
-                    (s.level == Level::Use && level == Level::Read)
+                    level > s.level
+                        || (level == Level::Run
+                            && s.level == Level::Run
+                            && targets.iter().any(|t| !s.targets.contains(t)))
                         || (g.env.is_some() && g.env != s.env)
                 }
             };
@@ -648,6 +683,7 @@ fn plan_grants(
                     grantee: key,
                     level,
                     env: g.env.clone(),
+                    targets: targets.clone(),
                     approval,
                 },
                 "grant",
@@ -658,9 +694,11 @@ fn plan_grants(
             if let Some(c) = p.report.changes.last_mut() {
                 c.level = Some(level);
                 c.env = g.env.clone();
+                c.targets = targets;
                 c.was = old.map(|s| GrantWas {
                     level: s.level,
                     env: s.env.clone(),
+                    targets: s.targets.clone(),
                 });
                 if approval {
                     c.approval = Some(APPROVAL_NEEDED.to_owned());
@@ -793,6 +831,7 @@ pub fn apply(t: &crate::db::Tx<'_>, plan: Plan, by: &str, approve: bool) -> ApiR
                 grantee,
                 level,
                 env,
+                targets,
                 approval,
             } => {
                 if *approval {
@@ -817,6 +856,7 @@ pub fn apply(t: &crate::db::Tx<'_>, plan: Plan, by: &str, approve: bool) -> ApiR
                         grantee: &g,
                         level: Some(*level),
                         env: env.as_deref(),
+                        targets,
                         by,
                     },
                 )?;
@@ -827,8 +867,8 @@ pub fn apply(t: &crate::db::Tx<'_>, plan: Plan, by: &str, approve: bool) -> ApiR
                     json!({
                         "scope": scope, "name": name, "kind": info.kind,
                         "grantee": grant.grantee, "grantee_label": grant.grantee_label,
-                        "level": grant.level, "env": grant.env, "created": created,
-                        "source": "config", "approved": *approval,
+                        "level": grant.level, "env": grant.env, "targets": grant.targets,
+                        "created": created, "source": "config", "approved": *approval,
                     }),
                 )?;
             }
@@ -1254,7 +1294,8 @@ mod tests {
                     None,
                     Some(GrantWas {
                         level: Level::Use,
-                        env: None
+                        env: None,
+                        targets: vec![]
                     })
                 ),
             ]
@@ -1309,5 +1350,63 @@ mod tests {
             .to_owned();
         let p = plan(&c, &[(path_of(GLOBAL), narrow)], &[]).unwrap();
         assert!(!p.needs_approval(), "{:?}", p.report);
+    }
+
+    /// TER-142: a `run` grant goes into the file with its targets and comes
+    /// back the same. A `run` grant with no target is skipped with a
+    /// warning, and a new target is a wider grant (S8).
+    #[test]
+    fn run_grants_round_trip_and_a_new_target_is_wider() {
+        let mut c = db();
+        let k = MasterKey::generate();
+        let s = secret(
+            &c,
+            &k,
+            GLOBAL,
+            "dk",
+            Kind::ApiKey,
+            json!({"fields": {"value": "dk_9fQ2mX7vL4tR8wN3pB6yH1cJ"}}),
+        );
+        grants::tests::grant_run(&c, &s, "agent:p/a", &["web", "box"]).unwrap();
+        let files = files(&c).unwrap();
+        let (_, text) = files.iter().find(|(p, _)| *p == path_of(GLOBAL)).unwrap();
+        assert!(text.contains("level = \"run\"\ntargets = [\"box\", \"web\"]"), "{text}");
+        // The same file plans nothing.
+        let p = plan(&c, &files, &[]).unwrap();
+        assert!(
+            !p.report.changes.iter().any(|x| x.action == "grant"),
+            "{:?}",
+            p.report
+        );
+        let file = |targets: &str| {
+            format!(
+                "version = 1\nscope = \"global\"\n\n\
+                 [[secret]]\nname = \"dk\"\nkind = \"api_key\"\n\n\
+                 [[secret.grant]]\ngrantee = \"agent:p/a\"\nlevel = \"run\"\n{targets}"
+            )
+        };
+        // A new target waits for the operator; fewer targets do not.
+        let wide = vec![(path_of(GLOBAL), file("targets = [\"box\", \"ci\"]\n"))];
+        let p = plan(&c, &wide, &[]).unwrap();
+        assert!(p.needs_approval(), "{:?}", p.report);
+        let g = p.report.changes.iter().find(|x| x.action == "grant").unwrap();
+        assert_eq!(g.targets, ["box", "ci"]);
+        assert_eq!(g.was.as_ref().unwrap().targets, ["box", "web"]);
+        let narrow = vec![(path_of(GLOBAL), file("targets = [\"box\"]\n"))];
+        let p = plan(&c, &narrow, &[]).unwrap();
+        assert!(!p.needs_approval(), "{:?}", p.report);
+        run_with(&mut c, &narrow, false);
+        assert_eq!(
+            grants::list(&c, &s).unwrap()[0].targets,
+            ["box".to_owned()]
+        );
+        // No target: skipped with a warning; the stored grant stays.
+        let none = vec![(path_of(GLOBAL), file(""))];
+        let p = plan(&c, &none, &[]).unwrap();
+        assert!(
+            p.report.warnings.iter().any(|w| w.contains("`run` grant")),
+            "{:?}",
+            p.report
+        );
     }
 }

@@ -8,12 +8,16 @@
 //!   lease or with the child's lifetime, whichever comes first. An
 //!   exclusive lease of the owner is `409`: it has room for one holder.
 //!   Any other target is `403`, with the target named.
-//! - **Grants** (`grants`): `<name>` or `<scope>/<name>`, with `:use` or
-//!   `:read`. The owner must hold the secret (its own grant or its
-//!   project's) at that level or higher. With no level, the child gets the
-//!   kind's default level, at most the owner's. A `read` grant keeps the
-//!   owner's env var name. The child's grants go with its row at the close
-//!   (`grants::on_agent_deleted`).
+//! - **Grants** (`grants`): `<name>` or `<scope>/<name>`, with `:use`,
+//!   `:run`, `:run=<target>,<target>`, or `:read`. The owner must hold the
+//!   secret (its own grant or its project's) at that level or higher
+//!   (`use` < `run` < `read`). With no level, the child gets the kind's
+//!   default level, at most the owner's. A `read` grant keeps the owner's
+//!   env var name. A `run` grant (TER-142) does not go past the owner's
+//!   targets: an owner with `run` gives a subset of its own run targets
+//!   (all of them when the ask names none); an owner with `read` names the
+//!   targets, each one it may use (policy or lease). The child's grants go
+//!   with its row at the close (`grants::on_agent_deleted`).
 //! - **Pool**: a template with no `subscription` and no
 //!   `subscription_pool` takes the owner's account and pool when the owner
 //!   runs the same harness, so the quota switch covers the child.
@@ -45,6 +49,9 @@ pub struct GrantAsk {
     pub name: String,
     /// `None`: the kind's default, at most the owner's level.
     pub level: Option<Level>,
+    /// The targets of a `run` ask (`:run=<t1>,<t2>`). Empty: the owner's
+    /// run targets.
+    pub targets: Vec<String>,
 }
 
 impl GrantAsk {
@@ -56,18 +63,35 @@ impl GrantAsk {
     }
 }
 
-/// Read `<name>`, `<scope>/<name>`, each with an optional `:use` or
-/// `:read`.
+/// Read `<name>`, `<scope>/<name>`, each with an optional `:use`,
+/// `:run`, `:run=<target>,<target>`, or `:read`.
 pub fn parse_grant(s: &str) -> ApiResult<GrantAsk> {
     let s = s.trim();
     let bad = || {
         ApiError::invalid(format!(
             "grant `{s}` is not `<name>`, `<scope>/<name>`, `<name>:<level>`, or \
-             `<scope>/<name>:<level>` (level `use` or `read`)"
+             `<scope>/<name>:<level>` (level `use`, `run`, `run=<target>,<target>`, or `read`)"
         ))
     };
+    let mut targets = Vec::new();
     let (path, level) = match s.rsplit_once(':') {
-        Some((p, l)) => (p, Some(Level::parse(l).ok_or_else(bad)?)),
+        Some((p, l)) => {
+            let l = match l.split_once('=') {
+                Some(("run", ts)) => {
+                    targets = ts
+                        .split(',')
+                        .map(|t| t.trim().to_owned())
+                        .collect::<Vec<_>>();
+                    if targets.iter().any(String::is_empty) {
+                        return Err(bad());
+                    }
+                    "run"
+                }
+                Some(_) => return Err(bad()),
+                None => l,
+            };
+            (p, Some(Level::parse(l).ok_or_else(bad)?))
+        }
         None => (s, None),
     };
     let (scope, name) = match path.split_once('/') {
@@ -81,6 +105,7 @@ pub fn parse_grant(s: &str) -> ApiResult<GrantAsk> {
         scope,
         name: name.to_owned(),
         level,
+        targets,
     })
 }
 
@@ -197,6 +222,8 @@ pub struct SecretGrant {
     pub info: secrets::SecretInfo,
     pub level: Level,
     pub env: Option<String>,
+    /// The targets of a `run` grant, sorted. Empty for the other levels.
+    pub targets: Vec<String>,
 }
 
 /// Check the `grants` of a spawn into `project` against the owner.
@@ -240,10 +267,13 @@ fn operator_grant(conn: &Connection, project: &str, ask: &GrantAsk) -> ApiResult
     for sc in scopes {
         if let Some(info) = secrets::get(conn, sc, &ask.name)? {
             let level = ask.level.unwrap_or_else(|| Level::default_for(info.kind));
+            let targets = grants::check_run_targets(level, &ask.targets)?;
+            grants::check_targets_exist(conn, project, &targets)?;
             return Ok(SecretGrant {
                 info,
                 level,
                 env: None,
+                targets,
             });
         }
     }
@@ -276,11 +306,72 @@ fn owner_grant(conn: &Connection, v: &AgentView, ask: &GrantAsk) -> ApiResult<Se
     };
     let info = secrets::get(conn, &e.scope, &e.name)?
         .ok_or_else(|| ApiError::not_found(format!("no secret `{}/{}`", e.scope, e.name)))?;
+    let targets = if level == Level::Run {
+        run_targets(conn, v, &e, ask)?
+    } else {
+        grants::check_run_targets(level, &ask.targets)?
+    };
     Ok(SecretGrant {
         info,
         level,
         env: e.env.filter(|_| level == Level::Read),
+        targets,
     })
+}
+
+/// The targets of a child's `run` grant of the secret `e` that the owner
+/// `v` holds (TER-142): never past the owner's targets. An owner with
+/// `run` gives its own run targets, or the subset that the ask names. An
+/// owner with `read` has no target limit on the secret, so the ask names
+/// the targets, and each one is a target that the owner may use (its
+/// `policy.targets` or an active lease).
+fn run_targets(
+    conn: &Connection,
+    v: &AgentView,
+    e: &grants::Effective,
+    ask: &GrantAsk,
+) -> ApiResult<Vec<String>> {
+    let who = format!("`{}/{}`", v.agent.project, v.agent.name);
+    if e.level == Level::Run {
+        if ask.targets.is_empty() {
+            return grants::check_run_targets(Level::Run, &e.targets);
+        }
+        let want = grants::check_run_targets(Level::Run, &ask.targets)?;
+        if let Some(t) = want.iter().find(|t| !e.targets.contains(t)) {
+            return Err(ApiError::forbidden(format!(
+                "spawning with secret `{}/{}` at level `run` on target `{t}` needs the owner's \
+                 run grant on it: {who} may run it on {} only",
+                e.scope,
+                e.name,
+                e.targets.join(", ")
+            )));
+        }
+        return Ok(want);
+    }
+    if ask.targets.is_empty() {
+        return Err(ApiError::invalid(format!(
+            "{who} holds secret `{}/{}` at `{}`, which names no targets: name the targets of \
+             the child's grant, `{}:run=<target>,<target>`",
+            e.scope, e.name, e.level, e.name
+        )));
+    }
+    let want = grants::check_run_targets(Level::Run, &ask.targets)?;
+    grants::check_targets_exist(conn, &v.agent.project, &want)?;
+    let id = v.agent.id.to_string();
+    let leased = leases::active_of(conn, &id)?;
+    for t in &want {
+        let usable = v.agent.policy.targets.iter().any(|p| p == t)
+            || leased.iter().any(|l| l.target == *t);
+        if !usable {
+            return Err(ApiError::forbidden(format!(
+                "spawning with secret `{}/{}` at level `run` on target `{t}` needs the owner's \
+                 right to use that target: {who} has it neither in its policy.targets nor by \
+                 an active lease",
+                e.scope, e.name
+            )));
+        }
+    }
+    Ok(want)
 }
 
 /// Give the owner's account and pool to a child whose template sets none
@@ -383,6 +474,7 @@ pub fn apply(
                 grantee: &grantee,
                 level: Some(g.level),
                 env: g.env.as_deref(),
+                targets: &g.targets,
                 by: &by,
             },
         )?;
@@ -393,11 +485,15 @@ pub fn apply(
             json!({
                 "scope": row.scope, "name": row.name, "kind": g.info.kind,
                 "grantee": row.grantee, "grantee_label": row.grantee_label,
-                "level": row.level, "env": row.env, "created": true,
+                "level": row.level, "env": row.env, "targets": row.targets, "created": true,
                 "spawn_owner": owner.map(|v| v.agent.id.to_string()),
             }),
         )?;
-        granted.push(json!({"scope": row.scope, "name": row.name, "level": row.level}));
+        let mut one = json!({"scope": row.scope, "name": row.name, "level": row.level});
+        if !row.targets.is_empty() {
+            one["targets"] = json!(row.targets);
+        }
+        granted.push(one);
     }
     let policy: Vec<&str> = targets
         .iter()
@@ -428,7 +524,8 @@ mod tests {
             GrantAsk {
                 scope: None,
                 name: "gh".into(),
-                level: None
+                level: None,
+                targets: vec![]
             }
         );
         assert_eq!(
@@ -436,11 +533,29 @@ mod tests {
             GrantAsk {
                 scope: Some("global".into()),
                 name: "gh".into(),
-                level: Some(Level::Read)
+                level: Some(Level::Read),
+                targets: vec![]
             }
         );
         assert_eq!(parse_grant("p/k:use").unwrap().level, Some(Level::Use));
-        for bad in ["", ":read", "gh:write", "/gh", "a/b/c", "p/"] {
+        // TER-142: `run`, with or without its targets.
+        let r = parse_grant("p/k:run").unwrap();
+        assert_eq!((r.level, r.targets.len()), (Some(Level::Run), 0));
+        let r = parse_grant("k:run=box, web").unwrap();
+        assert_eq!(r.level, Some(Level::Run));
+        assert_eq!(r.targets, ["box", "web"]);
+        for bad in [
+            "",
+            ":read",
+            "gh:write",
+            "/gh",
+            "a/b/c",
+            "p/",
+            "k:run=",
+            "k:run=a,,b",
+            "k:read=box",
+            "k:use=box",
+        ] {
             assert!(parse_grant(bad).is_err(), "{bad}");
         }
     }

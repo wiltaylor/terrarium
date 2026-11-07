@@ -2808,7 +2808,10 @@ pub struct RunArgs {
     /// The working directory on the target (an absolute path)
     #[arg(long)]
     pub cwd: Option<String>,
-    /// `KEY=VALUE` for the command's environment; repeat for more
+    /// `KEY=VALUE` for the command's environment; repeat for more.
+    /// `KEY=@secret:<name>[.<field>]`: the daemon puts the value of a
+    /// secret granted to you (`run` on this target, or `read`) into the
+    /// env of the remote process; it never reaches the sandbox
     #[arg(long = "env", short = 'e')]
     pub env: Vec<String>,
     /// A note for yourself: why you run it
@@ -3077,14 +3080,19 @@ pub enum SecretCmd {
         /// `agent:<project>/<name>`, `agent:<id>`, `project:<name>`, or
         /// `<project>/<name>` (an agent)
         grantee: String,
-        /// `use`: the git credential helper and the ssh-agent only. `read`:
-        /// also env vars and `secret get`. Default: `use` for token,
-        /// github_token, and ssh_key; `read` for the other kinds
-        #[arg(long, value_parser = ["use", "read"])]
+        /// `use`: the git credential helper and the ssh-agent only. `run`:
+        /// also `terrarium run -e KEY=@secret:<name>` on the `--target`
+        /// targets, no env var and no `secret get`. `read`: also env vars
+        /// and `secret get`. Default: `use` for token, github_token, and
+        /// ssh_key; `read` for the other kinds
+        #[arg(long, value_parser = ["use", "run", "read"])]
         level: Option<String>,
         /// Put the value into this env var at the start (needs `read`)
         #[arg(long)]
         env: Option<String>,
+        /// A target of a `run` grant; repeat for more (needs `--level run`)
+        #[arg(long = "target", value_name = "TARGET")]
+        targets: Vec<String>,
     },
     /// Remove a grant
     Revoke { name: String, grantee: String },

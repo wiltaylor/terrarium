@@ -365,6 +365,10 @@ struct RunBody {
     name: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
+    /// The env of the command. A value `@secret:<name>[.<field>]` is a
+    /// secret that the daemon resolves at the start, from a `run` grant
+    /// that names the target or a `read` grant (TER-142,
+    /// `crate::secrets::run_env`).
     #[serde(default)]
     env: BTreeMap<String, String>,
     /// The run stops at this time (a duration or a time). Default
@@ -384,7 +388,11 @@ const RUN_GRACE: Duration = Duration::from_secs(60);
 
 /// `POST /api/agents/{id}/run`: start a detached command on a target as
 /// the agent, with a `process` wait on it. The command runs with the
-/// agent's own target rights (its policy and leases).
+/// agent's own target rights (its policy and leases). Each secret
+/// reference in `env` is resolved from the agent's grants as they are
+/// now, goes into the env of the remote process only, is redacted from
+/// the output first, and writes a `secret.run` audit row with no value
+/// (TER-142).
 async fn run(
     State(state): State<Shared>,
     actor: Actor,
@@ -427,11 +435,36 @@ async fn run(
     let agent_actor = Actor::Agent(
         agent_actor.ok_or_else(|| ApiError::not_found(format!("no agent `{waiter_id}`")))?,
     );
+    let mut env = b.env.clone();
+    let refs = crate::secrets::run_env::parse_refs(&env)?;
+    let injected = if refs.is_empty() {
+        Vec::new()
+    } else {
+        let key = crate::secrets::key(&state.state_dir)?;
+        let proxy_on = state.git_proxy.is_on();
+        let (id, project, target) = (
+            waiter_id.clone(),
+            waiter.agent.project.clone(),
+            b.target.clone(),
+        );
+        state
+            .db
+            .read(move |c| {
+                let use_only = crate::git_proxy::use_only_secrets(c, proxy_on)?;
+                crate::secrets::run_env::resolve(
+                    c, &key, &id, &project, &target, &refs, &use_only,
+                )
+            })
+            .await?
+    };
+    for i in &injected {
+        env.insert(i.env.clone(), i.value.to_string());
+    }
     let command = b.cmd.join(" ");
     let cmd = RemoteCmd {
         argv: b.cmd.clone(),
         cwd: b.cwd.clone(),
-        env: b.env.clone(),
+        env,
         pty: None,
         timeout_secs: Some(limit.as_secs().max(1)),
         shell: false,
@@ -440,7 +473,11 @@ async fn run(
         // `start_exec` sets it from the caller.
         holder: None,
     };
-    let sess = executor::start_exec(&state, &agent_actor, &b.target, cmd).await?;
+    let own: Vec<(String, zeroize::Zeroizing<String>)> = injected
+        .iter()
+        .map(|i| (i.label(), i.value.clone()))
+        .collect();
+    let sess = executor::start_run_exec(&state, &agent_actor, &b.target, cmd, own).await?;
     let label = name.map(str::to_owned).unwrap_or_else(|| {
         b.cmd
             .first()
@@ -462,9 +499,28 @@ async fn run(
         timeout_at: Some(rt::from_now(limit + RUN_GRACE)),
         due_at: None,
     };
+    // The audit rows of the secrets: no value.
+    let audits: Vec<(String, Option<String>, Value)> = injected
+        .iter()
+        .map(|i| {
+            (
+                format!("{}/{}", i.scope, i.name),
+                crate::secrets::scope_project(&i.scope).map(str::to_owned),
+                i.audit_detail(&waiter_id, &b.target, &sess.id, ""),
+            )
+        })
+        .collect();
+    drop(injected);
     let created = state
         .db
-        .write(actor.label(), move |t| waits::create(t, new))
+        .write(actor.label(), move |t| {
+            let w = waits::create(t, new)?;
+            for (object, project, mut detail) in audits {
+                detail["run"] = json!(w.id);
+                t.audit("secret.run", &object, project.as_deref(), detail)?;
+            }
+            Ok(w)
+        })
         .await;
     let w = match created {
         Ok(w) => w,
