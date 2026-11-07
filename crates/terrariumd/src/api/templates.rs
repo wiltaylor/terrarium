@@ -205,11 +205,23 @@ async fn create(
     };
     template_files::refresh_quiet(&state).await;
     let repo = template_files::repo_dir(&state);
+    let who = actor.clone();
     let t = state
         .db
         .write(actor.label(), move |t| {
             templates::check_subscription(t, &new.spec)?;
             crate::store::tools::check_template_tools(t, new.project.as_deref(), &tools)?;
+            // Grants on a template need the right to grant each secret
+            // (TER-88).
+            let key = terrarium_core::fleet::template_key(new.project.as_deref(), &new.name);
+            crate::spawn_rights::check_template_write(
+                t,
+                &who,
+                new.project.as_deref(),
+                &key,
+                None,
+                &new.spec,
+            )?;
             templates::create(t, &new, repo.as_deref())
         })
         .await?;
@@ -277,11 +289,23 @@ async fn update(
         source: None,
     };
     let repo = template_files::repo_dir(&state);
+    let who = actor.clone();
     let v = state
         .db
         .write(actor.label(), move |tx| {
             if let Some(spec) = &patch.spec {
                 templates::check_subscription(tx, spec)?;
+                // A change of the grants needs the right to grant each
+                // secret (TER-88), checked against the row as it is now.
+                let now = templates::get(tx, &t.id)?;
+                crate::spawn_rights::check_template_write(
+                    tx,
+                    &who,
+                    now.project.as_deref(),
+                    &now.key(),
+                    Some(&now.spec),
+                    spec,
+                )?;
             }
             if let Some(tools) = &tools {
                 crate::store::tools::check_template_tools(tx, project.as_deref(), tools)?;
@@ -471,13 +495,18 @@ async fn from_agent(
 
 /// The template step of `POST /api/agents`: with `template`, the
 /// definition is the template's spec with the body's fields over it
-/// (`agent_template::merge`). Returns the definition and the template.
-/// The caller then runs the normal create checks on the definition.
+/// (`agent_template::merge`). Returns the definition, the template, and
+/// the template's secret grants, read from the same row (TER-88). The
+/// caller then runs the normal create checks on the definition.
 pub async fn create_body(
     state: &Shared,
     actor: &Actor,
     body: Value,
-) -> ApiResult<(AgentDef, Option<TemplateRef>)> {
+) -> ApiResult<(
+    AgentDef,
+    Option<TemplateRef>,
+    Option<crate::spawn_rights::TemplateGrants>,
+)> {
     let Value::Object(mut body) = body else {
         return Err(ApiError::bad_request("the body is not a JSON object"));
     };
@@ -502,7 +531,7 @@ pub async fn create_body(
         Some(_) => return Err(ApiError::bad_request("`template` must be a string")),
     };
     let Some(key) = key else {
-        return Ok((parse_def(Value::Object(body))?, None));
+        return Ok((parse_def(Value::Object(body))?, None, None));
     };
     let project = match body.get("project") {
         Some(Value::String(p)) if !p.is_empty() => p.clone(),
@@ -517,7 +546,12 @@ pub async fn create_body(
     policy::read_templates(actor, t.project.as_deref())?;
     // A `null` in the body clears the template's value.
     let merged = agent_template::merge(&t.spec, &body);
-    Ok((parse_def(Value::Object(merged))?, Some(t.reference())))
+    let grants = crate::spawn_rights::TemplateGrants::of(&t, t.key())?;
+    Ok((
+        parse_def(Value::Object(merged))?,
+        Some(t.reference()),
+        Some(grants),
+    ))
 }
 
 fn parse_def(v: Value) -> ApiResult<AgentDef> {

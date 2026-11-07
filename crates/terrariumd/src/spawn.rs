@@ -401,11 +401,10 @@ pub async fn spawn_with(
     };
     let mut def = agent_template::to_def(&template.spec, &name, &owner.project)
         .map_err(|e| ApiError::invalid(format!("template `{}`: {e}", template.use_key())))?;
-    // The template's grants (TER-88): checked against the owner in the
-    // write, with the body's grants.
-    let template_asks = spawn_rights::template_asks(&template.spec).map_err(|e| {
-        ApiError::invalid(format!("template `{}`: {}", template.use_key(), e.message))
-    })?;
+    // The template's grants (TER-88), from the same row as `def`: checked
+    // against the owner and against the one who set them in the write,
+    // with the body's grants.
+    let template_grants = spawn_rights::TemplateGrants::of(&template, template.use_key())?;
     // No idle stop: an idle ephemeral agent stays until `agent done`, a
     // cancel, its lifetime, or the removal of its owner.
     def.idle_stop = Some(IdleStop::Off);
@@ -501,8 +500,7 @@ pub async fn spawn_with(
                 t,
                 ov,
                 &def.project,
-                &tkey,
-                &template_asks,
+                &template_grants,
                 &grant_asks,
             )?;
             for tg in &target_grants {

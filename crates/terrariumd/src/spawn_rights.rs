@@ -21,9 +21,11 @@
 //! - **Template grants** (TER-88): the `grants` of the template go through
 //!   the same check against the owner ([`check_template_grants`]). A grant
 //!   of the body replaces the template's grant of the same secret
-//!   ([`check_spawn_grants`]). A
-//!   create from a template (not a spawn) has no owner: each grant needs
-//!   the caller's right to grant the secret ([`check_create_grants`]).
+//!   ([`check_spawn_grants`]). A create from a template (not a spawn) has
+//!   no owner: each grant needs the caller's right to grant the secret
+//!   ([`check_create_grants`]). Writing grants into a template needs the
+//!   right to grant each secret ([`check_template_write`]), and a spawn or
+//!   a create checks again that the one who set them still has it.
 //! - **Pool**: a template with no `subscription` and no
 //!   `subscription_pool` takes the owner's account and pool when the owner
 //!   runs the same harness, so the quota switch covers the child.
@@ -235,6 +237,33 @@ pub struct SecretGrant {
     pub template: Option<String>,
 }
 
+/// The grants of one template (TER-88): read from the same row as the
+/// definition that the agent gets, so a later edit of the template does
+/// not mix into it.
+#[derive(Debug, Clone)]
+pub struct TemplateGrants {
+    /// The template, as the messages name it.
+    pub key: String,
+    /// Its `grants`, read as asks.
+    pub asks: Vec<GrantAsk>,
+    /// Who set them ([`crate::store::templates::Template::grants_by`]).
+    pub by: Option<String>,
+}
+
+impl TemplateGrants {
+    /// The grants of `tpl`, named `key` in the messages.
+    pub fn of(tpl: &crate::store::templates::Template, key: String) -> ApiResult<Self> {
+        let asks = template_asks(&tpl.spec).map_err(|e| {
+            ApiError::invalid(format!("template `{key}`: {}", e.message))
+        })?;
+        Ok(Self {
+            key,
+            asks,
+            by: tpl.grants_by.clone(),
+        })
+    }
+}
+
 /// The grants of a template's spec, read as asks (TER-88).
 pub fn template_asks(spec: &terrarium_core::agent_template::Spec) -> ApiResult<Vec<GrantAsk>> {
     terrarium_core::agent_template::grants_of(spec)
@@ -253,6 +282,112 @@ fn in_template(key: &str) -> impl Fn(ApiError) -> ApiError + '_ {
     }
 }
 
+/// Check that `actor` may write the grants of `new` into a template of
+/// `project` (`None`: a global template) named `key` (TER-88): the right
+/// to grant each secret ([`crate::policy::grant_secret`]): the operator or
+/// a sysadmin for any secret, a project_admin for a secret of its own
+/// project. A write that keeps the grants of `old` checks nothing. A write
+/// that sets or changes them checks each one, because the writer becomes
+/// the template's `grants_by`. A grant with no scope counts as the secret
+/// that it names now (the project's, else the global one); with no such
+/// secret, as a secret of the template's project. A refusal is `403` and
+/// names the secret.
+pub fn check_template_write(
+    conn: &Connection,
+    actor: &Actor,
+    project: Option<&str>,
+    key: &str,
+    old: Option<&terrarium_core::agent_template::Spec>,
+    new: &terrarium_core::agent_template::Spec,
+) -> ApiResult<()> {
+    use terrarium_core::agent_template::grants_of;
+    let want = grants_of(new).map_err(ApiError::invalid)?;
+    let had = old.map(|o| grants_of(o).unwrap_or_default()).unwrap_or_default();
+    if want.is_empty() || want == had {
+        return Ok(());
+    }
+    for g in &want {
+        let ask = parse_grant(g)?;
+        let scope = match (&ask.scope, project) {
+            (Some(s), _) => s.clone(),
+            (None, None) => GLOBAL.to_owned(),
+            (None, Some(p)) => {
+                if secrets::get(conn, p, &ask.name)?.is_some() {
+                    p.to_owned()
+                } else if secrets::get(conn, GLOBAL, &ask.name)?.is_some() {
+                    GLOBAL.to_owned()
+                } else {
+                    p.to_owned()
+                }
+            }
+        };
+        crate::policy::grant_secret(actor, &scope).map_err(|e| {
+            ApiError::forbidden(format!(
+                "template `{key}`: the grant `{g}` gives secret `{scope}/{}`; setting it needs \
+                 the right to grant that secret ({})",
+                ask.name, e.message
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// The actor that set the grants of a template, as it is now: its
+/// `grants_by` label read back. `operator` and `system` (a template file
+/// of the config repo) are the operator; `agent:<id>` is that agent with
+/// its current roles. A template with grants and no such record, or whose
+/// agent is gone, gives no grants.
+fn grants_author(conn: &Connection, tg: &TemplateGrants) -> ApiResult<Actor> {
+    let resave = "a sysadmin or the operator saves the template's grants again";
+    let Some(by) = tg.by.as_deref() else {
+        return Err(ApiError::forbidden(format!(
+            "template `{}` has grants with no record of who set them: {resave}",
+            tg.key
+        )));
+    };
+    if by == "operator" || by == "system" {
+        return Ok(Actor::Operator);
+    }
+    let gone = || {
+        ApiError::forbidden(format!(
+            "template `{}`: its grants were set by `{by}`, which is no longer an agent: {resave}",
+            tg.key
+        ))
+    };
+    let id = by.strip_prefix("agent:").ok_or_else(gone)?;
+    match crate::store::agents::actor_for(conn, id)? {
+        Some(a) if a.id == id => Ok(Actor::Agent(a)),
+        _ => Err(gone()),
+    }
+}
+
+/// Check again, at a spawn or a create, that the one who set the
+/// template's grants may still grant each secret of `grants` (TER-88).
+fn check_grants_author(
+    conn: &Connection,
+    tg: &TemplateGrants,
+    grants: &[SecretGrant],
+) -> ApiResult<()> {
+    if grants.is_empty() {
+        return Ok(());
+    }
+    let author = grants_author(conn, tg)?;
+    for g in grants {
+        crate::policy::grant_secret(&author, &g.info.scope).map_err(|e| {
+            ApiError::forbidden(format!(
+                "template `{}` grants secret `{}/{}`, but `{}`, which set that grant, may not \
+                 grant it ({})",
+                tg.key,
+                g.info.scope,
+                g.info.name,
+                tg.by.as_deref().unwrap_or_default(),
+                e.message
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// Check the `grants` of the template `key` for a spawn into `project`
 /// against the owner (TER-88): the rules of [`check_grants`].
 pub fn check_template_grants(
@@ -269,52 +404,93 @@ pub fn check_template_grants(
     Ok(out)
 }
 
+/// The id of the secret that `ask` names for the owner, as [`check_grants`]
+/// resolves it, with no level check: for an owner, the grant that it
+/// holds; for the operator, the project's secret, else the global one.
+/// `None` when it names none.
+fn resolved_id(
+    conn: &Connection,
+    owner: OwnerView<'_>,
+    project: &str,
+    ask: &GrantAsk,
+) -> ApiResult<Option<String>> {
+    let found = match owner {
+        Some(v) => {
+            let id = v.agent.id.to_string();
+            match grants::effective(conn, &id, &v.agent.project)?
+                .into_iter()
+                .find(|e| e.name == ask.name && ask.scope.as_deref().is_none_or(|s| s == e.scope))
+            {
+                Some(e) => secrets::get(conn, &e.scope, &e.name)?,
+                None => None,
+            }
+        }
+        None => {
+            let scopes: Vec<&str> = match &ask.scope {
+                Some(s) => vec![s.as_str()],
+                None => vec![project, GLOBAL],
+            };
+            let mut hit = None;
+            for sc in scopes {
+                if let Some(info) = secrets::get(conn, sc, &ask.name)? {
+                    hit = Some(info);
+                    break;
+                }
+            }
+            hit
+        }
+    };
+    Ok(found.map(|i| i.id))
+}
+
 /// The grants of a spawn into `project`: the body's `asks`, and the
-/// `template_asks` of the template `key`, each checked against the owner.
-/// A body grant of a secret replaces the template's grant of it, so the
-/// template's ask is not checked (a spawn can ask for a lower level than
-/// the template).
+/// grants of the template `tg`, each checked against the owner, and the
+/// template's checked again against the one who set them. A body grant of
+/// a secret replaces the template's grant of the same secret (compared by
+/// the resolved secret), so the template's ask is not checked (a spawn
+/// can ask for a lower level than the template).
 pub fn check_spawn_grants(
     conn: &Connection,
     owner: OwnerView<'_>,
     project: &str,
-    key: &str,
-    template_asks: &[GrantAsk],
+    tg: &TemplateGrants,
     asks: &[GrantAsk],
 ) -> ApiResult<Vec<SecretGrant>> {
     let body = check_grants(conn, owner, project, asks)?;
-    let rest: Vec<GrantAsk> = template_asks
-        .iter()
-        .filter(|a| {
-            !body.iter().any(|b| {
-                b.info.name == a.name && a.scope.as_deref().is_none_or(|s| s == b.info.scope)
-            })
-        })
-        .cloned()
-        .collect();
-    let mut out: Vec<SecretGrant> = check_template_grants(conn, owner, project, key, &rest)?
-        .into_iter()
-        .filter(|t| !body.iter().any(|b| b.info.id == t.info.id))
-        .collect();
+    let mut rest: Vec<GrantAsk> = Vec::with_capacity(tg.asks.len());
+    for a in &tg.asks {
+        let id = resolved_id(conn, owner, project, a)?;
+        if !id.is_some_and(|id| body.iter().any(|b| b.info.id == id)) {
+            rest.push(a.clone());
+        }
+    }
+    let from_template: Vec<SecretGrant> =
+        check_template_grants(conn, owner, project, &tg.key, &rest)?
+            .into_iter()
+            .filter(|t| !body.iter().any(|b| b.info.id == t.info.id))
+            .collect();
+    check_grants_author(conn, tg, &from_template)?;
+    let mut out = from_template;
     out.extend(body);
     Ok(out)
 }
 
-/// Check the `grants` of the template `key` for a create of an agent in
+/// Check the grants of the template `tg` for a create of an agent in
 /// `project` by `actor` (TER-88). A create has no owner, so each grant
 /// resolves as for the operator (the secret exists, the project reaches
 /// it, a `run` grant names targets that exist), and then needs the
 /// caller's right to grant that secret ([`crate::policy::grant_secret`]):
 /// the operator, a sysadmin, or for a project secret a project_admin of
-/// its project. A refusal is `403` and names the secret.
+/// its project. The one who set the grants needs that right too. A
+/// refusal is `403` and names the secret.
 pub fn check_create_grants(
     conn: &Connection,
     actor: &Actor,
     project: &str,
-    key: &str,
-    asks: &[GrantAsk],
+    tg: &TemplateGrants,
 ) -> ApiResult<Vec<SecretGrant>> {
-    let out = check_template_grants(conn, None, project, key, asks)?;
+    let key = &tg.key;
+    let out = check_template_grants(conn, None, project, key, &tg.asks)?;
     for g in &out {
         crate::policy::grant_secret(actor, &g.info.scope).map_err(|e| {
             ApiError::forbidden(format!(
@@ -324,6 +500,7 @@ pub fn check_create_grants(
             ))
         })?;
     }
+    check_grants_author(conn, tg, &out)?;
     Ok(out)
 }
 
@@ -477,24 +654,22 @@ fn run_targets(
     Ok(want)
 }
 
-/// The template grants of an agent that `actor` just created from the
-/// template `tref` (`POST /api/agents`, a fleet apply; TER-88): each one
+/// The template grants of an agent that `actor` just created from a
+/// template (`POST /api/agents`, a fleet apply; TER-88). `tg` is read
+/// from the same template row as the agent's definition. Each grant is
 /// checked with [`check_create_grants`], then written. The answer is the
 /// audit part. A template with no grants writes nothing.
 pub fn grant_at_create(
     t: &mut Tx<'_>,
     actor: &Actor,
     agent: &AgentView,
-    tref: &crate::store::templates::TemplateRef,
+    tg: &TemplateGrants,
 ) -> ApiResult<Vec<Value>> {
-    let spec = crate::store::templates::get(t, &tref.id)?.spec;
-    let asks = template_asks(&spec)?;
-    if asks.is_empty() {
+    if tg.asks.is_empty() {
         return Ok(Vec::new());
     }
-    let key = terrarium_core::fleet::template_key(tref.project.as_deref(), &tref.name);
     let project = agent.agent.project.clone();
-    let grants = check_create_grants(t, actor, &project, &key, &asks)?;
+    let grants = check_create_grants(t, actor, &project, tg)?;
     let id = agent.agent.id.to_string();
     put_grants(t, None, &id, &agent.agent.name, &project, &grants)
 }

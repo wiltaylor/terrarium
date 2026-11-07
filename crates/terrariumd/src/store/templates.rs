@@ -57,6 +57,12 @@ pub struct Template {
     /// `GET /api/templates` fills it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_missing: Option<String>,
+    /// Who last set or changed `spec.grants` (TER-88): `operator`,
+    /// `system` (a template file), or `agent:<id>`. `None` with no grants.
+    /// A spawn or a create from the template checks again that this actor
+    /// may grant each secret (`crate::spawn_rights`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grants_by: Option<String>,
 }
 
 impl Template {
@@ -159,6 +165,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<Template> {
         file_hash,
         effective_skills: Vec::new(),
         subscription_missing: None,
+        grants_by: r.get("grants_by")?,
     })
 }
 
@@ -434,10 +441,11 @@ pub fn create(t: &mut Tx<'_>, new: &NewTemplate, repo: Option<&Path>) -> ApiResu
     }
     let id = ulid::Ulid::new().to_string();
     let at = now();
+    let grants_by = grants_by_of(t, None, &spec);
     t.execute(
         "INSERT INTO agent_templates (id, name, project, scope, description, spec, revision,
-                                      created_by, source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?9)",
+                                      created_by, source, created_at, updated_at, grants_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?9, ?10)",
         params![
             id,
             new.name,
@@ -447,7 +455,8 @@ pub fn create(t: &mut Tx<'_>, new: &NewTemplate, repo: Option<&Path>) -> ApiResu
             Value::Object(spec).to_string(),
             new.created_by,
             new.source,
-            at
+            at,
+            grants_by
         ],
     )?;
     stage_file(t, repo, &get(t, &id)?)?;
@@ -460,6 +469,22 @@ pub fn create(t: &mut Tx<'_>, new: &NewTemplate, repo: Option<&Path>) -> ApiResu
     )?;
     emit(t, &tpl, "created")?;
     Ok(tpl)
+}
+
+/// The `grants_by` of a template after a write of `spec` (TER-88): the
+/// writer (`t.actor`) when the write sets or changes `grants`, the old
+/// value when they stay the same, `None` with no grants.
+fn grants_by_of(t: &Tx<'_>, before: Option<&Template>, spec: &Spec) -> Option<String> {
+    let new = agent_template::grants_of(spec).unwrap_or_default();
+    if new.is_empty() {
+        return None;
+    }
+    match before {
+        Some(b) if agent_template::grants_of(&b.spec).unwrap_or_default() == new => {
+            b.grants_by.clone()
+        }
+        _ => Some(t.actor.clone()),
+    }
 }
 
 fn scope_words(project: Option<&str>) -> String {
@@ -517,9 +542,10 @@ pub fn update(
     if !changed && source == before.source {
         return Ok(before);
     }
+    let grants_by = grants_by_of(t, Some(&before), &spec);
     t.execute(
         "UPDATE agent_templates SET name = ?2, description = ?3, spec = ?4,
-                revision = revision + ?5, source = ?6, updated_at = ?7
+                revision = revision + ?5, source = ?6, updated_at = ?7, grants_by = ?8
          WHERE id = ?1",
         params![
             id,
@@ -528,7 +554,8 @@ pub fn update(
             Value::Object(spec).to_string(),
             i64::from(changed),
             source,
-            now()
+            now(),
+            grants_by
         ],
     )?;
     let mut after = get(t, id)?;

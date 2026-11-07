@@ -1119,3 +1119,128 @@ name = "b"
         b"{}\n"
     );
 }
+
+/// The grants of the secret `secret` to the agent with the ID `agent`.
+async fn secret_grants_to(td: &TestDaemon, secret: &str, agent: &str) -> Vec<Value> {
+    let key = format!("agent:{agent}");
+    td.get(&format!("/api/secrets/{secret}/grants"))
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|g| g["grantee"] == key)
+        .cloned()
+        .collect()
+}
+
+/// TER-88: a fleet apply that creates an agent from a template with
+/// secret grants needs the applier's right to grant each secret: a
+/// project_admin gets 403 for a global secret, and the apply makes no
+/// agent. A fleet template with grants needs that right too. A secret of
+/// the admin's own project is fine. Linking an agent that exists to a
+/// template with grants gives it no grants.
+#[tokio::test]
+async fn fleet_template_grants_need_the_right_to_grant_them() {
+    let td = TestDaemon::start().await;
+    td.project("side").await;
+    let lead = td
+        .agent("side", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let lead = lead["id"].as_str().unwrap();
+    for s in ["global/gk", "side/sk"] {
+        let r = td
+            .put(
+                &format!("/api/secrets/{s}"),
+                json!({"kind": "api_key", "fields": {"value": "fleet-grant-value-9Xq2"}}),
+            )
+            .await;
+        assert!(r.status < 300, "{}", r.body);
+    }
+    let r = td
+        .post(
+            "/api/templates",
+            json!({"name": "tg", "project": "side",
+                   "spec": {"harness": "claude", "grants": ["global/gk:read"]}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+
+    // The create path: an agent from the operator's template.
+    let create = r#"
+name = "g1"
+[[projects]]
+name = "side"
+[[projects.agents]]
+name = "c1"
+template = "tg"
+"#;
+    let r = td.post_as(lead, "/api/fleet/apply", body(create)).await;
+    r.err(403, "forbidden");
+    let m = r.body["error"]["message"].as_str().unwrap();
+    assert!(m.contains("secret `global/gk`"), "{}", r.body);
+    assert_eq!(td.get("/api/agents/side%2Fc1").await.status, 404);
+    assert!(
+        td.get("/api/secrets/global/gk/grants")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // The template path: a fleet template with a global grant.
+    let own = r#"
+name = "g2"
+[[projects]]
+name = "side"
+[[projects.templates]]
+name = "own"
+harness = "claude"
+grants = ["global/gk"]
+"#;
+    let r = td.post_as(lead, "/api/fleet/apply", body(own)).await;
+    r.err(403, "forbidden");
+    let m = r.body["error"]["message"].as_str().unwrap();
+    assert!(m.contains("secret `global/gk`"), "{}", r.body);
+    let list = td.get("/api/templates?project=side").await.body.to_string();
+    assert!(!list.contains("\"own\""), "{list}");
+
+    // A secret of the admin's own project: the template and the agent.
+    let mine = r#"
+name = "g3"
+[[projects]]
+name = "side"
+[[projects.templates]]
+name = "mine"
+harness = "claude"
+grants = ["sk:read"]
+[[projects.agents]]
+name = "c2"
+template = "mine"
+"#;
+    td.post_as(lead, "/api/fleet/apply", body(mine)).await.ok();
+    let c2 = agent_by_key(&td, "side/c2").await;
+    let g = secret_grants_to(&td, "side/sk", c2["id"].as_str().unwrap()).await;
+    assert_eq!(g.len(), 1, "{g:?}");
+    assert_eq!(g[0]["level"], "read");
+
+    // An agent that exists, linked to a template with grants: no grant.
+    let old = td.agent("side", "old", json!({})).await;
+    let old = old["id"].as_str().unwrap().to_owned();
+    let relink = r#"
+name = "g4"
+[[projects]]
+name = "side"
+[[projects.agents]]
+name = "old"
+harness = "claude"
+template = "tg"
+"#;
+    td.post("/api/fleet/apply", body(relink)).await.ok();
+    assert_eq!(
+        agent_by_key(&td, "side/old").await["template"]["name"],
+        "tg"
+    );
+    assert!(secret_grants_to(&td, "global/gk", &old).await.is_empty());
+}

@@ -211,7 +211,8 @@ async fn create(
     actor: Actor,
     ApiJson(body): ApiJson<serde_json::Value>,
 ) -> ApiResult<(StatusCode, Json<Created>)> {
-    let (def, template) = super::templates::create_body(&state, &actor, body).await?;
+    let (def, template, template_grants) =
+        super::templates::create_body(&state, &actor, body).await?;
     policy::admin_project(&actor, &def.project, "creating an agent")?;
     for role in &def.roles {
         policy::change_role(&actor, "", &def.project, *role)?;
@@ -237,10 +238,11 @@ async fn create(
             )?;
             let v =
                 agents::create_from(t, &def, &state_dir, projects::SOURCE_API, template.as_ref())?;
-            // The template's secret grants (TER-88): each needs the
-            // caller's right to grant that secret.
-            if let Some(tref) = &template {
-                crate::spawn_rights::grant_at_create(t, &who, &v, tref)?;
+            // The template's secret grants (TER-88), from the row that
+            // `def` was built from: each needs the caller's right to grant
+            // that secret.
+            if let Some(tg) = &template_grants {
+                crate::spawn_rights::grant_at_create(t, &who, &v, tg)?;
             }
             Ok(v)
         })

@@ -2268,6 +2268,17 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE secret_grants_v81 RENAME TO secret_grants;
     CREATE INDEX secret_grants_grantee ON secret_grants(grantee);
     "#,
+    // 82: who set the secret grants of a template (TER-88,
+    // `crate::spawn_rights`). `agent_templates.grants_by` is the actor
+    // label of the write that last set or changed `spec.grants`
+    // (`operator`, `system` for a template file, or `agent:<id>`); NULL
+    // when the template has no grants. A spawn or a create from the
+    // template checks again that this actor may grant each secret.
+    // Self-contained: when another branch takes this number, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE agent_templates ADD COLUMN grants_by TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
