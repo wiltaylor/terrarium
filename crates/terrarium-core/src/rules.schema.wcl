@@ -9,6 +9,9 @@
 // `{{...}}` templates, and the columns (`@<role>` or a column name of
 // the project's board).
 //
+// A rule with only `enabled = false` (no `on`, no verb) turns off the
+// rule of that name of the built-in pack (`board_flow = rules`).
+//
 // A rule reacts to an event of the log (`on`, kind globs) when every
 // `when` holds, and runs its verbs in the order of the file:
 //
@@ -31,8 +34,9 @@ type Rule {
   description: utf8?
   // Absent: true.
   enabled: bool?
-  // Event kind globs, for example `card` or `job.*`.
-  on: list<utf8>
+  // Event kind globs, for example `card` or `job.*`. A disabled rule
+  // may leave it out.
+  on: list<utf8>?
   // The most runs of the rule in one hour.
   max_per_hour: i64?
   @children("when") when: list<When>
@@ -87,13 +91,20 @@ type IfCard {
 }
 
 // A condition on the current state of the event's job (`data.id` of a
-// `job` event). A rule with an `if_job` does not run for another event.
-// `state`: queued, running, passed, failed, cancelled. `outcome`: red,
-// conflict, error, or none.
+// `job` event, `data.job` of a `job.verdict` event). A rule with an
+// `if_job` does not run for another event. `state`: queued, running,
+// passed, failed, cancelled. `outcome`: red, conflict, error, or none.
+// `split`: the job is a half of a split batch. `batch`: two or more
+// cards of the job merged (did not conflict). `rerun`: a rerun of the job
+// is queued or ran. `halves`: the job was split in halves.
 @block("if_job")
 type IfJob {
   state: list<utf8>?
   outcome: list<utf8>?
+  split: bool?
+  batch: bool?
+  rerun: bool?
+  halves: bool?
 }
 
 // Move the card of the event. `to` and `from` name a column: `@<role>`
@@ -107,6 +118,7 @@ type CardMove {
   position: utf8?
 }
 
+// `remove` takes globs (`by:*`). A label in `add` stays.
 @block("card_label")
 type CardLabel {
   add: list<utf8>?
@@ -138,12 +150,18 @@ type Mail {
 }
 
 // `kind`: `validate`, `merge`, or `batch`. A batch takes the cards of the
-// column `from` in board order, at most `limit`.
+// column `from` in board order, at most `limit` (absent: all of them).
+// `min_cards`: the batch goes only when at least that many cards wait,
+// or, with `max_wait_minutes`, when the first card that waits has waited
+// that long. The engine checks that time itself and runs the rule then
+// (a `rule.timer` event).
 @block("job_queue")
 type JobQueue {
   kind: utf8
   from: utf8?
   limit: i64?
+  min_cards: i64?
+  max_wait_minutes: i64?
 }
 
 @block("job_cancel")
@@ -156,22 +174,30 @@ type JobRerun {
   max_attempts: i64?
 }
 
-// Split a red batch of the event in halves.
+// Split a red batch of the event in halves. `after_fixes`: only when the
+// group had at least that many fix cards of earlier jobs (`job_fix`).
 @block("job_split")
-type JobSplit {}
+type JobSplit {
+  after_fixes: i64?
+}
 
 // Open one fix card for the red merge job of the event: in the column
 // `to` (absent: `@ready`), with the label `merge-fix:<job>` and the
 // `labels`, a link to each card of the job, and the failure block in its
-// body. Nothing when an open card has that label already.
+// body. Nothing when the job is not red, when an open card has that label
+// already, or when the group had `max` fix cards of earlier jobs.
 @block("job_fix")
 type JobFix {
   to: utf8?
   labels: list<utf8>?
+  max: i64?
 }
 
+// `reason`: the park reason (absent: `rule <name>`).
 @block("agent_park")
-type AgentPark {}
+type AgentPark {
+  reason: utf8?
+}
 
 // `turn`: the text of the turn that wakes the agent.
 @block("agent_unpark")
@@ -179,8 +205,10 @@ type AgentUnpark {
   turn: utf8?
 }
 
-// `outcome`: `done` or `cancelled`.
+// `outcome`: `done` or `cancelled`. `result`: the result for the owner
+// (absent: `the rule <name> ended it`).
 @block("agent_end")
 type AgentEnd {
   outcome: utf8
+  result: utf8?
 }

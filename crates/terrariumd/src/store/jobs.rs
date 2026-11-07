@@ -1094,9 +1094,19 @@ fn emit(t: &mut Tx<'_>, j: &Job, change: &str) -> ApiResult<()> {
         j.card,
         j.state.as_str()
     );
+    // Where the job comes from (TER-170): a new job of the queue, the
+    // rerun of a failed job, or a half of a split batch. The built-in rule
+    // pack comments a new job only.
+    let origin = if j.attempt > 1 {
+        "rerun"
+    } else if j.parent.is_some() {
+        "split"
+    } else {
+        "queue"
+    };
     let mut data = json!({"change": change, "project": j.project, "id": j.id, "card": j.card,
                           "kind": j.kind, "state": j.state, "attempt": j.attempt,
-                          "outcome": j.outcome});
+                          "outcome": j.outcome, "origin": origin, "parent": j.parent});
     if !j.batch.is_empty() {
         data["cards"] = json!(j.batch.iter().map(|c| &c.card).collect::<Vec<_>>());
     }
@@ -1104,8 +1114,39 @@ fn emit(t: &mut Tx<'_>, j: &Job, change: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// The most cards in one batch merge.
-pub const BATCH_MAX: usize = 32;
+/// A later attempt of `j` (its rerun), if one is queued or ran.
+pub fn rerun_of(conn: &Connection, j: &Job) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM jobs
+              WHERE project = ?1 AND kind = ?2 AND repo = ?3 AND created_at = ?4
+                AND split_path = ?5 AND coalesce(parent, '') = coalesce(?6, '')
+                AND attempt > ?7 AND id <> ?8
+              ORDER BY attempt LIMIT 1",
+            params![
+                j.project,
+                j.kind.as_str(),
+                j.repo,
+                j.created_at,
+                j.split_path,
+                j.parent,
+                j.attempt,
+                j.id
+            ],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The halves of job `id`, when a split made them: left first.
+pub fn halves_of(conn: &Connection, id: &str) -> ApiResult<Vec<Job>> {
+    let ids: Vec<String> = {
+        let mut st = conn.prepare("SELECT id FROM jobs WHERE parent = ?1 ORDER BY split_path")?;
+        st.query_map([id], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    ids.iter().map(|i| get(conn, i)).collect()
+}
 
 /// The JSON text of a batch; `None` for a job of one card.
 fn batch_text(batch: &[BatchCard]) -> ApiResult<Option<String>> {
@@ -1245,11 +1286,6 @@ pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
             return Err(ApiError::invalid(
                 "a batch has two or more cards and starts with the job's card",
             ));
-        }
-        if n.batch.len() > BATCH_MAX {
-            return Err(ApiError::invalid(format!(
-                "a batch has at most {BATCH_MAX} cards"
-            )));
         }
         let mut seen = HashSet::new();
         for c in &n.batch {

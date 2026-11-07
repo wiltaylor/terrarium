@@ -26,6 +26,7 @@
 //!   every few seconds, the spawn timer runs the queued unparks and ends
 //!   the agent of a finished card.
 
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use terrarium_core::AgentId;
@@ -43,13 +44,16 @@ use crate::rules_engine::{Done, RunCtx, lookup};
 use crate::store::board::{self, Card, CardPatch, NewCard, NewLink};
 use crate::store::jobs::{self, BatchCard, Job, JobKind, JobState, NewJob};
 use crate::store::mail::{self, Address};
+use crate::store::schedules;
 use crate::store::spawns::{self, Bound};
 
 /// The arguments whose text an agent reads: their placeholders are filled
 /// as quoted data (one line, in backticks). `card.prepend` is the
 /// exception: its text goes into the card body as it is, so a failure
 /// block keeps its lines (the card body is data to an agent already).
-pub const QUOTED_ARGS: &[&str] = &["text", "comment", "subject", "body", "turn"];
+pub const QUOTED_ARGS: &[&str] = &[
+    "text", "comment", "subject", "body", "turn", "reason", "result",
+];
 
 /// Whether the placeholders of argument `key` of `verb` are quoted.
 pub fn quoted(verb: &str, key: &str) -> bool {
@@ -125,7 +129,8 @@ impl Args<'_> {
     }
 
     /// The texts of a list argument, filled, trimmed, without the empty
-    /// ones.
+    /// ones. An item with a placeholder that has no value is left out
+    /// (`by:{{job.by_agent}}` without a worker), not kept half filled.
     fn list(&self, key: &str) -> Vec<String> {
         let items: Vec<&str> = match self.action.args.get(key) {
             Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
@@ -134,12 +139,11 @@ impl Args<'_> {
         };
         items
             .into_iter()
-            .map(|s| {
-                rules_file::render(s, &|n| lookup(self.ctx, n), false)
-                    .trim()
-                    .to_owned()
+            .filter_map(|s| {
+                let (v, empty) = rules_file::render_with(s, &|n| lookup(self.ctx, n), false);
+                let v = v.trim().to_owned();
+                (!empty && !v.is_empty()).then_some(v)
             })
-            .filter(|s| !s.is_empty())
             .collect()
     }
 
@@ -254,7 +258,7 @@ pub fn perform(
         "job.queue" => job_queue(t, actor, ctx, &a, &mut effects)?,
         "job.cancel" => job_cancel(t, actor, ctx, &mut effects)?,
         "job.rerun" => job_rerun(t, actor, ctx, &a, &mut effects)?,
-        "job.split" => job_split(t, actor, ctx, &mut effects)?,
+        "job.split" => job_split(t, actor, ctx, &a, &mut effects)?,
         "job.fix" => job_fix(t, actor, ctx, &a)?,
         "agent.park" | "agent.unpark" | "agent.end" => agent_verb(t, actor, ctx, &a, &mut effects)?,
         other => return Err(ApiError::invalid(format!("unknown verb `{other}`"))),
@@ -288,6 +292,7 @@ fn card_move(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiRe
     ))
 }
 
+/// `card.label`: `remove` takes globs (`by:*`); a label of `add` stays.
 fn card_label(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
     let card = the_card(ctx, "card.label")?;
     let add: Vec<String> = a
@@ -296,10 +301,17 @@ fn card_label(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
         .filter(|l| !card.labels.contains(l))
         .collect();
     let want = a.list("add");
-    let remove: Vec<String> = a
-        .list("remove")
-        .into_iter()
-        .filter(|l| card.labels.contains(l) && !want.contains(l))
+    let patterns = a.list("remove");
+    let remove: Vec<String> = card
+        .labels
+        .iter()
+        .filter(|l| {
+            !want.contains(l)
+                && patterns
+                    .iter()
+                    .any(|p| p == *l || (p.contains('*') && terrarium_core::schedule::glob(p, l)))
+        })
+        .cloned()
         .collect();
     if add.is_empty() && remove.is_empty() {
         return Ok(noop(json!({
@@ -484,15 +496,103 @@ fn job_queue(
             planned_secs: None,
         },
     )?;
+    if kind == JobKind::Merge && crate::jobs::code_flow(t, &job.project)? {
+        crate::jobs::mark_queued(t, &job)?;
+    }
     effects.push(Effect::Kick);
     Ok(changed(
         json!({"job": job.id, "kind": job.kind, "card": card.id}),
     ))
 }
 
+/// The cards of a batch of column `from` (TER-172).
+#[derive(Debug, Clone, Default)]
+pub struct BatchPick {
+    /// The cards that the batch takes: board order, at most the limit.
+    pub cards: Vec<Card>,
+    /// The cards of the column that wait for a batch (not held, no open
+    /// job), apart from the limit.
+    pub waiting: usize,
+    /// When the first of those came into the column (its newest move,
+    /// else its creation).
+    pub first_since: Option<DateTime<Utc>>,
+    /// The cards of the column that the batch leaves out, with the reason.
+    pub left_out: Vec<Value>,
+}
+
+/// The cards of column `from` of `project` that a batch takes, in board
+/// order, at most `limit` (`None`: all). A card that is held or has an
+/// open job is left out. There is no limit of the daemon's own: the rule
+/// sets it (TER-162 D9).
+pub fn pick_batch(
+    conn: &Connection,
+    project: &str,
+    from: &str,
+    limit: Option<usize>,
+) -> ApiResult<BatchPick> {
+    let board = board::get_board(conn, project)?;
+    let mut out = BatchPick::default();
+    for c in board.cards.iter().filter(|c| c.column == from) {
+        if api_jobs::not_held(c).is_err() {
+            out.left_out.push(json!({"card": c.id, "reason": "held"}));
+            continue;
+        }
+        if let Some(j) = open_job(conn, &c.id)? {
+            out.left_out
+                .push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
+            continue;
+        }
+        out.waiting += 1;
+        let since = board::last_moved_at(conn, &c.id)?.unwrap_or_else(|| c.created_at.clone());
+        if let Ok(t) = DateTime::parse_from_rfc3339(&since) {
+            let t = t.with_timezone(&Utc);
+            out.first_since = Some(out.first_since.map_or(t, |f| f.min(t)));
+        }
+        if limit.is_none_or(|l| out.cards.len() < l) {
+            out.cards.push(c.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// When a batch with `min_cards` and `max_wait_minutes` goes: `Ok` now,
+/// `Err((reason, due))` when it waits, with the time it goes by the
+/// wait (`None`: only a card more makes it go).
+pub fn batch_goes(
+    pick: &BatchPick,
+    min_cards: Option<i64>,
+    max_wait_minutes: Option<i64>,
+    now: DateTime<Utc>,
+) -> Result<(), (String, Option<DateTime<Utc>>)> {
+    let Some(min) = min_cards.and_then(|n| usize::try_from(n).ok()) else {
+        return Ok(());
+    };
+    if pick.waiting >= min {
+        return Ok(());
+    }
+    let due = max_wait_minutes
+        .zip(pick.first_since)
+        .map(|(m, first)| first + chrono::Duration::minutes(m));
+    match due {
+        Some(d) if d <= now => Ok(()),
+        Some(d) => Err((
+            format!(
+                "{} of {min} cards wait; the batch goes at {} ({} minutes after the first one)",
+                pick.waiting,
+                schedules::stamp(d),
+                max_wait_minutes.unwrap_or_default()
+            ),
+            Some(d),
+        )),
+        None => Err((format!("{} of {min} cards wait", pick.waiting), None)),
+    }
+}
+
 /// One merge job for the cards of column `from` in board order, at most
-/// `limit` (and [`jobs::BATCH_MAX`]). A card that is held or has an open
-/// job is left out.
+/// `limit`. A card that is held or has an open job is left out. With
+/// `min_cards` the job waits for that many cards, or (with
+/// `max_wait_minutes`) until the first card waited that long; until then
+/// the verb is a no-op that says when the batch goes.
 fn queue_batch(
     t: &mut Tx<'_>,
     actor: &Actor,
@@ -503,39 +603,31 @@ fn queue_batch(
     let project = ctx.project.clone();
     policy::admin_project(actor, &project, "queueing a merge onto next")?;
     let from = column_name(ctx, a.raw("from").unwrap_or_default())?;
-    let limit = a
-        .count("limit")
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(jobs::BATCH_MAX)
-        .min(jobs::BATCH_MAX);
+    let limit = a.count("limit").and_then(|n| usize::try_from(n).ok());
     let def = jobs::delivery(t, &project)?;
     api_jobs::enabled(&def, &project)?;
-    let board = board::get_board(t, &project)?;
-    let mut left_out = Vec::new();
-    let mut picked: Vec<&Card> = Vec::new();
-    for c in board.cards.iter().filter(|c| c.column == from) {
-        if picked.len() >= limit {
-            break;
-        }
-        if api_jobs::not_held(c).is_err() {
-            left_out.push(json!({"card": c.id, "reason": "held"}));
-            continue;
-        }
-        if let Some(j) = open_job(t, &c.id)? {
-            left_out.push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
-            continue;
-        }
-        picked.push(c);
-    }
-    if picked.is_empty() {
+    let pick = pick_batch(t, &project, &from, limit)?;
+    let left_out = pick.left_out.clone();
+    if pick.cards.is_empty() {
         return Ok(noop(json!({
             "column": from, "left_out": left_out,
             "reason": format!("no card to merge in {from}"),
         })));
     }
+    if let Err((reason, due)) = batch_goes(
+        &pick,
+        a.count("min_cards"),
+        a.count("max_wait_minutes"),
+        Utc::now(),
+    ) {
+        return Ok(noop(json!({
+            "column": from, "waiting": pick.waiting, "left_out": left_out,
+            "due": due.map(schedules::stamp), "reason": reason,
+        })));
+    }
     let mut repo: Option<String> = None;
     let mut batch = Vec::new();
-    for c in &picked {
+    for c in &pick.cards {
         let r = api_jobs::repo_of(t, c, None)?;
         match &repo {
             Some(have) if *have != r => {
@@ -576,6 +668,9 @@ fn queue_batch(
             planned_secs: None,
         },
     )?;
+    if crate::jobs::code_flow(t, &project)? {
+        crate::jobs::mark_queued(t, &job)?;
+    }
     effects.push(Effect::Kick);
     Ok(changed(
         json!({"job": job.id, "kind": "merge", "cards": names, "left_out": left_out}),
@@ -601,6 +696,11 @@ fn job_cancel(
     let was_running = job.state == JobState::Running;
     let j = jobs::cancel(t, &job.id)?;
     crate::jobs::emit_verdicts(t, &j)?;
+    // As the API cancel: with `board_flow = code` the labels go now; with
+    // `rules` the rule pack takes them off on the verdict (TER-170).
+    if crate::jobs::code_flow(t, &j.project)? {
+        crate::jobs::clear_job_labels(t, &j)?;
+    }
     if was_running {
         effects.push(Effect::Kill(j.id.clone()));
     }
@@ -616,35 +716,13 @@ fn merged(j: &Job) -> Vec<BatchCard> {
         .collect()
 }
 
-/// A later attempt of `j` (its rerun), if one is queued or ran.
-fn rerun_of(conn: &Connection, j: &Job) -> ApiResult<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT id FROM jobs
-              WHERE project = ?1 AND kind = ?2 AND repo = ?3 AND created_at = ?4
-                AND split_path = ?5 AND coalesce(parent, '') = coalesce(?6, '')
-                AND attempt > ?7 AND id <> ?8
-              ORDER BY attempt LIMIT 1",
-            params![
-                j.project,
-                j.kind.as_str(),
-                j.repo,
-                j.created_at,
-                j.split_path,
-                j.parent,
-                j.attempt,
-                j.id
-            ],
-            |r| r.get(0),
-        )
-        .optional()?)
-}
-
-/// A card of `cards` that has an open job: no new job for it.
-fn busy(conn: &Connection, cards: &[BatchCard]) -> ApiResult<()> {
+/// Why no new job runs for `cards`: a card that has an open job already
+/// (the coded flow split the batch, or someone queued it again). The verb
+/// is then a no-op, not a failure.
+fn busy(conn: &Connection, cards: &[BatchCard]) -> ApiResult<Option<String>> {
     for c in cards {
         if let Some(open) = open_job(conn, &c.card)? {
-            return Err(ApiError::conflict(format!(
+            return Ok(Some(format!(
                 "card {} has a {} job {} that is {} already",
                 c.card,
                 open.kind.as_str(),
@@ -653,7 +731,64 @@ fn busy(conn: &Connection, cards: &[BatchCard]) -> ApiResult<()> {
             )));
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+/// Is `card` a fix card (it has a `merge-fix:` label)?
+fn is_fix_card(conn: &Connection, card: &str) -> ApiResult<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM cards c, json_each(c.labels) l
+              WHERE c.id = ?1 AND l.value LIKE 'merge-fix:%'",
+            [card],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// The fix cards of this group from earlier jobs (TER-170, MEM-84): the
+/// cards with a `merge-fix:` label of another job whose linked cards, fix
+/// cards left out, include every card of `j` that is not a fix card. So
+/// the fix cards of the group count for its rerun (the fix card first in
+/// it) and for its split halves, and a fix card of another group that
+/// shared a card with this one does not. Done and archived ones count:
+/// each was an attempt.
+fn earlier_fixes(conn: &Connection, j: &Job) -> ApiResult<i64> {
+    let mut group: Vec<String> = Vec::new();
+    for c in j.cards() {
+        if !is_fix_card(conn, &c.card)? {
+            group.push(c.card);
+        }
+    }
+    let own = fix_label(&j.id);
+    let candidates: Vec<String> = {
+        let mut st = conn.prepare(
+            "SELECT DISTINCT l.card FROM card_links l JOIN cards c ON c.id = l.card
+              WHERE l.kind = 'card' AND l.ref IN (SELECT value FROM json_each(?1))
+                AND c.project = ?2
+                AND EXISTS (SELECT 1 FROM json_each(c.labels)
+                             WHERE value LIKE 'merge-fix:%' AND value <> ?3)",
+        )?;
+        st.query_map(
+            params![serde_json::to_string(&group)?, j.project, own],
+            |r| r.get(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut n = 0;
+    for fix in candidates {
+        let linked: Vec<String> = {
+            let mut st =
+                conn.prepare("SELECT ref FROM card_links WHERE card = ?1 AND kind = 'card'")?;
+            st.query_map([&fix], |r| r.get(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if group.iter().all(|c| linked.contains(c)) {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// Queue the event's failed job once more (not a conflict), while its
@@ -690,13 +825,15 @@ fn job_rerun(
             json!({"job": j.id, "reason": "every card of the job conflicted"}),
         ));
     }
-    if let Some(next) = rerun_of(t, j)? {
+    if let Some(next) = jobs::rerun_of(t, j)? {
         return Ok(noop(json!({
             "job": j.id, "next": next,
             "reason": format!("job {next} runs job {} again already", j.id),
         })));
     }
-    busy(t, &cards)?;
+    if let Some(why) = busy(t, &cards)? {
+        return Ok(noop(json!({"job": j.id, "reason": why})));
+    }
     let batch = (!j.batch.is_empty()).then_some(cards.as_slice());
     let next = jobs::rerun(t, j, batch)?;
     effects.push(Effect::Kick);
@@ -706,10 +843,13 @@ fn job_rerun(
 }
 
 /// Split the event's red batch (two or more cards that merged) in halves.
+/// `after_fixes`: only when the group had that many fix cards of earlier
+/// jobs.
 fn job_split(
     t: &mut Tx<'_>,
     actor: &Actor,
     ctx: &RunCtx,
+    a: &Args<'_>,
     effects: &mut Vec<Effect>,
 ) -> ApiResult<Done> {
     let j = the_job(ctx, "job.split")?;
@@ -742,7 +882,18 @@ fn job_split(
             "reason": format!("job {} is split already", j.id),
         })));
     }
-    busy(t, &cards)?;
+    if let Some(after) = a.count("after_fixes") {
+        let had = earlier_fixes(t, j)?;
+        if had < after {
+            return Ok(noop(json!({
+                "job": j.id,
+                "reason": format!("the group had {had} fix card(s); it splits after {after}"),
+            })));
+        }
+    }
+    if let Some(why) = busy(t, &cards)? {
+        return Ok(noop(json!({"job": j.id, "reason": why})));
+    }
     let (left, right) = jobs::split(t, j, &cards)?;
     effects.push(Effect::Kick);
     let names = |x: &Job| x.cards().into_iter().map(|c| c.card).collect::<Vec<_>>();
@@ -758,12 +909,27 @@ fn job_split(
 fn job_fix(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
     let j = the_job(ctx, "job.fix")?;
     policy::admin_project(actor, &j.project, "opening a fix card for a merge job")?;
-    if j.kind != JobKind::Merge || j.state != JobState::Failed {
+    // Only a red merge (its tests failed): a conflict, an error (the job
+    // could not run), or a cut run is not for a fix card (TER-169 review).
+    if j.kind != JobKind::Merge
+        || j.state != JobState::Failed
+        || j.outcome.as_deref() != Some("red")
+    {
         return Ok(noop(json!({
             "job": j.id,
-            "reason": format!("job {} is a {} job that is {}, not a failed merge", j.id,
-                              j.kind.as_str(), j.state.as_str()),
+            "reason": format!("job {} is a {} job that is {} ({}), not a red merge", j.id,
+                              j.kind.as_str(), j.state.as_str(),
+                              j.outcome.as_deref().unwrap_or("none")),
         })));
+    }
+    if let Some(max) = a.count("max") {
+        let had = earlier_fixes(t, j)?;
+        if had >= max {
+            return Ok(noop(json!({
+                "job": j.id,
+                "reason": format!("the group had {had} fix card(s), the most is {max}"),
+            })));
+        }
     }
     let label = fix_label(&j.id);
     if let Some(open) = board::find_open_by_label(t, &j.project, &label)? {
@@ -855,7 +1021,10 @@ fn agent_verb(
     let detail = |extra: &str| json!({"card": card.id, "agent": sp.name, "result": extra});
     match verb {
         "agent.park" => {
-            let reason = format!("rule {}", ctx.rule);
+            let reason = a
+                .text("reason")
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or_else(|| format!("rule {}", ctx.rule));
             Ok(match crate::bound::park_tx(t, &sp.id, &reason)? {
                 Some(owner) => {
                     effects.push(Effect::RetryOwner(owner));
@@ -888,10 +1057,14 @@ fn agent_verb(
                 Some("cancelled") => spawns::CANCELLED,
                 _ => spawns::DONE,
             };
+            let result = a
+                .text("result")
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or_else(|| format!("the rule {} ended it ({outcome})", ctx.rule));
             effects.push(Effect::End {
                 bound,
                 outcome,
-                result: format!("the rule {} ended it ({outcome})", ctx.rule),
+                result,
             });
             Ok(changed(detail(outcome)))
         }

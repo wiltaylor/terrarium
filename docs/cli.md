@@ -1099,7 +1099,8 @@ Markdown that embeds the artifact in a page (PLAN §15.1):
 a bundle or an HTML file, and `[name](artifact:ART-n)` for other files. Then
 it prints a signed preview URL. The URL expires (by default after 5
 minutes), so a page must use the embed, not the URL. `artifact ls --label`
-keeps the artifacts with a `label` link of that label (the CLI filters).
+lists the artifacts with a `label` link of that label: the daemon filters
+(`?label=`, TER-129), and the CLI filters again for a daemon from before.
 
 ### Test runs
 
@@ -1817,6 +1818,34 @@ terrarium schedule redeliver <id> <delivery>  send a delivery again (a copy, due
 terrarium schedule test <id> [--event-json <file|->]   run the action once as a test for a sample event; exit 1 on no match or a failure
 ```
 
+### Board rules
+
+`rule` has the alias `rules`. A board rule reacts to an event of the log
+and runs verbs on the board ([api.md §19.8](api.md#198-board-rules)).
+With `board_flow = rules` the built-in pack runs the card flow
+(§19.11). The project is `--project`, else the agent's own.
+
+```
+terrarium rule ls                             the rules that run, in order: pack, override, or own; on or off; events; verbs
+terrarium rule show <rule>                    the rule as WCL, and its last 5 runs
+terrarium rule check [<file|->]               lint the stored rules (or check and lint a rules.wcl text); exit 1 on a finding
+terrarium rule test (--seq <n> | --from <n> [--to <n>]) [--file <file|->]   a dry run on events of the log; writes nothing
+terrarium rule log [--rule <name>] [--limit 20]   the runs, newest first
+terrarium rule enable|disable <rule>          switch a rule of rules.wcl, or a pack rule, on or off
+terrarium rule migrate [--apply] [--text]     map the pack to the board; --apply stores rules.wcl and sets board_flow rules
+```
+
+- `check` finds a column that a rule names and the board lacks
+  (`missing_column`), and a column that rules move cards into and no rule
+  moves out of (`stuck_column`, [api.md §19.12](api.md#1912-migration-lint-and-the-rule-tools)).
+- `migrate` without `--apply` prints what changes and the lint after it.
+  `--text` prints the whole new `rules.wcl`. `--apply` needs
+  project_admin. For rules from a file, put the text into
+  `projects/<project>.rules.wcl` and set `board_flow = "rules"` in the
+  project file.
+- `disable` of a pack rule writes `rule "<name>" { enabled = false }` into
+  `rules.wcl`. `enable` takes it out again.
+
 - `<id>` is the ULID, `project/name`, or a name in your project.
 - `--owner` (docs/api.md §19.6): `actor` (the default) runs the schedule as
   you; `project` gives its rights to the project (project_admin;
@@ -1960,8 +1989,11 @@ terrarium whoami                              prints `operator`
 terrarium version                             the CLI's build and the daemon's; warns when the refs differ
 ```
 
-`terrarium --version` prints the build version of the CLI and its build
-time: `terrarium 0.1.0+6e31754 (built 2026-11-04T10:20:30Z)`. `-V` prints
+`terrarium --version` prints the build version of the CLI on the first
+line and its build time on the second: `terrarium 0.1.0+6e31754`, then
+`built 2026-11-04T10:20:30Z`. The first line ends with the version: host
+agents 0.5.0 and older read the last word of the first line of
+`terrarium-host --version` when they stage an update (TER-195). `-V` prints
 the version only. `terrariumd`, `terrarium-runner`, and `terrarium-host`
 have the same flags. The version is `<crate version>+<git ref>`, with
 `-dirty` for a build tree with changes, or `+unknown` (docs/api.md §4,
@@ -2376,7 +2408,7 @@ line of `card ls --unassigned --column ready` is the top card of `ready`.
 - `artifact push --note` is accepted, but the daemon does not store notes
   yet. The CLI says so on stderr.
 - `artifact ls` sends `--page` and `--card` as query filters. The daemon
-  does not filter on them yet. `--label` is filtered by the CLI.
+  does not filter on them yet. It filters on `--label`.
 - `test push` sends the whole file in one request. Through the tunnel
   (agent mode), the 4 MiB line limit of the runner applies, so a result
   file larger than about 3 MiB fails there.

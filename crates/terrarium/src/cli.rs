@@ -318,6 +318,14 @@ pub enum Command {
         #[command(subcommand)]
         command: ScheduleCmd,
     },
+    /// Board rules: the rules that run on the board events (the built-in
+    /// pack with `board_flow = rules`, and the project's rules.wcl), their
+    /// lint, a dry run, the run log, and the migration to rules
+    #[command(visible_alias = "rules")]
+    Rule {
+        #[command(subcommand)]
+        command: RuleCmd,
+    },
     /// Operator commands that an agent's role permits
     Admin {
         #[command(subcommand)]
@@ -3629,6 +3637,66 @@ pub enum SkillCmd {
     Validate { name: Option<String> },
     /// The agents and templates that name a skill
     Usage { name: String },
+}
+
+/// `terrarium rule` (docs/api.md §19.12). The project is `--project`, else
+/// the agent's own.
+#[derive(Debug, Subcommand)]
+pub enum RuleCmd {
+    /// The rules that run, in their order: each with where it comes from
+    /// (pack, override, own), on or off, its events, and its verbs
+    Ls,
+    /// One rule as WCL, and its last runs
+    Show { rule: String },
+    /// Lint the stored rules (with the pack when it runs): a column that a
+    /// rule names and the board lacks, a column that rules move cards into
+    /// and no rule moves out of. With FILE (or `-`), check that text as
+    /// the rules.wcl first. Exit 1 when the lint finds a problem
+    Check {
+        #[arg(value_name = "FILE|-")]
+        file: Option<String>,
+    },
+    /// Plan the rules for events of the log, on the current state, without
+    /// a write (a dry run)
+    Test {
+        /// One event
+        #[arg(long, conflicts_with = "from")]
+        seq: Option<i64>,
+        /// The first event of a range (at most 500 events)
+        #[arg(long)]
+        from: Option<i64>,
+        /// The last event of the range (default: the end of the log)
+        #[arg(long, requires = "from")]
+        to: Option<i64>,
+        /// Plan this rules.wcl text instead of the stored rules
+        #[arg(long, value_name = "FILE|-")]
+        file: Option<String>,
+    },
+    /// The runs of the rules, newest first
+    Log {
+        /// Only the runs of this rule
+        #[arg(long)]
+        rule: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Switch a rule on (a rule of rules.wcl, or a pack rule that
+    /// rules.wcl turned off)
+    Enable { rule: String },
+    /// Switch a rule off (a rule of rules.wcl, or a pack rule: rules.wcl
+    /// gets `rule "<name>" { enabled = false }`)
+    Disable { rule: String },
+    /// Map the built-in pack to the project's board (a move to a column
+    /// the board lacks becomes its comment, the wait columns map by role)
+    /// and show the overrides for rules.wcl. With --apply, store them and
+    /// switch the project to board_flow rules in one write (project_admin)
+    Migrate {
+        #[arg(long)]
+        apply: bool,
+        /// Print the whole new rules.wcl
+        #[arg(long)]
+        text: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
