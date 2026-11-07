@@ -183,8 +183,17 @@ pub const VERBS: &[Verb] = &[
 
 /// The block kind of a rule.
 const RULE: &str = "rule";
-/// The block kind of a condition.
+/// The block kind of a condition on the event.
 const WHEN: &str = "when";
+/// The block kind of a condition on the current state of the run's card.
+const IF_CARD: &str = "if_card";
+/// The block kind of a condition on the current state of the event's job.
+const IF_JOB: &str = "if_job";
+
+/// The states of a job, for `if_job.state`.
+pub const JOB_STATES: &[&str] = &["queued", "running", "passed", "failed", "cancelled"];
+/// The outcomes of a job, for `if_job.outcome` (`none`: no outcome).
+pub const JOB_OUTCOMES: &[&str] = &["red", "conflict", "error", "none"];
 
 /// The placeholders after `card.`.
 pub const CARD_FIELDS: &[&str] = &["id", "title", "column", "assignee", "labels", "project"];
@@ -237,6 +246,39 @@ pub struct Action {
     pub args: Map<String, Value>,
 }
 
+/// A condition on the current state of the run's card (`if_card`). Each
+/// field that is set must hold.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CardCondition {
+    /// In one of these columns (`@<role>` or a name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column: Vec<String>,
+    /// In none of these columns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_column: Vec<String>,
+    /// Has every one of these labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub has_labels: Vec<String>,
+    /// Has none of these labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lacks_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+}
+
+/// A condition on the current state of the event's job (`if_job`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct JobCondition {
+    /// The job is in one of these states ([`JOB_STATES`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state: Vec<String>,
+    /// The job has one of these outcomes ([`JOB_OUTCOMES`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outcome: Vec<String>,
+}
+
 /// One rule, read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
@@ -249,6 +291,13 @@ pub struct Rule {
     /// Every condition must hold.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub when: Vec<MatchRule>,
+    /// Conditions on the current state of the run's card: every one must
+    /// hold when the run starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub if_card: Vec<CardCondition>,
+    /// Conditions on the current state of the event's job.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub if_job: Vec<JobCondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_per_hour: Option<u32>,
     /// The verbs, in the order of the file.
@@ -310,7 +359,7 @@ fn no_files() -> FileLoader {
 /// fill a block slot with an expression (computed children), which breaks
 /// the file order of the verbs.
 fn is_block_kind(name: &str) -> bool {
-    name == RULE || name == "rules" || name == WHEN || VERBS.iter().any(|v| v.kind == name)
+    matches!(name, RULE | "rules" | WHEN | IF_CARD | IF_JOB) || VERBS.iter().any(|v| v.kind == name)
 }
 
 /// Is `e` a number literal?
@@ -586,6 +635,131 @@ fn read_when(path: String, fields: &Map<String, Value>) -> Result<MatchRule, Str
     Ok(m)
 }
 
+/// The texts of the field `key` of `fields`; absent: empty.
+fn text_list(fields: &Map<String, Value>, key: &str) -> Vec<String> {
+    fields
+        .get(key)
+        .map(|v| texts(v).into_iter().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Read one `if_card` block.
+fn read_if_card(ctx: &Context, fields: &Map<String, Value>) -> Result<CardCondition, String> {
+    for key in ["column", "not_column"] {
+        if let Some(v) = fields.get(key).filter(|v| !v.is_null()) {
+            check_arg(ctx, Arg::Columns, v).map_err(|e| format!("if_card.{key} {e}"))?;
+        }
+    }
+    let c = CardCondition {
+        column: text_list(fields, "column"),
+        not_column: text_list(fields, "not_column"),
+        has_labels: text_list(fields, "has_labels"),
+        lacks_labels: text_list(fields, "lacks_labels"),
+        assigned: fields.get("assigned").and_then(Value::as_bool),
+        archived: fields.get("archived").and_then(Value::as_bool),
+    };
+    if c.has_labels
+        .iter()
+        .chain(&c.lacks_labels)
+        .any(|l| l.trim().is_empty() || l.contains("{{"))
+    {
+        return Err("if_card labels are plain, non-empty texts".into());
+    }
+    if c == CardCondition::default() {
+        return Err("if_card needs at least one field".into());
+    }
+    Ok(c)
+}
+
+/// Read one `if_job` block.
+fn read_if_job(fields: &Map<String, Value>) -> Result<JobCondition, String> {
+    let c = JobCondition {
+        state: text_list(fields, "state"),
+        outcome: text_list(fields, "outcome"),
+    };
+    if let Some(s) = c.state.iter().find(|s| !JOB_STATES.contains(&s.as_str())) {
+        return Err(format!(
+            "if_job.state `{s}` is not one of {}",
+            JOB_STATES.join(", ")
+        ));
+    }
+    if let Some(o) = c.outcome.iter().find(|o| !JOB_OUTCOMES.contains(&o.as_str())) {
+        return Err(format!(
+            "if_job.outcome `{o}` is not one of {}",
+            JOB_OUTCOMES.join(", ")
+        ));
+    }
+    if c == JobCondition::default() {
+        return Err("if_job needs `state` or `outcome`".into());
+    }
+    Ok(c)
+}
+
+/// Every column that `rule` names: the column arguments of its verbs and
+/// the columns of its `if_card` conditions, in file order. The engine
+/// checks them against the board when a run starts (the board may have
+/// changed since the file was checked).
+pub fn column_refs(rule: &Rule) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in &rule.if_card {
+        out.extend(c.column.iter().chain(&c.not_column).cloned());
+    }
+    for a in &rule.actions {
+        let Some(verb) = VERBS.iter().find(|v| v.name == a.verb) else {
+            continue;
+        };
+        for (key, arg) in verb.args {
+            if matches!(arg, Arg::Column | Arg::Columns)
+                && let Some(v) = a.args.get(*key)
+            {
+                out.extend(texts(v).into_iter().map(str::to_owned));
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|c| seen.insert(c.clone()));
+    out
+}
+
+/// The column of `columns` that `reference` names ([`column_exists`]):
+/// `@<x>` is the column with the role `x`, else the column named `x`.
+pub fn resolve_column<'a>(columns: &'a [BoardColumn], reference: &str) -> Option<&'a BoardColumn> {
+    match reference.strip_prefix('@') {
+        Some(x) => columns
+            .iter()
+            .find(|c| c.role.as_deref() == Some(x))
+            .or_else(|| columns.iter().find(|c| c.name == x)),
+        None => columns.iter().find(|c| c.name == reference),
+    }
+}
+
+/// Fill a checked template ([`check_template`]): each `{{...}}` is
+/// replaced by `lookup` of its inner name (`event.kind`, `card.id`,
+/// `job.id`, `rule.name`, ...); `None` is empty. With `quoted`, each
+/// value is quoted data ([`crate::template::quote`]): for text that an
+/// agent reads, since a value can come from an event or a card title.
+pub fn render(template: &str, lookup: &dyn Fn(&str) -> Option<String>, quoted: bool) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find("{{") {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let v = lookup(after[..close].trim()).unwrap_or_default();
+        if quoted {
+            out.push_str(&crate::template::quote(&v));
+        } else {
+            out.push_str(&v);
+        }
+        rest = &after[close + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The fields of a block as JSON, with the offset of each.
 fn block_fields(b: &wcl_lang::Block<'_>) -> Vec<(String, Value, usize)> {
     b.fields()
@@ -687,6 +861,8 @@ pub fn parse(text: &str, file: &str, ctx: &Context) -> Result<RuleSet, FileError
             enabled: true,
             on: Vec::new(),
             when: Vec::new(),
+            if_card: Vec::new(),
+            if_job: Vec::new(),
             max_per_hour: None,
             actions: Vec::new(),
             line: position(text, at).0,
@@ -757,6 +933,24 @@ pub fn parse(text: &str, file: &str, ctx: &Context) -> Result<RuleSet, FileError
                 };
                 match read_when(path, &map) {
                     Ok(m) => rule.when.push(m),
+                    Err(e) => {
+                        problems.push(problem_at(text, Some(cat), format!("rule `{name}`: {e}")))
+                    }
+                }
+                continue;
+            }
+            if child.kind() == IF_CARD {
+                match read_if_card(ctx, &map) {
+                    Ok(c) => rule.if_card.push(c),
+                    Err(e) => {
+                        problems.push(problem_at(text, Some(cat), format!("rule `{name}`: {e}")))
+                    }
+                }
+                continue;
+            }
+            if child.kind() == IF_JOB {
+                match read_if_job(&map) {
+                    Ok(c) => rule.if_job.push(c),
                     Err(e) => {
                         problems.push(problem_at(text, Some(cat), format!("rule `{name}`: {e}")))
                     }
@@ -1135,9 +1329,100 @@ rule "validate-pass" {
         let kinds: Vec<String> = rule
             .fields()
             .filter_map(|f| f.children_block_kind())
-            .filter(|k| k != WHEN)
+            .filter(|k| k != WHEN && k != IF_CARD && k != IF_JOB)
             .collect();
         let verbs: Vec<&str> = VERBS.iter().map(|v| v.kind).collect();
         assert_eq!(kinds, verbs);
+    }
+
+    #[test]
+    fn state_conditions_read_and_check() {
+        let text = r#"rule "r" {
+  on = ["job"]
+  if_card {
+    column = ["@validating", "review"]
+    lacks_labels = ["hold"]
+    assigned = true
+  }
+  if_card { not_column = ["done"] }
+  if_job { state = ["passed"]  outcome = ["none"] }
+  card_comment { text = "ok" }
+}
+"#;
+        let set = parse(text, "rules.wcl", &board()).unwrap();
+        let r = &set.rules[0];
+        assert_eq!(r.if_card.len(), 2);
+        assert_eq!(r.if_card[0].column, vec!["@validating", "review"]);
+        assert_eq!(r.if_card[0].lacks_labels, vec!["hold"]);
+        assert_eq!(r.if_card[0].assigned, Some(true));
+        assert_eq!(r.if_card[1].not_column, vec!["done"]);
+        assert_eq!(r.if_job[0].state, vec!["passed"]);
+        assert_eq!(r.actions.len(), 1, "a condition is not a verb");
+        assert_eq!(
+            column_refs(r),
+            vec!["@validating", "review", "done"],
+            "the columns of the conditions"
+        );
+
+        let bad = |cond: &str| {
+            errors(&format!(
+                "rule \"r\" {{\n  on = [\"job\"]\n  {cond}\n  card_comment {{ text = \"x\" }}\n}}\n"
+            ))
+        };
+        let e = bad(r#"if_card { column = ["nowhere"] }"#);
+        assert!(e.contains("unknown column `nowhere`"), "{e}");
+        let e = bad("if_card {}");
+        assert!(e.contains("at least one field"), "{e}");
+        let e = bad(r#"if_card { has_labels = ["{{card.id}}"] }"#);
+        assert!(e.contains("plain"), "{e}");
+        let e = bad(r#"if_job { state = ["done"] }"#);
+        assert!(e.contains("if_job.state `done`"), "{e}");
+        let e = bad(r#"if_job { outcome = ["green"] }"#);
+        assert!(e.contains("if_job.outcome `green`"), "{e}");
+        let e = bad("if_job {}");
+        assert!(e.contains("needs `state` or `outcome`"), "{e}");
+        let e = bad(r#"if_card { colour = ["x"] }"#);
+        assert!(!e.is_empty(), "an unknown field is a schema error");
+        let e = bad(r#"if_card = [1]"#);
+        assert!(e.contains("field `if_card` is not allowed"), "{e}");
+    }
+
+    #[test]
+    fn column_refs_take_the_verb_columns() {
+        let text = r#"rule "r" {
+  on = ["card"]
+  card_move { to = "@review"  from = ["@validating", "ready"] }
+  job_queue { kind = "batch"  from = "review" }
+  card_comment { text = "x" }
+}
+"#;
+        let set = parse(text, "rules.wcl", &board()).unwrap();
+        assert_eq!(
+            column_refs(&set.rules[0]),
+            vec!["@review", "@validating", "ready", "review"]
+        );
+        let cols = board().columns.unwrap();
+        assert_eq!(resolve_column(&cols, "@working").unwrap().name, "in_progress");
+        assert_eq!(resolve_column(&cols, "@review").unwrap().name, "review");
+        assert_eq!(resolve_column(&cols, "review").unwrap().name, "review");
+        assert!(resolve_column(&cols, "@merge_queue").is_none());
+    }
+
+    #[test]
+    fn render_fills_and_quotes() {
+        let lookup = |k: &str| match k {
+            "card.id" => Some("TER-1".to_owned()),
+            "event.actor" => Some("a`b".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            render("{{card.id}} by {{ event.actor }}, {{job.id}}.", &lookup, false),
+            "TER-1 by a`b, ."
+        );
+        assert_eq!(
+            render("{{card.id}} by {{event.actor}}", &lookup, true),
+            "`TER-1` by `a'b`"
+        );
+        assert_eq!(render("open {{card.id", &lookup, false), "open {{card.id");
     }
 }
