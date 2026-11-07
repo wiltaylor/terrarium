@@ -359,8 +359,11 @@ async fn a_run_grant_names_existing_targets() {
     assert_eq!(r.status, 404, "{}", r.body);
     let r = post(json!({"grantee": "agent:p/w1", "level": "read", "targets": ["box"]})).await;
     assert_eq!(r.status, 422, "{}", r.body);
-    let r = post(json!({"grantee": "agent:p/w1", "level": "run", "targets": ["box"], "env": "DEPLOY"}))
-        .await;
+    let r = post(
+        json!({"grantee": "agent:p/w1", "level": "run", "targets": ["box"],
+                        "env": "DEPLOY"}),
+    )
+    .await;
     assert_eq!(r.status, 422, "{}", r.body);
     let r = post(json!({"grantee": "agent:p/w1", "level": "run", "targets": ["box"]})).await;
     assert_eq!(r.status, 201, "{}", r.body);
