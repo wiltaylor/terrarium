@@ -1129,6 +1129,7 @@ async fn a_green_validation_moves_the_card_to_review(flow: &'static str) {
     let lab = lab_flow(2, flow).await;
     let head = lab.branch("ter-a", "next", &[("OK", "yes\n")]);
     let id = lab.card("green", "ter-a").await;
+    let gate = hold_jobs(&lab).await;
     // A commit that is not the head of the pushed branch is refused.
     let r = lab
         .td
@@ -1172,6 +1173,7 @@ async fn a_green_validation_moves_the_card_to_review(flow: &'static str) {
     let l = labels(&c);
     assert!(l.contains(&"by:w1".to_owned()), "{l:?}");
     assert!(l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
+    std::fs::write(&gate, "").unwrap();
     let c = lab
         .until_card(&id, "review", |c| c["column"] == "review")
         .await;
@@ -1271,6 +1273,7 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
     // A validate pass: the card is in the role column, then in `qa`.
     let head = lab.branch("ter-a", "next", &[("OK", "yes\n")]);
     let a = lab.card("by role", "ter-a").await;
+    let gate = hold_jobs(&lab).await;
     let r = lab
         .td
         .post_as(
@@ -1282,6 +1285,7 @@ async fn the_job_queue_finds_its_columns_by_role_then_by_name(flow: &'static str
     assert_eq!(r.status, 201, "{}", r.body);
     lab.until_card(&a, "checking", |c| c["column"] == "checking")
         .await;
+    std::fs::write(&gate, "").unwrap();
     lab.until_card(&a, "qa", |c| c["column"] == "qa").await;
     // A merge pass: the name `accepted` is the fallback.
     let head = lab.branch("ter-c", "next", &[("OK", "yes\n")]);
@@ -1320,6 +1324,7 @@ async fn validate_replaces_stale_validation_and_by_labels(flow: &'static str) {
     let l = labels(&seeded);
     assert!(l.contains(&"by:w9".to_owned()), "{seeded}");
     assert!(l.contains(&"validation:running".to_owned()), "{seeded}");
+    let gate = hold_jobs(&lab).await;
     let r = lab
         .td
         .post_as(
@@ -1349,6 +1354,7 @@ async fn validate_replaces_stale_validation_and_by_labels(flow: &'static str) {
     assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
     assert_eq!(by_of(&c), ["by:w1"], "{c}");
     assert_eq!(validation_of(&c).len(), 1, "{c}");
+    std::fs::write(&gate, "").unwrap();
     // The pass: no validation label, the assignee cleared, one by:w1.
     let c = lab
         .until_card(&id, "review", |c| c["column"] == "review")
@@ -1375,6 +1381,7 @@ async fn an_admin_validate_keeps_the_workers_by_label(flow: &'static str) {
         .ok();
     let seeded = lab.card_of(&id).await;
     assert!(labels(&seeded).contains(&"by:w1".to_owned()), "{seeded}");
+    let gate = hold_jobs(&lab).await;
     let r = lab
         .td
         .post_as(
@@ -1400,6 +1407,7 @@ async fn an_admin_validate_keeps_the_workers_by_label(flow: &'static str) {
         .filter(|l| l.starts_with("validation:"))
         .count();
     assert_eq!(validation, 1, "{c}");
+    std::fs::write(&gate, "").unwrap();
     let c = lab
         .until_card(&id, "review", |c| c["column"] == "review")
         .await;
@@ -2484,6 +2492,24 @@ async fn a_cancelled_merge_job_does_not_push() {
     );
     assert!(log.contains(&v), "the validate job did not run: {log}");
     assert_eq!(git(&lab.origin, &["rev-parse", "next"]), before);
+}
+
+/// Hold each job of project `p` until the test writes the returned gate
+/// file, then run the lab recipe. A test that checks the card while its job
+/// is queued or running holds the job: with `board_flow = rules` the rule
+/// engine can lag behind the job, so a fast job can pass before the test
+/// sees the card in `validating` (TER-170 merge fix).
+async fn hold_jobs(lab: &Lab) -> PathBuf {
+    let gate = lab._dirs.path().join("gate");
+    set_recipe(
+        lab,
+        &format!(
+            "while ! test -f '{}'; do sleep 0.05; done; test -f OK",
+            gate.display()
+        ),
+    )
+    .await;
+    gate
 }
 
 /// Set the recipe of project `p`, with the lab's work dir.
