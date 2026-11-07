@@ -1013,6 +1013,26 @@ impl ConfigRepo {
         }
         Ok(())
     }
+
+    /// Write only the export files that are not in the repo, and remove
+    /// none: a pulled export waits, and its files stay as pulled
+    /// (TER-193: else a project of this instance never reaches `export/`
+    /// while a pull waits). The answer is the paths written.
+    pub fn write_export_new(&self, files: &[ExportFile]) -> ApiResult<Vec<String>> {
+        let mut written = Vec::new();
+        for f in files {
+            let path = self.dir.join(&f.path);
+            if path.exists() {
+                continue;
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
+            }
+            std::fs::write(&path, &f.content).map_err(|e| io_error(&path, e))?;
+            written.push(f.path.clone());
+        }
+        Ok(written)
+    }
 }
 
 /// A secrets file of the export: `export/secrets/<scope>.toml`.
