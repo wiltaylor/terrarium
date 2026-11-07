@@ -8,7 +8,13 @@
 //! | Level | The agent gets |
 //! |---|---|
 //! | `use` | the brokers: the git credential helper and the ssh-agent socket |
-//! | `read` | `use`, the env vars at start, and `terrarium secret get` |
+//! | `run` | `use`, and the value in `terrarium run -e KEY=@secret:<name>` on the named targets |
+//! | `read` | `run` on any target, the env vars at start, and `terrarium secret get` |
+//!
+//! A `run` grant names one or more targets (TER-142). The daemon resolves
+//! the value when a run starts, only on one of them, and puts it into the
+//! env of the remote process. It gives no env var at the start and no
+//! `secret get`.
 //!
 //! The effective grants of an agent ([`effective`]) are its own grants and
 //! the grants of its project, one entry for each secret, with the highest
@@ -32,12 +38,15 @@ use crate::error::{ApiError, ApiResult};
 /// The env var that a granted `github_token` with no `env` name sets.
 pub const GH_TOKEN: &str = "GH_TOKEN";
 
-/// The level of a grant. `Read` is higher than `Use`.
+/// The level of a grant: `Use` < `Run` < `Read`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Level {
     /// The brokers only. The agent cannot see the value.
     Use,
+    /// `Use`, and the value in the env of `terrarium run` on the targets
+    /// of the grant (TER-142). No env var at the start, no `secret get`.
+    Run,
     /// The brokers, the env vars, and `terrarium secret get`.
     Read,
 }
@@ -46,6 +55,7 @@ impl Level {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Use => "use",
+            Self::Run => "run",
             Self::Read => "read",
         }
     }
@@ -53,6 +63,7 @@ impl Level {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "use" => Some(Self::Use),
+            "run" => Some(Self::Run),
             "read" => Some(Self::Read),
             _ => None,
         }
@@ -372,8 +383,77 @@ pub struct Grant {
     pub level: Level,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    /// The targets of a `run` grant, sorted. Empty for the other levels.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
     pub created_by: String,
     pub created_at: String,
+}
+
+/// At most this many targets on one `run` grant.
+pub const MAX_RUN_TARGETS: usize = 32;
+
+/// Check the targets of a grant at `level`: a `run` grant needs 1 to
+/// [`MAX_RUN_TARGETS`] target names, the other levels none. The answer is
+/// sorted with no repeat. This checks the shape only; the caller checks
+/// that each target exists ([`check_targets_exist`]).
+pub fn check_run_targets(level: Level, targets: &[String]) -> ApiResult<Vec<String>> {
+    if level != Level::Run {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(ApiError::invalid(format!(
+            "`targets` names the targets of a `run` grant; a `{level}` grant takes none"
+        )));
+    }
+    let mut out: Vec<String> = targets.iter().map(|t| t.trim().to_owned()).collect();
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        return Err(ApiError::invalid(
+            "a `run` grant names the targets where the daemon may inject the value: give one \
+             or more in `targets`",
+        ));
+    }
+    if out.len() > MAX_RUN_TARGETS {
+        return Err(ApiError::invalid(format!(
+            "a `run` grant names at most {MAX_RUN_TARGETS} targets; it got {}",
+            out.len()
+        )));
+    }
+    for t in &out {
+        crate::store::check_name("target", t)?;
+    }
+    Ok(out)
+}
+
+/// Each of `targets` exists, and a project target belongs to the project
+/// of the grantee.
+pub fn check_targets_exist(conn: &Connection, project: &str, targets: &[String]) -> ApiResult<()> {
+    for name in targets {
+        let row = crate::store::targets::find(conn, name)?
+            .ok_or_else(|| ApiError::not_found(format!("no target `{name}`")))?;
+        if let Some(p) = &row.def.project
+            && p != project
+        {
+            return Err(ApiError::forbidden(format!(
+                "target `{name}` belongs to project `{p}`; a grant to an agent of `{project}` \
+                 cannot name it"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The JSON of the `targets` column: NULL with no target.
+fn targets_column(targets: &[String]) -> Option<String> {
+    (!targets.is_empty()).then(|| serde_json::to_string(targets).unwrap_or_default())
+}
+
+/// Read the `targets` column.
+fn targets_of(v: Option<String>) -> Vec<String> {
+    v.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 /// Who may hold a grant of `secret`: a global secret goes to any agent or
@@ -398,6 +478,8 @@ pub struct NewGrant<'a> {
     /// `None`: [`Level::default_for`] the kind.
     pub level: Option<Level>,
     pub env: Option<&'a str>,
+    /// The targets of a `run` grant ([`check_run_targets`]).
+    pub targets: &'a [String],
     /// The actor label.
     pub by: &'a str,
 }
@@ -419,18 +501,22 @@ pub fn put(conn: &Connection, secret: &SecretInfo, g: &NewGrant<'_>) -> ApiResul
             check_env_name(&name)?;
         }
     }
+    let targets = check_run_targets(level, g.targets)?;
     let key = g.grantee.key();
     let now = crate::db::now();
+    let tcol = targets_column(&targets);
     let n = conn.execute(
-        "UPDATE secret_grants SET level = ?3, env = ?4, created_by = ?5, created_at = ?6
+        "UPDATE secret_grants SET level = ?3, env = ?4, created_by = ?5, created_at = ?6,
+                                  targets = ?7
          WHERE secret_id = ?1 AND grantee = ?2",
-        params![secret.id, key, level.as_str(), g.env, g.by, now],
+        params![secret.id, key, level.as_str(), g.env, g.by, now, tcol],
     )?;
     if n == 0 {
         conn.execute(
-            "INSERT INTO secret_grants (secret_id, grantee, level, env, created_by, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![secret.id, key, level.as_str(), g.env, g.by, now],
+            "INSERT INTO secret_grants
+                 (secret_id, grantee, level, env, created_by, created_at, targets)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![secret.id, key, level.as_str(), g.env, g.by, now, tcol],
         )?;
     }
     Ok((
@@ -441,6 +527,7 @@ pub fn put(conn: &Connection, secret: &SecretInfo, g: &NewGrant<'_>) -> ApiResul
             grantee_label: g.grantee.label(),
             level,
             env: g.env.map(str::to_owned),
+            targets,
             created_by: g.by.to_owned(),
             created_at: now,
         },
@@ -461,7 +548,7 @@ pub fn delete(conn: &Connection, secret: &SecretInfo, grantee: &str) -> ApiResul
 /// The grants of one secret, by grantee.
 pub fn list(conn: &Connection, secret: &SecretInfo) -> ApiResult<Vec<Grant>> {
     let mut stmt = conn.prepare(
-        "SELECT grantee, level, env, created_by, created_at FROM secret_grants
+        "SELECT grantee, level, env, created_by, created_at, targets FROM secret_grants
          WHERE secret_id = ?1 ORDER BY grantee",
     )?;
     let rows = stmt
@@ -472,18 +559,25 @@ pub fn list(conn: &Connection, secret: &SecretInfo) -> ApiResult<Vec<Grant>> {
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rows.into_iter()
-        .map(|(grantee, level, env, created_by, created_at)| {
+        .map(|(grantee, level, env, created_by, created_at, targets)| {
+            let level = Level::parse(&level).unwrap_or(Level::Use);
             Ok(Grant {
                 scope: secret.scope.clone(),
                 name: secret.name.clone(),
                 grantee_label: label_of(conn, &grantee)?,
                 grantee,
-                level: Level::parse(&level).unwrap_or(Level::Use),
+                level,
                 env,
+                targets: if level == Level::Run {
+                    targets_of(targets)
+                } else {
+                    Vec::new()
+                },
                 created_by,
                 created_at,
             })
@@ -523,6 +617,11 @@ pub struct Effective {
     /// the project's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    /// With the level `run`: the targets where `terrarium run` may get the
+    /// value, the union of the `run` grants. Empty for `use` and `read`
+    /// (a `read` grant has no target limit).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
     /// The plain fields.
     pub fields: Map<String, Value>,
     /// The names of the secret fields.
@@ -538,7 +637,7 @@ pub struct Effective {
 /// for each secret, the project secrets first, then by name.
 pub fn effective(conn: &Connection, agent_id: &str, project: &str) -> ApiResult<Vec<Effective>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {cols}, g.grantee, g.level, g.env
+        "SELECT {cols}, g.grantee, g.level, g.env, g.targets
          FROM secret_grants g JOIN secrets s ON s.id = g.secret_id
          WHERE g.grantee IN (?1, ?2) AND (s.scope = 'global' OR s.scope = ?3)",
         cols = super::COLS
@@ -555,11 +654,12 @@ pub fn effective(conn: &Connection, agent_id: &str, project: &str) -> ApiResult<
             let grantee: String = r.get(10)?;
             let level: String = r.get(11)?;
             let env: Option<String> = r.get(12)?;
-            Ok((grantee, level, env, info))
+            let targets: Option<String> = r.get(13)?;
+            Ok((grantee, level, env, targets, info))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut by_id: BTreeMap<String, (Effective, Option<String>, Option<String>)> = BTreeMap::new();
-    for (grantee, level, env, info) in rows {
+    for (grantee, level, env, targets, info) in rows {
         let level = Level::parse(&level).unwrap_or(Level::Use);
         let own = grantee == agent_key;
         let e = by_id.entry(info.id.clone()).or_insert_with(|| {
@@ -571,6 +671,7 @@ pub fn effective(conn: &Connection, agent_id: &str, project: &str) -> ApiResult<
                     kind: info.kind,
                     level,
                     env: None,
+                    targets: Vec::new(),
                     fields: info.fields.clone(),
                     secret_fields: info.secret_fields.clone(),
                     has_value: info.has_value,
@@ -581,6 +682,9 @@ pub fn effective(conn: &Connection, agent_id: &str, project: &str) -> ApiResult<
             )
         });
         e.0.level = e.0.level.max(level);
+        if level == Level::Run {
+            e.0.targets.extend(targets_of(targets));
+        }
         e.0.via
             .push(if own { "agent" } else { "project" }.to_owned());
         // An env name counts only on a `read` grant.
@@ -596,6 +700,13 @@ pub fn effective(conn: &Connection, agent_id: &str, project: &str) -> ApiResult<
         .map(|(mut e, own_env, project_env)| {
             e.env = own_env.or(project_env);
             e.via.sort();
+            // The targets limit only a `run` level; a `read` grant has none.
+            if e.level == Level::Run {
+                e.targets.sort();
+                e.targets.dedup();
+            } else {
+                e.targets.clear();
+            }
             e
         })
         .collect();
@@ -905,9 +1016,125 @@ pub(crate) mod tests {
                 grantee: &g,
                 level,
                 env,
+                targets: &[],
                 by: "operator",
             },
         )
+    }
+
+    pub(crate) fn grant_run(
+        c: &Connection,
+        s: &SecretInfo,
+        grantee: &str,
+        targets: &[&str],
+    ) -> ApiResult<(Grant, bool)> {
+        let g = parse_grantee(c, grantee)?;
+        let targets: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
+        put(
+            c,
+            s,
+            &NewGrant {
+                grantee: &g,
+                level: Some(Level::Run),
+                env: None,
+                targets: &targets,
+                by: "operator",
+            },
+        )
+    }
+
+    #[test]
+    fn levels_order_use_run_read() {
+        assert!(Level::Use < Level::Run && Level::Run < Level::Read);
+        assert_eq!(Level::parse("run"), Some(Level::Run));
+        assert_eq!(Level::Run.as_str(), "run");
+        assert_eq!(
+            serde_json::to_value(Level::Run).unwrap(),
+            serde_json::json!("run")
+        );
+    }
+
+    /// TER-142: a `run` grant names its targets; it gives no env var at
+    /// the start; the targets of the agent's and the project's `run`
+    /// grants add up, and a `read` grant lifts the limit.
+    #[test]
+    fn run_grants_name_targets_and_give_no_env() {
+        let c = db();
+        let k = MasterKey::generate();
+        let s = secret(
+            &c,
+            &k,
+            "p",
+            "deploy",
+            Kind::ApiKey,
+            json!({"fields": {"value": "dpl_8sK2mQ7vX4tR9wL3nB6yH1"}}),
+        );
+        // `run` needs targets; the other levels take none.
+        let e = grant_run(&c, &s, "agent:p/a", &[]).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Invalid, "{}", e.message);
+        let g = parse_grantee(&c, "agent:p/a").unwrap();
+        let e = put(
+            &c,
+            &s,
+            &NewGrant {
+                grantee: &g,
+                level: Some(Level::Read),
+                env: None,
+                targets: &["box".to_owned()],
+                by: "operator",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Invalid, "{}", e.message);
+        // An env var needs `read`, also on `run`.
+        let e = put(
+            &c,
+            &s,
+            &NewGrant {
+                grantee: &g,
+                level: Some(Level::Run),
+                env: Some("DEPLOY"),
+                targets: &["box".to_owned()],
+                by: "operator",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Invalid, "{}", e.message);
+        assert!(grant_run(&c, &s, "agent:p/a", &["Bad Name"]).is_err());
+
+        let (g, created) = grant_run(&c, &s, "agent:p/a", &["web", "box", "box"]).unwrap();
+        assert!(created);
+        assert_eq!(g.level, Level::Run);
+        assert_eq!(g.targets, ["box", "web"]);
+        assert_eq!(list(&c, &s).unwrap()[0].targets, ["box", "web"]);
+        grant_run(&c, &s, "project:p", &["ci"]).unwrap();
+        let e = find(&c, AGENT, "p", "deploy").unwrap().unwrap();
+        assert_eq!(e.level, Level::Run);
+        assert_eq!(e.targets, ["box", "ci", "web"]);
+        // No env var and no git host at the start.
+        let l = launch(&c, &k, AGENT, "p", &Default::default()).unwrap();
+        assert!(l.env.is_empty(), "{l:?}");
+        // A `read` grant of the project lifts the target limit.
+        grant(&c, &s, "project:p", Some(Level::Read), None).unwrap();
+        let e = find(&c, AGENT, "p", "deploy").unwrap().unwrap();
+        assert_eq!(e.level, Level::Read);
+        assert!(e.targets.is_empty());
+        // Back to `use`: the targets go from the row.
+        grant(&c, &s, "agent:p/a", Some(Level::Use), None).unwrap();
+        let row = list(&c, &s)
+            .unwrap()
+            .into_iter()
+            .find(|g| g.grantee == format!("agent:{AGENT}"))
+            .unwrap();
+        assert!(row.targets.is_empty());
+        let raw: Option<String> = c
+            .query_row(
+                "SELECT targets FROM secret_grants WHERE grantee = ?1",
+                [format!("agent:{AGENT}")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, None);
     }
 
     #[test]

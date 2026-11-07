@@ -35,6 +35,14 @@ describe("ephemeral agents in the mock", () => {
     expect(eph.spawn?.owner_name).toBe("lead");
   });
 
+  it("lists the card agents with `card`, and the card names its agent (TER-75)", async () => {
+    const api = mock();
+    const cardAgents = (await api.agents.list("terrarium", { card: true })).filter((a) => a.ephemeral);
+    expect(cardAgents.map((a) => [a.name, a.current_card])).toEqual([["lead-worker-3", "TER-13"]]);
+    const card = await api.cards.get("TER-13");
+    expect(card).toMatchObject({ agent_name: "lead-worker-3" });
+  });
+
   it("spawns with the task as the first turn, and cancels with a mail to the owner", async () => {
     const api = mock();
     const s = await api.agents.spawn("terrarium/lead", { template: "worker", task: "Count the files\nin src" });
