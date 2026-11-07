@@ -429,6 +429,13 @@ pub enum ProjectCmd {
         /// a duration (`15m`, `1h`), `off`, or `default` (15m)
         #[arg(long)]
         idle_alert: Option<String>,
+        /// The GitHub login of the GitHub author gate (operator only).
+        /// Repeat it for each login: the list replaces the whole list
+        #[arg(long = "github-author", value_name = "LOGIN")]
+        github_author: Vec<String>,
+        /// Empty the GitHub author gate (operator only): no gate
+        #[arg(long = "github-authors-clear", conflicts_with = "github_author")]
+        github_authors_clear: bool,
     },
     /// Delete a project (sysadmin)
     Rm {
