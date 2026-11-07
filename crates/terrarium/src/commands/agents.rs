@@ -259,7 +259,10 @@ async fn ls(ctx: &Ctx, all_projects: bool, ephemeral: bool) -> anyhow::Result<()
         // project the agent can see, with the same `include`.
         let mut out = Vec::new();
         for p in ctx.api.list("/api/projects", vec![], None).await? {
-            let q = query([("project", Some(field(&p, "name"))), ("include", include.clone())]);
+            let q = query([
+                ("project", Some(field(&p, "name"))),
+                ("include", include.clone()),
+            ]);
             out.extend(ctx.api.list("/api/agents", q, None).await?);
         }
         out

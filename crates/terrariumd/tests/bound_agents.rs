@@ -476,7 +476,11 @@ async fn a_bound_agent_shows_with_its_card() {
         .ok()
         .clone();
     assert!(
-        !list.as_array().unwrap().iter().any(|x| x["id"] == eph.as_str()),
+        !list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == eph.as_str()),
         "{list}"
     );
 }
