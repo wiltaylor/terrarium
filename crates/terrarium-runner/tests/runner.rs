@@ -1144,6 +1144,7 @@ async fn spawn_err(config: RunnerConfig, spec: LaunchSpec) -> terrarium_runner::
         busy_screen: false,
         exit_pause: Duration::ZERO,
         startup_hook: false,
+        submit_pause: Duration::ZERO,
     });
     match Runner::spawn(config, adapter, spec, Arc::new(NoHandler)).await {
         Ok(runner) => {
