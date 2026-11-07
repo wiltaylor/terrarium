@@ -644,7 +644,13 @@ mod tests {
         // The daemon is gone: its run and the report are never used again.
         std::mem::forget(run);
         std::mem::forget(report);
-        let r = kill_file_with(starter.clone(), Some("p/jobs".into()), &job_pidfile(&job), 1).await;
+        let r = kill_file_with(
+            starter.clone(),
+            Some("p/jobs".into()),
+            &job_pidfile(&job),
+            1,
+        )
+        .await;
         assert!(r.get("error").is_none(), "{r}");
         assert!(r["term"].as_array().unwrap().contains(&json!(child)), "{r}");
         assert_eq!(r["left"], json!([]), "{r}");

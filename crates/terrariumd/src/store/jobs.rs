@@ -1228,10 +1228,25 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&mut conn).unwrap();
         for (id, state, started, ended) in [
-            ("J1", "cancelled", Some("2026-11-07T05:00:00.000Z"), "2026-11-07T05:40:00.000Z"),
-            ("J2", "cancelled", Some("2026-11-07T04:00:00.000Z"), "2026-11-07T04:10:00.000Z"),
+            (
+                "J1",
+                "cancelled",
+                Some("2026-11-07T05:00:00.000Z"),
+                "2026-11-07T05:40:00.000Z",
+            ),
+            (
+                "J2",
+                "cancelled",
+                Some("2026-11-07T04:00:00.000Z"),
+                "2026-11-07T04:10:00.000Z",
+            ),
             ("J3", "cancelled", None, "2026-11-07T05:41:00.000Z"),
-            ("J4", "failed", Some("2026-11-07T05:00:00.000Z"), "2026-11-07T05:42:00.000Z"),
+            (
+                "J4",
+                "failed",
+                Some("2026-11-07T05:00:00.000Z"),
+                "2026-11-07T05:42:00.000Z",
+            ),
         ] {
             conn.execute(
                 "INSERT INTO jobs (id, project, card, kind, repo, branch, state, created_by,
