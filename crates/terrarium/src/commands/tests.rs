@@ -279,7 +279,10 @@ async fn project_set_github_authors() {
         false,
         &["project", "show", "ops"],
         vec![
-            (200, json!({"name": "ops", "card_prefix": "OPS", "source": "api"})),
+            (
+                200,
+                json!({"name": "ops", "card_prefix": "OPS", "source": "api"}),
+            ),
             (200, json!([])),
             (200, json!([])),
             (200, json!([])),
