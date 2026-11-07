@@ -310,6 +310,20 @@ pub fn running(conn: &Connection) -> ApiResult<Vec<Job>> {
     Ok(rows)
 }
 
+/// The jobs that ran and got a cancel at `since` or later, in all
+/// projects. A cancelled job drains until the kill of its step ended
+/// (TER-115), so after a daemon restart these may still have processes
+/// on their target (TER-123).
+pub fn cancelled_since(conn: &Connection, since: &str) -> ApiResult<Vec<Job>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {COLS} FROM jobs
+         WHERE state = 'cancelled' AND started_at IS NOT NULL AND ended_at >= ?1
+         ORDER BY started_at"
+    ))?;
+    let rows = st.query_map([since], row)?.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// The address-based key of a target. Host-agent names are resolved to
 /// stable IDs by `host_of`, which has access to the host registry.
 pub fn host_key(name: &str, def: &TargetDef) -> String {
@@ -1206,6 +1220,34 @@ pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// TER-123: only jobs that started and got their cancel at `since` or
+    /// later count as maybe draining.
+    #[test]
+    fn cancelled_since_takes_recent_cancels_of_started_jobs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        for (id, state, started, ended) in [
+            ("J1", "cancelled", Some("2026-11-07T05:00:00.000Z"), "2026-11-07T05:40:00.000Z"),
+            ("J2", "cancelled", Some("2026-11-07T04:00:00.000Z"), "2026-11-07T04:10:00.000Z"),
+            ("J3", "cancelled", None, "2026-11-07T05:41:00.000Z"),
+            ("J4", "failed", Some("2026-11-07T05:00:00.000Z"), "2026-11-07T05:42:00.000Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, created_by,
+                                   created_at, started_at, ended_at)
+                 VALUES (?1, 'p', 'C', 'validate', 'app', 'b', ?2, 't', 't', ?3, ?4)",
+                params![id, state, started, ended],
+            )
+            .unwrap();
+        }
+        let got: Vec<String> = cancelled_since(&conn, "2026-11-07T05:00:00.000Z")
+            .unwrap()
+            .into_iter()
+            .map(|j| j.id)
+            .collect();
+        assert_eq!(got, ["J1"]);
+    }
 
     fn job(id: &str, project: &str, kind: JobKind, repo: &str, at: &str) -> Job {
         Job {

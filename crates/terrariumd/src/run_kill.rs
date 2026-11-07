@@ -18,6 +18,11 @@
 //! on a docker or ssh target) gets the same kill before its end goes out
 //! (TER-115).
 //!
+//! The steps of a job of the job queue use one PID file per job
+//! ([`job_pidfile`]), not a new one per run. A daemon that restarts
+//! while a job runs has lost the run, but it can still find that file
+//! and run the same kill on it ([`kill_file`], TER-123).
+//!
 //! A process that leaves both the group and the session (`setsid` in the
 //! command) is not found. A kill in the moment before the wrapper wrote its
 //! file finds no file and falls back to the client kill.
@@ -103,10 +108,15 @@ pub type Report = watch::Receiver<Option<Value>>;
 /// Does a run of `cmd` on `def` go through the wrapper? An interactive
 /// login shell (no argv) and a vmlab target do not.
 pub fn wraps(def: &TargetDef, cmd: &RemoteCmd) -> bool {
+    kind_wraps(def) && !cmd.argv.is_empty()
+}
+
+/// Do runs with an argv on `def` go through the wrapper?
+pub fn kind_wraps(def: &TargetDef) -> bool {
     matches!(
         def.kind,
         TargetKind::Host | TargetKind::Docker | TargetKind::Ssh
-    ) && !cmd.argv.is_empty()
+    )
 }
 
 /// `cmd` behind the wrapper with this PID file.
@@ -146,6 +156,15 @@ pub fn new_pidfile() -> String {
     format!("{PID_DIR}/terrarium-run-{}.pid", ulid::Ulid::new())
 }
 
+/// The PID file of the steps of job `job` on its target (TER-123). The
+/// steps of a job run one at a time, so one file serves them all, and a
+/// daemon that restarts finds the file of a job that was running. Only
+/// the letters and digits of the ID go into the path.
+pub fn job_pidfile(job: &str) -> String {
+    let id: String = job.chars().filter(char::is_ascii_alphanumeric).collect();
+    format!("{PID_DIR}/terrarium-run-job-{id}.pid")
+}
+
 /// Parse the output of [`KILL`].
 pub fn parse(stdout: &str) -> Value {
     let pids = |rest: &str| -> Vec<u32> {
@@ -173,6 +192,17 @@ pub fn start(
     def: &TargetDef,
     cmd: &RemoteCmd,
 ) -> ApiResult<(Running, Option<Report>)> {
+    start_named(state, def, cmd, new_pidfile())
+}
+
+/// [`start`] with this PID file on the target (a job step:
+/// [`job_pidfile`]).
+pub fn start_named(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+    pidfile: String,
+) -> ApiResult<(Running, Option<Report>)> {
     if !wraps(def, cmd) {
         return Ok((start_cmd(state, def, cmd)?, None));
     }
@@ -184,7 +214,7 @@ pub fn start(
             .ok_or_else(|| ApiError::internal("the daemon is shutting down"))?;
         start_cmd(&state, &d, &c)
     };
-    start_with(starter, cmd, GRACE_SECS)
+    start_with_file(starter, cmd, GRACE_SECS, pidfile)
 }
 
 /// [`start`] with any way to start a command on the target.
@@ -192,7 +222,19 @@ pub fn start_with<F>(start: F, cmd: &RemoteCmd, grace: u64) -> ApiResult<(Runnin
 where
     F: Fn(RemoteCmd) -> ApiResult<Running> + Send + Sync + 'static,
 {
-    let pidfile = new_pidfile();
+    start_with_file(start, cmd, grace, new_pidfile())
+}
+
+/// [`start_with`] with this PID file on the target.
+pub fn start_with_file<F>(
+    start: F,
+    cmd: &RemoteCmd,
+    grace: u64,
+    pidfile: String,
+) -> ApiResult<(Running, Option<Report>)>
+where
+    F: Fn(RemoteCmd) -> ApiResult<Running> + Send + Sync + 'static,
+{
     let inner = start(wrap(cmd, &pidfile))?;
     let (tx, rx) = watch::channel(None);
     let killer = kill_cmd(cmd, &pidfile, grace);
@@ -268,26 +310,7 @@ where
         };
         // Read the run's output meanwhile: a host session that nobody
         // reads is released, and that kills it at once, without TERM.
-        let run_kill = async {
-            match start(killer.clone()) {
-                Ok(r) => {
-                    let wait = Duration::from_secs(killer.timeout_secs.unwrap_or(60) + 5);
-                    match tokio::time::timeout(wait, r.collect(64 * 1024)).await {
-                        Ok(c) => {
-                            let out = String::from_utf8_lossy(&c.stdout).into_owned();
-                            if c.end.as_ref().is_some_and(crate::executor::End::success) {
-                                parse(&out)
-                            } else {
-                                json!({"error": format!("the kill command failed: {:?} {}",
-                                    c.end, String::from_utf8_lossy(&c.stderr).trim())})
-                            }
-                        }
-                        Err(_) => json!({"error": "the kill command timed out"}),
-                    }
-                }
-                Err(e) => json!({"error": format!("cannot start the kill command: {}", e.message)}),
-            }
-        };
+        let run_kill = run_killer(&start, &killer);
         tokio::pin!(run_kill);
         let mut open = true;
         let r = loop {
@@ -313,6 +336,64 @@ where
         events: erx,
         ctl: ctx,
     }
+}
+
+/// Run `killer` (a [`kill_cmd`]) through `start` and read its report.
+/// An error report when it cannot start, fails, or times out.
+async fn run_killer<F>(start: &F, killer: &RemoteCmd) -> Value
+where
+    F: Fn(RemoteCmd) -> ApiResult<Running>,
+{
+    match start(killer.clone()) {
+        Ok(r) => {
+            let wait = Duration::from_secs(killer.timeout_secs.unwrap_or(60) + 5);
+            match tokio::time::timeout(wait, r.collect(64 * 1024)).await {
+                Ok(c) => {
+                    let out = String::from_utf8_lossy(&c.stdout).into_owned();
+                    if c.end.as_ref().is_some_and(crate::executor::End::success) {
+                        parse(&out)
+                    } else {
+                        json!({"error": format!("the kill command failed: {:?} {}",
+                            c.end, String::from_utf8_lossy(&c.stderr).trim())})
+                    }
+                }
+                Err(_) => json!({"error": "the kill command timed out"}),
+            }
+        }
+        Err(e) => json!({"error": format!("cannot start the kill command: {}", e.message)}),
+    }
+}
+
+/// End what still runs of an earlier run on `def` from its PID file,
+/// without the run itself: the run of a daemon that restarted (TER-123).
+/// `holder` as in the run. The report as from a kill; its `pid` is null
+/// when the file is not there.
+pub async fn kill_file(
+    state: &Shared,
+    def: &TargetDef,
+    holder: Option<String>,
+    pidfile: &str,
+) -> Value {
+    let (state, d) = (state.clone(), def.clone());
+    kill_file_with(
+        move |c: RemoteCmd| start_cmd(&state, &d, &c),
+        holder,
+        pidfile,
+        GRACE_SECS,
+    )
+    .await
+}
+
+/// [`kill_file`] with any way to start a command on the target.
+pub async fn kill_file_with<F>(start: F, holder: Option<String>, pidfile: &str, grace: u64) -> Value
+where
+    F: Fn(RemoteCmd) -> ApiResult<Running>,
+{
+    let base = RemoteCmd {
+        holder,
+        ..RemoteCmd::default()
+    };
+    run_killer(&start, &kill_cmd(&base, pidfile, grace)).await
 }
 
 /// Wait for the report of a kill, at most until the kill command times
@@ -513,6 +594,64 @@ mod tests {
         assert!(r["term"].as_array().unwrap().contains(&json!(child)), "{r}");
         assert_eq!(r["left"], json!([]), "{r}");
         assert!(!alive(child), "the child {child} still runs: {r}");
+    }
+
+    /// TER-123: a job step over ssh whose daemon is gone (its run is
+    /// forgotten: no kill, no timeout, nobody reads it). A new daemon
+    /// knows only the job ID: the kill on the job's PID file ends the
+    /// session on the target, children too. A second kill finds no file.
+    #[tokio::test]
+    async fn a_lost_job_run_is_killed_from_its_job_pidfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join("ssh");
+        std::fs::write(
+            &ssh,
+            "#!/bin/sh\nfor a; do last=$a; done\n( exec setsid sh -c \"$last\" ) &\nwait $!\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let known = dir.path().join("known_hosts");
+        let mut def: TargetDef =
+            toml::from_str("kind = \"ssh\"\naddress = \"build@box\"\n").unwrap();
+        def.name = "remote".into();
+        assert!(kind_wraps(&def));
+        let ssh_bin = ssh.display().to_string();
+        let starter = move |c: RemoteCmd| {
+            let plan = ssh_plan(&ssh_bin, &def, None, &known, &c)?;
+            let mut p = tokio::process::Command::new(&plan.program);
+            p.args(&plan.args);
+            Ok(pump_process(p, plan.stdin_prefix, None, None))
+        };
+        let child_file = dir.path().join("child");
+        let cmd = RemoteCmd {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "trap '' TERM; sleep 300 & echo $! > \"$1\"; wait".into(),
+                "run".into(),
+                child_file.display().to_string(),
+            ],
+            holder: Some("p/jobs".into()),
+            ..RemoteCmd::default()
+        };
+        let job = ulid::Ulid::new().to_string();
+        let pidfile = job_pidfile(&job);
+        assert_eq!(pidfile, format!("/tmp/terrarium-run-job-{job}.pid"));
+        assert_eq!(job_pidfile("a/../b c"), "/tmp/terrarium-run-job-abc.pid");
+        let (run, report) = start_with_file(starter.clone(), &cmd, 1, pidfile.clone()).unwrap();
+        let child = read_pid(&child_file).await;
+        assert!(alive(child));
+        // The daemon is gone: its run and the report are never used again.
+        std::mem::forget(run);
+        std::mem::forget(report);
+        let r = kill_file_with(starter.clone(), Some("p/jobs".into()), &job_pidfile(&job), 1).await;
+        assert!(r.get("error").is_none(), "{r}");
+        assert!(r["term"].as_array().unwrap().contains(&json!(child)), "{r}");
+        assert_eq!(r["left"], json!([]), "{r}");
+        assert!(!alive(child), "the child {child} still runs: {r}");
+        assert!(!Path::new(&pidfile).exists(), "{r}");
+        let again = kill_file_with(starter, None, &pidfile, 1).await;
+        assert_eq!(again["pid"], Value::Null, "{again}");
     }
 
     /// A run that ends by itself reports no kill.

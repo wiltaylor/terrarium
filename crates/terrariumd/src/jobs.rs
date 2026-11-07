@@ -54,7 +54,13 @@
 //! - The labels `validation:queued` and `validation:running` follow the
 //!   job, so the board shows it.
 //! - A daemon restart loses the runs: each running job fails (`error`)
-//!   and goes through the rerun rule.
+//!   and goes through the rerun rule. Before that, and before the first
+//!   tick, the new daemon ends what still runs of them on their targets
+//!   (TER-123): each step of a job writes its PID to the same file
+//!   ([`crate::run_kill::job_pidfile`]), and [`kill_lost_runs`] runs the
+//!   kill of [`crate::run_kill`] on that file, for the running jobs and
+//!   for the jobs cancelled in the last [`DRAIN_WINDOW_HOURS`] (they may
+//!   still have been draining).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -63,7 +69,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use terrarium_core::config::DeliveryDef;
 
@@ -98,6 +104,9 @@ const STEP_MAX: usize = 64 * 1024;
 const RECIPE_MAX: usize = 1024 * 1024;
 /// The time limit of a prepare, push, or cleanup step.
 const STEP_TIMEOUT: u64 = 900;
+/// How long before a daemon start a cancelled job may have been still
+/// draining: its kill at the start then runs again (TER-123).
+pub const DRAIN_WINDOW_HOURS: i64 = 1;
 
 /// The controls of the running jobs, by job ID, for a cancel. The job IDs
 /// are ULIDs, so one map serves every daemon in a process (the tests).
@@ -180,8 +189,9 @@ pub fn kill(job: &str) {
     }
 }
 
-/// Start the queue: fail the jobs that the last daemon left running, then
-/// tick.
+/// Start the queue: end what still runs on the targets of the jobs that
+/// the last daemon left running ([`kill_lost_runs`]), fail those jobs,
+/// then tick.
 pub fn spawn(state: &Shared) -> JoinHandle<()> {
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
@@ -189,6 +199,7 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             if let Err(e) = prepare_hosts(&state.db, None).await {
                 warn!("cannot initialize stored job host keys: {e}");
             }
+            kill_lost_runs(&state).await;
             match state.db.write("system", jobs::fail_lost).await {
                 Ok(lost) => {
                     for j in lost {
@@ -209,6 +220,76 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
             tokio::time::sleep(TICK).await;
         }
     })
+}
+
+/// TER-123: end the processes that the jobs of the last daemon left on
+/// their targets, before those jobs end and their slots count as free.
+/// For each running job, and each job cancelled in the last
+/// [`DRAIN_WINDOW_HOURS`], run the kill of [`crate::run_kill`] on the PID
+/// file of its steps ([`crate::run_kill::job_pidfile`]) on the delivery
+/// target of its project. The kills run at the same time, each bounded by
+/// the timeout of the kill command. A target that cannot be reached, or
+/// that is not a `host`, `docker`, or `ssh` target, is logged and the job
+/// ends anyway.
+async fn kill_lost_runs(state: &Shared) {
+    let since = (chrono::Utc::now() - chrono::Duration::hours(DRAIN_WINDOW_HOURS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let found = state
+        .db
+        .read(move |c| {
+            let mut out = Vec::new();
+            for j in jobs::running(c)?
+                .into_iter()
+                .chain(jobs::cancelled_since(c, &since)?)
+            {
+                let Some(target) = jobs::delivery(c, &j.project)?.target else {
+                    continue;
+                };
+                match targets::get(c, &target) {
+                    Ok(row) if row.def.project.as_ref().is_none_or(|p| *p == j.project) => {
+                        out.push((j, row.def));
+                    }
+                    _ => warn!(job = %j.id, delivery_target = %target, "cannot kill a lost job run: no such target of its project"),
+                }
+            }
+            Ok(out)
+        })
+        .await;
+    let found = match found {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("cannot read the lost job runs: {e}");
+            return;
+        }
+    };
+    let kills = found.into_iter().filter_map(|(j, def)| {
+        if !crate::run_kill::kind_wraps(&def) {
+            debug!(job = %j.id, "a lost job run on a target without PID files");
+            return None;
+        }
+        let holder = Some(format!("{}/jobs", j.project));
+        Some(async move {
+            let r = crate::run_kill::kill_file(
+                state,
+                &def,
+                holder,
+                &crate::run_kill::job_pidfile(&j.id),
+            )
+            .await;
+            (j.id, r)
+        })
+    });
+    for (job, r) in futures_util::future::join_all(kills).await {
+        if r.get("error").is_some() {
+            warn!(%job, report = %r, "cannot kill a lost job run on its target");
+        } else if r["left"].as_array().is_some_and(|l| !l.is_empty()) {
+            warn!(%job, report = %r, "the kill of a lost job run left processes on the target");
+        } else if r["pid"].is_null() {
+            debug!(%job, "a lost job run had no PID file on its target");
+        } else {
+            info!(%job, report = %r, "killed a lost job run on its target");
+        }
+    }
 }
 
 /// Start a tick now, in the background.
@@ -405,7 +486,8 @@ async fn step(
     cmd: &RemoteCmd,
     max: usize,
 ) -> ApiResult<Collected> {
-    let (running, report) = crate::run_kill::start(state, def, cmd)?;
+    let pidfile = crate::run_kill::job_pidfile(job);
+    let (running, report) = crate::run_kill::start_named(state, def, cmd, pidfile)?;
     set_control(job, Some(running.ctl.clone()));
     // A kill between the check in [`StepCtx::run`] and set_control found
     // the old control or none: kill this step now.
