@@ -3505,7 +3505,19 @@ A template with no `subscription` and no `subscription_pool` takes the
 owner's subscription and pool when the owner runs the same harness, so
 the quota switch (§16.3) covers the ephemeral agent. The operator as owner
 holds every right: a target or secret needs only to exist and be in reach
-of the project. The audit row `agent.spawn` has `rights` (`targets`,
+of the project.
+
+**Template grants** (TER-88). The `grants` of the template (§21.1) go
+through the same owner check as the `grants` of the body, with the same
+syntax, levels, and `run` targets. A refusal is `403 forbidden` (or the
+`422` or `404` above), and its message starts with `template `<name>`:`
+and names the secret. A grant of the body replaces the template's grant
+of the same secret, so a spawn can ask for a lower level than the
+template. Each `secret.grant` row of a template grant has `template`.
+With the operator as owner, a template grant `:run` with no targets is
+`422`: the operator has no run targets to give.
+
+The audit row `agent.spawn` has `rights` (`targets`,
 `leases`, `grants`, no value), `subscription`, and `subscription_pool`.
 The close revokes the leases of the ephemeral agent, and the removal of
 its row deletes its grants, so no right outlives it.
@@ -8098,7 +8110,8 @@ A template:
 |---|---|
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
-| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `card_reminder`, `skills`, `skills_off`, `default_skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` and no `default_skills` when it is `true`, no empty `skills_off`. A template in an answer also has `effective_skills`: the skills that an agent of the template gets now, as on an agent (§6.1). A `system_prompt` over the limit (`TERRARIUM_SYSTEM_PROMPT_MAX`, default 32 KiB) is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `card_reminder`, `skills`, `skills_off`, `default_skills`, `new_session_on_prompt_change`, and the template key `grants` (below). The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` and no `default_skills` when it is `true`, no empty `skills_off`. A template in an answer also has `effective_skills`: the skills that an agent of the template gets now, as on an agent (§6.1). A `system_prompt` over the limit (`TERRARIUM_SYSTEM_PROMPT_MAX`, default 32 KiB) is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec.grants` | The secret grants that an agent of the template gets (TER-88): a list of at most 32 entries, each `<name>` or `<scope>/<name>` with an optional `:use`, `:run`, `:run=<target>,<target>`, or `:read` (the syntax of a spawn's `grants`, §6.10). A bad entry is `422 invalid` with `details.field = "spec"`. Any caller that may change the template may set it: the daemon checks each grant against the user of the template, at the spawn against the owner (§6.10, "Template grants"), at a create against the caller (§21.3). The grants are given at the create or the spawn only: a later change of the template does not change the grants of its agents. |
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. A change of the file by hand adds `1` when the load finds it (also a change of a comment only): one revision is one version of the file. |
 | `source` | `config` (a file of the config repo), or `fleet:<name>` (§18.1; its file is in the config repo too). `api` and `file` are templates from before the files: the first load writes their files and makes them `config`. |
 | `file` | The file in the config repo (§21.5): `templates/<name>.wcl`, or `templates/<project>/<name>.wcl`. `null` until the file is written (a daemon with no config repo). |
@@ -8178,6 +8191,19 @@ are required; each other field of the definition is optional.
    grant rights of each role (§3), and the `policy` rules of F13. A
    template never lets a caller grant a role or a target that it could not
    grant in the body itself.
+4. **Grants** (TER-88). Each entry of the template's `grants` resolves in
+   `project` (the project secret first, then the global one; a missing
+   secret is `404`, a secret of another project `403`). A `run` grant
+   must name its targets, each one that exists and that the project
+   reaches (`422` with none: a create has no owner to take them from).
+   Each secret then needs the caller's right to grant it (§5.2): the
+   operator, a sysadmin, or for a project secret a project_admin of the
+   project. Else `403 forbidden`, with the template and the secret named,
+   and no agent is made. The grants are written with the agent, each with
+   a `secret.grant` audit row that has `template` (`project/name`). A
+   fleet apply that creates an agent from a template (§21.4) runs the same
+   check against the caller of the apply. A create body with `grants` is
+   `422 invalid`: grant a secret with `POST /api/secrets/{scope}/{name}/grants`.
 
 The answer is the agent with `template: {id, name, project, revision}`.
 The daemon copies the values: a later change or delete of the template
@@ -8299,6 +8325,7 @@ type AgentTemplate {
   skills_off: list<utf8>?
   default_skills: bool?
   new_session_on_prompt_change: bool?
+  grants: list<utf8>?
   system_prompt: utf8?
   @child("policy") policy: TemplatePolicy?
 }
