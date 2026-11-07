@@ -280,6 +280,238 @@ pub fn list(conn: &Connection, project: &str, state: Option<JobState>) -> ApiRes
     Ok(rows)
 }
 
+/// The first-attempt numbers of the jobs of one kind, or of all (TER-135).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FirstAttempts {
+    /// Ended first attempts that ran the recipe: `passed + failed`.
+    pub ended: u64,
+    pub passed: u64,
+    /// Failed with `red` (or a timeout). A `conflict` and an `error` never
+    /// ran the tests, so they count in [`JobStats::conflicts`] and
+    /// [`JobStats::errors`] and not here.
+    pub failed: u64,
+    /// `passed / ended`, from 0 to 1. `None` with no ended first attempt.
+    pub pass_rate: Option<f64>,
+}
+
+impl FirstAttempts {
+    fn add(&mut self, passed: bool) {
+        self.ended += 1;
+        if passed {
+            self.passed += 1;
+        } else {
+            self.failed += 1;
+        }
+        self.pass_rate = Some(self.passed as f64 / self.ended as f64);
+    }
+}
+
+/// A test target that failed, and how often (TER-135).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetFails {
+    /// As cargo names it: `-p terrariumd --test jobs`.
+    pub target: String,
+    /// The failed jobs whose tail names the target, all attempts.
+    pub failed: u64,
+    /// Of them, the first attempts.
+    pub first_attempt: u64,
+}
+
+/// A recipe step that failed, and how often (TER-135).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepFails {
+    pub step: String,
+    pub failed: u64,
+}
+
+/// The pass rate of a project's job queue over a window (TER-135).
+///
+/// A job is in the window when its `created_at` is at or after `since`.
+/// A rerun keeps the `created_at` of its first try, so both tries fall in
+/// the same window. The halves of a split batch (`parent` set) are a
+/// search for the failing card: they count in `splits`, not as first
+/// attempts or reruns. A job with outcome `error` could not run (host
+/// agent offline, prepare step failed, push to `next` failed): it says
+/// nothing about test stability, so it counts in `errors`, not as a first
+/// attempt or a rerun.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct JobStats {
+    pub project: String,
+    pub since: String,
+    /// All jobs in the window, in all states.
+    pub jobs: u64,
+    pub first_attempt: FirstAttempts,
+    pub validate: FirstAttempts,
+    pub merge: FirstAttempts,
+    /// Ended reruns (attempt 2 or more): `passed` is a failure that the
+    /// rerun did not repeat.
+    pub reruns: FirstAttempts,
+    /// First attempts that ended in a merge conflict.
+    pub conflicts: u64,
+    /// First attempts and reruns that could not run (outcome `error`).
+    pub errors: u64,
+    pub cancelled: u64,
+    /// Queued or running.
+    pub open: u64,
+    pub splits: u64,
+    /// The failed recipe steps (`test`, `lint`, ...; `timeout` when the job
+    /// was killed), most first.
+    pub failed_steps: Vec<StepFails>,
+    /// The test targets that failed, most first.
+    pub failed_targets: Vec<TargetFails>,
+    /// Failed jobs whose `test` step failed but whose tail names no target:
+    /// the 4000-byte tail clip cut off the `error: N targets failed:`
+    /// header, or the step failed before cargo listed targets.
+    pub untargeted_test_fails: u64,
+}
+
+/// The test targets that a job tail names as failed: the indented lines
+/// after `error: N target(s) failed:`, as cargo `--no-fail-fast` prints
+/// them, without the backticks. In order, without duplicates.
+pub fn failed_targets(tail: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut lines = tail.lines();
+    while let Some(line) = lines.next() {
+        let l = line.trim();
+        let Some(rest) = l.strip_prefix("error: ") else {
+            continue;
+        };
+        let Some(n) = rest
+            .strip_suffix(" targets failed:")
+            .or_else(|| rest.strip_suffix(" target failed:"))
+        else {
+            continue;
+        };
+        if n.parse::<u64>().is_err() {
+            continue;
+        }
+        for item in lines.by_ref() {
+            if !item.starts_with([' ', '\t']) {
+                break;
+            }
+            let t = item.trim().trim_matches('`').trim();
+            if !t.is_empty() && !out.iter().any(|o| o == t) {
+                out.push(t.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// The recipe step that failed in a job tail: the first `error: recipe
+/// `<step>` failed` line (just prints the inner recipe first), else
+/// `timeout` when the job was killed at its timeout.
+pub fn failed_step(tail: &str) -> Option<String> {
+    for line in tail.lines() {
+        if let Some(rest) = line.trim().strip_prefix("error: recipe `")
+            && let Some((step, after)) = rest.split_once('`')
+            && after.trim_start().starts_with("failed")
+        {
+            return Some(step.to_owned());
+        }
+    }
+    tail.contains(", timeout]").then(|| "timeout".to_owned())
+}
+
+/// The pass rate of the jobs of `project` created at or after `since`
+/// (RFC 3339, UTC, as `created_at` is stored).
+pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStats> {
+    let mut st = conn.prepare(
+        "SELECT kind, state, attempt, outcome, parent,
+                CASE WHEN state = 'failed' THEN tail END
+         FROM jobs WHERE project = ?1 AND created_at >= ?2",
+    )?;
+    let rows = st
+        .query_map(params![project, since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut s = JobStats {
+        project: project.to_owned(),
+        since: since.to_owned(),
+        ..JobStats::default()
+    };
+    let mut targets: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut steps: HashMap<String, u64> = HashMap::new();
+    for (kind, state, attempt, outcome, parent, tail) in rows {
+        s.jobs += 1;
+        let state = JobState::parse(&state).unwrap_or(JobState::Failed);
+        let first = attempt <= 1 && parent.is_none();
+        if let Some(tail) = tail.as_deref() {
+            let found = failed_targets(tail);
+            let step = failed_step(tail);
+            if found.is_empty() && step.as_deref() == Some("test") {
+                s.untargeted_test_fails += 1;
+            }
+            for t in found {
+                let e = targets.entry(t).or_default();
+                e.0 += 1;
+                e.1 += u64::from(first);
+            }
+            if let Some(step) = step {
+                *steps.entry(step).or_default() += 1;
+            }
+        }
+        match state {
+            JobState::Queued | JobState::Running => {
+                s.open += 1;
+                continue;
+            }
+            JobState::Cancelled => {
+                s.cancelled += 1;
+                continue;
+            }
+            JobState::Passed | JobState::Failed => {}
+        }
+        if parent.is_some() {
+            s.splits += 1;
+            continue;
+        }
+        if outcome.as_deref() == Some("error") {
+            s.errors += 1;
+            continue;
+        }
+        let passed = state == JobState::Passed;
+        if !first {
+            s.reruns.add(passed);
+            continue;
+        }
+        if outcome.as_deref() == Some("conflict") {
+            s.conflicts += 1;
+            continue;
+        }
+        s.first_attempt.add(passed);
+        match JobKind::parse(&kind) {
+            Some(JobKind::Merge) => s.merge.add(passed),
+            _ => s.validate.add(passed),
+        }
+    }
+    let mut targets: Vec<TargetFails> = targets
+        .into_iter()
+        .map(|(target, (failed, first_attempt))| TargetFails {
+            target,
+            failed,
+            first_attempt,
+        })
+        .collect();
+    targets.sort_by(|a, b| b.failed.cmp(&a.failed).then(a.target.cmp(&b.target)));
+    s.failed_targets = targets;
+    let mut steps: Vec<StepFails> = steps
+        .into_iter()
+        .map(|(step, failed)| StepFails { step, failed })
+        .collect();
+    steps.sort_by(|a, b| b.failed.cmp(&a.failed).then(a.step.cmp(&b.step)));
+    s.failed_steps = steps;
+    Ok(s)
+}
+
 /// The open (queued or running) job of a card.
 pub fn open_of_card(conn: &Connection, card: &str) -> ApiResult<Option<Job>> {
     Ok(conn
@@ -320,7 +552,12 @@ pub fn cancelled_since(conn: &Connection, since: &str) -> ApiResult<Vec<Job>> {
          WHERE state = 'cancelled' AND started_at IS NOT NULL AND ended_at >= ?1
          ORDER BY started_at"
     ))?;
-    let rows = st.query_map([since], row)?.collect::<Result<Vec<_>, _>>()?;
+    let mut rows = st.query_map([since], row)?.collect::<Result<Vec<_>, _>>()?;
+    for job in &mut rows {
+        if let Some(host) = &job.host {
+            job.host = Some(canonical_key(conn, host)?);
+        }
+    }
     Ok(rows)
 }
 
@@ -341,7 +578,8 @@ pub fn host_key(name: &str, def: &TargetDef) -> String {
     name.to_owned()
 }
 
-fn address_key(a: &str) -> String {
+/// The host part of an ssh address: no user, no port, lower case.
+pub fn address_key(a: &str) -> String {
     let a = a.rsplit_once('@').map_or(a, |(_, h)| h);
     if let Ok(ip) = a.parse::<std::net::IpAddr>() {
         return ip.to_string();
@@ -680,7 +918,7 @@ pub fn startable(
 
 /// The host key of the delivery target of `def`. A target that is gone
 /// keeps its name as the key; the job then fails when it runs.
-fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
+pub fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
     let target = def.target.clone().unwrap_or_default();
     let key = match targets::get(conn, &target) {
         Ok(row) => row
@@ -1093,6 +1331,24 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
     Ok(Some(job))
 }
 
+/// Put a running job back in the queue: its target could not be reached
+/// before the recipe started (TER-160). It keeps its attempt and its place
+/// (`created_at`), and `tail` says why it waits. `None` when the job is
+/// not running (a cancel came first).
+pub fn requeue(t: &mut Tx<'_>, id: &str, why: &str) -> ApiResult<Option<Job>> {
+    let n = t.execute(
+        "UPDATE jobs SET state = 'queued', started_at = NULL, host = NULL, tail = ?2
+         WHERE id = ?1 AND state = 'running'",
+        params![id, clip_tail(&format!("waits for its host: {why}"))],
+    )?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let job = get(t, id)?;
+    emit(t, &job, "requeued")?;
+    Ok(Some(job))
+}
+
 /// Cancel an open job.
 pub fn cancel(t: &mut Tx<'_>, id: &str) -> ApiResult<Job> {
     let job = get(t, id)?;
@@ -1180,6 +1436,48 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
         json!({"old": old, "new": def}),
     )?;
     delivery(t, project)
+}
+
+/// The open job of a card, as the card API shows it (TER-158, D4): the
+/// board tile reads its state chip from this, not from labels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardJob {
+    pub id: String,
+    pub kind: JobKind,
+    /// `queued` or `running`.
+    pub state: JobState,
+    /// A queued job: its place among the queued jobs of its project and
+    /// lane (1 starts next).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<i64>,
+    /// A queued job: the count of queued jobs in its project and lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued: Option<i64>,
+}
+
+/// The open job of a card with its queue place. `None`: no open job.
+pub fn card_job(conn: &Connection, card: &str) -> ApiResult<Option<CardJob>> {
+    let Some(job) = open_of_card(conn, card)? else {
+        return Ok(None);
+    };
+    let (place, queued) = if job.state == JobState::Queued {
+        let (place, _) = place(conn, &job)?;
+        let queued: i64 = conn.query_row(
+            "SELECT count(*) FROM jobs WHERE project = ?1 AND kind = ?2 AND state = 'queued'",
+            params![job.project, job.kind.as_str()],
+            |r| r.get(0),
+        )?;
+        (Some(place), Some(queued))
+    } else {
+        (None, None)
+    };
+    Ok(Some(CardJob {
+        id: job.id,
+        kind: job.kind,
+        state: job.state,
+        place,
+        queued,
+    }))
 }
 
 /// Where a queued job stands: its place among the queued jobs of its
@@ -1540,5 +1838,195 @@ mod tests {
             host_of(&conn, &def),
             canonical_key(&conn, "MiXeD.INVALID").unwrap()
         );
+    }
+
+    const RED_TAIL: &str = "   Doc-tests terrariumd\nerror: 2 targets failed:\n    `-p terrariumd --test card_reminder`\n    `-p terrariumd --test displays`\nerror: recipe `test` failed with exit code 101\nerror: recipe `validate` failed with exit code 101\n[exit code Some(101), signal None, exited]\n";
+
+    #[test]
+    fn the_failed_targets_and_step_come_from_the_tail() {
+        assert_eq!(
+            failed_targets(RED_TAIL),
+            vec![
+                "-p terrariumd --test card_reminder",
+                "-p terrariumd --test displays"
+            ]
+        );
+        assert_eq!(failed_step(RED_TAIL).as_deref(), Some("test"));
+        let one = "error: 1 target failed:\n    `-p terrarium-updater --lib`\nerror: recipe `test` failed with exit code 101\n";
+        assert_eq!(failed_targets(one), vec!["-p terrarium-updater --lib"]);
+        let lint = "error: could not compile\nerror: recipe `lint` failed on line 33 with exit code 101\nerror: recipe `validate` failed with exit code 101\n";
+        assert!(failed_targets(lint).is_empty());
+        assert_eq!(failed_step(lint).as_deref(), Some("lint"));
+        let killed =
+            "     Running tests/card_sessions.rs\n[exit code None, signal Some(9), timeout]\n";
+        assert_eq!(failed_step(killed).as_deref(), Some("timeout"));
+        assert_eq!(failed_step("ok"), None);
+    }
+
+    #[test]
+    fn stats_count_first_attempts_reruns_and_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        #[allow(clippy::type_complexity)]
+        let rows: &[(
+            &str,
+            &str,
+            &str,
+            &str,
+            i64,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+        )] = &[
+            // (id, project, kind, state, attempt, outcome, tail, parent)
+            ("a1", "p", "validate", "passed", 1, None, None, None),
+            (
+                "a2",
+                "p",
+                "validate",
+                "failed",
+                1,
+                Some("red"),
+                Some(RED_TAIL),
+                None,
+            ),
+            ("a2r", "p", "validate", "passed", 2, None, None, None),
+            (
+                "a3",
+                "p",
+                "merge",
+                "failed",
+                1,
+                Some("conflict"),
+                None,
+                None,
+            ),
+            ("a4", "p", "merge", "passed", 1, None, None, None),
+            (
+                "a5",
+                "p",
+                "merge",
+                "failed",
+                1,
+                Some("red"),
+                Some(
+                    "error: 1 target failed:\n    `-p terrariumd --test displays`\nerror: recipe `test` failed\n",
+                ),
+                None,
+            ),
+            (
+                "a5s",
+                "p",
+                "merge",
+                "failed",
+                1,
+                Some("red"),
+                Some(RED_TAIL),
+                Some("a5"),
+            ),
+            (
+                "a8",
+                "p",
+                "validate",
+                "failed",
+                1,
+                Some("error"),
+                Some("the job could not run: host agent `helios` is offline\n"),
+                None,
+            ),
+            (
+                "a8r",
+                "p",
+                "validate",
+                "failed",
+                2,
+                Some("error"),
+                Some("the job could not run: host agent `helios` is offline\n"),
+                None,
+            ),
+            (
+                "a9",
+                "p",
+                "validate",
+                "failed",
+                1,
+                Some("red"),
+                Some("    `-p terrariumd --test jobs`\nerror: recipe `test` failed\n"),
+                None,
+            ),
+            ("a9r", "p", "validate", "passed", 2, None, None, None),
+            ("a6", "p", "validate", "cancelled", 1, None, None, None),
+            ("a7", "p", "validate", "queued", 1, None, None, None),
+            (
+                "q1",
+                "q",
+                "validate",
+                "failed",
+                1,
+                Some("red"),
+                Some(RED_TAIL),
+                None,
+            ),
+        ];
+        for (id, project, kind, state, attempt, outcome, tail, parent) in rows {
+            conn.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt, outcome,
+                                   tail, parent, created_by, created_at)
+                 VALUES (?1, ?2, 'C', ?3, 'r', 'b', ?4, ?5, ?6, ?7, ?8, 't', '2026-11-06T00:00:00.000Z')",
+                params![id, project, kind, state, attempt, outcome, tail, parent],
+            )
+            .unwrap();
+        }
+        // Out of the window.
+        conn.execute(
+            "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt, created_by, created_at)
+             VALUES ('old', 'p', 'C', 'validate', 'r', 'b', 'failed', 1, 't', '2026-10-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        let s = stats(&conn, "p", "2026-11-01T00:00:00.000Z").unwrap();
+        assert_eq!(s.jobs, 13);
+        assert_eq!(
+            s.first_attempt,
+            FirstAttempts {
+                ended: 5,
+                passed: 2,
+                failed: 3,
+                pass_rate: Some(0.4)
+            }
+        );
+        assert_eq!((s.validate.ended, s.validate.passed), (3, 1));
+        assert_eq!((s.merge.ended, s.merge.passed), (2, 1));
+        assert_eq!((s.reruns.ended, s.reruns.passed), (2, 2));
+        assert_eq!((s.conflicts, s.cancelled, s.open, s.splits), (1, 1, 1, 1));
+        // The helios-offline pair counts apart, not as fails.
+        assert_eq!(s.errors, 2);
+        // a9: the clip cut the `error: 1 target failed:` header off.
+        assert_eq!(s.untargeted_test_fails, 1);
+        assert_eq!(
+            s.failed_targets,
+            vec![
+                TargetFails {
+                    target: "-p terrariumd --test displays".into(),
+                    failed: 3,
+                    first_attempt: 2
+                },
+                TargetFails {
+                    target: "-p terrariumd --test card_reminder".into(),
+                    failed: 2,
+                    first_attempt: 1
+                },
+            ]
+        );
+        assert_eq!(
+            s.failed_steps,
+            vec![StepFails {
+                step: "test".into(),
+                failed: 4
+            }]
+        );
+        let empty = stats(&conn, "none", "2026-11-01T00:00:00.000Z").unwrap();
+        assert_eq!(empty.first_attempt.pass_rate, None);
+        assert_eq!(empty.jobs, 0);
     }
 }

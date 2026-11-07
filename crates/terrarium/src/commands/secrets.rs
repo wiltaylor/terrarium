@@ -334,14 +334,37 @@ pub fn grantee(s: &str) -> String {
     }
 }
 
+/// The `targets` of a `run` grant as one cell.
+fn with_targets(mut s: Value) -> Value {
+    let t = s["targets"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    s["targets_text"] = t.into();
+    s
+}
+
 fn print_grants(ctx: &Ctx, v: &Value) {
+    let rows: Vec<Value> = v
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(with_targets)
+        .collect();
     print_table(
         ctx,
-        v.as_array().map(Vec::as_slice).unwrap_or_default(),
+        &rows,
         &[
             ("GRANTEE", "grantee_label"),
             ("LEVEL", "level"),
             ("ENV", "env"),
+            ("TARGETS", "targets_text"),
             ("BY", "created_by"),
             ("AT", "created_at"),
         ],
@@ -358,7 +381,7 @@ fn print_granted(ctx: &Ctx, v: &Value) {
         .into_iter()
         .map(|mut s| {
             s["plain"] = plain_text(&s).into();
-            s
+            with_targets(s)
         })
         .collect();
     print_table(
@@ -370,6 +393,7 @@ fn print_granted(ctx: &Ctx, v: &Value) {
             ("KIND", "kind"),
             ("LEVEL", "level"),
             ("ENV", "env"),
+            ("TARGETS", "targets_text"),
             ("FIELDS", "plain"),
         ],
         "no secrets are granted to you",
@@ -406,6 +430,7 @@ pub async fn secret(ctx: &Ctx, cmd: &SecretCmd) -> anyhow::Result<()> {
             grantee: who,
             level,
             env,
+            targets,
         } => {
             let mut body = json!({"grantee": grantee(who)});
             if let Some(l) = level {
@@ -413,6 +438,9 @@ pub async fn secret(ctx: &Ctx, cmd: &SecretCmd) -> anyhow::Result<()> {
             }
             if let Some(e) = env {
                 body["env"] = e.clone().into();
+            }
+            if !targets.is_empty() {
+                body["targets"] = json!(targets);
             }
             let v = ctx
                 .api
@@ -423,8 +451,18 @@ pub async fn secret(ctx: &Ctx, cmd: &SecretCmd) -> anyhow::Result<()> {
                     .as_str()
                     .map(|e| format!(" as ${e}"))
                     .unwrap_or_default();
+                let when = if v["level"] == "run" {
+                    format!(
+                        " on {}; it applies at the next `terrarium run`",
+                        with_targets(v.clone())["targets_text"]
+                            .as_str()
+                            .unwrap_or_default()
+                    )
+                } else {
+                    "; it applies at the next start".to_owned()
+                };
                 c.line(format!(
-                    "granted {}/{} to {} ({}{env}); it applies at the next start",
+                    "granted {}/{} to {} ({}{env}){when}",
                     field(v, "scope"),
                     field(v, "name"),
                     field(v, "grantee_label"),

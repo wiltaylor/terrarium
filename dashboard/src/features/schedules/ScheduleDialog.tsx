@@ -18,6 +18,7 @@ const SPEC_KINDS: readonly { id: ScheduleSpecKind; label: string }[] = [
   { id: "cron", label: "Cron" },
   { id: "interval", label: "Interval" },
   { id: "at", label: "Once, at a time" },
+  { id: "manual", label: "On demand: a button runs it (project action)" },
 ];
 
 const localZone = (() => {
@@ -28,9 +29,10 @@ const localZone = (() => {
   }
 })();
 
-export function ScheduleDialog(props: { project: string | null; schedule?: Schedule; trigger?: boolean; onClose: () => void; onSaved: (s: Schedule) => void }) {
+export function ScheduleDialog(props: { project: string | null; schedule?: Schedule; trigger?: boolean; action?: boolean; onClose: () => void; onSaved: (s: Schedule) => void }) {
   // The dialog reads its props once: a new schedule needs a new dialog.
-  const dlg = createScheduleDialog(api, { project: props.project, schedule: props.schedule, init: !props.schedule && props.trigger ? { specKind: "on" } : undefined });
+  const init = props.schedule ? undefined : props.trigger ? { specKind: "on" as const } : props.action ? { specKind: "manual" as const } : undefined;
+  const dlg = createScheduleDialog(api, { project: props.project, schedule: props.schedule, init });
   const f = dlg.form;
   const trigger = dlg.isTrigger();
   const noun = trigger ? "trigger" : "schedule";

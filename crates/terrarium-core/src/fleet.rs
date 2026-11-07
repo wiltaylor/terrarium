@@ -32,6 +32,10 @@
 //! [[projects.agents]]        # an agent made from a template
 //! name = "w1"
 //! template = "worker"
+//!
+//! [projects.delivery]        # the job queue of the project (a DeliveryDef)
+//! target = "buildbox"
+//! recipe = "just ci::validate"
 //! ```
 //!
 //! This module parses and checks a file without the daemon. The daemon
@@ -45,8 +49,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_template::{self, Lookup, Spec, TemplateDef};
 use crate::config::{
-    AgentDef, Policy, ProjectDef, RestartPolicy, SYSTEM_PROMPT_FILE_KEY, SubscriptionDef,
-    TargetDef, clean_system_prompt, inline_system_prompt_file,
+    AgentDef, DeliveryDef, Policy, ProjectDef, RestartPolicy, SYSTEM_PROMPT_FILE_KEY,
+    SubscriptionDef, TargetDef, clean_system_prompt, inline_system_prompt_file,
 };
 use crate::harness::HarnessId;
 use crate::role::Role;
@@ -80,6 +84,16 @@ const PROJECT_KEYS: &[&str] = &[
     "targets",
     "schedules",
     "templates",
+    "delivery",
+];
+/// The keys of `[projects.delivery]` (TER-87), in the order of the schema.
+const DELIVERY_KEYS: &[&str] = &[
+    "target",
+    "recipe",
+    "slots",
+    "next_repos",
+    "work_dir",
+    "timeout_secs",
 ];
 /// The project key of the GitHub author gate (TER-85). A fleet file
 /// cannot set it.
@@ -168,6 +182,7 @@ const TEMPLATE_KEYS: &[&str] = &[
     "default_skills",
     "new_session_on_prompt_change",
     "tools",
+    "grants",
 ];
 
 /// Looks up a template that the fleet file does not declare: the daemon
@@ -229,6 +244,9 @@ pub struct FleetProject {
     pub agents: Vec<FleetAgent>,
     /// `project` is the enclosing project.
     pub targets: Vec<TargetDef>,
+    /// The job queue config of the project (`[projects.delivery]`,
+    /// TER-87). `None`: the file does not set it.
+    pub delivery: Option<DeliveryDef>,
 }
 
 /// A parsed fleet file, with the defaults applied.
@@ -770,6 +788,7 @@ fn project(
     unknown_keys(&t, PROJECT_KEYS, at, issues);
     let agent_tables = tables(&mut t, "agents", at, issues);
     let target_tables = tables(&mut t, "targets", at, issues);
+    let delivery = delivery(t.remove("delivery"), &format!("{at}.delivery"), issues);
     if let Some(toml::Value::Table(s)) = t.get("checkout") {
         unknown_keys(s, CHECKOUT_KEYS, &format!("{at}.checkout"), issues);
     }
@@ -962,7 +981,36 @@ fn project(
         def,
         agents,
         targets,
+        delivery,
     })
+}
+
+/// The `[projects.delivery]` table of a project (TER-87). The daemon
+/// checks the target and the repos against its store at the apply.
+fn delivery(v: Option<toml::Value>, at: &str, issues: &mut Vec<Issue>) -> Option<DeliveryDef> {
+    let t = match v? {
+        toml::Value::Table(t) => t,
+        _ => {
+            issues.push(Issue::error(
+                at,
+                "`delivery` must be a table: [projects.delivery]",
+            ));
+            return None;
+        }
+    };
+    unknown_keys(&t, DELIVERY_KEYS, at, issues);
+    let d: DeliveryDef = match t.try_into() {
+        Ok(d) => d,
+        Err(e) => {
+            issues.push(Issue::error(at, clean(&e)));
+            return None;
+        }
+    };
+    if d.slots == Some(0) {
+        issues.push(Issue::error(at, "`slots` must be 1 or more"));
+        return None;
+    }
+    Some(d)
 }
 
 impl Fleet {
@@ -1248,6 +1296,9 @@ impl Fleet {
                 && let Some(toml::Value::Table(c)) = checkout
             {
                 w.table(Some("[projects.checkout]"), &c, CHECKOUT_KEYS);
+            }
+            if let Some(d) = &p.delivery {
+                w.table(Some("[projects.delivery]"), &table_of(d), DELIVERY_KEYS);
             }
             for d in &p.def.templates {
                 write_template(&mut w, d, "projects.templates");
@@ -1585,6 +1636,83 @@ name = "w"
             errs.iter().any(|i| i.message.contains("bonud")),
             "{errs:#?}"
         );
+    }
+
+    /// TER-87: `[projects.delivery]` (the job queue config) parses and
+    /// round-trips. A project without it has none.
+    #[test]
+    fn delivery_parses_and_round_trips() {
+        let text = r#"
+[[projects]]
+name = "alpha"
+
+[[projects.repos]]
+name = "app"
+url = "https://example.invalid/app.git"
+
+[[projects.targets]]
+name = "build"
+kind = "host"
+host = "h1"
+
+[projects.delivery]
+target = "build"
+recipe = "just ci::validate"
+slots = 3
+next_repos = ["app"]
+work_dir = "/srv/jobs"
+timeout_secs = 5400
+
+[[projects]]
+name = "beta"
+"#;
+        let f = parse(text, Some("dl"))
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}"));
+        let d = f.projects[0].delivery.as_ref().unwrap();
+        assert_eq!(
+            *d,
+            DeliveryDef {
+                target: Some("build".into()),
+                recipe: Some("just ci::validate".into()),
+                slots: Some(3),
+                next_repos: vec!["app".into()],
+                work_dir: Some("/srv/jobs".into()),
+                timeout_secs: Some(5400),
+            }
+        );
+        assert!(f.projects[1].delivery.is_none());
+        let out = f.to_toml();
+        assert_eq!(out.matches("[projects.delivery]").count(), 1, "{out}");
+        let again = parse(&out, Some("dl"))
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}\n{out}"));
+        assert_eq!(f, again, "{out}");
+
+        // An empty table is the default config: it round-trips too.
+        let empty = "[[projects]]\nname = \"alpha\"\n[projects.delivery]\n";
+        let f = parse(empty, Some("dl")).ok().unwrap();
+        assert_eq!(f.projects[0].delivery, Some(DeliveryDef::default()));
+        let again = parse(&f.to_toml(), Some("dl")).ok().unwrap();
+        assert_eq!(f, again);
+
+        for (from, to, word) in [
+            ("slots = 3", "slots = 0", "slots"),
+            ("timeout_secs = 5400", "timeout = 5400", "timeout"),
+            (
+                "recipe = \"just ci::validate\"",
+                "recipe = 7",
+                "expected a string",
+            ),
+        ] {
+            let bad = text.replace(from, to);
+            let errs = parse(&bad, Some("dl")).ok().unwrap_err();
+            assert!(
+                errs.iter()
+                    .any(|i| i.at == "projects.alpha.delivery" && i.message.contains(word)),
+                "{from}: {errs:#?}"
+            );
+        }
     }
 
     #[test]

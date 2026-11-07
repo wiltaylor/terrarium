@@ -47,6 +47,7 @@ pub const SPEC_KEYS: &[&str] = &[
     "default_skills",
     "new_session_on_prompt_change",
     TOOLS_KEY,
+    GRANTS_KEY,
 ];
 
 /// A key of a template spec only, not of an agent definition: the tool
@@ -74,6 +75,50 @@ pub fn tools_of(spec: &Spec) -> Result<Vec<String>, String> {
     }
     out.sort();
     out.dedup();
+    Ok(out)
+}
+
+/// A key of a template spec only, not of an agent definition: the secret
+/// grants that an agent made from the template gets (TER-88), each
+/// `<name>` or `<scope>/<name>` with an optional level (`:use`, `:run`,
+/// `:run=<target>,<target>`, `:read`). The daemon checks each one against
+/// the user of the template at the spawn or the create
+/// (`terrariumd::spawn_rights`).
+pub const GRANTS_KEY: &str = "grants";
+
+/// At most this many `grants` on one template.
+pub const MAX_GRANTS: usize = 32;
+
+/// The grants of a spec: the entries trimmed, with no copy, in their
+/// order. A value that is not a list of strings, an empty entry, or more
+/// than [`MAX_GRANTS`] entries is an error. The daemon checks the syntax
+/// of each entry.
+pub fn grants_of(spec: &Spec) -> Result<Vec<String>, String> {
+    let Some(v) = spec.get(GRANTS_KEY) else {
+        return Ok(Vec::new());
+    };
+    let Value::Array(list) = v else {
+        return Err("`grants` must be a list of secret grants".into());
+    };
+    let mut out: Vec<String> = Vec::new();
+    for x in list {
+        let g = x
+            .as_str()
+            .ok_or_else(|| "`grants` must be a list of secret grants".to_owned())?
+            .trim();
+        if g.is_empty() {
+            return Err("an entry of `grants` is empty".into());
+        }
+        if !out.iter().any(|o| o == g) {
+            out.push(g.to_owned());
+        }
+    }
+    if out.len() > MAX_GRANTS {
+        return Err(format!(
+            "a template has at most {MAX_GRANTS} grants; it has {}",
+            out.len()
+        ));
+    }
     Ok(out)
 }
 
@@ -149,9 +194,11 @@ pub fn check_keys(spec: &Spec) -> Result<(), String> {
 pub fn to_def(spec: &Spec, name: &str, project: &str) -> Result<AgentDef, String> {
     check_keys(spec)?;
     tools_of(spec)?;
+    grants_of(spec)?;
     let mut m = spec.clone();
-    // A template key, not an agent field.
+    // Template keys, not agent fields.
     m.remove(TOOLS_KEY);
+    m.remove(GRANTS_KEY);
     m.insert("name".into(), Value::String(name.to_owned()));
     m.insert("project".into(), Value::String(project.to_owned()));
     let mut def: AgentDef = serde_json::from_value(Value::Object(m)).map_err(|e| e.to_string())?;
@@ -187,6 +234,10 @@ pub fn normalize(spec: &Spec) -> Result<Spec, String> {
     let tools = tools_of(spec)?;
     if !tools.is_empty() {
         n.insert(TOOLS_KEY.into(), Value::from(tools));
+    }
+    let grants = grants_of(spec)?;
+    if !grants.is_empty() {
+        n.insert(GRANTS_KEY.into(), Value::from(grants));
     }
     Ok(n)
 }
@@ -413,6 +464,37 @@ mod tests {
         ] {
             assert!(to_def(&spec(bad.clone()), "w", "p").is_err(), "{bad}");
         }
+    }
+
+    /// `grants` is a key of the template, not of the agent (TER-88): it
+    /// stays in the normal form, trimmed and with no copy, in its order,
+    /// and never reaches the agent definition. A bad list is refused.
+    #[test]
+    fn grants_stay_on_the_template() {
+        let s = spec(json!({"harness": "claude",
+                            "grants": ["gh:run=box", " p/k:read ", "gh:run=box"]}));
+        assert_eq!(grants_of(&s).unwrap(), ["gh:run=box", "p/k:read"]);
+        let n = normalize(&s).unwrap();
+        assert_eq!(n["grants"], json!(["gh:run=box", "p/k:read"]));
+        let def = to_def(&s, "w", "p").unwrap();
+        assert!(!spec_of(&def).contains_key("grants"));
+        assert!(
+            !normalize(&spec(json!({"harness": "claude", "grants": []})))
+                .unwrap()
+                .contains_key("grants")
+        );
+        let many: Vec<String> = (0..=MAX_GRANTS).map(|i| format!("s{i}")).collect();
+        for bad in [
+            json!({"harness": "claude", "grants": "gh"}),
+            json!({"harness": "claude", "grants": [1]}),
+            json!({"harness": "claude", "grants": [" "]}),
+            json!({"harness": "claude", "grants": many}),
+        ] {
+            assert!(to_def(&spec(bad.clone()), "w", "p").is_err(), "{bad}");
+        }
+        // A create body puts its own list over the template's, or clears it.
+        let m = merge(&s, &spec(json!({"grants": null})));
+        assert!(grants_of(&m).unwrap().is_empty());
     }
 
     #[test]

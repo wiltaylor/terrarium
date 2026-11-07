@@ -75,21 +75,13 @@ describe("mock API", () => {
     expect((full as ApiError).code).toBe("wip_limit");
   });
 
-  it("archives a version: no lane, not in the default list, history kept", async () => {
+  it("has no version objects: versions are the card labels of the seed (TER-58)", async () => {
     const api = mock();
-    const names = async (q?: Parameters<typeof api.versions.list>[1]) => (await api.versions.list("terrarium", q)).map((v) => v.name).sort();
-    expect(await names()).not.toContain("spike-pty");
-    expect(await names({ archived: "true" })).toEqual(["spike-pty"]);
-    expect(await names({ archived: "all" })).toContain("spike-pty");
-    const a = await api.versions.archive("terrarium/v0.1.0");
-    expect(a).toMatchObject({ archived: true, status: "in_review" });
-    expect(a.reviews.length).toBeGreaterThan(0);
-    expect(await names()).not.toContain("v0.1.0");
-    const u = await api.versions.unarchive(a.id);
-    expect(u.archived).toBe(false);
-    expect(u.archived_at).toBeUndefined();
-    expect(await names()).toContain("v0.1.0");
-    await expect(api.versions.list("terrarium", { archived: "maybe" as "all" })).rejects.toBeInstanceOf(ApiError);
+    expect("versions" in api).toBe(false);
+    const cards = (await api.board.get("terrarium")).cards;
+    const of = (id: string) => cards.find((c) => c.id === id)!.labels.filter((l) => l.startsWith("version:"));
+    expect(of("TER-11")).toEqual(["version:0.0.1", "version:0.1.0"]);
+    expect(of("TER-13")).toEqual(["version:vnext"]);
   });
 
   it("emits events to subscribers when a card moves", async () => {

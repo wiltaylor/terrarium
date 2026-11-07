@@ -484,18 +484,14 @@ describe("mock parity with docs/api.md", () => {
     expect(created.similar.map((x) => x.id)).toContain("MEM-6");
   });
 
-  it("follows the version flow and answers compare in the documented shape", async () => {
+  it("links artifacts to labels and refuses a version link, as the daemon since TER-58", async () => {
     const api = mock();
-    const v = await api.versions.create("terrarium", { name: "v0.2.0", notes: "next", cards: ["TER-13"] });
-    expect(v.cards).toEqual([{ id: "TER-13", title: "Stall timeout marks agents blocked", column: "ready" }]);
-    const submitted = await api.versions.transition("terrarium/v0.2.0", "submit");
-    expect(submitted.status).toBe("in_review");
-    expect(submitted.reviews.at(-1)!.decision).toBe("submitted");
-    await expect(api.versions.transition(v.id, "reject")).rejects.toMatchObject({ code: "comment_required" });
-    await expect(api.versions.update(v.id, { notes: "x" })).rejects.toMatchObject({ code: "conflict" });
-    const c = await api.versions.compare(v.id, "terrarium/v0.1.0");
-    expect(c.cards.added).toEqual(["TER-13"]);
-    expect(c.cards.removed.sort()).toEqual(["TER-11", "TER-12", "TER-16"]);
+    const a = await api.artifacts.link("terrarium/ART-5", "label", " version:vnext ");
+    expect(a.links.at(-1)).toMatchObject({ kind: "label", ref: "version:vnext" });
+    expect(a.links.at(-1)!.label).toBeUndefined();
+    await expect(api.artifacts.link("terrarium/ART-5", "version" as "label", "v0.1.0")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.artifacts.link("terrarium/ART-5", "label", "  ")).rejects.toMatchObject({ status: 422 });
+    expect((await api.artifacts.get("terrarium/ART-2")).links).toEqual([{ kind: "label", ref: "version:0.1.0" }]);
   });
 
   // ----- docs/api.md §16: subscriptions, quota, usage, login sessions -----
@@ -1971,6 +1967,22 @@ describe("triggers (docs/api.md §19.4)", () => {
     expect(t.every((s) => s.spec.kind === "on" && s.next_run_at === null)).toBe(true);
     expect((await api.schedules.list({ kind: "time" })).some((s) => s.spec.kind === "on")).toBe(false);
     await expect(api.schedules.list({ kind: "weekly" as never })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("lists the project actions with ?kind=action, has no next run for them, and refuses a run of a disabled one with 409 (TER-53)", async () => {
+    const api = mock();
+    const a = await api.schedules.list({ kind: "action" });
+    expect(a.map((s) => s.name).sort()).toEqual(["deploy-staging", "notify-shop"]);
+    expect(a.every((s) => s.spec.kind === "manual" && s.next_run_at === null)).toBe(true);
+    for (const k of ["time", "trigger"] as const) expect((await api.schedules.list({ kind: k })).some((s) => s.spec.kind === "manual")).toBe(false);
+    const made = await api.schedules.create({ name: "act", project: "terrarium", spec: { kind: "manual" }, action: { type: "turn", agent: "terrarium/lead", text: "go" } });
+    expect(made.next_run_at).toBeNull();
+    const off = await api.schedules.disable(made.id);
+    expect(off.next_run_at).toBeNull();
+    await expect(api.schedules.run(made.id)).rejects.toMatchObject({ status: 409, code: "conflict" });
+    await expect(api.schedules.test(made.id)).rejects.toMatchObject({ status: 409, code: "conflict" });
+    const on = await api.schedules.enable(made.id);
+    expect(on.next_run_at).toBeNull();
   });
 
   it("gives each trigger run its event, and every run event_seq", async () => {

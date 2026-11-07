@@ -5,11 +5,14 @@
 // The rules follow the daemon: an operator message or response makes the
 // thread `waiting_agent`; an agent message or question makes it
 // `waiting_operator`; the last open question settled makes it
-// `waiting_agent`. A close retracts the open questions first. Every write to
-// a closed thread is a 409.
+// `waiting_agent`. The agent's close proposal (TER-95) makes it
+// `waiting_operator`; the operator confirms it (`confirm: true`), or writes on
+// (a message, a response, or the answer that settles the last open question
+// clears it: a decline). A close retracts the open questions first. Every
+// write to a closed thread is a 409.
 
 import type { Api } from "../client";
-import type { Agent, AgentEvent, InboxEventData, InboxItem, Question, Thread, ThreadEventData, ThreadLink, ThreadMessage, ThreadStatus } from "../types";
+import type { Agent, AgentEvent, InboxEventData, InboxItem, Question, Thread, ThreadEventData, ThreadHandoff, ThreadLink, ThreadMessage, ThreadStatus } from "../types";
 import type { MockWorld } from "./data";
 
 type Fail = (status: number, code: string, message: string, details?: unknown) => never;
@@ -84,6 +87,8 @@ export function seedThreads(now: number, agents: Agent[]): { threads: MockThread
     created_at: ago(min),
     closed_at: null,
     closed_by: null,
+    close_proposal: null,
+    close_reason: null,
   });
   const threads: MockThread[] = [
     {
@@ -110,7 +115,8 @@ export function seedThreads(now: number, agents: Agent[]): { threads: MockThread
       response: { text: "Yes. Do it after v0.2.", by: "operator", at: ago(60 * 25) },
       handoff: { summary: "TER-31 has the rename; nothing more is needed.", links: [{ kind: "card", ref: "TER-31" }], by: worker.id, at: ago(60 * 24) },
       closed_at: ago(60 * 24),
-      closed_by: worker.id,
+      closed_by: "operator",
+      close_reason: "confirmed",
     },
   ];
   const q = (n: number, extra: Partial<Question>): Question => ({
@@ -211,7 +217,7 @@ export function createThreadMock(c: ThreadMockContext) {
     list: (q = {}) =>
       reply(() => {
         const st = q.status ?? "open";
-        if (!["open", "all", "waiting_operator", "waiting_agent", "closed"].includes(st)) fail(422, "invalid", `bad status \`${st}\`: use waiting_operator, waiting_agent, closed, open, or all`);
+        if (!["open", "all", "waiting_operator", "waiting_agent", "tracking", "closed"].includes(st)) fail(422, "invalid", `bad status \`${st}\`: use waiting_operator, waiting_agent, tracking, closed, open, or all`);
         return rows()
           .filter((t) => (st === "all" ? true : st === "open" ? t.status !== "closed" : t.status === st) && (!q.scope || t.scope === q.scope))
           .map(listed)
@@ -253,6 +259,8 @@ export function createThreadMock(c: ThreadMockContext) {
           updated_at: at,
           closed_at: null,
           closed_by: null,
+          close_proposal: null,
+          close_reason: null,
         };
         if (text) addMessage(t, "operator", "message", text);
         rows().push(t);
@@ -266,6 +274,8 @@ export function createThreadMock(c: ThreadMockContext) {
         notClosed(t, "a message");
         addMessage(t, "operator", "message", checkText("text", text, MAX_MESSAGE));
         setStatus(t, "waiting_agent");
+        // The operator writes on: a close proposal of the agent is declined.
+        t.close_proposal = null;
         emitChange(t, "message");
         return full(t);
       }),
@@ -277,6 +287,7 @@ export function createThreadMock(c: ThreadMockContext) {
         const m = addMessage(t, "operator", "response", s);
         t.response = { text: s, by: "operator", at: m.at };
         setStatus(t, "waiting_agent");
+        t.close_proposal = null;
         c.audit("thread.respond", t.id, project(t) ?? undefined, { text: s.slice(0, 200) });
         emitChange(t, "response");
         return full(t);
@@ -284,27 +295,44 @@ export function createThreadMock(c: ThreadMockContext) {
     close: (id, body = {}) =>
       reply(() => {
         const t = row(id);
+        if (body.confirm) {
+          if (body.summary !== undefined || body.links !== undefined) fail(422, "invalid", "`confirm` closes with the proposed handoff: send no `summary` or `links` with it");
+          notClosed(t, "a confirm");
+          const p = t.close_proposal ?? fail(409, "conflict", `thread ${t.id} has no close proposal to confirm: close it with a handoff of your own`);
+          // The handoff stays the agent's: it wrote it.
+          return closeAs(t, "confirmed", { ...p, links: p.links.map((l) => ({ ...l })) });
+        }
         notClosed(t, "a close");
-        const summary = body.summary?.trim() ? checkText("summary", body.summary, MAX_SUMMARY) : "";
-        const links = body.links ?? [];
-        if (links.length > MAX_LINKS) fail(422, "invalid", `a handoff has at most ${MAX_LINKS} links; it has ${links.length}`);
-        const checked: ThreadLink[] = links.map((l, n) => {
-          const kind = (l.kind ?? "").trim();
-          if (!LINK_KINDS.includes(kind)) fail(422, "invalid", `link ${n + 1}: bad kind \`${kind}\`: use ${LINK_KINDS.join(", ")}`);
-          const ref = (l.ref ?? "").trim();
-          if (!ref || [...ref].length > MAX_REF || /[\n\r\0]/.test(ref)) fail(422, "invalid", `link ${n + 1}: \`ref\` is one line of 1 to ${MAX_REF} characters`);
-          return { kind: kind as ThreadLink["kind"], ref };
-        });
-        const open = openQuestions(t.id).map((q) => q.id);
-        // Closed first in the mock, so that the retracts do not move the status.
-        const at = c.iso();
-        Object.assign(t, { status: "closed", handoff: { summary, links: checked, by: "operator", at }, closed_at: at, closed_by: "operator", updated_at: at });
-        for (const q of open) c.retractQuestion(q, `thread ${t.id} was closed`, false);
-        c.audit("thread.close", t.id, project(t) ?? undefined, { by: "operator", links: checked.length, retracted: open });
-        emitChange(t, "closed");
-        return full(t);
+        const h = checkedHandoff(body.summary, body.links);
+        return closeAs(t, "operator", { ...h, by: "operator", at: c.iso() });
       }),
   };
+
+  /** Check a handoff: the summary (empty when absent) and the links. */
+  function checkedHandoff(summaryIn: string | undefined, links: ThreadLink[] = []): { summary: string; links: ThreadLink[] } {
+    const summary = summaryIn?.trim() ? checkText("summary", summaryIn, MAX_SUMMARY) : "";
+    if (links.length > MAX_LINKS) fail(422, "invalid", `a handoff has at most ${MAX_LINKS} links; it has ${links.length}`);
+    const checked: ThreadLink[] = links.map((l, n) => {
+      const kind = (l.kind ?? "").trim();
+      if (!LINK_KINDS.includes(kind)) fail(422, "invalid", `link ${n + 1}: bad kind \`${kind}\`: use ${LINK_KINDS.join(", ")}`);
+      const ref = (l.ref ?? "").trim();
+      if (!ref || [...ref].length > MAX_REF || /[\n\r\0]/.test(ref)) fail(422, "invalid", `link ${n + 1}: \`ref\` is one line of 1 to ${MAX_REF} characters`);
+      return { kind: kind as ThreadLink["kind"], ref };
+    });
+    return { summary, links: checked };
+  }
+
+  /** Close a thread with a handoff, for a reason: its open questions are retracted. */
+  function closeAs(t: MockThread, reason: "operator" | "confirmed", handoff: ThreadHandoff): Thread {
+    const open = openQuestions(t.id).map((q) => q.id);
+    // Closed first in the mock, so that the retracts do not move the status.
+    const at = c.iso();
+    Object.assign(t, { status: "closed", handoff, closed_at: at, closed_by: "operator", close_reason: reason, close_proposal: null, updated_at: at });
+    for (const q of open) c.retractQuestion(q, `thread ${t.id} was closed`, false);
+    c.audit("thread.close", t.id, project(t) ?? undefined, { by: "operator", reason, links: handoff.links.length, retracted: open });
+    emitChange(t, "closed");
+    return full(t);
+  }
 
   function setStatus(t: MockThread, s: ThreadStatus) {
     t.status = s;
@@ -316,8 +344,11 @@ export function createThreadMock(c: ThreadMockContext) {
     const t = q.thread ? rows().find((x) => x.id === q.thread) : undefined;
     if (!t || t.status === "closed") return;
     if (change === "asked") setStatus(t, "waiting_operator");
-    else if (q.status !== "open" && openQuestions(t.id).length === 0) setStatus(t, "waiting_agent");
-    else t.updated_at = c.iso();
+    else if (q.status !== "open" && openQuestions(t.id).length === 0) {
+      setStatus(t, "waiting_agent");
+      // The operator answered the last open question: it writes on, so a close proposal is declined.
+      if (q.status === "answered" || q.status === "acknowledged") t.close_proposal = null;
+    } else t.updated_at = c.iso();
     emitChange(t, "question");
   };
 
@@ -358,7 +389,21 @@ export function createThreadMock(c: ThreadMockContext) {
     return out;
   };
 
+  /** The attached agent proposes the close (TER-95): the handoff waits for the operator; a new proposal replaces the old one. */
+  const agentPropose = (id: string, body: { summary?: string; links?: ThreadLink[] } = {}): Thread => {
+    const t = row(id);
+    notClosed(t, "a close proposal");
+    const a = t.agent ? c.agent(t.agent) : fail(409, "conflict", `thread ${t.id} has no agent`);
+    const h = checkedHandoff(body.summary, body.links);
+    const at = c.iso();
+    t.close_proposal = { ...h, by: a.id, at };
+    setStatus(t, "waiting_operator");
+    c.audit("thread.propose_close", t.id, project(t) ?? undefined, { by: a.id, links: h.links.length });
+    emitChange(t, "close_proposed");
+    return full(t);
+  };
+
   const items = (): InboxItem[] => rows().map(item);
 
-  return { threads, items, onQuestion, agentPost, agentAsk };
+  return { threads, items, onQuestion, agentPost, agentAsk, agentPropose };
 }

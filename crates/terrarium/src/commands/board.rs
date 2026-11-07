@@ -24,6 +24,15 @@ const CARD_COLS: &[(&str, &str)] = &[
     ("IDLE", "idle"),
 ];
 
+/// The card agent of a card (TER-75): the name of the ephemeral agent
+/// bound to it, when it is not the assignee already.
+pub fn card_agent(k: &Value) -> Option<&str> {
+    let agent = k["agent_name"].as_str()?;
+    let assignee = k["assignee_name"].as_str().unwrap_or_default();
+    let same = assignee == agent || assignee.rsplit('/').next() == Some(agent);
+    (!same).then_some(agent)
+}
+
 /// The idle time of a card with an idle mark (TER-67): `25m` since
 /// `idle_since`. `None` for a card with no mark.
 pub fn idle_for(k: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
@@ -280,6 +289,10 @@ async fn show_board(ctx: &Ctx, path: &str) -> anyhow::Result<()> {
                     "-" => String::new(),
                     a => format!("  @{a}"),
                 };
+                let who = match card_agent(card) {
+                    Some(a) => format!("{who}  agent {a}"),
+                    None => who,
+                };
                 let idle = idle_for(card, chrono::Utc::now())
                     .map(|d| format!("  (idle {d})"))
                     .unwrap_or_default();
@@ -306,9 +319,13 @@ pub fn print_card(ctx: &Ctx, k: &Value) {
         }
     ));
     ctx.line(format!(
-        "assignee: {}  created by: {}",
+        "assignee: {}  created by: {}{}",
         field(k, "assignee_name"),
-        field(k, "created_by_name")
+        field(k, "created_by_name"),
+        k["agent_name"]
+            .as_str()
+            .map(|a| format!("  agent: {a}"))
+            .unwrap_or_default()
     ));
     ctx.line(format!(
         "labels: {}  repo: {}  branch: {}",
@@ -539,10 +556,27 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
         }
         CardCmd::Link {
             id,
+            inbox_thread: Some(th),
+            ..
+        } => {
+            let v = ctx
+                .api
+                .post(
+                    &format!("/api/threads/{}/cards", encode(th)),
+                    Some(json!({"card": id})),
+                )
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!("linked {id} to Inbox thread {}", field(v, "id")));
+            })
+        }
+        CardCmd::Link {
+            id,
             thread,
             branch,
             card,
             link_url,
+            inbox_thread: None,
         } => {
             let (kind, r) = match (thread, branch, card, link_url) {
                 (Some(t), ..) => ("thread", t),
@@ -551,7 +585,7 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                 (.., Some(u)) => ("url", u),
                 _ => {
                     return Err(CliError::usage(
-                        "give --thread, --branch, --card, or --link-url",
+                        "give --thread, --inbox-thread, --branch, --card, or --link-url",
                     ));
                 }
             };
@@ -608,6 +642,7 @@ async fn new(ctx: &Ctx, a: &CardNewArgs) -> anyhow::Result<()> {
     set_opt(&mut b, "branch", a.branch.clone());
     set_opt(&mut b, "from_mail", a.from_mail.clone());
     set_opt(&mut b, "github_author", a.github_author.clone());
+    set_opt(&mut b, "inbox_thread", a.inbox_thread.clone());
     set_opt(&mut b, "comment", ctx.opt_text(a.comment.as_deref())?);
     set_opt(
         &mut b,

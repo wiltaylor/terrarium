@@ -68,7 +68,17 @@ fn print_thread(c: &Ctx, v: &Value) {
     let response = take("response");
     let handoff = take("handoff");
     let proposal = take("close_proposal");
+    let cards = take("cards");
     print_object(c, &head);
+    for k in cards.as_ref().map(as_items).unwrap_or_default() {
+        c.line(format!(
+            "card {}:{} linked by {} at {}",
+            field(k, "project"),
+            field(k, "card"),
+            field(k, "linked_by_name"),
+            field(k, "linked_at")
+        ));
+    }
     let messages = messages.as_ref().map(as_items).unwrap_or_default();
     for (i, m) in messages.iter().enumerate() {
         let what = match m["kind"].as_str() {
@@ -282,6 +292,17 @@ pub async fn thread(ctx: &Ctx, cmd: &ThreadCmd) -> anyhow::Result<()> {
                         Some("closed") => "closed".to_owned(),
                         _ => format!("close proposed ({})", field(v, "status")),
                     }
+                ));
+            })
+        }
+        ThreadCmd::Track { id, cards } => {
+            let body = (!cards.is_empty()).then(|| json!({"cards": cards}));
+            let v = ctx.api.post(&format!("{}/track", path(id)), body).await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "thread {} is {}.",
+                    field(v, "id"),
+                    field(v, "status")
                 ));
             })
         }

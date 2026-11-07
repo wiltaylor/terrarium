@@ -150,6 +150,7 @@ terrarium project ls
 terrarium project show [name]                 the project, its agents, repos, targets, and target grants
 terrarium project new <name> [-d text] [--prefix TER]      sysadmin
 terrarium project set [name] [-d text] [--prefix P]        project_admin
+terrarium project set [name] [--github-author login]... [--github-authors-clear]   operator only (the GitHub author gate)
 terrarium project rm <name> --confirm         sysadmin
 terrarium project repos [name]
 terrarium project grant <target> --for monitors|schedules       sysadmin (--project p names the project)
@@ -877,7 +878,7 @@ stay as they are. `--no-mark` leaves my messages unread. With an ID,
 ```
 terrarium board                               the board, grouped by column
 terrarium board columns [--from-file f.json | -]
-terrarium board column add <name> [--title t] [--wip N] [--role working|blocked] [--after c | --before c]
+terrarium board column add <name> [--title t] [--wip N] [--role r] [--after c | --before c]
 terrarium board column set <name> [--title t] [--wip N | --no-wip] [--role r | --no-role] [--rename new]
 terrarium board column rm <name>
 terrarium board column move <name> (--after c | --before c)
@@ -886,6 +887,7 @@ terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
                    [--assignee a] [--repo r] [--branch b] [-m comment] [--eta 2h30m]
                    [--github-author login]   the issue author of a GitHub card (api.md §8.3)
+                   [--inbox-thread <thread>] an Inbox thread that tracks the card (api.md §6.13)
 terrarium card new --from-mail <message id> [...]
 terrarium card edit <id> [--title t] [-b body] [--label l|none]... [--depends-on id|none]...
                     [--repo r|none] [--branch b|none]
@@ -894,7 +896,7 @@ terrarium card move <id> <column> [--position n] [-m comment] [--eta 2h30m]
 terrarium card eta <id> (<duration | time> | --clear)
 terrarium card assign <id> <agent | operator | me | none>
 terrarium card comment <id> (<text | -> | -b text | - | -m text)
-terrarium card link <id> (--thread T | --branch b | --card id | --link-url u)
+terrarium card link <id> (--thread T | --inbox-thread T | --branch b | --card id | --link-url u)
 terrarium card rm <id>                        archives the card
 terrarium card events <id>
 terrarium card wait [--mine] [--timeout 300]
@@ -1148,6 +1150,7 @@ terrarium card merge <id> [--repo r] [--branch b]          project_admin
 terrarium card merge <id> <id>... [--repo r]               project_admin
 terrarium job ls [--state queued|running|passed|failed|cancelled]
 terrarium job show <id>
+terrarium job stats [--since 7d]
 terrarium job cancel <id>
 terrarium job hosts
 terrarium job host-cap <host> <n> | --clear                sysadmin
@@ -1186,6 +1189,18 @@ list. `job hosts` shows the caps, the running jobs, the host-agent name,
 and the aliases per host. Jobs run at low
 IO and CPU priority (`ionice -c3 nice -n19`). Builds that you start with
 `terrarium exec` or `terrarium run` are outside the queue.
+
+`job stats` gives the first-attempt pass rate of the project's jobs over a
+window (default 7 days; `--since` takes a duration such as `30d`, an RFC
+3339 time, or `HH:MM` today), per kind and in all. A `conflict` is no
+first attempt: it never ran the recipe. A job that could not run (outcome
+`error`, such as a host agent offline) is no attempt either: it shows as
+`could not run`. It also gives the reruns that
+passed, the counts, the failed recipe steps, and the test targets that
+failed most often. The targets come from the `error: N targets failed:`
+lines of each failed job's output tail. When the tail clip cut that header
+off, the job counts in `test-step fails with no target`. `-p` picks another project, and
+`--json` gives all targets (docs/api.md §35.4).
 
 `project delivery set` keeps the flags that you leave out. `--target ""`
 or `--recipe ""` turns the queue off. `--next-repo` replaces the list.
@@ -1681,7 +1696,8 @@ terrarium thread ask <id> "<summary>" --bundle (--item "<text>"... | --items-fil
 terrarium thread respond <id> -m <text|->
 terrarium thread close <id> [--handoff <text|->] [--link <kind>:<ref>]...
 terrarium thread close <id> --confirm
-terrarium thread ls [--status waiting_operator|waiting_agent|closed|open|all] [--scope global|<project>]
+terrarium thread track <id> [--card <project>:<card>]...
+terrarium thread ls [--status waiting_operator|waiting_agent|tracking|closed|open|all] [--scope global|<project>]
 terrarium thread show <id>
 ```
 
@@ -1709,6 +1725,22 @@ terrarium thread show <id>
   or closes at any time with a handoff of its own. At the close the agent
   ends, its session is archived, and the thread (`session_id`) and each
   handoff card (a comment) link to it.
+- `track` is for the attached agent after its handoff: the thread becomes
+  `tracking` and prints `thread <id> is tracking.` The agent is stopped
+  (parked), and the thread gets no reminder and no stale close. An
+  operator message wakes the agent; its reply with `post` puts the thread
+  back into tracking. An open question in the thread is a conflict (exit 1).
+  Each `--card` links a card of any project that the thread tracks
+  (TER-146), in the same write: a card in a project that you do not read
+  is refused as not found (exit 1), as is an archived card, and then
+  nothing changes.
+- Linked cards (api.md §6.13 "Linked cards"): the lead links a new card
+  with `card new --inbox-thread <id>`, and an existing card with `card
+  link <card> --inbox-thread <id>` (`linked <card> to Inbox thread
+  <id>`). The linker reads the thread and the card's project; a link gives
+  no read access, and `thread show` lists only the cards whose project
+  you read. It prints one line for each of them:
+  `card <project>:<card> linked by <name> at <time>`.
 - `ls` lists the threads (an agent: the ones it opened, is attached to,
   or reports from; a sysadmin or an architect: all): `ID`, `STATUS`, `SCOPE`, `AGENT`, `MSGS`, `OPEN_Q`,
   `LAST`, `TOPIC`. `show` prints the fields, then each message, the

@@ -146,7 +146,9 @@ pub struct SpawnBody {
     #[serde(default)]
     pub targets: Vec<String>,
     /// Secrets for the ephemeral agent: `<name>` or `<scope>/<name>`, with
-    /// `:use` or `:read`, each one that the owner holds at that level.
+    /// `:use`, `:run`, `:run=<target>,<target>`, or `:read`, each one that
+    /// the owner holds at that level. They come on top of the template's
+    /// `grants` (TER-88); a body grant of a secret replaces the template's.
     #[serde(default)]
     pub grants: Vec<String>,
     /// Bind the ephemeral agent to an object (TER-74, [`crate::bound`]):
@@ -399,6 +401,10 @@ pub async fn spawn_with(
     };
     let mut def = agent_template::to_def(&template.spec, &name, &owner.project)
         .map_err(|e| ApiError::invalid(format!("template `{}`: {e}", template.use_key())))?;
+    // The template's grants (TER-88), from the same row as `def`: checked
+    // against the owner and against the one who set them in the write,
+    // with the body's grants.
+    let template_grants = spawn_rights::TemplateGrants::of(&template, template.use_key())?;
     // No idle stop: an idle ephemeral agent stays until `agent done`, a
     // cancel, its lifetime, or the removal of its owner.
     def.idle_stop = Some(IdleStop::Off);
@@ -490,7 +496,13 @@ pub async fn spawn_with(
             let ov = owner_view.as_ref();
             let target_grants =
                 spawn_rights::check_targets(t, ov, &def.project, &target_names)?;
-            let secret_grants = spawn_rights::check_grants(t, ov, &def.project, &grant_asks)?;
+            let secret_grants = spawn_rights::check_spawn_grants(
+                t,
+                ov,
+                &def.project,
+                &template_grants,
+                &grant_asks,
+            )?;
             for tg in &target_grants {
                 if let spawn_rights::TargetGrant::Policy(n) = tg
                     && !def.policy.targets.contains(n)
