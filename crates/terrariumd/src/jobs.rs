@@ -57,6 +57,10 @@
 //!   job, so the board shows it.
 //! - A daemon restart loses the runs: each running job fails (`error`)
 //!   and goes through the rerun rule.
+//! - Each end and each cancel emits one `job.verdict` event per card
+//!   (TER-167): `passed`, `red`, `conflict`, `cancelled`, or `error`, with
+//!   the end comment and the failure block. It is written in the same
+//!   write as the card flow above, which it does not change.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -73,6 +77,7 @@ use crate::actor::Actor;
 use crate::api::Shared;
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
+use crate::events::EventDraft;
 use crate::executor::{self, Collected, Control, End, RemoteCmd};
 use crate::policy;
 use crate::secrets;
@@ -1069,17 +1074,97 @@ fn failure_block(j: &Job) -> String {
 /// What happens after a job ends: the card move, or the rerun.
 async fn after_end(state: &Shared, j: &Job) -> ApiResult<()> {
     let j = j.clone();
-    state
-        .db
-        .write("system", move |t| {
-            if j.batch.is_empty() {
-                single_end(t, &j)
-            } else {
-                batch_end(t, &j)
-            }
-        })
-        .await?;
+    state.db.write("system", move |t| on_end(t, &j)).await?;
     kick(state);
+    Ok(())
+}
+
+/// The end of a job in one write: a `job.verdict` event for each card,
+/// then the coded card flow (the move, the rerun, or the split).
+fn on_end(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    emit_verdicts(t, j)?;
+    if j.batch.is_empty() {
+        single_end(t, j)
+    } else {
+        batch_end(t, j)
+    }
+}
+
+/// The verdict of a job for one card (TER-167): `passed`, `red`,
+/// `conflict`, `cancelled`, or `error`. `j` is the card's view
+/// ([`card_view`] for a batch).
+fn verdict_of(j: &Job) -> &'static str {
+    if j.state == jobs::JobState::Cancelled {
+        return "cancelled";
+    }
+    match j.outcome.as_deref() {
+        Some("conflict") => "conflict",
+        _ if j.state == jobs::JobState::Passed => "passed",
+        Some("red") => "red",
+        _ => "error",
+    }
+}
+
+/// The `job.verdict` event data of each card of an ended or cancelled
+/// job, in card order (TER-167). It says what the run found for the card,
+/// not what the queue does next: the rerun and the split stay in the
+/// coded flow until the board rules take them over.
+fn verdicts(j: &Job) -> Vec<Value> {
+    let views: Vec<Job> = if j.batch.is_empty() {
+        vec![j.clone()]
+    } else {
+        j.batch.iter().map(|c| card_view(j, c)).collect()
+    };
+    let batch: Option<Vec<&str>> =
+        (!j.batch.is_empty()).then(|| j.batch.iter().map(|c| c.card.as_str()).collect());
+    views
+        .iter()
+        .map(|v| {
+            let verdict = verdict_of(v);
+            let word = match verdict {
+                "passed" => "passed",
+                "cancelled" => "was cancelled",
+                _ => "failed",
+            };
+            let failure = matches!(verdict, "red" | "conflict" | "error").then(|| failure_block(v));
+            serde_json::json!({
+                "project": v.project,
+                "job": v.id,
+                "card": v.card,
+                "kind": v.kind,
+                "verdict": verdict,
+                "state": v.state,
+                "outcome": v.outcome,
+                "attempt": v.attempt,
+                "by_agent": v.by_agent,
+                "repo": v.repo,
+                "branch": v.branch,
+                "parent": v.parent,
+                "batch": batch,
+                "end_comment": end_comment(v, word),
+                "failure_block": failure,
+            })
+        })
+        .collect()
+}
+
+/// Emit one `job.verdict` event for each card of an ended or cancelled
+/// job (TER-167), in the write of the end or the cancel.
+pub fn emit_verdicts(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    for data in verdicts(j) {
+        let card = data["card"].as_str().unwrap_or_default().to_owned();
+        let summary = format!(
+            "{} job {} for {card}: {}",
+            j.kind.as_str(),
+            j.id,
+            data["verdict"].as_str().unwrap_or_default()
+        );
+        t.emit(
+            EventDraft::new("job.verdict", summary, data)
+                .project(j.project.clone())
+                .card(card),
+        )?;
+    }
     Ok(())
 }
 
@@ -1729,6 +1814,233 @@ echo "after: $GIT_SSH_COMMAND"
         })
         .await
         .unwrap();
+    }
+
+    /// A job for the verdict tests: ended at attempt 2 on `C1`.
+    fn ended(kind: JobKind, state: jobs::JobState, outcome: Option<&str>) -> Job {
+        Job {
+            id: "J1".into(),
+            project: "p".into(),
+            card: "C1".into(),
+            kind,
+            repo: "app".into(),
+            branch: "c1".into(),
+            commit: Some("abc1234".into()),
+            state,
+            attempt: 2,
+            outcome: outcome.map(str::to_owned),
+            exit_code: outcome.map(|_| 1),
+            tail: Some("test x ... FAILED".into()),
+            head: None,
+            by_agent: Some("w1".into()),
+            created_by: "agent:lead".into(),
+            created_at: "t0".into(),
+            started_at: Some("t1".into()),
+            ended_at: Some("t2".into()),
+            host: None,
+            batch: vec![],
+            parent: None,
+            split_path: String::new(),
+        }
+    }
+
+    fn batch_card(card: &str, by: &str, outcome: Option<&str>) -> BatchCard {
+        BatchCard {
+            card: card.into(),
+            branch: card.to_lowercase(),
+            by_agent: Some(by.into()),
+            outcome: outcome.map(str::to_owned),
+            note: outcome.map(|_| "src/a.rs".to_owned()),
+        }
+    }
+
+    fn batch(state: jobs::JobState, outcome: Option<&str>, cards: Vec<BatchCard>) -> Job {
+        let mut j = ended(JobKind::Merge, state, outcome);
+        j.card = cards[0].card.clone();
+        j.branch = cards[0].branch.clone();
+        j.by_agent = cards[0].by_agent.clone();
+        j.batch = cards;
+        j
+    }
+
+    fn field<'a>(v: &'a [Value], key: &str) -> Vec<&'a str> {
+        v.iter().map(|d| d[key].as_str().unwrap_or("-")).collect()
+    }
+
+    /// TER-167: a job of one card has one verdict with its kind, attempt,
+    /// worker, end comment, and (for a failure) the failure block.
+    #[test]
+    fn a_single_job_has_one_verdict() {
+        use jobs::JobState::{Cancelled, Failed, Passed};
+        let cases = [
+            (Passed, None, "passed", "passed"),
+            (Failed, Some("red"), "red", "failed"),
+            (Failed, Some("conflict"), "conflict", "failed"),
+            (Failed, Some("error"), "error", "failed"),
+            (Failed, None, "error", "failed"),
+            (Cancelled, None, "cancelled", "was cancelled"),
+        ];
+        for (state, outcome, verdict, word) in cases {
+            let v = verdicts(&ended(JobKind::Validate, state, outcome));
+            assert_eq!(v.len(), 1, "{verdict}");
+            let d = &v[0];
+            assert_eq!(d["verdict"], verdict);
+            assert_eq!(d["project"], "p");
+            assert_eq!(d["job"], "J1");
+            assert_eq!(d["card"], "C1");
+            assert_eq!(d["kind"], "validate");
+            assert_eq!(d["attempt"], 2);
+            assert_eq!(d["by_agent"], "w1");
+            assert_eq!(d["branch"], "c1");
+            assert!(d["batch"].is_null());
+            let comment = d["end_comment"].as_str().unwrap();
+            assert!(
+                comment.starts_with(&format!("Job queue: validate job J1 (attempt 2) {word}.")),
+                "{comment}"
+            );
+            let failure = &d["failure_block"];
+            if matches!(verdict, "passed" | "cancelled") {
+                assert!(failure.is_null(), "{verdict}: {failure}");
+            } else {
+                let f = failure.as_str().unwrap();
+                assert!(
+                    f.starts_with("Validation failed: t2, validate job J1"),
+                    "{f}"
+                );
+                assert!(f.contains("test x ... FAILED"), "{f}");
+            }
+        }
+    }
+
+    /// TER-167: a green batch has a verdict per card, with each card's
+    /// branch and worker. A card that left it on a conflict has its own.
+    #[test]
+    fn a_green_batch_has_a_verdict_per_card() {
+        let j = batch(
+            jobs::JobState::Passed,
+            None,
+            vec![
+                batch_card("C1", "w1", None),
+                batch_card("C2", "w2", Some("conflict")),
+                batch_card("C3", "w3", None),
+            ],
+        );
+        let v = verdicts(&j);
+        assert_eq!(field(&v, "card"), ["C1", "C2", "C3"]);
+        assert_eq!(field(&v, "verdict"), ["passed", "conflict", "passed"]);
+        assert_eq!(field(&v, "by_agent"), ["w1", "w2", "w3"]);
+        assert_eq!(field(&v, "branch"), ["c1", "c2", "c3"]);
+        assert_eq!(field(&v, "kind"), ["merge", "merge", "merge"]);
+        for d in &v {
+            assert_eq!(d["batch"], serde_json::json!(["C1", "C2", "C3"]));
+        }
+        assert!(v[0]["failure_block"].is_null());
+        let f = v[1]["failure_block"].as_str().unwrap();
+        assert!(f.contains("`c2` does not merge onto `next`"), "{f}");
+        assert!(f.contains("src/a.rs"), "{f}");
+    }
+
+    /// TER-167: a red batch and an error give each merged card the verdict
+    /// of the batch; a cancelled batch gives each card `cancelled`.
+    #[test]
+    fn a_red_failed_or_cancelled_batch_has_a_verdict_per_card() {
+        use jobs::JobState::{Cancelled, Failed};
+        let cards = || vec![batch_card("C1", "w1", None), batch_card("C2", "w2", None)];
+        let red = verdicts(&batch(Failed, Some("red"), cards()));
+        assert_eq!(field(&red, "verdict"), ["red", "red"]);
+        assert!(red.iter().all(|d| d["failure_block"].is_string()));
+        let error = verdicts(&batch(Failed, Some("error"), cards()));
+        assert_eq!(field(&error, "verdict"), ["error", "error"]);
+        let all_conflict = verdicts(&batch(
+            Failed,
+            Some("conflict"),
+            vec![
+                batch_card("C1", "w1", Some("conflict")),
+                batch_card("C2", "w2", Some("conflict")),
+            ],
+        ));
+        assert_eq!(field(&all_conflict, "verdict"), ["conflict", "conflict"]);
+        let cancelled = verdicts(&batch(Cancelled, None, cards()));
+        assert_eq!(field(&cancelled, "verdict"), ["cancelled", "cancelled"]);
+        assert!(cancelled.iter().all(|d| d["failure_block"].is_null()));
+    }
+
+    /// TER-167: the end writes the verdict events (kind `job.verdict`, the
+    /// project and the card on the row) in its write, and the coded flow
+    /// still splits a red batch.
+    #[tokio::test]
+    async fn the_end_writes_a_verdict_per_card_and_keeps_the_split() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        let rows = db
+            .write("system", |t| {
+                let cards = vec![
+                    batch_card("C1", "w1", None),
+                    batch_card("C2", "w2", Some("conflict")),
+                    batch_card("C3", "w3", None),
+                ];
+                let j = jobs::create(
+                    t,
+                    jobs::NewJob {
+                        project: "p".into(),
+                        card: "C1".into(),
+                        kind: JobKind::Merge,
+                        repo: "app".into(),
+                        branch: "c1".into(),
+                        commit: None,
+                        by_agent: Some("w1".into()),
+                        batch: cards.clone(),
+                    },
+                )?;
+                assert!(jobs::start(t, &j.id, "h")?);
+                let end = JobEnd {
+                    passed: false,
+                    outcome: Some("red".into()),
+                    exit_code: Some(1),
+                    tail: Some("red".into()),
+                    head: None,
+                    batch: Some(cards),
+                };
+                let j = jobs::finish(t, &j.id, &end)?.unwrap();
+                on_end(t, &j)?;
+                let mut st = t.prepare(
+                    "SELECT project, card, payload FROM events WHERE kind = 'job.verdict' ORDER BY seq",
+                )?;
+                let rows = st
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let open = jobs::list(t, "p", Some(jobs::JobState::Queued))?;
+                Ok((rows, open.len()))
+            })
+            .await
+            .unwrap();
+        let (rows, queued) = rows;
+        let got: Vec<(String, String, String)> = rows
+            .into_iter()
+            .map(|(p, c, d)| {
+                let d: Value = serde_json::from_str(&d).unwrap();
+                (
+                    p.unwrap(),
+                    c.unwrap(),
+                    d["verdict"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        let want = [("C1", "red"), ("C2", "conflict"), ("C3", "red")]
+            .map(|(c, v)| ("p".to_owned(), c.to_owned(), v.to_owned()));
+        assert_eq!(got, want);
+        // The coded flow: C1 and C3 merged and the batch is red, so it
+        // splits into two halves of one card each.
+        assert_eq!(queued, 2);
     }
 
     /// TER-137: the job queue writes its comments and its moves with the
