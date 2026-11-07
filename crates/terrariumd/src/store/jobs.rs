@@ -554,6 +554,25 @@ pub fn running(conn: &Connection) -> ApiResult<Vec<Job>> {
     Ok(rows)
 }
 
+/// The jobs that ran and got a cancel at `since` or later, in all
+/// projects. A cancelled job drains until the kill of its step ended
+/// (TER-115), so after a daemon restart these may still have processes
+/// on their target (TER-123).
+pub fn cancelled_since(conn: &Connection, since: &str) -> ApiResult<Vec<Job>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {COLS} FROM jobs
+         WHERE state = 'cancelled' AND started_at IS NOT NULL AND ended_at >= ?1
+         ORDER BY started_at"
+    ))?;
+    let mut rows = st.query_map([since], row)?.collect::<Result<Vec<_>, _>>()?;
+    for job in &mut rows {
+        if let Some(host) = &job.host {
+            job.host = Some(canonical_key(conn, host)?);
+        }
+    }
+    Ok(rows)
+}
+
 /// The address-based key of a target. Host-agent names are resolved to
 /// stable IDs by `host_of`, which has access to the host registry.
 pub fn host_key(name: &str, def: &TargetDef) -> String {
@@ -911,7 +930,7 @@ pub fn startable(
 
 /// The host key of the delivery target of `def`. A target that is gone
 /// keeps its name as the key; the job then fails when it runs.
-fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
+pub fn host_of(conn: &Connection, def: &DeliveryDef) -> String {
     let target = def.target.clone().unwrap_or_default();
     let key = match targets::get(conn, &target) {
         Ok(row) => row
@@ -1413,10 +1432,26 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
 /// (`created_at`), and `tail` says why it waits. `None` when the job is
 /// not running (a cancel came first).
 pub fn requeue(t: &mut Tx<'_>, id: &str, why: &str) -> ApiResult<Option<Job>> {
+    requeue_with(t, id, &format!("waits for its host: {why}"))
+}
+
+/// The tail of a job that [`requeue_lost`] put back.
+pub const LOST_TAIL: &str =
+    "the daemon restarted while the job ran; the run is lost, and the job waits in the queue again";
+
+/// Put job `id` back in the queue: it was running when the last daemon
+/// stopped, so its run is lost (TER-123, P5). As [`requeue`]: it keeps its
+/// attempt and its place, and `tail` says why. `None` when it is not
+/// running (any more).
+pub fn requeue_lost(t: &mut Tx<'_>, id: &str) -> ApiResult<Option<Job>> {
+    requeue_with(t, id, LOST_TAIL)
+}
+
+fn requeue_with(t: &mut Tx<'_>, id: &str, tail: &str) -> ApiResult<Option<Job>> {
     let n = t.execute(
         "UPDATE jobs SET state = 'queued', started_at = NULL, host = NULL, tail = ?2
          WHERE id = ?1 AND state = 'running'",
-        params![id, clip_tail(&format!("waits for its host: {why}"))],
+        params![id, clip_tail(tail)],
     )?;
     if n == 0 {
         return Ok(None);
@@ -1449,25 +1484,6 @@ pub fn cancel(t: &mut Tx<'_>, id: &str) -> ApiResult<Job> {
     )?;
     emit(t, &job, "cancelled")?;
     Ok(job)
-}
-
-/// Fail each job that was running when the daemon stopped: its run is
-/// lost. Returns the jobs.
-pub fn fail_lost(t: &mut Tx<'_>) -> ApiResult<Vec<Job>> {
-    let lost = running(t)?;
-    let mut out = Vec::new();
-    for j in lost {
-        let end = JobEnd {
-            passed: false,
-            outcome: Some("error".into()),
-            tail: Some("the daemon restarted while the job ran; the run is lost".into()),
-            ..JobEnd::default()
-        };
-        if let Some(j) = finish(t, &j.id, &end)? {
-            out.push(j);
-        }
-    }
-    Ok(out)
 }
 
 /// The queue config of a project. The default (no queue) when none is set.
@@ -1601,6 +1617,85 @@ pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// TER-123: only jobs that started and got their cancel at `since` or
+    /// later count as maybe draining.
+    #[test]
+    fn cancelled_since_takes_recent_cancels_of_started_jobs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        for (id, state, started, ended) in [
+            (
+                "J1",
+                "cancelled",
+                Some("2026-11-07T05:00:00.000Z"),
+                "2026-11-07T05:40:00.000Z",
+            ),
+            (
+                "J2",
+                "cancelled",
+                Some("2026-11-07T04:00:00.000Z"),
+                "2026-11-07T04:10:00.000Z",
+            ),
+            ("J3", "cancelled", None, "2026-11-07T05:41:00.000Z"),
+            (
+                "J4",
+                "failed",
+                Some("2026-11-07T05:00:00.000Z"),
+                "2026-11-07T05:42:00.000Z",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, created_by,
+                                   created_at, started_at, ended_at)
+                 VALUES (?1, 'p', 'C', 'validate', 'app', 'b', ?2, 't', 't', ?3, ?4)",
+                params![id, state, started, ended],
+            )
+            .unwrap();
+        }
+        let got: Vec<String> = cancelled_since(&conn, "2026-11-07T05:00:00.000Z")
+            .unwrap()
+            .into_iter()
+            .map(|j| j.id)
+            .collect();
+        assert_eq!(got, ["J1"]);
+    }
+
+    /// TER-123, P5: a job lost to a restart goes back to the queue with
+    /// its attempt and its place; a job that is not running stays as it is.
+    #[tokio::test]
+    async fn a_lost_job_is_requeued_without_using_an_attempt() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        for (id, state) in [("J1", "running"), ("J2", "cancelled")] {
+            c.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt,
+                                   created_by, created_at, started_at, host)
+                 VALUES (?1, 'p', 'C', 'validate', 'app', 'b', ?2, 1, 't',
+                         '2026-11-07T05:00:00.000Z', '2026-11-07T05:01:00.000Z', 'h')",
+                params![id, state],
+            )
+            .unwrap();
+        }
+        let db = crate::db::Db::new(c, crate::events::EventHub::default());
+        let j = db
+            .write("system", |t| requeue_lost(t, "J1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(j.state, JobState::Queued);
+        assert_eq!(j.attempt, 1);
+        assert_eq!(j.created_at, "2026-11-07T05:00:00.000Z");
+        assert_eq!(j.started_at, None);
+        assert_eq!(j.host, None);
+        assert_eq!(j.tail.as_deref(), Some(LOST_TAIL));
+        let again = db.write("system", |t| requeue_lost(t, "J1")).await.unwrap();
+        assert!(again.is_none(), "a queued job is not requeued again");
+        let cancelled = db.write("system", |t| requeue_lost(t, "J2")).await.unwrap();
+        assert!(cancelled.is_none(), "a cancel stays a cancel");
+        let j2 = db.read(|c| get(c, "J2")).await.unwrap();
+        assert_eq!(j2.state, JobState::Cancelled);
+    }
 
     fn job(id: &str, project: &str, kind: JobKind, repo: &str, at: &str) -> Job {
         Job {
