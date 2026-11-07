@@ -2958,7 +2958,10 @@ mod tests {
             exit(None, Some(9), "timeout"),
             exit(Some(255), None, "exited"),
         ] {
-            assert!(lost_run(Some(&e), b"error: tests failed\n", None).is_none(), "{e:?}");
+            assert!(
+                lost_run(Some(&e), b"error: tests failed\n", None).is_none(),
+                "{e:?}"
+            );
         }
         // An ssh target: 255 with a broken link to that host is lost; 255
         // from the recipe, or a broken link to another host, is red.
@@ -2980,7 +2983,14 @@ mod tests {
         assert!(lost_run(Some(&e255), other, Some("10.3.0.2")).is_none());
         assert!(lost_run(Some(&e255), b"exit 255\n", Some("10.3.0.2")).is_none());
         let closed = b"Connection to 10.3.0.2 closed by remote host.\n";
-        assert!(lost_run(Some(&exit(Some(1), None, "exited")), closed, Some("10.3.0.2")).is_none());
+        assert!(
+            lost_run(
+                Some(&exit(Some(1), None, "exited")),
+                closed,
+                Some("10.3.0.2")
+            )
+            .is_none()
+        );
         // No ssh target: the ssh lines do not count.
         assert!(lost_run(Some(&e255), closed, None).is_none());
     }
