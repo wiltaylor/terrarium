@@ -652,8 +652,397 @@ export interface Api {
     test(project: string, def: Omit<PipelineDef, "name"> & { name?: string }): Promise<PipelineTestReport>;
   };
 
-  /** docs/api.md §13. `id` is the ULID or `project/name`. */
+  /** docs/api.md §16. */
+  subscriptions: {
+    list(): Promise<Subscription[]>;
+    get(name: string): Promise<Subscription>;
+    /** `201`, `source = api`. `409 conflict` when the name exists; `422 invalid` for an unknown probe. */
+    create(def: NewSubscription): Promise<Subscription>;
+    /** `409 file_managed` for a file subscription. */
+    remove(name: string): Promise<void>;
+    /** Samples, oldest first. `since` defaults to 24 hours ago. */
+    quota(name: string, q?: { since?: string; window?: string; limit?: number }): Promise<QuotaSample[]>;
+    /** The models the subscription can use. Cached for 6 h by the daemon; `refresh` reads the list again. */
+    models(name: string, q?: { refresh?: boolean }): Promise<ModelList>;
+    /** A failed probe is still `200`, with `probe_status: failed`. */
+    probe(name: string): Promise<ProbeOutcome>;
+    verify(name: string): Promise<VerifyResult>;
+    logout(name: string): Promise<Subscription>;
+    /**
+     * Make the plan account the default account of its harness (PLAN §16.3).
+     * The old default stops being one. `422 invalid` for an API key or a
+     * subscription with no plan account of Claude Code, Codex, or Copilot.
+     */
+    makeDefault(name: string): Promise<Subscription>;
+    /** Write-only. The answer never has the key. */
+    setApiKey(name: string, input: ApiKeyInput): Promise<Subscription>;
+    /** `PATCH`: `alert_at`, and the harnesses and the server of a self-hosted one. `409 file_managed` for a file subscription. */
+    update(name: string, patch: SubscriptionPatch): Promise<Subscription>;
+    /** Agents on it may start and wake again; agents with work wake now. */
+    enable(name: string): Promise<Subscription>;
+    /** No agent on it starts or wakes; agents that run go on. */
+    disable(name: string): Promise<Subscription>;
+    /** Stop every running agent on it now. `disable` disables it first. */
+    stopAll(name: string, opts?: { disable?: boolean }): Promise<StopAllResult>;
+    /** The model list of a self-hosted server (one GET from the daemon). Operator and sysadmin only. `503 unavailable` when the server does not answer. */
+    fetchModels(input: FetchModelsInput): Promise<FetchModelsResult>;
+    detect(): Promise<DetectedLogin[]>;
+    startLogin(req: StartLogin): Promise<LoginSession>;
+    loginState(id: string): Promise<LoginSession>;
+    /** `202`; the session becomes `cancelled`. */
+    cancelLogin(id: string): Promise<void>;
+    /** `409 not_running` when the session ended. */
+    loginInput(id: string, code: string): Promise<void>;
+    /** The login terminal, with the PTY protocol of docs/api.md §6.5. */
+    loginPty(id: string): PtySocket;
+  };
 
+  /** docs/api.md §16.3. */
+  usage: {
+    series(q: UsageQuery): Promise<UsagePoint[]>;
+    /** `GET /api/usage/me?agent=`: the agent's subscription, its share today, and its holds. */
+    me(agent: string): Promise<UsageMe>;
+    /** `GET /api/cards/{id}/usage`: one card's usage by model and by agent. All time unless `since`/`until`. */
+    card(id: string, q?: { since?: string; until?: string }): Promise<CardUsage>;
+  };
+
+  mail: {
+    list(q?: MailQuery): Promise<Page<Message>>;
+    get(id: string): Promise<Message>;
+    send(m: NewMessage): Promise<Message>;
+    markRead(id: string): Promise<Message>;
+    /** One message for each participant except the sender. */
+    reply(id: string, body: string, subject?: string): Promise<Message[]>;
+    /** `POST /api/mail/{id}/release`: release one held message. The recipient gets its pointer now; the thread stays paused. */
+    release(id: string): Promise<Message>;
+    /** `POST /api/mail/threads/{id}/resume`: end the pause and release every held message. A note goes as `operator` to the participants. */
+    resume(threadId: string, note?: string): Promise<ThreadResume>;
+  };
+
+  /** What waits for the operator: questions, notices, mail to `operator`, and paused threads. Operator only. */
+  inbox: {
+    /** `GET /api/inbox?status=&kind=&project=`: open by default, urgent first, then the newest. */
+    list(q?: InboxQuery): Promise<InboxItem[]>;
+    /** `GET /api/inbox/counts?project=`: the open items by kind. */
+    counts(project?: string): Promise<InboxCounts>;
+    /** `POST /api/inbox/mail/{id}/ack`: acknowledge a mail to the operator. A reply goes out as `operator` on the thread. */
+    ackMail(id: string, reply?: string): Promise<MailAck>;
+    /** `POST /api/inbox/asks`: ask an agent, or forward a question of the Inbox to one. The Inbox watches the thread. */
+    ask(body: InboxAskBody): Promise<InboxAsk>;
+    /** `DELETE /api/inbox/watches/{thread}`: stop waiting for the agent. The mail stays. */
+    cancelWatch(thread: string): Promise<InboxWatch>;
+  };
+
+  /** Inbox threads (docs/api.md §6.13): a conversation with one agent on one topic. */
+  threads: {
+    /** `GET /api/threads?status=&scope=`: open (not closed) by default; the ones that wait for the operator first, then the newest activity. At most 200. */
+    list(q?: ThreadQuery): Promise<Thread[]>;
+    /** `GET /api/threads/{id}`: with `messages` and `questions`. */
+    get(id: string): Promise<Thread>;
+    /** `POST /api/threads`: open a thread. `scope` defaults to `global`. */
+    open(body: NewThread): Promise<Thread>;
+    /** `POST /api/threads/{id}/messages`: a message of the operator; the thread waits for the agent. */
+    post(id: string, text: string): Promise<Thread>;
+    /** `POST /api/threads/{id}/respond`: the operator's overall response, the approval record. */
+    respond(id: string, text: string): Promise<Thread>;
+    /** `POST /api/threads/{id}/close`: close with a handoff; the open questions of the thread are retracted. */
+    close(id: string, body?: ThreadClose): Promise<Thread>;
+  };
+
+  /** The inbox of a project: the address `project:<name>`. */
+  projectInbox: {
+    list(project: string, q?: ProjectInboxQuery): Promise<Page<Message>>;
+    send(project: string, m: Omit<NewMessage, "to">): Promise<Message>;
+    markRead(project: string, id: string): Promise<Message>;
+    /** From `project:<name>`, one message for each participant. */
+    reply(project: string, id: string, body: string, subject?: string): Promise<Message[]>;
+  };
+
+  audit(q?: AuditQuery): Promise<Page<AuditEntry>>;
+
+  /** PLAN §17, §19, the daemon's `api/targets.rs`. */
+  targets: {
+    list(): Promise<Target[]>;
+    /** `POST /api/targets`. No `project`: a global target, which needs a sysadmin (`403 forbidden`). */
+    create(t: NewTarget): Promise<Target>;
+    /** A lifecycle verb (docs/api.md §17.3). It runs to its end; the answer is the executor's report, not a target: refetch the list. */
+    action(id: string, action: TargetAction, body?: TargetVerbBody): Promise<TargetReport>;
+    /** Open an exec session. `{shell: true, pty}` gives an operator terminal. */
+    exec(id: string, req: ExecRequest): Promise<ExecOpened>;
+    /** The session terminal, with the PTY protocol of docs/api.md §6.5. */
+    sessionPty(id: string, session: string): PtySocket;
+    /** Kill the run. */
+    closeSession(id: string, session: string): Promise<void>;
+    /** `GET /api/targets/{name}/snapshots`: the snapshots the host reports, with `managed`; it drops the stored names the host lost. A docker target is `422 invalid`. */
+    snapshots(name: string, q?: SnapshotQuery): Promise<TargetSnapshotList>;
+    /** `DELETE /api/targets/{name}/snapshots/{snap}`. `terrarium-clean` with `snapshot_before_task` needs `force` (`409 conflict`). */
+    deleteSnapshot(name: string, snap: string, q?: SnapshotQuery): Promise<SnapshotDeleted>;
+    /** `GET /api/targets/{name}/leases`, newest first. `all` also lists the ended leases (the last 100). */
+    leases(name: string, opts?: { all?: boolean }): Promise<Lease[]>;
+    /** `POST /api/targets/{name}/leases`. A clash is `409 lease_held` with the holder in `details`. */
+    grant(name: string, body: LeaseGrant): Promise<LeaseGranted>;
+    /** `PATCH /api/targets/{name}/leases/{agent}`: a new `until`; `null` is until a revoke. */
+    extendLease(name: string, agent: string, until: string | null): Promise<Lease>;
+    /** `DELETE /api/targets/{name}/leases/{agent}`: answers the ended lease. */
+    revokeLease(name: string, agent: string): Promise<Lease>;
+    /** `GET /api/targets/{name}/display/info` (docs/api.md §17.10). */
+    displayInfo(name: string, agent?: string): Promise<DisplayInfo>;
+    /** `POST /api/targets/{name}/display/screenshot?format=json`. */
+    screenshot(name: string, opts?: ScreenshotOpts): Promise<DisplayShot>;
+    /** `POST /api/targets/{name}/display/{op}`. Input needs an exclusive lease, else `409`. */
+    displayOp(name: string, op: DisplayOpName, body?: Record<string, unknown>): Promise<DisplayOpResult>;
+    /** `PATCH /api/targets/{name}`: a JSON merge patch. While the target runs, only `keep` and `snapshot_before_task` (`409 conflict`). A bad `credential` is `422 invalid`. */
+    update(name: string, patch: TargetPatch): Promise<Target>;
+    /** `POST /api/targets/{name}/test`: one ssh login with the target's key (docs/api.md §17.2). Another kind is `422 invalid`. */
+    test(name: string): Promise<TargetTestReport>;
+  };
+
+  /**
+   * docs/api.md §19. Rights: the operator always; a project_admin within its
+   * project; a member reads only; a global schedule needs a sysadmin
+   * (`403 forbidden`). A bad field is `422 invalid` with `details.field`.
+   */
+  schedules: {
+    /** `GET /api/schedules?project=&enabled=`: with `project`, the global schedules and the project's. */
+    list(q?: ScheduleQuery): Promise<Schedule[]>;
+    get(id: string): Promise<Schedule>;
+    create(s: NewSchedule): Promise<Schedule>;
+    update(id: string, patch: SchedulePatch): Promise<Schedule>;
+    remove(id: string): Promise<void>;
+    /** `POST /api/schedules/{id}/run`: run now. The run ends later; watch the `schedule` events. */
+    run(id: string): Promise<ScheduleRun>;
+    enable(id: string): Promise<Schedule>;
+    disable(id: string): Promise<Schedule>;
+    /** `GET /api/schedules/{id}/runs?limit=&cursor=`, newest first. */
+    runs(id: string, q?: PageQuery): Promise<Page<ScheduleRun>>;
+    /** `GET /api/schedules/{id}/deliveries?limit=&cursor=`: the webhook deliveries, newest first (§19.5). */
+    deliveries(id: string, q?: PageQuery): Promise<Page<WebhookDelivery>>;
+    /** `POST /api/schedules/{id}/deliveries/{delivery}/redeliver`: a copy, due now (`202`). */
+    redeliver(id: string, delivery: string): Promise<WebhookDelivery>;
+    /** `POST /api/schedules/{id}/test` (docs/api.md §19.7): one test run of the action for a sample event; `event` is checked against the match rules. A webhook answer has the delivery and the request. */
+    test(id: string, event?: TestEvent): Promise<WebhookTestResult>;
+  };
+
+  /**
+   * docs/api.md §20. Rights: the operator always; a project_admin within its
+   * project; a member reads only; a global source needs a sysadmin. The
+   * secret is only in the answers of `create` and `rotate`.
+   */
+  eventSources: {
+    /** `GET /api/event-sources?project=`: with `project`, the project's sources and the global ones when the caller may read them. */
+    list(q?: { project?: string }): Promise<EventSource[]>;
+    get(id: string): Promise<EventSource>;
+    create(s: NewEventSource): Promise<EventSourceWithSecret>;
+    update(id: string, patch: EventSourcePatch): Promise<EventSource>;
+    /** A new secret; the old one stops at once. */
+    rotate(id: string): Promise<EventSourceWithSecret>;
+    remove(id: string): Promise<void>;
+  };
+
+  /**
+   * docs/api.md §21. A key is a ULID, `project/name`, `_/name`, `global:name`,
+   * or a name (the caller's project first, then global). Rights: everyone
+   * reads the global templates; members read their project's; a
+   * project_admin manages its project's; a global template needs a
+   * sysadmin (`403 forbidden`).
+   */
+  templates: {
+    /** `GET /api/templates?project=&scope=global`: with `project`, the project's templates and the global ones. Global first. */
+    list(q?: { project?: string; scope?: "global" }): Promise<AgentTemplate[]>;
+    get(key: string): Promise<AgentTemplate>;
+    create(t: NewTemplate): Promise<AgentTemplate>;
+    update(key: string, patch: TemplatePatch): Promise<AgentTemplate>;
+    remove(key: string): Promise<void>;
+    /** `GET /api/templates/{key}/resolve?project=`: a name picks the project's template first, then the global one. */
+    resolve(key: string, project: string): Promise<TemplateResolved>;
+    /** `POST /api/templates/from-agent/{agent}`: a template from the agent's settings now. */
+    fromAgent(agent: string, body: TemplateFromAgent): Promise<AgentTemplate>;
+    /** `GET /api/templates/{key}/wcl`: the template's WCL file in the config repo. */
+    wcl(key: string): Promise<TemplateWcl>;
+  };
+
+  /**
+   * The config repo (PLAN §8.3, docs/api.md §25). The operator or a
+   * sysadmin only. A daemon with no config repo answers `501 not_available`.
+   * A scan block is `422 invalid` with `details.findings`; a merge conflict
+   * is `409 conflict` with `details.conflicts`.
+   */
+  config: {
+    status(): Promise<ConfigStatus>;
+    /** `GET /api/config/diff?path=`: the unified diff of one file, or of all changes. */
+    diff(path?: string): Promise<{ diff: string }>;
+    log(limit?: number): Promise<ConfigLogEntry[]>;
+    commit(body: ConfigCommitBody): Promise<ConfigCommitResult>;
+    /** Fetch and merge. With `apply`, apply the `export/` changes as fleets; else their plans wait. */
+    pull(body?: { apply?: boolean; approve_grants?: boolean }): Promise<ConfigPullResult>;
+    push(): Promise<{ pushed: boolean }>;
+    /** Commit, fetch, merge, and push. */
+    sync(body?: {
+      message?: string;
+      apply?: boolean;
+      approve_grants?: boolean;
+    }): Promise<ConfigSyncResult>;
+    /** Leave a merge that stopped on a conflict. */
+    abort(): Promise<{ aborted: true }>;
+    setRemote(body: ConfigRemoteBody): Promise<ConfigStatus>;
+    clearRemote(): Promise<ConfigStatus>;
+    /** The new defaults that wait as `<file>.new`. */
+    defaults(): Promise<ConfigPendingDefault[]>;
+    /** Take the new default: `<file>.new` replaces the file. Answers the defaults that still wait. */
+    acceptDefault(path: string): Promise<ConfigPendingDefault[]>;
+    /** Keep the file: delete `<file>.new`. Answers the defaults that still wait. */
+    keepDefault(path: string): Promise<ConfigPendingDefault[]>;
+  };
+
+  /**
+   * Terrarium-managed skills, kept in the config repo. A write stays
+   * uncommitted: the Harness config page commits it. The operator or a sysadmin
+   * reads all and writes; another agent reads its own. A daemon with no
+   * config repo answers `501 not_available`. A failed check is `422 invalid`
+   * with `details.problems`.
+   */
+  /** Tool proxies (docs/api.md §17.11). Writes and grants: the operator and sysadmins; an agent sees its granted tools. */
+  tools: {
+    /** `GET /api/tools`: every tool with its grants for the operator; an agent's granted tools. */
+    list(): Promise<Tool[]>;
+    get(name: string): Promise<Tool>;
+    /** `DELETE /api/tools/{name}`: an API tool; a file tool is `409 file_managed`. */
+    remove(name: string): Promise<void>;
+    grants(name: string): Promise<ToolGrant[]>;
+    /** `POST /api/tools/{name}/grants`: `agent:<project>/<name>`, `agent:<id>`, or `project:<name>`. */
+    grant(name: string, grantee: string): Promise<ToolGrant>;
+    revoke(name: string, grantee: string): Promise<void>;
+  };
+
+  skills: {
+    list(): Promise<SkillSummary[]>;
+    get(name: string): Promise<SkillDetail>;
+    create(body: NewSkill): Promise<SkillDetail>;
+    update(name: string, body: SkillUpdate): Promise<SkillDetail>;
+    remove(name: string): Promise<void>;
+    /** `GET /api/skills/{name}/usage`: the agents and templates that name it. */
+    usage(name: string): Promise<SkillUsage>;
+  };
+
+  /**
+   * The system prompt library in the config repo (docs/api.md §28). A write
+   * stays uncommitted: the Harness config page commits it. The operator, a
+   * sysadmin, and a project_admin read and add. A delete of an entry in use
+   * is `409 conflict` with `details.users`, unless `force`. A secret in the
+   * text is `422 invalid`. No config repo: `501 not_available`.
+   */
+  systemPrompts: {
+    list(): Promise<SystemPromptSummary[]>;
+    get(name: string): Promise<SystemPromptDetail>;
+    create(body: NewSystemPrompt): Promise<SystemPromptDetail>;
+    update(name: string, body: SystemPromptUpdate): Promise<SystemPromptDetail>;
+    remove(name: string, opts?: { force?: boolean }): Promise<void>;
+  };
+
+  /**
+   * The secret manager (PLAN §16b, docs/api.md §5.2). A global secret needs
+   * a sysadmin or the operator; a project secret, a project_admin of the
+   * project too (`403 forbidden`). No answer holds a secret field, except
+   * `reveal`.
+   */
+  secrets: {
+    /** `GET /api/secrets?scope=`. No scope: each secret that the caller manages. */
+    list(q?: { scope?: string }): Promise<Secret[]>;
+    get(scope: string, name: string): Promise<Secret>;
+    /** `POST /api/secrets`: `409` when the name exists in the scope. */
+    create(body: NewSecret): Promise<Secret>;
+    /** `PUT /api/secrets/{scope}/{name}`: make or replace. */
+    put(scope: string, name: string, body: SecretPut): Promise<Secret>;
+    /** `DELETE /api/secrets/{scope}/{name}?force=`. A secret that a target uses is `409 conflict` with `details.targets`, unless `force`. */
+    remove(scope: string, name: string, opts?: { force?: boolean }): Promise<void>;
+    /** `POST /api/secrets/{scope}/{name}/generate`: a new SSH key pair. The private key never leaves the daemon. */
+    generate(scope: string, name: string, body?: SecretGenerate): Promise<Secret>;
+    /** `POST /api/secrets/{scope}/{name}/reveal`: the operator only, with the operator password. `403` wrong password, `409` no password set, `429` too many. */
+    reveal(scope: string, name: string, password: string): Promise<RevealedSecret>;
+    /** `GET /api/secrets/{scope}/{name}/grants`. */
+    grants(scope: string, name: string): Promise<SecretGrant[]>;
+    /** `POST /api/secrets/{scope}/{name}/grants`: a second grant to the same grantee replaces the first. */
+    grant(scope: string, name: string, body: NewSecretGrant): Promise<SecretGrant>;
+    /** `DELETE /api/secrets/{scope}/{name}/grants?grantee=`. */
+    revoke(scope: string, name: string, grantee: string): Promise<void>;
+  };
+
+  /** docs/host-protocol.md, the daemon's `api/hosts.rs`. */
+  hosts: {
+    list(): Promise<Host[]>;
+    /** Mint a host and its token. The token shows once, in this answer only. `enrol`: a one-time enrol token, with `install_command`. */
+    create(name: string, opts?: { enrol?: boolean }): Promise<NewHostToken>;
+    /** Revoke the token: the daemon sends `goodbye token_revoked` and closes the link. */
+    revoke(name: string): Promise<void>;
+    /** `GET /api/hosts/{name}/metrics?minutes=N` (1 to 60): the samples, oldest first. */
+    metrics(name: string, opts?: { minutes?: number }): Promise<HostMetricsHistory>;
+  };
+
+  events: {
+    /** The firehose socket (`/api/events`), reconnecting with `?since=<last seq>`. */
+    stream(opts?: { since?: number }): EventStream;
+    /** One page of the log after `since`, oldest first. */
+    history(q?: EventQuery): Promise<Page<AgentEvent>>;
+    /**
+     * The newest `seq` in the log (`GET /api/events/latest`), or null when
+     * this daemon does not have the endpoint. Then the stream asks for the
+     * whole log, as before.
+     */
+    latest(): Promise<number | null>;
+  };
+}
+
+export type TargetAction = "up" | "down" | "snapshot" | "restore" | "status";
+
+/** Read the answer of `GET /api/events/latest`: a number, `{seq}`, `{latest}`, or an event. */
+export function parseLatest(data: unknown): number | null {
+  if (typeof data === "number" && Number.isFinite(data)) return data;
+  if (typeof data === "object" && data !== null) {
+    const o = data as Record<string, unknown>;
+    for (const k of ["seq", "latest", "last_seq"]) if (typeof o[k] === "number") return o[k];
+  }
+  return null;
+}
+
+export interface HttpApiOptions {
+  /**
+   * The artifact origin, for example `https://artifacts.example.com`
+   * (`VITE_ARTIFACT_ORIGIN`). A signed URL that the daemon answers as a path
+   * is put on this origin, so that previews never load from the dashboard
+   * origin (docs/security-review.md F5).
+   */
+  artifactOrigin?: string;
+}
+
+export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
+  const get = <T>(path: string, query?: Query) => t.request<T>("GET", path, { query });
+  const post = <T>(path: string, body?: unknown) => t.request<T>("POST", path, { body });
+  const patch = <T>(path: string, body: unknown) => t.request<T>("PATCH", path, { body });
+  const put = <T>(path: string, body: unknown) => t.request<T>("PUT", path, { body });
+  const del = (path: string, query?: Query) => t.request<void>("DELETE", path, { query });
+  const page = <T>(path: string, query?: Query) => t.page<T>(path, query);
+  const all = <T>(path: string, query: Query = {}) => collectAll<T>((cursor) => t.page<T>(path, { ...query, cursor, limit: 1000 }));
+  const socket = (path: string): PtySocket => {
+    const ws = t.openSocket(t.wsUrl(path));
+    ws.binaryType = "arraybuffer";
+    return ws;
+  };
+  const p = (name: string) => `/api/projects/${seg(name)}`;
+  const a = (id: string) => `/api/agents/${seg(id)}`;
+  const c = (id: string) => `/api/cards/${seg(id)}`;
+  const sub = (name: string) => `/api/subscriptions/${seg(name)}`;
+  const login = (id: string) => `/api/subscriptions/login/${seg(id)}`;
+  const secretPath = (scope: string, name: string) => `/api/secrets/${seg(scope)}/${seg(name)}`;
+
+  return {
+    health: () => get("/api/health"),
+    systemVersion: () => get("/api/system/version"),
+    selfUpdate: {
+      status: () => get("/api/system/update"),
+      check: () => post("/api/system/update/check"),
+      apply: (version) => post("/api/system/update", version ? { version } : {}),
+      rollback: () => post("/api/system/update/rollback"),
+    },
     harnesses: (refresh, latest) => {
       const q: Query = {};
       if (refresh) q.refresh = true;
@@ -987,7 +1376,6 @@ export interface Api {
       run: (id, run) => get(`/api/pipelines/${seg(id)}/runs/${seg(run)}`),
       test: (project, def) => post(`${p(project)}/pipelines/test`, def),
     },
-
 
 
     subscriptions: {
