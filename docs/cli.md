@@ -1695,7 +1695,8 @@ terrarium thread ask <id> "<summary>" --bundle (--item "<text>"... | --items-fil
 terrarium thread respond <id> -m <text|->
 terrarium thread close <id> [--handoff <text|->] [--link <kind>:<ref>]...
 terrarium thread close <id> --confirm
-terrarium thread ls [--status waiting_operator|waiting_agent|closed|open|all] [--scope global|<project>]
+terrarium thread track <id>
+terrarium thread ls [--status waiting_operator|waiting_agent|tracking|closed|open|all] [--scope global|<project>]
 terrarium thread show <id>
 ```
 
@@ -1723,6 +1724,11 @@ terrarium thread show <id>
   or closes at any time with a handoff of its own. At the close the agent
   ends, its session is archived, and the thread (`session_id`) and each
   handoff card (a comment) link to it.
+- `track` is for the attached agent after its handoff: the thread becomes
+  `tracking` and prints `thread <id> is tracking.` The agent is stopped
+  (parked), and the thread gets no reminder and no stale close. An
+  operator message wakes the agent; its reply with `post` puts the thread
+  back into tracking. An open question in the thread is a conflict (exit 1).
 - `ls` lists the threads (an agent: the ones it opened, is attached to,
   or reports from; a sysadmin or an architect: all): `ID`, `STATUS`, `SCOPE`, `AGENT`, `MSGS`, `OPEN_Q`,
   `LAST`, `TOPIC`. `show` prints the fields, then each message, the
