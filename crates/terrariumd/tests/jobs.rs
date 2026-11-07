@@ -726,6 +726,58 @@ async fn a_green_validation_moves_the_card_to_review() {
     assert_eq!(j["exit_code"], 0);
 }
 
+/// TER-107: a validate leaves one `validation:*` label and one `by:` label,
+/// even when the card already has stale ones.
+#[tokio::test]
+async fn validate_replaces_stale_validation_and_by_labels() {
+    let lab = lab(2).await;
+    let head = lab.branch("ter-labels", "next", &[("OK", "yes\n")]);
+    let id = lab.card("stale labels", "ter-labels").await;
+    // Stale labels: another worker's `by:` and two `validation:` labels.
+    lab.td
+        .patch(
+            &format!("/api/cards/{id}"),
+            json!({"add_labels": ["by:w9", "validation:running", "validation:queued"]}),
+        )
+        .await
+        .ok();
+    let r = lab
+        .td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{id}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let by_of = |c: &Value| -> Vec<String> {
+        labels(c)
+            .into_iter()
+            .filter(|l| l.starts_with("by:"))
+            .collect()
+    };
+    let validation_of = |c: &Value| -> Vec<String> {
+        labels(c)
+            .into_iter()
+            .filter(|l| l.starts_with("validation:"))
+            .collect()
+    };
+    // At once: still w1's, one by:w1, and one validation label (queued or
+    // already running, the job may start at once).
+    let c = lab.card_of(&id).await;
+    assert_eq!(c["column"], "validating");
+    assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+    assert_eq!(validation_of(&c).len(), 1, "{c}");
+    // The pass: no validation label, the assignee cleared, one by:w1.
+    let c = lab
+        .until_card(&id, "review", |c| c["column"] == "review")
+        .await;
+    assert!(c["assignee"].is_null(), "{c}");
+    assert!(validation_of(&c).is_empty(), "{c}");
+    assert_eq!(by_of(&c), ["by:w1"], "{c}");
+}
+
 #[tokio::test]
 async fn a_red_validation_runs_twice_then_goes_to_the_top_of_ready() {
     let lab = lab(2).await;

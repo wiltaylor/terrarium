@@ -488,6 +488,26 @@ fn may_validate(actor: &Actor, card: &Card) -> ApiResult<()> {
     )
 }
 
+/// The labels of a validate: one `validation:*` label (`validation:queued`)
+/// and one `by:<agent>` label. Every `validation:*` and `by:*` label that
+/// the card has goes, so a stale one does not stay beside the new one. The
+/// `by:` label is the agent that queues, else the card's first `by:` label.
+/// Returns the labels to add and the labels to remove.
+fn job_labels(labels: &[String], by: Option<&str>) -> (Vec<String>, Vec<String>) {
+    let keep = by
+        .map(str::to_owned)
+        .or_else(|| rt::by_agent_of(labels))
+        .map(|n| format!("by:{n}"));
+    let remove = labels
+        .iter()
+        .filter(|l| l.starts_with("validation:") || l.starts_with("by:"))
+        .cloned()
+        .collect();
+    let mut add = vec![rt::LABEL_QUEUED.to_owned()];
+    add.extend(keep);
+    (add, remove)
+}
+
 async fn validate(
     State(state): State<Shared>,
     actor: Actor,
@@ -558,16 +578,10 @@ async fn validate(
                     batch: Vec::new(),
                 },
             )?;
-            let mut add = vec![rt::LABEL_QUEUED.to_owned()];
-            if let Some(n) = &by {
-                let label = format!("by:{n}");
-                if !card.labels.contains(&label) {
-                    add.push(label);
-                }
-            }
+            let (add, remove) = job_labels(&card.labels, by.as_deref());
             let patch = CardPatch {
                 add_labels: add,
-                remove_labels: vec![rt::LABEL_RUNNING.into()],
+                remove_labels: remove,
                 ..CardPatch::default()
             };
             board::update_card(t, &Actor::Operator, &card.id, patch)?;
