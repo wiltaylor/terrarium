@@ -1064,55 +1064,52 @@ prints RFC 4180 CSV with the full values. `--format json` and `--json`
 print the API answer. The query language is in api.md §27.3; for
 example `type:bug status=open severity>=high sort:-severity limit:20`.
 
-### Artifacts and versions
+### Artifacts and version labels
 
 ```
-terrarium artifact push <file | dir> [--name n] [--page p] [--version v] [--card c]
-terrarium artifact ls
+terrarium artifact push <file | dir> [--name n] [--page p] [--label l]... [--card c]
+terrarium artifact ls [--page p | --label l | --card c]
 terrarium artifact url <id>                   a signed preview URL
 terrarium artifact rm <id>
-terrarium version new <name> [--notes text | -] [--repo r --ref sha] [--card id]...
-terrarium version ls [--archived | --all]
-terrarium version show <name>
-terrarium version archive|unarchive <name>    the creator, admins, operator
-terrarium version attach <name> <artifact id>
-terrarium version submit <name>
-terrarium version wait <name> [--timeout 3600]
-terrarium version release <name>              admins
-terrarium version approve|reject <name> [-m comment]      operator
 ```
 
-`version ls` hides the archived versions; `--archived` shows only them, and
-`--all` shows both, with an ARCHIVED column. `version archive` keeps the
-status and the reviews; the version leaves the board rows.
+Versions are card labels (TER-58): `version:vnext` puts a card in the next
+version, and at the cut the lead renames it to `version:<X.Y.Z>`. `card ls
+--label version:<X.Y.Z>` lists the cards of a version. A test run or an
+artifact links to the label with `--label`. The operator's review of a
+result, and the approval of a full release, is a `terrarium question ask`
+with the artifacts linked. The `version new | ls | show | rename | add-card
+| rm-card | archive | unarchive | attach | submit | wait | release | approve
+| reject` subcommands are removed: each exits 2 with an error that names
+the labels. `terrarium version` with no subcommand still prints the build
+versions of the CLI and the daemon. The hidden `--version` flags of `artifact push | ls`
+and `test push | ls | link | unlink` exit 2 with an error that names
+`--label`; they go in the version after.
 
 `artifact push` sends the file as base64 in JSON. A directory becomes a tar
 archive with `kind: "bundle"`; the CLI runs the system `tar`. The limit is
 32 MiB. The CLI refuses a larger file before it sends it.
-`--page`, `--version`, and `--card` go together: the upload carries the
+`--page`, `--label`, and `--card` go together: the upload carries the
 first link, and the CLI adds each other one with
 `POST /api/artifacts/{id}/links`. After the upload, the CLI prints the
 Markdown that embeds the artifact in a page (PLAN §15.1):
 `![name](artifact:ART-n)` for an image, a fenced `artifact ART-n` block for
 a bundle or an HTML file, and `[name](artifact:ART-n)` for other files. Then
 it prints a signed preview URL. The URL expires (by default after 5
-minutes), so a page must use the embed, not the URL.
-
-`version wait` long-polls the version list for `approved`, in rounds of 30
-seconds. Between rounds, it reads the version, so that a rejection also
-ends the wait.
+minutes), so a page must use the embed, not the URL. `artifact ls --label`
+keeps the artifacts with a `label` link of that label (the CLI filters).
 
 ### Test runs
 
 ```
 terrarium test push <file> [--format auto|junit|trx|ctrf|libtest-json|vitest-json|jest-json|tap]
-                    [--name n] [--card id]... [--version v]... [--commit sha] [--branch b]
+                    [--name n] [--card id]... [--label l]... [--commit sha] [--branch b]
                     [--fail-on-failures]
-terrarium test ls [--card id] [--version v] [--name n] [--failed]
+terrarium test ls [--card id] [--label l] [--name n] [--failed]
 terrarium test show <id> [--failed] [--json]
 terrarium test compare <id> [--with <id> | previous]
-terrarium test link <id> [--card id]... [--version v]...
-terrarium test unlink <id> [--card id]... [--version v]...
+terrarium test link <id> [--card id]... [--label l]...
+terrarium test unlink <id> [--card id]... [--label l]...
 terrarium test rm <id>                        the creator, admins, operator
 ```
 
@@ -1128,9 +1125,10 @@ dashboard: /p/demo/board/tests/01JB7…
 
 `test push` exits with 0 also when tests fail: it uploads, it does not
 judge. With `--fail-on-failures`, it exits with 1 when the run has a
-failed or an errored test. `--card` and `--version` link the run; give
-each flag more than once for more links. The links follow the edit rights
-of the card and of the version (docs/api.md §29.4).
+failed or an errored test. `--card` and `--label` link the run; give
+each flag more than once for more links. A card link follows the edit
+rights of the card; a label is free text that any member links
+(docs/api.md §29.4).
 
 `test ls --failed` shows only the runs with the status `failed`.
 `test show --failed` shows only the failed and the errored cases, with
@@ -1937,8 +1935,8 @@ have the same flags. The version is `<crate version>+<git ref>`, with
 `-dirty` for a build tree with changes, or `+unknown` (docs/api.md §4,
 `GET /api/system/version`).
 
-`terrarium version` with no subcommand (the subcommands manage versions
-for review) works in both modes. It prints the client line and the
+`terrarium version` works in both modes. It has no subcommands: the
+version objects are removed (TER-58, "Artifacts and version labels"). It prints the client line and the
 daemon line (`GET /api/system/version`). When the two builds are from
 different commits, it adds a `warning:` line: install the CLI of the
 daemon's build. With `--json` it prints
@@ -2322,11 +2320,11 @@ Hand a result to the user (agent):
 terrarium artifact push target/coverage --page reports/coverage --card TER-42
 terrarium test push target/nextest/ci/junit.xml --name unit --card TER-42
 terrarium wiki new reports/coverage -m "Coverage for TER-42" --body - < report.md
-terrarium version new v0.3.0 --card TER-42 --notes "Parser and coverage."
-terrarium test link <run id> --version v0.3.0
-terrarium version submit v0.3.0
-terrarium version wait v0.3.0
+terrarium test link <run id> --label version:0.3.0
 ```
+
+A lead then asks the operator for the review with `terrarium question ask`,
+with the page and the artifacts linked.
 
 Use JSON in a script:
 
@@ -2345,8 +2343,8 @@ line of `card ls --unassigned --column ready` is the top card of `ready`.
   until the runner allows longer lines or the `upload` method is in use.
 - `artifact push --note` is accepted, but the daemon does not store notes
   yet. The CLI says so on stderr.
-- `artifact ls` sends `--page`, `--version`, and `--card` as query
-  filters. The daemon does not filter on them yet.
+- `artifact ls` sends `--page` and `--card` as query filters. The daemon
+  does not filter on them yet. `--label` is filtered by the CLI.
 - `test push` sends the whole file in one request. Through the tunnel
   (agent mode), the 4 MiB line limit of the runner applies, so a result
   file larger than about 3 MiB fails there.

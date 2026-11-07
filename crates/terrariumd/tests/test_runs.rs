@@ -138,7 +138,7 @@ async fn upload_list_show_raw_and_the_card_chip() {
         &td,
         "proj/w1",
         json!({"content": NEXTEST, "file_name": "junit.xml", "cards": [c1],
-               "commit": "4be1c0d", "branch": "main"}),
+               "labels": ["version:1.0.0"], "commit": "4be1c0d", "branch": "main"}),
     )
     .await;
     assert_eq!(run["format"], "junit");
@@ -155,7 +155,25 @@ async fn upload_list_show_raw_and_the_card_chip() {
     assert_eq!(run["file_name"], "junit.xml");
     assert_eq!(run["raw_size"], NEXTEST.len());
     assert_eq!(run["cards"], json!([c1]));
+    assert_eq!(run["labels"], json!(["version:1.0.0"]));
     assert_eq!(run["created_by_name"], "proj/w1");
+    // TER-58: a version link is refused with a pointer to labels.
+    let r = td
+        .post_as(
+            "proj/w1",
+            "/api/projects/proj/test-runs",
+            json!({"content": "ok 1", "versions": ["v1"]}),
+        )
+        .await;
+    r.err(400, "bad_request");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("label"),
+        "{}",
+        r.body
+    );
     let rid = id(&run);
     assert_eq!(run["url"], format!("/p/proj/board/tests/{rid}"));
 
@@ -487,7 +505,7 @@ async fn compare_with_previous_and_with_a_run() {
 }
 
 #[tokio::test]
-async fn links_follow_card_and_version_rights() {
+async fn links_follow_card_rights_and_take_labels() {
     let td = setup().await;
     let mine = card(&td, "proj/w1", "Mine").await;
     let theirs = card(&td, "proj/w2", "Theirs").await;
@@ -520,39 +538,38 @@ async fn links_follow_card_and_version_rights() {
         .await
         .err(404, "not_found");
 
-    // Versions: the creator, in draft.
-    td.post_as(
-        "proj/w1",
-        "/api/projects/proj/versions",
-        json!({"name": "v1"}),
-    )
-    .await
-    .ok();
-    td.patch_as("proj/w2", &url, json!({"add_versions": ["v1"]}))
-        .await
-        .err(403, "forbidden");
+    // Labels (TER-58): free text, any member of the project links them.
     let v = td
-        .patch_as("proj/w1", &url, json!({"add_versions": ["v1"]}))
+        .patch_as(
+            "proj/w2",
+            &url,
+            json!({"add_labels": [" version:1.0.0 ", "version:vnext"]}),
+        )
         .await;
-    let v = v.ok().clone();
-    assert_eq!(v["versions"][0]["name"], "v1");
-    let vid = v["versions"][0]["id"].as_str().unwrap().to_owned();
-    let by_version = td
-        .get(&format!("/api/projects/proj/test-runs?version={vid}"))
+    assert_eq!(v.ok()["labels"], json!(["version:1.0.0", "version:vnext"]));
+    assert!(v.ok().get("versions").is_none(), "{}", v.ok());
+    td.patch_as("proj/w1", &url, json!({"add_labels": [" "]}))
+        .await
+        .err(422, "invalid");
+    let by_label = td
+        .get("/api/projects/proj/test-runs?label=version:1.0.0")
         .await;
-    assert_eq!(by_version.ok().as_array().unwrap().len(), 1);
-    let by_version = td.get("/api/projects/proj/test-runs?version=v1").await;
-    assert_eq!(by_version.ok().as_array().unwrap().len(), 1);
-    td.get("/api/projects/proj/test-runs?version=v9")
+    assert_eq!(by_label.ok().as_array().unwrap().len(), 1);
+    let by_label = td
+        .get("/api/projects/proj/test-runs?label=version:9.9.9")
+        .await;
+    assert_eq!(by_label.ok().as_array().unwrap().len(), 0);
+    let v = td
+        .patch_as("proj/w1", &url, json!({"remove_labels": ["version:vnext"]}))
+        .await;
+    assert_eq!(v.ok()["labels"], json!(["version:1.0.0"]));
+    // The version fields are gone: 400, never a silent ignore.
+    td.patch_as("proj/w1", &url, json!({"add_versions": ["v1"]}))
         .await
-        .err(404, "not_found");
-    // A version in review is not editable.
-    td.post_as("proj/w1", &format!("/api/versions/{vid}/submit"), json!({}))
+        .err(400, "bad_request");
+    td.get("/api/projects/proj/test-runs?version=v1")
         .await
-        .ok();
-    td.patch_as("proj/w1", &url, json!({"remove_versions": ["v1"]}))
-        .await
-        .err(409, "conflict");
+        .err(400, "bad_request");
     // Unlink a card.
     let v = td
         .patch_as("proj/w1", &url, json!({"remove_cards": [mine]}))
@@ -568,7 +585,9 @@ async fn links_follow_card_and_version_rights() {
         .collect();
     assert_eq!(
         changes,
-        ["created", "linked", "linked", "linked", "unlinked"]
+        [
+            "created", "linked", "linked", "linked", "unlinked", "unlinked"
+        ]
     );
     // A card of another project.
     let other_card = td

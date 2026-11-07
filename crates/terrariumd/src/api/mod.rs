@@ -49,7 +49,6 @@ mod threads;
 mod tools;
 mod transcripts;
 mod usage;
-mod versions;
 mod waits;
 mod wiki;
 
@@ -301,7 +300,6 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(wiki::routes())
         .merge(records::routes())
         .merge(artifacts::routes())
-        .merge(versions::routes())
         .merge(test_runs::routes())
         .merge(monitors::routes())
         .merge(pipelines::routes())

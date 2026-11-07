@@ -8,8 +8,9 @@
 //! - A per-file limit and a per-project quota come from
 //!   `<config>/daemon.toml` (`[artifacts]`), with defaults.
 //! - The serving routes (`/a/...`) check a short-lived HMAC signature.
-//! - Retention: an artifact attached to something (a released version, a
-//!   live page, a card, any version) or embedded in a live page is kept.
+//! - Retention: an artifact attached to something (a live page, a card, a
+//!   label, or a version from before TER-58) or embedded in a live page is
+//!   kept.
 //!   An unattached artifact older than `retention_days` is pruned, after an
 //!   audit warning at least a day before.
 
@@ -31,7 +32,7 @@ use crate::error::{ApiError, ApiResult, Code};
 use crate::events::EventDraft;
 use crate::policy;
 use crate::store::memory::{name_of, next_number, resolve_short};
-use crate::store::{Page, Paged, board, projects, versions, wiki};
+use crate::store::{Page, Paged, board, link_label, projects, wiki};
 
 pub const PREFIX: &str = "ART";
 /// The hard cap of one upload, whatever the config says.
@@ -522,12 +523,12 @@ pub fn remove_blobs(ctx: &ArtifactCtx, conn: &Connection, blobs: &[(String, Stri
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactLink {
-    /// `page`, `card`, or `version`.
+    /// `page`, `card`, or `label`.
     pub kind: String,
-    /// The page ID, the card ID, or the version ID.
+    /// The page ID, the card ID, or the label (`version:1.4.0`).
     #[serde(rename = "ref")]
     pub reference: String,
-    /// The page path or the version name.
+    /// The page path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub created_by: String,
@@ -633,11 +634,6 @@ pub fn find_for(conn: &Connection, actor: &Actor, key: &str) -> ApiResult<ArtRow
     Ok(row)
 }
 
-/// The internal key of an artifact row, for other stores.
-pub fn pk_of(row: &ArtRow) -> i64 {
-    row.pk
-}
-
 pub fn render(conn: &Connection, row: ArtRow) -> ApiResult<Artifact> {
     let mut links = Vec::new();
     let mut stmt = conn.prepare(
@@ -658,18 +654,17 @@ pub fn render(conn: &Connection, row: ArtRow) -> ApiResult<Artifact> {
         .collect::<Result<Vec<_>, _>>()?;
     links.extend(rows);
     let mut stmt = conn.prepare(
-        "SELECT va.version, va.created_by, va.created_at, v.name FROM version_artifacts va
-           JOIN versions v ON v.id = va.version
-         WHERE va.artifact = ?1 ORDER BY va.created_at",
+        "SELECT label, created_by, created_at FROM artifact_labels
+         WHERE artifact = ?1 ORDER BY created_at, label",
     )?;
     let rows = stmt
         .query_map([row.pk], |r| {
             Ok(ArtifactLink {
-                kind: "version".into(),
+                kind: "label".into(),
                 reference: r.get(0)?,
                 created_by: r.get(1)?,
                 created_at: r.get(2)?,
-                label: r.get(3)?,
+                label: None,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -765,9 +760,9 @@ pub fn usage(conn: &Connection, project: &str, limits: &Limits) -> ApiResult<Usa
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewArtifactLink {
-    /// `page`, `version`, or `card`.
+    /// `page`, `card`, or `label`.
     pub kind: String,
-    /// A page key (path or ID), a version key (name or ID), or a card ID.
+    /// A page key (path or ID), a card ID, or a label (`version:1.4.0`).
     #[serde(rename = "ref")]
     pub reference: String,
 }
@@ -892,21 +887,32 @@ fn link_row(t: &mut Tx<'_>, actor: &Actor, row: &ArtRow, l: &NewArtifactLink) ->
             }
             card.id
         }
+        "label" => link_label(reference)?,
         "version" => {
-            return versions::attach_artifact(t, actor, reference, &row.project, row.pk)
-                .map(|_| ());
+            return Err(ApiError::invalid(
+                "version objects are removed (TER-58): link a version label, \
+                 kind `label` with ref `version:<X.Y.Z>`",
+            ));
         }
         other => {
             return Err(ApiError::invalid(format!(
-                "bad link kind `{other}`: use page, version, or card"
+                "bad link kind `{other}`: use page, card, or label"
             )));
         }
     };
-    t.execute(
-        "INSERT OR IGNORE INTO artifact_links (artifact, kind, ref, created_by, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![row.pk, l.kind, stored, actor.address(), now()],
-    )?;
+    if l.kind == "label" {
+        t.execute(
+            "INSERT OR IGNORE INTO artifact_labels (artifact, label, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![row.pk, stored, actor.address(), now()],
+        )?;
+    } else {
+        t.execute(
+            "INSERT OR IGNORE INTO artifact_links (artifact, kind, ref, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![row.pk, l.kind, stored, actor.address(), now()],
+        )?;
+    }
     t.execute(
         "UPDATE artifacts SET warned_at = NULL WHERE pk = ?1",
         [row.pk],
@@ -942,29 +948,12 @@ pub fn add_link(
     render(t, by_pk(t, row.pk)?)
 }
 
-fn on_released_version(conn: &Connection, pk: i64) -> ApiResult<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT v.name FROM version_artifacts va JOIN versions v ON v.id = va.version
-             WHERE va.artifact = ?1 AND v.status = 'released' LIMIT 1",
-            [pk],
-            |r| r.get(0),
-        )
-        .optional()?)
-}
-
 /// Delete an artifact. Returns the blob to remove when no one else uses it.
 pub fn delete(t: &mut Tx<'_>, actor: &Actor, key: &str) -> ApiResult<(String, String)> {
     let row = find_for(t, actor, key)?;
     // A write: the own project only, also for an architect (TER-47).
     crate::policy::write_project(actor, &row.project)?;
     policy::delete_artifact(actor, &row.project, &row.created_by)?;
-    if let Some(v) = on_released_version(t, row.pk)? {
-        return Err(ApiError::conflict(format!(
-            "{} is attached to released version `{v}`; released versions are immutable",
-            short(row.num)
-        )));
-    }
     t.execute("DELETE FROM artifacts WHERE pk = ?1", [row.pk])?;
     if actor.address() != row.created_by {
         t.audit(
@@ -1005,13 +994,15 @@ pub struct PruneReport {
     pub blobs: Vec<(String, String)>,
 }
 
-/// Kept: attached to anything that still exists (a released or any other
-/// version, a live page, a card) or embedded in a live page.
+/// Kept: attached to anything that still exists (a live page, a card, a
+/// label, or a version from before TER-58: the `version_artifacts` rows
+/// stay until a later version drops the table) or embedded in a live page.
 fn attached(conn: &Connection, row: &ArtRow) -> ApiResult<bool> {
     let target = format!("{}/{}", row.project, short(row.num));
     let n: i64 = conn.query_row(
         "SELECT
            (SELECT count(*) FROM version_artifacts WHERE artifact = ?1)
+         + (SELECT count(*) FROM artifact_labels WHERE artifact = ?1)
          + (SELECT count(*) FROM artifact_links l JOIN wiki_pages p ON p.id = l.ref
              WHERE l.artifact = ?1 AND l.kind = 'page' AND p.deleted_at IS NULL)
          + (SELECT count(*) FROM artifact_links l JOIN cards c ON c.id = l.ref
