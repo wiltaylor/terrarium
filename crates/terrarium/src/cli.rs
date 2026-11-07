@@ -1169,8 +1169,16 @@ pub enum BoardCmd {
 }
 
 /// A column role: `working` is where `card claim` moves a card; a move to
-/// `blocked` needs a comment.
-pub const COLUMN_ROLES: [&str; 2] = ["working", "blocked"];
+/// `blocked` needs a comment; `validating`, `review`, `merge_queue`, and
+/// `accepted` are where the job queue puts a card (see the daemon).
+pub const COLUMN_ROLES: [&str; 6] = [
+    "working",
+    "blocked",
+    "validating",
+    "review",
+    "merge_queue",
+    "accepted",
+];
 
 #[derive(Debug, Subcommand)]
 pub enum ColumnCmd {
@@ -1184,7 +1192,7 @@ pub enum ColumnCmd {
         /// The most cards the column holds
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
         wip: Option<u32>,
-        /// `working` or `blocked`; the column that had the role loses it
+        /// One of the column roles; the column that had the role loses it
         #[arg(long, value_parser = COLUMN_ROLES)]
         role: Option<String>,
         #[arg(long, value_name = "COLUMN", conflicts_with = "before")]
@@ -1203,7 +1211,7 @@ pub enum ColumnCmd {
         /// Remove the WIP limit
         #[arg(long)]
         no_wip: bool,
-        /// `working` or `blocked`; the column that had the role loses it
+        /// One of the column roles; the column that had the role loses it
         #[arg(long, value_parser = COLUMN_ROLES, conflicts_with = "no_role")]
         role: Option<String>,
         /// Remove the role
