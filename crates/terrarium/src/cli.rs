@@ -621,7 +621,9 @@ pub enum AgentCmd {
         /// Agents of every project the caller may read
         #[arg(long)]
         all_projects: bool,
-        /// The ephemeral agents too (PLAN §18, "Ephemeral agents")
+        /// All the ephemeral agents too (PLAN §18, "Ephemeral agents").
+        /// Without it, the list shows the card agents among them: those
+        /// bound to a card or the assignee of a card, with their card
         #[arg(long)]
         ephemeral: bool,
     },

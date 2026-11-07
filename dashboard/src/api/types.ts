@@ -1729,6 +1729,9 @@ export interface Card {
   assignee?: string;
   /** Readable: `project/agent` or `operator`. */
   assignee_name?: string;
+  /** The card agent (TER-75): the ULID of the open ephemeral agent bound to the card. It stays while the card waits. */
+  agent?: string;
+  agent_name?: string;
   labels: string[];
   repo?: string;
   branch?: string;

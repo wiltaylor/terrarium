@@ -129,6 +129,13 @@ pub struct Card {
     pub assignee: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee_name: Option<String>,
+    /// The card agent (TER-75): the ULID of the open ephemeral agent bound
+    /// to the card (`agent spawn --card`). It stays while the card waits
+    /// and the assignee is cleared. Absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
@@ -528,6 +535,10 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         .as_deref()
         .map(|a| name_of(conn, a))
         .transpose()?;
+    let bound = crate::store::spawns::open_bound(
+        conn,
+        &crate::store::spawns::Bound::new(crate::bound::KIND_CARD, &row.id),
+    )?;
     let eta_set_by_name = row
         .eta_set_by
         .as_deref()
@@ -546,6 +557,8 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         body: row.body,
         assignee: row.assignee,
         assignee_name,
+        agent: bound.as_ref().map(|b| b.id.clone()),
+        agent_name: bound.map(|b| b.name),
         labels: json_col(&row.labels),
         repo: row.repo,
         branch: row.branch,

@@ -765,3 +765,56 @@ async fn the_operator_gets_the_result_of_its_own() {
         "{subjects:?}"
     );
 }
+
+/// TER-75: `include=card` lists the card agents among the ephemeral
+/// agents. A plain spawn shows once it is the assignee of a card, with
+/// that card as `current_card` also outside the `working` column.
+#[tokio::test]
+async fn include_card_lists_the_ephemeral_assignee_of_a_card() {
+    let (td, _lead, w) = setup().await;
+    let s = spawn_ok(&td, &w, "TER-1: do it").await;
+    let eph = id(&s);
+    let names = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let list = td
+        .get("/api/agents?project=p&include=card")
+        .await
+        .ok()
+        .clone();
+    assert_eq!(names(&list), ["lead", "w"]);
+    let card = td
+        .post("/api/projects/p/cards", json!({"title": "Ship it"}))
+        .await
+        .ok()
+        .clone();
+    let card = id(&card);
+    td.post(
+        &format!("/api/cards/{card}/assign"),
+        json!({"assignee": eph}),
+    )
+    .await
+    .ok();
+    let list = td
+        .get("/api/agents?project=p&include=card")
+        .await
+        .ok()
+        .clone();
+    assert_eq!(names(&list), ["lead", "w", "w-worker-1"]);
+    let a = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == eph.as_str())
+        .unwrap();
+    assert_eq!(a["current_card"], card.as_str(), "{a}");
+    // The default list and the project list still leave it out.
+    let all = td.get("/api/agents?project=p").await.ok().clone();
+    assert_eq!(names(&all), ["lead", "w"]);
+    let all = td.get("/api/projects/p/agents").await.ok().clone();
+    assert_eq!(names(&all), ["lead", "w"]);
+}
