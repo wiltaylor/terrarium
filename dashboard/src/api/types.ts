@@ -1186,6 +1186,8 @@ export const EVENT_KINDS = [
   "db.record",
   // A test run (docs/api.md, test runs): `{change, project, id, name, counts, cards, versions}`.
   "test_run",
+  // The job queue (docs/api.md §35): a job queued, started, or ended `{change, project, id, card, kind, state, attempt, outcome, cards?}`.
+  "job",
   // Monitors (docs/api.md §30): each result, and a change of status `{project, monitor, monitor_id, from, to, value?, unit?, message?}`.
   "monitor.result",
   "monitor.status",
