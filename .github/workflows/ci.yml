@@ -76,6 +76,8 @@ jobs:
   # (0.x semantics: a breaking change bumps the minor, not the major).
   # A `bump: major|minor|patch` trailer on HEAD overrides the scan (the
   # history before 2026-10-27 uses `area: ...` subjects, which scan as patch).
+  # A `release: true` on top of the last tag vX.Y.Z-alpha promotes it: the
+  # version is X.Y.Z with no bump, unless a bump trailer is set or vX.Y.Z exists.
   version:
     name: Calculate version
     runs-on: ubuntu-latest
@@ -101,12 +103,19 @@ jobs:
           fi
 
           LAST_TAG=$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null || echo "")
+          PROMOTE=false
           if [[ -z "$LAST_TAG" ]]; then
             PREV_MAJOR=0; PREV_MINOR=0; PREV_PATCH=0; RANGE="HEAD"
           else
             VER="${LAST_TAG#v}"; VER="${VER%%-*}"
             IFS='.' read -r PREV_MAJOR PREV_MINOR PREV_PATCH <<< "$VER"
             RANGE="${LAST_TAG}..HEAD"
+            # A release on top of vX.Y.Z-alpha promotes it (no bump), unless a
+            # bump trailer asks for one or vX.Y.Z already exists.
+            if [[ "$IS_RELEASE" == "true" && "$IS_PRERELEASE" != "true" && "$LAST_TAG" == *-alpha \
+                  && -z "$BUMP_TRAILER" && -z "$(git tag --list "v$VER")" ]]; then
+              PROMOTE=true
+            fi
           fi
 
           BUMP="none"
@@ -141,6 +150,10 @@ jobs:
           if [[ "$IS_PRERELEASE" == "true" ]]; then
             VERSION="${VERSION}-alpha"
             PRERELEASE=true
+          fi
+          if [[ "$PROMOTE" == "true" ]]; then
+            VERSION="$VER"
+            BUMP="promoted from $LAST_TAG"
           fi
 
           echo "Calculated version: $VERSION (bump=$BUMP, prerelease=$PRERELEASE, from ${LAST_TAG:-none})"
