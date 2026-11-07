@@ -429,6 +429,13 @@ pub enum ProjectCmd {
         /// a duration (`15m`, `1h`), `off`, or `default` (15m)
         #[arg(long)]
         idle_alert: Option<String>,
+        /// The GitHub login of the GitHub author gate (operator only).
+        /// Repeat it for each login: the list replaces the whole list
+        #[arg(long = "github-author", value_name = "LOGIN")]
+        github_author: Vec<String>,
+        /// Empty the GitHub author gate (operator only): no gate
+        #[arg(long = "github-authors-clear", conflicts_with = "github_author")]
+        github_authors_clear: bool,
     },
     /// Delete a project (sysadmin)
     Rm {
@@ -503,6 +510,14 @@ pub enum JobCmd {
         /// queued, running, passed, failed, or cancelled
         #[arg(long)]
         state: Option<String>,
+    },
+    /// The first-attempt pass rate of the project's jobs, the counts,
+    /// and the test targets that failed most often (TER-135)
+    Stats {
+        /// The start of the window: a duration back from now (`7d`, `12h`),
+        /// an RFC 3339 time, or HH:MM today. Default: 7 days
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Show a job with its output tail
     Show { id: String },
@@ -606,7 +621,9 @@ pub enum AgentCmd {
         /// Agents of every project the caller may read
         #[arg(long)]
         all_projects: bool,
-        /// The ephemeral agents too (PLAN §18, "Ephemeral agents")
+        /// All the ephemeral agents too (PLAN §18, "Ephemeral agents").
+        /// Without it, the list shows the card agents among them: those
+        /// bound to a card or the assignee of a card, with their card
         #[arg(long)]
         ephemeral: bool,
     },
@@ -1264,8 +1281,9 @@ pub enum CardCmd {
         eta: Option<String>,
     },
     /// Queue a validation of the card's pushed commit: moves the card to
-    /// `validating`, clears the assignee, adds `by:<you>`. Then take your
-    /// next card; the daemon moves this one on the result
+    /// `validating`, keeps you assigned, sets one `validation:*` label and
+    /// one `by:<you>` label. Then take your next card; the daemon moves
+    /// this one on the result and clears the assignee
     Validate {
         id: String,
         /// The pushed commit: it must be the head of the branch on the
@@ -2811,7 +2829,10 @@ pub struct RunArgs {
     /// The working directory on the target (an absolute path)
     #[arg(long)]
     pub cwd: Option<String>,
-    /// `KEY=VALUE` for the command's environment; repeat for more
+    /// `KEY=VALUE` for the command's environment; repeat for more.
+    /// `KEY=@secret:<name>[.<field>]`: the daemon puts the value of a
+    /// secret granted to you (`run` on this target, or `read`) into the
+    /// env of the remote process; it never reaches the sandbox
     #[arg(long = "env", short = 'e')]
     pub env: Vec<String>,
     /// A note for yourself: why you run it
@@ -3080,14 +3101,19 @@ pub enum SecretCmd {
         /// `agent:<project>/<name>`, `agent:<id>`, `project:<name>`, or
         /// `<project>/<name>` (an agent)
         grantee: String,
-        /// `use`: the git credential helper and the ssh-agent only. `read`:
-        /// also env vars and `secret get`. Default: `use` for token,
-        /// github_token, and ssh_key; `read` for the other kinds
-        #[arg(long, value_parser = ["use", "read"])]
+        /// `use`: the git credential helper and the ssh-agent only. `run`:
+        /// also `terrarium run -e KEY=@secret:<name>` on the `--target`
+        /// targets, no env var and no `secret get`. `read`: also env vars
+        /// and `secret get`. Default: `use` for token, github_token, and
+        /// ssh_key; `read` for the other kinds
+        #[arg(long, value_parser = ["use", "run", "read"])]
         level: Option<String>,
         /// Put the value into this env var at the start (needs `read`)
         #[arg(long)]
         env: Option<String>,
+        /// A target of a `run` grant; repeat for more (needs `--level run`)
+        #[arg(long = "target", value_name = "TARGET")]
+        targets: Vec<String>,
     },
     /// Remove a grant
     Revoke { name: String, grantee: String },

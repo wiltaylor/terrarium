@@ -198,6 +198,108 @@ async fn daemon_and_system() {
     assert!(out.contains("roles: sysadmin,project_admin"), "{out}");
 }
 
+/// TER-140: the operator sets the GitHub author gate with `project set`.
+/// The list replaces the whole list, `--github-authors-clear` sends `[]`,
+/// the two flags do not combine, and `project show` lists the logins.
+#[tokio::test]
+async fn project_set_github_authors() {
+    ok(
+        false,
+        &[
+            "project",
+            "set",
+            "ops",
+            "--github-author",
+            "wiltaylor",
+            "--github-author",
+            "wiltaylor-daf",
+        ],
+        vec![(200, json!({"name": "ops"}))],
+        vec![(
+            Patch,
+            "/api/projects/ops",
+            vec![],
+            Some(json!({"github_authors": ["wiltaylor", "wiltaylor-daf"]})),
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &["project", "set", "ops", "--github-authors-clear"],
+        vec![(200, json!({"name": "ops"}))],
+        vec![(
+            Patch,
+            "/api/projects/ops",
+            vec![],
+            Some(json!({"github_authors": []})),
+        )],
+    )
+    .await;
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "project",
+            "set",
+            "ops",
+            "--github-author",
+            "wiltaylor",
+            "--github-authors-clear",
+        ])
+        .is_err(),
+        "the two flags conflict"
+    );
+    let out = ok(
+        false,
+        &["project", "show", "ops"],
+        vec![
+            (
+                200,
+                json!({"name": "ops", "card_prefix": "OPS", "source": "api",
+                       "github_authors": ["wiltaylor", "wiltaylor-daf"]}),
+            ),
+            (200, json!([])),
+            (200, json!([])),
+            (200, json!([])),
+            (200, json!({})),
+        ],
+        vec![
+            req(Get, "/api/projects/ops"),
+            req(Get, "/api/projects/ops/agents"),
+            req(Get, "/api/projects/ops/repos"),
+            req(Get, "/api/projects/ops/targets"),
+            req(Get, "/api/projects/ops/target-grants"),
+        ],
+    )
+    .await;
+    assert!(
+        out.contains("github authors: wiltaylor, wiltaylor-daf"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["project", "show", "ops"],
+        vec![
+            (
+                200,
+                json!({"name": "ops", "card_prefix": "OPS", "source": "api"}),
+            ),
+            (200, json!([])),
+            (200, json!([])),
+            (200, json!([])),
+            (200, json!({})),
+        ],
+        vec![
+            req(Get, "/api/projects/ops"),
+            req(Get, "/api/projects/ops/agents"),
+            req(Get, "/api/projects/ops/repos"),
+            req(Get, "/api/projects/ops/targets"),
+            req(Get, "/api/projects/ops/target-grants"),
+        ],
+    )
+    .await;
+    assert!(out.contains("github authors: none (no gate)"), "{out}");
+}
+
 #[tokio::test]
 async fn projects_and_repos() {
     ok(
@@ -554,24 +656,56 @@ async fn agents() {
         false,
         &["-p", "terra", "agent", "ls"],
         vec![],
-        vec![(Get, "/api/agents", vec![("project", "terra")], None)],
+        vec![(
+            Get,
+            "/api/agents",
+            vec![("project", "terra"), ("include", "card")],
+            None,
+        )],
     )
     .await;
     ok(
         true,
         &["agents", "ls"],
         vec![],
-        vec![req(Get, "/api/agents")],
+        vec![(Get, "/api/agents", vec![("include", "card")], None)],
     )
     .await;
+    // Each project with the same `include` (TER-75: the card agents, and
+    // all ephemeral agents with `--ephemeral`).
     ok(
         true,
         &["agents", "ls", "--all-projects"],
         vec![(200, json!([{"name": "terra"}, {"name": "ops"}]))],
         vec![
             req(Get, "/api/projects"),
-            req(Get, "/api/projects/terra/agents"),
-            req(Get, "/api/projects/ops/agents"),
+            (
+                Get,
+                "/api/agents",
+                vec![("project", "terra"), ("include", "card")],
+                None,
+            ),
+            (
+                Get,
+                "/api/agents",
+                vec![("project", "ops"), ("include", "card")],
+                None,
+            ),
+        ],
+    )
+    .await;
+    ok(
+        true,
+        &["agents", "ls", "--ephemeral", "--all-projects"],
+        vec![(200, json!([{"name": "terra"}]))],
+        vec![
+            req(Get, "/api/projects"),
+            (
+                Get,
+                "/api/agents",
+                vec![("project", "terra"), ("include", "ephemeral")],
+                None,
+            ),
         ],
     )
     .await;
@@ -1139,6 +1273,36 @@ async fn board_and_cards() {
         "{out}"
     );
     assert!(out.contains("== in_progress (0, wip 2)"), "{out}");
+    // The card agent (TER-75): on the tile when it is not the assignee,
+    // and in `card show`.
+    let out = ok(
+        false,
+        &["-p", "terra", "board"],
+        vec![(
+            200,
+            json!({"project": "terra", "card_prefix": "TER",
+              "columns": [{"name": "review", "count": 2}],
+              "cards": [
+                {"id": "TER-2", "column": "review", "title": "Waits", "agent_name": "ter-2"},
+                {"id": "TER-3", "column": "review", "title": "Works",
+                 "assignee_name": "terra/ter-3", "agent_name": "ter-3"}]}),
+        )],
+        vec![req(Get, "/api/projects/terra/board")],
+    )
+    .await;
+    assert!(out.contains("  TER-2     Waits  agent ter-2\n"), "{out}");
+    assert!(out.contains("  TER-3     Works  @terra/ter-3\n"), "{out}");
+    let out = ok(
+        false,
+        &["card", "show", "TER-2"],
+        vec![(
+            200,
+            json!({"id": "TER-2", "column": "review", "title": "Waits", "agent_name": "ter-2"}),
+        )],
+        vec![req(Get, "/api/cards/TER-2")],
+    )
+    .await;
+    assert!(out.contains("  agent: ter-2"), "{out}");
     ok(
         false,
         &["-p", "terra", "card", "ls", "--mine", "--column", "ready"],
@@ -7441,7 +7605,12 @@ async fn agent_lifecycle_commands() {
                  "paused": false},
             ]),
         )],
-        vec![(Get, "/api/agents", vec![("project", "terra")], None)],
+        vec![(
+            Get,
+            "/api/agents",
+            vec![("project", "terra"), ("include", "card")],
+            None,
+        )],
     )
     .await;
     assert!(out.contains("stopped (idle)"), "{out}");
