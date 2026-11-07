@@ -2712,7 +2712,10 @@ async fn a_drain_starts_no_job_and_lists_the_running_ones() {
         if j.first().is_some_and(|j| j["state"] == "running") {
             break j[0]["id"].as_str().unwrap().to_owned();
         }
-        assert!(start.elapsed() < DEADLINE, "the slow job never started: {j:?}");
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the slow job never started: {j:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
 
@@ -2726,7 +2729,10 @@ async fn a_drain_starts_no_job_and_lists_the_running_ones() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     terrariumd::jobs::tick(&state).await.unwrap();
     let j = job_of(&lab, &fast).await;
-    assert_eq!(j[0]["state"], "queued", "a job started during the drain: {j:?}");
+    assert_eq!(
+        j[0]["state"], "queued",
+        "a job started during the drain: {j:?}"
+    );
     assert_eq!(j[0]["attempt"], 1, "{j:?}");
 
     // The running job goes on to its end; then the drain lists no job.
@@ -2735,7 +2741,10 @@ async fn a_drain_starts_no_job_and_lists_the_running_ones() {
     let v = lab.td.get("/api/system/update").await.ok().clone();
     assert_eq!(v["drain"]["jobs"], json!([]), "{v}");
     let j = job_of(&lab, &fast).await;
-    assert_eq!(j[0]["state"], "queued", "a job started during the drain: {j:?}");
+    assert_eq!(
+        j[0]["state"], "queued",
+        "a job started during the drain: {j:?}"
+    );
 
     // The end of the drain starts it.
     let r = lab.td.post_empty("/api/system/update/resume").await;

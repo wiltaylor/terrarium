@@ -418,7 +418,9 @@ async fn end_lost(state: &Shared, l: Lost) {
             })
             .await;
         match back {
-            Ok(Some(j)) => info!(job = %j.id, attempt = j.attempt, "a lost job waits in the queue again"),
+            Ok(Some(j)) => {
+                info!(job = %j.id, attempt = j.attempt, "a lost job waits in the queue again")
+            }
             Ok(None) => debug!(job = %job.id, "a lost job was cancelled during its kill"),
             Err(e) => warn!(job = %job.id, "cannot put a lost job back in the queue: {e}"),
         }
