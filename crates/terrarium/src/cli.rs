@@ -504,6 +504,14 @@ pub enum JobCmd {
         #[arg(long)]
         state: Option<String>,
     },
+    /// The first-attempt pass rate of the project's jobs, the counts,
+    /// and the test targets that failed most often (TER-135)
+    Stats {
+        /// The start of the window: a duration back from now (`7d`, `12h`),
+        /// an RFC 3339 time, or HH:MM today. Default: 7 days
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// Show a job with its output tail
     Show { id: String },
     /// Cancel a queued or running job (a running one is killed)

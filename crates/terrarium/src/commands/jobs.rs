@@ -1,4 +1,5 @@
 //! The job queue of a project (TER-71): `job ls | show | cancel`,
+//! `job stats` (TER-135),
 //! `job hosts | host-cap` (TER-97), `job host-alias` (TER-105),
 //! `project delivery show | set`, and `card validate | merge`.
 
@@ -61,6 +62,21 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
                 print_table(c, items, JOB_COLS, "no jobs");
             })
         }
+        JobCmd::Stats { since } => {
+            let name = ctx.project_or(None).await?;
+            let since = since
+                .as_deref()
+                .map(|s| super::system::parse_since(s, chrono::Local::now()))
+                .transpose()?;
+            let v = ctx
+                .api
+                .get(
+                    &format!("{}/jobs/stats", project_path(&name)),
+                    query([("since", since)]),
+                )
+                .await?;
+            ctx.emit(&v, print_stats)
+        }
         JobCmd::Show { id } => {
             let v = ctx
                 .api
@@ -109,6 +125,76 @@ pub async fn job(ctx: &Ctx, cmd: &JobCmd) -> anyhow::Result<()> {
             })
         }
     }
+}
+
+/// The most failed targets that `job stats` prints.
+const STATS_TARGETS: usize = 10;
+
+/// `passed/ended (rate%)` of a first-attempt block.
+fn rate(v: &Value) -> String {
+    let pct = v["pass_rate"]
+        .as_f64()
+        .map_or_else(|| "-".to_owned(), |r| format!("{:.0}%", r * 100.0));
+    format!("{pct} ({}/{})", field(v, "passed"), field(v, "ended"))
+}
+
+fn print_stats(c: &Ctx, v: &Value) {
+    c.line(format!(
+        "jobs of {} since {}: {}",
+        field(v, "project"),
+        field(v, "since"),
+        field(v, "jobs")
+    ));
+    c.line(format!(
+        "first-attempt pass rate: {}",
+        rate(&v["first_attempt"])
+    ));
+    c.line(format!(
+        "  validate {}, merge {}",
+        rate(&v["validate"]),
+        rate(&v["merge"])
+    ));
+    c.line(format!(
+        "reruns passed: {} (a failure the rerun did not repeat)",
+        rate(&v["reruns"])
+    ));
+    c.line(format!(
+        "conflicts {}, cancelled {}, open {}, split halves {}",
+        field(v, "conflicts"),
+        field(v, "cancelled"),
+        field(v, "open"),
+        field(v, "splits")
+    ));
+    let steps = v["failed_steps"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if !steps.is_empty() {
+        let list: Vec<String> = steps
+            .iter()
+            .map(|s| format!("{} {}", field(s, "step"), field(s, "failed")))
+            .collect();
+        c.line(format!("failed steps: {}", list.join(", ")));
+    }
+    let targets = v["failed_targets"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if targets.len() > STATS_TARGETS {
+        c.line(format!(
+            "failed test targets (top {STATS_TARGETS} of {}, --json for all):",
+            targets.len()
+        ));
+    } else {
+        c.line("failed test targets:");
+    }
+    print_table(
+        c,
+        &targets[..targets.len().min(STATS_TARGETS)],
+        &[
+            ("TARGET", "target"),
+            ("FAILED", "failed"),
+            ("FIRST TRY", "first_attempt"),
+        ],
+        "no failed test targets",
+    );
 }
 
 fn print_hosts(c: &Ctx, v: &Value) {

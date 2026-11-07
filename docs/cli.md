@@ -1148,6 +1148,7 @@ terrarium card merge <id> [--repo r] [--branch b]          project_admin
 terrarium card merge <id> <id>... [--repo r]               project_admin
 terrarium job ls [--state queued|running|passed|failed|cancelled]
 terrarium job show <id>
+terrarium job stats [--since 7d]
 terrarium job cancel <id>
 terrarium job hosts
 terrarium job host-cap <host> <n> | --clear                sysadmin
@@ -1186,6 +1187,15 @@ list. `job hosts` shows the caps, the running jobs, the host-agent name,
 and the aliases per host. Jobs run at low
 IO and CPU priority (`ionice -c3 nice -n19`). Builds that you start with
 `terrarium exec` or `terrarium run` are outside the queue.
+
+`job stats` gives the first-attempt pass rate of the project's jobs over a
+window (default 7 days; `--since` takes a duration such as `30d`, an RFC
+3339 time, or `HH:MM` today), per kind and in all. A `conflict` is no
+first attempt: it never ran the recipe. It also gives the reruns that
+passed, the counts, the failed recipe steps, and the test targets that
+failed most often. The targets come from the `error: N targets failed:`
+lines of each failed job's output tail. `-p` picks another project, and
+`--json` gives all targets (docs/api.md §35.4).
 
 `project delivery set` keeps the flags that you leave out. `--target ""`
 or `--recipe ""` turns the queue off. `--next-repo` replaces the list.

@@ -4,6 +4,10 @@
 //!   operator): the queue config.
 //! - `GET /api/projects/{name}/jobs[?state=]`: the config, the counts, and
 //!   the jobs, newest first.
+//! - `GET /api/projects/{name}/jobs/stats[?since=]` (TER-135): the
+//!   first-attempt pass rate, the counts, and the failed test targets of
+//!   the jobs created since `since` (RFC 3339, or a duration back from
+//!   now such as `7d`; default 7 days).
 //! - `GET /api/jobs/{id}`, `DELETE /api/jobs/{id}` (cancel; a running job
 //!   is killed).
 //! - `POST /api/cards/{id}/validate` {commit?, repo?, branch?, comment?}:
@@ -49,6 +53,7 @@ pub fn routes() -> Router<Shared> {
             get(show_delivery).put(set_delivery),
         )
         .route("/projects/{name}/jobs", get(list))
+        .route("/projects/{name}/jobs/stats", get(stats))
         .route("/jobs/{id}", get(show).delete(cancel))
         .route("/cards/{id}/validate", post(validate))
         .route("/cards/{id}/merge", post(merge))
@@ -284,6 +289,55 @@ async fn list(
         })
         .await?;
     Ok(Json(rt::view(&def, &list)))
+}
+
+/// The default window of the job stats.
+const STATS_WINDOW: &str = "7d";
+
+#[derive(Debug, Default, Deserialize)]
+struct StatsQuery {
+    #[serde(default)]
+    since: Option<String>,
+}
+
+/// The start of the stats window: an RFC 3339 time, or a duration back
+/// from `now` (`7d`, `12h`). The result is in the form of `created_at`.
+fn stats_since(since: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> ApiResult<String> {
+    let s = since
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(STATS_WINDOW);
+    let at = match chrono::DateTime::parse_from_rfc3339(s) {
+        Ok(t) => t.with_timezone(&chrono::Utc),
+        Err(_) => {
+            let d = terrarium_core::eta::parse_duration(s).map_err(|e| {
+                ApiError::bad_request(format!(
+                    "bad since: {e}; give an RFC 3339 time or a duration such as 7d"
+                ))
+            })?;
+            now.checked_sub_signed(d)
+                .ok_or_else(|| ApiError::bad_request(format!("bad since `{s}`: too far back")))?
+        }
+    };
+    Ok(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+async fn stats(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiQuery(q): ApiQuery<StatsQuery>,
+) -> ApiResult<Json<jobs::JobStats>> {
+    policy::read_project(&actor, &name)?;
+    let since = stats_since(q.since.as_deref(), chrono::Utc::now())?;
+    let s = state
+        .db
+        .read(move |c| {
+            projects::get(c, &name)?;
+            jobs::stats(c, &name, &since)
+        })
+        .await?;
+    Ok(Json(s))
 }
 
 async fn find(state: &Shared, actor: &Actor, id: String) -> ApiResult<Job> {
