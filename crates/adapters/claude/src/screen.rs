@@ -338,7 +338,8 @@ mod tests {
     /// empty box, a busy screen, and a dialog do not.
     #[test]
     fn unsubmitted_paste_is_pending_input() {
-        let all = sections(&fixture("typing.txt"));
+        let mut all = sections(&fixture("typing.txt"));
+        all.extend(sections(&fixture("hooks.txt")));
         let pending = |prefix: &str| {
             let (_, lines) = all
                 .iter()

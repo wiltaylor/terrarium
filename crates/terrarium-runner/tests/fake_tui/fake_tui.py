@@ -61,7 +61,9 @@ Env:
                        lines]`, and a CR that comes less than 100 ms after
                        the end of the paste is lost (the paste stays in
                        the line). A later CR submits it. Ctrl-U empties
-                       the line
+                       the line. `done:` shows only the first line of a
+                       turn and its line count, so the screen does not
+                       scroll
   FAKE_TUI_INPUT_LOG   a path; with FAKE_TUI_SLASH_NEEDS_PAUSE, append one
                        line for each read of the terminal: the bytes as
                        hex. ICRNL is off then, so a CR stays a CR.
@@ -325,7 +327,11 @@ def main():
                 read_line()
         else:
             time.sleep(DELAY)
-        out(f"done: {text}\n")
+        if PASTE_NEEDS_PAUSE and "\n" in text:
+            first = text.splitlines()[0]
+            out(f"done: {first} (+{text.count(chr(10)) + 1} lines)\n")
+        else:
+            out(f"done: {text}\n")
         hook("Stop", {})
 
 
