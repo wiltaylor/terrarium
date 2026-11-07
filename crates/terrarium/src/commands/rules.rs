@@ -67,7 +67,10 @@ fn flow_line(v: &Value) -> String {
     } else {
         "the daemon runs the card flow; only the project's rules.wcl runs"
     };
-    format!("project {}: board_flow {flow} ({note})", field(v, "project"))
+    format!(
+        "project {}: board_flow {flow} ({note})",
+        field(v, "project")
+    )
 }
 
 fn print_ls(ctx: &Ctx, v: &Value) {
@@ -133,8 +136,7 @@ fn read_text(ctx: &Ctx, file: &str) -> anyhow::Result<String> {
     if file == "-" {
         return ctx.text("-");
     }
-    std::fs::read_to_string(file)
-        .map_err(|e| CliError::usage(format!("cannot read `{file}`: {e}")))
+    std::fs::read_to_string(file).map_err(|e| CliError::usage(format!("cannot read `{file}`: {e}")))
 }
 
 /// Exit 1 without a message (the output said why).
@@ -300,10 +302,7 @@ pub async fn rule(ctx: &Ctx, cmd: &RuleCmd) -> anyhow::Result<()> {
             let verb = if on { "enable" } else { "disable" };
             let v = ctx
                 .api
-                .post(
-                    &format!("{base}/{}/{verb}", encode(rule)),
-                    Some(json!({})),
-                )
+                .post(&format!("{base}/{}/{verb}", encode(rule)), Some(json!({})))
                 .await?;
             ctx.emit(&v, |c, v| {
                 let state = if on { "on" } else { "off" };

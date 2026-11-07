@@ -10259,7 +10259,10 @@ async fn rules_every_command() {
         ],
     )
     .await;
-    assert!(out.contains("rule merge-pass  (override, enabled yes)"), "{out}");
+    assert!(
+        out.contains("rule merge-pass  (override, enabled yes)"),
+        "{out}"
+    );
     assert!(out.contains("rule \"merge-pass\" {"), "{out}");
     assert!(out.contains("01RUN"), "{out}");
     // show of an unknown rule: a usage error, one request.
@@ -10354,7 +10357,16 @@ async fn rules_every_command() {
     // log.
     let out = ok(
         false,
-        &["-p", "terra", "rule", "log", "--rule", "merge-pass", "--limit", "3"],
+        &[
+            "-p",
+            "terra",
+            "rule",
+            "log",
+            "--rule",
+            "merge-pass",
+            "--limit",
+            "3",
+        ],
         vec![(200, runs)],
         vec![(
             Get,
@@ -10378,7 +10390,10 @@ async fn rules_every_command() {
         )],
     )
     .await;
-    assert!(out.contains("rule agent-park: off (rules.wcl changed)"), "{out}");
+    assert!(
+        out.contains("rule agent-park: off (rules.wcl changed)"),
+        "{out}"
+    );
     let out = ok(
         false,
         &["-p", "terra", "rule", "enable", "agent-park"],
@@ -10431,7 +10446,10 @@ async fn rules_every_command() {
         )],
     )
     .await;
-    assert!(out.contains("--- rules.wcl ---\nrule \"merge-pass\" {}\n"), "{out}");
+    assert!(
+        out.contains("--- rules.wcl ---\nrule \"merge-pass\" {}\n"),
+        "{out}"
+    );
     assert!(
         out.contains("applied: project terra runs board_flow rules (rules.wcl changed)"),
         "{out}"

@@ -242,11 +242,7 @@ async fn migration_on_a_board_without_validating_and_accepted() {
     assert_eq!(rows[0]["detail"]["previous_board_flow"], "code");
 
     // The rules that run: the pack, with the overrides in its order.
-    let eff = td
-        .get("/api/projects/p/rules/effective")
-        .await
-        .ok()
-        .clone();
+    let eff = td.get("/api/projects/p/rules/effective").await.ok().clone();
     assert_eq!(eff["board_flow"], "rules");
     let rules = eff["rules"].as_array().unwrap();
     let origin = |n: &str| {
@@ -365,7 +361,10 @@ rule "to-blocked" {
         .clone();
     assert_eq!(lint["source"], "text");
     let c = codes(&lint);
-    assert!(c.contains(&("stuck_column".into(), "ready".into())), "{lint}");
+    assert!(
+        c.contains(&("stuck_column".into(), "ready".into())),
+        "{lint}"
+    );
     assert!(!c.iter().any(|(_, col)| col == "blocked"), "{lint}");
     // A bad text is 422.
     td.post(
@@ -393,7 +392,10 @@ async fn enable_and_disable_edit_the_file() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(text.ends_with("rule \"job-cancelled\" { enabled = false }\n"), "{text}");
+    assert!(
+        text.ends_with("rule \"job-cancelled\" { enabled = false }\n"),
+        "{text}"
+    );
     let eff = td.get("/api/projects/p/rules/effective").await.ok().clone();
     let jc = eff["rules"]
         .as_array()
@@ -471,7 +473,10 @@ async fn the_dry_run_plans_the_pack_of_a_rules_project() {
         .await
         .unwrap();
     let plan = td
-        .post("/api/projects/p/rules/dry-run", json!({"from": seq - 5, "to": seq}))
+        .post(
+            "/api/projects/p/rules/dry-run",
+            json!({"from": seq - 5, "to": seq}),
+        )
         .await
         .ok()
         .clone();
@@ -519,9 +524,13 @@ async fn rights_plan_as_a_reader_apply_as_an_admin() {
     )
     .await
     .err(403, "forbidden");
-    td.post_as(&worker, "/api/projects/p/rules/agent-park/disable", json!({}))
-        .await
-        .err(403, "forbidden");
+    td.post_as(
+        &worker,
+        "/api/projects/p/rules/agent-park/disable",
+        json!({}),
+    )
+    .await
+    .err(403, "forbidden");
     td.get_as(&stranger, "/api/projects/p/rules/effective")
         .await
         .err(403, "forbidden");
@@ -530,7 +539,11 @@ async fn rights_plan_as_a_reader_apply_as_an_admin() {
         .err(403, "forbidden");
 
     let r = td
-        .post_as(&lead, "/api/projects/p/rules/migrate", json!({"apply": true}))
+        .post_as(
+            &lead,
+            "/api/projects/p/rules/migrate",
+            json!({"apply": true}),
+        )
         .await
         .ok()
         .clone();

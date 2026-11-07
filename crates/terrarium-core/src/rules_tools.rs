@@ -327,10 +327,7 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
                     }
                 }
                 if names.is_empty() {
-                    reasons.push(format!(
-                        "no column of `{} one_of` is on the board",
-                        m.path
-                    ));
+                    reasons.push(format!("no column of `{} one_of` is on the board", m.path));
                     off = true;
                 } else {
                     when.push(MatchRule {
@@ -352,7 +349,9 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
         c2.not_column.retain(|r| resolves(columns, r));
         for r in c.column.iter().chain(&c.not_column) {
             if !resolves(columns, r) {
-                reasons.push(format!("the board has no column `{r}`: dropped from if_card"));
+                reasons.push(format!(
+                    "the board has no column `{r}`: dropped from if_card"
+                ));
             }
         }
         if !c.column.is_empty() && c2.column.is_empty() {
@@ -559,9 +558,8 @@ pub struct Finding {
 /// conditions do not rule out `col`.
 fn leaves(rule: &Rule, col: &str, columns: &[BoardColumn]) -> bool {
     let named = |refs: &[String]| {
-        refs.iter().any(|r| {
-            rules_file::resolve_column(columns, r).is_some_and(|c| c.name == col)
-        })
+        refs.iter()
+            .any(|r| rules_file::resolve_column(columns, r).is_some_and(|c| c.name == col))
     };
     let ruled_out = rule
         .if_card
@@ -570,31 +568,34 @@ fn leaves(rule: &Rule, col: &str, columns: &[BoardColumn]) -> bool {
     if ruled_out {
         return false;
     }
-    rule.actions.iter().filter(|a| a.verb == "card.move").any(|a| {
-        let to = a
-            .args
-            .get("to")
-            .and_then(Value::as_str)
-            .and_then(|r| rules_file::resolve_column(columns, r));
-        let Some(to) = to else { return false };
-        if to.name == col {
-            return false;
-        }
-        match a.args.get("from") {
-            None | Some(Value::Null) => true,
-            Some(v) => {
-                let refs: Vec<String> = match v {
-                    Value::String(s) => vec![s.clone()],
-                    Value::Array(items) => items
-                        .iter()
-                        .filter_map(|i| i.as_str().map(str::to_owned))
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                named(&refs)
+    rule.actions
+        .iter()
+        .filter(|a| a.verb == "card.move")
+        .any(|a| {
+            let to = a
+                .args
+                .get("to")
+                .and_then(Value::as_str)
+                .and_then(|r| rules_file::resolve_column(columns, r));
+            let Some(to) = to else { return false };
+            if to.name == col {
+                return false;
             }
-        }
-    })
+            match a.args.get("from") {
+                None | Some(Value::Null) => true,
+                Some(v) => {
+                    let refs: Vec<String> = match v {
+                        Value::String(s) => vec![s.clone()],
+                        Value::Array(items) => items
+                            .iter()
+                            .filter_map(|i| i.as_str().map(str::to_owned))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    named(&refs)
+                }
+            }
+        })
 }
 
 /// The problems of the rules `set` (the rules that the engine runs, the
@@ -813,7 +814,9 @@ pub fn set_enabled(
     let in_pack = pack.rules.iter().any(|r| r.name == name);
     let Some(rule) = own.rules.iter().find(|r| r.name == name) else {
         if !in_pack {
-            return Err(format!("no rule `{name}` in the project's rules or the pack"));
+            return Err(format!(
+                "no rule `{name}` in the project's rules or the pack"
+            ));
         }
         if enabled {
             return Ok(None);
@@ -967,16 +970,16 @@ mod tests {
         assert_eq!(mp.change, "mapped");
         let o = m.overrides.iter().find(|r| r.name == "merge-pass").unwrap();
         assert!(o.actions.iter().all(|a| a.verb != "card.move"));
-        assert!(
-            o.actions
-                .iter()
-                .any(|a| a.verb == "card.comment"
-                    && a.args["text"] == Value::String("{{job.end_comment}}".into()))
-        );
+        assert!(o.actions.iter().any(|a| a.verb == "card.comment"
+            && a.args["text"] == Value::String("{{job.end_comment}}".into())));
         // agent-park: only review is a wait column of this board.
         let park = m.overrides.iter().find(|r| r.name == "agent-park").unwrap();
         assert_eq!(park.when[1].value, serde_json::json!(["review"]));
-        let unpark = m.overrides.iter().find(|r| r.name == "agent-unpark").unwrap();
+        let unpark = m
+            .overrides
+            .iter()
+            .find(|r| r.name == "agent-unpark")
+            .unwrap();
         let nes: Vec<&Value> = unpark.when.iter().skip(1).map(|w| &w.value).collect();
         assert_eq!(nes, vec![&Value::from("review"), &Value::from("done")]);
         // validate-pass and the failures name columns this board has.
@@ -1012,7 +1015,8 @@ mod tests {
             ("shipped", Some("accepted")),
             ("done", None),
         ]);
-        let own_text = "rule \"merge-pass\" {\n  on = [\"job.verdict\"]\n  card_comment { text = \"x\" }\n}\n";
+        let own_text =
+            "rule \"merge-pass\" {\n  on = [\"job.verdict\"]\n  card_comment { text = \"x\" }\n}\n";
         let own = parse(own_text, "rules.wcl", &ctx(&board)).unwrap();
         let m = migrate(default_pack(), own_text, &own, &board);
         assert!(m.text.starts_with(own_text.trim_end()));
@@ -1030,7 +1034,11 @@ mod tests {
     fn a_rule_that_cannot_act_is_turned_off() {
         let board = cols(&[("ready", None), ("review", None)]);
         let m = migrate(default_pack(), "", &RuleSet::default(), &board);
-        let done = m.changes.iter().find(|c| c.rule == "agent-end-done").unwrap();
+        let done = m
+            .changes
+            .iter()
+            .find(|c| c.rule == "agent-end-done")
+            .unwrap();
         assert_eq!(done.change, "disabled");
         let o = m
             .overrides
@@ -1040,7 +1048,13 @@ mod tests {
         assert!(!o.enabled && o.on.is_empty() && o.actions.is_empty());
         let own = parse(&m.text, "rules.wcl", &ctx(&board)).expect("checks");
         let set = rules_file::with_pack(default_pack(), &own);
-        assert!(!set.rules.iter().find(|r| r.name == "agent-end-done").unwrap().enabled);
+        assert!(
+            !set.rules
+                .iter()
+                .find(|r| r.name == "agent-end-done")
+                .unwrap()
+                .enabled
+        );
     }
 
     #[test]
@@ -1081,7 +1095,10 @@ rule "to-blocked" {
         assert_eq!(stuck, Vec::<&str>::new());
         // Without to-done nothing leaves validating (`in` leaves review,
         // `out-elsewhere` leaves only ready, `to-blocked` runs only in ready).
-        let text2 = text.replace("card_move { to = \"done\" }", "card_comment { text = \"x\" }");
+        let text2 = text.replace(
+            "card_move { to = \"done\" }",
+            "card_comment { text = \"x\" }",
+        );
         let set = parse(&text2, "rules.wcl", &ctx(&board)).unwrap();
         let found = lint(&set, &board);
         let stuck: Vec<&str> = found
