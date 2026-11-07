@@ -481,6 +481,7 @@ fn job_queue(
             commit: None,
             by_agent: worker_of(card),
             batch: Vec::new(),
+            planned_secs: None,
         },
     )?;
     effects.push(Effect::Kick);
@@ -572,6 +573,7 @@ fn queue_batch(
             commit: None,
             by_agent: first.by_agent.clone(),
             batch: if batch.len() > 1 { batch } else { Vec::new() },
+            planned_secs: None,
         },
     )?;
     effects.push(Effect::Kick);

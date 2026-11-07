@@ -228,6 +228,7 @@ async fn store_job(td: &TestDaemon, kind: JobKind, cards: &[&str]) -> Job {
                     commit: None,
                     by_agent: None,
                     batch,
+                    planned_secs: None,
                 },
             )
         })
