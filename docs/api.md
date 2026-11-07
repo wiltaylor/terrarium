@@ -3785,7 +3785,7 @@ There is no register of threads and no conflict check between threads
 | `session_id` | The session of the thread agent, set at the close: the agent ends and its session is archived (§6.6), so `/sessions/<id>` opens it after the agent is gone. `null` for a named agent, which lives on. |
 | `reminded_at` | The time of the last Inbox reminder of the untouched thread (below), or `null`. |
 | `tracking_at` | When the attached agent moved the thread into tracking (TER-145, below), or `null`. It stays set while an operator post wakes the agent, so that the agent's reply puts the thread back into `tracking`. |
-| `cards` | The linked cards (TER-146, below) whose project the reader may read, the oldest link first: `{project, card, linked_by, linked_by_name, linked_at}`. Only in `GET /api/threads/{id}` and the answers of the writes, not in the list. |
+| `cards` | The linked cards (TER-146, below) whose project the reader may read, the oldest link first: `{project, card, linked_by, linked_by_name, linked_at}`. In `GET /api/threads/{id}`, the answers of the writes, and the list (TER-147: the dashboard reads the cards and their boards for the n/m chip of the Threads list), with the same filter. |
 
 **Status.** A new thread with a first message of the operator is
 `waiting_agent`; with no first message, or opened by an agent, it is
@@ -3828,7 +3828,13 @@ the `cards` of the thread list only the cards whose project the reader
 may read, so a reader of the thread who cannot read a card's project
 does not see the card, its project, or that it is there; a reader of the
 card does not read the thread. A second link of the same card keeps the
-first. A closed thread is `409 conflict`. A link writes the audit row
+first. A closed thread is `409 conflict`. The dashboard shows the
+linked cards on the thread page as a mini kanban (TER-147): one row per
+project with that project's board columns in board order, open while
+the thread tracks and folded otherwise, and an n/m chip in the Threads
+list: the cards in the column with the role `review` or a later column
+(not the column with the role `blocked`) of all linked cards that the
+reader may read. A link writes the audit row
 `thread.card_link` (`by`, `card`, `project`) under the card's project,
 not the thread's, so the admin of the thread's project does not read it
 in the audit log when it cannot read the card's project. A link also

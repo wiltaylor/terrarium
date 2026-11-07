@@ -157,6 +157,9 @@ pub struct AppState {
     pub pipelines: Arc<crate::pipelines::Runtime>,
     /// The git proxy (`crate::git_proxy`): off until its listener binds.
     pub git_proxy: Arc<crate::git_proxy::Runtime>,
+    /// The job queue: whether the start has taken up the jobs of the last
+    /// daemon (`crate::jobs`).
+    pub job_queue: Arc<crate::jobs::Runtime>,
 }
 
 impl AppState {
@@ -938,6 +941,7 @@ mod tests {
             webhooks: Arc::default(),
             pipelines: Arc::default(),
             git_proxy: Arc::default(),
+            job_queue: Arc::default(),
         })
     }
 
