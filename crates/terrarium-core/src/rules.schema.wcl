@@ -150,12 +150,18 @@ type Mail {
 }
 
 // `kind`: `validate`, `merge`, or `batch`. A batch takes the cards of the
-// column `from` in board order, at most `limit`.
+// column `from` in board order, at most `limit` (absent: all of them).
+// `min_cards`: the batch goes only when at least that many cards wait,
+// or, with `max_wait_minutes`, when the first card that waits has waited
+// that long. The engine checks that time itself and runs the rule then
+// (a `rule.timer` event).
 @block("job_queue")
 type JobQueue {
   kind: utf8
   from: utf8?
   limit: i64?
+  min_cards: i64?
+  max_wait_minutes: i64?
 }
 
 @block("job_cancel")

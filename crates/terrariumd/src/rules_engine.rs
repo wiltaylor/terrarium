@@ -86,6 +86,11 @@ pub const KEEP_RUNS: i64 = 500;
 pub const MAX_DRY_RUN_EVENTS: usize = 500;
 /// The period of the engine without a wake-up.
 const TICK: Duration = Duration::from_secs(10);
+/// The kind of the event that the engine writes when the wait of a batch
+/// rule ends (`job_queue` with `max_wait_minutes`, TER-172).
+pub const TIMER_KIND: &str = "rule.timer";
+/// The actor of a timer event: the engine.
+const TIMER_ACTOR: &str = "system";
 
 /// The label of rule `rule` of `project`: the actor of its writes.
 pub fn actor_label(project: &str, rule: &str) -> String {
@@ -122,6 +127,11 @@ pub struct ProjectRules {
 #[derive(Debug, Default)]
 pub struct Cache {
     sets: HashMap<String, (String, Arc<RuleSet>)>,
+    /// The timers written ([`fire_timers`]): the due time of each
+    /// (project, rule), so one wait writes one timer.
+    fired: HashMap<(String, String), String>,
+    /// When [`fire_timers`] last ran.
+    timers_at: Option<std::time::Instant>,
 }
 
 /// One project for [`load`]: its rules file (hash, time) and its flow.
@@ -355,14 +365,24 @@ pub fn decide(
     if after.is_some_and(|a| e.at.as_str() < a) {
         return Ok(Vec::new());
     }
-    let view = event_view(e);
-    if !rule
-        .on
-        .iter()
-        .any(|k| terrarium_core::schedule::glob(k, &e.kind))
-        || !rule.when.iter().all(|m| m.holds(&view))
-    {
-        return Ok(Vec::new());
+    if e.kind == TIMER_KIND {
+        // A timer is for the rule that it names only, and only the engine
+        // writes one; `on` and `when` do not apply to it (TER-172).
+        if e.data["rule"].as_str() != Some(rule.name.as_str())
+            || e.actor.as_deref() != Some(TIMER_ACTOR)
+        {
+            return Ok(Vec::new());
+        }
+    } else {
+        let view = event_view(e);
+        if !rule
+            .on
+            .iter()
+            .any(|k| terrarium_core::schedule::glob(k, &e.kind))
+            || !rule.when.iter().all(|m| m.holds(&view))
+        {
+            return Ok(Vec::new());
+        }
     }
     if !rule.if_job.is_empty() && event_job(e).is_none() {
         return Ok(Vec::new());
@@ -1199,11 +1219,125 @@ fn end_run(t: &Tx<'_>, row: &RunRow) -> ApiResult<()> {
     finish(t, &row.id, if changed { "done" } else { "noop" }, None)
 }
 
+// ------------------------------------------------------------ the timers
+
+/// One batch rule that waits for a time: `job_queue` of kind `batch` with
+/// `min_cards` and `max_wait_minutes`.
+struct TimerRule {
+    project: String,
+    rule: String,
+    from: String,
+    limit: Option<usize>,
+    min_cards: i64,
+    wait: i64,
+}
+
+fn timer_rules(projects: &[ProjectRules]) -> Vec<TimerRule> {
+    let mut out = Vec::new();
+    for p in projects {
+        for r in p.set.rules.iter().filter(|r| r.enabled) {
+            for a in r.actions.iter().filter(|a| a.verb == "job.queue") {
+                let arg = |k: &str| a.args.get(k).and_then(Value::as_i64);
+                if a.args.get("kind").and_then(Value::as_str) != Some("batch") {
+                    continue;
+                }
+                let (Some(min_cards), Some(wait), Some(from)) = (
+                    arg("min_cards"),
+                    arg("max_wait_minutes"),
+                    a.args.get("from").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                out.push(TimerRule {
+                    project: p.project.clone(),
+                    rule: r.name.clone(),
+                    from: from.to_owned(),
+                    limit: arg("limit").and_then(|n| usize::try_from(n).ok()),
+                    min_cards,
+                    wait,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Write a `rule.timer` event ([`TIMER_KIND`]) for each batch rule of
+/// `projects` whose wait ended: cards wait in its `from` column, fewer
+/// than `min_cards`, and the first one came `max_wait_minutes` before
+/// `now` or earlier. The event plans a run of that rule only (no card),
+/// and the verb checks the time again. `fired` holds the due time of
+/// each timer written, so one wait writes one event (a restart may write
+/// it once more; the verb is then a no-op or queues the batch, as it
+/// should). Returns the events written.
+pub async fn fire_timers(
+    db: &Db,
+    projects: &[ProjectRules],
+    fired: &mut HashMap<(String, String), String>,
+    now: DateTime<Utc>,
+) -> ApiResult<usize> {
+    let timers = timer_rules(projects);
+    fired.retain(|(p, r), _| timers.iter().any(|t| t.project == *p && t.rule == *r));
+    let mut written = 0;
+    for t in timers {
+        let (project, from, limit) = (t.project.clone(), t.from.clone(), t.limit);
+        let pick = db
+            .read(move |c| {
+                let columns: Vec<BoardColumn> = board::column_roles(c, &project)?
+                    .into_iter()
+                    .map(|(name, role)| BoardColumn { name, role })
+                    .collect();
+                let Some(col) = rules_file::resolve_column(&columns, &from) else {
+                    return Ok(None);
+                };
+                Ok(Some(rules_verbs::pick_batch(c, &project, &col.name, limit)?))
+            })
+            .await?;
+        let Some(pick) = pick.filter(|p| p.waiting > 0) else {
+            continue;
+        };
+        let Some(due) = pick
+            .first_since
+            .map(|f| f + chrono::Duration::minutes(t.wait))
+        else {
+            continue;
+        };
+        if due > now || usize::try_from(t.min_cards).is_ok_and(|m| pick.waiting >= m) {
+            // Not yet; or enough cards wait, and their move ran the rule.
+            continue;
+        }
+        let due = schedules::stamp(due);
+        let key = (t.project.clone(), t.rule.clone());
+        if fired.get(&key) == Some(&due) {
+            continue;
+        }
+        let (project, rule, waiting, d) = (t.project.clone(), t.rule.clone(), pick.waiting, due.clone());
+        db.write(TIMER_ACTOR, move |tx| {
+            let summary = format!("the wait of rule {rule} ended: {waiting} cards wait");
+            tx.emit(
+                events::EventDraft::new(
+                    TIMER_KIND,
+                    summary,
+                    json!({"rule": rule, "due": d, "waiting": waiting}),
+                )
+                .project(project),
+            )?;
+            Ok(())
+        })
+        .await?;
+        fired.insert(key, due);
+        written += 1;
+    }
+    Ok(written)
+}
+
 // ------------------------------------------------------------ the engine
 
 /// One round: the pending rows of before, then a plan of the new events
-/// and their runs, until the log after the cursor is read.
+/// and their runs, until the log after the cursor is read. The timers of
+/// the batch rules are checked at most every [`TICK`].
 pub async fn pass(state: &Shared, cache: &mut Cache) {
+    let mut timers_checked = false;
     loop {
         let projects = match load(&state.db, cache).await {
             Ok(p) => p,
@@ -1212,6 +1346,13 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
                 return;
             }
         };
+        if !timers_checked && cache.timers_at.is_none_or(|at| at.elapsed() >= TICK) {
+            timers_checked = true;
+            cache.timers_at = Some(std::time::Instant::now());
+            if let Err(e) = fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await {
+                warn!("the rule engine cannot check the timers: {e}");
+            }
+        }
         let live = Arc::new(live_rules(&projects));
         if let Err(e) = drain_runs(state, &live).await {
             warn!("the rule engine cannot run its outbox: {e}");

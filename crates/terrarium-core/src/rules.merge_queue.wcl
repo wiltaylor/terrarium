@@ -1,0 +1,55 @@
+// Opt-in rules for the merge queue column (TER-172, TER-162 D8, D9).
+// Copy them into the project's rules.wcl. They run with either board flow
+// (`code` or `rules`); the board needs a column with the role or the name
+// `merge_queue`, and a `review` column.
+//
+// - A queued merge job (`card merge`, `POST /api/merges`, or the batch
+//   rule below) moves each of its cards to the merge queue column. A card
+//   there already stays where it is.
+// - A cancelled merge job moves its cards from the merge queue column back
+//   to review.
+// - The cards that wait in the merge queue column without a job go onto
+//   `next` as one batch merge, in board order: when 8 wait, or 30 minutes
+//   after the first one came, whichever is first. The daemon has no batch
+//   limit of its own (D9): the numbers are here. Change `limit`,
+//   `min_cards`, and `max_wait_minutes` to change the batch.
+//
+// The pass, the red result, and the labels and comments of the job stay
+// with the flow of the project (the coded flow, or the built-in pack).
+
+rule "merge-queue-move" {
+  description = "A queued merge job: its cards wait in the merge queue column."
+  on = ["job"]
+  max_per_hour = 600
+  when "data.change" { eq = "queued" }
+  when "data.kind" { eq = "merge" }
+  when "data.origin" { eq = "queue" }
+  card_move { to = "@merge_queue" }
+}
+
+rule "merge-queue-cancel" {
+  description = "A cancelled merge job: its cards go back from the merge queue column to review."
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.verdict" { eq = "cancelled" }
+  when "data.kind" { eq = "merge" }
+  card_move {
+    to = "@review"
+    from = ["@merge_queue"]
+  }
+}
+
+rule "merge-queue-batch" {
+  description = "One batch merge of the cards that wait in the merge queue column: when 8 wait, or 30 minutes after the first one."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.to_role" { eq = "merge_queue" }
+  job_queue {
+    kind = "batch"
+    from = "@merge_queue"
+    limit = 8
+    min_cards = 8
+    max_wait_minutes = 30
+  }
+}
