@@ -1289,59 +1289,74 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
     );
 }
 
-/// Review of TER-71, major 2: a merge job runs alone in its project. With 2
-/// slots, a validate job runs, then the merge (queued second) waits for it,
-/// and a validate job queued after the merge waits for the merge.
+/// TER-159: merges have their own lane. With 1 slot, a validate job queued
+/// after a merge starts beside it and passes while the merge runs, and a
+/// second merge waits for the first.
 #[tokio::test]
-async fn a_merge_job_runs_alone_in_its_project() {
-    let lab = lab(2).await;
+async fn a_validation_passes_while_a_merge_runs() {
+    let lab = lab(1).await;
     lab.td
         .put(
             "/api/projects/p/delivery",
-            json!({"target": "p-box", "recipe": "test -f OK && sleep 1", "slots": 2,
+            json!({"target": "p-box", "recipe": "test -f OK && sleep 2", "slots": 1,
                    "next_repos": ["app"],
                    "work_dir": lab._dirs.path().join("jobs").display().to_string()}),
         )
         .await
         .ok();
-    let h1 = lab.branch("ter-a1", "next", &[("OK", "1")]);
-    lab.branch("ter-a2", "next", &[("OK", "2")]);
-    let h3 = lab.branch("ter-a3", "next", &[("OK", "3")]);
-    let c1 = lab.card("a1", "ter-a1").await;
-    let c2 = lab.card("a2", "ter-a2").await;
-    let c3 = lab.card("a3", "ter-a3").await;
+    lab.branch("ter-m1", "next", &[("OK", "1")]);
+    let hv = lab.branch("ter-v", "next", &[("OK", "2")]);
+    // Its own file: it merges onto the `next` of the first merge, which
+    // holds `OK`.
+    lab.branch("ter-m2", "next", &[("M2", "3")]);
+    let cm1 = lab.card("m1", "ter-m1").await;
+    let cv = lab.card("v", "ter-v").await;
+    let cm2 = lab.card("m2", "ter-m2").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{cm1}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["queue"]["slots"], 1, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(&lab.lead, &format!("/api/cards/{cm2}/merge"), json!({}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    // Behind the first merge, queued or running.
+    let q = &r.body["queue"];
+    assert_eq!(
+        q["position"].as_i64().unwrap() + q["running"].as_i64().unwrap(),
+        2,
+        "{}",
+        r.body
+    );
     let r = lab
         .td
         .post_as(
             &lab.w1,
-            &format!("/api/cards/{c1}/validate"),
-            json!({"commit": h1}),
+            &format!("/api/cards/{cv}/validate"),
+            json!({"commit": hv}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    let r = lab
-        .td
-        .post_as(&lab.lead, &format!("/api/cards/{c2}/merge"), json!({}))
-        .await;
-    assert_eq!(r.status, 201, "{}", r.body);
-    let r = lab
-        .td
-        .post_as(
-            &lab.w1,
-            &format!("/api/cards/{c3}/validate"),
-            json!({"commit": h3}),
-        )
-        .await;
-    assert_eq!(r.status, 201, "{}", r.body);
+    // The merges do not count against the one slot.
+    assert_eq!(r.body["queue"]["position"], 1, "{}", r.body);
+    assert_eq!(r.body["queue"]["running"], 0, "{}", r.body);
     let jobs = lab.until_idle().await;
     let of = |c: &str| jobs.iter().find(|j| j["card"] == c).unwrap().clone();
-    let (v1, m, v3) = (of(&c1), of(&c2), of(&c3));
-    for j in [&v1, &m, &v3] {
+    let (m1, v, m2) = (of(&cm1), of(&cv), of(&cm2));
+    for j in [&m1, &v, &m2] {
         assert_eq!(j["state"], "passed", "{jobs:#?}");
     }
     let t = |j: &Value, k: &str| j[k].as_str().unwrap().to_owned();
-    assert!(t(&m, "started_at") >= t(&v1, "ended_at"), "{jobs:#?}");
-    assert!(t(&v3, "started_at") >= t(&m, "ended_at"), "{jobs:#?}");
+    // The validate job ran while a merge ran.
+    let overlaps = |m: &Value| {
+        t(&v, "started_at") < t(m, "ended_at") && t(m, "started_at") < t(&v, "ended_at")
+    };
+    assert!(overlaps(&m1) || overlaps(&m2), "{jobs:#?}");
+    // One merge at a time, in order.
+    assert!(t(&m2, "started_at") >= t(&m1, "ended_at"), "{jobs:#?}");
 }
 
 // ------------------------------------------------------------- TER-115

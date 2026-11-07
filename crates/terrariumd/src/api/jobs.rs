@@ -715,7 +715,8 @@ async fn merge(
             )?;
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
-            Ok((job, place, room, def.slots()))
+            // Merges have their own lane of one (TER-159).
+            Ok((job, place, room, 1))
         })
         .await?;
     rt::kick(&state);
@@ -839,7 +840,8 @@ async fn merge_batch(
             }
             let place = jobs::place(t, &job)?;
             let room = jobs::host_room(t, &job.project)?;
-            Ok((job, place, room, def.slots()))
+            // Merges have their own lane of one (TER-159).
+            Ok((job, place, room, 1))
         })
         .await?;
     rt::kick(&state);
