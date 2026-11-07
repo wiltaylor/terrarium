@@ -1013,7 +1013,14 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
         // A `job.verdict` event says what the job was for its card (the
         // outcome of a card that conflicted in a batch, its worker): its
         // own fields first. Then the event's job, then the event's fields.
-        if let Some(e) = ctx.event.as_ref().filter(|e| e.kind == "job.verdict") {
+        // A raw field (rules_file::RAW_FIELDS, not quoted) comes from the
+        // stored job only: any event source can write a `job.verdict`.
+        let raw = rules_file::RAW_FIELDS.contains(&name);
+        if let Some(e) = ctx
+            .event
+            .as_ref()
+            .filter(|e| e.kind == "job.verdict" && !raw)
+        {
             let key = if f == "id" { "job" } else { f };
             if let Some(v) = e.data.get(key).filter(|v| !v.is_null()) {
                 return Some(value_text(v));
@@ -1055,11 +1062,16 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
                 },
                 "fail_comment" => Some(crate::jobs::fail_comment(j, &v)),
                 "fail_mail" => Some(crate::jobs::fail_mail(&v)),
+                "end_comment" => Some(crate::jobs::verdict_comment(&v)),
+                "failure_block" => crate::jobs::verdict_failure(&v),
                 _ => None,
             };
             if out.is_some() {
                 return out;
             }
+        }
+        if raw {
+            return None;
         }
         let e = ctx.event.as_ref()?;
         return e.data.get(f).filter(|v| !v.is_null()).map(value_text);

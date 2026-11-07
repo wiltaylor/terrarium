@@ -962,7 +962,7 @@ pub struct ProjectDef {
     pub board_flow: Option<BoardFlow>,
 }
 
-/// Who runs the card flow of a project (TER-170, docs/api.md §19.10).
+/// Who runs the card flow of a project (TER-170, docs/api.md §19.11).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BoardFlow {

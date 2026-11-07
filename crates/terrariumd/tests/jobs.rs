@@ -7,7 +7,9 @@
 //! `board_flow = code` (the daemon's code) and with `board_flow = rules`
 //! (the built-in rule pack). They check the same card states, labels,
 //! comments, and mails; the rule engine acts a moment after the event, so
-//! each check polls. [`the_two_flows_leave_the_same_board`] compares the
+//! each check polls. The lab board has a `validating` column, so in rules
+//! mode project `p` adds the opt-in validate rules
+//! (`rules_file::VALIDATE_RULES`) to the pack. [`the_two_flows_leave_the_same_board`] compares the
 //! two boards of one scenario field by field.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -790,6 +792,16 @@ async fn lab_impl(slots: u32, docker: Option<&Path>, flow: &'static str) -> Lab 
             .await;
         assert_eq!(r.status, 200, "{}", r.body);
         assert_eq!(r.body["board_flow"], flow, "{}", r.body);
+        // The built-in pack has no validate rules (no validating column,
+        // operator 2026-11-07); this board has the column, so the project
+        // adds the opt-in ones, as a project that still validates does.
+        let r = td
+            .put(
+                "/api/projects/p/rules",
+                json!({"text": terrarium_core::rules_file::VALIDATE_RULES}),
+            )
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
     }
     Lab {
         td,
@@ -2233,9 +2245,18 @@ esac
 /// a recipe that starts a child, ignores `TERM` (the child too), and
 /// appends the child's PID to the returned file.
 async fn docker_lab(slots: u32, timeout_secs: u64) -> (Lab, tempfile::TempDir, PathBuf) {
+    docker_lab_flow(slots, timeout_secs, "code").await
+}
+
+/// [`docker_lab`] with the board flow `flow` (TER-170).
+async fn docker_lab_flow(
+    slots: u32,
+    timeout_secs: u64,
+    flow: &'static str,
+) -> (Lab, tempfile::TempDir, PathBuf) {
     let bins = tempfile::tempdir().unwrap();
     let docker = fake_docker(bins.path());
-    let lab = lab_with(slots, Some(&docker)).await;
+    let lab = lab_impl(slots, Some(&docker), flow).await;
     let r = lab
         .td
         .post(
@@ -3162,6 +3183,7 @@ async fn until_kills_run(ids: &[&str]) {
     }
 }
 
+both_flows!(lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots);
 /// TER-123 review, blocker 1 and major 3: after a daemon restart, a job
 /// that was running and one cancelled while it drained left their
 /// processes on a docker target (through host agent `lab1`). The host
@@ -3170,9 +3192,8 @@ async fn until_kills_run(ids: &[&str]) {
 /// its attempt (P5: a restart is not a failure). Until then both jobs
 /// keep their slots: a validation queued meanwhile (two slots) does not
 /// start, also not on a tick.
-#[tokio::test]
-async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots() {
-    let (lab, _bins, children) = docker_lab(2, 600).await;
+async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots(flow: &'static str) {
+    let (lab, _bins, children) = docker_lab_flow(2, 600, flow).await;
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
     // The running job runs again after its requeue: it needs its branch.
     lab.branch("ter-l1", "next", &[("OK", "1")]);
@@ -3314,6 +3335,15 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots()
     );
     let card = lab.td.get(&format!("/api/cards/{cr}")).await.ok().clone();
     assert_ne!(card["column"], "ready", "a restart moved the card: {card}");
+    // The requeue shows on the card in both flows (TER-170): one job
+    // label, queued or (when it runs again already) running.
+    lab.settle().await;
+    let card = lab.card_of(&cr).await;
+    let l: Vec<String> = labels(&card)
+        .into_iter()
+        .filter(|l| l.starts_with("validation:"))
+        .collect();
+    assert_eq!(l.len(), 1, "{card}");
     // The requeued job writes its own file again when it runs.
     let f = terrariumd::run_kill::job_pidfile(&cancel_id);
     assert!(!Path::new(&f).exists(), "{f} is left");
@@ -3338,13 +3368,13 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots()
     let _ = lc.wait();
 }
 
+both_flows!(a_lost_job_cancelled_during_its_kill_keeps_its_slot);
 /// TER-123 review 2, major 1: a lost job that is still running gets a
 /// cancel through the API while its kill waits for the host agent. Its
 /// slot stays taken until the kill ended (one slot): a queued validation
 /// does not start while the kill runs, and starts after it.
-#[tokio::test]
-async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot() {
-    let (lab, _bins, children) = docker_lab(1, 600).await;
+async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot(flow: &'static str) {
+    let (lab, _bins, children) = docker_lab_flow(1, 600, flow).await;
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
     let cr = lab.card("lost-run", "ter-m1").await;
     let run_id = ulid::Ulid::new().to_string();
@@ -3438,15 +3468,15 @@ async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot() {
     let _ = lr.wait();
 }
 
+both_flows!(a_lost_job_without_a_confirmed_kill_gets_its_slot_wiped);
 /// TER-190 review, finding 2: a lost running job ran on another host than
 /// the delivery target's now, so its kill cannot confirm that its
 /// processes ended. Its slot is marked, and the next job of the slot (the
 /// requeued job itself) gets a new tree: the old tree goes, `target/`
 /// too. The mark then goes, and the job after it keeps `target/` again.
-#[tokio::test]
-async fn a_lost_job_without_a_confirmed_kill_gets_its_slot_wiped() {
+async fn a_lost_job_without_a_confirmed_kill_gets_its_slot_wiped(flow: &'static str) {
     use terrariumd::store::jobs;
-    let lab = lab(1).await;
+    let lab = lab_flow(1, flow).await;
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
     let wd = lab._dirs.path().join("jobs");
     let slot = wd.join("p/slot-1");
@@ -3645,12 +3675,12 @@ async fn a_drain_starts_no_job_and_lists_the_running_ones() {
         .await;
 }
 
+both_flows!(a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects);
 /// TER-160: the host agent of the target is offline when the queue picks
 /// the job. The job stays queued with no attempt used and the card does
 /// not move; the job starts once the host agent connects, and passes.
-#[tokio::test]
-async fn a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects() {
-    let lab = lab(2).await;
+async fn a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     let td = &lab.td;
     let r = td.post("/api/hosts", json!({"name": "lab2"})).await;
     assert_eq!(r.status, 201, "{}", r.body);
@@ -3670,6 +3700,7 @@ async fn a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects() {
     assert_eq!(jobs[0]["state"], "queued", "{jobs:?}");
     assert_eq!(jobs[0]["attempt"], 1, "{jobs:?}");
     assert!(jobs[0]["started_at"].is_null(), "{jobs:?}");
+    lab.settle().await;
     let c = lab.card_of(&id).await;
     assert_eq!(c["column"], "validating", "{c}");
     assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");
@@ -3697,12 +3728,12 @@ async fn a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects() {
     assert_eq!(jobs[0]["attempt"], 1, "{jobs:?}");
 }
 
+both_flows!(a_refused_ssh_connect_puts_the_job_back_in_the_queue);
 /// TER-160: an ssh target that refuses the connection before the recipe
 /// starts. The job goes back to the queue with no attempt used, the tail
 /// says why it waits, and the card does not move.
-#[tokio::test]
-async fn a_refused_ssh_connect_puts_the_job_back_in_the_queue() {
-    let lab = lab(2).await;
+async fn a_refused_ssh_connect_puts_the_job_back_in_the_queue(flow: &'static str) {
+    let lab = lab_flow(2, flow).await;
     let td = &lab.td;
     // Port 1 on the loopback: nothing listens, the connect is refused.
     let r = td
@@ -3739,6 +3770,7 @@ async fn a_refused_ssh_connect_puts_the_job_back_in_the_queue() {
     assert!(tail.contains("Connection refused"), "{tail}");
     assert_eq!(job["attempt"], 1, "{job}");
     assert!(job["started_at"].is_null(), "{job}");
+    lab.settle().await;
     let c = lab.card_of(&id).await;
     assert_eq!(c["column"], "validating", "{c}");
     assert_eq!(c["assignee"], lab.w1.as_str(), "{c}");

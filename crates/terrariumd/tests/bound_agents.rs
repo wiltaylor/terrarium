@@ -1034,3 +1034,20 @@ async fn the_driver_reconciles_at_its_start() {
     .await;
     assert_eq!(spawn_row(&td, &eph).await["park_reason"], "card in review");
 }
+
+/// TER-170 review, minor 6: with `board_flow = rules` the reconcile leaves
+/// the cards of the project alone (it returns 0), and a move that the hub
+/// never sent still parks the agent: the rule engine reads the event log
+/// from its own cursor, so the rule `agent-park` sees it.
+#[tokio::test]
+async fn with_the_rule_pack_the_engine_not_the_reconcile_repairs_a_missed_move() {
+    let (td, lead) = setup_flow("rules").await;
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    hidden_move(&td, &c, "review").await;
+    assert_eq!(terrariumd::bound::reconcile(&state(&td)).await, 0);
+    parked(&td, &eph).await;
+    let sp = spawn_row(&td, &eph).await;
+    assert_eq!(sp["park_reason"], "card in review", "{sp}");
+}

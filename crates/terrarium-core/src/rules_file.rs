@@ -52,6 +52,12 @@ pub const DEFAULT_PACK: &str = include_str!("rules.default.wcl");
 /// The name of the built-in pack in the docs and the errors.
 pub const PACK_FILE: &str = "rules.default.wcl";
 
+/// Opt-in rules for a project that still validates cards (TER-170): the
+/// labels, the comment, and the move to `@validating` of a queued validate
+/// job. Not in the built-in pack (the operator removed the validating
+/// column, 2026-11-07); a project copies them into its `rules.wcl`.
+pub const VALIDATE_RULES: &str = include_str!("rules.validate.wcl");
+
 /// The name of a rules file in the docs and the errors.
 pub const FILE_NAME: &str = "rules.wcl";
 
@@ -245,6 +251,15 @@ pub const JOB_FIELDS: &[&str] = &[
 /// code`). [`render`] does not quote them, so the built-in pack writes the
 /// same comments and mails as the coded flow. Every other value is quoted
 /// in a text that an agent reads.
+///
+/// Each of these is one line of daemon fields, or a fixed text around one
+/// (`job.fail_mail`): a branch name has no space and no `[`, so none of
+/// them can hold a tag such as `[User]`. The engine fills the `job.*` ones
+/// from the stored job, never from event data (any event source can write
+/// a `job.verdict`). `job.failure_block` is not here: it holds the tail of
+/// the job output, untrusted text, so it is quoted data in a comment, a
+/// mail, or a turn. Only `card_prepend` writes it as it is, into the card
+/// body (which agents read as data).
 pub const RAW_FIELDS: &[&str] = &[
     "card.id",
     "card.project",
@@ -255,7 +270,6 @@ pub const RAW_FIELDS: &[&str] = &[
     "job.outcome",
     "job.attempt",
     "job.end_comment",
-    "job.failure_block",
     "job.next_jobs",
     "job.queue_comment",
     "job.rerun_comment",
@@ -1602,9 +1616,6 @@ rule "validate-pass" {
         assert!(set.rules.len() <= DEFAULT_MAX_RULES);
         let names: Vec<&str> = set.rules.iter().map(|r| r.name.as_str()).collect();
         for want in [
-            "validate-queued",
-            "validate-queued-note",
-            "validate-queued-move",
             "merge-queued",
             "job-started",
             "job-requeued",
@@ -1628,10 +1639,34 @@ rule "validate-pass" {
         ] {
             assert!(names.contains(&want), "no rule `{want}` in {names:?}");
         }
-        // The note of a queued validate runs before the move, so a card
-        // that the move puts in validating gets one comment, not two.
         let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
-        assert!(at("validate-queued-note") < at("validate-queued-move"));
+        // No rule moves a card to validating or labels a queued validate
+        // (no validating column, operator 2026-11-07).
+        assert!(
+            !names.iter().any(|n| n.starts_with("validate-queued")),
+            "{names:?}"
+        );
+        assert!(
+            set.rules
+                .iter()
+                .flat_map(column_refs)
+                .all(|c| c != "@validating" && c != "validating"),
+            "the pack names no validating column"
+        );
+        // The opt-in validate rules read too; their note runs before the
+        // move, so a card that the move puts in validating gets one
+        // comment, not two.
+        let v = parse(VALIDATE_RULES, "rules.validate.wcl", &default_board())
+            .unwrap_or_else(|e| panic!("the validate rules do not read: {e}"));
+        let vn: Vec<&str> = v.rules.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            vn,
+            [
+                "validate-queued",
+                "validate-queued-note",
+                "validate-queued-move"
+            ]
+        );
         // The rerun decides before its note and before the final failure.
         assert!(at("job-rerun-red") < at("job-rerun-note"));
         assert!(at("job-rerun-note") < at("job-fail-red"));

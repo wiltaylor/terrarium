@@ -649,21 +649,61 @@ fn busy(conn: &Connection, cards: &[BatchCard]) -> ApiResult<Option<String>> {
     Ok(None)
 }
 
-/// The fix cards of the group of `j` from earlier jobs: the cards with a
-/// `merge-fix:` label of another job that link to a card of `j` (TER-170,
-/// MEM-84). Done and archived ones count: each was an attempt.
+/// Is `card` a fix card (it has a `merge-fix:` label)?
+fn is_fix_card(conn: &Connection, card: &str) -> ApiResult<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM cards c, json_each(c.labels) l
+              WHERE c.id = ?1 AND l.value LIKE 'merge-fix:%'",
+            [card],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// The fix cards of this group from earlier jobs (TER-170, MEM-84): the
+/// cards with a `merge-fix:` label of another job whose linked cards, fix
+/// cards left out, include every card of `j` that is not a fix card. So
+/// the fix cards of the group count for its rerun (the fix card first in
+/// it) and for its split halves, and a fix card of another group that
+/// shared a card with this one does not. Done and archived ones count:
+/// each was an attempt.
 fn earlier_fixes(conn: &Connection, j: &Job) -> ApiResult<i64> {
-    let cards: Vec<String> = j.cards().into_iter().map(|c| c.card).collect();
+    let mut group: Vec<String> = Vec::new();
+    for c in j.cards() {
+        if !is_fix_card(conn, &c.card)? {
+            group.push(c.card);
+        }
+    }
     let own = fix_label(&j.id);
-    Ok(conn.query_row(
-        "SELECT count(DISTINCT l.card) FROM card_links l JOIN cards c ON c.id = l.card
-          WHERE l.kind = 'card' AND l.ref IN (SELECT value FROM json_each(?1))
-            AND c.project = ?2
-            AND EXISTS (SELECT 1 FROM json_each(c.labels)
-                         WHERE value LIKE 'merge-fix:%' AND value <> ?3)",
-        params![serde_json::to_string(&cards)?, j.project, own],
-        |r| r.get(0),
-    )?)
+    let candidates: Vec<String> = {
+        let mut st = conn.prepare(
+            "SELECT DISTINCT l.card FROM card_links l JOIN cards c ON c.id = l.card
+              WHERE l.kind = 'card' AND l.ref IN (SELECT value FROM json_each(?1))
+                AND c.project = ?2
+                AND EXISTS (SELECT 1 FROM json_each(c.labels)
+                             WHERE value LIKE 'merge-fix:%' AND value <> ?3)",
+        )?;
+        st.query_map(
+            params![serde_json::to_string(&group)?, j.project, own],
+            |r| r.get(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut n = 0;
+    for fix in candidates {
+        let linked: Vec<String> = {
+            let mut st =
+                conn.prepare("SELECT ref FROM card_links WHERE card = ?1 AND kind = 'card'")?;
+            st.query_map([&fix], |r| r.get(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if group.iter().all(|c| linked.contains(c)) {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// Queue the event's failed job once more (not a conflict), while its

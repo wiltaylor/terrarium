@@ -8146,11 +8146,17 @@ the exception: it goes into the card body with its lines, so a failure
 block stays whole. The values that the daemon makes are never quoted:
 `card.id`, `card.project`, `card.column`, `job.id`, `job.kind`,
 `job.state`, `job.outcome`, `job.attempt`, `rule.name`, and the texts of
-the job queue below (TER-170).
+the job queue below except `job.failure_block` (TER-170). Each is one
+line of daemon fields (a branch name has no space and no `[`), so none
+can hold a tag. The engine fills the unquoted `job.*` values from the
+stored job, never from event data: any event source can write a
+`job.verdict`. `job.failure_block` holds the tail of the job output,
+untrusted text: it is quoted data in a comment, a mail, or a turn, and
+only `card_prepend` writes it as it is.
 
 The texts of the job queue, as the coded flow writes them (§19.11):
 `job.queue_comment` (the comment of a queued job on the run's card),
-`job.end_comment` and `job.failure_block` (of a `job.verdict`),
+`job.end_comment` and `job.failure_block` (of an ended job),
 `job.rerun_comment` (the job runs again; empty without a rerun),
 `job.split_comment` (the batch split; empty without halves),
 `job.fail_comment` (the final failure: `failed again`, `failed (red alone
@@ -8305,6 +8311,18 @@ switch.
   run of the pack. The `comment` of a validate goes on the card as the
   actor's own comment.
 
+The pack has no rule for a queued validate job: the operator removed the
+validating column and `card validate` for card work (2026-11-07). With
+`rules`, `card validate` queues the job (`201`) and the card stays where
+it is, without a job label; on a pass the pack moves it to `@review`. A
+project that still validates copies the opt-in rules of
+`crates/terrarium-core/src/rules.validate.wcl` (`validate-queued`,
+`validate-queued-note`, `validate-queued-move`: one `validation:queued`
+and one `by:<worker>` label, the queue comment, the move to
+`@validating`) into its `rules.wcl`; its board needs a `validating`
+column. (With `code`, a validate on a board without that column fails in
+one write.)
+
 The pack (`crates/terrarium-core/src/rules.default.wcl`) does what the
 coded flow does, with the same labels, moves, comments, mails, and
 parks; its texts come from the code of the coded flow (§19.9 templates).
@@ -8312,7 +8330,6 @@ Its rules, in order:
 
 | Rule | On | Does |
 |---|---|---|
-| `validate-queued`, `validate-queued-note`, `validate-queued-move` | a new validate job (`data.origin = queue`) | one `validation:queued` and one `by:<worker>` label; the queue comment, with the move to `@validating` when the card is not there |
 | `merge-queued` | a new merge job | `validation:queued` and the queue comment on each card; no move |
 | `job-started`, `job-requeued` | a job starts, or waits again | `validation:queued` <-> `validation:running` |
 | `validate-pass`, `merge-pass` | a passed verdict | labels off, move to `@review` or `@accepted` with the end comment, unassign |
@@ -8324,8 +8341,12 @@ Its rules, in order:
 
 One change from the coded flow, by the operator's rule of 2026-11-07
 (MEM-84): a red merge group gets a fix card first, and splits in halves
-only after three fix cards. Set another number with your own
-`merge-red-group` rule.
+only after three fix cards. The fix cards of a group are the cards with a
+`merge-fix:` label of an earlier job whose linked cards (fix cards left
+out) include every card of this job: those of its reruns and of the group
+it was split from count, those of another group that shared a card do
+not. Set another number with your own `merge-red-group` rule. The pack
+does not spawn the fix agent or queue the group again (TER-181).
 
 A rule of the project's `rules.wcl` with the name of a pack rule
 replaces it. A rule with only `enabled = false` (no `on`, no verb) turns
@@ -8343,6 +8364,12 @@ a comment); a batch merge ends the bound agent of each card, not only
 the first; and the pack acts a moment after the event (§19.9), so the
 queue can start the next queued job before a rule splits or reruns the
 one that ended (the order of the merges after a split can differ).
+
+A switch back from `rules` to `code` drops the pack at the next pass of
+the engine. A job that ended under `rules` but whose events the engine
+had not run yet (a window of about one pass) then gets no flow from
+either side: its cards keep their column and job labels. Switch while the
+queue is idle, or move and relabel those cards by hand.
 
 ## 20. Event sources and ingest
 

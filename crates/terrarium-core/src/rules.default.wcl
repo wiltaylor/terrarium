@@ -13,46 +13,13 @@
 // (`job.*_comment`, `job.fail_mail`) come from the code of the coded flow.
 //
 // The rules of one card run in the order of this file.
+//
+// No rule here moves a card to validating or labels a queued validate job:
+// the operator removed the validating column and `card validate` for card
+// work (2026-11-07). A project that still validates adds the rules of
+// rules.validate.wcl to its own rules.wcl.
 
 // ------------------------------------------------------------ the queue
-
-rule "validate-queued" {
-  description = "A new validate job: one validation label and the worker's by: label."
-  on = ["job"]
-  max_per_hour = 600
-  when "data.change" { eq = "queued" }
-  when "data.kind" { eq = "validate" }
-  when "data.origin" { eq = "queue" }
-  card_label {
-    remove = ["validation:*", "by:*"]
-    add = ["validation:queued", "by:{{job.by_agent}}"]
-  }
-}
-
-rule "validate-queued-note" {
-  description = "A new validate job of a card in validating already: the queue comment."
-  on = ["job"]
-  max_per_hour = 600
-  when "data.change" { eq = "queued" }
-  when "data.kind" { eq = "validate" }
-  when "data.origin" { eq = "queue" }
-  if_card { column = ["@validating"] }
-  card_comment { text = "{{job.queue_comment}}" }
-}
-
-rule "validate-queued-move" {
-  description = "A new validate job: the card moves to validating with the queue comment."
-  on = ["job"]
-  max_per_hour = 600
-  when "data.change" { eq = "queued" }
-  when "data.kind" { eq = "validate" }
-  when "data.origin" { eq = "queue" }
-  if_card { not_column = ["@validating"] }
-  card_move {
-    to = "@validating"
-    comment = "{{job.queue_comment}}"
-  }
-}
 
 rule "merge-queued" {
   description = "A new merge job: the label and the queue comment on each card. No move."

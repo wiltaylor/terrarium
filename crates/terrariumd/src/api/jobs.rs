@@ -22,9 +22,10 @@
 //!   validated once. One card is the same as `POST /api/cards/{id}/merge`.
 //! - With `board_flow = rules` (TER-170) a validate, a merge, a batch,
 //!   and a cancel only queue or cancel the job: its events are all, and
-//!   the board rules (the built-in pack) set the labels, move, and
-//!   comment. The `comment` of a validate goes on the card as the
-//!   actor's own comment.
+//!   the board rules set the labels, move, and comment (the built-in pack
+//!   for a merge; for a validate only the opt-in rules of
+//!   `rules.validate.wcl`, as the pack has no validating column). The
+//!   `comment` of a validate goes on the card as the actor's own comment.
 //! - `eta` (TER-155 D2) is a planned duration such as `2h`, not a time.
 //!   The job's cards have no ETA while it is queued; when it starts, each
 //!   gets the start plus the duration. No `eta`, no ETA.

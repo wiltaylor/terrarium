@@ -1918,6 +1918,25 @@ fn verdict_of(j: &Job) -> &'static str {
     }
 }
 
+/// The end comment of the verdict of `v` (the card's view of an ended or
+/// cancelled job): `passed`, `was cancelled`, or `failed`. One line: the
+/// fields are the daemon's, and a branch name has no space or `[`
+/// ([`check_ref`]).
+pub fn verdict_comment(v: &Job) -> String {
+    let word = match verdict_of(v) {
+        "passed" => "passed",
+        "cancelled" => "was cancelled",
+        _ => "failed",
+    };
+    end_comment(v, word)
+}
+
+/// The failure block of the verdict of `v`, for a failure only. It holds
+/// the tail of the job output: untrusted text.
+pub fn verdict_failure(v: &Job) -> Option<String> {
+    matches!(verdict_of(v), "red" | "conflict" | "error").then(|| failure_block(v))
+}
+
 /// The `job.verdict` event data of each card of an ended or cancelled
 /// job, in card order (TER-167). It says what the run found for the card,
 /// not what the queue does next: the rerun and the split stay in the
@@ -1934,12 +1953,6 @@ fn verdicts(j: &Job) -> Vec<Value> {
         .iter()
         .map(|v| {
             let verdict = verdict_of(v);
-            let word = match verdict {
-                "passed" => "passed",
-                "cancelled" => "was cancelled",
-                _ => "failed",
-            };
-            let failure = matches!(verdict, "red" | "conflict" | "error").then(|| failure_block(v));
             serde_json::json!({
                 "project": v.project,
                 "job": v.id,
@@ -1954,8 +1967,8 @@ fn verdicts(j: &Job) -> Vec<Value> {
                 "branch": v.branch,
                 "parent": v.parent,
                 "batch": batch,
-                "end_comment": end_comment(v, word),
-                "failure_block": failure,
+                "end_comment": verdict_comment(v),
+                "failure_block": verdict_failure(v),
             })
         })
         .collect()
