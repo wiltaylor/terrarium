@@ -1788,7 +1788,11 @@ rule "mine" {
         let names: Vec<&str> = set.rules.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(
             names,
-            ["merge-queue-move", "merge-queue-cancel", "merge-queue-batch"]
+            [
+                "merge-queue-move",
+                "merge-queue-cancel",
+                "merge-queue-batch"
+            ]
         );
         let batch = &set.rules[2].actions[0];
         assert_eq!(batch.verb, "job.queue");
@@ -1801,7 +1805,10 @@ rule "mine" {
         assert_eq!(batch.args["max_wait_minutes"], 30);
         // A board without the column refuses the file.
         let e = parse(MERGE_QUEUE_RULES, "rules.wcl", &board()).unwrap_err();
-        assert!(e.to_string().contains("unknown column `@merge_queue`"), "{e}");
+        assert!(
+            e.to_string().contains("unknown column `@merge_queue`"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1812,7 +1819,10 @@ rule "mine" {
         let e = errors(&rule("kind = \"merge\"  limit = 2"));
         assert!(e.contains("job_queue.limit is for kind batch only"), "{e}");
         let e = errors(&rule("kind = \"validate\"  min_cards = 2"));
-        assert!(e.contains("job_queue.min_cards is for kind batch only"), "{e}");
+        assert!(
+            e.contains("job_queue.min_cards is for kind batch only"),
+            "{e}"
+        );
         let e = errors(&rule(
             "kind = \"batch\"  from = \"review\"  max_wait_minutes = 30",
         ));
@@ -1820,10 +1830,11 @@ rule "mine" {
         let e = errors(&rule(
             "kind = \"batch\"  from = \"review\"  limit = 4  min_cards = 8",
         ));
-        assert!(e.contains("min_cards (8) is more than its limit (4)"), "{e}");
-        let e = errors(&rule(
-            "kind = \"batch\"  from = \"review\"  min_cards = 0",
-        ));
+        assert!(
+            e.contains("min_cards (8) is more than its limit (4)"),
+            "{e}"
+        );
+        let e = errors(&rule("kind = \"batch\"  from = \"review\"  min_cards = 0"));
         assert!(e.contains("1 or more"), "{e}");
         parse(
             &rule("kind = \"batch\"  from = \"review\"  min_cards = 3  max_wait_minutes = 5"),

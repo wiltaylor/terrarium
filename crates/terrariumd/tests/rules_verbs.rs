@@ -1547,7 +1547,12 @@ async fn the_merge_queue_rules_move_a_queued_merge_and_move_a_cancel_back() {
     settle(&td).await;
     for job in [&job_a, &job_bc] {
         let r = td.delete(&format!("/api/jobs/{job}")).await;
-        assert!(r.status == 200 || r.status == 204, "{} {}", r.status, r.body);
+        assert!(
+            r.status == 200 || r.status == 204,
+            "{} {}",
+            r.status,
+            r.body
+        );
     }
     settle(&td).await;
     for id in [&a, &b] {
@@ -1555,7 +1560,11 @@ async fn the_merge_queue_rules_move_a_queued_merge_and_move_a_cancel_back() {
         assert_eq!(x["column"], "review", "{x}");
         assert_eq!(x["labels"], json!([]), "{x}");
     }
-    assert_eq!(column_of(&td, &c).await, "accepted", "not in merge_queue: stays");
+    assert_eq!(
+        column_of(&td, &c).await,
+        "accepted",
+        "not in merge_queue: stays"
+    );
     let cancel = runs_of(&td, "p", "merge-queue-cancel").await;
     assert_eq!(states(&cancel), vec!["done", "done", "noop"], "{cancel:?}");
 }
@@ -1566,7 +1575,14 @@ async fn the_merge_queue_batch_goes_when_8_cards_wait() {
     put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
     let mut ids = Vec::new();
     for i in 0..9 {
-        ids.push(new_card(&td, "p", json!({"title": format!("c{i}"), "column": "review"})).await);
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
     }
     settle(&td).await;
     for id in &ids[..7] {
@@ -1622,14 +1638,24 @@ async fn the_merge_queue_batch_goes_30_minutes_after_the_first_card() {
     put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
     let mut ids = Vec::new();
     for i in 0..3 {
-        ids.push(new_card(&td, "p", json!({"title": format!("c{i}"), "column": "review"})).await);
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
     }
     settle(&td).await;
     for id in &ids {
         move_to(&td, id, "merge_queue").await;
     }
     settle(&td).await;
-    assert!(open_jobs(&td).await.is_empty(), "3 cards wait: no batch yet");
+    assert!(
+        open_jobs(&td).await.is_empty(),
+        "3 cards wait: no batch yet"
+    );
 
     let st = state(&td);
     let projects = rules_engine::load(&st.db, &mut rules_engine::Cache::default())

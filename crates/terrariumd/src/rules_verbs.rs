@@ -584,10 +584,7 @@ pub fn batch_goes(
             ),
             Some(d),
         )),
-        None => Err((
-            format!("{} of {min} cards wait", pick.waiting),
-            None,
-        )),
+        None => Err((format!("{} of {min} cards wait", pick.waiting), None)),
     }
 }
 

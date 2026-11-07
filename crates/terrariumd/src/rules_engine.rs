@@ -1290,7 +1290,9 @@ pub async fn fire_timers(
                 let Some(col) = rules_file::resolve_column(&columns, &from) else {
                     return Ok(None);
                 };
-                Ok(Some(rules_verbs::pick_batch(c, &project, &col.name, limit)?))
+                Ok(Some(rules_verbs::pick_batch(
+                    c, &project, &col.name, limit,
+                )?))
             })
             .await?;
         let Some(pick) = pick.filter(|p| p.waiting > 0) else {
@@ -1311,7 +1313,8 @@ pub async fn fire_timers(
         if fired.get(&key) == Some(&due) {
             continue;
         }
-        let (project, rule, waiting, d) = (t.project.clone(), t.rule.clone(), pick.waiting, due.clone());
+        let (project, rule, waiting, d) =
+            (t.project.clone(), t.rule.clone(), pick.waiting, due.clone());
         db.write(TIMER_ACTOR, move |tx| {
             let summary = format!("the wait of rule {rule} ended: {waiting} cards wait");
             tx.emit(
