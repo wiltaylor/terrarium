@@ -232,6 +232,7 @@ pub async fn start_with_usage(
         webhooks: Arc::default(),
         pipelines: Arc::default(),
         git_proxy: Arc::default(),
+        job_queue: Arc::default(),
     });
     // No webhook may carry the API token (docs/security-review.md).
     state.webhooks.set_own_token(cfg.token.as_deref());
