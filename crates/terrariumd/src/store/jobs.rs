@@ -1426,6 +1426,48 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
     delivery(t, project)
 }
 
+/// The open job of a card, as the card API shows it (TER-158, D4): the
+/// board tile reads its state chip from this, not from labels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardJob {
+    pub id: String,
+    pub kind: JobKind,
+    /// `queued` or `running`.
+    pub state: JobState,
+    /// A queued job: its place among the queued jobs of its project (1
+    /// starts next).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<i64>,
+    /// A queued job: the count of queued jobs in its project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued: Option<i64>,
+}
+
+/// The open job of a card with its queue place. `None`: no open job.
+pub fn card_job(conn: &Connection, card: &str) -> ApiResult<Option<CardJob>> {
+    let Some(job) = open_of_card(conn, card)? else {
+        return Ok(None);
+    };
+    let (place, queued) = if job.state == JobState::Queued {
+        let (place, _) = place(conn, &job)?;
+        let queued: i64 = conn.query_row(
+            "SELECT count(*) FROM jobs WHERE project = ?1 AND state = 'queued'",
+            [&job.project],
+            |r| r.get(0),
+        )?;
+        (Some(place), Some(queued))
+    } else {
+        (None, None)
+    };
+    Ok(Some(CardJob {
+        id: job.id,
+        kind: job.kind,
+        state: job.state,
+        place,
+        queued,
+    }))
+}
+
 /// Where a queued job stands: its place among the queued jobs of its
 /// project and its lane (1 starts next), and the running count of that
 /// lane. Validate and merge jobs have their own lanes ([`pick`]).

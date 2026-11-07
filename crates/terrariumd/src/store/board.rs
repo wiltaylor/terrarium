@@ -174,6 +174,15 @@ pub struct Card {
     /// leads were told. It clears when the assignee works again or waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_since: Option<String>,
+    /// The open (queued or running) job of the card, with its queue place
+    /// (TER-158, D4). Absent when the card has no open job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<crate::store::jobs::CardJob>,
+    /// The stored status of the assignee agent (`working`, `idle`,
+    /// `waiting`, `blocked`, `stopped`, ...). Absent for the operator, no
+    /// assignee, or a removed agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -544,8 +553,18 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         .as_deref()
         .map(|a| name_of(conn, a))
         .transpose()?;
+    let assignee_status = match row.assignee.as_deref() {
+        Some(a) if a != "operator" => conn
+            .query_row("SELECT status FROM agents WHERE id = ?1", [a], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?,
+        _ => None,
+    };
     Ok(Card {
         tests: crate::store::test_runs::card_chip(conn, &row.id)?,
+        job: crate::store::jobs::card_job(conn, &row.id)?,
+        assignee_status,
         depends_on: deps(conn, &row.id)?,
         blocked_by: unmet(conn, &row.id)?,
         created_by_name: name_of(conn, &row.created_by)?,
@@ -713,11 +732,6 @@ pub struct ActiveCard {
     /// `working` (the column with that role), `research`, or another
     /// column that the query named.
     pub column_kind: String,
-    /// The status of the assignee agent (`working`, `idle`, `waiting`,
-    /// `blocked`, `stopped`, ...). Absent for the operator, no assignee, or
-    /// a removed agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assignee_status: Option<String>,
     /// A card in the blocked column (TER-51): when it moved there (the
     /// last move event; the card's `updated_at` without one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -788,15 +802,8 @@ pub fn active_cards(
             Some(BLOCKED) => BLOCKED.to_owned(),
             _ => row.column.to_lowercase(),
         };
+        // The card has the assignee's status (`Card::assignee_status`).
         let card = render(conn, row)?;
-        let status = match card.assignee.as_deref() {
-            Some(a) if a != "operator" => conn
-                .query_row("SELECT status FROM agents WHERE id = ?1", [a], |r| {
-                    r.get::<_, String>(0)
-                })
-                .optional()?,
-            _ => None,
-        };
         let (blocked_since, blocked_reason) = if kind == BLOCKED {
             let (since, reason) = blocked_info(conn, &card)?;
             (Some(since), reason)
@@ -806,7 +813,6 @@ pub fn active_cards(
         out.push(ActiveCard {
             card,
             column_kind: kind,
-            assignee_status: status,
             blocked_since,
             blocked_reason,
         });
