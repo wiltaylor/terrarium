@@ -41,6 +41,7 @@ pub use protocol::{BoxFuture, Message, NoHandler, RequestContext, RequestHandler
 pub use ready::{DefaultReadyDetector, ReadyDetector};
 pub use remote::{ConnectOptions, LOST_SIGNAL, RemoteRunner, SpawnOptions};
 pub use runner::{
-    Delivery, ExitStatus, INPUT_CLEAR_DEBOUNCE, MAX_RESUBMITS, OutputChunk, PERSON_INPUT_SLACK, RESUBMIT_AFTER, Runner, ScreenSnapshot,
+    Delivery, ExitStatus, INPUT_CLEAR_DEBOUNCE, MAX_RESUBMITS, OutputChunk, PERSON_INPUT_SLACK,
+    RESUBMIT_AFTER, Runner, ScreenSnapshot,
 };
 pub use spec::{AdapterKind, AdapterOptions, ReadyDetectorSpec, RunnerSpec};

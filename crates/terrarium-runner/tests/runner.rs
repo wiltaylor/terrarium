@@ -747,11 +747,15 @@ async fn text_typed_by_a_person_is_not_flagged() {
     h.runner.wait().await;
     let all = read_events(h.runner.events_path());
     assert!(
-        !all.iter()
-            .any(|r| matches!(&r.event, Event::Warning { message } if message.contains("unsubmitted"))),
+        !all.iter().any(
+            |r| matches!(&r.event, Event::Warning { message } if message.contains("unsubmitted"))
+        ),
         "{all:?}"
     );
-    assert_eq!(blocked_reasons(h.runner.events_path()), Vec::<Option<String>>::new());
+    assert_eq!(
+        blocked_reasons(h.runner.events_path()),
+        Vec::<Option<String>>::new()
+    );
 }
 
 /// TER-224: a redraw that hides the stuck text for a frame (the fake TUI

@@ -4649,7 +4649,11 @@ mod tests {
                  VALUES (?1, '', 'a', 'a')",
                 [name],
             )?;
-            t.emit(crate::events::EventDraft::new("system", name, serde_json::json!({})))?;
+            t.emit(crate::events::EventDraft::new(
+                "system",
+                name,
+                serde_json::json!({}),
+            ))?;
             Ok(())
         };
         insert(&mut t, "before").unwrap();
