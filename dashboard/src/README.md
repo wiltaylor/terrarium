@@ -581,6 +581,12 @@ PLAN §18). The pure model is `features/agents/spawn.ts`; the views are in
   health dots, the counts of the project cards, and the mail address book
   have no ephemeral agents. The store does not upsert one, and the events
   of an agent that a refresh did not bring ask for no more refreshes.
+- **Card agents** (TER-75). The project agents page lists the card agents
+  below the agents (`api.agents.list(project, { card: true })`, the
+  ephemeral ones of `?include=card`), each with its card. A card tile
+  names its bound agent (`agent_name`) when it is not the assignee
+  (`features/board/cardAgent.ts`). In the mock, `lead-worker-3` works
+  `TER-13`.
 - **Spawned tab.** The agent page has a **Spawned** tab, with the count
   of running ones in its label (`spawned_running`). The table
   (`GET /api/agents/{id}/spawned`) shows the running rows first: a status

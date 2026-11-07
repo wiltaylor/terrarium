@@ -5,9 +5,10 @@
 //!   a card commit) or `merge` (merge a card branch onto `next`, run the
 //!   recipe on the result, push `next` when it is green).
 //! - Jobs start first in, first out across projects, at most the host
-//!   cap on one host (TER-97, `job_hosts`), and at most `slots` running
-//!   at a time per project. A merge job runs alone in its project: no
-//!   other job of the project runs with it (TER-71 review, R1).
+//!   cap on one host (TER-97, `job_hosts`), and at most `slots` validate
+//!   jobs running at a time per project. Merge jobs have their own lane
+//!   (TER-159): one at a time per project, first in, first out, beside
+//!   the validate jobs and outside the slots.
 //! - A card has at most one job that is queued or running, also as a
 //!   card of a batch.
 //! - A merge job can merge several cards in order (TER-112, `batch`): one
@@ -279,6 +280,238 @@ pub fn list(conn: &Connection, project: &str, state: Option<JobState>) -> ApiRes
     Ok(rows)
 }
 
+/// The first-attempt numbers of the jobs of one kind, or of all (TER-135).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FirstAttempts {
+    /// Ended first attempts that ran the recipe: `passed + failed`.
+    pub ended: u64,
+    pub passed: u64,
+    /// Failed with `red` (or a timeout). A `conflict` and an `error` never
+    /// ran the tests, so they count in [`JobStats::conflicts`] and
+    /// [`JobStats::errors`] and not here.
+    pub failed: u64,
+    /// `passed / ended`, from 0 to 1. `None` with no ended first attempt.
+    pub pass_rate: Option<f64>,
+}
+
+impl FirstAttempts {
+    fn add(&mut self, passed: bool) {
+        self.ended += 1;
+        if passed {
+            self.passed += 1;
+        } else {
+            self.failed += 1;
+        }
+        self.pass_rate = Some(self.passed as f64 / self.ended as f64);
+    }
+}
+
+/// A test target that failed, and how often (TER-135).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetFails {
+    /// As cargo names it: `-p terrariumd --test jobs`.
+    pub target: String,
+    /// The failed jobs whose tail names the target, all attempts.
+    pub failed: u64,
+    /// Of them, the first attempts.
+    pub first_attempt: u64,
+}
+
+/// A recipe step that failed, and how often (TER-135).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepFails {
+    pub step: String,
+    pub failed: u64,
+}
+
+/// The pass rate of a project's job queue over a window (TER-135).
+///
+/// A job is in the window when its `created_at` is at or after `since`.
+/// A rerun keeps the `created_at` of its first try, so both tries fall in
+/// the same window. The halves of a split batch (`parent` set) are a
+/// search for the failing card: they count in `splits`, not as first
+/// attempts or reruns. A job with outcome `error` could not run (host
+/// agent offline, prepare step failed, push to `next` failed): it says
+/// nothing about test stability, so it counts in `errors`, not as a first
+/// attempt or a rerun.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct JobStats {
+    pub project: String,
+    pub since: String,
+    /// All jobs in the window, in all states.
+    pub jobs: u64,
+    pub first_attempt: FirstAttempts,
+    pub validate: FirstAttempts,
+    pub merge: FirstAttempts,
+    /// Ended reruns (attempt 2 or more): `passed` is a failure that the
+    /// rerun did not repeat.
+    pub reruns: FirstAttempts,
+    /// First attempts that ended in a merge conflict.
+    pub conflicts: u64,
+    /// First attempts and reruns that could not run (outcome `error`).
+    pub errors: u64,
+    pub cancelled: u64,
+    /// Queued or running.
+    pub open: u64,
+    pub splits: u64,
+    /// The failed recipe steps (`test`, `lint`, ...; `timeout` when the job
+    /// was killed), most first.
+    pub failed_steps: Vec<StepFails>,
+    /// The test targets that failed, most first.
+    pub failed_targets: Vec<TargetFails>,
+    /// Failed jobs whose `test` step failed but whose tail names no target:
+    /// the 4000-byte tail clip cut off the `error: N targets failed:`
+    /// header, or the step failed before cargo listed targets.
+    pub untargeted_test_fails: u64,
+}
+
+/// The test targets that a job tail names as failed: the indented lines
+/// after `error: N target(s) failed:`, as cargo `--no-fail-fast` prints
+/// them, without the backticks. In order, without duplicates.
+pub fn failed_targets(tail: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut lines = tail.lines();
+    while let Some(line) = lines.next() {
+        let l = line.trim();
+        let Some(rest) = l.strip_prefix("error: ") else {
+            continue;
+        };
+        let Some(n) = rest
+            .strip_suffix(" targets failed:")
+            .or_else(|| rest.strip_suffix(" target failed:"))
+        else {
+            continue;
+        };
+        if n.parse::<u64>().is_err() {
+            continue;
+        }
+        for item in lines.by_ref() {
+            if !item.starts_with([' ', '\t']) {
+                break;
+            }
+            let t = item.trim().trim_matches('`').trim();
+            if !t.is_empty() && !out.iter().any(|o| o == t) {
+                out.push(t.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// The recipe step that failed in a job tail: the first `error: recipe
+/// `<step>` failed` line (just prints the inner recipe first), else
+/// `timeout` when the job was killed at its timeout.
+pub fn failed_step(tail: &str) -> Option<String> {
+    for line in tail.lines() {
+        if let Some(rest) = line.trim().strip_prefix("error: recipe `")
+            && let Some((step, after)) = rest.split_once('`')
+            && after.trim_start().starts_with("failed")
+        {
+            return Some(step.to_owned());
+        }
+    }
+    tail.contains(", timeout]").then(|| "timeout".to_owned())
+}
+
+/// The pass rate of the jobs of `project` created at or after `since`
+/// (RFC 3339, UTC, as `created_at` is stored).
+pub fn stats(conn: &Connection, project: &str, since: &str) -> ApiResult<JobStats> {
+    let mut st = conn.prepare(
+        "SELECT kind, state, attempt, outcome, parent,
+                CASE WHEN state = 'failed' THEN tail END
+         FROM jobs WHERE project = ?1 AND created_at >= ?2",
+    )?;
+    let rows = st
+        .query_map(params![project, since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut s = JobStats {
+        project: project.to_owned(),
+        since: since.to_owned(),
+        ..JobStats::default()
+    };
+    let mut targets: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut steps: HashMap<String, u64> = HashMap::new();
+    for (kind, state, attempt, outcome, parent, tail) in rows {
+        s.jobs += 1;
+        let state = JobState::parse(&state).unwrap_or(JobState::Failed);
+        let first = attempt <= 1 && parent.is_none();
+        if let Some(tail) = tail.as_deref() {
+            let found = failed_targets(tail);
+            let step = failed_step(tail);
+            if found.is_empty() && step.as_deref() == Some("test") {
+                s.untargeted_test_fails += 1;
+            }
+            for t in found {
+                let e = targets.entry(t).or_default();
+                e.0 += 1;
+                e.1 += u64::from(first);
+            }
+            if let Some(step) = step {
+                *steps.entry(step).or_default() += 1;
+            }
+        }
+        match state {
+            JobState::Queued | JobState::Running => {
+                s.open += 1;
+                continue;
+            }
+            JobState::Cancelled => {
+                s.cancelled += 1;
+                continue;
+            }
+            JobState::Passed | JobState::Failed => {}
+        }
+        if parent.is_some() {
+            s.splits += 1;
+            continue;
+        }
+        if outcome.as_deref() == Some("error") {
+            s.errors += 1;
+            continue;
+        }
+        let passed = state == JobState::Passed;
+        if !first {
+            s.reruns.add(passed);
+            continue;
+        }
+        if outcome.as_deref() == Some("conflict") {
+            s.conflicts += 1;
+            continue;
+        }
+        s.first_attempt.add(passed);
+        match JobKind::parse(&kind) {
+            Some(JobKind::Merge) => s.merge.add(passed),
+            _ => s.validate.add(passed),
+        }
+    }
+    let mut targets: Vec<TargetFails> = targets
+        .into_iter()
+        .map(|(target, (failed, first_attempt))| TargetFails {
+            target,
+            failed,
+            first_attempt,
+        })
+        .collect();
+    targets.sort_by(|a, b| b.failed.cmp(&a.failed).then(a.target.cmp(&b.target)));
+    s.failed_targets = targets;
+    let mut steps: Vec<StepFails> = steps
+        .into_iter()
+        .map(|(step, failed)| StepFails { step, failed })
+        .collect();
+    steps.sort_by(|a, b| b.failed.cmp(&a.failed).then(a.step.cmp(&b.step)));
+    s.failed_steps = steps;
+    Ok(s)
+}
+
 /// The open (queued or running) job of a card.
 pub fn open_of_card(conn: &Connection, card: &str) -> ApiResult<Option<Job>> {
     Ok(conn
@@ -528,13 +761,16 @@ pub struct QueueOf {
 /// The queued jobs that may start now, with the host each one takes a
 /// place on, in all projects: first in, first out across projects. A
 /// job starts when (1) its host is under its cap (`caps`; a host without
-/// one has no cap), and (2) its project is under its `slots`. A merge job
-/// runs alone in its project (TER-71 review, R1: the recipes of a target
-/// run as one user): it starts only when no other job of the project runs
-/// or starts, and once the pick reaches it (started or not) or while it
-/// runs, no other job of its project starts. A job that must wait does not
-/// hold back the jobs of other projects behind it. A project missing from
-/// `queues` has no queue, and its jobs wait.
+/// one has no cap), and (2) for a validate job, its project runs fewer
+/// validate jobs than its `slots`. Merge jobs have their own lane
+/// (TER-159): at most one merge of a project runs at a time, merges start
+/// first in, first out among themselves (once the pick reaches a merge,
+/// started or not, no later merge of its project starts), and a merge
+/// does not take one of the project's slots, so validate jobs start
+/// beside it and never wait behind it. The host cap counts every job. A
+/// job that must wait does not hold back the jobs of other projects
+/// behind it. A project missing from `queues` has no queue, and its jobs
+/// wait.
 pub fn pick(
     queued: Vec<Job>,
     running: &[Job],
@@ -542,9 +778,10 @@ pub fn pick(
     caps: &HashMap<String, usize>,
 ) -> Vec<(Job, String)> {
     let mut on_host: HashMap<String, usize> = HashMap::new();
-    let mut in_project: HashMap<String, usize> = HashMap::new();
-    // The projects where no more job may start in this pick.
-    let mut closed: HashSet<String> = HashSet::new();
+    // The validate jobs that run or start, per project.
+    let mut validating: HashMap<String, usize> = HashMap::new();
+    // The projects where no more merge may start in this pick.
+    let mut merging: HashSet<String> = HashSet::new();
     for j in running {
         let host = j
             .host
@@ -553,9 +790,11 @@ pub fn pick(
         if let Some(h) = host {
             *on_host.entry(h).or_default() += 1;
         }
-        *in_project.entry(j.project.clone()).or_default() += 1;
-        if j.kind == JobKind::Merge {
-            closed.insert(j.project.clone());
+        match j.kind {
+            JobKind::Merge => {
+                merging.insert(j.project.clone());
+            }
+            JobKind::Validate => *validating.entry(j.project.clone()).or_default() += 1,
         }
     }
     let mut out = Vec::new();
@@ -563,25 +802,24 @@ pub fn pick(
         let Some(q) = queues.get(&j.project) else {
             continue;
         };
-        if closed.contains(&j.project) {
-            continue;
-        }
         let merge = j.kind == JobKind::Merge;
-        if merge {
-            // The jobs behind a merge wait for it, whether it starts now
-            // or not.
-            closed.insert(j.project.clone());
+        if merge && !merging.insert(j.project.clone()) {
+            // A merge of the project runs, or an older one comes first,
+            // whether it starts now or not.
+            continue;
         }
         let used = on_host.get(&q.host).copied().unwrap_or(0);
         if caps.get(&q.host).is_some_and(|cap| used >= *cap) {
             continue;
         }
-        let busy = in_project.get(&j.project).copied().unwrap_or(0);
-        if (merge && busy > 0) || busy >= q.slots {
-            continue;
+        if !merge {
+            let busy = validating.get(&j.project).copied().unwrap_or(0);
+            if busy >= q.slots {
+                continue;
+            }
+            *validating.entry(j.project.clone()).or_default() += 1;
         }
         *on_host.entry(q.host.clone()).or_default() += 1;
-        *in_project.entry(j.project.clone()).or_default() += 1;
         out.push((j, q.host.clone()));
     }
     out
@@ -981,8 +1219,8 @@ fn clean(cards: Vec<BatchCard>) -> Vec<BatchCard> {
 /// queued at the front with `parent` set to the red job. The left half
 /// and all the splits below it run before the right half: their
 /// `split_path` (the red job's, then `0` or `1`) sorts first at the same
-/// `created_at` (TER-112 review, F1). A merge runs alone in its project,
-/// so the right half merges onto `next` with the left half in it. A half
+/// `created_at` (TER-112 review, F1). One merge of a project runs at a
+/// time, so the right half merges onto `next` with the left half in it. A half
 /// of one card is a job of one card.
 pub fn split(t: &mut Tx<'_>, red: &Job, cards: &[BatchCard]) -> ApiResult<(Job, Job)> {
     if cards.len() < 2 {
@@ -1170,10 +1408,11 @@ pub fn set_delivery(t: &mut Tx<'_>, project: &str, def: &DeliveryDef) -> ApiResu
 }
 
 /// Where a queued job stands: its place among the queued jobs of its
-/// project (1 starts next), and the running count.
+/// project and its lane (1 starts next), and the running count of that
+/// lane. Validate and merge jobs have their own lanes ([`pick`]).
 pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
     let ahead: i64 = conn.query_row(
-        "SELECT count(*) FROM jobs WHERE project = ?1 AND state = 'queued'
+        "SELECT count(*) FROM jobs WHERE project = ?1 AND kind = ?6 AND state = 'queued'
            AND (created_at < ?2 OR (created_at = ?2 AND attempt > ?4)
                 OR (created_at = ?2 AND attempt = ?4
                     AND (split_path < ?5 OR (split_path = ?5 AND id < ?3))))",
@@ -1182,13 +1421,14 @@ pub fn place(conn: &Connection, job: &Job) -> ApiResult<(i64, i64)> {
             job.created_at,
             job.id,
             job.attempt,
-            job.split_path
+            job.split_path,
+            job.kind.as_str()
         ],
         |r| r.get(0),
     )?;
     let running: i64 = conn.query_row(
-        "SELECT count(*) FROM jobs WHERE project = ?1 AND state = 'running'",
-        [&job.project],
+        "SELECT count(*) FROM jobs WHERE project = ?1 AND kind = ?2 AND state = 'running'",
+        params![job.project, job.kind.as_str()],
         |r| r.get(0),
     )?;
     Ok((ahead + 1, running))
@@ -1306,42 +1546,73 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_runs_alone_in_its_project() {
-        let q = queues(&[("a", 4, "h"), ("b", 4, "h")]);
+    fn validations_start_beside_a_merge() {
+        let q = queues(&[("a", 2, "h"), ("b", 2, "h")]);
         let none = HashMap::new();
-        // A merge starts when nothing of its project runs or starts, and
-        // the jobs behind it in its project wait. Project b goes on.
+        // A merge at the front does not hold back the validate jobs of its
+        // project, and does not take one of its 2 slots.
         let queued = vec![
             job("1", "a", JobKind::Merge, "app", "t1"),
             job("2", "a", JobKind::Validate, "app", "t2"),
-            job("3", "b", JobKind::Validate, "app", "t3"),
-            job("4", "a", JobKind::Merge, "lib", "t4"),
-            job("5", "b", JobKind::Merge, "app", "t5"),
-        ];
-        assert_eq!(ids(&pick(queued, &[], &q, &none)), ["1", "3"]);
-        // A job of `a` runs: the merge waits, and so does the job behind it.
-        let run = [running(job("0", "a", JobKind::Validate, "r", "t0"), "h")];
-        let queued = vec![
-            job("1", "a", JobKind::Merge, "app", "t1"),
-            job("2", "a", JobKind::Validate, "app", "t2"),
-            job("3", "b", JobKind::Validate, "app", "t3"),
-        ];
-        assert_eq!(ids(&pick(queued.clone(), &run, &q, &none)), ["3"]);
-        // A validate job before the merge in the same pick: the merge waits.
-        let queued = vec![
-            job("1", "a", JobKind::Validate, "app", "t1"),
-            job("2", "a", JobKind::Merge, "app", "t2"),
             job("3", "a", JobKind::Validate, "app", "t3"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+            job("5", "b", JobKind::Validate, "app", "t5"),
         ];
-        assert_eq!(ids(&pick(queued, &[], &q, &none)), ["1"]);
-        // A merge of `a` runs: nothing else of `a` starts.
+        assert_eq!(ids(&pick(queued, &[], &q, &none)), ["1", "2", "3", "5"]);
+        // A merge of `a` runs: two validate jobs of `a` start beside it.
         let run = [running(job("0", "a", JobKind::Merge, "app", "t0"), "h")];
         let queued = vec![
             job("2", "a", JobKind::Validate, "app", "t2"),
-            job("3", "b", JobKind::Validate, "app", "t3"),
+            job("3", "a", JobKind::Validate, "app", "t3"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+        ];
+        assert_eq!(ids(&pick(queued, &run, &q, &none)), ["2", "3"]);
+        // Both slots run validate jobs: a merge still starts.
+        let run = [
+            running(job("8", "a", JobKind::Validate, "app", "t0"), "h"),
+            running(job("9", "a", JobKind::Validate, "app", "t0"), "h"),
+        ];
+        let queued = vec![
+            job("2", "a", JobKind::Validate, "app", "t2"),
+            job("3", "a", JobKind::Merge, "app", "t3"),
         ];
         assert_eq!(ids(&pick(queued, &run, &q, &none)), ["3"]);
-        // A merge that waits for the host cap holds back its project.
+    }
+
+    #[test]
+    fn one_merge_at_a_time_per_project_in_order() {
+        let q = queues(&[("a", 4, "h"), ("b", 4, "h")]);
+        let none = HashMap::new();
+        // The second merge of `a` waits for the first; `b` has its own lane.
+        let queued = vec![
+            job("1", "a", JobKind::Merge, "app", "t1"),
+            job("2", "a", JobKind::Merge, "lib", "t2"),
+            job("3", "b", JobKind::Merge, "app", "t3"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+        ];
+        assert_eq!(ids(&pick(queued, &[], &q, &none)), ["1", "3", "4"]);
+        // A merge of `a` runs: the next merge waits.
+        let run = [running(job("0", "a", JobKind::Merge, "app", "t0"), "h")];
+        let queued = vec![
+            job("2", "a", JobKind::Merge, "lib", "t2"),
+            job("4", "a", JobKind::Validate, "app", "t4"),
+        ];
+        assert_eq!(ids(&pick(queued, &run, &q, &none)), ["4"]);
+    }
+
+    #[test]
+    fn the_host_cap_counts_a_merge() {
+        let q = queues(&[("a", 4, "h"), ("b", 4, "h")]);
+        let caps = HashMap::from([("h".to_owned(), 2)]);
+        // A running merge takes a place on the host.
+        let run = [running(job("0", "a", JobKind::Merge, "app", "t0"), "h")];
+        let queued = vec![
+            job("1", "a", JobKind::Validate, "app", "t1"),
+            job("2", "b", JobKind::Validate, "app", "t2"),
+        ];
+        assert_eq!(ids(&pick(queued, &run, &q, &caps)), ["1"]);
+        // A merge that waits for the host cap holds back the later merges
+        // of its project, not its validate jobs or other projects.
         let caps = HashMap::from([("h".to_owned(), 1)]);
         let run = [running(job("0", "b", JobKind::Validate, "r", "t0"), "h")];
         let queued = vec![
@@ -1349,6 +1620,14 @@ mod tests {
             job("2", "a", JobKind::Validate, "app", "t2"),
         ];
         assert!(pick(queued, &run, &q, &caps).is_empty());
+        let q = queues(&[("a", 4, "h"), ("b", 4, "z")]);
+        let caps = HashMap::from([("h".to_owned(), 0)]);
+        let queued = vec![
+            job("1", "a", JobKind::Merge, "app", "t1"),
+            job("2", "a", JobKind::Merge, "lib", "t2"),
+            job("3", "b", JobKind::Merge, "app", "t3"),
+        ];
+        assert_eq!(ids(&pick(queued, &[], &q, &caps)), ["3"]);
     }
 
     #[test]
@@ -1443,5 +1722,195 @@ mod tests {
             host_of(&conn, &def),
             canonical_key(&conn, "MiXeD.INVALID").unwrap()
         );
+    }
+
+    const RED_TAIL: &str = "   Doc-tests terrariumd\nerror: 2 targets failed:\n    `-p terrariumd --test card_reminder`\n    `-p terrariumd --test displays`\nerror: recipe `test` failed with exit code 101\nerror: recipe `validate` failed with exit code 101\n[exit code Some(101), signal None, exited]\n";
+
+    #[test]
+    fn the_failed_targets_and_step_come_from_the_tail() {
+        assert_eq!(
+            failed_targets(RED_TAIL),
+            vec![
+                "-p terrariumd --test card_reminder",
+                "-p terrariumd --test displays"
+            ]
+        );
+        assert_eq!(failed_step(RED_TAIL).as_deref(), Some("test"));
+        let one = "error: 1 target failed:\n    `-p terrarium-updater --lib`\nerror: recipe `test` failed with exit code 101\n";
+        assert_eq!(failed_targets(one), vec!["-p terrarium-updater --lib"]);
+        let lint = "error: could not compile\nerror: recipe `lint` failed on line 33 with exit code 101\nerror: recipe `validate` failed with exit code 101\n";
+        assert!(failed_targets(lint).is_empty());
+        assert_eq!(failed_step(lint).as_deref(), Some("lint"));
+        let killed =
+            "     Running tests/card_sessions.rs\n[exit code None, signal Some(9), timeout]\n";
+        assert_eq!(failed_step(killed).as_deref(), Some("timeout"));
+        assert_eq!(failed_step("ok"), None);
+    }
+
+    #[test]
+    fn stats_count_first_attempts_reruns_and_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        #[allow(clippy::type_complexity)]
+        let rows: &[(
+            &str,
+            &str,
+            &str,
+            &str,
+            i64,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+        )] = &[
+            // (id, project, kind, state, attempt, outcome, tail, parent)
+            ("a1", "p", "validate", "passed", 1, None, None, None),
+            (
+                "a2",
+                "p",
+                "validate",
+                "failed",
+                1,
+                Some("red"),
+                Some(RED_TAIL),
+                None,
+            ),
+            ("a2r", "p", "validate", "passed", 2, None, None, None),
+            (
+                "a3",
+                "p",
+                "merge",
+                "failed",
+                1,
+                Some("conflict"),
+                None,
+                None,
+            ),
+            ("a4", "p", "merge", "passed", 1, None, None, None),
+            (
+                "a5",
+                "p",
+                "merge",
+                "failed",
+                1,
+                Some("red"),
+                Some(
+                    "error: 1 target failed:\n    `-p terrariumd --test displays`\nerror: recipe `test` failed\n",
+                ),
+                None,
+            ),
+            (
+                "a5s",
+                "p",
+                "merge",
+                "failed",
+                1,
+                Some("red"),
+                Some(RED_TAIL),
+                Some("a5"),
+            ),
+            (
+                "a8",
+                "p",
+                "validate",
+                "failed",
+                1,
+                Some("error"),
+                Some("the job could not run: host agent `helios` is offline\n"),
+                None,
+            ),
+            (
+                "a8r",
+                "p",
+                "validate",
+                "failed",
+                2,
+                Some("error"),
+                Some("the job could not run: host agent `helios` is offline\n"),
+                None,
+            ),
+            (
+                "a9",
+                "p",
+                "validate",
+                "failed",
+                1,
+                Some("red"),
+                Some("    `-p terrariumd --test jobs`\nerror: recipe `test` failed\n"),
+                None,
+            ),
+            ("a9r", "p", "validate", "passed", 2, None, None, None),
+            ("a6", "p", "validate", "cancelled", 1, None, None, None),
+            ("a7", "p", "validate", "queued", 1, None, None, None),
+            (
+                "q1",
+                "q",
+                "validate",
+                "failed",
+                1,
+                Some("red"),
+                Some(RED_TAIL),
+                None,
+            ),
+        ];
+        for (id, project, kind, state, attempt, outcome, tail, parent) in rows {
+            conn.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt, outcome,
+                                   tail, parent, created_by, created_at)
+                 VALUES (?1, ?2, 'C', ?3, 'r', 'b', ?4, ?5, ?6, ?7, ?8, 't', '2026-11-06T00:00:00.000Z')",
+                params![id, project, kind, state, attempt, outcome, tail, parent],
+            )
+            .unwrap();
+        }
+        // Out of the window.
+        conn.execute(
+            "INSERT INTO jobs (id, project, card, kind, repo, branch, state, attempt, created_by, created_at)
+             VALUES ('old', 'p', 'C', 'validate', 'r', 'b', 'failed', 1, 't', '2026-10-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        let s = stats(&conn, "p", "2026-11-01T00:00:00.000Z").unwrap();
+        assert_eq!(s.jobs, 13);
+        assert_eq!(
+            s.first_attempt,
+            FirstAttempts {
+                ended: 5,
+                passed: 2,
+                failed: 3,
+                pass_rate: Some(0.4)
+            }
+        );
+        assert_eq!((s.validate.ended, s.validate.passed), (3, 1));
+        assert_eq!((s.merge.ended, s.merge.passed), (2, 1));
+        assert_eq!((s.reruns.ended, s.reruns.passed), (2, 2));
+        assert_eq!((s.conflicts, s.cancelled, s.open, s.splits), (1, 1, 1, 1));
+        // The helios-offline pair counts apart, not as fails.
+        assert_eq!(s.errors, 2);
+        // a9: the clip cut the `error: 1 target failed:` header off.
+        assert_eq!(s.untargeted_test_fails, 1);
+        assert_eq!(
+            s.failed_targets,
+            vec![
+                TargetFails {
+                    target: "-p terrariumd --test displays".into(),
+                    failed: 3,
+                    first_attempt: 2
+                },
+                TargetFails {
+                    target: "-p terrariumd --test card_reminder".into(),
+                    failed: 2,
+                    first_attempt: 1
+                },
+            ]
+        );
+        assert_eq!(
+            s.failed_steps,
+            vec![StepFails {
+                step: "test".into(),
+                failed: 4
+            }]
+        );
+        let empty = stats(&conn, "none", "2026-11-01T00:00:00.000Z").unwrap();
+        assert_eq!(empty.first_attempt.pass_rate, None);
+        assert_eq!(empty.jobs, 0);
     }
 }

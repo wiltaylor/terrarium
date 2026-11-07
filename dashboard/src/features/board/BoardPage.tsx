@@ -23,6 +23,7 @@ import { LanesBoard } from "./LanesBoard";
 import { buildLanes, columnIndex, laneCells, laneMoveLabels, laneStateKey, readLaneState, toggleCollapsed } from "./lanes";
 import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_QUERY } from "./phone";
 import { boardVersions, matchesVersion, NO_VERSION } from "./versionLabels";
+import { cardAgentName } from "./cardAgent";
 import { agents, api, events } from "../../stores";
 
 export function BoardPage() {
@@ -515,6 +516,13 @@ function KCard(props: {
             )}
           </Show>
         </div>
+      </Show>
+      <Show when={cardAgentName(props.card)}>
+        {(n) => (
+          <div class="small muted kcard-agent" title={`Card agent: the ephemeral agent bound to ${props.card.id}`}>
+            agent {n()}
+          </div>
+        )}
       </Show>
     </article>
   );

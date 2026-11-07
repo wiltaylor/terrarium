@@ -304,8 +304,8 @@ export interface Api {
   };
 
   agents: {
-    /** `ephemeral` adds `?include=ephemeral`: the ephemeral agents too (docs/api.md §6.10). */
-    list(project?: string, opts?: { ephemeral?: boolean }): Promise<Agent[]>;
+    /** `ephemeral` adds `?include=ephemeral`: the ephemeral agents too (docs/api.md §6.10). `card` adds `?include=card`: only the card agents among them (TER-75). */
+    list(project?: string, opts?: { ephemeral?: boolean; card?: boolean }): Promise<Agent[]>;
     /** `id` is a ULID, `project/name`, or a unique name. */
     get(id: string): Promise<Agent>;
     /** With `template`, the given fields override the template's (docs/api.md §21). */
@@ -1121,7 +1121,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
     },
 
     agents: {
-      list: (project, o = {}) => all("/api/agents", o.ephemeral ? { project, include: "ephemeral" } : { project }),
+      list: (project, o = {}) => all("/api/agents", o.ephemeral ? { project, include: "ephemeral" } : o.card ? { project, include: "card" } : { project }),
       get: (id) => get(a(id)),
       create: (def) => post("/api/agents", def),
       update: (id, body) => patch(a(id), body),
