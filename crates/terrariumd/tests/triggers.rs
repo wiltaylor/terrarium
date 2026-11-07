@@ -13,6 +13,10 @@ use terrariumd::api::Shared;
 use terrariumd::events::{EventDraft, EventFilter};
 use terrariumd::store::schedules;
 
+/// The deadline of the waits for the trigger engine. Only a failing test
+/// waits it out.
+const WAIT: Duration = Duration::from_secs(60);
+
 fn state(td: &TestDaemon) -> Shared {
     td.daemon.as_ref().unwrap().state.clone()
 }
@@ -48,7 +52,10 @@ fn ci(repo: &str, branch: &str) -> Value {
 /// the runs it started can end.
 async fn settle(td: &TestDaemon, seq: i64) {
     let st = state(td);
-    for _ in 0..500 {
+    // A deadline, not a count of tries: each read is slow on a loaded
+    // machine.
+    let start = std::time::Instant::now();
+    while start.elapsed() < WAIT {
         let at = st
             .db
             .read(|c| Ok(schedules::cursor(c)?.unwrap_or(0)))
@@ -87,20 +94,17 @@ async fn runs(td: &TestDaemon, sid: &str) -> Vec<Value> {
     v
 }
 
-/// The longest wait of [`settled_runs`]: a loaded build host is slow.
-const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
-
 /// The runs of `sid` once it has `want` of them and none is `running`, then
 /// after a short pause, so a late extra run shows too. The runs of a
 /// trigger start after the pass that moves the cursor, and the runs of one
 /// trigger go one after another, so `settle` alone does not mean each run
-/// has a row, or that a row has its output. Returns the last read after
-/// [`SETTLE_DEADLINE`].
+/// has a row, or that a row has its output. Returns the last read after the
+/// deadline, so the assertion of the caller shows it.
 async fn settled_runs(td: &TestDaemon, sid: &str, want: usize) -> Vec<Value> {
     let st = state(td);
     let owned = sid.to_owned();
-    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
-    while tokio::time::Instant::now() < deadline {
+    let start = std::time::Instant::now();
+    while start.elapsed() < WAIT {
         let s = owned.clone();
         let running: i64 = st
             .db
@@ -689,12 +693,12 @@ async fn card_actions_open_comment_and_close() {
     .await;
     settle(&td, s).await;
     let c = settled_runs(&td, &close, 2).await;
-    assert_eq!(c[1]["status"], "ok");
+    assert_eq!(c[1]["status"], "ok", "{c:?}");
     assert!(c[1]["output"]["card"].is_null());
     let s = emit(&td, "terra", "ci.run.failed", ci("wil/terrarium", "main")).await;
     settle(&td, s).await;
     let o = settled_runs(&td, &open, 3).await;
-    assert_eq!(o[2]["output"]["op"], "open");
+    assert_eq!(o[2]["output"]["op"], "open", "{o:?}");
     assert_ne!(o[2]["output"]["card"], card_id.as_str());
 }
 

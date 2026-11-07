@@ -18,7 +18,9 @@
 //!      reset) and the others go on. When none merges, the job ends as
 //!      a conflict.
 //!   2. the recipe (`sh -c <recipe>` in the clone), without any
-//!      credential: it runs the repo's code.
+//!      credential: it runs the repo's code. Its env names the job kind
+//!      and, when `next` gives a base, the file of the changed paths
+//!      (TER-100, [`recipe_env`]).
 //!   3. a merge job only, when the recipe passed: push the merge commit
 //!      to `next`. The recipe may have changed the clone (new commits, a
 //!      moved HEAD, its `.git/config`), so the push never runs there:
@@ -64,7 +66,7 @@
 //!   [`LONG_WAIT`] the queue notes the wait on the cards, once per job and
 //!   daemon run. A failure after the recipe started stays a failure.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -957,9 +959,14 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
             batch,
         });
     };
+    let base = r
+        .get("base")
+        .filter(|b| check_commit(b).is_ok())
+        .map(String::as_str);
     let recipe_cmd = RemoteCmd {
-        argv: vec!["sh".into(), "-c".into(), recipe],
+        argv: vec!["sh".into(), "-c".into(), recipe_script(recipe, base)],
         cwd: Some(x.dir.to_owned()),
+        env: recipe_env(job, x.dir, &head, base),
         timeout_secs: Some(timeout),
         holder: x.holder.clone(),
         ..RemoteCmd::default()
@@ -1025,6 +1032,39 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         head: Some(head),
         batch,
     })
+}
+
+/// The file of the changed paths in a job clone, relative to its root
+/// (written by [`PREPARE_SCRIPT`]).
+pub const CHANGED_FILES: &str = ".git/terrarium/changed-files";
+
+/// The recipe as its shell runs it. Without a base the recipe must not see
+/// a `TERRARIUM_BASE` or `TERRARIUM_CHANGED_FILES` from the target's own
+/// env (for example a daemon test that runs inside a validate job), so the
+/// script unsets both first. With a base, [`recipe_env`] sets both.
+fn recipe_script(recipe: String, base: Option<&str>) -> String {
+    if base.is_some() {
+        return recipe;
+    }
+    format!("unset TERRARIUM_BASE TERRARIUM_CHANGED_FILES\n{recipe}")
+}
+
+/// The env of the recipe (TER-100, docs/api.md 35.2): the job kind and
+/// ID, the tested head, and with a base, the base and the absolute path
+/// of the changed files. No credential goes in here.
+fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.insert("TERRARIUM_JOB_KIND".into(), job.kind.as_str().to_owned());
+    env.insert("TERRARIUM_JOB_ID".into(), job.id.clone());
+    env.insert("TERRARIUM_HEAD".into(), head.to_owned());
+    if let Some(b) = base {
+        env.insert("TERRARIUM_BASE".into(), b.to_owned());
+        env.insert(
+            "TERRARIUM_CHANGED_FILES".into(),
+            format!("{}/{CHANGED_FILES}", dir.trim_end_matches('/')),
+        );
+    }
+    env
 }
 
 /// The conflicts that the prepare step of a batch printed: each
@@ -1560,8 +1600,9 @@ res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 
 /// Step 1: `url dir kind branch commit [branch...]` (the other branches of
 /// a batch merge, in order). Prints `TERRARIUM_CONFLICT <index>` and the
-/// files for each branch that conflicts, then `outcome=ok head=<sha>`,
-/// `outcome=conflict`, or `outcome=error`.
+/// files for each branch that conflicts, then `outcome=ok head=<sha>
+/// base=<sha or empty>`, `outcome=conflict`, or `outcome=error`. With a
+/// base, the changed files are in [`CHANGED_FILES`] of the clone.
 const PREPARE_SCRIPT: &str = r#"url=$1; dir=$2; kind=$3; branch=$4; commit=$5
 shift 5
 case "$dir" in /*) ;; *) echo "the job dir is not absolute"; res error; exit 2 ;; esac
@@ -1606,6 +1647,9 @@ else
   if ! g -C "$dir" fetch -q -- "$url" "+refs/heads/$branch:refs/remotes/job/card"; then
     forget; echo "cannot fetch $branch"; res error; exit 2
   fi
+  # `next` gives the base of the changed files. A repo without it is no
+  # error: the recipe then gets no list of changed files.
+  g -C "$dir" fetch -q -- "$url" "+refs/heads/next:refs/remotes/job/next" > /dev/null 2>&1 || true
   forget
   if [ -n "$commit" ]; then
     if ! G -C "$dir" merge-base --is-ancestor "$commit" refs/remotes/job/card 2>/dev/null; then
@@ -1616,7 +1660,22 @@ else
     G -C "$dir" checkout -q --detach refs/remotes/job/card || { res error; exit 2; }
   fi
 fi
-res ok "$(G -C "$dir" rev-parse HEAD)"
+# The changed files for the recipe (TER-100): the paths that differ
+# between the base and HEAD, one per line, in .git/terrarium/changed-files.
+# The base of a merge is `next` before the merge, of a validate the
+# merge-base of the commit and `next`. No base: no file, and `base=`.
+if [ "$kind" = merge ]; then
+  base=$(G -C "$dir" rev-parse -q --verify "refs/remotes/job/next^{commit}" 2>/dev/null) || base=
+else
+  base=$(G -C "$dir" merge-base HEAD refs/remotes/job/next 2>/dev/null) || base=
+fi
+if [ -n "$base" ]; then
+  mkdir -p -- "$dir/.git/terrarium" \
+    && G -C "$dir" -c core.quotePath=false diff --no-ext-diff --no-textconv --name-only --no-renames "$base" HEAD \
+      > "$dir/.git/terrarium/changed-files" \
+    || { rm -f -- "$dir/.git/terrarium/changed-files"; base=; }
+fi
+printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$(G -C "$dir" rev-parse HEAD)" "$base"
 "#;
 
 /// `url branch`: the head of the branch on the remote (empty when the
@@ -1668,6 +1727,24 @@ const CLEAN_SCRIPT: &str =
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// TER-100 review round 2: without a base, a list from the outer env
+    /// does not reach the recipe. With a base, the recipe runs as given.
+    #[test]
+    fn a_recipe_without_a_base_sees_no_inherited_list() {
+        let script = recipe_script(
+            "echo \"${TERRARIUM_BASE-unset} ${TERRARIUM_CHANGED_FILES-unset}\"".into(),
+            None,
+        );
+        let out = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("TERRARIUM_BASE", "abc")
+            .env("TERRARIUM_CHANGED_FILES", "/tmp/outer")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "unset unset\n");
+        assert_eq!(recipe_script("just x".into(), Some("abc")), "just x");
+    }
 
     /// Review of TER-71, major 1: ssh in the git steps reads no config
     /// file, keeps its host keys and the key file in the job's 0700 dir,
