@@ -517,28 +517,32 @@ async fn an_idle_ephemeral_agent_stays_until_its_lifetime() {
         compact_max_age: CompactMaxAge::Off,
         compact_wait: Duration::from_secs(5),
     });
-    // The lifetime counts from the spawn. Under load the start alone can
-    // take seconds (TER-108), so the lifetime leaves room for the start,
-    // the idle, and the 600 ms past the idle stop.
-    let lifetime = Duration::from_secs(10);
+    // The lifetime counts from the spawn, and under load the start alone
+    // took up to 16 s (TER-108). So the lifetime is long while the test
+    // checks that the agent stays, and the test then ends it: it moves the
+    // deadline to now, which the spawn timer reads on each tick.
     td.patch(
         &format!("/api/agents/{w}"),
-        json!({"policy": {"spawn": {"templates": ["worker"], "max_lifetime": "10s"}}}),
+        json!({"policy": {"spawn": {"templates": ["worker"], "max_lifetime": "1h"}}}),
     )
     .await
     .ok();
-    let spawned = std::time::Instant::now();
     let eph = id(&spawn_ok(&td, &w, "Think").await);
     idle_after_a_turn(&td, &eph).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
-    let at = spawned.elapsed();
-    assert!(
-        at < lifetime,
-        "the check came after the lifetime ({at:?}): the machine is too slow for this test"
-    );
     let a = td.get(&format!("/api/agents/{eph}")).await.ok().clone();
     assert_eq!(a["status"], "idle", "{a}");
     assert!(spawn_row(&td, &eph).await["finished_at"].is_null());
+    let (key, now) = (eph.clone(), terrariumd::waits::from_now(Duration::ZERO));
+    s.db.write("operator", move |t| {
+        t.execute(
+            "UPDATE spawns SET deadline_at = ?2 WHERE id = ?1",
+            [&key, &now],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     let sp = finished(&td, &eph).await;
     assert_eq!(sp["outcome"], "timeout");
     let mail = system_mail(&td, &w).await;
