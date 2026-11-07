@@ -15,6 +15,7 @@ import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 // Secrets (PLAN §16b): a block of its own.
 import type { Pin, ProjectFolder, ProjectFolderTree, ProjectPlacement } from "./types";
+import type { EffectiveRules, RuleRun, RuleToggle, RulesLint, RulesMigration } from "./types";
 import type { NewThread, Thread, ThreadClose, ThreadQuery } from "./types";
 import type { CalendarEvent, CalendarGrant, CalendarGrantResult, CalendarInput, CalendarRange, CalendarView, CalendarWatcher, CalendarWatchResult } from "./types";
 import type { NewSecret, NewSecretGrant, RevealedSecret, Secret, SecretGenerate, SecretGrant, SecretPut, TargetPatch, TargetTestReport } from "./types";
@@ -535,6 +536,25 @@ export interface Api {
    * Jest JSON, TAP) that the daemon parses. `id` is the run ULID. Errors: `422 invalid` for a file that does not
    * parse, `413 too_large` over 20 MiB.
    */
+  /**
+   * The board rules of a project (docs/api.md §19.8, §19.9, §19.12, TER-171). Read: whoever reads the project.
+   * `enable`, `disable`, and `migrate` with `apply`: the operator, a project admin, or a sysadmin.
+   */
+  rules: {
+    /** The rules that run, in their order: the built-in pack (with `board_flow = rules`) and the project's rules.wcl. */
+    effective(project: string): Promise<EffectiveRules>;
+    /** The lint of the stored rules, or of `text` as the rules.wcl (`422` when it does not check). */
+    lint(project: string, text?: string): Promise<RulesLint>;
+    /** The run log, newest first. */
+    runs(project: string, q?: { rule?: string; limit?: number }): Promise<{ runs: RuleRun[] }>;
+    /** Switch a rule on: a rule of rules.wcl, or a pack rule that rules.wcl turned off. */
+    enable(project: string, rule: string): Promise<RuleToggle>;
+    /** Switch a rule off; a pack rule gets `rule "<name>" { enabled = false }` in rules.wcl. */
+    disable(project: string, rule: string): Promise<RuleToggle>;
+    /** Map the pack to the board; with `apply`, store rules.wcl and switch the project to `board_flow = rules`. */
+    migrate(project: string, apply?: boolean): Promise<RulesMigration>;
+  };
+
   testRuns: {
     /** Newest first. `card`, `label` (`version:1.4.0`), `name`, and `status` filter. */
     list(project: string, q?: TestRunListQuery): Promise<Page<TestRunSummary>>;
@@ -1296,6 +1316,15 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
         if (!res.ok) throw new ApiError(res.status, `the artifact origin answered ${res.status}`);
         return res.text();
       },
+    },
+
+    rules: {
+      effective: (project) => get(`${p(project)}/rules/effective`),
+      lint: (project, text) => post(`${p(project)}/rules/lint`, text === undefined ? {} : { text }),
+      runs: (project, q = {}) => get(`${p(project)}/rules/runs`, { ...q }),
+      enable: (project, rule) => post(`${p(project)}/rules/${seg(rule)}/enable`),
+      disable: (project, rule) => post(`${p(project)}/rules/${seg(rule)}/disable`),
+      migrate: (project, apply = false) => post(`${p(project)}/rules/migrate`, { apply }),
     },
 
     testRuns: {

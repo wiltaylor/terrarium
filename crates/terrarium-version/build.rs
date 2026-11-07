@@ -99,10 +99,13 @@ fn main() {
          pub const DIRTY: bool = {dirty};\n\
          /// The build time, RFC 3339 UTC.\n\
          pub const BUILD_TIME: &str = {built:?};\n\
-         /// `--version` text: the full version and the build time.\n\
+         /// `--version` text: the full version, then `built <time>` on its own line.\n\
          pub const LONG: &str = {long:?};\n",
         r = git_ref.unwrap_or(parse::UNKNOWN),
-        long = format!("{full} (built {built})"),
+        // The first line must end with the version: host agents up to 0.5.0
+        // take the last word of the first line of `terrarium-host --version`
+        // as the version of a staged update (TER-195).
+        long = format!("{full}\nbuilt {built}"),
     );
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default()).join("build_info.rs");
     if let Err(e) = std::fs::write(&out, code) {

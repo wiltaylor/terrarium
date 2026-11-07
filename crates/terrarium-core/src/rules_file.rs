@@ -58,6 +58,14 @@ pub const PACK_FILE: &str = "rules.default.wcl";
 /// column, 2026-11-07); a project copies them into its `rules.wcl`.
 pub const VALIDATE_RULES: &str = include_str!("rules.validate.wcl");
 
+/// Opt-in rules for the merge queue column (TER-172, TER-162 D8, D9): a
+/// queued merge job moves its cards to `@merge_queue`, a cancel moves them
+/// back to `@review`, and one batch merge of the cards that wait there
+/// when 8 wait or 30 minutes after the first one. Not in the built-in pack
+/// (a board without that column would fail each run); a project copies
+/// them into its `rules.wcl`, with or without `board_flow = rules`.
+pub const MERGE_QUEUE_RULES: &str = include_str!("rules.merge_queue.wcl");
+
 /// The name of a rules file in the docs and the errors.
 pub const FILE_NAME: &str = "rules.wcl";
 
@@ -99,6 +107,21 @@ pub struct Verb {
     args: &'static [(&'static str, Arg)],
     /// The arguments that the verb needs.
     required: &'static [&'static str],
+}
+
+impl Verb {
+    /// The names of the arguments, in the order of the schema.
+    pub fn arg_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.args.iter().map(|(k, _)| *k)
+    }
+
+    /// The names of the arguments that name a column (one or a list).
+    pub fn column_args(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.args
+            .iter()
+            .filter(|(_, a)| matches!(a, Arg::Column | Arg::Columns))
+            .map(|(k, _)| *k)
+    }
 }
 
 /// The verbs, in the order of the schema.
@@ -155,6 +178,8 @@ pub const VERBS: &[Verb] = &[
             ("kind", Arg::OneOf(&["validate", "merge", "batch"])),
             ("from", Arg::Column),
             ("limit", Arg::Count),
+            ("min_cards", Arg::Count),
+            ("max_wait_minutes", Arg::Count),
         ],
         required: &["kind"],
     },
@@ -683,6 +708,42 @@ fn texts(v: &Value) -> Vec<&str> {
     }
 }
 
+/// The checks of `job_queue` across its arguments: a batch needs `from`;
+/// `limit`, `min_cards`, and `max_wait_minutes` are for a batch only;
+/// `max_wait_minutes` needs `min_cards` (without it the batch goes at
+/// once); `min_cards` is at most `limit`.
+fn check_batch_args(args: &Map<String, Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    let batch = args.get("kind").and_then(Value::as_str) == Some("batch");
+    if batch && !args.contains_key("from") {
+        out.push("job_queue of kind batch needs `from` (a column)".to_owned());
+    }
+    if !batch {
+        for key in ["from", "limit", "min_cards", "max_wait_minutes"] {
+            if args.contains_key(key) {
+                out.push(format!("job_queue.{key} is for kind batch only"));
+            }
+        }
+        return out;
+    }
+    if args.contains_key("max_wait_minutes") && !args.contains_key("min_cards") {
+        out.push(
+            "job_queue.max_wait_minutes needs `min_cards` (without it the batch goes at once)"
+                .to_owned(),
+        );
+    }
+    if let (Some(min), Some(limit)) = (
+        args.get("min_cards").and_then(Value::as_i64),
+        args.get("limit").and_then(Value::as_i64),
+    ) && min > limit
+    {
+        out.push(format!(
+            "job_queue.min_cards ({min}) is more than its limit ({limit}): the batch would never go"
+        ));
+    }
+    out
+}
+
 /// Check the value of one argument. `Err` is the message.
 fn check_arg(ctx: &Context, arg: Arg, v: &Value) -> Result<(), String> {
     match arg {
@@ -1126,15 +1187,10 @@ pub fn parse(text: &str, file: &str, ctx: &Context) -> Result<RuleSet, FileError
                     ));
                 }
             }
-            if verb.kind == "job_queue"
-                && args.get("kind").and_then(Value::as_str) == Some("batch")
-                && !args.contains_key("from")
-            {
-                problems.push(problem_at(
-                    text,
-                    Some(cat),
-                    format!("rule `{name}`: job_queue of kind batch needs `from` (a column)"),
-                ));
+            if verb.kind == "job_queue" {
+                for e in check_batch_args(&args) {
+                    problems.push(problem_at(text, Some(cat), format!("rule `{name}`: {e}")));
+                }
             }
             if verb.kind == "card_label" && args.is_empty() {
                 problems.push(problem_at(
@@ -1738,6 +1794,69 @@ rule "mine" {
         let e = errors("rule \"r\" { enabled = true }\n");
         assert!(e.contains("at least one event kind"), "{e}");
         assert!(e.contains("at least one verb"), "{e}");
+    }
+
+    #[test]
+    fn the_merge_queue_rules_read_and_hold_the_batch_numbers() {
+        let set = parse(MERGE_QUEUE_RULES, "rules.merge_queue.wcl", &default_board())
+            .unwrap_or_else(|e| panic!("the merge queue rules do not read: {e}"));
+        let names: Vec<&str> = set.rules.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "merge-queue-move",
+                "merge-queue-cancel",
+                "merge-queue-batch"
+            ]
+        );
+        let batch = &set.rules[2].actions[0];
+        assert_eq!(batch.verb, "job.queue");
+        assert_eq!(batch.args["kind"], "batch");
+        assert_eq!(batch.args["from"], "@merge_queue");
+        // terrarium starts with 8 cards, or 30 minutes after the first
+        // one (TER-162 D9).
+        assert_eq!(batch.args["limit"], 8);
+        assert_eq!(batch.args["min_cards"], 8);
+        assert_eq!(batch.args["max_wait_minutes"], 30);
+        // A board without the column refuses the file.
+        let e = parse(MERGE_QUEUE_RULES, "rules.wcl", &board()).unwrap_err();
+        assert!(
+            e.to_string().contains("unknown column `@merge_queue`"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn batch_arguments_are_checked_together() {
+        let rule = |args: &str| {
+            format!("rule \"r\" {{\n  on = [\"card\"]\n  job_queue {{ {args} }}\n}}\n")
+        };
+        let e = errors(&rule("kind = \"merge\"  limit = 2"));
+        assert!(e.contains("job_queue.limit is for kind batch only"), "{e}");
+        let e = errors(&rule("kind = \"validate\"  min_cards = 2"));
+        assert!(
+            e.contains("job_queue.min_cards is for kind batch only"),
+            "{e}"
+        );
+        let e = errors(&rule(
+            "kind = \"batch\"  from = \"review\"  max_wait_minutes = 30",
+        ));
+        assert!(e.contains("max_wait_minutes needs `min_cards`"), "{e}");
+        let e = errors(&rule(
+            "kind = \"batch\"  from = \"review\"  limit = 4  min_cards = 8",
+        ));
+        assert!(
+            e.contains("min_cards (8) is more than its limit (4)"),
+            "{e}"
+        );
+        let e = errors(&rule("kind = \"batch\"  from = \"review\"  min_cards = 0"));
+        assert!(e.contains("1 or more"), "{e}");
+        parse(
+            &rule("kind = \"batch\"  from = \"review\"  min_cards = 3  max_wait_minutes = 5"),
+            "rules.wcl",
+            &board(),
+        )
+        .expect("a batch without a limit takes min_cards and a wait");
     }
 
     #[test]

@@ -1481,3 +1481,252 @@ async fn a_fix_card_of_another_group_does_not_count() {
         .count();
     assert_eq!(halves, 0);
 }
+
+// ------------------------------------------------- the merge queue rules
+//
+// TER-172 (TER-162 D8, D9): the opt-in rules of
+// `rules_file::MERGE_QUEUE_RULES` on a board with the merge queue column,
+// with `board_flow = code` (terrarium's flow): the move of a queued merge,
+// the move back on a cancel, and the batch by count and by time.
+
+async fn move_to(td: &TestDaemon, id: &str, column: &str) {
+    let r = td
+        .post(&format!("/api/cards/{id}/move"), json!({"column": column}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+async fn column_of(td: &TestDaemon, id: &str) -> String {
+    card(td, id).await["column"].as_str().unwrap().to_owned()
+}
+
+/// The open jobs of project `p`, oldest first.
+async fn open_jobs(td: &TestDaemon) -> Vec<Job> {
+    all_jobs(td)
+        .await
+        .into_iter()
+        .filter(|j| j.state.is_open())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_merge_queue_rules_move_a_queued_merge_and_move_a_cancel_back() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    let a = new_card(&td, "p", json!({"title": "a", "column": "review"})).await;
+    let b = new_card(&td, "p", json!({"title": "b", "column": "review"})).await;
+    let c = new_card(&td, "p", json!({"title": "c", "column": "accepted"})).await;
+    settle(&td).await;
+
+    // card merge: the card goes to the merge queue column. The coded flow
+    // writes the label and the comment as before.
+    let r = td.post(&format!("/api/cards/{a}/merge"), json!({})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job_a = r.body["job"]["id"].as_str().unwrap().to_owned();
+    settle(&td).await;
+    let ca = card(&td, &a).await;
+    assert_eq!(ca["column"], "merge_queue", "{ca}");
+    assert_eq!(ca["labels"], json!(["validation:queued"]));
+    let mv = runs_of(&td, "p", "merge-queue-move").await;
+    assert_eq!(states(&mv), vec!["done"], "{mv:?}");
+    // The move ran the batch rule: one card waits, with a job already, so
+    // there is nothing to merge.
+    let batch = runs_of(&td, "p", "merge-queue-batch").await;
+    assert_eq!(states(&batch), vec!["noop"], "{batch:?}");
+
+    // A batch of the API: each card goes, from any column.
+    let r = td.post("/api/merges", json!({"cards": [b, c]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job_bc = r.body["job"]["id"].as_str().unwrap().to_owned();
+    settle(&td).await;
+    assert_eq!(column_of(&td, &b).await, "merge_queue");
+    assert_eq!(column_of(&td, &c).await, "merge_queue");
+
+    // A cancel: back to review, from the merge queue column only.
+    move_to(&td, &c, "accepted").await;
+    settle(&td).await;
+    for job in [&job_a, &job_bc] {
+        let r = td.delete(&format!("/api/jobs/{job}")).await;
+        assert!(
+            r.status == 200 || r.status == 204,
+            "{} {}",
+            r.status,
+            r.body
+        );
+    }
+    settle(&td).await;
+    for id in [&a, &b] {
+        let x = card(&td, id).await;
+        assert_eq!(x["column"], "review", "{x}");
+        assert_eq!(x["labels"], json!([]), "{x}");
+    }
+    assert_eq!(
+        column_of(&td, &c).await,
+        "accepted",
+        "not in merge_queue: stays"
+    );
+    let cancel = runs_of(&td, "p", "merge-queue-cancel").await;
+    assert_eq!(states(&cancel), vec!["done", "done", "noop"], "{cancel:?}");
+}
+
+#[tokio::test]
+async fn the_merge_queue_batch_goes_when_8_cards_wait() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    let mut ids = Vec::new();
+    for i in 0..9 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    for id in &ids[..7] {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    assert!(open_jobs(&td).await.is_empty(), "7 cards wait: no batch");
+    let r = runs_of(&td, "p", "merge-queue-batch").await;
+    assert_eq!(r.len(), 7, "{r:?}");
+    assert!(r.iter().all(|x| x["state"] == "noop"), "{r:?}");
+    let reason = r[6]["steps"][0]["detail"]["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("7 of 8 cards wait; the batch goes at "),
+        "{reason}"
+    );
+
+    // The 8th card: one batch of the 8, in board order.
+    move_to(&td, &ids[7], "merge_queue").await;
+    settle(&td).await;
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    let cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
+    let want: Vec<&str> = ids[..8].iter().map(String::as_str).collect();
+    assert_eq!(cards, want);
+    assert_eq!(open[0].created_by, "rule:p/merge-queue-batch");
+    // With `board_flow = code` each card gets the label and the queue
+    // comment, as from the API.
+    for id in &ids[..8] {
+        let x = card(&td, id).await;
+        assert_eq!(x["labels"], json!(["validation:queued"]), "{x}");
+        assert!(
+            bodies(&x)
+                .iter()
+                .any(|b| b.starts_with("Job queue: merge job")),
+            "{x}"
+        );
+        assert_eq!(x["column"], "merge_queue");
+    }
+
+    // A 9th card waits for the next batch.
+    move_to(&td, &ids[8], "merge_queue").await;
+    settle(&td).await;
+    assert_eq!(open_jobs(&td).await.len(), 1);
+    let r = runs_of(&td, "p", "merge-queue-batch").await;
+    let last = r.last().unwrap();
+    assert_eq!(last["state"], "noop", "{last}");
+    assert_eq!(last["steps"][0]["detail"]["waiting"], 1, "{last}");
+}
+
+#[tokio::test]
+async fn the_merge_queue_batch_goes_30_minutes_after_the_first_card() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::MERGE_QUEUE_RULES).await;
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        ids.push(
+            new_card(
+                &td,
+                "p",
+                json!({"title": format!("c{i}"), "column": "review"}),
+            )
+            .await,
+        );
+    }
+    settle(&td).await;
+    for id in &ids {
+        move_to(&td, id, "merge_queue").await;
+    }
+    settle(&td).await;
+    assert!(
+        open_jobs(&td).await.is_empty(),
+        "3 cards wait: no batch yet"
+    );
+
+    let st = state(&td);
+    let projects = rules_engine::load(&st.db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
+    let mut fired = std::collections::HashMap::new();
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "the wait has not ended");
+
+    // The first card came 31 minutes ago, the others 20 minutes ago.
+    let at = |m: i64| {
+        (chrono::Utc::now() - chrono::Duration::minutes(m))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    let (first, rest, old, newer) = (ids[0].clone(), ids[1..].to_vec(), at(31), at(20));
+    st.db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE events SET at = ?2 WHERE card = ?1 AND kind = 'card'",
+                rusqlite::params![first, old],
+            )?;
+            for c in &rest {
+                t.execute(
+                    "UPDATE events SET at = ?2 WHERE card = ?1 AND kind = 'card'",
+                    rusqlite::params![c, newer],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "the wait ended");
+    // One wait writes one timer.
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "the timer is written once");
+    settle(&td).await;
+
+    let open = open_jobs(&td).await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    let cards: Vec<&str> = open[0].batch.iter().map(|x| x.card.as_str()).collect();
+    let want: Vec<&str> = ids.iter().map(String::as_str).collect();
+    assert_eq!(cards, want);
+    // A timer run has no card. (The engine's own timer check may write a
+    // second timer in the same minute: its run is then a no-op.)
+    let r = runs_of(&td, "p", "merge-queue-batch").await;
+    let timed: Vec<&Value> = r.iter().filter(|x| x["card"].is_null()).collect();
+    assert_eq!(
+        timed.iter().filter(|x| x["state"] == "done").count(),
+        1,
+        "{timed:?}"
+    );
+    // A timer plans no other rule.
+    let all = runs(&td, "p").await;
+    for t in &timed {
+        assert!(
+            all.iter()
+                .filter(|x| x["event_seq"] == t["event_seq"])
+                .all(|x| x["rule"] == "merge-queue-batch"),
+            "{all:?}"
+        );
+    }
+    // The cards have their job now: no more timers.
+    let n = rules_engine::fire_timers(&st.db, &projects, &mut fired, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}

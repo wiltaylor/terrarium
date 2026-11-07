@@ -386,7 +386,8 @@ fn write_file(path: &Path, data: &[u8], mode: u32) -> Result<(), UpdateError> {
 }
 
 /// Run `<path> --version`: it must exit 0 and print the version `want`
-/// (`terrarium-host <version>` on its first line; `-dirty` does not count).
+/// (`terrarium-host <version>` on its first line, read by
+/// [`reported_version`]; `-dirty` does not count).
 pub async fn smoke_test(path: &Path, want: &str, timeout: Duration) -> Result<(), UpdateError> {
     let out = tokio::time::timeout(timeout, run_version(path))
         .await
@@ -399,17 +400,27 @@ pub async fn smoke_test(path: &Path, want: &str, timeout: Duration) -> Result<()
         )));
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let got = text
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().last())
-        .unwrap_or_default();
+    let got = reported_version(&text);
     if !same_build(got, want) {
         return Err(UpdateError::Smoke(format!(
             "reports version {got:?}, not {want}"
         )));
     }
     Ok(())
+}
+
+/// The version in the output of `terrarium-host --version`: the word after
+/// the program name on the first line. It reads both the two-line output
+/// (`terrarium-host 0.5.0+c7ac041`, then `built <time>`) and the one-line
+/// output of 0.5.0 and older (`terrarium-host 0.5.0+c7ac041 (built <time>)`).
+/// A first line of one word is the version.
+fn reported_version(text: &str) -> &str {
+    let mut words = text.lines().next().unwrap_or_default().split_whitespace();
+    match (words.next(), words.next()) {
+        (_, Some(version)) => version,
+        (Some(only), None) => only,
+        (None, _) => "",
+    }
 }
 
 /// How long [`run_version`] tries again a start that fails with
@@ -698,6 +709,37 @@ mod tests {
         // And swap with nothing staged changes nothing.
         assert!(swap(&bin, "0.3.0+bbbbbbb").is_err());
         assert!(!sidecar(&bin, PENDING).exists());
+    }
+
+    /// The `--version` output of the 0.5.0 release, which the 0.2.0 host
+    /// agent on helios refused (TER-195).
+    const OUTPUT_0_5_0: &str = "terrarium-host 0.5.0-alpha+c7ac041 (built 2026-11-07T11:04:01Z)\n";
+
+    #[test]
+    fn the_version_is_the_word_after_the_program_name() {
+        assert_eq!(reported_version(OUTPUT_0_5_0), "0.5.0-alpha+c7ac041");
+        assert_eq!(
+            reported_version("terrarium-host 0.6.0+ddddddd\nbuilt 2026-11-08T09:00:00Z\n"),
+            "0.6.0+ddddddd"
+        );
+        assert_eq!(
+            reported_version("terrarium-host 0.2.0-alpha+2ae4397\n"),
+            "0.2.0-alpha+2ae4397"
+        );
+        assert_eq!(reported_version("0.2.0+aaaaaaa\n"), "0.2.0+aaaaaaa");
+        assert_eq!(reported_version(""), "");
+        assert_eq!(reported_version("\nterrarium-host 0.2.0+aaaaaaa\n"), "");
+    }
+
+    #[tokio::test]
+    async fn the_0_5_0_output_stages() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = install(dir.path(), &script("0.2.0-alpha+2ae4397"));
+        let new = format!("#!/bin/sh\nprintf '%s' '{OUTPUT_0_5_0}'\n");
+        stage(&bin, new.as_bytes(), "0.5.0-alpha+c7ac041")
+            .await
+            .unwrap();
+        assert!(sidecar(&bin, NEW).is_file());
     }
 
     /// A file with a write fd open, as a child forked by another thread

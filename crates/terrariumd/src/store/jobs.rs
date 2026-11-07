@@ -1148,9 +1148,6 @@ pub fn halves_of(conn: &Connection, id: &str) -> ApiResult<Vec<Job>> {
     ids.iter().map(|i| get(conn, i)).collect()
 }
 
-/// The most cards in one batch merge.
-pub const BATCH_MAX: usize = 32;
-
 /// The JSON text of a batch; `None` for a job of one card.
 fn batch_text(batch: &[BatchCard]) -> ApiResult<Option<String>> {
     if batch.is_empty() {
@@ -1289,11 +1286,6 @@ pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
             return Err(ApiError::invalid(
                 "a batch has two or more cards and starts with the job's card",
             ));
-        }
-        if n.batch.len() > BATCH_MAX {
-            return Err(ApiError::invalid(format!(
-                "a batch has at most {BATCH_MAX} cards"
-            )));
         }
         let mut seen = HashSet::new();
         for c in &n.batch {
