@@ -90,6 +90,7 @@ export function GrantsPanel(props: { secret: Secret; onClose: () => void }) {
                     <td class="mono small">{g.grantee_label}</td>
                     <td>
                       <span class={`chip ${g.level === "read" ? "warn" : ""}`}>{g.level}</span>
+                      {g.targets?.length ? <span class="mono small"> {g.targets.join(", ")}</span> : null}
                     </td>
                     <td class="mono small">{g.env ?? <span class="muted">—</span>}</td>
                     <td class="small">{g.created_by}</td>

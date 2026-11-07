@@ -33,7 +33,10 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-const WAIT: Duration = Duration::from_secs(15);
+/// The deadline of the waits for a state. Under load one start of the fake
+/// TUI took 18 s (TER-117), so 15 s was too short. Only a failing test
+/// waits it out.
+const WAIT: Duration = Duration::from_secs(45);
 /// The lead nudge rate limit in these tests. Long enough that the requests
 /// a test makes inside one interval fit in it on a loaded machine.
 const LEAD_NUDGE: Duration = Duration::from_secs(4);
@@ -1058,6 +1061,28 @@ async fn prompts(td: &Td, id: &str) -> Vec<String> {
         .iter()
         .map(|e| e["data"]["prompt"].as_str().unwrap_or("").to_owned())
         .collect()
+}
+
+/// Start a turn of agent `id` that stays open until [`end_hold`]: the fake
+/// TUI's `/hold`. A test that needs work to land inside one turn holds it
+/// open, so a slow machine cannot end the turn first (TER-117). Returns
+/// when the agent is `working`.
+async fn hold(td: &Td, id: &str) {
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/hold"})),
+    )
+    .await;
+    td.wait_status(id, "working").await;
+}
+
+/// End the open `/hold` turn of agent `id`: type one line into it.
+async fn end_hold(td: &Td, id: &str) {
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "go", "raw": true})),
+    )
+    .await;
 }
 
 /// Lead nudges: a card with no assignee in `ready`, and a move to `review`
@@ -2572,12 +2597,9 @@ async fn a_stale_lead_nudge_is_dropped() {
     td.agent("demo", "w", json!({})).await;
     td.post(&format!("/api/agents/{lead}/start"), None).await;
     td.wait_status(&lead, "idle").await;
-    td.post(
-        &format!("/api/agents/{lead}/send"),
-        Some(json!({"text": "long work"})),
-    )
-    .await;
-    td.wait_status(&lead, "working").await;
+    // The turn stays open until the cards and the assignment are in: a
+    // fixed work time ended before the assignment under load.
+    hold(&td, &lead).await;
     let mk = |title: &'static str| {
         let td = &td;
         async move {
@@ -2597,6 +2619,7 @@ async fn a_stale_lead_nudge_is_dropped() {
         Some(json!({"assignee": "demo/w"})),
     )
     .await;
+    end_hold(&td, &lead).await;
     let want = format!(
         "[System:nudge] New card {b} in ready: Open. Run `terrarium card ls --unassigned --column ready`."
     );
@@ -2608,7 +2631,7 @@ async fn a_stale_lead_nudge_is_dropped() {
     assert_eq!(starts.len(), 2, "{starts:#?}");
     tokio::time::sleep(LEAD_NUDGE + Duration::from_millis(500)).await;
     let all = prompts(&td, &lead).await;
-    assert_eq!(all, vec!["[User] long work".to_owned(), want], "{all:#?}");
+    assert_eq!(all, vec!["[User] /hold".to_owned(), want], "{all:#?}");
 }
 
 /// Lease pointers (docs/api.md §17.7): a grant types "You now have access
@@ -2693,12 +2716,9 @@ async fn lease_grant_and_revoke_push_a_pointer() {
     .await;
     td.wait_events(&id, "turn_start", |e| e.len() >= 4).await;
     td.wait_status(&id, "idle").await;
-    td.post(
-        &format!("/api/agents/{id}/send"),
-        Some(json!({"text": "busy"})),
-    )
-    .await;
-    td.wait_status(&id, "working").await;
+    // The turn stays open until both are in: under load a 1 s turn ended
+    // between the grant and the revoke (TER-117).
+    hold(&td, &id).await;
     td.post(
         "/api/targets/demo-box/leases",
         Some(json!({"agent": "demo/bob"})),
@@ -2711,6 +2731,7 @@ async fn lease_grant_and_revoke_push_a_pointer() {
         None,
     )
     .await;
+    end_hold(&td, &id).await;
     let starts = td.wait_events(&id, "turn_start", |e| e.len() >= 6).await;
     td.wait_status(&id, "idle").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2911,12 +2932,9 @@ async fn a_swap_by_restart_waits_for_the_end_of_the_turn() {
     td.adapter.set_env("FAKE_TUI_DELAY_MS", "1500");
     td.post(&format!("/api/agents/{id}/start"), None).await;
     td.wait_status(&id, "idle").await;
-    td.post(
-        &format!("/api/agents/{id}/send"),
-        Some(json!({"text": "long work"})),
-    )
-    .await;
-    td.wait_status(&id, "working").await;
+    // The turn stays open until the swap is in: under load a 1.5 s turn
+    // ended before a poll saw `working` (TER-117).
+    hold(&td, &id).await;
     let r = td
         .post(
             &format!("/api/agents/{id}/subscription"),
@@ -2928,6 +2946,7 @@ async fn a_swap_by_restart_waits_for_the_end_of_the_turn() {
         td.get(&format!("/api/agents/{id}")).await["subscription"],
         "max-y"
     );
+    end_hold(&td, &id).await;
     // The turn ends first; then the harness starts again with resume.
     let starts = td
         .wait_events(&id, "session_started", |e| e.len() == 2)
@@ -3150,9 +3169,13 @@ async fn a_compaction_holds_turns_until_its_end_hook() {
     td.wait_status(&id, "idle").await;
 
     td.post(&format!("/api/agents/{id}/compact"), None).await;
-    let a = td.get(&format!("/api/agents/{id}")).await;
-    assert_eq!(a["status"], "working", "{a}");
-    assert_eq!(a["status_reason"], "compacting", "{a}");
+    // From the status events, not one read: under load the 600 ms
+    // compaction ended before the read (TER-117).
+    td.wait_events(&id, "status", |e| {
+        e.iter()
+            .any(|s| s["data"]["status"] == "working" && s["data"]["reason"] == "compacting")
+    })
+    .await;
     td.post(
         &format!("/api/agents/{id}/send"),
         Some(json!({"text": "second"})),
@@ -3458,12 +3481,10 @@ async fn the_then_turn_waits_for_a_free_stream() {
     for id in [&bob, &carol] {
         td.wait_status(id, "idle").await;
     }
-    td.post(
-        &format!("/api/agents/{bob}/send"),
-        Some(json!({"text": "long"})),
-    )
-    .await;
-    td.wait_events(&bob, "turn_start", |e| !e.is_empty()).await;
+    // Bob's turn holds the one stream until the test ends it: under load
+    // carol's new session took longer than a fixed 1.5 s turn, and she
+    // never had to wait (TER-117).
+    hold(&td, &bob).await;
     td.post(
         &format!("/api/agents/{carol}/new-session"),
         Some(json!({"then": "Go.", "recap": false})),
@@ -3471,6 +3492,19 @@ async fn the_then_turn_waits_for_a_free_stream() {
     .await;
     td.wait_events(&carol, "session_started", |e| e.len() == 2)
         .await;
+    td.wait_events(&carol, "status", |e| {
+        e.iter().any(|x| {
+            x["data"]["reason"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("stream_limit"))
+        })
+    })
+    .await;
+    assert!(
+        td.events(&carol, "turn_start").await.is_empty(),
+        "carol's then turn waits while bob holds the stream"
+    );
+    end_hold(&td, &bob).await;
     let starts = td
         .wait_events(&carol, "turn_start", |e| !e.is_empty())
         .await;
@@ -3478,15 +3512,8 @@ async fn the_then_turn_waits_for_a_free_stream() {
         starts[0]["data"]["prompt"],
         "[System:reset requested by operator] Go."
     );
-    let bob_end = td.events(&bob, "turn_end").await;
-    assert!(!bob_end.is_empty(), "bob's turn ended first");
-    let statuses = td.events(&carol, "status").await;
-    assert!(
-        statuses.iter().any(|x| x["data"]["reason"]
-            .as_str()
-            .is_some_and(|r| r.starts_with("stream_limit"))),
-        "{statuses:#?}"
-    );
+    // Bob's turn ended (its hook can land a moment after carol's start).
+    td.wait_events(&bob, "turn_end", |e| !e.is_empty()).await;
 }
 
 /// Set the subscription of agent `id` in the store, with no check: an

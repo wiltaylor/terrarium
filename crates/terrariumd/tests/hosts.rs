@@ -147,9 +147,10 @@ case "$1" in
   start) echo running > "$f"; echo "$2" ;;
   stop) echo exited > "$f"; echo "$4" ;;
   rm) rm -f "$f" ;;
-  exec) for a in "$@"; do if [ "$a" = sleeper ]; then sleep 3; fi; done ;;
+  exec) for a in "$@"; do if [ "$a" = sleeper ]; then i=0; while [ ! -f '{end}' ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done; fi; done ;;
 esac"#,
-            s = state.display()
+            s = state.display(),
+            end = dir.join("sleeper.end").display()
         ),
         _ => format!(
             r#"case "$1" in
@@ -2972,7 +2973,10 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
         json!(["terra/w1", "terra/w2"])
     );
 
-    // A live session: the third holder cannot join.
+    // A live session: the third holder cannot join. The fake `sleeper`
+    // runs until the test writes `sleeper.end` (at most 60 s), not for a
+    // fixed time: under load the start of w3 can outlast a fixed sleep
+    // (TER-118).
     let sid = exec(&lab.td, "terra-dbox", json!({"cmd": ["sleeper"]})).await;
     start_agent(&lab, &w3).await;
     let errs = on_agent_start(&state, &w3, &["terra-dbox".into()]).await;
@@ -2991,6 +2995,7 @@ async fn docker_targets_attach_the_workspaces_of_their_holders() {
         errs[0].1.message
     );
     assert_eq!(runs(&lab).len(), 2, "no new container");
+    std::fs::write(lab.bins.path().join("sleeper.end"), "").unwrap();
     let _ = drain(&lab.td, "terra-dbox", &sid).await;
     stop_agent(&lab, &w3).await;
     assert!(

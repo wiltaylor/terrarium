@@ -1222,7 +1222,7 @@ and custom secrets that the daemon and the agents use. The code is in
 | `POST /api/secrets/{scope}/{name}/generate` | `{"type"?: "ed25519" \| "rsa", "bits"?: 3072 \| 4096, "comment"?, "replace"?: false}` | `201` secret with `public_key` and `fingerprint`; `200` replaced | below |
 | `POST /api/secrets/{scope}/{name}/reveal` | `{"password"}` | `200` secret with `values` | the operator |
 | `GET /api/secrets/{scope}/{name}/grants` | | `200` `[grant]` | below |
-| `POST /api/secrets/{scope}/{name}/grants` | `{"grantee", "level"?, "env"?}` | `201` new, `200` replaced | below |
+| `POST /api/secrets/{scope}/{name}/grants` | `{"grantee", "level"?, "env"?, "targets"?}` | `201` new, `200` replaced | below |
 | `DELETE /api/secrets/{scope}/{name}/grants?grantee=` | | `204` | below |
 | `GET /api/agent/secrets` | | `200` `[granted]` | an agent |
 | `POST /api/agent/secrets/{name}/get` | `{"field"?}` or none | `200` `{scope, name, kind, field, value}` | an agent with a `read` grant |
@@ -1413,7 +1413,12 @@ also to the agents that start later.
 | Level | The agent gets |
 |---|---|
 | `use` | The brokers only: the git credential helper and the ssh-agent socket. The agent cannot see an `ssh_key`. For a `token` or a `github_token`, `use` is `read`: see below. |
-| `read` | `use`, the env var at the start, and `terrarium secret get`. |
+| `run` | `use`, and the value in the env of `terrarium run -e KEY=@secret:<name>` on the targets that the grant names (TER-142, "Secrets in a run" below). No env var at the start, no `terrarium secret get`. |
+| `read` | `run` on any target that the agent may use, the env var at the start, and `terrarium secret get`. |
+
+The levels are ordered `use` < `run` < `read`. An agent's own grant and
+its project's grant add up to the higher level; two `run` grants add up
+to the union of their targets, and a `read` grant has no target limit.
 
 **`use` is `read` for tokens.** The git credential helper hands the token
 to git in plain text (§5.1). The agent runs git, so it can call the helper
@@ -1441,6 +1446,19 @@ kinds that a broker serves). It defaults to `read` for `api_key`,
 var for the value. An env var puts the value into the agent's
 environment, where the agent can print it, so `env` needs the level
 `read` (`422` otherwise).
+
+`targets` names the targets of a `run` grant: 1 to 32 target names, each
+one a target that exists (`404` otherwise) and, for a project target, a
+target of the grantee's project (`403`). A `run` grant with no target, or
+`targets` on another level, is `422`. The answer and the list show
+`targets` on a `run` grant, sorted. A grant check does not need the
+grantee to hold the target in its policy: the run still checks the
+agent's target rights (§17).
+
+```
+POST /api/secrets/ops/deploy/grants
+{"grantee":"agent:ops/builder","level":"run","targets":["prod-1","prod-2"]}
+```
 
 *The name rule.* Each final env var name must obey this rule. The final
 names are the `env` name, and each `<ENV>_<FIELD>` of a `generic` secret
@@ -1485,8 +1503,9 @@ POST /api/secrets/ops/db/grants
 The delete takes the grantee in the query (`?grantee=agent:ops/builder`).
 A grant that does not exist is `404`. The list shows each grant of the
 secret. A grant change applies at the next start of the agent. The
-brokers and `get` check the grants at each call, so a revoke stops them
-at once. A delete of the secret, of the agent, or of the project removes
+brokers, `get`, and `terrarium run` check the grants at each call, so a
+revoke stops them at once, and a `run` grant applies at the next run with
+no restart. A delete of the secret, of the agent, or of the project removes
 its grants. A new agent with the name of a removed agent gets no grant.
 
 **Delivery to agents.** PLAN §16b.4.
@@ -1569,7 +1588,49 @@ before a global secret. No entry holds a value. The operator gets `403`.
   "fields":{},"secret_fields":["value"],"via":["agent"]}]
 ```
 
-`via` holds `agent`, `project`, or both.
+`via` holds `agent`, `project`, or both. An entry at the level `run` also
+has `targets`: the targets where `terrarium run` gets the value.
+
+**Secrets in a run** (TER-142). `terrarium run <target> -e
+KEY=@secret:<name> -- <cmd>` and `-e KEY=@secret:<name>.<field>` ask the
+daemon for a secret value in the env of the command. The CLI sends the
+reference as it is, in `env` of `POST /api/agents/{id}/run` (§6.7). A
+value that starts with `@secret:` is always a reference: a literal value
+cannot start with it. A secret name has no `.`, so the first `.` starts
+the field. The default field is the main secret field; a `generic`
+secret with several secret fields needs one (`422`).
+
+- The daemon reads the agent's grants at each run start: no cache, so a
+  grant that is added or revoked while the agent works applies at its
+  next run. A `run` grant that names the run's target, or a `read`
+  grant, resolves. A `run` grant on other targets is `403` with the
+  allowed targets named. A `use` grant is `403`, no grant `404`, a
+  placeholder with no value `409`, and the token of a repo that goes
+  through the git proxy `403`. A refused reference starts nothing.
+- The value goes into the env of the remote process only: on an `ssh`
+  target as one base64 line on the stdin of the remote shell, which reads
+  and exports it; on a `docker` target through `docker exec -e KEY` with
+  the value in the env of the `docker` process on the host; on a `host`
+  target in the env of the process. It is never on a command line (local
+  or remote), in the sandbox env, in the daemon log, or in a record. A
+  `vmlab` target takes no env (`422`).
+- The output is redacted first with the run's own values (each value of
+  at least 4 bytes, also a weak one that the daemon matcher leaves out,
+  label `[secret:run/<scope>/<name>]` or `[secret:run/<name>]`), then
+  with the daemon matcher. This covers the session output, `terrarium run
+  log`, the output tail in the wait result, and the mail of the run end.
+- Each reference writes one `secret.run` audit row: `{agent, scope, name,
+  field, env, level, target, session, run}`, where `run` is the wait ID.
+  The `target.exec` row of the run has the env names only. No row holds a
+  value.
+
+**The limit.** The redaction matches the known value as bytes. The
+command that gets the value can still leak it: print it encoded, split,
+or reversed, write it to a file, or send it elsewhere. A `run` grant stops
+an accidental exposure (a value in a transcript, a log, a command line,
+or the sandbox env). It does not stop a hostile agent or a hostile
+command: give a `run` grant only to an agent that may use the value on
+those targets.
 
 **The env of the start.** `POST /api/agent/secrets/env` answers the env
 of the calling agent's harness. `terrarium exec-env` calls it inside the
@@ -1604,7 +1665,7 @@ no grant and no `get` reads it.
 **Get.** `POST /api/agent/secrets/{name}/get` answers one value for a
 `read` grant. The name resolves among the granted secrets: the project
 secret first, then the global one. A secret with no grant is `404`. A
-`use` grant is `403`. `field` names a field; the default is the main
+`use` or a `run` grant is `403`. `field` names a field; the default is the main
 secret field (above). A `generic` secret with more than one secret field
 needs `field` (`422`). A plain field answers its value too. The answer
 has `Cache-Control: no-store`. Each answer writes a `secret.get` audit
@@ -1625,8 +1686,8 @@ true`, `type`, `bits`, and `fingerprint`), `secret.delete` (with
 `targets`: the targets that a forced delete left with no secret),
 `secret.reveal` (`{scope, name, kind, secret_fields, ip}`),
 `secret.grant` (`{scope, name, kind, grantee, grantee_label, level, env,
-created}`), `secret.revoke` (`{scope, name, kind, grantee}`),
-`secret.get`, and `secret.use` (`{agent, scope, name, broker, host}` for
+targets, created}`), `secret.revoke` (`{scope, name, kind, grantee}`),
+`secret.get`, `secret.run` (above), and `secret.use` (`{agent, scope, name, broker, host}` for
 the git helper; `{agent, scope, name, broker, signs}` for the ssh-agent).
 The target is `<scope>/<name>`. The project of a project secret is the
 row's `project`. No row holds a value.
@@ -1932,7 +1993,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `waiting_on` | What the agent waits on, in one short line: the summaries of the oldest 3 open waits and a count of the others. Absent when the agent has no open wait. |
 | `session` | The harness session ID of the current session, when known. |
 | `harness_version` | The harness version that the live agent runs: the version dir in the tools dir that its launch resolved (§4, `POST /api/harnesses/{name}/update`). It stays until the next start, also after an update. Absent when the agent does not run, or when the version is not known. |
-| `current_card` | The card the agent has in the `working` column of its board (§8.1), if any. |
+| `current_card` | The card the agent has in the `working` column of its board (§8.1), if any. For an ephemeral agent, else its bound card, else the newest open card that it is the assignee of (TER-75). |
 | `source` | `file`, `api`, or `fleet:<name>` (§18.1). |
 | `template` | The agent template that the create copied: `{"id", "name", "project", "revision"}` (§21). Absent when the create named none. For display only. |
 | `ephemeral`, `owner`, `spawn` | An ephemeral agent (§6.10): `true`, the owner (an agent ULID or `operator`), and `{"owner_name", "template", "task", "spawned_at", "deadline_at"}`. Absent for other agents. |
@@ -3000,7 +3061,12 @@ stops it at its `timeout`. An ephemeral target that goes down with the
 agent ends it (`failed`, `lost`). A daemon restart loses the exec session:
 each open `process` wait then fails with `error: "lost"`, and the command
 can still run on the target. The run counts toward the 8 live exec
-sessions of the agent.
+sessions of the agent. An `env` value `@secret:<name>[.<field>]` is a
+secret that the daemon resolves from the agent's grants at the start
+(§5.2, "Secrets in a run"): a `run` grant that names the target, or a
+`read` grant. The value goes into the env of the remote process only, is
+redacted from the output, the log, and the tail, and writes a
+`secret.run` audit row with no value.
 
 | Endpoint | Body or query | Answer | Who |
 |---|---|---|---|
@@ -3390,7 +3456,11 @@ leaves it out.
 
 **The lists.** `GET /api/agents` and `GET /api/projects/{name}/agents`
 leave the ephemeral agents out. `GET /api/agents?include=ephemeral` lists
-them too. They are not peers in the prompt of other agents. The events,
+them too. `GET /api/agents?include=card` lists only the card agents among
+them (TER-75): those bound to an open card, and those that are the
+assignee of a card that is not archived. `terrarium agent ls` asks with
+`include=card` by default, and with `include=ephemeral` for
+`--ephemeral`, also with `--all-projects`. They are not peers in the prompt of other agents. The events,
 the mail, the audit rows, and the session links of the logs show them as
 for any agent.
 
@@ -3433,7 +3503,7 @@ holds.
 | Field | Entry | The ephemeral agent gets |
 |---|---|---|
 | `targets` | A target name: global, or of the project. | A target in the owner's `policy.targets` goes into its `policy.targets`, also a global one that a project_admin could not add by `agent set`. A target that the owner holds by an active lease gives it a lease (`target.grant`) that ends with the owner's lease or its own deadline, whichever is first. An exclusive lease of the owner is `409 conflict`. Any other target is `403 forbidden`, with the target named; an unknown one is `404`. |
-| `grants` | `<name>` or `<scope>/<name>` (the project secret first, then the global one), with `:use` or `:read`. | An agent grant (`secret.grant`, with `spawn_owner`) at that level, when the owner holds the secret (its own grant or its project's) at that level or higher: else `403 forbidden`, with the secret and the levels named. No level: the kind's default, at most the owner's. A `read` grant keeps the owner's env var name. |
+| `grants` | `<name>` or `<scope>/<name>` (the project secret first, then the global one), with `:use`, `:run`, `:run=<target>,<target>`, or `:read`. | An agent grant (`secret.grant`, with `spawn_owner`) at that level, when the owner holds the secret (its own grant or its project's) at that level or higher (`use` < `run` < `read`): else `403 forbidden`, with the secret and the levels named. No level: the kind's default, at most the owner's. A `read` grant keeps the owner's env var name. A `run` grant (§5.2, "Secrets in a run") does not go past the owner's targets: an owner with `run` gives its own run targets, or the subset that the ask names (a target past them is `403`); an owner with `read` names the targets (`422` with none), each one in its `policy.targets` or held by an active lease (`403` otherwise). The operator names any target that the project reaches. |
 
 A template with no `subscription` and no `subscription_pool` takes the
 owner's subscription and pool when the owner runs the same harness, so
@@ -4076,6 +4146,9 @@ A card:
 ```
 
 - `assignee`, `assignee_name`, `repo`, `branch` are absent when not set.
+- `agent`, `agent_name`: the card agent (TER-75), the open ephemeral
+  agent bound to the card (§6.10). It stays while the card waits and
+  the assignee is cleared. Absent when none.
 - `eta_at` is when the work is expected to be done (RFC 3339, UTC,
   milliseconds). `eta_set_at` is when the ETA was set, and `eta_set_by` (an
   address) and `eta_set_by_name` say who set it. The four fields are absent
@@ -10563,6 +10636,24 @@ validate or a merge is a `409 conflict` that says how to set it.
   (`[{card, branch, by_agent?, outcome?, note?}]`); `card`, `branch`, and
   `by_agent` are those of the first card. See 35.3 for the results.
 
+The recipe gets this env (TER-100), and no credential:
+
+| variable                  | value                                                                 |
+|---------------------------|-----------------------------------------------------------------------|
+| `TERRARIUM_JOB_KIND`      | `validate` or `merge`                                                 |
+| `TERRARIUM_JOB_ID`        | the job ID                                                            |
+| `TERRARIUM_HEAD`          | the tested commit: the card commit, or the merge commit               |
+| `TERRARIUM_BASE`          | the base of the change: for a validate job the merge-base of the card commit and `next`, for a merge job `next` before the merge |
+| `TERRARIUM_CHANGED_FILES` | the absolute path of a file in the clone (`.git/terrarium/changed-files`) with the paths that differ between the base and the head, one per line (`git diff --name-only --no-renames`, so a rename lists both paths) |
+
+The prepare step fetches `next` for a validate job too. When the repo has
+no `next`, or the commit has no merge-base with it, `TERRARIUM_BASE` and
+`TERRARIUM_CHANGED_FILES` are not set, and a recipe that selects tests
+must run all of them. The terrarium repo's recipe for this is `just
+ci::validate-affected`: a validate job runs the checks that its changed
+files reach (the rules are in `scripts/affected.py`), and a merge job runs
+the full `just ci::validate`.
+
 Jobs start first in, first out across all projects. A job starts when:
 
 1. its host is under its cap (the host cap, below), and
@@ -10740,6 +10831,7 @@ start with `Job queue:`.
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
 | `POST /api/merges`                 | a project admin                       | `{cards, repo?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
+| `GET /api/projects/{name}/jobs/stats` | members                            | `?since=`: an RFC 3339 time, or a duration back from now such as `7d` (the default); anything else is `400`. The jobs created at or after `since` (a rerun keeps the `created_at` of its first try): `{project, since, jobs, first_attempt, validate, merge, reruns, conflicts, errors, cancelled, open, splits, failed_steps: [{step, failed}], failed_targets: [{target, failed, first_attempt}], untargeted_test_fails}`. Each of `first_attempt`, `validate`, `merge`, and `reruns` is `{ended, passed, failed, pass_rate}`; `pass_rate` is `passed / ended` from 0 to 1, `null` with none ended. A first attempt is attempt 1 and no split half; a `conflict` counts in `conflicts`, not in `ended`. A job with outcome `error` could not run (host agent offline, prepare step failed, push to `next` failed): first attempts and reruns with it count in `errors`, not in `ended`, so an outage does not lower the rate. Split halves count in `splits` only. `failed_targets` (most first) come from the `error: N targets failed:` lines of the failed jobs' output tails, all attempts; `failed_steps` from the first ``error: recipe `<step>` failed`` line, or `timeout`. `untargeted_test_fails` counts the failed `test` steps whose tail names no target (the 4000-byte tail clip cut the header off) |
 | `GET /api/jobs/{id}`               | members                               | one job with its output tail |
 | `DELETE /api/jobs/{id}`            | the creator, the card's worker, a project admin | cancel. A running job is killed. The card stays in its column without the job labels. A batch merge: the creator or a project admin only, as it holds the cards of several workers; every card of the batch loses the job labels |
 
