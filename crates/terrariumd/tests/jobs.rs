@@ -128,7 +128,7 @@ async fn host_counts_respect_the_readers_project() {
                         by_agent: None,
                     },
                 )?;
-                jobs::start(t, &j.id, "machine")?;
+                jobs::start(t, &j.id, "machine", Some(1))?;
                 jobs::set_host_cap(t, "machine", Some(2))?;
                 Ok(())
             })
@@ -219,7 +219,7 @@ async fn cards_carry_their_job_state_and_assignee_status() {
                     },
                 )?;
                 if i == 0 {
-                    jobs::start(t, &j.id, "machine")?;
+                    jobs::start(t, &j.id, "machine", Some(1))?;
                 }
             }
             Ok(())
@@ -324,7 +324,7 @@ async fn an_ssh_alias_of_a_host_agent_is_one_host() {
                 by_agent: None,
             },
         )?;
-        jobs::start(t, &j.id, "10.3.0.2")?;
+        jobs::start(t, &j.id, "10.3.0.2", Some(1))?;
         Ok(())
     })
     .await
@@ -1519,6 +1519,95 @@ async fn the_host_cap_holds_across_projects_in_order() {
     // The cap goes away: the host has no cap and no running job.
     let r = lab.td.delete("/api/job-hosts/lab1").await;
     assert_eq!(r.ok()["hosts"], json!([]), "{}", r.body);
+}
+
+/// TER-190: each slot has one work tree, `<work_dir>/p/slot-<n>`, kept from
+/// job to job. Four jobs on two slots: each recipe runs in the tree of
+/// its `TERRARIUM_JOB_SLOT`, at its own commit, with no file left from the
+/// job before but `target/`, which keeps what the jobs before wrote. No
+/// two jobs hold one tree at once (`target/busy`), and no dir per job is
+/// made. A merge runs in the tree of slot 0.
+#[tokio::test]
+async fn slots_keep_their_tree_and_never_share_it() {
+    let lab = lab(2).await;
+    let wd = lab._dirs.path().join("jobs");
+    let recipe = r#"set -e
+test "$(basename "$(pwd -P)")" = "slot-$TERRARIUM_JOB_SLOT"
+test ! -e junk
+test "$(git rev-parse HEAD)" = "$TERRARIUM_HEAD"
+mkdir -p target
+mkdir target/busy
+echo "$TERRARIUM_JOB_SLOT $TERRARIUM_HEAD" >> target/log
+echo x > junk
+sleep 1
+test "$(git rev-parse HEAD)" = "$TERRARIUM_HEAD"
+rmdir target/busy
+test -f OK"#;
+    lab.td
+        .put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "recipe": recipe, "slots": 2,
+                   "next_repos": ["app"], "work_dir": wd.display().to_string()}),
+        )
+        .await
+        .ok();
+    let mut heads = Vec::new();
+    for n in ["s1", "s2", "s3", "s4"] {
+        let head = lab.branch(&format!("ter-{n}"), "next", &[("OK", n)]);
+        let id = lab.card(n, &format!("ter-{n}")).await;
+        let r = lab
+            .td
+            .post_as(
+                &lab.w1,
+                &format!("/api/cards/{id}/validate"),
+                json!({"commit": head}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        heads.push(head);
+    }
+    let jobs = lab.until_idle().await;
+    assert!(
+        jobs.iter().all(|j| j["state"] == "passed"),
+        "{jobs:#?}"
+    );
+    let mut slots: Vec<i64> = jobs.iter().map(|j| j["slot"].as_i64().unwrap()).collect();
+    slots.sort_unstable();
+    slots.dedup();
+    assert_eq!(slots, [1, 2], "{jobs:#?}");
+    // Each tree's target/ kept the lines of all its jobs, of its slot only.
+    let mut seen = Vec::new();
+    let mut most = 0;
+    for s in [1, 2] {
+        let log = std::fs::read_to_string(wd.join(format!("p/slot-{s}/target/log"))).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        most = most.max(lines.len());
+        for l in lines {
+            let (slot, head) = l.split_once(' ').unwrap();
+            assert_eq!(slot, s.to_string(), "{log}");
+            seen.push(head.to_owned());
+        }
+    }
+    assert!(most >= 2, "no tree was used twice");
+    seen.sort();
+    heads.sort();
+    assert_eq!(seen, heads);
+    let mut dirs: Vec<String> = std::fs::read_dir(wd.join("p"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    dirs.sort();
+    assert_eq!(dirs, ["slot-1", "slot-2"]);
+
+    let job = merge_with_recipe(
+        &lab,
+        "ter-s5",
+        "test \"$TERRARIUM_JOB_SLOT\" = 0 && test \"$(basename \"$(pwd -P)\")\" = slot-0 && test -f OK",
+    )
+    .await;
+    assert_eq!(job["state"], "passed", "{job:#}");
+    assert_eq!(job["slot"], 0, "{job:#}");
 }
 
 /// Queue a merge of a new card on `branch` with `recipe`, wait for the

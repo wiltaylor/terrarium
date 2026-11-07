@@ -2428,6 +2428,16 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE agent_templates ADD COLUMN grants_by TEXT;
     "#,
+    // 88: the slot of a running job (TER-190, `crate::jobs`). `jobs.slot`
+    // is `1` to the project's `slots` for a validate job and `0` for a
+    // merge; NULL for a queued job and for a job started before this
+    // migration. Each slot has one persistent work tree on the target.
+    // A cancelled job keeps its slot, so its tree stays taken while its
+    // processes drain. Self-contained: when another branch takes this
+    // number, move this entry to the end of the list.
+    r#"
+    ALTER TABLE jobs ADD COLUMN slot INTEGER;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
