@@ -1367,8 +1367,9 @@ CLI is `terrarium admin subscription disable|enable <name>` and
 
 An agent uploads the result file of a test run with `terrarium test
 push`. You see each test case on the Tests tab of the Board screen
-(`/p/<project>/board/tests`), on the card, and in the Version modal
-(PLAN §15.5).
+(`/p/<project>/board/tests`) and on the card (PLAN §15.5). A run with a
+version label (`--label version:1.4.0`) shows the label, which opens the
+board filtered by that version.
 
 1. Give the packaged skill `terrarium-tests` to the agents that run tests.
    It gives the command that makes a standard file for each test

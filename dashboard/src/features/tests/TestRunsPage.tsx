@@ -1,28 +1,28 @@
 // The Tests tab of the board screen (app/nav.ts BOARD_TABS): the test runs of
 // the project, newest first (docs/api.md, test runs). Agents push them with
-// `terrarium test push`. The filters are in the URL (`?name=&status=&card=&version=`),
+// `terrarium test push`. The filters are in the URL (`?name=&status=&card=&label=`),
 // so a filtered list has a link. A row opens the run (/p/:project/board/tests/:id).
+// A run links to labels, such as the version label `version:1.4.0` (TER-58).
 
 import { A, useParams, useSearchParams } from "@solidjs/router";
-import { createEffect, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { TestRunListQuery, TestRunStatus, TestRunSummary } from "../../api/types";
 import { Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { api, events } from "../../stores";
 import { shortCommit, testDuration } from "./model";
-import { CountsBar, runHref, RunStatusChip } from "./parts";
+import { CountsBar, LabelChip, runHref, RunStatusChip } from "./parts";
 
 const STATUSES: TestRunStatus[] = ["failed", "passed", "empty"];
 
 export default function TestRunsPage() {
   const params = useParams<{ project: string }>();
-  const [search, setSearch] = useSearchParams<{ name?: string; status?: string; card?: string; version?: string }>();
+  const [search, setSearch] = useSearchParams<{ name?: string; status?: string; card?: string; label?: string }>();
   const [runs, setRuns] = createSignal<TestRunSummary[]>([]);
   const [next, setNext] = createSignal<string | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
-  const [versions] = createResource(() => params.project, (p) => api.versions.list(p, { archived: "all" }).catch(() => []));
   // The name filter is a text box: it applies on Enter or on blur, not on each key.
   const [nameDraft, setNameDraft] = createSignal(search.name ?? "");
 
@@ -30,7 +30,7 @@ export default function TestRunsPage() {
     name: search.name || undefined,
     status: STATUSES.includes(search.status as TestRunStatus) ? (search.status as TestRunStatus) : undefined,
     card: search.card || undefined,
-    version: search.version || undefined,
+    label: search.label || undefined,
     limit: 50,
   });
 
@@ -55,7 +55,7 @@ export default function TestRunsPage() {
   };
   createEffect(
     on(
-      () => [params.project, search.name, search.status, search.card, search.version],
+      () => [params.project, search.name, search.status, search.card, search.label],
       () => {
         setNameDraft(search.name ?? "");
         void load(false);
@@ -72,7 +72,7 @@ export default function TestRunsPage() {
     onCleanup(() => (off(), clearTimeout(t)));
   });
 
-  const filtered = () => !!(search.name || search.status || search.card || search.version);
+  const filtered = () => !!(search.name || search.status || search.card || search.label);
 
   return (
     <>
@@ -104,14 +104,11 @@ export default function TestRunsPage() {
           <input value={search.card ?? ""} onChange={(e) => setSearch({ card: e.currentTarget.value.trim().toUpperCase() || undefined })} placeholder="TER-12" aria-label="Card ID" />
         </label>
         <label class="small">
-          Version
-          <select value={search.version ?? ""} onChange={(e) => setSearch({ version: e.currentTarget.value || undefined })} aria-label="Version">
-            <option value="">Any</option>
-            <For each={versions() ?? []}>{(v) => <option value={v.name}>{v.name}</option>}</For>
-          </select>
+          Label
+          <input value={search.label ?? ""} onChange={(e) => setSearch({ label: e.currentTarget.value.trim() || undefined })} placeholder="version:vnext" aria-label="Label" />
         </label>
         <Show when={filtered()}>
-          <button type="button" class="small" onClick={() => setSearch({ name: undefined, status: undefined, card: undefined, version: undefined })}>
+          <button type="button" class="small" onClick={() => setSearch({ name: undefined, status: undefined, card: undefined, label: undefined })}>
             Clear filters
           </button>
         </Show>
@@ -161,13 +158,7 @@ function RunRow(props: { run: TestRunSummary }) {
             </A>
           )}
         </For>
-        <For each={r().versions}>
-          {(v) => (
-            <A class="chip info" href={`/p/${p()}/board?version=${encodeURIComponent(v.id)}`} title={`Open version ${v.name}`}>
-              {v.name}
-            </A>
-          )}
-        </For>
+        <For each={r().labels}>{(l) => <LabelChip project={r().project} label={l} />}</For>
       </div>
     </div>
   );

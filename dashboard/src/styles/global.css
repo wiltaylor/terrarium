@@ -1369,36 +1369,6 @@ button.link-button {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
-/* The versions of a card (features/board/versions.ts): a chip in the status colour. A click filters the board by that version. */
-.kcard-versions {
-  flex-wrap: wrap;
-  gap: 4px;
-}
-button.chip.version-chip {
-  display: inline-block;
-  border: 0;
-  border-radius: 99px;
-  padding: 0 8px;
-  line-height: inherit;
-  cursor: pointer;
-}
-button.chip.version-chip:hover {
-  text-decoration: underline;
-  filter: brightness(0.97);
-}
-/* A phone: a version chip is small, so its tap area is 40px high. */
-@media (max-width: 760px) {
-  /* A version chip is small; its tap area is 40px high. */
-  button.chip.version-chip {
-    position: relative;
-    padding: 3px 10px;
-  }
-  button.chip.version-chip::after {
-    content: "";
-    position: absolute;
-    inset: -9px 0;
-  }
-}
 /* The card of a question in the Inbox: a chip that opens the card drawer on the board. */
 a.chip.card-link {
   text-decoration: none;
@@ -3142,59 +3112,7 @@ tr.row-open > td {
   }
 }
 
-/* The Versions menu and the version lanes of the Cards tab (features/board/lanes.ts). */
-details.menu {
-  position: relative;
-}
-details.menu > summary {
-  list-style: none;
-  cursor: pointer;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
-details.menu > summary::-webkit-details-marker {
-  display: none;
-}
-details.menu > .menu-panel {
-  position: absolute;
-  right: 0;
-  z-index: 30;
-  margin-top: 4px;
-  min-width: 260px;
-  max-height: 60vh;
-  overflow-y: auto;
-  display: grid;
-  gap: 2px;
-  padding: 6px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 6px 20px rgb(0 0 0 / 0.15);
-}
-.menu-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  text-align: left;
-  background: none;
-  border: 0;
-  padding: 6px;
-  border-radius: 4px;
-}
-button.menu-item:hover {
-  background: var(--surface-2);
-}
-.menu-item.archived {
-  opacity: 0.85;
-}
-.menu-toggle {
-  gap: 6px;
-  padding: 6px;
-  border-top: 1px solid var(--border);
-}
+/* The lanes of the Cards tab (features/board/lanes.ts): a plain board, or a lane for each version label. */
 .lanes {
   display: grid;
   grid-template-columns: repeat(var(--lane-cols), minmax(250px, 1fr));
@@ -3264,7 +3182,7 @@ button.menu-item:hover {
 .lane-none .lane-name {
   font-style: italic;
 }
-/* Only the "No version" lane (no version in the project): a plain board, with no lane head or rule. */
+/* The board that is not grouped by version: a plain board, with no lane head or rule. */
 .lane.lane-plain,
 .lanes-column .lane-phone.lane-plain {
   border-top: 0;
@@ -3293,44 +3211,6 @@ button.menu-item:hover {
 }
 .kcard-note {
   font-style: italic;
-}
-.card-picker {
-  display: grid;
-  gap: 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 8px;
-  min-width: 0;
-}
-.card-picker ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  max-height: 14em;
-  overflow-y: auto;
-  display: grid;
-  gap: 2px;
-}
-.drawer-versions {
-  display: grid;
-  gap: 4px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 8px;
-}
-.drawer-versions label {
-  gap: 6px;
-}
-.version-card {
-  flex-wrap: wrap;
-}
-@media (max-width: 760px) {
-  details.menu > .menu-panel {
-    position: fixed;
-    left: 8px;
-    right: 8px;
-    min-width: 0;
-  }
 }
 
 /* Test runs (features/tests): the stacked counts bar, the list rows, the run page. Each status has an icon and a word too. */

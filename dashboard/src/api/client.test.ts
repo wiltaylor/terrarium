@@ -120,7 +120,7 @@ describe("createHttpApi", () => {
     await api.cards.update("TER-42", { column: "review", position: 0 });
     await api.memories.graph("MEM-1");
     await api.wiki.diff("PG-1", 2, 3);
-    await api.versions.transition("VER-1", "reject", "tests fail");
+    await api.testRuns.links("RUN-1", { add_labels: ["version:1.4.0"] });
     await api.subscriptions.loginInput("LOGIN-1", "abc");
     await api.projectInbox.list("webshop");
     await api.targets.action("TGT-1", "snapshot");
@@ -140,7 +140,7 @@ describe("createHttpApi", () => {
       "PATCH /api/cards/TER-42",
       "GET /api/memories/MEM-1/graph",
       "GET /api/wiki/PG-1/diff",
-      "POST /api/versions/VER-1/reject",
+      "PATCH /api/test-runs/RUN-1/links",
       "POST /api/subscriptions/login/LOGIN-1/input",
       "GET /api/projects/webshop/inbox",
       "POST /api/targets/TGT-1/snapshot",
@@ -159,7 +159,7 @@ describe("createHttpApi", () => {
     expect(calls[4]!.opts?.body).toEqual({ column: "review", position: 0 });
     expect(calls[5]!.opts?.query).toEqual({ depth: 1 });
     expect(calls[6]!.opts?.query).toEqual({ a: 2, b: 3 });
-    expect(calls[7]!.opts?.body).toEqual({ comment: "tests fail" });
+    expect(calls[7]!.opts?.body).toEqual({ add_labels: ["version:1.4.0"] });
   });
 
   it("maps the DB calls (docs/api.md §27)", async () => {

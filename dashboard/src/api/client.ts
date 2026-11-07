@@ -146,7 +146,6 @@ import type {
   RepoCommitDetail,
   ModelList,
   NewSubscription,
-  NewVersion,
   PageStatus,
   ProbeOutcome,
   Project,
@@ -198,10 +197,6 @@ import type {
   UsagePoint,
   UsageQuery,
   VerifyResult,
-  Version,
-  VersionCompare,
-  VersionPatch,
-  VersionStatus,
   ConfigCommitBody,
   ConfigCommitResult,
   ConfigLogEntry,
@@ -541,9 +536,9 @@ export interface Api {
    * parse, `413 too_large` over 20 MiB.
    */
   testRuns: {
-    /** Newest first. `card`, `version` (name or ID), `name`, and `status` filter. */
+    /** Newest first. `card`, `label` (`version:1.4.0`), `name`, and `status` filter. */
     list(project: string, q?: TestRunListQuery): Promise<Page<TestRunSummary>>;
-    /** Multipart: `file`, and the text parts `name`, `format`, `card` (repeat), `version` (repeat), `commit`, `branch`. */
+    /** Multipart: `file`, and the text parts `name`, `format`, `card` (repeat), `label` (repeat), `commit`, `branch`. A `version` part is `400` (TER-58). */
     upload(project: string, form: FormData): Promise<TestRunSummary>;
     /** The summary, every suite, and one page of cases. `status: "failed"` gives the failed and the errored cases. */
     get(id: string, q?: TestRunCaseQuery): Promise<TestRun>;
@@ -551,7 +546,7 @@ export interface Api {
     compare(id: string, withRun?: string): Promise<TestCompare>;
     /** The original upload, as the daemon keeps it, and its file name from `Content-Disposition`. */
     raw(id: string): Promise<{ blob: Blob; fileName: string }>;
-    /** Add or remove card and version links. The card and version edit rights apply. */
+    /** Add or remove card and label links. The card edit rights apply to a card; a label is free text. */
     links(id: string, patch: TestRunLinksPatch): Promise<TestRunSummary>;
     /** The creator, a project admin, or the operator. */
     remove(id: string): Promise<void>;
@@ -655,20 +650,6 @@ export interface Api {
     run(id: string, run: string): Promise<PipelineRunDetail>;
     /** Poll a pipeline that is not saved, once, as the caller. `name` may be absent. */
     test(project: string, def: Omit<PipelineDef, "name"> & { name?: string }): Promise<PipelineTestReport>;
-  };
-
-  /** docs/api.md §13. `id` is the ULID or `project/name`. */
-  versions: {
-    /** `archived`: absent or `false` for the versions that are not archived, `true` for the archived ones, `all` for both. */
-    list(project: string, q?: { status?: VersionStatus; name?: string; archived?: "true" | "false" | "all" }): Promise<Version[]>;
-    create(project: string, v: NewVersion): Promise<Version>;
-    get(id: string): Promise<Version>;
-    update(id: string, patch: VersionPatch): Promise<Version>;
-    transition(id: string, action: "submit" | "approve" | "reject" | "release", comment?: string): Promise<Version>;
-    compare(id: string, to: string): Promise<VersionCompare>;
-    /** Archive or unarchive (docs/api.md §13): the creator, a project admin, or the operator. The status and reviews stay. */
-    archive(id: string): Promise<Version>;
-    unarchive(id: string): Promise<Version>;
   };
 
   /** docs/api.md §16. */
@@ -1396,16 +1377,6 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       test: (project, def) => post(`${p(project)}/pipelines/test`, def),
     },
 
-    versions: {
-      list: (project, q = {}) => all(`${p(project)}/versions`, { ...q }),
-      create: (project, v) => post(`${p(project)}/versions`, v),
-      get: (id) => get(`/api/versions/${seg(id)}`),
-      update: (id, body) => patch(`/api/versions/${seg(id)}`, body),
-      transition: (id, action, comment) => post(`/api/versions/${seg(id)}/${action}`, comment ? { comment } : undefined),
-      compare: (id, to) => get(`/api/versions/${seg(id)}/compare`, { to }),
-      archive: (id) => post(`/api/versions/${seg(id)}/archive`),
-      unarchive: (id) => post(`/api/versions/${seg(id)}/unarchive`),
-    },
 
     subscriptions: {
       list: () => get("/api/subscriptions"),

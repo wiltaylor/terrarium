@@ -269,7 +269,7 @@ describe("navigation", () => {
     const start = app.indexOf('<Route path="/p/:project/board"');
     const block = app.slice(start, app.indexOf("</Route>", start));
     expect(block).toMatch(/path="\/" component=\{BoardPage\}/);
-    // The Cards tab manages the versions: no Versions tab.
+    // Versions are card labels (TER-58): no Versions tab.
     expect(app).not.toMatch(/VersionsPage/);
     expect(block).toMatch(/path="\/artifacts\/:id\?" component=\{ArtifactsPage\}/);
     expect(block).toMatch(/path="\/schedules" component=\{SchedulesPage\}/);
@@ -302,15 +302,15 @@ describe("navigation", () => {
     for (const now of ["/p/terrarium/knowledge/wiki", "/p/terrarium/knowledge/wiki/designs/runner-v2", "/p/terrarium/knowledge/memory", "/p/terrarium/knowledge/db", "/p/terrarium/knowledge/db/bug"]) expect(movedTo(now)).toBeUndefined();
   });
 
-  it("redirects the old Versions paths in one hop to the version lanes of the Cards tab, and the Artifacts paths to the board tab", () => {
+  it("redirects the old Versions paths in one hop to the Cards tab, and the Artifacts paths to the board tab", () => {
     expect(movedTo("/p/terrarium/versions")).toBe("/p/terrarium/board");
     expect(movedTo("/p/terrarium/versions/")).toBe("/p/terrarium/board");
-    // The daemon links `/p/<project>/versions/<id>` (Version.url, the review mail): the version modal opens.
-    expect(movedTo("/p/terrarium/versions/01M5PA1A0K16V6G88P3SE78WAB")).toBe("/p/terrarium/board?version=01M5PA1A0K16V6G88P3SE78WAB");
-    expect(movedTo("/p/my%20app/versions/v0.1.0/")).toBe("/p/my%20app/board?version=v0.1.0");
+    // An old mail links `/p/<project>/versions/<id>`: version objects are gone (TER-58), so it opens the board.
+    expect(movedTo("/p/terrarium/versions/01M5PA1A0K16V6G88P3SE78WAB")).toBe("/p/terrarium/board");
+    expect(movedTo("/p/my%20app/versions/v0.1.0/")).toBe("/p/my%20app/board");
     // The paths of the old Versions tab.
     expect(movedTo("/p/terrarium/board/versions")).toBe("/p/terrarium/board");
-    expect(movedTo("/p/terrarium/board/versions/01ABC")).toBe("/p/terrarium/board?version=01ABC");
+    expect(movedTo("/p/terrarium/board/versions/01ABC")).toBe("/p/terrarium/board");
     // The query of the old URL joins the query of the target.
     expect(withQuery("/p/t/board?version=X", "?card=TER-1")).toBe("/p/t/board?version=X&card=TER-1");
     // A key of the target wins; an old `rows` key goes along, and the board ignores it.

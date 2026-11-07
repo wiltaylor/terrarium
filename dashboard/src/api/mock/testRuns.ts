@@ -6,7 +6,7 @@
 // one run in each format; two `unit` runs show the compare.
 
 import type { Api } from "../client";
-import type { AgentEvent, Card, CardTests, TestCase, TestCaseStatus, TestCompare, TestFormat, TestRun, TestRunLinksPatch, TestRunListQuery, TestRunSummary, TestSuite, Version } from "../types";
+import type { AgentEvent, Card, CardTests, TestCase, TestCaseStatus, TestCompare, TestFormat, TestRun, TestRunLinksPatch, TestRunListQuery, TestRunSummary, TestSuite } from "../types";
 import { addCase, caseKey, diffCases, emptyCounts, matchCase, runStatus } from "../../features/tests/model";
 import { paginate } from "../../lib/paging";
 
@@ -20,7 +20,6 @@ export interface TestRunMockContext {
   /** Throws `404` for an unknown project. */
   project: (name: string) => unknown;
   cards: () => Card[];
-  versions: () => Version[];
   /** The ULID of an agent of project `terrarium` by name: the `created_by` address, as the daemon stores it. */
   agentId: (name: string) => string;
   /** The time of the seed runs. */
@@ -134,8 +133,14 @@ export function createTestRunMock(ctx: TestRunMockContext) {
   let idn = 0;
   const newId = () => `01JBTRUN${String(++idn).padStart(18, "0")}`;
 
-  const versionOf = (project: string, ref: string): Version =>
-    ctx.versions().find((v) => v.project === project && (v.id === ref || v.name === ref)) ?? ctx.fail(404, "not_found", `version \`${ref}\` not found`);
+  /** A label that a run links to, as `store::link_label`: trimmed, 1 to 200 characters, no control characters. */
+  const labelOf = (raw: string): string => {
+    const l = raw.trim();
+    if (!l) return ctx.fail(422, "invalid", "a label is empty");
+    // eslint-disable-next-line no-control-regex
+    if ([...l].length > 200 || /[\u0000-\u001f\u007f-\u009f]/.test(l)) return ctx.fail(422, "invalid", `bad label \`${l}\`: use 1-200 characters, no control characters`);
+    return l;
+  };
   const cardOf = (project: string, id: string): Card => {
     const c = ctx.cards().find((x) => x.id === id) ?? ctx.fail(404, "not_found", `card ${id} not found`);
     if (c.project !== project) ctx.fail(422, "invalid", "a test run links to a card of its project");
@@ -162,7 +167,7 @@ export function createTestRunMock(ctx: TestRunMockContext) {
     branch?: string | null;
     fileName: string;
     cards?: string[];
-    versions?: string[];
+    labels?: string[];
     notes?: string[];
     raw?: string;
   }): Stored => {
@@ -188,10 +193,7 @@ export function createTestRunMock(ctx: TestRunMockContext) {
       raw_size: new TextEncoder().encode(raw).length,
       notes: r.notes ?? [],
       cards: r.cards ?? [],
-      versions: (r.versions ?? []).map((v) => {
-        const x = versionOf(r.project, v);
-        return { id: x.id, name: x.name };
-      }),
+      labels: [...new Set((r.labels ?? []).map(labelOf))],
       created_by: r.by,
       created_by_name: r.byName,
       created_at: r.at,
@@ -214,7 +216,7 @@ export function createTestRunMock(ctx: TestRunMockContext) {
       actor: "operator",
       project: s.summary.project,
       summary: `test run ${s.summary.name} ${change}: ${s.summary.counts.passed} passed, ${s.summary.counts.failed + s.summary.counts.errored} failed`,
-      data: { change, project: s.summary.project, id: s.summary.id, name: s.summary.name, counts: s.summary.counts, cards: s.summary.cards, versions: s.summary.versions.map((v) => v.name) },
+      data: { change, project: s.summary.project, id: s.summary.id, name: s.summary.name, counts: s.summary.counts, cards: s.summary.cards, labels: s.summary.labels },
     });
 
   /** The newest older run of the same name in the project. */
@@ -241,7 +243,7 @@ export function createTestRunMock(ctx: TestRunMockContext) {
             (r) =>
               r.project === project &&
               (!q.card || r.cards.includes(q.card)) &&
-              (!q.version || r.versions.some((v) => v.id === q.version || v.name === q.version)) &&
+              (!q.label?.trim() || r.labels.includes(q.label.trim())) &&
               (!q.name || r.name === q.name) &&
               (!q.status || r.status === q.status),
           );
@@ -252,6 +254,7 @@ export function createTestRunMock(ctx: TestRunMockContext) {
         ctx.project(project);
         const file = form.get("file");
         if (!(file instanceof Blob)) return ctx.fail(400, "bad_request", "the multipart upload needs a `file` part");
+        if (form.has("version") || form.has("versions")) return ctx.fail(400, "bad_request", "version objects are removed (TER-58): link the run to a version label with `label` (`labels` in JSON), such as `version:1.4.0`");
         // The mock reads no Blob at once; a test passes the text in the `text` part.
         const text = String(form.get("text") ?? "");
         const parsed = crudeParse(text) ?? ctx.fail(422, "invalid", "the mock reads JUnit XML and TAP only (and a DOCTYPE is refused)");
@@ -268,7 +271,7 @@ export function createTestRunMock(ctx: TestRunMockContext) {
           branch: (form.get("branch") as string | null) ?? null,
           fileName: (file as File).name || "upload",
           cards: (form.getAll("card") as string[]).map((c) => cardOf(project, c).id),
-          versions: form.getAll("version") as string[],
+          labels: [...form.getAll("label"), ...form.getAll("labels")] as string[],
           raw: text,
         });
         event(s, "created");
@@ -309,25 +312,21 @@ export function createTestRunMock(ctx: TestRunMockContext) {
       ctx.reply(() => {
         const s = byId(id);
         const p = s.summary.project;
-        const editableVersion = (v: Version) => {
-          if (v.status !== "draft" && v.status !== "rejected") ctx.fail(409, "conflict", `version \`${v.name}\` is ${v.status}; edit it in draft or after a rejection`);
-          return v;
-        };
         const add = (patch.add_cards ?? []).map((c) => cardOf(p, c));
         const rm = (patch.remove_cards ?? []).map((c) => cardOf(p, c));
         for (const c of [...add, ...rm]) if (c.archived) ctx.fail(409, "conflict", `${c.id} is archived`);
-        const addV = (patch.add_versions ?? []).map((v) => editableVersion(versionOf(p, v)));
-        const rmV = (patch.remove_versions ?? []).map((v) => editableVersion(versionOf(p, v)));
+        const addL = (patch.add_labels ?? []).map(labelOf);
+        const rmL = (patch.remove_labels ?? []).map(labelOf);
         const cards = new Set(s.summary.cards);
         for (const c of add) cards.add(c.id);
         for (const c of rm) cards.delete(c.id);
-        const vs = new Map(s.summary.versions.map((v) => [v.id, v]));
-        for (const v of addV) vs.set(v.id, { id: v.id, name: v.name });
-        for (const v of rmV) vs.delete(v.id);
+        const labels = new Set(s.summary.labels);
+        for (const l of addL) labels.add(l);
+        for (const l of rmL) labels.delete(l);
         s.summary.cards = [...cards];
-        s.summary.versions = [...vs.values()];
-        if (add.length || addV.length) event(s, "linked");
-        if (rm.length || rmV.length) event(s, "unlinked");
+        s.summary.labels = [...labels];
+        if (add.length || addL.length) event(s, "linked");
+        if (rm.length || rmL.length) event(s, "unlinked");
         return s.summary;
       }),
     remove: (id) =>
@@ -387,7 +386,7 @@ export function createTestRunMock(ctx: TestRunMockContext) {
       branch: "lead/mail-push",
       fileName: "vitest-report.json",
       cards: ["TER-16"],
-      versions: ["v0.1.0"],
+      labels: ["version:0.1.0"],
     });
     plan.push({
       project: "terrarium",
@@ -412,7 +411,7 @@ export function createTestRunMock(ctx: TestRunMockContext) {
       commit: "b81d0c2",
       branch: "lead/mail-push",
       fileName: "ctrf-report.json",
-      versions: ["v0.1.0"],
+      labels: ["version:0.1.0"],
     });
     plan.push({
       project: "terrarium",
@@ -488,7 +487,7 @@ export function createTestRunMock(ctx: TestRunMockContext) {
       fileName: "smoke.tap",
       cards: ["TER-10"],
     });
-    plan.push({ project: "terrarium", name: "unit", format: "junit", tool: "cargo-nextest", cases: unitNew, at: ago(20), ...runner, commit: "c0ffee1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b", branch: "runner-dev/pty-resize", fileName: "junit.xml", cards: ["TER-12"], versions: ["v0.1.1"], notes: ["1 stdout truncated to 64 KiB"] });
+    plan.push({ project: "terrarium", name: "unit", format: "junit", tool: "cargo-nextest", cases: unitNew, at: ago(20), ...runner, commit: "c0ffee1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b", branch: "runner-dev/pty-resize", fileName: "junit.xml", cards: ["TER-12"], labels: ["version:vnext"], notes: ["1 stdout truncated to 64 KiB"] });
     for (const r of plan.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) add(r);
   };
 

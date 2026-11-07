@@ -484,18 +484,14 @@ describe("mock parity with docs/api.md", () => {
     expect(created.similar.map((x) => x.id)).toContain("MEM-6");
   });
 
-  it("follows the version flow and answers compare in the documented shape", async () => {
+  it("links artifacts to labels and refuses a version link, as the daemon since TER-58", async () => {
     const api = mock();
-    const v = await api.versions.create("terrarium", { name: "v0.2.0", notes: "next", cards: ["TER-13"] });
-    expect(v.cards).toEqual([{ id: "TER-13", title: "Stall timeout marks agents blocked", column: "ready" }]);
-    const submitted = await api.versions.transition("terrarium/v0.2.0", "submit");
-    expect(submitted.status).toBe("in_review");
-    expect(submitted.reviews.at(-1)!.decision).toBe("submitted");
-    await expect(api.versions.transition(v.id, "reject")).rejects.toMatchObject({ code: "comment_required" });
-    await expect(api.versions.update(v.id, { notes: "x" })).rejects.toMatchObject({ code: "conflict" });
-    const c = await api.versions.compare(v.id, "terrarium/v0.1.0");
-    expect(c.cards.added).toEqual(["TER-13"]);
-    expect(c.cards.removed.sort()).toEqual(["TER-11", "TER-12", "TER-16"]);
+    const a = await api.artifacts.link("terrarium/ART-5", "label", " version:vnext ");
+    expect(a.links.at(-1)).toMatchObject({ kind: "label", ref: "version:vnext" });
+    expect(a.links.at(-1)!.label).toBeUndefined();
+    await expect(api.artifacts.link("terrarium/ART-5", "version" as "label", "v0.1.0")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.artifacts.link("terrarium/ART-5", "label", "  ")).rejects.toMatchObject({ status: 422 });
+    expect((await api.artifacts.get("terrarium/ART-2")).links).toEqual([{ kind: "label", ref: "version:0.1.0" }]);
   });
 
   // ----- docs/api.md §16: subscriptions, quota, usage, login sessions -----

@@ -59,7 +59,7 @@ describe("test run counts", () => {
     expect(runStatus(counts(0, 0, 0, 2))).toBe("passed");
   });
 
-  it("combines the runs of a version: failed wins, then passed, then empty; none gives null", () => {
+  it("combines the runs of a label: failed wins, then passed, then empty; none gives null", () => {
     expect(combinedStatus([])).toBeNull();
     expect(combinedStatus([{ status: "passed" }, { status: "failed" }])).toBe("failed");
     expect(combinedStatus([{ status: "empty" }, { status: "passed" }])).toBe("passed");
