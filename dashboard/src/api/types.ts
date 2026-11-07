@@ -1516,8 +1516,8 @@ export interface InboxEventData {
 
 // ----- Inbox threads (docs/api.md §6.13) -----
 
-/** Who must act on a thread. */
-export type ThreadStatus = "waiting_operator" | "waiting_agent" | "closed";
+/** Who must act on a thread. `tracking` (TER-145): the agent tracks handed-off work, parked. */
+export type ThreadStatus = "waiting_operator" | "waiting_agent" | "tracking" | "closed";
 
 /** One message of a thread. `text` is Markdown: untrusted data. */
 export interface ThreadMessage {
@@ -1572,6 +1572,8 @@ export interface Thread {
   report_to: string | null;
   report_to_name: string | null;
   status: ThreadStatus;
+  /** When the agent moved the thread into tracking (TER-145); set while it tracks. An older daemon sends none. */
+  tracking_at?: string | null;
   messages?: ThreadMessage[];
   questions?: Question[];
   response: ThreadResponse | null;
@@ -1608,7 +1610,7 @@ export interface ThreadClose {
 
 /** `data` of a `thread` event. */
 export interface ThreadEventData {
-  change: "opened" | "message" | "response" | "question" | "closed";
+  change: "opened" | "message" | "response" | "question" | "tracking" | "closed";
   id: string;
   scope: string;
   status: ThreadStatus;

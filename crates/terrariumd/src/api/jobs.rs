@@ -352,6 +352,7 @@ async fn cancel(
         .db
         .write(actor.label(), move |t| {
             let j = jobs::cancel(t, &jid)?;
+            rt::emit_verdicts(t, &j)?;
             for c in j.cards() {
                 let patch = CardPatch {
                     remove_labels: vec![rt::LABEL_QUEUED.into(), rt::LABEL_RUNNING.into()],
@@ -579,8 +580,7 @@ async fn validate(
     // The job must test what was pushed: the commit is the head of the
     // branch on the remote.
     if let Some(commit) = &b.commit {
-        let target = def.target.clone().unwrap_or_default();
-        let head = rt::remote_head(&state, &card.project, &repo, &target, &branch).await?;
+        let head = rt::remote_head(&state, &card.project, &repo, &branch).await?;
         match head {
             Some(h) if h.starts_with(&commit.to_lowercase()) => {}
             Some(h) => {
@@ -638,12 +638,14 @@ async fn validate(
             {
                 note = format!("{c}\n\n{note}");
             }
-            if card.column != rt::COL_VALIDATING {
+            let validating =
+                board::role_name(t, &card.project, board::VALIDATING, rt::COL_VALIDATING)?;
+            if card.column != validating {
                 board::move_card(
                     t,
                     &Actor::Operator,
                     &card.id,
-                    rt::COL_VALIDATING,
+                    &validating,
                     None,
                     Some(&note),
                 )?;

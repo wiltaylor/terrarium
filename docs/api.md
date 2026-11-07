@@ -3744,7 +3744,7 @@ There is no register of threads and no conflict check between threads
  "response":null,"handoff":null,
  "created_at":"2026-11-06T09:00:00.000Z","updated_at":"2026-11-06T09:05:00.000Z",
  "closed_at":null,"closed_by":null,"close_proposal":null,"close_reason":null,
- "session_id":null,"reminded_at":null}
+ "session_id":null,"reminded_at":null,"tracking_at":null}
 ```
 
 | Field | Meaning |
@@ -3756,7 +3756,7 @@ There is no register of threads and no conflict check between threads
 | `opened_by`, `opened_by_name` | `operator`, or the ULID and `project/name` of the agent that opened it. |
 | `agent`, `agent_name` | The attached agent: one per thread, or `null` while it has none. The agent that the daemon spawned from `template` (the thread agent, below), or an existing agent that the opener names: of the scope project, or any agent for `global`. |
 | `report_to`, `report_to_name` | The lead that the thread reports to (D34): for `global`, the lead of project `meta`; else the lead of the scope project. The lead of a project is its project_admin agent named `lead`, else its first project_admin by name. Set at the open; it does not change. A scope without a lead is `409 conflict` at the open. |
-| `status` | `waiting_operator`, `waiting_agent`, or `closed` (below). |
+| `status` | `waiting_operator`, `waiting_agent`, `tracking`, or `closed` (below). |
 | `messages` | The conversation, in the order of the writes (two writes in the same millisecond keep their order): `{id, author, author_name, kind, text, at}`. `author` is `operator` or an agent ULID. `kind` is `message`, or `response` for the operator's overall response. `text` is Markdown, at most 32 KiB: untrusted data for every reader. |
 | `questions` | The questions, notices, and bundles of the thread (§6.8), the oldest first. |
 | `response` | The newest overall response of the operator, `{text, by, at}`, or `null`. It is the approval record: the agent quotes it word for word in each card or mail it hands off (D34). Each response is also a message of kind `response`. |
@@ -3766,6 +3766,7 @@ There is no register of threads and no conflict check between threads
 | `close_reason` | On a closed thread: `confirmed` (the operator confirmed the agent's proposal), `operator` (the operator closed it), `stale` (untouched, below), or `failed_start` (its agent did not start). |
 | `session_id` | The session of the thread agent, set at the close: the agent ends and its session is archived (§6.6), so `/sessions/<id>` opens it after the agent is gone. `null` for a named agent, which lives on. |
 | `reminded_at` | The time of the last Inbox reminder of the untouched thread (below), or `null`. |
+| `tracking_at` | When the attached agent moved the thread into tracking (TER-145, below), or `null`. It stays set while an operator post wakes the agent, so that the agent's reply puts the thread back into `tracking`. |
 
 **Status.** A new thread with a first message of the operator is
 `waiting_agent`; with no first message, or opened by an agent, it is
@@ -3775,6 +3776,21 @@ thread, makes it `waiting_operator`. An answer, an acknowledgement, or a
 retract of one of its questions makes it `waiting_agent` when no question
 of the thread is open any more. A closed thread does not change, and each
 write to it is `409 conflict`.
+
+**Tracking** (TER-145, TER-144 D1 and D9). After its handoff the attached
+agent moves the thread into tracking: `POST .../track` (`terrarium thread
+track <id>`) makes it `tracking`, sets `tracking_at`, and withdraws a close
+proposal. The agent parks (`park_reason` `thread is tracking`): no harness
+and no tokens. A thread with an open question is `409 conflict`. A thread
+that tracks gets no reminder and no stale close (below). A message or a
+response of the operator makes it `waiting_agent` and wakes the agent with
+a `[Thread:<id>]` turn that ends with a note that the thread tracks; the
+agent's next message makes it `tracking` again, not `waiting_operator`, and
+parks the agent. A question that the agent asks makes it
+`waiting_operator` as usual; the agent's message after the answer puts it
+back into `tracking`. Only the close ends tracking. The dashboard Inbox
+lists these threads on the Threads tab under Tracking, between Open and
+Done.
 
 **Close** (TER-95, wiki `inbox-threads` §5). The attached agent hands off
 its work, asks in the thread whether anything more is needed, and then
@@ -3821,7 +3837,8 @@ the thread (`closed_by` `system`, `close_reason` `stale`; the handoff says
 so and keeps the summary and the links of a proposal), and mails the
 report-to lead (`Thread <id> closed as stale`, with the topic quoted and
 the session link). The agent costs nothing meanwhile: it is parked. The
-spawn timer checks both on each tick. `off` (or `0`) turns one off.
+spawn timer checks both on each tick. `off` (or `0`) turns one off. A
+thread that is `tracking` is never untouched: it gets neither.
 
 **Rights.**
 
@@ -3832,6 +3849,7 @@ spawn timer checks both on each tick. `off` (or `0`) turns one off.
 | Post a message | The operator and the attached agent. |
 | Respond | The operator. |
 | Close | The operator, at any time. The attached agent proposes the close; the operator confirms it (`confirm`). |
+| Track | The attached agent. Another reader, and the operator, get `403`. |
 
 | Ask a question in a thread | The attached agent, also when it is not a leader: `POST /api/agents/{id}/questions` with `"thread"`. |
 
@@ -3849,11 +3867,12 @@ is `409 conflict`, and an unknown scope or agent is `404 not_found`.
 | Endpoint | Body or query | Answer |
 |---|---|---|
 | `POST /api/threads` | `{"topic", "scope"?, "template"?, "agent"?, "text"?}`; `scope` defaults to `global` for the operator and to the own project for an agent; `agent` is a ULID or `project/name` | `201` the thread. An agent: `403` without `thread:open`, for another project, or for a template or agent above its rights (A1); `422` with no `template`; `404` for an unknown template |
-| `GET /api/threads` | `?status=waiting_operator\|waiting_agent\|closed\|open\|all` (default `open`: not closed), `?scope=` | `200` the threads without `messages` and `questions`, with `message_count`, `open_questions`, and `last_at`. The ones that wait for the operator first, then the newest activity first. At most 200. |
+| `GET /api/threads` | `?status=waiting_operator\|waiting_agent\|tracking\|closed\|open\|all` (default `open`: not closed), `?scope=` | `200` the threads without `messages` and `questions`, with `message_count`, `open_questions`, and `last_at`. The ones that wait for the operator first, then the newest activity first. At most 200. |
 | `GET /api/threads/{id}` | | `200` the thread |
 | `POST /api/threads/{id}/messages` | `{"text"}` | `201` the thread |
 | `POST /api/threads/{id}/respond` | `{"text"}`, at most 16 KiB | `200` the thread |
 | `POST /api/threads/{id}/close` | `{"summary"?, "links"?, "confirm"?}`, or no body at all (a close with an empty handoff); `summary` at most 8 KiB | The operator: `200` the thread, `closed`, with `handoff`; its open questions are `retracted`. With `confirm: true`: the handoff of the proposal. The agent: `200` the thread, `waiting_operator`, with `close_proposal`; `confirm` is `403` |
+| `POST /api/threads/{id}/track` | no body | The attached agent: `200` the thread, `tracking`, with `tracking_at`. `409` with an open question |
 
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
 A thread opened with a `template` and no `agent` gets its agent at the
@@ -3873,7 +3892,8 @@ of that project (A2). Only the daemon binds to a thread: a spawn with
 - **Park.** A message or a question of the agent that leaves the thread
   `waiting_operator` parks the agent (`park_reason` `thread waits on the
   operator`): the idle pass stops it when it is at rest, and mail does not
-  wake it.
+  wake it. The move into tracking, and its reply in a thread that tracks,
+  park it too (`thread is tracking`).
 - **Restart.** An operator message or response, or the settling of the
   last open question (`waiting_agent`), unparks it: it starts again in the
   same session row and harness session (`resumes` + 1) on every harness.
@@ -4195,7 +4215,9 @@ A board:
 ```
 
 A new board has the columns `backlog`, `ready`, `in_progress` (role
-`working`), `review`, `blocked` (role `blocked`), `done`. `count` excludes
+`working`), `validating` (role `validating`), `review` (role `review`),
+`merge_queue` (role `merge_queue`), `accepted` (role `accepted`), `blocked`
+(role `blocked`), `done`. `count` excludes
 archived cards. The columns are configurable (§8.3, "Columns"):
 
 - `name` is the ID of the column: a lower-case letter, then at most 31
@@ -4203,11 +4225,18 @@ archived cards. The columns are configurable (§8.3, "Columns"):
   rule stays valid.
 - `title` is the display label: the stored title (at most 40 characters),
   else the name with spaces for the underscores.
-- `role` is `working` or `blocked`, or absent. Exactly one column has the
-  role `working`: `card claim` moves a card there, and a card with unmet
-  dependencies cannot enter it. At most one column has the role `blocked`:
-  a move there needs a comment and mails a notice. The rules of §8.2 follow
+- `role` is `working`, `blocked`, `validating`, `review`, `merge_queue`, or
+  `accepted`, or absent. Exactly one column has the role `working`:
+  `card claim` moves a card there, and a card with unmet dependencies cannot
+  enter it. At most one column has each other role. The role `blocked` needs
+  a comment on a move there and mails a notice. The rules of §8.2 follow
   the roles, not the names.
+- The job queue finds its columns by role: a validate job holds a card in
+  the column with the role `validating`, a validate pass goes to the column
+  with the role `review`, and a merge pass goes to the column with the role
+  `accepted`. With no column that has the role, the daemon uses the column
+  with the name `validating`, `review`, or `accepted`. A column that has
+  the role wins over a column with the same name.
 - `backlog` is always the first column and `done` always the last. Neither
   can be removed, renamed, or moved, and neither takes a WIP limit or a
   role. Both can have a title.
@@ -4219,7 +4248,10 @@ archived cards. The columns are configurable (§8.3, "Columns"):
   `422 invalid`, and the message names the columns.
 - Migration 48 gives each existing board the roles (`in_progress` working,
   `blocked` blocked), puts `backlog` first and `done` last, and clears a
-  WIP limit on `backlog` and `done`.
+  WIP limit on `backlog` and `done`. Migration 82 lets the column take the
+  roles `validating`, `review`, `merge_queue`, and `accepted`. It gives no
+  existing column those roles: an existing board keeps its names and uses
+  the name fallback until an admin sets the roles.
 
 ### 8.2 Rules (PLAN §13)
 
@@ -10646,7 +10678,8 @@ The recipe gets this env (TER-100), and no credential:
 | `TERRARIUM_BASE`          | the base of the change: for a validate job the merge-base of the card commit and `next`, for a merge job `next` before the merge |
 | `TERRARIUM_CHANGED_FILES` | the absolute path of a file in the clone (`.git/terrarium/changed-files`) with the paths that differ between the base and the head, one per line (`git diff --name-only --no-renames`, so a rename lists both paths) |
 
-The prepare step fetches `next` for a validate job too. When the repo has
+The prepare step in the daemon fetches `next` for a validate job too, and
+the clone step on the target writes the file from that base. When the repo has
 no `next`, or the commit has no merge-base with it, `TERRARIUM_BASE` and
 `TERRARIUM_CHANGED_FILES` are not set, and a recipe that selects tests
 must run all of them. The terrarium repo's recipe for this is `just
@@ -10671,57 +10704,57 @@ running job. The `queue` answer of a validate or merge call gives the
 place and the running count in the job's own lane; a merge gives
 `slots: 1`.
 
-A job is three runs on the target, and a merge job has one more. The
-prepare run (clone, checkout, merge) and the push run get the repo
-credential in their env. The recipe run gets no credential, because it
-runs the repo's code. Each run of a job runs at low priority: `ionice
--c3 nice -n19 <command>`. The daemon checks one time per target (per
-daemon run) that `ionice -c3` works. Without it, the runs use `nice -n19`
-only. The output tail of the job ends with the wrapper (`[run as: ...]`).
+The repo credential never goes to the target (TER-103). The steps that
+need it run in the daemon, which runs no recipe, in a bare repo of the
+job at `<state>/jobs/<project>/<job>.git` (0700 dir, removed after the
+job, and all of them at daemon start). They use the daemon's own git
+setup (§5.1): no user or system config, no hooks, the token through a
+one-shot helper or the key in a 0700 run dir under
+`<state>/credentials/.run/`, and the daemon's known hosts. A job is:
 
-The recipe can change its clone: make commits, move HEAD, or write
-`.git/config` (for example `url.<base>.insteadOf`). So the push of a merge
-job never runs in that clone, and never pushes what HEAD is after the
-recipe:
+1. Prepare, in the daemon, with the credential: fetch the card branch
+   (validate) or `next` and the card branches (merge). A validate job
+   takes the card commit. A merge job merges each branch onto `next` with
+   a merge commit, without a work tree (`git merge-tree --write-tree`,
+   then `git commit-tree`), so no checkout, filter, or hook runs. The
+   commit is recorded (`refs/job/head`, or `refs/job/merge`) and written
+   to a git bundle.
+2. On the target, with no credential: the bundle goes in on the stdin of
+   the step, a fresh clone in `<work_dir>/<project>/<job>` is made from
+   it, and its job ref must be the recorded commit; else the job fails
+   (`error`). The clone has no remote. Then the recipe runs in the clone.
+3. A merge job only, when the recipe passed, in the daemon, with the
+   credential: push the recorded commit ID from the daemon's repo to
+   `next`. The push is not forced.
 
-1. The prepare run records the merge commit before the recipe runs, and
-   keeps it as `refs/job/merge` in the clone.
-2. A run without any credential makes a fresh bare repo next to the clone
-   and fetches `refs/job/merge` from the clone over `file://`. It must be
-   the recorded commit; else the job fails (`error`).
-3. The push run checks that the fresh repo still holds that commit, and
-   pushes that commit ID to `next` from it.
+The recipe can change its clone: make commits, move HEAD, delete refs, or
+write `.git/config` (for example `url.<base>.insteadOf`). None of that
+reaches the push: the daemon's repo is the only source of the push, and
+no target, sandbox, or recipe can write it. The `ls-remote` check of
+`POST /api/cards/{id}/validate` also runs in the daemon.
 
-ssh in the git runs reads no config file (`-F /dev/null`), so a planted
-`~/.ssh/config` cannot send the push to another host or run a
-`ProxyCommand`. Its known hosts are a file of the job, seeded from the
-repo host keys (below), not `~/.ssh/known_hosts`. The key file is in a 0700
-dir of the job (`<clone>.ssh`), not in `/tmp`. The cleanup removes the
-clone, the push repo, and that dir.
+Each step on the target runs at low priority: `ionice -c3 nice -n19
+<command>`. The daemon checks one time per target (per daemon run) that
+`ionice -c3` works. Without it, the steps use `nice -n19` only. The
+output tail of the job ends with the wrapper (`[run as: ...]`).
+
+The daemon must reach the forge of each repo in `next_repos`, as it does
+for workspace checkouts (§5.1). A forge that only the target reaches does
+not work with the queue.
 
 #### Limits
 
-Every run of a job on a target runs as the same user: the recipe, and
-the runs that hold the credential. So any recipe on the target can reach
-the files of the credential runs. It can leave a background process
-behind, or, while it runs next to another job of the project, write that
-job's push repo or read its key file. Any worker can start such a recipe
-with `card validate` on its own branch, so the exposure is any worker at
-the next merge, not only the merging card. Validate jobs run beside a
-merge (TER-159; before, a merge ran alone in its project), so a recipe
-that runs at the same time on the same target can reach the merge's push
-credential while the merge runs, and a validate job fetches with the
-credential while other recipes of the project run. Two more paths of the
-same kind: the recipes of another project on a shared global target, and
-an agent with exec on the delivery target, which can reach
-`<clone>.ssh/key` or the push repo with no recipe at all. The fix (each
-recipe as its own user, or the credential runs on a host that runs no
-recipe) is TER-103.
-
-The known hosts of the git runs are the repo host keys that the daemon's
-own git trusts (GitHub's published keys and the recorded ones), not the
-host keys of the targets. A forge whose key the daemon has not recorded
-is accepted on first use in each run (`accept-new`).
+The steps on the target run as the target's user (the ssh login user, the
+`docker exec` user, or the host agent's user), as an agent's `exec` does.
+They hold no credential, so a recipe, or an agent with exec on the
+target, finds no key, token, or push repo there, and validate jobs can
+run beside a merge (TER-159). What is left: the recipes of one target
+share a user, so a recipe can change another job's clone on the same
+target, or leave a process that does. That can change the verdict of
+that job, but not what a merge pushes: the push is the commit that the
+daemon recorded before any recipe ran. A host agent must not run as the
+daemon's user on the daemon's machine (§17), or a recipe can read the
+state dir.
 
 #### The host cap
 
@@ -10827,7 +10860,7 @@ start with `Job queue:`.
 
 | method and path                    | who                                   | what |
 |------------------------------------|---------------------------------------|------|
-| `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` on the target. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
+| `POST /api/cards/{id}/validate`    | the card's assignee, a project admin  | `{commit?, repo?, branch?, comment?}`. The commit must be the head of the branch on the remote, read with `git ls-remote` in the daemon. In one write: the labels `by:<agent>` and `validation:queued`, the move to `validating`, and the job. The worker stays assigned; the final move (a pass, or the second failure) clears the name. `201` `{job, queue: {position, running, slots, note}}` |
 | `POST /api/cards/{id}/merge`       | a project admin                       | `{repo?, branch?}`. The repo must be in `next_repos`. The card stays where it is until the job ends. `201` as above |
 | `POST /api/merges`                 | a project admin                       | `{cards, repo?}`: a batch merge of 1 to 32 cards, in this order. All cards are of one project and one repo (the given one, else each card's, else the project's only repo), which must be in `next_repos`. The branch of each card is its branch, else its ID in lower case. Each card gets `validation:queued` and a comment, and stays where it is until the job ends. A card twice, or a card with an open job, is refused. One card is the same as `POST /api/cards/{id}/merge`. `201` as above |
 | `GET /api/projects/{name}/jobs`    | members                               | `?state=`. The config, the `running` and `queued` counts, and the jobs, newest first (200 at most) |
@@ -10842,3 +10875,15 @@ The repo defaults to the card's repo, then to the project's only repo. The
 branch defaults to the card's branch, then to the card ID in lower case.
 Events `job` {change, project, id, card, kind, state, attempt, outcome,
 cards?}; `cards` lists the cards of a batch.
+Events `job.verdict` {project, job, card, kind, verdict, state, outcome,
+attempt, by_agent, repo, branch, parent, batch, end_comment,
+failure_block}: one per card when a job ends or is cancelled, in the same
+write as the card flow above. `verdict` is `passed`, `red`, `conflict`,
+`cancelled`, or `error` (the job could not run, or the daemon restarted).
+In a batch each card has its own event: a card that left the batch is
+`conflict`, the merged cards have the verdict of the batch. `batch` lists
+the cards of a batch job, else `null`. `end_comment` is the `Job queue:`
+line of the end. `failure_block` is the `Validation failed:` block for
+`red`, `conflict`, and `error`, else `null`. The verdict says what the run
+found, not what the queue does next: the rerun and the split stay as
+above.

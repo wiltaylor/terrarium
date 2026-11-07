@@ -20,6 +20,11 @@
 //! - **Park**: a message or a question of the agent that leaves the
 //!   thread waiting on the operator parks the agent; the idle pass stops
 //!   it when it is at rest (no harness, no tokens).
+//! - **Tracking** (TER-145, TER-144 D1, D9): the agent moves the thread
+//!   into tracking after its handoff (`terrarium thread track`): it parks
+//!   as above. An operator message or response in a thread that tracks
+//!   wakes it with a `[Thread:<id>]` turn that says so; its reply puts the
+//!   thread back into tracking and parks it again.
 //! - **Unpark**: an operator message or response, or the settling of the
 //!   last open question, unparks it: it starts again in its own session
 //!   and workspace (resume, on every harness). Its lifetime is the
@@ -54,6 +59,8 @@ use crate::store::{agents, templates};
 pub const KIND_THREAD: &str = "thread";
 /// The park reason of a thread agent.
 pub const PARK_REASON: &str = "thread waits on the operator";
+/// The park reason of a thread agent whose thread tracks (TER-145).
+pub const PARK_TRACKING: &str = "thread is tracking";
 /// The time after its last change before [`retry_missed`] takes a thread
 /// as missed by the driver.
 const MISSED_AFTER: Duration = Duration::from_secs(60);
@@ -157,6 +164,14 @@ pub fn message_turn(thread: &str, kind: &str, text: &str) -> String {
     } else {
         render(thread, text)
     }
+}
+
+/// The note that a turn of a thread that tracks ends with (TER-145, D9).
+fn tracking_note(thread: &str) -> String {
+    format!(
+        "\n\n(Thread {thread} is tracking: answer with `terrarium thread post {thread} -m -`. \
+         Your reply puts it back into tracking, and the daemon stops you again.)"
+    )
 }
 
 /// The turn of an unpark that the driver missed.
@@ -378,7 +393,7 @@ fn first_turn_task(th: &Thread) -> String {
 /// What a thread event does to the agent of the thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// The thread waits on the operator.
+    /// The thread waits on the operator, or tracks.
     Park,
     /// A new message or response of the operator (its ID) for the agent.
     Turn(String),
@@ -400,6 +415,9 @@ pub fn action_of(ev: &StoredEvent) -> Option<(String, Action)> {
     let action = match (s("change")?, status) {
         (_, ThreadStatus::Closed) => Action::End,
         ("message", ThreadStatus::WaitingOperator) => Action::Park,
+        // The agent moved the thread into tracking, or replied in a thread
+        // that tracks (TER-145).
+        ("tracking" | "message", ThreadStatus::Tracking) => Action::Park,
         ("message" | "response", ThreadStatus::WaitingAgent) if s("author") == Some(OPERATOR) => {
             Action::Turn(s("message")?.to_owned())
         }
@@ -430,14 +448,33 @@ pub async fn handle(state: &Shared, ev: StoredEvent) {
     };
     debug!(thread = %tid, agent = %open.id, ?action, "thread event of a bound agent");
     let r = match action {
-        Action::Park => crate::bound::park(state, &open.id, PARK_REASON)
-            .await
-            .map(|_| ()),
+        Action::Park => {
+            let reason = if ev.data.get("status").and_then(Value::as_str)
+                == Some(ThreadStatus::Tracking.as_str())
+            {
+                PARK_TRACKING
+            } else {
+                PARK_REASON
+            };
+            crate::bound::park(state, &open.id, reason)
+                .await
+                .map(|_| ())
+        }
         Action::Turn(msg) => {
             let t2 = tid.clone();
-            match state.db.read(move |c| threads::message(c, &t2, &msg)).await {
-                Ok(m) => {
-                    let turn = message_turn(&tid, &m.kind, &m.text);
+            let read = state
+                .db
+                .read(move |c| {
+                    let th = threads::get_bare(c, &t2)?;
+                    Ok((threads::message(c, &t2, &msg)?, th.tracking_at.is_some()))
+                })
+                .await;
+            match read {
+                Ok((m, tracking)) => {
+                    let mut turn = message_turn(&tid, &m.kind, &m.text);
+                    if tracking {
+                        turn.push_str(&tracking_note(&tid));
+                    }
                     crate::bound::unpark(state, &open.id, Some(turn), "thread message")
                         .await
                         .map(|_| ())
@@ -637,6 +674,22 @@ mod tests {
             a(
                 json!({"change": "close_proposed", "id": "01T", "status": "waiting_operator",
                      "author": "01AGENT"})
+            ),
+            Some(Action::Park)
+        );
+        // Tracking parks it (TER-145): the move, and its reply in a
+        // thread that tracks.
+        assert_eq!(
+            a(
+                json!({"change": "tracking", "id": "01T", "status": "tracking",
+                     "author": "01AGENT"})
+            ),
+            Some(Action::Park)
+        );
+        assert_eq!(
+            a(
+                json!({"change": "message", "id": "01T", "status": "tracking",
+                     "message": "01M", "author": "01AGENT"})
             ),
             Some(Action::Park)
         );
