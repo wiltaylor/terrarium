@@ -2257,7 +2257,10 @@ async fn a_cancelled_merge_job_does_not_push() {
     let ran = bins.path().join("ran");
     let work_dir = bins.path().join("jobs");
     // The tree is the slot's (TER-190): the recipe logs its job ID.
-    let recipe = format!("echo \"$TERRARIUM_JOB_ID\" >> '{}'; test -f OK", ran.display());
+    let recipe = format!(
+        "echo \"$TERRARIUM_JOB_ID\" >> '{}'; test -f OK",
+        ran.display()
+    );
     let r = lab
         .td
         .put(
