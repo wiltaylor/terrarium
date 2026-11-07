@@ -1522,7 +1522,7 @@ async fn the_merge_queue_rules_move_a_queued_merge_and_move_a_cancel_back() {
     // writes the label and the comment as before.
     let r = td.post(&format!("/api/cards/{a}/merge"), json!({})).await;
     assert_eq!(r.status, 201, "{}", r.body);
-    let job_a = r.body["id"].as_str().unwrap().to_owned();
+    let job_a = r.body["job"]["id"].as_str().unwrap().to_owned();
     settle(&td).await;
     let ca = card(&td, &a).await;
     assert_eq!(ca["column"], "merge_queue", "{ca}");
@@ -1537,7 +1537,7 @@ async fn the_merge_queue_rules_move_a_queued_merge_and_move_a_cancel_back() {
     // A batch of the API: each card goes, from any column.
     let r = td.post("/api/merges", json!({"cards": [b, c]})).await;
     assert_eq!(r.status, 201, "{}", r.body);
-    let job_bc = r.body["id"].as_str().unwrap().to_owned();
+    let job_bc = r.body["job"]["id"].as_str().unwrap().to_owned();
     settle(&td).await;
     assert_eq!(column_of(&td, &b).await, "merge_queue");
     assert_eq!(column_of(&td, &c).await, "merge_queue");
