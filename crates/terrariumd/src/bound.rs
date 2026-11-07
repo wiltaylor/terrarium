@@ -170,7 +170,10 @@ pub fn park_tx(t: &mut crate::db::Tx<'_>, id: &str, reason: &str) -> ApiResult<O
             t.emit(
                 EventDraft::new(
                     "agent.unpark_dropped",
-                    format!("{}: stays parked ({reason}); its queued unpark is dropped", sp.name),
+                    format!(
+                        "{}: stays parked ({reason}); its queued unpark is dropped",
+                        sp.name
+                    ),
                     json!({"spawn_id": sp.id, "name": sp.name, "bound": sp.bound,
                            "reason": reason}),
                 )
