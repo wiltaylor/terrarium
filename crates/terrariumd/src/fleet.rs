@@ -1692,6 +1692,7 @@ fn apply_project(
                     t,
                     &def.name,
                     &ProjectPatch {
+                        card_dispatcher: None,
                         human_comment_notifications: None,
                         description: Some(description),
                         card_prefix: prefix,
@@ -1707,6 +1708,9 @@ fn apply_project(
     // the key.
     if let Some(flow) = def.board_flow {
         projects::set_board_flow(t, &def.name, flow)?;
+    }
+    if let Some(owner) = &def.card_dispatcher {
+        projects::set_card_dispatcher(t, &def.name, owner)?;
     }
     // Repos: the file list replaces the repos the fleet applied before,
     // and takes over API repos with the same name. Equal repos stay, so
@@ -2007,6 +2011,7 @@ pub fn export(
         templates: Vec::new(),
         projects: vec![fleet::FleetProject {
             def: ProjectDef {
+                card_dispatcher: p.card_dispatcher,
                 name: p.name.clone(),
                 description: (!p.description.is_empty()).then_some(p.description),
                 prefix: Some(p.card_prefix),

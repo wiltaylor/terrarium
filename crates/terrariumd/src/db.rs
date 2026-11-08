@@ -2545,6 +2545,10 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(thread, reason)
     );
     "#,
+    // 98: opt-in ready-card dispatcher (TER-76).
+    r#"
+    ALTER TABLE projects ADD COLUMN card_dispatcher TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

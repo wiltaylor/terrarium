@@ -85,6 +85,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
                     )?;
                     if prefix_change.is_some() {
                         let patch = projects::ProjectPatch {
+                            card_dispatcher: None,
                             human_comment_notifications: None,
                             description: None,
                             card_prefix: def.prefix.clone(),
@@ -126,6 +127,9 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
             && !report.projects.updated.contains(&def.name)
         {
             report.projects.updated.push(def.name.clone());
+        }
+        if let Some(owner) = &def.card_dispatcher {
+            projects::set_card_dispatcher(t, &def.name, owner)?;
         }
         // Repos: the file list replaces the file repos, and takes over API
         // repos with the same name.

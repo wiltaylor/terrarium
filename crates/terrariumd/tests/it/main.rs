@@ -29,6 +29,8 @@ mod board;
 mod bookmarks;
 #[path = "../bound_agents.rs"]
 mod bound_agents;
+#[path = "../card_dispatcher.rs"]
+mod card_dispatcher;
 #[path = "build_inputs.rs"]
 mod build_inputs;
 #[path = "../calendar.rs"]
