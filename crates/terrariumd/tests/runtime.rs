@@ -501,6 +501,27 @@ async fn idle_stop_refuses_a_pending_push_pointer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_stop_queues_a_turn_during_the_graceful_stop() {
+    use terrariumd::supervisor::Supervisor;
+
+    let td = Td::start().await;
+    *td.adapter.exit_keys.lock().unwrap() = b"/exit 0\r".to_vec();
+    *td.adapter.exit_pause.lock().unwrap() = WAIT;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let agent = id.parse().unwrap();
+    let runner = td.sup.runner(agent).unwrap();
+    td.daemon.as_ref().unwrap().state.lifecycle.expect_stop(agent, "idle");
+    td.sup.stop_idle(agent).await.unwrap();
+    let result = td.post(&format!("/api/agents/{id}/send"), Some(json!({"text": "after idle stop"}))).await;
+    assert_eq!(result["queued"], true, "{result}");
+    // Finish the split exit keys only after the API has persisted the turn.
+    runner.write(b"\r").await.unwrap();
+    td.wait_events(&id, "turn_start", |events| events.iter().any(|e| e["data"]["prompt"] == "[User] after idle stop")).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lifecycle_events_sse_and_pty() {
     let td = Td::start().await;
     let id = td.agent("demo", "bob", json!({})).await;

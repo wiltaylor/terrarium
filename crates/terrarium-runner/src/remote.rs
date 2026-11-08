@@ -929,6 +929,10 @@ impl RunnerHandle for RemoteRunner {
         })
     }
 
+    fn release_idle_stop(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.call_unit("release_idle_stop", json!({})))
+    }
+
     fn kill(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.call_unit("kill", json!({})))
     }

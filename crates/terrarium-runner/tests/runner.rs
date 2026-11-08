@@ -314,7 +314,22 @@ async fn idle_stop_claim_excludes_queued_and_running_turns() {
     let mut h = start(Opts::default()).await;
     until_idle(&mut h).await;
     assert!(h.runner.claim_idle_stop());
-    assert!(h.runner.type_turn("too late").wait().await.is_err());
+    assert!(h.runner.claim_idle_stop(), "claim retries are idempotent");
+    let delivery = h.runner.type_turn("after release");
+    h.runner.release_idle_stop();
+    delivery.wait().await.expect("released claim delivers queued work");
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_stop_claim_expires_after_a_lost_reply() {
+    let mut h = start(Opts::default()).await;
+    until_idle(&mut h).await;
+    assert!(h.runner.claim_idle_stop());
+    // The caller never received the reply and cannot release the claim.
+    timeout(wait(), h.runner.type_turn("after lost reply").wait())
+        .await.expect("claim expired").expect("delivered");
     h.runner.kill().expect("kill");
     h.runner.wait().await;
 }

@@ -47,6 +47,9 @@ pub trait RunnerHandle: Send + Sync + 'static {
     fn claim_idle_stop(&self) -> BoxFuture<'_, Result<bool>> {
         Box::pin(async { Ok(false) })
     }
+    fn release_idle_stop(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
     fn answer<'a>(&'a self, request_id: &'a str, answer: &'a Answer) -> BoxFuture<'a, Result<()>>;
     fn answer_keys<'a>(&'a self, keys: &'a str) -> BoxFuture<'a, Result<()>>;
     /// Interrupt the running turn with the adapter's interrupt keys
@@ -65,6 +68,9 @@ pub trait RunnerHandle: Send + Sync + 'static {
 }
 
 impl RunnerHandle for Runner {
+    fn release_idle_stop(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { Runner::release_idle_stop(self); Ok(()) })
+    }
     fn claim_idle_stop(&self) -> BoxFuture<'_, Result<bool>> {
         Box::pin(async move { Ok(Runner::claim_idle_stop(self)) })
     }
