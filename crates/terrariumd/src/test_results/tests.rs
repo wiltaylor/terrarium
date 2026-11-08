@@ -402,6 +402,15 @@ fn ctrf_statuses_and_suite_lists() {
 // ---- libtest JSON ----
 
 #[test]
+fn libtest_prefixed_events() {
+    let r = run(fixture!("prefixed-libtest.json"));
+    assert_eq!(r.counts(), counts(2, 0, 0, 0));
+    assert_eq!(case(&r, "first").duration_ms, Some(100));
+    assert_eq!(case(&r, "second").stdout.as_deref(), Some("literal { braces }"));
+    assert!(r.notes.is_empty());
+}
+
+#[test]
 fn libtest_cargo() {
     let r = run(fixture!("cargo-libtest.json"));
     assert_eq!(r.tool.as_deref(), Some("cargo test"));
@@ -449,7 +458,10 @@ fn libtest_nextest_binaries_crashes_and_junk_lines() {
     assert_eq!(case(&r, "tests::a").duration_ms, Some(500));
     let crash = case(&r, "crashes");
     assert_eq!(crash.status, Status::Errored);
-    assert!(crash.message.as_deref().unwrap().contains("did not finish"));
+    assert_eq!(
+        crash.message.as_deref(),
+        Some("incomplete: no end event in the output")
+    );
     let old = case(&r, "old");
     assert_eq!(old.message.as_deref(), Some("boom"));
     assert_eq!(old.file.as_deref(), Some("src/x.rs"));
