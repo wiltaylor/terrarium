@@ -64,6 +64,7 @@ mod hosts;
 mod idle_alert;
 #[path = "../inbox.rs"]
 mod inbox;
+mod inbox_perf;
 #[path = "../input_watchdog.rs"]
 mod input_watchdog;
 #[path = "../jobs.rs"]
@@ -182,4 +183,3 @@ mod waits;
 mod webhooks;
 #[path = "../wiki.rs"]
 mod wiki;
-mod inbox_perf;

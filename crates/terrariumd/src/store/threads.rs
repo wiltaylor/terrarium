@@ -677,7 +677,8 @@ pub fn inbox_urgency(conn: &Connection) -> ApiResult<HashMap<String, (bool, bool
         "SELECT thread, max(priority IN ('urgent', 'critical')), max(priority = 'critical')
          FROM questions WHERE status = 'open' AND thread IS NOT NULL GROUP BY thread",
     )?;
-    Ok(st.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+    Ok(st
+        .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
         .collect::<Result<_, _>>()?)
 }
 
@@ -735,12 +736,18 @@ fn list_unbounded(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
     let mut out = st
         .query_map(params![status, f.all, f.scope, f.involving], |r| {
             let mut th = row_named(r, |key| {
-                names.entry(key.to_owned()).or_insert_with(|| name_of(conn, key)).clone()
+                names
+                    .entry(key.to_owned())
+                    .or_insert_with(|| name_of(conn, key))
+                    .clone()
             })?;
             th.message_count = Some(r.get("list_messages")?);
             th.open_questions = Some(r.get("list_questions")?);
             let last: Option<String> = r.get("list_last")?;
-            th.last_at = Some(last.filter(|l| l > &th.updated_at).unwrap_or_else(|| th.updated_at.clone()));
+            th.last_at = Some(
+                last.filter(|l| l > &th.updated_at)
+                    .unwrap_or_else(|| th.updated_at.clone()),
+            );
             Ok(th)
         })?
         .collect::<Result<Vec<_>, _>>()?;

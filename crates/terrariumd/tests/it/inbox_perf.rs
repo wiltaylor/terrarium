@@ -43,7 +43,12 @@ async fn inbox_live_and_tenfold_load() {
             }
             Ok(())
         }).await.unwrap();
-        for path in ["/api/inbox", "/api/inbox/counts", "/api/threads", "/api/mail?to=project:p"] {
+        for path in [
+            "/api/inbox",
+            "/api/inbox/counts",
+            "/api/threads",
+            "/api/mail?to=project:p",
+        ] {
             let mut times = Vec::new();
             for _ in 0..5 {
                 let start = Instant::now();
@@ -52,7 +57,10 @@ async fn inbox_live_and_tenfold_load() {
                 times.push(start.elapsed());
             }
             times.sort();
-            println!("scale={scale} {path} median={:?} max={:?}", times[2], times[4]);
+            println!(
+                "scale={scale} {path} median={:?} max={:?}",
+                times[2], times[4]
+            );
             assert!(times[2] < Duration::from_secs(2), "{path}: {times:?}");
         }
         for action in ["ack", "answer"] {
@@ -71,7 +79,10 @@ async fn inbox_live_and_tenfold_load() {
                 times.push(start.elapsed());
             }
             times.sort();
-            println!("scale={scale} POST {action} median={:?} max={:?}", times[2], times[4]);
+            println!(
+                "scale={scale} POST {action} median={:?} max={:?}",
+                times[2], times[4]
+            );
             assert!(times[2] < Duration::from_secs(2), "{action}: {times:?}");
         }
         let counts = td.get("/api/inbox/counts?project=p").await.ok();
