@@ -429,6 +429,10 @@ class Cli(unittest.TestCase):
 
 class CommitTrailers(unittest.TestCase):
     def setUp(self):
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("TERRARIUM_BASE_REF", None)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.old = Path.cwd()
@@ -481,15 +485,49 @@ class CommitTrailers(unittest.TestCase):
             self.assertEqual(affected.main(["--check-commit-trailers"]), 1)
         read.assert_not_called()
 
-    def test_missing_base_fails_closed(self):
+    def test_full_plan_delegates_gate(self):
+        with mock.patch.object(affected, "read_changed", return_value=None), \
+                mock.patch.object(affected, "check_commit_trailers") as gate, \
+                mock.patch.object(affected, "run", return_value=0) as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(affected.main(["--run"]), 0)
+        gate.assert_not_called()
+        run.assert_called_once_with([["just", "ci::validate"]])
+
+    def test_missing_base_skips_visibly(self):
         self.git("update-ref", "-d", "refs/remotes/origin/next")
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(self.check()[0], 0)
+        self.assertIn("skipped", output.getvalue())
+
+    def test_local_next_base(self):
+        self.git("update-ref", "refs/heads/next", "origin/next")
+        self.git("update-ref", "-d", "refs/remotes/origin/next")
+        self.commit("fix: bad\n\nCo-authored-by : Test")
+        self.assertEqual(self.check()[0], 1)
+
+    def test_job_base(self):
+        self.git("update-ref", "refs/remotes/job/next", "origin/next")
+        self.git("update-ref", "-d", "refs/remotes/origin/next")
+        self.commit("fix: bad\n\nCo-authored-by: Test")
+        self.assertEqual(self.check()[0], 1)
+
+    def test_explicit_base_takes_precedence(self):
+        self.git("update-ref", "refs/heads/custom", "HEAD")
+        self.commit("fix: bad\n\nCo-authored-by: Test")
+        self.git("update-ref", "refs/remotes/origin/next", "HEAD")
+        os.environ["TERRARIUM_BASE_REF"] = "custom"
+        self.assertEqual(self.check()[0], 1)
+
+    def test_invalid_explicit_base_fails_closed(self):
+        os.environ["TERRARIUM_BASE_REF"] = "missing"
         self.assertEqual(self.check()[0], 1)
 
     def test_run_stops_before_metadata_or_tests(self):
         self.commit("fix: bad\n\nCo-authored-by: Test <test@example.invalid>")
         with mock.patch.object(affected, "run") as run, \
                 contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(affected.main(["--run"]), 1)
+            self.assertEqual(affected.main(["--check-commit-trailers"]), 1)
         run.assert_not_called()
 
 
