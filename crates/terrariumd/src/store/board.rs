@@ -857,6 +857,40 @@ pub fn board_summary(
             .remove("_column_role");
         let review = role.as_ref().and_then(Value::as_str) == Some(REVIEW)
             || (role.as_ref().is_none_or(Value::is_null) && card["column"] == REVIEW);
+        let working = role.as_ref().and_then(Value::as_str) == Some(WORKING)
+            || (role.as_ref().is_none_or(Value::is_null) && card["column"] == WORKING);
+        if working {
+            let id = card["id"]
+                .as_str()
+                .ok_or_else(|| ApiError::internal("board summary has no card id"))?;
+            if super::jobs::card_job(conn, id)?.is_none() {
+                let mut start = card["eta_set_at"].as_str().map(str::to_owned);
+                if start.is_none() {
+                    start = last_moved_at(conn, id)?;
+                }
+                if let Some(at) = start
+                    .as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                {
+                    let guess = card["eta_at"]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|end| (end - at).num_milliseconds() as f64);
+                    let labels: Vec<String> = serde_json::from_value(card["labels"].clone())?;
+                    let calibrated = estimates.worker_ms(conn, project, &labels, guess)?;
+                    if let Some(ms) = calibrated
+                        && let Some(end) =
+                            at.checked_add_signed(chrono::Duration::milliseconds(ms.round() as i64))
+                    {
+                        card["eta_at"] = json!(end.to_rfc3339());
+                    }
+                    if !card["eta_at"].is_null() {
+                        card["eta_set_at"] = json!(start);
+                        card["eta_calibrated"] = json!(calibrated.is_some());
+                    }
+                }
+            }
+        }
         if review {
             let id = card["id"]
                 .as_str()
