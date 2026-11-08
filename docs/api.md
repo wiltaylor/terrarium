@@ -4210,6 +4210,18 @@ POST /api/mail                      (X-Terrarium-Agent: terrarium/worker)
 
 ### 7.3 Project inboxes
 
+Mail to `project:<name>` stays addressed to the inbox and queues a turn for
+its non-ephemeral project-admin `lead`, or its oldest non-ephemeral project
+admin if no admin is named `lead`. A project with no such admin rejects the
+send. Queued inbox mail counts as waiting work for that admin, including
+after a daemon restart. The inbox message and thread are not copied.
+
+The live event targets the admin selected at send time. Mail listing,
+`mail check`, and queued-work recovery select the responsible admin at query
+time. If the project's admins change before delivery, recovery and visibility
+follow the current selection. Previously delivered messages are not replayed
+automatically.
+
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
 | `GET /api/projects/{name}/inbox?unread=&state=&thread=&wait=` | | `200` messages | inbox right |
@@ -8168,7 +8180,8 @@ on the events of the log.
   an event at chain depth 4 (`data.cause.depth`, shared with the
   triggers of §19.4) starts no run; a rule runs at most `max_per_hour`
   times in an hour (default 30), and at most 10 times for one card in an
-  hour. A guard records a `skipped` run with the reason.
+  hour by default. An explicit `max_per_hour` sets both limits (the built-in
+  pack uses 600). A guard records a `skipped` run with the reason.
 - Order. The runs of one card go one after another, in event order and
   then in rule order. The runs of other cards go beside them. A run that
   the engine cannot record (a database error) stays pending and holds the
@@ -8307,6 +8320,8 @@ Lead CLI (uses `--project`, else the agent's project):
 - `group_close`: `key`, optional `comment`. Archives the header, retains
   historical membership, and frees members to join their next group.
   Repeated close and mutations of a closed group are no-ops.
+  Optional `all_done = true` closes only a nonempty group whose members
+  have all reached its `done_when` anchor.
 
 `{{group.id|key|title|column|status|done|total|eta_at}}` (one field per
 placeholder) reads the open group of the event's card, or the group card
@@ -8517,7 +8532,18 @@ only after three fix cards. The fix cards of a group are the cards with a
 out) include every card of this job: those of its reruns and of the group
 it was split from count, those of another group that shared a card do
 not. Set another number with your own `merge-red-group` rule. The pack
-does not spawn the fix agent or queue the group again (TER-181).
+does not spawn the fix agent or queue the group again (TER-256).
+
+Queued merge jobs open a board group in `@review`, with `@accepted`
+as its completion anchor. The `queued` and `merged (full suite passed)` steps track
+the job. A red result keeps the group open and adds its fix card as the
+first member. Queue the repair and the original members together, fix
+first, to reuse the group. The passed merge verdict follows the configured
+recipe and the push of `next`. Each member then moves to accepted, and
+the last member closes the group. `{{job.group_key}}` is the stored
+merge group's key, or `merge:<job id>` for a new group, including when
+replaying verdicts after closure. Migration omits group actions on boards
+without review or accepted, retaining their existing delivery flow.
 
 A rule of the project's `rules.wcl` with the name of a pack rule
 replaces it. A rule with only `enabled = false` (no `on`, no verb) turns

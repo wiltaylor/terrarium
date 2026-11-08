@@ -695,6 +695,78 @@ async fn the_rate_limits_stop_a_rule_per_hour_and_per_card() {
     assert_eq!(r.iter().filter(|r| r["state"] == "done").count(), 11);
 }
 
+/// The pack's explicit hourly budget applies to a busy card too.
+#[tokio::test]
+async fn the_pack_matches_code_flow_after_ten_runs_for_one_card() {
+    let td = TestDaemon::start().await;
+    td.post("/api/hosts", json!({"name": "offline"})).await.ok();
+    let mut cards = Vec::new();
+    for project in ["coded", "ruled"] {
+        td.project(project).await;
+        td.post(
+            &format!("/api/projects/{project}/repos"),
+            json!({"name": "app", "url": "https://git.example/x/app.git"}),
+        )
+        .await
+        .ok();
+        let target = format!("{project}-build");
+        td.post(
+            "/api/targets",
+            json!({
+                "name": target, "kind": "host", "host": "offline", "project": project
+            }),
+        )
+        .await
+        .ok();
+        td.put(
+            &format!("/api/projects/{project}/delivery"),
+            json!({
+                "target": target, "recipe": "true", "next_repos": ["app"]
+            }),
+        )
+        .await
+        .ok();
+        if project == "ruled" {
+            td.patch(
+                &format!("/api/projects/{project}"),
+                json!({"board_flow": "rules"}),
+            )
+            .await
+            .ok();
+        }
+        cards.push(new_card(&td, project, json!({"title": "busy", "column": "review"})).await);
+    }
+    settle(&td).await;
+    for _ in 0..11 {
+        let mut jobs = Vec::new();
+        for card in &cards {
+            let r = td
+                .post(&format!("/api/cards/{card}/merge"), json!({}))
+                .await;
+            jobs.push(r.ok()["job"]["id"].as_str().unwrap().to_owned());
+        }
+        settle(&td).await;
+        for phase in ["queued", "cancelled"] {
+            if phase == "cancelled" {
+                for job in &jobs {
+                    td.delete(&format!("/api/jobs/{job}")).await.ok();
+                }
+                settle(&td).await;
+            }
+            let coded = td.get(&format!("/api/cards/{}", cards[0])).await;
+            let ruled = td.get(&format!("/api/cards/{}", cards[1])).await;
+            assert_eq!(coded.ok()["labels"], ruled.ok()["labels"], "{phase}");
+            assert_eq!(coded.ok()["column"], ruled.ok()["column"], "{phase}");
+        }
+    }
+    let r = runs(&td, "ruled").await;
+    for name in ["merge-queued", "job-cancelled"] {
+        let matching: Vec<_> = r.iter().filter(|r| r["rule"] == name).collect();
+        assert_eq!(matching.len(), 11, "{r:?}");
+        assert!(matching.iter().all(|r| r["state"] == "done"), "{r:?}");
+    }
+}
+
 const STATE: &str = r#"rule "open-job" {
   on = ["job"]
   if_job { state = ["queued", "running"] }

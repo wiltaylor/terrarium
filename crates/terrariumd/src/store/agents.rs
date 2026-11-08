@@ -271,15 +271,17 @@ fn ephemeral_card(
 /// with a `then` prompt (`crate::reset`). A lease line waits too, but it
 /// does not count: it does not wake the agent.
 pub fn queued_count(conn: &Connection, id: &str) -> ApiResult<usize> {
+    let inbox = super::mail::routed_inbox(conn, id)?;
     let n: i64 = conn.query_row(
         "SELECT (SELECT count(*) FROM queued_turns WHERE agent = ?1)
               + (SELECT count(*) FROM messages
-                 WHERE to_agent = ?1 AND to_kind = 'agent' AND state = 'queued')
+                 WHERE state = 'queued' AND ((to_agent = ?1 AND to_kind = 'agent')
+                       OR (to_agent = ?2 AND to_kind = 'project')))
               + (SELECT count(*) FROM pending_pointers
                  WHERE agent = ?1 AND kind IN ('card', 'lead'))
               + (SELECT count(*) FROM agents
                  WHERE id = ?1 AND json_extract(pending_reset, '$.then') IS NOT NULL)",
-        [id],
+        params![id, inbox],
         |r| r.get(0),
     )?;
     Ok(usize::try_from(n).unwrap_or(0))
@@ -293,9 +295,12 @@ pub fn with_queued_work(conn: &Connection) -> ApiResult<Vec<String>> {
          UNION SELECT agent FROM pending_pointers WHERE kind IN ('card', 'lead')
          UNION SELECT id FROM agents WHERE json_extract(pending_reset, '$.then') IS NOT NULL",
     )?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
+    rows.extend(super::mail::queued_inbox_recipients(conn)?);
+    rows.sort();
+    rows.dedup();
     Ok(rows)
 }
 

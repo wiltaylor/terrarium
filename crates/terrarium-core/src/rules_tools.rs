@@ -367,6 +367,17 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
     // The column arguments of the verbs.
     let mut actions = Vec::new();
     for a in &rule.actions {
+        // The delivery pack's merge group needs both its home and its
+        // completion anchor. Omit the whole lifecycle on older boards,
+        // not just group_open, leaving the existing delivery flow intact.
+        if a.verb.starts_with("group.")
+            && a.args.get("key").and_then(Value::as_str) == Some("{{job.group_key}}")
+            && (!resolves(columns, "@review") || !resolves(columns, "@accepted"))
+        {
+            reasons
+                .push("merge groups need review and accepted columns: group action dropped".into());
+            continue;
+        }
         let Some(verb) = VERBS.iter().find(|v| v.name == a.verb) else {
             actions.push(a.clone());
             continue;
@@ -1037,6 +1048,22 @@ mod tests {
         let again = migrate(default_pack(), &m.text, &own, &board);
         assert!(again.overrides.is_empty());
         assert_eq!(again.text, m.text);
+    }
+
+    #[test]
+    fn the_migration_drops_the_entire_group_lifecycle_without_anchors() {
+        let board = cols(&[("ready", None), ("review", Some("review")), ("done", None)]);
+        let m = migrate(default_pack(), "", &RuleSet::default(), &board);
+        let own = parse(&m.text, "rules.wcl", &ctx(&board)).expect("migrated rules");
+        let set = rules_file::with_pack(default_pack(), &own);
+        assert!(
+            set.rules
+                .iter()
+                .all(|r| r.actions.iter().all(|a| !a.verb.starts_with("group.")))
+        );
+        let queued = set.rules.iter().find(|r| r.name == "merge-queued").unwrap();
+        assert!(queued.actions.iter().any(|a| a.verb == "card.label"));
+        assert!(queued.actions.iter().any(|a| a.verb == "card.comment"));
     }
 
     #[test]

@@ -105,6 +105,7 @@ type GroupStatus {
 type GroupClose {
   key: utf8
   comment: utf8?
+  all_done: bool?
 }
 
 // One condition on the event: `project`, `kind`, `actor`, `summary`, or

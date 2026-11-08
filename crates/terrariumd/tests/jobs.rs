@@ -671,6 +671,29 @@ struct Lab {
     flow: &'static str,
 }
 
+/// Drive queue picks directly in tests that exercise retries, not the timer.
+struct QueueTicks(tokio::task::JoinHandle<()>);
+
+impl QueueTicks {
+    fn start(lab: &Lab) -> Self {
+        let state = lab.td.daemon.as_ref().unwrap().state.clone();
+        Self(tokio::spawn(async move {
+            loop {
+                if let Err(error) = terrariumd::jobs::tick(&state).await {
+                    tracing::warn!(%error, "test queue tick failed");
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }))
+    }
+}
+
+impl Drop for QueueTicks {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .args(args)
@@ -2124,12 +2147,77 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
         git(&lab.origin, &["log", "-1", "--format=%s", "next"]),
         "Merge ter-m3 onto next"
     );
-    // The daemon removed its repo of the job.
+    // The daemon keeps its repository, but removes the job's bundle.
     let state_jobs = lab.td.daemon.as_ref().unwrap().state.state_dir.join("jobs");
     let left: Vec<_> = std::fs::read_dir(state_jobs.join("p"))
         .map(|d| d.flatten().map(|e| e.file_name()).collect())
         .unwrap_or_default();
-    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(left, [std::ffi::OsString::from("repos")]);
+    let cached = state_jobs.join("p/repos/app.git");
+    assert_eq!(git(&cached, &["rev-parse", &next]), next);
+    git(&cached, &["update-ref", "refs/test/retained", &next]);
+    lab.branch("ter-m4", "next", &[("SECOND", "yes\n")]);
+    let card = lab.card("ter-m4", "ter-m4").await;
+    lab.td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await
+        .ok();
+    let second = lab
+        .until_idle()
+        .await
+        .into_iter()
+        .find(|j| j["card"] == card.as_str())
+        .unwrap();
+    assert_eq!(second["state"], "passed", "{second:#}");
+    assert_eq!(git(&cached, &["rev-parse", "refs/test/retained"]), next);
+    assert_eq!(
+        git(&cached, &["rev-parse", "refs/job/merge"]),
+        second["head"].as_str().unwrap()
+    );
+    let repos: Vec<_> = std::fs::read_dir(state_jobs.join("p/repos"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(repos, [std::ffi::OsString::from("app.git")]);
+}
+
+/// A crash can leave a lock or broken ref in the daemon's persistent
+/// cache. The next job rebuilds it, fetches, and merges successfully.
+#[tokio::test]
+async fn the_next_job_recovers_a_damaged_daemon_repo() {
+    let lab = lab(2).await;
+    let first = merge_with_recipe(&lab, "ter-cache", "test -f OK").await;
+    assert_eq!(first["state"], "passed", "{first:#}");
+    let cached = lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .state_dir
+        .join("jobs/p/repos/app.git");
+    for (i, damage) in ["index.lock", "refs/job/broken"].iter().enumerate() {
+        std::fs::write(cached.join(damage), "interrupted").unwrap();
+        let branch = format!("ter-recover-{i}");
+        lab.branch(&branch, "next", &[(&branch, "new\n")]);
+        let card = lab.card(&branch, &branch).await;
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .await
+            .ok();
+        let job = lab
+            .until_idle()
+            .await
+            .into_iter()
+            .find(|j| j["card"] == card.as_str())
+            .unwrap();
+        assert_eq!(job["state"], "passed", "{damage}: {job:#}");
+        assert!(!cached.join(damage).exists());
+        assert_eq!(
+            git(&cached, &["rev-parse", "refs/job/merge"]),
+            job["head"].as_str().unwrap()
+        );
+    }
 }
 
 /// TER-159: merges have their own lane. With 1 slot, a validate job queued
@@ -2329,7 +2417,8 @@ async fn until_not(lab: &Lab, id: &str, state: &str) -> Value {
 /// it shows as ended, no process of it is left. The rerun does the same.
 #[tokio::test]
 async fn a_job_timeout_ends_every_process_of_the_recipe() {
-    let (lab, _bins, children) = docker_lab(1, 3).await;
+    let (lab, _bins, children) = docker_lab(1, 1).await;
+    let _ticks = QueueTicks::start(&lab);
     let h = lab.branch("ter-t1", "next", &[("OK", "1")]);
     let c = lab.card("t1", "ter-t1").await;
     let r = lab
@@ -2993,11 +3082,24 @@ async fn flow_scenario(flow: &'static str) -> Value {
     let sha = regex::Regex::new(r"\b[0-9a-f]{7,40}\b").unwrap();
     let time = regex::Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})")
         .unwrap();
+    // Rules allocate group headers from the card sequence. Compare the
+    // original work cards by scenario identity, not their sequence gaps.
+    let work_cards = [&first, &a, &b, &c, &d, &e, &f1, &f2, &f3];
+    let card_id = regex::Regex::new(r"\bP-\d+\b").unwrap();
     let neutral = |text: &str| -> String {
         let t = text.replace(&dir, "<DIR>");
         let t = time.replace_all(&t, "<TIME>");
         let t = ulid.replace_all(&t, "<ID>");
-        sha.replace_all(&t, "<SHA>").into_owned()
+        let t = sha.replace_all(&t, "<SHA>");
+        card_id
+            .replace_all(&t, |caps: &regex::Captures<'_>| {
+                work_cards
+                    .iter()
+                    .position(|id| id.as_str() == &caps[0])
+                    .map(|i| format!("<CARD-{i}>"))
+                    .unwrap_or_else(|| caps[0].to_owned())
+            })
+            .into_owned()
     };
     let mut board = lab.td.get("/api/projects/p/board").await.ok().clone();
     // The split halves can finish in either order: in rules mode a
@@ -3006,6 +3108,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
     // order, but retain its positions relative to every other card.
     // In particular, neither card may overtake the earlier green merge.
     let board_cards = board["cards"].as_array_mut().unwrap();
+    board_cards.retain(|card| card["kind"] != "group");
     let cohort: Vec<usize> = board_cards
         .iter()
         .enumerate()
@@ -3016,7 +3119,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
     for &i in &cohort {
         assert_eq!(board_cards[i]["column"], "accepted");
     }
-    if board_cards[cohort[0]]["id"].as_str() > board_cards[cohort[1]]["id"].as_str() {
+    if board_cards[cohort[0]]["id"] != f1 {
         board_cards.swap(cohort[0], cohort[1]);
     }
     let accepted: Vec<&str> = board_cards
@@ -3043,7 +3146,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
             .map(|c| neutral(c["body"].as_str().unwrap_or("")))
             .collect();
         cards.push(json!({
-            "id": id, "column": card["column"], "position": position, "labels": l,
+            "id": neutral(id), "column": card["column"], "position": position, "labels": l,
             "assignee": card["assignee_name"], "body": neutral(card["body"].as_str().unwrap_or("")),
             "comments": notes,
         }));
@@ -3053,7 +3156,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
         .await
         .iter()
         .map(|j| {
-            json!({"card": j["card"], "kind": j["kind"], "state": j["state"],
+            json!({"card": neutral(j["card"].as_str().unwrap()), "kind": j["kind"], "state": j["state"],
                    "outcome": j["outcome"], "attempt": j["attempt"],
                    "split_path": j["split_path"]})
         })
@@ -3763,6 +3866,7 @@ both_flows!(a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects);
 /// not move; the job starts once the host agent connects, and passes.
 async fn a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects(flow: &'static str) {
     let lab = lab_flow(2, flow).await;
+    let _ticks = QueueTicks::start(&lab);
     let td = &lab.td;
     let r = td.post("/api/hosts", json!({"name": "lab2"})).await;
     assert_eq!(r.status, 201, "{}", r.body);
@@ -3775,8 +3879,12 @@ async fn a_job_waits_for_an_offline_host_agent_and_starts_when_it_connects(flow:
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let id = queue_for(&lab, "p-off").await;
-    // More than two ticks of the queue (5 s each).
-    tokio::time::sleep(Duration::from_secs(12)).await;
+    // Exercise repeated queue picks without waiting for its background timer.
+    for _ in 0..3 {
+        terrariumd::jobs::tick(&td.daemon.as_ref().unwrap().state)
+            .await
+            .unwrap();
+    }
     let jobs = job_of(&lab, &id).await;
     assert_eq!(jobs.len(), 1, "no rerun, no second job: {jobs:?}");
     assert_eq!(jobs[0]["state"], "queued", "{jobs:?}");
