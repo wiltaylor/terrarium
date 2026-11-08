@@ -4043,7 +4043,7 @@ async fn docker_pending_edits_can_be_undone_after_recreate_refusal() {
     lab.td
         .patch(
             "/api/targets/dbox",
-            json!({"image": "alpine:latest", "limits": {"cpu": 2}}),
+            json!({"image": "alpine:latest"}),
         )
         .await
         .ok();
@@ -4059,19 +4059,13 @@ async fn docker_pending_edits_can_be_undone_after_recreate_refusal() {
             .contains("old image and limits")
     );
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
-    let partial = lab
+    let undone = lab
         .td
         .patch("/api/targets/dbox", json!({"image": "alpine:3"}))
         .await
         .ok()
         .clone();
-    assert_eq!(partial["runtime"]["recreate_required"], true);
-    let undone = lab
-        .td
-        .patch("/api/targets/dbox", json!({"limits": {"cpu": 1}}))
-        .await
-        .ok()
-        .clone();
+    assert_eq!(undone["runtime"]["recreate_required"], false);
     assert!(undone["recreate_note"].is_null());
     let old = lab.td.post_empty("/api/targets/dbox/up").await.ok().clone();
     assert!(old["recreate_note"].is_null());
@@ -4189,17 +4183,19 @@ async fn docker_legacy_edit_captures_inspect_not_the_stale_definition() {
         .clone();
     assert_eq!(edited["runtime"]["docker_settings"]["image"], "alpine:3");
     assert_eq!(edited["runtime"]["recreate_required"], true);
-    let undone = lab
-        .td
+    // An older host cannot acknowledge a live limit edit, even when it
+    // would match the inspected container. Keep the persisted baseline.
+    lab.td
         .patch(
             "/api/targets/dbox",
             json!({"image":"alpine:3", "limits":{"cpu":1,"memory":"512M","swap":0,"pids":100}}),
         )
         .await
-        .ok()
-        .clone();
-    assert!(undone["recreate_note"].is_null());
-    assert!(lab.td.post_empty("/api/targets/dbox/up").await.ok()["recreate_note"].is_null());
+        .err(409, "conflict");
+    let unchanged = lab.td.get("/api/targets/dbox").await.ok().clone();
+    assert_eq!(unchanged["image"], "alpine:3.21");
+    assert_eq!(unchanged["runtime"]["docker_settings"], edited["runtime"]["docker_settings"]);
+    assert_eq!(unchanged["runtime"]["recreate_required"], true);
     assert!(!lab.log().contains("docker rm"));
 }
 

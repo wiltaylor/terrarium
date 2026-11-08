@@ -430,6 +430,21 @@ async fn update(
     {
         state.executor.resource_verb_idle(host)?;
     }
+    let baseline = if current.def.kind == TargetKind::Docker
+        && !current.def.ephemeral
+        && current.def.container.is_none()
+        && current.runtime.docker_settings.is_none()
+        && (patch.get("image").is_some() || patch.get("limits").is_some())
+        && (state
+            .executor
+            .hosts
+            .is_online(current.def.host.as_deref().unwrap_or(""))
+            || matches!(current.state.as_str(), "stopped" | "running"))
+    {
+        Some(executor::docker_baseline(&state, &current.def).await?)
+    } else {
+        None
+    };
     let changed = if live {
         let n = name.clone();
         let p = patch.clone();
@@ -449,21 +464,6 @@ async fn update(
         }
     } else {
         false
-    };
-    let baseline = if current.def.kind == TargetKind::Docker
-        && !current.def.ephemeral
-        && current.def.container.is_none()
-        && current.runtime.docker_settings.is_none()
-        && (patch.get("image").is_some() || patch.get("limits").is_some())
-        && (state
-            .executor
-            .hosts
-            .is_online(current.def.host.as_deref().unwrap_or(""))
-            || matches!(current.state.as_str(), "stopped" | "running"))
-    {
-        Some(executor::docker_baseline(&state, &current.def).await?)
-    } else {
-        None
     };
     let expected = current.clone();
     let r = state
