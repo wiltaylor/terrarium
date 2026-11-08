@@ -312,6 +312,8 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
                     groups::status(t, &g, a.text("text").as_deref(), a.text("eta").as_deref())?
                 }
             },
+            "group.close" if a.action.args.get("all_done").and_then(Value::as_bool) == Some(true)
+                && (g.total == 0 || g.done != g.total) => false,
             "group.close" => groups::close(
                 t,
                 &g,
@@ -1014,6 +1016,7 @@ fn job_fix(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResu
     }
     let label = fix_label(&j.id);
     if let Some(open) = board::find_open_by_label(t, &j.project, &label)? {
+        join_fix_group(t, ctx, &open)?;
         return Ok(noop(json!({
             "job": j.id, "card": open,
             "reason": format!("{open} is the fix card of job {} already", j.id),
@@ -1074,9 +1077,24 @@ fn job_fix(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResu
         }
     }
     let at = board::get_card(t, &card.id)?.column;
+    join_fix_group(t, ctx, &card.id)?;
     Ok(changed(
         json!({"job": j.id, "card": card.id, "column": at, "cards": cards}),
     ))
+}
+
+/// A repair belongs to the same group, before the original members, just
+/// as it must be first in the next merge. No group exists in the coded flow.
+fn join_fix_group(t: &mut Tx<'_>, ctx: &RunCtx, card: &str) -> ApiResult<()> {
+    let Some(key) = &ctx.merge_group_key else { return Ok(()); };
+    let Some(g) = crate::store::groups::by_key(t, &ctx.project, key)? else { return Ok(()); };
+    if crate::store::groups::add(t, &g, card)? {
+        t.execute(
+            "UPDATE group_members SET position = (SELECT min(position) - 1 FROM group_members WHERE group_card = ?1) WHERE group_card = ?1 AND card = ?2",
+            params![g.id, card],
+        )?;
+    }
+    Ok(())
 }
 
 // ----------------------------------------------------------- agent verbs
