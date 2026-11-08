@@ -25,7 +25,7 @@ pub const WAIT: Duration = Duration::from_secs(15);
 /// Each test gets its own database, but pays for schema creation only once
 /// per test binary. Close the connection before copying so WAL is checkpointed.
 pub fn seed_database(state: &Path) {
-    static TEMPLATE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    static TEMPLATE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     let path = state.join("terrarium.db");
     if path.exists() {
         return; // Restart tests must keep their existing data.
@@ -34,10 +34,10 @@ pub fn seed_database(state: &Path) {
         let dir = tempfile::tempdir().unwrap();
         let conn = terrariumd::db::open(&dir.path().join("template.db")).unwrap();
         conn.close().unwrap();
-        dir
+        std::fs::read(dir.path().join("template.db")).unwrap()
     });
     std::fs::create_dir_all(state).unwrap();
-    std::fs::copy(template.path().join("template.db"), path).unwrap();
+    std::fs::write(path, template).unwrap();
 }
 
 pub struct TestDaemon {
