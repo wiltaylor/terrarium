@@ -23,6 +23,7 @@ mod memory;
 mod monitors;
 mod pins;
 mod pipelines;
+mod preferences;
 mod project_folders;
 mod projects;
 mod questions;
@@ -312,6 +313,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(pipelines::routes())
         .merge(calendar::routes())
         .merge(pins::routes())
+        .merge(preferences::routes())
         .merge(bookmarks::routes())
         .merge(subscriptions::routes())
         .merge(usage::routes())

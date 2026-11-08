@@ -9,8 +9,9 @@ import type { InboxWatch, Message, Question } from "../../api/types";
 
 const ask = vi.fn();
 const cancelWatch = vi.fn();
+const preferences = vi.fn(async () => ({ default_agent: null as string | null }));
 vi.mock("../../stores", () => ({
-  api: { inbox: { ask, cancelWatch, ackMail: vi.fn() } },
+  api: { account: { preferences }, inbox: { ask, cancelWatch, ackMail: vi.fn() } },
   agents: { state: { agents: [{ id: "A2", project: "demo", name: "w2" }, { id: "A1", project: "demo", name: "w1" }, { id: "E1", project: "demo", name: "tmp", ephemeral: true }] } },
 }));
 vi.mock("@solidjs/router", () => ({ A: (p: { href: string; children?: unknown }) => p.children }));
@@ -44,6 +45,14 @@ const watch = (over: Partial<InboxWatch> = {}): InboxWatch => ({ thread_id: "T1"
 const question = { id: "Q1", kind: "question", agent_name: "demo/lead", text: "Ship it?", options: ["yes", "no"], status: "open" } as unknown as Question;
 
 describe("the Ask dialog", () => {
+  it("preselects the server default and lets the operator override it", async () => {
+    preferences.mockResolvedValueOnce({ default_agent: "demo/w2" });
+    mount(() => createComponent(AskDialog, { onClose: () => {}, onAsked: () => {} }));
+    await settle();
+    expect((document.querySelector("select") as HTMLSelectElement).value).toBe("demo/w2");
+    setValue("select", "demo/w1", "change");
+    expect((document.querySelector("select") as HTMLSelectElement).value).toBe("demo/w1");
+  });
   it("lists the agents without the ephemeral ones, checks the input, and asks", async () => {
     ask.mockResolvedValue({ message: { id: "M1" }, watch: watch() });
     const onAsked = vi.fn();

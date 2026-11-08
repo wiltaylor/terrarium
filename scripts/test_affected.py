@@ -330,7 +330,7 @@ class Cli(unittest.TestCase):
             self.assertEqual(affected.run(cmds), 3)
         self.assertEqual(calls, cmds[:2])
 
-    def test_run_appends_libtest_json_to_results_dir(self):
+    def test_run_routes_rust_tests_through_shared_runner(self):
         seen = []
 
         def call(cmd, stdout=None, env=None):
@@ -346,13 +346,11 @@ class Cli(unittest.TestCase):
                     ["cargo", "test", "-p", "terrarium", "--no-fail-fast"],
                     ["cargo", "test", "-p", "terrariumd", "--lib", "--bins", "--no-fail-fast"]]
             self.assertEqual(affected.run(cmds), 0)
-            self.assertEqual(Path(d, "rust.json").read_bytes().count(b"\n"), 2)
         self.assertEqual(seen[0], (["just", "ci::fmt-check"], None))
-        self.assertEqual(seen[1][0][-7:], ["--no-fail-fast", "--", "-Z", "unstable-options",
-                                           "--format", "json", "--report-time"])
-        self.assertEqual(seen[1][1], "1")
+        self.assertEqual(seen[1][0][1:], ["scripts/rust_tests.py", "-p", "terrarium", "--no-fail-fast"])
+        self.assertEqual(seen[2][0][1:], ["scripts/rust_tests.py", "-p", "terrariumd", "--lib", "--bins", "--no-fail-fast"])
 
-    def test_main_run_starts_rust_json_empty(self):
+    def test_main_run_clears_old_rust_reports(self):
         with tempfile.TemporaryDirectory() as d:
             changed = Path(d, "changed")
             changed.write_text("docs/api.md\n")
