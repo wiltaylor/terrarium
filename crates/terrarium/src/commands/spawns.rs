@@ -301,7 +301,10 @@ pub async fn spawn(ctx: &Ctx, a: &SpawnArgs) -> anyhow::Result<()> {
     ctx.emit(&r, |c, r| {
         if let Some(skipped) = r["skipped"].as_array() {
             for right in skipped {
-                c.line(format!("skipped copied right: {}", right.as_str().unwrap_or("")));
+                c.line(format!(
+                    "skipped copied right: {}",
+                    right.as_str().unwrap_or("")
+                ));
             }
         }
         let life = match r["bound"].as_str() {

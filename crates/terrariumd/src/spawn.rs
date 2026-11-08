@@ -405,10 +405,14 @@ pub async fn spawn_with(
                 if let Some(key) = &selection_like {
                     let source = agents::find(c, key, Some(&p))?;
                     if source.agent.project != p {
-                        return Err(ApiError::forbidden("--like requires an agent of the same project"));
+                        return Err(ApiError::forbidden(
+                            "--like requires an agent of the same project",
+                        ));
                     }
                     if source.agent.harness != def.harness {
-                        return Err(ApiError::invalid("--like requires the same harness as the template"));
+                        return Err(ApiError::invalid(
+                            "--like requires the same harness as the template",
+                        ));
                     }
                     def.subscription = source.agent.subscription;
                     def.subscription_pool = source.agent.subscription_pool;
