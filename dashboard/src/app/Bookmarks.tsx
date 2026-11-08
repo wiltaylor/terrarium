@@ -5,7 +5,8 @@ import { ErrorBanner } from "../components/ui";
 import { expanded, TreeNode } from "./TreeRoot";
 import { createRovingTree } from "./treeNav";
 
-export const BOOKMARKS_KEY = "bookmarks";
+import { BOOKMARKS_KEY } from "./treeModel";
+export { BOOKMARKS_KEY } from "./treeModel";
 export const bookmarkKey = (href: string) => `bookmark:${href}`;
 
 /** A real node of the Projects navigation tree. */

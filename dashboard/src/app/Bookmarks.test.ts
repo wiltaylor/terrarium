@@ -12,7 +12,7 @@ import { expanded } from "./TreeRoot";
 import { Bookmarks } from "./Bookmarks";
 
 let dispose: (() => void) | undefined;
-beforeEach(() => expanded.open("bookmarks"));
+beforeEach(() => expanded.open("/bookmarks"));
 afterEach(() => {
   dispose?.();
   for (const b of bookmarks.items()) bookmarks.remove(b.href);

@@ -46,7 +46,7 @@ const { expanded } = await import("./TreeRoot");
 let dispose: (() => void) | undefined;
 afterEach(() => {
   setAgentList([]);
-  expanded.close("bookmarks");
+  expanded.close("/bookmarks");
   for (const b of bookmarks.items()) bookmarks.remove(b.href);
   // The open set is global: each test starts with its nodes closed.
   for (const n of expanded.list()) if (/\/(agents|repos)$/.test(n)) expanded.close(n);
@@ -77,7 +77,7 @@ describe("ProjectTree", () => {
   it("navigates the Bookmarks node and wiki links with arrow keys", () => {
     bookmarks.add("Wiki", "/p/alpha/knowledge/wiki/a%20b");
     const el = mount("/projects");
-    const row = el.querySelector<HTMLElement>('[data-key="bookmarks"]')!;
+    const row = el.querySelector<HTMLElement>('[data-key="/bookmarks"]')!;
     expect(row.closest('[role="tree"]')?.getAttribute("aria-label")).toBe("Projects");
     const key = (target: HTMLElement, value: string) => target.dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true }));
     row.focus();
