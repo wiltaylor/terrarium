@@ -188,6 +188,9 @@ fn need(kind: &str, field: &str, present: bool) -> ApiResult<()> {
 /// Check a definition against the rules of its kind (PLAN §19).
 pub fn validate(def: &TargetDef) -> ApiResult<()> {
     check_name("target", &def.name)?;
+    if def.sync_workspace && def.kind != TargetKind::Ssh {
+        return Err(ApiError::invalid("sync_workspace requires an ssh target"));
+    }
     if let Some(p) = &def.project {
         check_name("project", p)?;
     }

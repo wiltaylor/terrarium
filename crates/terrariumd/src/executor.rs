@@ -55,6 +55,8 @@ use crate::secrets::{RunDirs, Secret};
 use crate::store::leases;
 use crate::store::targets::{self, TargetRow};
 
+mod workspace_sync;
+
 /// Live exec sessions an agent may hold at once.
 pub const MAX_SESSIONS_PER_AGENT: usize = 8;
 /// Unacknowledged output an exec session buffers before backpressure.
@@ -766,6 +768,7 @@ pub struct ExecSession {
     pub takes_stdin: std::sync::atomic::AtomicBool,
     /// The report of a kill of a wrapped run ([`crate::run_kill`]).
     kill_report: Mutex<Option<crate::run_kill::Report>>,
+    sync_end: Mutex<Option<mpsc::UnboundedSender<End>>>,
 }
 
 /// One answer of `GET .../output`.
@@ -830,6 +833,7 @@ impl ExecSession {
                 limit: limit.max(1),
                 takes_stdin: std::sync::atomic::AtomicBool::new(true),
                 kill_report: Mutex::new(None),
+                sync_end: Mutex::new(None),
             }),
             rx,
         )
@@ -895,6 +899,19 @@ impl ExecSession {
     }
 
     fn finish(&self, end: End) {
+        if let Some(tx) = self
+            .sync_end
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let _ = tx.send(end);
+            return;
+        }
+        self.finish_synced(end);
+    }
+
+    fn finish_synced(&self, end: End) {
         {
             let mut b = self.lock();
             if b.end.is_none() {
@@ -1652,6 +1669,14 @@ async fn start_exec_secrets(
         cmd.env.insert("TERRARIUM_GIT_TRAILERS".into(), p.trailers);
         cmd.env.remove("TERRARIUM_GIT_TRAILERS_FILE");
     }
+    cmd.check()?;
+    let sync = workspace_sync::prepare(
+        state,
+        actor,
+        &def,
+        cmd.agent.as_deref().or(cmd.holder.as_deref()),
+    )
+    .await?;
     let (run, report) = crate::run_kill::start(state, &def, &cmd)?;
     // The output is redacted for the caller (PLAN §16b.6, TER-33).
     let view = match actor {
@@ -1669,6 +1694,7 @@ async fn start_exec_secrets(
         state.executor.buffer_limit,
     );
     sess.set_kill_report(report);
+    workspace_sync::finish_with(&sess, sync);
     tokio::spawn(attach(run, sess.clone(), ctl, false, false));
     state.executor.insert(sess.clone());
     let mut detail = json!({"session": sess.id, "kind": targets::kind_str(row.def.kind),
@@ -2074,6 +2100,7 @@ pub async fn start_cp(
     check_cap(state, actor)?;
     no_exec(&row.def)?;
     let def = resolved_def(state, &row, Some(actor), body.agent.as_deref()).await?;
+    let sync = workspace_sync::prepare(state, actor, &def, body.agent.as_deref()).await?;
     let push = body.direction == CpDirection::Push;
     let (sess, ctl) = ExecSession::new(
         name,
@@ -2081,6 +2108,7 @@ pub async fn start_cp(
         if push { "push" } else { "pull" },
         state.executor.buffer_limit,
     );
+    workspace_sync::finish_with(&sess, sync);
     match def.kind {
         TargetKind::Host => {
             let host = host_of(&def)?;

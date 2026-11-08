@@ -4127,6 +4127,9 @@ pub struct AdminTargetNewArgs {
     /// credential
     #[arg(long)]
     pub credential: Option<String>,
+    /// `ssh`: rsync the agent workspace before and after commands
+    #[arg(long)]
+    pub sync_workspace: bool,
     /// `vnc`, `rdp`: the user name
     #[arg(long)]
     pub username: Option<String>,
