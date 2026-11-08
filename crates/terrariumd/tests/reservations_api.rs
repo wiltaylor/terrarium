@@ -97,3 +97,31 @@ async fn reservation_wait_resolves_on_start_and_reconciles_already_active() {
     assert_eq!(td.get(&format!("/api/waits/{late_id}")).await.ok()["state"], "resolved");
     client.abort(); server.abort();
 }
+
+#[tokio::test]
+async fn exclusive_budget_pins_owner_and_excludes_shared_workloads() {
+    use terrarium_core::{config::TargetKind, resources::Amounts};
+    use terrariumd::store::{reservations::{self as r, Holder, Request}, targets};
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    state.db.write("system", |tx| {
+        let r = r::request(tx, Request {
+            host:"h".into(), project:"p".into(), holder:Holder::Target("p-box".into()), target:"p-box".into(),
+            amounts:Amounts { cpu_millis:1000, ..Default::default() }, exclusive:true,
+            reason:"test".into(), duration_ms:1_800_000, queue_ms:None,
+        }, chrono::Utc::now().timestamp_millis())?;
+        r::activate(tx, &r.id)?;
+        Ok(())
+    }).await.unwrap();
+    let (owner, shared) = state.db.read(|c| Ok((targets::get(c,"p-box")?.def, targets::get(c,"p-box2")?.def))).await.unwrap();
+    assert_eq!(terrariumd::reservations::docker_budget(&state,&owner).unwrap().unwrap().cpus, Some(vec![0]));
+    assert_eq!(terrariumd::reservations::docker_budget(&state,&shared).unwrap().unwrap().cpus, Some(vec![1,2,3]));
+    let mut host = shared.clone(); host.kind = TargetKind::Host;
+    assert!(terrariumd::reservations::exec_budget(&state,&host,Some("p/worker")).unwrap().is_some());
+    for kind in [TargetKind::Vmlab, TargetKind::Ssh] {
+        host.kind = kind;
+        assert!(terrariumd::reservations::lifecycle_admission(&state,&host).is_err());
+        assert!(terrariumd::reservations::exec_budget(&state,&host,Some("p/worker")).is_err());
+    }
+    client.abort(); server.abort();
+}

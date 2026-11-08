@@ -2474,6 +2474,7 @@ fn docker_limits(state: &Shared, def: &TargetDef) -> ApiResult<Option<Limits>> {
 }
 
 async fn docker_start(state: &Shared, def: &TargetDef) -> ApiResult<()> {
+    crate::reservations::before_docker_start(state, def).await?;
     let container = container_name(def);
     verb_ok(state, def, "docker.start", move |session| {
         DaemonFrame::DockerStart(DockerStart {
@@ -2568,6 +2569,9 @@ pub async fn lifecycle(
     if is_instance_kind(def) && !opts.inner {
         // Boxed: an instance verb runs `lifecycle` on the instance's lab dir.
         return Box::pin(instance_lifecycle(state, def, verb_kind, opts)).await;
+    }
+    if verb_kind == V::Up {
+        crate::reservations::lifecycle_admission(state, def)?;
     }
     let mut add_snapshot = None;
     let mut result = None;

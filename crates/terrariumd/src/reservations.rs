@@ -247,7 +247,23 @@ async fn finish(state: &Shared, r: &Reservation) -> ApiResult<Reservation> {
             Ok(())
         }).await?;
     }
-    apply(state, r, true).await?;
+    let restored = apply(state, r, true).await;
+    if t.def.kind == TargetKind::Docker && (restored.is_err() || t.def.ephemeral) && t.state == "running" {
+        let container = executor::container_name(&t.def);
+        executor::verb_ok(state, &t.def, "reservation cleanup fallback stop", move |session| {
+            DaemonFrame::DockerStop(terrarium_host::protocol::DockerStop {
+                session, container, grace_secs: Some(10), timeout_secs: Some(120),
+            })
+        }).await?;
+        let target = r.target.clone();
+        let id = r.id.clone();
+        let error = restored.err().map(|e| e.message);
+        state.db.write("system", move |tx| {
+            targets::set_state(tx, &target, "stopped", None)?;
+            tx.audit("reserve.cleanup_stop", &id, None, json!({"target":target,"restore_error":error}))?;
+            Ok(())
+        }).await?;
+    } else { restored?; }
     if r.exclusive { isolate(state, &r.host, Some(&r.id)).await?; }
     let id = r.id.clone();
     state.db.write("system", move |tx| store::finish_end(tx, &id)).await
@@ -343,6 +359,47 @@ pub fn docker_budget(state: &Shared, def: &TargetDef) -> ApiResult<Option<Runtim
         }
         Ok(None)
     })
+}
+
+/// Lifecycle admission shares the same host-wide exclusion boundary as exec.
+pub fn lifecycle_admission(state: &Shared, def: &TargetDef) -> ApiResult<()> {
+    let Some(host) = &def.host else { return Ok(()); };
+    state.db.read_now(|c| {
+        let rows = store::list(c, host)?;
+        if rows.iter().any(|r| managed(r) && r.exclusive) && !matches!(def.kind, TargetKind::Host | TargetKind::Docker) {
+            return Err(ApiError::conflict("exclusive CPU reservations prohibit vmlab and SSH paths on this host"));
+        }
+        if rows.iter().any(|r| r.holder == Holder::Target(def.name.clone()) && managed(r)
+            && (r.state != State::Active || r.until.is_some_and(|u| u <= now()))) {
+            return Err(ApiError::conflict("reservation enforcement or cleanup is pending"));
+        }
+        Ok(())
+    })
+}
+
+/// A permanent stopped container does not run create-time flags again.
+/// Supported limits are always refreshed before start, including defaults
+/// left behind by a reservation whose cleanup had to stop the container.
+pub async fn before_docker_start(state: &Shared, def: &TargetDef) -> ApiResult<()> {
+    let reservation = docker_budget(state, def)?;
+    let supported = def.host.as_deref().and_then(|h| state.executor.hosts.capabilities(h)).is_some_and(|c| c.reservations);
+    if !supported {
+        if reservation.is_some() { return Err(ApiError::conflict("host is missing reservation support")); }
+        return Ok(());
+    }
+    let limits = reservation.unwrap_or(RuntimeLimits {
+        limits: def.limits.as_ref().map(|l| l.resolve()).transpose().map_err(ApiError::invalid)?.unwrap_or_default(),
+        ..Default::default()
+    });
+    if !limits.io.is_empty() {
+        return Err(ApiError::conflict("device IO limits need a newly created container at the next up; this permanent container already exists"));
+    }
+    let target = def.name.clone();
+    let container = Some(executor::container_name(def));
+    executor::verb_ok(state, def, "refresh Docker limits before start", move |session| DaemonFrame::ResourceApply(ResourceApply {
+        session, target, holder: String::new(), container, limits,
+    })).await?;
+    Ok(())
 }
 
 /// Future host commands share the host-wide agent slice or the target's
