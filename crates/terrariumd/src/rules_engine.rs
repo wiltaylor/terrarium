@@ -242,8 +242,9 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                         warn!(project = %project, "the stored rules do not parse; they run nothing: {e}");
                         let p = project.clone();
                         let data = json!({"hash": file_hash, "problems": rules::problems(&e)});
-                        let emitted = db.write("system", move |tx| {
-                            tx.emit(
+                        let emitted = db
+                            .write("system", move |tx| {
+                                tx.emit(
                                 events::EventDraft::new(
                                     "rules.invalid",
                                     "stored board rules no longer parse; own rules will not run",
@@ -251,9 +252,9 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                                 )
                                 .project(p),
                             )?;
-                            Ok(())
-                        })
-                        .await;
+                                Ok(())
+                            })
+                            .await;
                         if let Err(error) = emitted {
                             warn!(project = %project, %error, "could not record rules parse failure");
                         }

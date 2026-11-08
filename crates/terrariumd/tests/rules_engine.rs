@@ -170,11 +170,26 @@ async fn stored_rules_schema_failure_is_visible() {
     assert!(problems[0]["column"].is_number());
     assert!(problems[0]["message"].is_string());
 
-    let effective = td.get("/api/projects/broken/rules/effective").await.ok().clone();
+    let effective = td
+        .get("/api/projects/broken/rules/effective")
+        .await
+        .ok()
+        .clone();
     assert_eq!(effective["problems"], body["problems"]);
-    let lint = td.post("/api/projects/broken/rules/lint", json!({})).await.ok().clone();
+    let lint = td
+        .post("/api/projects/broken/rules/lint", json!({}))
+        .await
+        .ok()
+        .clone();
     assert_eq!(lint["problems"], body["problems"]);
-    let lint_text = td.post("/api/projects/broken/rules/lint", json!({"text": TWO_STEPS})).await.ok().clone();
+    let lint_text = td
+        .post(
+            "/api/projects/broken/rules/lint",
+            json!({"text": TWO_STEPS}),
+        )
+        .await
+        .ok()
+        .clone();
     assert_eq!(lint_text["problems"], json!([]));
 
     let mut cache = rules_engine::Cache::default();
@@ -215,10 +230,16 @@ async fn stored_rules_schema_failure_is_visible() {
     assert_eq!(data.len() as i64, before + 1);
     // A second load of the same revision must not emit another diagnostic.
     rules_engine::load(&db, &mut cache).await.unwrap();
-    let after: i64 = db.read(|c| Ok(c.query_row(
-        "SELECT count(*) FROM events WHERE project = 'broken' AND kind = 'rules.invalid'",
-        [], |r| r.get(0),
-    )?)).await.unwrap();
+    let after: i64 = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM events WHERE project = 'broken' AND kind = 'rules.invalid'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
     assert_eq!(after, before + 1);
     for data in data {
         let data: Value = serde_json::from_str(&data).unwrap();
@@ -227,13 +248,19 @@ async fn stored_rules_schema_failure_is_visible() {
     }
 
     db.write("system", |tx| {
-        tx.execute_batch("CREATE TRIGGER block_rules_invalid BEFORE INSERT ON events
+        tx.execute_batch(
+            "CREATE TRIGGER block_rules_invalid BEFORE INSERT ON events
             WHEN NEW.kind = 'rules.invalid'
-            BEGIN SELECT RAISE(FAIL, 'test event failure'); END;")?;
+            BEGIN SELECT RAISE(FAIL, 'test event failure'); END;",
+        )?;
         Ok(())
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     // Failure to record a diagnostic must not fail the engine pass.
-    let loaded = rules_engine::load(&db, &mut rules_engine::Cache::default()).await.unwrap();
+    let loaded = rules_engine::load(&db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
     assert!(loaded.iter().any(|p| p.project == "broken"));
 }
 
