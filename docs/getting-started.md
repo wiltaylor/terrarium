@@ -1866,6 +1866,15 @@ updater has it.
    It logs changed key names, never values. Missing mounts, unreadable files,
    or failed Compose interpolation stop the update before the swap. Automatic
    recovery after a failed swap uses the original container environment.
+   Shell-only variables used to start a source checkout are not retained:
+   put deployment settings in `.env` or a Compose env file. Compose runs with
+   HOME and a fixed PATH, plus the updater's deployment path and image overrides,
+   not the updater's old service environment.
+   Explicit rollback uses the recorded old container spec and backup without
+   resolving Compose again, so a broken `.env` does not prevent rollback.
+   Switches made before container specs were recorded cannot be rolled back
+   by the updater. The recorded spec contains environment values and is stored
+   in the updater state directory with owner-only file permissions.
 
    **Existing server installs: one-time updater migration.** This is a deploy
    step for the deployment owner, not a self-update. Schedule a maintenance

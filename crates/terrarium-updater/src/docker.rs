@@ -365,8 +365,9 @@ fn resolved_env(config: &Value, service: &str) -> Res<Vec<String>> {
 }
 
 fn with_environment(spec: &Container, env: Vec<String>) -> Container {
-    let old = env_map(&create_body(&spec.spec, &spec.image.reference)["Env"]);
-    let new = env_map(&json!(env));
+    let old = env_map(&spec.spec["container"]["Config"]["Env"]);
+    let mut new = env_map(&spec.spec["image"]["Env"]);
+    new.extend(env_map(&json!(env)));
     let keys: BTreeSet<_> = old.keys().chain(new.keys()).collect();
     let changed: Vec<_> = keys
         .into_iter()
@@ -377,6 +378,16 @@ fn with_environment(spec: &Container, env: Vec<String>) -> Container {
     prepared.spec["changed_env_keys"] = json!(changed);
     prepared.spec["compose_env"] = json!(env);
     prepared
+}
+
+fn compose_command() -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("docker");
+    // Never inherit the updater's old interpolated service environment.
+    cmd.env_clear().env("PATH", "/usr/local/bin:/usr/bin:/bin");
+    if let Some(home) = std::env::var_os("HOME") {
+        cmd.env("HOME", home);
+    }
+    cmd
 }
 
 /// The body of `POST /containers/create` for a container like `spec`
@@ -548,11 +559,8 @@ impl Engine for Docker {
             let service = labels[LABEL_SERVICE]
                 .as_str()
                 .ok_or_else(|| "missing Compose service (values hidden)".to_owned())?;
-            let mut cmd = tokio::process::Command::new("docker");
-            // Never inherit the updater's old interpolated environment.
-            cmd.env_clear()
-                .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-                .args(["compose", "--project-name", project, "--project-directory"])
+            let mut cmd = compose_command();
+            cmd.args(["compose", "--project-name", project, "--project-directory"])
                 .arg(&directory)
                 .current_dir(&directory);
             for file in files.split(',') {
@@ -802,6 +810,21 @@ mod tests {
     }
 
     #[test]
+    fn compose_keeps_home_and_path_but_not_service_environment() {
+        let cmd = compose_command();
+        let env: BTreeMap<_, _> = cmd.as_std().get_envs().collect();
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("HOME")).copied().flatten(),
+            std::env::var_os("HOME").as_deref()
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("PATH")).copied().flatten(),
+            Some(std::ffi::OsStr::new("/usr/local/bin:/usr/bin:/bin"))
+        );
+        assert!(env.keys().all(|k| *k == "HOME" || *k == "PATH"));
+    }
+
+    #[test]
     fn fresh_environment_replaces_removed_keys_and_preserves_explicit_image_defaults() {
         let original = Container {
             id: "old".into(),
@@ -823,7 +846,7 @@ mod tests {
         );
         assert_eq!(
             prepared.spec["changed_env_keys"],
-            json!(["HOME", "TERRARIUM_MAIL_LOOP_LIMIT", "TERRARIUM_TOKEN"])
+            json!(["TERRARIUM_MAIL_LOOP_LIMIT", "TERRARIUM_TOKEN"])
         );
         assert_eq!(
             create_body(&original.spec, "old:1")["Env"],

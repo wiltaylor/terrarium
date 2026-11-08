@@ -390,7 +390,7 @@ impl Updater {
         self.with_run(|r| r.from = Some(cur.image.clone()));
 
         // The image to switch to, and the backup to restore first.
-        let (to, restore) = match kind {
+        let (to, restore, recorded) = match kind {
             RunKind::Update => {
                 let tag = tag_of(target).unwrap_or_default();
                 let repo = self.cfg.repository.clone();
@@ -428,7 +428,7 @@ impl Updater {
                     })
                     .await
                     .map_err(failed)?;
-                (to, None)
+                (to, None, None)
             }
             RunKind::Rollback => {
                 let Some(prev) = self.store.previous() else {
@@ -441,26 +441,44 @@ impl Updater {
                         "the last switch made no backup; a rollback cannot restore the data".into(),
                     )));
                 };
+                let spec = prev.spec.clone().ok_or_else(|| failed(Fail(
+                    "the last switch has no recorded container spec; rollback cannot safely restore its environment".into(),
+                )))?;
                 let to = self.local_or_pull(&prev).await.map_err(failed)?;
                 self.skip("verify", "the image ran here before");
-                (to, Some(backup))
+                (to, Some(backup), Some(spec))
             }
         };
         self.with_run(|r| r.to = Some(to.clone()));
 
         let prepared = self
-            .step("environment", self.engine.prepare(&cur), |c| {
-                let keys = c.spec["changed_env_keys"].as_array();
-                format!(
-                    "resolved deployment environment; changed keys (values hidden): {}",
-                    keys.map(|a| a
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "))
-                        .unwrap_or_default()
-                )
-            })
+            .step(
+                "environment",
+                async {
+                    if let Some(spec) = recorded {
+                        let mut saved = cur.clone();
+                        saved.spec = spec;
+                        Ok(saved)
+                    } else {
+                        self.engine.prepare(&cur).await
+                    }
+                },
+                |c| {
+                    if kind == RunKind::Rollback {
+                        return "using recorded container environment (values hidden)".into();
+                    }
+                    let keys = c.spec["changed_env_keys"].as_array();
+                    format!(
+                        "resolved deployment environment; changed keys (values hidden): {}",
+                        keys.map(|a| a
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                            .unwrap_or_default()
+                    )
+                },
+            )
             .await
             .map_err(failed)?;
 
@@ -500,6 +518,7 @@ impl Updater {
             Ok(()) => {
                 let prev = Previous {
                     image: cur.image.clone(),
+                    spec: Some(cur.spec.clone()),
                     backup: Some(backup),
                 };
                 if let Err(e) = self.store.set_previous(&prev) {

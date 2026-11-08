@@ -98,7 +98,9 @@ impl Engine for Fake {
             if self.0.lock().unwrap().fail.contains("environment") {
                 return Err("Compose environment resolution failed (values hidden)".into());
             }
-            Ok(spec.clone())
+            let mut prepared = spec.clone();
+            prepared.spec["prepared"] = serde_json::json!(true);
+            Ok(prepared)
         })
     }
     fn target(&self) -> BoxFut<'_, Res<Container>> {
@@ -514,6 +516,12 @@ async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
         .run_now(RunKind::Update, "latest", "operator")
         .await;
     assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
+    assert!(
+        r.fake.0.lock().unwrap().containers["terrarium"]
+            .spec
+            .get("prepared")
+            .is_none()
+    );
     assert!(run.error.as_deref().unwrap().contains("health: unhealthy"));
     assert_eq!(
         steps(&run),
@@ -587,6 +595,12 @@ async fn a_rollback_restores_the_backup_of_the_last_switch() {
             .outcome,
         Outcome::Succeeded
     );
+    assert_eq!(
+        r.fake.0.lock().unwrap().containers["terrarium"].spec["prepared"],
+        true
+    );
+    // Model invalid Compose interpolation after the successful update.
+    r.fake.fail("environment");
     let run = r
         .updater
         .run_now(RunKind::Rollback, "previous", "agent:01SYS")
@@ -613,11 +627,41 @@ async fn a_rollback_restores_the_backup_of_the_last_switch() {
         "the old image restores the backup of the update"
     );
     assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
+    assert!(
+        r.fake.0.lock().unwrap().containers["terrarium"]
+            .spec
+            .get("prepared")
+            .is_none()
+    );
     // A rollback of the rollback goes forward again.
     let prev = r.store.previous().unwrap();
     assert_eq!(prev.image.reference, new_ref());
     assert_eq!(r.store.image().as_deref(), Some(OLD));
     assert_eq!(run.actor, "agent:01SYS");
+}
+
+#[tokio::test]
+async fn legacy_rollback_without_a_recorded_spec_stops_before_drain() {
+    let r = rig();
+    r.updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    let mut previous = r.store.previous().unwrap();
+    previous.spec = None;
+    r.store.set_previous(&previous).unwrap();
+    let run = r
+        .updater
+        .run_now(RunKind::Rollback, "previous", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Failed);
+    assert!(
+        run.error
+            .as_deref()
+            .unwrap()
+            .contains("no recorded container spec")
+    );
+    assert_eq!(steps(&run), ["inspect"]);
+    assert_eq!(r.fake.running_image().as_deref(), Some(new_ref().as_str()));
 }
 
 #[tokio::test]

@@ -28,6 +28,9 @@ pub const IMAGE: &str = "image";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Previous {
     pub image: Image,
+    /// Original engine spec, including environment. Never include in logs.
+    #[serde(default)]
+    pub spec: Option<serde_json::Value>,
     /// The path of the backup (in the terrarium container) that the
     /// switch away from `image` made.
     pub backup: Option<String>,
@@ -113,7 +116,19 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .unwrap_or_default();
     let tmp = dir.join(format!(".{name}.tmp"));
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut f = options.open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         f.write_all(bytes)?;
         f.sync_all()?;
     }
@@ -168,6 +183,7 @@ mod tests {
         s.set_image("ghcr.io/x/y@sha256:ab").unwrap();
         assert_eq!(s.image().as_deref(), Some("ghcr.io/x/y@sha256:ab"));
         let p = Previous {
+            spec: Some(serde_json::json!({"container": {"Config": {"Env": ["SETTING=old"]}}})),
             image: Image {
                 reference: "terrarium:dev".into(),
                 id: "sha256:1".into(),
@@ -177,6 +193,18 @@ mod tests {
         };
         s.set_previous(&p).unwrap();
         assert_eq!(s.previous(), Some(p));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(s.dir().join(PREVIOUS))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         // A bad file reads as empty.
         std::fs::write(dir.path().join("sub").join(HISTORY), "{").unwrap();
         assert!(s.history().is_empty());
