@@ -66,35 +66,25 @@ async fn notices(td: &TestDaemon, who: &str) -> usize {
         .count()
 }
 
-async fn settled_signals(td: &TestDaemon, card: &str, expected: Value) {
-    let start = std::time::Instant::now();
-    loop {
-        terrariumd::trouble::pass(&state(td)).await;
-        if usage(td, card).await["signals"] == expected {
-            return;
-        }
-        assert!(
-            start.elapsed() < crate::common::WAIT,
-            "trouble signals did not settle"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+async fn assert_signals(td: &TestDaemon, card: &str, expected: Value) {
+    terrariumd::trouble::pass(&state(td)).await;
+    assert_eq!(usage(td, card).await["signals"], expected);
 }
 
 #[tokio::test]
 async fn notice_is_once_across_ticks_resolution_recurrence_and_restart() {
     let (mut td, lead, worker, card) = setup().await;
     eta(&td, &card, true).await;
-    settled_signals(&td, &card, json!(["eta_overdue"])).await;
+    assert_signals(&td, &card, json!(["eta_overdue"])).await;
     terrariumd::trouble::pass(&state(&td)).await;
     assert_eq!(usage(&td, &card).await["signals"], json!(["eta_overdue"]));
     assert_eq!(notices(&td, &lead).await, 1);
     assert_eq!(notices(&td, &worker).await, 1);
     eta(&td, &card, false).await;
-    settled_signals(&td, &card, json!([])).await;
+    assert_signals(&td, &card, json!([])).await;
     td.boot(None, None).await;
     eta(&td, &card, true).await;
-    settled_signals(&td, &card, json!(["eta_overdue"])).await;
+    assert_signals(&td, &card, json!(["eta_overdue"])).await;
     assert_eq!(notices(&td, &lead).await, 1);
     assert_eq!(notices(&td, &worker).await, 1);
     assert_eq!(
@@ -117,7 +107,7 @@ async fn notice_is_once_across_ticks_resolution_recurrence_and_restart() {
     )
     .await
     .ok();
-    settled_signals(&td, &card, json!([])).await;
+    assert_signals(&td, &card, json!([])).await;
 }
 
 #[tokio::test]
@@ -181,7 +171,7 @@ async fn token_and_turn_budget_crossings_clear_when_disabled() {
         })
         .await
         .unwrap();
-    settled_signals(&td, &card, json!(["turn_budget"])).await;
+    assert_signals(&td, &card, json!(["turn_budget"])).await;
     let c = card.clone();
     state(&td)
         .db
@@ -194,11 +184,11 @@ async fn token_and_turn_budget_crossings_clear_when_disabled() {
         })
         .await
         .unwrap();
-    settled_signals(&td, &card, json!(["token_budget", "turn_budget"])).await;
+    assert_signals(&td, &card, json!(["token_budget", "turn_budget"])).await;
     td.put_as(&lead, "/api/projects/p/trouble", json!({}))
         .await
         .ok();
-    settled_signals(&td, &card, json!([])).await;
+    assert_signals(&td, &card, json!([])).await;
 }
 
 #[tokio::test]
@@ -248,7 +238,7 @@ async fn history_signals_and_working_time_reach_the_card_and_board() {
         "time_budget",
         "timer_polls"
     ]);
-    settled_signals(&td, &card, expected.clone()).await;
+    assert_signals(&td, &card, expected.clone()).await;
     let u = usage(&td, &card).await;
     assert_eq!(u["signals"], expected);
     assert!(u["working_seconds"].as_u64().unwrap() >= 90);
@@ -262,7 +252,7 @@ async fn history_signals_and_working_time_reach_the_card_and_board() {
     terrariumd::trouble::pass(&state(&td)).await;
     assert_eq!(notices(&td, &lead).await, 5);
     td.put_as(&lead, "/api/projects/p/trouble", json!({"time_seconds": {"small": 0}, "review_rounds": 0, "eta_delays": 0, "compactions": 0, "timer_polls": 0})).await.ok();
-    settled_signals(&td, &card, json!([])).await;
+    assert_signals(&td, &card, json!([])).await;
 }
 
 #[tokio::test]
@@ -288,6 +278,13 @@ async fn deploy_baseline_ignores_existing_cards_until_a_new_claim() {
     assert_eq!(notices(&td, &lead).await, 0);
     td.post_as(
         &worker,
+        &format!("/api/cards/{card}/move"),
+        json!({"column": "ready"}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        &worker,
         &format!("/api/cards/{card}/assign"),
         json!({"assignee": null}),
     )
@@ -297,7 +294,7 @@ async fn deploy_baseline_ignores_existing_cards_until_a_new_claim() {
         .await
         .ok();
     eta(&td, &card, true).await;
-    settled_signals(&td, &card, json!(["eta_overdue"])).await;
+    assert_signals(&td, &card, json!(["eta_overdue"])).await;
     assert_eq!(notices(&td, &lead).await, 1);
 }
 
@@ -325,11 +322,11 @@ async fn review_wait_marks_and_clears_on_return_to_work() {
             rusqlite::params![c, (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339()])?;
         Ok(())
     }).await.unwrap();
-    settled_signals(&td, &card, json!(["review_wait"])).await;
+    assert_signals(&td, &card, json!(["review_wait"])).await;
     td.post_as(&worker, &format!("/api/cards/{card}/claim"), json!({}))
         .await
         .ok();
-    settled_signals(&td, &card, json!([])).await;
+    assert_signals(&td, &card, json!([])).await;
 }
 
 #[tokio::test]
@@ -378,4 +375,43 @@ async fn real_claim_status_and_wait_events_drive_the_working_clock() {
     assert!(
         usage(&td, &card).await["working_seconds"].as_u64().unwrap() > resting.as_u64().unwrap()
     );
+}
+
+#[tokio::test]
+async fn lead_assigned_card_is_monitored_without_a_claimed_event() {
+    use std::time::Duration;
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let lead = id(&td
+        .agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await);
+    let worker = id(&td
+        .agent("p", "worker", json!({"card_reminder": false}))
+        .await);
+    let card = id(td
+        .post_as(
+            &lead,
+            "/api/projects/p/cards",
+            json!({"title": "Assigned", "column": "ready", "assignee": worker}),
+        )
+        .await
+        .ok());
+    // The lead's assignment means this claim emits only the working move.
+    td.post_as(&worker, &format!("/api/cards/{card}/claim"), json!({}))
+        .await
+        .ok();
+    let c = card.clone();
+    let claims: i64 = state(&td).db.read(move |db| Ok(db.query_row("SELECT count(*) FROM events WHERE card = ?1 AND json_extract(payload, '$.change') = 'claimed'", [c], |r| r.get(0))?)).await.unwrap();
+    assert_eq!(claims, 0);
+    td.post_empty(&format!("/api/agents/{worker}/start"))
+        .await
+        .ok();
+    td.wait_status(&worker, "idle").await;
+    td.sup.open_turn(worker.parse().unwrap());
+    td.wait_status(&worker, "working").await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(usage(&td, &card).await["working_seconds"].as_u64().unwrap() >= 1);
+    eta(&td, &card, true).await;
+    assert_signals(&td, &card, json!(["eta_overdue"])).await;
+    assert_eq!(notices(&td, &lead).await, 1);
 }

@@ -104,12 +104,16 @@ fn parse(s: &str) -> Option<DateTime<Utc>> {
 }
 
 fn history(c: &Connection, card: &str) -> ApiResult<Vec<Event>> {
-    // Start at the first claim after installation, not at card creation.
+    // Start at the first working-role entry after installation, regardless
+    // of who assigned/moved the card. A claim need not emit 'claimed'.
     // Only explicit assignees contribute status/wait/reset events. A lead
     // commenting on the card cannot pull in the lead's lifetime history.
     let start: Option<i64> = c.query_row(
         "SELECT min(seq) FROM events
-        WHERE card = ?1 AND kind = 'card' AND json_extract(payload, '$.change') = 'claimed'
+        WHERE card = ?1 AND kind = 'card' AND (
+          (json_extract(payload, '$.change') = 'moved' AND json_extract(payload, '$.to_role') = 'working'
+           AND coalesce(json_extract(payload, '$.from_role'), '') <> 'working')
+          OR (json_extract(payload, '$.change') = 'created' AND json_extract(payload, '$.column_role') = 'working'))
         AND seq > (SELECT seq FROM card_trouble_baseline WHERE singleton = 1)",
         [card],
         |r| r.get(0),
@@ -119,9 +123,10 @@ fn history(c: &Connection, card: &str) -> ApiResult<Vec<Event>> {
     };
     let mut q = c.prepare(
         "WITH assignees AS (
-            SELECT DISTINCT json_extract(payload, '$.assignee') AS agent FROM events
+            SELECT DISTINCT coalesce(json_extract(payload, '$.assignee'),
+                CASE WHEN json_extract(payload, '$.change') = 'created' THEN agent_id END) AS agent FROM events
             WHERE card = ?1 AND seq >= ?2 AND kind = 'card'
-            AND json_extract(payload, '$.change') IN ('claimed', 'assigned')
+            AND json_extract(payload, '$.change') IN ('created', 'claimed', 'assigned', 'moved')
         ) SELECT e.at, e.kind, e.agent_id, e.card,
           CASE WHEN e.kind = 'wait' THEN json_set(e.payload, '$.due_at', w.due_at) ELSE e.payload END
         FROM events e LEFT JOIN waits w ON e.kind = 'wait' AND w.id = json_extract(e.payload, '$.wait_id')
@@ -239,7 +244,7 @@ fn facts(card: &str, events: &[Event], now: DateTime<Utc>) -> Facts {
                     if d["change"] == "moved" && (d["to_role"] == "review" || d["to"] == "review") {
                         f.reviews += 1;
                         f.review_since = Some(e.at);
-                    } else {
+                    } else if d["change"] == "moved" {
                         f.review_since = None;
                     }
                     if d["change"] == "moved" {
@@ -360,6 +365,7 @@ struct Watched {
 }
 
 struct Change {
+    expected: CardRevision,
     card: Watched,
     signals: BTreeSet<String>,
     facts: Facts,
@@ -439,9 +445,7 @@ fn desired(
             card: Some(card.id.clone()),
             since: events
                 .iter()
-                .find(|e| {
-                    e.card.as_deref() == Some(card.id.as_str()) && e.data["change"] == "claimed"
-                })
+                .find(|e| e.card.as_deref() == Some(card.id.as_str()))
                 .map(|e| crate::time_param::stored(e.at)),
             ..Default::default()
         },
@@ -472,6 +476,7 @@ fn reconcile(t: &mut Tx<'_>, change: &Change) -> ApiResult<()> {
         signals,
         facts: f,
         totals,
+        ..
     } = change;
     let mut q = t.prepare("SELECT signal, active FROM card_trouble WHERE card = ?1")?;
     let old = q
@@ -601,6 +606,7 @@ fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
         let old: BTreeSet<String> = active_signals(c, &card.id)?.into_iter().collect();
         if old != signals {
             changes.push(Change {
+                expected: revision(c, &card)?,
                 card,
                 signals,
                 facts,
@@ -611,21 +617,32 @@ fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
     Ok(changes)
 }
 
-fn revision(c: &Connection) -> ApiResult<(i64, i64)> {
+#[derive(Debug, PartialEq)]
+struct CardRevision {
+    event: i64,
+    tests: i64,
+    settings: Option<String>,
+}
+
+fn revision(c: &Connection, card: &Watched) -> ApiResult<CardRevision> {
     Ok(c.query_row(
-        "SELECT (SELECT coalesce(max(seq), 0) FROM events),
-        (SELECT coalesce(max(seq), 0) FROM audit)",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        "SELECT (SELECT coalesce(max(seq), 0) FROM events WHERE card = ?1),
+        (SELECT coalesce(max(run), 0) FROM test_run_cards WHERE card = ?1),
+        (SELECT settings FROM project_trouble WHERE project = ?2)",
+        params![card.id, card.project],
+        |r| {
+            Ok(CardRevision {
+                event: r.get(0)?,
+                tests: r.get(1)?,
+                settings: r.get(2)?,
+            })
+        },
     )?)
 }
 
 pub async fn pass(state: &Shared) {
-    let planned = state
-        .db
-        .read(|c| Ok((revision(c)?, plan(c, Utc::now())?)))
-        .await;
-    let (expected, changes) = match planned {
+    let planned = state.db.read(|c| plan(c, Utc::now())).await;
+    let changes = match planned {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("card trouble read failed: {e}");
@@ -638,13 +655,13 @@ pub async fn pass(state: &Shared) {
     if let Err(e) = state
         .db
         .write("system", move |t| {
-            // A move, status, wait, reassignment or settings change won the
-            // race with the read. Retry next tick, without replaying in a write.
-            if revision(t)? != expected {
-                return Ok(());
-            }
+            // Only a change to this card, its linked tests, or its project
+            // thresholds invalidates its plan. Unrelated status/audit traffic
+            // must not starve notices. Clock/usage growth is seen next tick.
             for change in changes {
-                reconcile(t, &change)?;
+                if revision(t, &change.card)? == change.expected {
+                    reconcile(t, &change)?;
+                }
             }
             Ok(())
         })
@@ -874,7 +891,7 @@ mod tests {
             "card",
             "worker",
             Some("P-1"),
-            json!({"change": "claimed", "assignee": "worker", "column_role": "working"}),
+            json!({"change": "moved", "assignee": "worker", "column": "build", "column_role": "working", "to_role": "working", "from_role": "ready"}),
         );
         add(111, "status", "worker", None, json!({"status": "working"}));
         add(112, "status", "lead", None, json!({"status": "working"}));
@@ -895,6 +912,75 @@ mod tests {
                 .all(|e| e.agent.as_deref() == Some("worker"))
         );
         assert_eq!(facts("P-1", &events, at(120)).seconds, 10);
+    }
+
+    #[test]
+    fn assignment_and_claim_in_review_preserve_review_age() {
+        let e = vec![
+            event(
+                10,
+                "card",
+                "a",
+                json!({"change": "moved", "to_role": "review", "column_role": "review"}),
+            ),
+            event(
+                20,
+                "card",
+                "a",
+                json!({"change": "assigned", "assignee": "b", "column_role": "review"}),
+            ),
+            event(
+                30,
+                "card",
+                "b",
+                json!({"change": "claimed", "assignee": "b", "column_role": "review"}),
+            ),
+        ];
+        let f = facts("P-1", &e, at(40));
+        assert_eq!(f.review_since, Some(at(10)));
+        assert_eq!(f.reviews, 1);
+    }
+
+    #[test]
+    fn unrelated_events_do_not_invalidate_a_card_plan() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE events(seq INTEGER PRIMARY KEY, card TEXT);
+            CREATE TABLE test_run_cards(run INTEGER, card TEXT);
+            CREATE TABLE project_trouble(project TEXT, settings TEXT);
+            INSERT INTO events VALUES (1, 'P-1');",
+        )
+        .unwrap();
+        let card = Watched {
+            id: "P-1".into(),
+            project: "p".into(),
+            title: "Build".into(),
+            column: "doing".into(),
+            column_role: Some("working".into()),
+            agent: Some("a".into()),
+            labels: vec![],
+            eta_at: None,
+            archived: false,
+        };
+        let expected = revision(&c, &card).unwrap();
+        c.execute_batch(
+            "INSERT INTO events VALUES (2, 'P-2'), (3, NULL);
+            INSERT INTO test_run_cards VALUES (1, 'P-2');
+            INSERT INTO project_trouble VALUES ('other', '{}');",
+        )
+        .unwrap();
+        assert_eq!(revision(&c, &card).unwrap(), expected);
+        c.execute("INSERT INTO events VALUES (4, 'P-1')", [])
+            .unwrap();
+        assert_ne!(revision(&c, &card).unwrap(), expected);
+        let expected = revision(&c, &card).unwrap();
+        c.execute("INSERT INTO test_run_cards VALUES (2, 'P-1')", [])
+            .unwrap();
+        assert_ne!(revision(&c, &card).unwrap(), expected);
+        let expected = revision(&c, &card).unwrap();
+        c.execute("INSERT INTO project_trouble VALUES ('p', '{}')", [])
+            .unwrap();
+        assert_ne!(revision(&c, &card).unwrap(), expected);
     }
 
     #[test]

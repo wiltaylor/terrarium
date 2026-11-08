@@ -22,17 +22,23 @@ pub struct WorkSample {
 /// Most recent completed estimates, excluding jobs, superseded guesses,
 /// clears, open work and invalid timestamps. The first subsequent ETA or
 /// move closes an estimate, but only a move supplies a completed sample.
+/// Only the newest 2000 ETA events in the project are candidates. Matching
+/// partial indexes bound both that window and each closing-edge lookup.
 pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSample>> {
     let mut stmt = conn.prepare(
-        "SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
+        "WITH recent AS MATERIALIZED (
+            SELECT seq, at, card, payload FROM events
+            WHERE project = ?1 AND kind = 'card'
+              AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'eta'
+            ORDER BY seq DESC LIMIT 2000
+         ) SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
                 coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]'), e.seq, x.seq, e.card
-         FROM events e JOIN events x ON x.seq = (
+         FROM recent e JOIN events x ON x.seq = (
            SELECT min(n.seq) FROM events n WHERE n.card = e.card AND n.seq > e.seq
-             AND n.kind = 'card' AND json_extract(n.payload, '$.change') IN ('eta','moved'))
+             AND n.kind = 'card'
+             AND CASE WHEN json_valid(n.payload) THEN json_extract(n.payload, '$.change') END IN ('eta','moved'))
          LEFT JOIN cards c ON c.id = e.card
-         WHERE e.project = ?1 AND e.kind = 'card'
-           AND json_extract(e.payload, '$.change') = 'eta'
-           AND coalesce(json_extract(e.payload, '$.column_role'), json_extract(e.payload, '$.column')) IN ('working', 'in_progress')
+         WHERE coalesce(json_extract(e.payload, '$.column_role'), json_extract(e.payload, '$.column')) IN ('working', 'in_progress')
            AND coalesce(json_extract(e.payload, '$.job'), 0) = 0
            AND json_extract(x.payload, '$.change') = 'moved'
          ORDER BY x.seq DESC",
@@ -340,6 +346,43 @@ mod tests {
         assert_eq!(samples[0].actual_ms, 240000.0);
         assert_eq!(samples[0].guess_ms, 540000.0);
         assert_eq!(samples[0].labels, vec!["type:impl"]);
+    }
+
+    #[test]
+    fn worker_samples_bound_candidates_and_use_estimate_edge_indexes() {
+        let c = db();
+        c.execute_batch(include_str!(
+            "../../migrations/ter-79-work-sample-bounds.sql"
+        ))
+        .unwrap();
+        let eta = json!({"change":"eta","column_role":"working","eta_at":"2026-11-08T00:10:00Z"})
+            .to_string();
+        c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES ('p','old','card','2026-11-08T00:00:00Z',?1)", [&eta]).unwrap();
+        moved(&c, "p", "old", 5, "working", "review");
+        assert_eq!(work_samples(&c, "p").unwrap().len(), 1);
+        for n in 0..2000 {
+            c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES ('p',?1,'card','2026-11-08T00:00:00Z',?2)", params![format!("open-{n}"), eta]).unwrap();
+        }
+        assert!(work_samples(&c, "p").unwrap().is_empty());
+        for (sql, index) in [
+            (
+                "EXPLAIN QUERY PLAN SELECT seq FROM events WHERE project = 'p' AND kind = 'card' AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'eta' ORDER BY seq DESC LIMIT 2000",
+                "events_work_estimates",
+            ),
+            (
+                "EXPLAIN QUERY PLAN SELECT min(seq) FROM events WHERE card = 'old' AND seq > 1 AND kind = 'card' AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END IN ('eta','moved')",
+                "events_work_edges",
+            ),
+        ] {
+            let mut q = c.prepare(sql).unwrap();
+            let details = q
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join(" ");
+            assert!(details.contains(index), "{details}");
+        }
     }
 
     /// Run against a read-API export, never the daemon's live database.

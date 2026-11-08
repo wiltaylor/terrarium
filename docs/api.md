@@ -5717,11 +5717,12 @@ assignment, status and wait events: only an agent working on this card in a
 working/research column counts. Idle time, open waits and time in other
 columns do not count. Usage query date filters apply to token/turn totals,
 not the working clock or current marks. To avoid a deploy-time burst, only
-cards claimed after the trouble baseline migration are monitored. The
+cards entering the working-role column after the trouble baseline migration
+are monitored, including cards assigned by a lead. The
 baseline survives daemon restarts. Clock/history replay starts at the first
-such claim and reads only explicit assignees' status, wait and reset events,
+such entry and reads only explicit assignees' status, wait and reset events,
 not the lifetime history of agents who commented on the card. Budget usage
-starts at that claim. Interactive token usage totals retain their existing
+starts at that entry. Interactive token usage totals retain their existing
 all-time/date-filtered meaning.
 
 `GET /api/projects/{name}/trouble` reads the project's trouble thresholds.
@@ -5738,13 +5739,16 @@ defaults. Unknown fields and negative limits are rejected. Example:
 Time, token and turn maps are keyed by the suffix of the card's `type:` label
 (untyped cards use `impl`). Token/turn budgets are off until set. Time budgets
 use four times the project's type-specific p70 from completed card history
-(TER-316), requiring at least five distinct cards. With too few samples,
+(TER-316), requiring at least five distinct cards. Calibration inspects only
+the newest 2000 project ETA events, using partial indexes for both the
+candidate window and the subsequent ETA/move closing edge. With too few samples,
 they use the fixed fallbacks above (`hard` also uses four hours). Explicit
 project time overrides take precedence. A zero threshold disables that check.
 An ETA at or before now produces `eta_overdue`. The other signal names are
 `time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
 `validation_red`, `timer_polls`, `compactions` and `review_wait`. Review wait
 starts at the most recent entry into review and clears on return to work.
+Assignment changes while the card stays in review do not reset its age.
 Job-set ETAs do not count as agent ETA extensions.
 
 Validation counts linked test runs uploaded by the current assignee, or the
@@ -5757,8 +5761,10 @@ one-hour window. Review rounds and ETA extensions count the card's history.
 
 The lifecycle tick plans in a read, using lightweight working/review/research
 card metadata and marked cards that need clearing. It opens a write only if
-signals changed. That write checks event/audit revisions and defers stale
-plans to the next tick, rather than replaying history inside a write.
+signals changed. That write checks each card's event/linked-test revision
+and project threshold value, deferring only that card's stale plan. Unrelated
+events and audit traffic cannot starve notices. It does not replay history
+inside a write.
 On the lifecycle tick, each new signal sends one state request to the worker
 and one summary to each project lead, never to the operator. The once-per-card
 and signal record survives restarts, resolution and recurrence. A mark clears
