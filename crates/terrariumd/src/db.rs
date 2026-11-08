@@ -2545,12 +2545,6 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(thread, reason)
     );
     "#,
-    // 98: Bound review-history reads independently of non-card traffic (TER-157).
-    // Self-contained: append after any migration added by another branch.
-    r#"
-    CREATE INDEX events_card_moves ON events(project, seq)
-        WHERE kind = 'card' AND json_extract(payload, '$.change') = 'moved';
-    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -3279,6 +3273,21 @@ mod tests {
             97,
             "add a named migration under migrations/ instead"
         );
+    }
+
+    #[test]
+    fn card_move_index_tolerates_malformed_events_and_serves_history() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        conn.execute("INSERT INTO events(id,project,kind,payload,at) VALUES ('bad','p','card','not JSON','now')", []).unwrap();
+        conn.execute("UPDATE events SET payload = '{broken' WHERE id = 'bad'", []).unwrap();
+        let plan: String = conn.query_row(
+            "EXPLAIN QUERY PLAN SELECT seq FROM events WHERE project = 'p' AND kind = 'card'
+             AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
+             ORDER BY seq DESC LIMIT 2000", [], |r| r.get(3),
+        ).unwrap();
+        assert!(plan.contains("events_card_moves"), "{plan}");
+        assert!(crate::store::card_history::completed_visits(&conn,"p","review",20).unwrap().is_empty());
     }
 
     #[test]

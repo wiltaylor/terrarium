@@ -21,7 +21,8 @@ pub fn completed_visits(
     let mut stmt = conn.prepare(
         "WITH recent AS (
            SELECT seq, card, at, payload FROM events WHERE project = ?1
-             AND kind = 'card' AND json_extract(payload, '$.change') = 'moved'
+             AND kind = 'card'
+             AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
            ORDER BY seq DESC LIMIT 2000
          ), moves AS (
            SELECT seq, at, payload,
