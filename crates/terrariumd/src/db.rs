@@ -3270,7 +3270,7 @@ mod tests {
     fn legacy_migration_list_is_frozen() {
         assert_eq!(
             MIGRATIONS.len(),
-            96,
+            97,
             "add a named migration under migrations/ instead"
         );
     }
