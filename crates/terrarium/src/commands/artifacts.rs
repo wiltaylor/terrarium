@@ -334,6 +334,7 @@ mod tests {
         );
         assert!(attaches_of(&None, &[], &None).is_empty());
     }
+
     #[test]
     fn label_filter_reads_the_links() {
         let a = json!({"links": [{"kind": "card", "ref": "TER-1"},
