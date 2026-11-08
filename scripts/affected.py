@@ -457,12 +457,38 @@ def run(cmds: list[list[str]]) -> int:
     return 0
 
 
+def check_commit_trailers() -> int:
+    """Reject co-author trailers on every commit since origin/next's merge-base."""
+    try:
+        base = subprocess.run(["git", "merge-base", "origin/next", "HEAD"],
+                              check=True, capture_output=True, text=True).stdout.strip()
+        commits = subprocess.run(["git", "rev-list", f"{base}..HEAD"],
+                                 check=True, capture_output=True, text=True).stdout.splitlines()
+        rejected = []
+        for commit in commits:
+            trailers = subprocess.run(
+                ["git", "show", "-s", "--format=%(trailers:only,unfold)", commit],
+                check=True, capture_output=True, text=True).stdout
+            if re.search(r"^co-authored-by\s*:", trailers, re.IGNORECASE | re.MULTILINE):
+                rejected.append(commit)
+    except subprocess.CalledProcessError as error:
+        print(f"affected: cannot check commit trailers: {error.stderr.strip()}", file=sys.stderr)
+        return 1
+    if rejected:
+        for commit in rejected:
+            print(f"affected: {commit}: forbidden Co-authored-by trailer", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--files", help="the file of changed paths (default: $TERRARIUM_CHANGED_FILES)")
     ap.add_argument("--run", action="store_true", help="run the plan")
     ap.add_argument("--json", action="store_true", help="print the plan as JSON")
     a = ap.parse_args(argv)
+    if a.run and check_commit_trailers():
+        return 1
     changed = read_changed(a.files or os.environ.get("TERRARIUM_CHANGED_FILES"))
     if changed is None:
         crates: dict[str, Crate] = {}

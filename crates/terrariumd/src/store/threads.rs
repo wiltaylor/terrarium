@@ -40,6 +40,8 @@
 //!
 //! The rights are in the API layer ([`crate::api::threads`]).
 
+use std::collections::HashMap;
+
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -280,6 +282,10 @@ fn name_of(conn: &Connection, key: &str) -> String {
 }
 
 fn row(conn: &Connection, r: &Row<'_>) -> rusqlite::Result<Thread> {
+    row_named(r, |key| name_of(conn, key))
+}
+
+fn row_named(r: &Row<'_>, mut name: impl FnMut(&str) -> String) -> rusqlite::Result<Thread> {
     let status: String = r.get("status")?;
     let response: Option<String> = r.get("response")?;
     let handoff: Option<String> = r.get("handoff")?;
@@ -291,11 +297,11 @@ fn row(conn: &Connection, r: &Row<'_>) -> rusqlite::Result<Thread> {
         topic: r.get("topic")?,
         scope: r.get("scope")?,
         template: r.get("template")?,
-        opened_by_name: name_of(conn, &opened_by),
+        opened_by_name: name(&opened_by),
         opened_by,
-        agent_name: agent.as_deref().map(|a| name_of(conn, a)),
+        agent_name: agent.as_deref().map(&mut name),
         agent,
-        report_to_name: report_to.as_deref().map(|a| name_of(conn, a)),
+        report_to_name: report_to.as_deref().map(&mut name),
         report_to,
         status: ThreadStatus::parse(&status).unwrap_or(ThreadStatus::Closed),
         messages: None,
@@ -697,33 +703,32 @@ fn open_questions(conn: &Connection, thread: &str) -> ApiResult<i64> {
     )?)
 }
 
-/// Fill the list fields of a bare thread.
-fn summarised(conn: &Connection, mut th: Thread) -> ApiResult<Thread> {
-    let (count, last): (i64, Option<String>) = conn.query_row(
-        "SELECT count(*), max(at) FROM thread_messages WHERE thread = ?1",
-        [&th.id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+/// Urgency for the Inbox list, in one query rather than one per thread.
+pub fn inbox_urgency(conn: &Connection) -> ApiResult<HashMap<String, (bool, bool)>> {
+    let mut st = conn.prepare(
+        "SELECT thread, max(priority IN ('urgent', 'critical')), max(priority = 'critical')
+         FROM questions WHERE status = 'open' AND thread IS NOT NULL GROUP BY thread",
     )?;
-    th.message_count = Some(count);
-    th.open_questions = Some(open_questions(conn, &th.id)?);
-    th.last_at = Some(match last {
-        Some(l) if l > th.updated_at => l,
-        _ => th.updated_at.clone(),
-    });
-    Ok(th)
+    Ok(st
+        .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+        .collect::<Result<_, _>>()?)
 }
 
-/// Whether thread `id` has an open question that is urgent (or critical),
-/// and one that is critical.
-pub fn urgency(conn: &Connection, id: &str) -> ApiResult<(bool, bool)> {
-    let (u, c): (i64, i64) = conn.query_row(
-        "SELECT coalesce(sum(priority IN ('urgent', 'critical')), 0),
-                coalesce(sum(priority = 'critical'), 0)
-         FROM questions WHERE thread = ?1 AND status = 'open'",
-        [id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    Ok((u > 0, c > 0))
+/// Inbox badge counts need neither thread bodies nor per-thread name/summary queries.
+pub fn inbox_counts(conn: &Connection, project: Option<&str>) -> ApiResult<(usize, usize, usize)> {
+    Ok(conn.query_row(
+        "SELECT count(*), coalesce(sum(q.urgent > 0), 0), coalesce(sum(q.critical > 0), 0)
+         FROM threads t
+         LEFT JOIN (SELECT thread, count(*) AS open,
+                           sum(priority IN ('urgent', 'critical')) AS urgent,
+                           sum(priority = 'critical') AS critical
+                    FROM questions WHERE status = 'open' AND thread IS NOT NULL
+                    GROUP BY thread) q ON q.thread = t.id
+         WHERE t.status != 'closed' AND (t.status = 'waiting_operator' OR q.open > 0)
+           AND (?1 IS NULL OR (t.scope != 'global' AND t.scope = ?1))",
+        [project],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?)
 }
 
 /// The filters of a thread list.
@@ -749,21 +754,35 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
 fn list_unbounded(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
     let status = f.status.map(ThreadStatus::as_str);
     let mut st = conn.prepare(
-        "SELECT * FROM threads
+        "SELECT *,
+           (SELECT count(*) FROM thread_messages WHERE thread = threads.id) AS list_messages,
+           (SELECT max(at) FROM thread_messages WHERE thread = threads.id) AS list_last,
+           (SELECT count(*) FROM questions WHERE thread = threads.id AND status = 'open') AS list_questions
+         FROM threads
          WHERE (?1 IS NULL OR status = ?1)
            AND (?1 IS NOT NULL OR ?2 OR status != 'closed')
            AND (?3 IS NULL OR scope = ?3)
            AND (?4 IS NULL OR agent = ?4 OR report_to = ?4 OR opened_by = ?4)",
     )?;
-    let rows = st
+    let mut names = HashMap::new();
+    let mut out = st
         .query_map(params![status, f.all, f.scope, f.involving], |r| {
-            row(conn, r)
+            let mut th = row_named(r, |key| {
+                names
+                    .entry(key.to_owned())
+                    .or_insert_with(|| name_of(conn, key))
+                    .clone()
+            })?;
+            th.message_count = Some(r.get("list_messages")?);
+            th.open_questions = Some(r.get("list_questions")?);
+            let last: Option<String> = r.get("list_last")?;
+            th.last_at = Some(
+                last.filter(|l| l > &th.updated_at)
+                    .unwrap_or_else(|| th.updated_at.clone()),
+            );
+            Ok(th)
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut out = rows
-        .into_iter()
-        .map(|t| summarised(conn, t))
-        .collect::<ApiResult<Vec<_>>>()?;
     out.sort_by(|a, b| {
         let w = |t: &Thread| t.status != ThreadStatus::WaitingOperator;
         w(a).cmp(&w(b)).then_with(|| b.last_at.cmp(&a.last_at))

@@ -780,6 +780,22 @@ pub fn operator_mail(conn: &Connection, open: bool, limit: usize) -> ApiResult<V
         .collect())
 }
 
+/// Count without loading bodies or resolving the loop state of every mail thread.
+pub fn operator_mail_count(conn: &Connection, project: Option<&str>) -> ApiResult<usize> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM messages m
+         LEFT JOIN agents a ON m.from_kind = 'agent' AND a.id = m.from_agent
+         LEFT JOIN agents_removed old ON m.from_kind = 'agent' AND old.id = m.from_agent
+         WHERE m.to_kind = 'operator' AND m.state IN ('queued', 'delivered')
+           AND NOT (m.from_kind = 'system' AND coalesce(m.subject, '') LIKE ?1)
+           AND (?2 IS NULL OR
+                (m.from_kind = 'project' AND m.from_agent = 'project:' || ?2) OR
+                (m.from_kind = 'agent' AND coalesce(a.project, old.project) = ?2))",
+        params![PAUSE_SUBJECT_LIKE, project],
+        |r| r.get(0),
+    )?)
+}
+
 /// The held messages on `thread` that the operator did not release yet,
 /// oldest first.
 pub fn unreleased_held(conn: &Connection, thread: &str) -> ApiResult<Vec<Message>> {

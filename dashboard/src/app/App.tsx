@@ -39,6 +39,7 @@ const KnowledgePage = lazy(() => import("../features/knowledge/KnowledgePage"));
 const DbTypesPage = lazy(() => import("../features/db/DbTypesPage"));
 const DbRecordsPage = lazy(() => import("../features/db/DbRecordsPage"));
 const LogsPage = lazy(() => import("../features/logs/LogsPage"));
+const ManageBookmarks = lazy(() => import("./ManageBookmarks"));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
 const AccountPage = lazy(() => import("../features/settings/AccountPage"));
 const SoftwarePage = lazy(() => import("../features/settings/SoftwarePage"));
@@ -82,6 +83,7 @@ export function App() {
       <Router root={Layout}>
         <Route path="/" component={Home} />
         <Route path="/projects" component={ProjectsPage} />
+        <Route path="/bookmarks" component={ManageBookmarks} />
         <Route path="/agents/:id" component={AgentDetail} />
         <Route path="/sessions/:id" component={SessionPage} />
         <Route path="/inbox" component={InboxPage} />
