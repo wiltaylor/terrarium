@@ -689,6 +689,106 @@ async fn agent_rpc_hot_swap_failed_health_restores_then_replays_once() {
     hot_swap_probation(true).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_activation_failure_keeps_writes_closed_and_can_restart() {
+    let mut td = Td::start().await;
+    let state = td.dir.path().join("state");
+    let key = state.join("secrets.key");
+    let original = std::fs::read(&key).unwrap();
+    td.shutdown();
+    std::fs::create_dir_all(state.join("releases")).unwrap();
+    let marker = state.join("releases/probation");
+    std::fs::write(&marker, "").unwrap();
+    std::fs::write(&key, b"invalid test key").unwrap();
+    td.boot().await;
+    std::fs::remove_file(marker).unwrap();
+    let error = timeout(
+        WAIT,
+        td.daemon.as_ref().unwrap().state.agent_calls.wait_failure(),
+    )
+    .await
+    .unwrap();
+    assert!(error.contains("secret store"));
+    assert_eq!(
+        td.req_as(None, Method::GET, "/api/health", None).await.0,
+        503
+    );
+    assert_eq!(
+        td.req_as(
+            None,
+            Method::POST,
+            "/api/projects",
+            Some(json!({"name":"not-admitted"}))
+        )
+        .await
+        .0,
+        503
+    );
+    td.shutdown();
+    std::fs::write(key, original).unwrap();
+    td.boot().await;
+    assert_eq!(
+        td.req_as(None, Method::GET, "/api/health", None).await.0,
+        200
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_activation_failure_exits_the_daemon_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(state.join("releases")).unwrap();
+    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+    let marker = state.join("releases/probation");
+    std::fs::write(&marker, "").unwrap();
+    std::fs::write(state.join("secrets.key"), b"invalid test key").unwrap();
+    let socket = dir.path().join("api.sock");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_terrariumd"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap())
+        .env("TERRARIUM_STATE_DIR", &state)
+        .env("TERRARIUM_API_SOCKET", &socket)
+        .env("TERRARIUM_CONFIG_DIR", dir.path().join("config"))
+        .env("TERRARIUM_CONFIG_REPO", dir.path().join("config"))
+        .env("TERRARIUM_RUNTIME_DIR", dir.path().join("run"))
+        .env("TERRARIUM_HOST_LISTEN", "")
+        .env("TERRARIUM_ARTIFACT_LISTEN", "")
+        .env("TERRARIUM_RUNNER", runner_bin())
+        .args([
+            "--sandbox",
+            "none",
+            "--tools-dir",
+            "",
+            "--no-harness-install",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    timeout(WAIT, async {
+        while !socket.exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "daemon exited before probation health"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(child.try_wait().unwrap().is_none());
+    std::fs::remove_file(marker).unwrap();
+    let output = timeout(WAIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("activation failed after health commit")
+    );
+}
+
 async fn hot_swap_probation(rollback: bool) {
     let cli = cli_bin();
     let mut td = Td::start().await;

@@ -1,6 +1,7 @@
 """Filesystem and supervisor contract tests, with scratch processes only."""
 import importlib.util
 import os
+import re
 from pathlib import Path
 import signal
 import sqlite3
@@ -32,6 +33,7 @@ class HotSwapTests(unittest.TestCase):
             "TERRARIUM_STATE_DIR": str(self.state),
             "TERRARIUM_RUNTIME_DIR": str(self.run),
             "TERRARIUM_BUNDLED_RELEASE": str(self.payload),
+            "TERRARIUM_DAEMON_SERVICE": "1",
         })
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -78,7 +80,75 @@ class HotSwapTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             HOT.select(self.state, self.path)
 
+    def test_init_requires_service_mode_and_preserves_interrupted_probation(self):
+        HOT.main(["init"])
+        root = self.state / "releases"
+        marker = root / "probation"
+        marker.touch()
+        (self.run / "upgrade-initialized").unlink()
+        with patch.dict(os.environ, {"TERRARIUM_DAEMON_SERVICE": "0"}):
+            with self.assertRaises(RuntimeError):
+                HOT.main(["init"])
+        with self.assertRaises(RuntimeError):
+            HOT.main(["init"])
+        self.assertTrue(marker.exists())
+        self.assertEqual((root / "current").resolve().name, "a" * 64)
+
+    def test_pause_signal_failure_removes_pending_pause(self):
+        HOT.main(["init"])
+        (self.run / "upgrade-supervisor.pid").write_text("123")
+        with patch.object(HOT.os, "kill", side_effect=ProcessLookupError):
+            with self.assertRaises(ProcessLookupError):
+                HOT.main(["pause"])
+        self.assertFalse((self.run / "upgrade-pause").exists())
+
+    def test_commit_is_idempotent_and_retains_current_previous_and_live_payloads(self):
+        HOT.main(["init"])
+        root = self.state / "releases"
+        for key in "bcd":
+            (root / (key * 64)).mkdir()
+        # c represents a payload still mapped by a surviving runner.
+        real_link = HOT.os.readlink
+        def link(path):
+            if str(path).endswith("/exe"):
+                return str(root / ("c" * 64) / "bin/terrarium-runner")
+            return real_link(path)
+        with patch.object(HOT.os, "readlink", side_effect=link):
+            HOT.main(["commit", str(self.state / "backup"), "b" * 64])
+            HOT.main(["commit", str(self.state / "backup"), "b" * 64])
+        self.assertTrue((root / ("a" * 64)).exists())
+        self.assertTrue((root / ("b" * 64)).exists())
+        self.assertTrue((root / ("c" * 64)).exists())
+        self.assertFalse((root / ("d" * 64)).exists())
+        self.assertTrue(HOT.transaction(root)["admission_attempted"])
+
+    def test_image_epoch_tracks_the_oldest_supported_runner_protocol(self):
+        protocol = (ROOT / "crates/terrarium-runner/src/control.rs").read_text()
+        version = int(re.search(r"PROTOCOL_VERSION: u32 = (\d+)", protocol).group(1))
+        image = (ROOT / "docker/Dockerfile").read_text()
+        self.assertIn(f'io.terrarium.runner-compat-epoch="{version - 1}"', image)
+
+    def test_interrupted_transaction_retains_recovery_state(self):
+        HOT.main(["init"])
+        root = self.state / "releases"
+        key = "b" * 64
+        (root / key).mkdir()
+        HOT.main(["begin", key])
+        with sqlite3.connect(self.state / "terrarium.db") as conn:
+            conn.execute("CREATE TABLE journal(value TEXT)")
+        backup = str(self.state / "backup")
+        HOT.main(["snapshot", backup])
+        self.assertEqual(HOT.transaction(root)["phase"], "backed_up")
+        # A fresh helper process recovers from disk, not updater memory.
+        result = subprocess.run(["python3", str(ROOT / "docker/hot-swap.py"),
+                                 "status"], capture_output=True, text=True, check=True)
+        self.assertIn('"backed_up"', result.stdout)
+        HOT.main(["commit", backup])
+        with self.assertRaises(RuntimeError):
+            HOT.main(["restore-database", backup])
+
     def test_supervisor_pauses_clean_exit_without_stopping_container(self):
+        HOT.main(["init"])
         # Run exactly the production supervisor loop, skipping the image's
         # ownership/bootstrap section (which needs Docker's mounted directories).
         source = (ROOT / "docker/entrypoint.sh").read_text()
@@ -113,6 +183,16 @@ class HotSwapTests(unittest.TestCase):
         (self.run / "upgrade-pause").unlink()
         wait(lambda: len(log.read_text().splitlines()) == 2)
         self.assertNotEqual(*log.read_text().splitlines())
+
+        # Force a timeout after SIGUSR1. Cleanup must request a restart rather
+        # than letting the later clean daemon exit stop the whole container.
+        with patch.object(HOT, "wait_for", side_effect=TimeoutError):
+            with self.assertRaises(TimeoutError):
+                HOT.main(["pause"])
+        HOT.main(["cancel-pause"])
+        wait(lambda: len(log.read_text().splitlines()) == 3)
+        self.assertIsNone(process.poll())
+        self.assertFalse((self.run / "upgrade-pause").exists())
 
 
 if __name__ == "__main__":

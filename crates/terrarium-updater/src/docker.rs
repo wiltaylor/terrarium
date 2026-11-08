@@ -192,12 +192,23 @@ impl Docker {
         let mut image = image_of(&img, &reference);
         // Docker's image field stays unchanged after a binary-only upgrade.
         // Read the selected release identity, not the original container image.
-        if img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1"
-            && c["State"]["Running"] == true
-        {
-            let active = self
-                .exec(id, crate::machine::hot_argv("active", &[]))
-                .await?;
+        if img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1" {
+            let attempted = self.exec(id, crate::machine::hot_argv("active", &[])).await;
+            let active = match attempted {
+                Ok(out) if out.code == 0 => out,
+                _ => {
+                    // A stopped, paused or broken target must still expose its
+                    // release identity for status/recovery. Read only metadata
+                    // through a disposable container sharing the state mount.
+                    let spec = json!({"container": c, "image": img["Config"]});
+                    self.run_body(once_body(
+                        &spec,
+                        &image_id,
+                        &crate::machine::hot_argv("active", &[]),
+                    ))
+                    .await?
+                }
+            };
             if active.code != 0 {
                 return Err(format!(
                     "cannot read active release identity: {}",

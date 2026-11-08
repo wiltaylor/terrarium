@@ -247,20 +247,28 @@ pub async fn start_with_usage(
     // A probation daemon serves reads/health before activating background
     // effects that could escape the database snapshot (jobs, webhooks, etc.).
     let mut tasks = Vec::new();
-    if state.agent_calls.in_probation() {
+    if state.agent_calls.has_probation_marker() {
         let activation_state = state.clone();
         tasks.push(tokio::spawn(async move {
             activation_state.agent_calls.wait_for_commit().await;
-            match activate(activation_state, defs, errors).await {
+            match activate(activation_state.clone(), defs, errors).await {
                 Ok(handles) => {
+                    activation_state.agent_calls.activation_ready();
                     let _owned = ActivationTasks(handles);
                     std::future::pending::<()>().await;
                 }
-                Err(e) => error!(error = %e, "post-commit daemon activation failed"),
+                Err(e) => {
+                    error!(error = %e, "post-commit daemon activation failed");
+                    activation_state.supervisor.shutdown();
+                    activation_state
+                        .agent_calls
+                        .activation_failed(e.to_string());
+                }
             }
         }));
     } else {
         tasks.extend(activate(state.clone(), defs, errors).await?);
+        state.agent_calls.activation_ready();
     }
 
     tasks.push(api::serve_unix(state.clone(), &cfg.socket).await?);
@@ -297,17 +305,20 @@ pub async fn start_with_usage(
     // of a proxied repo gets its proxy URL.
     let mut git_proxy_addr = None;
     if let Some(addr) = cfg.web.git_proxy_listen.as_deref() {
-        if state.agent_calls.in_probation() {
+        if state.agent_calls.has_probation_marker() {
             let proxy_state = state.clone();
             let addr = addr.to_owned();
             tasks.push(tokio::spawn(async move {
                 proxy_state.agent_calls.wait_for_commit().await;
-                match git_proxy::serve(proxy_state, &addr).await {
+                match git_proxy::serve(proxy_state.clone(), &addr).await {
                     Ok((task, _)) => {
                         let _owned = ActivationTasks(vec![task]);
                         std::future::pending::<()>().await;
                     }
-                    Err(e) => error!(error = %e, "post-commit git proxy failed"),
+                    Err(e) => {
+                        error!(error = %e, "post-commit git proxy failed");
+                        proxy_state.agent_calls.activation_failed(e.to_string());
+                    }
                 }
             }));
         } else {
@@ -362,7 +373,8 @@ async fn activate(
         );
     }
 
-    let mut tasks = Vec::new();
+    let mut owned = ActivationTasks(Vec::new());
+    let tasks = &mut owned.0;
     tasks.push(spawn_pump(state.clone()));
     tasks.push(usage_collector::spawn(state.clone()));
     tasks.push(tool_run::spawn_sweep(state.clone()));
@@ -417,7 +429,7 @@ async fn activate(
     // The agents bound to cards: park, unpark, and end (TER-74).
     tasks.push(bound::spawn(&state));
     tasks.extend(start_usage(&state).await);
-    Ok(tasks)
+    Ok(std::mem::take(&mut owned.0))
 }
 
 /// Log a warning for each repo with `push_deny` whose checkouts go

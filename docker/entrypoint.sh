@@ -51,9 +51,28 @@ for dir in "${AUTH_DIRS[@]}" "${STATE_DIRS[@]}"; do
 done
 chmod 700 /state/credentials 2>/dev/null || true
 
-# Only the container entrypoint initializes current. One-off backup and stage
-# commands bypass this entrypoint, so they cannot select a different release.
+# Compose opts its long-running service into initialization with a command
+# prefix. `compose run SERVICE COMMAND` replaces that command, so backups and
+# shells never select a release or remove the live daemon's probation marker.
+service=0
+if [ "${1:-}" = --daemon-service ]; then service=1; shift; fi
+supervise=0
+if [ "$(basename -- "${1:-}")" = terrariumd ] && [ "${TERRARIUM_SUPERVISOR:-1}" != 0 ]; then
+	case "${2:-}" in --help | -h | --version | -V) ;; "" | -*) supervise=1 ;; esac
+fi
+if [ "$supervise" = 0 ]; then
+	export PATH="/opt/terrarium/bundled/bin:$PATH"
+	exec "$@"
+fi
+if [ "$service" != 1 ]; then
+	log "daemon initialization requires --daemon-service (set by the Compose service command)"
+	exit 1
+fi
 if [ -f /usr/local/lib/terrarium-hot-swap.py ]; then
+	mkdir -p "${TERRARIUM_STATE_DIR:-/state}/releases"
+	exec 9> "${TERRARIUM_STATE_DIR:-/state}/releases/service.lock"
+	flock -n 9 || { log "another daemon container owns this state volume"; exit 1; }
+	export TERRARIUM_DAEMON_SERVICE=1
 	python3 /usr/local/lib/terrarium-hot-swap.py init
 fi
 
@@ -73,7 +92,7 @@ fi
 if [ "${TERRARIUM_HARNESS_INSTALL:-1}" != 0 ] && command -v terrariumd > /dev/null 2>&1; then
 	log "checking the harnesses in $TOOLS_DIR"
 	started="$(date +%s)"
-	if terrariumd harness install; then
+	if terrariumd harness install 9>&-; then
 		log "harnesses ready in $(($(date +%s) - started))s"
 	else
 		log "a harness install failed (see above); the daemon tries again at its start"
@@ -94,16 +113,6 @@ MAX_BACKOFF="${TERRARIUM_SUPERVISOR_MAX_BACKOFF:-30}"
 RESET_AFTER="${TERRARIUM_SUPERVISOR_RESET_AFTER:-300}"
 DAEMON_STOP_TIMEOUT="${TERRARIUM_DAEMON_STOP_TIMEOUT:-5}"
 SHUTDOWN_GRACE="${TERRARIUM_SHUTDOWN_GRACE:-20}"
-
-# Supervise only `terrariumd` with no subcommand. Other commands (a shell,
-# `terrariumd sandbox-dry-run`) run once, as before.
-supervise=0
-if [ "$(basename -- "${1:-}")" = terrariumd ] && [ "${TERRARIUM_SUPERVISOR:-1}" != 0 ]; then
-	case "${2:-}" in "" | -*) supervise=1 ;; esac
-fi
-if [ "$supervise" = 0 ]; then
-	exec "$@"
-fi
 
 set +e
 stop_signal=""
@@ -233,9 +242,11 @@ while :; do
 	# A background job of a shell without job control ignores SIGINT and
 	# SIGQUIT; `env --default-signal` gives terrariumd and the runners the
 	# default dispositions back.
-	env --default-signal "$@" &
+	env --default-signal "$@" 9>&- &
 	daemon_pid=$!
-	rm -f "$RUN_DIR/upgrade-paused"
+	rm -f "$RUN_DIR/upgrade-paused" "$RUN_DIR/upgrade-resume"
+	# Covers SIGUSR1 arriving between the loop-top check and assigning the PID.
+	on_upgrade_pause
 	if [ -n "$stop_signal" ]; then kill -s "$stop_signal" "$daemon_pid" 2>/dev/null; fi
 	log "started terrariumd (pid $daemon_pid)"
 	wait_daemon stop
@@ -245,7 +256,7 @@ while :; do
 		break
 	fi
 	uptime=$(($(now) - started))
-	if [ -f "$RUN_DIR/upgrade-pause" ]; then
+	if [ -f "$RUN_DIR/upgrade-pause" ] || [ -f "$RUN_DIR/upgrade-resume" ]; then
 		daemon_pid=""
 		continue
 	fi

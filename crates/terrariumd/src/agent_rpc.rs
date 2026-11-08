@@ -27,6 +27,8 @@ const MAX_BODY: usize = 16 * 1024 * 1024;
 
 /// Admission and draining are shared by all runner connections of one daemon.
 pub struct CallGate {
+    ready: std::sync::atomic::AtomicBool,
+    failure: tokio::sync::watch::Sender<Option<String>>,
     /// A supervisor-owned marker. Its removal commits a hot swap. Keep this
     /// outside the restored database so recovery cannot accidentally admit RPCs.
     probation: Option<std::path::PathBuf>,
@@ -38,6 +40,8 @@ pub struct CallGate {
 impl Default for CallGate {
     fn default() -> Self {
         Self {
+            ready: std::sync::atomic::AtomicBool::new(true),
+            failure: tokio::sync::watch::Sender::new(None),
             probation: None,
             draining: tokio::sync::watch::Sender::new(false),
             active: Default::default(),
@@ -50,19 +54,64 @@ impl CallGate {
     pub fn with_probation(path: Option<std::path::PathBuf>) -> Self {
         Self {
             probation: path,
+            ready: std::sync::atomic::AtomicBool::new(false),
             ..Self::default()
         }
     }
 
-    pub fn in_probation(&self) -> bool {
+    pub fn has_probation_marker(&self) -> bool {
         self.probation.as_ref().is_some_and(|p| {
             // Fail closed on permission and other IO errors, not just presence.
             !matches!(std::fs::metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
         })
     }
 
+    pub fn in_probation(&self) -> bool {
+        self.has_probation_marker()
+            || self.failure().is_some()
+            || !self.ready.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn activation_ready(&self) {
+        self.ready.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn activation_failed(&self, error: String) {
+        self.ready
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.failure.send_replace(Some(error));
+    }
+
+    pub fn failure(&self) -> Option<String> {
+        self.failure.borrow().clone()
+    }
+
+    pub async fn wait_failure(&self) -> String {
+        let mut failure = self.failure.subscribe();
+        loop {
+            if let Some(error) = failure.borrow_and_update().clone() {
+                return error;
+            }
+            if failure.changed().await.is_err() {
+                return "activation channel closed".into();
+            }
+        }
+    }
+
+    pub async fn wait_until_ready(&self) -> Result<(), String> {
+        loop {
+            if let Some(error) = self.failure() {
+                return Err(error);
+            }
+            if !self.in_probation() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     pub async fn wait_for_commit(&self) {
-        while self.in_probation() {
+        while self.has_probation_marker() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -448,6 +497,19 @@ async fn journaled(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[test]
+    fn commit_does_not_admit_calls_until_activation_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("probation");
+        std::fs::write(&marker, "").unwrap();
+        let gate = super::CallGate::with_probation(Some(marker.clone()));
+        std::fs::remove_file(marker).unwrap();
+        assert!(gate.in_probation(), "commit alone is not readiness");
+        gate.activation_ready();
+        assert!(!gate.in_probation());
+        gate.activation_failed("failed reconcile".into());
+        assert!(gate.in_probation());
+    }
     use super::*;
 
     #[test]

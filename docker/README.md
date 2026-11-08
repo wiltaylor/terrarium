@@ -43,8 +43,13 @@ live runner again. The harness does not restart.
 When `terrariumd` exits with status 0 and the container got no stop signal,
 the entrypoint stops the runners (see below) and the container exits.
 
-The entrypoint supervises only `terrariumd` with no subcommand. Other
-commands (for example `bash`, or `terrariumd sandbox-dry-run`) run once.
+The Compose service explicitly runs `--daemon-service terrariumd`. Only this
+mode initializes releases and supervises the daemon. Direct `docker run`
+must supply that command too. Other commands (for example `bash`, backup
+subcommands, or `terrariumd --version`) run once using bundled binaries and
+never change the live release or probation marker. A state-volume lock rejects
+a second service, including an accidental `compose run terrarium` without a
+replacement command.
 
 ## Binary-only upgrades
 
@@ -79,11 +84,58 @@ survives a restart of the same container, while a new container boots its own
 bundled release. The updater process itself stays on its bundled binary until
 its container is replaced.
 
-Interrupted control operations fail closed. A surviving `upgrade-pause` in the
-runtime dir or `/state/releases/probation` requires recovery, not another blind
-update. Do not remove probation after restoring an old database unless the
-new daemon was stopped before any call was admitted. The control helper is
-private to the updater and supervisor, not exposed to agents.
+The total hold budget is 15 minutes, including drain, backup and health.
+The updater reserves the last minute for recovery and retries commit three
+times. Admission remains closed until activation finishes. An activation
+failure exits the daemon nonzero so the supervisor can restart it. Once any
+commit was attempted, automatic journal rollback is forbidden.
+
+Commit prunes unused payloads, keeping `current`, `previous`, and releases
+with a live executable under `/proc`. Thus retained runners keep their binaries.
+
+### Interrupted transaction recovery
+
+Stop automatic update attempts first. Keep the existing daemon container and
+runners alive. Use its actual container name in place of `terrarium` below:
+
+```sh
+docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py status
+```
+
+This reads durable `/state/releases/transaction.json` plus current marker
+state. Record `old`, `new`, `backup`, `phase` and `admission_attempted`.
+Use the literal values from this trusted local record as quoted arguments.
+Do not delete markers by hand or replace the container during probation.
+The helper is private to administrators, not exposed to agents.
+
+* If `admission_attempted` is true, **never restore the database with retained
+  runners**, even if `phase` is `commit_attempted` or the response was lost.
+  Retry `docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py commit`.
+  It is idempotent. Check daemon logs and health. If activation failed, fix
+  the reported cause and let the supervisor restart the selected release.
+  A later rollback must use the updater's drained container-replacement path.
+* For `staged`, `paused` or `snapshotting`, before a new payload started,
+  run `docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py cancel-pause`.
+  The old daemon resumes. A partial snapshot is not a valid rollback source.
+* For `backed_up`, `probation`, `restoring` or `restored` with
+  `admission_attempted: false`, restore the old release with the sequence below.
+  An interrupted SQLite restore is safe to repeat from the completed snapshot.
+  Do not use this sequence if admission was ever attempted.
+
+```sh
+docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py pause
+docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py restore-database 'BACKUP_PATH'
+docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py start 'OLD_RELEASE_HASH'
+docker exec terrarium terrarium daemon status
+# Only after health succeeds:
+docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py commit 'BACKUP_PATH' 'OLD_RELEASE_HASH'
+```
+
+Read `status` again and confirm probation is absent and health succeeds.
+After manual rollback, align the deployment's image setting with the restored
+release before enabling automatic updates. `committed`, `rolled_back` and
+`aborted` are terminal phases. If the durable record or completed snapshot is
+missing, stop and use a drained full-backup recovery instead of guessing.
 
 ## Container shutdown sequence
 

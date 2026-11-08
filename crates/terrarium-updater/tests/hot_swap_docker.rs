@@ -85,6 +85,20 @@ async fn real_container_hot_swap_and_failed_health_rollback() {
         target: Some(target),
     };
     let before = docker.target().await.unwrap();
+    // Exec is unavailable in a paused container. Status must still read the
+    // selected release metadata through the shared volume for recovery.
+    let paused = std::process::Command::new("docker")
+        .args(["pause", &before.id])
+        .status()
+        .unwrap();
+    assert!(paused.success());
+    let offline = docker.target().await;
+    let resumed = std::process::Command::new("docker")
+        .args(["unpause", &before.id])
+        .status()
+        .unwrap();
+    assert!(resumed.success());
+    assert_eq!(offline.unwrap().image, before.image);
     let changed = docker.image("ter-261-changed-base").await.unwrap().unwrap();
     assert!(!docker.can_hot_swap(&before, &changed).await.unwrap());
     let dir = tempfile::tempdir().unwrap();

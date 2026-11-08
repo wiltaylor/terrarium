@@ -57,6 +57,27 @@ pub struct Config {
 
 /// The default image repository.
 pub const DEFAULT_REPOSITORY: &str = "ghcr.io/wiltaylor/terrarium";
+const HOT_SWAP_HOLD_LIMIT: Duration = Duration::from_secs(900);
+const HOT_SWAP_RECOVERY_RESERVE: Duration = Duration::from_secs(60);
+
+fn budget_left(deadline: tokio::time::Instant, reserve: Duration) -> Res<Duration> {
+    deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .checked_sub(reserve)
+        .filter(|left| *left > Duration::from_millis(10))
+        .ok_or_else(|| "hot swap would exceed the 15-minute runner hold budget".into())
+}
+
+fn bounded_command(argv: Vec<String>, deadline: tokio::time::Instant) -> Res<Vec<String>> {
+    let left = budget_left(deadline, Duration::from_secs(5))?;
+    let mut bounded = vec![
+        "timeout".into(),
+        "--kill-after=5".into(),
+        format!("{:.3}s", left.as_secs_f64()),
+    ];
+    bounded.extend(argv);
+    Ok(bounded)
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -570,13 +591,38 @@ impl Updater {
             )
             .await
             .map_err(failed)?;
-        self.step(
-            "pause-daemon",
-            self.exec_ok(&cur.id, hot_argv("pause", &[])),
-            Clone::clone,
-        )
-        .await
-        .map_err(failed)?;
+        self.exec_ok(&cur.id, hot_argv("begin", &[&release]))
+            .await
+            .map_err(|e| failed(Fail(e)))?;
+        // Staging is outside the hold window. Reserve one minute for recovery
+        // rather than adding a fresh 15-minute health wait after a long drain.
+        let hold_deadline = tokio::time::Instant::now() + HOT_SWAP_HOLD_LIMIT;
+        let switch_deadline = hold_deadline - HOT_SWAP_RECOVERY_RESERVE;
+        if let Err(f) = self
+            .step(
+                "pause-daemon",
+                self.exec_ok(&cur.id, hot_argv("pause", &["660"])),
+                Clone::clone,
+            )
+            .await
+        {
+            let recovery = async {
+                let left = budget_left(hold_deadline, Duration::ZERO)?
+                    .as_secs_f64()
+                    .to_string();
+                self.exec_ok(&cur.id, hot_argv("cancel-pause", &[&left]))
+                    .await?;
+                self.wait_hot_healthy_until(&cur.id, hold_deadline).await
+            }
+            .await;
+            return Err(match recovery {
+                Ok(_) => failed(f),
+                Err(e) => (
+                    Outcome::RollbackFailed,
+                    Fail(format!("{}; cancel pause: {e}", f.0)),
+                ),
+            });
+        }
 
         // No daemon is running here. Hold/replay runners keep their processes,
         // while the snapshot includes every completed pre-upgrade write.
@@ -586,14 +632,21 @@ impl Updater {
                 async {
                     let mut argv = backup_argv();
                     argv[0] = "/opt/terrarium/bundled/bin/terrariumd".into();
-                    let out = self.engine.run_once(cur, &cur.image, argv).await?;
+                    let out = self
+                        .engine
+                        .run_once(cur, &cur.image, bounded_command(argv, switch_deadline)?)
+                        .await?;
                     if out.code != 0 {
                         return Err(out.reason());
                     }
                     let path = backup_path(&out.stdout)?;
                     let snapshot = self
                         .engine
-                        .run_once(cur, &cur.image, hot_argv("snapshot", &[&path]))
+                        .run_once(
+                            cur,
+                            &cur.image,
+                            bounded_command(hot_argv("snapshot", &[&path]), switch_deadline)?,
+                        )
                         .await?;
                     if snapshot.code != 0 {
                         return Err(snapshot.reason());
@@ -608,10 +661,13 @@ impl Updater {
             Err(f) => {
                 // No new code or migrations have run. Resume the original release.
                 let recovery = async {
-                    self.exec_ok(&cur.id, hot_argv("start", &[old.trim()]))
+                    let left = budget_left(hold_deadline, Duration::ZERO)?
+                        .as_secs_f64()
+                        .to_string();
+                    self.exec_ok(&cur.id, hot_argv("start", &[old.trim(), &left]))
                         .await?;
-                    self.wait_hot_healthy(&cur.id).await?;
-                    self.exec_ok(&cur.id, hot_argv("commit", &[])).await
+                    self.wait_hot_healthy_until(&cur.id, hold_deadline).await?;
+                    self.commit_with_retry(&cur.id, &[]).await
                 }
                 .await;
                 return Err((
@@ -626,14 +682,20 @@ impl Updater {
         };
         self.with_run(|r| r.backup = Some(backup.clone()));
         let attempt = async {
+            let left = budget_left(switch_deadline, Duration::ZERO).map_err(Fail)?;
+            let control_timeout = left.as_secs_f64().to_string();
             self.step(
                 "start-daemon",
-                self.exec_ok(&cur.id, hot_argv("start", &[&release])),
+                self.exec_ok(&cur.id, hot_argv("start", &[&release, &control_timeout])),
                 Clone::clone,
             )
             .await?;
-            self.step("health", self.wait_hot_healthy(&cur.id), Clone::clone)
-                .await?;
+            self.step(
+                "health",
+                self.wait_hot_healthy_until(&cur.id, switch_deadline),
+                Clone::clone,
+            )
+            .await?;
             self.store
                 .set_previous(&Previous {
                     image: cur.image.clone(),
@@ -652,7 +714,7 @@ impl Updater {
                 // response. Never rewind the journal after attempting admission.
                 self.step(
                     "commit",
-                    self.exec_ok(&cur.id, hot_argv("commit", &[&backup])),
+                    self.commit_with_retry(&cur.id, &[&backup, old.trim()]),
                     Clone::clone,
                 )
                 .await
@@ -661,23 +723,35 @@ impl Updater {
             }
             Err(f) => {
                 let recovery = async {
-                    self.exec_ok(&cur.id, hot_argv("pause", &[])).await?;
+                    let left = budget_left(hold_deadline, Duration::ZERO)?
+                        .as_secs_f64()
+                        .to_string();
+                    self.exec_ok(&cur.id, hot_argv("pause", &[&left])).await?;
                     // Keep the live runners' open files and logs intact.
                     let out = self
                         .engine
-                        .run_once(cur, &cur.image, hot_argv("restore-database", &[&backup]))
+                        .run_once(
+                            cur,
+                            &cur.image,
+                            bounded_command(
+                                hot_argv("restore-database", &[&backup]),
+                                hold_deadline,
+                            )?,
+                        )
                         .await?;
                     if out.code != 0 {
                         return Err(out.reason());
                     }
-                    self.exec_ok(&cur.id, hot_argv("start", &[old.trim()]))
+                    let left = budget_left(hold_deadline, Duration::ZERO)?
+                        .as_secs_f64()
+                        .to_string();
+                    self.exec_ok(&cur.id, hot_argv("start", &[old.trim(), &left]))
                         .await?;
-                    self.wait_hot_healthy(&cur.id).await?;
+                    self.wait_hot_healthy_until(&cur.id, hold_deadline).await?;
                     self.store
                         .set_image(&cur.image.reference)
                         .map_err(|e| e.to_string())?;
-                    self.exec_ok(&cur.id, hot_argv("commit", &[&backup]))
-                        .await?;
+                    self.commit_with_retry(&cur.id, &[&backup]).await?;
                     Ok::<_, String>(())
                 }
                 .await;
@@ -692,8 +766,12 @@ impl Updater {
         }
     }
 
-    async fn wait_hot_healthy(&self, id: &str) -> Res<String> {
-        let deadline = tokio::time::Instant::now() + self.cfg.health_timeout;
+    async fn wait_hot_healthy_until(
+        &self,
+        id: &str,
+        hold_deadline: tokio::time::Instant,
+    ) -> Res<String> {
+        let deadline = (tokio::time::Instant::now() + self.cfg.health_timeout).min(hold_deadline);
         // Docker health can still describe the old daemon. Require a new live
         // status answer too, and allow the normal start-period failures.
         loop {
@@ -707,6 +785,22 @@ impl Updater {
             }
             tokio::time::sleep(self.cfg.health_poll).await;
         }
+    }
+
+    async fn commit_with_retry(&self, id: &str, args: &[&str]) -> Res<String> {
+        let mut last = String::new();
+        for attempt in 0..3 {
+            match self.exec_ok(id, hot_argv("commit", args)).await {
+                Ok(out) => return Ok(out),
+                Err(error) => last = error,
+            }
+            if attempt < 2 {
+                tokio::time::sleep(self.cfg.health_poll.min(Duration::from_secs(1))).await;
+            }
+        }
+        Err(format!(
+            "commit failed after 3 attempts: {last}; do not restore the database; retry the idempotent commit command (docker/README.md)"
+        ))
     }
 
     /// The image of a rollback: here, else pulled by its digest.

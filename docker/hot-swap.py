@@ -56,32 +56,88 @@ def stage(root, image=None):
     return release
 
 
-def wait_for(check):
-    deadline = time.monotonic() + float(os.environ.get("TERRARIUM_UPGRADE_CONTROL_TIMEOUT", "660"))
+def wait_for(check, seconds=None):
+    deadline = time.monotonic() + float(seconds if seconds is not None else os.environ.get("TERRARIUM_UPGRADE_CONTROL_TIMEOUT", "660"))
     while not check():
         if time.monotonic() >= deadline:
             raise TimeoutError("supervisor did not acknowledge upgrade command")
         time.sleep(0.1)
 
 
+def transaction(root):
+    try:
+        return json.loads((root / "transaction.json").read_text())
+    except FileNotFoundError:
+        return {}
+
+
+def record(root, **changes):
+    value = {**transaction(root), **changes}
+    temp = root / "transaction.json.new"
+    with temp.open("w") as output:
+        json.dump(value, output)
+        output.flush()
+        os.fsync(output.fileno())
+    temp.replace(root / "transaction.json")
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def prune(root):
+    """Keep current, rollback target, and every payload with a live process."""
+    keep = {(root / name).resolve().name for name in ("current", "previous")}
+    prefix = str(root.resolve()) + "/"
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            exe = os.readlink(proc / "exe")
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        if exe.startswith(prefix):
+            keep.add(exe[len(prefix):].split("/", 1)[0])
+    for path in root.iterdir():
+        if (len(path.name) == 64 and all(c in "0123456789abcdef" for c in path.name)
+                and path.name not in keep and path.is_dir() and not path.is_symlink()):
+            shutil.rmtree(path)
+
+
 def main(argv):
     root, run = paths()
     command = argv[0]
     if command == "init":
+        if os.environ.get("TERRARIUM_DAEMON_SERVICE") != "1":
+            raise RuntimeError("initialization is exclusive to the daemon service")
         run.mkdir(parents=True, exist_ok=True)
         # A container replacement always boots ITS image, not the last hot swap.
         # Docker restart of this same container preserves the selected release.
         initialized = run / "upgrade-initialized"
         if not initialized.exists():
+            if (root / "probation").exists():
+                raise RuntimeError("unfinished probation: recover the existing transaction before replacing its container")
             release = stage(root)
             # The same payload can occur in a different runtime image. A new
             # container's identity comes from Docker until its first hot swap.
             (release / "image.json").unlink(missing_ok=True)
             select(root, release)
-            (root / "probation").unlink(missing_ok=True)
             initialized.touch()
     elif command == "stage":
         print(stage(root, json.loads(argv[1])).name)
+    elif command == "begin":
+        if transaction(root).get("phase") not in (None, "committed", "rolled_back", "aborted"):
+            raise RuntimeError("recover the unfinished transaction first")
+        if len(argv[1]) != 64 or any(c not in "0123456789abcdef" for c in argv[1]) or not (root / argv[1]).is_dir():
+            raise ValueError("unstaged release")
+        record(root, phase="staged", old=(root / "current").resolve().name,
+               new=argv[1], backup=None, admission_attempted=False)
+    elif command == "status":
+        print(json.dumps({**transaction(root), "current": (root / "current").resolve().name,
+                          "paused": (run / "upgrade-paused").exists(),
+                          "pause_requested": (run / "upgrade-pause").exists(),
+                          "probation": (root / "probation").exists()}))
     elif command == "active":
         try:
             print((root / "current" / "image.json").read_text())
@@ -92,26 +148,64 @@ def main(argv):
             raise RuntimeError("unfinished upgrade requires recovery before another update")
         if not (run / "upgrade-supervisor.pid").is_file():
             raise RuntimeError("no hot-swap supervisor")
+        os.kill(int((run / "upgrade-supervisor.pid").read_text()), 0)
         print((root / "current").resolve().name)
     elif command == "pause":
         (run / "upgrade-pause").touch()
-        pid = int((run / "upgrade-supervisor.pid").read_text())
-        os.kill(pid, signal.SIGUSR1)
-        wait_for(lambda: (run / "upgrade-paused").exists())
+        signalled = False
+        try:
+            pid = int((run / "upgrade-supervisor.pid").read_text())
+            os.kill(pid, signal.SIGUSR1)
+            signalled = True
+            wait_for(lambda: (run / "upgrade-paused").exists(), argv[1] if len(argv) > 1 else None)
+            record(root, phase="paused")
+        except BaseException:
+            if signalled:
+                (run / "upgrade-resume").touch()
+            (run / "upgrade-pause").unlink(missing_ok=True)
+            raise
+    elif command == "cancel-pause":
+        # The daemon may already be draining after SIGTERM. Keep a restart
+        # request until the supervisor launches it again, even for exit 0.
+        if (run / "upgrade-pause").exists() or (run / "upgrade-paused").exists():
+            (run / "upgrade-resume").touch()
+        (run / "upgrade-pause").unlink(missing_ok=True)
+        wait_for(lambda: not (run / "upgrade-paused").exists()
+                 and not (run / "upgrade-resume").exists(), argv[1] if len(argv) > 1 else None)
+        record(root, phase="aborted")
     elif command == "start":
         if not (run / "upgrade-paused").exists():
             raise RuntimeError("daemon must be stopped before selecting a release")
         key = argv[1]
         if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
             raise ValueError("invalid release ID")
+        info = transaction(root)
+        if key != info.get("old") and info.get("phase") not in ("backed_up", "restored"):
+            raise RuntimeError("new release requires a completed offline snapshot")
+        if info.get("admission_attempted") and key != (root / "current").resolve().name:
+            raise RuntimeError("admission was attempted: use container replacement for rollback")
         select(root, root / key)
         (root / "probation").touch()
+        record(root, phase="probation", selected=key)
         (run / "upgrade-pause").unlink()
-        wait_for(lambda: not (run / "upgrade-paused").exists())
+        wait_for(lambda: not (run / "upgrade-paused").exists(), argv[2] if len(argv) > 2 else None)
     elif command == "commit":
+        info = transaction(root)
+        record(root, phase="commit_attempted", admission_attempted=True)
         (root / "probation").unlink(missing_ok=True)
-        if len(argv) > 1:
-            Path(argv[1] + ".hot-swap.sqlite").unlink(missing_ok=True)
+        backup = argv[1] if len(argv) > 1 else info.get("backup")
+        if backup:
+            Path(backup + ".hot-swap.sqlite").unlink(missing_ok=True)
+        if len(argv) > 2:
+            previous = argv[2]
+            if len(previous) != 64 or any(c not in "0123456789abcdef" for c in previous):
+                raise ValueError("invalid previous release")
+            temp = root / "previous.new"
+            temp.unlink(missing_ok=True)
+            temp.symlink_to(previous)
+            temp.replace(root / "previous")
+        prune(root)
+        record(root, phase="rolled_back" if (root / "current").resolve().name == info.get("old") else "committed")
     elif command in ("snapshot", "restore-database"):
         # Full restore moves the agent directories, which live runners still
         # have open. Automatic hot rollback must restore ONLY the database.
@@ -122,12 +216,18 @@ def main(argv):
         if not source.is_file():
             raise RuntimeError("missing offline database snapshot")
         if command == "snapshot":
+            record(root, phase="snapshotting", backup=argv[1])
             fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(fd)
+        else:
+            if transaction(root).get("admission_attempted"):
+                raise RuntimeError("admission was attempted: never rewind this journal with retained runners")
+            record(root, phase="restoring")
         with sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True) as src:
             with sqlite3.connect(destination) as dst:
                 src.backup(dst)
         destination.chmod(0o600)
+        record(root, phase="backed_up" if command == "snapshot" else "restored")
     else:
         raise ValueError("unknown upgrade command")
 

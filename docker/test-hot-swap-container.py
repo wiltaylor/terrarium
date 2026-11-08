@@ -45,7 +45,7 @@ COPY hot-swap.py /usr/local/lib/terrarium-hot-swap.py
 RUN chmod +x /usr/local/bin/terrarium-entrypoint && ln -s /state/releases/current/bin/terrariumd /usr/local/bin/terrariumd && ln -s /state/releases/current/bin/terrarium /usr/local/bin/terrarium && ln -s /state/releases/current/bin/terrarium-runner /usr/local/bin/terrarium-runner
 ENV TERRARIUM_STATE_DIR=/state TERRARIUM_CONFIG_REPO=/config/terrarium TERRARIUM_CONFIG_DIR=/config/terrarium TERRARIUM_API_SOCKET=/run/terrarium/api.sock TERRARIUM_RUNTIME_DIR=/run/terrarium TERRARIUM_RUNNER=/usr/local/bin/terrarium-runner TERRARIUM_RUNNER_MODE=process TERRARIUM_HARNESS_INSTALL=0 TERRARIUM_NO_HARNESS_INSTALL=true TERRARIUM_HOST_LISTEN="" TERRARIUM_DEFAULTS_DIR=/state/releases/current/defaults
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/terrarium-entrypoint"]
-CMD ["terrariumd", "--sandbox", "none"]
+CMD ["--daemon-service", "terrariumd", "--sandbox", "none"]
 USER terrarium
 HEALTHCHECK --interval=1s --timeout=2s --start-period=10s --retries=3 CMD terrarium daemon status
 LABEL io.terrarium.hot-swap-layout="1" io.terrarium.runner-compat-epoch="1"
@@ -85,6 +85,21 @@ raise SystemExit(42)
                     if time.monotonic() > deadline:
                         self.fail(docker("logs", name).stdout)
                     time.sleep(.2)
+                # A documented compose-run-style backup from the bundled OLD
+                # image must not touch an active different release or probation.
+                docker("run", "--rm", "--volumes-from", name, "--entrypoint", "python3",
+                       "ter-261-good", "/usr/local/lib/terrarium-hot-swap.py", "stage", "{}")
+                switch = "from pathlib import Path; r=Path('/state/releases'); (r/'current').unlink(); (r/'current').symlink_to('b'*64); (r/'probation').touch()"
+                docker("exec", name, "python3", "-c", switch)
+                docker("run", "--rm", "--volumes-from", name, "ter-261-old", "terrariumd", "backup", "list", "--json")
+                check = "from pathlib import Path; r=Path('/state/releases'); assert (r/'probation').exists(); assert (r/'current').resolve().name=='b'*64"
+                docker("exec", name, "python3", "-c", check)
+                # Even an accidental second default service command cannot
+                # acquire the state-volume lock while the live service owns it.
+                second = docker("run", "--rm", "--volumes-from", name, "ter-261-old", check=False)
+                self.assertNotEqual(second.returncode, 0)
+                docker("exec", name, "python3", "-c", check)
+                docker("exec", name, "python3", "-c", "from pathlib import Path; r=Path('/state/releases'); (r/'current').unlink(); (r/'current').symlink_to('a'*64); (r/'probation').unlink()")
                 docker("exec", "-d", name, "sh", "-c", "echo $$ > /run/terrarium/survivor.pid; exec sleep 600")
                 result = subprocess.run([str(binaries / "hot-swap-docker-test"), "--ignored", "--nocapture"],
                                         env={**os.environ, "TER261_CONTAINER": name},

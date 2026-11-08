@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     let probation = terrariumd::agent_rpc::CallGate::with_probation(Some(
         settings.state_dir.join("releases/probation"),
     ))
-    .in_probation();
+    .has_probation_marker();
     if let Some(t) = &tools {
         if settings.no_harness_install {
             info!(tools = %t.dir.display(), "harness install skipped (--no-harness-install)");
@@ -175,7 +175,12 @@ async fn main() -> anyhow::Result<()> {
         // Health/read listeners are up, but no auxiliary subsystem or harness
         // update may escape the snapshot before the updater commits admission.
         tokio::select! {
-            () = daemon.state.agent_calls.wait_for_commit() => {},
+            ready = daemon.state.agent_calls.wait_until_ready() => {
+                if let Err(error) = ready {
+                    daemon.shutdown();
+                    anyhow::bail!("daemon activation failed after health commit: {error}");
+                }
+            },
             () = shutdown_signal() => {
                 daemon.shutdown();
                 return Ok(());
@@ -275,7 +280,13 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    shutdown_signal().await;
+    tokio::select! {
+        () = shutdown_signal() => {},
+        error = daemon.state.agent_calls.wait_failure() => {
+            daemon.shutdown();
+            anyhow::bail!("daemon activation failed after health commit: {error}");
+        }
+    }
     info!("shutting down");
     if let Err(e) = terrariumd::agent_rpc::drain(
         &daemon.state,
