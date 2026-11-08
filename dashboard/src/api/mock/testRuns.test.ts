@@ -44,6 +44,8 @@ describe("mock test runs", () => {
     const newest = (await api.testRuns.list("terrarium", { card: "TER-12" })).items[0]!;
     expect(card.tests).toEqual({ id: newest.id, name: "unit", status: newest.status, counts: newest.counts, created_at: newest.created_at });
     expect((await api.cards.get("TER-17")).tests).toBeUndefined();
+    const board = await api.board.get("terrarium");
+    expect(board.cards.find(c => c.id === "TER-12")!.tests).toEqual(card.tests);
   });
 
   it("filters and pages the cases of a run: failed means failed or errored", async () => {

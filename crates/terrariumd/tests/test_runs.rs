@@ -177,19 +177,16 @@ async fn upload_list_show_raw_and_the_card_chip() {
     let rid = id(&run);
     assert_eq!(run["url"], format!("/p/proj/board/tests/{rid}"));
 
-    // Board summaries omit test detail. Opening the card loads the latest run.
+    // Board summaries keep only the compact result chip, identical to detail.
     let b = td.get("/api/projects/proj/board").await;
     let cards = b.ok()["cards"].as_array().unwrap().clone();
-    assert!(
-        cards
-            .iter()
-            .find(|c| c["id"] == c1.as_str())
-            .unwrap()
-            .get("tests")
-            .is_none()
-    );
+    let summary_chip = &cards.iter().find(|c| c["id"] == c1.as_str()).unwrap()["tests"];
     let full = td.get(&format!("/api/cards/{c1}")).await;
     let chip = &full.ok()["tests"];
+    assert_eq!(summary_chip, chip);
+    assert_eq!(summary_chip.as_object().unwrap().len(), 5);
+    assert!(summary_chip.get("cases").is_none());
+    assert!(summary_chip.get("suites").is_none());
     assert_eq!(chip["id"], rid.as_str());
     assert_eq!(chip["status"], "failed");
     assert_eq!(chip["counts"]["failed"], 1);

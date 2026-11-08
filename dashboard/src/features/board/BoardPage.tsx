@@ -13,7 +13,7 @@ import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { CardQuestions } from "./CardQuestions";
 import { CardFiles } from "./CardFiles";
-import { LinkedRuns } from "../tests/parts";
+import { CardTestsChip, LinkedRuns } from "../tests/parts";
 import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkable } from "./questions";
 import { emptyNewCardForm, type NewCardErrors, type NewCardForm, newCardBody, newCardColumn, nextNewCardForm } from "./newCard";
 import { columnTitle, isBlockedColumn } from "./columns";
@@ -131,7 +131,8 @@ export function BoardPage(props: { done?: boolean }) {
 
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
   let questionTimer: ReturnType<typeof setTimeout> | undefined;
-  // Live: card, board, test run, and job events of this project reload the board (a test run changes the test chip of its cards; a job changes the state chip and the queue places); question events reload the badges.
+  // Live events refresh summaries (including compact test chips and job state),
+  // retaining the loaded Done range. Only the open drawer reloads full details.
   const off = events.on((e) => {
     if ((e.kind === "card" || e.kind === "board" || e.kind === "test_run" || e.kind === "job") && e.project === params.project && !dragging()) {
       clearTimeout(reloadTimer);
@@ -537,6 +538,7 @@ function KCard(props: {
       </Show>
       <EtaChip card={props.card} now={props.now} />
       <div class="row small">
+        <Show when={props.card.tests}>{(t) => <CardTestsChip project={props.card.project} tests={t()} />}</Show>
         <Show when={props.card.comment_count}><span class="small muted" title={props.card.last_comment_at ?? undefined}>{props.card.comment_count} comments</span></Show>
         <For each={tileLabels(props.card.labels)}>{(l) => <span class="chip">{l}</span>}</For>
       </div>

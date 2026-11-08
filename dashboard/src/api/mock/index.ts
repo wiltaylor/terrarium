@@ -2915,7 +2915,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         const limit = q.done ? Math.max(1, Math.min(q.limit ?? 100, 100)) : cards.length;
         return { ...board, next_cursor: offset + limit < cards.length ? String(offset + limit) : null,
           cards: cards.slice(offset, offset + limit).map(c => {
-            const { body: _body, comments, links: _links, tests: _tests, ...summary } = c;
+            const { body: _body, comments, links: _links, ...summary } = c;
             return { ...summary, comment_count: comments.length, last_comment_at: comments.at(-1)?.created_at ?? null };
           }) };
       }),

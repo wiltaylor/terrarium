@@ -39,13 +39,19 @@ export function createBoardStore(api: Pick<Api, "board" | "cards">) {
 
   const setBoard = (b: Board) => setState("board", reconcile(b, { key: "id", merge: false }));
 
-  const load = async (name: string, completed = false) => {
+  const load = async (name: string, completed = false, keepCount = 0) => {
     project = name;
     done = completed;
     const gen = ++generation;
     setState({ loading: true, error: null });
     try {
-      const b = await api.board.get(name, completed ? { done: true } : undefined);
+      let b = await api.board.get(name, completed ? { done: true } : undefined);
+      // Refresh the whole loaded range atomically. A failed later page leaves
+      // the old range intact, and navigation cancels the obsolete refresh.
+      while (completed && generation === gen && b.next_cursor && b.cards.length < keepCount) {
+        const page = await api.board.get(name, { done: true, cursor: b.next_cursor });
+        b = { ...page, cards: [...b.cards, ...page.cards] };
+      }
       if (generation === gen) setBoard(b);
     } catch (e) {
       if (generation === gen) setState("error", e);
@@ -57,7 +63,7 @@ export function createBoardStore(api: Pick<Api, "board" | "cards">) {
   return {
     state,
     load,
-    reload: () => (project ? load(project, done) : Promise.resolve()),
+    reload: () => (project ? load(project, done, state.board?.cards.length ?? 0) : Promise.resolve()),
     async more() {
       const cursor = state.board?.next_cursor;
       if (!project || !cursor || state.loading) return;

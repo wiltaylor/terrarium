@@ -1819,7 +1819,7 @@ export interface ActiveCard extends Card {
 }
 
 /** List-only card. Fetch cards.get(id) before displaying or editing details. */
-export type CardSummary = Omit<Card, "body" | "comments" | "links" | "tests"> & {
+export type CardSummary = Omit<Card, "body" | "comments" | "links"> & {
   comment_count?: number;
   last_comment_at?: string | null;
 };

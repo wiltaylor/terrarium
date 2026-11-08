@@ -4365,8 +4365,10 @@ A board:
  "cards":[ ...active card summaries, by column, then position... ], "next_cursor":null}
 ```
 
-`GET board` returns summaries, not full cards: `body`, `comments`, `links`
-and `tests` are omitted. `comment_count` and `last_comment_at` describe
+`GET board` returns summaries, not full cards: `body`, `comments` and `links`
+are omitted. `tests` contains only the latest linked result's compact chip
+(run ID, name, time, status and aggregate counts), never cases or output.
+ETA attribution and creator names are retained. `comment_count` and `last_comment_at` describe
 comments without loading them. Open a card with `GET /api/cards/{id}` for
 its full details. Column counts include Done, but the default card list
 excludes Done. `?done=true&limit=100&cursor=...` reads only Done, up to 100

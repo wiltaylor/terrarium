@@ -694,7 +694,7 @@ pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
     })
 }
 
-/// The board read model never loads descriptions, comment bodies, links or test runs.
+/// The board read model never loads descriptions, comment bodies, links or test details.
 /// Done is a separate, bounded page. Counts always describe the whole board.
 pub fn board_summary(
     conn: &Connection,
@@ -733,9 +733,17 @@ pub fn board_summary(
           'assignee', c.assignee, 'assignee_name', coalesce(a.project || '/' || a.name, ar.project || '/' || ar.name, c.assignee),
           'assignee_status', a.status, 'agent', s.id,
           'agent_name', s.name, 'repo', c.repo, 'branch', c.branch,
-          'created_by', c.created_by, 'created_at', c.created_at, 'updated_at', c.updated_at,
+          'created_by', c.created_by,
+          'created_by_name', coalesce(cb.project || '/' || cb.name, cbr.project || '/' || cbr.name, c.created_by),
+          'created_at', c.created_at, 'updated_at', c.updated_at,
           'archived', json('false'), 'eta_at', c.eta_at, 'eta_set_at', c.eta_set_at,
+          'eta_set_by', c.eta_set_by,
+          'eta_set_by_name', coalesce(eb.project || '/' || eb.name, ebr.project || '/' || ebr.name, c.eta_set_by),
           'done_at', c.done_at, 'idle_since', c.idle_since,
+          'tests', (SELECT json_object('id', r.id, 'name', r.name, 'created_at', r.created_at,
+            'status', CASE WHEN r.failed + r.errored > 0 THEN 'failed' WHEN r.total = 0 THEN 'empty' ELSE 'passed' END,
+            'counts', json_object('passed', r.passed, 'failed', r.failed, 'errored', r.errored, 'skipped', r.skipped, 'total', r.total))
+            FROM test_runs r WHERE r.pk = (SELECT max(run) FROM test_run_cards WHERE card = c.id)),
           'comment_count', (SELECT count(*) FROM card_comments WHERE card = c.id),
           'last_comment_at', (SELECT max(created_at) FROM card_comments WHERE card = c.id),
           'depends_on', (SELECT json_group_array(depends_on) FROM card_deps WHERE card = c.id),
@@ -745,6 +753,10 @@ pub fn board_summary(
          FROM cards c JOIN board_columns k ON k.id = c.column_id
          LEFT JOIN agents a ON a.id = c.assignee
          LEFT JOIN agents_removed ar ON ar.id = c.assignee
+         LEFT JOIN agents cb ON cb.id = c.created_by
+         LEFT JOIN agents_removed cbr ON cbr.id = c.created_by
+         LEFT JOIN agents eb ON eb.id = c.eta_set_by
+         LEFT JOIN agents_removed ebr ON ebr.id = c.eta_set_by
          LEFT JOIN spawns s ON s.bound_kind = 'card' AND s.bound_id = c.id AND s.finished_at IS NULL
          WHERE c.project = ?1 AND c.archived = 0 AND (k.name = 'done') = ?2
          ORDER BY k.position, c.position, c.number LIMIT ?3 OFFSET ?4"

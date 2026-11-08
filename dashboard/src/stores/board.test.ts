@@ -53,6 +53,38 @@ describe("moveCard", () => {
 });
 
 describe("createBoardStore", () => {
+  it("refreshes the loaded Done range after a live event without losing pages", async () => {
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0 });
+    const get = vi.spyOn(api.board, "get");
+    get.mockResolvedValueOnce({ ...board, cards: [card("D1", "done", 0)], next_cursor: "1" });
+    get.mockResolvedValueOnce({ ...board, cards: [card("D2", "done", 1)], next_cursor: "2" });
+    get.mockResolvedValueOnce({ ...board, cards: [{ ...card("D1", "done", 0), title: "Updated" }], next_cursor: "1" });
+    get.mockResolvedValueOnce({ ...board, cards: [card("D2", "done", 1)], next_cursor: "2" });
+    const s = createBoardStore(api);
+    await s.load("p", true);
+    await s.more();
+    await s.reload();
+    expect(get).toHaveBeenCalledTimes(4);
+    expect(s.state.board!.cards.map(c => c.id)).toEqual(["D1", "D2"]);
+    expect(s.state.board!.cards[0]!.title).toBe("Updated");
+    expect(s.state.board!.next_cursor).toBe("2");
+  });
+
+  it("keeps loaded Done pages if a later refresh page fails", async () => {
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0 });
+    const get = vi.spyOn(api.board, "get");
+    get.mockResolvedValueOnce({ ...board, cards: [card("D1", "done", 0)], next_cursor: "1" });
+    get.mockResolvedValueOnce({ ...board, cards: [card("D2", "done", 1)], next_cursor: "2" });
+    get.mockResolvedValueOnce({ ...board, cards: [card("D1", "done", 0)], next_cursor: "1" });
+    get.mockRejectedValueOnce(new Error("refresh failed"));
+    const s = createBoardStore(api);
+    await s.load("p", true);
+    await s.more();
+    await s.reload();
+    expect(s.state.board!.cards.map(c => c.id)).toEqual(["D1", "D2"]);
+    expect(s.state.error).toBeInstanceOf(Error);
+  });
+
   it("loads Done only on request and appends bounded pages", async () => {
     const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0 });
     const get = vi.spyOn(api.board, "get");

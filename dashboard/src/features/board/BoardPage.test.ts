@@ -59,4 +59,7 @@ it("does not fetch full cards when the board has no open drawer", async () => {
   }), host);
   await vi.waitFor(() => expect(host.querySelectorAll("[data-card]").length).toBeGreaterThan(0));
   expect(get).not.toHaveBeenCalled();
+  const chip = host.querySelector("[data-card='TER-12'] .test-chip");
+  expect(chip?.getAttribute("title")).toContain("Latest test run");
+  expect(chip?.getAttribute("href")).toContain("/board/tests/");
 });
