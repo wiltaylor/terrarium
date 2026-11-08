@@ -741,7 +741,7 @@ async fn project_inbox_mail_reaches_lead_as_a_turn() {
     let id = td
         .agent("destination", "lead", json!({"roles": ["project_admin"]}))
         .await;
-    // Queue before launch: recovery must find project mail, not just direct mail.
+    // A project inbox event must wake its stopped lead automatically.
     let (status, m) = td
         .req(
             Method::POST,
@@ -755,17 +755,6 @@ async fn project_inbox_mail_reaches_lead_as_a_turn() {
     assert_eq!(status, 201);
     assert_eq!(m["state"], "queued");
     let mid = m["id"].as_str().unwrap();
-    let (status, listed) = td
-        .req(
-            Method::GET,
-            "/api/mail?to=destination/lead&state=unread",
-            None,
-            Some("destination/lead"),
-        )
-        .await;
-    assert_eq!(status, 200);
-    assert_eq!(listed.as_array().unwrap().len(), 1);
-    td.post(&format!("/api/agents/{id}/start"), None).await;
     let want = format!(
         "[Mailbox:source/worker] Subject: release (thread {}, message {mid})\n> deploy notes",
         m["thread_id"].as_str().unwrap()
