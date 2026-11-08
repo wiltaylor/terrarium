@@ -606,11 +606,7 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
 fn thread_item(th: Thread, urgency: (bool, bool)) -> InboxItem {
     let open = th.status == ThreadStatus::WaitingOperator
         || (th.status != ThreadStatus::Closed && th.open_questions.unwrap_or(0) > 0);
-    let (urgent, critical) = if open {
-        urgency
-    } else {
-        (false, false)
-    };
+    let (urgent, critical) = if open { urgency } else { (false, false) };
     InboxItem {
         id: th.item_id(),
         kind: InboxKind::Thread,
