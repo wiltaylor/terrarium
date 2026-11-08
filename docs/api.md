@@ -5085,10 +5085,10 @@ A page:
   `ready_for_review`, `reviewed`) and `reviewer` (an agent name). Another
   status is `422 invalid`.
 - `links` are the links of the current revision. `target` is
-  `project/path` for a page, the card ID, `project/MEM-n`, `project/ART-n`,
-  or `project/<version>`. The daemon reads `[[path]]`, `[[path|label]]`,
-  `[[TER-42]]`, `[[MEM-17]]`, `[[v0.3.0]]` (a name that starts with `v` and
-  a digit, or the name of a version with no page of that path),
+  `project/path` for a page, the card ID, `project/MEM-n`, or `project/ART-n`.
+  The daemon reads `[[path]]`, `[[path|label]]`,
+  `[[TER-42]]`, `[[MEM-17]]`, `[[v0.3.0]]` (a page link to `project/v0.3.0`,
+  not a version link),
   `[[project:other/reports/x]]`, `artifact:ART-9` in a Markdown link or
   image, and a fenced block `` ```artifact ART-11``` ``.
 
