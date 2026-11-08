@@ -393,6 +393,12 @@ async fn update(
     ApiJson(patch): ApiJson<Value>,
 ) -> ApiResult<Json<TargetView>> {
     let current = load(&state, &actor, name.clone()).await?;
+    let _resources = state
+        .executor
+        .target_resource_lock(&current.def)
+        .lock_owned()
+        .await;
+    let current = load(&state, &actor, name.clone()).await?;
     policy::define_target(&actor, current.def.project.as_deref())?;
     if let Some(p) = patch.get("project")
         && p.as_str() != current.def.project.as_deref()
@@ -401,6 +407,28 @@ async fn update(
     }
     if let Some(address) = patch.get("address").and_then(Value::as_str) {
         crate::jobs::prepare_hosts(&state.db, Some(address.to_owned())).await?;
+    }
+    let live = current.def.kind == TargetKind::Docker && patch.get("limits").is_some();
+    let n = name.clone();
+    let p = patch.clone();
+    let (candidate, _) = state
+        .db
+        .write(actor.label(), move |t| {
+            targets::prepare_update(t, &n, &p, live)
+        })
+        .await?;
+    let mut before = serde_json::to_value(&current.def)?;
+    let mut after = serde_json::to_value(&candidate)?;
+    for value in [&mut before, &mut after] {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("keep");
+            object.remove("snapshot_before_task");
+        }
+    }
+    if before != after
+        && let Some(host) = &current.def.host
+    {
+        state.executor.resource_verb_idle(host)?;
     }
     let baseline = if current.def.kind == TargetKind::Docker
         && !current.def.ephemeral
@@ -417,20 +445,53 @@ async fn update(
     } else {
         None
     };
+    let changed = if live {
+        let n = name.clone();
+        let p = patch.clone();
+        let (def, _) = state
+            .db
+            .write(actor.label(), move |t| {
+                targets::prepare_update(t, &n, &p, true)
+            })
+            .await?;
+        if def.limits != current.def.limits
+            && matches!(current.state.as_str(), "running" | "stopped")
+        {
+            crate::reservations::update_docker_defaults(&state, &def).await?;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let expected = current.clone();
     let r = state
         .db
         .write(actor.label(), move |t| {
+            if targets::get(t, &name)? != expected {
+                return Err(ApiError::conflict(
+                    "target changed during limits update; retry",
+                ));
+            }
             if let Some(settings) = baseline {
                 let mut rt = targets::get(t, &name)?.runtime;
                 rt.docker_settings = settings;
                 rt.recreate_required = false;
                 targets::set_runtime(t, &name, &rt)?;
             }
-            let r = targets::update(t, &name, &patch)?;
+            let r = targets::update_with_live_limits(t, &name, &patch, live, changed)?;
             t.audit("target.update", &name, r.def.project.as_deref(), patch)?;
             Ok(r)
         })
-        .await?;
+        .await;
+    if r.is_err() && changed {
+        // A concurrent file reload or credential change can invalidate the
+        // prepared write. Restore the persisted defaults before returning.
+        let latest = load(&state, &actor, current.def.name.clone()).await?;
+        crate::reservations::update_docker_defaults(&state, &latest.def).await?;
+    }
+    let r = r?;
     Ok(Json(
         with_credential(&state, view(&state, &actor, r, &[])).await?,
     ))
@@ -443,6 +504,13 @@ async fn remove(
 ) -> ApiResult<StatusCode> {
     let current = load(&state, &actor, name.clone()).await?;
     policy::define_target(&actor, current.def.project.as_deref())?;
+    let reserved_name = name.clone();
+    state
+        .db
+        .read(move |conn| {
+            crate::store::reservations::guard_identity(conn, "target", &reserved_name)
+        })
+        .await?;
     if current.source != crate::store::projects::SOURCE_FILE {
         executor::teardown(&state, &current).await;
     }

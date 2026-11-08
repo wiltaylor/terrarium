@@ -27,6 +27,7 @@ pub mod projects;
 pub mod questions;
 pub mod records;
 pub mod repos;
+pub mod reservations;
 pub mod rules;
 pub mod schedules;
 pub mod session_refs;

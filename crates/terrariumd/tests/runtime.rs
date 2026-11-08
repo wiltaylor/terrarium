@@ -453,6 +453,90 @@ async fn rpc(socket: &Path, method: &str, params: Value) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_stop_refuses_a_turn_handed_over_after_the_idle_check() {
+    use terrarium_core::AgentStatus;
+    use terrariumd::supervisor::{Supervisor, SupervisorError};
+
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let agent = id.parse().unwrap();
+    assert_eq!(td.sup.status(agent).await, Some(AgentStatus::Idle));
+    // No await for a working status: the reservation must protect even
+    // the interval before the runner has taken the turn.
+    td.sup
+        .send_turn(agent, "do not stop this turn".into())
+        .await
+        .unwrap();
+    assert!(matches!(
+        td.sup.stop_idle(agent).await,
+        Err(SupervisorError::NotReady(_))
+    ));
+    td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
+    td.wait_status(&id, "idle").await;
+    td.sup.stop_idle(agent).await.unwrap();
+    td.wait_status(&id, "stopped").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_stop_refuses_a_pending_push_pointer() {
+    use terrariumd::supervisor::{Supervisor, SupervisorError};
+
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let agent = id.parse().unwrap();
+    // Hold the pointer before typing, while the live runner is idle.
+    td.sup.reset_gate(agent, true);
+    td.sup.lease_granted(agent, "box".into(), "lease".into());
+    assert!(matches!(
+        td.sup.stop_idle(agent).await,
+        Err(SupervisorError::NotReady(_))
+    ));
+    td.sup.stop(agent).await.unwrap();
+    td.wait_status(&id, "stopped").await;
+    assert!(td.sup.send_turn(agent, "too late".into()).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_stop_queues_a_turn_during_the_graceful_stop() {
+    use terrariumd::supervisor::Supervisor;
+
+    let td = Td::start().await;
+    *td.adapter.exit_keys.lock().unwrap() = b"/exit 0\r".to_vec();
+    *td.adapter.exit_pause.lock().unwrap() = WAIT;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let agent = id.parse().unwrap();
+    let runner = td.sup.runner(agent).unwrap();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .lifecycle
+        .expect_stop(agent, "idle");
+    td.sup.stop_idle(agent).await.unwrap();
+    let result = td
+        .post(
+            &format!("/api/agents/{id}/send"),
+            Some(json!({"text": "after idle stop"})),
+        )
+        .await;
+    assert_eq!(result["queued"], true, "{result}");
+    // Finish the split exit keys only after the API has persisted the turn.
+    runner.write(b"\r").await.unwrap();
+    td.wait_events(&id, "turn_start", |events| {
+        events
+            .iter()
+            .any(|e| e["data"]["prompt"] == "[User] after idle stop")
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lifecycle_events_sse_and_pty() {
     let td = Td::start().await;
     let id = td.agent("demo", "bob", json!({})).await;

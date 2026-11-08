@@ -121,6 +121,31 @@ async fn mail_wakes_a_stopped_agent() {
 /// the first send stored its turn, so the second send finds the agent
 /// live; it must not go past the stored turn.
 #[tokio::test]
+async fn a_busy_wake_delivers_a_turn_queued_after_the_first_wake_read() {
+    let (td, w) = setup().await;
+    td.post_empty(&format!("/api/agents/{w}/start")).await.ok();
+    td.wait_status(&w, "idle").await;
+    let st = state(&td);
+    let held = terrariumd::lifecycle::WakeGuard::take(&st.lifecycle, aid(&w)).unwrap();
+    let key = w.clone();
+    st.db
+        .write("system", move |tx| {
+            terrariumd::store::agents::queue_turn(tx, &key, "[User] after the first wake read")
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        terrariumd::lifecycle::wake(&st, aid(&w), "idle_stop_refused").await,
+        terrariumd::lifecycle::Woke::Busy
+    );
+    assert_eq!(
+        td.sup.prompts(aid(&w)),
+        ["[User] after the first wake read"]
+    );
+    drop(held);
+}
+
+#[tokio::test]
 async fn a_queued_turn_stays_ahead_of_a_later_direct_turn() {
     let (td, w) = setup().await;
     let path = format!("/api/agents/{w}/send");

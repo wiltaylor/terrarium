@@ -302,6 +302,26 @@ pub struct ExecLimits {
     /// The holder of the budget: `<project>/<agent>`, or `operator`.
     pub holder: String,
     pub limits: Limits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<terrarium_core::resources::RuntimeLimits>,
+}
+
+/// Apply a budget without stopping a container or a holder's scopes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceApply {
+    pub session: SessionId,
+    pub target: String,
+    pub holder: String,
+    pub container: Option<String>,
+    pub limits: terrarium_core::resources::RuntimeLimits,
+}
+
+/// Stop only this managed slice and its child scopes. Never a container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceStop {
+    pub session: SessionId,
+    pub target: String,
+    pub holder: String,
 }
 
 /// Write a file on the host. File data frames follow, then `cp_end`.
@@ -420,6 +440,8 @@ pub struct DockerRun {
     /// it only to a host agent that has `capabilities.limits.docker`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<Limits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<terrarium_core::resources::RuntimeLimits>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -951,6 +973,9 @@ pub enum DaemonFrame {
     CpPull(CpPull),
     #[serde(rename = "docker.run")]
     DockerRun(DockerRun),
+    #[serde(rename = "resource.apply")]
+    ResourceApply(ResourceApply),
+    ResourceStop(ResourceStop),
     #[serde(rename = "docker.exec")]
     DockerExec(DockerExec),
     #[serde(rename = "docker.start")]
@@ -1016,6 +1041,8 @@ impl DaemonFrame {
             F::CpPush(r) => r.session,
             F::CpPull(r) => r.session,
             F::DockerRun(r) => r.session,
+            F::ResourceApply(r) => r.session,
+            F::ResourceStop(r) => r.session,
             F::DockerExec(r) => r.session,
             F::DockerStart(r) => r.session,
             F::DockerStop(r) => r.session,
@@ -1308,6 +1335,8 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             capabilities: HostCapabilities {
+                capacity: None,
+                reservations: false,
                 docker: ToolCapability {
                     present: true,
                     version: Some("29.8.0".into()),
