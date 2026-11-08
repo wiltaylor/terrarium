@@ -2,7 +2,7 @@
 //! attach, a stopped agent, an old runner, and plain text.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use serde_json::{Value, json};

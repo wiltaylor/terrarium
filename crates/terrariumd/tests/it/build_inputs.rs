@@ -1,4 +1,4 @@
-//! Build-script inputs used by reusable CI slot trees.
+//! Build-script inputs used by reusable CI slot trees, in the shared test binary.
 #![allow(clippy::unwrap_used)]
 
 use std::path::Path;

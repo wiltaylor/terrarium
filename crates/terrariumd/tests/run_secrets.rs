@@ -7,7 +7,7 @@
 //! A `run` grant gives no `secret get` and no env var at the start.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;

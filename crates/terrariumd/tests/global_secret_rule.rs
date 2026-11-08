@@ -6,7 +6,7 @@
 //! the value to the agent (the credential helper hands it to git).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use serde_json::{Value, json};

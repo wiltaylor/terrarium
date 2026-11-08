@@ -3,7 +3,7 @@
 //! check, the size limit, the rights of `send`, and the git exclude.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::{Resp, TestDaemon};
 use http_body_util::{BodyExt, Full};
