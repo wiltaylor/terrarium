@@ -2572,6 +2572,10 @@ res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 /// commit `sha`, checks it out with `-f` (`next` for a merge, detached for
 /// a validate), and removes every file that the commit does not track,
 /// ignored ones too, except `target/` at the root, so builds reuse it. A
+/// cache larger than 10 GiB (allocated disk space) is removed before the
+/// recipe starts. This bounds retained caches, not a running build's size.
+/// Only this job's reserved slot is inspected. Links are never followed.
+/// A
 /// dir that is no repo yet, a `.git` that is no plain dir or holds a
 /// symlink, or a tree that git cannot fetch into or check out, is made new
 /// once: all but `target/` goes, and `git init` runs.
@@ -2623,6 +2627,20 @@ if [ "$wipe_first" = wipe ]; then
   wipe || { echo "cannot wipe $dir"; res error; exit 2; }
 fi
 mkdir -p -- "$dir" && rm -f -- "$b" || { echo "cannot make $dir"; res error; exit 2; }
+# Bound the cache retained between jobs. du does not follow symlinks.
+# Refuse the job if the check fails rather than silently growing forever.
+target_cap_kib=10485760
+if [ -L "$dir/target" ]; then
+  rm -f -- "$dir/target" || { echo "cannot remove target link"; res error; exit 2; }
+elif [ -e "$dir/target" ]; then
+  usage=$(du -sk -- "$dir/target") || { echo "cannot size target/"; res error; exit 2; }
+  set -- $usage
+  case "$1" in ''|*[!0-9]*) echo "bad target/ size"; res error; exit 2 ;; esac
+  if [ "$1" -gt "$target_cap_kib" ]; then
+    echo "target/ exceeds $target_cap_kib KiB; removing the slot cache"
+    rm -rf -- "$dir/target" || { echo "cannot remove target/"; res error; exit 2; }
+  fi
+fi
 if ! cat > "$b"; then rm -f -- "$b"; echo "cannot write the bundle"; res error; exit 2; fi
 # All of the tree goes but target/, and git makes a new repo.
 fresh() {
@@ -3000,6 +3018,43 @@ mod tests {
                 &[&d, sha, "validate", "", tree, wipe],
                 &self.bundle(sha),
             )
+        }
+    }
+
+    #[test]
+    fn oversized_slot_caches_are_removed_and_small_caches_reused() {
+        let s = Src::new();
+        let (sha, tree) = s.commit("one");
+        let script = RECEIVE_SCRIPT.replace("target_cap_kib=10485760", "target_cap_kib=64");
+        let d = s.slot().display().to_string();
+        let bundle = s.bundle(&sha);
+        let receive = || run_plain(&script, &[&d, &sha, "validate", "", &tree], &bundle);
+        let (ok, text) = receive();
+        assert!(ok, "{text}");
+        let cache = s.slot().join("target");
+        let other = s.tmp.path().join("jobs/p/slot-2/target");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("kept"), vec![1; 128 * 1024]).unwrap();
+        for _ in 0..3 {
+            std::fs::create_dir_all(&cache).unwrap();
+            std::fs::write(cache.join("small"), "built").unwrap();
+            let (ok, text) = receive();
+            assert!(ok, "{text}");
+            assert!(cache.join("small").exists());
+            std::fs::write(cache.join("large"), vec![1; 128 * 1024]).unwrap();
+            let (ok, text) = receive();
+            assert!(ok, "{text}");
+            assert!(text.contains("removing the slot cache"), "{text}");
+            assert!(!cache.exists());
+            assert!(other.join("kept").exists());
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&other, &cache).unwrap();
+            let (ok, text) = receive();
+            assert!(ok, "{text}");
+            assert!(!cache.exists());
+            assert!(other.join("kept").exists());
         }
     }
 
