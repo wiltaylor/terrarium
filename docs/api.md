@@ -8471,7 +8471,7 @@ it was split from count, those of another group that shared a card do
 not. Set another number with your own `merge-red-group` rule. The pack
 does not spawn the fix agent or queue the group again (TER-256).
 
-Queued merge jobs open a board group in `@merge_queue`, with `@accepted`
+Queued merge jobs open a board group in `@review`, with `@accepted`
 as its completion anchor. The `queued` and `merge and e2e` steps track
 the job. A red result keeps the group open and adds its fix card as the
 first member. Queue the repair and the original members together, fix
@@ -8480,7 +8480,7 @@ recipe and the push of `next`. Each member then moves to accepted, and
 the last member closes the group. `{{job.group_key}}` is the stored
 merge group's key, or `merge:<job id>` for a new group, including when
 replaying verdicts after closure. Migration omits group actions on boards
-without merge_queue or accepted, retaining their existing delivery flow.
+without review or accepted, retaining their existing delivery flow.
 
 A rule of the project's `rules.wcl` with the name of a pack rule
 replaces it. A rule with only `enabled = false` (no `on`, no verb) turns

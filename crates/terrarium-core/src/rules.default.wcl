@@ -30,7 +30,7 @@ rule "merge-queued" {
   when "data.origin" { eq = "queue" }
   card_label { add = ["validation:queued"] }
   card_comment { text = "{{job.queue_comment}}" }
-  group_open { key = "{{job.group_key}}" title = "Merge {{job.id}}" column = "@merge_queue" done_when = "@accepted" eta = "jobs" }
+  group_open { key = "{{job.group_key}}" title = "Merge {{job.id}}" column = "@review" done_when = "@accepted" eta = "jobs" }
   group_add { key = "{{job.group_key}}" }
   group_status { key = "{{job.group_key}}" step = "queued" state = "done" }
   group_status { key = "{{job.group_key}}" step = "merge and e2e" state = "pending" }

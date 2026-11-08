@@ -442,7 +442,7 @@ async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
     );
     let gid = g["id"].as_str().unwrap().to_owned();
     assert_eq!(g["members"], json!([a, b]));
-    assert_eq!(g["column"], "merge_queue");
+    assert_eq!(g["column"], "review");
     assert_eq!(card(&td, &a).await["column"], "review");
     assert_eq!(g["steps"][1]["state"], "pending");
 
