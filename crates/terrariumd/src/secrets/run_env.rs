@@ -125,9 +125,39 @@ pub fn resolve(
     refs: &[Ref],
     use_only: &HashSet<(String, String)>,
 ) -> ApiResult<Vec<Injected>> {
+    resolve_with(conn, key, target, refs, use_only, |name| grants::find(conn, agent_id, project, name))
+}
+
+/// Resolve only delivery grants. Agent and project grants cannot authorize a job.
+pub fn resolve_delivery(
+    conn: &Connection,
+    key: &MasterKey,
+    project: &str,
+    target: &str,
+    refs: &[Ref],
+    use_only: &HashSet<(String, String)>,
+) -> ApiResult<Vec<Injected>> {
+    let all = grants::delivery_effective(conn, project)?;
+    resolve_with(conn, key, target, refs, use_only, |name| {
+        let found = all.iter().find(|e| e.name == name).cloned();
+        if found.as_ref().is_some_and(|e| e.level != Level::Run) {
+            return Err(ApiError::forbidden("delivery secrets require a target-limited run grant"));
+        }
+        Ok(found)
+    })
+}
+
+fn resolve_with(
+    conn: &Connection,
+    key: &MasterKey,
+    target: &str,
+    refs: &[Ref],
+    use_only: &HashSet<(String, String)>,
+    find: impl Fn(&str) -> ApiResult<Option<grants::Effective>>,
+) -> ApiResult<Vec<Injected>> {
     let mut out = Vec::with_capacity(refs.len());
     for r in refs {
-        let Some(e) = grants::find(conn, agent_id, project, &r.name)? else {
+        let Some(e) = find(&r.name)? else {
             return Err(ApiError::not_found(format!(
                 "`{}`: no secret `{}` is granted to you; `terrarium secret list` shows your grants",
                 r.env, r.name
@@ -254,6 +284,29 @@ mod tests {
         for bad in ["@secret:", "@secret:Bad", "@secret:a/b", "@secret:x."] {
             assert!(parse_refs(&env(&[("K", bad)])).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn delivery_grants_are_isolated_from_workers_and_other_projects() {
+        let c = db();
+        let k = MasterKey::generate();
+        let s = secret(&c, &k, "p", "deploy", Kind::ApiKey, json!({"fields":{"value":VALUE}}));
+        let refs = parse_refs(&env(&[("KEY", "@secret:deploy")])).unwrap();
+        let none = HashSet::new();
+        grant_run(&c, &s, "delivery:p", &["box"]).unwrap();
+        assert!(resolve(&c, &k, AGENT, "p", "box", &refs, &none).is_err());
+        assert!(resolve_delivery(&c, &k, "q", "box", &refs, &none).is_err());
+        assert!(resolve_delivery(&c, &k, "p", "web", &refs, &none).is_err());
+        let got = resolve_delivery(&c, &k, "p", "box", &refs, &none).unwrap();
+        assert_eq!(got[0].value.as_str(), VALUE);
+        assert!(!format!("{got:?}").contains(VALUE));
+        assert!(grant(&c, &s, "delivery:p", Some(Level::Read), None).is_err());
+        assert!(grant(&c, &s, "delivery:p", Some(Level::Use), None).is_err());
+        grants::on_project_deleted(&c, "p").unwrap();
+        assert!(resolve_delivery(&c, &k, "p", "box", &refs, &none).is_err());
+        // Ordinary project grants never become delivery grants.
+        grant_run(&c, &s, "project:p", &["box"]).unwrap();
+        assert!(resolve_delivery(&c, &k, "p", "box", &refs, &none).is_err());
     }
 
     #[test]

@@ -2154,7 +2154,7 @@ impl ToolRedact {
 /// The matcher of a run's own secret values (`(label, value)`): each
 /// value of at least [`TOOL_SECRET_MIN`] bytes, also a weak one. `None`
 /// with no value.
-fn own_redactor(
+pub(crate) fn own_redactor(
     secrets: &[(String, zeroize::Zeroizing<String>)],
 ) -> Option<Arc<terrarium_core::redact::Redactor>> {
     use terrarium_core::redact::{Entry, Redactor};
@@ -2336,7 +2336,7 @@ impl ExecRedact {
 /// With no secret in either matcher, `run` is returned as it is.
 ///
 /// [`StreamRedactor`]: terrarium_core::redact::StreamRedactor
-fn redact_run(
+pub(crate) fn redact_run(
     run: Running,
     own: Option<Arc<terrarium_core::redact::Redactor>>,
     redactor: Arc<terrarium_core::redact::Redactor>,

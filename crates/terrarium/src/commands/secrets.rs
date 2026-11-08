@@ -327,7 +327,7 @@ fn set_body(ctx: &Ctx, a: &SecretSetArgs) -> anyhow::Result<Value> {
 /// A grantee as the API takes it: `<project>/<name>` and a bare agent ID
 /// get `agent:`.
 pub fn grantee(s: &str) -> String {
-    if s.starts_with("agent:") || s.starts_with("project:") {
+    if s.starts_with("agent:") || s.starts_with("project:") || s.starts_with("delivery:") {
         s.to_owned()
     } else {
         format!("agent:{s}")

@@ -516,6 +516,12 @@ pub enum DeliveryCmd {
 
 #[derive(Debug, Args)]
 pub struct DeliverySetArgs {
+    /// Merge-only secret env reference, NAME=@secret:name[.field] (repeat).
+    #[arg(long = "merge-secret")]
+    pub merge_secrets: Vec<String>,
+    /// Remove all merge-only secret references.
+    #[arg(long, conflicts_with = "merge_secrets")]
+    pub clear_merge_secrets: bool,
     /// The target that runs the jobs; `""` turns the queue off
     #[arg(long)]
     pub target: Option<String>,
@@ -3242,6 +3248,7 @@ pub enum SecretCmd {
     /// applies at the next start of the agent
     Grant {
         name: String,
+        /// `delivery:<project>` (merge-only, run level),
         /// `agent:<project>/<name>`, `agent:<id>`, `project:<name>`, or
         /// `<project>/<name>` (an agent)
         grantee: String,

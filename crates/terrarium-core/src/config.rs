@@ -874,6 +874,10 @@ pub struct CheckoutDef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryDef {
+    /// Secret references injected only into merge recipes. Values must be
+    /// @secret:<name>[.<field>], authorized by delivery:<project> run grants.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub merge_secrets: BTreeMap<String, String>,
     /// Literal failure markers to extract from job logs. None uses Rust's
     /// FAILED, panicked, test result: FAILED, and failures: markers.
     /// An empty list disables extraction. Matching lines include three

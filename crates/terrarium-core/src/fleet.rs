@@ -88,6 +88,7 @@ const PROJECT_KEYS: &[&str] = &[
 ];
 /// The keys of `[projects.delivery]` (TER-87), in the order of the schema.
 const DELIVERY_KEYS: &[&str] = &[
+    "merge_secrets",
     "target",
     "recipe",
     "slots",
@@ -1673,6 +1674,7 @@ name = "beta"
         assert_eq!(
             *d,
             DeliveryDef {
+                merge_secrets: BTreeMap::new(),
                 failure_patterns: None,
                 target: Some("build".into()),
                 recipe: Some("just ci::validate".into()),

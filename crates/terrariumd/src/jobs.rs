@@ -553,6 +553,7 @@ pub fn check_delivery(
     project: &str,
     def: &DeliveryDef,
 ) -> ApiResult<()> {
+    check_merge_refs(def)?;
     if def
         .failure_patterns
         .as_ref()
@@ -1003,11 +1004,30 @@ async fn step(
     max: usize,
     input: Option<Vec<u8>>,
 ) -> ApiResult<Collected> {
+    step_redacted(state, job, def, cmd, max, input, &[]).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn step_redacted(
+    state: &Shared,
+    job: &str,
+    def: &terrarium_core::config::TargetDef,
+    cmd: &RemoteCmd,
+    max: usize,
+    input: Option<Vec<u8>>,
+    own: &[(String, zeroize::Zeroizing<String>)],
+) -> ApiResult<Collected> {
     let pidfile = crate::run_kill::job_pidfile(job);
     let admission = state.executor.target_resource_lock(def).lock_owned().await;
     let (running, report) =
         crate::run_kill::start_named_locked(state, def, cmd, pidfile, &admission)?;
     let running = crate::executor::track_resource_run(state, def, cmd, running, report.clone())?;
+    let running = crate::executor::redact_run(
+        running,
+        crate::executor::own_redactor(own),
+        state.db.redactor().get(),
+        terrarium_core::redact::View::All,
+    );
     set_control(job, Some(running.ctl.clone()));
     drop(admission);
     // A kill between the check in [`StepCtx::run`] and set_control found
@@ -1890,20 +1910,37 @@ async fn steps(
             warn!(job = %job.id, "cannot update merge group recipe boundary: {e}");
         }
     }
+    let injected = merge_secrets(x.state, job, delivery).await?;
+    let own: Vec<_> = injected.iter().map(|i| (i.label(), i.value.clone())).collect();
+    let mut env = recipe_env(job, x.dir, &head, base);
+    for i in &injected {
+        env.insert(i.env.clone(), i.value.to_string());
+    }
+    // Secret-bearing recipes must not leave an unredacted log on the target.
+    // Their bounded output is redacted in the stream before collection.
+    let has_secrets = !injected.is_empty();
+    let script = recipe_script(recipe, base);
     let recipe_cmd = RemoteCmd {
         argv: vec![
             "sh".into(),
             "-c".into(),
-            logged_recipe(recipe_script(recipe, base), &log),
+            if has_secrets { script } else { logged_recipe(script, &log) },
         ],
         cwd: Some(x.dir.to_owned()),
-        env: recipe_env(job, x.dir, &head, base),
+        env,
         timeout_secs: Some(delivery.timeout_secs()),
         holder: x.holder.clone(),
         ..RemoteCmd::default()
     };
     // An error here is a recipe that did not start: no session.
-    let c = x.run(&recipe_cmd, RECIPE_MAX, None).await?;
+    if killed(&job.id) {
+        return Err(ApiError::conflict("the job was cancelled"));
+    }
+    let recipe_cmd = RemoteCmd {
+        argv: low_priority(recipe_cmd.argv.clone(), x.ionice),
+        ..recipe_cmd
+    };
+    let c = step_redacted(x.state, &job.id, x.def, &recipe_cmd, RECIPE_MAX, None, &own).await?;
     x.recipe_started.store(true, Ordering::SeqCst);
     let ok = c.end.as_ref().is_some_and(End::success);
     // TER-196: a run that the infrastructure lost is no red; [`run`]
@@ -1915,7 +1952,9 @@ async fn steps(
     };
     // The recipe group is gone now, even after timeout or cancel. Read its
     // log in a separate, bounded session that is not controlled by job.kill.
-    let excerpt = if lost.is_none() {
+    let excerpt = if has_secrets {
+        "Secret-bearing recipe: no raw log retained on the target.".to_owned()
+    } else if lost.is_none() {
         let cmd = RemoteCmd {
             argv: low_priority(
                 vec![
@@ -1994,6 +2033,52 @@ async fn steps(
             ..JobEnd::default()
         }),
     }
+}
+
+/// Resolve only the project's delivery principal, only at a merge boundary.
+async fn merge_secrets(
+    state: &Shared,
+    job: &Job,
+    delivery: &DeliveryDef,
+) -> ApiResult<Vec<secrets::run_env::Injected>> {
+    if job.kind != JobKind::Merge || delivery.merge_secrets.is_empty() {
+        return Ok(Vec::new());
+    }
+    check_merge_refs(delivery)?;
+    let refs = secrets::run_env::parse_refs(&delivery.merge_secrets)?;
+    let key = secrets::key(&state.state_dir)?;
+    let project = job.project.clone();
+    let target = delivery.target.clone().unwrap_or_default();
+    let proxy_on = state.git_proxy.is_on();
+    let injected = state.db.read(move |c| {
+        let use_only = crate::git_proxy::use_only_secrets(c, proxy_on)?;
+        secrets::run_env::resolve_delivery(c, &key, &project, &target, &refs, &use_only)
+    }).await?;
+    let audits: Vec<_> = injected.iter().map(|i| (
+        format!("{}/{}", i.scope, i.name),
+        serde_json::json!({"job": job.id, "project": job.project,
+            "target": delivery.target, "field": i.field, "env": i.env,
+            "principal": format!("delivery:{}", job.project), "level": "run"}),
+    )).collect();
+    let project = job.project.clone();
+    state.db.write("system", move |t| {
+        for (object, detail) in audits {
+            t.audit("secret.run", &object, Some(&project), detail)?;
+        }
+        Ok(())
+    }).await?;
+    Ok(injected)
+}
+
+fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
+    for name in delivery.merge_secrets.keys() {
+        secrets::grants::check_env_name(name)?;
+    }
+    let refs = secrets::run_env::parse_refs(&delivery.merge_secrets)?;
+    if refs.len() != delivery.merge_secrets.len() {
+        return Err(ApiError::invalid("merge_secrets accepts only @secret references"));
+    }
+    Ok(())
 }
 
 /// The file of the changed paths in a job clone, relative to its root
