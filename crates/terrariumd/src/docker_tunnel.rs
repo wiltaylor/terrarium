@@ -272,11 +272,11 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
                 if data.len() > 16384 {
                     return;
                 }
-                if let Some(tx) = connections.get(&id) {
-                    if tx.try_send(data).is_err() {
-                        connections.remove(&id);
-                        send(&run.ctl, json!({"id":id,"close":true}));
-                    }
+                if let Some(tx) = connections.get(&id)
+                    && tx.try_send(data).is_err()
+                {
+                    connections.remove(&id);
+                    send(&run.ctl, json!({"id":id,"close":true}));
                 }
             }
         }
