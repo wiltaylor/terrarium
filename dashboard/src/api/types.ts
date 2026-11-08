@@ -1818,11 +1818,18 @@ export interface ActiveCard extends Card {
   blocked_reason?: string;
 }
 
+/** List-only card. Fetch cards.get(id) before displaying or editing details. */
+export type CardSummary = Omit<Card, "body" | "comments" | "links" | "tests"> & {
+  comment_count?: number;
+  last_comment_at?: string | null;
+};
+
 export interface Board {
   project: string;
   card_prefix?: string;
   columns: Column[];
-  cards: Card[];
+  cards: CardSummary[];
+  next_cursor?: string | null;
 }
 
 export interface NewCard {

@@ -253,6 +253,68 @@ async fn board_shape_and_card_ids() {
     assert_eq!(l.next_cursor(), None);
 }
 
+/// Matched synthetic fixtures: today's card count and ten times that count.
+/// Large descriptions/comments must not affect the list payload or its budget.
+#[tokio::test]
+async fn board_summary_budget_and_done_pages() {
+    use std::time::Instant;
+    use terrariumd::store::{Page, board};
+    for count in [294, 2940] {
+        let td = setup().await;
+        let mut conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
+        let tx = conn.transaction().unwrap();
+        for n in 1..=count {
+            let id = format!("TER-{n}");
+            let column = if n % 3 == 0 { "ready" } else { "done" };
+            tx.execute("INSERT INTO cards(id, project, number, column_id, position, title, body, created_by, created_at, updated_at)
+              VALUES (?1, 'proj', ?2, (SELECT id FROM board_columns WHERE project = 'proj' AND name = ?3), ?2, ?4, ?5, 'operator', '2026-11-08T00:00:00Z', '2026-11-08T00:00:00Z')",
+              rusqlite::params![id, n, column, "Board performance fixture ".repeat(4), "b".repeat(950)]).unwrap();
+            for j in 0..10 {
+                tx.execute("INSERT INTO card_comments(id, card, author, body, created_at) VALUES (?1, ?2, 'operator', ?3, '2026-11-08T00:00:00Z')",
+                  rusqlite::params![format!("comment-{n}-{j}"), id, "c".repeat(950)]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let start = Instant::now();
+        let before = serde_json::to_vec(&board::get_board(&conn, "proj").unwrap()).unwrap();
+        let before_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let start = Instant::now();
+        let summary = board::board_summary(&conn, "proj", false, &Page::default()).unwrap();
+        let after = serde_json::to_vec(&summary).unwrap();
+        let after_ms = start.elapsed().as_secs_f64() * 1000.0;
+        println!("board count={count}: before={} bytes {before_ms:.2}ms after={} bytes {after_ms:.2}ms", before.len(), after.len());
+        assert!(after.len() < count as usize * 400, "summary size budget");
+        assert!(after.len() * 10 < before.len(), "at least 90% smaller");
+        assert!(after_ms < 2000.0, "board query and serialization budget");
+        assert_eq!(summary["cards"].as_array().unwrap().len(), count as usize / 3);
+        let response = td.get("/api/projects/proj/board").await;
+        let c = &response.ok()["cards"][0];
+        assert_eq!(c["comment_count"], 10);
+        for field in ["body", "comments", "links", "tests"] {
+            assert!(c.get(field).is_none(), "unexpected detail {field}");
+        }
+        let full = td.get("/api/cards/TER-3").await;
+        assert_eq!(full.ok()["comments"].as_array().unwrap().len(), 10);
+        assert_eq!(full.ok()["body"].as_str().unwrap().len(), 950);
+        let mut cursor = String::new();
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let response = td.get(&format!("/api/projects/proj/board?done=true&limit=37&cursor={cursor}")).await;
+            let b = response.ok();
+            let cards = b["cards"].as_array().unwrap();
+            assert!(cards.len() <= 37);
+            for c in cards {
+                assert_eq!(c["column"], "done");
+                assert!(seen.insert(c["id"].as_str().unwrap().to_owned()));
+            }
+            let Some(next) = b["next_cursor"].as_str() else { break };
+            cursor = next.to_owned();
+        }
+        assert_eq!(seen.len(), count as usize * 2 / 3);
+        td.get("/api/projects/proj/board?done=true&cursor=bad").await.err(422, "invalid");
+    }
+}
+
 fn ids(v: &Value) -> Vec<&str> {
     v.as_array()
         .unwrap()

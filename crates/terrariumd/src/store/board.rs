@@ -694,6 +694,72 @@ pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
     })
 }
 
+/// The board read model never loads descriptions, comment bodies, links or test runs.
+/// Done is a separate, bounded page. Counts always describe the whole board.
+pub fn board_summary(conn: &Connection, project: &str, done: bool, page: &Page) -> ApiResult<Value> {
+    let prefix = crate::store::projects::get(conn, project)?.card_prefix;
+    let columns = column_rows(conn, project)?
+        .into_iter().enumerate().map(|(i, c)| Ok(Column {
+            count: active_count(conn, c.id)?,
+            title: c.title.unwrap_or_else(|| default_title(&c.name)),
+            name: c.name, position: i as i64, wip_limit: c.wip_limit, role: c.role,
+        })).collect::<ApiResult<Vec<_>>>()?;
+    let offset = page.cursor().map(|s| s.parse::<u32>())
+        .transpose().map_err(|_| ApiError::invalid("invalid board cursor"))?.unwrap_or(0);
+    let limit = page.limit().min(100);
+    // All correlated lookups use existing card/agent primary keys or the
+    // card_comments(card, created_at), card_deps(card), spawns_bound_open indexes.
+    let mut stmt = conn.prepare(
+        "SELECT json_object(
+          'id', c.id, 'kind', c.kind, 'project', c.project, 'column', k.name,
+          'position', c.position, 'title', c.title, 'labels', json(c.labels),
+          'assignee', c.assignee, 'assignee_name', coalesce(a.project || '/' || a.name, ar.project || '/' || ar.name, c.assignee),
+          'assignee_status', a.status, 'agent', s.id,
+          'agent_name', s.name, 'repo', c.repo, 'branch', c.branch,
+          'created_by', c.created_by, 'created_at', c.created_at, 'updated_at', c.updated_at,
+          'archived', json('false'), 'eta_at', c.eta_at, 'eta_set_at', c.eta_set_at,
+          'done_at', c.done_at, 'idle_since', c.idle_since,
+          'comment_count', (SELECT count(*) FROM card_comments WHERE card = c.id),
+          'last_comment_at', (SELECT max(created_at) FROM card_comments WHERE card = c.id),
+          'depends_on', (SELECT json_group_array(depends_on) FROM card_deps WHERE card = c.id),
+          'blocked_by', (SELECT json_group_array(d.depends_on) FROM card_deps d
+            JOIN cards dc ON dc.id = d.depends_on JOIN board_columns dk ON dk.id = dc.column_id
+            WHERE d.card = c.id AND dc.archived = 0 AND dk.name <> 'done'))
+         FROM cards c JOIN board_columns k ON k.id = c.column_id
+         LEFT JOIN agents a ON a.id = c.assignee
+         LEFT JOIN agents_removed ar ON ar.id = c.assignee
+         LEFT JOIN spawns s ON s.bound_kind = 'card' AND s.bound_id = c.id AND s.finished_at IS NULL
+         WHERE c.project = ?1 AND c.archived = 0 AND (k.name = 'done') = ?2
+         ORDER BY k.position, c.position, c.number LIMIT ?3 OFFSET ?4"
+    )?;
+    let raw = stmt.query_map(params![project, done, if done { (limit + 1) as i64 } else { -1 }, if done { offset } else { 0 }], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut cards: Vec<Value> = raw.iter().map(|s| json_col(s)).collect();
+    let next = if done && cards.len() > limit {
+        cards.truncate(limit);
+        Some((u64::from(offset) + limit as u64).to_string())
+    } else { None };
+    // Load group metadata once per group, rather than once per member.
+    let mut groups = conn.prepare("SELECT card FROM card_groups WHERE project = ?1")?;
+    let ids = groups.query_map([project], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    for id in ids {
+        let group = crate::store::groups::get(conn, &id)?;
+        for card in &mut cards {
+            if card["id"] == id || (group.closed_at.is_none() && group.members.iter().any(|m| card["id"] == *m)) {
+                card["group"] = json!(group);
+            }
+        }
+    }
+    let mut jobs = conn.prepare("SELECT DISTINCT card FROM jobs WHERE project = ?1 AND state IN ('queued', 'running')")?;
+    let ids = jobs.query_map([project], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    for id in ids {
+        if let Some(card) = cards.iter_mut().find(|c| c["id"] == id) {
+            card["job"] = json!(crate::store::jobs::card_job(conn, &id)?);
+        }
+    }
+    Ok(json!({"project": project, "card_prefix": prefix, "columns": columns, "cards": cards, "next_cursor": next}))
+}
+
 /// Filters for `GET /api/projects/{name}/cards`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CardFilter {

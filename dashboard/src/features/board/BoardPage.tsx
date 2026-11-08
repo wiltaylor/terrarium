@@ -4,7 +4,7 @@ import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
-import type { Card, Column, NewCard, Question } from "../../api/types";
+import type { Card, CardSummary, Column, NewCard, Question } from "../../api/types";
 import { ago, compact } from "../../lib/format";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { idleBadge } from "../../lib/idle";
@@ -13,7 +13,7 @@ import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { CardQuestions } from "./CardQuestions";
 import { CardFiles } from "./CardFiles";
-import { CardTestsChip, LinkedRuns } from "../tests/parts";
+import { LinkedRuns } from "../tests/parts";
 import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkable } from "./questions";
 import { emptyNewCardForm, type NewCardErrors, type NewCardForm, newCardBody, newCardColumn, nextNewCardForm } from "./newCard";
 import { columnTitle, isBlockedColumn } from "./columns";
@@ -59,7 +59,7 @@ export function BoardPage(props: { done?: boolean }) {
     onCleanup(() => phoneQuery.removeEventListener("change", change));
   });
 
-  createEffect(on(() => params.project, (p) => void board.load(p)));
+  createEffect(on(() => [params.project, props.done] as const, ([p, done]) => void board.load(p, done)));
 
   // The open questions of the project: the "? n" badges of the cards and the "Link a question" list of the drawer.
   const [questions, setQuestions] = createSignal<Question[]>([]);
@@ -150,7 +150,7 @@ export function BoardPage(props: { done?: boolean }) {
 
   const labels = () => [...new Set(board.state.board?.cards.flatMap((c) => c.labels) ?? [])].sort();
   const assignees = () => [...new Set(board.state.board?.cards.map((c) => c.assignee_name ?? c.assignee).filter((a): a is string => !!a) ?? [])].sort();
-  const visible = (c: Card) =>
+  const visible = (c: CardSummary) =>
     (!label() || c.labels.includes(label())) && (!assignee() || (c.assignee_name ?? c.assignee) === assignee()) && matchesVersion(c.labels, versionFilter());
 
   const boardColumns = (): Column[] => board.state.board?.columns ?? [];
@@ -164,7 +164,10 @@ export function BoardPage(props: { done?: boolean }) {
     await board.move(id, column, index, comment);
   };
 
-  const selected = () => board.state.board?.cards.find((c) => c.id === search.card);
+  const [selected, { mutate: setSelected, refetch: reloadSelected }] = createResource(
+    () => search.card ? [params.project, search.card, board.state.board] as const : false,
+    ([, id]) => api.cards.get(id),
+  );
 
   // The column of the phone board: `?col=` in the URL, so a reload and the back button keep it.
   // A tap on a column chip and a swipe on the board change it; a change of the URL scrolls the board to it.
@@ -352,6 +355,8 @@ export function BoardPage(props: { done?: boolean }) {
         )}
       </Show>
 
+      <LoadMore hasMore={!!board.state.board?.next_cursor} loading={board.state.loading} onMore={() => void board.more()} />
+      <ErrorBanner error={selected.error} />
       <Show when={newCardIn()}>
         {(column) => (
           <NewCardModal
@@ -415,9 +420,9 @@ export function BoardPage(props: { done?: boolean }) {
             onMove={(column, comment) => {
               const b = board.state.board;
               const end = b ? cardsIn(b, column).filter((x) => x.id !== c().id).length : 0;
-              return commitMove(c().id, column, end, comment);
+              return commitMove(c().id, column, end, comment).then(() => { void reloadSelected(); });
             }}
-            onSaved={board.put}
+            onSaved={(card) => { board.put(card); setSelected(card); }}
             onArchived={() => {
               board.drop(c().id);
               setSearch({ card: undefined });
@@ -430,7 +435,7 @@ export function BoardPage(props: { done?: boolean }) {
 }
 
 /** The countdown chip of a card with an ETA, with a thin bar of the time used. Nothing for a done or archived card. */
-function EtaChip(props: { card: Card; now: number }) {
+function EtaChip(props: { card: CardSummary; now: number }) {
   const cd = () => countdown(props.card, props.now);
   return (
     <Show when={cd()}>
@@ -452,7 +457,7 @@ function EtaChip(props: { card: Card; now: number }) {
 }
 
 function KCard(props: {
-  card: Card;
+  card: CardSummary;
   now: number;
   questions?: CardQuestionBadge;
   /** A line under the title, for example "also in 1.4.0" in a version lane. */
@@ -524,7 +529,7 @@ function KCard(props: {
       </Show>
       <EtaChip card={props.card} now={props.now} />
       <div class="row small">
-        <Show when={props.card.tests}>{(t) => <CardTestsChip project={props.card.project} tests={t()} />}</Show>
+        <Show when={props.card.comment_count}><span class="small muted" title={props.card.last_comment_at ?? undefined}>{props.card.comment_count} comments</span></Show>
         <For each={tileLabels(props.card.labels)}>{(l) => <span class="chip">{l}</span>}</For>
       </div>
       <Show when={props.card.assignee}>

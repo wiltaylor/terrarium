@@ -2,7 +2,7 @@
 
 import { createStore, reconcile, unwrap } from "solid-js/store";
 import type { Api } from "../api/client";
-import type { Board, Card, NewCard } from "../api/types";
+import type { Board, Card, CardSummary, NewCard } from "../api/types";
 
 /**
  * Move a card to `toColumn` at `toIndex` (index among that column's cards,
@@ -17,13 +17,13 @@ export function moveCard(board: Board, id: string, toColumn: string, toIndex: nu
   const target = byCol(toColumn);
   const index = Math.max(0, Math.min(toIndex, target.length));
   target.splice(index, 0, { ...card, column: toColumn });
-  const renumbered = new Map<string, Card>();
+  const renumbered = new Map<string, CardSummary>();
   target.forEach((c, i) => renumbered.set(c.id, { ...c, position: i }));
   if (fromColumn !== toColumn) byCol(fromColumn).forEach((c, i) => renumbered.set(c.id, { ...c, position: i }));
   return { ...board, cards: board.cards.map((c) => renumbered.get(c.id) ?? c) };
 }
 
-export function cardsIn(board: Board, column: string): Card[] {
+export function cardsIn(board: Board, column: string): CardSummary[] {
   return board.cards.filter((c) => c.column === column).sort((a, b) => a.position - b.position);
 }
 
@@ -34,26 +34,47 @@ export function createBoardStore(api: Pick<Api, "board" | "cards">) {
     error: null,
   });
   let project: string | null = null;
+  let done = false;
+  let generation = 0;
 
   const setBoard = (b: Board) => setState("board", reconcile(b, { key: "id", merge: false }));
 
-  const load = async (name: string) => {
+  const load = async (name: string, completed = false) => {
     project = name;
+    done = completed;
+    const gen = ++generation;
     setState({ loading: true, error: null });
     try {
-      const b = await api.board.get(name);
-      if (project === name) setBoard(b);
+      const b = await api.board.get(name, completed ? { done: true } : undefined);
+      if (generation === gen) setBoard(b);
     } catch (e) {
-      setState("error", e);
+      if (generation === gen) setState("error", e);
     } finally {
-      setState("loading", false);
+      if (generation === gen) setState("loading", false);
     }
   };
 
   return {
     state,
     load,
-    reload: () => (project ? load(project) : Promise.resolve()),
+    reload: () => (project ? load(project, done) : Promise.resolve()),
+    async more() {
+      const cursor = state.board?.next_cursor;
+      if (!project || !cursor || state.loading) return;
+      const gen = generation;
+      setState({ loading: true, error: null });
+      try {
+        const b = await api.board.get(project, { done, cursor });
+        if (gen === generation && state.board) {
+          const ids = new Set(state.board.cards.map(c => c.id));
+          setBoard({ ...b, cards: [...state.board.cards, ...b.cards.filter(c => !ids.has(c.id))] });
+        }
+      } catch (e) {
+        if (gen === generation) setState("error", e);
+      } finally {
+        if (gen === generation) setState("loading", false);
+      }
+    },
     clearError: () => setState("error", null),
 
     /** Optimistic move. Resolves true when the daemon accepts it. */

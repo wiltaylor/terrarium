@@ -4,7 +4,7 @@
 // the Labels field of the card drawer moves a card between lanes. The plain lane has no lane head.
 
 import { createSignal, For, type JSX, Show } from "solid-js";
-import type { Board, Card, Column } from "../../api/types";
+import type { Board, CardSummary as Card, Column } from "../../api/types";
 import { cardsIn } from "../../stores/board";
 import { columnTitle, overLimit } from "./columns";
 import { alsoIn, isPlain, type Lane, laneCells, NO_VERSION_LANE } from "./lanes";
@@ -56,7 +56,9 @@ export function LanesBoard(props: {
 
   /** One cell: the cards of a lane in a column, with the drop handlers. */
   const Cell = (p: { lane: Lane; col: Column }) => {
+    const [limit, setLimit] = createSignal(50);
     const cards = () => laneCells(p.lane, p.col.name);
+    const filtered = () => cards().filter((c) => c.kind === "group" || props.visible(c));
     const isDrop = () => drop()?.lane === p.lane.key && drop()?.column === p.col.name;
     return (
       <div
@@ -89,7 +91,10 @@ export function LanesBoard(props: {
             {cards().length}
           </span>
         </Show>
-        <For each={groupSections(cards().filter((c) => c.kind === "group" || props.visible(c)), p.col.name)}>
+        <Show when={filtered().length > limit()}>
+          <button class="small" onClick={() => setLimit(n => n + 50)}>Show more ({filtered().length - limit()})</button>
+        </Show>
+        <For each={groupSections(filtered().slice(0, limit()), p.col.name)}>
           {(section) => <section classList={{ "board-group": !!section.group }}>
             <Show when={section.group}>{(group) => (
               <header class="board-group-head">

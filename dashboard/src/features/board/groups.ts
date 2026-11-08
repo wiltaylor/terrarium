@@ -1,4 +1,4 @@
-import type { BoardGroup, Card } from "../../api/types";
+import type { BoardGroup, CardSummary as Card } from "../../api/types";
 
 export interface GroupSection {
   group?: BoardGroup;
