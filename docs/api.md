@@ -3226,6 +3226,15 @@ The rights:
 
 The rules:
 
+- A notice needs `card`, `reply_to`, or an urgent (or critical) `priority`.
+  Otherwise it is `422 invalid`: only answers, one done per request, and
+  real problems belong in the Inbox. `reply_to` (notices only) names an
+  operator mail or Inbox-thread message to the sender, or an answered
+  question owned by the sender. Invalid references are `422 invalid`.
+  The reply reference is recorded in the ask audit event.
+- A question or bundle is `409 conflict` while the same agent has an open
+  question or bundle on the same card or Inbox thread. `details.question`
+  names it and the error points to `terrarium question update <id>`.
 - An agent has at most 50 open questions (`429 rate_limited`). A question
   whose text is the same as an open question of the agent (case and
   spaces do not count) is `409 conflict`; `details.question` names the
@@ -3380,6 +3389,14 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 
 | `POST /api/inbox/asks` | `{"to", "text"?, "question"?}` | `201` `{"message", "watch"}`: the mail (§7) and the new watch. Below. |
 | `DELETE /api/inbox/watches/{thread}` | | `200` the watch, with `cancelled_at`. An unknown thread is `404 not_found`; a cancelled watch `409 conflict`. The mail stays. |
+
+The Inbox list accepts `limit` (1–400, default 200) and `cursor`. To request
+the next page, URL-encode the JSON tuple `[open, critical, urgent, at, id]`
+of the last item as `cursor`, with the same filters. An empty page ends the
+list. The ordering uses descending ID to break timestamp ties. New items
+above a cursor do not shift older pages, and removing the cursor item does
+not invalidate it. Badge headers always count every matching open item,
+independent of the page. Mail bodies are loaded only for the selected page.
 
 **Ask and forward** (GitHub #24). The operator asks an agent a question
 from the Inbox, or forwards a question, a bundle, or a notice of the Inbox
@@ -4368,8 +4385,19 @@ A board:
             {"name":"review","title":"Code review","position":3,"count":0},
             {"name":"blocked","title":"blocked","position":4,"role":"blocked","count":1},
             {"name":"done","title":"done","position":5,"count":0}],
- "cards":[ ...cards that are not archived, by column, then position... ]}
+ "cards":[ ...active card summaries, by column, then position... ], "next_cursor":null}
 ```
+
+`GET board` returns summaries, not full cards: `body`, `comments` and `links`
+are omitted. `tests` contains only the latest linked result's compact chip
+(run ID, name, time, status and aggregate counts), never cases or output.
+ETA attribution and creator names are retained. `comment_count` and `last_comment_at` describe
+comments without loading them. Open a card with `GET /api/cards/{id}` for
+its full details. Column counts include Done, but the default card list
+excludes Done. `?done=true&limit=100&cursor=...` reads only Done, up to 100
+cards per page. Use the response body's `next_cursor` for the next page
+(null at the end). Filtering and version grouping on the Done screen apply
+to loaded pages. `PATCH board` retains its full-card response for compatibility.
 
 A new board has the columns `backlog`, `ready`, `in_progress` (role
 `working`), `validating` (role `validating`), `review` (role `review`),
@@ -4464,7 +4492,7 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `GET /api/projects/{name}/board` | | `200` board |
+| `GET /api/projects/{name}/board?done=&limit=&cursor=` | | `200` board with card summaries; Done pages are opt-in |
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
@@ -4542,8 +4570,8 @@ supply:
 - `assignee` follows the assign rules.
 - `eta_at` follows the ETA rule (§8.2). The daemon sets it last, after the
   assignment.
-- `github_author` is the GitHub login of the issue author of a GitHub card,
-  for the GitHub author gate (below).
+- `github_author` is a legacy caller assertion, ignored by the author gate.
+  Use the issue import endpoint below for a daemon-verified author.
 - `inbox_thread` is an Inbox thread that tracks the new card (TER-146,
   §6.13 "Linked cards"). The caller must read the thread: else `404`, and
   no card is made.
@@ -4554,7 +4582,7 @@ is a card with the label `github` (any case), or a title that starts with
 `GitHub #<n>:` (any case). A held card is a GitHub card with the label
 `hold`.
 
-- **Create.** An agent makes a GitHub card, and its `github_author` is
+- **Create.** An agent makes a GitHub card, and its daemon-verified author is
   missing or not on the list (the case does not matter, and a leading `@`
   is dropped). The card is held. It goes to the blocked column with the
   labels `github` and `hold` and a move comment that says why, whatever
@@ -4587,16 +4615,27 @@ is a card with the label `github` (any case), or a title that starts with
   from any column, in the same write. Any other answer leaves the
   card held. The operator can also edit or move the card directly.
 
-The gap: `github_author` is what the creating agent says. The daemon does
-not read the issue, so an agent that gives a false author, or that makes
-the card with neither the label nor the title, gets past the gate. The
-gate enforces the rule against mistakes, not against a hostile agent.
+Agent-supplied `github_author` never bypasses the gate. A card with neither
+the GitHub label nor title cannot be recognized as GitHub work.
 A card that a schedule `card` action (§19) opens as the operator is not
 gated. The action never finds a held card: `close` does not move it and
 `open` does not comment on it, whatever its `trigger:<key>` label.
-A daemon-side issue sync that takes the author from the signed GitHub
-webhook closes the gap (TER-124). The ingest listener (§20) must then be
-reachable from GitHub.
+**Import an issue** (TER-124): `POST /api/projects/{name}/github-issues/import`
+with `{"repo":"configured-repo-name","number":123}` returns `200` and the
+card. Requires project write access. The daemon fetches the issue from
+`api.github.com` using the configured repository's token credential, if any.
+Only canonical github.com HTTPS and SSH repository URLs are accepted, redirects
+are refused, and pull requests are rejected. No card is created on fetch failure.
+An SSH credential or unavailable token does not prevent anonymous public issue
+fetches. An inaccessible issue without a token reports that a private repo
+needs a granted token (GitHub also returns 404 for missing issues).
+The API's author, title and body supply the card. Control characters are removed
+from titles and the issue title is capped at 200 characters. An agent's import
+starts in backlog only when its verified author is on the project's list.
+With no author list configured every agent import is held. Repeated imports return the
+same card, including archived or held cards. A daemon-owned import identity
+records its canonical URL. Adding a URL link manually cannot forge an import.
+The CLI equivalent is `terrarium issue import 123 --repo configured-repo-name`.
 
 **Active cards** (`GET /api/cards`, TER-43, for the dashboard home). The
 cards that are not archived in the columns `columns` (a comma list,
@@ -5057,10 +5096,10 @@ A page:
   `ready_for_review`, `reviewed`) and `reviewer` (an agent name). Another
   status is `422 invalid`.
 - `links` are the links of the current revision. `target` is
-  `project/path` for a page, the card ID, `project/MEM-n`, `project/ART-n`,
-  or `project/<version>`. The daemon reads `[[path]]`, `[[path|label]]`,
-  `[[TER-42]]`, `[[MEM-17]]`, `[[v0.3.0]]` (a name that starts with `v` and
-  a digit, or the name of a version with no page of that path),
+  `project/path` for a page, the card ID, `project/MEM-n`, or `project/ART-n`.
+  The daemon reads `[[path]]`, `[[path|label]]`,
+  `[[TER-42]]`, `[[MEM-17]]`, `[[v0.3.0]]` (a page link to `project/v0.3.0`,
+  not a version link),
   `[[project:other/reports/x]]`, `artifact:ART-9` in a Markdown link or
   image, and a fenced block `` ```artifact ART-11``` ``.
 
@@ -6226,10 +6265,15 @@ the state of one of its lab instances, is `running`), `PATCH` changes only
 conflict`, with `details: {state, fields}`. Bring the target down first. A
 field with its current value is no change. `terrarium admin target edit`
 sends this `PATCH`. Exception: the `limits` of a `host` target change at
-any time ("Resource limits", below).
+any time, and supported Docker `limits` change live after host acknowledgement
+("Resource limits", below).
 
-For a permanent managed Docker target, changing `image` or `limits` sets
-`runtime.recreate_required` and returns `recreate_note`. The next `up` of
+For a permanent managed Docker target, changing `image` sets
+`runtime.recreate_required` and returns `recreate_note`. Supported limit edits
+on running or stopped containers use `docker update` without recreation.
+Only a successful host acknowledgement advances the saved limits baseline.
+A failed acknowledgement keeps both the stored defaults and baseline unchanged.
+An offline or older host refuses the live edit. The next `up` of
 an existing stopped container starts it with its old settings and a clear
 `recreate_note` warning. Editing both image and limits back to the container's
 original settings clears the pending flag, without discarding any data.
@@ -6258,6 +6302,134 @@ File sync, at start and on `POST /api/reload`: a file target is made or
 updated and becomes `file`. An API target with the same name becomes
 `file`. When the file is gone, the target is deleted. The API refuses to
 change a file target (`409 file_managed`).
+
+**Host reservations (phase 1).** Hosts advertise physical logical CPU IDs,
+memory bytes and reservation support. `GET /api/hosts/{host}/capacity`
+returns physical, reservable and charged capacity. An operator or sysadmin
+configures `PUT /api/hosts/{host}/capacity` with `percentage` (0–100) and
+an optional `io` map. The default percentage is zero. IO is an operator-set
+budget, not measured disk throughput. Map keys are canonical block-device
+numbers such as `8:0`; values contain `read_bps`, `write_bps`, `read_iops`
+and `write_iops` (nonnegative integers).
+
+The `used` object includes charged `cpu_millis`, `memory_bytes`, the summed
+per-device `io` map, and sorted `exclusive_cores` CPU IDs. Queued and terminal
+reservations are excluded. Admission locks are per host agent. Docker lifecycle
+verbs publish an in-progress intent, then release admission while pulling or
+creating a container. Verbs may overlap on the same host. Resource changes on
+that host return `409 resource_busy` until all verbs finish, except a grant
+with `queue: true`, which enters the FIFO. Metadata-only target patches remain
+allowed. Expiry cleanup retries afterward. Commands wait up to 500 ms for a
+short admission write before reporting `resource_busy`. Other hosts remain independent.
+
+`POST /api/hosts/{host}/reservations` accepts `target`, optional `agent`,
+`amounts`, `until`, optional `reason`, `exclusive`, `queue` and
+`queue_timeout`. `amounts` contains `cpu_millis` (1000 is one logical core),
+`memory_bytes`, and `io`. `until` uses the lease time syntax. Without
+`agent`, the reservation belongs to the target. Authorization follows target
+leasing. Docker has one container budget and cannot reserve separately for
+an agent. Agent host reservations span that agent's targets on the host.
+Host grants return 409 naming existing sessions that must end first:
+phase 1 does not reparent live scopes. Agent and target reservations cannot
+overlap on a host because they use different slice hierarchies.
+
+**GPU reservations.** The same POST accepts an optional `gpus` array. Each
+claim names a stable NVIDIA `uuid`, not a device index. For example:
+
+```json
+{"target":"p-gpu","gpus":[{"uuid":"GPU-abcd1234","exclusive":true}],"until":"30m"}
+```
+
+For cooperative sharing, use `{"uuid":"GPU-abcd1234","vram_bytes":1073741824}`.
+`exclusive` defaults to false. A shared claim requires positive `vram_bytes`
+no larger than physical VRAM. `amounts` may be omitted for GPU-only requests.
+The top-level `exclusive` remains the CPU affinity option, independent of each
+GPU claim's `exclusive`. The CLI accepts the array through `reserve new --gpus
+'[...]'`. No MIG partitions are created.
+
+Exclusive GPUs require a managed **ephemeral Docker target**. Native host,
+SSH and vmlab exclusive GPU requests are refused, never granted as unenforced
+exclusive access. Shared claims are supported for native host targets and
+managed ephemeral Docker targets. Docker reservations belong to the target,
+not individual agents. SSH and vmlab GPU reservations are unsupported.
+
+**Containers get no GPU by default**, including images that set
+`NVIDIA_VISIBLE_DEVICES=all`. Managed container creation overrides that variable
+with `void` without a GPU reservation, or the reserved UUID allowlist with one,
+and passes the same devices through Docker's `--gpus` option. A GPU reservation
+cannot change a running container's exposure. Stop it first and recreate it
+on the next `up`. Permanent and unmanaged Docker targets cannot reserve GPUs.
+An exclusive grant is refused while incompatible non-native sessions or
+containers are active. Active holders of disjoint devices can run concurrently.
+Native host execution remains available and does not generate GPU-session mail.
+
+A zero host reservation percentage disables GPU admission. A positive
+percentage enables whole-device exclusive allocations and shared accounting
+against physical VRAM, without fractionally partitioning devices. Exclusive
+and shared claims cannot overlap on the same device. Shared claims cannot
+overcommit its recorded VRAM. The usual FIFO and cleanup accounting apply.
+Capacity responses include `gpus` inventory (`uuid`, `name`, `memory_bytes`,
+`used_bytes`) and `used.gpus` entries with `reservation`, `holder`, and `claim`.
+
+Shared GPU memory limits are cooperative, not hard limits. The host samples
+NVIDIA compute-process VRAM and attributes it through PID cgroups to the
+container or native holder's systemd scopes. Overages send warning mail to
+the holder and project leads, once until a below-share sample rearms the
+warning. Overages never kill processes. Graphics-process usage and missing
+PID attribution are not inferred from whole-device totals. GPU samples are
+cached for 30 seconds. Inventory is refreshed for every host connection;
+missing reserved devices keep reconciliation closed. Ordinary reservation
+expiry and explicit retraction still perform their normal session cleanup.
+
+Insufficient capacity returns 409 with the current allocations. With
+`queue: true`, the request waits in a durable FIFO queue, without backfill.
+`queue_timeout` defaults to one hour. Starting and ending reservations keep
+capacity charged until enforcement or cleanup finishes. `GET
+/api/hosts/{host}/reservations` lists visible reservations; `GET
+/api/reservations/{id}` reads one. `PATCH /api/reservations/{id}` with
+`until` extends it, `DELETE` retracts it, and `POST
+/api/reservations/{id}/cancel` cancels a queued request. CLI equivalents are
+`reserve new`, `reserve extend`, `reserve retract`, `reserve ls` and
+`reserve cancel`. `wait reservation <id>` registers a durable wait: admission
+resolves it, and cancellation, expiry or queue timeout fails it. Resolution
+is mailed to the waiting agent.
+
+Warnings at 15 and 5 minutes remaining are audited and sent as mail and
+runner pointers. Ending a reservation ends registered sessions with
+`reservation_ended`. Host cleanup stops its own slice before releasing
+capacity. Docker cleanup waits a bounded interval for process-tree cleanup;
+an unconfirmed result emits a warning and audit record naming the sessions.
+Fixed supported limits are restored before capacity is released.
+Docker treats zero CPU/memory and empty affinity updates as no change.
+For an absent fixed default, release therefore sets the effective
+"unlimited" managed default explicitly: all host CPU IDs, a CPU quota equal
+to the host's logical CPU count, and physical host memory. Swap follows the
+target's configured allowance. These values come from the online host's
+capability report at release, not a cached reservation size. A missing or
+stale report leaves capacity charged and emits a cleanup warning rather
+than guessing. This default does not give a container memory beyond its
+host's physical capacity.
+
+Exclusive CPU reservations allocate disjoint whole logical CPUs and leave
+at least one CPU for shared work. Isolation covers Terrarium-managed host
+scopes and Docker containers, not unrelated host services. Shared scopes
+inherit the complement on `terrarium.slice`; exclusive scopes use a sibling
+`terrariumreserved` hierarchy. Docker uses cpusets. Existing host sessions
+must end before an exclusive grant. Vmlab, SSH and unmanaged Docker paths
+are refused while exclusivity is active. Nonexclusive reservations provide
+accounted CPU quotas and memory/IO caps, not dedicated CPU affinity.
+
+**Reservation device IO restrictions.** A Docker reservation's per-device
+bandwidth and IOPS limits are create-time settings. A live change returns
+`409 conflict`, explaining that the limit takes effect at the next up.
+Phase 1 accepts device-IO reservations only on ephemeral Docker targets
+created for the reservation. Permanent Docker targets return `409 conflict`:
+the limits cannot be cleared without recreating the container. Terrarium
+does not recreate a container or write its cgroup files to bypass this rule.
+At expiry, permanent targets stay running. If restoring their supported
+fixed limits fails, the reservation stays in cleanup and its capacity stays
+charged until restoration succeeds. Ephemeral reservation containers may
+be stopped during cleanup.
 
 **Resource limits.** `limits` keeps one agent from taking all of a
 machine. A `host` target and a `docker` target with `image` take it. Every
@@ -6304,11 +6476,12 @@ Rules:
   once.
 - **A `docker` target: one budget for the container.** The container is
   one for all holders (§17.8), so they share the limits. Docker sets them
-  when Terrarium runs the container (`up`). A change of `limits` while the
-  container runs is `409 conflict`, as for every field. While a container of
-  a permanent managed target is `stopped`, a change of `limits` requires
-  explicit `recreate` (above), rather than starting with old limits. An
-  ephemeral target gets a new container at each `up`.
+  when Terrarium runs the container (`up`). API `PATCH` updates supported
+  fixed limits through `docker update` on running or stopped containers,
+  without recreation. Defaults are saved only after acknowledgement. An
+  active reservation continues to override edited defaults until it ends.
+  An offline or older host without live-update support refuses the edit.
+  An ephemeral target gets a new container at each `up`.
 - **A `host` target is always `running`** while its host agent is online.
   Its `limits` change at any time with `PATCH`. A new session sets the new
   limits on the holder's slice, so the processes of the holder that run
@@ -6547,6 +6720,37 @@ has `attach_error` (a sentence that starts "attach needs a restart of the
 target"), unless the daemon could run a new container.
 
 ### 17.4 Exec sessions
+
+SSH targets can opt in to workspace mirroring with `sync_workspace = true`
+in the target definition (`admin target new --kind ssh --sync-workspace`).
+The default is false. Install `rsync` on the target. The daemon image includes
+it. This uses the same SSH credential, port and host-key policy as exec.
+
+Before exec, run or cp, Terrarium mirrors the caller's workspace to the same
+absolute path on the target, creating it if needed. An operator must select
+an agent. After a normally exited command (including nonzero exit) or a
+completed copy, it stages the remote tree locally and pulls changes and
+deletions before reporting the session done. Killed or lost commands leave
+their output on the target. Sync failure is reported as `sync_failed`.
+
+At every depth, `.git`, `.terrarium`, `.terrarium-stage`, `target` and
+`node_modules` are excluded in both directions and protected from deletion.
+The same rule excludes `.terrarium-git-trailers`, `.env`, `.env.*`, `.netrc`,
+`.npmrc`, `.pypirc`, `id_*`, `*.pem`, and `.ssh` (including its contents).
+These exclusions also apply to conflict snapshots. Supply build credentials
+through target-side configuration or explicit secret injection, not workspace files.
+Build caches stay on the target. Repository metadata and Terrarium control
+files stay local. Do not use remote git operations with this mode.
+Only one synced operation per workspace may run at a time.
+
+If a local file, directory, symlink or permission changes while the command
+runs, the pull is skipped entirely with `sync_conflict`, naming the changed
+paths. Remote output remains on the target. Stop local editing during the
+final pull. Recover remote files explicitly before starting another synced
+operation, since its push makes the local tree authoritative again.
+After the final apply, Terrarium scans again and reports a conflict if the
+local tree differs from the staged result. This detects surviving late edits,
+but is not an atomic filesystem transaction. Tool runs are not synced.
 
 An exec session runs one command, one shell, or one file copy. It uses
 plain requests only, so it works through the agent tunnel too
@@ -8125,6 +8329,14 @@ test: true}`. Each test writes the audit row `schedule.test`
 A project has one board rules file, `rules.wcl` (TER-162, TER-166). A
 rule reacts to an event of the log and runs verbs on the board. The
 daemon stores and checks the file here; the engine (§19.9) runs it.
+
+If stored text no longer parses under the current schema, GET rules
+preserves the text and hash, returns empty `rules`, and adds
+`problems: [{line, column, message}]`. The engine emits a project event
+`rules.invalid` with the stored hash and problems when it loads that
+revision. Its own rules do not run, but the built-in pack still runs in
+rules mode. A cached revision does not emit again until reloaded (for
+example after a daemon restart).
 
 The file is WCL. The daemon ships its schema
 (`crates/terrarium-core/src/rules.schema.wcl`, `GET /api/rules/schema`)
@@ -11615,7 +11827,7 @@ they do not get the low priority.
 | `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, name?, aliases?, heavy_jobs, running, projects, updated_by?, updated_at?}]}`: each host with a cap, a running job, or aliases. `name` is the host-agent name when the key is a host agent. `heavy_jobs` is `null` without a cap. Visibility is scoped as described below |
 | `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
 | `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
-| `PUT /api/job-hosts/{host}/aliases` | a sysadmin, the operator  | `{aliases: [address]}` (at most 32): the addresses of the host agent `{host}` (name or ID). Replaces the list; `[]` takes all away. 404 for no host agent, 409 when another host agent has the alias. The answer is the list above |
+| `PUT /api/job-hosts/{host}/aliases` | a sysadmin, the operator  | `{aliases: [address]}` (at most 32): the addresses of the host agent `{host}` (name or ID). Replaces the list; `[]` takes all away. 404 for no host agent, 409 when another host agent has the alias or its pinned key, 422 for invalid aliases (including a host-agent name, case-insensitive). The answer is the list above |
 
 The audit row `job.host_cap` keeps the old and the new cap. A job keeps
 the host it started on (`host` in the job).
@@ -11745,6 +11957,8 @@ queued.
 - An ETA duration that is given later for a card with an open job (`card
   eta`, `card move ... --eta`) sets the job's `planned_secs` (§8.2).
 - The job's end moves the card, and the move clears the ETA (§8.2).
+- Cancelling a job with a planned duration clears its cards' ETAs too.
+
 Events `job.verdict` {project, job, card, kind, verdict, state, outcome,
 attempt, by_agent, repo, branch, parent, batch, end_comment,
 failure_block}: one per card when a job ends or is cancelled, in the same
@@ -11757,3 +11971,45 @@ line of the end. `failure_block` is the `Validation failed:` block for
 `red`, `conflict`, and `error`, else `null`. The verdict says what the run
 found, not what the queue does next: the rerun and the split stay as
 above.
+
+## Agent calls during daemon restarts
+
+The agent CLI assigns a stable `request_id` to each tunneled HTTP call. The
+runner holds new calls after a daemon `hold` control frame and resumes them
+after the next daemon's `hello`. The default queue limit is 15 minutes. At
+that limit the caller receives `unavailable` (the tunnel is down).
+
+Graceful shutdown stops admission before draining calls. Reads and long
+polls receive `retry`, which the CLI resends with the same request ID. Writes
+already admitted finish, including saving their answers. After 30 seconds
+the daemon logs and audits a restart deferral. It waits up to
+the updater's `TERRARIUM_UPDATE_DRAIN_WAIT` (default 600 seconds),
+measured from the start of the drain, before exiting. New calls remain held
+during this interval. Keep this cap below the 15-minute runner queue. Long
+`terrarium exec` calls may hold the drain until persistent exec sessions land
+in TER-263, which is outside this change.
+
+Write request IDs are scoped to the agent and bound to a fingerprint of the
+request. A reused ID with different parameters is rejected. Completed write
+answers are stored in SQLite and returned without executing the write again,
+including after a daemon restart. Concurrent copies wait for the first call.
+Legacy callers without request IDs are drained but cannot safely replay.
+Secret reads (`POST /api/agent/secrets/env`, `/api/agent/secrets/{name}/get`,
+and `/api/secrets/{scope}/{name}/reveal`) are also retried without journaling.
+These are audited reads despite their HTTP verb. Their secret-bearing answers
+must not be stored in the restart journal.
+For other writes whose answer declares `Cache-Control: no-store`, the first
+caller receives the answer, but the journal stores only an `indeterminate`
+marker. Replays fail closed without repeating the write or retaining sensitive
+answer content.
+
+An unresolved (`started`, NULL answer) journal entry after a crash or the drain
+cap yields `indeterminate`, never another execution. The error includes the
+request ID and HTTP method and says "the call may or may not have happened;
+check before you retry". A non-NULL answer marks `done`. Each indeterminate
+outcome is logged and
+audited. External effects and the answer journal are not one transaction:
+this policy prevents duplicate execution, but cannot promise a successful
+answer for an interrupted external write. Journal records have no automatic
+expiry, so an old request ID cannot silently become executable again.
+

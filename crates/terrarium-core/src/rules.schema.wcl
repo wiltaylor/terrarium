@@ -125,6 +125,8 @@ type When {
 // without a card.
 @block("if_card")
 type IfCard {
+  // Belongs to an open group whose key starts with this prefix.
+  group_key_prefix: utf8?
   // In one of these columns (`@<role>` or a column name).
   column: list<utf8>?
   // In none of these columns.

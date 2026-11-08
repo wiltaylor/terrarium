@@ -373,6 +373,15 @@ const LIST_MAX: usize = 200;
 /// oldest first.
 /// Then the others, the newest first. At most [`LIST_MAX`].
 pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
+    list_with_limit(conn, f, LIST_MAX as i64)
+}
+
+/// Inbox pagination applies its limit after merging all kinds by urgency.
+pub fn list_inbox(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
+    list_with_limit(conn, f, -1)
+}
+
+fn list_with_limit(conn: &Connection, f: &Filter, limit: i64) -> ApiResult<Vec<Question>> {
     let mut sql = String::from("SELECT * FROM questions WHERE 1 = 1");
     let mut args: Vec<String> = Vec::new();
     if let Some(a) = &f.agent {
@@ -415,7 +424,7 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
                    CASE WHEN status = 'open' THEN {PRIORITY_RANK_SQL} ELSE 0 END DESC,
                    CASE WHEN status = 'open' THEN created_at END ASC,
                    coalesce(answered_at, updated_at) DESC, id
-          LIMIT {LIST_MAX}"
+          LIMIT {limit}"
     ));
     let mut st = conn.prepare(&sql)?;
     let rows = st
@@ -670,6 +679,8 @@ fn same_text(a: &str, b: &str) -> bool {
 /// A new question. The API layer checks the rights.
 #[derive(Debug, Clone, Default)]
 pub struct NewQuestion {
+    /// A notice answering an operator message or an answered question.
+    pub reply_to: Option<String>,
     /// The asking agent's ULID.
     pub agent: String,
     pub kind: QuestionKind,
@@ -699,6 +710,32 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     let items = check_items(n.kind, &n.items)?;
     let context = check_context(n.context.as_deref())?;
     let card = check_card(t, &project, n.card.as_deref())?;
+    if n.kind == QuestionKind::Notice {
+        if let Some(reply) = n.reply_to.as_deref() {
+            let valid: bool = t.query_row(
+                "SELECT EXISTS(SELECT 1 FROM questions WHERE id = ?1 AND agent = ?2
+                    AND status = 'answered')
+                 OR EXISTS(SELECT 1 FROM messages WHERE id = ?1 AND from_agent = 'operator'
+                    AND to_agent = ?2)
+                 OR EXISTS(SELECT 1 FROM thread_messages m JOIN threads th ON th.id = m.thread
+                    WHERE m.id = ?1 AND m.author = 'operator' AND th.agent = ?2)",
+                params![reply, n.agent],
+                |r| r.get(0),
+            )?;
+            if !valid {
+                return Err(ApiError::invalid(
+                    "reply_to must name an operator message to you or an answered question of yours",
+                ));
+            }
+        }
+        if card.is_none() && n.reply_to.is_none() && !n.priority.at_least_urgent() {
+            return Err(ApiError::invalid(
+                "notify requires --card, --reply-to or --urgent: only answers to the operator, one done per request, or real problems belong in the Inbox",
+            ));
+        }
+    } else if n.reply_to.is_some() {
+        return Err(ApiError::invalid("reply_to is only for notices"));
+    }
     let in_thread = match n.thread.as_deref() {
         Some(th) => Some(crate::store::threads::check_ask(t, th, &n.agent)?.id),
         None => None,
@@ -713,6 +750,19 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
             ..Filter::default()
         },
     )?;
+    if matches!(n.kind, QuestionKind::Question | QuestionKind::Bundle)
+        && let Some(q) = open.iter().find(|q| {
+            matches!(q.kind, QuestionKind::Question | QuestionKind::Bundle)
+                && ((card.is_some() && q.card == card)
+                    || (in_thread.is_some() && q.thread == in_thread))
+        })
+    {
+        return Err(ApiError::conflict(format!(
+            "question {} is open on this card or Inbox thread. Update it with `terrarium question update {}`",
+            q.id, q.id
+        ))
+        .with_details(json!({"question": q.id})));
+    }
     if open.len() >= MAX_OPEN {
         return Err(ApiError::new(
             Code::RateLimited,
@@ -768,6 +818,9 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     let q = get(t, &id)?;
     let mut detail = json!({"agent": q.agent, "kind": q.kind, "text": short(&q.text, 200),
                             "priority": q.priority, "options": q.options.len()});
+    if let Some(reply) = n.reply_to {
+        detail["reply_to"] = json!(reply);
+    }
     if let Some(th) = &q.thread {
         detail["thread"] = json!(th);
     }
@@ -858,6 +911,7 @@ pub fn update(t: &mut Tx<'_>, id: &str, p: QuestionPatch) -> ApiResult<Question>
         None => q.card.clone(),
     };
     let priority = p.priority.unwrap_or(q.priority);
+    check_update_context(t, &q, card.as_deref(), priority)?;
     let (text, options, context) = redact_fields(t, text, options, context);
     let mut changed: Vec<&str> = Vec::new();
     if text != q.text {
@@ -928,6 +982,9 @@ pub fn set_card(
         return Err(not_open(&q, "a change of the card"));
     }
     let card = check_card(t, &q.project, card)?;
+    if q.status == QuestionStatus::Open {
+        check_update_context(t, &q, card.as_deref(), q.priority)?;
+    }
     if card == q.card {
         return Ok(q);
     }
@@ -946,6 +1003,52 @@ pub fn set_card(
     )?;
     emit_change(t, &q, "updated", previous.as_deref())?;
     Ok(q)
+}
+
+/// Apply the Inbox context rules to both update paths before any write.
+fn check_update_context(
+    t: &Tx<'_>,
+    q: &Question,
+    card: Option<&str>,
+    priority: Priority,
+) -> ApiResult<()> {
+    if q.kind == QuestionKind::Notice && card.is_none() && !priority.at_least_urgent() {
+        // reply_to is recorded on creation, not mutable through an update.
+        let has_reply: bool = t.query_row(
+            "SELECT EXISTS(SELECT 1 FROM audit WHERE action = 'question.ask' AND target = ?1
+                AND json_extract(detail, '$.reply_to') IS NOT NULL)",
+            [&q.id],
+            |r| r.get(0),
+        )?;
+        if !has_reply {
+            return Err(ApiError::invalid(
+                "notify requires --card, --reply-to or --urgent: only answers to the operator, one done per request, or real problems belong in the Inbox",
+            ));
+        }
+    }
+    if matches!(q.kind, QuestionKind::Question | QuestionKind::Bundle) {
+        let open = list(
+            t,
+            &Filter {
+                agent: Some(q.agent.clone()),
+                status: Some(QuestionStatus::Open),
+                ..Filter::default()
+            },
+        )?;
+        if let Some(other) = open.iter().find(|other| {
+            other.id != q.id
+                && matches!(other.kind, QuestionKind::Question | QuestionKind::Bundle)
+                && ((card.is_some() && other.card.as_deref() == card)
+                    || (q.thread.is_some() && other.thread == q.thread))
+        }) {
+            return Err(ApiError::conflict(format!(
+                "question {} is open on this card or Inbox thread. Update it with `terrarium question update {}`",
+                other.id, other.id
+            ))
+            .with_details(json!({"question": other.id})));
+        }
+    }
+    Ok(())
 }
 
 /// Redact the text, the options, and the context of a question or a

@@ -495,6 +495,10 @@ export interface SpawnPolicy {
   max_lifetime?: string;
   /** The ephemeral agents may spawn too, one level (sysadmin or the operator). */
   may_spawn_children?: boolean;
+  /** May bind agents to cards or threads. Default false. */
+  bound?: boolean;
+  /** Bound-agent lifetime cap. Absent: 30d. At most 30d. */
+  max_bound_lifetime?: string;
 }
 
 /** The outcome of a finished ephemeral agent. */
@@ -1466,6 +1470,9 @@ export interface InboxItem {
 }
 
 export interface InboxQuery {
+  /** JSON tuple [open, critical, urgent, at, id] of the previous page's last item. */
+  cursor?: string;
+  limit?: number;
   status?: InboxStatus;
   kind?: InboxKind;
   project?: string;
@@ -1632,8 +1639,8 @@ export interface ThreadEventData {
 // ----- Board (§13, docs/api.md §8) -----
 
 /** The role of a column (docs/api.md §8.1): `working` is where `card claim` moves a card; a move to `blocked` needs a comment. */
-export type ColumnRole = "working" | "blocked";
-export const COLUMN_ROLES: ColumnRole[] = ["working", "blocked"];
+export type ColumnRole = "working" | "blocked" | "validating" | "review" | "merge_queue" | "accepted";
+export const COLUMN_ROLES: ColumnRole[] = ["working", "blocked", "validating", "review", "merge_queue", "accepted"];
 
 export interface Column {
   name: string;
@@ -1739,6 +1746,7 @@ export interface Card {
   id: string;
   project: string;
   column: string;
+  column_role?: ColumnRole | null;
   position: number;
   title: string;
   body: string;
@@ -1782,7 +1790,7 @@ export interface Card {
 }
 
 export interface BoardGroup {
-  steps: { name: string; state: "pending" | "running" | "done" | "failed"; text: string; eta_at: string | null }[];
+  steps: { name: string; state: "pending" | "running" | "done" | "failed"; text: string; eta_at: string | null; started_at?: string | null; duration_secs?: number | null; estimated_secs?: number | null }[];
   id: string;
   key: string;
   title: string;
@@ -1818,11 +1826,18 @@ export interface ActiveCard extends Card {
   blocked_reason?: string;
 }
 
+/** List-only card. Fetch cards.get(id) before displaying or editing details. */
+export type CardSummary = Omit<Card, "body" | "comments" | "links"> & {
+  comment_count?: number;
+  last_comment_at?: string | null;
+};
+
 export interface Board {
   project: string;
   card_prefix?: string;
   columns: Column[];
-  cards: Card[];
+  cards: CardSummary[];
+  next_cursor?: string | null;
 }
 
 export interface NewCard {
@@ -2944,7 +2959,33 @@ export interface ToolCapability {
 }
 
 /** `terrarium_core::protocol::HostCapabilities` (docs/host-protocol.md, Handshake). */
+export interface ResourceAmounts {
+  cpu_millis: number;
+  memory_bytes: number;
+  io?: Record<string, { read_bps: number; write_bps: number; read_iops: number; write_iops: number }>;
+}
+export interface HostCapacityBudget {
+  host: string;
+  percentage: number;
+  physical: { cpu_ids: number[]; memory_bytes: number };
+  reservable: ResourceAmounts;
+  used: ResourceAmounts & { exclusive_cores?: number[] };
+}
+export interface Reservation {
+  id: string;
+  host: string;
+  holder: { kind: "agent" | "target"; id: string };
+  amounts: ResourceAmounts;
+  state: "queued" | "starting" | "active" | "ending" | "expired" | "retracted" | "cancelled" | "timed_out";
+  exclusive: boolean;
+  reason: string;
+  start: number | null;
+  until: number | null;
+  queue_until: number | null;
+}
 export interface HostCapabilities {
+  reservations?: boolean;
+  capacity?: { cpu_ids: number[]; memory_bytes: number };
   docker?: ToolCapability;
   vmlab?: ToolCapability;
   shell?: string;

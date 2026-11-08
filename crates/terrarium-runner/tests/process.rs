@@ -227,6 +227,48 @@ fn seqs(path: &Path) -> Vec<u64> {
 }
 
 #[tokio::test]
+async fn idle_stop_claim_uses_the_remote_turn_state() {
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    r.type_turn("/hold".into()).wait().await.expect("delivered");
+    assert!(!r.claim_idle_stop().await.expect("claim"));
+    r.kill().await.expect("kill");
+    r.wait().await;
+
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    assert!(r.claim_idle_stop().await.expect("idle claim"));
+    assert!(r.claim_idle_stop().await.expect("idempotent retry"));
+    let delivery = r.type_turn("after release".into());
+    r.release_idle_stop().await.expect("release");
+    delivery.wait().await.expect("released claim delivers");
+    r.kill().await.expect("kill");
+    r.wait().await;
+}
+
+#[tokio::test]
+async fn idle_stop_claim_expires_when_a_daemon_disconnects_after_claiming() {
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    assert!(r.claim_idle_stop().await.expect("claim applied"));
+    drop(events);
+    drop(r);
+    let r = env.connect(None).await;
+    timeout(wait(), r.type_turn("after lost claim reply".into()).wait())
+        .await
+        .expect("claim expired")
+        .expect("delivered");
+    r.kill().await.expect("kill");
+    r.wait().await;
+}
+
+#[tokio::test]
 async fn the_runner_process_survives_a_daemon_disconnect() {
     let env = Env::new();
     let first = env.spawn().await;
@@ -283,7 +325,7 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
         false,
     )
     .await;
-    // The runner answers `whoami` itself.
+    // Identity needs the daemon so roles cannot silently go stale offline.
     let who = hook_socket(
         &hooks,
         json!({"type":"request","id":1,"method":"whoami"}),
@@ -291,7 +333,7 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
     )
     .await
     .expect("whoami");
-    assert_eq!(who["result"]["name"], "tester");
+    assert_eq!(who["error"]["code"], "unavailable", "{who}");
     // A request for the daemon gets the tunnel error.
     let rpc = hook_socket(
         &hooks,
@@ -485,6 +527,38 @@ async fn the_runner_process_exits_with_the_harness() {
     assert_eq!(read_exit_status(&env.state(), env.agent), Some(status));
     // No runner, no connect.
     assert!(RemoteRunner::connect(&env.run(), env.agent).await.is_err());
+}
+
+#[tokio::test]
+async fn hold_queues_requests_until_a_new_daemon_hello() {
+    let env = Env::new();
+    let first = env
+        .spawn_spec(env.spec_with_queue(ms(10_000).as_millis() as u64))
+        .await;
+    first.hold().await.expect("hold");
+    // A control round trip orders the hold before the agent request.
+    first.screen().await.expect("screen");
+    let hooks = first.socket_path().to_path_buf();
+    let pending = tokio::spawn(async move {
+        hook_socket(
+            &hooks,
+            json!({"type":"request","id":9,"method":"echo","params":{"held":true}}),
+            true,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !pending.is_finished(),
+        "held calls must not reach the old daemon"
+    );
+    drop(first);
+    let second = env.connect(None).await;
+    let reply = timeout(wait(), pending).await.unwrap().unwrap().unwrap();
+    assert_eq!(reply["result"]["params"]["held"], true);
+    second.kill().await.unwrap();
+    second.wait().await;
+    env.until_gone().await;
 }
 
 #[tokio::test]

@@ -1051,6 +1051,9 @@ pub struct TargetDef {
     /// `username` of the credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// `ssh`: mirror the caller's workspace before and after operations.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sync_workspace: bool,
     /// `rdp`: the Windows domain of the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,

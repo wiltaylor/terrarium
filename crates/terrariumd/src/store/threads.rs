@@ -165,6 +165,9 @@ pub struct Handoff {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thread {
     pub id: String,
+    /// The outcome of an agent that ended while this thread was open.
+    #[serde(default)]
+    pub agent_end_outcome: Option<String>,
     pub topic: String,
     pub scope: String,
     pub template: Option<String>,
@@ -294,6 +297,7 @@ fn row_named(r: &Row<'_>, mut name: impl FnMut(&str) -> String) -> rusqlite::Res
     let report_to: Option<String> = r.get("report_to")?;
     Ok(Thread {
         id: r.get("id")?,
+        agent_end_outcome: r.get("agent_end_outcome")?,
         topic: r.get("topic")?,
         scope: r.get("scope")?,
         template: r.get("template")?,
@@ -1047,6 +1051,60 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     emit_with(t, &th, "message", json!({"message": msg, "author": author}))?;
     flush_pending_wakes(t, id)?;
     Ok(th)
+}
+
+/// Mark an open thread whose bound agent ended, without an Inbox notice.
+/// Called in the spawn's finish transaction, so retries cannot duplicate it.
+pub fn agent_ended(t: &mut Tx<'_>, id: &str, agent: &str, outcome: &str) -> ApiResult<()> {
+    let th = get_bare(t, id)?;
+    if th.status == ThreadStatus::Closed || th.agent.as_deref() != Some(agent) {
+        return Ok(());
+    }
+    let text = format!(
+        "Thread agent ended: {outcome}. Its open questions were retracted because it can no longer receive answers. The thread remains open and its report-to lead has been mailed to review the linked cards."
+    );
+    let at = now();
+    insert_message(t, id, "system", "message", &text, &at)?;
+    t.execute(
+        "UPDATE threads SET updated_at = ?2, agent_end_outcome = ?3 WHERE id = ?1",
+        params![id, at, outcome],
+    )?;
+    let open: Vec<String> = {
+        let mut st = t.prepare(
+            "SELECT id FROM questions WHERE thread = ?1 AND agent = ?2 AND status = 'open'",
+        )?;
+        st.query_map(params![id, agent], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for question in open {
+        questions::retract(
+            t,
+            &question,
+            true,
+            Some(&format!(
+                "Thread agent ended: {outcome}; it can no longer receive answers."
+            )),
+        )?;
+    }
+    if let Some(lead) = &th.report_to
+        && let Ok(to) = super::mail::resolve(t, lead, None)
+    {
+        super::mail::send(
+            t,
+            super::mail::Outgoing {
+                from: &super::mail::Address::System,
+                to: &to,
+                subject: &format!("Thread {id}: agent ended"),
+                body: &format!(
+                    "{text}\n\nThread: {id}\nAgent: {agent}\nRead `terrarium thread show {id}` and review its linked cards with `terrarium card show <id>`. Use your board tools to arrange any follow-up work. Only the operator can close this thread now."
+                ),
+                thread: None,
+                in_reply_to: None,
+            },
+        )?;
+    }
+    emit(t, &get_bare(t, id)?, "agent_ended")?;
+    Ok(())
 }
 
 /// The operator's overall response: kept as `response` (the approval

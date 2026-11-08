@@ -45,8 +45,8 @@ export const MOCK_PACK: PackRule[] = [
   { name: "agent-end-done", on: ["card"], verbs: ["agent.end"] },
 ];
 
-/** The wait columns of the pack's `agent-park` (names, as bound.rs). */
-const WAIT_COLUMNS = ["validating", "review", "accepted"];
+/** The wait roles of the pack's `agent-park`, with legacy name fallback. */
+const WAIT_COLUMNS = ["validating", "review", "merge_queue", "accepted"];
 
 interface ProjectRules {
   flow: BoardFlow;
@@ -59,10 +59,10 @@ interface ProjectRules {
 
 const resolves = (cols: Column[], ref: string): boolean => {
   const x = ref.startsWith("@") ? ref.slice(1) : null;
-  return x === null ? cols.some((c) => c.name === ref) : cols.some((c) => c.role === x || c.name === x);
+  return x === null ? cols.some((c) => c.name === ref) : cols.some((c) => c.role === x) || cols.some((c) => !c.role && c.name === x);
 };
 
-const hasColumn = (cols: Column[], name: string) => cols.some((c) => c.name === name || c.role === name);
+const hasColumn = (cols: Column[], name: string) => cols.some((c) => c.role === name || (!c.role && c.name === name));
 
 /** The verbs of a pack rule as the migration maps it to `cols`. */
 const mappedVerbs = (r: PackRule, cols: Column[]): string[] => (r.to && !resolves(cols, r.to) ? r.verbs.map((v) => (v === "card.move" ? "card.comment" : v)) : r.verbs);
@@ -75,7 +75,7 @@ function plan(cols: Column[]): RuleChange[] {
   }
   const missing = WAIT_COLUMNS.filter((n) => !hasColumn(cols, n));
   if (missing.length) {
-    const why = missing.map((n) => `the board has no column \`${n}\`: dropped from \`data.to\``);
+    const why = missing.map((n) => `the board has no column \`${n}\`: dropped from \`data.to_role\``);
     out.push({ rule: "agent-park", change: "mapped", reasons: why });
     out.push({ rule: "agent-unpark", change: "mapped", reasons: why });
   }

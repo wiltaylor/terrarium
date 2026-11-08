@@ -65,6 +65,184 @@ async fn ask(td: &TestDaemon, agent: &str, body: Value) -> Value {
     r.body
 }
 
+#[tokio::test]
+async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
+    let World { td, lead, sys, .. } = setup().await;
+    let path = format!("/api/agents/{lead}/questions");
+    let r = td
+        .post_as(&lead, &path, json!({"kind": "notice", "text": "Progress"}))
+        .await;
+    r.err(422, "invalid");
+    for flag in ["--card", "--reply-to", "--urgent"] {
+        assert!(r.body["error"]["message"].as_str().unwrap().contains(flag));
+    }
+    let card = id(td
+        .post("/api/projects/p/cards", json!({"title": "Requested work"}))
+        .await
+        .ok());
+    ask(
+        &td,
+        &lead,
+        json!({"kind": "notice", "text": "Done", "card": card}),
+    )
+    .await;
+    for priority in ["urgent", "critical"] {
+        ask(
+            &td,
+            &lead,
+            json!({"kind": "notice", "text": priority, "priority": priority}),
+        )
+        .await;
+    }
+    td.post_as(
+        &lead,
+        &path,
+        json!({"kind": "notice", "text": "Answer", "reply_to": "missing"}),
+    )
+    .await
+    .err(422, "invalid");
+    let q = ask(&td, &lead, json!({"text": "Choose?", "card": card})).await;
+    for body in [
+        json!({"text": "Another choice?", "card": card}),
+        json!({"kind": "bundle", "text": "Choices", "card": card,
+            "items": [{"text": "A?"}, {"text": "B?"}]}),
+    ] {
+        let r = td.post_as(&lead, &path, body).await;
+        r.err(409, "conflict");
+        assert_eq!(r.body["error"]["details"]["question"], q["id"]);
+        assert!(
+            r.body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("terrarium question update")
+        );
+    }
+    // A different agent may ask on this card. No card remains unrestricted.
+    let peer = id(&td
+        .agent("p", "peer", json!({"roles": ["project_admin"]}))
+        .await);
+    ask(&td, &peer, json!({"text": "Independent?", "card": card})).await;
+    ask(&td, &lead, json!({"text": "Unrelated?"})).await;
+    let qid = id(&q);
+    td.post(
+        &format!("/api/questions/{qid}/answer"),
+        json!({"answer": "Yes"}),
+    )
+    .await
+    .ok();
+    ask(
+        &td,
+        &lead,
+        json!({"kind": "notice", "text": "Your answer", "reply_to": qid}),
+    )
+    .await;
+    td.post_as(
+        &sys,
+        &format!("/api/agents/{sys}/questions"),
+        json!({"kind": "notice", "text": "Not mine", "reply_to": qid}),
+    )
+    .await
+    .err(422, "invalid");
+    let bundle = ask(
+        &td,
+        &lead,
+        json!({"kind": "bundle", "text": "Next choices", "card": card,
+        "items": [{"text": "C?"}, {"text": "D?"}]}),
+    )
+    .await;
+    td.post_as(&lead, &path, json!({"text": "Follow up?", "card": card}))
+        .await
+        .err(409, "conflict");
+    let bid = id(&bundle);
+    td.post_as(
+        &lead,
+        &format!("/api/questions/{bid}/retract"),
+        json!({"reason": "No longer needed"}),
+    )
+    .await
+    .ok();
+    ask(&td, &lead, json!({"text": "After retract?", "card": card})).await;
+}
+
+#[tokio::test]
+async fn inbox_noise_updates_and_operator_mail_replies() {
+    let World { td, lead, sys, .. } = setup().await;
+    let card = id(td
+        .post("/api/projects/p/cards", json!({"title": "Request"}))
+        .await
+        .ok());
+    let first = ask(&td, &lead, json!({"text": "First?", "card": card})).await;
+    let second = ask(&td, &lead, json!({"text": "Second?"})).await;
+    let path = format!("/api/questions/{}", id(&second));
+    for patch in [
+        json!({"card": card}),
+        json!({"card": card, "text": "Changed?"}),
+    ] {
+        let r = td.patch_as(&lead, &path, patch).await;
+        r.err(409, "conflict");
+        assert_eq!(r.body["error"]["details"]["question"], first["id"]);
+        let unchanged = td.get(&path).await;
+        assert_eq!(unchanged.body["revision"], 1);
+        assert_eq!(unchanged.body["card"], Value::Null);
+        assert_eq!(unchanged.body["text"], "Second?");
+    }
+    td.patch_as(&lead, &path, json!({"text": "Valid follow-up?"}))
+        .await
+        .ok();
+    // Threads cannot be reassigned through question update.
+    td.patch_as(&lead, &path, json!({"thread": "another-thread"}))
+        .await
+        .err(400, "bad_request");
+
+    let notice = ask(
+        &td,
+        &lead,
+        json!({"kind": "notice", "text": "Done", "card": card}),
+    )
+    .await;
+    let path = format!("/api/questions/{}", id(&notice));
+    for patch in [
+        json!({"card": null}),
+        json!({"card": null, "text": "No context"}),
+    ] {
+        td.patch_as(&lead, &path, patch).await.err(422, "invalid");
+    }
+    td.patch_as(&lead, &path, json!({"card": null, "priority": "urgent"}))
+        .await
+        .ok();
+    td.patch_as(&lead, &path, json!({"priority": "normal"}))
+        .await
+        .err(422, "invalid");
+
+    let message = td
+        .post(
+            "/api/mail",
+            json!({"to": "p/lead", "body": "Please investigate"}),
+        )
+        .await;
+    let mid = id(message.ok());
+    let reply = ask(
+        &td,
+        &lead,
+        json!({"kind": "notice", "text": "Answer to your mail", "reply_to": mid}),
+    )
+    .await;
+    td.patch_as(
+        &lead,
+        &format!("/api/questions/{}", id(&reply)),
+        json!({"text": "Updated answer"}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        &sys,
+        &format!("/api/agents/{sys}/questions"),
+        json!({"kind": "notice", "text": "Not my mail", "reply_to": mid}),
+    )
+    .await
+    .err(422, "invalid");
+}
+
 async fn status(td: &TestDaemon, agent: &str) -> String {
     td.get(&format!("/api/agents/{agent}")).await.body["status"]
         .as_str()

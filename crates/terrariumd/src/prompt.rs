@@ -492,8 +492,9 @@ that step.
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit and push the branch. Comment at checkpoints with
    `terrarium card comment <id> -m "..."`.
-   Set an ETA when you claim: `terrarium card claim <id> --eta 2h` (`m`, `h`,
-   `d`; at most 30 days). The operator sees a countdown on the board. When
+   Set an ETA when you claim: `terrarium card claim <id> --eta <minutes>m`.
+   ETAs are agent time in minutes, not human hours. Most cards take 5-60
+   minutes. The operator sees a countdown on the board. When
    the estimate changes, run `terrarium card eta <id> <duration>` again. Do
    not let the ETA run overdue.
 3. Test on the target. When the work is done, run `terrarium card move <id>
@@ -623,6 +624,10 @@ mod tests {
         ] {
             assert!(out.contains(needle), "{needle}");
         }
+        assert!(out.contains("--eta <minutes>m"));
+        assert!(out.contains("ETAs are agent time in minutes, not human hours."));
+        assert!(out.contains("Most cards take 5-60"));
+        assert!(!out.contains("--eta 2h"));
         let words = DEFAULT_TEMPLATE.split_whitespace().count();
         // 1020 (910 before): the section "Long runs and waits" (PLAN
         // §12d) after the snapshot line of the CLI list (docs/api.md §17.3).
@@ -824,8 +829,10 @@ mod tests {
                 "`terrarium question bundle \"<summary>\" --items-file <path>`",
                 "Do not put unrelated questions in a\n  bundle",
                 "- `notify`: tell the operator something that needs no decision",
-                "run `terrarium notify \"<text>\"`",
-                "Do not mail\n  `operator` for these",
+                "`terrarium notify \"<text>\" --card <id>`",
+                "`--reply-to <message-or-question>`",
+                "No progress, release, or deploy\n  notices.",
+                "on the same card or Inbox thread.",
                 "Use `--critical` only when the operator must act now",
             ] {
                 assert!(t.contains(needle), "{name}: {needle}");

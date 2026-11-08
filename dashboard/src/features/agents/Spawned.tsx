@@ -269,7 +269,15 @@ export function SpawnRightsFields(props: { project: string; value: SpawnPolicy |
                 Max lifetime
                 <input value={cur().max_lifetime ?? ""} placeholder={SPAWN_DEFAULT_LIFETIME} onInput={(e) => set({ max_lifetime: e.currentTarget.value.trim() || undefined })} />
               </label>
+              <label>
+                Max bound lifetime
+                <input value={cur().max_bound_lifetime ?? ""} placeholder="30d" onInput={(e) => set({ max_bound_lifetime: e.currentTarget.value.trim() || undefined })} />
+              </label>
             </div>
+            <label class="row small">
+              <input type="checkbox" checked={!!cur().bound} onChange={(e) => set({ bound: e.currentTarget.checked || undefined })} /> May bind agents to cards or threads
+            </label>
+            <span class="muted small">Bound agents follow their card or thread until it finishes, subject to a lifetime cap of at most 30d (default 30d).</span>
             <label class="row small">
               <input type="checkbox" checked={!!cur().may_spawn_children} onChange={(e) => set({ may_spawn_children: e.currentTarget.checked || undefined })} /> Its ephemeral agents may spawn too (one level; sysadmin or the operator)
             </label>

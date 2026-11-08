@@ -56,10 +56,11 @@
 //! The wait columns are names, not roles: a board without them never
 //! parks its bound agents.
 //!
-//! With `board_flow = rules` (TER-170) the driver and [`reconcile`] leave
-//! the cards of the project alone: the rules `agent-park`, `agent-unpark`,
-//! and `agent-end-*` of the built-in pack do the same through the verbs
-//! `agent.park`, `agent.unpark`, and `agent.end`. The spawn timer still
+//! With `board_flow = rules` (TER-170) the rules `agent-park`, `agent-unpark`,
+//! and `agent-end-*` handle moves through the verbs `agent.park`,
+//! `agent.unpark`, and `agent.end`; [`reconcile`] skips those cards.
+//! The driver still handles assignment releases in both flows, but never
+//! unparks a card in a wait column on release. The spawn timer still
 //! ends the agent of a finished card ([`finished_object`]).
 //!
 //! An event that the driver misses (a lag of the event hub, or a daemon
@@ -258,6 +259,26 @@ fn refuse(
     if let Some(card_id) = sp.bound.as_deref().and_then(|b| b.strip_prefix("card:")) {
         drop_return_turns(t, &sp.id, card_id)?;
     }
+    // Reconcile may retry the same refusal at every start or event lag.
+    // An assignment change or a new park starts a new refusal state.
+    let repeated: bool = t.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events e
+         WHERE e.agent_id = ?1 AND e.kind = 'agent.unpark_refused'
+           AND e.at >= ?2 AND json_extract(e.payload, '$.assignee') = ?3
+           AND NOT EXISTS(SELECT 1 FROM events a WHERE a.seq > e.seq
+             AND a.card = ?4 AND a.kind = 'card'
+             AND json_extract(a.payload, '$.change') = 'assigned'))",
+        rusqlite::params![
+            sp.id,
+            sp.parked_at,
+            other,
+            sp.bound.as_deref().and_then(|b| b.strip_prefix("card:"))
+        ],
+        |r| r.get(0),
+    )?;
+    if repeated {
+        return Ok(());
+    }
     let who = crate::store::agents::display_name(t, other)?.unwrap_or_else(|| other.to_owned());
     t.emit(
         EventDraft::new(
@@ -374,6 +395,15 @@ pub fn unpark_tx(
     {
         refuse(t, &sp, &other, cause)?;
         return Ok((Unparked::Refused, sp.owner));
+    }
+    if sp.parked_at.is_some()
+        && sp.unpark_queued_at.is_none()
+        && let Some(thread) = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:"))
+        && t.execute("UPDATE threads SET restart_context_sent = 1 WHERE id = ?1 AND restart_context_sent = 0", [thread])? > 0
+    {
+        let restart = crate::thread_agent::restart_turn(thread);
+        crate::store::transcripts::record_turn(t, id, &restart)?;
+        crate::store::agents::queue_turn(t, id, &restart)?;
     }
     if let Some(turn) = turn {
         crate::store::transcripts::record_turn(t, id, turn)?;
@@ -558,6 +588,10 @@ pub enum Action {
 /// The action of a move of a bound card from `from` to `to`, with the
 /// agent `parked` or not. The table of the module docs.
 pub fn on_move(from: &str, to: &str, parked: bool) -> Option<Action> {
+    on_move_with_role(from, to, None, parked)
+}
+
+fn on_move_with_role(from: &str, to: &str, role: Option<&str>, parked: bool) -> Option<Action> {
     if from == to {
         return None;
     }
@@ -567,7 +601,7 @@ pub fn on_move(from: &str, to: &str, parked: bool) -> Option<Action> {
             format!("the card moved {from} -> {to}"),
         ));
     }
-    if WAIT_COLUMNS.contains(&to) {
+    if WAIT_COLUMNS.contains(&role.unwrap_or(to)) {
         return Some(Action::Park(format!("card in {to}")));
     }
     // Out of a wait column (or on, with an unpark that waits): the card
@@ -580,7 +614,10 @@ fn action_of(ev: &StoredEvent, parked: bool) -> Option<Action> {
     let s = |k: &str| ev.data.get(k).and_then(Value::as_str);
     match ev.kind.as_str() {
         "card" => match s("change")? {
-            "moved" => on_move(s("from")?, s("to")?, parked),
+            "moved" => on_move_with_role(s("from")?, s("to")?, s("to_role"), parked),
+            "assigned" if parked && ev.data.get("assignee") == Some(&Value::Null) => {
+                Some(Action::Unpark)
+            }
             "archived" => Some(Action::End(
                 spawns::CANCELLED,
                 "the card was archived".into(),
@@ -621,6 +658,9 @@ fn data_block(what: &str, text: &str) -> String {
 /// The unpark turn of a card that came back. The move comment and the
 /// card body are data: quoted, between markers.
 pub(crate) fn return_turn(card: &board::Card, ev: &StoredEvent) -> String {
+    if ev.data.get("change").and_then(Value::as_str) == Some("assigned") {
+        return return_text(card, "the other worker left the card", None, false);
+    }
     let s = |k: &str| ev.data.get(k).and_then(Value::as_str).unwrap_or("?");
     let comment = ev.data.get("comment").and_then(Value::as_str);
     return_text(
@@ -686,12 +726,18 @@ async fn handle(state: &Shared, ev: StoredEvent) {
     let b = Bound::new(KIND_CARD, &card_id);
     let key = b.clone();
     let project = ev.project.clone();
+    // Assignment release is shared by both board flows. The move rules
+    // do not run when a worker unassigns a card without moving it.
+    let released = ev.kind == "card"
+        && ev.data.get("change").and_then(Value::as_str) == Some("assigned")
+        && ev.data.get("assignee") == Some(&Value::Null);
     let open = match state
         .db
         .read(move |c| {
             // With `board_flow = rules` the board rules park, unpark, and
             // end the agent (TER-170).
-            if let Some(p) = &project
+            if !released
+                && let Some(p) = &project
                 && crate::store::projects::rules_flow(c, p)?
             {
                 return Ok(None);
@@ -715,8 +761,21 @@ async fn handle(state: &Shared, ev: StoredEvent) {
         Action::Park(reason) => park(state, &open.id, &reason).await.map(|_| ()),
         Action::Unpark => {
             let id = card_id.clone();
-            let turn = match state.db.read(move |c| board::get_card(c, &id)).await {
-                Ok(card) => Some(return_turn(&card, &ev)),
+            let turn = match state
+                .db
+                .read(move |c| {
+                    let card = board::get_card(c, &id)?;
+                    let role = board::role_of(c, &card.project, &card.column)?;
+                    Ok((card, role))
+                })
+                .await
+            {
+                Ok((card, role)) => {
+                    if released && WAIT_COLUMNS.contains(&role.as_deref().unwrap_or(&card.column)) {
+                        return;
+                    }
+                    Some(return_turn(&card, &ev))
+                }
                 Err(e) => {
                     warn!(card = %card_id, "cannot read the card for the unpark turn: {e}");
                     None
@@ -794,7 +853,8 @@ pub async fn reconcile(state: &Shared) -> usize {
                         // RFC 3339 UTC with milliseconds on both sides.
                         let moved_since =
                             board::last_moved_at(c, card_id)?.is_some_and(|at| at > sp.spawned_at);
-                        out.push((sp, card, moved_since));
+                        let role = board::role_of(c, &card.project, &card.column)?;
+                        out.push((sp, card, role, moved_since));
                     }
                     Ok(_) => {}
                     Err(e) if e.code.status().is_client_error() => {}
@@ -812,9 +872,9 @@ pub async fn reconcile(state: &Shared) -> usize {
         }
     };
     let mut n = 0;
-    for (sp, card, moved_since) in rows {
+    for (sp, card, role, moved_since) in rows {
         let action = reconcile_action(
-            &card.column,
+            role.as_deref().unwrap_or(&card.column),
             sp.parked_at.is_some(),
             sp.unpark_queued_at.is_some(),
             moved_since,
@@ -912,6 +972,22 @@ mod tests {
 
     fn park(to: &str) -> Option<Action> {
         Some(Action::Park(format!("card in {to}")))
+    }
+
+    #[test]
+    fn renamed_wait_columns_use_event_roles() {
+        for role in WAIT_COLUMNS {
+            let ev = ev(
+                "card",
+                Some("TER-176"),
+                json!({"change": "moved", "from": "in_progress", "to": "renamed", "to_role": role}),
+            );
+            assert_eq!(action_of(&ev, false), park("renamed"));
+        }
+        assert_eq!(
+            on_move_with_role("ready", "review", Some("working"), false),
+            None
+        );
     }
 
     #[test]

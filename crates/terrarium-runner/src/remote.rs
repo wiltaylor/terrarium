@@ -793,6 +793,16 @@ async fn forward_attach(
 }
 
 impl RunnerHandle for RemoteRunner {
+    fn hold(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.inner
+                .shared
+                .out
+                .send(Outgoing::Frame(ClientFrame::Hold))
+                .map_err(|_| RunnerError::Disconnected)?;
+            Ok(())
+        })
+    }
     fn agent(&self) -> AgentId {
         self.inner.hello.agent
     }
@@ -920,6 +930,17 @@ impl RunnerHandle for RemoteRunner {
             let v = self.inner.shared.call("interrupt", json!({})).await?;
             Ok(v.get("sent").and_then(Value::as_bool).unwrap_or(false))
         })
+    }
+
+    fn claim_idle_stop(&self) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move {
+            let v = self.inner.shared.call("claim_idle_stop", json!({})).await?;
+            Ok(v.get("claimed").and_then(Value::as_bool).unwrap_or(false))
+        })
+    }
+
+    fn release_idle_stop(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.call_unit("release_idle_stop", json!({})))
     }
 
     fn kill(&self) -> BoxFuture<'_, Result<()>> {

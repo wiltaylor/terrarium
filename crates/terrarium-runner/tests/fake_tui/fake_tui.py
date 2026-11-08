@@ -78,6 +78,8 @@ Env:
   FAKE_TUI_COMPACT     `silent`: /compact sends no PostCompact (a failed
                        compaction of Claude Code). `turn`: /compact also
                        sends UserPromptSubmit first and Stop last
+  FAKE_TUI_COMPACT_GATE  a path; /compact waits for this file before
+                       sending PostCompact
 
 Signals: SIGTERM and SIGHUP end it at once (the Python default), unless
 FAKE_TUI_IGNORE_HUP is set. When its parent (the runner) dies, it exits
@@ -112,6 +114,7 @@ CBREAK = SLASH_NEEDS_PAUSE or PASTE_NEEDS_PAUSE
 PASTES = [0]
 INPUT_LOG = os.environ.get("FAKE_TUI_INPUT_LOG")
 COMPACT = os.environ.get("FAKE_TUI_COMPACT", "")
+COMPACT_GATE = os.environ.get("FAKE_TUI_COMPACT_GATE")
 # The paste that /leave-blink puts in the next prompt.
 PREFILL = [None]
 # The smallest gap between a slash command and its CR that submits it.
@@ -327,6 +330,9 @@ def main():
                 hook("UserPromptSubmit", {"prompt": full})
             hook("PreCompact", {"trigger": "manual"})
             out("compacting...\n")
+            if COMPACT_GATE:
+                while not os.path.exists(COMPACT_GATE):
+                    time.sleep(0.01)
             time.sleep(DELAY)
             if COMPACT != "silent":
                 hook("PostCompact", {"trigger": "manual", "compact_summary": "s"})

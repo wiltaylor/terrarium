@@ -12,12 +12,13 @@ check: fmt-check lint test scripts-test dashboard-check
 
 # The validation gate for a card: every part GitHub CI runs (ci.yml check job), in CI's order, with CI's toolchain and cargo env. Run it on a clean checkout of the pushed commit (AGENTS.md)
 [group('ci')]
-validate:
+validate: require-uv
 	#!/usr/bin/env bash
 	set -euo pipefail
 	export RUSTUP_TOOLCHAIN=1.97.1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 	# Stable test-only inputs across slot checkouts. Release builds do not use this gate.
 	export TERRARIUM_GIT_REF=ci-test TERRARIUM_TEST_BUILD=1 SOURCE_DATE_EPOCH=0
+	uv run python scripts/affected.py --check-commit-trailers
 	just ci::fmt-check
 	just ci::lint
 	just ci::test

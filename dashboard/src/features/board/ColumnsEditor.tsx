@@ -170,6 +170,10 @@ export function ColumnsEditor(props: { columns: Column[]; onSave: (edits: Return
                       <option value="">none</option>
                       <option value="working">Working</option>
                       <option value="blocked">Blocked</option>
+                      <option value="validating">Validating</option>
+                      <option value="review">Review</option>
+                      <option value="merge_queue">Merge queue</option>
+                      <option value="accepted">Accepted</option>
                     </select>
                   </label>
                   <div class="columns-editor-end">

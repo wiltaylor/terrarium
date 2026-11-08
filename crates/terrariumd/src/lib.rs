@@ -25,6 +25,7 @@ pub mod fleet;
 pub mod git;
 pub mod git_identity;
 pub mod git_proxy;
+pub mod github_issues;
 pub mod harness_auto_update;
 pub mod harness_tools;
 pub mod harness_versions;
@@ -48,6 +49,7 @@ pub mod question_guard;
 pub mod quota_notices;
 pub mod quota_policy;
 pub mod repo_browse;
+pub mod reservations;
 pub mod reset;
 pub mod rules_engine;
 pub mod rules_verbs;
@@ -199,6 +201,7 @@ pub async fn start_with_usage(
     log_definitions(&defs, &errors, &cfg.config_dir);
 
     let state: Shared = Arc::new(AppState {
+        agent_calls: Default::default(),
         started: Instant::now(),
         started_at: chrono::Utc::now(),
         db: Db::new(conn, EventHub::default()),
@@ -338,6 +341,7 @@ pub async fn start_with_usage(
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
+    tasks.push(reservations::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
     // The board rule engine (TER-168): runs the outbox rows that the last
     // daemon left pending, then the new events.

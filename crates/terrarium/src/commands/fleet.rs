@@ -329,7 +329,7 @@ pub fn print_plan(ctx: &Ctx, v: &Value, prune: bool, applied: bool) {
             line.push_str(&notes.join("; "));
         }
         ctx.line(line.trim_end());
-        if action == "update" {
+        if matches!(action, "create" | "update") {
             for c in e["changes"].as_array().into_iter().flatten() {
                 ctx.line(format!(
                     "      {}: {} -> {}",
@@ -432,6 +432,7 @@ fleet terrarium: 1 to create, 1 to update, 1 to delete, 1 unchanged, 1 conflict(
 
   = project      terrarium
   + agent        terrarium/new
+      harness: (none) -> \"claude\"
   ~ agent        terrarium/lead  drift: prompt
       prompt: \"default\" -> \"project-lead\"
       model: (none) -> \"opus\"
@@ -454,6 +455,42 @@ warning: prompts: cannot check prompt template `x`
             "{out}"
         );
         assert!(!out.contains("add --prune"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn plan_prints_project_create_fields_including_delivery() {
+        let reply = json!({
+            "fleet": "t", "valid": true,
+            "summary": {"create": 1},
+            "entries": [{
+                "kind": "project", "key": "p", "action": "create",
+                "changes": [
+                    {"field": "description", "from": null, "to": "Project p"},
+                    {"field": "delivery", "from": null,
+                     "to": {"recipe": "sh -c 'just build && just test'", "target": "build-box"}}
+                ]
+            }]
+        });
+        let (r, out, _) = run(&["fleet", "plan", "-"], vec![(200, reply.clone())]).await;
+        r.unwrap();
+        assert_eq!(
+            out,
+            "\
+fleet t: 1 to create, 0 to update, 0 to delete, 0 unchanged
+
+  + project      p
+      description: (none) -> \"Project p\"
+      delivery: (none) -> {\"recipe\":\"sh -c 'just build && just test'\",\"target\":\"build-box\"}
+"
+        );
+
+        let (r, out, _) = run(
+            &["--json", "fleet", "plan", "-"],
+            vec![(200, reply.clone())],
+        )
+        .await;
+        r.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), reply);
     }
 
     #[tokio::test]

@@ -60,18 +60,24 @@ describe("Inbox load (TER-302)", () => {
           to: "operator", to_kind: "operator", to_name: "operator", subject: `Performance ${i}`,
           body: "Representative message content. ".repeat(100), state: "queued", created_at: "2026-11-08T00:00:00Z" },
       }));
-      const spy = vi.spyOn(api.inbox, "list").mockResolvedValue(rows);
+      const spy = vi.spyOn(api.inbox, "list").mockImplementation(async (q = {}) => {
+        const sorted = [...rows].sort((a, b) => b.at.localeCompare(a.at) || b.id.localeCompare(a.id));
+        const previous = q.cursor ? JSON.parse(q.cursor)[4] as string : undefined;
+        const start = previous ? sorted.findIndex((i) => i.id === previous) + 1 : 0;
+        return sorted.slice(start, start + (q.limit ?? 200));
+      });
       try {
-        const start = performance.now();
         const el = mount("/inbox");
         await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBeGreaterThan(0), 10000);
-        const elapsed = performance.now() - start;
-        console.log(`Inbox render scale=${scale}: ${elapsed.toFixed(1)}ms, cards=${el.querySelectorAll("article").length}`);
-        expect(elapsed).toBeLessThan(2000);
+        // Bound work, not wall time on a shared build host. A 10x regression
+        // in mounted cards or fetched pages must fail at either fixture size.
         expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBe(40);
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 200, cursor: undefined }));
         const more = [...el.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Load more"))!;
         more.click();
         expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBe(80);
+        expect(spy).toHaveBeenCalledTimes(1);
         const reply = el.querySelector("textarea")!;
         reply.value = "Keep my draft";
         reply.dispatchEvent(new Event("input", { bubbles: true }));
@@ -79,15 +85,32 @@ describe("Inbox load (TER-302)", () => {
         await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
         expect(el.querySelector("textarea")).toBe(reply);
         expect(reply.value).toBe("Keep my draft");
-        // Reaching an old item explicitly may render more. Stub browser scrolling in jsdom.
-        vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => 0);
-        const deep = mount(`/inbox?item=${encodeURIComponent(rows[0]!.id)}`);
-        await waitFor(() => expect(deep.querySelectorAll("article[aria-label^='Mail ']").length).toBe(rows.length), 10000);
+        const lastMounted = el.querySelector(".stack > div[id^='inbox-item']:last-child");
+        rows.push({ ...rows[0]!, id: "mail:new-top", at: "2026-11-09T00:00:00Z", message: { ...rows[0]!.message!, id: "new-top" } });
+        [...el.querySelectorAll("button")].find((b) => b.textContent === "Refresh")!.click();
+        await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBe(81));
+        expect(el.querySelector("textarea")).not.toBeNull();
+        expect(reply.isConnected).toBe(true);
+        expect(reply.value).toBe("Keep my draft");
+        if (lastMounted) expect(lastMounted.isConnected).toBe(true);
+        while (el.querySelectorAll("article[aria-label^='Mail ']").length < 240) {
+          const before = el.querySelectorAll("article[aria-label^='Mail ']").length;
+          [...el.querySelectorAll("button")].find((b) => b.textContent === "Load more")!.click();
+          await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBeGreaterThan(before));
+        }
+        expect(spy.mock.calls.some(([q]) => !!q?.cursor)).toBe(true);
+        // Deep links intentionally bypass the render bound. Check that behavior
+        // on the 1x fixture only, not by mounting 2570 rich cards in jsdom.
+        if (scale === 1) {
+          vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => 0);
+          const deep = mount(`/inbox?item=${encodeURIComponent(rows[0]!.id)}`);
+          await waitFor(() => expect(deep.querySelectorAll("article[aria-label^='Mail ']").length).toBe(rows.length), 10000);
+        }
       } finally {
         spy.mockRestore();
         vi.restoreAllMocks();
       }
-    });
+    }, 30000);
   }
 });
 

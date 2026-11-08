@@ -24,6 +24,8 @@ struct State {
     /// The operations that fail: `pull`, `drain`, `backup`, `stop`,
     /// `restore`, `create:<ref>`, `health:<ref>`, `status:<ref>`.
     fail: HashSet<String>,
+    /// Operations that fail this many times before succeeding.
+    transient_fail: HashMap<String, usize>,
     next: u32,
 }
 
@@ -71,6 +73,12 @@ impl Fake {
         let mut s = self.0.lock().unwrap();
         let key = c.split_once(' ').map_or(c.as_str(), |(k, _)| k).to_owned();
         s.calls.push(c);
+        if let Some(remaining) = s.transient_fail.get_mut(&key)
+            && *remaining > 0
+        {
+            *remaining -= 1;
+            return true;
+        }
         s.fail.contains(&key)
     }
 
@@ -93,12 +101,14 @@ fn old_image() -> Image {
 }
 
 impl Engine for Fake {
-    fn prepare<'a>(&'a self, spec: &'a Container) -> BoxFut<'a, Res<Container>> {
+    fn prepare<'a>(&'a self, spec: &'a Container, _image: &'a Image) -> BoxFut<'a, Res<Container>> {
         Box::pin(async move {
             if self.0.lock().unwrap().fail.contains("environment") {
                 return Err("Compose environment resolution failed (values hidden)".into());
             }
-            Ok(spec.clone())
+            let mut prepared = spec.clone();
+            prepared.spec["prepared"] = serde_json::json!(true);
+            Ok(prepared)
         })
     }
     fn target(&self) -> BoxFut<'_, Res<Container>> {
@@ -506,14 +516,84 @@ async fn a_failed_drain_or_backup_resumes_the_old_daemon() {
 }
 
 #[tokio::test]
+async fn a_running_container_retries_status_until_the_daemon_is_ready() {
+    let r = rig();
+    let status = format!("status:{}", new_ref());
+    r.fake
+        .0
+        .lock()
+        .unwrap()
+        .transient_fail
+        .insert(status.clone(), 2);
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded, "{run:#?}");
+    assert_eq!(
+        r.fake
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with(&status))
+            .count(),
+        3
+    );
+    assert!(!steps(&run).contains(&"rollback".into()));
+}
+
+#[tokio::test]
+async fn a_running_container_with_an_unreachable_daemon_times_out_and_rolls_back() {
+    let r = rig();
+    let status = format!("status:{}", new_ref());
+    r.fake.fail(&status);
+    let started = tokio::time::Instant::now();
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert!(started.elapsed() >= r.updater.cfg.health_timeout);
+    assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
+    assert!(
+        run.error
+            .as_deref()
+            .unwrap()
+            .contains("terrarium daemon status")
+    );
+    assert!(
+        r.fake
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with(&status))
+            .count()
+            > 1
+    );
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
+}
+
+#[tokio::test]
 async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
     let r = rig();
+    // First self-update: there is no recorded previous spec yet.
+    assert_eq!(r.store.previous(), None);
+    let original = r.fake.0.lock().unwrap().containers["terrarium"]
+        .spec
+        .clone();
     r.fake.fail(&format!("health:{}", new_ref()));
     let run = r
         .updater
         .run_now(RunKind::Update, "latest", "operator")
         .await;
     assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
+    assert_eq!(
+        r.fake.0.lock().unwrap().containers["terrarium"].spec,
+        original
+    );
+    assert!(
+        r.fake.0.lock().unwrap().containers["terrarium"]
+            .spec
+            .get("prepared")
+            .is_none()
+    );
     assert!(run.error.as_deref().unwrap().contains("health: unhealthy"));
     assert_eq!(
         steps(&run),
@@ -587,6 +667,12 @@ async fn a_rollback_restores_the_backup_of_the_last_switch() {
             .outcome,
         Outcome::Succeeded
     );
+    assert_eq!(
+        r.fake.0.lock().unwrap().containers["terrarium"].spec["prepared"],
+        true
+    );
+    // Model invalid Compose interpolation after the successful update.
+    r.fake.fail("environment");
     let run = r
         .updater
         .run_now(RunKind::Rollback, "previous", "agent:01SYS")
@@ -613,11 +699,42 @@ async fn a_rollback_restores_the_backup_of_the_last_switch() {
         "the old image restores the backup of the update"
     );
     assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
+    assert!(
+        r.fake.0.lock().unwrap().containers["terrarium"]
+            .spec
+            .get("prepared")
+            .is_none()
+    );
     // A rollback of the rollback goes forward again.
     let prev = r.store.previous().unwrap();
     assert_eq!(prev.image.reference, new_ref());
     assert_eq!(r.store.image().as_deref(), Some(OLD));
     assert_eq!(run.actor, "agent:01SYS");
+}
+
+#[tokio::test]
+async fn legacy_rollback_uses_the_inspected_spec_without_resolving_environment() {
+    let r = rig();
+    r.updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    let mut previous = r.store.previous().unwrap();
+    previous.spec = None;
+    r.store.set_previous(&previous).unwrap();
+    let inspected = r.fake.0.lock().unwrap().containers["terrarium"]
+        .spec
+        .clone();
+    r.fake.fail("environment");
+    let run = r
+        .updater
+        .run_now(RunKind::Rollback, "previous", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded, "{run:#?}");
+    assert_eq!(
+        r.fake.0.lock().unwrap().containers["terrarium"].spec,
+        inspected
+    );
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
 }
 
 #[tokio::test]

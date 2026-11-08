@@ -53,3 +53,4 @@ pub mod workspace;
 
 pub use client::{Client, ClientOptions, SelfUpdateOptions};
 pub use config::{Config, HostPaths};
+pub mod gpu;
