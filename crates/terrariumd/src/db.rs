@@ -3250,8 +3250,11 @@ mod tests {
     fn named_migrations_upgrade_legacy_and_allow_earlier_names() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate_with(&mut conn, MIGRATIONS).unwrap();
-        conn.execute("INSERT INTO projects (name) VALUES ('preserved')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO projects (name, created_at) VALUES ('preserved', ?1)",
+            [now()],
+        )
+        .unwrap();
         let later = ("ter-300-later.sql", "CREATE TABLE later (id INTEGER);");
         let earlier = ("ter-284-earlier.sql", "CREATE TABLE earlier (id INTEGER);");
         assert_eq!(migrate_named(&mut conn, &[later]).unwrap(), 1);
