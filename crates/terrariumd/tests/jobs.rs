@@ -1078,6 +1078,14 @@ async fn the_config_is_checked_and_audited() {
     .await
     .err(403, "forbidden");
     // Bad values.
+    for pattern in ["", " \t"] {
+        td.put(
+            "/api/projects/p/delivery",
+            json!({"target": "p-box", "failure_patterns": [pattern]}),
+        )
+        .await
+        .err(422, "invalid");
+    }
     td.put(
         "/api/projects/p/delivery",
         json!({"target": "p-box", "slots": 0}),
@@ -2011,7 +2019,8 @@ test -f OK"#;
     // Logs belong to jobs, not slots, and survive later slot checkouts.
     for job in &jobs {
         let id = job["id"].as_str().unwrap();
-        assert!(wd.join(format!("p/logs/{id}.log")).is_file());
+        let attempt = job["attempt"].as_i64().unwrap();
+        assert!(wd.join(format!("p/logs/{id}-{attempt}.log")).is_file());
     }
 
     let job = merge_with_recipe(
@@ -2035,7 +2044,8 @@ exit 101"#;
     assert_eq!(job["state"], "failed", "{job:#}");
     assert_eq!(job["exit_code"], 101, "{job:#}");
     let id = job["id"].as_str().unwrap();
-    let log = lab._dirs.path().join(format!("jobs/p/logs/{id}.log"));
+    let attempt = job["attempt"].as_i64().unwrap();
+    let log = lab._dirs.path().join(format!("jobs/p/logs/{id}-{attempt}.log"));
     let full = std::fs::read_to_string(&log).unwrap();
     assert_eq!(full.matches("unrelated build noise").count(), 2000);
     assert!(full.contains("expected value"));
@@ -2335,7 +2345,7 @@ async fn docker_lab_flow(
     assert_eq!(r.status, 201, "{}", r.body);
     let child_file = bins.path().join("children");
     let recipe = format!(
-        "trap '' TERM; sleep 300 & echo $! >> '{}'; wait",
+        "printf 'test interrupted ... FAILED\\npanic output before kill\\n'; trap '' TERM; sleep 300 & echo $! >> '{}'; wait",
         child_file.display()
     );
     let work_dir = bins.path().join("jobs");
@@ -2392,6 +2402,8 @@ async fn a_job_timeout_ends_every_process_of_the_recipe() {
     let tail = j["tail"].as_str().unwrap_or("");
     assert!(tail.contains("timeout"), "{j}");
     assert!(tail.contains("killed on the target"), "{j}");
+    assert!(tail.contains("test interrupted ... FAILED"), "{j}");
+    assert!(tail.contains("panic output before kill"), "{j}");
     // The rerun times out the same way.
     let jobs = lab.until_idle().await;
     assert_eq!(jobs.len(), 2, "{jobs:?}");
@@ -2439,6 +2451,23 @@ async fn a_cancel_ends_every_process_before_the_next_job_starts() {
         while alive(p) {
             assert!(start.elapsed() < DEADLINE, "the child {p} outlived its job");
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    // Cancellation keeps its state but receives the final retained output
+    // once the killed recipe has drained and the separate log read ends.
+    for id in ids {
+        let start = Instant::now();
+        loop {
+            let j = lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+            assert_eq!(j["state"], "cancelled");
+            let tail = j["tail"].as_str().unwrap_or("");
+            if tail.contains("panic output before kill") {
+                assert!(tail.contains("test interrupted ... FAILED"), "{j}");
+                assert!(tail.contains("Full log on target p-dbox:"), "{j}");
+                break;
+            }
+            assert!(start.elapsed() < DEADLINE, "cancelled log missing: {j}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 }

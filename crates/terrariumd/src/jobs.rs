@@ -558,6 +558,13 @@ pub fn check_delivery(
     project: &str,
     def: &DeliveryDef,
 ) -> ApiResult<()> {
+    if def
+        .failure_patterns
+        .as_ref()
+        .is_some_and(|patterns| patterns.iter().any(|p| p.trim().is_empty()))
+    {
+        return Err(ApiError::invalid("failure_patterns must not contain empty strings"));
+    }
     if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty()) {
         let row = targets::get(conn, target)?;
         match &row.def.project {
@@ -1782,20 +1789,17 @@ async fn steps(x: &StepCtx<'_>, recipe: String, delivery: &DeliveryDef) -> ApiRe
         .filter(|b| check_commit(b).is_ok())
         .map(String::as_str);
     let log = format!(
-        "{}/{}/logs/{}.log",
+        "{}/{}/logs/{}-{}.log",
         delivery.work_dir().trim_end_matches('/'),
         job.project,
-        job.id
+        job.id,
+        job.attempt
     );
     let recipe_cmd = RemoteCmd {
         argv: vec![
             "sh".into(),
             "-c".into(),
-            logged_recipe(
-                recipe_script(recipe, base),
-                &log,
-                delivery.failure_patterns.as_deref(),
-            ),
+            logged_recipe(recipe_script(recipe, base), &log),
         ],
         cwd: Some(x.dir.to_owned()),
         env: recipe_env(job, x.dir, &head, base),
@@ -1814,8 +1818,28 @@ async fn steps(x: &StepCtx<'_>, recipe: String, delivery: &DeliveryDef) -> ApiRe
     } else {
         lost_run(c.end.as_ref(), &c.stderr, x.ssh_host.as_deref())
     };
+    // The recipe group is gone now, even after timeout or cancel. Read its
+    // log in a separate, bounded session that is not controlled by job.kill.
+    let excerpt = if lost.is_none() {
+        let cmd = RemoteCmd {
+            argv: low_priority(
+                vec!["sh".into(), "-c".into(), log_excerpt(&log, delivery.failure_patterns.as_deref())],
+                x.ionice,
+            ),
+            timeout_secs: Some(30),
+            holder: x.holder.clone(),
+            ..RemoteCmd::default()
+        };
+        match crate::executor::start_cmd(x.state, x.def, &cmd) {
+            Ok(run) => output_of(&run.collect(RECIPE_MAX).await),
+            Err(e) => format!("[cannot read retained log: {e}]"),
+        }
+    } else {
+        String::new()
+    };
     let mut tail = format!(
-        "{}\n[{}]\n[run as: {} sh -c <recipe>]\nFull log on target {}: {}",
+        "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\nFull log on target {}: {}",
+        excerpt.trim_end(),
         output_of(&c).trim_end(),
         end_text(c.end.as_ref()),
         low_priority(Vec::new(), x.ionice).join(" "),
@@ -1891,7 +1915,21 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
 /// Keep merged stdout/stderr outside the reusable slot, so the next checkout
 /// cannot clean it away. Only a bounded excerpt crosses the runner protocol.
 /// No pipeline wraps the recipe: its exact exit status remains the job status.
-fn logged_recipe(recipe: String, log: &str, patterns: Option<&[String]>) -> String {
+fn logged_recipe(recipe: String, log: &str) -> String {
+    use crate::executor::sh_quote;
+    format!(
+        r#"log={log}
+mkdir -p -- "$(dirname -- "$log")" || exit 125
+(umask 077 && : > "$log") || exit 125
+exec sh -c {recipe} > "$log" 2>&1
+"#,
+        log = sh_quote(log),
+        recipe = sh_quote(&recipe),
+    )
+}
+
+/// Run after the recipe's session ends, including after its group was killed.
+fn log_excerpt(log: &str, patterns: Option<&[String]>) -> String {
     use crate::executor::sh_quote;
     let defaults = ["FAILED", "panicked", "test result: FAILED", "failures:"].map(str::to_owned);
     let patterns = patterns.unwrap_or(&defaults);
@@ -1908,18 +1946,12 @@ fn logged_recipe(recipe: String, log: &str, patterns: Option<&[String]>) -> Stri
         )
     };
     format!(
-        r#"umask 077
-log={log}
-mkdir -p -- "$(dirname -- "$log")" || exit 125
-sh -c {recipe} > "$log" 2>&1
-status=$?
+        r#"log={log}
 {grep}
 printf '\nOutput tail (last 1200 bytes):\n'
 tail -c 1200 -- "$log"
-exit "$status"
 "#,
         log = sh_quote(log),
-        recipe = sh_quote(&recipe),
     )
 }
 
@@ -2724,7 +2756,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("logs with 'quotes/job.log");
         let recipe = "printf 'test early_failure ... FAILED\\n'\nprintf \"thread 'early_failure' panicked at test.rs:1:2:\\nexpected value\\n\" >&2\ni=0; while [ \"$i\" -lt 2000 ]; do printf 'unrelated build noise\\n'; i=$((i + 1)); done\nexit 101";
-        let script = logged_recipe(recipe.into(), log.to_str().unwrap(), None);
+        let script = logged_recipe(recipe.into(), log.to_str().unwrap());
         let out = std::process::Command::new("sh")
             .args(["-c", &script])
             .output()
@@ -2735,7 +2767,11 @@ mod tests {
         assert!(full.contains("early_failure"));
         assert!(full.contains("expected value"));
         assert_eq!(full.matches("unrelated build noise").count(), 2000);
-        let excerpt = String::from_utf8_lossy(&out.stdout);
+        let summary = std::process::Command::new("sh")
+            .args(["-c", &log_excerpt(log.to_str().unwrap(), None)])
+            .output()
+            .unwrap();
+        let excerpt = String::from_utf8_lossy(&summary.stdout);
         assert!(excerpt.len() < jobs::TAIL_MAX);
         let mut j = ended(JobKind::Merge, jobs::JobState::Failed, Some("red"));
         j.tail = Some(jobs::clip_tail(&excerpt));
@@ -2754,20 +2790,40 @@ mod tests {
             let script = logged_recipe(
                 "printf \"custom [failure] 'marker'\\nmessage\\n\"; exit 7".into(),
                 log.to_str().unwrap(),
-                patterns.as_deref(),
             );
             let out = std::process::Command::new("sh")
                 .args(["-c", &script])
                 .output()
                 .unwrap();
             assert_eq!(out.status.code(), Some(7));
-            let excerpt = String::from_utf8_lossy(&out.stdout);
+            let summary = std::process::Command::new("sh")
+                .args(["-c", &log_excerpt(log.to_str().unwrap(), patterns.as_deref())])
+                .output()
+                .unwrap();
+            let excerpt = String::from_utf8_lossy(&summary.stdout);
             assert_eq!(
                 excerpt.contains("Failure lines"),
                 !patterns.unwrap().is_empty()
             );
             assert!(excerpt.contains("custom [failure] 'marker'"));
         }
+    }
+
+    #[test]
+    fn job_log_is_private_without_changing_the_recipe_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("recipe.log");
+        let script = format!("umask 022\n{}", logged_recipe("umask; touch output".into(), log.to_str().unwrap()));
+        let out = std::process::Command::new("sh")
+            .current_dir(dir.path())
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(std::fs::read_to_string(&log).unwrap().trim().ends_with("022"));
+        assert_eq!(std::fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(dir.path().join("output")).unwrap().permissions().mode() & 0o777, 0o644);
     }
 
     /// TER-100 review round 2: without a base, a list from the outer env
