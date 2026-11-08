@@ -18,6 +18,10 @@ SPEC.loader.exec_module(HOT)
 
 
 class HotSwapTests(unittest.TestCase):
+    def test_control_helper_is_in_the_docker_build_context(self):
+        rules = (ROOT / "docker/Dockerfile.dockerignore").read_text().splitlines()
+        self.assertIn("!docker/hot-swap.py", rules)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
