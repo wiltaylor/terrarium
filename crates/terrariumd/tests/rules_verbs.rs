@@ -420,12 +420,26 @@ async fn fail_job(td: &TestDaemon, job: &Job, outcome: &str) -> Job {
 async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
-    let a = new_card(&td, "p", json!({"title":"a", "column":"review", "repo":"app"})).await;
-    let b = new_card(&td, "p", json!({"title":"b", "column":"review", "repo":"app"})).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
     let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
     let g = card(&td, &a).await["group"].clone();
-    assert!(!g.is_null(), "{:?}", runs_of(&td, "p", "merge-queued").await);
+    assert!(
+        !g.is_null(),
+        "{:?}",
+        runs_of(&td, "p", "merge-queued").await
+    );
     let gid = g["id"].as_str().unwrap().to_owned();
     assert_eq!(g["members"], json!([a, b]));
     assert_eq!(g["column"], "merge_queue");
@@ -433,10 +447,23 @@ async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
     assert_eq!(g["steps"][1]["state"], "pending");
 
     let id = job.id.clone();
-    let passed = state(&td).db.write("system", move |t| {
-        jobs::start(t, &id, "machine", None)?;
-        Ok(jobs::finish(t, &id, &JobEnd { passed: true, exit_code: Some(0), ..JobEnd::default() })?.unwrap())
-    }).await.unwrap();
+    let passed = state(&td)
+        .db
+        .write("system", move |t| {
+            jobs::start(t, &id, "machine", None)?;
+            Ok(jobs::finish(
+                t,
+                &id,
+                &JobEnd {
+                    passed: true,
+                    exit_code: Some(0),
+                    ..JobEnd::default()
+                },
+            )?
+            .unwrap())
+        })
+        .await
+        .unwrap();
     // A passed job alone does not move members or close the group. Each
     // verdict accepts its own member, and only the last may close it.
     settle(&td).await;
@@ -464,7 +491,10 @@ async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     let b = new_card(&td, "p", json!({"title":"b", "repo":"app"})).await;
     let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
-    let gid = card(&td, &a).await["group"]["id"].as_str().unwrap().to_owned();
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let red = fail_job(&td, &job, "red").await;
     verdict(&td, &red, &a, "red").await;
     verdict(&td, &red, &b, "red").await;
@@ -481,11 +511,26 @@ async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     assert_eq!(card(&td, &fix).await["group"]["id"], gid);
     assert_eq!(card(&td, &a).await["group"]["total"], 3);
     let id = retry.id.clone();
-    let passed = state(&td).db.write("system", move |t| {
-        jobs::start(t, &id, "machine", None)?;
-        Ok(jobs::finish(t, &id, &JobEnd { passed: true, exit_code: Some(0), ..JobEnd::default() })?.unwrap())
-    }).await.unwrap();
-    for c in [&fix, &a, &b] { verdict(&td, &passed, c, "passed").await; }
+    let passed = state(&td)
+        .db
+        .write("system", move |t| {
+            jobs::start(t, &id, "machine", None)?;
+            Ok(jobs::finish(
+                t,
+                &id,
+                &JobEnd {
+                    passed: true,
+                    exit_code: Some(0),
+                    ..JobEnd::default()
+                },
+            )?
+            .unwrap())
+        })
+        .await
+        .unwrap();
+    for c in [&fix, &a, &b] {
+        verdict(&td, &passed, c, "passed").await;
+    }
     settle(&td).await;
     assert_eq!(card(&td, &gid).await["archived"], true);
     assert_eq!(card(&td, &fix).await["column"], "accepted");

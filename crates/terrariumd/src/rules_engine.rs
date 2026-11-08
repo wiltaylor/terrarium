@@ -871,13 +871,16 @@ fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
         None => (None, Vec::new()),
     };
     let merge_group_key = match &job {
-        Some(j) if j.kind == jobs::JobKind::Merge => conn.query_row(
-            "SELECT g.key FROM card_groups g JOIN group_members m ON m.group_card = g.card
+        Some(j) if j.kind == jobs::JobKind::Merge => conn
+            .query_row(
+                "SELECT g.key FROM card_groups g JOIN group_members m ON m.group_card = g.card
              WHERE m.card = ?1 AND g.project = ?2 AND g.key LIKE 'merge:%'
              AND (g.closed_at IS NULL OR g.closed_at >= ?3)
              ORDER BY g.rowid DESC LIMIT 1",
-            rusqlite::params![j.card, j.project, j.created_at], |r| r.get(0),
-        ).optional()?,
+                rusqlite::params![j.card, j.project, j.created_at],
+                |r| r.get(0),
+            )
+            .optional()?,
         _ => None,
     };
     Ok(RunCtx {
@@ -1088,7 +1091,8 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
             // The texts of the coded flow (TER-170), from its own code.
             let out = match f {
                 "group_key" => Some(
-                    ctx.merge_group_key.clone()
+                    ctx.merge_group_key
+                        .clone()
                         .unwrap_or_else(|| format!("merge:{}", j.id)),
                 ),
                 "id" => Some(j.id.clone()),

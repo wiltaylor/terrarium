@@ -367,6 +367,16 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
     // The column arguments of the verbs.
     let mut actions = Vec::new();
     for a in &rule.actions {
+        // The delivery pack's merge group needs both its home and its
+        // completion anchor. Omit the whole lifecycle on older boards,
+        // not just group_open, leaving the existing delivery flow intact.
+        if a.verb.starts_with("group.")
+            && a.args.get("key").and_then(Value::as_str) == Some("{{job.group_key}}")
+            && (!resolves(columns, "@merge_queue") || !resolves(columns, "@accepted"))
+        {
+            reasons.push("merge groups need merge_queue and accepted columns: group action dropped".into());
+            continue;
+        }
         let Some(verb) = VERBS.iter().find(|v| v.name == a.verb) else {
             actions.push(a.clone());
             continue;

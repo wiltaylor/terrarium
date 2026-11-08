@@ -170,7 +170,11 @@ pub const VERBS: &[Verb] = &[
     Verb {
         kind: "group_close",
         name: "group.close",
-        args: &[("key", Arg::Text), ("comment", Arg::Text), ("all_done", Arg::Bool)],
+        args: &[
+            ("key", Arg::Text),
+            ("comment", Arg::Text),
+            ("all_done", Arg::Bool),
+        ],
         required: &["key"],
     },
     Verb {
@@ -809,7 +813,13 @@ fn check_arg(ctx: &Context, arg: Arg, v: &Value) -> Result<(), String> {
             }
             Ok(())
         }
-        Arg::Bool => if v.is_boolean() { Ok(()) } else { Err("must be a boolean".into()) },
+        Arg::Bool => {
+            if v.is_boolean() {
+                Ok(())
+            } else {
+                Err("must be a boolean".into())
+            }
+        }
         Arg::Count => match v.as_i64() {
             Some(n) if n >= 1 => Ok(()),
             _ => Err(format!("needs a whole number of 1 or more, not `{v}`")),
