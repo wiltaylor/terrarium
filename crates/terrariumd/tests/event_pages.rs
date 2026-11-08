@@ -2,7 +2,7 @@
 //! oldest first by default, newest first with `?order=desc` (api.md §9.1).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use serde_json::{Value, json};

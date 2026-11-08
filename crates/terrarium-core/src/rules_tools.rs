@@ -367,6 +367,17 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
     // The column arguments of the verbs.
     let mut actions = Vec::new();
     for a in &rule.actions {
+        // The delivery pack's merge group needs both its home and its
+        // completion anchor. Omit the whole lifecycle on older boards,
+        // not just group_open, leaving the existing delivery flow intact.
+        if a.verb.starts_with("group.")
+            && a.args.get("key").and_then(Value::as_str) == Some("{{job.group_key}}")
+            && (!resolves(columns, "@review") || !resolves(columns, "@accepted"))
+        {
+            reasons
+                .push("merge groups need review and accepted columns: group action dropped".into());
+            continue;
+        }
         let Some(verb) = VERBS.iter().find(|v| v.name == a.verb) else {
             actions.push(a.clone());
             continue;
@@ -628,6 +639,24 @@ pub fn lint(set: &RuleSet, columns: &[BoardColumn]) -> Vec<Finding> {
     let mut out = Vec::new();
 
     let mut missing: Vec<(String, Vec<String>)> = Vec::new();
+    for r in &live {
+        for a in r.actions.iter().filter(|a| a.verb == "group.open") {
+            let key = a.args.get("key");
+            let has_close = live.iter().any(|r| {
+                r.actions
+                    .iter()
+                    .any(|close| close.verb == "group.close" && close.args.get("key") == key)
+            });
+            if !has_close && !a.args.contains_key("close_after") {
+                out.push(Finding {
+                    code: "group_without_close",
+                    column: a.args.get("column").and_then(Value::as_str).unwrap_or_default().into(),
+                    rules: vec![r.name.clone()],
+                    message: format!("rule `{}` opens a group without a matching group_close or close_after safeguard", r.name),
+                });
+            }
+        }
+    }
     for r in &live {
         for c in rules_file::column_refs(r) {
             if resolves(columns, &c) {
@@ -1022,6 +1051,22 @@ mod tests {
     }
 
     #[test]
+    fn the_migration_drops_the_entire_group_lifecycle_without_anchors() {
+        let board = cols(&[("ready", None), ("review", Some("review")), ("done", None)]);
+        let m = migrate(default_pack(), "", &RuleSet::default(), &board);
+        let own = parse(&m.text, "rules.wcl", &ctx(&board)).expect("migrated rules");
+        let set = rules_file::with_pack(default_pack(), &own);
+        assert!(
+            set.rules
+                .iter()
+                .all(|r| r.actions.iter().all(|a| !a.verb.starts_with("group.")))
+        );
+        let queued = set.rules.iter().find(|r| r.name == "merge-queued").unwrap();
+        assert!(queued.actions.iter().any(|a| a.verb == "card.label"));
+        assert!(queued.actions.iter().any(|a| a.verb == "card.comment"));
+    }
+
+    #[test]
     fn the_migration_maps_names_to_roles_and_keeps_own_rules() {
         let board = cols(&[
             ("ready", None),
@@ -1145,6 +1190,39 @@ rule "to-blocked" {
         assert_eq!(stuck, vec!["validating"]);
         let v = found.iter().find(|f| f.column == "validating").unwrap();
         assert_eq!(v.rules, vec!["in"]);
+    }
+
+    #[test]
+    fn group_open_needs_a_matching_close_or_timeout() {
+        let text = r#"rule "open" {
+          on = ["job"]
+          group_open { key = "batch:{{job.id}}" title = "Batch" column = "review" done_when = "done" }
+        }"#;
+        let set = parse(text, "rules.wcl", &Context::default()).unwrap();
+        assert!(
+            lint(&set, &[])
+                .iter()
+                .any(|f| f.code == "group_without_close")
+        );
+        let closed = format!(
+            "{text}\nrule \"close\" {{ on = [\"job\"] group_close {{ key = \"batch:{{{{job.id}}}}\" }} }}"
+        );
+        let set = parse(&closed, "rules.wcl", &Context::default()).unwrap();
+        assert!(
+            !lint(&set, &[])
+                .iter()
+                .any(|f| f.code == "group_without_close")
+        );
+        let timeout = text.replace(
+            "done_when = \"done\"",
+            "done_when = \"done\" close_after = \"1h\"",
+        );
+        let set = parse(&timeout, "rules.wcl", &Context::default()).unwrap();
+        assert!(
+            !lint(&set, &[])
+                .iter()
+                .any(|f| f.code == "group_without_close")
+        );
     }
 
     #[test]

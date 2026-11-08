@@ -272,6 +272,8 @@ export interface Api {
 
   /** The operator login (docs/api.md §1.1). */
   account: {
+    preferences(): Promise<{ default_agent: string | null }>;
+    setPreferences(body: { default_agent: string | null }): Promise<{ default_agent: string | null }>;
     /** `PUT /api/auth/password`. Every session ends, also this one. A wrong `current` is `403`. */
     setPassword(change: PasswordChange): Promise<void>;
     /** `DELETE /api/sessions`: log out everywhere. Every session ends; the static token stays good. */
@@ -1114,6 +1116,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
     },
 
     account: {
+      preferences: () => get("/api/preferences"),
+      setPreferences: (body) => t.request("PUT", "/api/preferences", { body }),
       setPassword: (change) => t.request<void>("PUT", "/api/auth/password", { body: change }),
       logoutEverywhere: () => t.request<void>("DELETE", "/api/sessions"),
     },

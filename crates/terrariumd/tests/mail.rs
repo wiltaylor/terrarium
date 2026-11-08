@@ -1,7 +1,7 @@
 //! The mailbox and project inboxes (PLAN §12).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use serde_json::{Value, json};
@@ -191,7 +191,7 @@ async fn project_inbox_flow() {
         .await;
     let sent = sent.ok().clone();
     assert_eq!(sent["to_kind"], "project");
-    assert_eq!(sent["state"], "delivered");
+    assert_eq!(sent["state"], "queued");
     let thread = sent["thread_id"].as_str().unwrap().to_owned();
     // ...and links the thread to its own card.
     let own = td
@@ -317,6 +317,42 @@ async fn project_inbox_flow() {
             .unwrap()
             .contains(&card_id)
     );
+}
+
+#[tokio::test]
+async fn project_inbox_requires_an_admin_and_falls_back_to_one() {
+    let td = two_projects().await;
+    td.project("empty").await;
+    let refused = td
+        .post_as(
+            "a/worker",
+            "/api/mail",
+            json!({"to": "project:empty", "body": "release notes"}),
+        )
+        .await;
+    assert_eq!(refused.status, 422);
+    assert!(
+        refused.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no project_admin")
+    );
+    td.agent("empty", "triage", json!({"roles": ["project_admin"]}))
+        .await;
+    let sent = td
+        .post_as(
+            "a/worker",
+            "/api/mail",
+            json!({"to": "project:empty", "body": "release notes"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(sent["state"], "queued");
+    let listed = td
+        .get_as("empty/triage", "/api/mail?to=empty/triage&state=unread")
+        .await;
+    assert_eq!(listed.ok()[0]["id"], sent["id"]);
 }
 
 /// The first read of a message records the reader (`read_by`) and writes

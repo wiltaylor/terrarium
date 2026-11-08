@@ -4,7 +4,7 @@
 //! `/output` and the WebSocket. A file copy is not changed.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;

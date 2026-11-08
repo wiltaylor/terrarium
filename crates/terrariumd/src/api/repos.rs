@@ -220,6 +220,9 @@ async fn checkout_inner(
     } else {
         None
     };
+    let mut hooks = repo.hooks();
+    hooks.provenance =
+        Some(crate::git_identity::provenance(state, &agent.agent.id.to_string()).await?);
     let c = Checkout {
         url: repo.url.clone(),
         dest: workspace.join(&dir),
@@ -229,7 +232,7 @@ async fn checkout_inner(
         store: RunDirs::new(&state.state_dir),
         deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
         timeout: git::DEFAULT_TIMEOUT,
-        hooks: repo.hooks(),
+        hooks,
         origin,
         fetch_from,
     };

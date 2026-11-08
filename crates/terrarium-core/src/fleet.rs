@@ -1673,6 +1673,7 @@ name = "beta"
         assert_eq!(
             *d,
             DeliveryDef {
+                failure_patterns: None,
                 target: Some("build".into()),
                 recipe: Some("just ci::validate".into()),
                 slots: Some(3),

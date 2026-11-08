@@ -2,10 +2,10 @@
 //! engine from an event to the end of its rule run, idle and under load,
 //! and the per-card order of the outbox under concurrent writers.
 //!
-//! Run: `cargo test -p terrariumd --test ter221_latency -- --nocapture --test-threads=1`
+//! Run: `cargo test -p terrariumd --test it ter221_latency:: -- --nocapture --test-threads=1`
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

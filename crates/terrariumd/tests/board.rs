@@ -1,7 +1,7 @@
 //! The kanban board and its rules (PLAN §13).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use serde_json::{Value, json};
@@ -30,6 +30,159 @@ async fn card(td: &TestDaemon, agent: &str, body: Value) -> String {
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+#[tokio::test]
+async fn human_comments_mail_leads_and_replies_reach_inbox() {
+    let td = setup().await;
+    let id = card(
+        &td,
+        "proj/w1",
+        json!({"title": "Discuss", "assignee": "w1"}),
+    )
+    .await;
+    let path = format!("/api/cards/{id}/comments");
+    let response = td.post(&path, json!({"body": "Please check"})).await;
+    let c = response.ok();
+    let reply = c["comments"][0]["id"].as_str().unwrap();
+    for recipient in ["proj/lead", "proj/w1"] {
+        let response = td.get(&format!("/api/mail?to={recipient}")).await;
+        let mail = response.ok();
+        let mail = mail.as_array().unwrap();
+        assert_eq!(mail.len(), 1);
+        assert!(mail[0]["body"].as_str().unwrap().contains("Please check"));
+        assert!(mail[0]["subject"].as_str().unwrap().contains(&id));
+    }
+    td.post_as("proj/w1", &path, json!({"body": "ordinary comment"}))
+        .await
+        .ok();
+    assert_eq!(
+        td.get("/api/mail?to=operator")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    td.post_as(
+        "proj/w1",
+        &path,
+        json!({"body": "Checked", "reply_to": reply}),
+    )
+    .await
+    .ok();
+    td.post_as("proj/w1", &path, json!({"body": "@operator follow-up"}))
+        .await
+        .ok();
+    let response = td.get("/api/mail?to=operator").await;
+    let mail = response.ok();
+    assert_eq!(mail.as_array().unwrap().len(), 2);
+    assert!(
+        mail.to_string()
+            .contains(&format!("/p/proj/board?card={id}"))
+    );
+    td.post_as(
+        "proj/w1",
+        &path,
+        json!({"body": "bad reply", "reply_to": "missing"}),
+    )
+    .await
+    .err(422, "invalid");
+    td.patch_as(
+        "proj/lead",
+        "/api/projects/proj",
+        json!({"human_comment_notifications": false}),
+    )
+    .await
+    .ok();
+    td.post(&path, json!({"body": "muted"})).await.ok();
+    assert_eq!(
+        td.get("/api/mail?to=proj/lead")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn human_create_and_move_comments_notify_and_bound_recipients_deduplicate() {
+    let td = setup().await;
+    let response = td
+        .post(
+            "/api/projects/proj/cards",
+            json!({
+                "title": "Create comment", "comment": "initial", "assignee": "w1"
+            }),
+        )
+        .await;
+    let id = response.ok()["id"].as_str().unwrap();
+    td.patch(
+        &format!("/api/cards/{id}"),
+        json!({"column": "ready", "comment": "moving"}),
+    )
+    .await
+    .ok();
+    for recipient in ["proj/lead", "proj/w1"] {
+        let response = td.get(&format!("/api/mail?to={recipient}")).await;
+        assert_eq!(response.ok().as_array().unwrap().len(), 2);
+    }
+    // Fixture: a live bound agent, without starting a harness process.
+    let conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
+    let worker: String = conn
+        .query_row(
+            "SELECT id FROM agents WHERE project = 'proj' AND name = 'w2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO spawns (id, owner, owner_name, project, name, template, harness, task,
+         spawned_by, spawned_at, deadline_at, bound_kind, bound_id)
+         VALUES (?1, 'operator', 'operator', 'proj', 'w2', 'worker', 'claude', 'test',
+         'operator', '2026-01-01', '2099-01-01', 'card', ?2)",
+        rusqlite::params![worker, id],
+    )
+    .unwrap();
+    td.post(
+        &format!("/api/cards/{id}/comments"),
+        json!({"body": "bound delivery"}),
+    )
+    .await
+    .ok();
+    let response = td.get("/api/mail?to=proj/w2").await;
+    assert_eq!(response.ok().as_array().unwrap().len(), 1);
+    td.post(
+        &format!("/api/cards/{id}/assign"),
+        json!({"assignee": "w2"}),
+    )
+    .await
+    .ok();
+    td.post(
+        &format!("/api/cards/{id}/comments"),
+        json!({"body": "same bound and assignee"}),
+    )
+    .await
+    .ok();
+    let response = td.get("/api/mail?to=proj/w2").await;
+    assert_eq!(response.ok().as_array().unwrap().len(), 2);
+    td.post(
+        &format!("/api/cards/{id}/assign"),
+        json!({"assignee": "lead"}),
+    )
+    .await
+    .ok();
+    td.post(
+        &format!("/api/cards/{id}/comments"),
+        json!({"body": "same lead and assignee"}),
+    )
+    .await
+    .ok();
+    let response = td.get("/api/mail?to=proj/lead").await;
+    assert_eq!(response.ok().as_array().unwrap().len(), 5);
 }
 
 #[tokio::test]
