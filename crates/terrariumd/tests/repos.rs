@@ -760,7 +760,7 @@ on_agent_create = ["app"]
     let a = created.ok().clone();
     let checkout = &a["checkout"][0];
     assert_eq!(checkout["action"], "cloned", "{a}");
-    assert_eq!(checkout["hooks"], json!(["commit-msg", "pre-push"]), "{a}");
+    assert_eq!(checkout["hooks"], json!(["commit-msg", "pre-push", "prepare-commit-msg"]), "{a}");
     let hooks = PathBuf::from(a["workspace"].as_str().unwrap()).join("app/.git/hooks");
     assert!(hooks.join("commit-msg").is_file());
     let guard = std::fs::read_to_string(hooks.join("pre-push")).unwrap();

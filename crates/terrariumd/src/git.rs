@@ -178,6 +178,7 @@ pub enum Origin {
 /// server.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hooks {
+    pub provenance: Option<crate::git_identity::Provenance>,
     /// A tracked dir of the repo: each regular file in it at `HEAD` goes
     /// to `.git/hooks/<name>`, mode 0755.
     pub dir: Option<String>,
@@ -190,7 +191,7 @@ pub struct Hooks {
 
 impl Hooks {
     fn is_empty(&self) -> bool {
-        self.dir.is_none() && self.push_deny.is_empty()
+        self.dir.is_none() && self.push_deny.is_empty() && self.provenance.is_none()
     }
 }
 
@@ -276,6 +277,14 @@ fn install_hooks(c: &Checkout, r: &Runner) -> Result<Vec<String>, GitError> {
             "pre-push".to_owned(),
             push_deny_hook(&c.hooks.push_deny).into_bytes(),
         ));
+    }
+    if let Some(p) = &c.hooks.provenance {
+        if let Some(f) = files.iter_mut().find(|(n, _)| n == "prepare-commit-msg") {
+            f.0 = "prepare-commit-msg.repo".into();
+        }
+        files.push(("prepare-commit-msg".into(), p.hook().into_bytes()));
+        r.quiet(&c.dest, &["config", "user.name", &p.identity.name])?;
+        r.quiet(&c.dest, &["config", "user.email", &p.identity.email])?;
     }
     let git_dir = open_git_dir(&c.dest, false)?;
     let shown = Path::new(".git");
@@ -2590,11 +2599,12 @@ impl JobRepo {
                 return Ok(MergeStep::Failed(msg));
             }
         }
+        let identity = crate::git_identity::Identity::from_env();
         let sha = self.local(&[
             "-c",
-            "user.name=terrarium",
+            &format!("user.name={}", identity.name),
             "-c",
-            "user.email=terrarium@localhost",
+            &format!("user.email={}", identity.email),
             "commit-tree",
             &tree,
             "-p",
@@ -2736,6 +2746,7 @@ mod tests {
         c.hooks = Hooks {
             dir: Some(".githooks".into()),
             push_deny: vec!["wip/*".into()],
+            provenance: None,
         };
         let out = clone_or_update(&c, &mut |_| {}).unwrap();
         let mut names = out.hooks.clone();

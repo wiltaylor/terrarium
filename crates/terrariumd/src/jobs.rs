@@ -1514,8 +1514,11 @@ impl StepCtx<'_> {
             "sh".to_owned(),
         ];
         argv.extend(args.iter().map(|a| (*a).to_owned()));
+        let mut env = std::collections::BTreeMap::new();
+        crate::git_identity::Identity::from_env().env(&mut env);
         RemoteCmd {
             argv,
+            env,
             timeout_secs: Some(STEP_TIMEOUT),
             holder: self.holder.clone(),
             ..RemoteCmd::default()
@@ -2511,7 +2514,7 @@ G() {
     -c credential.helper= -c protocol.allow=never -c protocol.file.allow=always \
     -c fetch.recurseSubmodules=false -c submodule.recurse=false -c gc.auto=0 \
     -c maintenance.auto=false -c advice.detachedHead=false -c core.pager=cat \
-    -c user.name=terrarium -c user.email=terrarium@localhost -c commit.gpgsign=false "$@"
+    -c "user.name=${GIT_COMMITTER_NAME:-Terrarium}" -c "user.email=${GIT_COMMITTER_EMAIL:-terrarium@localhost}" -c commit.gpgsign=false "$@"
 }
 res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 "#;
