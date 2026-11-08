@@ -1341,7 +1341,12 @@ async fn fire_hourly(db: &Db, projects: &[ProjectRules], now: DateTime<Utc>) -> 
     let hour = now.format("%Y-%m-%dT%H").to_string();
     let mut written = 0;
     for p in projects {
-        if !p.set.rules.iter().any(|r| r.enabled && r.on.iter().any(|k| k == "rule.hourly")) {
+        if !p
+            .set
+            .rules
+            .iter()
+            .any(|r| r.enabled && r.on.iter().any(|k| k == "rule.hourly"))
+        {
             continue;
         }
         let (project, hour) = (p.project.clone(), hour.clone());

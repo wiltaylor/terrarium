@@ -812,9 +812,15 @@ async fn card_prepend_keeps_the_lines_and_runs_once() {
 #[tokio::test]
 async fn default_triage_notifies_leads_on_backlog_and_hourly() {
     let td = queue_lab().await;
-    let lead = td.agent("p", "lead", json!({"roles": ["project_admin"]})).await["id"]
-        .as_str().unwrap().to_owned();
-    td.patch_as(&lead, "/api/projects/p", json!({"board_flow": "rules"})).await.ok();
+    let lead = td
+        .agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    td.patch_as(&lead, "/api/projects/p", json!({"board_flow": "rules"}))
+        .await
+        .ok();
     let card = new_card(&td, "p", json!({"title": "triage", "column": "backlog"})).await;
     settle(&td).await;
     let count = || async {
@@ -827,16 +833,35 @@ async fn default_triage_notifies_leads_on_backlog_and_hourly() {
     emit(&td, "card", "p", &card, json!({"change": "updated"})).await;
     settle(&td).await;
     assert_eq!(count().await, 1, "unrelated updates do not notify");
-    emit(&td, "card", "p", &card, json!({"change": "moved", "to": "backlog"})).await;
+    emit(
+        &td,
+        "card",
+        "p",
+        &card,
+        json!({"change": "moved", "to": "backlog"}),
+    )
+    .await;
     settle(&td).await;
     assert_eq!(count().await, 2);
-    let projects = rules_engine::load(&state(&td).db, &mut rules_engine::Cache::default()).await.unwrap();
+    let projects = rules_engine::load(&state(&td).db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
     let now = chrono::Utc::now() + chrono::Duration::hours(2);
     let mut fired = std::collections::HashMap::new();
-    assert_eq!(rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, now).await.unwrap(), 1);
+    assert_eq!(
+        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, now)
+            .await
+            .unwrap(),
+        1
+    );
     // A restart (empty in-memory timer state) must not resend this hour.
     fired.clear();
-    assert_eq!(rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, now).await.unwrap(), 0);
+    assert_eq!(
+        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, now)
+            .await
+            .unwrap(),
+        0
+    );
     settle(&td).await;
     let n: i64 = state(&td).db.read(move |c| {
         Ok(c.query_row("SELECT count(*) FROM messages WHERE to_agent = ?1 AND subject = 'Hourly backlog triage'", [lead], |r| r.get(0))?)
