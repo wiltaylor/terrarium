@@ -26,6 +26,44 @@ fn state(td: &TestDaemon) -> Shared {
 
 const SOURCE: &str = "source:test/ping";
 
+#[tokio::test]
+async fn group_step_eta_uses_project_history_and_records_real_duration() {
+    use terrariumd::store::groups;
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.project("q").await;
+    state(&td).db.write("system", |t| {
+        let mut ids = Vec::new();
+        for (project, key, secs) in [("p", "one", 60), ("p", "two", 180), ("q", "other", 999)] {
+            groups::open(t, groups::Open { project, rule: "merge", key, title: key,
+                column: "review", done_when: "accepted", eta: None, close_after: None })?;
+            let g = groups::by_key(t, project, key)?.unwrap();
+            groups::step(t, &g, "e2e", Some("running"), None, None)?;
+            groups::step(t, &g, "e2e", Some("done"), None, None)?;
+            t.execute("UPDATE group_steps SET started_at = '2026-11-08T10:00:00Z',
+                finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', '2026-11-08T10:00:00Z', ?2 || ' seconds')
+                WHERE group_card = ?1", rusqlite::params![g.id, secs])?;
+            ids.push(g.id);
+        }
+        groups::open(t, groups::Open { project: "p", rule: "merge", key: "new", title: "new",
+            column: "review", done_when: "accepted", eta: None, close_after: None })?;
+        let g = groups::by_key(t, "p", "new")?.unwrap();
+        groups::step(t, &g, "e2e", Some("running"), None, None)?;
+        let current = groups::get(t, &g.id)?;
+        let s = &current.steps[0];
+        assert_eq!(s.estimated_secs, Some(120));
+        let at = chrono::DateTime::parse_from_rfc3339(s.eta_at.as_deref().unwrap()).unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339(s.started_at.as_deref().unwrap()).unwrap();
+        assert_eq!((at - start).num_seconds(), 120);
+        groups::step(t, &g, "e2e", Some("done"), None, None)?;
+        let done = groups::get(t, &g.id)?;
+        assert!(done.steps[0].duration_secs.is_some());
+        assert!(done.steps[0].eta_at.is_none());
+        assert_eq!(groups::get(t, &ids[0])?.steps[0].duration_secs, Some(60));
+        Ok(())
+    }).await.unwrap();
+}
+
 /// Write an event of `kind` about `card` with `data`, as an event source
 /// does. Returns its `seq`.
 async fn emit(td: &TestDaemon, kind: &str, project: &str, card: &str, data: Value) -> i64 {

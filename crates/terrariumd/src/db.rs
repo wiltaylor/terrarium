@@ -2540,6 +2540,11 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(thread, reason)
     );
     "#,
+    // 98: Per-step group timing and project-local historical estimates (TER-252).
+    r#"
+    ALTER TABLE group_steps ADD COLUMN started_at TEXT;
+    ALTER TABLE group_steps ADD COLUMN finished_at TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

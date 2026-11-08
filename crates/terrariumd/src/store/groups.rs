@@ -29,6 +29,9 @@ pub struct GroupStep {
     pub state: String,
     pub text: String,
     pub eta_at: Option<String>,
+    pub started_at: Option<String>,
+    pub duration_secs: Option<i64>,
+    pub estimated_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,7 +131,7 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Group> {
         g.members.push(card);
     }
     let mut steps = conn.prepare(
-        "SELECT name, state, text, eta_at FROM group_steps
+        "SELECT name, state, text, eta_at, started_at, finished_at FROM group_steps
         WHERE group_card = ?1 ORDER BY position, name",
     )?;
     g.steps = steps
@@ -138,10 +141,56 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Group> {
                 state: r.get(1)?,
                 text: r.get(2)?,
                 eta_at: r.get(3)?,
+                started_at: r.get(4)?,
+                duration_secs: elapsed(r.get(4)?, r.get(5)?),
+                estimated_secs: None,
             })
         })?
         .collect::<Result<_, _>>()?;
+    let mut cursor = Utc::now();
+    for step in &mut g.steps {
+        step.estimated_secs = historical_secs(conn, id, &step.name)?;
+        if step.state == "done" || step.state == "failed" {
+            step.eta_at = None;
+            continue;
+        }
+        if step.eta_at.is_none() {
+            let start = step.started_at.as_deref()
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+                .map(|v| v.with_timezone(&Utc)).unwrap_or(cursor);
+            step.eta_at = step.estimated_secs
+                .and_then(|secs| start.checked_add_signed(Duration::seconds(secs)))
+                .map(crate::time_param::stored);
+        }
+        if let Some(at) = step.eta_at.as_deref()
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok()) {
+            cursor = cursor.max(at.with_timezone(&Utc));
+        }
+    }
     Ok(g)
+}
+
+fn elapsed(start: Option<String>, end: Option<String>) -> Option<i64> {
+    let start = chrono::DateTime::parse_from_rfc3339(start.as_deref()?).ok()?;
+    let end = chrono::DateTime::parse_from_rfc3339(end.as_deref()?).ok()?;
+    Some((end - start).num_seconds().max(0))
+}
+
+/// Successful samples only, scoped to this project and group lifecycle rule.
+fn historical_secs(conn: &Connection, id: &str, name: &str) -> ApiResult<Option<i64>> {
+    let mut stmt = conn.prepare("SELECT s.started_at, s.finished_at FROM group_steps s
+        JOIN card_groups g ON g.card = s.group_card
+        JOIN card_groups current ON current.card = ?1
+        WHERE g.project = current.project AND g.rule = current.rule
+        AND s.group_card <> ?1 AND s.name = ?2 AND s.state = 'done'
+        AND s.started_at IS NOT NULL AND s.finished_at IS NOT NULL")?;
+    let mut samples = stmt.query_map(params![id, name], |r| {
+        Ok(elapsed(r.get(0)?, r.get(1)?))
+    })?.collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<_>>();
+    samples.sort_unstable();
+    let n = samples.len();
+    Ok(if n == 0 { None } else if n % 2 == 1 { Some(samples[n / 2]) }
+        else { Some(samples[n / 2 - 1] + (samples[n / 2] - samples[n / 2 - 1]) / 2) })
 }
 
 pub fn by_key(conn: &Connection, project: &str, key: &str) -> ApiResult<Option<Group>> {
@@ -352,7 +401,9 @@ pub fn step(
             "group step state must be pending, running, done or failed",
         ));
     }
-    let existing = g.steps.iter().find(|s| s.name == name);
+    // Callers may update several steps using the same group snapshot.
+    let fresh = get(t, &g.id)?;
+    let existing = fresh.steps.iter().find(|s| s.name == name);
     let state = state
         .or_else(|| existing.map(|s| s.state.as_str()))
         .unwrap_or("pending");
@@ -363,16 +414,25 @@ pub fn step(
     let eta_at = match eta {
         Some("jobs") => return Err(ApiError::invalid("a step ETA takes a duration, not jobs")),
         Some(value) => Some(deadline(value)?),
-        None => existing.and_then(|s| s.eta_at.clone()),
+        None => t.query_row("SELECT eta_at FROM group_steps WHERE group_card = ?1 AND name = ?2",
+            params![g.id, name], |r| r.get::<_, Option<String>>(0)).optional()?.flatten(),
     };
     if existing.is_some_and(|s| s.state == state && s.text == text && s.eta_at == eta_at) {
         return Ok(false);
     }
-    t.execute("INSERT INTO group_steps (group_card, name, position, state, text, eta_at)
-        SELECT ?1, ?2, coalesce(max(position), -1) + 1, ?3, ?4, ?5 FROM group_steps WHERE group_card = ?1
+    let at = crate::time_param::stored(Utc::now());
+    t.execute("INSERT INTO group_steps (group_card, name, position, state, text, eta_at, started_at, finished_at)
+        SELECT ?1, ?2, coalesce(max(position), -1) + 1, ?3, ?4, ?5,
+        CASE WHEN ?3 <> 'pending' THEN ?6 END,
+        CASE WHEN ?3 IN ('done', 'failed') THEN ?6 END FROM group_steps WHERE group_card = ?1
         ON CONFLICT(group_card, name) DO UPDATE SET state = excluded.state,
-        text = excluded.text, eta_at = excluded.eta_at",
-        params![g.id, name, state, text, eta_at])?;
+        text = excluded.text, eta_at = excluded.eta_at,
+        started_at = CASE WHEN excluded.state = 'pending' THEN NULL
+            WHEN excluded.state = 'running' AND group_steps.state IN ('done', 'failed') THEN ?6
+            ELSE coalesce(group_steps.started_at, excluded.started_at) END,
+        finished_at = CASE WHEN excluded.state IN ('done', 'failed')
+            THEN coalesce(group_steps.finished_at, ?6) ELSE NULL END",
+        params![g.id, name, state, text, eta_at, at])?;
     event(t, &g.id, "group_step")?;
     Ok(true)
 }
