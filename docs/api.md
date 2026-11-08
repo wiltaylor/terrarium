@@ -5690,13 +5690,19 @@ Agents with no usage are in the list with zero totals and no `share_pct`.
 `models` and `agents` are biggest spender (input plus output tokens)
 first. `since` and `until` are in the answer when the query gives them.
 
-The card usage answer also includes all-time `working_seconds` and active
+The card usage answer also includes `working_seconds` and active
 trouble `signals` (arrays of signal names). The card and board summary expose
 the same active names as `trouble`. Working time is replayed from card
 assignment, status and wait events: only an agent working on this card in a
 working/research column counts. Idle time, open waits and time in other
 columns do not count. Usage query date filters apply to token/turn totals,
-not the all-time working clock or current marks.
+not the working clock or current marks. To avoid a deploy-time burst, only
+cards claimed after the trouble baseline migration are monitored. The
+baseline survives daemon restarts. Clock/history replay starts at the first
+such claim and reads only explicit assignees' status, wait and reset events,
+not the lifetime history of agents who commented on the card. Budget usage
+starts at that claim. Interactive token usage totals retain their existing
+all-time/date-filtered meaning.
 
 `GET /api/projects/{name}/trouble` reads the project's trouble thresholds.
 `PUT` replaces them and requires project admin rights. Omitted fields use
@@ -5705,7 +5711,8 @@ defaults. Unknown fields and negative limits are rejected. Example:
 ```json
 {"time_seconds":{"small":2700,"impl":7200,"impl-hard":14400},
  "tokens":{},"turns":{},"red_streak":3,"red_same_commit":2,
- "review_rounds":2,"eta_delays":3,"timer_polls":3,"compactions":3}
+ "review_rounds":2,"eta_delays":3,"timer_polls":3,"compactions":3,
+ "review_wait_seconds":3600}
 ```
 
 Time, token and turn maps are keyed by the suffix of the card's `type:` label
@@ -5714,15 +5721,22 @@ currently use the fixed fallbacks above (`hard` also uses four hours), with a
 hook for calibrated type p70 history. A zero threshold disables that check.
 An ETA at or before now produces `eta_overdue`. The other signal names are
 `time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
-`validation_red`, `timer_polls` and `compactions`.
+`validation_red`, `timer_polls`, `compactions` and `review_wait`. Review wait
+starts at the most recent entry into review and clears on return to work.
+Job-set ETAs do not count as agent ETA extensions.
 
 Validation counts linked test runs uploaded by the current assignee, or the
 bound card agent while unassigned. Each suite name has its own streak. A
-green/empty run breaks that suite's streak. Three consecutive red runs, or
+green/empty run breaks that suite's streak. The latest 128 linked runs are
+examined per card. Three consecutive red runs, or
 two red runs on the same nonempty commit within the streak, trigger the mark.
 Short timer waits (at most one minute) and compaction requests use a rolling
 one-hour window. Review rounds and ETA extensions count the card's history.
 
+The lifecycle tick plans in a read, using lightweight working/review/research
+card metadata and marked cards that need clearing. It opens a write only if
+signals changed. That write checks event/audit revisions and defers stale
+plans to the next tick, rather than replaying history inside a write.
 On the lifecycle tick, each new signal sends one state request to the worker
 and one summary to each project lead, never to the operator. The once-per-card
 and signal record survives restarts, resolution and recurrence. A mark clears

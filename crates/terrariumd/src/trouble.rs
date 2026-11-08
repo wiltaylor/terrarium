@@ -12,7 +12,7 @@ use crate::api::Shared;
 use crate::db::Tx;
 use crate::error::ApiResult;
 use crate::events::EventDraft;
-use crate::store::{board, mail, usage};
+use crate::store::{mail, usage};
 use mail::{Address, Outgoing};
 
 /// Project overrides. Missing token/turn limits are off. Type names are
@@ -29,6 +29,7 @@ pub struct Settings {
     pub eta_delays: u64,
     pub timer_polls: u64,
     pub compactions: u64,
+    pub review_wait_seconds: u64,
 }
 
 impl Default for Settings {
@@ -43,6 +44,7 @@ impl Default for Settings {
             eta_delays: 3,
             timer_polls: 3,
             compactions: 3,
+            review_wait_seconds: 3600,
         }
     }
 }
@@ -98,16 +100,36 @@ fn parse(s: &str) -> Option<DateTime<Utc>> {
 }
 
 fn history(c: &Connection, card: &str) -> ApiResult<Vec<Event>> {
+    // Start at the first claim after installation, not at card creation.
+    // Only explicit assignees contribute status/wait/reset events. A lead
+    // commenting on the card cannot pull in the lead's lifetime history.
+    let start: Option<i64> = c.query_row(
+        "SELECT min(seq) FROM events
+        WHERE card = ?1 AND kind = 'card' AND json_extract(payload, '$.change') = 'claimed'
+        AND seq > (SELECT seq FROM card_trouble_baseline WHERE singleton = 1)",
+        [card],
+        |r| r.get(0),
+    )?;
+    let Some(start) = start else {
+        return Ok(Vec::new());
+    };
     let mut q = c.prepare(
-        "SELECT e.at, e.kind, e.agent_id, e.card,
+        "WITH assignees AS (
+            SELECT DISTINCT json_extract(payload, '$.assignee') AS agent FROM events
+            WHERE card = ?1 AND seq >= ?2 AND kind = 'card'
+            AND json_extract(payload, '$.change') IN ('claimed', 'assigned')
+        ) SELECT e.at, e.kind, e.agent_id, e.card,
           CASE WHEN e.kind = 'wait' THEN json_set(e.payload, '$.due_at', w.due_at) ELSE e.payload END
         FROM events e LEFT JOIN waits w ON e.kind = 'wait' AND w.id = json_extract(e.payload, '$.wait_id')
-        WHERE e.card = ?1 OR (e.kind IN ('status', 'wait', 'agent.reset') AND e.agent_id IN
-          (SELECT agent_id FROM events WHERE card = ?1 AND agent_id IS NOT NULL))
+        WHERE (e.card = ?1 AND e.seq >= ?2)
+          OR (e.seq >= ?2 AND e.kind IN ('status', 'wait', 'agent.reset')
+              AND e.agent_id IN (SELECT agent FROM assignees))
+          OR e.seq IN (SELECT max(s.seq) FROM events s JOIN assignees a ON a.agent = s.agent_id
+              WHERE s.kind = 'status' AND s.seq < ?2 GROUP BY s.agent_id)
         ORDER BY e.seq",
     )?;
     let rows = q
-        .query_map([card], |r| {
+        .query_map(params![card, start], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -138,6 +160,7 @@ struct Facts {
     eta_delays: u64,
     polls: u64,
     compactions: u64,
+    review_since: Option<DateTime<Utc>>,
 }
 
 /// Replay only the intervals when this card has an assignee in a working
@@ -211,6 +234,9 @@ fn facts(card: &str, events: &[Event], now: DateTime<Utc>) -> Facts {
                     });
                     if d["change"] == "moved" && (d["to_role"] == "review" || d["to"] == "review") {
                         f.reviews += 1;
+                        f.review_since = Some(e.at);
+                    } else {
+                        f.review_since = None;
                     }
                     if d["change"] == "moved" {
                         eta = None;
@@ -225,6 +251,7 @@ fn facts(card: &str, events: &[Event], now: DateTime<Utc>) -> Facts {
                     let previous_eta = eta.or_else(|| d["previous"].as_str().and_then(parse));
                     if let (Some(old), Some(new)) = (previous_eta, next)
                         && new > old
+                        && d["job"] != true
                     {
                         f.eta_delays += 1;
                     }
@@ -252,7 +279,7 @@ fn validation_red(c: &Connection, card: &str, agent: &str, s: &Settings) -> ApiR
     let mut q = c.prepare(
         "SELECT r.name, r.commit_sha, r.failed + r.errored FROM test_runs r
         JOIN test_run_cards l ON l.run = r.pk WHERE l.card = ?1 AND r.created_by = ?2
-        ORDER BY r.pk DESC",
+        ORDER BY r.pk DESC LIMIT 128",
     )?;
     let runs = q
         .query_map(params![card, agent], |r| {
@@ -314,18 +341,47 @@ pub fn active_signals(c: &Connection, card: &str) -> ApiResult<Vec<String>> {
     Ok(signals)
 }
 
-fn desired(c: &Connection, card: &board::Card, now: DateTime<Utc>) -> ApiResult<BTreeSet<String>> {
+/// The tick does not hydrate card bodies, comments, links, dependencies,
+/// or test cases. Those belong to the interactive card API, not this scan.
+struct Watched {
+    id: String,
+    project: String,
+    title: String,
+    column: String,
+    column_role: Option<String>,
+    agent: Option<String>,
+    labels: Vec<String>,
+    eta_at: Option<String>,
+    archived: bool,
+}
+
+struct Change {
+    card: Watched,
+    signals: BTreeSet<String>,
+    facts: Facts,
+    totals: usage::Totals,
+}
+
+fn desired(
+    c: &Connection,
+    card: &Watched,
+    now: DateTime<Utc>,
+) -> ApiResult<(BTreeSet<String>, Facts, usage::Totals)> {
     let mut out = BTreeSet::new();
     if card.archived {
-        return Ok(out);
+        return Ok((out, Facts::default(), usage::Totals::default()));
     }
     if !matches!(card.column_role.as_deref(), Some("working" | "review"))
         && card.column != "research"
     {
-        return Ok(out);
+        return Ok((out, Facts::default(), usage::Totals::default()));
     }
     let s = settings(c, &card.project)?;
-    let f = facts(&card.id, &history(c, &card.id)?, now);
+    let events = history(c, &card.id)?;
+    if events.is_empty() {
+        return Ok((out, Facts::default(), usage::Totals::default()));
+    }
+    let f = facts(&card.id, &events, now);
     let kind = card
         .labels
         .iter()
@@ -349,6 +405,13 @@ fn desired(c: &Connection, card: &board::Card, now: DateTime<Utc>) -> ApiResult<
     if s.review_rounds > 0 && f.reviews >= s.review_rounds {
         out.insert("review_rounds".into());
     }
+    if s.review_wait_seconds > 0
+        && card.column_role.as_deref() == Some("review")
+        && f.review_since
+            .is_some_and(|at| (now - at).num_seconds().max(0) as u64 >= s.review_wait_seconds)
+    {
+        out.insert("review_wait".into());
+    }
     if s.timer_polls > 0 && f.polls >= s.timer_polls {
         out.insert("timer_polls".into());
     }
@@ -359,6 +422,12 @@ fn desired(c: &Connection, card: &board::Card, now: DateTime<Utc>) -> ApiResult<
         c,
         &usage::UsageFilter {
             card: Some(card.id.clone()),
+            since: events
+                .iter()
+                .find(|e| {
+                    e.card.as_deref() == Some(card.id.as_str()) && e.data["change"] == "claimed"
+                })
+                .map(|e| crate::time_param::stored(e.at)),
             ..Default::default()
         },
     )?;
@@ -374,15 +443,21 @@ fn desired(c: &Connection, card: &board::Card, now: DateTime<Utc>) -> ApiResult<
     {
         out.insert("turn_budget".into());
     }
-    if let Some(a) = card.assignee.as_ref().or(card.agent.as_ref())
+    if let Some(a) = card.agent.as_ref()
         && validation_red(c, &card.id, a, &s)?
     {
         out.insert("validation_red".into());
     }
-    Ok(out)
+    Ok((out, f, totals))
 }
 
-fn reconcile(t: &mut Tx<'_>, card: &board::Card, signals: &BTreeSet<String>) -> ApiResult<()> {
+fn reconcile(t: &mut Tx<'_>, change: &Change) -> ApiResult<()> {
+    let Change {
+        card,
+        signals,
+        facts: f,
+        totals,
+    } = change;
     let mut q = t.prepare("SELECT signal, active FROM card_trouble WHERE card = ?1")?;
     let old = q
         .query_map([&card.id], |r| {
@@ -426,14 +501,6 @@ fn reconcile(t: &mut Tx<'_>, card: &board::Card, signals: &BTreeSet<String>) -> 
         )?;
         if !old.contains_key(signal) {
             let subject = format!("{}: trouble signal {signal}", card.id);
-            let f = facts(&card.id, &history(t, &card.id)?, Utc::now());
-            let totals = usage::totals(
-                t,
-                &usage::UsageFilter {
-                    card: Some(card.id.clone()),
-                    ..Default::default()
-                },
-            )?;
             let body = format!(
                 "Card {} ({}) in {}: {signal}.\nWorking time: {} seconds. Usage: {} turns, {} tokens. Review rounds: {}. ETA extensions: {}. Short timer polls in the last hour: {}. Compaction requests in the last hour: {}.\nPlease check its state. This notice is sent once per card and signal.",
                 card.id,
@@ -447,11 +514,7 @@ fn reconcile(t: &mut Tx<'_>, card: &board::Card, signals: &BTreeSet<String>) -> 
                 f.polls,
                 f.compactions
             );
-            let agent = card
-                .assignee
-                .as_deref()
-                .or(card.agent.as_deref())
-                .unwrap_or("");
+            let agent = card.agent.as_deref().unwrap_or("");
             for to in crate::question_guard::leads(t, &card.project, agent)? {
                 mail::send(
                     t,
@@ -494,30 +557,84 @@ fn reconcile(t: &mut Tx<'_>, card: &board::Card, signals: &BTreeSet<String>) -> 
     Ok(())
 }
 
+fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
+    let mut q = c.prepare("SELECT c.id, c.project, c.title, k.name, k.role,
+        coalesce(c.assignee, (SELECT s.id FROM spawns s WHERE s.bound_kind = 'card'
+            AND s.bound_id = c.id AND s.finished_at IS NULL LIMIT 1)), c.labels, c.eta_at, c.archived
+        FROM cards c JOIN board_columns k ON k.id = c.column_id
+        WHERE (c.archived = 0 AND (k.role IN ('working', 'review') OR k.name = 'research'))
+        OR EXISTS (SELECT 1 FROM card_trouble m WHERE m.card = c.id AND m.active = 1)")?;
+    let rows = q
+        .query_map([], |r| {
+            Ok(Watched {
+                id: r.get(0)?,
+                project: r.get(1)?,
+                title: r.get(2)?,
+                column: r.get(3)?,
+                column_role: r.get(4)?,
+                agent: r.get(5)?,
+                labels: crate::store::json_col(&r.get::<_, String>(6)?),
+                eta_at: r.get(7)?,
+                archived: r.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut changes = Vec::new();
+    for card in rows {
+        let (signals, facts, totals) = desired(c, &card, now)?;
+        let old: BTreeSet<String> = active_signals(c, &card.id)?.into_iter().collect();
+        if old != signals {
+            changes.push(Change {
+                card,
+                signals,
+                facts,
+                totals,
+            });
+        }
+    }
+    Ok(changes)
+}
+
+fn revision(c: &Connection) -> ApiResult<(i64, i64)> {
+    Ok(c.query_row(
+        "SELECT (SELECT coalesce(max(seq), 0) FROM events),
+        (SELECT coalesce(max(seq), 0) FROM audit)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
 pub async fn pass(state: &Shared) {
+    let planned = state
+        .db
+        .read(|c| Ok((revision(c)?, plan(c, Utc::now())?)))
+        .await;
+    let (expected, changes) = match planned {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("card trouble read failed: {e}");
+            return;
+        }
+    };
+    if changes.is_empty() {
+        return;
+    }
     if let Err(e) = state
         .db
-        .write("system", |t| {
-            let mut q = t.prepare(
-                "SELECT c.id FROM cards c JOIN board_columns k ON k.id = c.column_id
-            WHERE (c.archived = 0 AND (k.role IN ('working', 'review') OR k.name = 'research'))
-            OR EXISTS (SELECT 1 FROM card_trouble m WHERE m.card = c.id AND m.active = 1)",
-            )?;
-            let ids = q
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            drop(q);
-            let now = Utc::now();
-            for id in ids {
-                let card = board::get_card(t, &id)?;
-                let signals = desired(t, &card, now)?;
-                reconcile(t, &card, &signals)?;
+        .write("system", move |t| {
+            // A move, status, wait, reassignment or settings change won the
+            // race with the read. Retry next tick, without replaying in a write.
+            if revision(t)? != expected {
+                return Ok(());
+            }
+            for change in changes {
+                reconcile(t, &change)?;
             }
             Ok(())
         })
         .await
     {
-        tracing::warn!("card trouble pass failed: {e}");
+        tracing::warn!("card trouble write failed: {e}");
     }
 }
 
@@ -650,6 +767,26 @@ mod tests {
         assert_eq!(time_limit("small", &s), 0);
         assert!(serde_json::from_value::<Settings>(json!({"red_streak": -1})).is_err());
         assert!(serde_json::from_value::<Settings>(json!({"unknown": 1})).is_err());
+    }
+
+    #[test]
+    fn job_set_etas_are_not_agent_extensions() {
+        let e = vec![
+            claim(0, "a"),
+            event(
+                1,
+                "card",
+                "a",
+                json!({"change": "eta", "eta_at": at(100).to_rfc3339()}),
+            ),
+            event(
+                2,
+                "card",
+                "a",
+                json!({"change": "eta", "eta_at": at(200).to_rfc3339(), "job": true}),
+            ),
+        ];
+        assert_eq!(facts("P-1", &e, at(10)).eta_delays, 0);
     }
 
     #[test]

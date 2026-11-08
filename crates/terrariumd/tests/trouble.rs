@@ -257,3 +257,119 @@ async fn history_signals_and_working_time_reach_the_card_and_board() {
     terrariumd::trouble::pass(&state(&td)).await;
     assert_eq!(usage(&td, &card).await["signals"], json!([]));
 }
+
+#[tokio::test]
+async fn deploy_baseline_ignores_existing_cards_until_a_new_claim() {
+    let (mut td, lead, worker, card) = setup().await;
+    state(&td)
+        .db
+        .write("system", |t| {
+            t.execute(
+                "UPDATE card_trouble_baseline SET seq = (SELECT max(seq) FROM events)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    eta(&td, &card, true).await;
+    terrariumd::trouble::pass(&state(&td)).await;
+    assert_eq!(notices(&td, &lead).await, 0);
+    assert_eq!(usage(&td, &card).await["working_seconds"], 0);
+    td.boot(None, None).await;
+    terrariumd::trouble::pass(&state(&td)).await;
+    assert_eq!(notices(&td, &lead).await, 0);
+    td.post_as(
+        &worker,
+        &format!("/api/cards/{card}/assign"),
+        json!({"assignee": null}),
+    )
+    .await
+    .ok();
+    td.post_as(&worker, &format!("/api/cards/{card}/claim"), json!({}))
+        .await
+        .ok();
+    eta(&td, &card, true).await;
+    terrariumd::trouble::pass(&state(&td)).await;
+    assert_eq!(notices(&td, &lead).await, 1);
+}
+
+#[tokio::test]
+async fn review_wait_marks_and_clears_on_return_to_work() {
+    let (td, lead, worker, card) = setup().await;
+    td.put_as(
+        &lead,
+        "/api/projects/p/trouble",
+        json!({"review_wait_seconds": 1}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        &worker,
+        &format!("/api/cards/{card}/move"),
+        json!({"column": "review"}),
+    )
+    .await
+    .ok();
+    let c = card.clone();
+    state(&td).db.write("system", move |t| {
+        t.execute("UPDATE events SET at = ?2 WHERE card = ?1 AND kind = 'card'
+            AND json_extract(payload, '$.change') = 'moved' AND json_extract(payload, '$.to_role') = 'review'",
+            rusqlite::params![c, (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339()])?;
+        Ok(())
+    }).await.unwrap();
+    terrariumd::trouble::pass(&state(&td)).await;
+    assert_eq!(usage(&td, &card).await["signals"], json!(["review_wait"]));
+    td.post_as(&worker, &format!("/api/cards/{card}/claim"), json!({}))
+        .await
+        .ok();
+    terrariumd::trouble::pass(&state(&td)).await;
+    assert_eq!(usage(&td, &card).await["signals"], json!([]));
+}
+
+#[tokio::test]
+async fn real_claim_status_and_wait_events_drive_the_working_clock() {
+    use std::time::Duration;
+    let (td, _, worker, card) = setup().await;
+    td.patch(
+        &format!("/api/agents/{worker}"),
+        json!({"card_reminder": false}),
+    )
+    .await
+    .ok();
+    td.post_empty(&format!("/api/agents/{worker}/start"))
+        .await
+        .ok();
+    td.wait_status(&worker, "idle").await;
+    td.sup.open_turn(worker.parse().unwrap());
+    td.wait_status(&worker, "working").await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let running = usage(&td, &card).await["working_seconds"].as_u64().unwrap();
+    assert!(running >= 1);
+    let wait = td
+        .post_as(
+            &worker,
+            &format!("/api/agents/{worker}/waits"),
+            json!({"kind": "time",
+        "at": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()}),
+        )
+        .await;
+    let wait_id = id(wait.ok());
+    td.wait_status(&worker, "waiting").await;
+    let resting = usage(&td, &card).await["working_seconds"].clone();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(usage(&td, &card).await["working_seconds"], resting);
+    td.req(
+        hyper::Method::DELETE,
+        &format!("/api/waits/{wait_id}"),
+        None,
+        Some(&worker),
+    )
+    .await
+    .ok();
+    td.wait_status(&worker, "working").await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(
+        usage(&td, &card).await["working_seconds"].as_u64().unwrap() > resting.as_u64().unwrap()
+    );
+}
