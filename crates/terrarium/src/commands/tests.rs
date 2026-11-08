@@ -10394,10 +10394,15 @@ async fn rules_every_command() {
         out.contains("rule agent-park: off (rules.wcl changed)"),
         "{out}"
     );
+    assert!(!out.contains("lint:"), "{out}");
     let out = ok(
         false,
         &["-p", "terra", "rule", "enable", "agent-park"],
-        vec![(200, json!({"changed": false}))],
+        vec![(
+            200,
+            json!({"changed": false, "findings": [{"code": "missing_column", "column": "accepted",
+                "rules": ["agent-park"], "message": "agent-park names `accepted`"}]}),
+        )],
         vec![(
             Post,
             "/api/projects/terra/rules/agent-park/enable",
@@ -10407,6 +10412,11 @@ async fn rules_every_command() {
     )
     .await;
     assert!(out.contains("rule agent-park: on already"), "{out}");
+    // The enable answer's lint findings are a warning (TER-226).
+    assert!(
+        out.contains("lint: missing_column accepted: agent-park names `accepted`"),
+        "{out}"
+    );
     // migrate: the plan, then --apply with the text.
     let mig = json!({"project": "terra", "applied": false, "board_flow": "code", "changed": true,
         "text": "rule \"merge-pass\" {}\n",

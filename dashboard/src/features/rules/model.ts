@@ -1,7 +1,7 @@
 // The Rules tab of the board screen (docs/api.md §19.12, TER-171): the pure
 // parts, so the tests need no DOM.
 
-import type { BoardFlow, EffectiveRule, RuleChange, RuleFinding, RuleRun } from "../../api/types";
+import type { BoardFlow, EffectiveRule, RuleChange, RuleFinding, RuleRun, RuleToggle } from "../../api/types";
 
 /** One row of the rules table. */
 export interface RuleRow {
@@ -51,6 +51,17 @@ export function flowText(flow: BoardFlow): string {
 export function findingText(f: RuleFinding): string {
   const kind = f.code === "missing_column" ? "Missing column" : "Stuck column";
   return `${kind} ${f.column}: ${f.message}`;
+}
+
+/**
+ * The notice after a switch, with the lint findings of the rules that run now as a warning: an enable of a pack
+ * rule that the migration turned off can name a missing column again (TER-226).
+ */
+export function toggleText(name: string, r: Pick<RuleToggle, "enabled" | "changed" | "findings">): string {
+  const state = r.enabled ? "on" : "off";
+  const head = r.changed ? `${name} is ${state}: rules.wcl changed.` : `${name} was ${state} already.`;
+  const found = r.findings ?? [];
+  return found.length ? `${head} Lint: ${found.map(findingText).join("; ")}.` : head;
 }
 
 export function changeText(c: RuleChange): string {

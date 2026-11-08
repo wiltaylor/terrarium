@@ -321,11 +321,27 @@ fn is_timeout(ev: &Ev) -> bool {
     matches!(ev, Ev::End(End::Exit { reason, .. }) if reason == "timeout")
 }
 
+/// Did the run end by itself? Not when no end came, or an error end with
+/// no exit code (the host agent no longer holds the session, the host is
+/// offline), or the host agent ended it for a down daemon link: its
+/// processes may still run. Such a run keeps its PID file, so a later
+/// kill from the file finds them (TER-196, as after a daemon restart).
+fn ended_by_itself(end: Option<&Ev>) -> bool {
+    match end {
+        Some(Ev::End(End::Exit { reason, .. })) => {
+            reason != "detached_timeout" && reason != "output_overflow"
+        }
+        Some(Ev::End(End::Cp { .. })) => true,
+        _ => false,
+    }
+}
+
 /// Forward `inner`. A `Kill` (or the drop of the returned run) runs
 /// `killer` on the target first, then kills `inner`. A run that hits its
 /// own timeout runs `killer` too, and its end goes out only after the
-/// kill, with the report ready (TER-115). A run that ends by itself runs
-/// `clear` (when given) before its end goes out (TER-123).
+/// kill, with the report ready (TER-115). A run that ends by itself
+/// ([`ended_by_itself`]) runs `clear` (when given) before its end goes
+/// out (TER-123); a lost run keeps its PID file (TER-196).
 fn guard<F>(
     inner: Running,
     start: F,
@@ -363,7 +379,7 @@ where
         };
         let held = match stop {
             Stop::Ended(end) => {
-                if let Some(c) = &clear {
+                if let Some(c) = clear.as_ref().filter(|_| ended_by_itself(end.as_ref())) {
                     let ok = match start(c.clone()) {
                         Ok(r) => {
                             let wait = Duration::from_secs(c.timeout_secs.unwrap_or(15) + 5);
@@ -527,6 +543,38 @@ mod tests {
 
     use super::*;
     use crate::executor::{pump_process, ssh_plan};
+
+    /// TER-196: only a run that ended by itself clears its PID file. A
+    /// lost run keeps it for the kill of a lost run.
+    #[test]
+    fn a_lost_run_keeps_its_pid_file() {
+        let exit = |code: Option<i32>, reason: &str| {
+            Ev::End(End::Exit {
+                code,
+                signal: None,
+                reason: reason.into(),
+            })
+        };
+        for ev in [
+            exit(Some(0), "exited"),
+            exit(Some(1), "exited"),
+            exit(None, "signaled"),
+        ] {
+            assert!(ended_by_itself(Some(&ev)));
+        }
+        let lost = Ev::End(End::Error {
+            code: "lost".into(),
+            message: "the host agent no longer holds the session".into(),
+        });
+        for ev in [
+            lost,
+            exit(None, "detached_timeout"),
+            exit(None, "output_overflow"),
+        ] {
+            assert!(!ended_by_itself(Some(&ev)));
+        }
+        assert!(!ended_by_itself(None));
+    }
 
     #[test]
     fn the_wrapper_keeps_the_command_and_names_the_file() {
