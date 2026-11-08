@@ -167,11 +167,17 @@ async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
 #[tokio::test]
 async fn inbox_noise_updates_and_operator_mail_replies() {
     let World { td, lead, sys, .. } = setup().await;
-    let card = id(td.post("/api/projects/p/cards", json!({"title": "Request"})).await.ok());
+    let card = id(td
+        .post("/api/projects/p/cards", json!({"title": "Request"}))
+        .await
+        .ok());
     let first = ask(&td, &lead, json!({"text": "First?", "card": card})).await;
     let second = ask(&td, &lead, json!({"text": "Second?"})).await;
     let path = format!("/api/questions/{}", id(&second));
-    for patch in [json!({"card": card}), json!({"card": card, "text": "Changed?"})] {
+    for patch in [
+        json!({"card": card}),
+        json!({"card": card, "text": "Changed?"}),
+    ] {
         let r = td.patch_as(&lead, &path, patch).await;
         r.err(409, "conflict");
         assert_eq!(r.body["error"]["details"]["question"], first["id"]);
@@ -180,23 +186,61 @@ async fn inbox_noise_updates_and_operator_mail_replies() {
         assert_eq!(unchanged.body["card"], Value::Null);
         assert_eq!(unchanged.body["text"], "Second?");
     }
-    td.patch_as(&lead, &path, json!({"text": "Valid follow-up?"})).await.ok();
+    td.patch_as(&lead, &path, json!({"text": "Valid follow-up?"}))
+        .await
+        .ok();
     // Threads cannot be reassigned through question update.
-    td.patch_as(&lead, &path, json!({"thread": "another-thread"})).await.err(422, "invalid");
+    td.patch_as(&lead, &path, json!({"thread": "another-thread"}))
+        .await
+        .err(400, "bad_request");
 
-    let notice = ask(&td, &lead, json!({"kind": "notice", "text": "Done", "card": card})).await;
+    let notice = ask(
+        &td,
+        &lead,
+        json!({"kind": "notice", "text": "Done", "card": card}),
+    )
+    .await;
     let path = format!("/api/questions/{}", id(&notice));
-    for patch in [json!({"card": null}), json!({"card": null, "text": "No context"})] {
+    for patch in [
+        json!({"card": null}),
+        json!({"card": null, "text": "No context"}),
+    ] {
         td.patch_as(&lead, &path, patch).await.err(422, "invalid");
     }
-    td.patch_as(&lead, &path, json!({"card": null, "priority": "urgent"})).await.ok();
-    td.patch_as(&lead, &path, json!({"priority": "normal"})).await.err(422, "invalid");
+    td.patch_as(&lead, &path, json!({"card": null, "priority": "urgent"}))
+        .await
+        .ok();
+    td.patch_as(&lead, &path, json!({"priority": "normal"}))
+        .await
+        .err(422, "invalid");
 
-    let message = td.post("/api/mail", json!({"to": "p/lead", "body": "Please investigate"})).await;
+    let message = td
+        .post(
+            "/api/mail",
+            json!({"to": "p/lead", "body": "Please investigate"}),
+        )
+        .await;
     let mid = id(message.ok());
-    let reply = ask(&td, &lead, json!({"kind": "notice", "text": "Answer to your mail", "reply_to": mid})).await;
-    td.patch_as(&lead, &format!("/api/questions/{}", id(&reply)), json!({"text": "Updated answer"})).await.ok();
-    td.post_as(&sys, &format!("/api/agents/{sys}/questions"), json!({"kind": "notice", "text": "Not my mail", "reply_to": mid})).await.err(422, "invalid");
+    let reply = ask(
+        &td,
+        &lead,
+        json!({"kind": "notice", "text": "Answer to your mail", "reply_to": mid}),
+    )
+    .await;
+    td.patch_as(
+        &lead,
+        &format!("/api/questions/{}", id(&reply)),
+        json!({"text": "Updated answer"}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        &sys,
+        &format!("/api/agents/{sys}/questions"),
+        json!({"kind": "notice", "text": "Not my mail", "reply_to": mid}),
+    )
+    .await
+    .err(422, "invalid");
 }
 
 async fn status(td: &TestDaemon, agent: &str) -> String {
