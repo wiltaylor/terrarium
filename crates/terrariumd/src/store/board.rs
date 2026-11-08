@@ -1853,12 +1853,7 @@ pub fn may_read_message(actor: &Actor, m: &mail::Message) -> bool {
     }
 }
 
-pub fn create_card(
-    t: &mut Tx<'_>,
-    actor: &Actor,
-    project: &str,
-    new: NewCard,
-) -> ApiResult<Card> {
+pub fn create_card(t: &mut Tx<'_>, actor: &Actor, project: &str, new: NewCard) -> ApiResult<Card> {
     create_card_with_author(t, actor, project, new, None)
 }
 

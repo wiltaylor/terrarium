@@ -4582,7 +4582,7 @@ is a card with the label `github` (any case), or a title that starts with
 `GitHub #<n>:` (any case). A held card is a GitHub card with the label
 `hold`.
 
-- **Create.** An agent makes a GitHub card, and its `github_author` is
+- **Create.** An agent makes a GitHub card, and its daemon-verified author is
   missing or not on the list (the case does not matter, and a leading `@`
   is dropped). The card is held. It goes to the blocked column with the
   labels `github` and `hold` and a move comment that says why, whatever

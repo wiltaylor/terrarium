@@ -1523,9 +1523,8 @@ pub struct CardNewArgs {
     /// The ETA: a duration such as 45m, 2h30m, or 1d, or an RFC 3339 time
     #[arg(long, value_name = "DURATION|TIME")]
     pub eta: Option<String>,
-    /// The GitHub login of the issue author, for a GitHub card (label
-    /// `github` or a `GitHub #<n>:` title). An author off the project's
-    /// `github_authors` list holds the card for the operator
+    /// Legacy author assertion, ignored by the gate. Use the daemon's GitHub
+    /// issue import endpoint for a verified author
     #[arg(long, value_name = "LOGIN")]
     pub github_author: Option<String>,
     /// Link the new card to this Inbox thread, which tracks it (you must

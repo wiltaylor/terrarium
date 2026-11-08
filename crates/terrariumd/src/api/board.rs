@@ -44,7 +44,9 @@ async fn import_issue(
     Path(name): Path<String>,
     ApiJson(body): ApiJson<ImportIssue>,
 ) -> ApiResult<Json<Card>> {
-    Ok(Json(crate::github_issues::import(&state, actor, name, body.repo, body.number).await?))
+    Ok(Json(
+        crate::github_issues::import(&state, actor, name, body.repo, body.number).await?,
+    ))
 }
 
 async fn show_board(
