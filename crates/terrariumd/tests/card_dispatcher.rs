@@ -191,8 +191,20 @@ async fn review_changes_returns_top_and_lead_label_reserves_decision() {
         .await
         .ok();
         assert_eq!(get(&td, &id).await["column"], c["column"]);
-        terrariumd::spawn::close(&state(&td), &agent, terrariumd::store::spawns::DONE, None, false).await.unwrap();
-        assert!(!terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+        terrariumd::spawn::close(
+            &state(&td),
+            &agent,
+            terrariumd::store::spawns::DONE,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+                .await
+                .unwrap()
+        );
     }
 }
 
@@ -200,21 +212,54 @@ async fn review_changes_returns_top_and_lead_label_reserves_decision() {
 async fn review_rounds_reject_stale_verdict_and_retry_unfinished_review() {
     let (td, id) = review_setup().await;
     let s = state(&td);
-    assert!(terrariumd::review_dispatcher::dispatch(&s, "p").await.unwrap());
+    assert!(
+        terrariumd::review_dispatcher::dispatch(&s, "p")
+            .await
+            .unwrap()
+    );
     let old = reviewer(&td, &id).await;
     // A reviewer that ended without a verdict must not strand the card.
-    terrariumd::spawn::close(&s, &old, terrariumd::store::spawns::DONE, None, false).await.unwrap();
-    assert!(terrariumd::review_dispatcher::dispatch(&s, "p").await.unwrap());
+    terrariumd::spawn::close(&s, &old, terrariumd::store::spawns::DONE, None, false)
+        .await
+        .unwrap();
+    assert!(
+        terrariumd::review_dispatcher::dispatch(&s, "p")
+            .await
+            .unwrap()
+    );
     assert_eq!(get(&td, &id).await["review_round"], 2);
     let current = reviewer(&td, &id).await;
     // Moving away invalidates the round, even if the same card returns immediately.
-    td.post(&format!("/api/cards/{id}/move"), json!({"column":"backlog"})).await.ok();
-    td.post(&format!("/api/cards/{id}/move"), json!({"column":"review"})).await.ok();
-    td.post_as(&current, &format!("/api/cards/{id}/comments"), json!({"body":"accept"})).await.ok();
+    td.post(
+        &format!("/api/cards/{id}/move"),
+        json!({"column":"backlog"}),
+    )
+    .await
+    .ok();
+    td.post(&format!("/api/cards/{id}/move"), json!({"column":"review"}))
+        .await
+        .ok();
+    td.post_as(
+        &current,
+        &format!("/api/cards/{id}/comments"),
+        json!({"body":"accept"}),
+    )
+    .await
+    .ok();
     assert_eq!(get(&td, &id).await["column"], "review");
-    assert!(!terrariumd::review_dispatcher::dispatch(&s, "p").await.unwrap());
-    terrariumd::spawn::close(&s, &current, terrariumd::store::spawns::DONE, None, false).await.unwrap();
-    assert!(terrariumd::review_dispatcher::dispatch(&s, "p").await.unwrap());
+    assert!(
+        !terrariumd::review_dispatcher::dispatch(&s, "p")
+            .await
+            .unwrap()
+    );
+    terrariumd::spawn::close(&s, &current, terrariumd::store::spawns::DONE, None, false)
+        .await
+        .unwrap();
+    assert!(
+        terrariumd::review_dispatcher::dispatch(&s, "p")
+            .await
+            .unwrap()
+    );
     assert_eq!(get(&td, &id).await["review_round"], 3);
 }
 
@@ -222,30 +267,80 @@ async fn review_rounds_reject_stale_verdict_and_retry_unfinished_review() {
 async fn review_caps_and_template_failure_backoff() {
     let (td, id) = review_setup().await;
     let lead = lead_id(&td).await;
-    td.patch(&format!("/api/agents/{lead}"), json!({"policy":{"spawn":{
-        "templates":["card-small"],"bound":true,"max_concurrent":4
-    }}})).await.ok();
-    assert!(terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.is_err());
-    assert!(!terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+    td.patch(
+        &format!("/api/agents/{lead}"),
+        json!({"policy":{"spawn":{
+            "templates":["card-small"],"bound":true,"max_concurrent":4
+        }}}),
+    )
+    .await
+    .ok();
+    assert!(
+        terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+            .await
+            .is_err()
+    );
+    assert!(
+        !terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+            .await
+            .unwrap()
+    );
     assert_eq!(deferred_counts(&td).await.0, 1);
     assert_eq!(get(&td, &id).await["review_round"], 0);
-    td.patch(&format!("/api/agents/{lead}"), json!({"policy":{"spawn":{
-        "templates":["project:*"],"bound":true,"max_concurrent":1,"max_per_day":1
-    }}})).await.ok();
+    td.patch(
+        &format!("/api/agents/{lead}"),
+        json!({"policy":{"spawn":{
+            "templates":["project:*"],"bound":true,"max_concurrent":1,"max_per_day":1
+        }}}),
+    )
+    .await
+    .ok();
     let key = id.clone();
-    state(&td).db.write("operator", move |t| {
-        t.execute("UPDATE card_dispatch_retries SET retry_at = 0 WHERE card = ?1", [&key])?;
-        Ok(())
-    }).await.unwrap();
-    assert!(terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+    state(&td)
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE card_dispatch_retries SET retry_at = 0 WHERE card = ?1",
+                [&key],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+            .await
+            .unwrap()
+    );
     let second = card(&td, "small").await;
-    td.post(&format!("/api/cards/{second}/move"), json!({"column":"review"})).await.ok();
-    assert!(!terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+    td.post(
+        &format!("/api/cards/{second}/move"),
+        json!({"column":"review"}),
+    )
+    .await
+    .ok();
+    assert!(
+        !terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+            .await
+            .unwrap()
+    );
     assert_eq!(get(&td, &second).await["review_round"], 0);
     let agent = reviewer(&td, &id).await;
-    terrariumd::spawn::close(&state(&td), &agent, terrariumd::store::spawns::DONE, None, false).await.unwrap();
+    terrariumd::spawn::close(
+        &state(&td),
+        &agent,
+        terrariumd::store::spawns::DONE,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
     // The daily cap still applies after the concurrent place is released.
-    assert!(!terrariumd::review_dispatcher::dispatch(&state(&td), "p").await.unwrap());
+    assert!(
+        !terrariumd::review_dispatcher::dispatch(&state(&td), "p")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -253,15 +348,36 @@ async fn review_fleet_and_file_setting_removal_disables_dispatch() {
     let td = setup(2, 4, 20).await;
     for setting in ["review_dispatcher = \"lead\"", ""] {
         td.post("/api/fleet/apply", json!({"content":format!("name = \"review-fleet\"\n[[projects]]\nname = \"p\"\n{setting}\n")})).await.ok();
-        assert_eq!(td.get("/api/projects/p").await.ok()["review_dispatcher"], if setting.is_empty() { Value::Null } else { json!("lead") });
+        assert_eq!(
+            td.get("/api/projects/p").await.ok()["review_dispatcher"],
+            if setting.is_empty() {
+                Value::Null
+            } else {
+                json!("lead")
+            }
+        );
     }
     for setting in [Some("lead"), None] {
         let mut def = json!({"name":"p"});
-        if let Some(owner) = setting { def["review_dispatcher"] = json!(owner); }
-        let defs = terrarium_core::config::Definitions { projects: vec![serde_json::from_value(def).unwrap()], ..Default::default() };
+        if let Some(owner) = setting {
+            def["review_dispatcher"] = json!(owner);
+        }
+        let defs = terrarium_core::config::Definitions {
+            projects: vec![serde_json::from_value(def).unwrap()],
+            ..Default::default()
+        };
         let path = td.state.clone();
-        state(&td).db.write("operator", move |t| terrariumd::store::sync::sync(t, &defs, &path)).await.unwrap();
-        assert_eq!(td.get("/api/projects/p").await.ok()["review_dispatcher"], json!(setting));
+        state(&td)
+            .db
+            .write("operator", move |t| {
+                terrariumd::store::sync::sync(t, &defs, &path)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            td.get("/api/projects/p").await.ok()["review_dispatcher"],
+            json!(setting)
+        );
     }
 }
 
