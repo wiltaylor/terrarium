@@ -126,7 +126,7 @@ async fn only_the_operator_sets_the_allow_list() {
 
 /// Even an allow-listed author assertion from an agent is unverified.
 #[tokio::test]
-async fn an_allowed_author_makes_work() {
+async fn an_agent_cannot_assert_an_allowed_author() {
     let td = setup().await;
     allow(&td, &["wiltaylor", "wiltaylor-daf"]).await;
     let c = make(
