@@ -1769,6 +1769,7 @@ export interface Card {
   /** The address that set the ETA: an agent ULID or `operator`. */
   eta_set_by?: string | null;
   eta_set_by_name?: string | null;
+  eta_calibrated?: boolean | null;
   /** When the card last moved to `done`; a reopen clears it. */
   done_at?: string | null;
   /** The latest test run linked to the card (docs/api.md, test runs). Absent when no run is linked. */

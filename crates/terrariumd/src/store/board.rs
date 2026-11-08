@@ -195,6 +195,9 @@ pub struct Card {
     pub eta_set_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta_set_by_name: Option<String>,
+    /// Worker ETA calibration status. Absent for review and job estimates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_calibrated: Option<bool>,
     /// When the card last moved to `done`. A reopen clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<String>,
@@ -635,6 +638,34 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
     } else {
         None
     };
+    let mut eta_calibrated = None;
+    let mut worker_eta = row.eta_at.clone();
+    let mut worker_start = row.eta_set_at.clone();
+    if !row.archived && job.is_none()
+        && (row.column_role.as_deref() == Some(WORKING)
+            || (row.column_role.is_none() && row.column == WORKING))
+    {
+        if worker_start.is_none() {
+            worker_start = conn.query_row(
+                "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
+                 AND json_extract(payload, '$.change') = 'moved' ORDER BY seq DESC LIMIT 1",
+                [&row.id], |r| r.get(0),
+            ).optional()?;
+        }
+        if let Some(start) = worker_start.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
+            let guess = row.eta_at.as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|at| (at - start).num_milliseconds() as f64);
+            let samples = super::card_history::work_samples(conn, &row.project)?;
+            let labels: Vec<String> = json_col(&row.labels);
+            let calibrated = super::card_history::calibrated_ms(&samples, &labels, guess);
+            eta_calibrated = Some(calibrated.is_some());
+            if let Some(ms) = calibrated
+                && let Some(at) = start.checked_add_signed(chrono::Duration::milliseconds(ms.round() as i64)) {
+                worker_eta = Some(at.to_rfc3339());
+            }
+        }
+    }
     let (eta_at, eta_set_at, eta_set_by, eta_set_by_name) = if review {
         (
             review_eta.as_ref().map(|v| v.0.clone()),
@@ -643,7 +674,7 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
             None,
         )
     } else {
-        (row.eta_at, row.eta_set_at, row.eta_set_by, eta_set_by_name)
+        (worker_eta, worker_start, row.eta_set_by, eta_set_by_name)
     };
     Ok(Card {
         kind: row.kind,
@@ -677,6 +708,7 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         eta_set_at,
         eta_set_by,
         eta_set_by_name,
+        eta_calibrated,
         done_at: row.done_at,
         idle_since: row.idle_since,
     })
@@ -2224,7 +2256,7 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
         t,
         &row,
         "eta",
-        json!({"eta_at": at, "previous": card.eta_at}),
+        json!({"eta_at": at, "previous": card.eta_at, "labels": json_col::<Vec<String>>(&card.labels)}),
     )?;
     get_card(t, &card.id)
 }
