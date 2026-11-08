@@ -19,6 +19,40 @@ use terrarium_core::config::TargetDef;
 const KNOWN_HOST: &str = "[10.3.0.2]:2250 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGgTrtbsNPDR6lWHJVpgAh6tStS4C7O9F0ksb405ScXy\n";
 const RELAY: &str = include_str!("docker_relay.py");
 
+/// META-104 forced command. No recipe code or remote command is involved.
+pub async fn reset(state: &Shared, key: &str) -> ApiResult<()> {
+    let dir = RunDirs::new(&state.state_dir).run_dir()?;
+    let identity = dir.write_private("reset-identity", key.as_bytes())?;
+    let hosts = crate::executor::known_hosts(&state.state_dir)?;
+    let mut child = tokio::process::Command::new(&state.executor.ssh_bin)
+        .args(reset_args(&identity, &hosts))
+        .env_remove("SSH_AUTH_SOCK")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .kill_on_drop(true).spawn()
+        .map_err(|_| ApiError::internal("cannot start daemon Docker CI reset"))?;
+    let status = tokio::time::timeout(Duration::from_secs(150), child.wait()).await
+        .map_err(|_| ApiError::conflict("Docker CI reset timed out; tunnel not opened"))?
+        .map_err(|_| ApiError::internal("cannot wait for Docker CI reset"))?;
+    reset_status(status.code())
+}
+
+fn reset_args(identity: &std::path::Path, hosts: &std::path::Path) -> Vec<String> {
+    vec!["-F".into(), "/dev/null".into(), "-T".into(),
+        "-o".into(), "BatchMode=yes".into(), "-o".into(), "IdentitiesOnly=yes".into(),
+        "-o".into(), "IdentityAgent=none".into(), "-o".into(), "StrictHostKeyChecking=yes".into(),
+        "-o".into(), "GlobalKnownHostsFile=/dev/null".into(),
+        "-o".into(), format!("UserKnownHostsFile={}", hosts.display()),
+        "-i".into(), identity.display().to_string(), "dockerci@10.3.0.2".into()]
+}
+
+fn reset_status(code: Option<i32>) -> ApiResult<()> {
+    match code {
+        Some(0) => Ok(()),
+        Some(75) => Err(ApiError::conflict("Docker CI reset lock busy (exit 75); tunnel not opened")),
+        code => Err(ApiError::conflict(format!("Docker CI reset failed (exit {code:?}); tunnel not opened"))),
+    }
+}
+
 pub struct Tunnel {
     pub endpoint: String,
     ssh: tokio::process::Child,
@@ -66,7 +100,7 @@ pub async fn open(
     let hosts = dir.write_private("known_hosts", KNOWN_HOST.as_bytes())?;
     let socket = dir.path().join("docker.sock");
     let forward = format!("{}:/var/run/docker.sock", socket.display());
-    let mut ssh = tokio::process::Command::new("ssh")
+    let mut ssh = tokio::process::Command::new(&state.executor.ssh_bin)
         .args([
             "-F",
             "/dev/null",
@@ -258,6 +292,18 @@ async fn connection(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forced_reset_has_no_remote_command_and_fails_closed() {
+        let args = reset_args(std::path::Path::new("/private/reset"), std::path::Path::new("/pinned/hosts"));
+        assert_eq!(args.last().map(String::as_str), Some("dockerci@10.3.0.2"));
+        assert!(args.contains(&"IdentitiesOnly=yes".to_owned()));
+        assert!(args.contains(&"StrictHostKeyChecking=yes".to_owned()));
+        assert!(reset_status(Some(0)).is_ok());
+        for code in [Some(1), Some(75), None] {
+            assert!(reset_status(code).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn daemon_bridge_round_trips_without_any_secret_in_target_frames() {

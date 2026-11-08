@@ -516,7 +516,7 @@ pub enum DeliveryCmd {
 
 #[derive(Debug, Args)]
 pub struct DeliverySetArgs {
-    /// Daemon Docker key reference, DOCKER_CI_KEY=@secret:name[.field].
+    /// Daemon key reference, DOCKER_CI_KEY or DOCKER_CI_RESET_KEY=@secret:name[.field].
     #[arg(long = "merge-secret")]
     pub merge_secrets: Vec<String>,
     /// Remove all merge-only secret references.

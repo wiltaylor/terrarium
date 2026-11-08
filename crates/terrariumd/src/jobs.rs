@@ -1916,10 +1916,10 @@ async fn steps(
         .map(|i| (i.label(), i.value.clone()))
         .collect();
     let mut env = recipe_env(job, x.dir, &head, base);
-    let tunnel = if let Some(key) = injected.first() {
-        // Reset hook: the meta-owned per-job VM reset must complete before
-        // this SSH connection opens. Keep rollout disabled until its
-        // interface is wired here (META/ops2 owns that interface).
+    let tunnel = if let Some(key) = injected.iter().find(|i| i.env == "DOCKER_CI_KEY") {
+        let reset = injected.iter().find(|i| i.env == "DOCKER_CI_RESET_KEY")
+            .ok_or_else(|| ApiError::invalid("Docker tunnel requires DOCKER_CI_RESET_KEY"))?;
+        crate::docker_tunnel::reset(x.state, &reset.value).await?;
         let tunnel =
             crate::docker_tunnel::open(x.state, x.def, &key.value, x.dir, delivery.timeout_secs())
                 .await?;
@@ -2111,11 +2111,14 @@ async fn merge_secrets(
 fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
     for name in delivery.merge_secrets.keys() {
         secrets::grants::check_env_name(name)?;
-        if name != "DOCKER_CI_KEY" {
+        if name != "DOCKER_CI_KEY" && name != "DOCKER_CI_RESET_KEY" {
             return Err(ApiError::invalid(
-                "merge_secrets supports only DOCKER_CI_KEY, consumed by the daemon Docker tunnel, never recipe env",
+                "merge_secrets supports only DOCKER_CI_KEY and DOCKER_CI_RESET_KEY, consumed by the daemon, never recipe env",
             ));
         }
+    }
+    if !delivery.merge_secrets.is_empty() && delivery.merge_secrets.len() != 2 {
+        return Err(ApiError::invalid("Docker tunnel requires both DOCKER_CI_KEY and DOCKER_CI_RESET_KEY"));
     }
     let refs = secrets::run_env::parse_refs(&delivery.merge_secrets)?;
     if refs.len() != delivery.merge_secrets.len() {
@@ -3016,6 +3019,7 @@ mod tests {
         delivery
             .merge_secrets
             .insert("DOCKER_CI_KEY".into(), "@secret:vm.private_key".into());
+        delivery.merge_secrets.insert("DOCKER_CI_RESET_KEY".into(), "@secret:reset.private_key".into());
         assert!(check_merge_refs(&delivery).is_ok());
     }
 

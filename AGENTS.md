@@ -52,7 +52,8 @@ yourself only when your change touches the build (see above).
 Merge jobs enter through `ci::validate-affected` and `ci::merge`. The merge
 gate is opt-in with `TERRARIUM_DOCKER_CI=1` in the delivery recipe. Off by
 default, it runs only `ci::validate` and needs neither a key nor Docker.
-When enabled, the daemon consumes the configured `DOCKER_CI_KEY` reference
+When enabled, the daemon consumes the configured `DOCKER_CI_KEY` and
+`DOCKER_CI_RESET_KEY` references
 from a `delivery:terrarium` run grant. The recipe receives only `DOCKER_HOST`
 for a job-scoped Unix socket, never a key or SSH agent. It runs
 the full suite with the pinned remote Docker daemon, then explicitly runs

@@ -2231,7 +2231,7 @@ async fn delivery_secret_config_refuses_plaintext_and_arbitrary_env_injection() 
     }
     lab.td.put("/api/projects/p/delivery", json!({
         "target":"p-box", "recipe":"test -z \"${DOCKER_CI_KEY:-}\" && test -z \"${SSH_AUTH_SOCK:-}\"",
-        "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm"}
+        "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm", "DOCKER_CI_RESET_KEY":"@secret:reset"}
     })).await.ok();
     let head = lab.branch("no-recipe-key", "next", &[("OK", "yes\n")]);
     let job = validate_card(&lab, "no-recipe-key", &head).await;

@@ -875,7 +875,8 @@ pub struct CheckoutDef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryDef {
-    /// Daemon-consumed Docker SSH key reference under DOCKER_CI_KEY.
+    /// Daemon-consumed Docker SSH key references under DOCKER_CI_KEY
+    /// and DOCKER_CI_RESET_KEY (both required when configured).
     /// Values must be @secret:<name>[.<field>], authorized by delivery
     /// run grants. The recipe receives only a Docker endpoint, never a key.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
