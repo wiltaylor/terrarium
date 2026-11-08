@@ -204,7 +204,11 @@ fn facts(card: &str, events: &[Event], now: DateTime<Utc>) -> Facts {
             match d["change"].as_str().unwrap_or_default() {
                 "created" | "claimed" | "assigned" | "moved" => {
                     working = d["column_role"] == "working" || d["column"] == "research";
-                    agent = d["assignee"].as_str().map(str::to_owned);
+                    agent = d["assignee"].as_str().map(str::to_owned).or_else(|| {
+                        (d["change"] == "created")
+                            .then(|| e.agent.clone())
+                            .flatten()
+                    });
                     if d["change"] == "moved" && (d["to_role"] == "review" || d["to"] == "review") {
                         f.reviews += 1;
                     }
@@ -294,16 +298,20 @@ pub struct View {
 
 pub fn view(c: &Connection, card: &str, now: DateTime<Utc>) -> ApiResult<View> {
     let seconds = facts(card, &history(c, card)?, now).seconds;
+    Ok(View {
+        working_seconds: seconds,
+        signals: active_signals(c, card)?,
+    })
+}
+
+pub fn active_signals(c: &Connection, card: &str) -> ApiResult<Vec<String>> {
     let mut q = c.prepare(
         "SELECT signal FROM card_trouble WHERE card = ?1 AND active = 1 ORDER BY signal",
     )?;
     let signals = q
         .query_map([card], |r| r.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(View {
-        working_seconds: seconds,
-        signals,
-    })
+    Ok(signals)
 }
 
 fn desired(c: &Connection, card: &board::Card, now: DateTime<Utc>) -> ApiResult<BTreeSet<String>> {
@@ -418,9 +426,26 @@ fn reconcile(t: &mut Tx<'_>, card: &board::Card, signals: &BTreeSet<String>) -> 
         )?;
         if !old.contains_key(signal) {
             let subject = format!("{}: trouble signal {signal}", card.id);
+            let f = facts(&card.id, &history(t, &card.id)?, Utc::now());
+            let totals = usage::totals(
+                t,
+                &usage::UsageFilter {
+                    card: Some(card.id.clone()),
+                    ..Default::default()
+                },
+            )?;
             let body = format!(
-                "Card {} ({}): {signal}. Please check its state. This notice is sent once per card and signal.",
-                card.id, card.title
+                "Card {} ({}) in {}: {signal}.\nWorking time: {} seconds. Usage: {} turns, {} tokens. Review rounds: {}. ETA extensions: {}. Short timer polls in the last hour: {}. Compaction requests in the last hour: {}.\nPlease check its state. This notice is sent once per card and signal.",
+                card.id,
+                card.title,
+                card.column,
+                f.seconds,
+                totals.turns,
+                totals.tokens(),
+                f.reviews,
+                f.eta_delays,
+                f.polls,
+                f.compactions
             );
             let agent = card
                 .assignee

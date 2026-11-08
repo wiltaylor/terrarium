@@ -5690,6 +5690,47 @@ Agents with no usage are in the list with zero totals and no `share_pct`.
 `models` and `agents` are biggest spender (input plus output tokens)
 first. `since` and `until` are in the answer when the query gives them.
 
+The card usage answer also includes all-time `working_seconds` and active
+trouble `signals` (arrays of signal names). The card and board summary expose
+the same active names as `trouble`. Working time is replayed from card
+assignment, status and wait events: only an agent working on this card in a
+working/research column counts. Idle time, open waits and time in other
+columns do not count. Usage query date filters apply to token/turn totals,
+not the all-time working clock or current marks.
+
+`GET /api/projects/{name}/trouble` reads the project's trouble thresholds.
+`PUT` replaces them and requires project admin rights. Omitted fields use
+defaults. Unknown fields and negative limits are rejected. Example:
+
+```json
+{"time_seconds":{"small":2700,"impl":7200,"impl-hard":14400},
+ "tokens":{},"turns":{},"red_streak":3,"red_same_commit":2,
+ "review_rounds":2,"eta_delays":3,"timer_polls":3,"compactions":3}
+```
+
+Time, token and turn maps are keyed by the suffix of the card's `type:` label
+(untyped cards use `impl`). Token/turn budgets are off until set. Time budgets
+currently use the fixed fallbacks above (`hard` also uses four hours), with a
+hook for calibrated type p70 history. A zero threshold disables that check.
+An ETA at or before now produces `eta_overdue`. The other signal names are
+`time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
+`validation_red`, `timer_polls` and `compactions`.
+
+Validation counts linked test runs uploaded by the current assignee, or the
+bound card agent while unassigned. Each suite name has its own streak. A
+green/empty run breaks that suite's streak. Three consecutive red runs, or
+two red runs on the same nonempty commit within the streak, trigger the mark.
+Short timer waits (at most one minute) and compaction requests use a rolling
+one-hour window. Review rounds and ETA extensions count the card's history.
+
+On the lifecycle tick, each new signal sends one state request to the worker
+and one summary to each project lead, never to the operator. The once-per-card
+and signal record survives restarts, resolution and recurrence. A mark clears
+when its condition stops holding, its threshold is disabled, or the card
+leaves working/research/review or is archived. A recurrence can restore the
+mark but cannot send another notice. The existing idle alert is separate.
+No-push detection is deferred to successful remote-head tracking (TER-370).
+
 The CLI calls `GET /api/usage?agent=<me>` for `terrarium usage` and
 `GET /api/usage?project=<p>` for `terrarium usage project`. Both work;
 `/api/usage/me` and `/api/usage/project` are the richer answers for a later

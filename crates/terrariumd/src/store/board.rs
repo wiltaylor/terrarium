@@ -144,6 +144,10 @@ fn normal_card_kind() -> String {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Card {
+    /// Active trouble signals (TER-79). The durable notification history
+    /// stays separate, so resolving a mark cannot send another notice.
+    #[serde(default)]
+    pub trouble: Vec<String>,
     #[serde(default = "normal_card_kind")]
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -624,6 +628,7 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         _ => None,
     };
     Ok(Card {
+        trouble: crate::trouble::active_signals(conn, &row.id)?,
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,
         tests: crate::store::test_runs::card_chip(conn, &row.id)?,
@@ -743,6 +748,8 @@ pub fn board_summary(
           'eta_set_by', c.eta_set_by,
           'eta_set_by_name', coalesce(eb.project || '/' || eb.name, ebr.project || '/' || ebr.name, c.eta_set_by),
           'done_at', c.done_at, 'idle_since', c.idle_since,
+          'trouble', (SELECT json_group_array(signal) FROM
+            (SELECT signal FROM card_trouble WHERE card = c.id AND active = 1 ORDER BY signal)),
           'tests', (SELECT json_object('id', r.id, 'name', r.name, 'created_at', r.created_at,
             'status', CASE WHEN r.failed + r.errored > 0 THEN 'failed' WHEN r.total = 0 THEN 'empty' ELSE 'passed' END,
             'counts', json_object('passed', r.passed, 'failed', r.failed, 'errored', r.errored, 'skipped', r.skipped, 'total', r.total))

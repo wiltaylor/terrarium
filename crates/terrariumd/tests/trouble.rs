@@ -193,3 +193,67 @@ async fn token_and_turn_budget_crossings_clear_when_disabled() {
     terrariumd::trouble::pass(&state(&td)).await;
     assert_eq!(usage(&td, &card).await["signals"], json!([]));
 }
+
+#[tokio::test]
+async fn history_signals_and_working_time_reach_the_card_and_board() {
+    let (td, lead, worker, card) = setup().await;
+    td.put_as(
+        &lead,
+        "/api/projects/p/trouble",
+        json!({"time_seconds": {"small": 1}}),
+    )
+    .await
+    .ok();
+    let c = card.clone();
+    state(&td).db.write("system", move |t| {
+        let base = chrono::Utc::now() - chrono::Duration::seconds(100);
+        let claim = json!({"change": "claimed", "assignee": worker, "column_role": "working"});
+        let mut events = vec![("status", json!({"status": "working"})), ("card", claim.clone())];
+        for n in 0..4 {
+            events.push(("card", json!({"change": "eta", "eta_at": (base + chrono::Duration::hours(1 + n)).to_rfc3339()})));
+        }
+        for _ in 0..2 {
+            events.push(("card", json!({"change": "moved", "to_role": "review"})));
+            events.push(("card", claim.clone()));
+        }
+        for n in 0..3 {
+            let id = format!("poll{n}");
+            let due = (base + chrono::Duration::seconds(50)).to_rfc3339();
+            t.execute("INSERT INTO waits(id, agent, project, kind, spec, summary, created_by, created_at, due_at, state)
+                VALUES (?1, ?2, 'p', 'time', '{}', 'poll', ?2, ?3, ?4, 'resolved')", rusqlite::params![id, worker, base.to_rfc3339(), due])?;
+            events.push(("wait", json!({"change": "opened", "wait_id": id, "kind": "time"})));
+            events.push(("wait", json!({"change": "resolved", "wait_id": id, "kind": "time"})));
+            events.push(("agent.reset", json!({"kind": "compact"})));
+        }
+        for (n, (kind, data)) in events.into_iter().enumerate() {
+            let mut draft = terrariumd::events::EventDraft::new(kind, "history", data).project("p").agent(&worker, "worker");
+            if kind == "card" { draft = draft.card(&c); }
+            let e = t.emit(draft)?;
+            t.execute("UPDATE events SET at = ?2 WHERE seq = ?1", rusqlite::params![e.seq, (base + chrono::Duration::seconds(n as i64)).to_rfc3339()])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    terrariumd::trouble::pass(&state(&td)).await;
+    let expected = json!([
+        "compactions",
+        "eta_delayed",
+        "review_rounds",
+        "time_budget",
+        "timer_polls"
+    ]);
+    let u = usage(&td, &card).await;
+    assert_eq!(u["signals"], expected);
+    assert!(u["working_seconds"].as_u64().unwrap() >= 90);
+    assert_eq!(
+        td.get(&format!("/api/cards/{card}")).await.ok()["trouble"],
+        expected
+    );
+    let b = td.get("/api/projects/p/board?view=summary").await;
+    assert_eq!(b.ok()["cards"][0]["trouble"], expected);
+    assert_eq!(notices(&td, &lead).await, 5);
+    terrariumd::trouble::pass(&state(&td)).await;
+    assert_eq!(notices(&td, &lead).await, 5);
+    td.put_as(&lead, "/api/projects/p/trouble", json!({"time_seconds": {"small": 0}, "review_rounds": 0, "eta_delays": 0, "compactions": 0, "timer_polls": 0})).await.ok();
+    terrariumd::trouble::pass(&state(&td)).await;
+    assert_eq!(usage(&td, &card).await["signals"], json!([]));
+}

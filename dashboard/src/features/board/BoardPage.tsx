@@ -550,6 +550,9 @@ function KCard(props: {
       <EtaChip card={props.card} now={props.now} />
       <div class="row small">
         <Show when={props.card.tests}>{(t) => <CardTestsChip project={props.card.project} tests={t()} />}</Show>
+        <Show when={props.card.trouble?.length}>
+          <span class="chip warn" title={props.card.trouble?.map((s) => s.replaceAll("_", " ")).join(", ")}>Trouble: {props.card.trouble?.length}</span>
+        </Show>
         <Show when={props.card.comment_count}><span class="small muted" title={props.card.last_comment_at ?? undefined}>{props.card.comment_count} comments</span></Show>
         <For each={tileLabels(props.card.labels)}>{(l) => <span class="chip">{l}</span>}</For>
       </div>
