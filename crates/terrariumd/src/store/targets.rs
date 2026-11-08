@@ -582,9 +582,7 @@ pub fn update_with_live_limits(
         && (def.image != current.def.image || def.limits != current.def.limits)
     {
         let mut rt = current.runtime.clone();
-        if live
-            && let Some(baseline) = &mut rt.docker_settings
-        {
+        if live && let Some(baseline) = &mut rt.docker_settings {
             baseline.limits = DockerSettings::of(&def).limits;
         }
         rt.recreate_required = rt
