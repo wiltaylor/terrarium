@@ -12,7 +12,7 @@ import { agents, api, auth, events, inbox, pins, projectFolders, projects, signO
 import { badge } from "../features/inbox/model";
 import { SETTINGS_ITEMS, TOP_ITEMS } from "./nav";
 import { ProjectTree } from "./ProjectTree";
-import { Bookmarks } from "./Bookmarks";
+import { bookmarks } from "../stores";
 import { projectFromPath } from "./treeModel";
 import { LoginScreen } from "./LoginScreen";
 import { PinnedBar } from "./PinnedBar";
@@ -27,11 +27,13 @@ export function Layout(props: RouteSectionProps) {
     void agents.refresh();
     void inbox.refresh();
     void pins.refresh();
+    void bookmarks.refresh();
     // The pins and the project folders are on the daemon: read them again when the operator comes back (another
     // browser may have changed them).
     const again = () => {
       if (document.visibilityState !== "visible") return;
       void pins.refresh();
+      void bookmarks.refresh();
       void projectFolders.refresh();
     };
     document.addEventListener("visibilitychange", again);
@@ -42,7 +44,7 @@ export function Layout(props: RouteSectionProps) {
     });
     subscriptions.poll(isMock ? 5000 : 30_000);
     events.start();
-    const t = setInterval(refetch, 30_000);
+    const t = setInterval(() => { void refetch(); void bookmarks.refresh(); }, 30_000);
     onCleanup(() => clearInterval(t));
   });
 
@@ -95,7 +97,6 @@ export function Layout(props: RouteSectionProps) {
         </div>
 
         <ProjectTree />
-        <Bookmarks />
 
         {/* At the bottom, above the footer. The link is active on every /settings/... tab. */}
         <div class="nav-section nav-settings">

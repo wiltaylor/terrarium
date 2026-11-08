@@ -9,7 +9,7 @@
 //!   overfill the slots.
 //! - The repo credential never goes to the target (TER-103). The steps
 //!   that need it run in the daemon, which runs no recipe, in a bare repo
-//!   of the job at `<state>/jobs/<project>/<job>.git` ([`git::JobRepo`]).
+//!   at `<state>/jobs/<project>/repos/<repo>.git` ([`git::JobRepo`]).
 //!   The target runs only steps without any credential. A job is:
 //!   1. prepare, in the daemon, with the credential: fetch the card
 //!      branch (validate) or `next` and the card branches (merge). A
@@ -39,8 +39,7 @@
 //!
 //!   Each step on the target runs as `ionice -c3 nice -n19 <argv>`
 //!   (`nice` only on a target without `ionice`), so jobs do not starve
-//!   their host. Then the daemon's repo is removed; the slot's tree on
-//!   the target stays.
+//!   their host. The daemon repo and target slot tree stay for reuse.
 //! - A step that hits its timeout, or a cancel, ends the process group and
 //!   the session of the step on the target (`TERM`, then `KILL`), through
 //!   [`crate::run_kill`]: killing the `ssh` or `docker exec` client alone
@@ -283,13 +282,9 @@ pub fn kill(job: &str) {
 /// ([`recover_lost`]), then tick. The kills of their runs go on in the
 /// background, while their slots stay taken.
 pub fn spawn(state: &Shared) -> JoinHandle<()> {
-    // The daemon's job repos of the last daemon: its jobs are lost (they
-    // start again from the queue below), so none of these is in use. Before any tick.
-    let stale = state.state_dir.join(JOBS_DIR);
-    if let Err(e) = std::fs::remove_dir_all(&stale)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        warn!(dir = %stale.display(), "cannot remove the old job repos: {e}");
+    // Persistent daemon repositories survive recovery too.
+    if let Err(e) = cleanup_job_files(&state.state_dir.join(JOBS_DIR)) {
+        warn!("cannot remove stale job files: {e}");
     }
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
@@ -1307,7 +1302,8 @@ async fn run_inner(
     }
     // The daemon's repo of the job (TER-103): the credential steps run
     // there, never on the target.
-    let local = job_repo_dir(state, &job.project, &job.id);
+    let local = job_repo_dir(state, &job.project, &job.repo);
+    let guard = repo_lock(&local).lock_owned().await;
     let checkout = git::Checkout {
         url: repo.url.clone(),
         dest: local.clone(),
@@ -1321,13 +1317,14 @@ async fn run_inner(
         origin: git::Origin::default(),
         fetch_from: None,
     };
-    let made = tokio::task::spawn_blocking(move || git::JobRepo::create(checkout))
-        .await
-        .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?;
-    let job_repo = match made {
-        Ok(r) => Arc::new(r),
+    let made = tokio::task::spawn_blocking(move || {
+        git::JobRepo::create(checkout).map(|repo| (repo, guard))
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?;
+    let (job_repo, guard) = match made {
+        Ok((r, guard)) => (Arc::new(r), guard),
         Err(e) => {
-            remove_job_repo(local).await;
             return Err(ApiError::conflict(format!(
                 "cannot make the job repo in the daemon: {e}"
             )));
@@ -1346,7 +1343,7 @@ async fn run_inner(
         def: &row.def,
         dir: &dir,
         repo: job_repo,
-        bundle: local.with_extension("bundle"),
+        bundle: local.with_file_name(format!("{}.bundle", job.id)),
         holder,
         ionice,
         recipe_started,
@@ -1362,9 +1359,10 @@ async fn run_inner(
     };
     // The slot's tree stays on the target for the next job of the slot
     // (TER-190): no delete of the tree and its build output per job.
-    let result = steps(&ctx, recipe, def.timeout_secs()).await;
+    let bundle = ctx.bundle.clone();
+    let result = steps(&ctx, recipe, def.timeout_secs(), guard).await;
     drop(ctx);
-    remove_job_repo(local).await;
+    let _ = tokio::fs::remove_file(bundle).await;
     result
 }
 
@@ -1378,31 +1376,66 @@ pub fn slot_dir(def: &DeliveryDef, project: &str, slot: i64) -> String {
     )
 }
 
-/// The daemon's repo of a job: `<state>/jobs/<project>/<job>.git`, and its
-/// bundle beside it (`.bundle`).
-fn job_repo_dir(state: &Shared, project: &str, job: &str) -> PathBuf {
+/// One daemon repo per project and registered repository. Bundles remain
+/// job-specific. Different registered repositories never share objects.
+fn job_repo_dir(state: &Shared, project: &str, repo: &str) -> PathBuf {
     state
         .state_dir
         .join(JOBS_DIR)
         .join(project)
-        .join(format!("{job}.git"))
+        .join("repos")
+        .join(format!("{repo}.git"))
 }
 
-/// Remove the daemon's repo of a job and its bundle.
-async fn remove_job_repo(dir: PathBuf) {
-    let r = tokio::task::spawn_blocking(move || {
-        let _ = std::fs::remove_file(dir.with_extension("bundle"));
-        match std::fs::remove_dir_all(&dir) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
+/// Serialize creation, health checks and prepare, whose scratch refs are
+/// shared. The guard moves into blocking prepare so cancellation cannot
+/// unlock a fetch that is still running. Recipes use independent bundles,
+/// and pushes use recorded commit IDs, never these shared scratch refs.
+fn repo_lock(path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(path.to_owned())
+        .or_default()
+        .clone()
+}
+
+/// Before starting jobs, remove pre-cache per-job repositories and all
+/// interrupted bundles. Preserve `repos/*.git` and never follow symlinks.
+fn cleanup_job_files(root: &std::path::Path) -> std::io::Result<()> {
+    let projects = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for project in projects {
+        let project = project?;
+        if !project.file_type()?.is_dir() {
+            continue;
         }
-    })
-    .await;
-    match r {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => warn!("cannot remove the job repo in the daemon: {e}"),
-        Err(e) => warn!("cannot remove the job repo in the daemon: {e}"),
+        for entry in std::fs::read_dir(project.path())? {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if path.extension().is_some_and(|e| e == "git") && kind.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else if path.extension().is_some_and(|e| e == "bundle") && kind.is_file() {
+                std::fs::remove_file(path)?;
+            } else if entry.file_name() == "repos" && kind.is_dir() {
+                for bundle in std::fs::read_dir(path)? {
+                    let bundle = bundle?;
+                    if bundle.path().extension().is_some_and(|e| e == "bundle")
+                        && bundle.file_type()?.is_file()
+                    {
+                        std::fs::remove_file(bundle.path())?;
+                    }
+                }
+            }
+        }
     }
+    Ok(())
 }
 
 /// The command that the steps of a job run under (TER-97): the idle IO
@@ -1514,8 +1547,11 @@ impl StepCtx<'_> {
             "sh".to_owned(),
         ];
         argv.extend(args.iter().map(|a| (*a).to_owned()));
+        let mut env = std::collections::BTreeMap::new();
+        crate::git_identity::Identity::from_env().env(&mut env);
         RemoteCmd {
             argv,
+            env,
             timeout_secs: Some(STEP_TIMEOUT),
             holder: self.holder.clone(),
             ..RemoteCmd::default()
@@ -1706,7 +1742,12 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
 
 /// Prepare in the daemon, clone on the target from the bundle, run the
 /// recipe there, and push `next` from the daemon for a merge.
-async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEnd> {
+async fn steps(
+    x: &StepCtx<'_>,
+    recipe: String,
+    timeout: u64,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) -> ApiResult<JobEnd> {
     let job = x.job;
     if job.kind == JobKind::Merge {
         for c in job.cards().iter().skip(1) {
@@ -1714,7 +1755,13 @@ async fn steps(x: &StepCtx<'_>, recipe: String, timeout: u64) -> ApiResult<JobEn
         }
     }
     let (j, bundle) = (job.clone(), x.bundle.clone());
-    let (head, batch, base) = match x.daemon(move |r| prepare(r, &j, &bundle)).await? {
+    let (head, batch, base) = match x
+        .daemon(move |r| {
+            let _guard = guard;
+            prepare(r, &j, &bundle)
+        })
+        .await?
+    {
         Prepared::Ready { head, batch, base } => (head, batch, base),
         Prepared::End(end) => return Ok(end),
     };
@@ -1877,6 +1924,7 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
 /// of the changed files. No credential goes in here.
 fn recipe_env(job: &Job, dir: &str, head: &str, base: Option<&str>) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
+    crate::git_identity::Identity::from_env().env(&mut env);
     env.insert("TERRARIUM_JOB_KIND".into(), job.kind.as_str().to_owned());
     env.insert("TERRARIUM_JOB_ID".into(), job.id.clone());
     env.insert("TERRARIUM_HEAD".into(), head.to_owned());
@@ -2511,7 +2559,7 @@ G() {
     -c credential.helper= -c protocol.allow=never -c protocol.file.allow=always \
     -c fetch.recurseSubmodules=false -c submodule.recurse=false -c gc.auto=0 \
     -c maintenance.auto=false -c advice.detachedHead=false -c core.pager=cat \
-    -c user.name=terrarium -c user.email=terrarium@localhost -c commit.gpgsign=false "$@"
+    -c "user.name=${GIT_COMMITTER_NAME:-Terrarium}" -c "user.email=${GIT_COMMITTER_EMAIL:-terrarium@localhost}" -c commit.gpgsign=false "$@"
 }
 res() { printf 'TERRARIUM_JOB\toutcome=%s\thead=%s\n' "$1" "${2:-}"; }
 "#;
@@ -2597,6 +2645,8 @@ sync() {
   rm -rf -- "$dir/.git/info" "$dir/.git/hooks" "$dir/.git/refs/replace" \
     "$dir/.git/objects/info/commit-graphs" "$dir/.git/worktrees"
   T init -q && T config core.logAllRefUpdates false || return 1
+  T config user.name "${GIT_COMMITTER_NAME:-Terrarium}" || return 1
+  T config user.email "${GIT_COMMITTER_EMAIL:-terrarium@localhost}" || return 1
   T for-each-ref --format='delete %(refname)' refs/replace/ | T update-ref --stdin || return 1
   T fetch -q --no-tags -- "$b" "+$r:$r" || return 1
   got=$(T rev-parse --verify -q "$r^{commit}")
@@ -2672,6 +2722,27 @@ printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_removes_legacy_repos_and_bundles_but_keeps_cached_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("jobs");
+        cleanup_job_files(&root).unwrap();
+        let project = root.join("p");
+        std::fs::create_dir_all(project.join("J1.git/objects")).unwrap();
+        std::fs::create_dir_all(project.join("repos/app.git")).unwrap();
+        std::fs::write(project.join("J1.bundle"), "old").unwrap();
+        std::fs::write(project.join("repos/J2.bundle"), "old").unwrap();
+        std::fs::write(project.join("repos/app.git/HEAD"), "kept").unwrap();
+        cleanup_job_files(&root).unwrap();
+        assert!(!project.join("J1.git").exists());
+        assert!(!project.join("J1.bundle").exists());
+        assert!(!project.join("repos/J2.bundle").exists());
+        assert_eq!(
+            std::fs::read_to_string(project.join("repos/app.git/HEAD")).unwrap(),
+            "kept"
+        );
+    }
 
     /// TER-100 review round 2: without a base, a list from the outer env
     /// does not reach the recipe. With a base, the recipe runs as given.

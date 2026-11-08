@@ -1734,6 +1734,8 @@ export interface CardFileUploaded extends CardFile {
 }
 
 export interface Card {
+  kind?: "card" | "group";
+  group?: BoardGroup;
   id: string;
   project: string;
   column: string;
@@ -1777,6 +1779,20 @@ export interface Card {
   job?: CardJob;
   /** The stored status of the assignee agent. Absent for the operator, no assignee, or a removed agent. */
   assignee_status?: string;
+}
+
+export interface BoardGroup {
+  steps: { name: string; state: "pending" | "running" | "done" | "failed"; text: string; eta_at: string | null }[];
+  id: string;
+  key: string;
+  title: string;
+  column: string;
+  status: string;
+  done: number;
+  total: number;
+  members: string[];
+  eta_at: string | null;
+  closed_at: string | null;
 }
 
 /** The open job of a card: the tile reads its state chip from it, not from labels. */
@@ -2226,6 +2242,8 @@ export interface SubscriptionAgentRef {
 
 /** docs/api.md §16.1. */
 export interface Subscription {
+  session_period?: { since: string; until: string };
+  sessions?: Array<{ id: string; agent: string; project: string; harness: string; started_at: string; model?: string; card?: string; input_tokens?: number; output_tokens?: number }>;
   name: string;
   /**
    * The name for people: the operator's `label`, else the vendor's product

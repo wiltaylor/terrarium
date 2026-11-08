@@ -110,6 +110,164 @@ async fn put_rules(td: &TestDaemon, project: &str, text: &str) {
     assert_eq!(r.status, 200, "{}", r.body);
 }
 
+const GROUPS: &str = r#"
+rule "open-group" {
+  on = ["test.ping"]
+  when "data.n" { eq = "1" }
+  group_open { key = "batch" title = "Batch" column = "review" done_when = "review" close_after = "1h" }
+  group_add { key = "batch" }
+  group_status { key = "batch" text = "{{group.done}}/{{group.total}}" }
+  group_status { key = "batch" step = "queued" state = "done" }
+  group_status { key = "batch" step = "merge" state = "running" eta = "10m" }
+  group_status { key = "batch" step = "queued" text = "Ready" }
+}
+rule "other-group" {
+  on = ["test.ping"]
+  when "data.n" { eq = "2" }
+  group_open { key = "other" title = "Other" column = "review" done_when = "done" }
+  group_add { key = "other" }
+}
+rule "remove-group" {
+  on = ["test.ping"]
+  when "data.n" { eq = "3" }
+  group_remove { key = "batch" }
+}
+rule "close-group" {
+  on = ["test.ping"]
+  when "data.n" { eq = "4" }
+  group_close { key = "batch" comment = "Finished" }
+}
+"#;
+
+#[tokio::test]
+async fn group_lifecycle_is_rule_only_and_members_keep_their_columns() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    let b = new_card(&td, "p", json!({"title":"b", "column":"review"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    ping(&td, "p", &b, 1).await;
+    settle(&td).await;
+    let ca = card(&td, &a).await;
+    assert_eq!(ca["column"], "backlog");
+    let g = &ca["group"];
+    let id = g["id"].as_str().unwrap();
+    assert_eq!(g["done"], 1);
+    assert_eq!(g["total"], 2);
+    assert_eq!(g["status"], "`1`/`2`");
+    assert_eq!(g["members"], json!([a, b]));
+    assert_eq!(g["steps"][0]["name"], "queued");
+    assert_eq!(g["steps"][0]["state"], "done");
+    assert_eq!(g["steps"][0]["text"], "Ready");
+    assert_eq!(g["steps"][1]["name"], "merge");
+    assert_eq!(g["steps"][1]["state"], "running");
+    assert!(g["steps"][1]["eta_at"].as_str().is_some());
+    assert_eq!(g["steps"].as_array().unwrap().len(), 2);
+    let gc = card(&td, id).await;
+    assert_eq!(gc["kind"], "group");
+    assert!(gc.get("assignee").is_none());
+    for (path, body) in [
+        (format!("/api/cards/{id}/claim"), json!({})),
+        (format!("/api/cards/{id}/move"), json!({"column":"ready"})),
+    ] {
+        let response = td.post(&path, body).await;
+        assert!(response.status.is_client_error(), "{}", response.body);
+    }
+    let board = td.get("/api/projects/p/board").await;
+    assert_eq!(board.status, 200, "{}", board.body);
+    let review = board.body["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "review")
+        .unwrap();
+    assert_eq!(review["count"], 1);
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["group"]["total"], 2);
+    ping(&td, "p", &a, 3).await;
+    settle(&td).await;
+    assert!(card(&td, &a).await.get("group").is_none());
+    ping(&td, "p", &b, 4).await;
+    settle(&td).await;
+    assert!(card(&td, &b).await.get("group").is_none());
+    assert_eq!(card(&td, id).await["archived"], true);
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    assert!(
+        card(&td, &a).await.get("group").is_none(),
+        "closed key cannot reopen"
+    );
+}
+
+#[tokio::test]
+async fn groups_refuse_second_membership_then_allow_the_next_lifecycle_group() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    ping(&td, "p", &a, 2).await;
+    settle(&td).await;
+    let logs = runs_of(&td, "p", "other-group").await;
+    assert_eq!(logs[0]["state"], "failed");
+    assert!(
+        logs[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("already in open group")
+    );
+    ping(&td, "p", &a, 4).await;
+    settle(&td).await;
+    ping(&td, "p", &a, 2).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["group"]["key"], "other");
+}
+
+#[tokio::test]
+async fn group_timeout_closes_once_and_records_comment_and_rule_log() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td, "p", GROUPS).await;
+    let a = new_card(&td, "p", json!({"title":"a"})).await;
+    ping(&td, "p", &a, 1).await;
+    settle(&td).await;
+    let id = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    state(&td)
+        .db
+        .write("test", |t| {
+            t.execute(
+                "UPDATE card_groups SET close_at = '2000-01-01T00:00:00Z'",
+                [],
+            )?;
+            terrariumd::store::groups::expire(t)?;
+            terrariumd::store::groups::expire(t)
+        })
+        .await
+        .unwrap();
+    let closed = card(&td, &id).await;
+    assert_eq!(closed["archived"], true);
+    assert_eq!(
+        bodies(&closed),
+        vec!["Group closed by the close_after safeguard."]
+    );
+    assert_eq!(
+        runs(&td, "p")
+            .await
+            .iter()
+            .filter(|r| r["reason"] == "close_after safeguard")
+            .count(),
+        1
+    );
+    assert!(card(&td, &a).await.get("group").is_none());
+}
+
 async fn new_card(td: &TestDaemon, project: &str, body: Value) -> String {
     let r = td
         .post(&format!("/api/projects/{project}/cards"), body)
@@ -257,6 +415,194 @@ async fn fail_job(td: &TestDaemon, job: &Job, outcome: &str) -> Job {
 }
 
 // ------------------------------------------------------------ card verbs
+
+#[tokio::test]
+async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let g = card(&td, &a).await["group"].clone();
+    assert!(
+        !g.is_null(),
+        "{:?}",
+        runs_of(&td, "p", "merge-queued").await
+    );
+    let gid = g["id"].as_str().unwrap().to_owned();
+    assert_eq!(g["members"], json!([a, b]));
+    assert_eq!(g["column"], "review");
+    assert_eq!(card(&td, &a).await["column"], "review");
+    assert_eq!(g["steps"][1]["state"], "pending");
+
+    let id = job.id.clone();
+    let passed = state(&td)
+        .db
+        .write("system", move |t| {
+            jobs::start(t, &id, "machine", None)?;
+            Ok(jobs::finish(
+                t,
+                &id,
+                &JobEnd {
+                    passed: true,
+                    exit_code: Some(0),
+                    ..JobEnd::default()
+                },
+            )?
+            .unwrap())
+        })
+        .await
+        .unwrap();
+    // A passed job alone does not move members or close the group. Each
+    // verdict accepts its own member, and only the last may close it.
+    settle(&td).await;
+    assert_eq!(card(&td, &gid).await["archived"], false);
+    verdict(&td, &passed, &a, "passed").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["column"], "accepted");
+    assert_eq!(card(&td, &gid).await["archived"], false);
+    verdict(&td, &passed, &b, "passed").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &b).await["column"], "accepted");
+    assert_eq!(card(&td, &gid).await["archived"], true);
+    // Replayed verdicts must not open another group or fail after close.
+    verdict(&td, &passed, &a, "passed").await;
+    settle(&td).await;
+    let runs = runs_of(&td, "p", "merge-pass").await;
+    assert!(runs.iter().all(|r| r["state"] != "failed"), "{runs:?}");
+}
+
+#[tokio::test]
+async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
+    let b = new_card(&td, "p", json!({"title":"b", "repo":"app"})).await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let red = fail_job(&td, &job, "red").await;
+    verdict(&td, &red, &a, "red").await;
+    verdict(&td, &red, &b, "red").await;
+    settle(&td).await;
+    let g = card(&td, &gid).await["group"].clone();
+    assert_eq!(g["total"], 3);
+    assert_eq!(g["steps"][1]["state"], "failed");
+    let fix = g["members"][0].as_str().unwrap().to_owned();
+    assert_ne!(fix, a);
+    assert_ne!(fix, b);
+    assert_eq!(card(&td, &gid).await["archived"], false);
+    let retry = store_job(&td, JobKind::Merge, &[&fix, &a, &b]).await;
+    settle(&td).await;
+    assert_eq!(card(&td, &fix).await["group"]["id"], gid);
+    assert_eq!(card(&td, &a).await["group"]["total"], 3);
+    let id = retry.id.clone();
+    let passed = state(&td)
+        .db
+        .write("system", move |t| {
+            jobs::start(t, &id, "machine", None)?;
+            Ok(jobs::finish(
+                t,
+                &id,
+                &JobEnd {
+                    passed: true,
+                    exit_code: Some(0),
+                    ..JobEnd::default()
+                },
+            )?
+            .unwrap())
+        })
+        .await
+        .unwrap();
+    for c in [&fix, &a, &b] {
+        verdict(&td, &passed, c, "passed").await;
+    }
+    settle(&td).await;
+    assert_eq!(card(&td, &gid).await["archived"], true);
+    assert_eq!(card(&td, &fix).await["column"], "accepted");
+    assert!(card(&td, &a).await.get("group").is_none());
+}
+
+#[tokio::test]
+async fn default_merge_group_finds_members_after_a_manual_fix_card() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
+    let b = new_card(&td, "p", json!({"title":"b", "repo":"app"})).await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fail_job(&td, &job, "red").await;
+    let fix = new_card(&td, "p", json!({"title":"manual fix", "repo":"app"})).await;
+    assert!(card(&td, &fix).await.get("group").is_none());
+    let retry = store_job(&td, JobKind::Merge, &[&fix, &a, &b]).await;
+    settle(&td).await;
+    for c in [&fix, &a, &b] {
+        assert_eq!(card(&td, c).await["group"]["id"], gid);
+        assert_eq!(card(&td, c).await["group"]["total"], 3);
+    }
+    assert_eq!(card(&td, &gid).await["archived"], false);
+    let runs = runs_of(&td, "p", "merge-queued").await;
+    assert!(runs.iter().all(|r| r["state"] != "failed"), "{runs:?}");
+    assert_eq!(
+        card(&td, &fix).await["group"]["key"],
+        format!("merge:{}", job.id)
+    );
+    assert_ne!(job.id, retry.id);
+}
+
+#[tokio::test]
+async fn default_merge_group_skips_jobs_queued_before_pack_installation() {
+    let td = queue_lab().await;
+    let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
+    let job = store_job(&td, JobKind::Merge, &[&a]).await;
+    settle(&td).await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let id = job.id.clone();
+    let passed = state(&td)
+        .db
+        .write("system", move |t| {
+            jobs::start(t, &id, "machine", None)?;
+            Ok(jobs::finish(
+                t,
+                &id,
+                &JobEnd {
+                    passed: true,
+                    exit_code: Some(0),
+                    ..JobEnd::default()
+                },
+            )?
+            .unwrap())
+        })
+        .await
+        .unwrap();
+    verdict(&td, &passed, &a, "passed").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["column"], "accepted");
+    assert!(card(&td, &a).await.get("group").is_none());
+    for rule in ["merge-group-started", "merge-pass"] {
+        let runs = runs_of(&td, "p", rule).await;
+        assert!(!runs.is_empty());
+        assert!(runs.iter().all(|r| r["state"] != "failed"), "{runs:?}");
+    }
+}
 
 const MOVE: &str = r#"rule "to-ready" {
   on = ["test.ping"]
@@ -992,6 +1338,26 @@ rule "h-unpark" {
 rule "h-end" {
   on = ["test.ping"]
   agent_end { outcome = "cancelled" }
+}
+rule "h-group-open" {
+  on = ["test.ping"]
+  group_open { key = "held" title = "Held" column = "review" done_when = "done" }
+}
+rule "h-group-add" {
+  on = ["test.ping"]
+  group_add { key = "held" }
+}
+rule "h-group-remove" {
+  on = ["test.ping"]
+  group_remove { key = "held" }
+}
+rule "h-group-status" {
+  on = ["test.ping"]
+  group_status { key = "held" text = "waiting" }
+}
+rule "h-group-close" {
+  on = ["test.ping"]
+  group_close { key = "held" }
 }
 "#;
 

@@ -74,6 +74,7 @@ impl Repo {
         crate::git::Hooks {
             dir: self.hooks_dir.clone(),
             push_deny: self.push_deny.clone(),
+            provenance: None,
         }
     }
 }

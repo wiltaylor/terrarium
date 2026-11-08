@@ -3699,6 +3699,24 @@ focus.
 
 ### 6.12 Project folders
 
+#### Sidebar bookmarks
+
+`/api/bookmarks` stores the operator's sidebar bookmarks in SQLite, shared
+across browsers. All methods are operator-only. GET returns an array of
+`{title, href}` in insertion order. PUT accepts `{title, href}`, adds or
+renames that URL, and returns the list. DELETE accepts `{href}` and returns
+the list, including when the URL was absent. Mutations write `bookmark.add`
+or `bookmark.remove` audit rows.
+
+Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
+without credentials, or a relative `/p/<project>/knowledge/wiki` path.
+URLs are normalized and deduplicated, and are limited to 8192 bytes on add.
+Invalid values return `422 invalid`. Wiki links open in place. External
+links open in a new window. The dashboard refreshes on focus and every 30
+seconds and imports its old `terrarium.bookmarks` list on first load,
+clearing that list only after successful import. Existing daemon titles win
+over legacy titles during migration.
+
 The code is in `crates/terrariumd/src/store/project_folders.rs` and
 `crates/terrariumd/src/api/project_folders.rs`. The tables are
 `project_folders` and `project_placements` (migration 68).
@@ -4191,6 +4209,18 @@ POST /api/mail                      (X-Terrarium-Agent: terrarium/worker)
 ```
 
 ### 7.3 Project inboxes
+
+Mail to `project:<name>` stays addressed to the inbox and queues a turn for
+its non-ephemeral project-admin `lead`, or its oldest non-ephemeral project
+admin if no admin is named `lead`. A project with no such admin rejects the
+send. Queued inbox mail counts as waiting work for that admin, including
+after a daemon restart. The inbox message and thread are not copied.
+
+The live event targets the admin selected at send time. Mail listing,
+`mail check`, and queued-work recovery select the responsible admin at query
+time. If the project's admins change before delivery, recovery and visibility
+follow the current selection. Previously delivered messages are not replayed
+automatically.
 
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
@@ -5336,6 +5366,8 @@ A subscription:
 | `held_agents` | Agents whose turns wait after a usage-limit error on this subscription (cause `limit:<subscription>`, §16.6). |
 | `account` | The plan account of the subscription (PLAN §16.3), when it has one: `harness` (whose login it holds), `has_login` (the credential file is there), `login` (the Copilot login name, or the email of a Claude login), `source` (`migration`: the shared login moved here at a daemon start; `login`: the login wizard), `created_at`, `updated_at`. Never a secret. |
 | `agents` | The agents whose current `subscription` this is: `[{id, name, project}]`. Always present. |
+| `session_period` | `{since, until}` in RFC 3339 UTC. The longest active probe window (`monthly`, `<n>h` or `<n>d`), otherwise the current UTC calendar month. The start is inclusive and the end exclusive. |
+| `sessions` | Newest-first sessions overlapping `session_period`, including retained sessions of removed ephemeral agents. Each has `id`, `agent_id`, `agent` (name), `project`, `harness`, `started_at`, optional `ended_at`, `removed`, and nullable `model`, `card`, `input_tokens`, `output_tokens`. Token totals count only usage within the period. Usage samples attribute historical subscriptions, otherwise the live agent's current subscription is used. Model and card are representative values when several occur. Cost is not available. The dashboard and CLI subscription show consume this same list. Earlier-period navigation is not provided. |
 | `default` | `true` when the plan account is the default account of its harness (PLAN §16.3): a Claude Code, Codex, or Copilot agent with no subscription runs on it. Each harness has one default or none. Always present. |
 | `default_models` | The model that each harness gets on this subscription when the agent sets no `model`, by harness name, for example `{"pi":"glm-5.3-flash","claude":"glm-5.3"}` for a Z.ai key, or `{"pi":"kimi-for-coding"}` for a Moonshot `coding` key. Only the harnesses where the daemon picks the model: pi (the provider's default from the pi adapter's table; no entry when pi refuses the subscription) and Claude Code on Z.ai. `{}` when every harness keeps its own default. Always present. |
 
@@ -8148,7 +8180,8 @@ on the events of the log.
   an event at chain depth 4 (`data.cause.depth`, shared with the
   triggers of §19.4) starts no run; a rule runs at most `max_per_hour`
   times in an hour (default 30), and at most 10 times for one card in an
-  hour. A guard records a `skipped` run with the reason.
+  hour by default. An explicit `max_per_hour` sets both limits (the built-in
+  pack uses 600). A guard records a `skipped` run with the reason.
 - Order. The runs of one card go one after another, in event order and
   then in rule order. The runs of other cards go beside them. A run that
   the engine cannot record (a database error) stays pending and holds the
@@ -8229,6 +8262,45 @@ run's card's, in a batch).
 Verbs (TER-169). Each verb goes through the store functions of the API
 as the rule actor, so the same checks hold. A verb whose precondition
 does not hold changes nothing (a no-op, `changed: false` in `steps`).
+
+Board groups (TER-180) are rule-owned cards with `kind = "group"`. A
+member's JSON has `group` with `id`, `key`, `title`, `column`, `status`,
+`members` (in membership order), `done`, `total`, `eta_at`, and `closed_at`.
+Groups have no assignee, cannot be claimed, edited manually, bound to an
+agent, validated, or merged, and do not count toward WIP. Card listings
+for pulling work omit them. The board includes their home headers and
+shows a header in each column containing members, without moving members.
+
+- `group_open`: required `key`, `title`, `column`, and `done_when`. The key
+  is project-scoped. Repeating an open is a no-op, even after closure.
+  `done_when` is a column or `@role` anchor: members there or later in
+  board order count as done, except the blocked column (TER-147).
+  Optional `eta` is a duration from now or `"jobs"` (latest running
+  member job ETA). Optional `close_after` is a duration safeguard.
+- `group_add` and `group_remove`: `key` identifies the group. Add or
+  remove the event's card. Adding to a second open group fails in the
+  rule log. A group cannot contain a group, a held card, an archived card,
+  or a card of another project. Duplicate membership is a no-op.
+- `group_status`: `key`, optional `text`, optional `eta` as above. With
+  `step = "name"`, updates that named step instead of the overall line.
+  `state` is `pending`, `running`, `done`, or `failed` (new steps default
+  to pending). A step ETA is a duration. The group exposes `steps` in
+  first-insertion order, each with `name`, `state`, `text`, and `eta_at`.
+  Omitted fields keep their previous values. `state` requires `step`.
+- `group_close`: `key`, optional `comment`. Archives the header, retains
+  historical membership, and frees members to join their next group.
+  Repeated close and mutations of a closed group are no-ops.
+  Optional `all_done = true` closes only a nonempty group whose members
+  have all reached its `done_when` anchor.
+
+`{{group.id|key|title|column|status|done|total|eta_at}}` (one field per
+placeholder) reads the open group of the event's card, or the group card
+itself. Each action reads fresh state, so templates after `group_add`
+see the new membership. A `close_after` deadline survives rule removal
+and daemon restart. The engine closes it with a comment and a rule-log
+row. Lint code `group_without_close` warns when an enabled opening rule
+has neither a timeout nor an enabled closing rule with the same key
+expression. No manual close endpoint exists.
 
 - `card_move`: move the run's card to `to`. A card not in `from` (when
   given), or in `to` already, is a no-op. `position = "top"` puts it at
@@ -8430,7 +8502,18 @@ only after three fix cards. The fix cards of a group are the cards with a
 out) include every card of this job: those of its reruns and of the group
 it was split from count, those of another group that shared a card do
 not. Set another number with your own `merge-red-group` rule. The pack
-does not spawn the fix agent or queue the group again (TER-181).
+does not spawn the fix agent or queue the group again (TER-256).
+
+Queued merge jobs open a board group in `@review`, with `@accepted`
+as its completion anchor. The `queued` and `merged (full suite passed)` steps track
+the job. A red result keeps the group open and adds its fix card as the
+first member. Queue the repair and the original members together, fix
+first, to reuse the group. The passed merge verdict follows the configured
+recipe and the push of `next`. Each member then moves to accepted, and
+the last member closes the group. `{{job.group_key}}` is the stored
+merge group's key, or `merge:<job id>` for a new group, including when
+replaying verdicts after closure. Migration omits group actions on boards
+without review or accepted, retaining their existing delivery flow.
 
 A rule of the project's `rules.wcl` with the name of a pack rule
 replaces it. A rule with only `enabled = false` (no `on`, no verb) turns
