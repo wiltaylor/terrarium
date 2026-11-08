@@ -546,7 +546,9 @@ mod tests {
             while !revoked.is_done() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(revoked.end(), Some(end));
 
         let sync = Sync {
