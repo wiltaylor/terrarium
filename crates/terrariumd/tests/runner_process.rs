@@ -1063,7 +1063,7 @@ exit 0
 async fn ephemeral_targets_follow_the_agent() {
     let td = Td::start().await;
     let state = td.daemon.as_ref().unwrap().state.clone();
-    let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
+    let (_task, addr) = terrariumd::hosts::serve(state.clone(), "127.0.0.1:0")
         .await
         .unwrap();
     let bins = tempfile::tempdir().unwrap();
@@ -1101,6 +1101,12 @@ async fn ephemeral_targets_follow_the_agent() {
     let start = Instant::now();
     while td.get("/api/hosts/lab1").await["online"] != true {
         assert!(start.elapsed() < WAIT, "the host never came online");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Online means the link is connected, not that reservation reconciliation
+    // has opened admission. Starting earlier can correctly refuse target up.
+    while state.executor.resource_pending("lab1") {
+        assert!(start.elapsed() < WAIT, "host admission never became ready");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     for (name, keep) in [("dbox", false), ("kbox", true)] {
