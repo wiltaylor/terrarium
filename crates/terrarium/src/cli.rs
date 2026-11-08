@@ -3872,7 +3872,7 @@ pub struct ScheduleArgs {
     /// The turn text, or `-` for stdin
     #[arg(long, allow_hyphen_values = true, requires = "turn")]
     pub text: Option<String>,
-    /// Start a stopped agent first (else the run is skipped)
+    /// Start a stopped agent with `agent start` first (without it, a stopped agent gets the turn at its wake, as `agent send` does)
     #[arg(long, requires = "turn")]
     pub start_if_stopped: bool,
     /// Action: run the command after `--` on this target
