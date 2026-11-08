@@ -974,6 +974,7 @@ async fn step(
     let admission = state.executor.resource_lock.lock().await;
     let (running, report) =
         crate::run_kill::start_named_locked(state, def, cmd, pidfile, &admission)?;
+    let running = crate::executor::track_resource_run(state, def, cmd, running, report.clone())?;
     set_control(job, Some(running.ctl.clone()));
     drop(admission);
     // A kill between the check in [`StepCtx::run`] and set_control found

@@ -11,6 +11,37 @@ use terrarium_core::{
 };
 use terrarium_host::{Client, ClientOptions};
 
+#[tokio::test]
+async fn internal_commands_participate_in_reservation_cleanup() {
+    let (td, client, server) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let mut def = state
+        .db
+        .read(|c| Ok(terrariumd::store::targets::get(c, "p-box")?.def))
+        .await
+        .unwrap();
+    def.kind = terrarium_core::config::TargetKind::Host;
+    let cmd = terrariumd::executor::RemoteCmd {
+        argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
+        ..Default::default()
+    };
+    let running = terrariumd::executor::start_cmd(&state, &def, &cmd).unwrap();
+    let names = vec![def.name.clone()];
+    assert_eq!(state.executor.resource_sessions(&names, None).len(), 1);
+    let collected = tokio::spawn(running.collect(1024));
+    state.executor.end_resource_sessions(&names, None).await;
+    let result = tokio::time::timeout(Duration::from_secs(5), collected)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(result.end, Some(terrariumd::executor::End::Error { code, .. }) if code == "reservation_ended")
+    );
+    assert!(state.executor.resource_sessions(&names, None).is_empty());
+    client.abort();
+    server.abort();
+}
+
 async fn setup() -> (
     TestDaemon,
     tokio::task::JoinHandle<()>,
