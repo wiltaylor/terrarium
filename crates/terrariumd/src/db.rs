@@ -4666,7 +4666,10 @@ mod tests {
             Err(ApiError::internal("the second step fails"))
         });
         assert!(r.is_err());
-        assert_eq!(t.rebuild, None, "the rebuild of the failed savepoint is undone");
+        assert_eq!(
+            t.rebuild, None,
+            "the rebuild of the failed savepoint is undone"
+        );
         t.savepoint(|t| insert(t, "kept")).unwrap();
         let names: Vec<String> = t
             .prepare("SELECT name FROM projects ORDER BY name")
