@@ -453,6 +453,9 @@ pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResu
         params![th.id, c.project, c.id, by, at],
     )?;
     if n > 0 {
+        if !all_review_or_later(t, &th.id)? {
+            t.execute("UPDATE threads SET monitor_done = 0 WHERE id = ?1", [&th.id])?;
+        }
         // The row is in the card's project, not the thread's: a project
         // admin reads the audit rows of its own project (`audit_scope`),
         // and the admin of the thread's project may not read the card's
@@ -556,8 +559,8 @@ pub fn linked_states(conn: &Connection, thread: &str) -> ApiResult<Vec<LinkedSta
     Ok(out)
 }
 
-/// True when thread `thread` links at least one card that is not archived,
-/// and each of them is in review or later.
+/// True when all live cards are in review or later and an optional monitor
+/// is green. Requires a live card or a monitor, so monitor-only ops work too.
 fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
     let monitor = get_bare(conn, thread)?.monitor;
     if let Some(key) = &monitor {
@@ -587,7 +590,8 @@ pub fn link_monitor(t: &mut Tx<'_>, actor: &Actor, id: &str, key: &str) -> ApiRe
         .split_once(':')
         .filter(|(p, n)| !p.is_empty() && !n.is_empty())
         .ok_or_else(|| ApiError::invalid("monitor must be PROJECT:MONITOR"))?;
-    policy::read_project(actor, project)?;
+    policy::read_project(actor, project)
+        .map_err(|_| ApiError::not_found("no monitor"))?;
     crate::store::monitors::find(t, &format!("{project}/{name}"))?;
     t.execute(
         "UPDATE threads SET monitor = ?2, monitor_done = 0 WHERE id = ?1 AND monitor IS NOT ?2",
@@ -612,7 +616,7 @@ pub fn on_monitor_status(
         .collect::<Result<_, _>>()?
     };
     for (id, done) in ids {
-        if status == Status::Ok && all_review_or_later(t, &id)? {
+        if status == Status::Ok && !done && all_review_or_later(t, &id)? {
             wake(t, &id, WAKE_REVIEW)?;
         } else if status == Status::Crit && done {
             t.execute("UPDATE threads SET monitor_done = 0 WHERE id = ?1", [&id])?;
@@ -657,6 +661,12 @@ pub fn on_card_moved(
     if ids.is_empty() {
         return Ok(());
     }
+    let cols = board::column_roles(t, project)?;
+    if !review_or_later(&cols, to) {
+        for id in &ids {
+            t.execute("UPDATE threads SET monitor_done = 0 WHERE id = ?1", [id])?;
+        }
+    }
     let reason = if to_role == Some(board::BLOCKED) {
         WAKE_BLOCKED
     } else {
@@ -698,6 +708,11 @@ fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
     };
     let at = now();
     if th.status == ThreadStatus::WaitingOperator {
+        if reason == "monitor_green" || reason == "monitor_red" {
+            // Coalesce each monitor reason at its latest position, so the
+            // last delivered state matches the latest monitor transition.
+            t.execute("DELETE FROM thread_pending_wakes WHERE thread = ?1 AND reason = ?2", params![id, reason])?;
+        }
         t.execute(
             "INSERT OR IGNORE INTO thread_pending_wakes(thread, reason) VALUES (?1, ?2)",
             params![id, reason],
@@ -729,7 +744,7 @@ fn flush_pending_wakes(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     }
     let reasons: Vec<String> = {
         let mut st =
-            t.prepare("SELECT reason FROM thread_pending_wakes WHERE thread = ?1 ORDER BY reason")?;
+            t.prepare("SELECT reason FROM thread_pending_wakes WHERE thread = ?1 ORDER BY rowid")?;
         st.query_map([id], |r| r.get(0))?
             .collect::<Result<Vec<_>, _>>()?
     };
@@ -1190,7 +1205,11 @@ pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     t.audit("thread.track", &th.id, th.project(), json!({"by": by}))?;
     emit_with(t, &th, "tracking", json!({"author": by}))?;
     flush_pending_wakes(t, id)?;
-    if first && all_review_or_later(t, id)? {
+    let monitor_pending: bool = t.query_row(
+        "SELECT monitor IS NOT NULL AND monitor_done = 0 FROM threads WHERE id = ?1",
+        [id], |r| r.get(0),
+    )?;
+    if (first || monitor_pending) && all_review_or_later(t, id)? {
         wake(t, id, WAKE_REVIEW)?;
     }
     get(t, id)
