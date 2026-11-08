@@ -4628,8 +4628,8 @@ Only canonical github.com HTTPS and SSH repository URLs are accepted, redirects
 are refused, and pull requests are rejected. No card is created on fetch failure.
 The API's author, title and body supply the card, which starts in backlog or
 is held by the project's configured author gate. Repeated imports return the
-same card, including archived or held cards. The reserved `github_issue` link
-records its canonical URL and cannot be supplied through the card link API.
+same card, including archived or held cards. A daemon-owned import identity
+records its canonical URL. Adding a URL link manually cannot forge an import.
 
 **Active cards** (`GET /api/cards`, TER-43, for the dashboard home). The
 cards that are not archived in the columns `columns` (a comma list,

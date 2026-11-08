@@ -2545,6 +2545,16 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(thread, reason)
     );
     "#,
+    // 98: Daemon-owned GitHub issue import identities (TER-124).
+    // Self-contained. Append after concurrent migrations when merging.
+    r#"
+    CREATE TABLE github_issue_imports (
+        project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        url TEXT NOT NULL,
+        card TEXT NOT NULL REFERENCES cards(id),
+        PRIMARY KEY(project, url)
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

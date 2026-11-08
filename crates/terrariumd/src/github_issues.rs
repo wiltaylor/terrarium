@@ -109,10 +109,16 @@ async fn fetch_issue(request: reqwest::RequestBuilder, number: u64) -> ApiResult
         ));
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await
-        .map_err(|_| ApiError::new(Code::Unavailable, "GitHub issue read failed"))? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| ApiError::new(Code::Unavailable, "GitHub issue read failed"))?
+    {
         if body.len() + chunk.len() > 2 * 1024 * 1024 {
-            return Err(ApiError::new(Code::Unavailable, "GitHub issue response too large"));
+            return Err(ApiError::new(
+                Code::Unavailable,
+                "GitHub issue response too large",
+            ));
         }
         body.extend_from_slice(&chunk);
     }
@@ -127,7 +133,7 @@ async fn fetch_issue(request: reqwest::RequestBuilder, number: u64) -> ApiResult
 }
 
 /// A verified webhook can reuse this transaction without trusting a caller's
-/// author assertion. The reserved link kind cannot be added through the API.
+/// author assertion. The import identity is not writable through the card API.
 pub(crate) fn import_verified(
     t: &mut Tx<'_>,
     actor: &Actor,
@@ -140,8 +146,7 @@ pub(crate) fn import_verified(
     let url = format!("https://github.com/{repository}/issues/{}", issue.number);
     let existing: Option<String> = t
         .query_row(
-            "SELECT l.card FROM card_links l JOIN cards c ON c.id = l.card
-         WHERE c.project = ?1 AND l.kind = 'github_issue' AND l.ref = ?2",
+            "SELECT card FROM github_issue_imports WHERE project = ?1 AND url = ?2",
             params![project, url],
             |r| r.get(0),
         )
@@ -168,13 +173,17 @@ pub(crate) fn import_verified(
     )?;
     t.execute(
         "INSERT INTO card_links (card, kind, ref, created_by, created_at)
-         VALUES (?1, 'github_issue', ?2, ?3, ?4)",
+         VALUES (?1, 'url', ?2, ?3, ?4)",
         params![
             card.id,
             url,
             actor.address(),
             chrono::Utc::now().to_rfc3339()
         ],
+    )?;
+    t.execute(
+        "INSERT INTO github_issue_imports (project, url, card) VALUES (?1, ?2, ?3)",
+        params![project, url, card.id],
     )?;
     board::get_card(t, &card.id)
 }
@@ -191,15 +200,29 @@ mod tests {
         let app = Router::new()
             .route("/ok", get(move || async move { valid }))
             .route("/bad", get(|| async { "not json" }))
-            .route("/pr", get(|| async { r#"{"number":7,"title":"x","user":{"login":"wiltaylor"},"pull_request":{}}"# }))
-            .route("/redirect", get(|| async { axum::response::Redirect::temporary("/ok") }))
+            .route(
+                "/pr",
+                get(|| async {
+                    r#"{"number":7,"title":"x","user":{"login":"wiltaylor"},"pull_request":{}}"#
+                }),
+            )
+            .route(
+                "/redirect",
+                get(|| async { axum::response::Redirect::temporary("/ok") }),
+            )
             .route("/large", get(|| async { "x".repeat(2 * 1024 * 1024 + 1) }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
         let request = |path| client.get(format!("http://{addr}/{path}"));
-        assert_eq!(fetch_issue(request("ok"), 7).await.unwrap().user.login, "eve");
+        assert_eq!(
+            fetch_issue(request("ok"), 7).await.unwrap().user.login,
+            "eve"
+        );
         assert!(fetch_issue(request("ok"), 8).await.is_err());
         for path in ["bad", "pr", "redirect", "missing", "large"] {
             assert!(fetch_issue(request(path), 7).await.is_err(), "{path}");
