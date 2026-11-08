@@ -186,7 +186,10 @@ pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
 }
 
 /// Start with an explicit executor, avoiding process-global SSH overrides in tests.
-pub async fn start_with_executor(cfg: DaemonConfig, executor: executor::Executor) -> anyhow::Result<Daemon> {
+pub async fn start_with_executor(
+    cfg: DaemonConfig,
+    executor: executor::Executor,
+) -> anyhow::Result<Daemon> {
     start_with_usage_and_executor(cfg, usage_collector::UsageConfig::from_env(), executor).await
 }
 

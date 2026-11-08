@@ -24,28 +24,32 @@ pub async fn reset(state: &Shared, key: &str, config: &DockerCiDef) -> ApiResult
     let identity = dir.write_private("reset-identity", key.as_bytes())?;
     let hosts = crate::executor::known_hosts(&state.state_dir)?;
     for attempt in 0..3 {
-    let mut child = tokio::process::Command::new(&state.executor.ssh_bin)
-        .args(reset_args(&identity, &hosts, config))
-        .env_remove("SSH_AUTH_SOCK")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| ApiError::internal("cannot start daemon Docker CI reset"))?;
-    let status = tokio::time::timeout(Duration::from_secs(150), child.wait())
-        .await
-        .map_err(|_| ApiError::conflict("Docker CI reset timed out; tunnel not opened"))?
-        .map_err(|_| ApiError::internal("cannot wait for Docker CI reset"))?;
-    if status.code() != Some(75) || attempt == 2 {
-        return reset_status(status.code());
-    }
-    tokio::time::sleep(Duration::from_secs(2)).await;
+        let mut child = tokio::process::Command::new(&state.executor.ssh_bin)
+            .args(reset_args(&identity, &hosts, config))
+            .env_remove("SSH_AUTH_SOCK")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| ApiError::internal("cannot start daemon Docker CI reset"))?;
+        let status = tokio::time::timeout(Duration::from_secs(150), child.wait())
+            .await
+            .map_err(|_| ApiError::conflict("Docker CI reset timed out; tunnel not opened"))?
+            .map_err(|_| ApiError::internal("cannot wait for Docker CI reset"))?;
+        if status.code() != Some(75) || attempt == 2 {
+            return reset_status(status.code());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
     unreachable!("reset loop always returns")
 }
 
-fn reset_args(identity: &std::path::Path, hosts: &std::path::Path, config: &DockerCiDef) -> Vec<String> {
+fn reset_args(
+    identity: &std::path::Path,
+    hosts: &std::path::Path,
+    config: &DockerCiDef,
+) -> Vec<String> {
     vec![
         "-F".into(),
         "/dev/null".into(),
@@ -275,10 +279,18 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
                 let (credit, credit_rx) = mpsc::channel(1);
                 credits.insert(id, credit);
                 connections.insert(id, tx);
-                tasks.spawn(connection(id, socket.clone(), run.ctl.clone(), rx, credit_rx));
+                tasks.spawn(connection(
+                    id,
+                    socket.clone(),
+                    run.ctl.clone(),
+                    rx,
+                    credit_rx,
+                ));
             } else if event["ack"] == true {
                 if let Some(credit) = credits.get(&id) {
-                    if credit.send(()).await.is_err() { credits.remove(&id); }
+                    if credit.send(()).await.is_err() {
+                        credits.remove(&id);
+                    }
                 }
             } else if event["close"] == true {
                 connections.remove(&id);
@@ -314,21 +326,29 @@ async fn connection(
         let write_ctl = ctl.clone();
         let write = async move {
             while let Some(data) = input.recv().await {
-                if writer.write_all(&data).await.is_err() { break; }
-                if !send(&write_ctl, json!({"id":id,"ack":true})) { break; }
+                if writer.write_all(&data).await.is_err() {
+                    break;
+                }
+                if !send(&write_ctl, json!({"id":id,"ack":true})) {
+                    break;
+                }
             }
         };
         let read = async {
-        let mut data = vec![0; 16384];
-        loop {
-            match reader.read(&mut data).await {
-                Ok(n) if n > 0 => {
-                    if !send(&ctl, json!({"id":id,"data":STANDARD.encode(&data[..n])})) { break; }
-                    if credit.recv().await.is_none() { break; }
+            let mut data = vec![0; 16384];
+            loop {
+                match reader.read(&mut data).await {
+                    Ok(n) if n > 0 => {
+                        if !send(&ctl, json!({"id":id,"data":STANDARD.encode(&data[..n])})) {
+                            break;
+                        }
+                        if credit.recv().await.is_none() {
+                            break;
+                        }
+                    }
+                    _ => break,
                 }
-                _ => break,
             }
-        }
         };
         tokio::select! { _ = write => {}, _ = read => {} }
     }
@@ -345,7 +365,13 @@ mod tests {
         let args = reset_args(
             std::path::Path::new("/private/reset"),
             std::path::Path::new("/pinned/hosts"),
-            &DockerCiDef { destination: "root@vm".into(), port: 2250, known_hosts: "pin".into(), reset_destination: "reset@host".into(), reset_port: 22 },
+            &DockerCiDef {
+                destination: "root@vm".into(),
+                port: 2250,
+                known_hosts: "pin".into(),
+                reset_destination: "reset@host".into(),
+                reset_port: 22,
+            },
         );
         assert_eq!(args.last().map(String::as_str), Some("reset@host"));
         assert!(args.contains(&"IdentitiesOnly=yes".to_owned()));
@@ -386,10 +412,15 @@ mod tests {
             .unwrap();
         ready_rx.await.unwrap();
         let response = loop {
-            let frame = tokio::time::timeout(Duration::from_secs(5), controls.recv()).await.unwrap().unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(5), controls.recv())
+                .await
+                .unwrap()
+                .unwrap();
             if let Control::Stdin(bytes) = &frame {
                 let event: Value = serde_json::from_slice(bytes).unwrap();
-                if event["ack"] == true { continue; }
+                if event["ack"] == true {
+                    continue;
+                }
             }
             break frame;
         };
@@ -402,7 +433,13 @@ mod tests {
             STANDARD.decode(event["data"].as_str().unwrap()).unwrap(),
             b"pong"
         );
-        events.send(Ev::Data(Stream::Stdout, b"{\"id\":1,\"ack\":true}\n".to_vec())).await.unwrap();
+        events
+            .send(Ev::Data(
+                Stream::Stdout,
+                b"{\"id\":1,\"ack\":true}\n".to_vec(),
+            ))
+            .await
+            .unwrap();
         server.await.unwrap();
         drop(events);
         task.await.unwrap();

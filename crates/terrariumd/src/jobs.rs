@@ -1921,11 +1921,19 @@ async fn steps(
             .iter()
             .find(|i| i.env == "DOCKER_CI_RESET_KEY")
             .ok_or_else(|| ApiError::invalid("Docker tunnel requires DOCKER_CI_RESET_KEY"))?;
-        let config = delivery.docker_ci.as_ref().ok_or_else(|| ApiError::invalid("merge_secrets requires docker_ci endpoint configuration"))?;
+        let config = delivery.docker_ci.as_ref().ok_or_else(|| {
+            ApiError::invalid("merge_secrets requires docker_ci endpoint configuration")
+        })?;
         crate::docker_tunnel::reset(x.state, &reset.value, config).await?;
-        let tunnel =
-            crate::docker_tunnel::open(x.state, x.def, &key.value, x.dir, delivery.timeout_secs(), config)
-                .await?;
+        let tunnel = crate::docker_tunnel::open(
+            x.state,
+            x.def,
+            &key.value,
+            x.dir,
+            delivery.timeout_secs(),
+            config,
+        )
+        .await?;
         env.insert("DOCKER_HOST".into(), tunnel.endpoint.clone());
         Some(tunnel)
     } else {
@@ -1934,11 +1942,7 @@ async fn steps(
     // Credentials stay in the daemon, so retain the normal target recipe log.
     let script = recipe_script(recipe, base);
     let recipe_cmd = RemoteCmd {
-        argv: vec![
-            "sh".into(),
-            "-c".into(),
-            logged_recipe(script, &log),
-        ],
+        argv: vec!["sh".into(), "-c".into(), logged_recipe(script, &log)],
         cwd: Some(x.dir.to_owned()),
         env,
         timeout_secs: Some(delivery.timeout_secs()),
@@ -1990,10 +1994,10 @@ async fn steps(
         String::new()
     };
     let log_location = format!(
-            "Full log on target {}: {}",
-            delivery.target.as_deref().unwrap_or("-"),
-            log
-        );
+        "Full log on target {}: {}",
+        delivery.target.as_deref().unwrap_or("-"),
+        log
+    );
     let mut tail = format!(
         "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\n{}",
         excerpt.trim_end(),
