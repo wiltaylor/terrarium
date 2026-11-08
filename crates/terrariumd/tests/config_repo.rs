@@ -556,11 +556,20 @@ async fn a_pulled_export_is_a_plan_until_apply() {
     assert_eq!(s.ok()["export_pending"], true);
     let log = git(&b_repo, &["log", "-1", "--name-only", "--format="]);
     assert!(log.contains("export/projects/own.fleet.toml"), "{log}");
+    // Later changes stay held until apply succeeds, then reach export/
+    // without requiring another commit.
+    b.agent("own", "later", json!({"persona": "none"})).await;
+    b.post("/api/config/commit", json!({"message": "held change"}))
+        .await
+        .ok();
+    let own_path = b_repo.join("export/projects/own.fleet.toml");
+    assert!(!std::fs::read_to_string(&own_path).unwrap().contains("later"));
     let r = b.post("/api/config/pull", json!({"apply": true})).await;
     let body = r.ok().clone();
     assert!(body["export"][0]["applied"].is_object(), "{body}");
     let w1 = b.get("/api/agents/shared%2Fw1").await;
     assert_eq!(w1.ok()["persona"], "none");
+    assert!(std::fs::read_to_string(&own_path).unwrap().contains("later"));
     let s = b.get("/api/config/status").await;
     assert_eq!(s.ok()["export_pending"], false);
 }
