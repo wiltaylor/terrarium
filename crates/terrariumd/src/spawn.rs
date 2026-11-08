@@ -818,6 +818,10 @@ pub async fn close(
                 return spawns::get(t, &key);
             }
             let sp = spawns::get(t, &key)?;
+            let thread = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:"));
+            if let Some(thread) = thread {
+                crate::store::threads::agent_ended(t, thread, &sp.id, outcome)?;
+            }
             let owner_live = sp.owner != OPERATOR && agents::display_name(t, &sp.owner)?.is_some();
             let mut data = json!({
                 "outcome": outcome, "spawn": sp.id, "name": sp.name,
@@ -830,7 +834,7 @@ pub async fn close(
                 Some(w) => waits::finish(t, w, WaitState::Resolved, data, true, 0)?.is_some(),
                 None => false,
             };
-            if notify && !waited && outcome != spawns::OWNER_GONE {
+            if notify && !waited && outcome != spawns::OWNER_GONE && thread.is_none() {
                 let to = if sp.owner == OPERATOR {
                     Some(mail::Address::Operator)
                 } else if owner_live {

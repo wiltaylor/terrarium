@@ -319,6 +319,16 @@ fn missed_turn(thread: &str) -> String {
     )
 }
 
+/// Re-read live state rather than relying on the resumed session's history.
+pub fn restart_turn(thread: &str) -> String {
+    render(
+        thread,
+        &format!(
+            "Before acting after this restart, run `terrarium thread show {thread}`. Read the current messages, overall response, questions, tracking state and linked cards. Run `terrarium card show <card>` in each linked card's project that you may read. Use this current state, not only the earlier session history."
+        ),
+    )
+}
+
 /// The AgentActor of the opener `id` as it is now.
 fn opener_now(conn: &rusqlite::Connection, id: &str) -> ApiResult<AgentActor> {
     let v = agents::get(conn, id).map_err(|e| {

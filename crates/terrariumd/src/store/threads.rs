@@ -1049,6 +1049,41 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     Ok(th)
 }
 
+/// Mark an open thread whose bound agent ended, without an Inbox notice.
+/// Called in the spawn's finish transaction, so retries cannot duplicate it.
+pub fn agent_ended(t: &mut Tx<'_>, id: &str, agent: &str, outcome: &str) -> ApiResult<()> {
+    let th = get_bare(t, id)?;
+    if th.status == ThreadStatus::Closed || th.agent.as_deref() != Some(agent) {
+        return Ok(());
+    }
+    let text = format!(
+        "Thread agent ended: {outcome}. The thread remains open. Its report-to lead must arrange the handoff or a replacement."
+    );
+    let at = now();
+    insert_message(t, id, "system", "message", &text, &at)?;
+    t.execute(
+        "UPDATE threads SET updated_at = ?2 WHERE id = ?1",
+        params![id, at],
+    )?;
+    if let Some(lead) = &th.report_to
+        && let Ok(to) = super::mail::resolve(t, lead, None)
+    {
+        super::mail::send(
+            t,
+            super::mail::Outgoing {
+                from: &super::mail::Address::System,
+                to: &to,
+                subject: &format!("Thread {id}: agent ended"),
+                body: &format!("{text}\n\nThread: {id}\nAgent: {agent}"),
+                thread: None,
+                in_reply_to: None,
+            },
+        )?;
+    }
+    emit(t, &get_bare(t, id)?, "agent_ended")?;
+    Ok(())
+}
+
 /// The operator's overall response: kept as `response` (the approval
 /// record) and as a message of kind `response`.
 pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {

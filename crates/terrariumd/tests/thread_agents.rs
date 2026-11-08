@@ -744,6 +744,50 @@ async fn a_missed_event_unparks_on_the_timer() {
     lab.td.wait_status(&eph, "idle").await;
 }
 
+/// Every finish path shares the transaction that marks the thread and mails
+/// its report-to lead. A retry and the ordinary thread close stay quiet.
+#[tokio::test]
+async fn an_ended_agent_marks_only_its_open_thread_once() {
+    let lab = lab().await;
+    for outcome in ["done", "cancelled", "expired", "failed"] {
+        let th = lab
+            .open(json!({"topic": "Ended", "scope": "p", "template": "consult"}))
+            .await;
+        let tid = id(&th);
+        let agent = th["agent"].as_str().unwrap();
+        lab.td.wait_status(agent, "idle").await;
+        let s = state(&lab.td);
+        terrariumd::spawn::close(&s, agent, outcome, Some("ended elsewhere".into()), true)
+            .await
+            .unwrap();
+        terrariumd::spawn::close(&s, agent, outcome, None, true)
+            .await
+            .unwrap();
+        let marked = lab.thread(&tid).await;
+        assert_ne!(marked["status"], "closed");
+        let messages = marked["messages"].as_array().unwrap();
+        let marks: Vec<_> = messages
+            .iter()
+            .filter(|m| {
+                m["author"] == "system"
+                    && m["text"].as_str().unwrap().contains("Thread agent ended:")
+            })
+            .collect();
+        assert_eq!(marks.len(), 1, "{marked}");
+        assert!(marks[0]["text"].as_str().unwrap().contains(outcome));
+        let mail = lab
+            .td
+            .get(&format!("/api/mail?to={}&from=system", lab.p_lead))
+            .await
+            .ok();
+        assert!(
+            mail.to_string()
+                .contains(&format!("Thread {tid}: agent ended")),
+            "{mail}"
+        );
+    }
+}
+
 /// A2: the thread agent reads and writes the memories of the project it
 /// runs in, and neither reads nor writes another one; a global thread's
 /// agent writes in `meta`.

@@ -340,6 +340,11 @@ fn end_park(t: &mut crate::db::Tx<'_>, sp: &spawns::Spawn, cause: &str) -> ApiRe
     if !spawns::clear_parked(t, &sp.id)? {
         return Ok(false);
     }
+    if let Some(thread) = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:")) {
+        let turn = crate::thread_agent::restart_turn(thread);
+        crate::store::transcripts::record_turn(t, &sp.id, &turn)?;
+        crate::store::agents::queue_turn(t, &sp.id, &turn)?;
+    }
     t.emit(
         EventDraft::new(
             "agent.unparked",
