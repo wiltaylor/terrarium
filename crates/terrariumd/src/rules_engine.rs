@@ -673,8 +673,11 @@ mod lane_tests {
         // Intentionally omit the projects table to inject a real load
         // error, independently of a lane's already committed work.
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE probe (actions INTEGER, recorded INTEGER);
-            INSERT INTO probe VALUES (0, 0);").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE probe (actions INTEGER, recorded INTEGER);
+            INSERT INTO probe VALUES (0, 0);",
+        )
+        .unwrap();
         let db = Db::new(conn, events::EventHub::default());
         let committed = Arc::new(Semaphore::new(0));
         let release = Arc::new(Semaphore::new(0));
@@ -684,10 +687,18 @@ mod lane_tests {
             let committed = committed.clone();
             let release = release.clone();
             async move {
-                db.read(|c| { c.execute("UPDATE probe SET actions = actions + 1", [])?; Ok(()) }).await?;
+                db.read(|c| {
+                    c.execute("UPDATE probe SET actions = actions + 1", [])?;
+                    Ok(())
+                })
+                .await?;
                 committed.add_permits(1);
                 let _permit = release.acquire().await;
-                db.read(|c| { c.execute("UPDATE probe SET recorded = 1", [])?; Ok(()) }).await
+                db.read(|c| {
+                    c.execute("UPDATE probe SET recorded = 1", [])?;
+                    Ok(())
+                })
+                .await
             }
         });
         committed.acquire().await.unwrap().forget();
@@ -699,14 +710,29 @@ mod lane_tests {
             lanes.finish_pass(result).await;
             assert!(lanes.active.is_empty());
         });
-        assert!(tokio::time::timeout(Duration::from_millis(30), &mut finishing).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut finishing)
+                .await
+                .is_err()
+        );
         release.add_permits(1);
-        tokio::time::timeout(Duration::from_secs(5), finishing).await.unwrap().unwrap();
-        let row: (i64, i64) = db.read(|c| {
-            // Model the next pass: only an unrecorded row would replay.
-            c.execute("UPDATE probe SET actions = actions + 1 WHERE recorded = 0", [])?;
-            Ok(c.query_row("SELECT actions, recorded FROM probe", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
-        }).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), finishing)
+            .await
+            .unwrap()
+            .unwrap();
+        let row: (i64, i64) = db
+            .read(|c| {
+                // Model the next pass: only an unrecorded row would replay.
+                c.execute(
+                    "UPDATE probe SET actions = actions + 1 WHERE recorded = 0",
+                    [],
+                )?;
+                Ok(c.query_row("SELECT actions, recorded FROM probe", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?)
+            })
+            .await
+            .unwrap();
         assert_eq!(row, (1, 1));
     }
 
