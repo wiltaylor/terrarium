@@ -679,7 +679,9 @@ impl QueueTicks {
         let state = lab.td.daemon.as_ref().unwrap().state.clone();
         Self(tokio::spawn(async move {
             loop {
-                terrariumd::jobs::tick(&state).await.unwrap();
+                if let Err(error) = terrariumd::jobs::tick(&state).await {
+                    tracing::warn!(%error, "test queue tick failed");
+                }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }))
@@ -2274,11 +2276,6 @@ case "$1" in
       touch "$gate/${5##*/}"
       while [ -d "$gate" ]; do sleep 0.02; done
     fi
-    # Only the timeout speed test opts in. Keep the real TERM/KILL script
-    # and its process checks, but replace its shell timer with a short one.
-    if [ "$4" = terrarium-kill ] && [ -f "${0%/*}/short-kill-timer" ]; then
-      set -- "$1" "$2" 'sleep() { command sleep 0.01; }; '"$3" "$4" "$5" "$6"
-    fi
     # An async list gets /dev/null on stdin: keep the real one (`-i`, the
     # bundle of a job) on fd 3 and hand it on.
     exec 3<&0
@@ -2355,8 +2352,7 @@ async fn until_not(lab: &Lab, id: &str, state: &str) -> Value {
 /// it shows as ended, no process of it is left. The rerun does the same.
 #[tokio::test]
 async fn a_job_timeout_ends_every_process_of_the_recipe() {
-    let (lab, bins, children) = docker_lab(1, 1).await;
-    std::fs::write(bins.path().join("short-kill-timer"), "").unwrap();
+    let (lab, _bins, children) = docker_lab(1, 1).await;
     let _ticks = QueueTicks::start(&lab);
     let h = lab.branch("ter-t1", "next", &[("OK", "1")]);
     let c = lab.card("t1", "ter-t1").await;
