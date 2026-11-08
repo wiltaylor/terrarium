@@ -589,17 +589,13 @@ pub fn detect(text: &str) -> Result<Format, ParseError> {
     ))
 }
 
-/// One of the first 20 lines is a JSON object with `type`: libtest JSON.
+/// One of the first 20 lines contains a libtest JSON event.
 fn libtest_lines(t: &str) -> bool {
     t.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .take(20)
-        .any(|l| {
-            l.starts_with('{')
-                && serde_json::from_str::<serde_json::Value>(l)
-                    .is_ok_and(|v| v.get("type").and_then(|x| x.as_str()).is_some())
-        })
+        .any(|l| libtest::event_on_line(l).is_some())
 }
 
 fn detect_json(v: &serde_json::Value) -> Result<Format, ParseError> {

@@ -182,19 +182,20 @@ export function BundleCard(props: { question: Question; now: number; showAgent?:
                         <div class="row" style={{ "flex-wrap": "wrap", gap: "6px" }} role="group" aria-label={`${label()} options`}>
                           <For each={item.options}>
                             {(o, k) => (
-                              <button type="button" class={d().option === k() ? "primary" : ""} aria-pressed={d().option === k()} onClick={() => edit(i(), { option: d().option === k() ? null : k() })}>
+                              <button type="button" class={d().option === k() ? "primary" : ""} aria-pressed={d().option === k()} onClick={() => edit(i(), { option: d().option === k() ? null : k(), skip: false })}>
                                 {o}
                               </button>
                             )}
                           </For>
                         </div>
                       </Show>
+                      <button type="button" aria-pressed={!!d().skip} onClick={() => edit(i(), { skip: !d().skip, option: null })}>Skip question</button>
                       <textarea
                         rows={2}
-                        placeholder={item.options.length ? "An answer in your own words (optional with an option)" : "Your answer"}
+                        placeholder={d().skip ? "Why are you skipping this question? (required)" : item.options.length ? "An answer in your own words (optional with an option)" : "Your answer"}
                         value={d().text}
                         onInput={(e) => edit(i(), { text: e.currentTarget.value })}
-                        aria-label={`${label()} answer text`}
+                        aria-label={`${label()} ${d().skip ? "skip reason" : "answer text"}`}
                       />
                     </fieldset>
                   </li>

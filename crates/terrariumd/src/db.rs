@@ -2819,6 +2819,36 @@ impl<'c> Tx<'c> {
         detail
     }
 
+    /// Run `f` in a SQLite savepoint. On an error of `f`, its writes roll
+    /// back, the events, audit rows and staged files that it added are
+    /// dropped, a redactor rebuild that it asked for is undone, and the
+    /// rest of the transaction stays: all of `f` or none of it. The error
+    /// goes to the caller.
+    pub fn savepoint<T>(&mut self, f: impl FnOnce(&mut Self) -> ApiResult<T>) -> ApiResult<T> {
+        let marks = (
+            self.events.len(),
+            self.audits.borrow().len(),
+            self.files.len(),
+        );
+        let rebuild = self.rebuild.clone();
+        self.tx.execute_batch("SAVEPOINT tx_savepoint")?;
+        match f(self) {
+            Ok(v) => {
+                self.tx.execute_batch("RELEASE tx_savepoint")?;
+                Ok(v)
+            }
+            Err(e) => {
+                self.tx
+                    .execute_batch("ROLLBACK TO tx_savepoint; RELEASE tx_savepoint")?;
+                self.events.truncate(marks.0);
+                self.audits.borrow_mut().truncate(marks.1);
+                self.files.truncate(marks.2);
+                self.rebuild = rebuild;
+                Err(e)
+            }
+        }
+    }
+
     /// Append an event to the log. Subscribers get it after the commit.
     /// The summary and the data are redacted first, so the event log, the
     /// streams, and the trigger payloads hold no known secret.
@@ -3078,9 +3108,26 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
 
 /// Run every migration newer than the database's `user_version`.
 pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
+    migrate_with(conn, MIGRATIONS)
+}
+
+fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> anyhow::Result<usize> {
     let current: usize = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    // A fresh database has no state to preserve between versions. Commit
+    // its schema once, without changing SQLite's durability settings.
+    if current == 0 {
+        let tx = conn.transaction()?;
+        for (index, sql) in migrations.iter().enumerate() {
+            let version = index + 1;
+            tx.execute_batch(sql)
+                .with_context(|| format!("migration {version} failed"))?;
+            tx.pragma_update(None, "user_version", version)?;
+        }
+        tx.commit()?;
+        return Ok(migrations.len());
+    }
     let mut applied = 0;
-    for (index, sql) in MIGRATIONS.iter().enumerate().skip(current) {
+    for (index, sql) in migrations.iter().enumerate().skip(current) {
         let version = index + 1;
         let tx = conn.transaction()?;
         tx.execute_batch(sql)
@@ -3097,6 +3144,40 @@ pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_migrations_roll_back_together() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let err = migrate_with(
+            &mut conn,
+            &["CREATE TABLE first (id INTEGER);", "invalid SQL"],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("migration 2 failed"));
+        let version: usize = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        assert!(!conn.table_exists(None, "first").unwrap());
+    }
+
+    #[test]
+    fn upgrades_keep_each_successful_migration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        assert!(
+            migrate_with(
+                &mut conn,
+                &["unused", "CREATE TABLE second (id INTEGER);", "invalid SQL"],
+            )
+            .is_err()
+        );
+        let version: usize = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        assert!(conn.table_exists(None, "second").unwrap());
+    }
 
     #[test]
     fn migrations_create_tables_and_are_idempotent() {
@@ -4607,5 +4688,53 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(rows, vec![2]);
+    }
+
+    /// TER-224: an error in a savepoint rolls back its rows and drops its
+    /// events. The writes before it and a good savepoint stay.
+    #[test]
+    fn a_failed_savepoint_keeps_nothing_of_its_writes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        let mut t = Tx::for_test(conn.transaction().unwrap(), "system");
+        let insert = |t: &mut Tx<'_>, name: &str| -> ApiResult<()> {
+            t.execute(
+                "INSERT INTO projects (name, description, created_at, updated_at)
+                 VALUES (?1, '', 'a', 'a')",
+                [name],
+            )?;
+            t.emit(crate::events::EventDraft::new(
+                "system",
+                name,
+                serde_json::json!({}),
+            ))?;
+            Ok(())
+        };
+        insert(&mut t, "before").unwrap();
+        let r: ApiResult<()> = t.savepoint(|t| {
+            insert(t, "lost")?;
+            t.rebuild_redactor(Path::new("/state"));
+            Err(ApiError::internal("the second step fails"))
+        });
+        assert!(r.is_err());
+        assert_eq!(
+            t.rebuild, None,
+            "the rebuild of the failed savepoint is undone"
+        );
+        t.savepoint(|t| insert(t, "kept")).unwrap();
+        let names: Vec<String> = t
+            .prepare("SELECT name FROM projects ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(names, ["before", "kept"]);
+        let summaries: Vec<&str> = t.events.iter().map(|e| e.summary.as_str()).collect();
+        assert_eq!(summaries, ["before", "kept"]);
+        let stored: i64 = t
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, 2);
     }
 }
