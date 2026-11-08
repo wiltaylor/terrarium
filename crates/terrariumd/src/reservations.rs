@@ -653,8 +653,20 @@ pub async fn cancel(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Reserv
 }
 
 pub async fn sweep(state: &Shared) -> ApiResult<()> {
-    let _guard = state.executor.resource_lock.lock().await;
     for host in state.db.read(hosts::list).await? {
+        let name = host.name.clone();
+        let needs_work = state
+            .db
+            .read(move |c| {
+                Ok(store::list(c, &name)?
+                    .iter()
+                    .any(|r| managed(r) || r.state == State::Queued))
+            })
+            .await?;
+        if !needs_work && !state.executor.resource_pending(&host.name) {
+            continue;
+        }
+        let _guard = state.executor.resource_lock.lock().await;
         if state.executor.resource_pending(&host.name)
             && let Err(error) = reconcile_host_locked(state, &host.name).await
         {

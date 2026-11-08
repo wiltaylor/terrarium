@@ -266,6 +266,17 @@ pub fn start_named(
 }
 
 /// Start while the executor holds admission through registration.
+pub(crate) fn start_named_locked(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+    pidfile: String,
+    _guard: &tokio::sync::MutexGuard<'_, ()>,
+) -> ApiResult<(Running, Option<Report>)> {
+    start_named_inner(state, def, cmd, pidfile, true)
+}
+
+/// Start while the executor holds admission through registration.
 pub(crate) fn start_registered(
     state: &Shared,
     def: &TargetDef,
