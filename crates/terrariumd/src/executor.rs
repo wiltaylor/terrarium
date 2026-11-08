@@ -2393,6 +2393,9 @@ async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> A
         })
     })
     .await?;
+    let mut rt = runtime_of(state, &def.name).await?;
+    rt.recreate_required = false;
+    store_runtime(state, &def.name, rt).await?;
     Ok(())
 }
 
@@ -2444,6 +2447,40 @@ async fn docker_rm(state: &Shared, def: &TargetDef) -> ApiResult<()> {
     })
     .await?;
     Ok(())
+}
+
+/// Explicit consent to lose the stopped container's writable layer, never volumes.
+pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
+    if def.kind != TargetKind::Docker || def.container.is_some() || def.image.is_none() {
+        return Err(ApiError::invalid("recreate needs a managed Docker target with an image"));
+    }
+    host_online(state, def)?;
+    if state.executor.live_on(&def.name) > 0 {
+        return Err(ApiError::conflict("recreate refused: exec sessions are live on the target"));
+    }
+    let st = docker_state(state, def).await?;
+    if st != "stopped" && st != "absent" {
+        return Err(ApiError::conflict("recreate refused: bring the container down first"));
+    }
+    // Check capability and capacity before discarding the old writable layer.
+    docker_limits(state, def)?;
+    check_running_cap(state, def, None).await?;
+    if st == "stopped" {
+        let container = container_name(def);
+        verb_ok(state, def, "docker.rm", move |session| {
+            DaemonFrame::DockerRm(DockerRm {
+                session,
+                container,
+                force: false,
+                volumes: false,
+                timeout_secs: Some(120),
+            })
+        })
+        .await?;
+    }
+    let mut out = lifecycle(state, def, LifecycleVerb::Up, &LifecycleOpts::default()).await?;
+    out["verb"] = "recreate".into();
+    Ok(out)
 }
 
 async fn vmlab_state(state: &Shared, def: &TargetDef) -> ApiResult<String> {
@@ -2617,6 +2654,12 @@ pub async fn lifecycle(
                         }
                         // A permanent target keeps its files over down and up.
                         "stopped" => {
+                            if runtime_of(state, &def.name).await?.recreate_required {
+                                return Err(ApiError::conflict(
+                                    "image or limits changed: explicitly recreate the target to apply them; \
+                                     the writable layer will be lost, volumes are kept",
+                                ));
+                            }
                             check_running_cap(state, def, None).await?;
                             docker_start(state, def).await?;
                             if !fits && def.container.is_none() {

@@ -39,6 +39,9 @@ pub struct TargetRow {
 /// The runtime record of a target (docs/api.md §17.2, "Workspaces").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Runtime {
+    /// Create-time settings changed. Replacing a permanent container needs consent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recreate_required: bool,
     /// The agent workspaces (`<project>/<agent>`) that the running
     /// container or lab instance has attached.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -564,7 +567,7 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
             .with_details(json!({"state": "running", "fields": changed})));
         }
     }
-    if p.contains_key("limits") {
+    if p.contains_key("limits") && current.def.container.is_some() {
         refuse_docker_limits(&current, p.get("limits"), o.get("limits"))?;
     }
     for (k, val) in p {
@@ -591,6 +594,15 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
     let was = credential_admin(t, name)?;
     let admin = admin_after_write(t, &def, Some((&current.def, was)))?;
     check_global_credential(t, &def, admin)?;
+    if def.kind == TargetKind::Docker
+        && !def.ephemeral
+        && def.container.is_none()
+        && (def.image != current.def.image || def.limits != current.def.limits)
+    {
+        let mut rt = current.runtime.clone();
+        rt.recreate_required = true;
+        set_runtime(t, name, &rt)?;
+    }
     t.execute(
         "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5,
                             credential_admin = ?6

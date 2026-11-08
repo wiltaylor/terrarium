@@ -46,6 +46,7 @@ pub fn routes() -> Router<Shared> {
         .route("/targets/{name}", get(show).patch(update).delete(remove))
         .route("/targets/{name}/test", post(test))
         .route("/targets/{name}/up", post(up))
+        .route("/targets/{name}/recreate", post(recreate))
         .route("/targets/{name}/down", post(down))
         .route("/targets/{name}/snapshot", post(snapshot))
         .route("/targets/{name}/restore", post(restore))
@@ -80,6 +81,8 @@ pub fn routes() -> Router<Shared> {
 /// A target with its state, as the API shows it.
 #[derive(Debug, Clone, Serialize)]
 pub struct TargetView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recreate_note: Option<&'static str>,
     /// The target name. Targets have no other ID.
     pub id: String,
     #[serde(flatten)]
@@ -248,6 +251,9 @@ pub fn view(state: &Shared, actor: &Actor, r: TargetRow, mine: &[LeaseRow]) -> T
         usable,
         access,
         lease: if access == Some("lease") { lease } else { None },
+        recreate_note: r.runtime.recreate_required.then_some(
+            "New image or limits take effect only after explicit recreate: the writable layer is lost, volumes are kept",
+        ),
         runtime: r.runtime,
         credential_info: None,
         limits_info,
@@ -501,6 +507,21 @@ async fn snapshot_delete(
 
 /// Lifecycle verbs: an actor that may use the target, or one that may
 /// define it.
+async fn recreate(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let r = load(&state, &actor, name).await?;
+    policy::define_target(&actor, r.def.project.as_deref())?;
+    let out = executor::recreate(&state, &r.def).await?;
+    let detail = out.clone();
+    state.db.write(actor.label(), move |t| {
+        t.audit("target.recreate", &r.def.name, r.def.project.as_deref(), detail)
+    }).await?;
+    Ok(Json(out))
+}
+
 async fn run_verb(
     state: Shared,
     actor: Actor,

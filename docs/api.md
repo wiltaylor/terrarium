@@ -6198,6 +6198,18 @@ field with its current value is no change. `terrarium admin target edit`
 sends this `PATCH`. Exception: the `limits` of a `host` target change at
 any time ("Resource limits", below).
 
+For a permanent managed Docker target, changing `image` or `limits` sets
+`runtime.recreate_required` and returns `recreate_note`. The next `up` of
+an existing stopped container refuses rather than silently using old settings.
+Run `terrarium admin target verb NAME recreate` (`POST
+/api/targets/{name}/recreate`) explicitly to apply the settings. This requires
+the rights to define the target (project admin or global sysadmin), refuses
+running containers and live exec sessions, and removes the stopped container
+without force or volume deletion before starting the new image. **The old
+writable layer is lost.** Volumes remain on the host, but anonymous volumes
+are not automatically reattached. Existing-container targets (`container`)
+cannot be recreated. Ephemeral targets keep their existing behavior.
+
 An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values
 that go onto a command line (`host`, `address`, `image`, `container`,
 `machine`, `credential`, `username`, `domain`) must not be empty, must not
@@ -6255,9 +6267,8 @@ Rules:
   one for all holders (§17.8), so they share the limits. Docker sets them
   when Terrarium runs the container (`up`). A change of `limits` while the
   container runs is `409 conflict`, as for every field. While a container of
-  a permanent target is `stopped`, a change of `limits` is `409 conflict`
-  too, because `up` starts that container with its old limits: remove it
-  first (`POST /api/targets/{name}/down` with `{"destroy": true}`). An
+  a permanent managed target is `stopped`, a change of `limits` requires
+  explicit `recreate` (above), rather than starting with old limits. An
   ephemeral target gets a new container at each `up`.
 - **A `host` target is always `running`** while its host agent is online.
   Its `limits` change at any time with `PATCH`. A new session sets the new

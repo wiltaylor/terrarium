@@ -3845,25 +3845,23 @@ async fn docker_limits_go_on_the_container() {
         ),
         "{run}"
     );
-    // A stopped container keeps the limits it was made with.
+    // Changed create-time settings require explicit consent to recreate.
     lab.td.post_empty("/api/targets/dbox/down").await.ok();
     let r = lab
         .td
         .patch("/api/targets/dbox", json!({"limits": {"cpu": 2}}))
         .await;
-    assert_eq!(r.status, 409, "{}", r.body);
-    assert!(
-        r.body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("stopped container")
-    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["runtime"]["recreate_required"], true);
+    lab.td.post_empty("/api/targets/dbox/up").await.err(409, "conflict");
+    lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
+    assert!(lab.log().contains("--cpus=2 "), "{}", lab.log());
     // The same limits are no change.
     let r = lab
         .td
         .patch(
             "/api/targets/dbox",
-            json!({"limits": {"cpu": 1.5}, "keep": true}),
+            json!({"limits": {"cpu": 2}, "keep": true}),
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
@@ -3883,6 +3881,60 @@ async fn docker_limits_go_on_the_container() {
             .unwrap()
             .contains("systemd-run is off in this test")
     );
+}
+
+#[tokio::test]
+async fn docker_image_edit_needs_explicit_recreate_without_volume_deletion() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1",
+                      "image": "alpine:3"})).await;
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    lab.td.post_empty("/api/targets/dbox/recreate").await.err(409, "conflict");
+    assert!(!lab.log().contains("docker rm"));
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    let unchanged = lab.td.patch("/api/targets/dbox", json!({"image": "alpine:3"})).await.ok();
+    assert!(unchanged["recreate_note"].is_null());
+    let edited = lab.td.patch("/api/targets/dbox", json!({"image": "alpine:latest"})).await.ok();
+    assert!(edited["recreate_note"].as_str().unwrap().contains("writable layer"));
+    // An unrelated patch must not clear the persisted requirement.
+    let edited = lab.td.patch("/api/targets/dbox", json!({"keep": true})).await.ok();
+    assert_eq!(edited["runtime"]["recreate_required"], true);
+    lab.td.post_empty("/api/targets/dbox/up").await.err(409, "conflict");
+    let recreated = lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
+    assert_eq!(recreated["verb"], "recreate");
+    assert_eq!(recreated["state"], "running");
+    let log = lab.log();
+    assert!(log.contains("docker rm terrarium-dbox"), "{log}");
+    assert!(!log.contains("docker rm -"), "{log}");
+    assert!(log.lines().rfind(|l| l.starts_with("docker run")).unwrap().contains("alpine:latest"), "{log}");
+    assert_eq!(log.matches("docker run ").count(), 2, "{log}");
+    assert!(lab.td.get("/api/targets/dbox").await.ok()["recreate_note"].is_null());
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    assert_eq!(lab.log().matches("docker run ").count(), 2);
+    assert!(lab.log().contains("docker start terrarium-dbox"));
+}
+
+#[tokio::test]
+async fn docker_recreate_requires_admin_and_refuses_live_sessions() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let worker = lab.td.agent("terra", "worker", json!({"policy": {"targets": ["dbox"]}})).await;
+    let worker = worker["id"].as_str().unwrap();
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3"})).await;
+    lab.td.req(hyper::Method::POST, "/api/targets/dbox/recreate", None, Some(worker)).await.err(403, "forbidden");
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    let sid = exec(&lab.td, "dbox", json!({"cmd": ["sleeper"]})).await;
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    lab.td.post_empty("/api/targets/dbox/recreate").await.err(409, "conflict");
+    assert!(!lab.log().contains("docker rm"));
+    std::fs::write(lab.bins.path().join("sleeper.end"), "").unwrap();
+    drain(&lab.td, "dbox", &sid).await;
+    lab.td.post_empty("/api/targets/dbox/recreate").await.ok();
+    lab.target(json!({"name": "external", "kind": "docker", "host": "lab1", "container": "existing"})).await;
+    lab.td.post_empty("/api/targets/external/recreate").await.err(422, "invalid");
 }
 
 /// The whole path on this machine: the daemon sends the limits and the
