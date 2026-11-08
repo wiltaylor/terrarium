@@ -737,28 +737,65 @@ async fn delete_moves_the_agent_dir_to_the_trash() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn project_inbox_mail_reaches_lead_as_a_turn() {
     let td = Td::start().await;
-    let sender = td.agent("source", "worker", json!({})).await;
-    let id = td.agent("destination", "lead", json!({"roles": ["project_admin"]})).await;
+    td.agent("source", "worker", json!({})).await;
+    let id = td
+        .agent("destination", "lead", json!({"roles": ["project_admin"]}))
+        .await;
     // Queue before launch: recovery must find project mail, not just direct mail.
-    let m = td.req(Method::POST, "/api/mail",
-        Some(json!({"to": "project:destination", "subject": "release", "body": "deploy notes"})),
-        Some("source/worker")).await;
+    let (status, m) = td
+        .req(
+            Method::POST,
+            "/api/mail",
+            Some(
+                json!({"to": "project:destination", "subject": "release", "body": "deploy notes"}),
+            ),
+            Some("source/worker"),
+        )
+        .await;
+    assert_eq!(status, 201);
     assert_eq!(m["state"], "queued");
     let mid = m["id"].as_str().unwrap();
-    let listed = td.req(Method::GET, "/api/mail?to=destination/lead&state=unread", None, Some("destination/lead")).await;
+    let (status, listed) = td
+        .req(
+            Method::GET,
+            "/api/mail?to=destination/lead&state=unread",
+            None,
+            Some("destination/lead"),
+        )
+        .await;
+    assert_eq!(status, 200);
     assert_eq!(listed.as_array().unwrap().len(), 1);
     td.post(&format!("/api/agents/{id}/start"), None).await;
-    let want = format!("[Mailbox:source/worker] Subject: release (thread {}, message {mid})\n> deploy notes", m["thread_id"].as_str().unwrap());
-    td.wait_events(&id, "turn_start", |es| es.iter().any(|e| e["data"]["prompt"] == want)).await;
+    let want = format!(
+        "[Mailbox:source/worker] Subject: release (thread {}, message {mid})\n> deploy notes",
+        m["thread_id"].as_str().unwrap()
+    );
+    td.wait_events(&id, "turn_start", |es| {
+        es.iter().any(|e| e["data"]["prompt"] == want)
+    })
+    .await;
     td.wait_status(&id, "idle").await;
     assert_eq!(td.get(&format!("/api/mail/{mid}")).await["read_by"], id);
     // A live event must route to the same lead without rewriting the inbox address.
-    let live = td.req(Method::POST, "/api/projects/destination/inbox",
-        Some(json!({"body": "live notes"})), Some("source/worker")).await;
+    let (status, live) = td
+        .req(
+            Method::POST,
+            "/api/projects/destination/inbox",
+            Some(json!({"body": "live notes"})),
+            Some("source/worker"),
+        )
+        .await;
+    assert_eq!(status, 201);
     let live_id = live["id"].as_str().unwrap();
-    td.wait_events(&id, "turn_start", |es| es.iter().any(|e| e["data"]["prompt"].as_str().is_some_and(|p| p.contains(live_id) && p.contains("> live notes")))).await;
+    td.wait_events(&id, "turn_start", |es| {
+        es.iter().any(|e| {
+            e["data"]["prompt"]
+                .as_str()
+                .is_some_and(|p| p.contains(live_id) && p.contains("> live notes"))
+        })
+    })
+    .await;
     assert_eq!(live["to"], "project:destination");
-    let _ = sender;
 }
 
 #[tokio::test]

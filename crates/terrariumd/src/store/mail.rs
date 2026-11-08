@@ -360,16 +360,27 @@ pub struct MailFilter {
 /// The durable, non-ephemeral admin responsible for a project inbox.
 /// Prefer the named lead, otherwise the oldest admin.
 fn inbox_recipient(conn: &Connection, project: &str) -> ApiResult<Option<Address>> {
-    let mut page = Page { limit: Some(Page::MAX), cursor: None };
+    let mut page = Page {
+        limit: Some(Page::MAX),
+        cursor: None,
+    };
     let mut first = None;
     loop {
         let rows = agents::list(conn, Some(project), &page)?;
         for v in rows.items {
             let a = v.agent;
             if a.roles.contains(&terrarium_core::Role::ProjectAdmin) {
-                let address = Address::Agent { id: a.id.to_string(), name: a.name.clone(), project: a.project };
-                if a.name == "lead" { return Ok(Some(address)); }
-                if first.is_none() { first = Some(address); }
+                let address = Address::Agent {
+                    id: a.id.to_string(),
+                    name: a.name.clone(),
+                    project: a.project,
+                };
+                if a.name == "lead" {
+                    return Ok(Some(address));
+                }
+                if first.is_none() {
+                    first = Some(address);
+                }
             }
         }
         match rows.next {
@@ -380,11 +391,17 @@ fn inbox_recipient(conn: &Connection, project: &str) -> ApiResult<Option<Address
 }
 
 fn routed_inbox(conn: &Connection, id: &str) -> ApiResult<String> {
-    let Ok(v) = agents::get(conn, id) else { return Ok(String::new()); };
+    let Ok(v) = agents::get(conn, id) else {
+        return Ok(String::new());
+    };
     let project = v.agent.project;
-    Ok(if inbox_recipient(conn, &project)?.is_some_and(|a| a.key() == id) {
-        format!("project:{project}")
-    } else { String::new() })
+    Ok(
+        if inbox_recipient(conn, &project)?.is_some_and(|a| a.key() == id) {
+            format!("project:{project}")
+        } else {
+            String::new()
+        },
+    )
 }
 
 /// Messages, oldest first. The cursor is a message ID.
@@ -404,7 +421,9 @@ pub fn list(conn: &Connection, f: &MailFilter, page: &Page) -> ApiResult<Paged<M
                 sql.push_str(&format!(" AND {col} = ?"));
             }
             args.push(v.clone());
-            if col == "to_agent" { args.push(routed_inbox(conn, v)?); }
+            if col == "to_agent" {
+                args.push(routed_inbox(conn, v)?);
+            }
         }
     }
     match f.state.as_deref() {
