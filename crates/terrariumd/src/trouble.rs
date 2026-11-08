@@ -840,6 +840,64 @@ mod tests {
     }
 
     #[test]
+    fn read_only_history_excludes_preclaim_and_commenting_lead_statuses() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, at TEXT, kind TEXT, agent_id TEXT, card TEXT, payload TEXT);
+            CREATE TABLE waits(id TEXT, due_at TEXT);
+            CREATE TABLE card_trouble_baseline(singleton INTEGER PRIMARY KEY, seq INTEGER);
+            INSERT INTO card_trouble_baseline VALUES (1, 100);").unwrap();
+        let add = |seq, kind, agent, card, data: Value| {
+            c.execute(
+                "INSERT INTO events VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    seq,
+                    at(seq).to_rfc3339(),
+                    kind,
+                    agent,
+                    card,
+                    data.to_string()
+                ],
+            )
+            .unwrap();
+        };
+        add(1, "status", "lead", None, json!({"status": "working"}));
+        add(
+            50,
+            "card",
+            "worker",
+            Some("P-1"),
+            json!({"change": "claimed", "assignee": "worker"}),
+        );
+        add(109, "status", "worker", None, json!({"status": "working"}));
+        add(
+            110,
+            "card",
+            "worker",
+            Some("P-1"),
+            json!({"change": "claimed", "assignee": "worker", "column_role": "working"}),
+        );
+        add(111, "status", "worker", None, json!({"status": "working"}));
+        add(112, "status", "lead", None, json!({"status": "working"}));
+        add(
+            113,
+            "card",
+            "lead",
+            Some("P-1"),
+            json!({"change": "commented"}),
+        );
+        c.pragma_update(None, "query_only", true).unwrap();
+        let events = history(&c, "P-1").unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(
+            events
+                .iter()
+                .filter(|e| e.kind == "status")
+                .all(|e| e.agent.as_deref() == Some("worker"))
+        );
+        assert_eq!(facts("P-1", &events, at(120)).seconds, 10);
+    }
+
+    #[test]
     fn validation_uses_same_suite_worker_and_red_streak() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch("CREATE TABLE test_runs(pk INTEGER PRIMARY KEY, name TEXT, commit_sha TEXT, failed INTEGER, errored INTEGER, created_by TEXT);

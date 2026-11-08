@@ -66,6 +66,21 @@ async fn notices(td: &TestDaemon, who: &str) -> usize {
         .count()
 }
 
+async fn settled_signals(td: &TestDaemon, card: &str, expected: Value) {
+    let start = std::time::Instant::now();
+    loop {
+        terrariumd::trouble::pass(&state(td)).await;
+        if usage(td, card).await["signals"] == expected {
+            return;
+        }
+        assert!(
+            start.elapsed() < crate::common::WAIT,
+            "trouble signals did not settle"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn notice_is_once_across_ticks_resolution_recurrence_and_restart() {
     let (mut td, lead, worker, card) = setup().await;
@@ -323,8 +338,7 @@ async fn review_wait_marks_and_clears_on_return_to_work() {
     td.post_as(&worker, &format!("/api/cards/{card}/claim"), json!({}))
         .await
         .ok();
-    terrariumd::trouble::pass(&state(&td)).await;
-    assert_eq!(usage(&td, &card).await["signals"], json!([]));
+    settled_signals(&td, &card, json!([])).await;
 }
 
 #[tokio::test]
@@ -355,7 +369,8 @@ async fn real_claim_status_and_wait_events_drive_the_working_clock() {
         )
         .await;
     let wait_id = id(wait.ok());
-    td.wait_status(&worker, "waiting").await;
+    // Registering a wait during an open turn intentionally leaves its
+    // status working. The clock must still exclude that open wait.
     let resting = usage(&td, &card).await["working_seconds"].clone();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(usage(&td, &card).await["working_seconds"], resting);
