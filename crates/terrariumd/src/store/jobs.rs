@@ -1255,7 +1255,7 @@ pub fn set_planned(t: &mut Tx<'_>, job: &Job, secs: i64, by: &str) -> ApiResult<
     Ok(job)
 }
 
-/// Clear the ETA of the cards of a queued job that has a planned duration.
+/// Clear card ETAs when a planned job is queued or cancelled.
 fn queued_eta(t: &mut Tx<'_>, job: &Job) -> ApiResult<()> {
     if job.planned_secs.is_none() {
         return Ok(());

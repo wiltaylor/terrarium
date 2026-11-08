@@ -11754,6 +11754,7 @@ queued.
 - An ETA duration that is given later for a card with an open job (`card
   eta`, `card move ... --eta`) sets the job's `planned_secs` (§8.2).
 - The job's end moves the card, and the move clears the ETA (§8.2).
+- Cancelling a job with a planned duration clears its cards' ETAs too.
 
 Events `job.verdict` {project, job, card, kind, verdict, state, outcome,
 attempt, by_agent, repo, branch, parent, batch, end_comment,
