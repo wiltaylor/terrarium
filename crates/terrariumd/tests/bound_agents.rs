@@ -886,6 +886,15 @@ async fn an_unpark_is_refused_when_another_agent_has_the_card(flow: &str) {
 /// place frees, the agent stays parked.
 #[tokio::test]
 async fn a_re_park_drops_a_queued_unpark() {
+    re_park_drops_a_queued_unpark(false).await;
+}
+
+#[tokio::test]
+async fn reconcile_drops_a_queued_custom_unpark() {
+    re_park_drops_a_queued_unpark(true).await;
+}
+
+async fn re_park_drops_a_queued_unpark(missed: bool) {
     let (td, lead) = setup().await;
     let a = card(&td, "p", "in_progress").await;
     let b = card(&td, "p", "in_progress").await;
@@ -903,8 +912,25 @@ async fn a_re_park_drops_a_queued_unpark() {
         spawn_row(&td, &key).await["unpark_queued_at"].is_string()
     })
     .await;
+    // A custom agent.unpark turn has no default return prefix. An
+    // unrelated queued turn must survive the re-park.
+    let key = ea.clone();
+    state(&td)
+        .db
+        .write("system", move |t| {
+            terrariumd::bound::unpark_tx(t, &key, Some("Custom return"), "rule")?;
+            terrariumd::store::agents::queue_turn(t, &key, "Unrelated turn")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     // A goes back to review before a place frees: the unpark is dropped.
-    mv(&td, &a, "review", None).await;
+    if missed {
+        hidden_move(&td, &a, "review").await;
+        terrariumd::bound::reconcile(&state(&td)).await;
+    } else {
+        mv(&td, &a, "review", None).await;
+    }
     let key = ea.clone();
     until("the dropped unpark", || async {
         spawn_row(&td, &key).await["unpark_queued_at"].is_null()
@@ -927,6 +953,14 @@ async fn a_re_park_drops_a_queued_unpark() {
     let card_tag = format!("[System:card {a}]");
     assert!(
         !waiting.iter().any(|q| q.text.starts_with(&card_tag)),
+        "{waiting:?}"
+    );
+    assert!(
+        !waiting.iter().any(|q| q.text == "Custom return"),
+        "{waiting:?}"
+    );
+    assert!(
+        waiting.iter().any(|q| q.text == "Unrelated turn"),
         "{waiting:?}"
     );
     // B parks: a place frees, but A stays parked, with no turn.
