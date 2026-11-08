@@ -403,22 +403,21 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
         assert!(terrariumd::reservations::exec_budget(&state, &def, None).is_err());
     }
     def.kind = terrarium_core::config::TargetKind::Host;
+    let before: i64 = state
+        .db
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?))
+        .await
+        .unwrap();
     for _ in 0..3 {
         assert!(terrariumd::reservations::exec_budget(&state, &def, Some("p/worker")).is_ok());
     }
     tokio::time::sleep(Duration::from_millis(30)).await;
     let count: i64 = state
         .db
-        .read(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM messages WHERE subject LIKE '%gpu_native_session'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(count, 0, "native admission must not generate GPU mail");
+    assert_eq!(count, before, "native admission must not generate any mail");
     td.delete(&format!("/api/reservations/{id}")).await.ok();
     let shared = td.post("/api/hosts/h/reservations", json!({"target":"p-box","amounts":{},"gpus":[{"uuid":"GPU-abcd","vram_bytes":1048576}],"until":"30m"})).await;
     let sid = shared.ok()["id"].as_str().unwrap();
@@ -452,6 +451,46 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
         count, 2,
         "holder and project lead, deduplicated across sweeps"
     );
+    let reservation_id = sid.to_owned();
+    state
+        .db
+        .write("system", move |tx| {
+            use terrariumd::store::reservations::{get, gpu_usage};
+            let id = &reservation_id;
+            let start = get(tx, id)?.gpu_last_warning.unwrap();
+            // Oscillation must not rearm, even after an hour.
+            for offset in [30_000, 60_000, 3_600_000] {
+                gpu_usage(tx, id, false, start + offset)?;
+                gpu_usage(tx, id, true, start + offset + 1)?;
+                assert!(get(tx, id)?.gpu_warned);
+                assert_eq!(get(tx, id)?.gpu_last_warning, Some(start));
+            }
+            // A full hold rearms, but cannot bypass the hourly limit.
+            gpu_usage(tx, id, false, start + 3_700_000)?;
+            gpu_usage(tx, id, false, start + 4_299_999)?;
+            assert!(get(tx, id)?.gpu_warned);
+            gpu_usage(tx, id, false, start + 4_300_000)?;
+            assert!(!get(tx, id)?.gpu_warned);
+            gpu_usage(tx, id, true, start + 4_300_001)?;
+            let last = start + 4_300_001;
+            gpu_usage(tx, id, false, last + 1)?;
+            gpu_usage(tx, id, false, last + 600_001)?;
+            gpu_usage(tx, id, true, last + 600_002)?;
+            assert_eq!(get(tx, id)?.gpu_last_warning, Some(last));
+            gpu_usage(tx, id, true, last + 3_599_999)?;
+            assert_eq!(get(tx, id)?.gpu_last_warning, Some(last));
+            gpu_usage(tx, id, true, last + 3_600_000)?;
+            assert_eq!(get(tx, id)?.gpu_last_warning, Some(last + 3_600_000));
+            let mails: i64 = tx.query_row(
+                "SELECT count(*) FROM messages WHERE subject=?1",
+                [format!("Reservation {id}: gpu_overage")],
+                |r| r.get(0),
+            )?;
+            assert_eq!(mails, 6, "three warnings to holder and lead");
+            Ok(())
+        })
+        .await
+        .unwrap();
     assert_eq!(
         td.get(&format!("/api/reservations/{sid}")).await.ok()["state"],
         "active"

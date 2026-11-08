@@ -396,6 +396,15 @@ pub fn unpark_tx(
         refuse(t, &sp, &other, cause)?;
         return Ok((Unparked::Refused, sp.owner));
     }
+    if sp.parked_at.is_some()
+        && sp.unpark_queued_at.is_none()
+        && let Some(thread) = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:"))
+        && t.execute("UPDATE threads SET restart_context_sent = 1 WHERE id = ?1 AND restart_context_sent = 0", [thread])? > 0
+    {
+        let restart = crate::thread_agent::restart_turn(thread);
+        crate::store::transcripts::record_turn(t, id, &restart)?;
+        crate::store::agents::queue_turn(t, id, &restart)?;
+    }
     if let Some(turn) = turn {
         crate::store::transcripts::record_turn(t, id, turn)?;
         crate::store::agents::queue_turn(t, id, turn)?;
