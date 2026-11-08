@@ -2985,6 +2985,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn merge_references_refuse_literals_and_reserved_env_names() {
+        for (name, value) in [("KEY", "literal"), ("KEY", "@secret:"), ("PATH", "@secret:vm")] {
+            let mut delivery = DeliveryDef::default();
+            delivery.merge_secrets.insert(name.into(), value.into());
+            assert!(check_merge_refs(&delivery).is_err());
+        }
+        let mut delivery = DeliveryDef::default();
+        delivery.merge_secrets.insert("DOCKER_CI_KEY".into(), "@secret:vm.private_key".into());
+        assert!(check_merge_refs(&delivery).is_ok());
+    }
+
+    #[test]
     fn job_log_keeps_early_panics_before_a_long_noisy_tail() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("logs with 'quotes/job.log");

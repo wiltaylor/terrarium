@@ -2162,10 +2162,14 @@ pub(crate) fn own_redactor(
         return None;
     }
     let r = Redactor::build_min(
-        secrets.iter().map(|(label, v)| Entry {
-            label: label.clone(),
-            scope: None,
-            value: v.as_bytes(),
+        secrets.iter().flat_map(|(label, v)| {
+            std::iter::once(v.as_str())
+                .chain(v.lines().filter(|line| v.contains("PRIVATE KEY") && !line.trim().is_empty()))
+                .map(move |value| Entry {
+                    label: label.clone(),
+                    scope: None,
+                    value: value.as_bytes(),
+                })
         }),
         |_| true,
         TOOL_SECRET_MIN,
@@ -5132,6 +5136,14 @@ pub async fn checkout_on_target(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[test]
+    fn own_key_redaction_covers_individual_pem_lines() {
+        let body = "dummy-base64-private-key-line-for-redaction";
+        let value = format!("-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----\n");
+        let redactor = super::own_redactor(&[("job/vm".into(), zeroize::Zeroizing::new(value))]).unwrap();
+        assert!(!redactor.redact_str(body).contains(body));
+        assert!(redactor.redact_str("ordinary build output").contains("ordinary build output"));
+    }
     use super::*;
 
     fn ssh_def() -> TargetDef {

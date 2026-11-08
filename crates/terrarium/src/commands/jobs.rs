@@ -438,6 +438,28 @@ fn queued_line(c: &Ctx, v: &Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merge_secret_flags_parse_clear_and_refuse_literals() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Args {
+            #[command(flatten)]
+            delivery: super::DeliverySetArgs,
+        }
+        let parse = |flags: &[&str]| {
+            Args::try_parse_from(std::iter::once("test").chain(flags.iter().copied()))
+        };
+        let args = parse(&["--merge-secret", "KEY=@secret:vm.private_key"]).unwrap();
+        let value = super::merged(&serde_json::json!({}), &args.delivery).unwrap();
+        assert_eq!(value["merge_secrets"]["KEY"], "@secret:vm.private_key");
+        let clear = parse(&["--clear-merge-secrets"]).unwrap();
+        assert_eq!(super::merged(&value, &clear.delivery).unwrap()["merge_secrets"], serde_json::json!({}));
+        for value in ["KEY=literal", "KEY", "=@secret:vm"] {
+            let args = parse(&["--merge-secret", value]).unwrap();
+            assert!(super::merged(&serde_json::json!({}), &args.delivery).is_err());
+        }
+        assert!(parse(&["--clear-merge-secrets", "--merge-secret", "KEY=@secret:vm"]).is_err());
+    }
     use std::sync::Arc;
 
     use super::*;

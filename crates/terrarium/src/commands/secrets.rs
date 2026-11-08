@@ -334,6 +334,16 @@ pub fn grantee(s: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn delivery_principal_passes_through_cli() {
+        assert_eq!(super::grantee("delivery:p"), "delivery:p");
+        assert_eq!(super::grantee("project:p"), "project:p");
+        assert_eq!(super::grantee("p/worker"), "agent:p/worker");
+    }
+}
+
 /// The `targets` of a `run` grant as one cell.
 fn with_targets(mut s: Value) -> Value {
     let t = s["targets"]
