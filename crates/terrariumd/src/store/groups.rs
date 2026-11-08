@@ -428,9 +428,14 @@ fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
         let g = get(t, &id)?;
         for member in &g.members {
             let card = board::get_card(t, member)?;
+            let role: Option<String> = t.query_row(
+                "SELECT k.role FROM cards c JOIN board_columns k ON k.id = c.column_id WHERE c.id = ?1",
+                [member],
+                |r| r.get(0),
+            )?;
             if card.archived
                 || matches!(
-                    card.column_role.as_deref(),
+                    role.as_deref(),
                     Some("in_progress" | "ready" | "blocked" | "backlog")
                 )
             {
