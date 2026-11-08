@@ -178,6 +178,7 @@ pub enum Origin {
 /// server.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hooks {
+    pub provenance: Option<crate::git_identity::Provenance>,
     /// A tracked dir of the repo: each regular file in it at `HEAD` goes
     /// to `.git/hooks/<name>`, mode 0755.
     pub dir: Option<String>,
@@ -190,7 +191,7 @@ pub struct Hooks {
 
 impl Hooks {
     fn is_empty(&self) -> bool {
-        self.dir.is_none() && self.push_deny.is_empty()
+        self.dir.is_none() && self.push_deny.is_empty() && self.provenance.is_none()
     }
 }
 
@@ -276,6 +277,14 @@ fn install_hooks(c: &Checkout, r: &Runner) -> Result<Vec<String>, GitError> {
             "pre-push".to_owned(),
             push_deny_hook(&c.hooks.push_deny).into_bytes(),
         ));
+    }
+    if let Some(p) = &c.hooks.provenance {
+        if let Some(f) = files.iter_mut().find(|(n, _)| n == "prepare-commit-msg") {
+            f.0 = "prepare-commit-msg.repo".into();
+        }
+        files.push(("prepare-commit-msg".into(), p.hook().into_bytes()));
+        r.quiet(&c.dest, &["config", "user.name", &p.identity.name])?;
+        r.quiet(&c.dest, &["config", "user.email", &p.identity.email])?;
     }
     let git_dir = open_git_dir(&c.dest, false)?;
     let shown = Path::new(".git");
@@ -2590,20 +2599,28 @@ impl JobRepo {
                 return Ok(MergeStep::Failed(msg));
             }
         }
-        let sha = self.local(&[
-            "-c",
-            "user.name=terrarium",
-            "-c",
-            "user.email=terrarium@localhost",
-            "commit-tree",
-            &tree,
-            "-p",
-            head,
-            "-p",
-            other,
-            "-m",
-            message,
-        ])?;
+        let identity = crate::git_identity::Identity::from_env();
+        let mut runner = self.runner(false)?;
+        let mut env = std::collections::BTreeMap::new();
+        identity.env(&mut env);
+        runner.env.extend(env);
+        let sha = runner.quiet(
+            &self.c.dest,
+            &[
+                "-c",
+                &format!("user.name={}", identity.name),
+                "-c",
+                &format!("user.email={}", identity.email),
+                "commit-tree",
+                &tree,
+                "-p",
+                head,
+                "-p",
+                other,
+                "-m",
+                message,
+            ],
+        )?;
         Ok(MergeStep::Merged(sha.trim().to_owned()))
     }
 
@@ -2736,6 +2753,7 @@ mod tests {
         c.hooks = Hooks {
             dir: Some(".githooks".into()),
             push_deny: vec!["wip/*".into()],
+            provenance: None,
         };
         let out = clone_or_update(&c, &mut |_| {}).unwrap();
         let mut names = out.hooks.clone();
@@ -3542,7 +3560,14 @@ mod tests {
         assert_eq!(parents.split_whitespace().count(), 3, "{parents}");
         assert_eq!(
             git_out(r.path(), &["log", "-1", "--format=%s %an", &m1]),
-            "Merge clean onto next terrarium"
+            "Merge clean onto next Terrarium"
+        );
+        assert_eq!(
+            git_out(
+                r.path(),
+                &["log", "-1", "--format=%an <%ae>%n%cn <%ce>", &m1]
+            ),
+            "Terrarium <terrarium@localhost>\nTerrarium <terrarium@localhost>"
         );
         let MergeStep::Merged(m2) = r
             .merge(&m1, "refs/remotes/job/c1", "Merge c1 onto next")

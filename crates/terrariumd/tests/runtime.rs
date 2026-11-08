@@ -1009,11 +1009,8 @@ async fn local_repos_bind_into_the_sandbox_of_their_project_only() {
         );
         let line = a.join(" ");
         assert!(!line.contains(&outside.display().to_string()), "{line}");
-        assert_eq!(spec.env["GIT_AUTHOR_NAME"], agent.name);
-        assert_eq!(
-            spec.env["GIT_COMMITTER_EMAIL"],
-            format!("{}.{}@terrarium.invalid", agent.name, agent.project)
-        );
+        assert_eq!(spec.env["GIT_AUTHOR_NAME"], "Terrarium");
+        assert_eq!(spec.env["GIT_COMMITTER_EMAIL"], "terrarium@localhost");
     }
 }
 
