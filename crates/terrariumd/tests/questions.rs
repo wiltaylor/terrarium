@@ -118,13 +118,15 @@ async fn inbox_noise_requires_notice_context_and_one_question_per_card() {
         );
     }
     // A different agent may ask on this card. No card remains unrestricted.
-    let peer = id(&td.agent("p", "peer", json!({"roles": ["project_admin"]})).await);
+    let peer = id(&td
+        .agent("p", "peer", json!({"roles": ["project_admin"]}))
+        .await);
     ask(&td, &peer, json!({"text": "Independent?", "card": card})).await;
     ask(&td, &lead, json!({"text": "Unrelated?"})).await;
     let qid = id(&q);
     td.post(
         &format!("/api/questions/{qid}/answer"),
-        json!({"text": "Yes"}),
+        json!({"answer": "Yes"}),
     )
     .await
     .ok();

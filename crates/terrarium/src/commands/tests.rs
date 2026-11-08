@@ -7065,7 +7065,17 @@ async fn question_bundles_ask_show_update_and_answer() {
 async fn follow_up_questions_report_the_open_question() {
     for args in [
         vec!["question", "ask", "Follow up?", "--card", "TER-1"],
-        vec!["question", "bundle", "Follow ups", "--card", "TER-1", "--item", "A?", "--item", "B?"],
+        vec![
+            "question",
+            "bundle",
+            "Follow ups",
+            "--card",
+            "TER-1",
+            "--item",
+            "A?",
+            "--item",
+            "B?",
+        ],
         vec!["thread", "ask", "T1", "Follow up?"],
     ] {
         let r = exec(true, &args, vec![(409, json!({"error": {
