@@ -235,11 +235,7 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
                 }
             })
         }
-        ArtifactCmd::Ls {
-            page,
-            label,
-            card,
-        } => {
+        ArtifactCmd::Ls { page, label, card } => {
             let p = ctx.project_or(None).await?;
             let q = query([
                 ("page", page.clone()),
@@ -338,8 +334,6 @@ mod tests {
         );
         assert!(attaches_of(&None, &[], &None).is_empty());
     }
-
-
     #[test]
     fn label_filter_reads_the_links() {
         let a = json!({"links": [{"kind": "card", "ref": "TER-1"},

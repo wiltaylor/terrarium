@@ -392,16 +392,7 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
                 }
             })
         }
-        TestCmd::Link {
-            id,
-            cards,
-            labels,
-        }
-        | TestCmd::Unlink {
-            id,
-            cards,
-            labels,
-        } => {
+        TestCmd::Link { id, cards, labels } | TestCmd::Unlink { id, cards, labels } => {
             if cards.is_empty() && labels.is_empty() {
                 return Err(CliError::usage("give --card or --label"));
             }

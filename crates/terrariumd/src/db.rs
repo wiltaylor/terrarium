@@ -3527,12 +3527,21 @@ mod tests {
         assert_eq!(n, 2);
         assert_eq!(migrate(&mut conn).unwrap(), migration_count() - 80);
         assert_eq!(migrate(&mut conn).unwrap(), 0);
-        for table in ["versions", "version_cards", "version_artifacts", "version_reviews", "test_run_versions"] {
+        for table in [
+            "versions",
+            "version_cards",
+            "version_artifacts",
+            "version_reviews",
+            "test_run_versions",
+        ] {
             assert!(!conn.table_exists(None, table).unwrap(), "{table}");
-            let indexes: i64 = conn.query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1",
-                [table], |r| r.get(0),
-            ).unwrap();
+            let indexes: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(indexes, 0, "{table}");
         }
         for table in ["test_run_labels", "artifact_labels"] {

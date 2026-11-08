@@ -563,7 +563,10 @@ async fn attach_and_prune_keep_the_right_things() {
         .post("/api/artifacts/prune", json!({"as_of": at(day * 40)}))
         .await;
     assert_eq!(r.ok()["dry_run"], true);
-    assert_eq!(keys(r.ok(), "warned"), ["proj/ART-1", "proj/ART-2", "proj/ART-4"]);
+    assert_eq!(
+        keys(r.ok(), "warned"),
+        ["proj/ART-1", "proj/ART-2", "proj/ART-4"]
+    );
     let audit = td.get("/api/audit?action=artifact.prune_warning").await;
     assert_eq!(audit.ok(), &json!([]));
     // First real run: the warning, a day ahead.
@@ -573,7 +576,10 @@ async fn attach_and_prune_keep_the_right_things() {
             json!({"dry_run": false, "as_of": at(day * 40)}),
         )
         .await;
-    assert_eq!(keys(r.ok(), "warned"), ["proj/ART-1", "proj/ART-2", "proj/ART-4"]);
+    assert_eq!(
+        keys(r.ok(), "warned"),
+        ["proj/ART-1", "proj/ART-2", "proj/ART-4"]
+    );
     assert_eq!(keys(r.ok(), "pruned"), Vec::<String>::new());
     let audit = td.get("/api/audit?action=artifact.prune_warning").await;
     assert_eq!(audit.ok().as_array().unwrap().len(), 3);
@@ -596,7 +602,10 @@ async fn attach_and_prune_keep_the_right_things() {
             json!({"dry_run": false, "as_of": at(day * 41 + chrono::Duration::hours(1))}),
         )
         .await;
-    assert_eq!(keys(r.ok(), "pruned"), ["proj/ART-1", "proj/ART-2", "proj/ART-4"]);
+    assert_eq!(
+        keys(r.ok(), "pruned"),
+        ["proj/ART-1", "proj/ART-2", "proj/ART-4"]
+    );
     assert_eq!(r.ok()["kept"], 3);
     td.get("/api/artifacts/proj%2FART-1")
         .await
