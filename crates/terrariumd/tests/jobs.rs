@@ -2044,11 +2044,12 @@ exit 101"#;
     assert!(tail.contains(&log.display().to_string()), "{tail}");
     assert!(tail.contains("Full log on target p-box:"), "{tail}");
     let card = lab
-        .td
-        .get(&format!("/api/cards/{}", job["card"].as_str().unwrap()))
-        .await
-        .ok()
-        .clone();
+        .until_card(job["card"].as_str().unwrap(), "failure block", |c| {
+            c["body"]
+                .as_str()
+                .is_some_and(|body| body.starts_with("Validation failed:"))
+        })
+        .await;
     let body = card["body"].as_str().unwrap();
     for expected in [
         "test early_failure ... FAILED",
