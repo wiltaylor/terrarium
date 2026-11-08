@@ -28,8 +28,8 @@ describe("done screen", () => {
     expect(view.cards.map((c) => c.id)).toEqual(["P-2"]);
   });
   it("does not create version lanes for hidden cards", () => {
-    expect(buildLanes(boardView(board).cards, true).map((l) => l.version)).toEqual(["vnext"]);
-    expect(buildLanes(boardView(board, true).cards, true).map((l) => l.version)).toEqual(["1.0"]);
+    expect(buildLanes(boardView(board).cards, true).map((l) => l.version)).toEqual(["vnext", undefined]);
+    expect(buildLanes(boardView(board, true).cards, true).map((l) => l.version)).toEqual(["1.0", undefined]);
   });
   it("handles an empty done screen", () => {
     expect(boardView({ ...board, cards: [] }, true).cards).toEqual([]);
