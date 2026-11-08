@@ -1,0 +1,65 @@
+// @vitest-environment jsdom
+import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
+import { createComponent } from "solid-js";
+import { render } from "solid-js/web";
+import { afterEach, expect, it, vi } from "vitest";
+import { createMockApi } from "../../api/mock";
+
+const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
+vi.mock("../../stores", () => ({
+  api,
+  events: { on: () => () => {} },
+  inbox: { refresh: async () => {} },
+  agents: { inProject: () => [], byId: () => undefined },
+}));
+const { BoardPage } = await import("./BoardPage");
+const { loadBoards } = await import("../inbox/TrackedCards");
+let dispose: (() => void) | undefined;
+afterEach(() => { dispose?.(); document.body.innerHTML = ""; vi.restoreAllMocks(); });
+
+it("fetches only missing linked Done cards for Inbox progress", async () => {
+  const done = await api.cards.create("terrarium", { title: "Linked completion", column: "done" });
+  const get = vi.spyOn(api.cards, "get");
+  const boards = await loadBoards(["terrarium"], [
+    { project: "terrarium", card: done.id, linked_by: "operator", linked_at: "" },
+    { project: "terrarium", card: "TER-12", linked_by: "operator", linked_at: "" },
+  ]);
+  expect(get).toHaveBeenCalledExactlyOnceWith(done.id);
+  expect(boards.terrarium!.cards.find(c => c.id === done.id)?.column).toBe("done");
+  expect(boards.terrarium!.cards.some(c => c.id === "TER-11")).toBe(false);
+});
+
+it("opens full details for a Done card absent from the active board", async () => {
+  const done = await api.cards.create("terrarium", { title: "Completed regression", column: "done", body: "Full detail only" });
+  await api.cards.comment(done.id, "Full comment only");
+  const get = vi.spyOn(api.cards, "get");
+  const history = createMemoryHistory();
+  history.set({ value: `/p/terrarium/board?card=${done.id}` });
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(() => createComponent(MemoryRouter, {
+    history,
+    get children() { return createComponent(Route, { path: "/p/:project/board", component: BoardPage }); },
+  }), host);
+  await vi.waitFor(() => expect(get).toHaveBeenCalledWith(done.id));
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Full comment only"));
+  expect(document.body.textContent).toContain("Full detail only");
+  expect((await api.board.get("terrarium")).cards.some(c => c.id === done.id)).toBe(false);
+});
+
+it("does not fetch full cards when the board has no open drawer", async () => {
+  const get = vi.spyOn(api.cards, "get");
+  const history = createMemoryHistory();
+  history.set({ value: "/p/terrarium/board" });
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(() => createComponent(MemoryRouter, {
+    history,
+    get children() { return createComponent(Route, { path: "/p/:project/board", component: BoardPage }); },
+  }), host);
+  await vi.waitFor(() => expect(host.querySelectorAll("[data-card]").length).toBeGreaterThan(0));
+  expect(get).not.toHaveBeenCalled();
+  const chip = host.querySelector("[data-card='TER-12'] .test-chip");
+  expect(chip?.getAttribute("title")).toContain("Latest test run");
+  expect(chip?.getAttribute("href")).toContain("/board/tests/");
+});
