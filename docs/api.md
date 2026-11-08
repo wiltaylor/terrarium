@@ -11590,9 +11590,11 @@ Graceful shutdown stops admission before draining calls. Reads and long
 polls receive `retry`, which the CLI resends with the same request ID. Writes
 already admitted finish, including saving their answers. After 30 seconds
 the daemon logs and audits a restart deferral. It waits up to
-`--rpc-drain-secs` / `TERRARIUM_RPC_DRAIN_SECS` (default 600, range 30..899),
+the updater's `TERRARIUM_UPDATE_DRAIN_WAIT` (default 600 seconds),
 measured from the start of the drain, before exiting. New calls remain held
-during this interval.
+during this interval. Keep this cap below the 15-minute runner queue. Long
+`terrarium exec` calls may hold the drain until persistent exec sessions land
+in TER-263, which is outside this change.
 
 Write request IDs are scoped to the agent and bound to a fingerprint of the
 request. A reused ID with different parameters is rejected. Completed write
@@ -11600,9 +11602,10 @@ answers are stored in SQLite and returned without executing the write again,
 including after a daemon restart. Concurrent copies wait for the first call.
 Legacy callers without request IDs are drained but cannot safely replay.
 
-An unresolved journal entry after a crash or the drain cap yields
-`indeterminate`, never another execution. The caller must inspect the effect
-before deciding on a new operation. Each indeterminate outcome is logged and
+An unresolved (`started`, NULL answer) journal entry after a crash or the drain
+cap yields `indeterminate`, never another execution. The error includes the
+request ID and HTTP method and says "the call may or may not have happened;
+check before you retry". A non-NULL answer marks `done`. Each indeterminate outcome is logged and
 audited. External effects and the answer journal are not one transaction:
 this policy prevents duplicate execution, but cannot promise a successful
 answer for an interrupted external write. Journal records have no automatic

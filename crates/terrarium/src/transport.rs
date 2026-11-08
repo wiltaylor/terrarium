@@ -332,6 +332,36 @@ pub mod mock {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn retries_long_poll_with_the_same_request_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("runner.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let mut first = None;
+            for attempt in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                let frame: Value = serde_json::from_str(&line).unwrap();
+                let id = frame["params"]["request_id"].as_str().unwrap();
+                assert!(ulid::Ulid::from_string(id).is_ok());
+                if let Some(previous) = &first { assert_eq!(previous, &frame); }
+                first = Some(frame.clone());
+                let response = if attempt == 0 {
+                    json!({"type":"response", "id":frame["id"], "error":{"code":"retry", "message":"restarting"}})
+                } else {
+                    json!({"type":"response", "id":frame["id"], "result":{"status":200, "body":[]}})
+                };
+                write.write_all(format!("{response}\n").as_bytes()).await.unwrap();
+            }
+        });
+        let response = RunnerTunnelTransport::new(socket).send(ApiRequest::new(Method::Get, "/api/mail")).await.unwrap();
+        assert_eq!(response.status, 200);
+        server.await.unwrap();
+    }
+
     #[test]
     fn encodes_segments() {
         assert_eq!(encode("terrarium/worker"), "terrarium%2Fworker");

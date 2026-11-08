@@ -193,36 +193,7 @@ impl AgentRpc {
         let agent = ctx.agent.to_string();
         let lock = state.agent_calls.key(format!("{agent}:{id}"));
         let _unique = lock.lock().await;
-        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&params).map_err(|e| bad_params(e.to_string()))?));
-        let key = agent.clone();
-        let request_id = id.clone();
-        let project = ctx.project.clone();
-        let cached = state.db.write(format!("agent:{agent}"), move |t| {
-            let old: Option<(String, Option<String>)> = t.query_row(
-                "SELECT fingerprint, answer FROM agent_rpc_answers WHERE agent = ?1 AND request_id = ?2",
-                rusqlite::params![key, request_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-            if let Some((hash, answer)) = old {
-                if hash != fingerprint {
-                    return Ok(Some(Err(bad_params("request_id was already used for a different request"))));
-                }
-                if let Some(answer) = answer {
-                    return Ok(Some(serde_json::from_str::<Result<Value, RpcError>>(&answer)?));
-                }
-                tracing::warn!(agent = key, request_id, "agent write has an indeterminate outcome");
-                t.audit("agent_rpc.indeterminate", &request_id, Some(&project), json!({"agent": key, "reason": "unresolved_journal"}))?;
-                return Ok(Some(Err(RpcError::new("indeterminate", "the previous daemon did not record this write's answer; it will not be executed again"))));
-            }
-            t.execute("INSERT INTO agent_rpc_answers(agent, request_id, fingerprint) VALUES (?1, ?2, ?3)", rusqlite::params![key, request_id, fingerprint])?;
-            Ok(None)
-        }).await.map_err(internal)?;
-        if let Some(answer) = cached { return answer; }
-        let answer = self.execute_http(ctx, params).await;
-        let stored = serde_json::to_string(&answer).map_err(|e| RpcError::new("internal", e.to_string()))?;
-        state.db.write(format!("agent:{agent}"), move |t| {
-            t.execute("UPDATE agent_rpc_answers SET answer = ?3 WHERE agent = ?1 AND request_id = ?2", rusqlite::params![agent, id, stored])?;
-            Ok(())
-        }).await.map_err(internal)?;
-        answer
+        journaled(&state.db, ctx, id, &params, self.execute_http(ctx, params.clone())).await
     }
 
     async fn execute_http(&self, ctx: &RequestContext, params: Value) -> Result<Value, RpcError> {
@@ -306,9 +277,122 @@ impl AgentRpc {
     }
 }
 
+
+/// Persist admission before polling the effect, and its answer before replying.
+/// The caller serializes concurrent requests with the same agent and ID.
+async fn journaled(
+    db: &crate::db::Db,
+    ctx: &RequestContext,
+    id: String,
+    params: &Value,
+    effect: impl std::future::Future<Output = Result<Value, RpcError>>,
+) -> Result<Value, RpcError> {
+    let agent = ctx.agent.to_string();
+        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&params).map_err(|e| bad_params(e.to_string()))?));
+        let key = agent.clone();
+        let request_id = id.clone();
+        let project = ctx.project.clone();
+        let method = params["method"].as_str().unwrap_or_default().to_owned();
+        let cached = db.write(format!("agent:{agent}"), move |t| {
+            let old: Option<(String, Option<String>)> = t.query_row(
+                "SELECT fingerprint, answer FROM agent_rpc_answers WHERE agent = ?1 AND request_id = ?2",
+                rusqlite::params![key, request_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if let Some((hash, answer)) = old {
+                if hash != fingerprint {
+                    return Ok(Some(Err(bad_params("request_id was already used for a different request"))));
+                }
+                if let Some(answer) = answer {
+                    return Ok(Some(serde_json::from_str::<Result<Value, RpcError>>(&answer)?));
+                }
+                tracing::warn!(agent = key, request_id, "agent write has an indeterminate outcome");
+                t.audit("agent_rpc.indeterminate", &request_id, Some(&project), json!({"agent": key, "reason": "unresolved_journal"}))?;
+                return Ok(Some(Err(RpcError::new("indeterminate", format!("request {request_id} ({method}): the call may or may not have happened; check before you retry")))));
+            }
+            t.execute("INSERT INTO agent_rpc_answers(agent, request_id, fingerprint) VALUES (?1, ?2, ?3)", rusqlite::params![key, request_id, fingerprint])?;
+            Ok(None)
+        }).await.map_err(internal)?;
+        if let Some(answer) = cached { return answer; }
+        let answer = effect.await;
+        let stored = serde_json::to_string(&answer).map_err(|e| RpcError::new("internal", e.to_string()))?;
+        db.write(format!("agent:{agent}"), move |t| {
+            t.execute("UPDATE agent_rpc_answers SET answer = ?3 WHERE agent = ?1 AND request_id = ?2", rusqlite::params![agent, id, stored])?;
+            Ok(())
+        }).await.map_err(internal)?;
+        answer
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn crash_context() -> RequestContext {
+        serde_json::from_value(json!({
+            "agent":"00000000000000000000000001", "name":"tester", "project":"demo",
+            "harness":"claude", "status":"idle"
+        })).unwrap()
+    }
+
+    fn crash_params() -> Value {
+        json!({"method":"POST", "path":"/api/test-effect", "request_id":"crash-boundary"})
+    }
+
+    fn crash_db(path: &std::path::Path) -> crate::db::Db {
+        let mut conn = rusqlite::Connection::open(path).unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        crate::db::Db::new(conn, crate::events::EventHub::default())
+    }
+
+    // Invoked in its own OS process by the test below. There is no production
+    // failpoint: the journal polls this effect only after STARTED is durable.
+    #[tokio::test]
+    async fn journal_crash_child() {
+        use std::io::Write;
+        let Some(path) = std::env::var_os("TER_260_CRASH_DB") else { return; };
+        let db = crash_db(std::path::Path::new(&path));
+        let _ = journaled(&db, &crash_context(), "crash-boundary".into(), &crash_params(), async {
+            db.write("test", |t| {
+                t.execute_batch("CREATE TABLE crash_effect(value INTEGER); INSERT INTO crash_effect VALUES (1);")?;
+                Ok(())
+            }).await.unwrap();
+            println!("effect durable");
+            std::io::stdout().flush().unwrap();
+            std::future::pending::<Result<Value, RpcError>>().await
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn sigkill_between_started_and_done_never_repeats_the_effect() {
+        use tokio::io::AsyncBufReadExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite");
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "agent_rpc::tests::journal_crash_child", "--nocapture"])
+            .env("TER_260_CRASH_DB", &path)
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn().unwrap();
+        let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let line = lines.next_line().await.unwrap().expect("child reached the durable effect");
+                if line == "effect durable" { break; }
+            }
+        }).await.unwrap();
+        // Tokio Child::kill sends SIGKILL on Unix and reaps only our child.
+        child.kill().await.unwrap();
+        let db = crash_db(&path);
+        let result = journaled(&db, &crash_context(), "crash-boundary".into(), &crash_params(), async {
+            panic!("an unresolved write must never be executed again");
+        }).await.unwrap_err();
+        assert_eq!(result.code, "indeterminate");
+        assert!(result.message.contains("crash-boundary (POST)"));
+        assert!(result.message.contains("check before you retry"));
+        let count: i64 = db.read(|c| Ok(c.query_row("SELECT count(*) FROM crash_effect", [], |r| r.get(0))?)).await.unwrap();
+        assert_eq!(count, 1);
+        let audits: i64 = db.read(|c| Ok(c.query_row("SELECT count(*) FROM audit WHERE action = 'agent_rpc.indeterminate'", [], |r| r.get(0))?)).await.unwrap();
+        assert_eq!(audits, 1);
+    }
 
     #[test]
     fn query_encoding() {
