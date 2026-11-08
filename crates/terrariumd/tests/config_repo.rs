@@ -580,6 +580,9 @@ async fn a_pulled_export_is_a_plan_until_apply() {
     );
     let s = b.get("/api/config/status").await;
     assert_eq!(s.ok()["export_pending"], false);
+    // Refresh must be committed or the next pull refuses the dirty tree.
+    assert!(git(&b_repo, &["status", "--porcelain"]).trim().is_empty());
+    b.post("/api/config/pull", json!({})).await.ok();
 }
 
 /// A pulled export brings the secret names as placeholders with no value,
