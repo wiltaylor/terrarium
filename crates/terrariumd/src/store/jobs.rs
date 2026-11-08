@@ -1310,9 +1310,12 @@ pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
         n.batch.iter().map(|c| c.card.as_str()).collect()
     };
     for card in cards {
-        let kind: String =
-            t.query_row("SELECT kind FROM cards WHERE id = ?1", [card], |r| r.get(0))?;
-        if kind == "group" {
+        let is_group: bool = t.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cards WHERE id = ?1 AND kind = 'group')",
+            [card],
+            |r| r.get(0),
+        )?;
+        if is_group {
             return Err(ApiError::invalid(
                 "group cards cannot be validated or merged",
             ));
