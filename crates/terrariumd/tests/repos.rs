@@ -689,7 +689,14 @@ async fn the_browser_reads_main_and_agent_trees() {
             "{trees:#?}"
         );
         td.get(&format!("{base}/main/files")).await.ok();
-        eprintln!("skipped the agent tree reads: no read sandbox here");
+        // Write directly so libtest does not hide this coverage gap when
+        // the fallback assertions pass (normal output is captured).
+        use std::io::Write as _;
+        writeln!(
+            std::io::stderr(),
+            "SKIP the_browser_reads_main_and_agent_trees: agent-tree API assertions need a working bwrap read sandbox"
+        )
+        .unwrap();
         return;
     }
 
