@@ -42,10 +42,12 @@ async fn human_comments_mail_leads_and_replies_reach_inbox() {
     )
     .await;
     let path = format!("/api/cards/{id}/comments");
-    let c = td.post(&path, json!({"body": "Please check"})).await.ok();
+    let response = td.post(&path, json!({"body": "Please check"})).await;
+    let c = response.ok();
     let reply = c["comments"][0]["id"].as_str().unwrap();
     for recipient in ["proj/lead", "proj/w1"] {
-        let mail = td.get(&format!("/api/mail?to={recipient}")).await.ok();
+        let response = td.get(&format!("/api/mail?to={recipient}")).await;
+        let mail = response.ok();
         let mail = mail.as_array().unwrap();
         assert_eq!(mail.len(), 1);
         assert!(mail[0]["body"].as_str().unwrap().contains("Please check"));
@@ -73,7 +75,8 @@ async fn human_comments_mail_leads_and_replies_reach_inbox() {
     td.post_as("proj/w1", &path, json!({"body": "@operator follow-up"}))
         .await
         .ok();
-    let mail = td.get("/api/mail?to=operator").await.ok();
+    let response = td.get("/api/mail?to=operator").await;
+    let mail = response.ok();
     assert_eq!(mail.as_array().unwrap().len(), 2);
     assert!(
         mail.to_string()
