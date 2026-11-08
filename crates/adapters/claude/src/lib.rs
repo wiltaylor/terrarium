@@ -269,6 +269,16 @@ impl Adapter for ClaudeAdapter {
         hooks::hook_events(hook)
     }
 
+    // SessionStart is captured on both fresh starts and resumes. Do not
+    // spend a queued wake's delivery attempts on an early ready screen.
+    fn waits_for_startup_hook(&self) -> bool {
+        true
+    }
+
+    fn is_startup_hook(&self, hook: &HookPayload) -> bool {
+        hook.hook == "SessionStart"
+    }
+
     fn screen_hint(&self, screen: &Screen) -> ScreenHint {
         screen::screen_hint(screen)
     }
@@ -516,6 +526,26 @@ mod tests {
         assert!(!a.turn_submit_pause().is_zero());
         // Regression: the stop path needs the exit keys, else it kills.
         assert_eq!(a.exit_keys(), b"/exit\r".to_vec());
+    }
+
+    #[test]
+    fn startup_waits_for_session_start_on_fresh_start_and_resume() {
+        let a: &dyn Adapter = &ClaudeAdapter::default();
+        assert!(a.waits_for_startup_hook());
+        for source in ["startup", "resume"] {
+            let hook = HookPayload {
+                harness: HarnessId::Claude,
+                hook: "SessionStart".into(),
+                body: serde_json::json!({"source": source, "session_id": "s1"}),
+            };
+            assert!(a.is_startup_hook(&hook));
+        }
+        let other = HookPayload {
+            harness: HarnessId::Claude,
+            hook: "UserPromptSubmit".into(),
+            body: serde_json::json!({}),
+        };
+        assert!(!a.is_startup_hook(&other));
     }
 
     /// Spawns the real binary. Run with `cargo test -- --ignored`.
