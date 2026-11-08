@@ -566,7 +566,8 @@ fn all_review_or_later(conn: &Connection, thread: &str) -> ApiResult<bool> {
             "SELECT EXISTS(SELECT 1 FROM monitors m WHERE m.project = ?1 AND m.name = ?2
              AND (SELECT status FROM monitor_results r WHERE r.monitor = m.id
                   ORDER BY r.pk DESC LIMIT 1) = 'ok')",
-            params![project, name], |r| r.get(0),
+            params![project, name],
+            |r| r.get(0),
         )?;
         if !green {
             return Ok(false);
