@@ -243,13 +243,17 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                         let p = project.clone();
                         let data = json!({"hash": file_hash, "problems": rules::problems(&e)});
                         db.write("system", move |tx| {
-                            tx.emit(events::EventDraft::new(
-                                "rules.invalid",
-                                "stored board rules no longer parse; own rules will not run",
-                                data,
-                            ).project(p))?;
+                            tx.emit(
+                                events::EventDraft::new(
+                                    "rules.invalid",
+                                    "stored board rules no longer parse; own rules will not run",
+                                    data,
+                                )
+                                .project(p),
+                            )?;
                             Ok(())
-                        }).await?;
+                        })
+                        .await?;
                         RuleSet::default()
                     }
                 };

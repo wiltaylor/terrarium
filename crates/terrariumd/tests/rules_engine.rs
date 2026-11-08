@@ -150,13 +150,17 @@ async fn stored_rules_schema_failure_is_visible() {
     // Model a schema upgrade removing a previously accepted verb. Keep
     // the stored row, but replace that verb with one the current schema rejects.
     let text = TWO_STEPS.replace("card_comment", "retired_comment");
-    state(&td).db.write("system", move |tx| {
-        tx.execute(
-            "UPDATE project_rules SET text = ?1, hash = 'old-schema' WHERE project = 'broken'",
-            [text],
-        )?;
-        Ok(())
-    }).await.unwrap();
+    state(&td)
+        .db
+        .write("system", move |tx| {
+            tx.execute(
+                "UPDATE project_rules SET text = ?1, hash = 'old-schema' WHERE project = 'broken'",
+                [text],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let body = td.get("/api/projects/broken/rules").await.ok();
     assert_eq!(body["hash"], "old-schema");
     assert_eq!(body["rules"], json!([]));
@@ -168,18 +172,39 @@ async fn stored_rules_schema_failure_is_visible() {
 
     let mut cache = rules_engine::Cache::default();
     let db = state(&td).db.clone();
-    let before: i64 = db.read(|c| Ok(c.query_row(
-        "SELECT count(*) FROM events WHERE project = 'broken' AND kind = 'rules.invalid'",
-        [], |r| r.get(0),
-    )?)).await.unwrap();
+    let before: i64 = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM events WHERE project = 'broken' AND kind = 'rules.invalid'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
     let loaded = rules_engine::load(&db, &mut cache).await.unwrap();
-    assert!(loaded.iter().find(|p| p.project == "broken").unwrap().set.rules.is_empty());
+    assert!(
+        loaded
+            .iter()
+            .find(|p| p.project == "broken")
+            .unwrap()
+            .set
+            .rules
+            .is_empty()
+    );
     // A second load of the same revision must not emit another diagnostic.
     rules_engine::load(&db, &mut cache).await.unwrap();
-    let data: Vec<String> = db.read(|c| {
-        let mut st = c.prepare("SELECT payload FROM events WHERE project = 'broken' AND kind = 'rules.invalid'")?;
-        Ok(st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?)
-    }).await.unwrap();
+    let data: Vec<String> = db
+        .read(|c| {
+            let mut st = c.prepare(
+                "SELECT payload FROM events WHERE project = 'broken' AND kind = 'rules.invalid'",
+            )?;
+            Ok(st
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap();
     // The daemon's independent cache may also observe the revision.
     assert!(data.len() as i64 > before);
     for data in data {

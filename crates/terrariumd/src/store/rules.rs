@@ -110,8 +110,7 @@ fn file_error(e: &FileError) -> ApiError {
 }
 
 pub fn problems(e: &FileError) -> Vec<serde_json::Value> {
-    e
-        .problems
+    e.problems
         .iter()
         .map(|p| json!({"line": p.line, "column": p.column, "message": p.message}))
         .collect()
