@@ -8557,6 +8557,20 @@ queue is idle, or move and relabel those cards by hand.
 
 ### 19.12 Migration, lint, and the rule tools
 
+The default delivery pack also mails the project's leads on a new backlog
+card, a move to backlog, and hourly (`triage-new-backlog`,
+`triage-moved-backlog`, `triage-hourly`). These reminders ask for constant
+triage into ready without theme or scope approval. They do not move cards.
+`mail.to = ["@leads"]` resolves all current project_admin agents of the
+rule's project at execution time. No lead means no recipient.
+The engine emits `rule.hourly` once per UTC hour for a rules project with
+an enabled rule explicitly listening to it. The event has `data.hour`
+(`YYYY-MM-DDTHH`), no card, and actor `system`. The event is persisted to
+avoid duplicate ticks after a restart. Missed hours are not replayed.
+Projects may override or disable these rules by name. Code-flow projects
+do not run them. Version cuts reuse the version-cut rule and its count
+and age parameters rather than adding a second cut rule.
+
 TER-171. These endpoints help a project move to `board_flow = rules`
 (§19.11) and show what its rules do. The CLI is `terrarium rule`
 (docs/cli.md), and the dashboard has a Rules tab beside Schedules on the

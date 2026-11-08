@@ -1319,9 +1319,9 @@ pub async fn fire_timers(
     fired: &mut HashMap<(String, String), String>,
     now: DateTime<Utc>,
 ) -> ApiResult<usize> {
+    let mut written = fire_hourly(db, projects, now).await?;
     let timers = timer_rules(projects);
     fired.retain(|(p, r), _| timers.iter().any(|t| t.project == *p && t.rule == *r));
-    let mut written = 0;
     for t in timers {
         match fire_timer(db, &t, fired, now).await {
             Ok(true) => written += 1,
@@ -1331,6 +1331,29 @@ pub async fn fire_timers(
                 t.rule, t.project
             ),
         }
+    }
+    Ok(written)
+}
+
+/// One persisted hourly event per rules project, including across restarts.
+/// There is no catch-up burst after downtime.
+async fn fire_hourly(db: &Db, projects: &[ProjectRules], now: DateTime<Utc>) -> ApiResult<usize> {
+    let hour = now.format("%Y-%m-%dT%H").to_string();
+    let mut written = 0;
+    for p in projects {
+        if !p.set.rules.iter().any(|r| r.enabled && r.on.iter().any(|k| k == "rule.hourly")) {
+            continue;
+        }
+        let (project, hour) = (p.project.clone(), hour.clone());
+        written += db.write(TIMER_ACTOR, move |tx| {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE project = ?1 AND kind = 'rule.hourly' AND json_extract(data, '$.hour') = ?2)",
+                rusqlite::params![project, hour], |r| r.get(0),
+            )?;
+            if exists { return Ok(0); }
+            tx.emit(events::EventDraft::new("rule.hourly", "hourly board check", json!({"hour": hour})).project(project))?;
+            Ok(1)
+        }).await?;
     }
     Ok(written)
 }
