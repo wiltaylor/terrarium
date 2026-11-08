@@ -468,13 +468,18 @@ async fn version_cut_default_pack_threshold_and_lead_notification() {
         new_card(
             &td,
             "p",
-            json!({"title":"sixth","column":"accepted","labels":["version:vnext"]}),
+            json!({"title":"sixth","column":"ready","labels":["version:vnext"]}),
         )
         .await,
     );
+    td.post(&format!("/api/cards/{}/move", members[5]), json!({"column":"accepted"})).await.ok();
     settle(&td).await;
     let g = card(&td, &members[0]).await["group"].clone();
     assert_eq!(g["total"], 6);
+    let event_runs: i64 = state(&td).db.read(|c| {
+        Ok(c.query_row("SELECT count(*) FROM rule_runs r JOIN events e ON e.seq = r.event_seq WHERE r.rule = 'version-cut' AND r.state = 'done' AND e.kind = 'card' AND json_extract(e.payload, '$.change') = 'moved'", [], |r| r.get(0))?)
+    }).await.unwrap();
+    assert_eq!(event_runs, 1, "the accepted move, not only the timer, cuts");
     let mail = td.mail_of(&lead).await;
     let cuts: Vec<_> = mail
         .iter()
@@ -1185,14 +1190,10 @@ async fn default_triage_notifies_leads_on_backlog_and_hourly() {
     emit(&td, "card", "p", &card, json!({"change": "updated"})).await;
     settle(&td).await;
     assert_eq!(count().await, 1, "unrelated updates do not notify");
-    emit(
-        &td,
-        "card",
-        "p",
-        &card,
-        json!({"change": "moved", "to": "backlog"}),
-    )
-    .await;
+    td.post(&format!("/api/cards/{card}/move"), json!({"column":"ready"})).await.ok();
+    settle(&td).await;
+    assert_eq!(count().await, 1, "moves elsewhere do not notify");
+    td.post(&format!("/api/cards/{card}/move"), json!({"column":"backlog"})).await.ok();
     settle(&td).await;
     assert_eq!(count().await, 2);
     let projects = rules_engine::load(&state(&td).db, &mut rules_engine::Cache::default())

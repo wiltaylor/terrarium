@@ -8599,7 +8599,10 @@ an enabled rule explicitly listening to it. The event has `data.hour`
 avoid duplicate ticks after a restart. Missed hours are not replayed.
 Projects may override or disable these rules by name. Code-flow projects
 do not run them. Version cuts reuse the version-cut rule and its count
-and age parameters rather than adding a second cut rule.
+and age parameters rather than adding a second cut rule. Its timer checks
+every engine tick (10 seconds), which is more frequent than the former
+hourly cut schedule. Moves into accepted check immediately. Either six
+eligible cards or an oldest accepted age of 240 minutes opens the cut.
 
 TER-171. These endpoints help a project move to `board_flow = rules`
 (§19.11) and show what its rules do. The CLI is `terrarium rule`
