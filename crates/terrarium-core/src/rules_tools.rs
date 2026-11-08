@@ -285,7 +285,10 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
     // The column names of a `when` on the move of a card.
     let mut when = Vec::new();
     for m in &rule.when {
-        if !matches!(m.path.as_str(), "data.to" | "data.from") {
+        if !matches!(
+            m.path.as_str(),
+            "data.to" | "data.from" | "data.to_role" | "data.from_role"
+        ) {
             when.push(m.clone());
             continue;
         }
@@ -293,7 +296,11 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
             (MatchOp::Eq | MatchOp::Ne, Value::String(name)) => {
                 match map_name(columns, name, &mut reasons) {
                     Some(n) => when.push(MatchRule {
-                        value: Value::String(n),
+                        value: Value::String(if m.path.ends_with("_role") {
+                            name.clone()
+                        } else {
+                            n
+                        }),
                         ..m.clone()
                     }),
                     None if m.op == MatchOp::Eq => {
@@ -318,7 +325,11 @@ fn map_rule(rule: &Rule, columns: &[BoardColumn]) -> Option<(Rule, bool, Vec<Str
                     };
                     match map_name(columns, name, &mut reasons) {
                         Some(n) => {
-                            let n = Value::String(n);
+                            let n = Value::String(if m.path.ends_with("_role") {
+                                name.to_owned()
+                            } else {
+                                n
+                            });
                             if !names.contains(&n) {
                                 names.push(n);
                             }
@@ -1030,7 +1041,7 @@ mod tests {
             .iter()
             .find(|r| r.name == "agent-unpark")
             .unwrap();
-        let nes: Vec<&Value> = unpark.when.iter().skip(1).map(|w| &w.value).collect();
+        let nes: Vec<&Value> = unpark.when.iter().skip(2).map(|w| &w.value).collect();
         assert_eq!(nes, vec![&Value::from("review"), &Value::from("done")]);
         // validate-pass and the failures name columns this board has.
         assert!(by("validate-pass").is_none());
@@ -1089,7 +1100,7 @@ mod tests {
         let park = m.overrides.iter().find(|r| r.name == "agent-park").unwrap();
         assert_eq!(
             park.when[1].value,
-            serde_json::json!(["code_review", "shipped"])
+            serde_json::json!(["review", "accepted"])
         );
         let kept = m.changes.iter().find(|c| c.rule == "merge-pass");
         assert!(kept.is_none(), "merge-pass resolves @accepted by role here");

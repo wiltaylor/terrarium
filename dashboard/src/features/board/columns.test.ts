@@ -30,6 +30,20 @@ const board: Column[] = [
 ];
 
 describe("board columns", () => {
+  it.each(COLUMN_ROLES)("rejects duplicate %s roles in the editor and mock", (role) => {
+    const rows = rowsFromBoard(board).map((r) => r.name === "ready" || r.name === "review" ? { ...r, role } : r);
+    expect(isClean(checkColumns(rows))).toBe(false);
+    expect(() => checkColumnEdits(board, toEdits(rows))).toThrow(/column/);
+  });
+
+  it.each(["validating", "review", "merge_queue", "accepted"] as const)("does not reserve the name %s as an alias", (name) => {
+    const current = board.filter((c) => c.name !== "review");
+    const rows = rowsFromBoard(current);
+    const added = addRow(rows).map((r) => r.name === "" ? { ...r, name } : r);
+    expect(isClean(checkColumns(added))).toBe(true);
+    expect(checkColumnEdits(current, toEdits(added)).find((c) => c.name === name)?.role).toBeUndefined();
+  });
+
   it.each(["validating", "review", "merge_queue", "accepted"] as const)("round-trips the %s role through edits and the mock", (role) => {
     expect(COLUMN_ROLES).toContain(role);
     const rows = setRole(rowsFromBoard(board), 1, role);

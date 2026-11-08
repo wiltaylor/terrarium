@@ -2,6 +2,7 @@
 // The daemon checks the same rules again; these give the errors before the save.
 
 import type { Column, ColumnEdit, ColumnRole } from "../../api/types";
+import { COLUMN_ROLES } from "../../api/types";
 
 /** The first column: new cards go there. It cannot be removed, renamed, or moved, and takes no WIP limit and no role. */
 export const BACKLOG = "backlog";
@@ -145,7 +146,9 @@ export function checkColumns(rows: readonly ColumnRow[]): ColumnsCheck {
   if (rows.some((r) => isFixed(r.original ?? "") && r.role)) out.list.push("backlog and done take no role.");
   const working = rows.filter((r) => r.role === "working").length;
   if (working !== 1) out.list.push("One column must have the role Working: card claim moves cards there.");
-  if (rows.filter((r) => r.role === "blocked").length > 1) out.list.push("Only one column can have the role Blocked.");
+  for (const role of COLUMN_ROLES) {
+    if (role !== "working" && rows.filter((r) => r.role === role).length > 1) out.list.push(`Only one column can have the role ${defaultTitle(role)}.`);
+  }
   return out;
 }
 

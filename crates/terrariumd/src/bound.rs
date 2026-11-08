@@ -579,6 +579,10 @@ pub enum Action {
 /// The action of a move of a bound card from `from` to `to`, with the
 /// agent `parked` or not. The table of the module docs.
 pub fn on_move(from: &str, to: &str, parked: bool) -> Option<Action> {
+    on_move_with_role(from, to, None, parked)
+}
+
+fn on_move_with_role(from: &str, to: &str, role: Option<&str>, parked: bool) -> Option<Action> {
     if from == to {
         return None;
     }
@@ -588,7 +592,7 @@ pub fn on_move(from: &str, to: &str, parked: bool) -> Option<Action> {
             format!("the card moved {from} -> {to}"),
         ));
     }
-    if WAIT_COLUMNS.contains(&to) {
+    if WAIT_COLUMNS.contains(&role.unwrap_or(to)) {
         return Some(Action::Park(format!("card in {to}")));
     }
     // Out of a wait column (or on, with an unpark that waits): the card
@@ -601,7 +605,7 @@ fn action_of(ev: &StoredEvent, parked: bool) -> Option<Action> {
     let s = |k: &str| ev.data.get(k).and_then(Value::as_str);
     match ev.kind.as_str() {
         "card" => match s("change")? {
-            "moved" => on_move(s("from")?, s("to")?, parked),
+            "moved" => on_move_with_role(s("from")?, s("to")?, s("to_role"), parked),
             "assigned" if parked && ev.data.get("assignee") == Some(&Value::Null) => {
                 Some(Action::Unpark)
             }
@@ -748,9 +752,17 @@ async fn handle(state: &Shared, ev: StoredEvent) {
         Action::Park(reason) => park(state, &open.id, &reason).await.map(|_| ()),
         Action::Unpark => {
             let id = card_id.clone();
-            let turn = match state.db.read(move |c| board::get_card(c, &id)).await {
-                Ok(card) => {
-                    if released && WAIT_COLUMNS.contains(&card.column.as_str()) {
+            let turn = match state
+                .db
+                .read(move |c| {
+                    let card = board::get_card(c, &id)?;
+                    let role = board::role_of(c, &card.project, &card.column)?;
+                    Ok((card, role))
+                })
+                .await
+            {
+                Ok((card, role)) => {
+                    if released && WAIT_COLUMNS.contains(&role.as_deref().unwrap_or(&card.column)) {
                         return;
                     }
                     Some(return_turn(&card, &ev))
@@ -832,7 +844,8 @@ pub async fn reconcile(state: &Shared) -> usize {
                         // RFC 3339 UTC with milliseconds on both sides.
                         let moved_since =
                             board::last_moved_at(c, card_id)?.is_some_and(|at| at > sp.spawned_at);
-                        out.push((sp, card, moved_since));
+                        let role = board::role_of(c, &card.project, &card.column)?;
+                        out.push((sp, card, role, moved_since));
                     }
                     Ok(_) => {}
                     Err(e) if e.code.status().is_client_error() => {}
@@ -850,9 +863,9 @@ pub async fn reconcile(state: &Shared) -> usize {
         }
     };
     let mut n = 0;
-    for (sp, card, moved_since) in rows {
+    for (sp, card, role, moved_since) in rows {
         let action = reconcile_action(
-            &card.column,
+            role.as_deref().unwrap_or(&card.column),
             sp.parked_at.is_some(),
             sp.unpark_queued_at.is_some(),
             moved_since,
@@ -950,6 +963,22 @@ mod tests {
 
     fn park(to: &str) -> Option<Action> {
         Some(Action::Park(format!("card in {to}")))
+    }
+
+    #[test]
+    fn renamed_wait_columns_use_event_roles() {
+        for role in WAIT_COLUMNS {
+            let ev = ev(
+                "card",
+                Some("TER-176"),
+                json!({"change": "moved", "from": "in_progress", "to": "renamed", "to_role": role}),
+            );
+            assert_eq!(action_of(&ev, false), park("renamed"));
+        }
+        assert_eq!(
+            on_move_with_role("ready", "review", Some("working"), false),
+            None
+        );
     }
 
     #[test]

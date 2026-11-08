@@ -457,6 +457,41 @@ async fn forward_moves_stay_parked_and_returns_wake(flow: &str) {
 }
 
 both_flows!(done_and_archive_close);
+both_flows!(renamed_wait_columns_park_and_return);
+
+async fn renamed_wait_columns_park_and_return(flow: &str) {
+    let (td, lead) = setup_flow(flow).await;
+    let r = td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"},
+                {"name": "qa", "rename_from": "validating", "role": "validating"},
+                {"name": "review"}, {"name": "merge_queue"}, {"name": "accepted"},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}
+            ]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    mv(&td, &c, "qa", None).await;
+    parked(&td, &eph).await;
+    assert_eq!(spawn_row(&td, &eph).await["park_reason"], "card in qa");
+    // Clearing an assignee must not unpark a card still waiting by role.
+    let r = td
+        .post(&format!("/api/cards/{c}/assign"), json!({"assignee": null}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(spawn_row(&td, &eph).await["parked_at"].is_string());
+    mv(&td, &c, "ready", Some("QA failed")).await;
+    td.wait_status(&eph, "idle").await;
+    assert!(spawn_row(&td, &eph).await["parked_at"].is_null());
+}
+
 /// A return to the working column unparks too; `done` and an archive
 /// close.
 async fn done_and_archive_close(flow: &str) {
@@ -749,6 +784,10 @@ async fn hidden_move(td: &TestDaemon, card: &str, to: &str) {
 async fn reconcile_repairs_a_missed_park_and_unpark() {
     let (td, lead) = setup().await;
     let s = state(&td);
+    s.db.write("test rename accepted", |t| {
+        t.execute("UPDATE board_columns SET name = 'shipped', role = 'accepted' WHERE project = 'p' AND name = 'accepted'", [])?;
+        Ok(())
+    }).await.unwrap();
     // Bound to a card in review (a reviewer): no move since the spawn,
     // so no missed park.
     let a = card(&td, "p", "review").await;
@@ -758,7 +797,7 @@ async fn reconcile_repairs_a_missed_park_and_unpark() {
     assert!(spawn_row(&td, &ea).await["parked_at"].is_null());
     // A missed park: the card moves on to accepted, and the driver does
     // not see the move.
-    hidden_move(&td, &a, "accepted").await;
+    hidden_move(&td, &a, "shipped").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(spawn_row(&td, &ea).await["parked_at"].is_null());
     assert_eq!(terrariumd::bound::reconcile(&s).await, 1);

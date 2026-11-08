@@ -151,6 +151,8 @@ pub struct Card {
     pub id: String,
     pub project: String,
     pub column: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_role: Option<String>,
     pub position: i64,
     pub title: String,
     pub body: String,
@@ -633,6 +635,7 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         id: row.id,
         project: row.project,
         column: row.column,
+        column_role: row.column_role,
         position: row.position,
         title: row.title,
         body: row.body,

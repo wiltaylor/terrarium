@@ -1742,6 +1742,7 @@ export interface Card {
   id: string;
   project: string;
   column: string;
+  column_role?: ColumnRole | null;
   position: number;
   title: string;
   body: string;

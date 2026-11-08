@@ -48,7 +48,9 @@ export function checkColumnEdits(current: readonly Column[], edits: readonly Col
   });
   const working = out.filter((c) => c.role === "working").length;
   if (working !== 1) bad(`exactly one column must have the role \`working\` (\`terrarium card claim\` moves a card there); this list has ${working}`);
-  const blocked = out.filter((c) => c.role === "blocked").length;
-  if (blocked > 1) bad(`at most one column can have the role \`blocked\`; this list has ${blocked}`);
+  for (const role of COLUMN_ROLES) {
+    const count = out.filter((c) => c.role === role).length;
+    if (role !== "working" && count > 1) bad(`at most one column can have the role \`${role}\`; this list has ${count}`);
+  }
   return out;
 }
