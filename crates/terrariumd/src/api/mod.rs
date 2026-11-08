@@ -7,6 +7,7 @@ mod artifacts;
 pub mod attachments;
 pub mod backups;
 mod board;
+mod bookmarks;
 mod calendar;
 pub mod card_files;
 mod config;
@@ -310,6 +311,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(pipelines::routes())
         .merge(calendar::routes())
         .merge(pins::routes())
+        .merge(bookmarks::routes())
         .merge(subscriptions::routes())
         .merge(usage::routes())
         .merge(fleet::routes())

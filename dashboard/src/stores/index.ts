@@ -3,6 +3,7 @@
 
 import { createApi } from "../api";
 import { createAgentsStore } from "./agents";
+import { createBookmarksStore } from "./bookmarks";
 import { changePassword, createAuthStore, restoreSession, signIn, signInWithPassword, signOut, signOutEverywhere } from "./auth";
 import { createEventsStore } from "./events";
 import { createInboxStore } from "./inbox";
@@ -33,6 +34,7 @@ const session = (() => {
 
 export const auth = createAuthStore({ session, local: storage });
 export const api = createApi(auth);
+export const bookmarks = createBookmarksStore(storage, window.location.origin, api.bookmarks);
 export const events = createEventsStore(api, { ready: () => auth.mode() === "session" || auth.mode() === "bearer" });
 export const projects = createProjectsStore(api, storage);
 export const projectFolders = createProjectFoldersStore(api);

@@ -3699,6 +3699,24 @@ focus.
 
 ### 6.12 Project folders
 
+#### Sidebar bookmarks
+
+`/api/bookmarks` stores the operator's sidebar bookmarks in SQLite, shared
+across browsers. All methods are operator-only. GET returns an array of
+`{title, href}` in insertion order. PUT accepts `{title, href}`, adds or
+renames that URL, and returns the list. DELETE accepts `{href}` and returns
+the list, including when the URL was absent. Mutations write `bookmark.add`
+or `bookmark.remove` audit rows.
+
+Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
+without credentials, or a relative `/p/<project>/knowledge/wiki` path.
+URLs are normalized and deduplicated, and are limited to 8192 bytes on add.
+Invalid values return `422 invalid`. Wiki links open in place. External
+links open in a new window. The dashboard refreshes on focus and every 30
+seconds and imports its old `terrarium.bookmarks` list on first load,
+clearing that list only after successful import. Existing daemon titles win
+over legacy titles during migration.
+
 The code is in `crates/terrariumd/src/store/project_folders.rs` and
 `crates/terrariumd/src/api/project_folders.rs`. The tables are
 `project_folders` and `project_placements` (migration 68).
