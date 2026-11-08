@@ -9,6 +9,8 @@ use crate::error::ApiResult;
 
 /// A completed worker estimate. Raw guesses remain in the event log.
 pub struct WorkSample {
+    pub start_seq: i64,
+    pub end_seq: i64,
     pub actual_ms: f64,
     pub guess_ms: f64,
     pub labels: Vec<String>,
@@ -20,13 +22,14 @@ pub struct WorkSample {
 pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSample>> {
     let mut stmt = conn.prepare(
         "SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
-                coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]')
+                coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]'), e.seq, x.seq
          FROM events e JOIN events x ON x.seq = (
            SELECT min(n.seq) FROM events n WHERE n.card = e.card AND n.seq > e.seq
              AND n.kind = 'card' AND json_extract(n.payload, '$.change') IN ('eta','moved'))
          LEFT JOIN cards c ON c.id = e.card
          WHERE e.project = ?1 AND e.kind = 'card'
            AND json_extract(e.payload, '$.change') = 'eta'
+           AND coalesce(json_extract(e.payload, '$.column_role'), json_extract(e.payload, '$.column')) IN ('working', 'in_progress')
            AND coalesce(json_extract(e.payload, '$.job'), 0) = 0
            AND json_extract(x.payload, '$.change') = 'moved'
          ORDER BY x.seq DESC",
@@ -37,11 +40,13 @@ pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSampl
             r.get::<_, Option<String>>(1)?,
             r.get::<_, String>(2)?,
             r.get::<_, String>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
         ))
     })?;
     let mut samples = Vec::new();
     for row in rows {
-        let (start, guess, end, labels) = row?;
+        let (start, guess, end, labels, start_seq, end_seq) = row?;
         let Some(guess) = guess else { continue };
         if let (Ok(start), Ok(guess), Ok(end)) = (
             DateTime::parse_from_rfc3339(&start),
@@ -51,6 +56,8 @@ pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSampl
             && end > start
         {
             samples.push(WorkSample {
+                start_seq,
+                end_seq,
                 actual_ms: (end - start).num_milliseconds() as f64,
                 guess_ms: (guess - start).num_milliseconds() as f64,
                 labels: serde_json::from_str(&labels).unwrap_or_default(),
@@ -209,6 +216,8 @@ mod tests {
         let samples: Vec<_> = (1..=10)
             .rev()
             .map(|n| WorkSample {
+                start_seq: 0,
+                end_seq: 1,
                 actual_ms: f64::from(n) * 1000.0,
                 guess_ms: 10000.0,
                 labels: vec!["type:impl".into()],
@@ -231,6 +240,8 @@ mod tests {
         );
         let mut recent = samples;
         recent.extend((0..40).map(|_| WorkSample {
+            start_seq: 0,
+            end_seq: 1,
             actual_ms: 1e9,
             guess_ms: 1.0,
             labels: labels.clone(),
@@ -243,7 +254,7 @@ mod tests {
         let c = db();
         for (card, project, job) in [("a", "p", false), ("b", "other", false), ("c", "p", true)] {
             for minute in [0, 1] {
-                c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES (?1,?2,'card',?3,?4)", params![project, card, format!("2026-11-08T00:0{minute}:00Z"), json!({"change":"eta","eta_at":"2026-11-08T00:10:00Z","job":job,"labels":["type:impl"]}).to_string()]).unwrap();
+                c.execute("INSERT INTO events(project,card,kind,at,payload) VALUES (?1,?2,'card',?3,?4)", params![project, card, format!("2026-11-08T00:0{minute}:00Z"), json!({"change":"eta","column_role":"working","eta_at":"2026-11-08T00:10:00Z","job":job,"labels":["type:impl"]}).to_string()]).unwrap();
             }
             moved(&c, project, card, 5, "working", "review");
         }
@@ -252,6 +263,43 @@ mod tests {
         assert_eq!(samples[0].actual_ms, 240000.0);
         assert_eq!(samples[0].guess_ms, 540000.0);
         assert_eq!(samples[0].labels, vec!["type:impl"]);
+    }
+
+    /// Run against a read-API export, never the daemon's live database.
+    #[test]
+    #[ignore = "requires TERRARIUM_ETA_HISTORY export"]
+    fn backtest_export() {
+        let path = std::env::var("TERRARIUM_ETA_HISTORY").unwrap();
+        let cards: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let c = db();
+        for card in &cards {
+            c.execute("INSERT INTO cards(id,labels) VALUES (?1,?2)", params![card["id"].as_str().unwrap(), card["labels"].to_string()]).unwrap();
+            for event in card["events"].as_array().unwrap() {
+                c.execute("INSERT INTO events(seq,project,card,kind,at,payload) VALUES (?1,?2,?3,'card',?4,?5)", params![event["seq"].as_i64().unwrap(), event["project"].as_str().unwrap(), card["id"].as_str().unwrap(), event["at"].as_str().unwrap(), event["data"].to_string()]).unwrap();
+            }
+        }
+        let mut count = 0;
+        let mut raw_on_time = 0;
+        let mut calibrated_on_time = 0;
+        let mut raw_close = 0;
+        let mut calibrated_close = 0;
+        // Samples are ordered by completion. Only older completions train each prediction.
+        for project in cards.iter().flat_map(|c| c["events"].as_array().unwrap()).filter_map(|e| e["project"].as_str()).collect::<std::collections::BTreeSet<_>>() {
+            let samples = work_samples(&c, project).unwrap();
+            for sample in &samples {
+                let history: Vec<_> = samples.iter().filter(|s| s.end_seq < sample.start_seq).map(|s| WorkSample {
+                    start_seq: s.start_seq, end_seq: s.end_seq, actual_ms: s.actual_ms, guess_ms: s.guess_ms, labels: s.labels.clone(),
+                }).collect();
+                let Some(prediction) = calibrated_ms(&history, &sample.labels, Some(sample.guess_ms)) else { continue };
+                count += 1;
+                raw_on_time += usize::from(sample.actual_ms <= sample.guess_ms);
+                calibrated_on_time += usize::from(sample.actual_ms <= prediction);
+                raw_close += usize::from((0.5..=2.0).contains(&(sample.actual_ms / sample.guess_ms)));
+                calibrated_close += usize::from((0.5..=2.0).contains(&(sample.actual_ms / prediction)));
+            }
+        }
+        println!("backtest: eligible={count}, raw_on_time={raw_on_time}, calibrated_on_time={calibrated_on_time}, raw_half_to_double={raw_close}, calibrated_half_to_double={calibrated_close}");
+        assert!(count > 0);
     }
 
     #[test]
