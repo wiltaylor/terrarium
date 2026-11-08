@@ -718,11 +718,6 @@ pub fn list_cards(
 ) -> ApiResult<Paged<Card>> {
     let limit = page.limit();
     let (after_k, after_p, after_n) = list_cursor(page.cursor());
-    // Set the assignee before inserting any human comment so delivery can
-    // include the assignee supplied with the new card.
-    if let Some(who) = &new.assignee {
-        assign_card(t, actor, &id, Some(who))?;
-    }
     // A role alias (`working`, `blocked`) names the column with that role.
     // An unknown name matches no card, as before.
     let column_name = f.column.as_deref().map(|c| {
@@ -1809,6 +1804,10 @@ pub fn create_card(
             insert_comment(t, &id, &author, c.trim())?;
         }
         return get_card(t, &id);
+    }
+    // Include the requested assignee in delivery of the initial comment.
+    if let Some(who) = &new.assignee {
+        assign_card(t, actor, &id, Some(who))?;
     }
     // A role alias (`working`, `blocked`) names the column with that role.
     let to = new
