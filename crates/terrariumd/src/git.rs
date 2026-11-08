@@ -3533,14 +3533,21 @@ mod tests {
         let next = r.commit_of("refs/remotes/job/next").unwrap().unwrap();
         // A second job opens the same repo and fetches only new objects.
         // Its first job's refs and locally made objects must survive.
-        let marker = r.merge(&next, "refs/remotes/job/clean", "cached merge").unwrap();
-        let MergeStep::Merged(marker) = marker else { panic!("clean merge failed") };
+        let marker = r
+            .merge(&next, "refs/remotes/job/clean", "cached merge")
+            .unwrap();
+        let MergeStep::Merged(marker) = marker else {
+            panic!("clean merge failed")
+        };
         r.set_ref("refs/job/cached", &marker).unwrap();
         drop(r);
         let r = JobRepo::create(c).unwrap();
         assert_eq!(r.commit_of("refs/job/cached").unwrap(), Some(marker));
         r.fetch(&specs).unwrap();
-        assert_eq!(r.commit_of("refs/remotes/job/next").unwrap(), Some(next.clone()));
+        assert_eq!(
+            r.commit_of("refs/remotes/job/next").unwrap(),
+            Some(next.clone())
+        );
         assert_eq!(r.commit_of("refs/remotes/job/nope").unwrap(), None);
 
         let MergeStep::Merged(m1) = r

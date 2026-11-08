@@ -1317,8 +1317,8 @@ async fn run_inner(
     let made = tokio::task::spawn_blocking(move || {
         git::JobRepo::create(checkout).map(|repo| (repo, guard))
     })
-        .await
-        .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?;
+    .await
+    .map_err(|e| ApiError::internal(format!("the git task of the job failed: {e}")))?;
     let (job_repo, guard) = match made {
         Ok((r, guard)) => (Arc::new(r), guard),
         Err(e) => {
@@ -1387,8 +1387,7 @@ fn job_repo_dir(state: &Shared, project: &str, repo: &str) -> PathBuf {
 /// Serialize only creation and prepare, whose scratch refs are shared.
 /// Recipes and pushes of recorded commit IDs can run concurrently.
 fn repo_lock(path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     LOCKS
         .get_or_init(Mutex::default)
         .lock()
@@ -1712,10 +1711,13 @@ async fn steps(
         }
     }
     let (j, bundle) = (job.clone(), x.bundle.clone());
-    let (head, batch, base) = match x.daemon(move |r| {
-        let _guard = guard;
-        prepare(r, &j, &bundle)
-    }).await? {
+    let (head, batch, base) = match x
+        .daemon(move |r| {
+            let _guard = guard;
+            prepare(r, &j, &bundle)
+        })
+        .await?
+    {
         Prepared::Ready { head, batch, base } => (head, batch, base),
         Prepared::End(end) => return Ok(end),
     };
