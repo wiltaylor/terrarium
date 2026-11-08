@@ -234,6 +234,8 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_INGEST_ADDR` | unset: no ingest listener. The webhook listener of the event sources: only `POST /hooks/{project}/{source}` and `GET /healthz` ([api.md](api.md) §20). Compose sets `0.0.0.0:8083`. |
 | `TERRARIUM_INGEST_PUBLIC_URL` | unset: made from `TERRARIUM_INGEST_ADDR`. The ingest listener as a forge reaches it, for the `hook_url` of each event source. |
 | `TERRARIUM_PIPELINE_PARALLEL` | `4`. The most pipeline polls at once in the daemon ([api.md](api.md) §31.4). |
+| `TERRARIUM_GIT_NAME` | `Terrarium`. Author and committer name for agent sessions, managed checkouts, and merge jobs. |
+| `TERRARIUM_GIT_EMAIL` | `terrarium@localhost`. Author and committer email, independent of push authentication. Set the verified email of your bot account if GitHub should link commits to that account. This does not change branch protection, signing requirements, or the `github_authors` gate, which checks PR authors' GitHub logins. |
 | `TERRARIUM_WEBHOOK_PRIVATE` | `allow`. Which addresses a `webhook` action can reach ([api.md](api.md) §19.5). `allow`: any address, the LAN and this host too (self-hosted receivers are common). `deny`: refuse loopback, link-local (the cloud metadata address too), private (RFC 1918, CGNAT), unique-local, and the ports of the daemon's own listeners. Set `deny` on a public deployment where untrusted people are project_admins. Another value is `deny`, with a warning. |
 | `TERRARIUM_GIT_PROXY_LISTEN` | `127.0.0.1:8084`. The git proxy (PLAN §9, "The git proxy"; [api.md](api.md) §5.1): the agent checkouts of a proxied repo fetch and push through it, so `push_deny` is a hard rule and the forge token stays in the daemon. Keep it on loopback: the sandboxes share the daemon's network, and a non-loopback bind logs an `INSECURE` warning. Empty: no proxy, and every repo is `direct`. The key of the agent proxy credentials is `<state>/git-proxy.key` (mode 0600; remove it and restart to change every credential). |
 | `TERRARIUM_WS_QUERY_TOKEN` | `0`: refuse the bearer token in `?token=` on a WebSocket upgrade (`401`). `1` (or `true`, `yes`, `on`): take it, with a warning in the log. Clients send the token as the subprotocol `bearer.<token>`. |
@@ -262,6 +264,16 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_UPDATE_VERIFY` | `gh`. The updater only: the image check of a release (`gh attestation verify` of the build provenance of the release workflow; `cosign`, `off`, or `command:<shell command>`; [api.md](api.md) §34.4). A check that fails stops the update. `TERRARIUM_UPDATE_WORKFLOW` (`.github/workflows/ci.yml`) is the signing workflow. |
 | `TERRARIUM_UPDATE_IMAGE`, `TERRARIUM_UPDATE_DRAIN_WAIT`, `TERRARIUM_UPDATE_HEALTH_TIMEOUT`, `TERRARIUM_UPDATER_TARGET`, `TERRARIUM_UPDATER_STATE` | The updater only ([api.md](api.md) §34.2). |
 | `TERRARIUM_DOCKER_GID`, `TERRARIUM_UPDATER_IMAGE` | compose.yaml only: the group of `docker.sock` for the updater service, and its image (default: the image of the daemon). The daemon never gets `docker.sock`. |
+
+Agent checkouts made or refreshed by `repo checkout` install a
+`prepare-commit-msg` hook. It adds `Terrarium-Session` (the Terrarium session
+ULID), `Terrarium-Agent`, `Terrarium-Harness` (name and version),
+`Terrarium-Model`, and `Terrarium-Card` when there is a current card. Missing
+model or version telemetry is `unknown`. Existing release trailers stay intact.
+The sandbox reads live session metadata, and target execs supply their caller's
+current metadata. A target commit made outside an agent exec uses the checkout's
+snapshot. Refresh older checkouts to install the hook. These hooks are attribution
+helpers, not a security boundary. Merge jobs still disable checkout hooks.
 
 ### The directories
 

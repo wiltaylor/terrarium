@@ -2202,12 +2202,77 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
         git(&lab.origin, &["log", "-1", "--format=%s", "next"]),
         "Merge ter-m3 onto next"
     );
-    // The daemon removed its repo of the job.
+    // The daemon keeps its repository, but removes the job's bundle.
     let state_jobs = lab.td.daemon.as_ref().unwrap().state.state_dir.join("jobs");
     let left: Vec<_> = std::fs::read_dir(state_jobs.join("p"))
         .map(|d| d.flatten().map(|e| e.file_name()).collect())
         .unwrap_or_default();
-    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(left, [std::ffi::OsString::from("repos")]);
+    let cached = state_jobs.join("p/repos/app.git");
+    assert_eq!(git(&cached, &["rev-parse", &next]), next);
+    git(&cached, &["update-ref", "refs/test/retained", &next]);
+    lab.branch("ter-m4", "next", &[("SECOND", "yes\n")]);
+    let card = lab.card("ter-m4", "ter-m4").await;
+    lab.td
+        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+        .await
+        .ok();
+    let second = lab
+        .until_idle()
+        .await
+        .into_iter()
+        .find(|j| j["card"] == card.as_str())
+        .unwrap();
+    assert_eq!(second["state"], "passed", "{second:#}");
+    assert_eq!(git(&cached, &["rev-parse", "refs/test/retained"]), next);
+    assert_eq!(
+        git(&cached, &["rev-parse", "refs/job/merge"]),
+        second["head"].as_str().unwrap()
+    );
+    let repos: Vec<_> = std::fs::read_dir(state_jobs.join("p/repos"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(repos, [std::ffi::OsString::from("app.git")]);
+}
+
+/// A crash can leave a lock or broken ref in the daemon's persistent
+/// cache. The next job rebuilds it, fetches, and merges successfully.
+#[tokio::test]
+async fn the_next_job_recovers_a_damaged_daemon_repo() {
+    let lab = lab(2).await;
+    let first = merge_with_recipe(&lab, "ter-cache", "test -f OK").await;
+    assert_eq!(first["state"], "passed", "{first:#}");
+    let cached = lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .state_dir
+        .join("jobs/p/repos/app.git");
+    for (i, damage) in ["index.lock", "refs/job/broken"].iter().enumerate() {
+        std::fs::write(cached.join(damage), "interrupted").unwrap();
+        let branch = format!("ter-recover-{i}");
+        lab.branch(&branch, "next", &[(&branch, "new\n")]);
+        let card = lab.card(&branch, &branch).await;
+        lab.td
+            .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
+            .await
+            .ok();
+        let job = lab
+            .until_idle()
+            .await
+            .into_iter()
+            .find(|j| j["card"] == card.as_str())
+            .unwrap();
+        assert_eq!(job["state"], "passed", "{damage}: {job:#}");
+        assert!(!cached.join(damage).exists());
+        assert_eq!(
+            git(&cached, &["rev-parse", "refs/job/merge"]),
+            job["head"].as_str().unwrap()
+        );
+    }
 }
 
 /// TER-159: merges have their own lane. With 1 slot, a validate job queued
@@ -3091,11 +3156,24 @@ async fn flow_scenario(flow: &'static str) -> Value {
     let sha = regex::Regex::new(r"\b[0-9a-f]{7,40}\b").unwrap();
     let time = regex::Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})")
         .unwrap();
+    // Rules allocate group headers from the card sequence. Compare the
+    // original work cards by scenario identity, not their sequence gaps.
+    let work_cards = [&first, &a, &b, &c, &d, &e, &f1, &f2, &f3];
+    let card_id = regex::Regex::new(r"\bP-\d+\b").unwrap();
     let neutral = |text: &str| -> String {
         let t = text.replace(&dir, "<DIR>");
         let t = time.replace_all(&t, "<TIME>");
         let t = ulid.replace_all(&t, "<ID>");
-        sha.replace_all(&t, "<SHA>").into_owned()
+        let t = sha.replace_all(&t, "<SHA>");
+        card_id
+            .replace_all(&t, |caps: &regex::Captures<'_>| {
+                work_cards
+                    .iter()
+                    .position(|id| id.as_str() == &caps[0])
+                    .map(|i| format!("<CARD-{i}>"))
+                    .unwrap_or_else(|| caps[0].to_owned())
+            })
+            .into_owned()
     };
     let mut board = lab.td.get("/api/projects/p/board").await.ok().clone();
     // The split halves can finish in either order: in rules mode a
@@ -3104,6 +3182,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
     // order, but retain its positions relative to every other card.
     // In particular, neither card may overtake the earlier green merge.
     let board_cards = board["cards"].as_array_mut().unwrap();
+    board_cards.retain(|card| card["kind"] != "group");
     let cohort: Vec<usize> = board_cards
         .iter()
         .enumerate()
@@ -3114,7 +3193,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
     for &i in &cohort {
         assert_eq!(board_cards[i]["column"], "accepted");
     }
-    if board_cards[cohort[0]]["id"].as_str() > board_cards[cohort[1]]["id"].as_str() {
+    if board_cards[cohort[0]]["id"] != f1 {
         board_cards.swap(cohort[0], cohort[1]);
     }
     let accepted: Vec<&str> = board_cards
@@ -3141,7 +3220,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
             .map(|c| neutral(c["body"].as_str().unwrap_or("")))
             .collect();
         cards.push(json!({
-            "id": id, "column": card["column"], "position": position, "labels": l,
+            "id": neutral(id), "column": card["column"], "position": position, "labels": l,
             "assignee": card["assignee_name"], "body": neutral(card["body"].as_str().unwrap_or("")),
             "comments": notes,
         }));
@@ -3151,7 +3230,7 @@ async fn flow_scenario(flow: &'static str) -> Value {
         .await
         .iter()
         .map(|j| {
-            json!({"card": j["card"], "kind": j["kind"], "state": j["state"],
+            json!({"card": neutral(j["card"].as_str().unwrap()), "kind": j["kind"], "state": j["state"],
                    "outcome": j["outcome"], "attempt": j["attempt"],
                    "split_path": j["split_path"]})
         })
