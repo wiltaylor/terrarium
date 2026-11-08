@@ -12,4 +12,7 @@ fn main() {
         println!("cargo::warning=cannot create {}: {e}", dist.display());
     }
     println!("cargo::rerun-if-changed=../../dashboard/dist");
+    // Watch the directory, not just existing embedded files: new SQL files
+    // must cause the daemon to be rebuilt too.
+    println!("cargo::rerun-if-changed=migrations");
 }

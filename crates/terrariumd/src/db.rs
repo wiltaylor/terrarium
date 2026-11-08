@@ -3161,14 +3161,18 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
 /// Run pending legacy migrations, then named migrations in filename order.
 pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
     let legacy = migrate_with(conn, MIGRATIONS)?;
-    let mut names: Vec<_> = <NamedMigrations as rust_embed::RustEmbed>::iter()
+    Ok(legacy + migrate_embedded::<NamedMigrations>(conn)?)
+}
+
+fn migrate_embedded<E: rust_embed::RustEmbed>(conn: &mut Connection) -> anyhow::Result<usize> {
+    let mut names: Vec<_> = E::iter()
         .filter(|name| name.ends_with(".sql"))
         .collect();
     names.sort();
     let files: Vec<_> = names
         .iter()
         .map(|name| {
-            let file = <NamedMigrations as rust_embed::RustEmbed>::get(name)
+            let file = E::get(name)
                 .with_context(|| format!("missing migration {name}"))?;
             let sql = String::from_utf8(file.data.into_owned())?;
             Ok((name.as_ref(), sql))
@@ -3178,7 +3182,7 @@ pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
         .iter()
         .map(|(name, sql)| (*name, sql.as_str()))
         .collect();
-    Ok(legacy + migrate_named(conn, &borrowed)?)
+    migrate_named(conn, &borrowed)
 }
 
 fn migrate_named(conn: &mut Connection, migrations: &[(&str, &str)]) -> anyhow::Result<usize> {
@@ -3190,7 +3194,7 @@ fn migrate_named(conn: &mut Connection, migrations: &[(&str, &str)]) -> anyhow::
     )?;
     let mut applied = 0;
     for (name, sql) in migrations {
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?1)",
             [name],
@@ -3245,6 +3249,25 @@ fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> anyhow::Result<us
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_migration_list_is_frozen() {
+        assert_eq!(MIGRATIONS.len(), 94, "add named SQL files, not legacy migrations");
+    }
+
+    #[test]
+    fn embedded_sql_migration_is_loaded_and_applied() {
+        #[derive(rust_embed::RustEmbed)]
+        #[folder = "tests/fixtures/named-migrations/"]
+        struct Fixture;
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert_eq!(migrate_embedded::<Fixture>(&mut conn).unwrap(), 1);
+        assert!(conn.table_exists(None, "embedded_migration_fixture").unwrap());
+        assert_eq!(migrate_embedded::<Fixture>(&mut conn).unwrap(), 0);
+        let name: String = conn.query_row("SELECT name FROM schema_migrations", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "ter-284-embedded.sql");
+    }
 
     #[test]
     fn named_migrations_upgrade_legacy_and_allow_earlier_names() {
