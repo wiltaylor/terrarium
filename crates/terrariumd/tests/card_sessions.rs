@@ -4,7 +4,7 @@
 //! session row stays, and its transcript comes from the archive.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

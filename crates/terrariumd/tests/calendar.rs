@@ -6,7 +6,7 @@
 //! touches these events.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use chrono::{DateTime, Duration, DurationRound, Utc};
 use common::TestDaemon;

@@ -2528,6 +2528,10 @@ const MIGRATIONS: &[&str] = &[
         default_agent TEXT REFERENCES agents(id) ON DELETE SET NULL
     );
     "#,
+    // 96: built-in human card comment delivery (TER-254).
+    r#"
+    ALTER TABLE projects ADD COLUMN human_comment_notifications INTEGER NOT NULL DEFAULT 1;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

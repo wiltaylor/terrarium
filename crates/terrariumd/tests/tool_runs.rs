@@ -3,7 +3,7 @@
 //! the tests run tools through `POST /api/tools/{name}/run` as an agent.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
