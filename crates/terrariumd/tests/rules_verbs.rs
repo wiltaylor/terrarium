@@ -222,6 +222,10 @@ async fn version_cut_freezes_members_and_explicit_built_completes_only_snapshot(
         .await;
     assert_eq!(step.status, 200, "{}", step.body);
     assert!(step.body["group"]["steps"][2]["eta_at"].is_string());
+    assert_eq!(td.post(&format!("/api/cards/{b}/move"),json!({"column":"ready"})).await.status,200);
+    assert_eq!(td.post(&format!("{path}/built"),json!({"version":"v1.2.3"})).await.status,409);
+    assert_eq!(card(&td,&a).await["column"],"accepted","failed acknowledgement must not partially finish members");
+    assert_eq!(td.post(&format!("/api/cards/{b}/move"),json!({"column":"accepted"})).await.status,200);
     let built = td
         .post(&format!("{path}/built"), json!({"version":"v1.2.3"}))
         .await;
@@ -265,8 +269,9 @@ async fn version_cut_age_timer_waits_for_merge_group_close() {
         .write("test", move |t| {
             t.execute(
                 "UPDATE cards SET created_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
-                [id],
+                [&id],
             )?;
+            t.execute("UPDATE events SET at = '2000-01-01T00:00:00Z' WHERE card = ?1 AND kind = 'card' AND json_extract(payload, '$.change') = 'moved'", [&id])?;
             assert_eq!(terrariumd::store::version_groups::pick(t, "p")?.waiting, 0);
             let g = terrariumd::store::groups::by_key(t, "p", "batch")?.unwrap();
             terrariumd::store::groups::close(t, &g, "merged")?;
@@ -298,6 +303,28 @@ async fn version_cut_age_timer_waits_for_merge_group_close() {
             .unwrap()
             .starts_with("version:")
     );
+}
+
+#[tokio::test]
+async fn version_cut_default_pack_threshold_and_lead_notification() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let lead = td.agent("p","lead",json!({"roles":["project_admin"]})).await["id"].as_str().unwrap().to_owned();
+    assert_eq!(td.patch("/api/projects/p",json!({"board_flow":"rules"})).await.status,200);
+    let mut members = Vec::new();
+    for n in 0..5 {
+        members.push(new_card(&td,"p",json!({"title":format!("member {n}"),"column":"accepted","labels":["version:vnext"]})).await);
+    }
+    settle(&td).await;
+    assert!(card(&td,&members[0]).await.get("group").is_none());
+    members.push(new_card(&td,"p",json!({"title":"sixth","column":"accepted","labels":["version:vnext"]})).await);
+    settle(&td).await;
+    let g = card(&td,&members[0]).await["group"].clone();
+    assert_eq!(g["total"],6);
+    let mail = td.mail_of(&lead).await;
+    let cuts: Vec<_> = mail.iter().filter(|m|m["subject"].as_str().unwrap_or_default().ends_with("version cut ready")).collect();
+    assert_eq!(cuts.len(),1,"{mail:?}");
+    for id in members { assert!(cuts[0]["body"].as_str().unwrap().contains(&id)); }
 }
 
 #[tokio::test]
