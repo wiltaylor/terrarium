@@ -753,11 +753,18 @@ async fn text_typed_by_a_person_is_not_flagged() {
 
 /// TER-224: a redraw that hides the stuck text for a frame (the fake TUI
 /// shows an empty prompt for 50 ms every 300 ms) does not unblock the
-/// agent. One stuck box gives one flag, so the daemon sends one mail.
+/// agent. One stuck box gives one flag, so the daemon sends one mail. The
+/// redraws start when the agent is blocked (the gate): before that they
+/// would keep the box from the watchdog's `submit_timeout`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_redraw_does_not_unblock_the_agent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gate = dir.path().join("blink");
     let mut h = start(Opts {
-        env: env(&[("FAKE_TUI_PASTE_NEEDS_PAUSE", "1")]),
+        env: vec![
+            ("FAKE_TUI_PASTE_NEEDS_PAUSE", "1".to_owned()),
+            ("FAKE_TUI_BLINK_GATE", gate.display().to_string()),
+        ],
         submit: ms(500),
         ..Opts::default()
     })
@@ -767,6 +774,7 @@ async fn a_redraw_does_not_unblock_the_agent() {
     // within the short `submit_timeout` of this test.
     h.runner.write(b"/leave-blink\r").await.expect("type");
     until_status(&mut h.events, AgentStatus::Blocked).await;
+    std::fs::write(&gate, b"").expect("open the gate");
     // Ten redraws, each shorter than INPUT_CLEAR_DEBOUNCE.
     tokio::time::sleep(ms(3_000)).await;
     assert_eq!(h.runner.status(), AgentStatus::Blocked);

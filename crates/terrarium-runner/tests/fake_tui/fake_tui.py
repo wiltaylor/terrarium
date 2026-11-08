@@ -22,9 +22,10 @@ Commands:
   /abort      die of SIGABRT, with no hooks
   /leave-blink  with FAKE_TUI_PASTE_NEEDS_PAUSE: a normal turn, then the
               next prompt holds a paste (`left`, `behind`) that nobody
-              typed. A CR submits it, Ctrl-U empties it. Until the next
-              input, the line is drawn again every 300 ms, and for 50 ms
-              it shows an empty `> ` (a redraw)
+              typed. A CR submits it, Ctrl-U empties it. Once the file
+              FAKE_TUI_BLINK_GATE exists, and until the next input, the
+              line is drawn again every 300 ms, and for 50 ms it shows an
+              empty `> ` (a redraw)
   /compact    as Claude Code: no UserPromptSubmit. Send PreCompact
               (trigger "manual"), print `compacting...`, wait the work time,
               send PostCompact, and print `compacted`
@@ -45,6 +46,8 @@ Env:
                        this long after the start, with no hooks
   FAKE_TUI_SUBMIT_GATE a path: after a line is read, wait until this file
                        exists before UserPromptSubmit goes out
+  FAKE_TUI_BLINK_GATE  a path: /leave-blink redraws its line only once this
+                       file exists
   FAKE_TUI_STARTUP_GATE  a path: as pi 1.4.0, show the prompt at once, but
                        finish the startup only when this file exists. Then
                        send the SessionStart hook (with --session). Input
@@ -101,6 +104,7 @@ NO_SUBMIT = os.environ.get("FAKE_TUI_NO_SUBMIT") == "1"
 NO_SUBMIT_HOOK = os.environ.get("FAKE_TUI_NO_SUBMIT_HOOK") == "1"
 SUBMIT_GATE = os.environ.get("FAKE_TUI_SUBMIT_GATE")
 STARTUP_GATE = os.environ.get("FAKE_TUI_STARTUP_GATE")
+BLINK_GATE = os.environ.get("FAKE_TUI_BLINK_GATE")
 SLASH_NEEDS_PAUSE = os.environ.get("FAKE_TUI_SLASH_NEEDS_PAUSE") == "1"
 PASTE_NEEDS_PAUSE = os.environ.get("FAKE_TUI_PASTE_NEEDS_PAUSE") == "1"
 CBREAK = SLASH_NEEDS_PAUSE or PASTE_NEEDS_PAUSE
@@ -142,6 +146,8 @@ def read_line():
 
         def redraw(stop=blink, marker=marker):
             while not stop.wait(0.3):
+                if not (BLINK_GATE and os.path.exists(BLINK_GATE)):
+                    continue
                 out("\r\x1b[K> ")
                 time.sleep(0.05)
                 out(marker)
