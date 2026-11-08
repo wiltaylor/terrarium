@@ -425,6 +425,37 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     assert_eq!(secs_between(&restart, &c["eta_at"]), 1200, "{c:#}");
     assert!(restarted.started_at > started.started_at);
 
+    // Requeue keeps the plan, clears the old ETA, and restarts its clock.
+    let rid = rerun.id.clone();
+    let queued = db
+        .write("system", move |t| jobs::requeue(t, &rid, "unreachable"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(queued.planned_secs, Some(1200));
+    assert!(queued.started_at.is_none());
+    assert!(card(ids[0].clone()).await.get("eta_at").is_none());
+    let rid = rerun.id.clone();
+    let restarted = db
+        .write("system", move |t| {
+            assert!(jobs::start(t, &rid, "machine", Some(1))?);
+            jobs::get(t, &rid)
+        })
+        .await
+        .unwrap();
+    let c = card(ids[0].clone()).await;
+    assert_eq!(
+        secs_between(&json!(restarted.started_at.unwrap()), &c["eta_at"]),
+        1200
+    );
+
+    // Cancelling a running planned job must not leave an overdue ETA.
+    let rid = rerun.id.clone();
+    db.write("system", move |t| jobs::cancel(t, &rid))
+        .await
+        .unwrap();
+    assert!(card(ids[0].clone()).await.get("eta_at").is_none());
+
     // No duration: the job leaves the card's ETA alone and sets none.
     let j = create(ids[1].clone(), None).await;
     let before = card(ids[1].clone()).await["eta_at"].clone();
@@ -437,17 +468,27 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     assert_eq!(c["eta_at"], before, "{c:#}");
     assert!(c["job"].get("planned_secs").is_none(), "{c:#}");
 
-    // A duration given while the job is queued is its planned duration:
-    // no ETA yet. A time is an ETA as before.
+    // D2: a move to validating with a queued validate job sets its planned
+    // duration, not a point-in-time card ETA. No ETA until the job starts.
     let j = create(ids[2].clone(), None).await;
     let path = format!("/api/cards/{}", ids[2]);
     let c = td
-        .patch_as("p/w", &path, json!({"eta_at": "45m"}))
+        .patch_as(
+            "p/w",
+            &path,
+            json!({"column": "validating", "eta_at": "45m"}),
+        )
         .await
         .ok()
         .clone();
     assert!(c.get("eta_at").is_none(), "{c:#}");
     assert_eq!(c["job"]["planned_secs"], 2700, "{c:#}");
+    assert_eq!(c["column"], "validating", "{c:#}");
+    assert_eq!(c["job"]["state"], "queued", "{c:#}");
+    let jid = j.id.clone();
+    let queued = db.read(move |c| jobs::get(c, &jid)).await.unwrap();
+    assert_eq!(queued.planned_secs, Some(2700));
+    assert!(queued.started_at.is_none());
     let jid = j.id.clone();
     let started = db
         .write("system", move |t| {
@@ -478,6 +519,60 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     td.patch_as("p/w2", &path, json!({"eta_at": "2h"}))
         .await
         .err(403, "forbidden");
+
+    // Both halves inherit a batch's duration, wait without an ETA, and
+    // set their cards' ETA from their own start.
+    let jid = j.id.clone();
+    let batch = [ids[0].clone(), ids[2].clone()]
+        .into_iter()
+        .map(|card| jobs::BatchCard {
+            card,
+            branch: "b".into(),
+            by_agent: Some("w".into()),
+            outcome: None,
+            note: None,
+        })
+        .collect::<Vec<_>>();
+    let halves = db
+        .write("system", move |t| {
+            jobs::cancel(t, &jid)?;
+            let parent = jobs::create(
+                t,
+                NewJob {
+                    project: "p".into(),
+                    card: batch[0].card.clone(),
+                    kind: JobKind::Merge,
+                    repo: "app".into(),
+                    branch: "b".into(),
+                    commit: None,
+                    by_agent: Some("w".into()),
+                    batch: batch.clone(),
+                    planned_secs: Some(1200),
+                },
+            )?;
+            jobs::start(t, &parent.id, "machine", Some(1))?;
+            let red = jobs::finish(t, &parent.id, &JobEnd::default())?.unwrap();
+            jobs::split(t, &red, &batch)
+        })
+        .await
+        .unwrap();
+    for half in [halves.0, halves.1] {
+        assert_eq!(half.planned_secs, Some(1200));
+        assert!(card(half.card.clone()).await.get("eta_at").is_none());
+        let hid = half.id.clone();
+        let started = db
+            .write("system", move |t| {
+                assert!(jobs::start(t, &hid, "machine", Some(1))?);
+                jobs::get(t, &hid)
+            })
+            .await
+            .unwrap();
+        let c = card(half.card.clone()).await;
+        assert_eq!(
+            secs_between(&json!(started.started_at.unwrap()), &c["eta_at"]),
+            1200
+        );
+    }
 }
 
 #[tokio::test]
@@ -2170,7 +2265,8 @@ async fn a_merge_push_ignores_the_config_that_the_recipe_wrote() {
 /// TER-103: the target holds no credential and no push repo. The recipe
 /// of a merge finds no `.ssh` or `.push` dir beside its clone, no git
 /// credential env, and no remote in its clone. `TERRARIUM_GIT_REF` is a
-/// public build stamp, not a credential. It deletes the job ref in
+/// public build stamp and `TERRARIUM_GIT_TRAILERS` is public provenance,
+/// not a credential. It deletes the job ref in
 /// its clone, and the merge still pushes the recorded commit: the push
 /// runs from the daemon's repo.
 #[tokio::test]
@@ -2179,7 +2275,7 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
     let before = git(&lab.origin, &["rev-parse", "next"]);
     let recipe = "test -f OK \
          && ! ls -a .. | grep -E '[.](ssh|push)$' \
-         && ! env | grep -v '^TERRARIUM_GIT_REF=' | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
+         && ! env | grep -vE '^TERRARIUM_GIT_(REF|TRAILERS)=' | grep -E '^(TERRARIUM_GIT|GIT_SSH_COMMAND)' \
          && test -z \"$(git remote)\" \
          && test \"$(git rev-parse refs/job/merge)\" = \"$(git rev-parse HEAD)\" \
          && git update-ref -d refs/job/merge \

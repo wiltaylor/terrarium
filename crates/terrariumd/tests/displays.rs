@@ -353,6 +353,18 @@ async fn input_needs_an_exclusive_lease_and_is_audited_without_the_text() {
 #[tokio::test]
 async fn input_is_rate_limited_on_each_target() {
     let (lab, ..) = setup().await;
+    let limiter = &lab
+        .td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .executor
+        .display_limiter;
+    let start = std::time::Instant::now();
+    // Host subprocesses and HTTP requests can take more than a second under
+    // load. Keep all requests in one rate window regardless of wall time.
+    limiter.set_test_time(start);
     let calls = (0..30).map(|i| {
         lab.td.post(
             "/api/targets/terra-win/display/move",
@@ -362,11 +374,27 @@ async fn input_is_rate_limited_on_each_target() {
     let answers = futures_util::future::join_all(calls).await;
     let limited = answers.iter().filter(|r| r.status == 429).count();
     let ok = answers.iter().filter(|r| r.status == 200).count();
-    assert!(limited >= 10, "{limited} limited, {ok} ok");
-    assert!(ok <= 20, "{ok} ok");
+    assert_eq!(limited, 10, "{limited} limited, {ok} ok");
+    assert_eq!(ok, 20, "{ok} ok");
     // Screenshots are reads: no limit.
     lab.td
         .post("/api/targets/terra-win/display/screenshot", json!({}))
+        .await
+        .ok();
+    limiter.set_test_time(start + Duration::from_millis(999));
+    lab.td
+        .post(
+            "/api/targets/terra-win/display/move",
+            json!({"x": 1, "y": 1}),
+        )
+        .await
+        .err(429, "rate_limited");
+    limiter.set_test_time(start + Duration::from_secs(1));
+    lab.td
+        .post(
+            "/api/targets/terra-win/display/move",
+            json!({"x": 1, "y": 1}),
+        )
         .await
         .ok();
 }

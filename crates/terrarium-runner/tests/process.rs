@@ -530,6 +530,38 @@ async fn the_runner_process_exits_with_the_harness() {
 }
 
 #[tokio::test]
+async fn hold_queues_requests_until_a_new_daemon_hello() {
+    let env = Env::new();
+    let first = env
+        .spawn_spec(env.spec_with_queue(ms(10_000).as_millis() as u64))
+        .await;
+    first.hold().await.expect("hold");
+    // A control round trip orders the hold before the agent request.
+    first.screen().await.expect("screen");
+    let hooks = first.socket_path().to_path_buf();
+    let pending = tokio::spawn(async move {
+        hook_socket(
+            &hooks,
+            json!({"type":"request","id":9,"method":"echo","params":{"held":true}}),
+            true,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !pending.is_finished(),
+        "held calls must not reach the old daemon"
+    );
+    drop(first);
+    let second = env.connect(None).await;
+    let reply = timeout(wait(), pending).await.unwrap().unwrap().unwrap();
+    assert_eq!(reply["result"]["params"]["held"], true);
+    second.kill().await.unwrap();
+    second.wait().await;
+    env.until_gone().await;
+}
+
+#[tokio::test]
 async fn an_agent_request_waits_for_a_daemon_to_connect() {
     let env = Env::new();
     let first = env

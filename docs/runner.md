@@ -390,7 +390,7 @@ other field takes the default of `RunnerConfig::new`.
   "stall_timeout_ms": 300000, "submit_timeout_ms": 10000, "submit_attempts": 2,
   "log_max_bytes": 8388608, "tick_ms": 50,
   "ready_detector": {"quiet_ms": 300, "pattern": "> $"},
-  "rpc_queue_timeout_ms": 10000,
+  "rpc_queue_timeout_ms": 900000,
   "kill_grace_ms": 3000, "stop_grace_ms": 5000
 }
 ```
@@ -450,6 +450,7 @@ The daemon sends two kinds of frame:
 ```json
 {"type":"call","id":1,"method":"hello","params":{"client":"terrariumd","protocol":1}}
 {"type":"rpc_response","id":7,"result":{"status":200,"headers":{},"body":{}}}
+{"type":"hold"}
 ```
 
 The runner sends five kinds of frame:
@@ -559,16 +560,28 @@ sends an `rpc_response` with the same `id`. The runner gives the result or
 the error to the agent CLI.
 
 When no daemon is connected, the request waits for a daemon up to
-`rpc_queue_timeout_ms` (default 10 s). When a daemon connects in that time,
+`rpc_queue_timeout_ms` (default 15 min, 900000 ms). When a daemon connects in that time,
 the request goes to it. Else the agent gets this tunnel error:
 
 ```json
-{"type":"response","id":2,"error":{"code":"unavailable","message":"the agent RPC tunnel is down: no daemon connected to the runner within 10000 ms; try again later"}}
+{"type":"response","id":2,"error":{"code":"unavailable","message":"the agent RPC tunnel is down: no daemon connected to the runner within 900000 ms; try again later"}}
 ```
 
-When the daemon disconnects before it answers, the agent also gets
-`unavailable`. The runner does not send the request again, because the
-daemon can have done it already.
+Before a graceful restart, the daemon sends `hold` on its claimed control
+connection. The runner keeps that connection for in-flight replies but holds
+new agent calls in the bounded queue. A new daemon connection's `hello`
+resumes forwarding. Hold does not cancel an admitted call.
+
+If the connection drops before an answer, the runner replays identified
+`http` calls (those with `params.request_id`) after reconnecting. The daemon's
+durable answer journal prevents duplicate writes. Unresolved writes return
+`indeterminate`, never another execution. Legacy calls without request IDs
+still receive `unavailable` rather than unsafe replay.
+
+Reads and long polls interrupted by a drain receive `retry`. The CLI repeats
+them with the same request ID and bounds repeated admission refusals to 15
+minutes. Once a call is held or admitted, it waits normally for its answer:
+the runner enforces the hold budget, not a client timeout on running writes.
 
 ## RemoteRunner and RunnerHandle
 

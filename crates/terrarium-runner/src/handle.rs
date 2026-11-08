@@ -14,6 +14,10 @@ use crate::runner::{Delivery, ExitStatus, Runner, ScreenSnapshot};
 /// One harness, in this process or in a runner process. The trait is
 /// object safe: hold an `Arc<dyn RunnerHandle>`.
 pub trait RunnerHandle: Send + Sync + 'static {
+    /// Hold new agent RPCs during a graceful daemon restart.
+    fn hold(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
     fn agent(&self) -> AgentId;
     /// The hook and agent RPC socket, `<run>/agents/<ulid>.sock`.
     fn socket_path(&self) -> &Path;

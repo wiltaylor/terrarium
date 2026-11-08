@@ -253,6 +253,172 @@ async fn board_shape_and_card_ids() {
     assert_eq!(l.next_cursor(), None);
 }
 
+/// Keep the shared tile/Inbox/ETA contract in sync with full-card reads.
+#[tokio::test]
+async fn board_summary_keeps_tile_and_eta_metadata() {
+    let td = setup().await;
+    let dependency = card(&td, "proj/w1", json!({"title": "Dependency"})).await;
+    let id = card(
+        &td,
+        "proj/lead",
+        json!({
+            "title": "Attributed estimate", "assignee": "w1", "eta_at": "1h",
+            "labels": ["version:vnext"], "depends_on": [dependency], "body": "detail only"
+        }),
+    )
+    .await;
+    td.patch_as(
+        "proj/w1",
+        &format!("/api/cards/{id}"),
+        json!({"eta_at": "2h"}),
+    )
+    .await
+    .ok();
+    let full = td.get(&format!("/api/cards/{id}")).await;
+    let response = td.get("/api/projects/proj/board").await;
+    let summary = response.ok()["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap();
+    for field in [
+        "id",
+        "project",
+        "kind",
+        "column",
+        "position",
+        "title",
+        "labels",
+        "group",
+        "assignee",
+        "assignee_name",
+        "agent",
+        "agent_name",
+        "depends_on",
+        "blocked_by",
+        "archived",
+        "created_by",
+        "created_by_name",
+        "created_at",
+        "updated_at",
+        "eta_at",
+        "eta_set_at",
+        "eta_set_by",
+        "eta_set_by_name",
+        "done_at",
+        "idle_since",
+        "job",
+        "tests",
+        "repo",
+        "branch",
+    ] {
+        assert_eq!(
+            summary.get(field),
+            full.ok().get(field),
+            "tile field {field}"
+        );
+    }
+    // Live agent status can change between the two requests. Both responses
+    // must still include its string value rather than omit the tile field.
+    for card in [summary, full.ok()] {
+        assert!(
+            card.get("assignee_status").is_some_and(Value::is_string),
+            "tile field assignee_status must be a string"
+        );
+    }
+    assert_eq!(summary["created_by_name"], "proj/lead");
+    assert_eq!(summary["eta_set_by_name"], "proj/w1");
+    assert_eq!(summary["assignee_name"], "proj/w1");
+    assert_eq!(summary["blocked_by"], json!([dependency]));
+    for field in ["body", "comments", "links"] {
+        assert!(summary.get(field).is_none());
+    }
+}
+
+/// Matched synthetic fixtures: today's card count and ten times that count.
+/// Large descriptions/comments must not affect the list payload or its budget.
+#[tokio::test]
+async fn board_summary_budget_and_done_pages() {
+    use std::time::Instant;
+    use terrariumd::store::{Page, board};
+    for count in [294, 2940] {
+        let td = setup().await;
+        let mut conn = terrariumd::db::open(&td.state.join("terrarium.db")).unwrap();
+        let tx = conn.transaction().unwrap();
+        for n in 1..=count {
+            let id = format!("TER-{n}");
+            let column = if n % 3 == 0 { "ready" } else { "done" };
+            tx.execute("INSERT INTO cards(id, project, number, column_id, position, title, body, created_by, created_at, updated_at)
+              VALUES (?1, 'proj', ?2, (SELECT id FROM board_columns WHERE project = 'proj' AND name = ?3), ?2, ?4, ?5, 'operator', '2026-11-08T00:00:00Z', '2026-11-08T00:00:00Z')",
+              rusqlite::params![id, n, column, "Board performance fixture ".repeat(4), "b".repeat(950)]).unwrap();
+            for j in 0..10 {
+                tx.execute("INSERT INTO card_comments(id, card, author, body, created_at) VALUES (?1, ?2, 'operator', ?3, '2026-11-08T00:00:00Z')",
+                  rusqlite::params![format!("comment-{n}-{j}"), id, "c".repeat(950)]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let start = Instant::now();
+        let before = serde_json::to_vec(&board::get_board(&conn, "proj").unwrap()).unwrap();
+        let before_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let start = Instant::now();
+        let summary = board::board_summary(&conn, "proj", false, &Page::default()).unwrap();
+        let after = serde_json::to_vec(&summary).unwrap();
+        let after_ms = start.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "board count={count}: before={} bytes {before_ms:.2}ms after={} bytes {after_ms:.2}ms",
+            before.len(),
+            after.len()
+        );
+        assert!(after.len() < count as usize * 400, "summary size budget");
+        assert!(after.len() * 10 < before.len(), "at least 90% smaller");
+        assert!(after_ms < 2000.0, "board query and serialization budget");
+        assert_eq!(
+            summary["cards"].as_array().unwrap().len(),
+            count as usize / 3
+        );
+        let start = Instant::now();
+        let response = td.get("/api/projects/proj/board").await;
+        let http_ms = start.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "board HTTP count={count}: {} bytes {http_ms:.2}ms",
+            serde_json::to_vec(response.ok()).unwrap().len()
+        );
+        let c = &response.ok()["cards"][0];
+        assert_eq!(c["comment_count"], 10);
+        for field in ["body", "comments", "links", "tests"] {
+            assert!(c.get(field).is_none(), "unexpected detail {field}");
+        }
+        let full = td.get("/api/cards/TER-3").await;
+        assert_eq!(full.ok()["comments"].as_array().unwrap().len(), 10);
+        assert_eq!(full.ok()["body"].as_str().unwrap().len(), 950);
+        let mut cursor = String::new();
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let response = td
+                .get(&format!(
+                    "/api/projects/proj/board?done=true&limit=37&cursor={cursor}"
+                ))
+                .await;
+            let b = response.ok();
+            let cards = b["cards"].as_array().unwrap();
+            assert!(cards.len() <= 37);
+            for c in cards {
+                assert_eq!(c["column"], "done");
+                assert!(seen.insert(c["id"].as_str().unwrap().to_owned()));
+            }
+            let Some(next) = b["next_cursor"].as_str() else {
+                break;
+            };
+            cursor = next.to_owned();
+        }
+        assert_eq!(seen.len(), count as usize * 2 / 3);
+        td.get("/api/projects/proj/board?done=true&cursor=bad")
+            .await
+            .err(422, "invalid");
+    }
+}
+
 fn ids(v: &Value) -> Vec<&str> {
     v.as_array()
         .unwrap()
@@ -977,6 +1143,35 @@ async fn eta_set_clear_and_rules() {
         .filter(|e| e["data"]["change"] == "eta")
         .count();
     assert_eq!(n, 5);
+}
+
+/// Without an open job, a validating move resolves its ETA from now.
+#[tokio::test]
+async fn move_to_validating_without_a_job_resolves_eta_from_now() {
+    let td = setup().await;
+    let id = card(&td, "proj/w1", json!({"title": "Check"})).await;
+    td.post_empty_as("proj/w1", &format!("/api/cards/{id}/claim"))
+        .await
+        .ok();
+    let before = chrono::Utc::now();
+    let c = td
+        .patch_as(
+            "proj/w1",
+            &format!("/api/cards/{id}"),
+            json!({"column": "validating", "eta_at": "20m"}),
+        )
+        .await
+        .ok()
+        .clone();
+    let after = chrono::Utc::now();
+    assert_eq!(c["column"], "validating");
+    assert!(c.get("job").is_none(), "{c:#}");
+    let eta = chrono::DateTime::parse_from_rfc3339(c["eta_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    // Stored timestamps have millisecond precision.
+    assert!(eta >= before + chrono::Duration::minutes(20) - chrono::Duration::milliseconds(1));
+    assert!(eta <= after + chrono::Duration::minutes(20));
 }
 
 /// Every move to another column clears the ETA (TER-155 D1); a reorder in

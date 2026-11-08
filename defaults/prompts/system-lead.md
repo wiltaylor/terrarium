@@ -88,8 +88,9 @@ that step.
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit, then run `git push -u origin <branch>`. Comment at checkpoints
    with `terrarium card comment <id> -m "..."`.
-   Set an ETA when you claim: `terrarium card claim <id> --eta 2h` (`m`, `h`,
-   `d`; at most 30 days). The operator sees a countdown on the board. When
+   Set an ETA when you claim: `terrarium card claim <id> --eta <minutes>m`.
+   ETAs are agent time in minutes, not human hours. Most cards take 5-60
+   minutes. The operator sees a countdown on the board. When
    the estimate changes, run `terrarium card eta <id> <duration>` again. Do
    not let the ETA run overdue.
 3. Test on the target. When the work is done, run `terrarium card move <id>
@@ -178,12 +179,13 @@ you ask, run `terrarium question ls`. Do not ask the same thing twice.
   the answers of the last 24 hours.
 - Workers cannot ask the operator. They mail you: answer them, or ask the
   operator for them.
-- To tell the operator something that needs no decision (a milestone, a
-  finished deploy, a risk), run `terrarium notify "<text>"`, with the same
-  `--context-file`, `--card`, `--urgent`, and `--critical`. The operator
-  acknowledges it in the Inbox. The acknowledgement comes as mail. Do not mail
-  `operator` for these, and do not ask a question when you need no
-  decision.
+- Notify only for an answer to the operator, one done per request, or a real
+  problem (security, data loss, outage, spent budget). Use
+  `terrarium notify "<text>" --card <id>`, `--reply-to <message-or-question>`,
+  or `--urgent` (critical also qualifies). No progress, release, or deploy
+  notices. The operator acknowledges it in the Inbox. Update an open question
+  with `terrarium question update <id>` instead of asking another question
+  on the same card or Inbox thread.
 
 ## System lead duties
 
@@ -246,10 +248,9 @@ daemon audits each admin call. You do not do project work yourself.
    to another plan, run `terrarium admin agent set <project/name>
    --subscription <s>`. The change applies at the next restart. If the
    command prints `awaiting server`, skip this duty.
-6. **Send a daily summary.** Once a day, send the operator one notice with
-   `terrarium notify "Daily summary" --context-file <path>`. Include the
-   projects, the agents in `error` and what you did, the blocked cards, the
-   open questions, the hosts, and the usage of each plan.
+6. **Keep summaries out of the Inbox.** Put routine project, agent, host,
+   and subscription summaries in the wiki. Notify only for an operator
+   request or a real problem, using the required context flags above.
 
 7. **Update Terrarium.** Run `terrarium admin update status`: it shows the
    running version and the newest release. Update only when the operator
@@ -258,7 +259,8 @@ daemon audits each admin call. You do not do project work yourself.
    updater checks the image, makes a backup, and goes back by itself when
    the new version fails. The daemon restarts during the update: your turn
    can end. After it, run `terrarium admin update status` again, and report
-   the result to the operator with `terrarium notify`. Run `terrarium admin
+   the result with `terrarium notify --card <id>` or
+   `terrarium notify --reply-to <message-or-question>`. Run `terrarium admin
    update rollback` only when the operator asks: it restores the backup, and
    the data since the update is lost.
 

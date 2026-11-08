@@ -32,6 +32,98 @@ const OUT_CAPACITY: usize = 1024;
 
 type Out = mpsc::Sender<ServerFrame>;
 
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+
+    fn context() -> RequestContext {
+        serde_json::from_value(json!({"agent":"00000000000000000000000001",
+            "name":"tester", "project":"demo", "harness":"claude", "status":"idle"}))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn lost_answer_replays_the_same_request_after_hello() {
+        let hub = Hub::new(Duration::from_secs(5));
+        let (tx, mut first) = mpsc::channel(4);
+        let (epoch, _) = hub.claim(tx);
+        let params = json!({"method":"POST", "path":"/api/mail", "request_id":"stable"});
+        let ctx = context();
+        let (answer, ()) = tokio::join!(hub.forward(&ctx, "http", params.clone()), async {
+            let ServerFrame::RpcRequest { params: sent, .. } = first.recv().await.unwrap() else {
+                panic!("request");
+            };
+            assert_eq!(sent, params);
+            hub.release(epoch);
+            let (tx, mut second) = mpsc::channel(4);
+            hub.claim(tx);
+            let ServerFrame::RpcRequest {
+                id,
+                params: replayed,
+                ..
+            } = second.recv().await.unwrap()
+            else {
+                panic!("replay");
+            };
+            assert_eq!(replayed, params);
+            hub.resolve(id, Ok(json!({"stored_answer":true})));
+        });
+        assert_eq!(answer.unwrap()["stored_answer"], true);
+        assert!(lock(&hub.pending).is_empty());
+    }
+
+    #[tokio::test]
+    async fn hold_does_not_cancel_an_admitted_call() {
+        let hub = Hub::new(Duration::from_secs(5));
+        let (tx, mut daemon) = mpsc::channel(4);
+        let (epoch, _) = hub.claim(tx);
+        let ctx = context();
+        let (answer, ()) = tokio::join!(hub.forward(&ctx, "echo", json!({})), async {
+            let ServerFrame::RpcRequest { id, .. } = daemon.recv().await.unwrap() else {
+                panic!("request");
+            };
+            hub.hold(epoch);
+            hub.resolve(id, Ok(json!("finished")));
+        });
+        assert_eq!(answer.unwrap(), "finished");
+        assert!(hub.connected());
+    }
+
+    #[tokio::test]
+    async fn held_queue_expires_without_forwarding() {
+        let hub = Hub::new(Duration::from_millis(20));
+        let (tx, mut daemon) = mpsc::channel(4);
+        let (epoch, _) = hub.claim(tx);
+        hub.hold(epoch);
+        let err = hub
+            .forward(&context(), "http", json!({"request_id":"held"}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unavailable");
+        assert!(err.message.contains("tunnel is down"));
+        assert!(daemon.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn an_application_unavailable_answer_is_not_replayed() {
+        let hub = Hub::new(Duration::from_secs(5));
+        let (tx, mut daemon) = mpsc::channel(4);
+        hub.claim(tx);
+        let ctx = context();
+        let (answer, ()) = tokio::join!(
+            hub.forward(&ctx, "http", json!({"request_id":"once"})),
+            async {
+                let ServerFrame::RpcRequest { id, .. } = daemon.recv().await.unwrap() else {
+                    panic!("request");
+                };
+                hub.resolve(id, Err(unavailable("application failure")));
+            }
+        );
+        assert_eq!(answer.unwrap_err().message, "application failure");
+        assert!(daemon.try_recv().is_err());
+    }
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -44,6 +136,7 @@ fn unavailable(m: impl Into<String>) -> RpcError {
 #[derive(Clone)]
 struct Link {
     epoch: u64,
+    held: bool,
     out: Out,
     close: Arc<Notify>,
 }
@@ -77,6 +170,7 @@ impl Hub {
         let close = Arc::new(Notify::new());
         let old = self.link.send_replace(Some(Link {
             epoch,
+            held: false,
             out,
             close: close.clone(),
         }));
@@ -104,6 +198,17 @@ impl Hub {
         self.fail_epoch(epoch, "the daemon disconnected before it answered");
     }
 
+    fn hold(&self, epoch: u64) {
+        self.link.send_if_modified(|link| {
+            if let Some(link) = link.as_mut().filter(|l| l.epoch == epoch) {
+                link.held = true;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
     fn fail_epoch(&self, epoch: u64, message: &str) {
         let failed: Vec<_> = {
             let mut pending = lock(&self.pending);
@@ -117,7 +222,7 @@ impl Hub {
                 .collect()
         };
         for (_, tx) in failed {
-            let _ = tx.send(Err(unavailable(message)));
+            let _ = tx.send(Err(RpcError::new("tunnel_lost", message)));
         }
     }
 
@@ -146,34 +251,74 @@ impl Hub {
         params: Value,
     ) -> Result<Value, RpcError> {
         let mut rx = self.link.subscribe();
-        let link =
-            match tokio::time::timeout(self.queue_timeout, rx.wait_for(Option::is_some)).await {
-                Ok(Ok(l)) => l.clone(),
-                _ => None,
+        // Only identified HTTP calls are safe to replay after losing an answer.
+        // Older callers and other methods retain the fail-on-disconnect behavior.
+        let replay = method == "http" && params["request_id"].is_string();
+        let mut deadline = None;
+        loop {
+            if deadline.is_some_and(|until| tokio::time::Instant::now() >= until) {
+                return Err(unavailable(
+                    "the agent RPC tunnel is down: restart queue expired",
+                ));
+            }
+            let ready = rx.borrow().clone().filter(|l| !l.held);
+            let link = if ready.is_some() {
+                ready
+            } else {
+                let until = *deadline
+                    .get_or_insert_with(|| tokio::time::Instant::now() + self.queue_timeout);
+                match tokio::time::timeout_at(
+                    until,
+                    rx.wait_for(|l| l.as_ref().is_some_and(|l| !l.held)),
+                )
+                .await
+                {
+                    Ok(Ok(l)) => l.clone(),
+                    _ => None,
+                }
             };
-        let Some(link) = link else {
-            return Err(unavailable(format!(
-                "the agent RPC tunnel is down: no daemon connected to the runner within {} ms; \
+            let Some(link) = link else {
+                return Err(unavailable(format!(
+                    "the agent RPC tunnel is down: no daemon connected to the runner within {} ms; \
                  try again later",
-                self.queue_timeout.as_millis()
-            )));
-        };
-        let id = self.next_rpc.fetch_add(1, Ordering::Relaxed);
-        let (tx, answer) = oneshot::channel();
-        lock(&self.pending).insert(id, (link.epoch, tx));
-        let frame = ServerFrame::RpcRequest {
-            id,
-            method: method.to_owned(),
-            params,
-            context: ctx.clone(),
-        };
-        if link.out.send(frame).await.is_err() {
+                    self.queue_timeout.as_millis()
+                )));
+            };
+            let id = self.next_rpc.fetch_add(1, Ordering::Relaxed);
+            let (tx, answer) = oneshot::channel();
+            lock(&self.pending).insert(id, (link.epoch, tx));
+            let frame = ServerFrame::RpcRequest {
+                id,
+                method: method.to_owned(),
+                params: params.clone(),
+                context: ctx.clone(),
+            };
+            if link.out.send(frame).await.is_err() {
+                lock(&self.pending).remove(&id);
+                self.release(link.epoch);
+                if replay {
+                    deadline
+                        .get_or_insert_with(|| tokio::time::Instant::now() + self.queue_timeout);
+                    continue;
+                }
+                return Err(unavailable("the daemon disconnected"));
+            }
+            let outcome = tokio::select! {
+                answer = answer => answer.unwrap_or_else(|_| Err(RpcError::new("tunnel_lost", "the daemon disconnected"))),
+                _ = rx.wait_for(|l| l.as_ref().is_none_or(|l| l.epoch != link.epoch)) => Err(RpcError::new("tunnel_lost", "the daemon disconnected")),
+            };
             lock(&self.pending).remove(&id);
-            return Err(unavailable("the daemon disconnected"));
+            if outcome.as_ref().is_err_and(|e| e.code == "tunnel_lost") {
+                if !replay {
+                    return Err(unavailable("the daemon disconnected"));
+                }
+                // The queue budget starts when the connection is lost, not when a
+                // potentially long-running command was first sent.
+                deadline.get_or_insert_with(|| tokio::time::Instant::now() + self.queue_timeout);
+                continue;
+            }
+            return outcome;
         }
-        answer
-            .await
-            .unwrap_or_else(|_| Err(unavailable("the daemon disconnected")))
     }
 }
 
@@ -332,6 +477,11 @@ impl Conn {
             return;
         }
         match serde_json::from_str::<ClientFrame>(text) {
+            Ok(ClientFrame::Hold) => {
+                if let Some((epoch, _)) = &self.claim {
+                    self.ctx.hub.hold(*epoch);
+                }
+            }
             Ok(ClientFrame::Call { id, method, params }) => {
                 if let Some(outcome) = self.call(id, &method, params).await {
                     self.send(ServerFrame::reply(id, outcome)).await;

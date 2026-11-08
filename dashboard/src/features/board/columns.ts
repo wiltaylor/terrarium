@@ -26,7 +26,7 @@ export const columnTitle = (c: Pick<Column, "name" | "title">) => c.title || def
  */
 export function roleColumn(columns: readonly Column[], role: ColumnRole): Column | undefined {
   if (columns.some((c) => c.role)) return columns.find((c) => c.role === role);
-  return columns.find((c) => c.name === (role === "working" ? "in_progress" : "blocked"));
+  return columns.find((c) => c.name === (role === "working" ? "in_progress" : role));
 }
 
 /** Is `name` the blocked column (a move there needs a comment)? */

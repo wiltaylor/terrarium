@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BoardGroup, Card } from "../../api/types";
-import { groupSections } from "./groups";
+import { groupDetailsColumn, groupSections } from "./groups";
 
 const group: BoardGroup = { id: "P-3", key: "batch", title: "Batch", column: "review", status: "", done: 1, total: 2, members: ["P-2", "P-1"], eta_at: null, closed_at: null, steps: [] };
 const card = (id: string, column: string, kind: "card" | "group" = "card"): Card => ({ id, column, kind, group } as Card);
@@ -19,6 +19,51 @@ describe("board groups", () => {
   });
 
   it("shows the home header even before members are added", () => {
-    expect(groupSections([card("P-3", "review", "group")], "review")).toEqual([{ group, cards: [] }]);
+    const empty = { ...group, members: [], total: 0, done: 0 };
+    const home = { ...card("P-3", "review", "group"), group: empty };
+    expect(groupSections([home], "review")).toEqual([{ group: empty, cards: [] }]);
+  });
+
+  it("removes the home header when the last member leaves its column", () => {
+    const home = card("P-3", "review", "group");
+    const first = card("P-1", "ready");
+    const last = card("P-2", "review");
+    expect(groupSections([home, first, last], "review")).toEqual([{ group, cards: [last] }]);
+
+    const moved = { ...last, column: "ready" };
+    expect(groupSections([home, first, moved], "review")).toEqual([]);
+    expect(groupSections([home, first, moved], "ready")).toEqual([{ group, cards: [moved, first] }]);
+    // LanesBoard supplies a column-local, visibility-filtered list.
+    expect(groupSections([home], "review")).toEqual([]);
+  });
+
+  it("moves the only header out of home and back again", () => {
+    const home = card("P-3", "review", "group");
+    const cards = [home, card("P-1", "ready"), card("P-2", "ready")];
+    expect(groupSections(cards, "ready")).toHaveLength(1);
+    expect(groupSections(cards, "review")).toEqual([]);
+    const moved = cards.map((c) => ({ ...c, column: "review" }));
+    expect(groupSections(moved, "ready")).toEqual([]);
+    expect(groupSections(moved, "review")[0]!.cards.map((c) => c.id)).toEqual(["P-2", "P-1"]);
+  });
+
+  it("shows details in exactly one occupied column, preferring home", () => {
+    const columns = ["ready", "review", "done"];
+    const home = card("P-3", "review", "group");
+    const cards = [home, card("P-1", "done"), card("P-2", "ready")];
+    const details = (members: Card[]) => columns.filter((column) =>
+      groupSections(members, column).some((section) => section.group &&
+        groupDetailsColumn(section.group, members, columns) === column));
+    expect(details(cards)).toEqual(["ready"]);
+    expect(details(cards.map((c) => c.id === "P-2" ? { ...c, column: "review" } : c))).toEqual(["review"]);
+    // A filter hiding the first occupied column moves details to the next.
+    expect(details(cards.filter((c) => c.id !== "P-2"))).toEqual(["done"]);
+  });
+
+  it("hides populated group headers when all members are filtered out", () => {
+    const visible = [card("P-3", "review", "group")];
+    for (const column of ["ready", "review", "done"]) {
+      expect(groupSections(visible, column)).toEqual([]);
+    }
   });
 });

@@ -2908,7 +2908,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     },
 
     board: {
-      get: (proj) => reply(() => boardOf(proj)),
+      get: (proj, q = {}) => reply(() => {
+        const board = boardOf(proj);
+        const cards = board.cards.filter(c => (c.column === "done") === !!q.done);
+        const offset = q.done ? Number(q.cursor ?? 0) : 0;
+        const limit = q.done ? Math.max(1, Math.min(q.limit ?? 100, 100)) : cards.length;
+        return { ...board, next_cursor: offset + limit < cards.length ? String(offset + limit) : null,
+          cards: cards.slice(offset, offset + limit).map(c => {
+            const { body: _body, comments, links: _links, ...summary } = c;
+            return { ...summary, comment_count: comments.length, last_comment_at: comments.at(-1)?.created_at ?? null };
+          }) };
+      }),
       update: (proj, columns: ColumnEdit[]) =>
         reply(() => {
           project(proj);
@@ -4094,7 +4104,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       let rows: { title: string; href: string }[] = [];
       return {
         list: async () => [...rows],
-        add: async (title: string, href: string) => (rows = [...rows.filter((b) => b.href !== href), { title, href }]),
+        add: async (title: string, href: string, previousHref?: string) => {
+          if (previousHref && (!rows.some((b) => b.href === previousHref) || rows.some((b) => b.href === href && b.href !== previousHref))) {
+            fail(422, "invalid", "Bookmark missing or URL already bookmarked");
+          }
+          const old = previousHref ?? href;
+          return rows = rows.some((b) => b.href === old) ? rows.map((b) => b.href === old ? { title, href } : b) : [...rows, { title, href }];
+        },
         remove: async (href: string) => (rows = rows.filter((b) => b.href !== href)),
       };
     })(),

@@ -5,7 +5,7 @@
 // The Threads tab lists the Inbox threads themselves (`GET /api/threads`).
 
 import { A, useNavigate, useSearchParams } from "@solidjs/router";
-import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { InboxItem, InboxWatch, Message, Question } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
@@ -22,8 +22,12 @@ import { NewThreadDialog } from "./NewThreadDialog";
 import { ThreadRow } from "./ThreadRow";
 import { ThreadsView } from "./ThreadsView";
 import { threadHref } from "./threads";
+import { byInboxOrder } from "./model";
 
 const TAB_IDS = INBOX_TABS.map((t) => t.id) as string[];
+const PAGE_SIZE = 40;
+const FETCH_SIZE = 200;
+const cursorOf = (i: InboxItem) => JSON.stringify([i.open, !!i.critical, i.urgent, i.at, i.id]);
 
 export default function InboxPage() {
   const now = useNow(30_000);
@@ -44,8 +48,16 @@ export default function InboxPage() {
   // the focus). Only new and gone items change the DOM.
   const [items, setItems] = createStore<{ list: InboxItem[] }>({ list: [] });
   const list = () => items.list;
+  const [visibleCount, setVisibleCount] = createSignal(PAGE_SIZE);
+  const [hasMore, setHasMore] = createSignal(false);
+  let cursor: string | undefined;
+  const visible = createMemo(() => list().slice(0, visibleCount()));
   const setList = (next: InboxItem[] | ((cur: InboxItem[]) => InboxItem[])) => {
     const rows = typeof next === "function" ? next(items.list) : next;
+    // Keep every mounted card mounted when a new item is inserted above it.
+    const mounted = new Set(visible().map((i) => i.id));
+    const last = rows.reduce((n, i, index) => mounted.has(i.id) ? index + 1 : n, 0);
+    setVisibleCount((n) => Math.max(n, last));
     keepView(() => setItems("list", reconcile(rows, { key: "id", merge: true })));
   };
   let listEl: HTMLDivElement | undefined;
@@ -65,15 +77,34 @@ export default function InboxPage() {
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
   let gen = 0;
-  const reload = async () => {
+  const reload = async (append = false) => {
     const mine = ++gen;
     if (threadsTab()) return;
     setLoading(true);
     try {
-      const rows = await api.inbox.list(inboxQuery(tab(), status(), project()));
-      if (mine !== gen) return;
+      const boundary = append ? undefined : list().at(-1);
+      const target = params.item;
+      let nextCursor = append ? cursor : undefined;
+      const rows: InboxItem[] = [];
+      let more = false;
+      do {
+        const page = await api.inbox.list({ ...inboxQuery(tab(), status(), project()), limit: FETCH_SIZE, cursor: nextCursor });
+        if (mine !== gen) return;
+        rows.push(...page);
+        const last = page.at(-1);
+        const next = last ? cursorOf(last) : undefined;
+        more = page.length === FETCH_SIZE && next !== nextCursor;
+        nextCursor = next;
+        if (!more) break;
+        if (target && !rows.some((i) => i.id === target)) continue;
+        if (boundary && !rows.some((i) => byInboxOrder(i, boundary) >= 0)) continue;
+        if (rows.filter(keep).length >= PAGE_SIZE) break;
+      } while (more);
+      cursor = nextCursor;
+      setHasMore(more);
       // The daemon's `open` has the waiting asks too: they show under Asked only.
-      setList(sortItems(rows.filter(keep)));
+      setList(sortItems((append ? [...list(), ...rows] : rows).filter(keep)));
+      if (append) setVisibleCount((n) => n + PAGE_SIZE);
       setError(null);
     } catch (e) {
       if (mine === gen) setError(e);
@@ -81,7 +112,13 @@ export default function InboxPage() {
       if (mine === gen) setLoading(false);
     }
   };
-  createEffect(on([tab, status, project], () => void reload()));
+  createEffect(on([tab, status, project], () => {
+    setItems("list", []);
+    cursor = undefined;
+    setHasMore(false);
+    setVisibleCount(PAGE_SIZE);
+    void reload();
+  }));
 
   onMount(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
@@ -97,7 +134,11 @@ export default function InboxPage() {
   let scrolledTo: string | null = null;
   createEffect(() => {
     const target = params.item;
-    if (!target || target === scrolledTo || !list().some((i) => i.id === target)) return;
+    if (!target || target === scrolledTo) return;
+    const index = list().findIndex((i) => i.id === target);
+    if (index < 0) return;
+    // A critical banner or question link must still reach an item beyond the first page.
+    setVisibleCount((n) => Math.max(n, index + 1));
     scrolledTo = target;
     requestAnimationFrame(() => document.getElementById(inboxItemDomId(target))?.scrollIntoView({ block: "center", behavior: "smooth" }));
   });
@@ -200,7 +241,7 @@ export default function InboxPage() {
       </Show>
       <Show when={!threadsTab() && list().length} fallback={<Show when={!threadsTab()}><Empty>{loading() ? "Loading…" : emptyText(tab(), status())}</Empty></Show>}>
         <div class="stack" ref={listEl}>
-          <For each={list()}>
+          <For each={visible()}>
             {(item) => (
               <div id={inboxItemDomId(item.id)} classList={{ "inbox-target": params.item === item.id }}>
                 <Switch>
@@ -234,6 +275,11 @@ export default function InboxPage() {
             )}
           </For>
         </div>
+        <Show when={visibleCount() < list().length || hasMore()}>
+          <button disabled={loading()} onClick={() => visibleCount() < list().length ? setVisibleCount((n) => n + PAGE_SIZE) : void reload(true)}>
+            Load more
+          </button>
+        </Show>
       </Show>
       <Show when={newThread()}>
         <NewThreadDialog

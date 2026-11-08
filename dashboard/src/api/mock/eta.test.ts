@@ -51,5 +51,6 @@ describe("mock card ETA", () => {
 });
 
 async function mockBoard() {
-  return (await mock().board.get("terrarium")).cards;
+  const api = mock();
+  return [...(await api.board.get("terrarium")).cards, ...(await api.board.get("terrarium", { done: true })).cards];
 }

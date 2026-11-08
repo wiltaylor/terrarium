@@ -1844,6 +1844,19 @@ async fn steps(
         job.id,
         job.attempt
     );
+    if job.kind == JobKind::Merge {
+        let card = job.card.clone();
+        if let Err(e) = x
+            .state
+            .db
+            .write("system", move |t| {
+                crate::store::groups::merge_recipe_started(t, &card)
+            })
+            .await
+        {
+            warn!(job = %job.id, "cannot update merge group recipe boundary: {e}");
+        }
+    }
     let recipe_cmd = RemoteCmd {
         argv: vec![
             "sh".into(),

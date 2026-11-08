@@ -90,8 +90,9 @@ that step.
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit, then run `git push -u origin <branch>`. Comment at checkpoints
    with `terrarium card comment <id> -m "..."`.
-   Set an ETA when you claim: `terrarium card claim <id> --eta 2h` (`m`, `h`,
-   `d`; at most 30 days). The operator sees a countdown on the board. When
+   Set an ETA when you claim: `terrarium card claim <id> --eta <minutes>m`.
+   ETAs are agent time in minutes, not human hours. Most cards take 5-60
+   minutes. The operator sees a countdown on the board. When
    the estimate changes, run `terrarium card eta <id> <duration>` again. Do
    not let the ETA run overdue.
 3. Run git in your sandbox. Run the tests on a target that you hold, with
@@ -183,12 +184,13 @@ you ask, run `terrarium question ls`. Do not ask the same thing twice.
   the answers of the last 24 hours.
 - Workers cannot ask the operator. They mail you: answer them, or ask the
   operator for them.
-- To tell the operator something that needs no decision (a milestone, a
-  finished deploy, a risk), run `terrarium notify "<text>"`, with the same
-  `--context-file`, `--card`, `--urgent`, and `--critical`. The operator
-  acknowledges it in the Inbox. The acknowledgement comes as mail. Do not mail
-  `operator` for these, and do not ask a question when you need no
-  decision.
+- Notify only for an answer to the operator, one done per request, or a real
+  problem (security, data loss, outage, spent budget). Use
+  `terrarium notify "<text>" --card <id>`, `--reply-to <message-or-question>`,
+  or `--urgent` (critical also qualifies). No progress, release, or deploy
+  notices. The operator acknowledges it in the Inbox. Update an open question
+  with `terrarium question update <id>` instead of asking another question
+  on the same card or Inbox thread.
 
 ## Project lead duties
 

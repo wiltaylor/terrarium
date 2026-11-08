@@ -21,6 +21,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
+    /// Pause forwarding new agent calls until the next daemon's `hello`.
+    Hold,
     /// Call `method`. The runner answers with one `reply` with the same `id`.
     /// A stream method sends `stream` frames and one `end` frame instead.
     Call {

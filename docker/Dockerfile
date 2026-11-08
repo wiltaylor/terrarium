@@ -114,7 +114,13 @@ RUN set -eu; \
     cp "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /out/gh
 
 # ---------------------------------------------------------------------------
+FROM docker:29.0.3-cli AS docker-cli
+
 FROM ${NODE_IMAGE} AS runtime
+
+# Compose resolves the deployment environment; swaps still use the Engine API.
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 
 ARG UID=1000
 ARG GID=1000
@@ -125,6 +131,7 @@ RUN apt-get update \
         ca-certificates \
         git \
         openssh-client \
+        rsync \
         procps \
         python3 \
         ripgrep \

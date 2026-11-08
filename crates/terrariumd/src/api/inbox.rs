@@ -52,6 +52,8 @@ fn operator(actor: &Actor) -> ApiResult<()> {
 
 #[derive(Debug, Default, Deserialize)]
 struct ListQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
@@ -78,9 +80,18 @@ async fn list(
         project: q.project.filter(|p| !p.trim().is_empty()),
     };
     let project = f.project.clone();
+    let limit = q.limit.unwrap_or(200);
+    if !(1..=400).contains(&limit) {
+        return Err(ApiError::invalid("Inbox limit must be between 1 and 400"));
+    }
     let (rows, c) = state
         .db
-        .read(move |c| Ok((inbox::list(c, &f)?, inbox::counts(c, project.as_deref())?)))
+        .read(move |c| {
+            Ok((
+                inbox::page(c, &f, q.cursor.as_deref(), limit)?,
+                inbox::counts(c, project.as_deref())?,
+            ))
+        })
         .await?;
     let mut resp = Json(rows).into_response();
     for (k, v) in [

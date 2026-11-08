@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Column } from "../../api/types";
+import { COLUMN_ROLES } from "../../api/types";
+import { checkColumnEdits } from "../../api/mock/boardColumns";
 import {
   addRow,
   canMove,
@@ -28,6 +30,16 @@ const board: Column[] = [
 ];
 
 describe("board columns", () => {
+  it.each(["validating", "review", "merge_queue", "accepted"] as const)("round-trips the %s role through edits and the mock", (role) => {
+    expect(COLUMN_ROLES).toContain(role);
+    const rows = setRole(rowsFromBoard(board), 1, role);
+    expect(isClean(checkColumns(rows))).toBe(true);
+    const saved = checkColumnEdits(board, toEdits(rows));
+    expect(roleColumn(saved, role)?.name).toBe("ready");
+    expect(rowsFromBoard(saved)[1]!.role).toBe(role);
+    expect(roleColumn([{ name: role, position: 0 }], role)?.name).toBe(role);
+  });
+
   it("finds the role columns, with the old names for a daemon without roles", () => {
     expect(roleColumn(board, "working")?.name).toBe("in_progress");
     expect(isBlockedColumn(board, "blocked")).toBe(true);

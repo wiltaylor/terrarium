@@ -294,6 +294,8 @@ gives them to the routers and the mail code.
 | Env | Flag | Default | Use |
 |---|---|---|---|
 | `TERRARIUM_PUBLIC_URL` | `--public-url` | unset (mail: `http://localhost:8080`) | Mail links, `Version.url`, the cookie `Origin` check, CORS on `/a/...`. |
+| `TERRARIUM_GIT_NAME` | none | `Terrarium` | Author and committer name for agent commits, independent of forge authentication. Set in the deployment `.env` to override per instance. |
+| `TERRARIUM_GIT_EMAIL` | none | `terrarium@localhost` | Author and committer email for agent commits, independent of forge authentication. Set in the deployment `.env` to override per instance. |
 | `TERRARIUM_MAIL_LOOP_LIMIT` | none | `6` | The mail loop guard (§6, PLAN §12): the agent-to-agent messages a thread can have since the last operator or project-inbox message before new agent mail on it types no pointer. The daemon reads it once. |
 | `TERRARIUM_HARNESS_AUTO_UPDATE` | `--harness-auto-update` | `daily` | The background check for harness updates (§4, "Auto-update and pins"): `daily`, `off`, or a duration of `1h` or more (`6h`). A value that does not parse stops the daemon at start. |
 | `TERRARIUM_HARNESS_UPDATE_MAIL` | `--harness-update-mail` | `off` | An Inbox mail for each update that the auto-update installs (§4, "Auto-update and pins"): `off` or `on`. A failed install sends one mail for each failed version with both values. |
@@ -3224,6 +3226,15 @@ The rights:
 
 The rules:
 
+- A notice needs `card`, `reply_to`, or an urgent (or critical) `priority`.
+  Otherwise it is `422 invalid`: only answers, one done per request, and
+  real problems belong in the Inbox. `reply_to` (notices only) names an
+  operator mail or Inbox-thread message to the sender, or an answered
+  question owned by the sender. Invalid references are `422 invalid`.
+  The reply reference is recorded in the ask audit event.
+- A question or bundle is `409 conflict` while the same agent has an open
+  question or bundle on the same card or Inbox thread. `details.question`
+  names it and the error points to `terrarium question update <id>`.
 - An agent has at most 50 open questions (`429 rate_limited`). A question
   whose text is the same as an open question of the agent (case and
   spaces do not count) is `409 conflict`; `details.question` names the
@@ -3378,6 +3389,14 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 
 | `POST /api/inbox/asks` | `{"to", "text"?, "question"?}` | `201` `{"message", "watch"}`: the mail (§7) and the new watch. Below. |
 | `DELETE /api/inbox/watches/{thread}` | | `200` the watch, with `cancelled_at`. An unknown thread is `404 not_found`; a cancelled watch `409 conflict`. The mail stays. |
+
+The Inbox list accepts `limit` (1–400, default 200) and `cursor`. To request
+the next page, URL-encode the JSON tuple `[open, critical, urgent, at, id]`
+of the last item as `cursor`, with the same filters. An empty page ends the
+list. The ordering uses descending ID to break timestamp ties. New items
+above a cursor do not shift older pages, and removing the cursor item does
+not invalidate it. Badge headers always count every matching open item,
+independent of the page. Mail bodies are loaded only for the selected page.
 
 **Ask and forward** (GitHub #24). The operator asks an agent a question
 from the Inbox, or forwards a question, a bundle, or a notice of the Inbox
@@ -3720,6 +3739,10 @@ across browsers. All methods are operator-only. GET returns an array of
 renames that URL, and returns the list. DELETE accepts `{href}` and returns
 the list, including when the URL was absent. Mutations write `bookmark.add`
 or `bookmark.remove` audit rows.
+
+PUT also accepts an optional `previous_href` to edit an existing bookmark's
+title and URL atomically, preserving its position. A missing source or a URL
+already used by another bookmark returns `422 invalid` without changing the list.
 
 Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
 without credentials, or a relative `/p/<project>/knowledge/wiki` path.
@@ -4362,8 +4385,19 @@ A board:
             {"name":"review","title":"Code review","position":3,"count":0},
             {"name":"blocked","title":"blocked","position":4,"role":"blocked","count":1},
             {"name":"done","title":"done","position":5,"count":0}],
- "cards":[ ...cards that are not archived, by column, then position... ]}
+ "cards":[ ...active card summaries, by column, then position... ], "next_cursor":null}
 ```
+
+`GET board` returns summaries, not full cards: `body`, `comments` and `links`
+are omitted. `tests` contains only the latest linked result's compact chip
+(run ID, name, time, status and aggregate counts), never cases or output.
+ETA attribution and creator names are retained. `comment_count` and `last_comment_at` describe
+comments without loading them. Open a card with `GET /api/cards/{id}` for
+its full details. Column counts include Done, but the default card list
+excludes Done. `?done=true&limit=100&cursor=...` reads only Done, up to 100
+cards per page. Use the response body's `next_cursor` for the next page
+(null at the end). Filtering and version grouping on the Done screen apply
+to loaded pages. `PATCH board` retains its full-card response for compatibility.
 
 A new board has the columns `backlog`, `ready`, `in_progress` (role
 `working`), `validating` (role `validating`), `review` (role `review`),
@@ -4458,7 +4492,7 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `GET /api/projects/{name}/board` | | `200` board |
+| `GET /api/projects/{name}/board?done=&limit=&cursor=` | | `200` board with card summaries; Done pages are opt-in |
 | `PATCH /api/projects/{name}/board` | `{"columns": [column, ...]}` | `200` board; project_admin |
 | `GET /api/projects/{name}/cards?column=&assignee=&unassigned=&label=&archived=&wait=` | | `200` cards in board order: by column, then by place in the column (the top first), then by number. Each card has its `position` in its column, from 0. Cursor: opaque |
 | `POST /api/projects/{name}/cards` | new card | `201` card |
@@ -6541,6 +6575,37 @@ has `attach_error` (a sentence that starts "attach needs a restart of the
 target"), unless the daemon could run a new container.
 
 ### 17.4 Exec sessions
+
+SSH targets can opt in to workspace mirroring with `sync_workspace = true`
+in the target definition (`admin target new --kind ssh --sync-workspace`).
+The default is false. Install `rsync` on the target. The daemon image includes
+it. This uses the same SSH credential, port and host-key policy as exec.
+
+Before exec, run or cp, Terrarium mirrors the caller's workspace to the same
+absolute path on the target, creating it if needed. An operator must select
+an agent. After a normally exited command (including nonzero exit) or a
+completed copy, it stages the remote tree locally and pulls changes and
+deletions before reporting the session done. Killed or lost commands leave
+their output on the target. Sync failure is reported as `sync_failed`.
+
+At every depth, `.git`, `.terrarium`, `.terrarium-stage`, `target` and
+`node_modules` are excluded in both directions and protected from deletion.
+The same rule excludes `.terrarium-git-trailers`, `.env`, `.env.*`, `.netrc`,
+`.npmrc`, `.pypirc`, `id_*`, `*.pem`, and `.ssh` (including its contents).
+These exclusions also apply to conflict snapshots. Supply build credentials
+through target-side configuration or explicit secret injection, not workspace files.
+Build caches stay on the target. Repository metadata and Terrarium control
+files stay local. Do not use remote git operations with this mode.
+Only one synced operation per workspace may run at a time.
+
+If a local file, directory, symlink or permission changes while the command
+runs, the pull is skipped entirely with `sync_conflict`, naming the changed
+paths. Remote output remains on the target. Stop local editing during the
+final pull. Recover remote files explicitly before starting another synced
+operation, since its push makes the local tree authoritative again.
+After the final apply, Terrarium scans again and reports a conflict if the
+local tree differs from the staged result. This detects surviving late edits,
+but is not an atomic filesystem transaction. Tool runs are not synced.
 
 An exec session runs one command, one shell, or one file copy. It uses
 plain requests only, so it works through the agent tunnel too
@@ -11739,6 +11804,8 @@ queued.
 - An ETA duration that is given later for a card with an open job (`card
   eta`, `card move ... --eta`) sets the job's `planned_secs` (§8.2).
 - The job's end moves the card, and the move clears the ETA (§8.2).
+- Cancelling a job with a planned duration clears its cards' ETAs too.
+
 Events `job.verdict` {project, job, card, kind, verdict, state, outcome,
 attempt, by_agent, repo, branch, parent, batch, end_comment,
 failure_block}: one per card when a job ends or is cancelled, in the same
@@ -11751,3 +11818,45 @@ line of the end. `failure_block` is the `Validation failed:` block for
 `red`, `conflict`, and `error`, else `null`. The verdict says what the run
 found, not what the queue does next: the rerun and the split stay as
 above.
+
+## Agent calls during daemon restarts
+
+The agent CLI assigns a stable `request_id` to each tunneled HTTP call. The
+runner holds new calls after a daemon `hold` control frame and resumes them
+after the next daemon's `hello`. The default queue limit is 15 minutes. At
+that limit the caller receives `unavailable` (the tunnel is down).
+
+Graceful shutdown stops admission before draining calls. Reads and long
+polls receive `retry`, which the CLI resends with the same request ID. Writes
+already admitted finish, including saving their answers. After 30 seconds
+the daemon logs and audits a restart deferral. It waits up to
+the updater's `TERRARIUM_UPDATE_DRAIN_WAIT` (default 600 seconds),
+measured from the start of the drain, before exiting. New calls remain held
+during this interval. Keep this cap below the 15-minute runner queue. Long
+`terrarium exec` calls may hold the drain until persistent exec sessions land
+in TER-263, which is outside this change.
+
+Write request IDs are scoped to the agent and bound to a fingerprint of the
+request. A reused ID with different parameters is rejected. Completed write
+answers are stored in SQLite and returned without executing the write again,
+including after a daemon restart. Concurrent copies wait for the first call.
+Legacy callers without request IDs are drained but cannot safely replay.
+Secret reads (`POST /api/agent/secrets/env`, `/api/agent/secrets/{name}/get`,
+and `/api/secrets/{scope}/{name}/reveal`) are also retried without journaling.
+These are audited reads despite their HTTP verb. Their secret-bearing answers
+must not be stored in the restart journal.
+For other writes whose answer declares `Cache-Control: no-store`, the first
+caller receives the answer, but the journal stores only an `indeterminate`
+marker. Replays fail closed without repeating the write or retaining sensitive
+answer content.
+
+An unresolved (`started`, NULL answer) journal entry after a crash or the drain
+cap yields `indeterminate`, never another execution. The error includes the
+request ID and HTTP method and says "the call may or may not have happened;
+check before you retry". A non-NULL answer marks `done`. Each indeterminate
+outcome is logged and
+audited. External effects and the answer journal are not one transaction:
+this policy prevents duplicate execution, but cannot promise a successful
+answer for an interrupted external write. Journal records have no automatic
+expiry, so an old request ID cannot silently become executable again.
+

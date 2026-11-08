@@ -185,9 +185,6 @@ pub struct Filter {
     pub project: Option<String>,
 }
 
-/// The most items of one kind in a list.
-const KIND_MAX: usize = 200;
-
 /// The project of a message: the project of its sender.
 fn sender_project(m: &Message) -> Option<String> {
     match m.from_kind.as_str() {
@@ -338,8 +335,7 @@ fn watch_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Watch> {
 /// Every watch, newest first.
 pub fn watches(conn: &Connection) -> ApiResult<Vec<Watch>> {
     let mut st = conn.prepare(&format!(
-        "{WATCH_SELECT} ORDER BY w.created_at DESC, w.thread_id DESC LIMIT {}",
-        KIND_MAX * 5
+        "{WATCH_SELECT} ORDER BY w.created_at DESC, w.thread_id DESC"
     ))?;
     let rows = st
         .query_map([], watch_row)?
@@ -569,7 +565,7 @@ fn in_project(f: &Filter, item: &InboxItem) -> bool {
 fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResult<Vec<InboxItem>> {
     let mut out = Vec::new();
     let take = |status: Option<QuestionStatus>| -> ApiResult<Vec<Question>> {
-        questions::list(
+        questions::list_inbox(
             conn,
             &questions::Filter {
                 project: f.project.clone(),
@@ -603,15 +599,11 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
 /// The item of an Inbox thread: open while it waits for the operator or
 /// has an open question (its questions are no items of their own); urgent
 /// or critical by its open questions.
-fn thread_item(conn: &Connection, th: Thread) -> ApiResult<InboxItem> {
+fn thread_item(th: Thread, urgency: (bool, bool)) -> InboxItem {
     let open = th.status == ThreadStatus::WaitingOperator
         || (th.status != ThreadStatus::Closed && th.open_questions.unwrap_or(0) > 0);
-    let (urgent, critical) = if open {
-        threads::urgency(conn, &th.id)?
-    } else {
-        (false, false)
-    };
-    Ok(InboxItem {
+    let (urgent, critical) = if open { urgency } else { (false, false) };
+    InboxItem {
         id: th.item_id(),
         kind: InboxKind::Thread,
         open,
@@ -624,14 +616,16 @@ fn thread_item(conn: &Connection, th: Thread) -> ApiResult<InboxItem> {
         system: None,
         watch: None,
         thread: Some(th),
-    })
+    }
 }
 
 /// The thread items of the filter.
 fn thread_items(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
     let mut out = Vec::new();
+    let urgency = threads::inbox_urgency(conn)?;
     for th in threads::list_all(conn, f.status.done())? {
-        let item = thread_item(conn, th)?;
+        let flags = urgency.get(&th.id).copied().unwrap_or_default();
+        let item = thread_item(th, flags);
         if ((item.open && f.status.open()) || (!item.open && f.status.done()))
             && in_project(f, &item)
         {
@@ -644,6 +638,26 @@ fn thread_items(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
 /// The Inbox: critical first, then urgent, then the newest first. The
 /// open items come before the done ones in a list of both.
 pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
+    page(conn, f, None, usize::MAX)
+}
+
+type Cursor = (bool, bool, bool, String, String);
+
+fn key(i: &InboxItem) -> Cursor {
+    (i.open, i.critical, i.urgent, i.at.clone(), i.id.clone())
+}
+
+/// Keyset pagination, independent of whether the previous item still exists.
+/// Only mail in the selected page loads bodies and resolves thread state.
+pub fn page(
+    conn: &Connection,
+    f: &Filter,
+    cursor: Option<&str>,
+    limit: usize,
+) -> ApiResult<Vec<InboxItem>> {
+    let cursor: Option<Cursor> = cursor
+        .map(|s| serde_json::from_str(s).map_err(|_| ApiError::invalid("invalid Inbox cursor")))
+        .transpose()?;
     let mut items = Vec::new();
     if wants(f, InboxKind::Question) {
         items.extend(question_items(conn, f, QuestionKind::Question)?);
@@ -654,27 +668,41 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
         items.extend(question_items(conn, f, QuestionKind::Notice)?);
     }
     if wants(f, InboxKind::Mail) {
-        let mut mail_rows = Vec::new();
-        if f.status.open() {
-            mail_rows.extend(
-                mail::operator_mail(conn, true, KIND_MAX * 5)?
-                    .into_iter()
-                    .map(|m| mail_item(m, true)),
-            );
+        let mut st = conn.prepare(
+            "SELECT m.id, m.created_at, m.state IN ('queued','delivered'),
+                    CASE m.from_kind WHEN 'project' THEN substr(m.from_agent,9)
+                         WHEN 'agent' THEN coalesce(a.project, old.project) END AS project
+             FROM messages m
+             LEFT JOIN agents a ON m.from_kind = 'agent' AND a.id = m.from_agent
+             LEFT JOIN agents_removed old ON m.from_kind = 'agent' AND old.id = m.from_agent
+             WHERE m.to_kind = 'operator' AND m.state IN ('queued','delivered','read','replied')
+               AND NOT (m.from_kind = 'system' AND coalesce(m.subject,'') LIKE ?1)
+               AND (?2 IS NULL OR
+                    (m.from_kind = 'project' AND m.from_agent = 'project:' || ?2) OR
+                    (m.from_kind = 'agent' AND coalesce(a.project, old.project) = ?2))",
+        )?;
+        let rows = st.query_map(params![mail::PAUSE_SUBJECT_LIKE, f.project], |r| {
+            Ok(InboxItem {
+                id: format!("mail:{}", r.get::<_, String>(0)?),
+                at: r.get(1)?,
+                open: r.get(2)?,
+                project: r.get(3)?,
+                kind: InboxKind::Mail,
+                urgent: false,
+                critical: false,
+                question: None,
+                message: None,
+                system: None,
+                watch: None,
+                thread: None,
+            })
+        })?;
+        for row in rows {
+            let item = row?;
+            if (item.open && f.status.open()) || (!item.open && f.status.done()) {
+                items.push(item);
+            }
         }
-        if f.status.done() {
-            mail_rows.extend(
-                mail::operator_mail(conn, false, KIND_MAX * 5)?
-                    .into_iter()
-                    .map(|m| mail_item(m, false)),
-            );
-        }
-        items.extend(
-            mail_rows
-                .into_iter()
-                .filter(|i| in_project(f, i))
-                .take(KIND_MAX * 2),
-        );
     }
     if wants(f, InboxKind::Watch) {
         for w in watches(conn)? {
@@ -683,18 +711,6 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
                 && in_project(f, &item)
             {
                 items.push(item);
-            }
-        }
-    }
-    // A mail on a watched thread names the watch that it answers.
-    if items.iter().any(|i| i.kind == InboxKind::Mail) {
-        let by_thread: HashMap<String, Watch> = watches(conn)?
-            .into_iter()
-            .map(|w| (w.thread_id.clone(), w))
-            .collect();
-        for i in items.iter_mut().filter(|i| i.kind == InboxKind::Mail) {
-            if let Some(m) = &i.message {
-                i.watch = by_thread.get(&m.thread_id).cloned();
             }
         }
     }
@@ -717,6 +733,20 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
             .then(b.at.cmp(&a.at))
             .then(b.id.cmp(&a.id))
     });
+    items.retain(|i| cursor.as_ref().is_none_or(|c| key(i) < *c));
+    items.truncate(limit);
+    if items.iter().any(|i| i.kind == InboxKind::Mail) {
+        let by_thread: HashMap<String, Watch> = watches(conn)?
+            .into_iter()
+            .map(|w| (w.thread_id.clone(), w))
+            .collect();
+        for i in items.iter_mut().filter(|i| i.kind == InboxKind::Mail) {
+            let m = mail::get(conn, &i.id[5..])?;
+            let watch = by_thread.get(&m.thread_id).cloned();
+            *i = mail_item(m, i.open);
+            i.watch = watch;
+        }
+    }
     Ok(items)
 }
 
@@ -753,11 +783,7 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
         kind: None,
         project: project.map(str::to_owned),
     };
-    let mail = mail::operator_mail(conn, true, KIND_MAX * 5)?
-        .into_iter()
-        .map(|m| mail_item(m, true))
-        .filter(|i| in_project(&f, i))
-        .count();
+    let mail = mail::operator_mail_count(conn, project)?;
     let mut system = 0;
     for thread in mail::guard_threads(conn)? {
         if in_project(&f, &system_item(conn, &thread)?) {
@@ -769,10 +795,7 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
         .map(watch_item)
         .filter(|i| i.open && in_project(&f, i))
         .count();
-    let thread_rows = thread_items(conn, &f)?;
-    let thread = thread_rows.len();
-    let thread_urgent = thread_rows.iter().filter(|i| i.urgent).count();
-    let thread_critical = thread_rows.iter().filter(|i| i.critical).count();
+    let (thread, thread_urgent, thread_critical) = threads::inbox_counts(conn, project)?;
     Ok(Counts {
         open: question + notice + mail + system + thread,
         urgent: q.urgent + b.urgent + r.urgent + n.urgent + thread_urgent,
