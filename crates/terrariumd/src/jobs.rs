@@ -846,13 +846,13 @@ async fn prepare_hosts_with(
     struct Lookup(String);
     impl Drop for Lookup {
         fn drop(&mut self) {
-            LOOKUPS.lock().unwrap().remove(&self.0);
+            LOOKUPS.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
         }
     }
     let resolve = Arc::new(resolve);
     let mut pending = Vec::new();
     for name in names {
-        if !LOOKUPS.lock().unwrap().insert(name.clone()) {
+        if !LOOKUPS.lock().unwrap_or_else(|e| e.into_inner()).insert(name.clone()) {
             continue;
         }
         let guard = Lookup(name.clone());
