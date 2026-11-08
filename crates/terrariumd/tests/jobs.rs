@@ -1289,6 +1289,13 @@ async fn a_green_validation_moves_the_card_to_review(flow: &'static str) {
     let l = labels(&c);
     assert!(l.contains(&"by:w1".to_owned()), "{l:?}");
     assert!(l.iter().any(|l| l.starts_with("validation:")), "{l:?}");
+    let own = c["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["body"] == "done by w1")
+        .unwrap();
+    assert_eq!(own["author"], lab.w1.as_str(), "{own:#}");
     std::fs::write(&gate, "").unwrap();
     let c = lab
         .until_card(&id, "review", |c| c["column"] == "review")

@@ -4570,8 +4570,8 @@ supply:
 - `assignee` follows the assign rules.
 - `eta_at` follows the ETA rule (§8.2). The daemon sets it last, after the
   assignment.
-- `github_author` is the GitHub login of the issue author of a GitHub card,
-  for the GitHub author gate (below).
+- `github_author` is a legacy caller assertion, ignored by the author gate.
+  Use the issue import endpoint below for a daemon-verified author.
 - `inbox_thread` is an Inbox thread that tracks the new card (TER-146,
   §6.13 "Linked cards"). The caller must read the thread: else `404`, and
   no card is made.
@@ -4582,7 +4582,7 @@ is a card with the label `github` (any case), or a title that starts with
 `GitHub #<n>:` (any case). A held card is a GitHub card with the label
 `hold`.
 
-- **Create.** An agent makes a GitHub card, and its `github_author` is
+- **Create.** An agent makes a GitHub card, and its daemon-verified author is
   missing or not on the list (the case does not matter, and a leading `@`
   is dropped). The card is held. It goes to the blocked column with the
   labels `github` and `hold` and a move comment that says why, whatever
@@ -4615,16 +4615,27 @@ is a card with the label `github` (any case), or a title that starts with
   from any column, in the same write. Any other answer leaves the
   card held. The operator can also edit or move the card directly.
 
-The gap: `github_author` is what the creating agent says. The daemon does
-not read the issue, so an agent that gives a false author, or that makes
-the card with neither the label nor the title, gets past the gate. The
-gate enforces the rule against mistakes, not against a hostile agent.
+Agent-supplied `github_author` never bypasses the gate. A card with neither
+the GitHub label nor title cannot be recognized as GitHub work.
 A card that a schedule `card` action (§19) opens as the operator is not
 gated. The action never finds a held card: `close` does not move it and
 `open` does not comment on it, whatever its `trigger:<key>` label.
-A daemon-side issue sync that takes the author from the signed GitHub
-webhook closes the gap (TER-124). The ingest listener (§20) must then be
-reachable from GitHub.
+**Import an issue** (TER-124): `POST /api/projects/{name}/github-issues/import`
+with `{"repo":"configured-repo-name","number":123}` returns `200` and the
+card. Requires project write access. The daemon fetches the issue from
+`api.github.com` using the configured repository's token credential, if any.
+Only canonical github.com HTTPS and SSH repository URLs are accepted, redirects
+are refused, and pull requests are rejected. No card is created on fetch failure.
+An SSH credential or unavailable token does not prevent anonymous public issue
+fetches. An inaccessible issue without a token reports that a private repo
+needs a granted token (GitHub also returns 404 for missing issues).
+The API's author, title and body supply the card. Control characters are removed
+from titles and the issue title is capped at 200 characters. An agent's import
+starts in backlog only when its verified author is on the project's list.
+With no author list configured every agent import is held. Repeated imports return the
+same card, including archived or held cards. A daemon-owned import identity
+records its canonical URL. Adding a URL link manually cannot forge an import.
+The CLI equivalent is `terrarium issue import 123 --repo configured-repo-name`.
 
 **Active cards** (`GET /api/cards`, TER-43, for the dashboard home). The
 cards that are not archived in the columns `columns` (a comma list,
@@ -5085,10 +5096,10 @@ A page:
   `ready_for_review`, `reviewed`) and `reviewer` (an agent name). Another
   status is `422 invalid`.
 - `links` are the links of the current revision. `target` is
-  `project/path` for a page, the card ID, `project/MEM-n`, `project/ART-n`,
-  or `project/<version>`. The daemon reads `[[path]]`, `[[path|label]]`,
-  `[[TER-42]]`, `[[MEM-17]]`, `[[v0.3.0]]` (a name that starts with `v` and
-  a digit, or the name of a version with no page of that path),
+  `project/path` for a page, the card ID, `project/MEM-n`, or `project/ART-n`.
+  The daemon reads `[[path]]`, `[[path|label]]`,
+  `[[TER-42]]`, `[[MEM-17]]`, `[[v0.3.0]]` (a page link to `project/v0.3.0`,
+  not a version link),
   `[[project:other/reports/x]]`, `artifact:ART-9` in a Markdown link or
   image, and a fenced block `` ```artifact ART-11``` ``.
 
@@ -11760,7 +11771,7 @@ they do not get the low priority.
 | `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, name?, aliases?, heavy_jobs, running, projects, updated_by?, updated_at?}]}`: each host with a cap, a running job, or aliases. `name` is the host-agent name when the key is a host agent. `heavy_jobs` is `null` without a cap. Visibility is scoped as described below |
 | `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
 | `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
-| `PUT /api/job-hosts/{host}/aliases` | a sysadmin, the operator  | `{aliases: [address]}` (at most 32): the addresses of the host agent `{host}` (name or ID). Replaces the list; `[]` takes all away. 404 for no host agent, 409 when another host agent has the alias. The answer is the list above |
+| `PUT /api/job-hosts/{host}/aliases` | a sysadmin, the operator  | `{aliases: [address]}` (at most 32): the addresses of the host agent `{host}` (name or ID). Replaces the list; `[]` takes all away. 404 for no host agent, 409 when another host agent has the alias or its pinned key, 422 for invalid aliases (including a host-agent name, case-insensitive). The answer is the list above |
 
 The audit row `job.host_cap` keeps the old and the new cap. A job keeps
 the host it started on (`host` in the job).

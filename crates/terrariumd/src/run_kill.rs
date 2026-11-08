@@ -25,7 +25,7 @@
 //!
 //! A process that leaves both the group and the session (`setsid` in the
 //! command) is not found. A kill in the moment before the wrapper wrote its
-//! file finds no file and falls back to the client kill.
+//! file waits one second and retries once before falling back to the client kill.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,7 +59,8 @@ for o in /tmp/terrarium-run-*.pid; do
   q= t=
   read -r q t < "$o" 2>/dev/null
   case $q in ''|*[!0-9]*) continue ;; esac
-  if ! kill -0 "$q" 2>/dev/null || { [ -n "$t" ] && [ "$(st "$q")" != "$t" ]; }; then
+  u=$(st "$q")
+  if { [ -d /proc/self ] && [ ! -d "/proc/$q" ]; } || { [ -n "$t" ] && [ -n "$u" ] && [ "$u" != "$t" ]; }; then
     rm -f "$o" 2>/dev/null
   fi
 done
@@ -77,8 +78,10 @@ exec "$@""#;
 /// process, the members of its group and session (if any) are still the
 /// run's: Linux does not reuse a PID while it is a group or session ID.
 pub const KILL: &str = r#"f=$1; g=${2:-5}; p= t=
+[ -f "$f" ] || sleep 1
 [ -f "$f" ] && read -r p t < "$f"
 case $p in ''|*[!0-9]*) echo none; exit 0 ;; esac
+[ "$p" -gt 1 ] 2>/dev/null || { echo none; exit 0; }
 rm -f "$f"
 if [ -n "$t" ]; then
   s=
@@ -584,6 +587,62 @@ mod tests {
 
     use super::*;
     use crate::executor::{pump_process, ssh_plan};
+
+    #[test]
+    fn kill_retries_a_missing_pidfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("late.pid");
+        let writer_file = file.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            // A stale identity must be found on the second read, not signalled.
+            std::fs::write(writer_file, format!("{} 0\n", std::process::id())).unwrap();
+        });
+        let out = std::process::Command::new("sh")
+            .args(["-c", KILL, "test"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        writer.join().unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            parse(&String::from_utf8_lossy(&out.stdout))["stale"],
+            json!(std::process::id())
+        );
+    }
+
+    #[test]
+    fn kill_rejects_pid_zero_and_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("invalid.pid");
+        for pid in ["0", "1", "0001"] {
+            std::fs::write(&file, pid).unwrap();
+            let out = std::process::Command::new("sh")
+                .args(["-c", KILL, "test"])
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "none");
+        }
+    }
+
+    #[test]
+    fn wrapper_keeps_a_live_pidfile_when_kill_zero_is_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = new_pidfile();
+        std::fs::write(&live, format!("{}\n", std::process::id())).unwrap();
+        let out = std::process::Command::new("sh")
+            .args(["-c", &format!("kill() {{ return 1; }}\n{WRAP}"), "test"])
+            .arg(dir.path().join("own.pid"))
+            .arg("true")
+            .output()
+            .unwrap();
+        let kept = Path::new(&live).exists();
+        let _ = std::fs::remove_file(&live);
+        assert!(out.status.success());
+        assert!(kept, "a failed kill -0 must not imply a dead process");
+    }
 
     /// TER-196: only a run that ended by itself clears its PID file. A
     /// lost run keeps it for the kill of a lost run.

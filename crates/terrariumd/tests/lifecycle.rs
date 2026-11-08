@@ -116,10 +116,8 @@ async fn mail_wakes_a_stopped_agent() {
     .await;
 }
 
-/// TER-25: a turn that waits in the store because a wake was on the way
-/// stays ahead of a later turn. The wake had read the empty queue before
-/// the first send stored its turn, so the second send finds the agent
-/// live; it must not go past the stored turn.
+/// TER-212: a Busy wake drains a turn queued after the first wake read,
+/// even though that first wake still holds the start guard.
 #[tokio::test]
 async fn a_busy_wake_delivers_a_turn_queued_after_the_first_wake_read() {
     let (td, w) = setup().await;
@@ -145,6 +143,8 @@ async fn a_busy_wake_delivers_a_turn_queued_after_the_first_wake_read() {
     drop(held);
 }
 
+/// TER-25: a stored turn stays ahead of a later direct turn, even when
+/// the first wake read the queue before the stored turn arrived.
 #[tokio::test]
 async fn a_queued_turn_stays_ahead_of_a_later_direct_turn() {
     let (td, w) = setup().await;

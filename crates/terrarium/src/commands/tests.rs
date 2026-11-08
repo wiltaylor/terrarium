@@ -17,6 +17,26 @@ use crate::transport::{ApiRequest, Method};
 const ME: &str = "01AGENTAGENTAGENTAGENTAGEN";
 
 #[tokio::test]
+async fn issue_import_uses_the_daemon_endpoint() {
+    let run = exec(
+        true,
+        &["issue", "import", "7", "--repo", "terrarium"],
+        vec![(
+            200,
+            json!({"id":"TER-1", "title":"GitHub #7: x", "column":"backlog"}),
+        )],
+        None,
+    )
+    .await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].path, "/api/projects/terra/github-issues/import");
+    assert_eq!(
+        run.reqs[0].body,
+        Some(json!({"repo":"terrarium", "number":7}))
+    );
+}
+
+#[tokio::test]
 async fn reservation_commands_send_amounts_and_queue_options() {
     let run = exec(
         true,
@@ -1975,6 +1995,90 @@ async fn memory() {
         vec![req(Delete, "/api/memories/MEM-1")],
     )
     .await;
+}
+
+#[tokio::test]
+async fn memory_project_keys_for_every_id_command() {
+    // Bare IDs use -p, qualified IDs win over -p, and without -p the
+    // daemon keeps resolving bare IDs in the caller's project.
+    for (project, id, other, key, other_key) in [
+        (
+            Some("other"),
+            "MEM-1",
+            "MEM-2",
+            "other%2FMEM-1",
+            "other/MEM-2",
+        ),
+        (
+            Some("other"),
+            "explicit/MEM-1",
+            "target/MEM-2",
+            "explicit%2FMEM-1",
+            "target/MEM-2",
+        ),
+        (None, "MEM-1", "MEM-2", "MEM-1", "MEM-2"),
+    ] {
+        let cases = [
+            (vec!["show", id], Get, "/graph", vec![("depth", "1")], None),
+            (vec!["show", id, "--depth", "0"], Get, "", vec![], None),
+            (
+                vec!["neighbors", id, "--relation", "supports"],
+                Get,
+                "/graph",
+                vec![("depth", "1"), ("relation", "supports")],
+                None,
+            ),
+            (
+                vec!["link", id, other, "supports"],
+                Post,
+                "/links",
+                vec![],
+                Some(json!({"to": other_key, "relation": "supports"})),
+            ),
+            (
+                vec!["unlink", id, other, "supports"],
+                Delete,
+                "/links",
+                vec![],
+                Some(json!({"to": other_key, "relation": "supports"})),
+            ),
+            (
+                vec!["edit", id, "--title", "changed"],
+                Patch,
+                "",
+                vec![],
+                Some(json!({"title": "changed"})),
+            ),
+            (
+                vec!["supersede", id, other],
+                Post,
+                "/supersede",
+                vec![],
+                Some(json!({"by": other_key})),
+            ),
+            (vec!["rm", id], Delete, "", vec![], None),
+        ];
+        for (command, method, suffix, query, body) in cases {
+            let mut args = vec!["mem"];
+            if let Some(project) = project {
+                args.extend(["-p", project]);
+            }
+            args.extend(command);
+            let run = exec(true, &args, vec![(200, json!({}))], None).await;
+            assert!(run.result.is_ok(), "{args:?}: {:?}", run.result);
+            let path = format!("/api/memories/{key}{suffix}");
+            assert_eq!(run.reqs.len(), 1, "{args:?}");
+            let request = &run.reqs[0];
+            assert_eq!(request.method, method, "{args:?}");
+            assert_eq!(request.path, path, "{args:?}");
+            let query: Vec<(String, String)> = query
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect();
+            assert_eq!(request.query, query, "{args:?}");
+            assert_eq!(request.body, body, "{args:?}");
+        }
+    }
 }
 
 #[tokio::test]
