@@ -592,6 +592,7 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 address,
                 port,
                 credential,
+                sync_workspace,
                 username,
                 domain,
                 display,
@@ -614,6 +615,9 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             set_opt(&mut body, "address", address.clone());
             set_opt(&mut body, "port", *port);
             set_opt(&mut body, "credential", credential.clone());
+            if *sync_workspace {
+                body["sync_workspace"] = true.into();
+            }
             set_opt(&mut body, "username", username.clone());
             set_opt(&mut body, "domain", domain.clone());
             set_opt(&mut body, "display", display.clone());

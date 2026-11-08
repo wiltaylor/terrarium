@@ -125,6 +125,7 @@ RUN apt-get update \
         ca-certificates \
         git \
         openssh-client \
+        rsync \
         procps \
         python3 \
         ripgrep \

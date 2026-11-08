@@ -6522,6 +6522,30 @@ target"), unless the daemon could run a new container.
 
 ### 17.4 Exec sessions
 
+SSH targets can opt in to workspace mirroring with `sync_workspace = true`
+in the target definition (`admin target new --kind ssh --sync-workspace`).
+The default is false. Install `rsync` on the target. The daemon image includes
+it. This uses the same SSH credential, port and host-key policy as exec.
+
+Before exec, run or cp, Terrarium mirrors the caller's workspace to the same
+absolute path on the target, creating it if needed. An operator must select
+an agent. After a normally exited command (including nonzero exit) or a
+completed copy, it stages the remote tree locally and pulls changes and
+deletions before reporting the session done. Killed or lost commands leave
+their output on the target. Sync failure is reported as `sync_failed`.
+
+At every depth, `.git`, `.terrarium`, `.terrarium-stage`, `target` and
+`node_modules` are excluded in both directions and protected from deletion.
+Build caches stay on the target. Repository metadata and Terrarium control
+files stay local. Do not use remote git operations with this mode.
+Only one synced operation per workspace may run at a time.
+
+If a local file, directory, symlink or permission changes while the command
+runs, the pull is skipped entirely with `sync_conflict`, naming the changed
+paths. Remote output remains on the target. Stop local editing during the
+final pull. Recover remote files explicitly before starting another synced
+operation, since its push makes the local tree authoritative again.
+
 An exec session runs one command, one shell, or one file copy. It uses
 plain requests only, so it works through the agent tunnel too
 ([agent-rpc.md](agent-rpc.md), "Streams over the tunnel").
