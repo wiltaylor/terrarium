@@ -45,7 +45,7 @@ fn read_work_samples(
          LEFT JOIN cards c ON c.id = e.card
          WHERE e.project = ?1 AND e.kind = 'card'
            AND e.seq >= CASE WHEN ?2 THEN coalesce((
-             SELECT min(seq) FROM (
+             SELECT CASE WHEN count(*) < 2000 THEN 0 ELSE min(seq) END FROM (
                SELECT seq FROM events INDEXED BY events_project
                WHERE project = ?1 AND kind = 'card' AND json_extract(payload, '$.change') = 'moved'
                ORDER BY seq DESC LIMIT 2000
