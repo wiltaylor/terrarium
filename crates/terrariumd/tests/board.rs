@@ -992,9 +992,9 @@ async fn move_to_validating_without_a_job_resolves_eta_from_now() {
         .ok();
     let before = chrono::Utc::now();
     let c = td
-        .post_as(
+        .patch_as(
             "proj/w1",
-            &format!("/api/cards/{id}/move"),
+            &format!("/api/cards/{id}"),
             json!({"column": "validating", "eta_at": "20m"}),
         )
         .await
