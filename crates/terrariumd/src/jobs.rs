@@ -1893,15 +1893,18 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
 /// No pipeline wraps the recipe: its exact exit status remains the job status.
 fn logged_recipe(recipe: String, log: &str, patterns: Option<&[String]>) -> String {
     use crate::executor::sh_quote;
-    let defaults = ["FAILED", "panicked", "test result: FAILED", "failures:"]
-        .map(str::to_owned);
+    let defaults = ["FAILED", "panicked", "test result: FAILED", "failures:"].map(str::to_owned);
     let patterns = patterns.unwrap_or(&defaults);
     let grep = if patterns.is_empty() {
         String::new()
     } else {
         format!(
             "printf 'Failure lines (first 1800 bytes, with context):\\n'; grep -a -F -A 3 {} -- \"$log\" | head -c 1800; printf '\\n'",
-            patterns.iter().map(|p| format!("-e {}", sh_quote(p))).collect::<Vec<_>>().join(" ")
+            patterns
+                .iter()
+                .map(|p| format!("-e {}", sh_quote(p)))
+                .collect::<Vec<_>>()
+                .join(" ")
         )
     };
     format!(
@@ -2753,10 +2756,16 @@ mod tests {
                 log.to_str().unwrap(),
                 patterns.as_deref(),
             );
-            let out = std::process::Command::new("sh").args(["-c", &script]).output().unwrap();
+            let out = std::process::Command::new("sh")
+                .args(["-c", &script])
+                .output()
+                .unwrap();
             assert_eq!(out.status.code(), Some(7));
             let excerpt = String::from_utf8_lossy(&out.stdout);
-            assert_eq!(excerpt.contains("Failure lines"), !patterns.unwrap().is_empty());
+            assert_eq!(
+                excerpt.contains("Failure lines"),
+                !patterns.unwrap().is_empty()
+            );
             assert!(excerpt.contains("custom [failure] 'marker'"));
         }
     }
