@@ -13,6 +13,40 @@ use serde_json::{Value, json};
 
 const CARDS: &str = "/api/projects/proj/cards";
 
+#[tokio::test]
+async fn issue_import_route_and_function_validate_before_fetching() {
+    let td = setup().await;
+    let route = "/api/projects/proj/github-issues/import";
+    let bad = td
+        .post_as("proj/w1", route, json!({"repo":"missing", "number":0}))
+        .await;
+    assert_eq!(bad.code(), "invalid");
+    let forged = td
+        .post_as(
+            "proj/w1",
+            route,
+            json!({"repo":"missing", "number":7, "github_author":"wiltaylor"}),
+        )
+        .await;
+    assert!(!forged.status.is_success());
+    td.agent("ops", "outsider", json!({})).await;
+    let outside = td
+        .post_as("ops/outsider", route, json!({"repo":"missing", "number":7}))
+        .await;
+    assert_eq!(outside.code(), "forbidden");
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let error = terrariumd::github_issues::import(
+        &state,
+        terrariumd::actor::Actor::Operator,
+        "proj".into(),
+        "missing".into(),
+        0,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, terrariumd::error::Code::Invalid);
+}
+
 /// Project `proj` with a lead, a worker, and a sysadmin (in `ops`).
 async fn setup() -> TestDaemon {
     let td = TestDaemon::start().await;
@@ -124,9 +158,9 @@ async fn only_the_operator_sets_the_allow_list() {
     assert!(p.ok().get("github_authors").is_none(), "{}", p.body);
 }
 
-/// An author on the list makes work as asked, in any case.
+/// Even an allow-listed author assertion from an agent is unverified.
 #[tokio::test]
-async fn an_allowed_author_makes_work() {
+async fn an_agent_cannot_assert_an_allowed_author() {
     let td = setup().await;
     allow(&td, &["wiltaylor", "wiltaylor-daf"]).await;
     let c = make(
@@ -136,15 +170,15 @@ async fn an_allowed_author_makes_work() {
                "github_author": "WilTaylor-DAF"}),
     )
     .await;
-    assert_eq!(c["column"], "ready");
-    assert_eq!(labels(&c), ["github"]);
+    assert_eq!(c["column"], "blocked");
+    assert_eq!(labels(&c), ["github", "hold"]);
     let c = make(
         &td,
         "proj/w1",
         json!({"title": "GitHub #3: z", "github_author": "wiltaylor"}),
     )
     .await;
-    assert_eq!(c["column"], "backlog");
+    assert_eq!(c["column"], "blocked");
 }
 
 /// The acceptance of TER-85: another author, no author, or the title
