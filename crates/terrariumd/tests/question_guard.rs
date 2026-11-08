@@ -141,7 +141,10 @@ async fn registered_waits_and_tracked_questions_are_exempt() {
             } else {
                 let mut body = json!({"kind": kind, "text": "Choose a branch", "thread": thread});
                 if kind == "bundle" {
-                    body["items"] = json!([{"text": "Which branch?", "options": ["next", "main"]}]);
+                    body["items"] = json!([
+                        {"text": "Which branch?", "options": ["next", "main"]},
+                        {"text": "Which target?", "options": ["build", "test"]}
+                    ]);
                 }
                 td.post_as(&id, &format!("/api/agents/{id}/questions"), body)
                     .await
