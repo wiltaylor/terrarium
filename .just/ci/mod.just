@@ -73,7 +73,7 @@ test: require-cargo
 		exit 0
 	fi
 	mkdir -p "$RESULTS_DIR"
-	RUSTC_BOOTSTRAP=1 cargo test --workspace --no-fail-fast -- -Z unstable-options --format json --report-time | tee "$RESULTS_DIR/rust.json"
+	RUSTC_BOOTSTRAP=1 cargo test --workspace --no-fail-fast -- -Z unstable-options --format json --report-time > "$RESULTS_DIR/rust.json"
 
 # Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer, the deploy, the CI workflow)
 [group('ci')]
