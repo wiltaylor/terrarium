@@ -11450,8 +11450,25 @@ one key, the strictest applies until a cap write replaces them.
   <why>` and the event change `requeued`. An ssh target is tried again
   after 60 s. Neither uses an attempt or moves the card, and the card
   keeps `validation:queued`. After 30 min of waiting the card gets one
-  comment that says so (once per job in a daemon run). A failure after
-  the recipe started stays a failure.
+  comment that says so (once per job in a daemon run).
+- A recipe run lost to the infrastructure is not a failure (TER-196).
+  Only an end of the recipe itself (an exit code, a signal, its timeout)
+  is `red`. A run with no exit code (the host agent no longer holds the
+  session, the host went offline, the run process died), a run that the
+  host agent ended because its link to the daemon was down, or an ssh run
+  whose link to the target broke (exit code 255 and an ssh client line
+  that names the target host) is lost. An error end that a rerun gets
+  again (`spawn_failed`, `path_denied`, `unsupported`, `bad_request`,
+  `refused`) is `red`. What may still run of it on the target is killed first,
+  and the slot's tree is made new when the kill is not confirmed. Then
+  the same job goes back to the queue with its attempt and its place,
+  with `tail` `the infrastructure lost the run after the recipe started
+  (<why>); ...` and the event change `requeued`. A batch merge reruns
+  whole and does not split. The card does not move. A job reruns this
+  way at most 3 times in a row in one daemon run: the next lost run gets
+  the same kill (and the slot mark), then it is `red`, and its `tail`
+  starts with `the infrastructure lost the run 4
+  times in a row, so this run counts as red: <why>`.
 
 A batch merge:
 
