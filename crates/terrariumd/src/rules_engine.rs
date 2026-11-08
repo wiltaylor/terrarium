@@ -1352,7 +1352,7 @@ async fn fire_hourly(db: &Db, projects: &[ProjectRules], now: DateTime<Utc>) -> 
         let (project, hour) = (p.project.clone(), hour.clone());
         written += db.write(TIMER_ACTOR, move |tx| {
             let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM events WHERE project = ?1 AND kind = 'rule.hourly' AND json_extract(data, '$.hour') = ?2)",
+                "SELECT EXISTS(SELECT 1 FROM events WHERE project = ?1 AND kind = 'rule.hourly' AND actor = 'system' AND json_extract(payload, '$.hour') = ?2)",
                 rusqlite::params![project, hour], |r| r.get(0),
             )?;
             if exists { return Ok(0); }
