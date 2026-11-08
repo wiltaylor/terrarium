@@ -262,16 +262,57 @@ pub fn start_named(
     cmd: &RemoteCmd,
     pidfile: String,
 ) -> ApiResult<(Running, Option<Report>)> {
+    start_named_inner(state, def, cmd, pidfile, false)
+}
+
+/// Start while the executor holds admission through registration.
+pub(crate) fn start_named_locked(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+    pidfile: String,
+    _guard: &tokio::sync::OwnedMutexGuard<()>,
+) -> ApiResult<(Running, Option<Report>)> {
+    start_named_inner(state, def, cmd, pidfile, true)
+}
+
+/// Start while the executor holds admission through registration.
+pub(crate) fn start_registered(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+    _guard: &tokio::sync::OwnedMutexGuard<()>,
+) -> ApiResult<(Running, Option<Report>)> {
+    start_named_inner(state, def, cmd, new_pidfile(), true)
+}
+
+fn start_named_inner(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+    pidfile: String,
+    locked: bool,
+) -> ApiResult<(Running, Option<Report>)> {
+    let initial_start = if locked {
+        crate::executor::start_cmd_locked
+    } else {
+        start_cmd
+    };
     if !wraps(def, cmd) {
-        return Ok((start_cmd(state, def, cmd)?, None));
+        return Ok((initial_start(state, def, cmd)?, None));
     }
     let weak = Arc::downgrade(state);
     let d = def.clone();
+    let initial = std::sync::atomic::AtomicBool::new(true);
     let starter = move |c: RemoteCmd| {
         let state = weak
             .upgrade()
             .ok_or_else(|| ApiError::internal("the daemon is shutting down"))?;
-        start_cmd(&state, &d, &c)
+        if initial.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            initial_start(&state, &d, &c)
+        } else {
+            crate::executor::start_resource_cleanup(&state, &d, &c)
+        }
     };
     start_with_file(starter, cmd, GRACE_SECS, pidfile, true)
 }

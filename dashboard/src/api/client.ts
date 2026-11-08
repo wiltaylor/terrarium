@@ -15,6 +15,7 @@ import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 // Secrets (PLAN §16b): a block of its own.
 import type { Pin, ProjectFolder, ProjectFolderTree, ProjectPlacement } from "./types";
+import type { HostCapacityBudget, Reservation } from "./types";
 import type { EffectiveRules, RuleRun, RuleToggle, RulesLint, RulesMigration } from "./types";
 import type { NewThread, Thread, ThreadClose, ThreadQuery } from "./types";
 import type { CalendarEvent, CalendarGrant, CalendarGrantResult, CalendarInput, CalendarRange, CalendarView, CalendarWatcher, CalendarWatchResult } from "./types";
@@ -1007,6 +1008,8 @@ export interface Api {
     revoke(name: string): Promise<void>;
     /** `GET /api/hosts/{name}/metrics?minutes=N` (1 to 60): the samples, oldest first. */
     metrics(name: string, opts?: { minutes?: number }): Promise<HostMetricsHistory>;
+    capacity(name: string): Promise<HostCapacityBudget>;
+    reservations(name: string): Promise<Reservation[]>;
   };
 
   events: {
@@ -1606,6 +1609,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
 
     hosts: {
       list: () => all("/api/hosts"),
+      capacity: (name) => get(`/api/hosts/${seg(name)}/capacity`),
+      reservations: (name) => get(`/api/hosts/${seg(name)}/reservations`),
       create: (name, opts) => post("/api/hosts", opts?.enrol ? { name, enrol: true } : { name }),
       revoke: (name) => del(`/api/hosts/${seg(name)}`),
       metrics: (name, opts = {}) => get(`/api/hosts/${seg(name)}/metrics`, opts.minutes ? { minutes: opts.minutes } : undefined),

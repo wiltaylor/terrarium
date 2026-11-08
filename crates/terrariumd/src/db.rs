@@ -3334,7 +3334,7 @@ mod tests {
     #[test]
     fn named_migrations_upgrade_legacy_and_allow_earlier_names() {
         let mut conn = Connection::open_in_memory().unwrap();
-        migrate(&mut conn).unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
         conn.execute(
             "INSERT INTO projects (name, created_at, updated_at) VALUES ('preserved', ?1, ?1)",
             [now()],
@@ -3345,6 +3345,10 @@ mod tests {
         assert_eq!(migrate_named(&mut conn, &[later]).unwrap(), 1);
         assert_eq!(migrate_named(&mut conn, &[earlier, later]).unwrap(), 1);
         assert_eq!(migrate_named(&mut conn, &[earlier, later]).unwrap(), 0);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            migration_count() - MIGRATIONS.len()
+        );
         assert_eq!(migrate(&mut conn).unwrap(), 0);
         let version: usize = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))

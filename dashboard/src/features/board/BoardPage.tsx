@@ -130,13 +130,23 @@ export function BoardPage(props: { done?: boolean }) {
   });
 
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  let detailTimer: ReturnType<typeof setTimeout> | undefined;
   let questionTimer: ReturnType<typeof setTimeout> | undefined;
   // Live events refresh summaries (including compact test chips and job state),
   // retaining the loaded Done range. Only the open drawer reloads full details.
   const off = events.on((e) => {
     if ((e.kind === "card" || e.kind === "board" || e.kind === "test_run" || e.kind === "job") && e.project === params.project && !dragging()) {
       clearTimeout(reloadTimer);
-      reloadTimer = setTimeout(() => { void board.reload(); if (search.card) void reloadSelected(); }, 300);
+      // Done can span many pages. Coalesce busy project bursts before fetching
+      // that range, rather than requesting every page several times a second.
+      reloadTimer = setTimeout(() => void board.reload(), props.done ? 2000 : 300);
+      const card = search.card;
+      if (card && (e.card === card || e.data.card_id === card)) {
+        clearTimeout(detailTimer);
+        detailTimer = setTimeout(() => {
+          if (search.card === card) void reloadSelected();
+        }, 300);
+      }
     }
     if (isCardQuestionEvent(e, { project: params.project })) {
       clearTimeout(questionTimer);
@@ -146,6 +156,7 @@ export function BoardPage(props: { done?: boolean }) {
   onCleanup(() => {
     off();
     clearTimeout(reloadTimer);
+    clearTimeout(detailTimer);
     clearTimeout(questionTimer);
   });
 

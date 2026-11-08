@@ -30,6 +30,7 @@ mod questions;
 mod records;
 mod repo_trees;
 mod repos;
+mod reservations;
 mod rules;
 mod rules_tools;
 mod schedules;
@@ -282,6 +283,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .route("/harnesses/{name}/pin", post(system::harness_pin))
         .route("/harnesses/{name}/unpin", post(system::harness_unpin))
         .merge(hosts::routes())
+        .merge(reservations::routes())
         .merge(targets::routes())
         .merge(tools::routes())
         .route("/reload", post(system::reload))

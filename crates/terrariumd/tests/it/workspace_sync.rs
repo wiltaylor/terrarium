@@ -51,6 +51,7 @@ impl Ssh {
             "/bin/mkdir",
             "/bin/mv",
             "/bin/rm",
+            "/bin/ln",
             "/usr/bin/wc",
             "/bin/chmod",
             "/usr/bin/dirname",
@@ -60,6 +61,17 @@ impl Ssh {
         ] {
             copy_binary(&jail, binary);
         }
+        std::fs::rename(jail.join("usr/bin/rsync"), jail.join("usr/bin/rsync-real")).unwrap();
+        std::fs::write(
+            jail.join("usr/bin/rsync"),
+            "#!/bin/sh\nexec /usr/bin/rsync-real --debug=DELTASUM3 --msgs2stderr \"$@\" 2>/tmp/rsync-debug\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            jail.join("usr/bin/rsync"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         for name in ["tmp", "root", "dev", "etc"] {
             std::fs::create_dir(jail.join(name)).unwrap();
         }
@@ -175,6 +187,19 @@ async fn ssh_api_exec_run_copy_and_conflict() {
     std::fs::create_dir_all(&root).unwrap();
     let remote = ssh.jail.join(root.strip_prefix("/").unwrap());
     std::fs::write(root.join("input"), "pushed").unwrap();
+    std::fs::write(root.join("id_parser.rs"), "source").unwrap();
+    for name in [
+        "id_rsa",
+        "id_ed25519.pub",
+        "id_ecdsa",
+        "id_dsa.pub",
+        "id_ed25519_sk",
+        "id_ed25519_sk.pub",
+        "id_ecdsa_sk",
+        "id_ecdsa_sk.pub",
+    ] {
+        std::fs::write(root.join(name), "excluded").unwrap();
+    }
     std::fs::write(root.join(".env"), "never ship").unwrap();
     let started = td
         .post(
@@ -190,6 +215,32 @@ async fn ssh_api_exec_run_copy_and_conflict() {
     })
     .await
     .unwrap();
+    // Plant hostile remote output while the command is still running.
+    std::fs::write(remote.join("privileged"), "not privileged locally").unwrap();
+    std::fs::set_permissions(
+        remote.join("privileged"),
+        std::fs::Permissions::from_mode(0o6755),
+    )
+    .unwrap();
+    std::fs::create_dir(remote.join("privileged-dir")).unwrap();
+    std::fs::set_permissions(
+        remote.join("privileged-dir"),
+        std::fs::Permissions::from_mode(0o2775),
+    )
+    .unwrap();
+    for args in [
+        vec!["mkfifo", "pipe"],
+        vec!["mknod", "device", "c", "1", "3"],
+    ] {
+        assert!(
+            std::process::Command::new(args[0])
+                .args(&args[1..])
+                .current_dir(&remote)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
     assert!(!root.join("output").exists());
     assert_eq!(
         td.get(&format!("/api/targets/synced/sessions/{sid}"))
@@ -203,6 +254,78 @@ async fn ssh_api_exec_run_copy_and_conflict() {
         "pushed"
     );
     assert!(!remote.join(".env").exists());
+    assert_eq!(
+        std::fs::read_to_string(remote.join("id_parser.rs")).unwrap(),
+        "source"
+    );
+    for name in [
+        "id_rsa",
+        "id_ed25519.pub",
+        "id_ecdsa",
+        "id_dsa.pub",
+        "id_ed25519_sk",
+        "id_ed25519_sk.pub",
+        "id_ecdsa_sk",
+        "id_ecdsa_sk.pub",
+    ] {
+        assert!(!remote.join(name).exists());
+    }
+    for name in ["privileged", "privileged-dir"] {
+        assert_eq!(
+            std::fs::metadata(root.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o6000,
+            0
+        );
+    }
+    assert!(!root.join("pipe").exists());
+    assert!(!root.join("device").exists());
+
+    // A first pull plants a directory symlink. The next pull replaces it
+    // with a directory containing an attacker guess at an outside file.
+    let outside = td.dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(
+        outside.join("secret"),
+        format!("{}private", "Q".repeat(65536)),
+    )
+    .unwrap();
+    std::fs::write(root.join("guess"), format!("{}guess", "Q".repeat(65536))).unwrap();
+    let started = td
+        .post(
+            "/api/targets/synced/exec",
+            json!({"agent":agent,"cwd":root,"cmd":["ln","-s",outside,"escape"]}),
+        )
+        .await;
+    assert_eq!(
+        done(&td, started.ok()["session_id"].as_str().unwrap()).await["code"],
+        0
+    );
+    assert!(root.join("escape").is_symlink());
+    let started = td.post("/api/targets/synced/exec", json!({"agent":agent,"cwd":root,"cmd":["sh","-c","rm escape; mkdir escape; cat guess > escape/secret"]})).await;
+    assert_eq!(
+        done(&td, started.ok()["session_id"].as_str().unwrap()).await["code"],
+        0
+    );
+    let debug = std::fs::read_to_string(ssh.jail.join("tmp/rsync-debug")).unwrap();
+    let counts: Vec<_> = debug
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("count="))
+        .collect();
+    assert!(
+        !counts.is_empty(),
+        "missing sender checksum diagnostics: {debug}"
+    );
+    assert!(
+        counts.iter().all(|count| *count == "0"),
+        "outside-file block checksums leaked: {debug}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("secret")).unwrap(),
+        format!("{}private", "Q".repeat(65536))
+    );
 
     let run = td
         .post_as(

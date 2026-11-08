@@ -89,6 +89,8 @@ impl Lab {
             metrics: false,
             limits: None,
             no_workspaces: false,
+            capacity: None,
+            reservations: false,
         };
         o.display.enabled = desktop;
         o.docker_bin = self.bins.path().join("docker").display().to_string();
