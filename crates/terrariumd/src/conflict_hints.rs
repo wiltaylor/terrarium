@@ -174,6 +174,12 @@ async fn check(state: &Shared) -> ApiResult<()> {
         {
             continue;
         }
+        // A throttled or failed refresh can return an older mirror. Do not compare it.
+        if local_head(&dir, "next").await.as_ref() != Some(&base)
+            || local_head(&dir, &card.branch).await.as_ref() != Some(&head)
+        {
+            continue;
+        }
         if let Some(paths) = files(&dir, "next", &card.branch).await {
             scanned.push((card, repo.id, paths));
         }
