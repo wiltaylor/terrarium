@@ -1,6 +1,7 @@
 // The column rules of `PATCH /api/projects/{name}/board` (store/board.rs check_columns), for the mock.
 
 import type { Column, ColumnEdit, ColumnRole } from "../types";
+import { COLUMN_ROLES } from "../types";
 import { ApiError } from "../http";
 import { BACKLOG, COLUMN_NAME_RE, defaultTitle, DONE, isFixed, TITLE_MAX } from "../../features/board/columns";
 
@@ -36,7 +37,7 @@ export function checkColumnEdits(current: readonly Column[], edits: readonly Col
       if (!Number.isInteger(e.wip_limit) || e.wip_limit < 1) bad(`column \`${name}\`: wip_limit must be 1 or more, or null`);
     }
     const role: ColumnRole | undefined = e.role === undefined ? old?.role : (e.role ?? undefined);
-    if (role !== undefined && role !== "working" && role !== "blocked") bad(`column \`${name}\`: bad role \`${String(role)}\`; use working, blocked, or null`);
+    if (role !== undefined && !COLUMN_ROLES.includes(role)) bad(`column \`${name}\`: bad role \`${String(role)}\`; use ${COLUMN_ROLES.join(", ")}, or null`);
     if (role && isFixed(name)) bad(`column \`${name}\` takes no role`);
     if ((name === "working" || name === "blocked") && role !== name) bad(`the name \`${name}\` is kept for the column with the role \`${name}\`; give this column the role \`${name}\`, or another name`);
     const rawTitle = e.title === undefined ? old?.title : e.title;
