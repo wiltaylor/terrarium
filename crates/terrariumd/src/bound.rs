@@ -267,8 +267,12 @@ fn refuse(
            AND NOT EXISTS(SELECT 1 FROM events a WHERE a.seq > e.seq
              AND a.card = ?4 AND a.kind = 'card'
              AND json_extract(a.payload, '$.change') = 'assigned'))",
-        rusqlite::params![sp.id, sp.parked_at, other,
-            sp.bound.as_deref().and_then(|b| b.strip_prefix("card:"))],
+        rusqlite::params![
+            sp.id,
+            sp.parked_at,
+            other,
+            sp.bound.as_deref().and_then(|b| b.strip_prefix("card:"))
+        ],
         |r| r.get(0),
     )?;
     if repeated {
@@ -718,7 +722,8 @@ async fn handle(state: &Shared, ev: StoredEvent) {
         .read(move |c| {
             // With `board_flow = rules` the board rules park, unpark, and
             // end the agent (TER-170).
-            if !released && let Some(p) = &project
+            if !released
+                && let Some(p) = &project
                 && crate::store::projects::rules_flow(c, p)?
             {
                 return Ok(None);
