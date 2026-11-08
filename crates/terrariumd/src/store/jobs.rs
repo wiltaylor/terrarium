@@ -2145,6 +2145,32 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_hosts_ignores_history_and_fallback_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        for (id, state, host) in [
+            ("old", "passed", "old.invalid"),
+            ("running", "running", "active.invalid"),
+            ("queued", "queued", "queued.invalid"),
+            ("removed", "running", "01M6Y0BHFHXXBDVXWN7BQP96AN"),
+            ("fallback", "running", "local-box"),
+        ] {
+            conn.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, host,
+                                   created_by, created_at)
+                 VALUES (?1, 'p', 'C', 'validate', 'app', 'b', ?2, ?3, 't', 't')",
+                params![id, state, host],
+            ).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO targets (name, def, source, state, snapshots, created_at, updated_at)
+             VALUES ('local-box', '{\"kind\":\"docker\",\"image\":\"x\"}', 'api', 'unknown', '[]', '', '')",
+            [],
+        ).unwrap();
+        assert_eq!(unresolved_hosts(&conn, None).unwrap(), ["active.invalid", "queued.invalid"]);
+    }
+
+    #[test]
     fn missing_target_and_agent_keys_match_caps() {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
