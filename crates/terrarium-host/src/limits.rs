@@ -59,6 +59,9 @@ pub fn escape(s: &str) -> String {
 /// `terrarium-<target>-_operator.slice`: no project name starts with `_`.
 /// A name that is too long for systemd becomes `terrarium-x<hash>.slice`.
 pub fn slice_name(target: &str, holder: &str) -> String {
+    if holder.is_empty() {
+        return format!("terrarium-{}.slice", escape(target));
+    }
     let holder = if holder.contains('/') {
         escape(holder)
     } else {

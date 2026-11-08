@@ -733,6 +733,12 @@ struct NudgeQueue {
     armed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ReservationItem {
+    id: String,
+    line: String,
+}
+
 /// The items one pointer turn covers.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Pointer {
@@ -740,6 +746,7 @@ struct Pointer {
     cards: Vec<CardItem>,
     leads: Vec<LeadItem>,
     leases: Vec<LeaseItem>,
+    reservations: Vec<ReservationItem>,
 }
 
 impl Pointer {
@@ -748,6 +755,14 @@ impl Pointer {
             && self.cards.is_empty()
             && self.leads.is_empty()
             && self.leases.is_empty()
+            && self.reservations.is_empty()
+    }
+
+    fn add_reservation(&mut self, r: ReservationItem) {
+        match self.reservations.iter_mut().find(|x| x.id == r.id) {
+            Some(old) => *old = r,
+            None => self.reservations.push(r),
+        }
     }
 
     /// One item for each target: the newest change replaces the text, so
@@ -803,6 +818,7 @@ impl Pointer {
         for l in other.leases {
             self.add_lease(l);
         }
+        for r in other.reservations { self.add_reservation(r); }
     }
 
     /// The pointer turn (PLAN §8.5): one tagged block for each mail, card,
@@ -827,6 +843,7 @@ impl Pointer {
                 .iter()
                 .map(|l| system(SystemKind::Lease, l.line())),
         );
+        blocks.extend(self.reservations.iter().map(|r| system(SystemKind::Nudge, r.line.clone())));
         turn_tag::join(&blocks)
     }
 
@@ -868,12 +885,16 @@ impl Pointer {
                 data: item_json(l),
             });
         }
+        for r in &self.reservations {
+            out.push(StoredItem { kind: "reservation", key: r.id.clone(), line: r.line.clone(), data: item_json(r) });
+        }
         out
     }
 
     /// Add one stored item. False: the row does not parse.
     fn add_stored(&mut self, kind: &str, data: &str) -> bool {
         match kind {
+            "reservation" => serde_json::from_str(data).map(|r| self.add_reservation(r)).is_ok(),
             "card" => serde_json::from_str(data).map(|c| self.add_card(c)).is_ok(),
             "lead" => serde_json::from_str(data).map(|l| self.add_lead(l)).is_ok(),
             "lease" => serde_json::from_str(data)
@@ -3635,6 +3656,11 @@ impl RunnerSupervisor {
                             _ => continue,
                         };
                         me.add_card_pointer(agent, CardItem { card, change });
+                    }
+                    "reservation_pointer" => {
+                        if let (Some(id), Some(line)) = (s("reservation_id"), s("line")) {
+                            me.add_parked_pointer(agent, |p| p.add_reservation(ReservationItem { id, line }));
+                        }
                     }
                     // The grant pointer comes from `lease_granted`, after
                     // the lifecycle step; an extend types none.

@@ -184,6 +184,46 @@ fn save(t: &mut Tx<'_>, r: &Reservation, change: &str) -> ApiResult<()> {
         event = event.agent(id.clone(), name);
     }
     t.emit(event)?;
+    if !matches!(change, "starting" | "ending") {
+        notify(t, r, change)?;
+    }
+    Ok(())
+}
+
+fn notify(t: &mut Tx<'_>, r: &Reservation, change: &str) -> ApiResult<()> {
+    use super::mail::{self, Address, Outgoing};
+    let mut ids = Vec::new();
+    match &r.holder {
+        Holder::Agent(id) => ids.push(id.clone()),
+        Holder::Target(target) => {
+            let mut stmt = t.prepare("SELECT id, policy FROM agents")?;
+            let agents = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for (id, policy) in agents {
+                let p: terrarium_core::config::Policy = serde_json::from_str(&policy)?;
+                if p.targets.contains(target) { ids.push(id); }
+            }
+            for lease in super::leases::active_on(t, target)? { ids.push(lease.agent); }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    let end = r.until.and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+        .map(|d| d.to_rfc3339()).unwrap_or_else(|| "not started".into());
+    let line = if change == "warning" {
+        let minutes = if r.warned_5 { 5 } else { 15 };
+        format!("Reservation {} on {} ends within {minutes} minutes, at {end}. Ask your lead to run `terrarium reserve extend {} --until <duration>` before it ends. Sessions end with reservation_ended at expiry.", r.id, r.host, r.id)
+    } else {
+        format!("Reservation {} on {} {change}. State: {}. Until: {end}. Run `terrarium reserve ls --host {}`.", r.id, r.host, r.state.name(), r.host)
+    };
+    let subject = format!("Reservation {}: {change}", r.id);
+    for id in ids {
+        let Ok(a) = super::agents::get(t, &id) else { continue; };
+        let to = Address::Agent { id: id.clone(), name: a.agent.name.clone(), project: a.agent.project.clone() };
+        mail::send(t, Outgoing { from: &Address::System, to: &to, subject: &subject, body: &line, thread: None, in_reply_to: None })?;
+        t.emit(EventDraft::new("reservation_pointer", line.clone(), json!({"reservation_id":r.id,"line":line}))
+            .agent(id, a.agent.name).project(a.agent.project))?;
+    }
     Ok(())
 }
 

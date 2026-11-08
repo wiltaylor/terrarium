@@ -33,6 +33,7 @@ pub mod ingest;
 pub mod input_watchdog;
 pub mod jobs;
 pub mod leases;
+pub mod reservations;
 pub mod lifecycle;
 pub mod login_session;
 pub mod models;
@@ -337,6 +338,7 @@ pub async fn start_with_usage(
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
+    tasks.push(reservations::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
     // The board rule engine (TER-168): runs the outbox rows that the last
     // daemon left pending, then the new events.

@@ -1229,6 +1229,8 @@ async fn pull_via_cat(
 
 /// The executor state: the host registry and the exec sessions.
 pub struct Executor {
+    /// Serialize reservation enforcement and cleanup across API calls/timers.
+    pub resource_lock: tokio::sync::Mutex<()>,
     pub hosts: Arc<HostRegistry>,
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
     pub max_per_agent: usize,
@@ -1243,6 +1245,7 @@ impl Default for Executor {
     fn default() -> Self {
         Self {
             hosts: Arc::default(),
+            resource_lock: tokio::sync::Mutex::new(()),
             sessions: Mutex::default(),
             max_per_agent: MAX_SESSIONS_PER_AGENT,
             ssh_bin: std::env::var("TERRARIUM_SSH").unwrap_or_else(|_| "ssh".into()),
@@ -1361,6 +1364,21 @@ impl Executor {
         self.table().len()
     }
 
+    pub fn resource_sessions(&self, targets: &[String], holder: Option<&str>) -> Vec<String> {
+        self.table().values().filter(|s| targets.contains(&s.target)
+            && holder.is_none_or(|a| s.owner.as_deref() == Some(a)) && !s.is_done())
+            .map(|s| s.id.clone()).collect()
+    }
+
+    pub fn end_resource_sessions(&self, targets: &[String], holder: Option<&str>) {
+        let sessions: Vec<_> = self.table().values().filter(|s| targets.contains(&s.target)
+            && holder.is_none_or(|a| s.owner.as_deref() == Some(a)) && !s.is_done()).cloned().collect();
+        for s in sessions {
+            s.finish(End::error("reservation_ended", "your resource reservation on this host ended"));
+            s.kill();
+        }
+    }
+
     /// End the live sessions of `agent` on `target`: each ends with the
     /// error `code` and `message`, and its run is killed. For a lease that
     /// ended (`lease_revoked`). Returns the number of sessions.
@@ -1413,6 +1431,8 @@ pub(crate) fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
 
 /// Start a command on a target.
 pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
+    let _resources = state.executor.resource_lock.try_lock()
+        .map_err(|_| ApiError::conflict("resource reservations are being updated; retry the command"))?;
     no_exec(def)?;
     let ex = &state.executor;
     match def.kind {
@@ -1457,7 +1477,8 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
         _ => {
             let host = host_of(def)?;
             let caps = ex.hosts.capabilities(host);
-            let limits = exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?;
+            let limits = crate::reservations::exec_budget(state, def, cmd.holder.as_deref())?
+                .or(exec_limits(def, caps.as_ref(), cmd.holder.as_deref())?);
             let shell = caps.and_then(|c| c.shell);
             let make = host_frame(def, shell.as_deref(), cmd, limits)?;
             Ok(pump_host(ex.hosts.open(host, make)?))
@@ -1497,7 +1518,7 @@ fn verb_failed(what: &str, c: &Collected) -> ApiError {
     }))
 }
 
-async fn verb_ok(
+pub(crate) async fn verb_ok(
     state: &Shared,
     def: &TargetDef,
     what: &str,
@@ -2361,6 +2382,7 @@ async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> A
     let mut labels = BTreeMap::new();
     labels.insert("terrarium.target".to_owned(), def.name.clone());
     let limits = docker_limits(state, def)?;
+    let reservation = crate::reservations::docker_budget(state, def)?;
     verb_ok(state, def, "docker.run", move |session| {
         DaemonFrame::DockerRun(DockerRun {
             session,
@@ -2382,7 +2404,7 @@ async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> A
             pty: None,
             timeout_secs: Some(VERB_TIMEOUT),
             limits,
-            reservation: None,
+            reservation,
         })
     })
     .await?;
