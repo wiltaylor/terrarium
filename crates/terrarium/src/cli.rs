@@ -42,6 +42,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Reserve host CPU, memory and device IO capacity
+    Reserve {
+        #[command(subcommand)]
+        command: ReserveCmd,
+    },
     /// Daemon commands
     Daemon {
         #[command(subcommand)]
@@ -2425,6 +2430,56 @@ pub struct WaitOpts {
     pub reason: Option<String>,
     #[command(flatten)]
     pub waiter: WaiterArg,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReserveCmd {
+    /// Grant a reservation, or queue it FIFO when capacity is occupied
+    New {
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        target: String,
+        /// Agent holder (default: the target)
+        #[arg(long)]
+        agent: Option<String>,
+        /// CPU cores, for example 2 or 0.5
+        #[arg(long)]
+        cpu: Option<String>,
+        /// Bytes or a size such as 4G
+        #[arg(long)]
+        memory: Option<String>,
+        /// JSON device map: {"8:0":{"read_bps":1048576}}
+        #[arg(long)]
+        io: Option<String>,
+        #[arg(long)]
+        until: String,
+        #[arg(long)]
+        exclusive: bool,
+        #[arg(long, short = 'm', default_value = "")]
+        reason: String,
+        #[arg(long)]
+        queue: bool,
+        #[arg(long, requires = "queue")]
+        queue_timeout: Option<String>,
+    },
+    /// Extend an active reservation
+    Extend { id: String, #[arg(long)] until: String },
+    /// End a reservation and its holder's sessions on that host
+    Retract { id: String },
+    /// Cancel a queued reservation
+    Cancel { id: String },
+    /// List a host's reservations
+    Ls { #[arg(long)] host: String },
+    /// Read capacity, or configure its reservable percentage (sysadmin)
+    Capacity {
+        host: String,
+        #[arg(long)]
+        percentage: Option<u8>,
+        /// Device IO capacities as a JSON device map
+        #[arg(long, requires = "percentage")]
+        io: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

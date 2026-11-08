@@ -34,6 +34,7 @@ pub mod threads;
 pub mod tools;
 pub mod update;
 pub mod waits;
+pub mod reservations;
 
 #[cfg(test)]
 mod tests;
@@ -48,6 +49,7 @@ use crate::transport::encode;
 
 pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
     match cmd {
+        Command::Reserve { command } => reservations::run(ctx, command).await,
         Command::Daemon { command } => system::daemon(ctx, command).await,
         Command::Whoami => system::whoami(ctx).await,
         Command::Login {
