@@ -63,17 +63,25 @@ fmt-check: require-cargo
 lint: require-cargo
 	cargo clippy --workspace --all-targets -- -D warnings
 
-# Run the Rust unit and integration tests; --no-fail-fast runs every test binary, so one failure does not hide the rest. With RESULTS_DIR set, libtest writes JSON to $RESULTS_DIR/rust.json
+# Install the same pinned runner locally, in merge jobs, and in GitHub CI.
+[group('ci')]
+install-nextest: require-cargo
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [ "$(cargo nextest --version 2>/dev/null || true)" != 'cargo-nextest 0.9.103' ]; then
+		cargo install cargo-nextest --version 0.9.103 --locked
+	fi
+
+# Parallel unit/integration tests and separate doctests. RESULTS_DIR retains rust.json.
 [group('ci')]
 test: require-cargo
 	#!/usr/bin/env bash
 	set -euo pipefail
-	if [ -z "${RESULTS_DIR:-}" ]; then
-		cargo test --workspace --no-fail-fast
-		exit 0
+	if [ -n "${RESULTS_DIR:-}" ]; then
+		mkdir -p "$RESULTS_DIR"
+		: > "$RESULTS_DIR/rust.json"
 	fi
-	mkdir -p "$RESULTS_DIR"
-	RUSTC_BOOTSTRAP=1 cargo test --workspace --no-fail-fast -- -Z unstable-options --format json --report-time > "$RESULTS_DIR/rust.json"
+	python3 scripts/rust_tests.py --workspace --no-fail-fast
 
 # Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer, the deploy, the CI workflow)
 [group('ci')]

@@ -42,7 +42,7 @@ It runs, in this order, the same parts as the GitHub CI `check` job
 
 1. `ci::fmt-check`: `cargo fmt --all --check`
 2. `ci::lint`: clippy over the workspace, warnings fail
-3. `ci::test`: `cargo test --workspace --no-fail-fast`
+3. `ci::test`: `cargo nextest run --profile ci --workspace --no-fail-fast`, then `cargo test --doc --workspace --no-fail-fast`
 4. `ci::scripts-test`: the Python tests under `scripts/`
 5. `ci::dashboard-check`: `npm run check`, then the dashboard unit tests (`npm run test -- --run`) in `dashboard/`
 
