@@ -1042,6 +1042,9 @@ async fn a_park_stop_spares_an_unparked_agent() {
 async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
     let (td, lead) = setup().await;
     let s = state(&td);
+    // A card reminder after the spawn task would add an unrelated turn
+    // while stop is gated. This test controls the task and return turns only.
+    s.lifecycle.reminders.set_default(false);
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
     let agent_id = eph.parse().unwrap();
