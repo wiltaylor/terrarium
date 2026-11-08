@@ -124,8 +124,9 @@ pub enum Command {
         #[command(subcommand)]
         command: InboxCmd,
     },
-    /// The project board, grouped by column; `board columns` and `board
-    /// column` change the columns
+    /// The project board, grouped by column, excluding Done cards.
+    /// Use `card ls --column done` for completed cards. `board columns`
+    /// and `board column` change the columns.
     Board {
         #[command(subcommand)]
         command: Option<BoardCmd>,
@@ -2626,6 +2627,9 @@ pub struct NotifyArgs {
     /// The card that the notice is about
     #[arg(long)]
     pub card: Option<String>,
+    /// Answer an operator message or an answered question of yours
+    #[arg(long)]
+    pub reply_to: Option<String>,
     /// Mark the notice urgent
     #[arg(long, conflicts_with = "critical")]
     pub urgent: bool,
@@ -4124,6 +4128,9 @@ pub struct AdminTargetNewArgs {
     /// credential
     #[arg(long)]
     pub credential: Option<String>,
+    /// `ssh`: rsync the agent workspace before and after commands
+    #[arg(long)]
+    pub sync_workspace: bool,
     /// `vnc`, `rdp`: the user name
     #[arg(long)]
     pub username: Option<String>,
@@ -4632,6 +4639,18 @@ pub fn hide_for_mode(cmd: clap::Command, agent_mode: bool) -> clap::Command {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn board_help_points_to_completed_cards() {
+        let mut cli = Cli::command();
+        let help = cli
+            .find_subcommand_mut("board")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("excluding Done cards"));
+        assert!(help.contains("card ls --column done"));
+    }
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))

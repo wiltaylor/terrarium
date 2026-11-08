@@ -78,7 +78,7 @@ describe("mock API", () => {
   it("has no version objects: versions are the card labels of the seed (TER-58)", async () => {
     const api = mock();
     expect("versions" in api).toBe(false);
-    const cards = (await api.board.get("terrarium")).cards;
+    const cards = [...(await api.board.get("terrarium")).cards, ...(await api.board.get("terrarium", { done: true })).cards];
     const of = (id: string) => cards.find((c) => c.id === id)!.labels.filter((l) => l.startsWith("version:"));
     expect(of("TER-11")).toEqual(["version:0.0.1", "version:0.1.0"]);
     expect(of("TER-13")).toEqual(["version:vnext"]);

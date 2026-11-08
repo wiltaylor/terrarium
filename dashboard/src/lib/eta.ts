@@ -1,7 +1,7 @@
 // The ETA of a card (docs/api.md §8): the parse of an ETA value, and the
 // countdown chip of the board. Pure functions, no Solid imports.
 
-import type { Card } from "../api/types";
+import type { CardSummary as Card } from "../api/types";
 
 /** The largest ETA, in days from now (terrarium_core::eta::MAX_DAYS). */
 export const MAX_ETA_DAYS = 30;

@@ -6,7 +6,7 @@
 import { createSignal, For, type JSX, Show, onCleanup } from "solid-js";
 import type { BoardGroup } from "../../api/types";
 import { stepTiming } from "./stepTiming";
-import type { Board, Card, Column } from "../../api/types";
+import type { Board, CardSummary as Card, Column } from "../../api/types";
 import { cardsIn } from "../../stores/board";
 import { columnTitle, overLimit } from "./columns";
 import { alsoIn, isPlain, type Lane, laneCells, NO_VERSION_LANE } from "./lanes";
@@ -47,6 +47,9 @@ export function LanesBoard(props: {
   const [now, setNow] = createSignal(Date.now());
   const timer = setInterval(() => setNow(Date.now()), 1000);
   onCleanup(() => clearInterval(timer));
+  const [limits, setLimits] = createSignal<Record<string, number>>({});
+  const limit = (column: string) => limits()[column] ?? 50;
+  const filteredColumn = (column: string) => cardsIn(props.board, column).filter(c => c.kind === "group" || props.visible(c));
 
   const dropIndex = (cell: HTMLElement, y: number, order: Card[]) => {
     const cards = [...cell.querySelectorAll<HTMLElement>("[data-card]")].filter((el) => el.dataset.card !== dragging()?.id);
@@ -55,7 +58,8 @@ export function LanesBoard(props: {
       return y < r.top + r.height / 2;
     });
     const remaining = order.filter((c) => c.id !== dragging()?.id);
-    return i < 0 ? remaining.length : remaining.findIndex((c) => c.id === cards[i]!.dataset.card);
+    // Dropping below the rendered window must not jump past hidden cards.
+    return i < 0 ? (cards.length ? remaining.findIndex(c => c.id === cards.at(-1)!.dataset.card) + 1 : 0) : remaining.findIndex((c) => c.id === cards[i]!.dataset.card);
   };
   // The board that is not grouped: no lane head, and the lane cannot collapse.
   const plain = () => isPlain(props.lanes);
@@ -66,6 +70,10 @@ export function LanesBoard(props: {
   /** One cell: the cards of a lane in a column, with the drop handlers. */
   const Cell = (p: { lane: Lane; col: Column }) => {
     const cards = () => laneCells(p.lane, p.col.name);
+    const filtered = () => {
+      const ids = new Set(filteredColumn(p.col.name).slice(0, limit(p.col.name)).map(c => c.id));
+      return cards().filter(c => ids.has(c.id));
+    };
     const isDrop = () => drop()?.lane === p.lane.key && drop()?.column === p.col.name;
     return (
       <div
@@ -98,7 +106,7 @@ export function LanesBoard(props: {
             {cards().length}
           </span>
         </Show>
-        <For each={groupSections(cards().filter((c) => c.kind === "group" || props.visible(c)), p.col.name)}>
+        <For each={groupSections(filtered(), p.col.name)}>
           {(section) => <section classList={{ "board-group": !!section.group }}>
             <Show when={section.group}>{(group) => (
               <header class="board-group-head">
@@ -177,6 +185,9 @@ export function LanesBoard(props: {
       <div class="column-head lanes-col-head" classList={{ "over-limit": over() }} data-column-head={p.col.name}>
         <span>{columnTitle(p.col)}</span>
         <span class="row column-head-end">
+          <Show when={filteredColumn(p.col.name).length > limit(p.col.name)}>
+            <button class="small" onClick={() => setLimits(v => ({ ...v, [p.col.name]: limit(p.col.name) + 50 }))}>Show more ({filteredColumn(p.col.name).length - limit(p.col.name)})</button>
+          </Show>
           <span class="count muted small" title={over() ? `Over the WIP limit of ${p.col.wip_limit}: no more cards enter until some leave` : undefined}>
             {n()}
             {p.col.wip_limit !== undefined ? ` / ${p.col.wip_limit}` : ""}

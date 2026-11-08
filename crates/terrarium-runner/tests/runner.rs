@@ -299,7 +299,7 @@ fn transitions(events: &[EventRecord]) -> Vec<AgentStatus> {
 async fn turn_runs_starting_idle_working_idle() {
     let mut h = start(Opts::default()).await;
     until_idle(&mut h).await;
-    assert!(h.runner.screen().text().contains("fake tui 1.0"));
+    until_screen(&h, "fake tui 1.0").await;
 
     let delivery = h.runner.type_turn("hello");
     timeout(wait(), delivery.wait())
@@ -940,7 +940,7 @@ async fn a_turn_waits_for_the_startup_hook() {
 
     std::fs::write(&gate, b"").expect("end the startup");
     until_status(&mut h.events, AgentStatus::Idle).await;
-    assert!(h.runner.screen().text().contains("session s1 (startup)"));
+    until_screen(&h, "session s1 (startup)").await;
     timeout(wait(), delivery.wait())
         .await
         .expect("delivery in time")
@@ -967,13 +967,16 @@ async fn no_startup_hook_falls_back_to_the_screen() {
         ..Opts::default()
     })
     .await;
+    // No session argument means the fake harness never sends SessionStart.
+    // A wake queued during startup must survive the timeout, not just a
+    // turn sent after the fallback has already made the runner idle.
+    let d = h.runner.type_turn("hello");
     let seen = until_status(&mut h.events, AgentStatus::Idle).await;
     assert!(
         seen.iter()
             .any(|e| matches!(e, Event::Warning { message } if message.contains("startup hook"))),
         "{seen:?}"
     );
-    let d = h.runner.type_turn("hello");
     timeout(wait(), d.wait())
         .await
         .expect("delivery in time")

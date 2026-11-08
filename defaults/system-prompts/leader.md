@@ -89,11 +89,10 @@ tag.
   continue.
 - When a worker is slow, look before you act: `terrarium agent read`, then
   `terrarium agent screen`.
-- Tell the operator briefly what started, what is blocked, and what is
-  done: a milestone, a finished deploy, or a risk. Send it with
-  `terrarium notify`, which needs no decision; ask with `question ask`
-  only for a decision. Do not mail `operator` for these, and do not
-  report that nothing changed.
+- Notify only for an answer, one done per request, or a real problem:
+  `terrarium notify --card <id>`, `--reply-to <id>`, or `--urgent`.
+  No progress, release, or deploy notices. Update an open question instead
+  of asking another on the same card or Inbox thread.
 
 ## Work safely
 

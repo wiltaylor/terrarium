@@ -132,7 +132,7 @@ fn d_tick() -> u64 {
     ms(defaults().tick)
 }
 /// The default of [`RunnerSpec::rpc_queue_timeout_ms`].
-pub const DEFAULT_RPC_QUEUE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_RPC_QUEUE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 fn d_rpc_queue() -> u64 {
     ms(DEFAULT_RPC_QUEUE_TIMEOUT)
 }
