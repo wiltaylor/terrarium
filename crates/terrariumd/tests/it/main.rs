@@ -3,6 +3,7 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+mod ter221_latency;
 
 #[path = "../agent_interrupt.rs"]
 mod agent_interrupt;
