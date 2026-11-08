@@ -62,8 +62,16 @@ impl Ssh {
             copy_binary(&jail, binary);
         }
         std::fs::rename(jail.join("usr/bin/rsync"), jail.join("usr/bin/rsync-real")).unwrap();
-        std::fs::write(jail.join("usr/bin/rsync"), "#!/bin/sh\nexec /usr/bin/rsync-real --debug=DELTASUM3 \"$@\" 2>/tmp/rsync-debug\n").unwrap();
-        std::fs::set_permissions(jail.join("usr/bin/rsync"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            jail.join("usr/bin/rsync"),
+            "#!/bin/sh\nexec /usr/bin/rsync-real --debug=DELTASUM3 \"$@\" 2>/tmp/rsync-debug\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            jail.join("usr/bin/rsync"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         for name in ["tmp", "root", "dev", "etc"] {
             std::fs::create_dir(jail.join(name)).unwrap();
         }
@@ -180,7 +188,16 @@ async fn ssh_api_exec_run_copy_and_conflict() {
     let remote = ssh.jail.join(root.strip_prefix("/").unwrap());
     std::fs::write(root.join("input"), "pushed").unwrap();
     std::fs::write(root.join("id_parser.rs"), "source").unwrap();
-    for name in ["id_rsa", "id_ed25519.pub", "id_ecdsa", "id_dsa.pub", "id_ed25519_sk", "id_ed25519_sk.pub", "id_ecdsa_sk", "id_ecdsa_sk.pub"] {
+    for name in [
+        "id_rsa",
+        "id_ed25519.pub",
+        "id_ecdsa",
+        "id_dsa.pub",
+        "id_ed25519_sk",
+        "id_ed25519_sk.pub",
+        "id_ecdsa_sk",
+        "id_ecdsa_sk.pub",
+    ] {
         std::fs::write(root.join(name), "excluded").unwrap();
     }
     std::fs::write(root.join(".env"), "never ship").unwrap();
@@ -241,7 +258,16 @@ async fn ssh_api_exec_run_copy_and_conflict() {
         std::fs::read_to_string(remote.join("id_parser.rs")).unwrap(),
         "source"
     );
-    for name in ["id_rsa", "id_ed25519.pub", "id_ecdsa", "id_dsa.pub", "id_ed25519_sk", "id_ed25519_sk.pub", "id_ecdsa_sk", "id_ecdsa_sk.pub"] {
+    for name in [
+        "id_rsa",
+        "id_ed25519.pub",
+        "id_ecdsa",
+        "id_dsa.pub",
+        "id_ed25519_sk",
+        "id_ed25519_sk.pub",
+        "id_ecdsa_sk",
+        "id_ecdsa_sk.pub",
+    ] {
         assert!(!remote.join(name).exists());
     }
     for name in ["privileged", "privileged-dir"] {
@@ -261,18 +287,45 @@ async fn ssh_api_exec_run_copy_and_conflict() {
     // with a directory containing an attacker guess at an outside file.
     let outside = td.dir.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
-    std::fs::write(outside.join("secret"), format!("{}private", "Q".repeat(65536))).unwrap();
+    std::fs::write(
+        outside.join("secret"),
+        format!("{}private", "Q".repeat(65536)),
+    )
+    .unwrap();
     std::fs::write(root.join("guess"), format!("{}guess", "Q".repeat(65536))).unwrap();
-    let started = td.post("/api/targets/synced/exec", json!({"agent":agent,"cwd":root,"cmd":["ln","-s",outside,"escape"]})).await;
-    assert_eq!(done(&td, started.ok()["session_id"].as_str().unwrap()).await["code"], 0);
+    let started = td
+        .post(
+            "/api/targets/synced/exec",
+            json!({"agent":agent,"cwd":root,"cmd":["ln","-s",outside,"escape"]}),
+        )
+        .await;
+    assert_eq!(
+        done(&td, started.ok()["session_id"].as_str().unwrap()).await["code"],
+        0
+    );
     assert!(root.join("escape").is_symlink());
     let started = td.post("/api/targets/synced/exec", json!({"agent":agent,"cwd":root,"cmd":["sh","-c","rm escape; mkdir escape; cat guess > escape/secret"]})).await;
-    assert_eq!(done(&td, started.ok()["session_id"].as_str().unwrap()).await["code"], 0);
+    assert_eq!(
+        done(&td, started.ok()["session_id"].as_str().unwrap()).await["code"],
+        0
+    );
     let debug = std::fs::read_to_string(ssh.jail.join("tmp/rsync-debug")).unwrap();
-    let counts: Vec<_> = debug.split_whitespace().filter_map(|word| word.strip_prefix("count=")).collect();
-    assert!(!counts.is_empty(), "missing sender checksum diagnostics: {debug}");
-    assert!(counts.iter().all(|count| *count == "0"), "outside-file block checksums leaked: {debug}");
-    assert_eq!(std::fs::read_to_string(outside.join("secret")).unwrap(), format!("{}private", "Q".repeat(65536)));
+    let counts: Vec<_> = debug
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("count="))
+        .collect();
+    assert!(
+        !counts.is_empty(),
+        "missing sender checksum diagnostics: {debug}"
+    );
+    assert!(
+        counts.iter().all(|count| *count == "0"),
+        "outside-file block checksums leaked: {debug}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("secret")).unwrap(),
+        format!("{}private", "Q".repeat(65536))
+    );
 
     let run = td
         .post_as(

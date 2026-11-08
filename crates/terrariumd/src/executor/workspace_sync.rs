@@ -162,7 +162,9 @@ pub(super) struct Sync {
 }
 
 async fn rsync(source: &str, destination: &str, shell: Option<&str>) -> ApiResult<()> {
-    rsync_basis(source, destination, shell, None, false).await.map(|_| ())
+    rsync_basis(source, destination, shell, None, false)
+        .await
+        .map(|_| ())
 }
 
 async fn rsync_basis(
@@ -318,8 +320,8 @@ pub(super) async fn prepare(
 
 impl Sync {
     async fn download(&self, stage: &Path) -> ApiResult<String> {
-        let basis = tempfile::tempdir()
-            .map_err(|e| ApiError::invalid(format!("sync basis: {e}")))?;
+        let basis =
+            tempfile::tempdir().map_err(|e| ApiError::invalid(format!("sync basis: {e}")))?;
         // rsync must never resolve live-workspace symlinks as basis paths.
         // Seed a private, symlink-free copy. No other process can replace its
         // directories during the remote transfer, and no hard links are used.
@@ -329,14 +331,16 @@ impl Sync {
             None,
             None,
             true,
-        ).await?;
+        )
+        .await?;
         rsync_basis(
             &self.remote,
             &format!("{}/", stage.display()),
             Some(&self.shell),
             Some(basis.path()),
             false,
-        ).await
+        )
+        .await
     }
 
     async fn pull(&self) -> ApiResult<()> {
@@ -401,8 +405,16 @@ pub(super) fn finish_with(sess: &Arc<ExecSession>, sync: Option<Sync>) {
                 sender.take();
                 while let Ok(pending) = rx.try_recv() {
                     end = match end {
-                        End::Error { code, message } if code == "sync_conflict" || code == "sync_failed" => {
-                            End::error(&code, format!("{message}; pending session end: {}", serde_json::to_string(&pending).unwrap_or_default()))
+                        End::Error { code, message }
+                            if code == "sync_conflict" || code == "sync_failed" =>
+                        {
+                            End::error(
+                                &code,
+                                format!(
+                                    "{message}; pending session end: {}",
+                                    serde_json::to_string(&pending).unwrap_or_default()
+                                ),
+                            )
                         }
                         _ => pending,
                     };
@@ -610,7 +622,9 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(matches!(session.end(), Some(End::Error { code, message }) if code == "sync_conflict" && message.contains("lease_revoked") && message.contains("remote output retained")));
+        assert!(
+            matches!(session.end(), Some(End::Error { code, message }) if code == "sync_conflict" && message.contains("lease_revoked") && message.contains("remote output retained"))
+        );
         assert_eq!(
             std::fs::read_to_string(local.path().join("result")).unwrap(),
             "harness"
@@ -748,7 +762,10 @@ mod tests {
         sync.pull().await.unwrap();
         let stage = tempfile::tempdir().unwrap();
         let stats = sync.download(stage.path()).await.unwrap();
-        assert!(stats.contains("Number of regular files transferred: 0"), "{stats}");
+        assert!(
+            stats.contains("Number of regular files transferred: 0"),
+            "{stats}"
+        );
         for name in SECRET_NAMES {
             assert_eq!(
                 std::fs::read_to_string(local.join(name)).unwrap(),
