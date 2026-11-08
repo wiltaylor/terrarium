@@ -2160,14 +2160,18 @@ mod tests {
                                    created_by, created_at)
                  VALUES (?1, 'p', 'C', 'validate', 'app', 'b', ?2, ?3, 't', 't')",
                 params![id, state, host],
-            ).unwrap();
+            )
+            .unwrap();
         }
         conn.execute(
             "INSERT INTO targets (name, def, source, state, snapshots, created_at, updated_at)
              VALUES ('local-box', '{\"kind\":\"docker\",\"image\":\"x\"}', 'api', 'unknown', '[]', '', '')",
             [],
         ).unwrap();
-        assert_eq!(unresolved_hosts(&conn, None).unwrap(), ["active.invalid", "queued.invalid"]);
+        assert_eq!(
+            unresolved_hosts(&conn, None).unwrap(),
+            ["active.invalid", "queued.invalid"]
+        );
     }
 
     #[test]
