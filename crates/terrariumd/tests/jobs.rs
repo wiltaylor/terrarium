@@ -2007,7 +2007,12 @@ test -f OK"#;
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     dirs.sort();
-    assert_eq!(dirs, ["slot-1", "slot-2"]);
+    assert_eq!(dirs, ["logs", "slot-1", "slot-2"]);
+    // Logs belong to jobs, not slots, and survive later slot checkouts.
+    for job in &jobs {
+        let id = job["id"].as_str().unwrap();
+        assert!(wd.join(format!("p/logs/{id}.log")).is_file());
+    }
 
     let job = merge_with_recipe(
         &lab,
@@ -2017,6 +2022,42 @@ test -f OK"#;
     .await;
     assert_eq!(job["state"], "passed", "{job:#}");
     assert_eq!(job["slot"], 0, "{job:#}");
+}
+
+#[tokio::test]
+async fn a_failed_job_keeps_the_full_log_and_puts_early_panics_on_the_card() {
+    let lab = lab(1).await;
+    let recipe = r#"printf 'test early_failure ... FAILED\n'
+printf "thread 'early_failure' panicked at test.rs:1:2:\nexpected value\n" >&2
+i=0; while [ "$i" -lt 2000 ]; do printf 'unrelated build noise\n'; i=$((i + 1)); done
+exit 101"#;
+    let job = merge_with_recipe(&lab, "ter-log-failure", recipe).await;
+    assert_eq!(job["state"], "failed", "{job:#}");
+    assert_eq!(job["exit_code"], 101, "{job:#}");
+    let id = job["id"].as_str().unwrap();
+    let log = lab._dirs.path().join(format!("jobs/p/logs/{id}.log"));
+    let full = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(full.matches("unrelated build noise").count(), 2000);
+    assert!(full.contains("expected value"));
+    let shown = lab.td.get(&format!("/api/jobs/{id}")).await.ok().clone();
+    let tail = shown["tail"].as_str().unwrap();
+    assert!(tail.contains(&log.display().to_string()), "{tail}");
+    assert!(tail.contains("Full log on target p-box:"), "{tail}");
+    let card = lab
+        .td
+        .get(&format!("/api/cards/{}", job["card"].as_str().unwrap()))
+        .await
+        .ok()
+        .clone();
+    let body = card["body"].as_str().unwrap();
+    for expected in [
+        "test early_failure ... FAILED",
+        "panicked at test.rs:1:2",
+        "expected value",
+        "Full log on target p-box:",
+    ] {
+        assert!(body.contains(expected), "missing {expected}: {body}");
+    }
 }
 
 /// Queue a merge of a new card on `branch` with `recipe`, wait for the
