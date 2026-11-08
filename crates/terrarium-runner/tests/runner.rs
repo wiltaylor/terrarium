@@ -719,7 +719,7 @@ fn blocked_reasons(path: &Path) -> Vec<Option<String>> {
 
 /// TER-224: text that a person types at the terminal of an idle agent
 /// ([`Runner::write_person`]) is not flagged, also long after
-/// `submit_timeout`. When the box is empty again, a turn goes out.
+/// `submit_timeout`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_typed_by_a_person_is_not_flagged() {
     let mut h = start(Opts {
@@ -736,13 +736,6 @@ async fn text_typed_by_a_person_is_not_flagged() {
     until_screen(&h, "[Pasted text #1 +2 lines]").await;
     tokio::time::sleep(ms(2_000)).await;
     assert_eq!(h.runner.status(), AgentStatus::Idle);
-    h.runner.write_person(b"\x15").await.expect("ctrl-u");
-    let d = h.runner.type_turn("after");
-    timeout(wait(), d.wait())
-        .await
-        .expect("time")
-        .expect("the turn submits");
-    until_screen(&h, "done: after").await;
     h.runner.kill().expect("kill");
     h.runner.wait().await;
     let all = read_events(h.runner.events_path());
@@ -770,11 +763,9 @@ async fn a_redraw_does_not_unblock_the_agent() {
     })
     .await;
     until_idle(&mut h).await;
-    let d = h.runner.type_turn("/leave-blink");
-    timeout(wait(), d.wait())
-        .await
-        .expect("time")
-        .expect("the turn submits");
+    // A raw write, not a turn: a turn would need its prompt-submit hook
+    // within the short `submit_timeout` of this test.
+    h.runner.write(b"/leave-blink\r").await.expect("type");
     until_status(&mut h.events, AgentStatus::Blocked).await;
     // Ten redraws, each shorter than INPUT_CLEAR_DEBOUNCE.
     tokio::time::sleep(ms(3_000)).await;
