@@ -5017,12 +5017,31 @@ mod tests {
     /// TER-213: idle arrives while the completed delivery still owns busy.
     #[tokio::test]
     async fn pointer_is_re_pushed_after_idle_during_busy_delivery() {
+        struct PointerAdapter;
+        impl Adapter for PointerAdapter {
+            fn id(&self) -> HarnessId { HarnessId::Claude }
+            fn detect_version(&self) -> terrarium_core::Result<semver::Version> {
+                Ok(semver::Version::new(1, 0, 0))
+            }
+            fn launch(&self, _: &Agent, _: Option<&HarnessSessionId>) -> LaunchSpec {
+                unreachable!("the test supplies the launch spec")
+            }
+            fn hook_event(&self, hook: &terrarium_core::HookPayload) -> Vec<Event> {
+                match hook.hook.as_str() {
+                    "UserPromptSubmit" => vec![Event::TurnStart {
+                        prompt: hook.str_field("prompt").map(str::to_owned),
+                    }],
+                    "Stop" => vec![Event::TurnEnd],
+                    _ => vec![],
+                }
+            }
+        }
         let tmp = tempfile::tempdir().unwrap();
         let cfg = RunnerSupervisorConfig::new(
             tmp.path().join("state"), tmp.path().join("run"),
             tmp.path().join("prompts"), SandboxConfig::default(), HashMap::new(),
         );
-        let adapter = cfg.adapters[&HarnessId::Claude].adapter.clone();
+        let adapter = Arc::new(PointerAdapter);
         let sup = RunnerSupervisor::new(cfg);
         let agent: Agent = serde_json::from_value(serde_json::json!({
             "id": AgentId::new(), "name": "a", "project": "p",
@@ -5038,7 +5057,7 @@ mod tests {
                 .join("../terrarium-runner/tests/fake_tui/fake_tui.py").display().to_string()
         );
         let runner = Runner::spawn(rc, adapter, spec, sup.rpc_handler()).await.unwrap();
-        let mut status = runner.watch_status();
+        let status = runner.watch_status();
         let wait_idle = |mut status: watch::Receiver<AgentStatus>| async move {
             tokio::time::timeout(Duration::from_secs(45), async {
                 while *status.borrow_and_update() != AgentStatus::Idle {
