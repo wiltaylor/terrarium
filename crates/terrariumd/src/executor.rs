@@ -23,7 +23,7 @@
 //! limit, the session stops taking events, and the backpressure goes back
 //! to the process.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1231,6 +1231,7 @@ async fn pull_via_cat(
 pub struct Executor {
     /// Serialize reservation enforcement and cleanup across API calls/timers.
     pub resource_lock: tokio::sync::Mutex<()>,
+    resource_pending: Mutex<HashSet<String>>,
     pub hosts: Arc<HostRegistry>,
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
     pub max_per_agent: usize,
@@ -1246,6 +1247,7 @@ impl Default for Executor {
         Self {
             hosts: Arc::default(),
             resource_lock: tokio::sync::Mutex::new(()),
+            resource_pending: Mutex::default(),
             sessions: Mutex::default(),
             max_per_agent: MAX_SESSIONS_PER_AGENT,
             ssh_bin: std::env::var("TERRARIUM_SSH").unwrap_or_else(|_| "ssh".into()),
@@ -1257,6 +1259,15 @@ impl Default for Executor {
 }
 
 impl Executor {
+    pub fn set_resource_pending(&self, host: &str, pending: bool) {
+        let mut hosts = self.resource_pending.lock().unwrap_or_else(|e| e.into_inner());
+        if pending { hosts.insert(host.to_owned()); } else { hosts.remove(host); }
+    }
+
+    pub fn resource_pending(&self, host: &str) -> bool {
+        self.resource_pending.lock().unwrap_or_else(|e| e.into_inner()).contains(host)
+    }
+
     fn table(&self) -> MutexGuard<'_, HashMap<String, Arc<ExecSession>>> {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }

@@ -27,6 +27,13 @@ pub struct NewBody {
 
 fn now() -> i64 { chrono::Utc::now().timestamp_millis() }
 
+fn ready(state: &Shared, host: &str) -> ApiResult<()> {
+    if state.executor.resource_pending(host) {
+        return Err(ApiError::conflict("host reservation reconciliation is pending; retry after enforcement is restored"));
+    }
+    Ok(())
+}
+
 fn docker_defaults(state: &Shared, def: &TargetDef, limits: &mut RuntimeLimits) -> ApiResult<()> {
     let host = def.host.as_deref().ok_or_else(|| ApiError::conflict("missing host capacity"))?;
     if !state.executor.hosts.is_online(host)
@@ -146,6 +153,7 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
 
 pub async fn grant(state: &Shared, actor: &Actor, host: &str, body: NewBody) -> ApiResult<Reservation> {
     let _guard = state.executor.resource_lock.lock().await;
+    ready(state, host)?;
     let target = body.target.clone();
     let key = body.agent.clone();
     let context = actor.project().map(str::to_owned);
@@ -211,6 +219,7 @@ async fn apply(state: &Shared, r: &Reservation, reset: bool) -> ApiResult<()> {
         }).await?;
     }
     if t.def.kind == TargetKind::Docker && t.state != "running" { return Ok(()); }
+    if t.def.kind == TargetKind::Docker && r.state == State::Active { limits.io.clear(); }
     if t.def.kind == TargetKind::Docker { docker_defaults(state, &t.def, &mut limits)?; }
     let container = (t.def.kind == TargetKind::Docker).then(|| executor::container_name(&t.def));
     executor::verb_ok(state, &t.def, "reservation limits", move |session| DaemonFrame::ResourceApply(ResourceApply {
@@ -332,6 +341,12 @@ pub async fn cancel(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Reserv
 pub async fn sweep(state: &Shared) -> ApiResult<()> {
     let _guard = state.executor.resource_lock.lock().await;
     for host in state.db.read(hosts::list).await? {
+        if state.executor.resource_pending(&host.name) {
+            if let Err(error) = reconcile_host_locked(state, &host.name).await {
+                tracing::warn!(host=%host.name, %error, "reservation reconciliation pending");
+                continue;
+            }
+        }
         let name = host.name.clone();
         let rows = state.db.read(move |c| store::list(c, &name)).await?;
         for r in rows {
@@ -340,7 +355,12 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
                 let id = r.id.clone();
                 let ended = state.db.write("system", move |tx| store::end(tx, &id, true)).await?;
                 finish(state, &ended).await.map(|_| ())
-            } else if r.state == State::Starting { start(state, &r).await.map(|_| ()) }
+            } else if r.state == State::Starting {
+                match preflight(state, &r).await {
+                    Ok(()) => start(state, &r).await.map(|_| ()),
+                    Err(error) => Err(error),
+                }
+            }
             else { Ok(()) };
             if let Err(e) = result { tracing::warn!(reservation=%r.id, "reservation reconcile: {e}"); }
         }
@@ -356,6 +376,36 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             } else if let Err(e) = start(state, &r).await { tracing::warn!(reservation=%r.id, "queued reservation start: {e}"); }
         }
     }
+    Ok(())
+}
+
+/// Reapply persisted enforcement before permitting new work after a host
+/// reconnect. Failure leaves the admission gate closed and the sweep retries.
+pub async fn reconcile_host(state: &Shared, host: &str) -> ApiResult<()> {
+    let _guard = state.executor.resource_lock.lock().await;
+    reconcile_host_locked(state, host).await
+}
+
+async fn reconcile_host_locked(state: &Shared, host: &str) -> ApiResult<()> {
+    if !state.executor.hosts.is_online(host) { return Err(ApiError::conflict("host is offline")); }
+    let name = host.to_owned();
+    let rows = state.db.read(move |c| store::list(c, &name)).await?;
+    if rows.iter().any(|r| managed(r) && r.exclusive) { isolate(state, host, None).await?; }
+    for r in rows.iter().filter(|r| managed(r)) {
+        if r.state == State::Ending {
+            finish(state, r).await?;
+        } else if r.until.is_some_and(|u| u <= now()) {
+            let id = r.id.clone();
+            let ended = state.db.write("system", move |tx| store::end(tx, &id, true)).await?;
+            finish(state, &ended).await?;
+        } else if r.state == State::Starting {
+            preflight(state, r).await?;
+            start(state, r).await?;
+        } else {
+            apply(state, r, false).await?;
+        }
+    }
+    state.executor.set_resource_pending(host, false);
     Ok(())
 }
 
@@ -398,6 +448,7 @@ pub fn docker_budget(state: &Shared, def: &TargetDef) -> ApiResult<Option<Runtim
 /// Lifecycle admission shares the same host-wide exclusion boundary as exec.
 pub fn lifecycle_admission(state: &Shared, def: &TargetDef) -> ApiResult<()> {
     let Some(host) = &def.host else { return Ok(()); };
+    ready(state, host)?;
     state.db.read_now(|c| {
         let rows = store::list(c, host)?;
         if rows.iter().any(|r| managed(r) && r.exclusive) && (!matches!(def.kind, TargetKind::Host | TargetKind::Docker)
@@ -464,6 +515,7 @@ pub async fn before_docker_start(state: &Shared, def: &TargetDef) -> ApiResult<(
 /// existing slice hierarchy. This read runs before sending the exec frame.
 pub fn exec_budget(state: &Shared, def: &TargetDef, holder: Option<&str>) -> ApiResult<Option<terrarium_host::protocol::ExecLimits>> {
     let Some(host) = &def.host else { return Ok(None); };
+    ready(state, host)?;
     state.db.read_now(|c| {
         let agent = holder.and_then(|h| agents::find(c, h, None).ok()).map(|a| a.agent.id.to_string());
         let rows = store::list(c, host)?;

@@ -87,6 +87,25 @@ async fn active_docker_budget_overrides_edits_and_retract_restores_defaults() {
 }
 
 #[tokio::test]
+async fn reconnect_gate_blocks_exec_until_active_limits_are_restored() {
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    state.db.write("system", |tx| terrariumd::store::targets::set_state(tx, "p-box", "running", None)).await.unwrap();
+    td.post("/api/hosts/h/reservations", json!({"target":"p-box","amounts":{"cpu_millis":1000},"until":"30m"})).await.ok();
+    let def = state.db.read(|c| Ok(terrariumd::store::targets::get(c, "p-box")?.def)).await.unwrap();
+    state.executor.set_resource_pending("h", true);
+    assert!(terrariumd::reservations::exec_budget(&state, &def, None).is_err());
+    std::fs::write(td.dir.path().join("docker.fail"), "fail").unwrap();
+    assert!(terrariumd::reservations::reconcile_host(&state, "h").await.is_err());
+    assert!(state.executor.resource_pending("h"));
+    std::fs::remove_file(td.dir.path().join("docker.fail")).unwrap();
+    terrariumd::reservations::reconcile_host(&state, "h").await.unwrap();
+    assert!(!state.executor.resource_pending("h"));
+    assert!(terrariumd::reservations::exec_budget(&state, &def, None).is_ok());
+    client.abort(); server.abort();
+}
+
+#[tokio::test]
 async fn permanent_docker_refuses_create_only_io_reservations() {
     let (td, server, client) = setup().await;
     td.put("/api/hosts/h/capacity", json!({"percentage":50,"io":{"8:0":{"read_bps":1000000}}})).await.ok();
