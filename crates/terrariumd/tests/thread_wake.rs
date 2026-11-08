@@ -58,6 +58,193 @@ async fn until<F: std::future::Future<Output = bool>>(what: &str, mut f: impl Fn
 const BLOCKED_TURN: &str = "A card that this thread tracks went to blocked.";
 const REVIEW_TURN: &str = "All cards that this thread tracks are in review or later.";
 
+#[tokio::test]
+async fn ops_monitor_gates_ready_and_wakes_on_green_and_red() {
+    use terrariumd::monitors::parse::{Parsed, Status};
+    use terrariumd::store::monitors;
+    let lab = lab().await;
+    let monitor = state(&lab.td)
+        .db
+        .write("system", |t| {
+            let def = serde_json::from_value(json!({
+                "name": "health", "target": "unused", "script": "true",
+                "schedule": {"kind": "interval", "every": "1m"},
+                "kind": "status", "enabled": false
+            }))
+            .unwrap();
+            Ok(monitors::create(
+                t,
+                "p",
+                &def,
+                terrariumd::owner::Owner::Actor,
+                "operator",
+                chrono::Utc::now(),
+            )?
+            .id)
+        })
+        .await
+        .unwrap();
+    let (tid, eph) = lab.started("consult", "Ops health").await;
+    let card = lab.card("p", "Ops change").await;
+    let r = lab
+        .td
+        .post_as(
+            &eph,
+            &format!("/api/threads/{tid}/track"),
+            json!({"cards": [format!("p:{card}")], "monitor": "p:missing"}),
+        )
+        .await;
+    assert_eq!(r.status, 404, "{}", r.body);
+    assert!(
+        lab.thread(&tid).await["cards"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let r = lab
+        .td
+        .post_as(
+            &eph,
+            &format!("/api/threads/{tid}/track"),
+            json!({"cards": [format!("p:{card}")], "monitor": "p:health"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["monitor"], "p:health");
+    lab.parked(&eph).await;
+    lab.mv(&card, "review", None).await;
+    assert!(lab.wakes(&tid).await.is_empty());
+    for (status, expected) in [
+        (Status::Crit, vec![]),
+        (Status::Ok, vec!["monitor_green"]),
+        (Status::Ok, vec!["monitor_green"]),
+        (Status::Warn, vec!["monitor_green"]),
+        (Status::Ok, vec!["monitor_green"]),
+        (Status::Unknown, vec!["monitor_green"]),
+        (Status::Ok, vec!["monitor_green"]),
+        (Status::Warn, vec!["monitor_green"]),
+        (Status::Ok, vec!["monitor_green"]),
+        (Status::Crit, vec!["monitor_green", "monitor_red"]),
+    ] {
+        let mid = monitor.clone();
+        state(&lab.td)
+            .db
+            .write("system", move |t| {
+                monitors::record(
+                    t,
+                    &mid,
+                    &Parsed {
+                        status,
+                        value: None,
+                        text: None,
+                        json: None,
+                        error: None,
+                    },
+                    chrono::Utc::now(),
+                    1,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(lab.wakes(&tid).await, expected);
+    }
+    assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
+    // Adding unfinished work clears completion. Red is no longer an alert
+    // about completed work until the new card is ready too.
+    let more = lab.card("p", "Follow-up").await;
+    lab.link(&tid, &format!("p:{more}")).await;
+    monitor_sample(&lab, &monitor, Status::Ok).await;
+    monitor_sample(&lab, &monitor, Status::Crit).await;
+    assert_eq!(lab.wakes(&tid).await, ["monitor_green", "monitor_red"]);
+
+    // A late link to an already green monitor completes a monitor-only
+    // thread immediately, even though this is not its first track call.
+    monitor_sample(&lab, &monitor, Status::Ok).await;
+    let (ops, agent) = lab.started("consult", "Monitor only").await;
+    lab.track(&agent, &ops).await;
+    lab.parked(&agent).await;
+    let r = lab
+        .td
+        .post_as(
+            &agent,
+            &format!("/api/threads/{ops}/track"),
+            json!({"monitor": "q:hidden"}),
+        )
+        .await;
+    assert_eq!(r.status, 404, "{}", r.body);
+    let r = lab
+        .td
+        .post_as(
+            &agent,
+            &format!("/api/threads/{ops}/track"),
+            json!({"monitor": "p:health"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(lab.wakes(&ops).await, ["monitor_green"]);
+
+    // Filtering does not grant the thread's reader monitor-project access.
+    let mut th = serde_json::from_value::<terrariumd::store::threads::Thread>(r.body).unwrap();
+    th.monitor = Some("q:hidden".to_owned());
+    let actor = terrariumd::actor::Actor::Agent(terrariumd::actor::AgentActor {
+        id: agent.clone(),
+        name: "reader".to_owned(),
+        project: "p".to_owned(),
+        roles: vec![],
+        policy: Default::default(),
+    });
+    assert!(
+        terrariumd::store::threads::visible(&actor, th)
+            .monitor
+            .is_none()
+    );
+
+    // Hold red then green while waiting for the operator. Delivery must
+    // preserve that order, with green last, and must not violate SQL checks.
+    lab.td.wait_status(&agent, "idle").await;
+    let question = lab
+        .td
+        .post_as(
+            &agent,
+            &format!("/api/agents/{agent}/questions"),
+            json!({"thread": ops, "text": "Proceed?", "options": ["yes", "no"]}),
+        )
+        .await;
+    assert_eq!(question.status, 201, "{}", question.body);
+    lab.parked(&agent).await;
+    monitor_sample(&lab, &monitor, Status::Crit).await;
+    monitor_sample(&lab, &monitor, Status::Ok).await;
+    assert_eq!(lab.thread(&ops).await["status"], "waiting_operator");
+    assert_eq!(lab.wakes(&ops).await, ["monitor_green"]);
+    let qid = id(&question.body);
+    lab.td
+        .post(
+            &format!("/api/questions/{qid}/answer"),
+            json!({"option": "yes"}),
+        )
+        .await
+        .ok();
+    assert_eq!(
+        lab.wakes(&ops).await,
+        ["monitor_green", "monitor_red", "monitor_green"]
+    );
+}
+
+async fn monitor_sample(lab: &Lab, monitor: &str, status: terrariumd::monitors::parse::Status) {
+    let monitor = monitor.to_owned();
+    state(&lab.td)
+        .db
+        .write("system", move |t| {
+            let mut parsed = terrariumd::monitors::parse::Parsed::unknown("test");
+            parsed.status = status;
+            terrariumd::store::monitors::record(t, &monitor, &parsed, chrono::Utc::now(), 1)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 struct Lab {
     td: TestDaemon,
     /// `p/lead`, the report-to lead of the `p` threads.

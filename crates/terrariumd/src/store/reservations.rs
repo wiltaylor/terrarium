@@ -58,6 +58,10 @@ pub struct Reservation {
     pub gpus: Vec<terrarium_core::resources::GpuClaim>,
     #[serde(default)]
     pub gpu_warned: bool,
+    #[serde(default)]
+    pub gpu_below_since: Option<i64>,
+    #[serde(default)]
+    pub gpu_last_warning: Option<i64>,
     pub id: String,
     pub host: String,
     pub project: String,
@@ -426,6 +430,8 @@ pub fn request_deferred(
     let mut r = Reservation {
         gpus: req.gpus,
         gpu_warned: false,
+        gpu_below_since: None,
+        gpu_last_warning: None,
         id: ulid::Ulid::new().to_string(),
         host: req.host,
         project: req.project,
@@ -631,13 +637,29 @@ pub fn warnings(t: &mut Tx<'_>, host: &str, at: i64) -> ApiResult<Vec<(Reservati
 }
 
 /// Warning only: a shared allocation is cooperative, never a kill threshold.
-pub fn gpu_usage(t: &mut Tx<'_>, id: &str, over: bool) -> ApiResult<()> {
+pub fn gpu_usage(t: &mut Tx<'_>, id: &str, over: bool, at: i64) -> ApiResult<()> {
     let mut r = get(t, id)?;
-    if r.state != State::Active || r.gpu_warned == over {
+    if r.state != State::Active {
         return Ok(());
     }
-    r.gpu_warned = over;
+    let mut warn = false;
     if over {
+        r.gpu_below_since = None;
+        if !r.gpu_warned
+            && r.gpu_last_warning
+                .is_none_or(|last| at.saturating_sub(last) >= 3_600_000)
+        {
+            r.gpu_warned = true;
+            r.gpu_last_warning = Some(at);
+            warn = true;
+        }
+    } else if r.gpu_warned {
+        let since = *r.gpu_below_since.get_or_insert(at);
+        if at.saturating_sub(since) >= 600_000 {
+            r.gpu_warned = false;
+        }
+    }
+    if warn {
         save(t, &r, "gpu_overage")
     } else {
         t.execute(

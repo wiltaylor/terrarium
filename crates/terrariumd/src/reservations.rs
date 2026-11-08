@@ -806,7 +806,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
                     let id = r.id.clone();
                     state
                         .db
-                        .write("system", move |tx| store::gpu_usage(tx, &id, over))
+                        .write("system", move |tx| store::gpu_usage(tx, &id, over, now()))
                         .await?;
                 }
             }
