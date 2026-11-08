@@ -66,6 +66,10 @@ pub fn routes() -> Router<Shared> {
 const TAIL: usize = 4000;
 /// How long a turn action waits for an agent that it started.
 const READY_WAIT: Duration = Duration::from_secs(120);
+/// The wakes of a turn action for a stopped agent, and the pause between
+/// two of them.
+const WAKE_TRIES: usize = 3;
+const WAKE_PAUSE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default, Clone, Deserialize)]
 struct ListQuery {
@@ -1191,9 +1195,9 @@ async fn execute(
             turn(
                 state,
                 actor,
+                s,
                 &id,
                 &format!("{project}/{name}"),
-                &s.name,
                 text,
                 start_if_stopped,
             )
@@ -1373,9 +1377,8 @@ async fn card_action(state: &Shared, actor: Actor, w: CardWork, ctx: &RunCtx) ->
 }
 
 /// Wait until a started agent is ready for a turn: `idle`, `waiting`,
-/// `working`, or `blocked`. False when it stops or the wait ends.
-async fn wait_ready(state: &Shared, agent: AgentId) -> bool {
-    let end = tokio::time::Instant::now() + READY_WAIT;
+/// `working`, or `blocked`. False when it stops or `end` passes.
+async fn wait_ready(state: &Shared, agent: AgentId, end: tokio::time::Instant) -> bool {
     while tokio::time::Instant::now() < end {
         match state.supervisor.status(agent).await {
             Some(
@@ -1391,12 +1394,107 @@ async fn wait_ready(state: &Shared, agent: AgentId) -> bool {
     false
 }
 
+/// Wake an agent that has a queued turn until it is ready for it: at most
+/// [`WAKE_TRIES`] wakes in [`READY_WAIT`]. The wake gives it the queued
+/// turn. `Err` says why it does not start; the turn then stays queued for
+/// the agent's next wake.
+async fn wake_until_ready(state: &Shared, agent: AgentId) -> Result<(), String> {
+    use crate::lifecycle::Woke;
+    let end = tokio::time::Instant::now() + READY_WAIT;
+    let mut why = String::from("it did not become ready");
+    for n in 0..WAKE_TRIES {
+        if n > 0 {
+            if tokio::time::Instant::now() + WAKE_PAUSE >= end {
+                break;
+            }
+            tokio::time::sleep(WAKE_PAUSE).await;
+        }
+        // A wake of the send can have started it already.
+        let runs = state
+            .supervisor
+            .status(agent)
+            .await
+            .is_some_and(|s| s.is_live() || s == AgentStatus::Restarting);
+        let woke = if runs {
+            Woke::Running
+        } else {
+            crate::lifecycle::wake(state, agent, "schedule").await
+        };
+        why = match woke {
+            Woke::Started | Woke::Running | Woke::Busy => {
+                if wait_ready(state, agent, end).await {
+                    return Ok(());
+                }
+                "it did not become ready".into()
+            }
+            // These last longer than a retry: the turn waits for them.
+            Woke::Paused => return Err("it is paused".into()),
+            Woke::Parked => return Err("it is a parked bound agent".into()),
+            Woke::Error => return Err("it is in error".into()),
+            Woke::Draining => return Err("the daemon drains for a self-update".into()),
+            Woke::Held => return Err("a quota or budget hold lasts".into()),
+            Woke::Disabled => return Err("its subscription is disabled".into()),
+            Woke::Gone => return Err("it no longer exists".into()),
+            Woke::Failed(e) => return Err(e),
+        };
+    }
+    Err(why)
+}
+
+/// Mail the owner of schedule `s` that its turn did not reach `who`: the
+/// `run_as` actor, the project inbox, or the operator for a system-owned
+/// schedule (TER-210: never a silent skip).
+async fn tell_owner(state: &Shared, s: &Schedule, who: &str, why: &str) {
+    let (key, sid, run_as, owner, project) = (
+        s.key(),
+        s.id.clone(),
+        s.run_as.clone(),
+        s.owner,
+        s.project.clone(),
+    );
+    let (who, why) = (who.to_owned(), why.to_owned());
+    let label = schedules::run_label(&s.id);
+    let sent = state
+        .db
+        .write(label, move |t| {
+            let to = match (owner, &project) {
+                (Owner::Actor, _) => {
+                    let name = run_as.strip_prefix("agent:").unwrap_or(&run_as);
+                    crate::store::mail::resolve(t, name, project.as_deref())
+                        .unwrap_or(Address::Operator)
+                }
+                (Owner::Project, Some(p)) => Address::Project(p.clone()),
+                _ => Address::Operator,
+            };
+            crate::store::mail::send(
+                t,
+                crate::store::mail::Outgoing {
+                    from: &Address::System,
+                    to: &to,
+                    subject: &format!("Schedule {key}: turn not delivered"),
+                    body: &format!(
+                        "Schedule {key} ({sid}) could not start {who} for its turn: {why}. \
+                         The turn waits in the queue of {who} and goes in at its next wake. \
+                         For a time-critical turn, act now (`terrarium agent start`)."
+                    ),
+                    thread: None,
+                    in_reply_to: None,
+                },
+            )
+            .map(|_| ())
+        })
+        .await;
+    if let Err(e) = sent {
+        tracing::warn!(schedule = %s.id, "cannot mail the owner of the schedule: {e}");
+    }
+}
+
 async fn turn(
     state: &Shared,
     actor: Actor,
+    s: &Schedule,
     id: &str,
     who: &str,
-    schedule: &str,
     text: String,
     start_if_stopped: bool,
 ) -> Outcome {
@@ -1410,17 +1508,14 @@ async fn turn(
     let before = state.supervisor.status(agent).await;
     let live = before.is_some_and(AgentStatus::is_live);
     let mut started = false;
-    if !live {
-        if !start_if_stopped {
-            return Outcome::skipped("agent not running");
-        }
+    if !live && start_if_stopped {
         if let Err(e) =
             super::agents::start(State(state.clone()), actor.clone(), Path(id.to_owned())).await
         {
             return failed(&e, json!({"agent": who, "started": false}));
         }
         started = true;
-        if !wait_ready(state, agent).await {
+        if !wait_ready(state, agent, tokio::time::Instant::now() + READY_WAIT).await {
             return Outcome::failed(
                 format!("failed: {who} did not become ready"),
                 format!("agent {who} did not become ready for a turn"),
@@ -1432,10 +1527,13 @@ async fn turn(
     // The turn starts with `[System:schedule <name>]` (PLAN §8.5).
     let source = terrarium_core::turn_tag::TurnSource::System {
         kind: terrarium_core::turn_tag::SystemKind::Schedule,
-        detail: Some(schedule.to_owned()),
+        detail: Some(s.name.clone()),
     };
-    match super::agents::send_as(state, actor, id.to_owned(), body, &source).await {
-        Ok(_) => Outcome::ok(
+    if let Err(e) = super::agents::send_as(state, actor, id.to_owned(), body, &source).await {
+        return failed(&e, json!({"agent": who, "started": started}));
+    }
+    if live || started {
+        return Outcome::ok(
             if started {
                 format!("started {who} and sent the turn")
             } else {
@@ -1443,8 +1541,26 @@ async fn turn(
             },
             json!({"agent": who, "started": started, "delivery": "accepted",
                    "status_before": before}),
+        );
+    }
+    // A stopped agent (an idle stop is the usual case): the send queued
+    // the turn and woke the agent, as `agent send` does (TER-210). Check
+    // that it starts, and tell the owner when it does not.
+    match wake_until_ready(state, agent).await {
+        Ok(()) => Outcome::ok(
+            format!("woke {who} and sent the turn"),
+            json!({"agent": who, "started": true, "delivery": "queued",
+                   "status_before": before}),
         ),
-        Err(e) => failed(&e, json!({"agent": who, "started": started})),
+        Err(why) => {
+            tell_owner(state, s, who, &why).await;
+            Outcome::failed(
+                format!("failed: {who} did not start ({why}); the turn waits in its queue"),
+                format!("agent {who} did not start for the turn: {why}"),
+                json!({"agent": who, "started": false, "delivery": "queued",
+                       "status_before": before}),
+            )
+        }
     }
 }
 

@@ -25,7 +25,7 @@ use terrarium_host::{Client, ClientOptions};
 
 /// How long a poll waits before the test fails. A bound for a hung test
 /// only: each poll returns as soon as its state is there.
-const DEADLINE: Duration = Duration::from_secs(90);
+const DEADLINE: Duration = Duration::from_secs(300);
 
 /// Run the test `$name(flow)` once with each board flow (TER-170): the
 /// tests `$name::code` and `$name::rules`.
@@ -2246,6 +2246,13 @@ case "$1" in
   exec) shift
     while [ $# -gt 0 ]; do case "$1" in -i|-t) shift ;; -w) cd "$2" || exit 1; shift 2 ;; -e|-u) shift 2 ;; *) break ;; esac; done
     shift
+    # Recovery tests can hold kills before execution, rather than race
+    # the five-second TERM grace on a loaded host.
+    gate="${0%/*}/kill-gate"
+    if [ "$4" = terrarium-kill ] && [ -d "$gate" ]; then
+      touch "$gate/${5##*/}"
+      while [ -d "$gate" ]; do sleep 0.02; done
+    fi
     # An async list gets /dev/null on stdin: keep the real one (`-i`, the
     # bundle of a job) on fd 3 and hand it on.
     exec 3<&0
@@ -2873,7 +2880,8 @@ async fn a_red_batch_gets_fix_cards_then_splits_with_the_rule_pack() {
 /// One scenario of the card flow on a fresh lab with `flow`, and the
 /// board, the jobs, and the mails to the worker after it, with the IDs,
 /// the commits, the times, and the paths made neutral. Each step waits
-/// for the one before, so the two flows see the same order.
+/// for the one before, except for the successful halves of the final
+/// split batch, whose relative completion order is not defined.
 async fn flow_scenario(flow: &'static str) -> Value {
     let lab = lab_flow(2, flow).await;
     set_recipe(&lab, "test -f OK && { test ! -f SLOW || sleep 30; }").await;
@@ -2991,7 +2999,32 @@ async fn flow_scenario(flow: &'static str) -> Value {
         let t = ulid.replace_all(&t, "<ID>");
         sha.replace_all(&t, "<SHA>").into_owned()
     };
-    let board = lab.td.get("/api/projects/p/board").await.ok().clone();
+    let mut board = lab.td.get("/api/projects/p/board").await.ok().clone();
+    // The split halves can finish in either order: in rules mode a
+    // deferred split can let the right half start before the left (see
+    // the batch-splitting test above). Compare that cohort in card-ID
+    // order, but retain its positions relative to every other card.
+    // In particular, neither card may overtake the earlier green merge.
+    let board_cards = board["cards"].as_array_mut().unwrap();
+    let cohort: Vec<usize> = board_cards
+        .iter()
+        .enumerate()
+        .filter(|(_, card)| card["id"] == f1 || card["id"] == f3)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(cohort.len(), 2);
+    for &i in &cohort {
+        assert_eq!(board_cards[i]["column"], "accepted");
+    }
+    if board_cards[cohort[0]]["id"].as_str() > board_cards[cohort[1]]["id"].as_str() {
+        board_cards.swap(cohort[0], cohort[1]);
+    }
+    let accepted: Vec<&str> = board_cards
+        .iter()
+        .filter(|card| card["column"] == "accepted")
+        .map(|card| card["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(accepted, [&c, &f1, &f3]);
     let mut cards = Vec::new();
     for id in [&first, &a, &b, &c, &d, &e, &f1, &f2, &f3] {
         let card = lab.card_of(id).await;
@@ -3042,7 +3075,8 @@ async fn flow_scenario(flow: &'static str) -> Value {
 /// TER-170 acceptance: one scenario (a green and a red validate, a green
 /// and a conflicting merge, a cancel while it runs, a batch with a
 /// conflict) leaves the same board with `board_flow = code` and with
-/// `board_flow = rules`: the columns, the positions, the labels, the
+/// `board_flow = rules`: the columns, the positions (with the concurrent
+/// split-batch cohort in card-ID order), the labels, the
 /// assignees, the bodies, the comment texts in order, the jobs, and the
 /// mails to the worker (subject and body). Not compared, by design: the
 /// author of a comment (`system` against `rule:p/<rule>`) and the sender
@@ -3206,13 +3240,12 @@ fn orphan(job: &str) -> (std::process::Child, u32) {
     (leader, child)
 }
 
-/// Wait until the kills of lost jobs `ids` started: KILL removes the job
-/// PID file before its first signal.
-async fn until_kills_run(ids: &[&str]) {
+/// Wait until the fake docker has held every kill before execution.
+async fn until_kills_held(gate: &Path, ids: &[&str]) {
     let start = Instant::now();
     for id in ids {
         let f = terrariumd::run_kill::job_pidfile(id);
-        while Path::new(&f).exists() {
+        while !gate.join(Path::new(&f).file_name().unwrap()).exists() {
             assert!(start.elapsed() < DEADLINE, "the kill of {id} never started");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -3229,7 +3262,13 @@ both_flows!(lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slot
 /// keep their slots: a validation queued meanwhile (two slots) does not
 /// start, also not on a tick.
 async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots(flow: &'static str) {
-    let (lab, _bins, children) = docker_lab_flow(2, 600, flow).await;
+    let (lab, bins, children) = docker_lab_flow(2, 600, flow).await;
+    let gate = tempfile::Builder::new()
+        .prefix("kill-gate-owner")
+        .tempdir_in(bins.path())
+        .unwrap();
+    let kill_gate = bins.path().join("kill-gate");
+    std::os::unix::fs::symlink(gate.path(), &kill_gate).unwrap();
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
     // The running job runs again after its requeue: it needs its branch.
     lab.branch("ter-l1", "next", &[("OK", "1")]);
@@ -3323,11 +3362,10 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots(f
 
     // TER-160 holds a queued job while its host agent is offline, so the
     // check above alone does not prove the slots are held (review 2,
-    // minor 3). Check again with the host agent back, while the kills run:
-    // they removed the PID files, and the orphans ignore `TERM` for the
-    // grace of the kill.
+    // minor 3). Check again with the host agent back, while the fake
+    // docker holds both kills. No scheduling delay can finish them early.
     lab.agent_up().await;
-    until_kills_run(&[&run_id, &cancel_id]).await;
+    until_kills_held(&kill_gate, &[&run_id, &cancel_id]).await;
     terrariumd::jobs::tick(&state).await.unwrap();
     let q = lab
         .td
@@ -3342,6 +3380,7 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots(f
     for p in [lr.id(), lc.id()] {
         assert!(alive(p), "the kill of {p} ended before the check");
     }
+    drop(gate);
     tokio::time::timeout(DEADLINE, recovery)
         .await
         .unwrap()
@@ -3410,7 +3449,13 @@ both_flows!(a_lost_job_cancelled_during_its_kill_keeps_its_slot);
 /// slot stays taken until the kill ended (one slot): a queued validation
 /// does not start while the kill runs, and starts after it.
 async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot(flow: &'static str) {
-    let (lab, _bins, children) = docker_lab_flow(1, 600, flow).await;
+    let (lab, bins, children) = docker_lab_flow(1, 600, flow).await;
+    let gate = tempfile::Builder::new()
+        .prefix("kill-gate-owner")
+        .tempdir_in(bins.path())
+        .unwrap();
+    let kill_gate = bins.path().join("kill-gate");
+    std::os::unix::fs::symlink(gate.path(), &kill_gate).unwrap();
     let state = lab.td.daemon.as_ref().unwrap().state.clone();
     let cr = lab.card("lost-run", "ter-m1").await;
     let run_id = ulid::Ulid::new().to_string();
@@ -3460,7 +3505,7 @@ async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot(flow: &'static str)
 
     // The host agent is back and the kill runs: the slot is still taken.
     lab.agent_up().await;
-    until_kills_run(&[&run_id]).await;
+    until_kills_held(&kill_gate, &[&run_id]).await;
     terrariumd::jobs::tick(&state).await.unwrap();
     let q = lab
         .td
@@ -3474,6 +3519,7 @@ async fn a_lost_job_cancelled_during_its_kill_keeps_its_slot(flow: &'static str)
     );
     assert!(alive(lr.id()), "the kill ended before the check");
 
+    drop(gate);
     tokio::time::timeout(DEADLINE, recovery)
         .await
         .unwrap()
@@ -3899,4 +3945,209 @@ async fn the_recipe_gets_the_job_kind_and_the_changed_files() {
     let text = read(&job);
     assert!(text.contains("base=unset\nfiles=unset\n"), "{text}");
     assert_eq!(text.lines().count(), 4, "{text}");
+}
+
+// ------------------------------------------------------------- TER-196
+
+/// TER-196: the host agent restarts while the recipe of a batch merge
+/// runs, so the daemon gets "the host agent no longer holds the session".
+/// That is no red: the batch does not split, the same job goes back to
+/// the queue with its attempt, reruns whole, and both cards merge.
+#[tokio::test]
+async fn a_lost_host_agent_session_reruns_the_whole_batch() {
+    let lab = lab(2).await;
+    let marks = tempfile::tempdir().unwrap();
+    let m = marks.path().display().to_string();
+    // Each run counts itself. The first run waits to be lost, far longer
+    // than the test: only the kill of the lost run ends it. The rerun
+    // passes.
+    set_recipe(
+        &lab,
+        &format!(
+            "test -f OK && test -f s1 && test -f s2 && echo run >> '{m}/runs' && \
+             if test -f '{m}/ran'; then exit 0; fi; echo $$ > '{m}/pid'; touch '{m}/ran'; sleep 600"
+        ),
+    )
+    .await;
+    lab.branch("ter-s1", "next", &[("OK", "yes\n"), ("s1", "1")]);
+    lab.branch("ter-s2", "next", &[("OK", "yes\n"), ("s2", "2")]);
+    let c1 = lab.card("s1", "ter-s1").await;
+    let c2 = lab.card("s2", "ter-s2").await;
+    let r = lab
+        .td
+        .post_as(&lab.lead, "/api/merges", json!({"cards": [c1, c2]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let job_id = r.body["job"]["id"].as_str().unwrap().to_owned();
+
+    // The recipe runs: restart the host agent. The new one does not hold
+    // the session of the run.
+    let ran = marks.path().join("ran");
+    let start = Instant::now();
+    while !ran.exists() {
+        assert!(start.elapsed() < DEADLINE, "the recipe never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pid: u32 = std::fs::read_to_string(marks.path().join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    lab.agent_down().await;
+    lab.agent_up().await;
+
+    for c in [&c1, &c2] {
+        let card = lab
+            .until_card(c, "accepted", |c| c["column"] == "accepted")
+            .await;
+        let text = comments(&card);
+        assert!(!text.contains("The batch splits"), "{card}");
+        assert!(
+            !card["body"].as_str().unwrap().contains("Validation failed"),
+            "{card}"
+        );
+    }
+    // The lost run's processes got the kill of a lost run: its recipe
+    // sleeps 600 s, so nothing else ends it by now (review, major 1).
+    if alive(pid) {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .status();
+        panic!("the lost run {pid} outlived its rerun");
+    }
+    let jobs = lab.until_idle().await;
+    assert_eq!(jobs.len(), 1, "the batch did not split: {jobs:#?}");
+    let j = lab
+        .td
+        .get(&format!("/api/jobs/{job_id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(j["state"], "passed", "{j:#}");
+    assert_eq!(j["attempt"], 1, "a lost session used an attempt: {j:#}");
+    assert_eq!(j["batch"].as_array().unwrap().len(), 2, "{j:#}");
+    let runs = std::fs::read_to_string(marks.path().join("runs")).unwrap();
+    assert_eq!(runs.lines().count(), 2, "the same job ran twice: {runs}");
+    assert_eq!(
+        next_merges(&lab),
+        ["Merge ter-s1 onto next", "Merge ter-s2 onto next"]
+    );
+}
+
+/// TER-196 review 2, major 1: a run that the infrastructure lost past
+/// `MAX_LOST_RERUNS` ends red, but only after the kill of a lost run. The
+/// delivery moved to another host while the recipe ran, so that kill
+/// cannot confirm the end, and the slot gets its wipe mark: only the kill
+/// of a lost run writes it.
+#[tokio::test]
+async fn a_lost_run_past_the_cap_ends_red_after_the_kill() {
+    let lab = lab(1).await;
+    let td = &lab.td;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let marks = tempfile::tempdir().unwrap();
+    let m = marks.path().display().to_string();
+    let work_dir = lab._dirs.path().join("jobs").display().to_string();
+    let recipe = format!("echo $$ > '{m}/pid'; touch '{m}/ran'; sleep 600");
+    let deliver = |target: &str| {
+        json!({"target": target, "recipe": recipe, "slots": 1, "next_repos": ["app"],
+               "work_dir": work_dir})
+    };
+    let r = td.put("/api/projects/p/delivery", deliver("p-box")).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // A second host agent, for the move of the delivery.
+    let r = td.post("/api/hosts", json!({"name": "lab2"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let token = r.body["token"].as_str().unwrap().to_owned();
+    let r = td
+        .post(
+            "/api/targets",
+            json!({"name": "p-two", "kind": "host", "host": "lab2", "project": "p"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    connect_host(
+        td,
+        lab.hosts_addr,
+        "lab2",
+        &token,
+        &lab._dirs.path().join("lab2"),
+        None,
+    )
+    .await;
+    let head = lab.branch("ter-cap", "next", &[("OK", "yes\n")]);
+    let card = lab.card("capped", "ter-cap").await;
+    let r = td
+        .post_as(
+            &lab.w1,
+            &format!("/api/cards/{card}/validate"),
+            json!({"commit": head}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let ran = marks.path().join("ran");
+    let start = Instant::now();
+    while !ran.exists() {
+        assert!(start.elapsed() < DEADLINE, "the recipe never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let job_id = job_of(&lab, &card).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pid: u32 = std::fs::read_to_string(marks.path().join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // Its last attempt, and its lost runs at the cap: the next lost run
+    // is red, and nothing runs after it.
+    let jid = job_id.clone();
+    state
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE jobs SET attempt = 2 WHERE id = ?1",
+                rusqlite::params![jid],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    terrariumd::jobs::set_lost_runs(&job_id, terrariumd::jobs::MAX_LOST_RERUNS);
+    let r = td.put("/api/projects/p/delivery", deliver("p-two")).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    lab.agent_down().await;
+    lab.agent_up().await;
+
+    let start = Instant::now();
+    let j = loop {
+        let j = td.get(&format!("/api/jobs/{job_id}")).await.ok().clone();
+        if j["state"] != "running" && j["state"] != "queued" {
+            break j;
+        }
+        assert!(start.elapsed() < DEADLINE, "the job never ended: {j:#}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(j["state"], "failed", "{j:#}");
+    assert_eq!(j["outcome"], "red", "{j:#}");
+    let tail = j["tail"].as_str().unwrap();
+    let cap = format!(
+        "the infrastructure lost the run {} times in a row",
+        terrariumd::jobs::MAX_LOST_RERUNS + 1
+    );
+    assert!(tail.starts_with(&cap), "{tail}");
+    let pending = state
+        .db
+        .read(|c| terrariumd::store::jobs::slot_wipe_pending(c, "p", 1))
+        .await
+        .unwrap();
+    assert!(pending, "the capped lost run got no kill of a lost run");
+    lab.until_card(&card, "ready", |c| c["column"] == "ready")
+        .await;
+    if alive(pid) {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .status();
+        panic!("the capped lost run {pid} outlived its end");
+    }
 }

@@ -299,15 +299,21 @@ async fn set_enabled(
         }
     })?;
     let Some(text) = new else {
+        let findings = rules_tools::lint(&running(r.flow, &own), &r.columns());
         return Ok(Json(json!({
             "project": name,
             "rule": rule,
             "enabled": enabled,
             "changed": false,
             "hash": r.rules.hash,
+            "findings": findings,
         })));
     };
     let set = rules::check(text.clone(), r.ctx.clone()).await?;
+    // The lint of the rules that run after the change: an enable of a
+    // pack rule that the migration turned off can name a missing column
+    // again (TER-226).
+    let findings = rules_tools::lint(&running(r.flow, &set), &r.columns());
     let base = r.base();
     let ctx = r.ctx.clone();
     let p = name.clone();
@@ -323,5 +329,6 @@ async fn set_enabled(
         "enabled": enabled,
         "changed": true,
         "hash": stored.hash,
+        "findings": findings,
     })))
 }
