@@ -71,13 +71,27 @@ async fn dump(st: &Shared, seq: i64) {
                 .prepare("SELECT project, updated_at FROM project_rules")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<Result<_, _>>()?;
-            let ev: Vec<(i64, String, Option<String>, Option<String>, Option<String>, String)> = c
+            let ev: Vec<(
+                i64,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                String,
+            )> = c
                 .prepare(
                     "SELECT seq, kind, project, card, actor, at FROM events
                       WHERE seq >= ?1 - 3 ORDER BY seq LIMIT 8",
                 )?
                 .query_map([seq], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
                 })?
                 .collect::<Result<_, _>>()?;
             let runs: Vec<(i64, String, String, String, i64, Option<String>, String)> = c
@@ -86,7 +100,15 @@ async fn dump(st: &Shared, seq: i64) {
                       ORDER BY event_seq DESC LIMIT 15",
                 )?
                 .query_map([], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
                 })?
                 .collect::<Result<_, _>>()?;
             Ok(format!(
@@ -197,8 +219,14 @@ fn report(name: &str, wall: &mut [f64], plan: &mut [f64], run: &mut [f64]) {
         )
     };
     eprintln!("TER221 {name} {}", line("wall_ms", wall));
-    eprintln!("TER221 {name} {}", line("plan_ms(event.at->run.created)", plan));
-    eprintln!("TER221 {name} {}", line("run_ms(run.created->run.end)", run));
+    eprintln!(
+        "TER221 {name} {}",
+        line("plan_ms(event.at->run.created)", plan)
+    );
+    eprintln!(
+        "TER221 {name} {}",
+        line("run_ms(run.created->run.end)", run)
+    );
 }
 
 /// `n` pings of rule `lat` on the cards (at most 10 per card: the card
@@ -391,12 +419,16 @@ async fn outbox_keeps_the_per_card_order() {
     let states: Vec<(String, i64)> = st
         .db
         .read(|c| {
-            Ok(c.prepare("SELECT state, count(*) FROM rule_runs GROUP BY state")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<_, _>>()?)
+            Ok(
+                c.prepare("SELECT state, count(*) FROM rule_runs GROUP BY state")?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()?,
+            )
         })
         .await
         .unwrap();
-    eprintln!("TER221 order cards=40 events=400 comments={runs_done} bad_cards={bad} runs={states:?}");
+    eprintln!(
+        "TER221 order cards=40 events=400 comments={runs_done} bad_cards={bad} runs={states:?}"
+    );
     assert_eq!(bad, 0);
 }
