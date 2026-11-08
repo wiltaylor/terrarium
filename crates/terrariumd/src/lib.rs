@@ -903,9 +903,10 @@ fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
         }
         SupervisorEventKind::Harness(Event::StatusChanged { to, reason, .. }) => {
             // The runner's input-box watchdog: mail the leads (TER-208).
-            // A failed mail must not lose the status change.
+            // A failed mail must not lose the status change. The savepoint
+            // keeps all of the mails and the event, or none of them (TER-224).
             if input_watchdog::is_stuck(*to, reason.as_deref())
-                && let Err(e) = input_watchdog::notify(t, &id)
+                && let Err(e) = t.savepoint(|t| input_watchdog::notify(t, &id))
             {
                 warn!(agent = %id, "cannot mail the leads about the input box: {e}");
             }
