@@ -1077,6 +1077,8 @@ fn hold_reason(h: &TurnHold) -> String {
 }
 
 struct Inner {
+    #[cfg(test)]
+    pointer_delivery_pause: Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
     cfg: RunnerSupervisorConfig,
     /// The installed harness versions ([`crate::harness_versions`]).
     versions: VersionCache,
@@ -1212,6 +1214,8 @@ impl RunnerSupervisor {
         let (tx, _) = broadcast::channel(4096);
         Self {
             inner: Arc::new(Inner {
+                #[cfg(test)]
+                pointer_delivery_pause: Mutex::new(None),
                 cfg,
                 versions: VersionCache::default(),
                 slots: Mutex::new(HashMap::new()),
@@ -3236,6 +3240,14 @@ impl RunnerSupervisor {
             me.log_delivery(id, &text).await;
             let delivery = runner.type_turn(text);
             let result = delivery.wait().await;
+            #[cfg(test)]
+            {
+                let pause = lock(&me.inner.pointer_delivery_pause).take();
+                if let Some((reached, resume)) = pause {
+                    let _ = reached.send(());
+                    let _ = resume.await;
+                }
+            }
             match &result {
                 Ok(()) => {
                     let (read, delivered) = pointer.message_ids();
@@ -5001,6 +5013,71 @@ fn is_terminal_report(bytes: &[u8]) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// TER-213: idle arrives while the completed delivery still owns busy.
+    #[tokio::test]
+    async fn pointer_is_re_pushed_after_idle_during_busy_delivery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = RunnerSupervisorConfig::new(
+            tmp.path().join("state"), tmp.path().join("run"),
+            tmp.path().join("prompts"), SandboxConfig::default(), HashMap::new(),
+        );
+        let adapter = cfg.adapters[&HarnessId::Claude].adapter.clone();
+        let sup = RunnerSupervisor::new(cfg);
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "a", "project": "p",
+            "harness": "claude", "workspace": tmp.path()
+        })).unwrap();
+        let id = agent.id;
+        let mut rc = RunnerConfig::new(id, &sup.inner.cfg.state_dir, &sup.inner.cfg.runtime_dir);
+        rc.ready_detector = Some(Arc::new(terrarium_runner::DefaultReadyDetector {
+            quiet: Duration::from_millis(100), pattern: None,
+        }));
+        let spec = LaunchSpec::new("python3", tmp.path()).arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../terrarium-runner/tests/fake_tui/fake_tui.py").display().to_string()
+        );
+        let runner = Runner::spawn(rc, adapter, spec, sup.rpc_handler()).await.unwrap();
+        let mut status = runner.watch_status();
+        let wait_idle = |mut status: watch::Receiver<AgentStatus>| async move {
+            tokio::time::timeout(Duration::from_secs(45), async {
+                while *status.borrow_and_update() != AgentStatus::Idle {
+                    status.changed().await.unwrap();
+                }
+            }).await.unwrap();
+        };
+        wait_idle(status.clone()).await;
+        let mut slot = Slot::new(agent);
+        slot.runner = Some(Arc::new(runner.clone()));
+        slot.phase = Phase::Running;
+        slot.seen = AgentStatus::Idle;
+        lock(&sup.inner.slots).insert(id, slot);
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        *lock(&sup.inner.pointer_delivery_pause) = Some((reached_tx, resume_rx));
+        sup.add_pointer(id, |p| p.add_mail(MailItem::new("m1".into(), "p/b".into(), "T1".into())));
+        tokio::time::timeout(Duration::from_secs(45), reached_rx).await.unwrap().unwrap();
+        // The delivery succeeded. Let its turn end before releasing busy.
+        wait_idle(status.clone()).await;
+        assert!(lock(&sup.inner.slots)[&id].pointer_busy);
+        sup.maybe_push(id); // The idle notification cannot push while busy.
+        sup.add_pointer(id, |p| p.add_mail(MailItem::new("m2".into(), "p/b".into(), "T2".into())));
+        assert!(!lock(&sup.inner.slots)[&id].pointer.is_empty());
+        let mut events = runner.subscribe_events();
+        resume_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                let record = events.recv().await.unwrap();
+                if let Event::TurnStart { prompt: Some(prompt) } = record.event
+                    && prompt.contains("m2") {
+                    break;
+                }
+            }
+        }).await.unwrap();
+        assert!(lock(&sup.inner.slots)[&id].pointer.is_empty());
+        runner.kill().unwrap();
+        runner.wait().await;
+    }
 
     /// TER-224: the auto-replies of a terminal emulator are no person
     /// typing. Keys, arrows and text are.
