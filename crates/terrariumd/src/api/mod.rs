@@ -23,6 +23,7 @@ mod memory;
 mod monitors;
 mod pins;
 mod pipelines;
+mod preferences;
 mod project_folders;
 mod projects;
 mod questions;
@@ -52,6 +53,7 @@ mod threads;
 mod tools;
 mod transcripts;
 mod usage;
+mod version_groups;
 mod waits;
 mod wiki;
 
@@ -311,6 +313,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(pipelines::routes())
         .merge(calendar::routes())
         .merge(pins::routes())
+        .merge(preferences::routes())
         .merge(bookmarks::routes())
         .merge(subscriptions::routes())
         .merge(usage::routes())
@@ -318,6 +321,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(schedules::routes())
         .merge(rules::routes())
         .merge(rules_tools::routes())
+        .merge(version_groups::routes())
         .merge(event_sources::routes())
         .merge(templates::routes())
         .merge(waits::routes())

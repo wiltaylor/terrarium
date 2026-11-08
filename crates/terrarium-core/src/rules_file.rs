@@ -128,6 +128,12 @@ impl Verb {
 /// The verbs, in the order of the schema.
 pub const VERBS: &[Verb] = &[
     Verb {
+        kind: "version_cut",
+        name: "version.cut",
+        args: &[("min_cards", Arg::Count), ("max_wait_minutes", Arg::Count)],
+        required: &["min_cards", "max_wait_minutes"],
+    },
+    Verb {
         kind: "group_open",
         name: "group.open",
         args: &[

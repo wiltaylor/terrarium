@@ -8,16 +8,19 @@ import type { InboxAsk, Question } from "../../api/types";
 import { ErrorBanner, Modal } from "../../components/ui";
 import { agents, api } from "../../stores";
 import { ASK_TEXT_MAX, askBody } from "./model";
+import { useDefaultAgent } from "./defaultAgent";
 
 export function AskDialog(props: { question?: Question; onClose: () => void; onAsked: (r: InboxAsk) => void }) {
   const forward = () => !!props.question;
-  const [to, setTo] = createSignal("");
+  const defaultAgent = useDefaultAgent();
+  const [picked, setTo] = createSignal<string>();
+  const to = () => picked() ?? (choices().includes(defaultAgent() ?? "") ? defaultAgent()! : "");
   const [text, setText] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
   const choices = () =>
     agents.state.agents
-      .filter((a) => !a.ephemeral)
+      .filter((a) => !a.ephemeral || `${a.project}/${a.name}` === defaultAgent())
       .map((a) => `${a.project}/${a.name}`)
       .sort();
   const submit = async (e: Event) => {
