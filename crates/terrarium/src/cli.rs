@@ -2626,6 +2626,9 @@ pub struct NotifyArgs {
     /// The card that the notice is about
     #[arg(long)]
     pub card: Option<String>,
+    /// Answer an operator message or an answered question of yours
+    #[arg(long)]
+    pub reply_to: Option<String>,
     /// Mark the notice urgent
     #[arg(long, conflicts_with = "critical")]
     pub urgent: bool,
@@ -4124,6 +4127,9 @@ pub struct AdminTargetNewArgs {
     /// credential
     #[arg(long)]
     pub credential: Option<String>,
+    /// `ssh`: rsync the agent workspace before and after commands
+    #[arg(long)]
+    pub sync_workspace: bool,
     /// `vnc`, `rdp`: the user name
     #[arg(long)]
     pub username: Option<String>,

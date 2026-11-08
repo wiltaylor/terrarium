@@ -59,6 +59,20 @@ async fn setup() -> World {
 async fn notify(td: &TestDaemon, agent: &str, body: Value) -> Value {
     let mut body = body;
     body["kind"] = json!("notice");
+    if body.get("card").is_none() {
+        let project = td.get(&format!("/api/agents/{agent}")).await.body["project"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        body["card"] = td
+            .post(
+                &format!("/api/projects/{project}/cards"),
+                json!({"title": "Requested work"}),
+            )
+            .await
+            .ok()["id"]
+            .clone();
+    }
     let r = td
         .post_as(agent, &format!("/api/agents/{agent}/questions"), body)
         .await;
@@ -159,7 +173,7 @@ async fn a_lead_sends_a_notice_and_the_rights_follow_the_roles() {
         .post_as(
             &lead,
             &format!("/api/agents/{lead}/questions"),
-            json!({"kind": "notice", "text": "V2 is  deployed."}),
+            json!({"kind": "notice", "text": "V2 is  deployed.", "card": n["card"]}),
         )
         .await;
     r.err(409, "conflict");

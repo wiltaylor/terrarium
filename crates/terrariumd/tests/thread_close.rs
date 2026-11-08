@@ -596,7 +596,7 @@ async fn an_answer_to_the_last_question_declines_the_proposal() {
         .post_as(
             &eph,
             &asks,
-            json!({"text": "Note this.", "kind": "notice", "thread": tid}),
+            json!({"text": "Note this.", "kind": "notice", "thread": tid, "priority": "urgent"}),
         )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);

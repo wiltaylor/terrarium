@@ -803,12 +803,19 @@ class Layout(unittest.TestCase):
         text = (dp.REPO / "compose.yaml").read_text()
         binds = re.findall(r"^\s*- (\S+?):/", text, re.MULTILINE)
         sources = [b for b in binds if not b.startswith(("seccomp", "apparmor", "systempaths", '"'))]
-        # docker.sock is the one bind outside the data dir: the updater
-        # service has it, the daemon never does (docs/api.md §34).
+        # Only the updater can see docker.sock or the deployment source.
+        # Its two deployment roots are read-only for fresh env resolution.
         self.assertEqual(sources.count("/var/run/docker.sock"), 1)
         daemon = text.split("\n  terrarium-updater:", 1)[0]
+        updater = text.split("\n  terrarium-updater:", 1)[1]
         self.assertNotIn("docker.sock:/", daemon)
-        sources = [b for b in sources if b != "/var/run/docker.sock"]
+        for mount in (".:/compose:ro", "${TERRARIUM_DATA_DIR:-.}:/deployment:ro"):
+            self.assertEqual(text.count(mount), 1)
+            self.assertIn(mount, updater)
+            self.assertNotIn(mount, daemon)
+        sources = [b for b in sources if b not in (
+            "/var/run/docker.sock", ".", "${TERRARIUM_DATA_DIR:-.}"
+        )]
         self.assertTrue(sources)
         for s in sources:
             self.assertTrue(s.startswith("${TERRARIUM_DATA_DIR:-.}/"), s)
