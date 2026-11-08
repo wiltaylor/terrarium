@@ -676,10 +676,14 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     let lab = Lab::start().await;
     let _host = lab.host("lab1").await;
     lab.td.project("terra").await;
-    let worker = lab.td.agent("terra", "worker", json!({"policy": {"targets": ["box"]}})).await;
+    let worker = lab
+        .td
+        .agent("terra", "worker", json!({"policy": {"targets": ["box"]}}))
+        .await;
     let id = worker["id"].as_str().unwrap().to_owned();
     let base = lab.bins.path().join("builds");
-    lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "work_root": base})).await;
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "work_root": base}))
+        .await;
     let root = base.join("terra/worker");
     std::fs::create_dir_all(root.join("target")).unwrap();
     std::fs::write(root.join(".terrarium-owner"), &id).unwrap();
@@ -712,7 +716,17 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     std::fs::write(root.join(".terrarium-owner"), "foreign-agent").unwrap();
     terrariumd::target_roots::sweep(&state).await.unwrap();
     assert!(root.exists());
-    let count = state.db.read(|c| Ok(c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    let count = state
+        .db
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
     assert_eq!(count, 1);
     std::fs::write(root.join(".terrarium-owner"), &id).unwrap();
     terrariumd::target_roots::sweep(&state).await.unwrap();
@@ -724,7 +738,17 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     assert_eq!(detail["target"], "box");
     assert_eq!(detail["path"], root.to_str().unwrap());
     assert!(detail["size"].as_u64().unwrap() > 0);
-    let count = state.db.read(|c| Ok(c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    let count = state
+        .db
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
     assert_eq!(count, 0);
 }
 
