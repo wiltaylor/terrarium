@@ -864,8 +864,13 @@ async fn an_assignment_change_resets_unpark_refusal_dedup() {
                 );
             }
             Ok(())
-        }).await.unwrap();
-        let events = td.get(&format!("/api/agents/{eph}/events?kind=agent.unpark_refused"))
+        })
+        .await
+        .unwrap();
+        let events = td
+            .get(&format!(
+                "/api/agents/{eph}/events?kind=agent.unpark_refused"
+            ))
             .await;
         assert_eq!(events.ok().as_array().unwrap().len(), expected);
         td.post(&path, json!({"assignee": null})).await.ok();
