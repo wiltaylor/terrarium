@@ -2540,6 +2540,17 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(thread, reason)
     );
     "#,
+    // 98: Agent RPC restart journal (TER-260). A NULL answer is never replayed
+    // after a crash. Append after concurrent migrations without changing them.
+    r#"
+    CREATE TABLE agent_rpc_answers (
+        agent TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        answer TEXT,
+        PRIMARY KEY (agent, request_id)
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

@@ -90,6 +90,7 @@ async fn live_transcripts() {
         .map(|h| parse_homes(&h))
         .unwrap_or_default();
     let state = Arc::new(AppState {
+        agent_calls: Default::default(),
         started: Instant::now(),
         started_at: chrono::Utc::now(),
         db: Db::new(conn, terrariumd::events::EventHub::default()),
