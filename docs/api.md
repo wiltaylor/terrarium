@@ -6196,6 +6196,18 @@ updated and becomes `file`. An API target with the same name becomes
 `file`. When the file is gone, the target is deleted. The API refuses to
 change a file target (`409 file_managed`).
 
+**Reservation device IO restrictions.** A Docker reservation's per-device
+bandwidth and IOPS limits are create-time settings. A live change returns
+`409 conflict`, explaining that the limit takes effect at the next up.
+Phase 1 accepts device-IO reservations only on ephemeral Docker targets
+created for the reservation. Permanent Docker targets return `409 conflict`:
+the limits cannot be cleared without recreating the container. Terrarium
+does not recreate a container or write its cgroup files to bypass this rule.
+At expiry, permanent targets stay running. If restoring their supported
+fixed limits fails, the reservation stays in cleanup and its capacity stays
+charged until restoration succeeds. Ephemeral reservation containers may
+be stopped during cleanup.
+
 **Resource limits.** `limits` keeps one agent from taking all of a
 machine. A `host` target and a `docker` target with `image` take it. Every
 field is optional:

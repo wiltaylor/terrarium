@@ -38,6 +38,18 @@ async fn setup() -> (TestDaemon, tokio::task::JoinHandle<()>, tokio::task::JoinH
 }
 
 #[tokio::test]
+async fn permanent_docker_refuses_create_only_io_reservations() {
+    let (td, server, client) = setup().await;
+    td.put("/api/hosts/h/capacity", json!({"percentage":50,"io":{"8:0":{"read_bps":1000000}}})).await.ok();
+    let response = td.post("/api/hosts/h/reservations", json!({
+        "target":"p-box", "amounts":{"io":{"8:0":{"read_bps":1000}}}, "until":"30m"
+    })).await;
+    response.err(409, "conflict");
+    assert!(response.body.to_string().contains("cannot be cleared without recreating"));
+    client.abort(); server.abort();
+}
+
+#[tokio::test]
 async fn capacity_configuration_and_grants_obey_lease_roles() {
     let (td, server, client) = setup().await;
     td.put_as("p/lead", "/api/hosts/h/capacity", json!({"percentage":100})).await.err(403, "forbidden");

@@ -107,6 +107,9 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
             if target.def.image.is_none() { return Err(ApiError::invalid("Docker reservations need a managed image target")); }
             if matches!(r.holder, Holder::Agent(_)) { return Err(ApiError::invalid("a Docker container shares one budget: reserve for its target, not an individual agent")); }
             limits.limits.docker_support(caps.limits.as_ref()).map_err(ApiError::conflict)?;
+            if !limits.io.is_empty() && !target.def.ephemeral {
+                return Err(ApiError::conflict("device IO reservations require an ephemeral Docker target: limits are fixed at create and cannot be cleared without recreating a permanent container"));
+            }
             if !limits.io.is_empty() && target.state == "running" {
                 return Err(ApiError::conflict("device IO limits take effect at the next up; Docker cannot change them live"));
             }
@@ -255,7 +258,7 @@ async fn finish(state: &Shared, r: &Reservation) -> ApiResult<Reservation> {
         }).await?;
     }
     let restored = apply(state, r, true).await;
-    if t.def.kind == TargetKind::Docker && (restored.is_err() || t.def.ephemeral) && t.state == "running" {
+    if t.def.kind == TargetKind::Docker && t.def.ephemeral && t.state == "running" {
         let container = executor::container_name(&t.def);
         executor::verb_ok(state, &t.def, "reservation cleanup fallback stop", move |session| {
             DaemonFrame::DockerStop(terrarium_host::protocol::DockerStop {
