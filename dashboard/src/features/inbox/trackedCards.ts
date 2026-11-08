@@ -5,7 +5,7 @@
 // already cut to the projects the reader may read); the cards and the columns
 // come live from the board of each project. Pure functions, no Solid imports.
 
-import type { Board, Card, Column, ThreadCard } from "../../api/types";
+import type { Board, CardSummary as Card, Column, ThreadCard } from "../../api/types";
 
 /** One column of a project row: its cards among the linked ones, in board order. */
 export interface KanbanColumn {

@@ -9,7 +9,7 @@
 
 import { A } from "@solidjs/router";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import type { Board, Card, Thread } from "../../api/types";
+import type { Board, CardSummary as Card, Thread, ThreadCard } from "../../api/types";
 import { cardState } from "../../lib/cardState";
 import { countdown } from "../../lib/eta";
 import { api, events } from "../../stores";
@@ -17,13 +17,22 @@ import { cardHref } from "./questions";
 import { cardProgress, kanbanRows, linkedProjects, progressChip } from "./trackedCards";
 
 /** The boards of `projects`; a board that does not load is absent (no read right, or an error). */
-export async function loadBoards(projects: readonly string[]): Promise<Record<string, Board | undefined>> {
+export async function loadBoards(projects: readonly string[], links: readonly ThreadCard[] = []): Promise<Record<string, Board | undefined>> {
   const got = await Promise.allSettled(projects.map((p) => api.board.get(p)));
   const out: Record<string, Board | undefined> = {};
   projects.forEach((p, i) => {
     const r = got[i]!;
     out[p] = r.status === "fulfilled" ? r.value : undefined;
   });
+  // Board lists omit Done. Load only missing linked cards, not the entire
+  // completed history of each project, so progress counts remain correct.
+  const missing = new Map(links.filter(l => out[l.project] && !out[l.project]!.cards.some(c => c.id === l.card)).map(l => [l.card, l]));
+  await Promise.all([...missing.values()].map(async l => {
+    try {
+      const card = await api.cards.get(l.card);
+      if (card.project === l.project && !card.archived) out[l.project]!.cards.push(card);
+    } catch { /* A deleted or inaccessible card remains missing. */ }
+  }));
   return out;
 }
 
@@ -52,7 +61,7 @@ export function TrackedCards(props: { thread: Thread; now: number }) {
     const mine = ++gen;
     const ps = projects();
     if (!ps.length) return;
-    const b = await loadBoards(ps);
+    const b = await loadBoards(ps, links());
     if (mine !== gen) return;
     setBoards(b);
     setLoaded(true);

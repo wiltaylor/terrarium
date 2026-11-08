@@ -135,7 +135,7 @@ export function BoardPage(props: { done?: boolean }) {
   const off = events.on((e) => {
     if ((e.kind === "card" || e.kind === "board" || e.kind === "test_run" || e.kind === "job") && e.project === params.project && !dragging()) {
       clearTimeout(reloadTimer);
-      reloadTimer = setTimeout(() => void board.reload(), 300);
+      reloadTimer = setTimeout(() => { void board.reload(); if (search.card) void reloadSelected(); }, 300);
     }
     if (isCardQuestionEvent(e, { project: params.project })) {
       clearTimeout(questionTimer);
@@ -164,10 +164,18 @@ export function BoardPage(props: { done?: boolean }) {
     await board.move(id, column, index, comment);
   };
 
-  const [selected, { mutate: setSelected, refetch: reloadSelected }] = createResource(
-    () => search.card ? [params.project, search.card, board.state.board] as const : false,
-    ([, id]) => api.cards.get(id),
+  const [detailError, setDetailError] = createSignal<unknown>(null);
+  const [detail, { mutate: setSelected, refetch: reloadSelected }] = createResource(
+    () => search.card ? [params.project, search.card] as const : false,
+    async ([project, id]) => {
+      setDetailError(null);
+      try {
+        const card = await api.cards.get(id);
+        return card.project === project ? card : undefined;
+      } catch (e) { setDetailError(e); return undefined; }
+    },
   );
+  const selected = () => detail()?.id.toUpperCase() === search.card?.toUpperCase() ? detail() : undefined;
 
   // The column of the phone board: `?col=` in the URL, so a reload and the back button keep it.
   // A tap on a column chip and a swipe on the board change it; a change of the URL scrolls the board to it.
@@ -356,7 +364,7 @@ export function BoardPage(props: { done?: boolean }) {
       </Show>
 
       <LoadMore hasMore={!!board.state.board?.next_cursor} loading={board.state.loading} onMore={() => void board.more()} />
-      <ErrorBanner error={selected.error} />
+      <ErrorBanner error={detailError()} />
       <Show when={newCardIn()}>
         {(column) => (
           <NewCardModal
