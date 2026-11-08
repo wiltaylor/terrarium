@@ -716,27 +716,52 @@ fn fake_runner(dir: &Path, answer: fn(&Value) -> Value) -> (PathBuf, Arc<Mutex<V
 #[test]
 fn version_group_actions_use_project_scoped_api() {
     let dir = temp_dir("version-groups");
-    let (socket, seen) = fake_runner(&dir, |_| json!({"status":200,"headers":{},"body":{"changed":true,"group":{"key":"version:cut-1"}}}));
+    let (socket, seen) = fake_runner(
+        &dir,
+        |_| json!({"status":200,"headers":{},"body":{"changed":true,"group":{"key":"version:cut-1"}}}),
+    );
     for args in [
-        vec!["group","status","version:cut-1","--step","version branch e2e","--state","running","--eta","10m"],
-        vec!["group","remove","version:cut-1","TER-7"],
-        vec!["group","built","version:cut-1","v1.2.3"],
+        vec![
+            "group",
+            "status",
+            "version:cut-1",
+            "--step",
+            "version branch e2e",
+            "--state",
+            "running",
+            "--eta",
+            "10m",
+        ],
+        vec!["group", "remove", "version:cut-1", "TER-7"],
+        vec!["group", "built", "version:cut-1", "v1.2.3"],
     ] {
-        let o = bin().env("TERRARIUM_AGENT","01AGENT").env("TERRARIUM_SOCKET",&socket).args(args).output().unwrap();
-        assert!(o.status.success(),"{}",text(&o.stderr));
+        let o = bin()
+            .env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", text(&o.stderr));
         assert!(text(&o.stdout).contains("changed"));
     }
     let requests = seen.lock().unwrap();
-    let http: Vec<_> = requests.iter().filter(|r|r["method"]=="http").map(|r| &r["params"]).collect();
-    assert_eq!(http.len(),3);
-    for (r,action) in http.iter().zip(["status","remove","built"]) {
-        assert_eq!(r["method"],"POST");
-        assert_eq!(r["path"],format!("/api/projects/terra/version-groups/version%3Acut-1/{action}"));
+    let http: Vec<_> = requests
+        .iter()
+        .filter(|r| r["method"] == "http")
+        .map(|r| &r["params"])
+        .collect();
+    assert_eq!(http.len(), 3);
+    for (r, action) in http.iter().zip(["status", "remove", "built"]) {
+        assert_eq!(r["method"], "POST");
+        assert_eq!(
+            r["path"],
+            format!("/api/projects/terra/version-groups/version%3Acut-1/{action}")
+        );
     }
-    assert_eq!(http[0]["body"]["step"],"version branch e2e");
-    assert_eq!(http[0]["body"]["eta"],"10m");
-    assert_eq!(http[1]["body"]["card"],"TER-7");
-    assert_eq!(http[2]["body"]["version"],"v1.2.3");
+    assert_eq!(http[0]["body"]["step"], "version branch e2e");
+    assert_eq!(http[0]["body"]["eta"], "10m");
+    assert_eq!(http[1]["body"]["card"], "TER-7");
+    assert_eq!(http[2]["body"]["version"], "v1.2.3");
     std::fs::remove_dir_all(dir).ok();
 }
 

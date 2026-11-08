@@ -24,7 +24,10 @@ pub fn routes() -> Router<Shared> {
             "/projects/{project}/version-groups/{key}/status",
             post(status),
         )
-        .route("/projects/{project}/version-groups/{key}/remove", post(remove))
+        .route(
+            "/projects/{project}/version-groups/{key}/remove",
+            post(remove),
+        )
 }
 
 #[derive(Deserialize)]
@@ -33,19 +36,36 @@ struct Built {
 }
 
 #[derive(Deserialize)]
-struct Remove { card: String }
+struct Remove {
+    card: String,
+}
 
-async fn remove(State(state): State<Shared>, actor: Actor, Path((project, key)): Path<(String, String)>, Json(req): Json<Remove>) -> ApiResult<Json<Value>> {
+async fn remove(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((project, key)): Path<(String, String)>,
+    Json(req): Json<Remove>,
+) -> ApiResult<Json<Value>> {
     policy::admin_project(&actor, &project, "removing a version group member")?;
-    let result = state.db.write(actor.label(), move |t| {
-        let g = version_groups::get(t, &project, &key)?;
-        if g.closed_at.is_some() { return Err(ApiError::conflict("version group is closed")); }
-        let changed = groups::remove(t, &g, &req.card)?;
-        if changed {
-            t.audit("version.member_removed", &g.id, Some(&project), json!({"card":req.card}))?;
-        }
-        Ok(json!({"changed":changed,"group":version_groups::get(t,&project,&key)?}))
-    }).await?;
+    let result = state
+        .db
+        .write(actor.label(), move |t| {
+            let g = version_groups::get(t, &project, &key)?;
+            if g.closed_at.is_some() {
+                return Err(ApiError::conflict("version group is closed"));
+            }
+            let changed = groups::remove(t, &g, &req.card)?;
+            if changed {
+                t.audit(
+                    "version.member_removed",
+                    &g.id,
+                    Some(&project),
+                    json!({"card":req.card}),
+                )?;
+            }
+            Ok(json!({"changed":changed,"group":version_groups::get(t,&project,&key)?}))
+        })
+        .await?;
     Ok(Json(result))
 }
 

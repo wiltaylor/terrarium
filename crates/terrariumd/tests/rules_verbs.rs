@@ -152,32 +152,85 @@ async fn version_cut_remove_recovers_returned_archived_and_held_members() {
     for change in ["returned", "archived", "held"] {
         let td = TestDaemon::start().await;
         td.project("p").await;
-        let worker = td.agent("p","worker",json!({})).await["id"].as_str().unwrap().to_owned();
-        put_rules(&td,"p",VERSION_CUT).await;
-        let a = new_card(&td,"p",json!({"title":"ships","column":"accepted","labels":["version:vnext"]})).await;
-        let b = new_card(&td,"p",json!({"title":"excluded","column":"accepted","labels":["version:vnext"]})).await;
+        let worker = td.agent("p", "worker", json!({})).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        put_rules(&td, "p", VERSION_CUT).await;
+        let a = new_card(
+            &td,
+            "p",
+            json!({"title":"ships","column":"accepted","labels":["version:vnext"]}),
+        )
+        .await;
+        let b = new_card(
+            &td,
+            "p",
+            json!({"title":"excluded","column":"accepted","labels":["version:vnext"]}),
+        )
+        .await;
         settle(&td).await;
-        let g = card(&td,&a).await["group"].clone();
-        let path = format!("/api/projects/p/version-groups/{}",g["key"].as_str().unwrap());
+        let g = card(&td, &a).await["group"].clone();
+        let path = format!(
+            "/api/projects/p/version-groups/{}",
+            g["key"].as_str().unwrap()
+        );
         let id = b.clone();
-        state(&td).db.write("test",move |t| {
-            match change {
-                "returned" => { terrariumd::store::board::move_card(t,&Actor::Operator,&id,"ready",None,None)?; }
-                "archived" => { t.execute("UPDATE cards SET archived = 1 WHERE id = ?1",[id])?; }
-                _ => { t.execute("UPDATE cards SET labels = '[\"github\",\"hold\"]' WHERE id = ?1",[id])?; }
-            }
-            Ok(())
-        }).await.unwrap();
-        assert_eq!(td.post(&format!("{path}/built"),json!({"version":"v2"})).await.status,409);
-        assert_eq!(td.post_as(&worker,&format!("{path}/remove"),json!({"card":b})).await.status,403);
-        let removed = td.post(&format!("{path}/remove"),json!({"card":b})).await;
-        assert_eq!(removed.status,200,"{}",removed.body);
-        assert_eq!(removed.body["group"]["total"],1);
-        assert_eq!(td.post(&format!("{path}/remove"),json!({"card":b})).await.body["changed"],false);
-        let built = td.post(&format!("{path}/built"),json!({"version":"v2"})).await;
-        assert_eq!(built.status,200,"{}",built.body);
-        assert_eq!(card(&td,&a).await["column"],"done");
-        assert_ne!(card(&td,&b).await["column"],"done");
+        state(&td)
+            .db
+            .write("test", move |t| {
+                match change {
+                    "returned" => {
+                        terrariumd::store::board::move_card(
+                            t,
+                            &Actor::Operator,
+                            &id,
+                            "ready",
+                            None,
+                            None,
+                        )?;
+                    }
+                    "archived" => {
+                        t.execute("UPDATE cards SET archived = 1 WHERE id = ?1", [id])?;
+                    }
+                    _ => {
+                        t.execute(
+                            "UPDATE cards SET labels = '[\"github\",\"hold\"]' WHERE id = ?1",
+                            [id],
+                        )?;
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            td.post(&format!("{path}/built"), json!({"version":"v2"}))
+                .await
+                .status,
+            409
+        );
+        assert_eq!(
+            td.post_as(&worker, &format!("{path}/remove"), json!({"card":b}))
+                .await
+                .status,
+            403
+        );
+        let removed = td.post(&format!("{path}/remove"), json!({"card":b})).await;
+        assert_eq!(removed.status, 200, "{}", removed.body);
+        assert_eq!(removed.body["group"]["total"], 1);
+        assert_eq!(
+            td.post(&format!("{path}/remove"), json!({"card":b}))
+                .await
+                .body["changed"],
+            false
+        );
+        let built = td
+            .post(&format!("{path}/built"), json!({"version":"v2"}))
+            .await;
+        assert_eq!(built.status, 200, "{}", built.body);
+        assert_eq!(card(&td, &a).await["column"], "done");
+        assert_ne!(card(&td, &b).await["column"], "done");
     }
 }
 
@@ -185,15 +238,28 @@ async fn version_cut_remove_recovers_returned_archived_and_held_members() {
 async fn version_cut_key_is_unique_when_same_members_are_cut_again() {
     let td = TestDaemon::start().await;
     td.project("p").await;
-    new_card(&td,"p",json!({"title":"reused","column":"accepted","labels":["version:vnext"]})).await;
-    state(&td).db.write("test",|t| {
-        let first = terrariumd::store::version_groups::cut(t,&Actor::Operator,"p","test",1,240)?.unwrap();
-        let g = terrariumd::store::version_groups::get(t,"p",&first)?;
-        terrariumd::store::groups::close(t,&g,"abandoned cut")?;
-        let second = terrariumd::store::version_groups::cut(t,&Actor::Operator,"p","test",1,240)?.unwrap();
-        assert_ne!(first,second);
-        Ok(())
-    }).await.unwrap();
+    new_card(
+        &td,
+        "p",
+        json!({"title":"reused","column":"accepted","labels":["version:vnext"]}),
+    )
+    .await;
+    state(&td)
+        .db
+        .write("test", |t| {
+            let first =
+                terrariumd::store::version_groups::cut(t, &Actor::Operator, "p", "test", 1, 240)?
+                    .unwrap();
+            let g = terrariumd::store::version_groups::get(t, "p", &first)?;
+            terrariumd::store::groups::close(t, &g, "abandoned cut")?;
+            let second =
+                terrariumd::store::version_groups::cut(t, &Actor::Operator, "p", "test", 1, 240)?
+                    .unwrap();
+            assert_ne!(first, second);
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
