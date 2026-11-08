@@ -323,7 +323,8 @@ pub async fn spawn_with(
                 return Err(ApiError::forbidden(format!(
                     "agent `{}` has no spawn rights: {why}",
                     owner.name
-                )));
+                ))
+                .with_details(json!({"spawn_owner_right": "spawn"})));
             }
         },
         None => None,
@@ -353,7 +354,8 @@ pub async fn spawn_with(
             "`{}` may not bind an ephemeral agent: its spawn policy has no `bound`; ask \
              sysadmin or the operator (`terrarium agent set {} --spawn-bound on`)",
             owner.name, owner.name
-        )));
+        ))
+        .with_details(json!({"spawn_owner_right": "bound"})));
     }
     let lifetime = match (&bound, &rules) {
         (Some(_), Some(sp)) => sp.bound_lifetime().map_err(ApiError::invalid)?,
@@ -523,7 +525,7 @@ pub async fn spawn_with(
                         "`{oname}` runs {running} ephemeral agent(s); its spawn.max_concurrent is {}. \
                          Wait for one to finish, or cancel one",
                         sp.max_concurrent
-                    )));
+                    )).with_details(json!({"spawn_cap": "max_concurrent"})));
                 }
                 if let Some(day) = sp.max_per_day {
                     let since = crate::waits::from_now(Duration::ZERO);
@@ -539,7 +541,7 @@ pub async fn spawn_with(
                         return Err(ApiError::conflict(format!(
                             "`{oname}` spawned {n} ephemeral agent(s) in the last 24 hours; \
                              its spawn.max_per_day is {day}"
-                        )));
+                        )).with_details(json!({"spawn_cap": "max_per_day"})));
                     }
                 }
             }

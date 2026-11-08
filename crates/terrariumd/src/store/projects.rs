@@ -26,6 +26,8 @@ pub fn fleet_source(name: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default)]
+    pub card_dispatcher: Option<String>,
     /// Mail human card comments to leads and the card's agents by default.
     pub human_comment_notifications: bool,
     pub name: String,
@@ -57,6 +59,7 @@ pub struct Project {
 
 fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
+        card_dispatcher: r.get("card_dispatcher")?,
         human_comment_notifications: r.get("human_comment_notifications")?,
         name: r.get("name")?,
         description: r
@@ -237,6 +240,9 @@ pub fn create(t: &mut Tx<'_>, p: &NewProject, source: &str) -> ApiResult<Project
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectPatch {
+    /// Project admin name to dispatch ready cards, or `off` to disable.
+    #[serde(default)]
+    pub card_dispatcher: Option<String>,
     #[serde(default)]
     pub human_comment_notifications: Option<bool>,
     #[serde(default)]
@@ -260,6 +266,9 @@ pub struct ProjectPatch {
 /// no cards, so card IDs stay stable.
 pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Project> {
     let before = get(t, name)?;
+    if let Some(owner) = &patch.card_dispatcher {
+        set_card_dispatcher(t, name, owner)?;
+    }
     if let Some(enabled) = patch.human_comment_notifications {
         t.execute(
             "UPDATE projects SET human_comment_notifications = ?2 WHERE name = ?1",
@@ -320,10 +329,22 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
         Some(name),
         json!({"description": patch.description, "card_prefix": patch.card_prefix,
                "idle_alert": patch.idle_alert, "github_authors": patch.github_authors,
-               "board_flow": patch.board_flow,
+               "board_flow": patch.board_flow, "card_dispatcher": patch.card_dispatcher,
                "human_comment_notifications": patch.human_comment_notifications}),
     )?;
     get(t, name)
+}
+
+/// Store a name rather than an ID so file sync can precede agent creation.
+/// The runtime requires this agent to be a project admin on every dispatch.
+pub fn set_card_dispatcher(t: &mut Tx<'_>, project: &str, owner: &str) -> ApiResult<()> {
+    check_name("dispatcher owner", owner)?;
+    let owner = (owner != "off").then_some(owner);
+    t.execute(
+        "UPDATE projects SET card_dispatcher = ?2 WHERE name = ?1",
+        params![project, owner],
+    )?;
+    Ok(())
 }
 
 /// Set the GitHub author allow list of a project (TER-85). The caller

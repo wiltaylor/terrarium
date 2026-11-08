@@ -174,7 +174,7 @@ pub struct Card {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     pub depends_on: Vec<String>,
-    /// The dependencies that are not done yet.
+    /// The dependencies that are neither accepted nor done yet.
     pub blocked_by: Vec<String>,
     pub comments: Vec<Comment>,
     pub links: Vec<Link>,
@@ -550,7 +550,8 @@ fn unmet(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
         "SELECT d.depends_on FROM card_deps d
          JOIN cards c ON c.id = d.depends_on
          JOIN board_columns k ON k.id = c.column_id
-         WHERE d.card = ?1 AND k.name <> 'done' AND c.archived = 0
+         WHERE d.card = ?1 AND c.archived = 0
+           AND coalesce(k.role, k.name) NOT IN ('accepted', 'done')
          ORDER BY d.depends_on",
     )?;
     let rows = stmt
@@ -825,7 +826,8 @@ pub fn board_summary(
           'depends_on', (SELECT json_group_array(depends_on) FROM card_deps WHERE card = c.id),
           'blocked_by', (SELECT json_group_array(d.depends_on) FROM card_deps d
             JOIN cards dc ON dc.id = d.depends_on JOIN board_columns dk ON dk.id = dc.column_id
-            WHERE d.card = c.id AND dc.archived = 0 AND dk.name <> 'done'))
+            WHERE d.card = c.id AND dc.archived = 0
+              AND coalesce(dk.role, dk.name) NOT IN ('accepted', 'done')))
          FROM cards c JOIN board_columns k ON k.id = c.column_id
          LEFT JOIN agents a ON a.id = c.assignee
          LEFT JOIN agents_removed ar ON ar.id = c.assignee
@@ -1640,7 +1642,7 @@ fn check_move(
             return Err(ApiError::new(
                 Code::DependenciesUnmet,
                 format!(
-                    "{} depends on {} that are not done",
+                    "{} depends on {} that are not accepted or done",
                     card.id,
                     open.join(", ")
                 ),
