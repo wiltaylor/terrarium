@@ -1,6 +1,6 @@
 //! The daemon side of the runner socket (`docs/agent-rpc.md`).
 //!
-//! The runner answers `ping` and `whoami` itself and sends every other
+//! The runner answers `ping` itself and sends every other
 //! request here. Method `http` runs one HTTP request through the daemon's
 //! own router, as the agent that owns the socket. The caller cannot choose
 //! the actor: it comes from the socket, through [`RequestContext`].
@@ -178,6 +178,23 @@ impl RequestHandler for AgentRpc {
     ) -> BoxFuture<'a, Result<Value, RpcError>> {
         Box::pin(async move {
             match method {
+                "whoami" => {
+                    let state = self.state.upgrade().ok_or_else(retry)?;
+                    let key = ctx.agent.to_string();
+                    let agent = state
+                        .db
+                        .read(move |c| crate::store::agents::get(c, &key))
+                        .await
+                        .map_err(|e| RpcError::new("internal", e.message))?;
+                    Ok(json!({
+                        "agent": ctx.agent,
+                        "name": agent.agent.name,
+                        "project": agent.agent.project,
+                        "harness": ctx.harness,
+                        "roles": agent.agent.roles,
+                        "status": ctx.status,
+                    }))
+                }
                 "http" => self.http(ctx, params).await,
                 "upload" | "upload.chunk" | "upload.finish" => Err(RpcError::new(
                     "not_implemented",
