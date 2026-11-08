@@ -382,25 +382,52 @@ async fn edits_and_supersedes_isolate_colliding_project_ids() {
         .await
         .err(400, "bad_request");
     // An explicit foreign key cannot redirect an agent's write.
-    td.patch_as("proj/w1", "/api/memories/other%2FMEM-1", json!({"body": "foreign"}))
-        .await
-        .err(403, "forbidden");
-    td.post_as("proj/w1", "/api/memories/MEM-1/supersede", json!({"by": "other/MEM-2"}))
-        .await
-        .err(422, "invalid");
+    td.patch_as(
+        "proj/w1",
+        "/api/memories/other%2FMEM-1",
+        json!({"body": "foreign"}),
+    )
+    .await
+    .err(403, "forbidden");
+    td.post_as(
+        "proj/w1",
+        "/api/memories/MEM-1/supersede",
+        json!({"by": "other/MEM-2"}),
+    )
+    .await
+    .err(422, "invalid");
 
     // Project-qualified operator edits and bare agent edits affect the same row.
-    td.patch("/api/memories/proj%2FMEM-1", json!({"body": "operator edit"}))
+    td.patch(
+        "/api/memories/proj%2FMEM-1",
+        json!({"body": "operator edit"}),
+    )
+    .await
+    .ok();
+    let edited = td
+        .patch_as(
+            "proj/w1",
+            "/api/memories/MEM-1",
+            json!({"body": "agent edit"}),
+        )
         .await
-        .ok();
-    let edited = td.patch_as("proj/w1", "/api/memories/MEM-1", json!({"body": "agent edit"}))
-        .await.ok().clone();
+        .ok()
+        .clone();
     assert_eq!(edited["title"], "proj title 1");
     assert_eq!(edited["body"], "agent edit");
-    let old = td.post("/api/memories/proj%2FMEM-1/supersede", json!({"by": "MEM-2"}))
-        .await.ok().clone();
+    let old = td
+        .post(
+            "/api/memories/proj%2FMEM-1/supersede",
+            json!({"by": "MEM-2"}),
+        )
+        .await
+        .ok()
+        .clone();
     assert_eq!(old["superseded_by"], "MEM-2");
-    assert_eq!(td.get("/api/memories/proj%2FMEM-2").await.ok()["supersedes"], json!(["MEM-1"]));
+    assert_eq!(
+        td.get("/api/memories/proj%2FMEM-2").await.ok()["supersedes"],
+        json!(["MEM-1"])
+    );
     assert_eq!(td.get("/api/memories/other%2FMEM-1").await.ok(), &untouched);
     let other_new = td.get("/api/memories/other%2FMEM-2").await;
     assert_eq!(other_new.ok()["supersedes"], json!([]));
