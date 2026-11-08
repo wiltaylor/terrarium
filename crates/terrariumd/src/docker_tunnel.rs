@@ -287,10 +287,10 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
                     credit_rx,
                 ));
             } else if event["ack"] == true {
-                if let Some(credit) = credits.get(&id) {
-                    if credit.send(()).await.is_err() {
-                        credits.remove(&id);
-                    }
+                if let Some(credit) = credits.get(&id)
+                    && credit.send(()).await.is_err()
+                {
+                    credits.remove(&id);
                 }
             } else if event["close"] == true {
                 connections.remove(&id);
