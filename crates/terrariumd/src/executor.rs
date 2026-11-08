@@ -2320,38 +2320,89 @@ fn state_of(v: &Value) -> String {
 }
 
 /// Read the actual legacy container settings, never infer them from an edited definition.
-pub async fn docker_baseline(state: &Shared, def: &TargetDef) -> ApiResult<Option<targets::DockerSettings>> {
+pub async fn docker_baseline(
+    state: &Shared,
+    def: &TargetDef,
+) -> ApiResult<Option<targets::DockerSettings>> {
     let container = container_name(def);
-    let inspected = verb(state, def, move |session| DaemonFrame::DockerInspect(DockerInspect {
-        session, container, timeout_secs: Some(60),
-    })).await?;
-    let result = inspected.result.as_ref().ok_or_else(|| verb_failed("docker.inspect", &inspected))?;
-    if state_of(result) == "absent" { return Ok(None); }
-    let image = result["image"].as_str().ok_or_else(|| ApiError::conflict("cannot read container image; update the host agent before editing this legacy target"))?;
-    let limits = result["container_limits"].as_object().ok_or_else(|| ApiError::conflict("cannot read container limits; update the host agent before editing this legacy target"))?;
+    let inspected = verb(state, def, move |session| {
+        DaemonFrame::DockerInspect(DockerInspect {
+            session,
+            container,
+            timeout_secs: Some(60),
+        })
+    })
+    .await?;
+    let result = inspected
+        .result
+        .as_ref()
+        .ok_or_else(|| verb_failed("docker.inspect", &inspected))?;
+    if state_of(result) == "absent" {
+        return Ok(None);
+    }
+    let image = result["image"].as_str().ok_or_else(|| {
+        ApiError::conflict(
+            "cannot read container image; update the host agent before editing this legacy target",
+        )
+    })?;
+    let limits = result["container_limits"].as_object().ok_or_else(|| {
+        ApiError::conflict(
+            "cannot read container limits; update the host agent before editing this legacy target",
+        )
+    })?;
     let positive = |key: &str| limits.get(key).and_then(Value::as_u64).filter(|v| *v > 0);
     let mut values = serde_json::Map::new();
-    let nano = positive("cpu").or_else(|| positive("cpu_quota").and_then(|q| q.checked_mul(1_000_000_000)).zip(positive("cpu_period")).map(|(q,p)| q / p));
+    let nano = positive("cpu").or_else(|| {
+        positive("cpu_quota")
+            .and_then(|q| q.checked_mul(1_000_000_000))
+            .zip(positive("cpu_period"))
+            .map(|(q, p)| q / p)
+    });
     if let Some(nano) = nano {
-        if nano % 1_000_000 != 0 { return Err(ApiError::conflict("legacy container CPU limit cannot be represented exactly")); }
+        if nano % 1_000_000 != 0 {
+            return Err(ApiError::conflict(
+                "legacy container CPU limit cannot be represented exactly",
+            ));
+        }
         let millis = nano / 1_000_000;
-        values.insert("cpu".into(), format!("{}.{:03}", millis / 1000, millis % 1000).into());
+        values.insert(
+            "cpu".into(),
+            format!("{}.{:03}", millis / 1000, millis % 1000).into(),
+        );
     }
     if let Some(memory) = positive("memory") {
         values.insert("memory".into(), memory.into());
         let total = match limits.get("memory_swap").and_then(Value::as_i64) {
-            Some(-1) => return Err(ApiError::conflict("legacy container has unlimited swap; cannot capture its limits exactly")),
+            Some(-1) => {
+                return Err(ApiError::conflict(
+                    "legacy container has unlimited swap; cannot capture its limits exactly",
+                ));
+            }
             Some(0) | None => memory.saturating_mul(2),
-            Some(n) => u64::try_from(n).map_err(|_| ApiError::conflict("invalid legacy swap limit"))?,
+            Some(n) => {
+                u64::try_from(n).map_err(|_| ApiError::conflict("invalid legacy swap limit"))?
+            }
         };
         values.insert("swap".into(), total.saturating_sub(memory).into());
     }
-    if let Some(pids) = positive("pids") { values.insert("pids".into(), pids.into()); }
-    if let Some(weight) = positive("blkio_weight") {
-        values.insert("io_weight".into(), (1 + (weight.clamp(10,1000) - 10) * 9999 / 990).into());
+    if let Some(pids) = positive("pids") {
+        values.insert("pids".into(), pids.into());
     }
-    let limits = if values.is_empty() { None } else { Some(serde_json::from_value(Value::Object(values))?) };
-    Ok(Some(targets::DockerSettings { image: Some(image.to_owned()), limits }))
+    if let Some(weight) = positive("blkio_weight") {
+        values.insert(
+            "io_weight".into(),
+            (1 + (weight.clamp(10, 1000) - 10) * 9999 / 990).into(),
+        );
+    }
+    let limits = if values.is_empty() {
+        None
+    } else {
+        Some(serde_json::from_value(Value::Object(values))?)
+    };
+    Ok(Some(targets::DockerSettings {
+        image: Some(image.to_owned()),
+        limits,
+    }))
 }
 
 async fn docker_state(state: &Shared, def: &TargetDef) -> ApiResult<String> {

@@ -4130,17 +4130,40 @@ async fn docker_absent_edits_need_only_up_and_attach_holder_workspaces() {
     let lab = Lab::start().await;
     let _h = lab.host("lab1").await;
     lab.td.project("terra").await;
-    let worker = id_of(&lab.td.agent("terra", "worker", json!({"policy":{"targets":["dbox"]}})).await);
-    lab.target(json!({"name":"dbox", "kind":"docker", "host":"lab1", "image":"alpine:3"})).await;
+    let worker = id_of(
+        &lab.td
+            .agent("terra", "worker", json!({"policy":{"targets":["dbox"]}}))
+            .await,
+    );
+    lab.target(json!({"name":"dbox", "kind":"docker", "host":"lab1", "image":"alpine:3"}))
+        .await;
     // Both a new target and an inspected absent target need no recreation.
-    let edit = lab.td.patch("/api/targets/dbox", json!({"image":"alpine:3.20"})).await.ok().clone();
+    let edit = lab
+        .td
+        .patch("/api/targets/dbox", json!({"image":"alpine:3.20"}))
+        .await
+        .ok()
+        .clone();
     assert!(edit["recreate_note"].is_null());
-    assert_eq!(lab.td.post_empty("/api/targets/dbox/status").await.ok()["state"], "absent");
-    let edit = lab.td.patch("/api/targets/dbox", json!({"image":"alpine:3.21"})).await.ok().clone();
+    assert_eq!(
+        lab.td.post_empty("/api/targets/dbox/status").await.ok()["state"],
+        "absent"
+    );
+    let edit = lab
+        .td
+        .patch("/api/targets/dbox", json!({"image":"alpine:3.21"}))
+        .await
+        .ok()
+        .clone();
     assert!(edit["recreate_note"].is_null());
     let refused = lab.td.post_empty("/api/targets/dbox/recreate").await;
     refused.err(409, "conflict");
-    assert!(refused.body["error"]["message"].as_str().unwrap().contains("no container yet; up creates it"));
+    assert!(
+        refused.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no container yet; up creates it")
+    );
     assert!(runs(&lab).is_empty());
     start_agent(&lab, &worker).await;
     let run = runs(&lab);
@@ -4155,14 +4178,31 @@ async fn docker_legacy_edit_captures_inspect_not_the_stale_definition() {
     let _h = lab.host_with("lab1", Some(full_limits_cap())).await;
     // Legacy definition was edited, but the old container was never replaced.
     lab.target(json!({"name":"dbox", "kind":"docker", "host":"lab1", "image":"alpine:latest", "limits":{"cpu":2}})).await;
-    std::fs::write(lab.bins.path().join("docker.state.terrarium-dbox"), "exited").unwrap();
+    std::fs::write(
+        lab.bins.path().join("docker.state.terrarium-dbox"),
+        "exited",
+    )
+    .unwrap();
     std::fs::write(lab.bins.path().join("docker.image"), "alpine:3").unwrap();
     std::fs::write(lab.bins.path().join("docker.host-config"), json!({"NanoCpus":1000000000_u64,"Memory":536870912,"MemorySwap":536870912,"PidsLimit":100}).to_string()).unwrap();
     lab.td.post_empty("/api/targets/dbox/status").await.ok();
-    let edited = lab.td.patch("/api/targets/dbox", json!({"image":"alpine:3.21"})).await.ok().clone();
+    let edited = lab
+        .td
+        .patch("/api/targets/dbox", json!({"image":"alpine:3.21"}))
+        .await
+        .ok()
+        .clone();
     assert_eq!(edited["runtime"]["docker_settings"]["image"], "alpine:3");
     assert_eq!(edited["runtime"]["recreate_required"], true);
-    let undone = lab.td.patch("/api/targets/dbox", json!({"image":"alpine:3", "limits":{"cpu":1,"memory":"512M","swap":0,"pids":100}})).await.ok().clone();
+    let undone = lab
+        .td
+        .patch(
+            "/api/targets/dbox",
+            json!({"image":"alpine:3", "limits":{"cpu":1,"memory":"512M","swap":0,"pids":100}}),
+        )
+        .await
+        .ok()
+        .clone();
     assert!(undone["recreate_note"].is_null());
     assert!(lab.td.post_empty("/api/targets/dbox/up").await.ok()["recreate_note"].is_null());
     assert!(!lab.log().contains("docker rm"));
@@ -4176,7 +4216,9 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
     struct ContainerGuard(&'static str);
     impl Drop for ContainerGuard {
         fn drop(&mut self) {
-            let _ = std::process::Command::new("docker").args(["rm", "-f", self.0]).output();
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", self.0])
+                .output();
         }
     }
     let lab = Lab::start().await;

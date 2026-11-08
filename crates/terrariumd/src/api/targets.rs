@@ -403,14 +403,20 @@ async fn update(
         crate::jobs::prepare_hosts(&state.db, Some(address.to_owned())).await?;
     }
     let baseline = if current.def.kind == TargetKind::Docker
-        && !current.def.ephemeral && current.def.container.is_none()
+        && !current.def.ephemeral
+        && current.def.container.is_none()
         && current.runtime.docker_settings.is_none()
         && (patch.get("image").is_some() || patch.get("limits").is_some())
-        && (state.executor.hosts.is_online(current.def.host.as_deref().unwrap_or(""))
+        && (state
+            .executor
+            .hosts
+            .is_online(current.def.host.as_deref().unwrap_or(""))
             || matches!(current.state.as_str(), "stopped" | "running"))
     {
         Some(executor::docker_baseline(&state, &current.def).await?)
-    } else { None };
+    } else {
+        None
+    };
     let r = state
         .db
         .write(actor.label(), move |t| {

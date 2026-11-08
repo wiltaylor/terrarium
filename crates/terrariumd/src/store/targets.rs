@@ -70,7 +70,11 @@ pub struct DockerSettings {
 impl DockerSettings {
     pub fn equivalent(&self, other: &Self) -> bool {
         let normalized = |settings: &Self| {
-            let mut limits = settings.limits.as_ref().and_then(|l| l.resolve().ok()).unwrap_or_default();
+            let mut limits = settings
+                .limits
+                .as_ref()
+                .and_then(|l| l.resolve().ok())
+                .unwrap_or_default();
             limits.swap_bytes = limits.swap_bytes.filter(|v| *v > 0);
             limits.io_weight = limits.io_weight.map(|w| {
                 let w = u32::from(w);
@@ -630,7 +634,9 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
         && (def.image != current.def.image || def.limits != current.def.limits)
     {
         let mut rt = current.runtime.clone();
-        rt.recreate_required = rt.docker_settings.as_ref()
+        rt.recreate_required = rt
+            .docker_settings
+            .as_ref()
             .is_some_and(|baseline| !baseline.equivalent(&DockerSettings::of(&def)));
         set_runtime(t, name, &rt)?;
     }
