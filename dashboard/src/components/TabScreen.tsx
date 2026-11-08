@@ -9,10 +9,10 @@ import { A } from "@solidjs/router";
 import { For, type JSX } from "solid-js";
 import { PageHead } from "./ui";
 
-export function TabScreen(props: { title: JSX.Element; label: string; base: string; tabs: readonly { path: string; label: string }[]; children?: JSX.Element }) {
+export function TabScreen(props: { title: JSX.Element; label: string; base: string; tabs: readonly { path: string; label: string }[]; level?: 1 | 2; children?: JSX.Element }) {
   return (
     <>
-      <PageHead title={props.title} />
+      <PageHead title={props.title} level={props.level} />
       {/* Links, not ARIA tabs: each tab is a page, and the current one has aria-current="page". */}
       <nav class="tabs" aria-label={props.label}>
         <For each={props.tabs}>

@@ -106,7 +106,7 @@ export function AgentsPage() {
 
   return (
     <>
-      <PageHead title={`Agents · ${route.project}`}>
+      <PageHead title={`Agents · ${route.project}`} level={2}>
         <select value={status()} onChange={(e) => setStatus(e.currentTarget.value as AgentStatus | "paused" | "")} aria-label="Status filter">
           <option value="">Any status</option>
           <For each={AGENT_STATUSES}>{(s) => <option value={s}>{s}</option>}</For>

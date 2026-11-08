@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import app from "./App.tsx?raw";
 import layout from "./Layout.tsx?raw";
-import { BOARD_TABS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
+import { BOARD_TABS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_TABS, withQuery, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
 
 describe("navigation", () => {
   it("has no Spend item; the project has Logs, not Inbox or Mail, with a route", () => {
@@ -34,6 +34,24 @@ describe("navigation", () => {
     expect(block).toMatch(/path="\/mail" component=\{MailPage\}/);
     expect(block).toMatch(/path="\/events" component=\{EventsPage\}/);
     expect(block).not.toMatch(/AuditPage/);
+  });
+
+  it("has a project shell with Board first and every former view as a route tab", () => {
+    expect(PROJECT_TABS).toEqual([
+      { path: "board", label: "Board" },
+      { path: "dashboard", label: "Dashboard" },
+      { path: "agents", label: "Agents" },
+      { path: "repos", label: "Repos" },
+      { path: "knowledge", label: "Knowledge" },
+      { path: "pipelines", label: "Pipelines" },
+      { path: "calendar", label: "Calendar" },
+      { path: "logs", label: "Logs" },
+      { path: "settings", label: "Settings" },
+    ]);
+    expect(app).toMatch(/<Route path="\/p\/:project" component=\{ProjectScreen\}>/);
+    expect(app).toMatch(/<Route path="\/" component=\{ProjectIndex\} \/>/);
+    expect(app).toMatch(/<Navigate href=\{`\/p\/\$\{params\.project\}\/board`\} \/>/);
+    expect(app).not.toMatch(/<Navigate href=\{`\/p\/\$\{params\.project\}\/dashboard`\} \/>/);
   });
 
   it("has Agents last under the project, with a route to the Agents page", () => {

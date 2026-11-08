@@ -11,7 +11,7 @@ import { BOARD_TABS } from "../../app/nav";
 export default function BoardScreen(props: RouteSectionProps) {
   const params = useParams<{ project: string }>();
   return (
-    <TabScreen title={`Board · ${params.project}`} label="Board" base={`/p/${encodeURIComponent(params.project)}/board`} tabs={BOARD_TABS}>
+    <TabScreen title={`Board · ${params.project}`} label="Board" base={`/p/${encodeURIComponent(params.project)}/board`} tabs={BOARD_TABS} level={2}>
       {props.children}
     </TabScreen>
   );

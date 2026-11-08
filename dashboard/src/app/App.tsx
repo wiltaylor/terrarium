@@ -33,6 +33,7 @@ const AuditPage = lazy(() => import("../features/audit/AuditPage"));
 const EventsPage = lazy(() => import("../features/events/EventsPage"));
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
 const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
+const ProjectScreen = lazy(() => import("../features/projects/ProjectScreen"));
 const ReposPage = lazy(() => import("../features/repos/ReposPage"));
 const RepoPage = lazy(() => import("../features/repos/RepoPage"));
 const KnowledgePage = lazy(() => import("../features/knowledge/KnowledgePage"));
@@ -51,10 +52,10 @@ const SecretsPage = lazy(() => import("../features/secrets/SecretsPage"));
 // Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
 const XssPage = lazy(() => import("../features/devxss/XssPage"));
 
-/** The page of a project is its dashboard: the first item of the project in the tree. */
+/** The project index opens Board, the first tab of the project shell. */
 function ProjectIndex() {
   const params = useParams();
-  return <Navigate href={`/p/${params.project}/dashboard`} />;
+  return <Navigate href={`/p/${params.project}/board`} />;
 }
 
 function NotFound() {
@@ -109,43 +110,46 @@ export function App() {
           <Route path="/hosts" component={HostsPage} />
           <Route path="/software" component={SoftwarePage} />
         </Route>
-        <Route path="/p/:project" component={ProjectIndex} />
-        <Route path="/p/:project/dashboard" component={DashboardPage} />
-        <Route path="/p/:project/pipelines" component={PipelinesPage} />
-        <Route path="/p/:project/calendar" component={CalendarPage} />
+        {/* Every project page keeps its URL under one shell with route tabs (nav.ts PROJECT_TABS). */}
+        <Route path="/p/:project" component={ProjectScreen}>
+          <Route path="/" component={ProjectIndex} />
+          <Route path="/p/:project/dashboard" component={DashboardPage} />
+          <Route path="/p/:project/pipelines" component={PipelinesPage} />
+          <Route path="/p/:project/calendar" component={CalendarPage} />
+          <Route path="/p/:project/agents" component={AgentsPage} />
+          {/* The board screen: the tabs Cards, Artifacts, Tests, Schedules, and Rules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it filters and groups the cards by version label (?version=<name>&group=version). */}
+          <Route path="/p/:project/board" component={BoardScreen}>
+            <Route path="/" component={BoardPage} />
+            <Route path="/done" component={DoneCardsPage} />
+            <Route path="/artifacts/:id?" component={ArtifactsPage} />
+            <Route path="/tests" component={TestRunsPage} />
+            <Route path="/tests/:id" component={TestRunPage} />
+            <Route path="/schedules" component={SchedulesPage} />
+            <Route path="/rules" component={RulesPage} />
+          </Route>
+          {/* The repos of the project, and the browser of one repo (its trees: main and each agent checkout). */}
+          <Route path="/p/:project/repos" component={ReposPage} />
+          <Route path="/p/:project/repos/:repo" component={RepoPage} />
+          {/* The project logs: the Mail and Events tabs (nav.ts PROJECT_LOGS_TABS), each for this project only. */}
+          <Route path="/p/:project/logs" component={LogsPage}>
+            <Route path="/mail" component={MailPage} />
+            <Route path="/events" component={EventsPage} />
+          </Route>
+          {/* The project settings screen: the tabs General, Secrets, and Templates (nav.ts PROJECT_SETTINGS_TABS). /p/:project/settings redirects to the first tab. */}
+          <Route path="/p/:project/settings" component={SettingsPage}>
+            <Route path="/general" component={ProjectSettings} />
+            <Route path="/secrets" component={SecretsPage} />
+            <Route path="/templates" component={TemplatesPage} />
+          </Route>
+          {/* The knowledge screen: the tabs Wiki, Memory, and DB (nav.ts KNOWLEDGE_TABS). /p/:project/knowledge redirects to the Wiki tab. */}
+          <Route path="/p/:project/knowledge" component={KnowledgePage}>
+            <Route path="/wiki/*path" component={WikiPage} />
+            <Route path="/memory" component={MemoryPage} />
+            <Route path="/db" component={DbTypesPage} />
+            <Route path="/db/:type" component={DbRecordsPage} />
+          </Route>
+        </Route>
         <Route path="/calendar" component={CalendarPage} />
-        <Route path="/p/:project/agents" component={AgentsPage} />
-        {/* The board screen: the tabs Cards, Artifacts, Tests, Schedules, and Rules (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board; it filters and groups the cards by version label (?version=<name>&group=version). */}
-        <Route path="/p/:project/board" component={BoardScreen}>
-          <Route path="/" component={BoardPage} />
-          <Route path="/done" component={DoneCardsPage} />
-          <Route path="/artifacts/:id?" component={ArtifactsPage} />
-          <Route path="/tests" component={TestRunsPage} />
-          <Route path="/tests/:id" component={TestRunPage} />
-          <Route path="/schedules" component={SchedulesPage} />
-          <Route path="/rules" component={RulesPage} />
-        </Route>
-        {/* The repos of the project, and the browser of one repo (its trees: main and each agent checkout). */}
-        <Route path="/p/:project/repos" component={ReposPage} />
-        <Route path="/p/:project/repos/:repo" component={RepoPage} />
-        {/* The project logs: the Mail and Events tabs (nav.ts PROJECT_LOGS_TABS), each for this project only. */}
-        <Route path="/p/:project/logs" component={LogsPage}>
-          <Route path="/mail" component={MailPage} />
-          <Route path="/events" component={EventsPage} />
-        </Route>
-        {/* The project settings screen: the tabs General, Secrets, and Templates (nav.ts PROJECT_SETTINGS_TABS). /p/:project/settings redirects to the first tab. */}
-        <Route path="/p/:project/settings" component={SettingsPage}>
-          <Route path="/general" component={ProjectSettings} />
-          <Route path="/secrets" component={SecretsPage} />
-          <Route path="/templates" component={TemplatesPage} />
-        </Route>
-        {/* The knowledge screen: the tabs Wiki, Memory, and DB (nav.ts KNOWLEDGE_TABS). /p/:project/knowledge redirects to the Wiki tab. */}
-        <Route path="/p/:project/knowledge" component={KnowledgePage}>
-          <Route path="/wiki/*path" component={WikiPage} />
-          <Route path="/memory" component={MemoryPage} />
-          <Route path="/db" component={DbTypesPage} />
-          <Route path="/db/:type" component={DbRecordsPage} />
-        </Route>
         <Show when={isMock}>
           <Route path="/dev/xss" component={XssPage} />
         </Show>
