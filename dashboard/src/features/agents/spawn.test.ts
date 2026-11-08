@@ -38,7 +38,7 @@ describe("spawn rights in the agent form", () => {
 
   it("validates bound caps and detects changes without dropping bound rights", () => {
     const spawn = { templates: ["project:*"], bound: true, max_bound_lifetime: "3d" };
-    const a = agent({ policy: { spawn } });
+    const a = agent({ policy: { targets: [], mail_to: ["*"], spawn } });
     const v = agentToForm(a);
     expect(formToPatch(a, v)).toEqual({});
     expect(formToPatch(a, { ...v, spawn: { ...spawn, bound: false } }).policy?.spawn?.bound).toBe(false);
