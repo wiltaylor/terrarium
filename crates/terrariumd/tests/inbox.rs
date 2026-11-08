@@ -61,9 +61,17 @@ async fn notify(td: &TestDaemon, agent: &str, body: Value) -> Value {
     body["kind"] = json!("notice");
     if body.get("card").is_none() {
         let project = td.get(&format!("/api/agents/{agent}")).await.body["project"]
-            .as_str().unwrap().to_owned();
-        body["card"] = td.post(&format!("/api/projects/{project}/cards"),
-            json!({"title": "Requested work"})).await.ok()["id"].clone();
+            .as_str()
+            .unwrap()
+            .to_owned();
+        body["card"] = td
+            .post(
+                &format!("/api/projects/{project}/cards"),
+                json!({"title": "Requested work"}),
+            )
+            .await
+            .ok()["id"]
+            .clone();
     }
     let r = td
         .post_as(agent, &format!("/api/agents/{agent}/questions"), body)

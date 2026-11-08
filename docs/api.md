@@ -3224,6 +3224,15 @@ The rights:
 
 The rules:
 
+- A notice needs `card`, `reply_to`, or an urgent (or critical) `priority`.
+  Otherwise it is `422 invalid`: only answers, one done per request, and
+  real problems belong in the Inbox. `reply_to` (notices only) names an
+  operator mail or Inbox-thread message to the sender, or an answered
+  question owned by the sender. Invalid references are `422 invalid`.
+  The reply reference is recorded in the ask audit event.
+- A question or bundle is `409 conflict` while the same agent has an open
+  question or bundle on the same card or Inbox thread. `details.question`
+  names it and the error points to `terrarium question update <id>`.
 - An agent has at most 50 open questions (`429 rate_limited`). A question
   whose text is the same as an open question of the agent (case and
   spaces do not count) is `409 conflict`; `details.question` names the

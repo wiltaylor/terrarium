@@ -7062,6 +7062,24 @@ async fn question_bundles_ask_show_update_and_answer() {
 }
 
 #[tokio::test]
+async fn follow_up_questions_report_the_open_question() {
+    for args in [
+        vec!["question", "ask", "Follow up?", "--card", "TER-1"],
+        vec!["question", "bundle", "Follow ups", "--card", "TER-1", "--item", "A?", "--item", "B?"],
+        vec!["thread", "ask", "T1", "Follow up?"],
+    ] {
+        let r = exec(true, &args, vec![(409, json!({"error": {
+            "code": "conflict", "message": "question Q1 is open. Update it with `terrarium question update Q1`",
+            "details": {"question": "Q1"}
+        }}))], None).await;
+        let e = r.result.unwrap_err();
+        let error = e.downcast_ref::<ServerError>().unwrap();
+        assert_eq!(error.code, "conflict");
+        assert!(error.message.contains("terrarium question update Q1"));
+    }
+}
+
+#[tokio::test]
 async fn notify_and_the_admin_inbox() {
     let r = exec(true, &["notify", "Unsolicited update"], vec![], None).await;
     let error = r.result.unwrap_err().to_string();
@@ -7071,10 +7089,18 @@ async fn notify_and_the_admin_inbox() {
     ok(
         true,
         &["notify", "Your answer", "--reply-to", "M1"],
-        vec![(201, json!({"id": "N1", "priority": "normal", "thread_id": "T1"}))],
-        vec![(Post, Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()), vec![],
-            Some(json!({"kind": "notice", "text": "Your answer", "reply_to": "M1"})))],
-    ).await;
+        vec![(
+            201,
+            json!({"id": "N1", "priority": "normal", "thread_id": "T1"}),
+        )],
+        vec![(
+            Post,
+            Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()),
+            vec![],
+            Some(json!({"kind": "notice", "text": "Your answer", "reply_to": "M1"})),
+        )],
+    )
+    .await;
     let mine = || Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()) as &str;
     let n = json!({"id": "N1", "kind": "notice", "status": "open", "priority": "normal",
                    "agent_name": "terra/lead", "text": "v2 is deployed.", "options": [],
