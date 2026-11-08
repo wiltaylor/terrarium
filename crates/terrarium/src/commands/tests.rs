@@ -1907,7 +1907,13 @@ async fn memory_project_keys_for_every_id_command() {
     // Bare IDs use -p, qualified IDs win over -p, and without -p the
     // daemon keeps resolving bare IDs in the caller's project.
     for (project, id, other, key, other_key) in [
-        (Some("other"), "MEM-1", "MEM-2", "other%2FMEM-1", "other/MEM-2"),
+        (
+            Some("other"),
+            "MEM-1",
+            "MEM-2",
+            "other%2FMEM-1",
+            "other/MEM-2",
+        ),
         (
             Some("other"),
             "explicit/MEM-1",
