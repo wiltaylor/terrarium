@@ -468,13 +468,23 @@ async fn version_cut_default_pack_threshold_and_lead_notification() {
         new_card(
             &td,
             "p",
-            json!({"title":"sixth","column":"accepted","labels":["version:vnext"]}),
+            json!({"title":"sixth","column":"ready","labels":["version:vnext"]}),
         )
         .await,
     );
+    td.post(
+        &format!("/api/cards/{}/move", members[5]),
+        json!({"column":"accepted"}),
+    )
+    .await
+    .ok();
     settle(&td).await;
     let g = card(&td, &members[0]).await["group"].clone();
     assert_eq!(g["total"], 6);
+    let event_runs: i64 = state(&td).db.read(|c| {
+        Ok(c.query_row("SELECT count(*) FROM rule_runs r JOIN events e ON e.seq = r.event_seq WHERE r.rule = 'version-cut' AND r.state = 'done' AND e.kind = 'card' AND json_extract(e.payload, '$.change') = 'moved'", [], |r| r.get(0))?)
+    }).await.unwrap();
+    assert_eq!(event_runs, 1, "the accepted move, not only the timer, cuts");
     let mail = td.mail_of(&lead).await;
     let cuts: Vec<_> = mail
         .iter()
@@ -1160,6 +1170,129 @@ async fn card_prepend_keeps_the_lines_and_runs_once() {
 }
 
 // ------------------------------------------------------------------ mail
+
+#[tokio::test]
+async fn default_triage_notifies_leads_on_backlog_and_hourly() {
+    let td = queue_lab().await;
+    let lead = td
+        .agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    td.patch_as(&lead, "/api/projects/p", json!({"board_flow": "rules"}))
+        .await
+        .ok();
+    let card = new_card(&td, "p", json!({"title": "triage", "column": "backlog"})).await;
+    settle(&td).await;
+    let count = || async {
+        let lead = lead.clone();
+        state(&td).db.read(move |c| {
+            Ok(c.query_row("SELECT count(*) FROM messages WHERE to_agent = ?1 AND subject = 'Triage backlog'", [lead], |r| r.get::<_, i64>(0))?)
+        }).await.unwrap()
+    };
+    assert_eq!(count().await, 1);
+    emit(&td, "card", "p", &card, json!({"change": "updated"})).await;
+    settle(&td).await;
+    assert_eq!(count().await, 1, "unrelated updates do not notify");
+    td.post(
+        &format!("/api/cards/{card}/move"),
+        json!({"column":"ready"}),
+    )
+    .await
+    .ok();
+    settle(&td).await;
+    assert_eq!(count().await, 1, "moves elsewhere do not notify");
+    td.post(
+        &format!("/api/cards/{card}/move"),
+        json!({"column":"backlog"}),
+    )
+    .await
+    .ok();
+    settle(&td).await;
+    assert_eq!(count().await, 2);
+    let hourly_count = || async {
+        let lead = lead.clone();
+        state(&td).db.read(move |c| {
+            Ok(c.query_row("SELECT count(*) FROM messages WHERE to_agent = ?1 AND subject = 'Hourly backlog triage'", [lead], |r| r.get::<_, i64>(0))?)
+        }).await.unwrap()
+    };
+    let baseline = hourly_count().await;
+    let mut projects = rules_engine::load(&state(&td).db, &mut rules_engine::Cache::default())
+        .await
+        .unwrap();
+    for project in &mut projects {
+        std::sync::Arc::make_mut(&mut project.set)
+            .rules
+            .retain(|r| r.name == "triage-hourly");
+    }
+    let now = chrono::Utc::now() + chrono::Duration::hours(2);
+    let mut fired = std::collections::HashMap::new();
+    assert_eq!(
+        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, now)
+            .await
+            .unwrap(),
+        1
+    );
+    settle(&td).await;
+    assert_eq!(hourly_count().await, baseline + 1);
+
+    // Hold the DB mutex: a cached same-hour tick must complete without
+    // accessing either the writer or a reader, not merely emit no event.
+    let db = state(&td).db.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = tokio::spawn(async move {
+        db.write("system", move |_| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    });
+    entered_rx.await.unwrap();
+    let cached = tokio::time::timeout(
+        Duration::from_millis(500),
+        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, now),
+    )
+    .await;
+    release_tx.send(()).unwrap();
+    blocker.await.unwrap();
+    assert_eq!(
+        cached
+            .expect("cached hourly tick must not access DB")
+            .unwrap(),
+        0
+    );
+    // A restart (empty in-memory timer state) must not resend this hour.
+    fired.clear();
+    assert_eq!(
+        rules_engine::fire_timers(&state(&td).db, &projects, &mut fired, now)
+            .await
+            .unwrap(),
+        0
+    );
+    settle(&td).await;
+    assert_eq!(
+        hourly_count().await,
+        baseline + 1,
+        "restart does not resend"
+    );
+    assert_eq!(
+        rules_engine::fire_timers(
+            &state(&td).db,
+            &projects,
+            &mut fired,
+            now + chrono::Duration::hours(1)
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    settle(&td).await;
+    assert_eq!(hourly_count().await, baseline + 2, "next hour sends once");
+}
 
 const MAIL: &str = r#"rule "tell" {
   on = ["test.ping"]

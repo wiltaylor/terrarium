@@ -517,8 +517,17 @@ fn send_mail(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiRe
         .unwrap_or_else(|| subject.clone());
     let from = Address::Project(ctx.project.clone());
     let mut sent = Vec::new();
+    let mut recipients = Vec::new();
     for who in &to {
-        let addr = mail::resolve(t, who, Some(&ctx.project))?;
+        if who == "@leads" {
+            recipients.extend(crate::owner::leads(t, &ctx.project, "")?);
+        } else {
+            recipients.push(mail::resolve(t, who, Some(&ctx.project))?);
+        }
+    }
+    recipients.sort_by_key(Address::key);
+    recipients.dedup();
+    for addr in recipients {
         if matches!(addr, Address::System) {
             return Err(ApiError::invalid("mail cannot go to `system`"));
         }

@@ -21,6 +21,42 @@
 // work (2026-11-07). A project that still validates adds the rules of
 // rules.validate.wcl to its own rules.wcl.
 
+// ------------------------------------------------------------ triage
+
+rule "triage-new-backlog" {
+  max_per_hour = 600
+  on = ["card"]
+  when "data.change" { eq = "created" }
+  if_card { column = ["@backlog"] }
+  mail {
+    to = ["@leads"]
+    subject = "Triage backlog"
+    body = "A new backlog card needs triage. Move clear, startable cards to ready with version:vnext. Research unclear cards, close unwanted cards with a reason, and order ready. Do not ask for themes or scope approval."
+  }
+}
+
+rule "triage-moved-backlog" {
+  max_per_hour = 600
+  on = ["card"]
+  when "data.change" { eq = "moved" }
+  if_card { column = ["@backlog"] }
+  mail {
+    to = ["@leads"]
+    subject = "Triage backlog"
+    body = "A card moved to backlog. Triage backlog into ready, research unclear cards, close unwanted cards with a reason, and order ready. Startable code cards get version:vnext. No themes or scope approval."
+  }
+}
+
+rule "triage-hourly" {
+  max_per_hour = 600
+  on = ["rule.hourly"]
+  mail {
+    to = ["@leads"]
+    subject = "Hourly backlog triage"
+    body = "Triage backlog into ready and order ready. Startable code cards get version:vnext. Research unclear cards and close unwanted cards with a reason. No themes or scope approval."
+  }
+}
+
 // ------------------------------------------------------------ the queue
 
 rule "version-cut" {
