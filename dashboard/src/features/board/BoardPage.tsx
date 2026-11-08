@@ -1,4 +1,4 @@
-import { A, useParams, useSearchParams } from "@solidjs/router";
+import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";
@@ -25,11 +25,18 @@ import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_Q
 import { boardVersions, matchesVersion, NO_VERSION } from "./versionLabels";
 import { cardAgentName } from "./cardAgent";
 import { agents, api, events } from "../../stores";
+import { boardView } from "./done";
 
-export function BoardPage() {
+export function DoneCardsPage() {
+  return <BoardPage done />;
+}
+
+export function BoardPage(props: { done?: boolean }) {
+  const navigate = useNavigate();
   const params = useParams<{ project: string }>();
   const [search, setSearch] = useSearchParams<{ card?: string; version?: string; group?: string; col?: string }>();
   const board = createBoardStore(api);
+  const view = createMemo(() => board.state.board ? boardView(board.state.board, props.done) : undefined);
   // The card that is in a drag (LanesBoard): no live reload of the board until the drop.
   const [dragging, setDragging] = createSignal<string | null>(null);
   const [pendingBlock, setPendingBlock] = createSignal<{ id: string; column: string; index: number } | null>(null);
@@ -89,7 +96,7 @@ export function BoardPage() {
   const grouped = () => search.group === "version";
   const versionFilter = () => search.version?.trim() || undefined;
   const versionNames = createMemo(() => boardVersions(board.state.board?.cards ?? []));
-  const lanes = createMemo(() => buildLanes(board.state.board?.cards ?? [], grouped()));
+  const lanes = createMemo(() => buildLanes(view()?.cards ?? [], grouped()));
   const [laneError, setLaneError] = createSignal<unknown>(null);
 
   /** A drop: in the same lane it moves the card; into another version lane it changes the card's version label first. */
@@ -163,7 +170,7 @@ export function BoardPage() {
   // A tap on a column chip and a swipe on the board change it; a change of the URL scrolls the board to it.
   let boardEl: HTMLDivElement | undefined;
   let chipsEl: HTMLDivElement | undefined;
-  const columnNames = () => board.state.board?.columns.map((c) => c.name) ?? [];
+  const columnNames = () => view()?.columns.map((c) => c.name) ?? [];
   const activeColumn = () => columnFromQuery(search.col, columnNames());
   const setColumn = (name: string) => setSearch({ col: columnQuery(name, columnNames()) }, { replace: true });
   // The target of a scroll that the page started: the scroll events on the way to it do not change the column.
@@ -233,7 +240,10 @@ export function BoardPage() {
 
   return (
     <div class="board-page">
-      <PageHead title="Cards" level={2}>
+      <PageHead title={props.done ? "Done cards" : "Cards"} level={2}>
+        <button type="button" onClick={() => navigate(`/p/${encodeURIComponent(params.project)}/board${props.done ? "" : "/done"}`)}>
+          {props.done ? "Back to cards" : "Show done cards"}
+        </button>
         {/* A phone folds the two filters into this button; a wider screen shows them in the row and hides the button. */}
         <button
           type="button"
@@ -279,7 +289,7 @@ export function BoardPage() {
       <ErrorBanner error={board.state.error} onDismiss={board.clearError} />
       <ErrorBanner error={laneError()} onDismiss={() => setLaneError(null)} />
 
-      <Show when={board.state.board} fallback={<p class="muted">{board.state.loading ? "Loading…" : ""}</p>}>
+      <Show when={view()} fallback={<p class="muted">{board.state.loading ? "Loading…" : ""}</p>}>
         {(b) => (
           <>
             {/* The phone board shows one column; these chips choose it. A wider screen hides them. */}

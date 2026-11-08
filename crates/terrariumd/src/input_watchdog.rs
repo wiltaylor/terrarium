@@ -8,8 +8,12 @@
 //! project (or the operator, when the project has no other lead), so a
 //! stuck agent is seen.
 //!
-//! The runner flags each stuck box once, and the event pump drops a
-//! replayed runner event, so one stuck box gives one mail.
+//! The runner flags each stuck box once, does not flag text that a person
+//! typed (`write_person`: the terminal, `agent keys`), and unblocks only
+//! after the box stays empty for `INPUT_CLEAR_DEBOUNCE`. The event pump drops a replayed runner event.
+//! So one stuck box gives one mail. The caller runs [`notify`] in a
+//! savepoint ([`crate::db::Tx::savepoint`]): all of its mails and its event
+//! go in, or none of them (TER-224).
 
 use serde_json::json;
 use terrarium_core::AgentStatus;

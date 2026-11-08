@@ -4822,7 +4822,7 @@ Kinds:
 | `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`, `previous_eta_at`: the ETA that the move cleared), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared; `job: true` when the job queue set it, §35.5), `reminded` (`eta_passed`: the daemon reminded the idle assignee to update the card, §6.2 "Card reminder"), `idle` (`idle_since`, `mailed`: the idle alert marked the card and mailed the leads, §6.2 "Idle alert"), or `idle_cleared` (`idle_since`: the mark went). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `question_guard` | `{question, mailed}`: a member ended its turn with a question in plain text and reported nothing, so the daemon set `blocked` (reason "asked a question in plain text: ...") and mailed `mailed` (the leads, or `operator`). `question` is the first 200 characters. The actor is `system`. PLAN §8.4. |
-| `input_watchdog` | `{reason, mailed}`: the runner saw an idle agent keep unsubmitted text in the input box of its harness for the submit timeout and set `blocked` (reason "unsubmitted text in the input box"), so the daemon mailed `mailed` (the leads, or `operator`). The agent goes back to `idle` when the box is empty. The actor is `system`. TER-208. |
+| `input_watchdog` | `{reason, mailed}`: the runner saw an idle agent keep unsubmitted text in the input box of its harness for the submit timeout and set `blocked` (reason "unsubmitted text in the input box"), so the daemon mailed `mailed` (the leads, or `operator`). Text that a person typed at the terminal or with `agent keys` is not flagged. The agent goes back to `idle` when the box stays empty for 1 s, so one stuck box gives one mail. The mails and the event go in together or not at all. The actor is `system`. TER-208, TER-224. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |
 | `wiki.created`, `wiki.saved`, `wiki.deleted`, `wiki.restored`, `wiki.moved`, `wiki.reviewed` | `{page_id, path, title, rev, ...}`: `summary`, `author`, `from_rev`, `from`, `decision`, `comment`. |
 | `artifact.created`, `artifact.linked`, `artifact.deleted`, `artifact.pruned` | `{artifact_id, key, uid, name, kind, ...}`: `size`, `content_type`, `sha256`, `link_kind`, `ref`. |
@@ -6762,17 +6762,18 @@ gets a lease while it runs, its workspace joins the target:
 |---|---|
 | No other running holder | The ephemeral target comes up (§17.6) with the workspaces of its running holders: `docker run -v` for each, or `vmlab.prepare` with an `@dev` decorator (one workspace for each machine). |
 | The target runs, the workspace is attached | Nothing. |
-| The target runs without it, ephemeral, no live exec session | A new container (or lab instance) with the new set: `docker rm`, `docker run`; or `vmlab destroy`, `vmlab.prepare`, `vmlab up`. Audit row `target.attach`. |
-| The target runs without it, and it is permanent or a session is live | Nothing runs. The agent gets the notification "target `<t>`: attach needs a restart of the target: ...", and a grant answers it in `lifecycle_error`. |
+| The target runs without it, ephemeral lab instance, no live exec session | A new lab instance with the new set: `vmlab destroy`, `vmlab.prepare`, `vmlab up`. Audit row `target.attach`. |
+| The target runs without it, and it is Docker, permanent, or a session is live | Nothing runs. The agent gets the notification "target `<t>`: attach needs a restart of the target: ...". A Docker workspace change never replaces a running container, since background processes may outlive tracked exec sessions. |
 
 A docker target with `container` (an existing container) and a vmlab target
 with `lab` take no workspace.
 
 **Detach.** When a holder stops, or its lease ends, and other running agents
-still hold the target, a new container (or lab instance) without its
+still hold the target, a new lab instance without its
 workspace runs, with the same rule (ephemeral, no live session; audit row
 `target.detach`). Else the workspace stays attached until the target runs
-again. When the last holder goes, the destroy of §17.6 removes it all.
+again. Docker containers are not replaced to detach workspaces. When the
+last holder goes, the destroy of §17.6 removes it all.
 
 **Lab instances.** A `lab_repo` target has one instance, named after the
 target, in a git worktree of the repo on the host. A `lab_from_workspace`

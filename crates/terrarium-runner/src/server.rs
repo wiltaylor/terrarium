@@ -378,12 +378,16 @@ impl Conn {
             },
             "status" => Ok(json!({ "status": runner.status() })),
             "screen" => to_value(&WireSnapshot::from(&runner.screen())),
-            "write" => match params::<WriteParams>(p).and_then(|w| decode(&w.data)) {
-                Ok(bytes) => runner
-                    .write(&bytes)
-                    .await
-                    .map(|()| Value::Null)
-                    .map_err(runner_err),
+            "write" => match params::<WriteParams>(p)
+                .and_then(|w| decode(&w.data).map(|bytes| (bytes, w.person)))
+            {
+                Ok((bytes, person)) => if person {
+                    runner.write_person(&bytes).await
+                } else {
+                    runner.write(&bytes).await
+                }
+                .map(|()| Value::Null)
+                .map_err(runner_err),
                 Err(e) => Err(e),
             },
             "resize" => match params::<ResizeParams>(p) {
