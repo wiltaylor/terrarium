@@ -91,14 +91,16 @@ pub fn work_accuracy(samples: &[WorkSample]) -> WorkAccuracy {
         .filter(|s| seen.insert(&s.card))
         .take(30)
         .collect();
-    let percent = |count: usize| {
-        (!recent.is_empty()).then(|| count as f64 * 100.0 / recent.len() as f64)
-    };
+    let percent =
+        |count: usize| (!recent.is_empty()).then(|| count as f64 * 100.0 / recent.len() as f64);
     WorkAccuracy {
         samples: recent.len(),
         on_time_pct: percent(recent.iter().filter(|s| s.actual_ms <= s.guess_ms).count()),
         within_half_to_double_pct: percent(
-            recent.iter().filter(|s| s.actual_ms >= s.guess_ms / 2.0 && s.actual_ms <= s.guess_ms * 2.0).count(),
+            recent
+                .iter()
+                .filter(|s| s.actual_ms >= s.guess_ms / 2.0 && s.actual_ms <= s.guess_ms * 2.0)
+                .count(),
         ),
     }
 }
@@ -364,10 +366,20 @@ mod tests {
         assert_eq!(empty.on_time_pct, None);
         assert_eq!(empty.within_half_to_double_pct, None);
         let sample = |card: &str, actual_ms| WorkSample {
-            card: card.into(), start_seq: 0, end_seq: 1,
-            actual_ms, guess_ms: 100.0, labels: vec![],
+            card: card.into(),
+            start_seq: 0,
+            end_seq: 1,
+            actual_ms,
+            guess_ms: 100.0,
+            labels: vec![],
         };
-        let samples = vec![sample("a", 50.0), sample("b", 100.0), sample("c", 200.0), sample("d", 201.0), sample("a", 999.0)];
+        let samples = vec![
+            sample("a", 50.0),
+            sample("b", 100.0),
+            sample("c", 200.0),
+            sample("d", 201.0),
+            sample("a", 999.0),
+        ];
         let accuracy = work_accuracy(&samples);
         assert_eq!(accuracy.samples, 4);
         assert_eq!(accuracy.on_time_pct, Some(50.0));

@@ -486,7 +486,12 @@ async fn dashboard(
             crate::store::projects::get(c, &p)?;
             let (l, meta) = monitors::layout_of(c, &p)?;
             let samples = crate::store::card_history::work_samples(c, &p)?;
-            Ok((l, meta, monitors::list(c, &p)?, crate::store::card_history::work_accuracy(&samples)))
+            Ok((
+                l,
+                meta,
+                monitors::list(c, &p)?,
+                crate::store::card_history::work_accuracy(&samples),
+            ))
         })
         .await?;
     let kinds = rows.iter().map(|m| (m.id.clone(), m.def.kind)).collect();
