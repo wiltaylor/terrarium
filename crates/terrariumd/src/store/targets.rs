@@ -608,7 +608,7 @@ pub fn update_with_live_limits(
             admin
         ],
     )?;
-    if p.contains_key("address") {
+    if patch.as_object().is_some_and(|p| p.contains_key("address")) {
         for address in [current.def.address.as_deref(), def.address.as_deref()]
             .into_iter()
             .flatten()
