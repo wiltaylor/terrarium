@@ -22,6 +22,7 @@ import { NewThreadDialog } from "./NewThreadDialog";
 import { ThreadRow } from "./ThreadRow";
 import { ThreadsView } from "./ThreadsView";
 import { threadHref } from "./threads";
+import { byInboxOrder } from "./model";
 
 const TAB_IDS = INBOX_TABS.map((t) => t.id) as string[];
 const PAGE_SIZE = 40;
@@ -81,7 +82,7 @@ export default function InboxPage() {
     if (threadsTab()) return;
     setLoading(true);
     try {
-      const boundary = append ? undefined : list().at(-1)?.id;
+      const boundary = append ? undefined : list().at(-1);
       const target = params.item;
       let nextCursor = append ? cursor : undefined;
       let rows: InboxItem[] = [];
@@ -96,7 +97,7 @@ export default function InboxPage() {
         nextCursor = next;
         if (!more) break;
         if (target && !rows.some((i) => i.id === target)) continue;
-        if (boundary && !rows.some((i) => i.id === boundary)) continue;
+        if (boundary && !rows.some((i) => byInboxOrder(i, boundary) >= 0)) continue;
         if (rows.filter(keep).length >= PAGE_SIZE) break;
       } while (more);
       cursor = nextCursor;

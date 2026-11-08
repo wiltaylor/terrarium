@@ -3381,6 +3381,14 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 | `POST /api/inbox/asks` | `{"to", "text"?, "question"?}` | `201` `{"message", "watch"}`: the mail (§7) and the new watch. Below. |
 | `DELETE /api/inbox/watches/{thread}` | | `200` the watch, with `cancelled_at`. An unknown thread is `404 not_found`; a cancelled watch `409 conflict`. The mail stays. |
 
+The Inbox list accepts `limit` (1–400, default 200) and `cursor`. To request
+the next page, URL-encode the JSON tuple `[open, critical, urgent, at, id]`
+of the last item as `cursor`, with the same filters. An empty page ends the
+list. The ordering uses descending ID to break timestamp ties. New items
+above a cursor do not shift older pages, and removing the cursor item does
+not invalidate it. Badge headers always count every matching open item,
+independent of the page. Mail bodies are loaded only for the selected page.
+
 **Ask and forward** (GitHub #24). The operator asks an agent a question
 from the Inbox, or forwards a question, a bundle, or a notice of the Inbox
 to an agent, and the Inbox watches the thread until the agent answers.
