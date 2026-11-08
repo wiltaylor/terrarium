@@ -357,6 +357,36 @@ pub struct MailFilter {
     pub text: Option<String>,
 }
 
+/// The durable, non-ephemeral admin responsible for a project inbox.
+/// Prefer the named lead, otherwise the oldest admin.
+fn inbox_recipient(conn: &Connection, project: &str) -> ApiResult<Option<Address>> {
+    let mut page = Page { limit: Some(Page::MAX), cursor: None };
+    let mut first = None;
+    loop {
+        let rows = agents::list(conn, Some(project), &page)?;
+        for v in rows.items {
+            let a = v.agent;
+            if a.roles.contains(&terrarium_core::Role::ProjectAdmin) {
+                let address = Address::Agent { id: a.id.to_string(), name: a.name.clone(), project: a.project };
+                if a.name == "lead" { return Ok(Some(address)); }
+                if first.is_none() { first = Some(address); }
+            }
+        }
+        match rows.next {
+            Some(cursor) => page.cursor = Some(cursor),
+            None => return Ok(first),
+        }
+    }
+}
+
+fn routed_inbox(conn: &Connection, id: &str) -> ApiResult<String> {
+    let Ok(v) = agents::get(conn, id) else { return Ok(String::new()); };
+    let project = v.agent.project;
+    Ok(if inbox_recipient(conn, &project)?.is_some_and(|a| a.key() == id) {
+        format!("project:{project}")
+    } else { String::new() })
+}
+
 /// Messages, oldest first. The cursor is a message ID.
 pub fn list(conn: &Connection, f: &MailFilter, page: &Page) -> ApiResult<Paged<Message>> {
     let limit = page.limit();
@@ -368,8 +398,13 @@ pub fn list(conn: &Connection, f: &MailFilter, page: &Page) -> ApiResult<Paged<M
         ("thread_id", &f.thread),
     ] {
         if let Some(v) = val {
-            sql.push_str(&format!(" AND {col} = ?"));
+            if col == "to_agent" {
+                sql.push_str(" AND (to_agent = ? OR to_agent = ?)");
+            } else {
+                sql.push_str(&format!(" AND {col} = ?"));
+            }
             args.push(v.clone());
+            if col == "to_agent" { args.push(routed_inbox(conn, v)?); }
         }
     }
     match f.state.as_deref() {
@@ -386,9 +421,10 @@ pub fn list(conn: &Connection, f: &MailFilter, page: &Page) -> ApiResult<Paged<M
         }
     }
     if let Some(who) = &f.involving {
-        sql.push_str(" AND (to_agent = ? OR from_agent = ?)");
+        sql.push_str(" AND (to_agent = ? OR from_agent = ? OR to_agent = ?)");
         args.push(who.clone());
         args.push(who.clone());
+        args.push(routed_inbox(conn, who)?);
     }
     if let Some(p) = &f.project {
         sql.push_str(
@@ -470,8 +506,8 @@ pub struct Outgoing<'a> {
 }
 
 /// Write one message and its `mail` event. Mail to an agent waits in
-/// `queued` for the runner; mail to the operator or a project inbox is
-/// `delivered` at once.
+/// `queued` for the runner. Project inbox mail queues for its lead (or
+/// oldest admin), keeping the project address and thread intact.
 pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
     if m.body.is_empty() {
         return Err(ApiError::invalid("the message body is empty"));
@@ -493,6 +529,12 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
     if *m.to == Address::System {
         return Err(ApiError::invalid("`system` only sends mail"));
     }
+    let recipient = match m.to {
+        Address::Project(p) => inbox_recipient(t, p)?.ok_or_else(|| ApiError::invalid(
+            format!("project:{p} has no project_admin to receive mail; ask for a project admin before sending")
+        ))?,
+        other => other.clone(),
+    };
     // The loop guard: agent mail past the limit types no pointer.
     let limit = mail_loop_limit();
     let held_reason = if matches!(
@@ -511,7 +553,7 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
         None
     };
     let held = held_reason.is_some();
-    let (state, delivered) = match m.to {
+    let (state, delivered) = match &recipient {
         Address::Agent { .. } if !held => ("queued", None),
         _ => ("delivered", Some(at.clone())),
     };
@@ -561,7 +603,7 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
     // The event names the recipient agent, also for a held message, so it
     // shows in the agent's events. The push listener types no pointer for
     // an event with `held: true`.
-    if let Address::Agent { id, name, .. } = m.to {
+    if let Address::Agent { id, name, .. } = &recipient {
         draft = draft.agent(id.clone(), name.clone());
     }
     if let Some(p) = m.to.project() {

@@ -191,7 +191,7 @@ async fn project_inbox_flow() {
         .await;
     let sent = sent.ok().clone();
     assert_eq!(sent["to_kind"], "project");
-    assert_eq!(sent["state"], "delivered");
+    assert_eq!(sent["state"], "queued");
     let thread = sent["thread_id"].as_str().unwrap().to_owned();
     // ...and links the thread to its own card.
     let own = td
