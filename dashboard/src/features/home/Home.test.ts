@@ -55,10 +55,12 @@ it("opens New thread from Home with the shared dialog", async () => {
   const open = vi.spyOn(api.threads, "open");
   mount(); button("New thread").click(); await settle();
   expect(document.querySelector("form[aria-label='New thread']")).not.toBeNull();
+  input("select[aria-label=Scope]", "terrarium", "change");
+  input("select[aria-label=Agent]", "terrarium/lead", "change");
   input("input[aria-label=Topic]", "A new topic");
   input("textarea", "First message");
   button("Open the thread").click(); await settle();
-  expect(open).toHaveBeenCalledWith({ scope: "global", topic: "A new topic", text: "First message" });
+  expect(open).toHaveBeenCalledWith({ scope: "terrarium", agent: "terrarium/lead", topic: "A new topic", text: "First message" });
   expect(navigate).toHaveBeenCalledWith(expect.stringContaining("/inbox/threads/"));
   expect(document.querySelector("form[aria-label='New thread']")).toBeNull();
 });
