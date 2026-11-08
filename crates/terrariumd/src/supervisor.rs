@@ -258,16 +258,28 @@ pub struct PendingTurn {
 
 impl From<String> for PendingTurn {
     fn from(text: String) -> Self {
-        Self { id: AgentId::new().to_string(), text, source: "supervisor" }
+        Self {
+            id: AgentId::new().to_string(),
+            text,
+            source: "supervisor",
+        }
     }
 }
 
 /// Runs agents. Work happens in the background and shows up as events.
 pub trait Supervisor: Send + Sync + 'static {
-    fn list_pending(&self, _agent: AgentId) -> BoxFuture<'_, Result<Vec<PendingTurn>, SupervisorError>> {
+    fn list_pending(
+        &self,
+        _agent: AgentId,
+    ) -> BoxFuture<'_, Result<Vec<PendingTurn>, SupervisorError>> {
         Box::pin(async { Ok(Vec::new()) })
     }
-    fn cancel_pending(&self, _agent: AgentId, _source: &str, _id: String) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+    fn cancel_pending(
+        &self,
+        _agent: AgentId,
+        _source: &str,
+        _id: String,
+    ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
         Box::pin(async { Ok(false) })
     }
     /// Start the agent. `resume` is the harness session to continue.
@@ -1113,17 +1125,32 @@ mod fake {
     }
 
     impl Supervisor for InMemorySupervisor {
-        fn list_pending(&self, agent: AgentId) -> BoxFuture<'_, Result<Vec<super::PendingTurn>, SupervisorError>> {
+        fn list_pending(
+            &self,
+            agent: AgentId,
+        ) -> BoxFuture<'_, Result<Vec<super::PendingTurn>, SupervisorError>> {
             Box::pin(async move {
-                Ok(self.lock().agents.get(&agent).map(|a| a.early.clone()).unwrap_or_default())
+                Ok(self
+                    .lock()
+                    .agents
+                    .get(&agent)
+                    .map(|a| a.early.clone())
+                    .unwrap_or_default())
             })
         }
 
-        fn cancel_pending(&self, agent: AgentId, source: &str, id: String) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+        fn cancel_pending(
+            &self,
+            agent: AgentId,
+            source: &str,
+            id: String,
+        ) -> BoxFuture<'_, Result<bool, SupervisorError>> {
             let supported = source == "supervisor";
             Box::pin(async move {
                 let mut inner = self.lock();
-                let Some(a) = inner.agents.get_mut(&agent) else { return Ok(false); };
+                let Some(a) = inner.agents.get_mut(&agent) else {
+                    return Ok(false);
+                };
                 if supported && let Some(index) = a.early.iter().position(|t| t.id == id) {
                     a.early.remove(index);
                     return Ok(true);
@@ -1678,7 +1705,8 @@ mod fake {
                         ));
                     }
                     first.extend(plan.then);
-                    a.early.splice(0..0, first.into_iter().map(super::PendingTurn::from));
+                    a.early
+                        .splice(0..0, first.into_iter().map(super::PendingTurn::from));
                 }
                 self.boot_with(agent.id, None, Some(&plan.reason));
                 Ok(())

@@ -238,12 +238,26 @@ async fn pending_turns_remote_cancel_keeps_order_and_refuses_typed() {
     let third = r.type_turn("third".into());
     // Remote delivery handles use local IDs. Queue controls use runner IDs.
     let pending = r.list_pending().await.expect("list");
-    assert_eq!(pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["first", "second", "third"]);
-    assert!(r.cancel_pending(pending[1].id.clone()).await.expect("cancel"));
-    assert!(!r.cancel_pending(pending[1].id.clone()).await.expect("cancel again"));
+    assert_eq!(
+        pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+    assert!(
+        r.cancel_pending(pending[1].id.clone())
+            .await
+            .expect("cancel")
+    );
+    assert!(
+        !r.cancel_pending(pending[1].id.clone())
+            .await
+            .expect("cancel again")
+    );
     assert!(second.wait().await.is_err());
     let pending = r.list_pending().await.expect("remaining");
-    assert_eq!(pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["first", "third"]);
+    assert_eq!(
+        pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+        ["first", "third"]
+    );
     let first_id = pending[0].id.clone();
     r.write(b"\r").await.expect("release hold");
     first.wait().await.expect("first typed");

@@ -801,7 +801,11 @@ impl RunnerHandle for RemoteRunner {
     }
     fn cancel_pending(&self, id: String) -> BoxFuture<'_, Result<bool>> {
         Box::pin(async move {
-            let value = self.inner.shared.call("cancel_pending", json!({"delivery": id})).await?;
+            let value = self
+                .inner
+                .shared
+                .call("cancel_pending", json!({"delivery": id}))
+                .await?;
             serde_json::from_value(value).map_err(|e| RunnerError::Other(e.to_string()))
         })
     }

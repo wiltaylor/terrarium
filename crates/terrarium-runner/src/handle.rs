@@ -47,10 +47,18 @@ pub trait RunnerHandle: Send + Sync + 'static {
     /// Queue a user turn (see `docs/runner.md`, "Typing a turn").
     fn type_turn(&self, text: String) -> Delivery;
     fn list_pending(&self) -> BoxFuture<'_, Result<Vec<crate::WaitingTurn>>> {
-        Box::pin(async { Err(crate::RunnerError::Other("pending queues unsupported".into())) })
+        Box::pin(async {
+            Err(crate::RunnerError::Other(
+                "pending queues unsupported".into(),
+            ))
+        })
     }
     fn cancel_pending(&self, _id: String) -> BoxFuture<'_, Result<bool>> {
-        Box::pin(async { Err(crate::RunnerError::Other("pending queues unsupported".into())) })
+        Box::pin(async {
+            Err(crate::RunnerError::Other(
+                "pending queues unsupported".into(),
+            ))
+        })
     }
     /// Claim an idle stop under the same lock as `type_turn`.
     /// Unsupported handles refuse the claim rather than risk a busy stop.

@@ -574,16 +574,25 @@ impl Runner {
 
     /// Snapshot only untouched turns, under the dispatch lock.
     pub fn list_pending(&self) -> Vec<WaitingTurn> {
-        lock(&self.inner.state).queue.iter()
+        lock(&self.inner.state)
+            .queue
+            .iter()
             .filter(|t| t.attempts == 0)
-            .map(|t| WaitingTurn { id: t.pending_id.clone(), text: t.text.clone() })
+            .map(|t| WaitingTurn {
+                id: t.pending_id.clone(),
+                text: t.text.clone(),
+            })
             .collect()
     }
 
     /// Refuse a turn once dispatch has taken it, including retries.
     pub fn cancel_pending(&self, id: &str) -> bool {
         let mut state = lock(&self.inner.state);
-        let Some(index) = state.queue.iter().position(|t| t.pending_id == id && t.attempts == 0) else {
+        let Some(index) = state
+            .queue
+            .iter()
+            .position(|t| t.pending_id == id && t.attempts == 0)
+        else {
             return false;
         };
         let turn = state.queue.remove(index).expect("pending turn");

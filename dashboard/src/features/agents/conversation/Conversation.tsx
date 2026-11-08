@@ -145,7 +145,7 @@ export function LiveLine(props: { agent: Agent }) {
 }
 
 /**
- * The turns that wait in the store for the agent's wake (TER-54), oldest first, at the bottom of
+ * Untouched queued turns in delivery order, at the bottom of
  * the conversation. Edit takes a turn out of the queue and gives its text to the composer; Remove
  * drops it. The list reads again when the agent's `queued` count or status changes.
  */
