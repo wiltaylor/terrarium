@@ -480,12 +480,13 @@ async fn dashboard(
 ) -> ApiResult<Json<Value>> {
     policy::read_project(&actor, &name)?;
     let p = name.clone();
-    let (layout, meta, rows) = state
+    let (layout, meta, rows, eta_accuracy) = state
         .db
         .read(move |c| {
             crate::store::projects::get(c, &p)?;
             let (l, meta) = monitors::layout_of(c, &p)?;
-            Ok((l, meta, monitors::list(c, &p)?))
+            let samples = crate::store::card_history::work_samples(c, &p)?;
+            Ok((l, meta, monitors::list(c, &p)?, crate::store::card_history::work_accuracy(&samples)))
         })
         .await?;
     let kinds = rows.iter().map(|m| (m.id.clone(), m.def.kind)).collect();
@@ -510,6 +511,7 @@ async fn dashboard(
         "updated_at": updated_at,
         "updated_by": updated_by,
         "monitors": rows,
+        "eta_accuracy": eta_accuracy,
     })))
 }
 

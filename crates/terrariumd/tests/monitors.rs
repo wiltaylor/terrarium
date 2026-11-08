@@ -371,6 +371,7 @@ async fn runs_status_events_and_the_dashboard() {
     let dpath = "/api/projects/terra/dashboard";
     let d = td.get_as(&worker, dpath).await;
     assert_eq!(d.ok()["blocks"], json!([]));
+    assert_eq!(d.body["eta_accuracy"], json!({"samples": 0, "on_time_pct": null, "within_half_to_double_pct": null}));
     assert_eq!(d.body["monitors"].as_array().unwrap().len(), 3);
     let layout = json!({"blocks": [
         {"id": "h", "kind": "note", "text": "## Host", "size": "l"},

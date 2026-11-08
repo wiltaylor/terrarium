@@ -148,6 +148,17 @@ export default function DashboardPage() {
         <MonitorsPanel project={params.project} monitors={view.latest?.monitors ?? []} now={now()} onChanged={() => void refetch()} />
       </Show>
       <Show when={tab() === "blocks"}>
+        <Show when={view.latest?.eta_accuracy}>
+          {(accuracy) => (
+            <section aria-label="ETA accuracy">
+              <h2>ETA accuracy</h2>
+              <p class="small muted">Raw worker guesses · latest 30 completed cards · {accuracy().samples} samples. History is limited to the latest 2,000 project card events. Each card counts once.</p>
+              <Show when={accuracy().samples > 0} fallback={<p>No completed worker estimates yet.</p>}>
+                <p>On time: {accuracy().on_time_pct?.toFixed(0)}% · Within half to double: {accuracy().within_half_to_double_pct?.toFixed(0)}%</p>
+              </Show>
+            </section>
+          )}
+        </Show>
         <Show when={draft()}>
           <div class="dash-editbar small" role="status">
             Edit mode: drag a block, or use its arrows, to move it. Save to keep the layout.

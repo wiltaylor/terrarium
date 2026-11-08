@@ -4325,6 +4325,11 @@ export interface DashboardLayout {
 
 /** `GET /api/projects/{name}/dashboard`. */
 export interface DashboardView extends DashboardLayout {
+  eta_accuracy?: {
+    samples: number;
+    on_time_pct: number | null;
+    within_half_to_double_pct: number | null;
+  };
   project: string;
   updated_at: string | null;
   updated_by: string | null;
