@@ -1060,6 +1060,13 @@ async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
     })
     .await;
     td.wait_status(&eph, "idle").await;
+    let ends = td
+        .get(&format!("/api/agents/{eph}/events?kind=turn_end"))
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .len();
     let before = sessions(&td, &eph).await;
     let hold = terrariumd::lifecycle::WakeGuard::take(&s.lifecycle, agent_id).unwrap();
     terrariumd::bound::park(&s, &eph, "test stop race")
@@ -1103,7 +1110,7 @@ async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
             .as_array()
             .unwrap()
             .len()
-            == 2
+            > ends
     })
     .await;
     td.wait_status(&eph, "idle").await;
