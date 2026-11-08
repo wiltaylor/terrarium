@@ -752,8 +752,10 @@ pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<V
         .filter_map(|t| t.def.address)
         .collect();
     let mut st = conn.prepare(
-        "SELECT host FROM job_hosts UNION SELECT host FROM jobs WHERE host IS NOT NULL
-         UNION SELECT alias FROM job_host_aliases",
+        "SELECT host FROM job_hosts UNION SELECT host FROM jobs
+         WHERE host IS NOT NULL AND state IN ('queued', 'running')
+         UNION SELECT alias FROM job_host_aliases a
+         WHERE EXISTS (SELECT 1 FROM hosts h WHERE h.id = a.host_id)",
     )?;
     keys.extend(
         st.query_map([], |r| r.get::<_, String>(0))?
@@ -763,7 +765,10 @@ pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<V
     let agents = hosts::list(conn)?;
     let mut names = Vec::new();
     for key in keys {
-        if agents.iter().any(|h| h.name == key || h.id == key) {
+        if agents.iter().any(|h| h.name == key || h.id == key)
+            || targets::get(conn, &key).is_ok()
+            || key.parse::<ulid::Ulid>().is_ok()
+        {
             continue;
         }
         let hostname = address_key(&key);
@@ -2135,11 +2140,38 @@ mod tests {
             assert_eq!(canonical_key(&conn, key).unwrap(), want, "{key}");
         }
         let unresolved = unresolved_hosts(&conn, None).unwrap();
-        assert!(
-            unresolved.contains(&"gone.lan".to_owned()),
-            "{unresolved:?}"
-        );
+        assert!(!unresolved.contains(&"gone.lan".to_owned()));
         assert!(!unresolved.contains(&"helios.lan".to_owned()));
+    }
+
+    #[test]
+    fn unresolved_hosts_ignores_history_and_fallback_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        for (id, state, host) in [
+            ("old", "passed", "old.invalid"),
+            ("running", "running", "active.invalid"),
+            ("queued", "queued", "queued.invalid"),
+            ("removed", "running", "01M6Y0BHFHXXBDVXWN7BQP96AN"),
+            ("fallback", "running", "local-box"),
+        ] {
+            conn.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, host,
+                                   created_by, created_at)
+                 VALUES (?1, 'p', 'C', 'validate', 'app', 'b', ?2, ?3, 't', 't')",
+                params![id, state, host],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO targets (name, def, source, state, snapshots, created_at, updated_at)
+             VALUES ('local-box', '{\"kind\":\"docker\",\"image\":\"x\"}', 'api', 'unknown', '[]', '', '')",
+            [],
+        ).unwrap();
+        assert_eq!(
+            unresolved_hosts(&conn, None).unwrap(),
+            ["active.invalid", "queued.invalid"]
+        );
     }
 
     #[test]
