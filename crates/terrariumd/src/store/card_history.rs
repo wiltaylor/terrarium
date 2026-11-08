@@ -19,6 +19,7 @@ pub fn completed_visits(
         "WITH moves AS (
            SELECT seq, at, payload,
              lead(at) OVER (PARTITION BY card ORDER BY seq) AS left_at,
+             lead(seq) OVER (PARTITION BY card ORDER BY seq) AS left_seq,
              lead(payload) OVER (PARTITION BY card ORDER BY seq) AS left_payload
            FROM events WHERE project = ?1 AND kind = 'card'
              AND json_extract(payload, '$.change') = 'moved'
@@ -26,7 +27,7 @@ pub fn completed_visits(
            WHERE coalesce(json_extract(payload, '$.to_role'), json_extract(payload, '$.to')) = ?2
              AND coalesce(json_extract(left_payload, '$.from_role'), json_extract(left_payload, '$.from')) = ?2
              AND coalesce(json_extract(left_payload, '$.to_role'), json_extract(left_payload, '$.to')) <> ?2
-           ORDER BY seq DESC",
+           ORDER BY left_seq DESC",
     )?;
     let rows = stmt.query_map(params![project, column], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
