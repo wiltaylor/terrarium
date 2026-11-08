@@ -65,7 +65,7 @@ fn enabled_value(v: Option<&str>) -> bool {
 }
 
 /// The phrases that make the last paragraph a question to the user, also
-/// with no question mark. Each one asks for a decision or waits for one.
+/// with no question mark. Each one asks the reader for a decision.
 /// A plain "let me know" is not in the list: "Let me know if you have
 /// questions." closes many reports.
 const ASKING: &[&str] = &[
@@ -88,20 +88,12 @@ const ASKING: &[&str] = &[
     "please advise",
     "which option do you",
     "which would you prefer",
-    "waiting for your",
-    "awaiting your",
     "please tell me",
     "tell me your",
     "tell me which",
-    "your preference",
     "which do you prefer",
     "what do you prefer",
     "let me know your",
-    "i can ask you",
-    "once you decide",
-    "once you tell me",
-    "when you tell me",
-    "after you confirm",
 ];
 
 /// How many paragraphs at the end of the text the guard reads: a question
@@ -203,7 +195,7 @@ pub struct TurnFacts {
     /// The stored status rests (`idle`, `waiting`).
     pub resting: bool,
     /// The agent sent mail, set `blocked`, or moved a card to `blocked`
-    /// in the turn.
+    /// in the turn, or has a registered wait or an open tracked question.
     pub reported: bool,
 }
 
@@ -251,11 +243,19 @@ pub fn turn_facts(conn: &Connection, id: &str, end_seq: i64) -> ApiResult<TurnFa
         params![actor, start, end_seq],
         |r| r.get(0),
     )?;
+    let tracked: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM waits WHERE agent = ?1 AND state = 'open')
+             OR EXISTS (SELECT 1 FROM questions
+                        WHERE agent = ?1 AND status = 'open' AND kind IN ('question', 'bundle'))
+             OR EXISTS (SELECT 1 FROM threads WHERE agent = ?1 AND status = 'waiting_operator')",
+        [id],
+        |r| r.get(0),
+    )?;
     Ok(TurnFacts {
         lead,
         newer_turn,
         resting: a.status.is_resting(),
-        reported,
+        reported: reported || tracked,
     })
 }
 
@@ -468,7 +468,6 @@ mod tests {
             "The tests fail on main.\n\nPlease confirm that I may change the CI file.",
             "I need a decision.\n\nPlease let me know which branch to use.",
             "Would you like me to also update the docs?",
-            "Waiting for your go-ahead before I push.",
             // Live, Copilot on 2026-10-28: the question in bold, then a
             // closing paragraph.
             "I don't have a specialized tool to halt and wait for user input mid-task. \
@@ -496,6 +495,11 @@ mod tests {
             "Here is the query:\n\n```sql\nSELECT * FROM t WHERE a = ?\n```",
             "| Option | Fine? |\n|---|---|",
             "I mailed the lead the question and moved the card to blocked.",
+            "Next: when you tell me TER-91 is merged, I merge ...",
+            "I am idle now, as you asked. I am waiting for your mail that TER-91 is merged.",
+            "I'm waiting for your mail that the merge hold has ended.",
+            "Status: waiting for your answers to the six questions ...",
+            "Awaiting your mail. After you confirm the merge, I will continue.",
         ] {
             assert_eq!(plain_text_question(t), None, "{t}");
         }
