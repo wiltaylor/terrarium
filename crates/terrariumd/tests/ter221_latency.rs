@@ -60,6 +60,44 @@ async fn new_cards(td: &TestDaemon, project: &str, n: usize) -> Vec<String> {
     out
 }
 
+/// Print the engine state, the rules, the event `seq`, and the run rows.
+async fn dump(st: &Shared, seq: i64) {
+    let out = st
+        .db
+        .read(move |c| {
+            let cursor = terrariumd::rules_engine::cursor(c)?;
+            let last = terrariumd::events::last_seq(c)?;
+            let rules: Vec<(String, String)> = c
+                .prepare("SELECT project, updated_at FROM project_rules")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            let ev: Vec<(i64, String, Option<String>, Option<String>, Option<String>, String)> = c
+                .prepare(
+                    "SELECT seq, kind, project, card, actor, at FROM events
+                      WHERE seq >= ?1 - 3 ORDER BY seq LIMIT 8",
+                )?
+                .query_map([seq], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })?
+                .collect::<Result<_, _>>()?;
+            let runs: Vec<(i64, String, String, String, i64, Option<String>, String)> = c
+                .prepare(
+                    "SELECT event_seq, rule, lane, state, step, reason, updated_at FROM rule_runs
+                      ORDER BY event_seq DESC LIMIT 15",
+                )?
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+                })?
+                .collect::<Result<_, _>>()?;
+            Ok(format!(
+                "cursor={cursor:?} last={last}\nrules={rules:?}\nevents={ev:#?}\nruns={runs:#?}"
+            ))
+        })
+        .await
+        .unwrap();
+    eprintln!("TER221 DUMP seq={seq} now={}\n{out}", chrono::Utc::now());
+}
+
 /// Wait until the engine read the whole log and ran every pending row.
 async fn settle(st: &Shared) {
     let mut quiet = 0;
@@ -87,7 +125,10 @@ async fn settle(st: &Shared) {
         } else {
             quiet = 0;
         }
-        assert!(start.elapsed() < Duration::from_secs(120), "no settle");
+        if start.elapsed() >= Duration::from_secs(120) {
+            dump(st, last).await;
+            panic!("no settle: cursor={cursor} last={last} pending={pending}");
+        }
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 }
@@ -173,7 +214,10 @@ async fn measure(name: &str, st: &Shared, cards: &[String], n: usize) {
             if let Some(x) = run_of(st, seq).await {
                 break x;
             }
-            assert!(t0.elapsed() < Duration::from_secs(60), "run {seq} never ended");
+            if t0.elapsed() >= Duration::from_secs(60) {
+                dump(st, seq).await;
+                panic!("run {seq} never ended");
+            }
             tokio::time::sleep(Duration::from_millis(2)).await;
         };
         assert_eq!(s, "done", "event {seq}");
