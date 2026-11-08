@@ -339,7 +339,12 @@ pub fn request(t: &mut Tx<'_>, req: Request, at: i64) -> ApiResult<Reservation> 
     request_deferred(t, req, at, false)
 }
 
-pub fn request_deferred(t: &mut Tx<'_>, req: Request, at: i64, deferred: bool) -> ApiResult<Reservation> {
+pub fn request_deferred(
+    t: &mut Tx<'_>,
+    req: Request,
+    at: i64,
+    deferred: bool,
+) -> ApiResult<Reservation> {
     req.amounts.validate().map_err(ApiError::invalid)?;
     if req.amounts.is_empty() || req.duration_ms <= 0 || req.queue_ms.is_some_and(|q| q <= 0) {
         return Err(ApiError::invalid(
@@ -390,7 +395,9 @@ pub fn request_deferred(t: &mut Tx<'_>, req: Request, at: i64, deferred: bool) -
         ));
     }
     let admission = if deferred {
-        Err(ApiError::resource_busy("host lifecycle verbs are in progress"))
+        Err(ApiError::resource_busy(
+            "host lifecycle verbs are in progress",
+        ))
     } else if existing.iter().any(|x| x.state == State::Queued) {
         Err(ApiError::conflict(
             "host reservation FIFO has waiting holders",

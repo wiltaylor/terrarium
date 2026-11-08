@@ -405,9 +405,12 @@ async fn update(
     let live = current.def.kind == TargetKind::Docker && patch.get("limits").is_some();
     let n = name.clone();
     let p = patch.clone();
-    let (candidate, _) = state.db.write(actor.label(), move |t| {
-        targets::prepare_update(t, &n, &p, live)
-    }).await?;
+    let (candidate, _) = state
+        .db
+        .write(actor.label(), move |t| {
+            targets::prepare_update(t, &n, &p, live)
+        })
+        .await?;
     let mut before = serde_json::to_value(&current.def)?;
     let mut after = serde_json::to_value(&candidate)?;
     for value in [&mut before, &mut after] {
@@ -416,7 +419,9 @@ async fn update(
             object.remove("snapshot_before_task");
         }
     }
-    if before != after && let Some(host) = &current.def.host {
+    if before != after
+        && let Some(host) = &current.def.host
+    {
         state.executor.resource_verb_idle(host)?;
     }
     let changed = if live {

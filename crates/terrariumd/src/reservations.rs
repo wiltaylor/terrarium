@@ -369,7 +369,9 @@ pub async fn grant(
     // marks the reservation active until the host acknowledges it.
     let r = state
         .db
-        .write(actor.label(), move |tx| store::request_deferred(tx, req, at, deferred))
+        .write(actor.label(), move |tx| {
+            store::request_deferred(tx, req, at, deferred)
+        })
         .await?;
     if let Err(e) = preflight(state, &r).await {
         let id = r.id.clone();

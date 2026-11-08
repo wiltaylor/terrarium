@@ -1267,7 +1267,8 @@ struct ResourceVerb {
 
 impl Drop for ResourceVerb {
     fn drop(&mut self) {
-        let mut verbs = self.executor
+        let mut verbs = self
+            .executor
             .resource_verbs
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1317,10 +1318,12 @@ impl Executor {
 
     fn begin_resource_verb(self: &Arc<Self>, def: &TargetDef) -> ApiResult<ResourceVerb> {
         let host = host_of(def)?.to_owned();
-        *self.resource_verbs
+        *self
+            .resource_verbs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(host.clone()).or_default() += 1;
+            .entry(host.clone())
+            .or_default() += 1;
         Ok(ResourceVerb {
             executor: self.clone(),
             host,
@@ -1621,7 +1624,12 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
             Ok(run) => run,
             Err(error) => {
                 let code = serde_json::to_value(error.code).unwrap_or_default();
-                let _ = tx.send(Ev::End(End::error(code.as_str().unwrap_or("internal"), error.message))).await;
+                let _ = tx
+                    .send(Ev::End(End::error(
+                        code.as_str().unwrap_or("internal"),
+                        error.message,
+                    )))
+                    .await;
                 return;
             }
         };
