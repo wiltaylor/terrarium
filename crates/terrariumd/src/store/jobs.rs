@@ -785,22 +785,22 @@ pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<V
         .filter_map(|t| t.def.address)
         .collect();
     let mut st = conn.prepare(
-        "SELECT host FROM job_hosts UNION SELECT host FROM jobs
+        "SELECT host FROM job_hosts WHERE host NOT IN (SELECT name FROM targets)
+         UNION SELECT host FROM jobs
          WHERE host IS NOT NULL AND state IN ('queued', 'running')
+         AND host NOT IN (SELECT name FROM targets)
          UNION SELECT alias FROM job_host_aliases a
          WHERE EXISTS (SELECT 1 FROM hosts h WHERE h.id = a.host_id)",
     )?;
+    let agents = hosts::list(conn)?;
     keys.extend(
         st.query_map([], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?,
     );
     keys.extend(extra);
-    let agents = hosts::list(conn)?;
     let mut names = Vec::new();
     for key in keys {
-        if agents.iter().any(|h| h.name == key || h.id == key)
-            || targets::get(conn, &key).is_ok()
-            || key.parse::<ulid::Ulid>().is_ok()
+        if agents.iter().any(|h| h.name == key || h.id == key) || key.parse::<ulid::Ulid>().is_ok()
         {
             continue;
         }
@@ -809,7 +809,7 @@ pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<V
             continue;
         }
         let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1 AND host_key != hostname)",
             [&hostname],
             |r| r.get(0),
         )?;
@@ -822,11 +822,11 @@ pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<V
     Ok(names)
 }
 
-/// First writer wins, including a failed resolution pinned to the hostname.
+/// The first successful resolution wins. Failed lookups can be retried.
 pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
     for (hostname, key) in keys {
         let exists: bool = t.query_row(
-            "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1 AND host_key != hostname)",
             [&hostname],
             |r| r.get(0),
         )?;
@@ -853,7 +853,7 @@ pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
             tracing::warn!(%host, %hostname, %key, clash = %error.message, "skipping clashing job-host pin");
             continue;
         }
-        t.execute("INSERT INTO job_host_keys (hostname, host_key) VALUES (?1, ?2) ON CONFLICT(hostname) DO NOTHING", params![hostname, key])?;
+        t.execute("INSERT INTO job_host_keys (hostname, host_key) VALUES (?1, ?2) ON CONFLICT(hostname) DO UPDATE SET host_key = excluded.host_key WHERE job_host_keys.host_key = job_host_keys.hostname", params![hostname, key])?;
     }
     Ok(())
 }
@@ -2342,6 +2342,45 @@ mod tests {
             unresolved_hosts(&conn, None).unwrap(),
             ["active.invalid", "queued.invalid"]
         );
+    }
+
+    #[tokio::test]
+    async fn failed_job_host_and_alias_pins_can_recover() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        db.write("operator", |t| {
+            hosts::create(t, "agent", false)?;
+            set_host_aliases(t, "agent", &["alias.invalid".into()])?;
+            t.execute("INSERT INTO job_hosts (host, heavy_jobs, updated_by, updated_at) VALUES ('job.invalid', 1, 'operator', '')", [])?;
+            pin_hosts(t, vec![
+                ("alias.invalid".into(), "alias.invalid".into()),
+                ("job.invalid".into(), "job.invalid".into()),
+            ])?;
+            assert_eq!(unresolved_hosts(t, None)?, ["alias.invalid", "job.invalid"]);
+            pin_hosts(t, vec![
+                ("alias.invalid".into(), "192.0.2.1".into()),
+                ("job.invalid".into(), "192.0.2.2".into()),
+            ])?;
+            assert!(unresolved_hosts(t, None)?.is_empty());
+            assert_eq!(canonical_key(t, "job.invalid")?, "192.0.2.2");
+            assert_eq!(canonical_key(t, "192.0.2.1")?, hosts::get(t, "agent")?.id);
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[test]
+    fn target_address_is_resolved_even_when_it_is_a_target_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        conn.execute(
+            "INSERT INTO targets (name, def, source, state, snapshots, created_at, updated_at)
+             VALUES ('box.invalid', '{\"kind\":\"ssh\",\"address\":\"box.invalid\"}', 'api', 'unknown', '[]', '', '')",
+            [],
+        ).unwrap();
+        assert_eq!(unresolved_hosts(&conn, None).unwrap(), ["box.invalid"]);
     }
 
     #[test]
