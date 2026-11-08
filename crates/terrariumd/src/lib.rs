@@ -68,6 +68,7 @@ pub mod ssh_agent;
 pub mod store;
 pub mod stream_limit;
 pub mod supervisor;
+pub mod target_roots;
 pub mod system_prompts;
 pub mod target_test;
 pub mod template_files;
@@ -340,6 +341,7 @@ pub async fn start_with_usage(
     }
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
+    tasks.push(target_roots::spawn(state.clone()));
     tasks.push(leases::spawn_timer(&state));
     tasks.push(reservations::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
