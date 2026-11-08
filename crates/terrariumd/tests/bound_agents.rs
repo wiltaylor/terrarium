@@ -1045,6 +1045,16 @@ async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
     // A card reminder after the spawn task would add an unrelated turn
     // while stop is gated. This test controls the task and return turns only.
     s.lifecycle.reminders.set_default(false);
+    // The card stays in_progress while we park manually. Reconciliation
+    // would unpark it on the next fast tick, before the gated stop enters.
+    // Drive the park stop and unpark explicitly instead of racing that tick.
+    s.lifecycle.set_tuning(terrariumd::lifecycle::Tuning {
+        idle_stop: IdleStop::Off,
+        tick: Duration::from_secs(3600),
+        compact_on_idle: false,
+        compact_max_age: CompactMaxAge::Off,
+        compact_wait: Duration::from_secs(5),
+    });
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
     let agent_id = eph.parse().unwrap();
