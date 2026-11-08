@@ -24,6 +24,8 @@ struct State {
     /// The operations that fail: `pull`, `drain`, `backup`, `stop`,
     /// `restore`, `create:<ref>`, `health:<ref>`, `status:<ref>`.
     fail: HashSet<String>,
+    /// Operations that fail this many times before succeeding.
+    transient_fail: HashMap<String, usize>,
     next: u32,
 }
 
@@ -71,6 +73,12 @@ impl Fake {
         let mut s = self.0.lock().unwrap();
         let key = c.split_once(' ').map_or(c.as_str(), |(k, _)| k).to_owned();
         s.calls.push(c);
+        if let Some(remaining) = s.transient_fail.get_mut(&key)
+            && *remaining > 0
+        {
+            *remaining -= 1;
+            return true;
+        }
         s.fail.contains(&key)
     }
 
@@ -505,6 +513,45 @@ async fn a_failed_drain_or_backup_resumes_the_old_daemon() {
         .await;
     assert_eq!(steps(&run).last().unwrap(), "resume");
     assert!(!r.fake.calls().iter().any(|c| c.starts_with("backup")));
+}
+
+#[tokio::test]
+async fn a_running_container_retries_status_until_the_daemon_is_ready() {
+    let r = rig();
+    let status = format!("status:{}", new_ref());
+    r.fake
+        .0
+        .lock()
+        .unwrap()
+        .transient_fail
+        .insert(status.clone(), 2);
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(run.outcome, Outcome::Succeeded, "{run:#?}");
+    assert_eq!(
+        r.fake.calls().iter().filter(|c| c.starts_with(&status)).count(),
+        3
+    );
+    assert!(!steps(&run).contains(&"rollback".into()));
+}
+
+#[tokio::test]
+async fn a_running_container_with_an_unreachable_daemon_times_out_and_rolls_back() {
+    let r = rig();
+    let status = format!("status:{}", new_ref());
+    r.fake.fail(&status);
+    let started = tokio::time::Instant::now();
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert!(started.elapsed() >= r.updater.cfg.health_timeout);
+    assert_eq!(run.outcome, Outcome::RolledBack, "{run:#?}");
+    assert!(run.error.as_deref().unwrap().contains("terrarium daemon status"));
+    assert!(r.fake.calls().iter().filter(|c| c.starts_with(&status)).count() > 1);
+    assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
 }
 
 #[tokio::test]

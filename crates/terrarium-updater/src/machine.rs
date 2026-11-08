@@ -622,31 +622,43 @@ impl Updater {
         Ok(())
     }
 
-    /// Wait for the health check, then for `terrarium daemon status`.
+    /// Wait for both container health and daemon readiness within one deadline.
     async fn wait_healthy(&self, id: &str) -> Res<String> {
         let started = tokio::time::Instant::now();
+        let deadline = started + self.cfg.health_timeout;
         loop {
+            let mut status_error = None;
             match self.engine.health(id).await? {
-                Health::Healthy => break,
+                // Docker also reports Healthy when no healthcheck is configured.
+                // The process may be running before the daemon socket is ready.
+                Health::Healthy => {
+                    match tokio::time::timeout_at(deadline, self.exec_ok(id, status_argv())).await {
+                        Ok(Ok(_)) => {
+                            return Ok(format!(
+                                "healthy after {}s; the daemon answers",
+                                started.elapsed().as_secs()
+                            ));
+                        }
+                        Ok(Err(e)) => status_error = Some(e),
+                        Err(_) => status_error = Some("readiness deadline elapsed".into()),
+                    }
+                }
                 Health::Starting => {}
                 Health::Unhealthy(why) => return Err(format!("unhealthy: {why}")),
                 Health::Exited(why) => return Err(format!("the container stopped: {why}")),
             }
             if started.elapsed() >= self.cfg.health_timeout {
+                let why = status_error
+                    .map(|e| format!("; terrarium daemon status: {e}"))
+                    .unwrap_or_default();
                 return Err(format!(
-                    "not healthy after {}s",
+                    "not healthy after {}s{why}",
                     self.cfg.health_timeout.as_secs()
                 ));
             }
-            tokio::time::sleep(self.cfg.health_poll).await;
+            tokio::time::sleep_until((tokio::time::Instant::now() + self.cfg.health_poll).min(deadline))
+                .await;
         }
-        self.exec_ok(id, status_argv())
-            .await
-            .map_err(|e| format!("terrarium daemon status: {e}"))?;
-        Ok(format!(
-            "healthy after {}s; the daemon answers",
-            started.elapsed().as_secs()
-        ))
     }
 
     /// Go back to `cur`: remove what runs under its name, restore
