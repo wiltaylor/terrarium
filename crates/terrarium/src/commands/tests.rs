@@ -1903,6 +1903,75 @@ async fn memory() {
 }
 
 #[tokio::test]
+async fn memory_project_keys_for_every_id_command() {
+    // Bare IDs use -p, qualified IDs win over -p, and without -p the
+    // daemon keeps resolving bare IDs in the caller's project.
+    for (project, id, other, key, other_key) in [
+        (Some("other"), "MEM-1", "MEM-2", "other%2FMEM-1", "other/MEM-2"),
+        (
+            Some("other"),
+            "explicit/MEM-1",
+            "target/MEM-2",
+            "explicit%2FMEM-1",
+            "target/MEM-2",
+        ),
+        (None, "MEM-1", "MEM-2", "MEM-1", "MEM-2"),
+    ] {
+        let cases = [
+            (vec!["show", id], Get, "/graph", vec![("depth", "1")], None),
+            (vec!["show", id, "--depth", "0"], Get, "", vec![], None),
+            (
+                vec!["neighbors", id, "--relation", "supports"],
+                Get,
+                "/graph",
+                vec![("depth", "1"), ("relation", "supports")],
+                None,
+            ),
+            (
+                vec!["link", id, other, "supports"],
+                Post,
+                "/links",
+                vec![],
+                Some(json!({"to": other_key, "relation": "supports"})),
+            ),
+            (
+                vec!["unlink", id, other, "supports"],
+                Delete,
+                "/links",
+                vec![],
+                Some(json!({"to": other_key, "relation": "supports"})),
+            ),
+            (
+                vec!["edit", id, "--title", "changed"],
+                Patch,
+                "",
+                vec![],
+                Some(json!({"title": "changed"})),
+            ),
+            (
+                vec!["supersede", id, other],
+                Post,
+                "/supersede",
+                vec![],
+                Some(json!({"by": other_key})),
+            ),
+            (vec!["rm", id], Delete, "", vec![], None),
+        ];
+        for (command, method, suffix, query, body) in cases {
+            let mut args = vec!["mem"];
+            if let Some(project) = project {
+                args.extend(["-p", project]);
+            }
+            args.extend(command);
+            let run = exec(true, &args, vec![(200, json!({}))], None).await;
+            assert!(run.result.is_ok(), "{args:?}: {:?}", run.result);
+            let path = format!("/api/memories/{key}{suffix}");
+            check(&args, &run.reqs, &[(method, &path, query, body)]);
+        }
+    }
+}
+
+#[tokio::test]
 async fn wiki() {
     let out = ok(
         true,
