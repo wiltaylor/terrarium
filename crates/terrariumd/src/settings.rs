@@ -749,7 +749,8 @@ pub fn parse_switch(s: &str) -> Result<bool, String> {
 }
 
 /// The default of `TERRARIUM_QUOTA_SAMPLE_KEEP`.
-pub const DEFAULT_QUOTA_SAMPLE_KEEP: std::time::Duration = std::time::Duration::from_secs(48 * 3600);
+pub const DEFAULT_QUOTA_SAMPLE_KEEP: std::time::Duration =
+    std::time::Duration::from_secs(48 * 3600);
 
 /// `TERRARIUM_QUOTA_SAMPLE_KEEP`: a duration of at least 24 hours.
 pub fn parse_sample_keep(s: &str) -> Result<std::time::Duration, String> {

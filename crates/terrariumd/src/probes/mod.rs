@@ -498,7 +498,12 @@ pub async fn prune_samples(db: &Db, keep: Duration, now: DateTime<Utc>) -> ApiRe
     };
     let before = crate::time_param::stored(before);
     let names = db
-        .read(|c| Ok(subs::list(c)?.into_iter().map(|s| s.name).collect::<Vec<_>>()))
+        .read(|c| {
+            Ok(subs::list(c)?
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>())
+        })
         .await?;
     let mut deleted = 0;
     for name in names {
@@ -807,7 +812,11 @@ pub(crate) mod tests {
                     "SELECT subscription, window, used_pct FROM quota_samples ORDER BY id",
                 )?;
                 let rows = st.query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?))
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, f64>(2)?,
+                    ))
                 })?;
                 Ok(rows.collect::<Result<Vec<_>, _>>()?)
             })
@@ -826,6 +835,10 @@ pub(crate) mod tests {
                 ("s2", "monthly", 71.0),
             ]
         );
-        assert_eq!(prune_samples(&db, keep, now).await.unwrap(), 0, "nothing more to do");
+        assert_eq!(
+            prune_samples(&db, keep, now).await.unwrap(),
+            0,
+            "nothing more to do"
+        );
     }
 }
