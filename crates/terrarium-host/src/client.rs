@@ -888,7 +888,8 @@ impl Client {
             ),
             F::DockerInspect(r) => self.start(
                 r.session,
-                need(docker_ok, "docker").and_then(|_| docker::plan_inspect(&r, db, &o.paths.work_dir)),
+                need(docker_ok, "docker")
+                    .and_then(|_| docker::plan_inspect(&r, db, &o.paths.work_dir)),
                 tx,
             ),
             F::DockerPs(r) => self.start(

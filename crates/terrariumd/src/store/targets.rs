@@ -69,7 +69,10 @@ pub struct DockerSettings {
 
 impl DockerSettings {
     pub fn of(def: &TargetDef) -> Self {
-        Self { image: def.image.clone(), limits: def.limits.clone() }
+        Self {
+            image: def.image.clone(),
+            limits: def.limits.clone(),
+        }
     }
 }
 
@@ -615,7 +618,9 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
         && (def.image != current.def.image || def.limits != current.def.limits)
     {
         let mut rt = current.runtime.clone();
-        let baseline = rt.docker_settings.get_or_insert_with(|| DockerSettings::of(&current.def));
+        let baseline = rt
+            .docker_settings
+            .get_or_insert_with(|| DockerSettings::of(&current.def));
         rt.recreate_required = *baseline != DockerSettings::of(&def);
         set_runtime(t, name, &rt)?;
     }

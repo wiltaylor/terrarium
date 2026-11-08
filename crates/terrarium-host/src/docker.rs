@@ -256,7 +256,11 @@ pub fn plan_rm(req: &DockerRm, bin: &str) -> Result<VerbPlan, BuildError> {
     Ok(VerbPlan::plain(base(bin, a, req.timeout_secs)))
 }
 
-pub fn plan_inspect(req: &DockerInspect, bin: &str, work_dir: &std::path::Path) -> Result<VerbPlan, BuildError> {
+pub fn plan_inspect(
+    req: &DockerInspect,
+    bin: &str,
+    work_dir: &std::path::Path,
+) -> Result<VerbPlan, BuildError> {
     let a = vec![
         s("inspect"),
         s("--type"),
@@ -348,14 +352,26 @@ pub fn parse_inspect(stdout: &str, code: Option<i32>) -> Value {
 }
 
 /// Identify only exact workspace binds resolved against this host's work root.
-pub fn parse_inspect_workspaces(stdout: &str, code: Option<i32>, work_dir: &std::path::Path) -> Value {
+pub fn parse_inspect_workspaces(
+    stdout: &str,
+    code: Option<i32>,
+    work_dir: &std::path::Path,
+) -> Value {
     let mut result = parse_inspect(stdout, code);
     let mut workspaces = serde_json::Map::new();
     if let Some(mounts) = result["mounts"].as_array() {
         for mount in mounts {
-            let Some(path) = mount["Destination"].as_str().and_then(|s| s.strip_prefix("/work/")) else { continue };
-            let workspace = crate::protocol::WorkspaceMount { path: path.to_owned() };
-            if mount["Type"] == "bind" && mount["RW"] == true
+            let Some(path) = mount["Destination"]
+                .as_str()
+                .and_then(|s| s.strip_prefix("/work/"))
+            else {
+                continue;
+            };
+            let workspace = crate::protocol::WorkspaceMount {
+                path: path.to_owned(),
+            };
+            if mount["Type"] == "bind"
+                && mount["RW"] == true
                 && mount["Propagation"] == "rprivate"
                 && let Ok(source) = crate::workspace::resolve(work_dir, &workspace)
                 && mount["Source"].as_str() == source.to_str()

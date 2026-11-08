@@ -44,7 +44,9 @@ impl ResultParser {
         let text = String::from_utf8_lossy(stdout);
         match self {
             ResultParser::DockerRunId => crate::docker::parse_run_id(&text),
-            ResultParser::DockerInspect(root) => crate::docker::parse_inspect_workspaces(&text, code, &root),
+            ResultParser::DockerInspect(root) => {
+                crate::docker::parse_inspect_workspaces(&text, code, &root)
+            }
             ResultParser::DockerPs => crate::docker::parse_ps(&text),
             ResultParser::VmlabStatus => crate::vmlab::parse_status(&text),
             ResultParser::VmlabSnapshotList => crate::vmlab::parse_snapshot_list(&text),

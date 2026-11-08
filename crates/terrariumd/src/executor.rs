@@ -2497,12 +2497,22 @@ pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
                 )
             })?;
         let rt = runtime_of(state, &def.name).await?;
-        let verified = inspected.result.as_ref().and_then(|r| r["workspace_mounts"].as_object());
-        if mounts.len() != rt.attached.len() || rt.attached.iter().any(|path| {
-            !verified.and_then(|v| v.get(path)).is_some_and(|mount| mounts.contains(mount))
-        }) || mounts.iter().any(|mount| {
-            !rt.attached.iter().any(|path| verified.and_then(|v| v.get(path)) == Some(mount))
-        }) {
+        let verified = inspected
+            .result
+            .as_ref()
+            .and_then(|r| r["workspace_mounts"].as_object());
+        if mounts.len() != rt.attached.len()
+            || rt.attached.iter().any(|path| {
+                !verified
+                    .and_then(|v| v.get(path))
+                    .is_some_and(|mount| mounts.contains(mount))
+            })
+            || mounts.iter().any(|mount| {
+                !rt.attached
+                    .iter()
+                    .any(|path| verified.and_then(|v| v.get(path)) == Some(mount))
+            })
+        {
             return Err(ApiError::conflict(
                 "recreate refused: container has foreign mounts or volumes; only verified Terrarium workspace binds can be preserved",
             ));
@@ -2519,7 +2529,10 @@ pub async fn recreate(state: &Shared, def: &TargetDef) -> ApiResult<Value> {
         })
         .await?;
     }
-    let opts = LifecycleOpts { recreate_workspaces: Some(preserved), ..LifecycleOpts::default() };
+    let opts = LifecycleOpts {
+        recreate_workspaces: Some(preserved),
+        ..LifecycleOpts::default()
+    };
     let mut out = lifecycle(state, def, LifecycleVerb::Up, &opts).await?;
     out["verb"] = "recreate".into();
     Ok(out)
