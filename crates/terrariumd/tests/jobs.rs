@@ -2045,7 +2045,10 @@ exit 101"#;
     assert_eq!(job["exit_code"], 101, "{job:#}");
     let id = job["id"].as_str().unwrap();
     let attempt = job["attempt"].as_i64().unwrap();
-    let log = lab._dirs.path().join(format!("jobs/p/logs/{id}-{attempt}.log"));
+    let log = lab
+        ._dirs
+        .path()
+        .join(format!("jobs/p/logs/{id}-{attempt}.log"));
     let full = std::fs::read_to_string(&log).unwrap();
     assert_eq!(full.matches("unrelated build noise").count(), 2000);
     assert!(full.contains("expected value"));

@@ -563,7 +563,9 @@ pub fn check_delivery(
         .as_ref()
         .is_some_and(|patterns| patterns.iter().any(|p| p.trim().is_empty()))
     {
-        return Err(ApiError::invalid("failure_patterns must not contain empty strings"));
+        return Err(ApiError::invalid(
+            "failure_patterns must not contain empty strings",
+        ));
     }
     if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty()) {
         let row = targets::get(conn, target)?;
@@ -1823,7 +1825,11 @@ async fn steps(x: &StepCtx<'_>, recipe: String, delivery: &DeliveryDef) -> ApiRe
     let excerpt = if lost.is_none() {
         let cmd = RemoteCmd {
             argv: low_priority(
-                vec!["sh".into(), "-c".into(), log_excerpt(&log, delivery.failure_patterns.as_deref())],
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    log_excerpt(&log, delivery.failure_patterns.as_deref()),
+                ],
                 x.ionice,
             ),
             timeout_secs: Some(30),
@@ -2797,7 +2803,10 @@ mod tests {
                 .unwrap();
             assert_eq!(out.status.code(), Some(7));
             let summary = std::process::Command::new("sh")
-                .args(["-c", &log_excerpt(log.to_str().unwrap(), patterns.as_deref())])
+                .args([
+                    "-c",
+                    &log_excerpt(log.to_str().unwrap(), patterns.as_deref()),
+                ])
                 .output()
                 .unwrap();
             let excerpt = String::from_utf8_lossy(&summary.stdout);
@@ -2814,16 +2823,34 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("recipe.log");
-        let script = format!("umask 022\n{}", logged_recipe("umask; touch output".into(), log.to_str().unwrap()));
+        let script = format!(
+            "umask 022\n{}",
+            logged_recipe("umask; touch output".into(), log.to_str().unwrap())
+        );
         let out = std::process::Command::new("sh")
             .current_dir(dir.path())
             .args(["-c", &script])
             .output()
             .unwrap();
         assert!(out.status.success());
-        assert!(std::fs::read_to_string(&log).unwrap().trim().ends_with("022"));
-        assert_eq!(std::fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(std::fs::metadata(dir.path().join("output")).unwrap().permissions().mode() & 0o777, 0o644);
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .trim()
+                .ends_with("022")
+        );
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("output"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
     }
 
     /// TER-100 review round 2: without a base, a list from the outer env

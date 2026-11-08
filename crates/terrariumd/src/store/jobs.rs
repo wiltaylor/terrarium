@@ -1492,7 +1492,12 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
         t.execute(
             "UPDATE jobs SET tail = ?2, head = COALESCE(?3, head), exit_code = ?4
              WHERE id = ?1 AND state = 'cancelled'",
-            params![id, end.tail.as_deref().map(clip_tail), end.head, end.exit_code],
+            params![
+                id,
+                end.tail.as_deref().map(clip_tail),
+                end.head,
+                end.exit_code
+            ],
         )?;
         return Ok(None);
     }
