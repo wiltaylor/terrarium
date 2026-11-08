@@ -37,10 +37,11 @@ describe("board columns", () => {
   });
 
   it.each(["validating", "review", "merge_queue", "accepted"] as const)("does not reserve the name %s as an alias", (name) => {
-    const rows = rowsFromBoard(board).map((r) => r.name === "review" ? { ...r, name: "existing_review" } : r);
+    const current = board.filter((c) => c.name !== "review");
+    const rows = rowsFromBoard(current);
     const added = addRow(rows).map((r) => r.name === "" ? { ...r, name } : r);
     expect(isClean(checkColumns(added))).toBe(true);
-    expect(checkColumnEdits(board, toEdits(added)).find((c) => c.name === name)?.role).toBeUndefined();
+    expect(checkColumnEdits(current, toEdits(added)).find((c) => c.name === name)?.role).toBeUndefined();
   });
 
   it.each(["validating", "review", "merge_queue", "accepted"] as const)("round-trips the %s role through edits and the mock", (role) => {
