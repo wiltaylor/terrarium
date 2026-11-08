@@ -18,6 +18,21 @@ pub struct RuntimeLimits {
 }
 
 impl RuntimeLimits {
+    /// Docker treats zero CPU/memory and empty cpuset updates as no change.
+    /// Resolve absent dimensions to explicit managed host defaults instead.
+    pub fn docker_defaults(&mut self, capacity: &HostCapacity) -> Result<(), String> {
+        if capacity.cpu_ids.is_empty() || capacity.memory_bytes == 0 {
+            return Err("host capacity is incomplete".into());
+        }
+        let cpu = u32::try_from(capacity.cpu_ids.len()).ok().and_then(|n| n.checked_mul(1000))
+            .ok_or("host CPU capacity overflow")?;
+        self.limits.cpu_millis.get_or_insert(cpu);
+        self.limits.memory_bytes.get_or_insert(capacity.memory_bytes);
+        self.limits.io_weight.get_or_insert(100);
+        self.cpus.get_or_insert_with(|| capacity.cpu_ids.clone());
+        self.validate()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         Amounts { io: self.io.clone(), ..Default::default() }.validate()?;
         if self.cpus.as_ref().is_some_and(Vec::is_empty) {

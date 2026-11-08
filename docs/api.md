@@ -6235,6 +6235,15 @@ runner pointers. Ending a reservation ends registered sessions with
 capacity. Docker cleanup waits a bounded interval for process-tree cleanup;
 an unconfirmed result emits a warning and audit record naming the sessions.
 Fixed supported limits are restored before capacity is released.
+Docker treats zero CPU/memory and empty affinity updates as no change.
+For an absent fixed default, release therefore sets the effective
+"unlimited" managed default explicitly: all host CPU IDs, a CPU quota equal
+to the host's logical CPU count, and physical host memory. Swap follows the
+target's configured allowance. These values come from the online host's
+capability report at release, not a cached reservation size. A missing or
+stale report leaves capacity charged and emits a cleanup warning rather
+than guessing. This default does not give a container memory beyond its
+host's physical capacity.
 
 Exclusive CPU reservations allocate disjoint whole logical CPUs and leave
 at least one CPU for shared work. Isolation covers Terrarium-managed host

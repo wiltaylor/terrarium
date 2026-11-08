@@ -27,6 +27,17 @@ pub struct NewBody {
 
 fn now() -> i64 { chrono::Utc::now().timestamp_millis() }
 
+fn docker_defaults(state: &Shared, def: &TargetDef, limits: &mut RuntimeLimits) -> ApiResult<()> {
+    let host = def.host.as_deref().ok_or_else(|| ApiError::conflict("missing host capacity"))?;
+    if !state.executor.hosts.is_online(host)
+        || state.executor.hosts.latest_metrics(host).is_some_and(|(_, stale)| stale) {
+        return Err(ApiError::conflict("host capacity report is stale; reservation capacity remains charged"));
+    }
+    let capacity = state.executor.hosts.capabilities(host).and_then(|c| c.capacity)
+        .ok_or_else(|| ApiError::conflict("host capacity report is missing; reservation capacity remains charged"))?;
+    limits.docker_defaults(&capacity).map_err(ApiError::conflict)
+}
+
 fn until(value: &str) -> ApiResult<i64> {
     let s = crate::leases::parse_until(Some(value))?.ok_or_else(|| ApiError::invalid("until is required"))?;
     chrono::DateTime::parse_from_rfc3339(&s).map(|d| d.timestamp_millis()).map_err(|e| ApiError::invalid(e.to_string()))
@@ -200,6 +211,7 @@ async fn apply(state: &Shared, r: &Reservation, reset: bool) -> ApiResult<()> {
         }).await?;
     }
     if t.def.kind == TargetKind::Docker && t.state != "running" { return Ok(()); }
+    if t.def.kind == TargetKind::Docker { docker_defaults(state, &t.def, &mut limits)?; }
     let container = (t.def.kind == TargetKind::Docker).then(|| executor::container_name(&t.def));
     executor::verb_ok(state, &t.def, "reservation limits", move |session| DaemonFrame::ResourceApply(ResourceApply {
         session, target: scope, holder, container, limits,
@@ -258,6 +270,18 @@ async fn finish(state: &Shared, r: &Reservation) -> ApiResult<Reservation> {
         }).await?;
     }
     let restored = apply(state, r, true).await;
+    if let Err(error) = &restored {
+        let id = r.id.clone();
+        let project = r.project.clone();
+        let reason = error.message.clone();
+        state.db.write("system", move |tx| {
+            let detail = json!({"reservation":id,"reason":reason,"capacity_charged":true});
+            tx.audit("reserve.restore_pending", &id, Some(&project), detail.clone())?;
+            tx.emit(crate::events::EventDraft::new("reservation_cleanup_warning",
+                format!("reservation {id}: limits restoration pending; capacity remains charged"), detail).project(project))?;
+            Ok(())
+        }).await?;
+    }
     if t.def.kind == TargetKind::Docker && t.def.ephemeral && t.state == "running" {
         let container = executor::container_name(&t.def);
         executor::verb_ok(state, &t.def, "reservation cleanup fallback stop", move |session| {
@@ -401,6 +425,7 @@ pub async fn update_docker_defaults(state: &Shared, def: &TargetDef) -> ApiResul
     limits.limits.docker_support(caps.limits.as_ref()).map_err(ApiError::conflict)?;
     // Active create-time IO is unchanged by a supported-field update.
     limits.io.clear();
+    docker_defaults(state, def, &mut limits)?;
     let target = def.name.clone();
     let container = Some(executor::container_name(def));
     executor::verb_ok(state, def, "update Docker defaults", move |session| DaemonFrame::ResourceApply(ResourceApply {
@@ -419,13 +444,14 @@ pub async fn before_docker_start(state: &Shared, def: &TargetDef) -> ApiResult<(
         if reservation.is_some() { return Err(ApiError::conflict("host is missing reservation support")); }
         return Ok(());
     }
-    let limits = reservation.unwrap_or(RuntimeLimits {
+    let mut limits = reservation.unwrap_or(RuntimeLimits {
         limits: def.limits.as_ref().map(|l| l.resolve()).transpose().map_err(ApiError::invalid)?.unwrap_or_default(),
         ..Default::default()
     });
     if !limits.io.is_empty() {
         return Err(ApiError::conflict("device IO limits need a newly created container at the next up; this permanent container already exists"));
     }
+    docker_defaults(state, def, &mut limits)?;
     let target = def.name.clone();
     let container = Some(executor::container_name(def));
     executor::verb_ok(state, def, "refresh Docker limits before start", move |session| DaemonFrame::ResourceApply(ResourceApply {
@@ -494,6 +520,7 @@ async fn isolate(state: &Shared, host: &str, omit: Option<&str>) -> ApiResult<()
             None => RuntimeLimits { limits: t.def.limits.as_ref().map(|l| l.resolve()).transpose().map_err(ApiError::invalid)?.unwrap_or_default(), ..Default::default() },
         };
         if !own.is_some_and(|r| r.exclusive) { limits.cpus = cpus.clone(); }
+        docker_defaults(state, &t.def, &mut limits)?;
         // docker update leaves create-time device IO unchanged.
         limits.io.clear();
         let container = Some(executor::container_name(&t.def));

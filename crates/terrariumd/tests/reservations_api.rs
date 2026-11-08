@@ -74,9 +74,15 @@ async fn active_docker_budget_overrides_edits_and_retract_restores_defaults() {
     td.delete(&format!("/api/reservations/{id}")).await.ok();
     let calls = std::fs::read_to_string(td.dir.path().join("docker.calls")).unwrap();
     assert!(calls.lines().last().unwrap().contains("--cpus=1"));
-    assert!(calls.lines().all(|line| line.starts_with("update ")));
+    assert!(calls.lines().all(|line| !line.starts_with("stop ") && !line.starts_with("rm ")));
     let saved = state.db.read(|c| terrariumd::store::targets::get(c, "p-box")).await.unwrap();
     assert_eq!(saved.state, "running");
+    td.patch("/api/targets/p-box", json!({"limits":null})).await.ok();
+    let calls = std::fs::read_to_string(td.dir.path().join("docker.calls")).unwrap();
+    let released = calls.lines().filter(|line| line.starts_with("update ")).next_back().unwrap();
+    assert!(released.contains("--cpus=4"));
+    assert!(released.contains("--memory=8589934592"));
+    assert!(released.contains("--cpuset-cpus=0,1,2,3"));
     client.abort(); server.abort();
 }
 

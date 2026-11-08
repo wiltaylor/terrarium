@@ -36,9 +36,12 @@ fn live_update_sets_supported_fields_without_recreating() {
 }
 
 #[test]
-fn default_update_explicitly_clears_old_limits() {
-    let args = docker::plan_update("container", &RuntimeLimits::default(), "docker").unwrap().exec.args;
-    for flag in ["--cpus=0", "--memory=0", "--memory-swap=-1", "--pids-limit=-1", "--blkio-weight=0", "--cpuset-cpus="] {
+fn default_update_requires_explicit_host_capacity() {
+    assert!(docker::plan_update("container", &RuntimeLimits::default(), "docker").is_err());
+    let mut limits = RuntimeLimits::default();
+    limits.docker_defaults(&terrarium_core::resources::HostCapacity { cpu_ids:vec![0,1,2,3], memory_bytes:6 << 30 }).unwrap();
+    let args = docker::plan_update("container", &limits, "docker").unwrap().exec.args;
+    for flag in ["--cpus=4", "--memory=6442450944", "--memory-swap=6442450944", "--pids-limit=-1", "--cpuset-cpus=0,1,2,3"] {
         assert!(args.contains(&flag.into()), "{flag}");
     }
 }
