@@ -2216,8 +2216,14 @@ async fn default_lifecycle_labels_only_merge_jobs() {
             settle(&td).await;
             let c = card(&td, &a).await;
             let labels = c["labels"].as_array().unwrap();
-            assert_eq!(labels.contains(&json!("validation:running")), kind == "merge" && change == "started");
-            assert_eq!(labels.contains(&json!("validation:queued")), kind == "merge" && change == "requeued");
+            assert_eq!(
+                labels.contains(&json!("validation:running")),
+                kind == "merge" && change == "started"
+            );
+            assert_eq!(
+                labels.contains(&json!("validation:queued")),
+                kind == "merge" && change == "requeued"
+            );
         }
     }
 }
