@@ -342,6 +342,11 @@ pub fn parse_inspect(stdout: &str, code: Option<i32>) -> Value {
         "id": first["Id"],
         "name": first["Name"].as_str().map(|n| n.trim_start_matches('/')),
         "image": first["Config"]["Image"],
+        "container_limits": first.get("HostConfig").map(|h| json!({
+            "cpu": h["NanoCpus"], "cpu_quota": h["CpuQuota"], "cpu_period": h["CpuPeriod"],
+            "memory": h["Memory"], "memory_swap": h["MemorySwap"],
+            "pids": h["PidsLimit"], "blkio_weight": h["BlkioWeight"],
+        })),
         "mounts": first["Mounts"],
         "status": status,
         "running": st["Running"],

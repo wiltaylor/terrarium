@@ -6203,6 +6203,11 @@ For a permanent managed Docker target, changing `image` or `limits` sets
 an existing stopped container starts it with its old settings and a clear
 `recreate_note` warning. Editing both image and limits back to the container's
 original settings clears the pending flag, without discarding any data.
+When no container exists, an edit only stores the definition, without marking
+recreation pending. Use normal `up` to create it with the holder workspaces.
+`recreate` refuses an absent container with `no container yet; up creates it`.
+For a legacy container without a saved baseline, the first edit reads its
+actual image and limits from Docker inspect rather than the definition.
 Run `terrarium admin target verb NAME recreate` (`POST
 /api/targets/{name}/recreate`) explicitly to apply the settings. This requires
 the rights to define the target (project admin or global sysadmin), refuses

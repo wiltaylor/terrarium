@@ -68,6 +68,18 @@ pub struct DockerSettings {
 }
 
 impl DockerSettings {
+    pub fn equivalent(&self, other: &Self) -> bool {
+        let normalized = |settings: &Self| {
+            let mut limits = settings.limits.as_ref().and_then(|l| l.resolve().ok()).unwrap_or_default();
+            limits.swap_bytes = limits.swap_bytes.filter(|v| *v > 0);
+            limits.io_weight = limits.io_weight.map(|w| {
+                let w = u32::from(w);
+                u16::try_from(10 + ((w - 1) * 990 + 9999 / 2) / 9999).unwrap_or(1000)
+            });
+            limits
+        };
+        self.image == other.image && normalized(self) == normalized(other)
+    }
     pub fn of(def: &TargetDef) -> Self {
         Self {
             image: def.image.clone(),
@@ -618,10 +630,8 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
         && (def.image != current.def.image || def.limits != current.def.limits)
     {
         let mut rt = current.runtime.clone();
-        let baseline = rt
-            .docker_settings
-            .get_or_insert_with(|| DockerSettings::of(&current.def));
-        rt.recreate_required = *baseline != DockerSettings::of(&def);
+        rt.recreate_required = rt.docker_settings.as_ref()
+            .is_some_and(|baseline| !baseline.equivalent(&DockerSettings::of(&def)));
         set_runtime(t, name, &rt)?;
     }
     t.execute(

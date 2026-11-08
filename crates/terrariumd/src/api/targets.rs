@@ -402,9 +402,24 @@ async fn update(
     if let Some(address) = patch.get("address").and_then(Value::as_str) {
         crate::jobs::prepare_hosts(&state.db, Some(address.to_owned())).await?;
     }
+    let baseline = if current.def.kind == TargetKind::Docker
+        && !current.def.ephemeral && current.def.container.is_none()
+        && current.runtime.docker_settings.is_none()
+        && (patch.get("image").is_some() || patch.get("limits").is_some())
+        && (state.executor.hosts.is_online(current.def.host.as_deref().unwrap_or(""))
+            || matches!(current.state.as_str(), "stopped" | "running"))
+    {
+        Some(executor::docker_baseline(&state, &current.def).await?)
+    } else { None };
     let r = state
         .db
         .write(actor.label(), move |t| {
+            if let Some(settings) = baseline {
+                let mut rt = targets::get(t, &name)?.runtime;
+                rt.docker_settings = settings;
+                rt.recreate_required = false;
+                targets::set_runtime(t, &name, &rt)?;
+            }
             let r = targets::update(t, &name, &patch)?;
             t.audit("target.update", &name, r.def.project.as_deref(), patch)?;
             Ok(r)

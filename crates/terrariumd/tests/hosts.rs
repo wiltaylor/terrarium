@@ -142,7 +142,7 @@ fn fake_tool(tool: &str, dir: &Path) -> String {
 if [ "$1" = run ]; then prev=; for a in "$@"; do if [ "$prev" = --name ]; then c=$a; fi; prev=$a; done; fi
 f='{s}'.$c
 case "$1" in
-  inspect) if [ -f "$f" ]; then st=$(cat "$f"); mounts='[]'; if [ -f '{mounts}' ]; then mounts=$(cat '{mounts}'); fi; echo "[{{\"Id\":\"abc\",\"Name\":\"/terrarium-dbox\",\"Mounts\":$mounts,\"State\":{{\"Status\":\"$st\"}}}}]"; else echo '[]'; echo 'Error: No such object' >&2; exit 1; fi ;;
+  inspect) if [ -f "$f" ]; then st=$(cat "$f"); mounts='[]'; image=alpine:3; hc='{{}}'; if [ -f '{mounts}' ]; then mounts=$(cat '{mounts}'); fi; if [ -f '{image}' ]; then image=$(cat '{image}'); fi; if [ -f '{hc}' ]; then hc=$(cat '{hc}'); fi; echo "[{{\"Id\":\"abc\",\"Name\":\"/terrarium-dbox\",\"Config\":{{\"Image\":\"$image\"}},\"HostConfig\":$hc,\"Mounts\":$mounts,\"State\":{{\"Status\":\"$st\"}}}}]"; else echo '[]'; echo 'Error: No such object' >&2; exit 1; fi ;;
   run) echo running > "$f"; echo abc123 ;;
   start) echo running > "$f"; echo "$2" ;;
   stop) echo exited > "$f"; echo "$4" ;;
@@ -151,6 +151,8 @@ case "$1" in
 esac"#,
             s = state.display(),
             mounts = dir.join("docker.mounts").display(),
+            image = dir.join("docker.image").display(),
+            hc = dir.join("docker.host-config").display(),
             end = dir.join("sleeper.end").display()
         ),
         _ => format!(
@@ -4123,11 +4125,60 @@ async fn docker_recreate_preserves_verified_workspace_binds() {
     );
 }
 
+#[tokio::test]
+async fn docker_absent_edits_need_only_up_and_attach_holder_workspaces() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let worker = id_of(&lab.td.agent("terra", "worker", json!({"policy":{"targets":["dbox"]}})).await);
+    lab.target(json!({"name":"dbox", "kind":"docker", "host":"lab1", "image":"alpine:3"})).await;
+    // Both a new target and an inspected absent target need no recreation.
+    let edit = lab.td.patch("/api/targets/dbox", json!({"image":"alpine:3.20"})).await.ok().clone();
+    assert!(edit["recreate_note"].is_null());
+    assert_eq!(lab.td.post_empty("/api/targets/dbox/status").await.ok()["state"], "absent");
+    let edit = lab.td.patch("/api/targets/dbox", json!({"image":"alpine:3.21"})).await.ok().clone();
+    assert!(edit["recreate_note"].is_null());
+    let refused = lab.td.post_empty("/api/targets/dbox/recreate").await;
+    refused.err(409, "conflict");
+    assert!(refused.body["error"]["message"].as_str().unwrap().contains("no container yet; up creates it"));
+    assert!(runs(&lab).is_empty());
+    start_agent(&lab, &worker).await;
+    let run = runs(&lab);
+    assert_eq!(run.len(), 1);
+    assert!(run[0].contains(":/work/terra/worker"), "{run:?}");
+    assert!(run[0].contains("alpine:3.21"), "{run:?}");
+}
+
+#[tokio::test]
+async fn docker_legacy_edit_captures_inspect_not_the_stale_definition() {
+    let lab = Lab::start().await;
+    let _h = lab.host_with("lab1", Some(full_limits_cap())).await;
+    // Legacy definition was edited, but the old container was never replaced.
+    lab.target(json!({"name":"dbox", "kind":"docker", "host":"lab1", "image":"alpine:latest", "limits":{"cpu":2}})).await;
+    std::fs::write(lab.bins.path().join("docker.state.terrarium-dbox"), "exited").unwrap();
+    std::fs::write(lab.bins.path().join("docker.image"), "alpine:3").unwrap();
+    std::fs::write(lab.bins.path().join("docker.host-config"), json!({"NanoCpus":1000000000_u64,"Memory":536870912,"MemorySwap":536870912,"PidsLimit":100}).to_string()).unwrap();
+    lab.td.post_empty("/api/targets/dbox/status").await.ok();
+    let edited = lab.td.patch("/api/targets/dbox", json!({"image":"alpine:3.21"})).await.ok().clone();
+    assert_eq!(edited["runtime"]["docker_settings"]["image"], "alpine:3");
+    assert_eq!(edited["runtime"]["recreate_required"], true);
+    let undone = lab.td.patch("/api/targets/dbox", json!({"image":"alpine:3", "limits":{"cpu":1,"memory":"512M","swap":0,"pids":100}})).await.ok().clone();
+    assert!(undone["recreate_note"].is_null());
+    assert!(lab.td.post_empty("/api/targets/dbox/up").await.ok()["recreate_note"].is_null());
+    assert!(!lab.log().contains("docker rm"));
+}
+
 /// Opt-in evidence on the leased throwaway Docker VM, never on shared build Docker.
 #[tokio::test]
 #[ignore = "requires the leased terrarium-docker-scratch VM with Docker"]
 async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
     let name = "ter-202-image-check";
+    struct ContainerGuard(&'static str);
+    impl Drop for ContainerGuard {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("docker").args(["rm", "-f", self.0]).output();
+        }
+    }
     let lab = Lab::start().await;
     // Map the test daemon's managed name to this card's permitted container prefix.
     std::fs::write(lab.bins.path().join("docker"), format!(
@@ -4144,6 +4195,7 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         .await
         .unwrap()
         .def;
+    let _guard = ContainerGuard(name);
     terrariumd::executor::lifecycle(
         &state,
         &def,
@@ -4182,14 +4234,6 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
     println!(
         "docker inspect after: {}",
         json!({"Id":after["Id"],"Image":after["Image"],"Mounts":after["Mounts"]})
-    );
-    // Remove only this test's container, without volume deletion.
-    assert!(
-        std::process::Command::new("docker")
-            .args(["rm", "-f", name])
-            .status()
-            .unwrap()
-            .success()
     );
     assert_ne!(before["Image"], after["Image"]);
     assert_ne!(before["Id"], after["Id"]);
