@@ -2050,6 +2050,13 @@ async fn memory_project_keys_for_every_id_command() {
                 Some(json!({"title": "changed"})),
             ),
             (
+                vec!["edit", id, "--body", "changed body"],
+                Patch,
+                "",
+                vec![],
+                Some(json!({"body": "changed body"})),
+            ),
+            (
                 vec!["supersede", id, other],
                 Post,
                 "/supersede",
