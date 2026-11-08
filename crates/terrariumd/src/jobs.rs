@@ -3674,10 +3674,13 @@ mod tests {
         db.write("operator", |t| {
             let def = serde_json::from_value(serde_json::json!({
                 "name": "dns-box", "kind": "ssh", "address": "SLOW.INVALID"
-            })).unwrap();
+            }))
+            .unwrap();
             crate::store::targets::create(t, &def)?;
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let (release, wait) = std::sync::mpsc::channel();
         let wait = std::sync::Mutex::new(wait);
         let started = Arc::new(tokio::sync::Notify::new());
@@ -3688,23 +3691,38 @@ mod tests {
                 ready.notify_one();
                 wait.lock().unwrap().recv().unwrap();
                 "192.0.2.2".into()
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
         });
         started.notified().await;
         prepare_hosts_with(&db, Some("slow.invalid".into()), |_| {
             panic!("parallel kick must not look up the name twice")
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         first.await.unwrap();
-        let key = db.read(|c| jobs::canonical_key(c, "SLOW.INVALID")).await.unwrap();
+        let key = db
+            .read(|c| jobs::canonical_key(c, "SLOW.INVALID"))
+            .await
+            .unwrap();
         assert_eq!(key, "slow.invalid");
         db.write("operator", |t| {
-            crate::store::targets::update(t, "dns-box", &serde_json::json!({"address": "SLOW.INVALID"}))?;
+            crate::store::targets::update(
+                t,
+                "dns-box",
+                &serde_json::json!({"address": "SLOW.INVALID"}),
+            )?;
             assert_eq!(jobs::unresolved_hosts(t, None)?, vec!["slow.invalid"]);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         prepare_hosts_with(&db, None, |_| {
             panic!("timed out libc lookup is still in flight")
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         release.send(()).unwrap();
     }
 
