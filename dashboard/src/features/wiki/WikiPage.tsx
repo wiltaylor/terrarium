@@ -11,7 +11,7 @@ import { renderWiki, splitFrontMatter } from "../../lib/markdown";
 import { isMissingEndpoint } from "../../api/http";
 import type { WikiPage as Page } from "../../api/types";
 import { api, projects } from "../../stores";
-import { bookmarks } from "../../stores/bookmarks";
+import { bookmarks } from "../../stores";
 import { buildTree, type TreeNode } from "./tree";
 
 const TABS = [
@@ -28,7 +28,7 @@ function Tree(props: { nodes: TreeNode[]; project: string; current: string }): J
           <li>
             <Show when={n.page} fallback={<div class="dir">{n.name}/</div>}>
               {(p) => (
-                <A href={`/p/${props.project}/knowledge/wiki/${p().path}`} class={props.current === p().path ? "active" : ""}>
+                <A href={wikiHref(props.project, p().path)} class={props.current === p().path ? "active" : ""}>
                   {p().title}
                   <Show when={p().status === "ready_for_review"}>
                     {" "}
@@ -47,10 +47,12 @@ function Tree(props: { nodes: TreeNode[]; project: string; current: string }): J
   );
 }
 
+export const wikiHref = (project: string, path: string) => `/p/${encodeURIComponent(project)}/knowledge/wiki/${path.split("/").map(encodeURIComponent).join("/")}`;
+
 export default function WikiPage() {
   const params = useParams<{ project: string; path?: string }>();
   const path = () => (params.path && params.path.length ? decodeURIComponent(params.path) : "index");
-  const bookmarkUrl = () => `/p/${encodeURIComponent(params.project)}/knowledge/wiki/${path().split("/").map(encodeURIComponent).join("/")}`;
+  const bookmarkUrl = () => wikiHref(params.project, path());
   const [tab, setTab] = createSignal<(typeof TABS)[number]["id"]>("page");
   const [error, setError] = createSignal<unknown>(null);
   const [q, setQ] = createSignal("");
@@ -113,6 +115,7 @@ export default function WikiPage() {
         <input type="search" placeholder="Search pages" value={q()} onInput={(e) => setQ(e.currentTarget.value)} aria-label="Search pages" />
       </PageHead>
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <ErrorBanner error={bookmarks.error()} />
       <div class="split">
         <nav class="card-box" aria-label="Pages">
           <Show when={tree()?.length} fallback={<span class="muted">No pages.</span>}>
@@ -133,7 +136,10 @@ export default function WikiPage() {
               <div class="spread">
                 <div>
                   <h3 style={{ margin: 0 }}>{p().title}</h3>
-                  <button aria-pressed={bookmarks.has(bookmarkUrl())} onClick={() => bookmarks.has(bookmarkUrl()) ? bookmarks.remove(bookmarkUrl()) : bookmarks.add(p().title, bookmarkUrl())}>
+                  <button aria-pressed={bookmarks.has(bookmarkUrl())} onClick={() => {
+                    if (bookmarks.has(bookmarkUrl())) bookmarks.remove(bookmarkUrl());
+                    else if (!bookmarks.add(p().title, bookmarkUrl())) setError(new Error("This page needs a title before it can be pinned."));
+                  }}>
                     {bookmarks.has(bookmarkUrl()) ? "Unpin bookmark" : "Pin to bookmarks"}
                   </button>
                   <div class="muted small">

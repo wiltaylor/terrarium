@@ -2,11 +2,17 @@
 import { MemoryRouter, Route } from "@solidjs/router";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
-import { afterEach, expect, it } from "vitest";
-import { bookmarks } from "../stores/bookmarks";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+vi.mock("../stores", async () => {
+  const { createBookmarksStore } = await import("../stores/bookmarks");
+  return { bookmarks: createBookmarksStore(null, window.location.origin) };
+});
+import { bookmarks } from "../stores";
+import { expanded } from "./TreeRoot";
 import { Bookmarks } from "./Bookmarks";
 
 let dispose: (() => void) | undefined;
+beforeEach(() => expanded.open("/bookmarks"));
 afterEach(() => {
   dispose?.();
   for (const b of bookmarks.items()) bookmarks.remove(b.href);

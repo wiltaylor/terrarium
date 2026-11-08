@@ -2474,7 +2474,21 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE projects ADD COLUMN board_flow TEXT;
     ALTER TABLE projects ADD COLUMN board_flow_at TEXT;
     "#,
-    // Board groups (TER-180). Self-contained, append after concurrent migrations.
+    // 92: retain the origin of custom bound-agent return turns (TER-217).
+    // Self-contained: move this entry to the end if another branch takes its number.
+    r#"
+    ALTER TABLE queued_turns ADD COLUMN unpark_card TEXT;
+    "#,
+    // 93: Sidebar bookmarks, scoped to the operator, independent of projects.
+    r#"
+    CREATE TABLE bookmarks (
+        owner TEXT NOT NULL,
+        href TEXT NOT NULL,
+        title TEXT NOT NULL,
+        PRIMARY KEY (owner, href)
+    );
+    "#,
+    // 94: Board groups (TER-180). Self-contained, append after concurrent migrations.
     r#"
     ALTER TABLE cards ADD COLUMN kind TEXT NOT NULL DEFAULT 'card'
         CHECK(kind IN ('card', 'group'));

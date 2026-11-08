@@ -2242,6 +2242,8 @@ export interface SubscriptionAgentRef {
 
 /** docs/api.md §16.1. */
 export interface Subscription {
+  session_period?: { since: string; until: string };
+  sessions?: Array<{ id: string; agent: string; project: string; harness: string; started_at: string; model?: string; card?: string; input_tokens?: number; output_tokens?: number }>;
   name: string;
   /**
    * The name for people: the operator's `label`, else the vendor's product
