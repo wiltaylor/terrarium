@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import secrets
 import subprocess
 import tempfile
 import time
@@ -95,11 +94,11 @@ class RuntimeImage(unittest.TestCase):
 ''')
         env = {**os.environ, "TERRARIUM_IMAGE": image,
                "TERRARIUM_DATA_DIR": str(root / "data"),
-               "TERRARIUM_TOKEN": secrets.token_hex(32)}
+               "TERRARIUM_TOKEN": "scratch-test-only-not-a-live-credential"}
         args = ("compose", "-p", project, "-f", str(old), "-f", str(override))
         config = json.loads(docker(*args, "config", "--format", "json", env=env).stdout)
         service = config["services"]["terrarium"]
-        self.assertNotIn("command", service)
+        self.assertIsNone(service.get("command"))
         for mount in service["volumes"]:
             if mount["type"] == "bind":
                 path = Path(mount["source"])
