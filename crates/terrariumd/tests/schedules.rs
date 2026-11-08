@@ -54,6 +54,39 @@ fn mail_body(project: Option<&str>, name: &str, to: &str) -> Value {
 }
 
 #[tokio::test]
+async fn operator_schedule_comments_are_system_authored() {
+    let td = TestDaemon::start().await;
+    setup(&td).await;
+    let s = td
+        .post(
+            "/api/schedules",
+            json!({
+                "name": "card-note", "project": "terra",
+                "spec": {"kind": "interval", "every": "1h"},
+                "action": {"type": "card", "op": "open", "key": "note",
+                           "title": "Scheduled card", "body": "scheduled note"}
+            }),
+        )
+        .await
+        .ok()
+        .clone();
+    let sid = id(&s);
+    td.post_empty(&format!("/api/schedules/{sid}/run"))
+        .await
+        .ok();
+    let runs = tick(&td, hours(2)).await;
+    assert_eq!(runs.len(), 1);
+    let cards = td.get("/api/projects/terra/cards").await;
+    let cid = id(&cards.ok()[0]);
+    let card = td.get(&format!("/api/cards/{cid}")).await;
+    let comments = card.ok()["comments"].as_array().unwrap();
+    assert!(!comments.is_empty());
+    for comment in comments {
+        assert_eq!(comment["author"], "system", "{comment:#}");
+    }
+}
+
+#[tokio::test]
 async fn crud_validation_run_now_events_and_audit() {
     let td = TestDaemon::start().await;
     let (_lead, worker, _) = setup(&td).await;

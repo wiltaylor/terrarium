@@ -1223,7 +1223,7 @@ fn notify_blocked(t: &mut Tx<'_>, actor: &Actor, card: &CardRow, comment: &str) 
         card.id, card.title, card.column, card.id
     );
     let mut thread: Option<String> = None;
-    for recipient in to.iter().filter(|a| a.key() != me) {
+    for recipient in to.iter().filter(|a| a.key() != me || author != me) {
         let m = mail::send(
             t,
             Outgoing {
