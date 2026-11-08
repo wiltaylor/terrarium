@@ -84,10 +84,11 @@ async fn check(state: &Shared) -> ApiResult<()> {
         let repo = match state
             .db
             .read(move |c| repos::resolve(c, &name, Some(&project)))
-            .await {
-                Ok(repo) => repo,
-                Err(_) => continue,
-            };
+            .await
+        {
+            Ok(repo) => repo,
+            Err(_) => continue,
+        };
         if crate::api::repo_trees::ensure_mirror(state, &repo, false)
             .await
             .is_err()
@@ -116,26 +117,41 @@ async fn check(state: &Shared) -> ApiResult<()> {
                 b.id,
                 common.join(", ")
             );
-            state.db.write("system", move |t| publish(t, &a, &b, &body)).await?;
+            state
+                .db
+                .write("system", move |t| publish(t, &a, &b, &body))
+                .await?;
         }
     }
     Ok(())
 }
 
 fn publish(t: &mut crate::db::Tx<'_>, a: &Card, b: &Card, body: &str) -> ApiResult<()> {
-                // Persisted deduplication also survives daemon restarts.
-                let seen: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM card_comments WHERE card = ?1 AND author = 'system' AND body = ?2)", params![a.id, body], |r| r.get(0))?;
-                if seen { return Ok(()); }
-                board::system_comment(t, &a.id, &body, None)?;
-                board::system_comment(t, &b.id, &body, None)?;
-                let mut recipients = crate::question_guard::leads(t, &a.project, "")?;
-                if recipients.is_empty() { recipients.push(Address::Operator); }
-                for to in recipients {
-                    mail::send(t, Outgoing { from: &Address::System, to: &to,
-                        subject: &format!("Conflict hint: {} / {}", a.id, b.id),
-                        body, thread: None, in_reply_to: None })?;
-                }
-                Ok(())
+    // Persisted deduplication also survives daemon restarts.
+    let seen: bool = t.query_row("SELECT EXISTS(SELECT 1 FROM card_comments WHERE card = ?1 AND author = 'system' AND body = ?2)", params![a.id, body], |r| r.get(0))?;
+    if seen {
+        return Ok(());
+    }
+    board::system_comment(t, &a.id, &body, None)?;
+    board::system_comment(t, &b.id, &body, None)?;
+    let mut recipients = crate::question_guard::leads(t, &a.project, "")?;
+    if recipients.is_empty() {
+        recipients.push(Address::Operator);
+    }
+    for to in recipients {
+        mail::send(
+            t,
+            Outgoing {
+                from: &Address::System,
+                to: &to,
+                subject: &format!("Conflict hint: {} / {}", a.id, b.id),
+                body,
+                thread: None,
+                in_reply_to: None,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -157,16 +173,31 @@ mod tests {
             for title in ["A", "B"] {
                 let new = serde_json::from_value(serde_json::json!({"title": title})).unwrap();
                 let c = board::create_card(t, &actor, "test", new)?;
-                cards.push(Card { id: c.id, project: "test".into(), repo: "r".into(), branch: title.into() });
+                cards.push(Card {
+                    id: c.id,
+                    project: "test".into(),
+                    repo: "r".into(),
+                    branch: title.into(),
+                });
             }
             publish(t, &cards[0], &cards[1], "Conflict hint: shared.rs")?;
             publish(t, &cards[0], &cards[1], "Conflict hint: shared.rs")?;
-            let count: i64 = t.query_row("SELECT count(*) FROM card_comments WHERE body = 'Conflict hint: shared.rs'", [], |r| r.get(0))?;
+            let count: i64 = t.query_row(
+                "SELECT count(*) FROM card_comments WHERE body = 'Conflict hint: shared.rs'",
+                [],
+                |r| r.get(0),
+            )?;
             assert_eq!(count, 2);
-            let count: i64 = t.query_row("SELECT count(*) FROM messages WHERE subject LIKE 'Conflict hint:%'", [], |r| r.get(0))?;
+            let count: i64 = t.query_row(
+                "SELECT count(*) FROM messages WHERE subject LIKE 'Conflict hint:%'",
+                [],
+                |r| r.get(0),
+            )?;
             assert_eq!(count, 1);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

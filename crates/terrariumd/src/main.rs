@@ -232,7 +232,9 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            let Some(state) = hints_state.upgrade() else { return };
+            let Some(state) = hints_state.upgrade() else {
+                return;
+            };
             terrariumd::conflict_hints::pass(&state).await;
         }
     });
