@@ -4166,6 +4166,7 @@ async fn docker_absent_edits_need_only_up_and_attach_holder_workspaces() {
     );
     assert!(runs(&lab).is_empty());
     start_agent(&lab, &worker).await;
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
     let run = runs(&lab);
     assert_eq!(run.len(), 1);
     assert!(run[0].contains(":/work/terra/worker"), "{run:?}");
