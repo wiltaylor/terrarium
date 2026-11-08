@@ -17,16 +17,33 @@ const CARDS: &str = "/api/projects/proj/cards";
 async fn issue_import_route_and_function_validate_before_fetching() {
     let td = setup().await;
     let route = "/api/projects/proj/github-issues/import";
-    let bad = td.post_as("proj/w1", route, json!({"repo":"missing", "number":0})).await;
+    let bad = td
+        .post_as("proj/w1", route, json!({"repo":"missing", "number":0}))
+        .await;
     assert_eq!(bad.code(), "invalid");
-    let forged = td.post_as("proj/w1", route,
-        json!({"repo":"missing", "number":7, "github_author":"wiltaylor"})).await;
+    let forged = td
+        .post_as(
+            "proj/w1",
+            route,
+            json!({"repo":"missing", "number":7, "github_author":"wiltaylor"}),
+        )
+        .await;
     assert!(!forged.status.is_success());
-    let outside = td.post_as("ops/sys", route, json!({"repo":"missing", "number":7})).await;
+    td.agent("ops", "outsider", json!({})).await;
+    let outside = td
+        .post_as("ops/outsider", route, json!({"repo":"missing", "number":7}))
+        .await;
     assert_eq!(outside.code(), "forbidden");
     let state = td.daemon.as_ref().unwrap().state.clone();
-    let error = terrariumd::github_issues::import(&state, terrariumd::actor::Actor::Operator,
-        "proj".into(), "missing".into(), 0).await.unwrap_err();
+    let error = terrariumd::github_issues::import(
+        &state,
+        terrariumd::actor::Actor::Operator,
+        "proj".into(),
+        "missing".into(),
+        0,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error.code, terrariumd::error::Code::Invalid);
 }
 

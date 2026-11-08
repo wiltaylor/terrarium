@@ -93,7 +93,10 @@ pub async fn import(
         .await
 }
 
-fn token_auth(request: reqwest::RequestBuilder, credential: Option<Secret>) -> reqwest::RequestBuilder {
+fn token_auth(
+    request: reqwest::RequestBuilder,
+    credential: Option<Secret>,
+) -> reqwest::RequestBuilder {
     match credential {
         Some(Secret::Token { token, .. }) => request.bearer_auth(token.as_str()),
         _ => request,
@@ -101,7 +104,9 @@ fn token_auth(request: reqwest::RequestBuilder, credential: Option<Secret>) -> r
 }
 
 async fn fetch_issue(request: reqwest::RequestBuilder, number: u64) -> ApiResult<Issue> {
-    let authenticated = request.try_clone().and_then(|r| r.build().ok())
+    let authenticated = request
+        .try_clone()
+        .and_then(|r| r.build().ok())
         .is_some_and(|r| r.headers().contains_key(reqwest::header::AUTHORIZATION));
     let mut response = request
         .send()
@@ -109,8 +114,10 @@ async fn fetch_issue(request: reqwest::RequestBuilder, number: u64) -> ApiResult
         .map_err(|_| ApiError::new(Code::Unavailable, "GitHub issue fetch failed"))?;
     if !response.status().is_success() {
         if !authenticated && matches!(response.status().as_u16(), 401 | 403 | 404) {
-            return Err(ApiError::new(Code::Unavailable,
-                "GitHub issue unavailable without a token. For a private repository, configure a granted token credential; public issues may be missing or rate-limited."));
+            return Err(ApiError::new(
+                Code::Unavailable,
+                "GitHub issue unavailable without a token. For a private repository, configure a granted token credential; public issues may be missing or rate-limited.",
+            ));
         }
         return Err(ApiError::new(
             Code::Unavailable,
@@ -168,8 +175,16 @@ pub(crate) fn import_verified(
         actor,
         project,
         board::NewCard {
-            title: Some(format!("GitHub #{}: {}", issue.number,
-                issue.title.chars().filter(|c| !c.is_control()).take(200).collect::<String>())),
+            title: Some(format!(
+                "GitHub #{}: {}",
+                issue.number,
+                issue
+                    .title
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(200)
+                    .collect::<String>()
+            )),
             body: Some(format!(
                 "{url}\nAuthor: {}\n\n{}",
                 issue.user.login,
@@ -208,10 +223,13 @@ mod tests {
         use axum::{Router, routing::get};
         let valid = r#"{"number":7,"title":"x","body":null,"user":{"login":"eve"}}"#;
         let app = Router::new()
-            .route("/ok", get(move |headers: axum::http::HeaderMap| async move {
-                assert!(!headers.contains_key("authorization"));
-                valid
-            }))
+            .route(
+                "/ok",
+                get(move |headers: axum::http::HeaderMap| async move {
+                    assert!(!headers.contains_key("authorization"));
+                    valid
+                }),
+            )
             .route("/bad", get(|| async { "not json" }))
             .route(
                 "/pr",
@@ -237,8 +255,21 @@ mod tests {
             "eve"
         );
         let ssh = Secret::SshKey(zeroize::Zeroizing::new("test deploy key".into()));
-        assert_eq!(fetch_issue(token_auth(request("ok"), Some(ssh)), 7).await.unwrap().number, 7);
-        assert!(fetch_issue(token_auth(request("missing"), None), 7).await.err().unwrap().message.contains("private repository"));
+        assert_eq!(
+            fetch_issue(token_auth(request("ok"), Some(ssh)), 7)
+                .await
+                .unwrap()
+                .number,
+            7
+        );
+        assert!(
+            fetch_issue(token_auth(request("missing"), None), 7)
+                .await
+                .err()
+                .unwrap()
+                .message
+                .contains("private repository")
+        );
         assert!(fetch_issue(request("ok"), 8).await.is_err());
         for path in ["bad", "pr", "redirect", "missing", "large"] {
             assert!(fetch_issue(request(path), 7).await.is_err(), "{path}");
@@ -309,15 +340,30 @@ mod tests {
         assert_eq!(again.id, held.id);
         assert_eq!(again.column, "blocked");
         projects::set_github_authors(&mut t, "p", &[]).unwrap();
-        let unconfigured = import_verified(&mut t, &actor, "p", "repo", "o/r", issue(3, "wiltaylor")).unwrap();
+        let unconfigured =
+            import_verified(&mut t, &actor, "p", "repo", "o/r", issue(3, "wiltaylor")).unwrap();
         assert_eq!(unconfigured.column, "blocked");
         assert!(unconfigured.labels.contains(&"hold".into()));
-        let forged = board::create_card(&mut t, &actor, "p", board::NewCard {
-            title: Some("ordinary".into()), ..Default::default()
-        }).unwrap();
-        board::add_link(&mut t, &actor, &forged.id, &board::NewLink {
-            kind: "url".into(), reference: "https://github.com/o/r/issues/4".into()
-        }).unwrap();
+        let forged = board::create_card(
+            &mut t,
+            &actor,
+            "p",
+            board::NewCard {
+                title: Some("ordinary".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        board::add_link(
+            &mut t,
+            &actor,
+            &forged.id,
+            &board::NewLink {
+                kind: "url".into(),
+                reference: "https://github.com/o/r/issues/4".into(),
+            },
+        )
+        .unwrap();
         let mut malicious = issue(4, "wiltaylor");
         malicious.title = format!("bad\n\r\u{1b}{}", "x".repeat(1000));
         let imported = import_verified(&mut t, &actor, "p", "repo", "o/r", malicious).unwrap();
