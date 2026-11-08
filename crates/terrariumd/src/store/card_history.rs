@@ -19,7 +19,7 @@ pub struct WorkSample {
     pub labels: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkHistory {
     pub n: usize,
     pub median_ms: Option<f64>,

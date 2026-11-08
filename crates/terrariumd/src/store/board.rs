@@ -201,6 +201,7 @@ pub struct Card {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta_calibrated: Option<bool>,
     /// Recent completed worker estimates in this project with the same type.
+    #[serde(default)]
     pub eta_history: super::card_history::WorkHistory,
     /// When the card last moved to `done`. A reopen clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
