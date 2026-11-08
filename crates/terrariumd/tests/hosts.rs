@@ -815,14 +815,39 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
         .unwrap();
     assert_eq!(count, 1);
     terrariumd::target_roots::sweep(&state).await.unwrap();
-    let refused = lab.td.get("/api/audit?action=agent.target_cleanup_refused").await;
-    assert_eq!(refused.ok().as_array().unwrap().len(), 1, "unchanged refusals are not repeated");
-    lab.td.patch("/api/targets/box", json!({"work_root": base.join("elsewhere")})).await.ok();
+    let refused = lab
+        .td
+        .get("/api/audit?action=agent.target_cleanup_refused")
+        .await;
+    assert_eq!(
+        refused.ok().as_array().unwrap().len(),
+        1,
+        "unchanged refusals are not repeated"
+    );
+    lab.td
+        .patch(
+            "/api/targets/box",
+            json!({"work_root": base.join("elsewhere")}),
+        )
+        .await
+        .ok();
     terrariumd::target_roots::sweep(&state).await.unwrap();
-    assert!(root.join("target/output").exists(), "changed location must not be cleaned");
-    let refused = lab.td.get("/api/audit?action=agent.target_cleanup_refused").await;
-    assert_eq!(refused.ok()[0]["detail"]["error"], "target machine or work_root changed");
-    lab.td.patch("/api/targets/box", json!({"work_root": base})).await.ok();
+    assert!(
+        root.join("target/output").exists(),
+        "changed location must not be cleaned"
+    );
+    let refused = lab
+        .td
+        .get("/api/audit?action=agent.target_cleanup_refused")
+        .await;
+    assert_eq!(
+        refused.ok()[0]["detail"]["error"],
+        "target machine or work_root changed"
+    );
+    lab.td
+        .patch("/api/targets/box", json!({"work_root": base}))
+        .await
+        .ok();
     std::fs::write(root.join(".terrarium-owner"), &id).unwrap();
     terrariumd::target_roots::sweep(&state).await.unwrap();
     assert!(!root.exists());
@@ -833,7 +858,10 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     assert_eq!(detail["target"], "box");
     assert_eq!(detail["path"], root.to_str().unwrap());
     assert!(detail["size"].as_u64().unwrap() > 0);
-    let started = lab.td.get("/api/audit?action=agent.target_cleanup_started").await;
+    let started = lab
+        .td
+        .get("/api/audit?action=agent.target_cleanup_started")
+        .await;
     assert_eq!(started.ok()[0]["detail"]["size"], detail["size"]);
     let count = state
         .db

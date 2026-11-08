@@ -548,13 +548,35 @@ mod tests {
         assert!(run(tmp.path(), "prepare", "repo"));
         let owned = tmp.path().join("src/terrarium/p/a");
         let injection = "os.rename(name, name + '.old', src_dir_fd=parent, dst_dir_fd=parent)\n            os.mkdir(name, dir_fd=parent)\n            replacement = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)\n            keep = os.open('keep', os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=replacement)\n            os.close(keep)\n            os.close(replacement)\n            walk(fd, True, meta.st_dev, mount_id(fd), keep_owner=True)";
-        let script = SCRIPT.replace("walk(fd, True, meta.st_dev, mount_id(fd), keep_owner=True)", injection);
-        let script = script.replace("os.open('/',", &format!("os.open({:?},", tmp.path().to_str().unwrap()));
-        let out = Command::new("python3").args(["-c", &script, "delete", "/src/terrarium", "p", "a", "agent-id", ""])
-            .output().unwrap();
+        let script = SCRIPT.replace(
+            "walk(fd, True, meta.st_dev, mount_id(fd), keep_owner=True)",
+            injection,
+        );
+        let script = script.replace(
+            "os.open('/',",
+            &format!("os.open({:?},", tmp.path().to_str().unwrap()),
+        );
+        let out = Command::new("python3")
+            .args([
+                "-c",
+                &script,
+                "delete",
+                "/src/terrarium",
+                "p",
+                "a",
+                "agent-id",
+                "",
+            ])
+            .output()
+            .unwrap();
         assert!(!out.status.success());
         assert!(owned.join("keep").exists());
-        assert!(owned.with_file_name("a.old").join(".terrarium-owner").exists());
+        assert!(
+            owned
+                .with_file_name("a.old")
+                .join(".terrarium-owner")
+                .exists()
+        );
     }
 
     #[test]
