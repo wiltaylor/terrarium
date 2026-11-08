@@ -16,7 +16,8 @@
 //!   runs; an event at chain depth [`MAX_CHAIN_DEPTH`] (`data.cause.depth`,
 //!   counted over rule and trigger runs) starts no run; a rule runs at most
 //!   `max_per_hour` times in an hour (default [`DEFAULT_MAX_PER_HOUR`]),
-//!   and at most [`MAX_PER_CARD_PER_HOUR`] times for one card. A guard
+//!   and at most [`MAX_PER_CARD_PER_HOUR`] times for one card unless
+//!   `max_per_hour` explicitly sets both limits. A guard
 //!   writes a `skipped` row with the reason.
 //! - **Per-card order.** [`run_pending`] runs the pending rows in event
 //!   order, then rule order. The rows of one card (its lane) run one after
@@ -409,15 +410,16 @@ pub fn decide(
     }
     let hour_ago = schedules::stamp(now - chrono::Duration::hours(1));
     let max = i64::from(rule.max_per_hour.unwrap_or(DEFAULT_MAX_PER_HOUR));
+    let card_max = rule.max_per_hour.map_or(MAX_PER_CARD_PER_HOUR, i64::from);
     let mut out = Vec::new();
     for card in cards {
         let skip = if count_since(conn, project, &rule.name, None, &hour_ago)? >= max {
             Some(format!("rate limit: {max} runs in an hour"))
         } else if let Some(c) = &card
-            && count_since(conn, project, &rule.name, Some(c), &hour_ago)? >= MAX_PER_CARD_PER_HOUR
+            && count_since(conn, project, &rule.name, Some(c), &hour_ago)? >= card_max
         {
             Some(format!(
-                "card rate limit: {MAX_PER_CARD_PER_HOUR} runs for {c} in an hour"
+                "card rate limit: {card_max} runs for {c} in an hour"
             ))
         } else {
             None
@@ -815,6 +817,7 @@ pub struct RunCtx {
     pub rerun: Option<jobs::Job>,
     /// The halves of the job, when it was split (left first).
     pub halves: Vec<jobs::Job>,
+    pub merge_group_key: Option<String>,
 }
 
 impl RunCtx {
@@ -869,6 +872,24 @@ fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
         ),
         None => (None, Vec::new()),
     };
+    let merge_group_key = match &job {
+        Some(j) if j.kind == jobs::JobKind::Merge => conn
+            .query_row(
+                "SELECT g.key FROM card_groups g JOIN group_members m ON m.group_card = g.card
+             WHERE m.card IN (SELECT value FROM json_each(?1))
+             AND g.project = ?2 AND g.key LIKE 'merge:%'
+             AND (g.closed_at IS NULL OR g.closed_at >= ?3)
+             ORDER BY g.rowid DESC LIMIT 1",
+                rusqlite::params![
+                    serde_json::to_string(&j.cards().iter().map(|c| &c.card).collect::<Vec<_>>())?,
+                    j.project,
+                    j.created_at
+                ],
+                |r| r.get(0),
+            )
+            .optional()?,
+        _ => None,
+    };
     Ok(RunCtx {
         project: row.project.clone(),
         rule: row.rule.clone(),
@@ -878,6 +899,7 @@ fn load_ctx(conn: &Connection, row: &RunRow) -> ApiResult<RunCtx> {
         job,
         rerun,
         halves,
+        merge_group_key,
     })
 }
 
@@ -1014,6 +1036,20 @@ pub fn card_condition_fails(
 
 /// The value of a placeholder (`event.*`, `card.*`, `job.*`, `rule.name`).
 pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
+    if let Some(f) = name.strip_prefix("group.") {
+        let g = ctx.card.as_ref()?.group.as_ref()?;
+        return Some(match f {
+            "id" => g.id.clone(),
+            "key" => g.key.clone(),
+            "title" => g.title.clone(),
+            "column" => g.column.clone(),
+            "status" => g.status.clone(),
+            "done" => g.done.to_string(),
+            "total" => g.total.to_string(),
+            "eta_at" => g.eta_at.clone()?,
+            _ => return None,
+        });
+    }
     if let Some(path) = name.strip_prefix("event.") {
         return ctx.event.as_ref().map(|e| event_view(e).text(path));
     }
@@ -1061,6 +1097,11 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
             };
             // The texts of the coded flow (TER-170), from its own code.
             let out = match f {
+                "group_key" => Some(
+                    ctx.merge_group_key
+                        .clone()
+                        .unwrap_or_else(|| format!("merge:{}", j.id)),
+                ),
                 "id" => Some(j.id.clone()),
                 "kind" => Some(j.kind.as_str().to_owned()),
                 "state" => Some(j.state.as_str().to_owned()),
@@ -1370,6 +1411,13 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
         if !timers_checked && cache.timers_at.is_none_or(|at| at.elapsed() >= TICK) {
             timers_checked = true;
             cache.timers_at = Some(std::time::Instant::now());
+            if let Err(e) = state
+                .db
+                .write("rule:group-timeout", crate::store::groups::expire)
+                .await
+            {
+                warn!("the rule engine cannot close expired groups: {e}");
+            }
             if let Err(e) = fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await {
                 warn!("the rule engine cannot check the timers: {e}");
             }

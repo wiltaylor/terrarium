@@ -583,6 +583,7 @@ export interface Api {
    * Each call answers with the new list.
    */
   pins: {
+    // Conversation pins are independent of sidebar bookmarks.
     list(): Promise<Pin[]>;
     /** `PUT /api/pins/{agent}`: pin at the end. A pin that exists stays where it is. */
     pin(agent: string): Promise<Pin[]>;
@@ -594,6 +595,11 @@ export interface Api {
    * Project folders of the sidebar (docs/api.md §6.12). Kept on the daemon, so they are the same in each browser. The
    * operator and a sysadmin only. A delete moves the subfolders and projects of the folder up one level.
    */
+  bookmarks: {
+    list(): Promise<{ title: string; href: string }[]>;
+    add(title: string, href: string): Promise<{ title: string; href: string }[]>;
+    remove(href: string): Promise<{ title: string; href: string }[]>;
+  };
   projectFolders: {
     list(): Promise<ProjectFolderTree>;
     create(body: { name: string; parent_id?: string | null }): Promise<ProjectFolder>;
@@ -1348,6 +1354,11 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       remove: (id) => del(`/api/test-runs/${seg(id)}`),
     },
 
+    bookmarks: {
+      list: () => get("/api/bookmarks"),
+      add: (title, href) => put("/api/bookmarks", { title, href }),
+      remove: (href) => t.request("DELETE", "/api/bookmarks", { body: { href } }),
+    },
     projectFolders: {
       list: () => get("/api/project-folders"),
       create: (body) => post("/api/project-folders", body),

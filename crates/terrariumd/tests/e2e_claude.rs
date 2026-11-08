@@ -16,6 +16,8 @@
 //! are in `docs/compat.md`, "Claude inside bwrap".
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)]
 
+mod common;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -136,6 +138,7 @@ async fn claude_in_bwrap_answers_one_turn() {
     let sup = Arc::new(RunnerSupervisor::new(with_runner_mode(cfg)));
     let socket = run.path().join("api.sock");
     std::fs::create_dir_all(root.path().join("config")).unwrap();
+    common::seed_database(&root.path().join("state"));
     let daemon: Daemon = terrariumd::start(DaemonConfig {
         socket: socket.clone(),
         listen: None,
@@ -462,6 +465,7 @@ async fn two_claude_agents_share_one_home() {
     let sup = Arc::new(RunnerSupervisor::new(with_runner_mode(cfg)));
     let socket = run.path().join("api.sock");
     std::fs::create_dir_all(root.path().join("config")).unwrap();
+    common::seed_database(&root.path().join("state"));
     let daemon: Daemon = terrariumd::start(DaemonConfig {
         socket: socket.clone(),
         listen: None,

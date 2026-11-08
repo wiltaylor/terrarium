@@ -4090,6 +4090,14 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     calendar: calendarMock.api,
 
     projectFolders: folderMock.api,
+    bookmarks: (() => {
+      let rows: { title: string; href: string }[] = [];
+      return {
+        list: async () => [...rows],
+        add: async (title: string, href: string) => (rows = [...rows.filter((b) => b.href !== href), { title, href }]),
+        remove: async (href: string) => (rows = rows.filter((b) => b.href !== href)),
+      };
+    })(),
 
     // docs/api.md §6.11: operator only; each call answers with the list.
     pins: (() => {

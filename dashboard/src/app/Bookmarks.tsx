@@ -1,27 +1,33 @@
 import { A } from "@solidjs/router";
 import { createSignal, For, Show } from "solid-js";
-import { bookmarks } from "../stores/bookmarks";
+import { bookmarks } from "../stores";
+import { ErrorBanner } from "../components/ui";
+import { expanded, TreeNode } from "./TreeRoot";
+import { createRovingTree } from "./treeNav";
 
-/** Browser-local bookmarks, below Projects in the sidebar. */
-export function Bookmarks() {
+import { BOOKMARKS_KEY } from "./treeModel";
+export { BOOKMARKS_KEY } from "./treeModel";
+export const bookmarkKey = (href: string) => `bookmark:${href}`;
+
+/** A real node of the Projects navigation tree. */
+export function Bookmarks(props: { nav?: ReturnType<typeof createRovingTree> }) {
+  const nav = props.nav ?? createRovingTree({ keys: () => [BOOKMARKS_KEY, ...bookmarks.items().map((b) => bookmarkKey(b.href))] });
   const [title, setTitle] = createSignal("");
   const [url, setUrl] = createSignal("");
   const [error, setError] = createSignal(false);
   return (
-    <details class="nav-section">
-      <summary>Bookmarks</summary>
-      <p class="muted small">Saved in this browser.</p>
-      <For each={bookmarks.items()} fallback={<p class="muted small">No bookmarks.</p>}>
+    <TreeNode label="Bookmarks" rowKey={BOOKMARKS_KEY} project="" groupId="bookmarks-group" open={expanded.isOpen(BOOKMARKS_KEY)} onToggle={() => expanded.toggle(BOOKMARKS_KEY)} nav={nav}>
+      <For each={bookmarks.items()} fallback={<li role="none" class="muted small">No bookmarks.</li>}>
         {(b) => (
-          <div class="row">
-            <Show when={b.href.startsWith("/")} fallback={<a href={b.href} target="_blank" rel="noopener noreferrer" title="Opens in a new window">{b.title}</a>}>
-              <A href={b.href}>{b.title}</A>
+          <li role="none" class="row">
+            <Show when={b.href.startsWith("/")} fallback={<a role="treeitem" data-key={bookmarkKey(b.href)} tabIndex={nav.tabIndex(bookmarkKey(b.href))} onFocus={() => nav.setFocusKey(bookmarkKey(b.href))} href={b.href} target="_blank" rel="noopener noreferrer" title="Opens in a new window">{b.title}</a>}>
+              <A role="treeitem" data-key={bookmarkKey(b.href)} tabIndex={nav.tabIndex(bookmarkKey(b.href))} onFocus={() => nav.setFocusKey(bookmarkKey(b.href))} href={b.href}>{b.title}</A>
             </Show>
             <button aria-label={`Remove bookmark ${b.title}`} onClick={() => bookmarks.remove(b.href)}>×</button>
-          </div>
+          </li>
         )}
       </For>
-      <form class="stack" onSubmit={(e) => {
+      <li role="none"><ErrorBanner error={bookmarks.error()} /><form class="stack" onSubmit={(e) => {
         e.preventDefault();
         if (!bookmarks.add(title(), url())) { setError(true); return; }
         setTitle(""); setUrl(""); setError(false);
@@ -30,7 +36,7 @@ export function Bookmarks() {
         <input aria-label="Bookmark URL" placeholder="https://…" required value={url()} onInput={(e) => setUrl(e.currentTarget.value)} />
         <Show when={error()}><p role="alert">Enter a wiki page URL or an HTTP(S) URL and a title.</p></Show>
         <button type="submit">Add bookmark</button>
-      </form>
-    </details>
+      </form></li>
+    </TreeNode>
   );
 }

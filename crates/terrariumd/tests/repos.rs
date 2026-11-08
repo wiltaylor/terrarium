@@ -83,6 +83,127 @@ on_agent_create = ["proj", "missing"]
     (td, origin, remotes)
 }
 
+/// Run as the checkout's user, without the identity inherited by this test.
+fn agent_git(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir).args(args);
+    for k in [
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "TERRARIUM_GIT_TRAILERS",
+        "TERRARIUM_GIT_TRAILERS_FILE",
+    ] {
+        cmd.env_remove(k);
+    }
+    cmd.envs(env.iter().copied());
+    let o = cmd.output().unwrap();
+    assert!(
+        o.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    String::from_utf8(o.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn agent_commits_have_bot_identity_and_current_terrarium_session() {
+    let (td, _origin, _remotes) = daemon_with_repo().await;
+    let a = td
+        .agent("terra", "worker", json!({"model": "test-model"}))
+        .await;
+    let id = a["id"].as_str().unwrap().to_owned();
+    let workspace = PathBuf::from(a["workspace"].as_str().unwrap());
+    let dest = workspace.join("proj");
+    let state = &td.daemon.as_ref().unwrap().state;
+    let key = id.clone();
+    let first = state
+        .db
+        .write("system", move |t| {
+            terrariumd::store::agents::begin_session(t, &key, "test")
+        })
+        .await
+        .unwrap();
+    terrariumd::git_identity::refresh(state, &id).await.unwrap();
+    let file = workspace
+        .join(terrariumd::git_identity::TRAILERS_FILE)
+        .display()
+        .to_string();
+    let env = [("TERRARIUM_GIT_TRAILERS_FILE", file.as_str())];
+    agent_git(
+        &dest,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "feat: provenance",
+            "-m",
+            "pre-release: true\nbump: patch",
+        ],
+        &env,
+    );
+    let identity = agent_git(&dest, &["show", "-s", "--format=%an <%ae>%n%cn <%ce>"], &[]);
+    assert_eq!(
+        identity,
+        "Terrarium <terrarium@localhost>\nTerrarium <terrarium@localhost>\n"
+    );
+    let parsed = agent_git(
+        &dest,
+        &["show", "-s", "--format=%(trailers:only,unfold)"],
+        &[],
+    );
+    for expected in [
+        format!("Terrarium-Session: {first}"),
+        "Terrarium-Agent: terra/worker".into(),
+        "Terrarium-Harness: claude unknown".into(),
+        "Terrarium-Model: test-model".into(),
+        "pre-release: true".into(),
+        "bump: patch".into(),
+    ] {
+        assert!(parsed.contains(&expected), "missing {expected}: {parsed}");
+    }
+    assert!(!parsed.to_lowercase().contains("co-authored"));
+
+    // A new session must replace the old trailer, including on --amend.
+    let key = id.clone();
+    let second = state
+        .db
+        .write("system", move |t| {
+            terrariumd::store::agents::begin_session(t, &key, "test")
+        })
+        .await
+        .unwrap();
+    terrariumd::git_identity::refresh(state, &id).await.unwrap();
+    agent_git(
+        &dest,
+        &["commit", "--allow-empty", "--amend", "--no-edit"],
+        &env,
+    );
+    let parsed = agent_git(&dest, &["show", "-s", "--format=%(trailers:only)"], &[]);
+    assert!(
+        parsed.contains(&format!("Terrarium-Session: {second}")),
+        "{parsed}"
+    );
+    assert!(!parsed.contains(&first), "{parsed}");
+    assert_eq!(parsed.matches("Terrarium-Session:").count(), 1);
+    assert!(parsed.contains("pre-release: true"));
+
+    // Refresh replaces a planted link, never the file it names.
+    let victim = workspace.join("victim");
+    std::fs::write(&victim, "keep").unwrap();
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink(&victim, &file).unwrap();
+    terrariumd::git_identity::refresh(state, &id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    assert!(
+        !std::fs::symlink_metadata(&file)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
 #[tokio::test]
 async fn credentials_are_write_only() {
     let td = TestDaemon::start().await;
@@ -760,7 +881,11 @@ on_agent_create = ["app"]
     let a = created.ok().clone();
     let checkout = &a["checkout"][0];
     assert_eq!(checkout["action"], "cloned", "{a}");
-    assert_eq!(checkout["hooks"], json!(["commit-msg", "pre-push"]), "{a}");
+    assert_eq!(
+        checkout["hooks"],
+        json!(["commit-msg", "pre-push", "prepare-commit-msg"]),
+        "{a}"
+    );
     let hooks = PathBuf::from(a["workspace"].as_str().unwrap()).join("app/.git/hooks");
     assert!(hooks.join("commit-msg").is_file());
     let guard = std::fs::read_to_string(hooks.join("pre-push")).unwrap();
