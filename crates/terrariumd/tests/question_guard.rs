@@ -98,6 +98,8 @@ async fn status_lines_do_not_block_or_mail_the_lead() {
 async fn registered_waits_and_tracked_questions_are_exempt() {
     let td = TestDaemon::start().await;
     td.project("p").await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
     for (index, kind) in ["wait", "thread", "question", "bundle"]
         .into_iter()
         .enumerate()
