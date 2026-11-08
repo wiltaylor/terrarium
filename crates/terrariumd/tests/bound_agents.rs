@@ -955,8 +955,14 @@ async fn re_park_drops_a_queued_unpark(missed: bool) {
         !waiting.iter().any(|q| q.text.starts_with(&card_tag)),
         "{waiting:?}"
     );
-    assert!(!waiting.iter().any(|q| q.text == "Custom return"), "{waiting:?}");
-    assert!(waiting.iter().any(|q| q.text == "Unrelated turn"), "{waiting:?}");
+    assert!(
+        !waiting.iter().any(|q| q.text == "Custom return"),
+        "{waiting:?}"
+    );
+    assert!(
+        waiting.iter().any(|q| q.text == "Unrelated turn"),
+        "{waiting:?}"
+    );
     // B parks: a place frees, but A stays parked, with no turn.
     mv(&td, &b, "validating", None).await;
     parked(&td, &eb).await;
