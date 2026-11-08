@@ -238,6 +238,8 @@ pub enum CloseReason {
     Stale,
     /// Its agent did not start.
     FailedStart,
+    /// A later operator message reached a thread whose agent ended.
+    AgentEnded,
 }
 
 impl CloseReason {
@@ -247,6 +249,7 @@ impl CloseReason {
             Self::Confirmed => "confirmed",
             Self::Stale => "stale",
             Self::FailedStart => "failed_start",
+            Self::AgentEnded => "agent_ended",
         }
     }
 }
@@ -1119,6 +1122,19 @@ fn set_status(t: &mut Tx<'_>, id: &str, status: ThreadStatus, at: &str) -> ApiRe
     Ok(())
 }
 
+fn close_after_agent_end(t: &mut Tx<'_>, th: Thread) -> ApiResult<Thread> {
+    let summary = "Your message was saved, but the thread agent has ended. Nobody will answer in this thread.";
+    insert_message(t, &th.id, "system", "message", summary, &now())?;
+    close(
+        t,
+        &th.id,
+        "system",
+        CloseReason::AgentEnded,
+        Some(summary),
+        vec![],
+    )
+}
+
 /// Post a message: by the operator (then the agent must act) or by the
 /// attached agent (then the operator must act). In a thread that tracks
 /// (`tracking_at`), the agent's message puts it back into `tracking`
@@ -1129,6 +1145,10 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     let text = t.redact_string(check_text("text", text, MAX_MESSAGE)?);
     let at = now();
     let msg = insert_message(t, &th.id, author, "message", &text, &at)?;
+    if author == "operator" && th.agent_end_outcome.is_some() {
+        emit_with(t, &th, "message", json!({"message": msg, "author": author}))?;
+        return close_after_agent_end(t, th);
+    }
     let status = if author == "operator" {
         ThreadStatus::WaitingAgent
     } else if open_questions(t, &th.id)? > 0 {
@@ -1163,7 +1183,9 @@ pub fn agent_ended(t: &mut Tx<'_>, id: &str, agent: &str, outcome: &str) -> ApiR
     let at = now();
     insert_message(t, id, "system", "message", &text, &at)?;
     t.execute(
-        "UPDATE threads SET updated_at = ?2, agent_end_outcome = ?3 WHERE id = ?1",
+        "UPDATE threads SET updated_at = ?2, agent_end_outcome = ?3,
+         status = CASE WHEN status = 'waiting_agent' THEN 'waiting_operator' ELSE status END
+         WHERE id = ?1",
         params![id, at, outcome],
     )?;
     let open: Vec<String> = {
@@ -1183,9 +1205,15 @@ pub fn agent_ended(t: &mut Tx<'_>, id: &str, agent: &str, outcome: &str) -> ApiR
             )),
         )?;
     }
-    if let Some(lead) = &th.report_to
-        && let Ok(to) = super::mail::resolve(t, lead, None)
-    {
+    if let Some(lead) = &th.report_to {
+        let to = match super::mail::resolve(t, lead, None) {
+            Ok(to) => to,
+            Err(e) => {
+                tracing::warn!(thread = %id, report_to = %lead, "no agent-end mail: {}", e.message);
+                emit(t, &get_bare(t, id)?, "agent_ended")?;
+                return Ok(());
+            }
+        };
         super::mail::send(
             t,
             super::mail::Outgoing {
@@ -1236,6 +1264,9 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
         "response",
         json!({"message": msg, "author": "operator"}),
     )?;
+    if th.agent_end_outcome.is_some() {
+        return close_after_agent_end(t, th);
+    }
     flush_pending_wakes(t, id)?;
     Ok(th)
 }

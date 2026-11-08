@@ -411,6 +411,9 @@ fn live_project(
         "repos": repos,
         "checkout": checkout,
     });
+    if let Some(owner) = &p.card_dispatcher {
+        spec["card_dispatcher"] = json!(owner);
+    }
     if delivery {
         spec["delivery"] = json!(jobs::delivery(conn, &p.name)?);
     }
@@ -430,6 +433,13 @@ fn desired_project(
         "repos": desired_repos(def),
         "checkout": def.checkout.on_agent_create,
     });
+    if let Some(owner) = def
+        .card_dispatcher
+        .as_deref()
+        .filter(|owner| *owner != "off")
+    {
+        spec["card_dispatcher"] = json!(owner);
+    }
     if let Some(d) = delivery {
         spec["delivery"] = json!(d);
     }
@@ -1692,6 +1702,7 @@ fn apply_project(
                     t,
                     &def.name,
                     &ProjectPatch {
+                        card_dispatcher: None,
                         human_comment_notifications: None,
                         description: Some(description),
                         card_prefix: prefix,
@@ -1708,6 +1719,11 @@ fn apply_project(
     if let Some(flow) = def.board_flow {
         projects::set_board_flow(t, &def.name, flow)?;
     }
+    projects::set_card_dispatcher(
+        t,
+        &def.name,
+        def.card_dispatcher.as_deref().unwrap_or("off"),
+    )?;
     // Repos: the file list replaces the repos the fleet applied before,
     // and takes over API repos with the same name. Equal repos stay, so
     // their IDs stay.
@@ -2007,6 +2023,7 @@ pub fn export(
         templates: Vec::new(),
         projects: vec![fleet::FleetProject {
             def: ProjectDef {
+                card_dispatcher: p.card_dispatcher,
                 name: p.name.clone(),
                 description: (!p.description.is_empty()).then_some(p.description),
                 prefix: Some(p.card_prefix),
