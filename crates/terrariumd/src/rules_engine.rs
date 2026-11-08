@@ -334,12 +334,15 @@ fn count_since(
     rule: &str,
     card: Option<&str>,
     since: &str,
+    limit: i64,
 ) -> ApiResult<i64> {
+    // Guards only need to know whether the limit was reached. Once it
+    // was, do not scan the growing tail of skipped rows on every event.
     Ok(conn.query_row(
-        "SELECT count(*) FROM rule_runs
+        "SELECT count(*) FROM (SELECT 1 FROM rule_runs
           WHERE project = ?1 AND rule = ?2 AND created_at >= ?3 AND state != 'skipped'
-            AND (?4 IS NULL OR card = ?4)",
-        params![project, rule, since, card],
+            AND (?4 IS NULL OR card = ?4) LIMIT ?5)",
+        params![project, rule, since, card, limit],
         |r| r.get(0),
     )?)
 }
@@ -411,10 +414,10 @@ pub fn decide(
     let max = i64::from(rule.max_per_hour.unwrap_or(DEFAULT_MAX_PER_HOUR));
     let mut out = Vec::new();
     for card in cards {
-        let skip = if count_since(conn, project, &rule.name, None, &hour_ago)? >= max {
+        let skip = if count_since(conn, project, &rule.name, None, &hour_ago, max)? >= max {
             Some(format!("rate limit: {max} runs in an hour"))
         } else if let Some(c) = &card
-            && count_since(conn, project, &rule.name, Some(c), &hour_ago)? >= MAX_PER_CARD_PER_HOUR
+            && count_since(conn, project, &rule.name, Some(c), &hour_ago, MAX_PER_CARD_PER_HOUR)? >= MAX_PER_CARD_PER_HOUR
         {
             Some(format!(
                 "card rate limit: {MAX_PER_CARD_PER_HOUR} runs for {c} in an hour"
@@ -448,10 +451,15 @@ pub async fn plan_pass(
     projects: Vec<ProjectRules>,
     now: DateTime<Utc>,
 ) -> ApiResult<(usize, bool)> {
-    db.write("system", move |t| plan_events(t, &projects, now)).await
+    db.write("system", move |t| plan_events(t, &projects, now))
+        .await
 }
 
-fn plan_events(t: &Tx<'_>, projects: &[ProjectRules], now: DateTime<Utc>) -> ApiResult<(usize, bool)> {
+fn plan_events(
+    t: &Tx<'_>,
+    projects: &[ProjectRules],
+    now: DateTime<Utc>,
+) -> ApiResult<(usize, bool)> {
     let Some(cursor) = cursor(t)? else {
         let last = events::last_seq(t)?;
         set_cursor(t, last)?;
@@ -1410,10 +1418,14 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
         // Discover runnable lanes in the planning transaction. A separate
         // read would queue behind every worker again before we can plan
         // the next events under load.
-        let (more, pending) = match state.db.write("system", move |t| {
-            let (_, more) = plan_events(t, &projects, Utc::now())?;
-            Ok((more, pending_lanes(t)?))
-        }).await {
+        let (more, pending) = match state
+            .db
+            .write("system", move |t| {
+                let (_, more) = plan_events(t, &projects, Utc::now())?;
+                Ok((more, pending_lanes(t)?))
+            })
+            .await
+        {
             Ok(planned) => planned,
             Err(e) => {
                 warn!("the rule engine cannot read the event log: {e}");
