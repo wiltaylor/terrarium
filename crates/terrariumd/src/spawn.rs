@@ -1145,6 +1145,14 @@ pub fn prompt_section(info: &PromptInfo) -> String {
 
 /// The prompt of a bound agent (TER-74): its life follows its object.
 fn bound_prompt_section(owner: &str, bound: &str) -> String {
+    if let Some(card) = bound.strip_prefix("review:") {
+        return format!(
+            "## You are a review agent\n\nYou review card {card} for `{owner}`. \
+             Post a comment on that card with the first line exactly `accept` or `changes`, \
+             followed by findings. Do not move cards, merge, deploy, or claim work. \
+             End your turn after the verdict. The daemon closes this review round.\n"
+        );
+    }
     if let Some(thread) = bound.strip_prefix("thread:") {
         return thread_prompt_section(thread);
     }

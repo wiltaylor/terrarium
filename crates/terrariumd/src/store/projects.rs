@@ -338,6 +338,7 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
         json!({"description": patch.description, "card_prefix": patch.card_prefix,
                "idle_alert": patch.idle_alert, "github_authors": patch.github_authors,
                "board_flow": patch.board_flow, "card_dispatcher": patch.card_dispatcher,
+               "review_dispatcher": patch.review_dispatcher,
                "human_comment_notifications": patch.human_comment_notifications}),
     )?;
     get(t, name)

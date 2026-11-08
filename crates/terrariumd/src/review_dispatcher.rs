@@ -42,7 +42,9 @@ fn candidate(c: &Connection, project: &str) -> ApiResult<Option<String>> {
             |r| r.get(0),
         )?;
         let reviewed: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM card_reviews WHERE card = ?1 AND applied = 0)",
+            "SELECT EXISTS(SELECT 1 FROM card_reviews r WHERE card = ?1
+             AND (applied = 2 OR (applied = 0 AND EXISTS
+                 (SELECT 1 FROM spawns s WHERE s.id = r.agent AND s.finished_at IS NULL))))",
             [&card.id],
             |r| r.get(0),
         )?;
@@ -116,7 +118,8 @@ pub fn verdict(t: &mut Tx<'_>, reviewer: &Actor, id: &str, body: &str) -> ApiRes
         return Ok(());
     };
     let current: bool = t.query_row(
-        "SELECT EXISTS(SELECT 1 FROM card_reviews WHERE card = ?1 AND agent = ?2 AND applied = 0)",
+        "SELECT EXISTS(SELECT 1 FROM card_reviews r JOIN spawns s ON s.id = r.agent
+         WHERE r.card = ?1 AND r.agent = ?2 AND r.applied = 0 AND s.finished_at IS NULL)",
         params![id, a.id],
         |r| r.get(0),
     )?;
@@ -137,7 +140,7 @@ pub fn verdict(t: &mut Tx<'_>, reviewer: &Actor, id: &str, body: &str) -> ApiRes
         _ => return Ok(()),
     };
     // Mark this round consumed even when the decision is reserved for the lead.
-    t.execute("UPDATE card_reviews SET applied = 1 WHERE card = ?1", [id])?;
+    t.execute("UPDATE card_reviews SET applied = 2 WHERE card = ?1", [id])?;
     if card.labels.iter().any(|l| l == "review:lead") {
         return Ok(());
     }

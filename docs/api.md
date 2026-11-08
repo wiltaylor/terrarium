@@ -878,6 +878,22 @@ address per 10 min with a `count`), `auth.lockout` (`scope`: `address` or
 
 ## 5. Projects
 
+Projects may opt into automatic reviews with `review_dispatcher: "<project-admin>"`
+in a project file, fleet project, or project PATCH. The default is off, and
+`"off"` disables it. This is independent of ready-card dispatch. The dispatcher
+uses the project's `card-review` template and that admin's spawn rights, caps,
+and template grants. Missing templates back off rather than falling back to a
+global template.
+
+Each card in review gets at most one review agent at a time. `review_round`
+on the card counts successful review spawns. Only the current review agent's
+comment can supply a verdict: its first line must be exactly `accept` or
+`changes`, with findings below it. Accept moves to `merge_queue`, never
+merges. Changes moves to the top of `ready`, carrying the findings and
+waking the bound implementation agent through the normal card-move flow.
+The `review:lead` label retains both decisions for the lead without an
+automatic move. Moving the card invalidates the previous round's verdict.
+
 A project:
 
 ```json
