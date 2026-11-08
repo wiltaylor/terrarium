@@ -10,15 +10,67 @@ const EXCLUDES: &[&str] = &[
     "target",
     "node_modules",
     ".terrarium-stage",
+    ".terrarium-git-trailers",
+    ".env",
+    ".env.*",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "id_*",
+    "*.pem",
+    ".ssh",
 ];
 type Snapshot = BTreeMap<PathBuf, Vec<u8>>;
+
+fn excluded(name: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let name = name.as_bytes();
+    EXCLUDES.iter().any(|pattern| {
+        let pattern = pattern.as_bytes();
+        if let Some(prefix) = pattern.strip_suffix(b"*") {
+            name.starts_with(prefix)
+        } else if let Some(suffix) = pattern.strip_prefix(b"*") {
+            name.ends_with(suffix)
+        } else {
+            name == pattern
+        }
+    })
+}
+
+fn changed_paths(before: &Snapshot, after: &Snapshot) -> Vec<String> {
+    let paths: BTreeSet<_> = before.keys().chain(after.keys()).collect();
+    paths.into_iter().filter(|p| before.get(*p) != after.get(*p))
+        .map(|p| p.display().to_string()).collect()
+}
+
+fn conflict(changed: Vec<String>) -> ApiError {
+    ApiError::invalid(format!("sync_conflict: local edits in {}; remote output retained on target", changed.join(", ")))
+}
+
+fn rsync_reason(code: Option<i32>) -> &'static str {
+    match code {
+        Some(1) => "invalid rsync options",
+        Some(2) => "protocol mismatch",
+        Some(3) => "file selection failed",
+        Some(5) => "remote protocol startup failed",
+        Some(10) => "socket I/O failed",
+        Some(11) => "file I/O failed",
+        Some(12) => "protocol stream failed",
+        Some(23) => "partial transfer",
+        Some(24) => "source files vanished",
+        Some(30 | 35) => "connection timed out",
+        Some(255) => "SSH connection failed (check access and remote rsync)",
+        None => "terminated by signal",
+        _ => "transfer failed",
+    }
+}
 
 fn snapshot(root: &Path) -> std::io::Result<Snapshot> {
     fn visit(root: &Path, dir: &Path, out: &mut Snapshot) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
-            if EXCLUDES.iter().any(|n| entry.file_name() == *n) {
+            if excluded(&entry.file_name()) {
                 continue;
             }
             let path = entry.path();
@@ -94,7 +146,7 @@ pub(super) struct Sync {
 
 async fn rsync(source: &str, destination: &str, shell: Option<&str>) -> ApiResult<()> {
     let mut cmd = tokio::process::Command::new("rsync");
-    cmd.args(["-a", "--delete", "--checksum", "--protect-args"]);
+    cmd.args(["-a", "--no-owner", "--no-group", "--delete", "--checksum", "--protect-args"]);
     for name in EXCLUDES {
         cmd.arg(format!("--exclude={name}"));
     }
@@ -114,8 +166,8 @@ async fn rsync(source: &str, destination: &str, shell: Option<&str>) -> ApiResul
     if !output.status.success() {
         // Do not expose stderr: filenames or remote diagnostics may contain secrets.
         return Err(ApiError::invalid(format!(
-            "workspace rsync failed ({})",
-            output.status
+            "workspace rsync failed ({}): {}",
+            output.status, rsync_reason(output.status.code())
         )));
     }
     Ok(())
@@ -169,7 +221,7 @@ pub(super) async fn prepare(
         def,
         key_path.as_deref(),
         &known_hosts(&state.state_dir)?,
-        &RemoteCmd::default(),
+        &RemoteCmd { argv: vec!["true".into()], ..RemoteCmd::default() },
     )?;
     let shell = std::iter::once(plan.program.as_str())
         .chain(plan.args[..plan.args.len() - 3].iter().map(String::as_str))
@@ -223,24 +275,20 @@ impl Sync {
         )
         .await?;
         let now = scan(&self.root).await?;
-        let paths: BTreeSet<_> = self.before.keys().chain(now.keys()).collect();
-        let changed: Vec<_> = paths
-            .into_iter()
-            .filter(|p| self.before.get(*p) != now.get(*p))
-            .map(|p| p.display().to_string())
-            .collect();
+        let changed = changed_paths(&self.before, &now);
         if !changed.is_empty() {
-            return Err(ApiError::invalid(format!(
-                "sync_conflict: local edits in {}; remote output retained on target",
-                changed.join(", ")
-            )));
+            return Err(conflict(changed));
         }
+        let expected = scan(stage.path()).await?;
         rsync(
             &format!("{}/", stage.path().display()),
             &format!("{}/", self.root.display()),
             None,
         )
-        .await
+        .await?;
+        let changed = changed_paths(&expected, &scan(&self.root).await?);
+        if !changed.is_empty() { return Err(conflict(changed)); }
+        Ok(())
     }
 }
 
@@ -287,6 +335,24 @@ pub(super) fn finish_with(sess: &Arc<ExecSession>, sync: Option<Sync>) {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    const SECRET_NAMES: &[&str] = &[".env", ".env.production", ".netrc", ".npmrc", ".pypirc", "id_ed25519", "id_rsa.pub", "certificate.pem", ".terrarium-git-trailers"];
+
+    #[test]
+    fn secret_patterns_match_real_names_at_every_depth() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("nested")).unwrap();
+        for name in SECRET_NAMES {
+            assert!(excluded(std::ffi::OsStr::new(name)));
+            std::fs::write(root.path().join("nested").join(name), "secret").unwrap();
+        }
+        std::fs::create_dir(root.path().join("nested/.ssh")).unwrap();
+        std::fs::write(root.path().join("nested/.ssh/config"), "secret").unwrap();
+        assert_eq!(snapshot(root.path()).unwrap().len(), 1);
+        assert!(!excluded(std::ffi::OsStr::new("environment.rs")));
+        assert_eq!(rsync_reason(Some(23)), "partial transfer");
+        assert_eq!(rsync_reason(Some(255)), "SSH connection failed (check access and remote rsync)");
+    }
 
     #[test]
     fn sync_is_opt_in_and_ssh_only() {
@@ -484,12 +550,22 @@ mod tests {
         .unwrap();
         std::fs::create_dir(local.join("target")).unwrap();
         std::fs::write(local.join("target/cache"), "local cache").unwrap();
+        for name in SECRET_NAMES {
+            std::fs::write(local.join(name), "local secret").unwrap();
+            std::fs::write(remote.join(name), "remote secret").unwrap();
+        }
+        std::fs::create_dir(local.join(".ssh")).unwrap();
+        std::fs::write(local.join(".ssh/config"), "local secret").unwrap();
         let remote_spec = format!("{user}@127.0.0.1:{}/", remote.display());
         rsync(&format!("{}/", local.display()), &remote_spec, Some(&shell))
             .await
             .unwrap();
         assert_eq!(snapshot(&local).unwrap(), snapshot(&remote).unwrap());
         assert!(!remote.join("target").exists());
+        assert!(!remote.join(".ssh").exists());
+        for name in SECRET_NAMES {
+            assert_eq!(std::fs::read_to_string(remote.join(name)).unwrap(), "remote secret");
+        }
         std::fs::remove_file(local.join("source-0")).unwrap();
         rsync(&format!("{}/", local.display()), &remote_spec, Some(&shell))
             .await
@@ -536,6 +612,9 @@ mod tests {
             _lock: workspace_lock(&local).try_lock_owned().unwrap(),
         };
         sync.pull().await.unwrap();
+        for name in SECRET_NAMES {
+            assert_eq!(std::fs::read_to_string(local.join(name)).unwrap(), "local secret");
+        }
         assert!(!local.join("source-1").exists());
         assert_eq!(
             std::fs::read_to_string(local.join("result")).unwrap(),

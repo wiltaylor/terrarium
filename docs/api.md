@@ -6536,6 +6536,10 @@ their output on the target. Sync failure is reported as `sync_failed`.
 
 At every depth, `.git`, `.terrarium`, `.terrarium-stage`, `target` and
 `node_modules` are excluded in both directions and protected from deletion.
+The same rule excludes `.terrarium-git-trailers`, `.env`, `.env.*`, `.netrc`,
+`.npmrc`, `.pypirc`, `id_*`, `*.pem`, and `.ssh` (including its contents).
+These exclusions also apply to conflict snapshots. Supply build credentials
+through target-side configuration or explicit secret injection, not workspace files.
 Build caches stay on the target. Repository metadata and Terrarium control
 files stay local. Do not use remote git operations with this mode.
 Only one synced operation per workspace may run at a time.
@@ -6545,6 +6549,9 @@ runs, the pull is skipped entirely with `sync_conflict`, naming the changed
 paths. Remote output remains on the target. Stop local editing during the
 final pull. Recover remote files explicitly before starting another synced
 operation, since its push makes the local tree authoritative again.
+After the final apply, Terrarium scans again and reports a conflict if the
+local tree differs from the staged result. This detects surviving late edits,
+but is not an atomic filesystem transaction. Tool runs are not synced.
 
 An exec session runs one command, one shell, or one file copy. It uses
 plain requests only, so it works through the agent tunnel too
