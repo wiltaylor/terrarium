@@ -3703,7 +3703,13 @@ mod tests {
         .unwrap();
         first.await.unwrap();
         let key = db
-            .read(|c| jobs::canonical_key(c, "SLOW.INVALID"))
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT host_key FROM job_host_keys WHERE hostname = 'slow.invalid'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
             .await
             .unwrap();
         assert_eq!(key, "slow.invalid");
