@@ -1,5 +1,12 @@
 import type { BoardGroup, Card } from "../../api/types";
 
+/** Show details once per lane, preferring the home column when occupied. */
+export function groupDetailsColumn(group: BoardGroup, cards: readonly Card[], columns: readonly string[]): string {
+  const occupied = new Set(cards.filter((c) => c.kind !== "group" && c.group?.id === group.id).map((c) => c.column));
+  if (occupied.has(group.column)) return group.column;
+  return columns.find((column) => occupied.has(column)) ?? group.column;
+}
+
 export interface GroupSection {
   group?: BoardGroup;
   cards: Card[];
