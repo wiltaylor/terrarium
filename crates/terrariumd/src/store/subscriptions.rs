@@ -1343,10 +1343,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(
-            !plan.iter().any(|p| p.contains("CORRELATED")),
-            "{plan:?}"
-        );
+        assert!(!plan.iter().any(|p| p.contains("CORRELATED")), "{plan:?}");
     }
 
     /// A login check renames the plan of an API subscription (Max 20x is
