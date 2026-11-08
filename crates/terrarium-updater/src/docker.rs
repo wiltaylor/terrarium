@@ -525,9 +525,12 @@ impl Engine for Docker {
             let own = self.inspect(&me).await?;
             let mounts = &own["Mounts"];
             for required in ["/compose", "/deployment"] {
-                if !mounts.as_array().into_iter().flatten().any(|m| {
-                    m["Destination"] == required && m["RW"] == false
-                }) {
+                if !mounts
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|m| m["Destination"] == required && m["RW"] == false)
+                {
                     return Err("read-only deployment mounts are missing; recreate the updater with the current compose.yaml; differing keys unavailable (values hidden)".into());
                 }
             }
