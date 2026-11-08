@@ -434,10 +434,8 @@ fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
                 |r| r.get(0),
             )?;
             if card.archived
-                || matches!(
-                    role.as_deref(),
-                    Some("in_progress" | "ready" | "blocked" | "backlog")
-                )
+                || matches!(role.as_deref(), Some("working" | "blocked"))
+                || matches!(card.column.as_str(), "ready" | "backlog")
             {
                 remove(t, &g, member)?;
             }
