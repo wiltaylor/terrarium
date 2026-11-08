@@ -384,7 +384,7 @@ async fn hot_swap_keeps_container_and_commits_only_after_health() {
             .iter()
             .any(|c| c.starts_with("drain") || c.starts_with("remove") || c.starts_with("stop"))
     );
-    assert_eq!(calls.last().unwrap(), "hot:commit");
+    assert_eq!(calls.last().unwrap(), "hot:ready");
     assert!(
         calls.iter().position(|c| c == "hot:pause").unwrap()
             < calls.iter().position(|c| c == "offline-backup").unwrap()
