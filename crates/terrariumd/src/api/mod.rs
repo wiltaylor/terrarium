@@ -30,7 +30,6 @@ mod repo_trees;
 mod repos;
 mod rules;
 mod rules_tools;
-mod version_groups;
 mod schedules;
 mod screen;
 mod secret_grants;
@@ -52,6 +51,7 @@ mod threads;
 mod tools;
 mod transcripts;
 mod usage;
+mod version_groups;
 mod waits;
 mod wiki;
 
