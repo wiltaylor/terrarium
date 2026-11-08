@@ -285,12 +285,19 @@ mod tests {
     fn db() -> Connection {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, project TEXT, card TEXT, kind TEXT, at TEXT, payload TEXT); CREATE TABLE cards(id TEXT PRIMARY KEY, labels TEXT, project TEXT, archived INTEGER DEFAULT 0); CREATE INDEX events_card ON events(card, seq);").unwrap();
-        c.execute_batch(include_str!("../../migrations/ter-157-card-move-history-index.sql")).unwrap();
+        c.execute_batch(include_str!(
+            "../../migrations/ter-157-card-move-history-index.sql"
+        ))
+        .unwrap();
         c
     }
 
     fn moved(c: &Connection, project: &str, card: &str, minute: u32, from: &str, to: &str) {
-        c.execute("INSERT OR IGNORE INTO cards(id,project) VALUES (?1,?2)", params![card, project]).unwrap();
+        c.execute(
+            "INSERT OR IGNORE INTO cards(id,project) VALUES (?1,?2)",
+            params![card, project],
+        )
+        .unwrap();
         c.execute(
             "INSERT INTO events(project,card,kind,at,payload) VALUES (?1,?2,'card',?3,?4)",
             params![
@@ -393,7 +400,12 @@ mod tests {
         c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,card,kind,payload) SELECT 'p','noise','card','{\"change\":\"moved\"}' FROM n;").unwrap();
         assert!(work_samples(&c, "p").unwrap().is_empty());
         assert_eq!(cache.worker_ms(&c, "p", &labels, None).unwrap(), first);
-        assert_eq!(ReviewEstimates::default().worker_ms(&c, "p", &labels, None).unwrap(), None);
+        assert_eq!(
+            ReviewEstimates::default()
+                .worker_ms(&c, "p", &labels, None)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -401,10 +413,21 @@ mod tests {
         let c = db();
         moved(&c, "p", "a", 1, "ready", "working");
         moved(&c, "p", "b", 2, "working", "review");
-        c.execute("INSERT INTO events(project,card,kind,payload) VALUES ('p','a','card','broken JSON')", []).unwrap();
+        c.execute(
+            "INSERT INTO events(project,card,kind,payload) VALUES ('p','a','card','broken JSON')",
+            [],
+        )
+        .unwrap();
         assert!(work_samples(&c, "p").unwrap().is_empty());
-        let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {COLUMN_ENTRIES_SQL}")).unwrap();
-        let plan = stmt.query_map(["p"], |r| r.get::<_, String>(3)).unwrap().collect::<Result<Vec<_>, _>>().unwrap().join("\n");
+        let mut stmt = c
+            .prepare(&format!("EXPLAIN QUERY PLAN {COLUMN_ENTRIES_SQL}"))
+            .unwrap();
+        let plan = stmt
+            .query_map(["p"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
         assert!(plan.contains("events_card_moves"), "{plan}");
         assert!(plan.contains("events_card (card=?"), "{plan}");
         assert!(!plan.contains("SCAN e"), "{plan}");
