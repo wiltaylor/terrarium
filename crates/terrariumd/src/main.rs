@@ -181,10 +181,10 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
         }
-        if let Some(t) = &tools {
-            if !settings.no_harness_install {
-                log_install(&t.install().await);
-            }
+        if let Some(t) = &tools
+            && !settings.no_harness_install
+        {
+            log_install(&t.install().await);
         }
         seed_config_repo(&settings);
     }

@@ -773,12 +773,11 @@ impl Engine for Docker {
         Box::pin(async move {
             // Offline restore must use the requested image's executable, not
             // the volume's current link (which may still select the new daemon).
-            if argv.first().is_some_and(|s| s == "terrariumd") {
-                if let Some(img) = self.inspect_image(&image.id).await? {
-                    if img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1" {
-                        argv[0] = "/opt/terrarium/bundled/bin/terrariumd".into();
-                    }
-                }
+            if argv.first().is_some_and(|s| s == "terrariumd")
+                && let Some(img) = self.inspect_image(&image.id).await?
+                && img["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1"
+            {
+                argv[0] = "/opt/terrarium/bundled/bin/terrariumd".into();
             }
             self.run_body(once_body(&spec.spec, &image.reference, &argv))
                 .await
