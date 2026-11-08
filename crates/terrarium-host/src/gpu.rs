@@ -84,7 +84,8 @@ pub async fn usage(docker: &str) -> Vec<Usage> {
         docker,
         &["ps", "--no-trunc", "--format", "{{.ID}} {{.Names}}"],
     )
-    .await.unwrap_or_default();
+    .await
+    .unwrap_or_default();
     attribute(&processes, &containers, |pid| {
         std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()
     })
@@ -110,7 +111,9 @@ pub fn attribute(
         let Some(group) = cgroup(pid) else {
             continue;
         };
-        let Some(group) = group.lines().find_map(|l| l.strip_prefix("0::")) else { continue; };
+        let Some(group) = group.lines().find_map(|l| l.strip_prefix("0::")) else {
+            continue;
+        };
         let mut owner = "";
         for container in containers.lines() {
             let Some((id, name)) = container.split_once(' ') else {
@@ -126,7 +129,9 @@ pub fn attribute(
                 break;
             }
         }
-        let total = totals.entry((f[0].into(), owner.into(), group.into())).or_default();
+        let total = totals
+            .entry((f[0].into(), owner.into(), group.into()))
+            .or_default();
         *total = total.saturating_add(bytes);
     }
     totals
@@ -160,7 +165,10 @@ mod tests {
         );
         assert_eq!(result.len(), 2);
         assert_eq!(
-            result.iter().find(|u| u.container == "terrarium-box").unwrap(),
+            result
+                .iter()
+                .find(|u| u.container == "terrarium-box")
+                .unwrap(),
             &Usage {
                 uuid: "GPU-abcd".into(),
                 container: "terrarium-box".into(),

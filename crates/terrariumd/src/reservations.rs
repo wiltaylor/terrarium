@@ -211,9 +211,15 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
             return Err(ApiError::conflict("host lacks GPU reservation support"));
         }
         if r.gpus.iter().any(|g| g.exclusive) && target.def.kind != TargetKind::Docker {
-            return Err(ApiError::invalid("exclusive GPU needs a managed ephemeral Docker target; native host, SSH and vmlab cannot enforce exclusive access"));
+            return Err(ApiError::invalid(
+                "exclusive GPU needs a managed ephemeral Docker target; native host, SSH and vmlab cannot enforce exclusive access",
+            ));
         }
-        if target.def.kind == TargetKind::Docker && (!target.def.ephemeral || target.def.image.is_none() || !matches!(r.holder, Holder::Target(_))) {
+        if target.def.kind == TargetKind::Docker
+            && (!target.def.ephemeral
+                || target.def.image.is_none()
+                || !matches!(r.holder, Holder::Target(_)))
+        {
             return Err(ApiError::invalid(
                 "Docker GPU reservations require a managed ephemeral target, not an individual agent",
             ));
@@ -747,12 +753,18 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
                         Holder::Target(_) => (scope(&r, &r.target), String::new()),
                         Holder::Agent(id) => {
                             let id = id.clone();
-                            let holder = state.db.read(move |c| agents::display_name(c, &id)).await?.unwrap_or_default();
+                            let holder = state
+                                .db
+                                .read(move |c| agents::display_name(c, &id))
+                                .await?
+                                .unwrap_or_default();
                             (scope(&r, "_reservation"), holder)
                         }
                     };
                     Some(terrarium_host::limits::slice_name(&target, &holder))
-                } else { None };
+                } else {
+                    None
+                };
                 // Missing attribution is unknown, not zero. Do not rearm warnings
                 // on a failed sample or charge another holder's memory.
                 let measured: Vec<_> = sample
@@ -766,7 +778,11 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
                     .collect();
                 if !measured.is_empty() {
                     let over = r.gpus.iter().filter(|g| !g.exclusive).any(|g| {
-                        measured.iter().filter(|u| u.uuid == g.uuid).fold(0u64, |total, u| total.saturating_add(u.used_bytes)) > g.vram_bytes
+                        measured
+                            .iter()
+                            .filter(|u| u.uuid == g.uuid)
+                            .fold(0u64, |total, u| total.saturating_add(u.used_bytes))
+                            > g.vram_bytes
                     });
                     let id = r.id.clone();
                     state

@@ -145,7 +145,12 @@ async fn setup_docker(
 async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
     let (td, server, client) = setup().await;
     let state = td.daemon.as_ref().unwrap().state.clone();
-    td.post("/api/targets", json!({"name":"p-native","kind":"host","host":"h","project":"p"})).await.ok();
+    td.post(
+        "/api/targets",
+        json!({"name":"p-native","kind":"host","host":"h","project":"p"}),
+    )
+    .await
+    .ok();
     let refused = td.post("/api/hosts/h/reservations", json!({"target":"p-native","gpus":[{"uuid":"GPU-abcd","exclusive":true}],"until":"30m"})).await;
     assert!(!refused.status.is_success());
     assert!(refused.body.to_string().contains("exclusive GPU needs"));
@@ -165,7 +170,9 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
     let cooperative = td.post("/api/hosts/h/reservations", json!({"target":"p-native","gpus":[{"uuid":"GPU-abcd","vram_bytes":1048576}],"until":"30m","queue":true})).await;
     assert_eq!(cooperative.ok()["state"], "queued");
     let native_id = cooperative.body["id"].as_str().unwrap();
-    td.post(&format!("/api/reservations/{native_id}/cancel"), json!({})).await.ok();
+    td.post(&format!("/api/reservations/{native_id}/cancel"), json!({}))
+        .await
+        .ok();
     let capacity = td.get("/api/hosts/h/capacity").await;
     assert_eq!(
         capacity.ok()["used"]["gpus"][0]["claim"]["uuid"],
