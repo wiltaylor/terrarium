@@ -406,7 +406,10 @@ fn libtest_prefixed_events() {
     let r = run(fixture!("prefixed-libtest.json"));
     assert_eq!(r.counts(), counts(2, 0, 0, 0));
     assert_eq!(case(&r, "first").duration_ms, Some(100));
-    assert_eq!(case(&r, "second").stdout.as_deref(), Some("literal { braces }"));
+    assert_eq!(
+        case(&r, "second").stdout.as_deref(),
+        Some("literal { braces }")
+    );
     assert!(r.notes.is_empty());
 }
 
