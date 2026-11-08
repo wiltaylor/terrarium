@@ -121,6 +121,14 @@ rule "merge-group-returned" {
   group_remove { key = "{{group.key}}" }
 }
 
+rule "merge-group-cancelled" {
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.kind" { eq = "merge" }
+  when "data.verdict" { eq = "cancelled" }
+  group_close { key = "{{job.group_key}}" comment = "Merge group abandoned: merge job cancelled." }
+}
+
 rule "job-requeued" {
   description = "A job waits again (its host was away, or a restart lost its run): running -> queued."
   on = ["job"]

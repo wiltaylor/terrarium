@@ -271,21 +271,35 @@ pub fn remove(t: &mut Tx<'_>, g: &Group, card: &str) -> ApiResult<bool> {
     if g.closed_at.is_some() {
         return Ok(false);
     }
+    if g.key.starts_with("merge:") {
+        let member = board::get_card(t, card)?;
+        // Repair cards deliberately stay with their batch while being worked.
+        // Done has no role on the default board, so it is matched by name.
+        if member.labels.iter().any(|l| l.starts_with("merge-fix:")) && member.column != "done" {
+            return Ok(false);
+        }
+    }
     let changed = t.execute(
         "DELETE FROM group_members WHERE group_card = ?1 AND card = ?2",
         params![g.id, card],
     )? > 0;
     if changed {
         event(t, &g.id, "group_removed")?;
-        if g.key.starts_with("merge:") && get(t, &g.id)?.total == 0 {
-            close(
-                t,
-                &get(t, &g.id)?,
-                "Merge group abandoned: no members remain.",
-            )?;
-        }
+        close_finished_merge(t, &g.id)?;
     }
     Ok(changed)
+}
+
+fn close_finished_merge(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
+    let g = get(t, id)?;
+    if g.closed_at.is_none() && g.key.starts_with("merge:") {
+        if g.total == 0 {
+            close(t, &g, "Merge group abandoned: no members remain.")?;
+        } else if g.done == g.total {
+            close(t, &g, "All remaining members merged (accepted or later).")?;
+        }
+    }
+    Ok(())
 }
 
 pub fn status(t: &mut Tx<'_>, g: &Group, text: Option<&str>, eta: Option<&str>) -> ApiResult<bool> {
@@ -433,22 +447,19 @@ fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
                 [member],
                 |r| r.get(0),
             )?;
-            // A repair card joins before it is worked, rather than being
-            // sent back from the queue. Preserve that deliberate membership.
+            // Ready, backlog and done have no roles on the default board.
+            // Working and blocked use roles so renamed columns work too.
             let repair = card.labels.iter().any(|l| l.starts_with("merge-fix:"));
-            if card.archived
-                || role.as_deref() == Some("blocked")
+            if (repair && card.column == "done")
                 || (!repair
-                    && (role.as_deref() == Some("working")
-                        || matches!(card.column.as_str(), "ready" | "backlog")))
+                    && (card.archived
+                        || matches!(role.as_deref(), Some("working" | "blocked"))
+                        || (role.is_none() && matches!(card.column.as_str(), "ready" | "backlog"))))
             {
                 remove(t, &g, member)?;
             }
         }
-        let current = get(t, &id)?;
-        if current.closed_at.is_none() && current.total == 0 {
-            close(t, &current, "Merge group abandoned: no members remain.")?;
-        }
+        close_finished_merge(t, &id)?;
     }
     Ok(())
 }
