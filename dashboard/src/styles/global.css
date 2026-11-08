@@ -3219,6 +3219,17 @@ tr.row-open > td {
   margin-bottom: 8px;
   border-radius: var(--radius);
 }
+
+.board-group-head {
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  padding: .5rem;
+}
+
+.board-group > .kcard {
+  margin-left: 1rem;
+}
 .lane-cell.drop {
   border-color: var(--accent);
   background: var(--accent-soft);

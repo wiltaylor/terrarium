@@ -1016,6 +1016,20 @@ pub fn card_condition_fails(
 
 /// The value of a placeholder (`event.*`, `card.*`, `job.*`, `rule.name`).
 pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
+    if let Some(f) = name.strip_prefix("group.") {
+        let g = ctx.card.as_ref()?.group.as_ref()?;
+        return Some(match f {
+            "id" => g.id.clone(),
+            "key" => g.key.clone(),
+            "title" => g.title.clone(),
+            "column" => g.column.clone(),
+            "status" => g.status.clone(),
+            "done" => g.done.to_string(),
+            "total" => g.total.to_string(),
+            "eta_at" => g.eta_at.clone()?,
+            _ => return None,
+        });
+    }
     if let Some(path) = name.strip_prefix("event.") {
         return ctx.event.as_ref().map(|e| event_view(e).text(path));
     }
@@ -1372,6 +1386,13 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
         if !timers_checked && cache.timers_at.is_none_or(|at| at.elapsed() >= TICK) {
             timers_checked = true;
             cache.timers_at = Some(std::time::Instant::now());
+            if let Err(e) = state
+                .db
+                .write("rule:group-timeout", crate::store::groups::expire)
+                .await
+            {
+                warn!("the rule engine cannot close expired groups: {e}");
+            }
             if let Err(e) = fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await {
                 warn!("the rule engine cannot check the timers: {e}");
             }
