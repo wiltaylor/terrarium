@@ -658,7 +658,7 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
 }
 
 /// The subject of the notice of a pause, from `system` to the operator.
-const PAUSE_SUBJECT_LIKE: &str = "Thread % needs a human";
+pub(super) const PAUSE_SUBJECT_LIKE: &str = "Thread % needs a human";
 
 /// Is this the notice of a pause? The Inbox shows the paused thread as a
 /// system item, not this mail.
