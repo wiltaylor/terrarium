@@ -81,7 +81,7 @@ describe("Inbox load (TER-302)", () => {
         expect(reply.value).toBe("Keep my draft");
         // Reaching an old item explicitly may render more. Stub browser scrolling in jsdom.
         vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => 0);
-        const deep = mount(`/inbox?item=${encodeURIComponent(rows[0].id)}`);
+        const deep = mount(`/inbox?item=${encodeURIComponent(rows[0]!.id)}`);
         await waitFor(() => expect(deep.querySelectorAll("article[aria-label^='Mail ']").length).toBe(rows.length), 10000);
       } finally {
         spy.mockRestore();
