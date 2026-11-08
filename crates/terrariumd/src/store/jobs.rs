@@ -835,8 +835,9 @@ pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
                 |r| r.get(0),
             )
             .optional()?;
-        if let Some(owner) = owner {
-            if let Err(error) = check_alias_pin(t, &owner, &key) {
+        if let Some(owner) = owner
+            && let Err(error) = check_alias_pin(t, &owner, &key)
+        {
                 if error.code != crate::error::Code::Conflict {
                     return Err(error);
                 }
@@ -846,7 +847,6 @@ pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
                     })?;
                 tracing::warn!(%host, %hostname, %key, clash = %error.message, "skipping clashing job-host pin");
                 continue;
-            }
         }
         t.execute("INSERT INTO job_host_keys (hostname, host_key) VALUES (?1, ?2) ON CONFLICT(hostname) DO NOTHING", params![hostname, key])?;
     }
