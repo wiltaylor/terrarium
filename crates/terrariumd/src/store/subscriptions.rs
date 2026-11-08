@@ -853,6 +853,44 @@ pub fn samples(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// The most `quota_samples` rows that one prune transaction deletes
+/// (TER-395): the daemon has one connection behind a mutex, so each batch
+/// holds the lock only briefly.
+pub const SAMPLE_PRUNE_BATCH: usize = 500;
+
+/// The windows of a subscription with the ID of each window's newest
+/// sample (the row that [`latest_windows`] reads), by window name.
+pub fn sample_windows(conn: &Connection, subscription: &str) -> ApiResult<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT window, max(id) FROM quota_samples
+         WHERE subscription = ?1 GROUP BY window ORDER BY window",
+    )?;
+    let rows = stmt.query_map([subscription], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Delete at most `batch` samples of one window that are older than
+/// `before` (an RFC 3339 time as stored) and older than the sample
+/// `newest` (from [`sample_windows`]), which always stays. Returns the
+/// rows deleted. The range read uses `quota_samples_sub`.
+pub fn prune_window_samples(
+    t: &Tx<'_>,
+    subscription: &str,
+    window: &str,
+    newest: i64,
+    before: &str,
+    batch: usize,
+) -> ApiResult<usize> {
+    let batch = i64::try_from(batch).unwrap_or(i64::MAX);
+    Ok(t.execute(
+        "DELETE FROM quota_samples WHERE id IN (
+             SELECT id FROM quota_samples
+             WHERE subscription = ?1 AND window = ?2 AND at < ?3 AND id < ?4
+             ORDER BY at LIMIT ?5)",
+        params![subscription, window, before, newest, batch],
+    )?)
+}
+
 // ---- Default plan accounts (PLAN §16.3) ----
 
 /// The harnesses that have a default plan account. A pi agent names its

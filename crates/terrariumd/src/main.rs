@@ -133,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
         // files are in the shared home.
         per_agent_sessions: settings.sandbox == sandbox::SandboxMode::Bwrap,
         auto_swap: terrariumd::accounts::auto_swap_from_env(),
+        quota_sample_keep: settings.quota_sample_keep,
         ..UsageConfig::default()
     };
     // The web settings, from the flags and the env, in one place.
