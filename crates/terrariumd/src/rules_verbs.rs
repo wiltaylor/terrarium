@@ -302,7 +302,21 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
             return Err(ApiError::invalid(format!("no group with key `{key}`")));
         };
         match verb {
-            "group.add" => groups::add(t, &g, &the_card(ctx, verb)?.id)?,
+            "group.add" => {
+                let card = the_card(ctx, verb)?;
+                let added = groups::add(t, &g, &card.id)?;
+                // Per-card rule lanes may run in either order. Keep the
+                // merge group's membership in the queued batch order.
+                if added && a.raw("key") == Some("{{job.group_key}}")
+                    && let Some(job) = &ctx.job
+                {
+                    for (position, member) in job.cards().iter().enumerate() {
+                        t.execute("UPDATE group_members SET position = ?3 WHERE group_card = ?1 AND card = ?2",
+                            params![g.id, member.card, position as i64])?;
+                    }
+                }
+                added
+            }
             "group.remove" => groups::remove(t, &g, &the_card(ctx, verb)?.id)?,
             "group.status" => match a.text("step") {
                 Some(step) => groups::step(
