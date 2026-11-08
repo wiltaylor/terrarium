@@ -258,22 +258,67 @@ async fn board_shape_and_card_ids() {
 async fn board_summary_keeps_tile_and_eta_metadata() {
     let td = setup().await;
     let dependency = card(&td, "proj/w1", json!({"title": "Dependency"})).await;
-    let id = card(&td, "proj/lead", json!({
-        "title": "Attributed estimate", "assignee": "w1", "eta_at": "1h",
-        "labels": ["version:vnext"], "depends_on": [dependency], "body": "detail only"
-    })).await;
-    td.patch_as("proj/w1", &format!("/api/cards/{id}"), json!({"eta_at": "2h"})).await.ok();
+    let id = card(
+        &td,
+        "proj/lead",
+        json!({
+            "title": "Attributed estimate", "assignee": "w1", "eta_at": "1h",
+            "labels": ["version:vnext"], "depends_on": [dependency], "body": "detail only"
+        }),
+    )
+    .await;
+    td.patch_as(
+        "proj/w1",
+        &format!("/api/cards/{id}"),
+        json!({"eta_at": "2h"}),
+    )
+    .await
+    .ok();
     let full = td.get(&format!("/api/cards/{id}")).await;
     let response = td.get("/api/projects/proj/board").await;
-    let summary = response.ok()["cards"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap();
+    let summary = response.ok()["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap();
     for field in [
-        "id", "project", "kind", "column", "position", "title", "labels", "group",
-        "assignee", "assignee_name", "assignee_status", "agent", "agent_name",
-        "depends_on", "blocked_by", "archived", "created_by", "created_by_name",
-        "created_at", "updated_at", "eta_at", "eta_set_at", "eta_set_by", "eta_set_by_name",
-        "done_at", "idle_since", "job", "tests", "repo", "branch",
+        "id",
+        "project",
+        "kind",
+        "column",
+        "position",
+        "title",
+        "labels",
+        "group",
+        "assignee",
+        "assignee_name",
+        "assignee_status",
+        "agent",
+        "agent_name",
+        "depends_on",
+        "blocked_by",
+        "archived",
+        "created_by",
+        "created_by_name",
+        "created_at",
+        "updated_at",
+        "eta_at",
+        "eta_set_at",
+        "eta_set_by",
+        "eta_set_by_name",
+        "done_at",
+        "idle_since",
+        "job",
+        "tests",
+        "repo",
+        "branch",
     ] {
-        assert_eq!(summary.get(field), full.ok().get(field), "tile field {field}");
+        assert_eq!(
+            summary.get(field),
+            full.ok().get(field),
+            "tile field {field}"
+        );
     }
     assert_eq!(summary["created_by_name"], "proj/lead");
     assert_eq!(summary["eta_set_by_name"], "proj/w1");

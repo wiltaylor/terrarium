@@ -4637,7 +4637,11 @@ mod tests {
     #[test]
     fn board_help_points_to_completed_cards() {
         let mut cli = Cli::command();
-        let help = cli.find_subcommand_mut("board").unwrap().render_long_help().to_string();
+        let help = cli
+            .find_subcommand_mut("board")
+            .unwrap()
+            .render_long_help()
+            .to_string();
         assert!(help.contains("excluding Done cards"));
         assert!(help.contains("card ls --column done"));
     }
