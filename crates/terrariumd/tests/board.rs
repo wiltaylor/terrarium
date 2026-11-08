@@ -791,6 +791,24 @@ async fn wip_limits_and_columns() {
 }
 
 #[tokio::test]
+async fn daemon_blocked_move_mails_operator() {
+    let td = setup().await;
+    let id = card(&td, "proj/w1", json!({"title": "Daemon blocked"})).await;
+    let db = td.daemon.as_ref().unwrap().state.db.clone();
+    db.write("system", move |t| {
+        terrariumd::store::board::move_card(
+            t, &terrariumd::actor::Actor::Operator, &id, "blocked", None,
+            Some("automatic failure")
+        )
+    }).await.unwrap();
+    let mail = td.get("/api/mail?to=operator").await;
+    let mail = mail.ok().as_array().unwrap();
+    assert_eq!(mail.len(), 1);
+    assert_eq!(mail[0]["from"], "system");
+    assert!(mail[0]["body"].as_str().unwrap().contains("by system"));
+}
+
+#[tokio::test]
 async fn blocked_needs_a_comment_and_mails() {
     let td = setup().await;
     let id = card(&td, "proj/w1", json!({"title": "Hard"})).await;

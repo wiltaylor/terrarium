@@ -644,13 +644,13 @@ async fn validate(
                 .as_deref()
                 .map(str::trim)
                 .filter(|c| !c.is_empty());
+            if let Some(c) = given {
+                board::add_comment(t, &actor, &card.id, c)?;
+            }
             // With `board_flow = rules` the job's `queued` event is all:
             // the built-in pack labels, moves, and comments (TER-170). The
             // worker's own comment goes on the card as its own.
             if !rt::code_flow(t, &card.project)? {
-                if let Some(c) = given {
-                    board::add_comment(t, &actor, &card.id, c)?;
-                }
                 let place = jobs::place(t, &job)?;
                 let room = jobs::host_room(t, &job.project)?;
                 return Ok((job, (place, room)));
@@ -662,10 +662,7 @@ async fn validate(
                 ..CardPatch::default()
             };
             board::update_card(t, &Actor::Operator, &card.id, patch)?;
-            let mut note = rt::queue_comment(&job, &card.id);
-            if let Some(c) = given {
-                note = format!("{c}\n\n{note}");
-            }
+            let note = rt::queue_comment(&job, &card.id);
             let validating =
                 board::role_name(t, &card.project, board::VALIDATING, rt::COL_VALIDATING)?;
             if card.column != validating {
