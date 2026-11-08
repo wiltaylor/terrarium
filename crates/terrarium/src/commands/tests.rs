@@ -1972,7 +1972,16 @@ async fn memory_project_keys_for_every_id_command() {
             let run = exec(true, &args, vec![(200, json!({}))], None).await;
             assert!(run.result.is_ok(), "{args:?}: {:?}", run.result);
             let path = format!("/api/memories/{key}{suffix}");
-            check(&args, &run.reqs, &[(method, &path, query, body)]);
+            assert_eq!(run.reqs.len(), 1, "{args:?}");
+            let request = &run.reqs[0];
+            assert_eq!(request.method, method, "{args:?}");
+            assert_eq!(request.path, path, "{args:?}");
+            let query: Vec<(String, String)> = query
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect();
+            assert_eq!(request.query, query, "{args:?}");
+            assert_eq!(request.body, body, "{args:?}");
         }
     }
 }
