@@ -4,6 +4,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 mod ter221_latency;
+mod workspace_sync;
 
 #[path = "../agent_interrupt.rs"]
 mod agent_interrupt;
