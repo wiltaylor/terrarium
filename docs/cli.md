@@ -1995,7 +1995,7 @@ terrarium version                             the CLI's build and the daemon's; 
 `terrarium --version` prints the build version of the CLI on the first
 line and its build time on the second: `terrarium 0.1.0+6e31754`, then
 `built 2026-11-04T10:20:30Z`. The first line ends with the version: host
-agents 0.5.0 and older read the last word of the first line of
+agents from releases before TER-195 read the last word of the first line of
 `terrarium-host --version` when they stage an update (TER-195). `-V` prints
 the version only. `terrariumd`, `terrarium-runner`, and `terrarium-host`
 have the same flags. The version is `<crate version>+<git ref>`, with
