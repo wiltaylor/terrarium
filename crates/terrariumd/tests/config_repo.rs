@@ -563,7 +563,11 @@ async fn a_pulled_export_is_a_plan_until_apply() {
         .await
         .ok();
     let own_path = b_repo.join("export/projects/own.fleet.toml");
-    assert!(!std::fs::read_to_string(&own_path).unwrap().contains("later"));
+    assert!(
+        !std::fs::read_to_string(&own_path)
+            .unwrap()
+            .contains("later")
+    );
     let r = b.post("/api/config/pull", json!({"apply": true})).await;
     let body = r.ok().clone();
     assert!(body["export"][0]["applied"].is_object(), "{body}");

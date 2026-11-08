@@ -112,7 +112,9 @@ async fn log(
 async fn refresh_export(state: &Shared, r: &ConfigRepo, force: bool) -> ApiResult<Vec<String>> {
     let files = state.db.read(repo::export_files).await?;
     if r.state().export_pending && !force {
-        tracing::warn!("pulled export pending: existing export files are not refreshed until a successful pull --apply or force_export");
+        tracing::warn!(
+            "pulled export pending: existing export files are not refreshed until a successful pull --apply or force_export"
+        );
         return blocking(r.clone(), move |r| {
             r.ensure()?;
             r.write_export_new(&files)
