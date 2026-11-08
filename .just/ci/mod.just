@@ -16,6 +16,8 @@ validate:
 	#!/usr/bin/env bash
 	set -euo pipefail
 	export RUSTUP_TOOLCHAIN=1.97.1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+	# Stable test-only inputs across slot checkouts. Release builds do not use this gate.
+	export TERRARIUM_GIT_REF=ci-test TERRARIUM_TEST_BUILD=1 SOURCE_DATE_EPOCH=0
 	just ci::fmt-check
 	just ci::lint
 	just ci::test
@@ -28,6 +30,7 @@ validate-affected: require-uv
 	#!/usr/bin/env bash
 	set -euo pipefail
 	export RUSTUP_TOOLCHAIN=1.97.1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+	export TERRARIUM_GIT_REF=ci-test TERRARIUM_TEST_BUILD=1 SOURCE_DATE_EPOCH=0
 	kind=${TERRARIUM_JOB_KIND:-}
 	list=${TERRARIUM_CHANGED_FILES:-}
 	if [ "$kind" = merge ]; then
