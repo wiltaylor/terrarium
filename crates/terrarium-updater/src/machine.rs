@@ -724,10 +724,8 @@ impl Updater {
                 self.step(
                     "activation",
                     async {
-                        let deadline = hold_deadline.min(
-                            tokio::time::Instant::now()
-                                + self.cfg.health_timeout.min(Duration::from_secs(30)),
-                        );
+                        let deadline = tokio::time::Instant::now()
+                            + self.cfg.health_timeout.min(Duration::from_secs(30));
                         loop {
                             match self.exec_ok(&cur.id, hot_argv("ready", &[])).await {
                                 Ok(out) => break Ok(out),

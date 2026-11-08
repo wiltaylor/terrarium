@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import secrets
 import subprocess
 import tempfile
 import time
@@ -16,8 +17,8 @@ import unittest
 REPO = Path(__file__).resolve().parents[1]
 
 
-def docker(*args, check=True):
-    result = subprocess.run(["docker", *args], text=True, capture_output=True)
+def docker(*args, check=True, env=None):
+    result = subprocess.run(["docker", *args], text=True, capture_output=True, env=env)
     if check and result.returncode:
         raise AssertionError(f"docker {args}: {result.stdout}\n{result.stderr}")
     return result
@@ -60,8 +61,7 @@ class RuntimeImage(unittest.TestCase):
                 docker("rm", name)
                 docker("run", "-d", "--name", name,
                        "-e", "TERRARIUM_HARNESS_INSTALL=0", "-e", "TERRARIUM_NO_HARNESS_INSTALL=true",
-                       "-e", "TERRARIUM_HOST_LISTEN=", image,
-                       "--daemon-service", "terrariumd", "--sandbox", "none")
+                       "-e", "TERRARIUM_HOST_LISTEN=", "-e", "TERRARIUM_SANDBOX=none", image)
                 deadline = time.monotonic() + 60
                 while docker("exec", name, "terrarium", "daemon", "status", check=False).returncode:
                     if time.monotonic() > deadline:
@@ -70,10 +70,59 @@ class RuntimeImage(unittest.TestCase):
                 selected = docker("exec", name, "readlink", "/state/releases/current").stdout.strip()
                 self.assertEqual(len(selected), 64)
                 docker("exec", name, "test", "-x", "/state/releases/current/bin/terrariumd")
+                self.check_old_compose(root, image)
                 self.check_legacy_boundary(binaries)
             finally:
                 docker("rm", "-f", name, check=False)
                 docker("rmi", image, check=False)
+
+    def check_old_compose(self, root, image):
+        # Exact published 0.17.0 Compose file, before service command opt-in.
+        # Override only scratch mounts/ports/security and external integrations.
+        project = "ter-261-old-compose"
+        old = REPO / "docker/fixtures/compose-0.17.0.yaml"
+        override = root / "scratch.yaml"
+        override.write_text('''services:
+  terrarium:
+    ports: !reset []
+    security_opt: !reset []
+    environment:
+      TERRARIUM_SANDBOX: none
+      TERRARIUM_HARNESS_INSTALL: "0"
+      TERRARIUM_NO_HARNESS_INSTALL: "true"
+      TERRARIUM_HOST_LISTEN: ""
+      TERRARIUM_SELF_UPDATE: "off"
+''')
+        env = {**os.environ, "TERRARIUM_IMAGE": image,
+               "TERRARIUM_DATA_DIR": str(root / "data"),
+               "TERRARIUM_TOKEN": secrets.token_hex(32)}
+        args = ("compose", "-p", project, "-f", str(old), "-f", str(override))
+        config = json.loads(docker(*args, "config", "--format", "json", env=env).stdout)
+        service = config["services"]["terrarium"]
+        self.assertNotIn("command", service)
+        for mount in service["volumes"]:
+            if mount["type"] == "bind":
+                path = Path(mount["source"])
+                self.assertTrue(path.is_relative_to(root / "data"))
+                path.mkdir(parents=True, exist_ok=True)
+                path.chmod(0o777)
+        self.assertEqual(docker("ps", "-aq", "--filter", f"label=com.docker.compose.project={project}").stdout.strip(), "")
+        try:
+            docker(*args, "up", "-d", "--no-build", "--no-deps", "terrarium", env=env)
+            container = docker(*args, "ps", "-q", "terrarium", env=env).stdout.strip()
+            deadline = time.monotonic() + 60
+            while docker("exec", container, "terrarium", "daemon", "status", check=False).returncode:
+                if time.monotonic() > deadline:
+                    self.fail("old Compose startup did not become healthy")
+                time.sleep(.2)
+            actual = json.loads(docker("inspect", container).stdout)[0]
+            self.assertEqual(actual["Config"]["Cmd"], ["--daemon-service", "terrariumd"])
+            # An old-compose one-off replaces CMD and cannot clear probation.
+            docker("exec", container, "touch", "/state/releases/probation")
+            docker(*args, "run", "--rm", "--no-deps", "terrarium", "terrariumd", "backup", "ls", "--json", env=env)
+            docker("exec", container, "test", "-f", "/state/releases/probation")
+        finally:
+            docker(*args, "down", "--volumes", env=env, check=False)
 
     def check_legacy_boundary(self, binaries):
         legacy = "ghcr.io/wiltaylor/terrarium:0.17.0-alpha"

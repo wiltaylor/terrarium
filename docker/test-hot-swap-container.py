@@ -49,7 +49,7 @@ RUN chmod +x /usr/local/bin/terrarium-entrypoint && ln -s /state/releases/curren
 ENV TERRARIUM_STATE_DIR=/state TERRARIUM_CONFIG_REPO=/config/terrarium TERRARIUM_CONFIG_DIR=/config/terrarium TERRARIUM_API_SOCKET=/run/terrarium/api.sock TERRARIUM_RUNTIME_DIR=/run/terrarium TERRARIUM_RUNNER=/usr/local/bin/terrarium-runner TERRARIUM_RUNNER_MODE=process TERRARIUM_HARNESS_INSTALL=0 TERRARIUM_NO_HARNESS_INSTALL=true TERRARIUM_HOST_LISTEN="" TERRARIUM_DEFAULTS_DIR=/state/releases/current/defaults
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/terrarium-entrypoint"]
 ENV TERRARIUM_SANDBOX=none
-CMD ["terrariumd"]
+CMD ["--daemon-service", "terrariumd"]
 USER terrarium
 HEALTHCHECK --interval=1s --timeout=2s --start-period=10s --retries=3 CMD terrarium daemon status
 LABEL io.terrarium.hot-swap-layout="1" io.terrarium.runner-compat-epoch="1"

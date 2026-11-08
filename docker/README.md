@@ -44,8 +44,8 @@ When `terrariumd` exits with status 0 and the container got no stop signal,
 the entrypoint stops the runners (see below) and the container exits.
 
 The Compose service explicitly runs `--daemon-service terrariumd`. Only this
-mode initializes releases and supervises the daemon. Direct `docker run`
-must supply that command too. Other commands (for example `bash`, backup
+mode initializes releases and supervises the daemon. The image defaults to the
+same command, so direct `docker run` and older Compose files work too. Other commands (for example `bash`, backup
 subcommands, or `terrariumd --version`) run once using bundled binaries and
 never change the live release or probation marker. A state-volume lock rejects
 a second service, including an accidental `compose run terrarium` without a
@@ -94,8 +94,8 @@ The updater reserves the last minute for recovery and retries commit three
 times. Admission remains closed until activation finishes. An activation
 failure exits the daemon nonzero so the supervisor can restart it. Once any
 commit was attempted, automatic journal rollback is forbidden.
-After commit the updater waits up to 30 seconds (within the remaining hold
-budget) for core activation. A failure reports Failed without a journal rewind.
+After commit the updater starts a separate wait of up to 30 seconds for core
+activation. A failure reports Failed without a journal rewind.
 Use explicit rollback if the committed release cannot activate.
 
 Post-commit activation has two remaining ordering windows: harness pin install

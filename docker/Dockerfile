@@ -234,7 +234,7 @@ EXPOSE 8080 8081 8082 8083
 # No `-g`: tini sends SIGTERM to the entrypoint only, and the entrypoint
 # stops terrariumd and then the runners in order (docker/README.md).
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/terrarium-entrypoint"]
-CMD ["terrariumd"]
+CMD ["--daemon-service", "terrariumd"]
 
 # Must remain the LAST filesystem layer. Everything before it is the runtime
 # base and must be byte-identical for a hot swap. Metadata below adds no layer.

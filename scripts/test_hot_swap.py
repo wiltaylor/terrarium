@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("hot_swap", ROOT / "docker/hot-swap.py")
@@ -18,6 +18,40 @@ SPEC.loader.exec_module(HOT)
 
 
 class HotSwapTests(unittest.TestCase):
+    def test_ready_rejects_non_ok_health(self):
+        HOT.main(["init"])
+        for status, body in ((200, b'{"status":"activating"}'),
+                             (503, b'{"status":"activation_failed"}')):
+            connection = MagicMock()
+            connection.getresponse.return_value.status = status
+            connection.getresponse.return_value.read.return_value = body
+            with patch.object(HOT.http.client, "HTTPConnection", return_value=connection), \
+                    patch.object(HOT.socket, "socket"):
+                with self.assertRaisesRegex(RuntimeError, "not ready"):
+                    HOT.main(["ready"])
+            connection.close.assert_called_once()
+
+    def test_start_marks_probation_before_selecting_release(self):
+        HOT.main(["init"])
+        root = self.state / "releases"
+        key = "b" * 64
+        (root / key).mkdir()
+        (self.run / "upgrade-paused").touch()
+        (self.run / "upgrade-pause").touch()
+        HOT.record(root, phase="backed_up", old="a" * 64)
+        select = HOT.select
+        def interrupted(root, release):
+            self.assertTrue((root / "probation").exists())
+            select(root, release)
+            raise RuntimeError("interrupted after selection")
+        with patch.object(HOT, "select", side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                HOT.main(["start", key])
+        with self.assertRaisesRegex(RuntimeError, "rollback in progress"):
+            HOT.main(["cancel-pause"])
+        self.assertEqual(HOT.transaction(root)["phase"], "backed_up")
+        self.assertTrue((self.run / "upgrade-pause").exists())
+
     def test_control_helper_is_in_the_docker_build_context(self):
         rules = (ROOT / "docker/Dockerfile.dockerignore").read_text().splitlines()
         self.assertIn("!docker/hot-swap.py", rules)

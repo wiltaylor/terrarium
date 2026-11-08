@@ -207,8 +207,8 @@ def main(argv):
             raise RuntimeError("new release requires a completed offline snapshot")
         if info.get("admission_attempted") and key != (root / "current").resolve().name:
             raise RuntimeError("admission was attempted: use container replacement for rollback")
-        select(root, root / key)
         (root / "probation").touch()
+        select(root, root / key)
         record(root, phase="probation", selected=key)
         (run / "upgrade-pause").unlink()
         wait_for(lambda: not (run / "upgrade-paused").exists(), argv[2] if len(argv) > 2 else None)

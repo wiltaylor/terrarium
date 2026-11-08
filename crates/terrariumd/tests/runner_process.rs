@@ -689,6 +689,34 @@ async fn agent_rpc_hot_swap_failed_health_restores_then_replays_once() {
     hot_swap_probation(true).await;
 }
 
+#[tokio::test]
+async fn agent_rpc_health_reports_activating_until_admission_is_ready() {
+    let mut td = Td::start().await;
+    td.shutdown();
+    let releases = td.dir.path().join("state/releases");
+    std::fs::create_dir_all(&releases).unwrap();
+    let marker = releases.join("probation");
+    std::fs::write(&marker, "").unwrap();
+    td.boot().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    // Current-thread runtime plus direct handler calls keep activation from
+    // racing the assertion between marker removal and activation_ready.
+    std::fs::remove_file(marker).unwrap();
+    let response = terrariumd::api::system::health(axum::extract::State(state.clone())).await;
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["status"],
+        "activating"
+    );
+    state.agent_calls.activation_ready();
+    let response = terrariumd::api::system::health(axum::extract::State(state)).await;
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["status"],
+        "ok"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_rpc_activation_failure_keeps_writes_closed_and_can_restart() {
     let mut td = Td::start().await;
