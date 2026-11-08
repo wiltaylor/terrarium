@@ -28,7 +28,11 @@ pub fn parse(text: &str) -> Option<Vec<GpuDevice>> {
 }
 
 pub async fn sample() -> Option<Vec<GpuDevice>> {
-    let mut cmd = tokio::process::Command::new("nvidia-smi");
+    sample_with("nvidia-smi").await
+}
+
+pub async fn sample_with(bin: &str) -> Option<Vec<GpuDevice>> {
+    let mut cmd = tokio::process::Command::new(bin);
     cmd.args([
         "--query-gpu=uuid,name,memory.total,memory.used",
         "--format=csv,noheader,nounits",
@@ -54,7 +58,7 @@ pub struct Usage {
 }
 
 /// Attribute compute VRAM using host PID cgroups, never whole-device totals.
-pub async fn usage(docker: &str) -> Vec<Usage> {
+async fn usage(nvidia: &str, docker: &str) -> Vec<Usage> {
     async fn output(bin: &str, args: &[&str]) -> Option<String> {
         let mut cmd = tokio::process::Command::new(bin);
         cmd.args(args).kill_on_drop(true);
@@ -67,7 +71,7 @@ pub async fn usage(docker: &str) -> Vec<Usage> {
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     }
     let Some(processes) = output(
-        "nvidia-smi",
+        nvidia,
         &[
             "--query-compute-apps=gpu_uuid,pid,used_gpu_memory",
             "--format=csv,noheader,nounits",
@@ -89,6 +93,28 @@ pub async fn usage(docker: &str) -> Vec<Usage> {
     attribute(&processes, &containers, |pid| {
         std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()
     })
+}
+
+/// Cache successes and failures alike, so a fast metrics tick cannot create a
+/// probe storm. Each connection gets a fresh cache, independent of its hello.
+pub const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Default)]
+pub struct Cache {
+    refreshed: Option<std::time::Instant>,
+    pub devices: Vec<GpuDevice>,
+    pub usage: Vec<Usage>,
+}
+
+impl Cache {
+    pub async fn refresh(&mut self, nvidia: &str, docker: &str) {
+        if self.refreshed.is_some_and(|at| at.elapsed() < CACHE_TTL) {
+            return;
+        }
+        self.devices = sample_with(nvidia).await.unwrap_or_default();
+        self.usage = usage(nvidia, docker).await;
+        self.refreshed = Some(std::time::Instant::now());
+    }
 }
 
 pub fn attribute(
@@ -148,6 +174,45 @@ pub fn attribute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn cache_limits_probes_and_refreshes_successes_and_failures() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("smi");
+        let inventory = dir.path().join("inventory");
+        let calls = dir.path().join("calls");
+        std::fs::write(&bin, format!("#!/bin/sh\nprintf 'call\\n' >> '{}'\ncase \"$1\" in --query-gpu=*) cat '{}' ;; esac\n", calls.display(), inventory.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&inventory, "GPU-abcd, test, 8192, 0\n").unwrap();
+        let mut cache = Cache::default();
+        cache
+            .refresh(bin.to_str().unwrap(), "/nonexistent/docker")
+            .await;
+        assert_eq!(cache.devices[0].uuid, "GPU-abcd");
+        std::fs::write(&inventory, "GPU-1234, changed, 8192, 0\n").unwrap();
+        for _ in 0..5 {
+            cache
+                .refresh(bin.to_str().unwrap(), "/nonexistent/docker")
+                .await;
+        }
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2);
+        assert_eq!(cache.devices[0].uuid, "GPU-abcd");
+        cache.refreshed = Some(std::time::Instant::now() - CACHE_TTL);
+        cache
+            .refresh(bin.to_str().unwrap(), "/nonexistent/docker")
+            .await;
+        assert_eq!(cache.devices[0].uuid, "GPU-1234");
+        std::fs::write(&inventory, "unavailable\n").unwrap();
+        cache.refreshed = Some(std::time::Instant::now() - CACHE_TTL);
+        cache
+            .refresh(bin.to_str().unwrap(), "/nonexistent/docker")
+            .await;
+        assert!(cache.devices.is_empty());
+        cache
+            .refresh(bin.to_str().unwrap(), "/nonexistent/docker")
+            .await;
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 6);
+    }
     #[test]
     fn compute_usage_is_attributed_to_container_not_device_total() {
         let id = "a".repeat(64);

@@ -214,7 +214,7 @@ fn save(t: &mut Tx<'_>, r: &Reservation, change: &str) -> ApiResult<()> {
     Ok(())
 }
 
-pub fn notify(t: &mut Tx<'_>, r: &Reservation, change: &str) -> ApiResult<()> {
+fn notify(t: &mut Tx<'_>, r: &Reservation, change: &str) -> ApiResult<()> {
     use super::mail::{self, Address, Outgoing};
     let mut ids = Vec::new();
     match &r.holder {
@@ -255,11 +255,6 @@ pub fn notify(t: &mut Tx<'_>, r: &Reservation, change: &str) -> ApiResult<()> {
         format!(
             "Reservation {} on {}: measured holder compute VRAM exceeds a cooperative shared GPU share. No process was killed. Reduce GPU memory use or ask the lead to change the reservation.",
             r.id, r.host
-        )
-    } else if change == "gpu_native_session" {
-        format!(
-            "A native session is starting on {} while GPU reservation {} is held. Native processes can access the reserved device.",
-            r.host, r.id
         )
     } else if change == "warning" {
         let minutes = if r.warned_5 { 5 } else { 15 };

@@ -1141,33 +1141,6 @@ pub fn exec_budget(
         return Ok(None);
     };
     ready(state, host)?;
-    if def.kind == TargetKind::Host {
-        let host = host.clone();
-        let state = state.clone();
-        let holder = holder.map(str::to_owned);
-        tokio::spawn(async move {
-            let _ = state
-                .db
-                .write("system", move |tx| {
-                    for r in store::list(tx, &host)?
-                        .iter()
-                        .filter(|r| managed(r) && r.gpus.iter().any(|g| g.exclusive))
-                    {
-                        store::notify(tx, r, "gpu_native_session")?;
-                        if let Some(holder) = &holder
-                            && let Ok(agent) = agents::find(tx, holder, None)
-                        {
-                            let mut warning = r.clone();
-                            warning.holder = Holder::Agent(agent.agent.id.to_string());
-                            warning.project = agent.agent.project;
-                            store::notify(tx, &warning, "gpu_native_session")?;
-                        }
-                    }
-                    Ok(())
-                })
-                .await;
-        });
-    }
     state.db.read_now(|c| {
         let agent = holder.and_then(|h| agents::find(c, h, None).ok()).map(|a| a.agent.id.to_string());
         let rows = store::list(c, host)?;

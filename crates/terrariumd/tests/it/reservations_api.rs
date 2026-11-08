@@ -89,6 +89,14 @@ async fn setup_docker(
     std::fs::write(&docker, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/docker.calls'\n[ ! -f '{}/docker.fail' ] || exit 1\n[ \"$1\" = update ] || exit 2\n", td.dir.path().display(), td.dir.path().display())).unwrap();
     std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
     options.docker_bin = docker.to_string_lossy().into_owned();
+    let nvidia = td.dir.path().join("reservation-nvidia-smi");
+    std::fs::write(
+        &nvidia,
+        "#!/bin/sh\nprintf 'GPU-abcd, test, 8192, 0\\nGPU-1234, test, 8192, 0\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&nvidia, std::fs::Permissions::from_mode(0o700)).unwrap();
+    options.nvidia_smi_bin = nvidia.to_string_lossy().into_owned();
     options.capabilities = HostCapabilities {
         gpu_reservations: true,
         gpus: ["GPU-abcd", "GPU-1234"]
@@ -142,6 +150,70 @@ async fn setup_docker(
         .await
         .ok();
     (td, server, client)
+}
+
+#[tokio::test]
+async fn exclusive_gpu_refuses_running_holder_and_unknown_container_exposure() {
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    td.patch("/api/targets/p-box", json!({"ephemeral":true}))
+        .await
+        .ok();
+    state
+        .db
+        .write("system", |tx| {
+            terrariumd::store::targets::set_state(tx, "p-box", "running", None)
+        })
+        .await
+        .unwrap();
+    let body =
+        json!({"target":"p-box","gpus":[{"uuid":"GPU-abcd","exclusive":true}],"until":"30m"});
+    let refused = td.post("/api/hosts/h/reservations", body.clone()).await;
+    refused.err(409, "conflict");
+    assert!(refused.body.to_string().contains("stop the target"));
+    state
+        .db
+        .write("system", |tx| {
+            terrariumd::store::targets::set_state(tx, "p-box", "absent", None)?;
+            terrariumd::store::targets::set_state(tx, "p-box2", "running", None)
+        })
+        .await
+        .unwrap();
+    let refused = td.post("/api/hosts/h/reservations", body.clone()).await;
+    refused.err(409, "conflict");
+    assert!(refused.body.to_string().contains("incompatible containers"));
+    // An ephemeral container without a known GPU reservation also has no
+    // durable device-exposure baseline. Do not assume it was created GPU-free.
+    state
+        .db
+        .write("system", |tx| {
+            terrariumd::store::targets::set_state(tx, "p-box2", "absent", None)
+        })
+        .await
+        .unwrap();
+    td.patch("/api/targets/p-box2", json!({"ephemeral":true}))
+        .await
+        .ok();
+    state
+        .db
+        .write("system", |tx| {
+            terrariumd::store::targets::set_state(tx, "p-box2", "running", None)
+        })
+        .await
+        .unwrap();
+    td.post("/api/hosts/h/reservations", body)
+        .await
+        .err(409, "conflict");
+    let rows = td.get("/api/hosts/h/reservations").await;
+    assert!(
+        rows.ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["state"] == "retracted")
+    );
+    client.abort();
+    server.abort();
 }
 
 #[tokio::test]
@@ -330,27 +402,23 @@ async fn gpu_reservations_enforce_docker_boundary_and_warn_without_killing() {
         def.kind = kind;
         assert!(terrariumd::reservations::exec_budget(&state, &def, None).is_err());
     }
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let count: i64 = state
-                .db
-                .read(|c| {
-                    Ok(c.query_row(
-                        "SELECT count(*) FROM messages WHERE subject LIKE '%gpu_native_session'",
-                        [],
-                        |r| r.get(0),
-                    )?)
-                })
-                .await
-                .unwrap();
-            if count >= 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    def.kind = terrarium_core::config::TargetKind::Host;
+    for _ in 0..3 {
+        assert!(terrariumd::reservations::exec_budget(&state, &def, Some("p/worker")).is_ok());
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let count: i64 = state
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM messages WHERE subject LIKE '%gpu_native_session'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "native admission must not generate GPU mail");
     td.delete(&format!("/api/reservations/{id}")).await.ok();
     let shared = td.post("/api/hosts/h/reservations", json!({"target":"p-box","amounts":{},"gpus":[{"uuid":"GPU-abcd","vram_bytes":1048576}],"until":"30m"})).await;
     let sid = shared.ok()["id"].as_str().unwrap();
