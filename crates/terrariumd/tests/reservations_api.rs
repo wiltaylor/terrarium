@@ -273,8 +273,7 @@ async fn active_docker_budget_overrides_edits_and_retract_restores_defaults() {
     let calls = std::fs::read_to_string(td.dir.path().join("docker.calls")).unwrap();
     let released = calls
         .lines()
-        .filter(|line| line.starts_with("update "))
-        .next_back()
+        .rfind(|line| line.starts_with("update "))
         .unwrap();
     assert!(released.contains("--cpus=4"));
     assert!(released.contains("--memory=8589934592"));
