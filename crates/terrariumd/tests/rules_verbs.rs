@@ -163,7 +163,7 @@ async fn group_lifecycle_is_rule_only_and_members_keep_their_columns() {
         (format!("/api/cards/{id}/move"), json!({"column":"ready"})),
     ] {
         let response = td.post(&path, body).await;
-        assert!(response.status >= 400, "{}", response.body);
+        assert!(response.status.is_client_error(), "{}", response.body);
     }
     let board = td.get("/api/projects/p/board").await;
     assert_eq!(board.status, 200, "{}", board.body);
