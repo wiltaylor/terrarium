@@ -3,6 +3,7 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+mod ter221_latency;
 
 #[path = "../agent_interrupt.rs"]
 mod agent_interrupt;
@@ -64,6 +65,7 @@ mod hosts;
 mod idle_alert;
 #[path = "../inbox.rs"]
 mod inbox;
+mod inbox_perf;
 #[path = "../input_watchdog.rs"]
 mod input_watchdog;
 #[path = "../jobs.rs"]

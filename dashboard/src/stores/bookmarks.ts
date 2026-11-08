@@ -71,13 +71,16 @@ export function createBookmarksStore(storage: Pick<Storage, "getItem" | "setItem
     error,
     refresh,
     has: (href: string) => items().some((b) => b.href === bookmarkHref(href, origin)),
-    add: (title: string, value: string) => {
+    add: (title: string, value: string, previousHref?: string) => {
       const href = bookmarkHref(value, origin);
       if (!href || !title.trim() || new TextEncoder().encode(title.trim()).length > 500 || new TextEncoder().encode(href).length > 8192) return false;
-      save([...items().filter((b) => b.href !== href), { title: title.trim(), href }]);
+      if (previousHref && items().some((b) => b.href === href && b.href !== previousHref)) return false;
+      const old = previousHref ?? href;
+      const next = { title: title.trim(), href };
+      save(items().some((b) => b.href === old) ? items().map((b) => b.href === old ? next : b) : [...items(), next]);
       if (remote) void enqueue(async () => {
         await migrate();
-        setItems(await remote.add(title.trim(), href));
+        setItems(await remote.add(title.trim(), href, previousHref));
         setError(null);
       });
       return true;

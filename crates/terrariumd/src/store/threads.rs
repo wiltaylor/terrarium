@@ -28,6 +28,9 @@
 //!   leaves all linked cards in review or later, wakes the agent (the
 //!   `thread` event `cards`). A thread in `tracking` goes to
 //!   `waiting_agent` and back to `tracking` on the agent's reply.
+//!   Starting tracking with ready cards, or archiving the last unfinished
+//!   card, also checks review readiness. Card events never interrupt an
+//!   operator wait, and replies preserve open questions.
 //! - The overall response can be sent again (TER-148, D10): the newest
 //!   replaces `response`, and each stays in the conversation as a message
 //!   of kind `response`.
@@ -36,6 +39,8 @@
 //!   the item `inbox-thread:<id>`.
 //!
 //! The rights are in the API layer ([`crate::api::threads`]).
+
+use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -277,6 +282,10 @@ fn name_of(conn: &Connection, key: &str) -> String {
 }
 
 fn row(conn: &Connection, r: &Row<'_>) -> rusqlite::Result<Thread> {
+    row_named(r, |key| name_of(conn, key))
+}
+
+fn row_named(r: &Row<'_>, mut name: impl FnMut(&str) -> String) -> rusqlite::Result<Thread> {
     let status: String = r.get("status")?;
     let response: Option<String> = r.get("response")?;
     let handoff: Option<String> = r.get("handoff")?;
@@ -288,11 +297,11 @@ fn row(conn: &Connection, r: &Row<'_>) -> rusqlite::Result<Thread> {
         topic: r.get("topic")?,
         scope: r.get("scope")?,
         template: r.get("template")?,
-        opened_by_name: name_of(conn, &opened_by),
+        opened_by_name: name(&opened_by),
         opened_by,
-        agent_name: agent.as_deref().map(|a| name_of(conn, a)),
+        agent_name: agent.as_deref().map(&mut name),
         agent,
-        report_to_name: report_to.as_deref().map(|a| name_of(conn, a)),
+        report_to_name: report_to.as_deref().map(&mut name),
         report_to,
         status: ThreadStatus::parse(&status).unwrap_or(ThreadStatus::Closed),
         messages: None,
@@ -604,13 +613,20 @@ pub fn on_card_moved(
 /// Wake the agent of the thread `id` that tracks, for `reason`
 /// ([`WAKE_BLOCKED`], [`WAKE_REVIEW`]). A thread in `tracking` goes to
 /// `waiting_agent`; `tracking_at` stays, so the agent's reply puts it back
-/// into tracking ([`post`]). A thread that waits on the operator (an open
-/// question) or on the agent keeps its status. The `thread` event `cards`
+/// into tracking ([`post`]). A thread that waits on the operator is left
+/// parked. A thread waiting on the agent keeps its status. The `thread` event `cards`
 /// carries only the reason, not the card: a reader of the thread's events
 /// need not read the card's project (TER-146).
 fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
     let th = get_bare(t, id)?;
     let at = now();
+    if th.status == ThreadStatus::WaitingOperator {
+        t.execute(
+            "INSERT OR IGNORE INTO thread_pending_wakes(thread, reason) VALUES (?1, ?2)",
+            params![id, reason],
+        )?;
+        return Ok(());
+    }
     let status = if th.status == ThreadStatus::Tracking {
         ThreadStatus::WaitingAgent
     } else {
@@ -625,6 +641,28 @@ fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
         json!({"reason": reason}),
     )?;
     emit_with(t, &th, "cards", json!({"reason": reason}))
+}
+
+/// Deliver each held reason once, after the operator wait ends. Keep the
+/// reason even if the card moved again: it is an event, not a status poll.
+fn flush_pending_wakes(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
+    let th = get_bare(t, id)?;
+    if th.status == ThreadStatus::WaitingOperator {
+        return Ok(());
+    }
+    let reasons: Vec<String> = {
+        let mut st =
+            t.prepare("SELECT reason FROM thread_pending_wakes WHERE thread = ?1 ORDER BY reason")?;
+        st.query_map([id], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    t.execute("DELETE FROM thread_pending_wakes WHERE thread = ?1", [id])?;
+    if th.status != ThreadStatus::Closed {
+        for reason in reasons {
+            wake(t, id, &reason)?;
+        }
+    }
+    Ok(())
 }
 
 fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
@@ -665,33 +703,32 @@ fn open_questions(conn: &Connection, thread: &str) -> ApiResult<i64> {
     )?)
 }
 
-/// Fill the list fields of a bare thread.
-fn summarised(conn: &Connection, mut th: Thread) -> ApiResult<Thread> {
-    let (count, last): (i64, Option<String>) = conn.query_row(
-        "SELECT count(*), max(at) FROM thread_messages WHERE thread = ?1",
-        [&th.id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+/// Urgency for the Inbox list, in one query rather than one per thread.
+pub fn inbox_urgency(conn: &Connection) -> ApiResult<HashMap<String, (bool, bool)>> {
+    let mut st = conn.prepare(
+        "SELECT thread, max(priority IN ('urgent', 'critical')), max(priority = 'critical')
+         FROM questions WHERE status = 'open' AND thread IS NOT NULL GROUP BY thread",
     )?;
-    th.message_count = Some(count);
-    th.open_questions = Some(open_questions(conn, &th.id)?);
-    th.last_at = Some(match last {
-        Some(l) if l > th.updated_at => l,
-        _ => th.updated_at.clone(),
-    });
-    Ok(th)
+    Ok(st
+        .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+        .collect::<Result<_, _>>()?)
 }
 
-/// Whether thread `id` has an open question that is urgent (or critical),
-/// and one that is critical.
-pub fn urgency(conn: &Connection, id: &str) -> ApiResult<(bool, bool)> {
-    let (u, c): (i64, i64) = conn.query_row(
-        "SELECT coalesce(sum(priority IN ('urgent', 'critical')), 0),
-                coalesce(sum(priority = 'critical'), 0)
-         FROM questions WHERE thread = ?1 AND status = 'open'",
-        [id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    Ok((u > 0, c > 0))
+/// Inbox badge counts need neither thread bodies nor per-thread name/summary queries.
+pub fn inbox_counts(conn: &Connection, project: Option<&str>) -> ApiResult<(usize, usize, usize)> {
+    Ok(conn.query_row(
+        "SELECT count(*), coalesce(sum(q.urgent > 0), 0), coalesce(sum(q.critical > 0), 0)
+         FROM threads t
+         LEFT JOIN (SELECT thread, count(*) AS open,
+                           sum(priority IN ('urgent', 'critical')) AS urgent,
+                           sum(priority = 'critical') AS critical
+                    FROM questions WHERE status = 'open' AND thread IS NOT NULL
+                    GROUP BY thread) q ON q.thread = t.id
+         WHERE t.status != 'closed' AND (t.status = 'waiting_operator' OR q.open > 0)
+           AND (?1 IS NULL OR (t.scope != 'global' AND t.scope = ?1))",
+        [project],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?)
 }
 
 /// The filters of a thread list.
@@ -717,21 +754,35 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
 fn list_unbounded(conn: &Connection, f: &Filter) -> ApiResult<Vec<Thread>> {
     let status = f.status.map(ThreadStatus::as_str);
     let mut st = conn.prepare(
-        "SELECT * FROM threads
+        "SELECT *,
+           (SELECT count(*) FROM thread_messages WHERE thread = threads.id) AS list_messages,
+           (SELECT max(at) FROM thread_messages WHERE thread = threads.id) AS list_last,
+           (SELECT count(*) FROM questions WHERE thread = threads.id AND status = 'open') AS list_questions
+         FROM threads
          WHERE (?1 IS NULL OR status = ?1)
            AND (?1 IS NOT NULL OR ?2 OR status != 'closed')
            AND (?3 IS NULL OR scope = ?3)
            AND (?4 IS NULL OR agent = ?4 OR report_to = ?4 OR opened_by = ?4)",
     )?;
-    let rows = st
+    let mut names = HashMap::new();
+    let mut out = st
         .query_map(params![status, f.all, f.scope, f.involving], |r| {
-            row(conn, r)
+            let mut th = row_named(r, |key| {
+                names
+                    .entry(key.to_owned())
+                    .or_insert_with(|| name_of(conn, key))
+                    .clone()
+            })?;
+            th.message_count = Some(r.get("list_messages")?);
+            th.open_questions = Some(r.get("list_questions")?);
+            let last: Option<String> = r.get("list_last")?;
+            th.last_at = Some(
+                last.filter(|l| l > &th.updated_at)
+                    .unwrap_or_else(|| th.updated_at.clone()),
+            );
+            Ok(th)
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut out = rows
-        .into_iter()
-        .map(|t| summarised(conn, t))
-        .collect::<ApiResult<Vec<_>>>()?;
     out.sort_by(|a, b| {
         let w = |t: &Thread| t.status != ThreadStatus::WaitingOperator;
         w(a).cmp(&w(b)).then_with(|| b.last_at.cmp(&a.last_at))
@@ -979,6 +1030,8 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     let msg = insert_message(t, &th.id, author, "message", &text, &at)?;
     let status = if author == "operator" {
         ThreadStatus::WaitingAgent
+    } else if open_questions(t, &th.id)? > 0 {
+        ThreadStatus::WaitingOperator
     } else if th.tracking_at.is_some() {
         ThreadStatus::Tracking
     } else {
@@ -992,6 +1045,7 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     }
     let th = get(t, &th.id)?;
     emit_with(t, &th, "message", json!({"message": msg, "author": author}))?;
+    flush_pending_wakes(t, id)?;
     Ok(th)
 }
 
@@ -1027,6 +1081,7 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
         "response",
         json!({"message": msg, "author": "operator"}),
     )?;
+    flush_pending_wakes(t, id)?;
     Ok(th)
 }
 
@@ -1034,8 +1089,10 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
 /// handoff (TER-145, TER-144 D1): the agent parks, and the reminder and
 /// the stale close do not apply. A close proposal is withdrawn. A thread
 /// with an open question waits on the operator: `409 conflict`.
+/// On the first handoff, cards already in review or later wake it at once.
 pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
+    let first = th.tracking_at.is_none();
     not_closed(&th, "tracking")?;
     let open = open_questions(t, &th.id)?;
     if open > 0 {
@@ -1055,7 +1112,32 @@ pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     let th = get(t, &th.id)?;
     t.audit("thread.track", &th.id, th.project(), json!({"by": by}))?;
     emit_with(t, &th, "tracking", json!({"author": by}))?;
-    Ok(th)
+    flush_pending_wakes(t, id)?;
+    if first && all_review_or_later(t, id)? {
+        wake(t, id, WAKE_REVIEW)?;
+    }
+    get(t, id)
+}
+
+/// Archiving an unfinished card can leave all remaining live cards ready.
+pub fn on_card_archived(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
+    let ids: Vec<String> = {
+        let mut st = t.prepare(
+            "SELECT th.id FROM thread_cards tc JOIN threads th ON th.id = tc.thread
+             WHERE tc.card = ?1 AND th.status != 'closed' AND th.tracking_at IS NOT NULL",
+        )?;
+        st.query_map([card], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for id in ids {
+        let states = linked_states(t, &id)?;
+        if states.iter().any(|s| s.card == card && !s.review_or_later)
+            && all_review_or_later(t, &id)?
+        {
+            wake(t, &id, WAKE_REVIEW)?;
+        }
+    }
+    Ok(())
 }
 
 fn clear_proposal(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
@@ -1376,7 +1458,8 @@ pub fn on_question(t: &mut Tx<'_>, id: &str, q: &Question, change: &str) -> ApiR
         }
     }
     let th = get_bare(t, &th.id)?;
-    emit(t, &th, "question")
+    emit(t, &th, "question")?;
+    flush_pending_wakes(t, id)
 }
 
 /// The `thread` and `inbox` events of a change.

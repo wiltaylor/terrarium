@@ -33,6 +33,21 @@ _spec.loader.exec_module(dp)
 NOW = datetime(2026, 10, 28, 12, 0, 0, tzinfo=timezone.utc)
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 TOKEN = "f00dfeedcafebeef" * 4
+
+
+class ComposeGitIdentityTests(unittest.TestCase):
+    def test_instance_identity_is_forwarded_with_daemon_defaults(self):
+        compose = (HERE.parent / "compose.yaml").read_text()
+        identity = (HERE.parent / "crates/terrariumd/src/git_identity.rs").read_text()
+        for key, default in (
+            ("TERRARIUM_GIT_NAME", "Terrarium"),
+            ("TERRARIUM_GIT_EMAIL", "terrarium@localhost"),
+        ):
+            with self.subTest(key=key):
+                self.assertIn(f"      {key}: ${{{key}:-{default}}}", compose)
+                self.assertIn(f'"{default}".into()', identity)
+
+
 EXAMPLE = """# example
 TERRARIUM_TOKEN=change-me
 TERRARIUM_IMAGE=terrarium:dev

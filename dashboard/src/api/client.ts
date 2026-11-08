@@ -597,7 +597,7 @@ export interface Api {
    */
   bookmarks: {
     list(): Promise<{ title: string; href: string }[]>;
-    add(title: string, href: string): Promise<{ title: string; href: string }[]>;
+    add(title: string, href: string, previousHref?: string): Promise<{ title: string; href: string }[]>;
     remove(href: string): Promise<{ title: string; href: string }[]>;
   };
   projectFolders: {
@@ -1356,7 +1356,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
 
     bookmarks: {
       list: () => get("/api/bookmarks"),
-      add: (title, href) => put("/api/bookmarks", { title, href }),
+      add: (title, href, previousHref) => put("/api/bookmarks", { title, href, previous_href: previousHref }),
       remove: (href) => t.request("DELETE", "/api/bookmarks", { body: { href } }),
     },
     projectFolders: {
