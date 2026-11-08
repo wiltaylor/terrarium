@@ -641,7 +641,7 @@ mod fake {
 
     impl InMemorySupervisor {
         /// Hold the next stop of `agent` until released. The receiver fires
-        /// when stop has entered, before it changes the harness or status.
+        /// after the harness is stopped, before stop returns to its caller.
         pub fn gate_stop(&self, agent: AgentId) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
             let (entered, entering) = oneshot::channel();
             let (release, gate) = oneshot::channel();
@@ -1166,11 +1166,6 @@ mod fake {
 
         fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
             Box::pin(async move {
-                let gate = self.lock().stop_gates.remove(&agent);
-                if let Some((entered, gate)) = gate {
-                    let _ = entered.send(());
-                    let _ = gate.await;
-                }
                 if !self.current(agent).is_some_and(|(s, _)| s.is_live()) {
                     return Err(SupervisorError::NotRunning(agent));
                 }
@@ -1209,6 +1204,11 @@ mod fake {
                         }
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
+                }
+                let gate = self.lock().stop_gates.remove(&agent);
+                if let Some((entered, gate)) = gate {
+                    let _ = entered.send(());
+                    let _ = gate.await;
                 }
                 Ok(())
             })
