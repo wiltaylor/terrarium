@@ -8271,6 +8271,14 @@ A project has one board rules file, `rules.wcl` (TER-162, TER-166). A
 rule reacts to an event of the log and runs verbs on the board. The
 daemon stores and checks the file here; the engine (§19.9) runs it.
 
+If stored text no longer parses under the current schema, GET rules
+preserves the text and hash, returns empty `rules`, and adds
+`problems: [{line, column, message}]`. The engine emits a project event
+`rules.invalid` with the stored hash and problems when it loads that
+revision. Its own rules do not run, but the built-in pack still runs in
+rules mode. A cached revision does not emit again until reloaded (for
+example after a daemon restart).
+
 The file is WCL. The daemon ships its schema
 (`crates/terrarium-core/src/rules.schema.wcl`, `GET /api/rules/schema`)
 and checks each file against it when it loads the file and on each edit:

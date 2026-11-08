@@ -149,7 +149,7 @@ struct LoadRow {
 /// after the switch. Each changed file is parsed off the DB lock, without
 /// the column check (the engine checks the columns when a run starts). A
 /// file that does not parse (a stored text that a later schema refuses)
-/// runs nothing of its own and logs a warning.
+/// runs nothing of its own and emits a `rules.invalid` project event.
 pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
     let rows: Vec<LoadRow> = db
         .read(|c| {
@@ -240,6 +240,16 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                     Ok(s) => s,
                     Err(e) => {
                         warn!(project = %project, "the stored rules do not parse; they run nothing: {e}");
+                        let p = project.clone();
+                        let data = json!({"hash": file_hash, "problems": rules::problems(&e)});
+                        db.write("system", move |tx| {
+                            tx.emit(events::EventDraft::new(
+                                "rules.invalid",
+                                "stored board rules no longer parse; own rules will not run",
+                                data,
+                            ).project(p))?;
+                            Ok(())
+                        }).await?;
                         RuleSet::default()
                     }
                 };
