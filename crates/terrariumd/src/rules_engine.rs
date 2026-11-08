@@ -383,7 +383,20 @@ pub fn decide(
             .on
             .iter()
             .any(|k| terrarium_core::schedule::glob(k, &e.kind))
-            || !rule.when.iter().all(|m| m.holds(&view))
+            || !rule.when.iter().all(|m| {
+                // Legacy boards/events have no roles. Only the built-in
+                // bound rules retain their column-name fallback.
+                if matches!(rule.name.as_str(), "agent-park" | "agent-unpark")
+                    && matches!(m.path.as_str(), "data.to_role" | "data.from_role")
+                    && e.data[m.path.trim_start_matches("data.")].is_null()
+                {
+                    let mut legacy = m.clone();
+                    legacy.path = m.path.trim_end_matches("_role").into();
+                    legacy.holds(&view)
+                } else {
+                    m.holds(&view)
+                }
+            })
         {
             return Ok(Vec::new());
         }

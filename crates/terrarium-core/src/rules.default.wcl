@@ -327,15 +327,14 @@ rule "job-cancelled" {
 
 // ---------------------------------------------------- the bound agents
 //
-// As bound.rs: the wait columns are names, so a board without them never
-// parks its bound agents.
+// Follow column roles, including boards that rename their wait columns.
 
 rule "agent-park" {
   description = "The card waits on others: its bound agent parks."
   on = ["card"]
   max_per_hour = 600
   when "data.change" { eq = "moved" }
-  when "data.to" { one_of = ["validating", "review", "merge_queue", "accepted"] }
+  when "data.to_role" { one_of = ["validating", "review", "merge_queue", "accepted"] }
   agent_park { reason = "card in {{card.column}}" }
 }
 
@@ -344,10 +343,11 @@ rule "agent-unpark" {
   on = ["card"]
   max_per_hour = 600
   when "data.change" { eq = "moved" }
-  when "data.to" { ne = "validating" }
-  when "data.to" { ne = "review" }
-  when "data.to" { ne = "merge_queue" }
-  when "data.to" { ne = "accepted" }
+  when "data.from_role" { one_of = ["validating", "review", "merge_queue", "accepted"] }
+  when "data.to_role" { ne = "validating" }
+  when "data.to_role" { ne = "review" }
+  when "data.to_role" { ne = "merge_queue" }
+  when "data.to_role" { ne = "accepted" }
   when "data.to" { ne = "done" }
   agent_unpark {}
 }

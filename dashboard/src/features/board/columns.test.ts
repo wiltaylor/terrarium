@@ -37,9 +37,8 @@ describe("board columns", () => {
   });
 
   it.each(["validating", "review", "merge_queue", "accepted"] as const)("does not reserve the name %s as an alias", (name) => {
-    const rows = rowsFromBoard(board).map((r) => r.name === "ready" ? { ...r, name: `new_${name}` } : r);
+    const rows = rowsFromBoard(board).map((r) => r.name === "review" ? { ...r, name: "existing_review" } : r);
     const added = addRow(rows).map((r) => r.name === "" ? { ...r, name } : r);
-    if (name === "review") return; // Already present without a role in this fixture.
     expect(isClean(checkColumns(added))).toBe(true);
     expect(checkColumnEdits(board, toEdits(added)).find((c) => c.name === name)?.role).toBeUndefined();
   });

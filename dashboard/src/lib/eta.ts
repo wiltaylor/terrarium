@@ -46,7 +46,7 @@ export function span(ms: number, seconds = true): string {
  * True when the card is accepted, done, or archived: its ETA shows no countdown (TER-155 D1). The daemon clears the
  * ETA on each column change, so this only hides an ETA that was set in the column itself.
  */
-export const etaStopped = (c: Pick<Card, "column" | "archived">) => c.column === "accepted" || c.column === "done" || c.archived;
+export const etaStopped = (c: Pick<Card, "column" | "column_role" | "archived">) => (c.column_role ?? c.column) === "accepted" || c.column === "done" || c.archived;
 
 export interface Countdown {
   /** `1h 12m left`, `overdue 12m`. */
