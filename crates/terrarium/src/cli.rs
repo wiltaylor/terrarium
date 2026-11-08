@@ -326,6 +326,11 @@ pub enum Command {
         #[command(subcommand)]
         command: RuleCmd,
     },
+    /// Version group lifecycle acknowledgements (project admin)
+    Group {
+        #[command(subcommand)]
+        command: GroupCmd,
+    },
     /// Operator commands that an agent's role permits
     Admin {
         #[command(subcommand)]
@@ -1380,6 +1385,9 @@ pub enum CardCmd {
     /// Comment on a card: `card comment <id> <text>`, `-b <text>`, or `-m <text>`
     Comment {
         id: String,
+        /// Reply to this comment ID. Replies to human comments reach the Inbox.
+        #[arg(long)]
+        reply_to: Option<String>,
         /// The text, or `-` for stdin
         #[arg(required_unless_present_any = ["message", "body"], conflicts_with_all = ["message", "body"])]
         text: Option<String>,
@@ -3637,6 +3645,26 @@ pub enum SkillCmd {
     Validate { name: Option<String> },
     /// The agents and templates that name a skill
     Usage { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GroupCmd {
+    /// Record a version group's step
+    Status {
+        key: String,
+        #[arg(long)]
+        step: String,
+        #[arg(long, value_parser = ["pending", "running", "done", "failed"])]
+        state: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        eta: Option<String>,
+    },
+    /// Acknowledge publication after release CI succeeds
+    Built { key: String, version: String },
+    /// Remove a snapshot member, for example a card returned for a fix
+    Remove { key: String, card: String },
 }
 
 /// `terrarium rule` (docs/api.md §19.12). The project is `--project`, else

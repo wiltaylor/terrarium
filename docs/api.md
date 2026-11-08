@@ -26,6 +26,19 @@ Sections: [1 Transports](#1-transports-and-callers) ·
 
 ## 1. Transports and callers
 
+### Operator preferences
+
+`GET /api/preferences` reads the operator's server-side preferences.
+`PUT /api/preferences` replaces them with `{"default_agent":"meta/lead"}`
+or `{"default_agent":null}` to clear the default. Both are operator-only
+(`403 forbidden` for agents) and return the same object. The PUT accepts
+an existing agent's ULID or `project/name` (`404 not_found` otherwise).
+The response uses `project/name`. The preference is stored in SQLite,
+survives daemon and browser restarts, and becomes null if the agent is deleted.
+Ask an agent and Message an agent preselect this recipient, while allowing
+an override. With no default they retain the empty picker. Home and Inbox
+use the same dialogs.
+
 The daemon serves one router on two listeners.
 
 | Listener | Address | Authentication |
@@ -4457,10 +4470,21 @@ archived cards. The columns are configurable (§8.3, "Columns"):
 | `POST /api/cards/{id}/assign` | `{"assignee": "<address>" \| "me" \| null}` | `200` card |
 | `POST /api/cards/{id}/claim` | none | `200` card, assigned to the caller, in the `working` column |
 | `GET /api/cards/{id}/comments` | | `200` comments |
-| `POST /api/cards/{id}/comments` | `{"body"}` | `201` card |
+| `POST /api/cards/{id}/comments` | `{"body", "reply_to"?: "comment ID on this card"}` | `201` card |
+
 | `POST /api/cards/{id}/links` | `{"kind", "ref"}` | `201` card |
 | `GET /api/cards/{id}/events?since=` | | `200` card events, cursor: `seq`. `since` is a `seq`, an event ID, or a time (§2.1). |
 | `GET /api/cards/{id}/sessions` | | `200` the session links (§6.6) of the card's comments and card events, distinct, oldest first |
+
+Human comments, including comments supplied with card creation or moves,
+mail the project's project_admin agents and the card's assignee and bound
+agent, deduplicated. Agents' ordinary comments and daemon notes do not.
+A project admin can disable human comment mail with
+`PATCH /api/projects/{name}` and `{"human_comment_notifications": false}`
+(default true, including new projects). An agent comment replying to a human
+comment with `reply_to`, or mentioning `@operator` as a standalone mention,
+mails the operator's Inbox with a card link. The CLI supports
+`card comment <id> --reply-to <comment-id> -m <text>`.
 
 **Columns.** The `PATCH` list is the whole board, in order. Each column is
 `{"name", "title"?, "wip_limit"?, "role"?, "rename_from"?}`.
@@ -8291,6 +8315,36 @@ agent, validated, or merged, and do not count toward WIP. Card listings
 for pulling work omit them. The board includes their home headers and
 shows a header in each column containing members, without moving members.
 
+Version groups (TER-182) require `board_flow = rules` for the default pack
+(or explicitly copying the rule into the project's `rules.wcl`).
+The default `version-cut` rule reacts only to moves into the accepted role and runs
+`version_cut { min_cards = 6 max_wait_minutes = 240 }`. Either threshold
+freezes all active, unheld `version:vnext` cards in the accepted role
+that have no open group. Cards in an open merge group wait until it closes.
+The age is time since the last move (creation for cards created in accepted).
+The timer checks eligibility again, including after a merge group closes.
+Override the rule by name in `rules.wcl` to change the thresholds or disable it.
+Each cut opens a project-scoped unique `version:<ULID>` group, records
+gathering, cut, version branch e2e, pre-release, and done steps, and mails
+the project lead (the operator if no lead exists). No Git work is done.
+The lead chooses the version, relabels only the snapshot members, branches,
+tests, and publishes. Later accepted cards are not added to that snapshot.
+
+| endpoint | body | result |
+|---|---|---|
+| `POST /api/projects/{project}/version-groups/{key}/status` | `{step, state, text?, eta?}` | `{changed, group}`. Updates one of the five steps using the `group_status` state/ETA contract. A closed group rejects updates. |
+| `POST /api/projects/{project}/version-groups/{key}/built` | `{version: "vX.Y.Z"}` | `{changed, group}`. Explicit acknowledgement after release CI publishes. Moves only the snapshot's accepted members to done, clears assignees, completes steps, archives the header, and emits `version.built`. All members must be active, unheld, and accepted or done. Repeating the same acknowledgement is a no-op. Another version on a closed group is a conflict. |
+| `POST /api/projects/{project}/version-groups/{key}/remove` | `{card}` | `{changed, group}`. Explicitly drops a member from an open snapshot without moving or editing that card. Use for a card returned for a fix, archived, or held. Removal is audited. Duplicate removal is a no-op. Closed groups reject removal. |
+
+All three endpoints require project admin. Keys are project-scoped. A successful
+pipeline poll is never a built acknowledgement. The `version.built` event
+contains `key`, `version`, and `members` and names the group card.
+
+Lead CLI (uses `--project`, else the agent's project):
+`terrarium group status <key> --step "version branch e2e" --state running --eta 10m`,
+`terrarium group remove <key> <card>`, and
+`terrarium group built <key> vX.Y.Z`. Removed cards do not count in that build.
+
 - `group_open`: required `key`, `title`, `column`, and `done_when`. The key
   is project-scoped. Repeating an open is a no-op, even after closure.
   `done_when` is a column or `@role` anchor: members there or later in
@@ -11335,6 +11389,22 @@ or the operator) read and set the config. The body is a JSON object:
 | `next_repos`   | the repos (by name) that have a `next` branch for merge jobs    | none                  |
 | `work_dir`     | the dir on the target for the work trees of the slots           | `/tmp/terrarium-jobs` |
 | `timeout_secs` | the most time the recipe may run                                | 3600                  |
+| `failure_patterns` | literal strings to extract from recipe output, with three following lines of context | `["FAILED", "panicked", "test result: FAILED", "failures:"]` |
+
+`failure_patterns: []` disables extraction. The patterns are literal, not
+regular expressions, must not be empty or whitespace-only, and can also be
+set in the project's `[delivery]` table.
+Recipe stdout and stderr are merged into
+`<work_dir>/<project>/logs/<job-id>-<attempt>.log` on the target. Logs are outside
+the reusable slot and are not removed by later jobs. `job show` and the
+card's failure block include the target and full log path. They show the
+first 1800 bytes of matching lines (with context), then the last 1200 bytes
+of output. A separate target session reads the excerpt after the recipe
+ends, including after a timeout or cancellation. A cancelled job keeps its
+cancelled state and receives its final output after draining. The recipe
+keeps its inherited umask, while the log file is created privately (0600).
+Each attempt has its own file, including reruns after a lost run. Logs have
+no automatic retention limit.
 
 The target must be a target of the project. A global target needs a
 sysadmin or the operator. The audit row `project.delivery` keeps the old

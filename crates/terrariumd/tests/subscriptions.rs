@@ -3,7 +3,7 @@
 //! through a fake HTTP client; login and status commands are fake scripts.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;

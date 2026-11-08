@@ -2521,6 +2521,17 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY(group_card, name)
     );
     "#,
+    // 95: Operator preferences (TER-253). Self-contained migration.
+    r#"
+    CREATE TABLE operator_preferences (
+        owner TEXT PRIMARY KEY,
+        default_agent TEXT REFERENCES agents(id) ON DELETE SET NULL
+    );
+    "#,
+    // 96: built-in human card comment delivery (TER-254).
+    r#"
+    ALTER TABLE projects ADD COLUMN human_comment_notifications INTEGER NOT NULL DEFAULT 1;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

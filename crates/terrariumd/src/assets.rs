@@ -2,11 +2,7 @@
 
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
-use rust_embed::RustEmbed;
-
-#[derive(RustEmbed)]
-#[folder = "../../dashboard/dist"]
-struct Dist;
+include!(concat!(env!("OUT_DIR"), "/dashboard.rs"));
 
 const PLACEHOLDER: &str = r#"<!doctype html>
 <html lang="en">
