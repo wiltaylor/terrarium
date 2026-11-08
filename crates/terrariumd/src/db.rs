@@ -3449,10 +3449,6 @@ mod tests {
             "wiki_fts",
             "artifacts",
             "artifact_links",
-            "versions",
-            "version_cards",
-            "version_artifacts",
-            "version_reviews",
             "subscriptions",
             "quota_samples",
             "usage_samples",
@@ -3479,7 +3475,6 @@ mod tests {
             "test_suites",
             "test_cases",
             "test_run_cards",
-            "test_run_versions",
             "test_run_labels",
             "artifact_labels",
             "spawns",
@@ -3520,7 +3515,7 @@ mod tests {
                VALUES ('R1', 'V1', 'operator', 'approved', 't');",
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), migration_count() - 79);
+        assert_eq!(migrate_with(&mut conn, &MIGRATIONS[..80]).unwrap(), 1);
         let n: i64 = conn
             .query_row(
                 "SELECT (SELECT count(*) FROM versions WHERE status = 'released')
@@ -3530,6 +3525,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 2);
+        assert_eq!(migrate(&mut conn).unwrap(), migration_count() - 80);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+        for table in ["versions", "version_cards", "version_artifacts", "version_reviews", "test_run_versions"] {
+            assert!(!conn.table_exists(None, table).unwrap(), "{table}");
+            let indexes: i64 = conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1",
+                [table], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(indexes, 0, "{table}");
+        }
         for table in ["test_run_labels", "artifact_labels"] {
             let n: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))

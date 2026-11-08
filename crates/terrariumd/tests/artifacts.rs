@@ -429,25 +429,14 @@ async fn per_file_limit_and_project_quota() {
 #[tokio::test]
 async fn attach_and_prune_keep_the_right_things() {
     let td = setup().await;
-    // ART-1 unattached; ART-2 on a version from before TER-58 (an old
-    // row); ART-3 embedded in a live page; ART-4 embedded in a page that is
+    // ART-1 and ART-2 unattached; ART-3 embedded in a live page;
+    // ART-4 embedded in a page that is
     // deleted; ART-5 on a card; ART-6 on a label.
     for (i, n) in ["loose", "release", "embedded", "dead-page", "card", "label"]
         .iter()
         .enumerate()
     {
         upload(&td, "proj/lead", n, format!("data {i}").as_bytes()).await;
-    }
-    {
-        let db = rusqlite::Connection::open(td.state.join("terrarium.db")).unwrap();
-        db.execute_batch(
-            "INSERT INTO versions (id, project, name, status, created_by, created_at, updated_at)
-               VALUES ('01OLDVERSION', 'proj', 'v1.0.0', 'released', 'operator', '2026-01-01', '2026-01-01');
-             INSERT INTO version_artifacts (version, artifact, created_by, created_at)
-               SELECT '01OLDVERSION', pk, 'operator', '2026-01-01' FROM artifacts
-               WHERE project = 'proj' AND num = 2;",
-        )
-        .unwrap();
     }
     let r = td
         .post_as(
@@ -480,7 +469,7 @@ async fn attach_and_prune_keep_the_right_things() {
     assert_eq!(ids(l.ok()), Vec::<String>::new());
     let l = td.get("/api/projects/proj/artifacts?label=").await;
     assert_eq!(ids(l.ok()).len(), 6);
-    // The old version link is not shown, and no new one can be made.
+    // Version links cannot be made.
     let a2 = td.get("/api/artifacts/proj%2FART-2").await;
     assert_eq!(a2.ok()["links"], json!([]));
     let e = td
@@ -574,7 +563,7 @@ async fn attach_and_prune_keep_the_right_things() {
         .post("/api/artifacts/prune", json!({"as_of": at(day * 40)}))
         .await;
     assert_eq!(r.ok()["dry_run"], true);
-    assert_eq!(keys(r.ok(), "warned"), ["proj/ART-1", "proj/ART-4"]);
+    assert_eq!(keys(r.ok(), "warned"), ["proj/ART-1", "proj/ART-2", "proj/ART-4"]);
     let audit = td.get("/api/audit?action=artifact.prune_warning").await;
     assert_eq!(audit.ok(), &json!([]));
     // First real run: the warning, a day ahead.
@@ -584,10 +573,10 @@ async fn attach_and_prune_keep_the_right_things() {
             json!({"dry_run": false, "as_of": at(day * 40)}),
         )
         .await;
-    assert_eq!(keys(r.ok(), "warned"), ["proj/ART-1", "proj/ART-4"]);
+    assert_eq!(keys(r.ok(), "warned"), ["proj/ART-1", "proj/ART-2", "proj/ART-4"]);
     assert_eq!(keys(r.ok(), "pruned"), Vec::<String>::new());
     let audit = td.get("/api/audit?action=artifact.prune_warning").await;
-    assert_eq!(audit.ok().as_array().unwrap().len(), 2);
+    assert_eq!(audit.ok().as_array().unwrap().len(), 3);
     // Less than a day after the warning: still kept.
     let r = td
         .post(
@@ -607,40 +596,21 @@ async fn attach_and_prune_keep_the_right_things() {
             json!({"dry_run": false, "as_of": at(day * 41 + chrono::Duration::hours(1))}),
         )
         .await;
-    assert_eq!(keys(r.ok(), "pruned"), ["proj/ART-1", "proj/ART-4"]);
-    assert_eq!(r.ok()["kept"], 4);
+    assert_eq!(keys(r.ok(), "pruned"), ["proj/ART-1", "proj/ART-2", "proj/ART-4"]);
+    assert_eq!(r.ok()["kept"], 3);
     td.get("/api/artifacts/proj%2FART-1")
         .await
         .err(404, "not_found");
-    for k in ["ART-2", "ART-3", "ART-5", "ART-6"] {
+    for k in ["ART-3", "ART-5", "ART-6"] {
         td.get(&format!("/api/artifacts/proj%2F{k}")).await.ok();
     }
     assert!(!td.state.join("artifacts").join(sha1).exists());
     let audit = td.get("/api/audit?action=artifact.prune").await;
-    assert_eq!(audit.ok().as_array().unwrap().len(), 2);
+    assert_eq!(audit.ok().as_array().unwrap().len(), 3);
     let ev = td.get("/api/events?kind=artifact.pruned").await;
-    assert_eq!(ev.ok().as_array().unwrap().len(), 2);
+    assert_eq!(ev.ok().as_array().unwrap().len(), 3);
 
-    // An artifact of a released version from before TER-58 is not deleted,
-    // also not by its author (TER-129). An artifact on a label is.
-    let e = td
-        .req(
-            Method::DELETE,
-            "/api/artifacts/ART-2",
-            None,
-            Some("proj/lead"),
-        )
-        .await;
-    e.err(409, "conflict");
-    assert!(
-        e.body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("released version `v1.0.0`"),
-        "{}",
-        e.body
-    );
-    td.get("/api/artifacts/proj%2FART-2").await.ok();
+    // A label link does not block deletion.
     let r = td
         .req(
             Method::DELETE,

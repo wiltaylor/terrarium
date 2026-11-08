@@ -164,12 +164,7 @@ pub enum Command {
     /// The build version of this CLI and of the daemon, with a warning
     /// when their refs differ. Versions of a project are card labels
     /// (`version:vnext`, `version:<X.Y.Z>`), not objects
-    Version {
-        /// The removed `version new | ls | submit | ...` subcommands
-        /// (TER-58): they exit with an error that names card labels
-        #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
-        removed: Vec<String>,
-    },
+    Version,
     /// Test runs: upload test result files as proof, list, show, compare
     Test {
         #[command(subcommand)]
@@ -1880,9 +1875,6 @@ pub enum ArtifactCmd {
         /// Link it to this label, such as `version:1.4.0` (repeat for more)
         #[arg(long = "label")]
         labels: Vec<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long, hide = true)]
-        version: Option<String>,
         /// Link it to this card
         #[arg(long)]
         card: Option<String>,
@@ -1896,9 +1888,6 @@ pub enum ArtifactCmd {
         /// Only the artifacts with this label, such as `version:1.4.0`
         #[arg(long, group = "attach")]
         label: Option<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long, hide = true)]
-        version: Option<String>,
         #[arg(long, group = "attach")]
         card: Option<String>,
     },
@@ -1943,9 +1932,6 @@ pub enum TestCmd {
         /// more)
         #[arg(long = "label")]
         labels: Vec<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long = "version", hide = true)]
-        versions: Vec<String>,
         /// The commit that was tested
         #[arg(long)]
         commit: Option<String>,
@@ -1963,9 +1949,6 @@ pub enum TestCmd {
         /// Only the runs with this label, such as `version:1.4.0`
         #[arg(long)]
         label: Option<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long, hide = true)]
-        version: Option<String>,
         #[arg(long)]
         name: Option<String>,
         /// Only runs with a failed or errored test
@@ -1994,9 +1977,6 @@ pub enum TestCmd {
         /// A label, such as `version:1.4.0` (repeat for more)
         #[arg(long = "label")]
         labels: Vec<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long = "version", hide = true)]
-        versions: Vec<String>,
     },
     /// Unlink a run from cards and labels
     Unlink {
@@ -2006,9 +1986,6 @@ pub enum TestCmd {
         /// A label, such as `version:1.4.0` (repeat for more)
         #[arg(long = "label")]
         labels: Vec<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long = "version", hide = true)]
-        versions: Vec<String>,
     },
     /// Delete a run (its creator, a project admin, or the operator)
     Rm { id: String },
