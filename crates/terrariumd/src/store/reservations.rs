@@ -199,7 +199,7 @@ fn allocation(
         .collect();
     let conflict = || {
         ApiError::conflict(format!("reservable capacity on `{}` is exhausted", request.host))
-        .details(json!({"host":request.host,"holders":held.iter().map(|r| json!({"holder":r.holder,"until":r.until,"reservation":r.id})).collect::<Vec<_>>()}))
+        .with_details(json!({"host":request.host,"holders":held.iter().map(|r| json!({"holder":r.holder,"until":r.until,"reservation":r.id})).collect::<Vec<_>>()}))
     };
     for r in &held {
         remaining = remaining

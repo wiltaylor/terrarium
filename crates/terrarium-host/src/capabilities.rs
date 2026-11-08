@@ -30,6 +30,7 @@ pub async fn detect_with(
     limits.docker = docker.present;
     HostCapabilities {
         capacity: detect_capacity(Path::new("/proc")),
+        reservations: true,
         docker,
         vmlab,
         shell: detect_shell(),

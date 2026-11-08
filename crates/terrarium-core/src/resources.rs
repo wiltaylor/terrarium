@@ -5,6 +5,45 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Fully resolved enforcement values. `cpus: None` clears affinity, while
+/// `Some` must contain at least one logical CPU. Device keys are major:minor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeLimits {
+    pub limits: crate::limits::Limits,
+    #[serde(default)]
+    pub cpus: Option<Vec<u32>>,
+    #[serde(default)]
+    pub io: BTreeMap<String, IoAmounts>,
+}
+
+impl RuntimeLimits {
+    pub fn validate(&self) -> Result<(), String> {
+        Amounts { io: self.io.clone(), ..Default::default() }.validate()?;
+        if self.cpus.as_ref().is_some_and(Vec::is_empty) {
+            return Err("CPU affinity cannot be empty".into());
+        }
+        Ok(())
+    }
+
+    pub fn cpuset(&self) -> String {
+        self.cpus.as_ref().map(|v| v.iter().map(u32::to_string).collect::<Vec<_>>().join(",")).unwrap_or_default()
+    }
+
+    pub fn host_support(&self, cap: Option<&crate::limits::LimitsCapability>) -> Result<(), String> {
+        self.validate()?;
+        self.limits.host_support(cap)?;
+        let controllers = &cap.ok_or("missing resource limits capability")?.controllers;
+        if self.cpus.is_some() && !controllers.iter().any(|c| c == "cpuset") {
+            return Err("missing delegated cpuset controller".into());
+        }
+        if !self.io.is_empty() && !controllers.iter().any(|c| c == "io") {
+            return Err("missing delegated io controller".into());
+        }
+        Ok(())
+    }
+}
+
 /// Per-device throughput and operation budgets. Zero means no allocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

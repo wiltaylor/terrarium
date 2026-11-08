@@ -468,6 +468,7 @@ pub fn exec_limits(
         .host_support(caps.limits.as_ref())
         .map_err(|r| ApiError::conflict(terrarium_core::limits::refusal(&r)))?;
     Ok(Some(ExecLimits {
+        reservation: None,
         target: def.name.clone(),
         holder: holder.unwrap_or("operator").to_owned(),
         limits,
@@ -2381,6 +2382,7 @@ async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> A
             pty: None,
             timeout_secs: Some(VERB_TIMEOUT),
             limits,
+            reservation: None,
         })
     })
     .await?;
