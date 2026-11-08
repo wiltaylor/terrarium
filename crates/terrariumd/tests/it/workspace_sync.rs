@@ -64,7 +64,7 @@ impl Ssh {
         std::fs::rename(jail.join("usr/bin/rsync"), jail.join("usr/bin/rsync-real")).unwrap();
         std::fs::write(
             jail.join("usr/bin/rsync"),
-            "#!/bin/sh\nexec /usr/bin/rsync-real --debug=DELTASUM3 \"$@\" 2>/tmp/rsync-debug\n",
+            "#!/bin/sh\nexec /usr/bin/rsync-real --debug=DELTASUM3 --msgs2stderr \"$@\" 2>/tmp/rsync-debug\n",
         )
         .unwrap();
         std::fs::set_permissions(
