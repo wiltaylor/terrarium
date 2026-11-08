@@ -4,7 +4,7 @@
 //! a real runner and a running agent is in `runner_process.rs`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use common::TestDaemon;
 use serde_json::{Value, json};

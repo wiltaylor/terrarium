@@ -2,7 +2,7 @@
 //! retention (PLAN §15.2).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
+use crate::common;
 
 use base64::Engine;
 use common::{TestDaemon, write};
