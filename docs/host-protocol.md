@@ -832,6 +832,9 @@ systemd slice properties including AllowedCPUs and device bandwidth/IOPS.
 An empty target and holder address the shared `terrarium.slice`. Exclusive
 scopes use the sibling `terrariumreserved` hierarchy. Clearing affinity
 restores inheritance. Device identifiers map to `/dev/block/<major>:<minor>`.
+For Docker, the host resolves that symlink before constructing the
+`device:rate` flag, because Docker does not accept colons inside its device
+path. A missing device fails closed.
 
 `resource_stop` carries `session`, `target` and `holder`. It stops only that
 reservation slice through the user systemd manager. Both verbs use normal

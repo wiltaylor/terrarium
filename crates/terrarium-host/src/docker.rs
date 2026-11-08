@@ -90,7 +90,7 @@ pub fn plan_run(
     if let Some(l) = &req.reservation {
         l.validate().map_err(BuildError::bad)?;
         a.extend(limit_flags(&l.limits));
-        a.extend(reservation_flags(l));
+        a.extend(reservation_flags(l, std::path::Path::new("/dev/block"))?);
     } else if let Some(l) = &req.limits {
         a.extend(limit_flags(l));
     }
@@ -201,12 +201,24 @@ pub fn limit_flags(l: &Limits) -> Vec<String> {
 
 /// Create-only device IO flags and CPU affinity. Device IDs were resolved on
 /// this host, so Docker can use the kernel's /dev/block symlinks.
-pub fn reservation_flags(l: &terrarium_core::resources::RuntimeLimits) -> Vec<String> {
+pub fn reservation_flags(
+    l: &terrarium_core::resources::RuntimeLimits,
+    device_root: &std::path::Path,
+) -> Result<Vec<String>, BuildError> {
+    l.validate().map_err(BuildError::bad)?;
     let mut args = Vec::new();
     if l.cpus.is_some() {
         args.push(format!("--cpuset-cpus={}", l.cpuset()));
     }
     for (device, io) in &l.io {
+        // Docker splits device:rate at the colon, so /dev/block/major:minor
+        // cannot be passed literally. Resolve the host's kernel device link.
+        let path = std::fs::canonicalize(device_root.join(device))
+            .map_err(|e| BuildError::bad(format!("cannot resolve IO device {device}: {e}")))?;
+        let path = path
+            .to_str()
+            .filter(|p| !p.contains(':'))
+            .ok_or_else(|| BuildError::bad("Docker IO device path must be UTF-8 without colons"))?;
         for (flag, value) in [
             ("read-bps", io.read_bps),
             ("write-bps", io.write_bps),
@@ -214,11 +226,11 @@ pub fn reservation_flags(l: &terrarium_core::resources::RuntimeLimits) -> Vec<St
             ("write-iops", io.write_iops),
         ] {
             if value > 0 {
-                args.push(format!("--device-{flag}=/dev/block/{device}:{value}"));
+                args.push(format!("--device-{flag}={path}:{value}"));
             }
         }
     }
-    args
+    Ok(args)
 }
 
 /// Docker update cannot apply per-device IO. Refuse it rather than silently

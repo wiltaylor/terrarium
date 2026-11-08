@@ -25,10 +25,14 @@ fn budget() -> RuntimeLimits {
 #[test]
 fn create_has_device_limits_but_live_update_refuses_them() {
     let b = budget();
-    let flags = docker::reservation_flags(&b);
+    let devices = tempfile::tempdir().unwrap();
+    let block = devices.path().join("device");
+    std::fs::write(&block, "fake block device").unwrap();
+    std::os::unix::fs::symlink(&block, devices.path().join("8:0")).unwrap();
+    let flags = docker::reservation_flags(&b, devices.path()).unwrap();
     assert!(flags.contains(&"--cpuset-cpus=1,3".into()));
-    assert!(flags.contains(&"--device-read-bps=/dev/block/8:0:1024".into()));
-    assert!(flags.contains(&"--device-write-iops=/dev/block/8:0:50".into()));
+    assert!(flags.contains(&format!("--device-read-bps={}:1024", block.display())));
+    assert!(flags.contains(&format!("--device-write-iops={}:50", block.display())));
     let err = docker::plan_update("container", &b, "docker").unwrap_err();
     assert!(err.message.contains("next up"));
 }
