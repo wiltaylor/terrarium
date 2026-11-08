@@ -32,8 +32,12 @@ pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSampl
          ORDER BY x.seq DESC",
     )?;
     let rows = stmt.query_map([project], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?,
-            r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
     })?;
     let mut samples = Vec::new();
     for row in rows {
@@ -43,7 +47,9 @@ pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSampl
             DateTime::parse_from_rfc3339(&start),
             DateTime::parse_from_rfc3339(&guess),
             DateTime::parse_from_rfc3339(&end),
-        ) && guess > start && end > start {
+        ) && guess > start
+            && end > start
+        {
             samples.push(WorkSample {
                 actual_ms: (end - start).num_milliseconds() as f64,
                 guess_ms: (guess - start).num_milliseconds() as f64,
@@ -56,16 +62,29 @@ pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSampl
 
 /// Nearest-rank p70. Five completed cards are required for each history.
 fn p70(mut values: Vec<f64>) -> Option<f64> {
-    if values.len() < 5 { return None; }
+    if values.len() < 5 {
+        return None;
+    }
     values.sort_by(f64::total_cmp);
     Some(values[(values.len() * 7).div_ceil(10) - 1])
 }
 
 pub fn calibrated_ms(samples: &[WorkSample], labels: &[String], guess: Option<f64>) -> Option<f64> {
-    let ratios = p70(samples.iter().take(30).map(|s| s.actual_ms / s.guess_ms).collect());
-    let actual = p70(samples.iter().filter(|s| labels.iter().any(|l|
-        l.starts_with("type:") && s.labels.contains(l)))
-        .take(30).map(|s| s.actual_ms).collect());
+    let ratios = p70(samples
+        .iter()
+        .take(30)
+        .map(|s| s.actual_ms / s.guess_ms)
+        .collect());
+    let actual = p70(samples
+        .iter()
+        .filter(|s| {
+            labels
+                .iter()
+                .any(|l| l.starts_with("type:") && s.labels.contains(l))
+        })
+        .take(30)
+        .map(|s| s.actual_ms)
+        .collect());
     match guess {
         Some(guess) => Some((guess * ratios? * actual?).sqrt()),
         None => actual,
@@ -187,19 +206,35 @@ mod tests {
 
     #[test]
     fn calibration_combines_ratio_and_type_history_or_uses_history_alone() {
-        let samples: Vec<_> = (1..=10).rev().map(|n| WorkSample {
-            actual_ms: f64::from(n) * 1000.0,
-            guess_ms: 10000.0,
-            labels: vec!["type:impl".into()],
-        }).collect();
+        let samples: Vec<_> = (1..=10)
+            .rev()
+            .map(|n| WorkSample {
+                actual_ms: f64::from(n) * 1000.0,
+                guess_ms: 10000.0,
+                labels: vec!["type:impl".into()],
+            })
+            .collect();
         let labels = vec!["type:impl".into()];
-        assert_eq!(calibrated_ms(&samples, &labels, Some(10000.0)), Some(7000.0));
+        assert_eq!(
+            calibrated_ms(&samples, &labels, Some(10000.0)),
+            Some(7000.0)
+        );
         assert_eq!(calibrated_ms(&samples, &labels, None), Some(7000.0));
         assert_eq!(calibrated_ms(&samples[..4], &labels, Some(10000.0)), None);
-        assert_eq!(calibrated_ms(&samples, &["type:small".into()], Some(10000.0)), None);
-        assert_eq!(calibrated_ms(&samples, &labels, Some(40000.0)), Some(14000.0));
+        assert_eq!(
+            calibrated_ms(&samples, &["type:small".into()], Some(10000.0)),
+            None
+        );
+        assert_eq!(
+            calibrated_ms(&samples, &labels, Some(40000.0)),
+            Some(14000.0)
+        );
         let mut recent = samples;
-        recent.extend((0..40).map(|_| WorkSample { actual_ms: 1e9, guess_ms: 1.0, labels: labels.clone() }));
+        recent.extend((0..40).map(|_| WorkSample {
+            actual_ms: 1e9,
+            guess_ms: 1.0,
+            labels: labels.clone(),
+        }));
         assert!(calibrated_ms(&recent, &labels, None).is_some());
     }
 

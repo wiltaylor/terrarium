@@ -641,19 +641,28 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
     let mut eta_calibrated = None;
     let mut worker_eta = row.eta_at.clone();
     let mut worker_start = row.eta_set_at.clone();
-    if !row.archived && job.is_none()
+    if !row.archived
+        && job.is_none()
         && (row.column_role.as_deref() == Some(WORKING)
             || (row.column_role.is_none() && row.column == WORKING))
     {
         if worker_start.is_none() {
-            worker_start = conn.query_row(
-                "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
+            worker_start = conn
+                .query_row(
+                    "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
                  AND json_extract(payload, '$.change') = 'moved' ORDER BY seq DESC LIMIT 1",
-                [&row.id], |r| r.get(0),
-            ).optional()?;
+                    [&row.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
         }
-        if let Some(start) = worker_start.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
-            let guess = row.eta_at.as_deref()
+        if let Some(start) = worker_start
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        {
+            let guess = row
+                .eta_at
+                .as_deref()
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .map(|at| (at - start).num_milliseconds() as f64);
             let samples = super::card_history::work_samples(conn, &row.project)?;
@@ -661,7 +670,9 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
             let calibrated = super::card_history::calibrated_ms(&samples, &labels, guess);
             eta_calibrated = Some(calibrated.is_some());
             if let Some(ms) = calibrated
-                && let Some(at) = start.checked_add_signed(chrono::Duration::milliseconds(ms.round() as i64)) {
+                && let Some(at) =
+                    start.checked_add_signed(chrono::Duration::milliseconds(ms.round() as i64))
+            {
                 worker_eta = Some(at.to_rfc3339());
             }
         }
