@@ -144,7 +144,7 @@ const TWO_STEPS: &str = r#"rule "note" {
 
 #[tokio::test]
 async fn stored_rules_schema_failure_is_visible() {
-    let td = TestDaemon::start().await;
+    let mut td = TestDaemon::start().await;
     td.project("broken").await;
     put_rules(&td, "broken", TWO_STEPS).await;
     // Model a schema upgrade removing a previously accepted verb. Keep
@@ -170,8 +170,17 @@ async fn stored_rules_schema_failure_is_visible() {
     assert!(problems[0]["column"].is_number());
     assert!(problems[0]["message"].is_string());
 
+    let effective = td.get("/api/projects/broken/rules/effective").await.ok().clone();
+    assert_eq!(effective["problems"], body["problems"]);
+    let lint = td.post("/api/projects/broken/rules/lint", json!({})).await.ok().clone();
+    assert_eq!(lint["problems"], body["problems"]);
+    let lint_text = td.post("/api/projects/broken/rules/lint", json!({"text": TWO_STEPS})).await.ok().clone();
+    assert_eq!(lint_text["problems"], json!([]));
+
     let mut cache = rules_engine::Cache::default();
     let db = state(&td).db.clone();
+    // Stop the daemon's independent cache so event counts are deterministic.
+    td.daemon.take().unwrap().shutdown();
     let before: i64 = db
         .read(|c| {
             Ok(c.query_row(
@@ -192,8 +201,6 @@ async fn stored_rules_schema_failure_is_visible() {
             .rules
             .is_empty()
     );
-    // A second load of the same revision must not emit another diagnostic.
-    rules_engine::load(&db, &mut cache).await.unwrap();
     let data: Vec<String> = db
         .read(|c| {
             let mut st = c.prepare(
@@ -205,13 +212,29 @@ async fn stored_rules_schema_failure_is_visible() {
         })
         .await
         .unwrap();
-    // The daemon's independent cache may also observe the revision.
-    assert!(data.len() as i64 > before);
+    assert_eq!(data.len() as i64, before + 1);
+    // A second load of the same revision must not emit another diagnostic.
+    rules_engine::load(&db, &mut cache).await.unwrap();
+    let after: i64 = db.read(|c| Ok(c.query_row(
+        "SELECT count(*) FROM events WHERE project = 'broken' AND kind = 'rules.invalid'",
+        [], |r| r.get(0),
+    )?)).await.unwrap();
+    assert_eq!(after, before + 1);
     for data in data {
         let data: Value = serde_json::from_str(&data).unwrap();
         assert_eq!(data["hash"], "old-schema");
         assert_eq!(data["problems"], body["problems"]);
     }
+
+    db.write("system", |tx| {
+        tx.execute_batch("CREATE TRIGGER block_rules_invalid BEFORE INSERT ON events
+            WHEN NEW.kind = 'rules.invalid'
+            BEGIN SELECT RAISE(FAIL, 'test event failure'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    // Failure to record a diagnostic must not fail the engine pass.
+    let loaded = rules_engine::load(&db, &mut rules_engine::Cache::default()).await.unwrap();
+    assert!(loaded.iter().any(|p| p.project == "broken"));
 }
 
 /// A recording error must not strand rows beyond the old global batch
