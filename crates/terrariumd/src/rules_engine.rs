@@ -1251,13 +1251,20 @@ fn timer_rules(projects: &[ProjectRules]) -> Vec<TimerRule> {
     let mut out = Vec::new();
     for p in projects {
         for r in p.set.rules.iter().filter(|r| r.enabled) {
-            for a in r.actions.iter().filter(|a| a.verb == "job.queue" || a.verb == "version.cut") {
+            for a in r
+                .actions
+                .iter()
+                .filter(|a| a.verb == "job.queue" || a.verb == "version.cut")
+            {
                 let arg = |k: &str| a.args.get(k).and_then(Value::as_i64);
                 if a.verb == "version.cut" {
                     out.push(TimerRule {
-                        project: p.project.clone(), rule: r.name.clone(),
-                        from: "@accepted".into(), limit: None,
-                        wait: arg("max_wait_minutes").unwrap_or(240), version: true,
+                        project: p.project.clone(),
+                        rule: r.name.clone(),
+                        from: "@accepted".into(),
+                        limit: None,
+                        wait: arg("max_wait_minutes").unwrap_or(240),
+                        version: true,
                         min_cards: arg("min_cards").and_then(|n| usize::try_from(n).ok()),
                     });
                     continue;
@@ -1350,16 +1357,13 @@ async fn fire_timer(
     let Some(pick) = pick.filter(|p| p.waiting > 0) else {
         return Ok(false);
     };
-    let Some(due) = pick
-        .first_since
-        .and_then(|f| {
-            if t.version && t.min_cards.is_some_and(|min| pick.waiting >= min) {
-                Some(f)
-            } else {
-                chrono::Duration::try_minutes(t.wait).and_then(|wait| f.checked_add_signed(wait))
-            }
-        })
-    else {
+    let Some(due) = pick.first_since.and_then(|f| {
+        if t.version && t.min_cards.is_some_and(|min| pick.waiting >= min) {
+            Some(f)
+        } else {
+            chrono::Duration::try_minutes(t.wait).and_then(|wait| f.checked_add_signed(wait))
+        }
+    }) else {
         return Ok(false);
     };
     if due > now {
