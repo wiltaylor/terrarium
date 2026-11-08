@@ -11760,7 +11760,7 @@ they do not get the low priority.
 | `GET /api/job-hosts`            | any agent, the operator       | `{hosts: [{host, name?, aliases?, heavy_jobs, running, projects, updated_by?, updated_at?}]}`: each host with a cap, a running job, or aliases. `name` is the host-agent name when the key is a host agent. `heavy_jobs` is `null` without a cap. Visibility is scoped as described below |
 | `PUT /api/job-hosts/{host}`     | a sysadmin, the operator      | `{heavy_jobs}` (1 or more). The answer is the list above |
 | `DELETE /api/job-hosts/{host}`  | a sysadmin, the operator      | take the cap away. The answer is the list above |
-| `PUT /api/job-hosts/{host}/aliases` | a sysadmin, the operator  | `{aliases: [address]}` (at most 32): the addresses of the host agent `{host}` (name or ID). Replaces the list; `[]` takes all away. 404 for no host agent, 409 when another host agent has the alias. The answer is the list above |
+| `PUT /api/job-hosts/{host}/aliases` | a sysadmin, the operator  | `{aliases: [address]}` (at most 32): the addresses of the host agent `{host}` (name or ID). Replaces the list; `[]` takes all away. 404 for no host agent, 409 when another host agent has the alias or its pinned key, 422 for invalid aliases (including a host-agent name, case-insensitive). The answer is the list above |
 
 The audit row `job.host_cap` keeps the old and the new cap. A job keeps
 the host it started on (`host` in the job).
