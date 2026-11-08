@@ -183,8 +183,26 @@ async fn dry_run(
     let project = name.clone();
     let (set, source) = match body.text {
         Some(text) => {
-            let ctx = state.db.read(move |c| rules::context(c, &project)).await?;
-            (rules::check(text, ctx).await?, "text")
+            let (ctx, flow) = state
+                .db
+                .read(move |c| {
+                    Ok((
+                        rules::context(c, &project)?,
+                        crate::store::projects::board_flow(c, &project)?,
+                    ))
+                })
+                .await?;
+            let own = rules::check(text, ctx).await?;
+            // As the lint with `text`: with `board_flow = rules` the text
+            // runs with the pack, so plan both (TER-226).
+            if flow == terrarium_core::config::BoardFlow::Rules {
+                (
+                    rules_file::with_pack(rules_file::default_pack(), &own),
+                    "text",
+                )
+            } else {
+                (own, "text")
+            }
         }
         None => {
             let (r, flow) = state

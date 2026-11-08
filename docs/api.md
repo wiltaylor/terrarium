@@ -8323,7 +8323,7 @@ ends the agent of a finished card.
 
 | Method and path | Body | Answer |
 |---|---|---|
-| `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. The stored rules of a project with `board_flow = rules` include the pack (§19.12). No rules, no pack, and no `text`: `404`. |
+| `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. The rules of a project with `board_flow = rules`, the stored ones or `text`, include the pack (§19.12), as in the lint. No rules, no pack, and no `text`: `404`. |
 | `GET /api/projects/{name}/rules/runs?rule=&limit=` | | `200`, `{runs: [{id, project, rule, rule_hash, event_seq, card?, state, step, steps, reason?, created_at, updated_at}]}`, newest first (`limit` 1 to 500, default 100). `state` is `pending`, `done`, `noop`, `failed`, or `skipped`; `step` the next action (pending) or the actions run; `steps` one `{verb, ok, changed?, detail?, error?}` for each action run. The project keeps its newest 500 finished runs, and every run of the last hour (the rate limits count them). |
 
 Both: whoever reads the project.
@@ -8480,7 +8480,9 @@ such a board a run of the pack fails (§19.9). The migration maps the pack
 to the board's columns:
 
 - A `card_move` to a column that the board lacks becomes a `card_comment`
-  with the move's `comment`. With no comment the move is dropped. The
+  with the move's `comment`. With no comment the move is dropped. A move
+  with a `from` is dropped too: a comment has no `from`, so it would reach
+  the cards that the move skips. The
   coded flow wrote a comment when such a move failed. Example: on a board
   with no `accepted` column, `merge-pass` takes the labels off, writes
   the end comment, and unassigns the card. The card stays where it is.
@@ -8519,7 +8521,7 @@ Rules that are off count for nothing. It finds two problems:
 | `GET /api/projects/{name}/rules/effective` | | `200`, `{project, board_flow, exists, hash?, source?, rules: [...]}`. `rules` is the rules that the engine runs, in its order. Each rule has the fields of §19.8, `origin` (`pack`, `override`: a rule of `rules.wcl` with a pack name, or `own`), and `wcl` (the rule as WCL text). |
 | `POST /api/projects/{name}/rules/lint` | `{text?}` | `200`, `{project, board_flow, source: "stored" or "text", findings: [{code, column, rules, message}]}`. With `text`, the text is checked as the `rules.wcl` first (`422` as §19.8). |
 | `POST /api/projects/{name}/rules/migrate` | `{apply?, base_hash?}` | `200`, `{project, applied, board_flow, changed, text, hash?, changes: [{rule, change, reasons}], findings}`. `change` is `mapped`, `disabled`, or `kept`. `text` is the new `rules.wcl` (the old text, then the overrides). `findings` is the lint of the rules after the migration, with the pack. Without `apply` it writes nothing. With `apply`, one write stores the text (when it changed) and sets `board_flow = rules`, with the audit row `rules.migrate` (`{board_flow, previous_board_flow, hash, changes}`) and `rules.put` for the text. |
-| `POST /api/projects/{name}/rules/{rule}/enable` | | `200`, `{project, rule, enabled, changed, hash?}`. |
+| `POST /api/projects/{name}/rules/{rule}/enable` | | `200`, `{project, rule, enabled, changed, hash?, findings}`. `findings` is the lint of the rules that run after the change (as `lint`). |
 | `POST /api/projects/{name}/rules/{rule}/disable` | | The same. |
 
 `enable` and `disable` edit the text of `rules.wcl` and keep the rest of
@@ -8527,8 +8529,10 @@ the text as it is. A rule of the file gets its `enabled` field set (or a
 new `enabled = false` line after its `{`). A pack rule that the file does
 not name gets `rule "<name>" { enabled = false }` at the end. To enable a
 pack rule that the file turns off with that short form, the short form is
-removed, so the pack rule runs again. A rule that is already so changes
-nothing (`changed: false`). An unknown rule is `404`. A short form of a
+removed, so the pack rule runs again. Such a pack rule can name a column
+that the board lacks (the migration turned it off for that reason): the
+answer's `findings` then has a `missing_column`, and the CLI prints it. A
+rule that is already so changes nothing (`changed: false`). An unknown rule is `404`. A short form of a
 rule that is not in the pack is `409`: edit the file.
 
 Rights: `effective`, `lint`, and a `migrate` without `apply` are for
@@ -8542,9 +8546,10 @@ whose rules come from a file, run the migration without `apply`, put
 `text` into `projects/<project>.rules.wcl`, and set `board_flow =
 "rules"` in the project file.
 
-The dry run of §19.9 without `text` plans the pack too when the project
-runs it (`board_flow = rules`). Such a project with no `rules.wcl` plans
-the pack alone (before TER-171 it was `404`).
+The dry run of §19.9 plans the pack too when the project runs it
+(`board_flow = rules`), with the stored rules or with `text`, as the lint
+does. Such a project with no `rules.wcl` plans the pack alone (before
+TER-171 it was `404`).
 
 ## 20. Event sources and ingest
 
