@@ -388,14 +388,25 @@ async fn lead_assigned_card_is_monitored_without_a_claimed_event() {
     let worker = id(&td
         .agent("p", "worker", json!({"card_reminder": false}))
         .await);
+    td.post_empty(&format!("/api/agents/{worker}/start"))
+        .await
+        .ok();
+    td.wait_status(&worker, "idle").await;
     let card = id(td
         .post_as(
             &lead,
             "/api/projects/p/cards",
-            json!({"title": "Assigned", "column": "ready", "assignee": worker}),
+            json!({"title": "Assigned", "column": "ready"}),
         )
         .await
         .ok());
+    td.post_as(
+        &lead,
+        &format!("/api/cards/{card}/assign"),
+        json!({"assignee": worker}),
+    )
+    .await
+    .ok();
     // The lead's assignment means this claim emits only the working move.
     td.post_as(&worker, &format!("/api/cards/{card}/claim"), json!({}))
         .await
@@ -403,9 +414,6 @@ async fn lead_assigned_card_is_monitored_without_a_claimed_event() {
     let c = card.clone();
     let claims: i64 = state(&td).db.read(move |db| Ok(db.query_row("SELECT count(*) FROM events WHERE card = ?1 AND json_extract(payload, '$.change') = 'claimed'", [c], |r| r.get(0))?)).await.unwrap();
     assert_eq!(claims, 0);
-    td.post_empty(&format!("/api/agents/{worker}/start"))
-        .await
-        .ok();
     td.wait_status(&worker, "idle").await;
     td.sup.open_turn(worker.parse().unwrap());
     td.wait_status(&worker, "working").await;
