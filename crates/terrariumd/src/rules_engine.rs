@@ -1194,9 +1194,15 @@ pub fn card_condition_fails(
     columns: &[BoardColumn],
 ) -> Option<String> {
     if let Some(prefix) = &cond.group_key_prefix
-        && !card.group.as_ref().is_some_and(|g| g.key.starts_with(prefix))
+        && !card
+            .group
+            .as_ref()
+            .is_some_and(|g| g.key.starts_with(prefix))
     {
-        return Some(format!("{} is not in a group with key prefix {prefix}", card.id));
+        return Some(format!(
+            "{} is not in a group with key prefix {prefix}",
+            card.id
+        ));
     }
     let is_in = |refs: &[String]| {
         refs.iter()

@@ -278,7 +278,11 @@ pub fn remove(t: &mut Tx<'_>, g: &Group, card: &str) -> ApiResult<bool> {
     if changed {
         event(t, &g.id, "group_removed")?;
         if g.key.starts_with("merge:") && get(t, &g.id)?.total == 0 {
-            close(t, &get(t, &g.id)?, "Merge group abandoned: no members remain.")?;
+            close(
+                t,
+                &get(t, &g.id)?,
+                "Merge group abandoned: no members remain.",
+            )?;
         }
     }
     Ok(changed)
@@ -417,14 +421,18 @@ fn reconcile_merge_groups(t: &mut Tx<'_>) -> ApiResult<()> {
         let mut stmt = t.prepare(
             "SELECT card FROM card_groups WHERE closed_at IS NULL AND key LIKE 'merge:%'",
         )?;
-        stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?
+        stmt.query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
     };
     for id in ids {
         let g = get(t, &id)?;
         for member in &g.members {
             let card = board::get_card(t, member)?;
             if card.archived
-                || matches!(card.column_role.as_deref(), Some("in_progress" | "ready" | "blocked" | "backlog"))
+                || matches!(
+                    card.column_role.as_deref(),
+                    Some("in_progress" | "ready" | "blocked" | "backlog")
+                )
             {
                 remove(t, &g, member)?;
             }

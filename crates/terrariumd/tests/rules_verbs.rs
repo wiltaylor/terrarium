@@ -782,11 +782,24 @@ async fn fail_job(td: &TestDaemon, job: &Job, outcome: &str) -> Job {
 async fn default_merge_group_returned_members_leave_and_last_abandons() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
-    let a = new_card(&td, "p", json!({"title":"a", "column":"review", "repo":"app"})).await;
-    let b = new_card(&td, "p", json!({"title":"b", "column":"review", "repo":"app"})).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
     store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
-    let gid = card(&td, &a).await["group"]["id"].as_str().unwrap().to_owned();
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     move_to(&td, &a, "ready").await;
     settle(&td).await;
     assert!(card(&td, &a).await.get("group").is_none());
@@ -806,11 +819,24 @@ async fn default_merge_group_returned_members_leave_and_last_abandons() {
 async fn default_merge_group_sweep_repairs_stale_members_idempotently() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
-    let a = new_card(&td, "p", json!({"title":"a", "column":"review", "repo":"app"})).await;
-    let b = new_card(&td, "p", json!({"title":"b", "column":"review", "repo":"app"})).await;
+    let a = new_card(
+        &td,
+        "p",
+        json!({"title":"a", "column":"review", "repo":"app"}),
+    )
+    .await;
+    let b = new_card(
+        &td,
+        "p",
+        json!({"title":"b", "column":"review", "repo":"app"}),
+    )
+    .await;
     store_job(&td, JobKind::Merge, &[&a, &b]).await;
     settle(&td).await;
-    let gid = card(&td, &a).await["group"]["id"].as_str().unwrap().to_owned();
+    let gid = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let members = [a.clone(), b.clone()];
     state(&td).db.write("test", move |t| {
         // Model old data with no move event for the new rule to handle.
