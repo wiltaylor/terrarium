@@ -23,6 +23,7 @@ pub mod events;
 pub mod executor;
 pub mod fleet;
 pub mod git;
+pub mod git_identity;
 pub mod git_proxy;
 pub mod harness_auto_update;
 pub mod harness_tools;
@@ -983,6 +984,13 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
             // An idle stop and a pause give the `stopped` status their
             // reason (`crate::lifecycle`).
             let ev = state.lifecycle.with_stop_reason(ev);
+            let provenance_agent = matches!(
+                &ev.kind,
+                SupervisorEventKind::NewSession { .. }
+                    | SupervisorEventKind::Status { .. }
+                    | SupervisorEventKind::Harness(Event::SessionStarted { .. })
+            )
+            .then_some(ev.agent);
             let ended = matches!(
                 &ev.kind,
                 SupervisorEventKind::Status {
@@ -997,6 +1005,11 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
             let result = state.db.write("system", move |t| record(t, &ev)).await;
             if let Err(e) = result {
                 warn!("cannot record a supervisor event: {e}");
+            }
+            if let Some(id) = provenance_agent
+                && let Err(e) = git_identity::refresh(&state, &id.to_string()).await
+            {
+                warn!(agent = %id, "cannot refresh git provenance: {e}");
             }
             // A parked agent that stops frees its owner's place (TER-111).
             if let Some(agent) = ended {

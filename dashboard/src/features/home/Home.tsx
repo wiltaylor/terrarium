@@ -1,4 +1,4 @@
-import { A } from "@solidjs/router";
+import { A, useNavigate } from "@solidjs/router";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { isLocalOnly, Sparkline, UsageTile } from "../../components/UsageTile";
 import { Empty, ErrorBanner, Modal, PageHead, Tabs, useNow } from "../../components/ui";
@@ -10,6 +10,10 @@ import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKe
 import { HostCards } from "./HostCards";
 import { ActiveCards } from "./ActiveCards";
 import { BlockedCards } from "./BlockedCards";
+import { AskDialog } from "../inbox/AskDialog";
+import { MessageDialog } from "../inbox/MessageDialog";
+import { NewThreadDialog } from "../inbox/NewThreadDialog";
+import { threadHref } from "../inbox/threads";
 
 const HOUR = 3_600_000;
 
@@ -43,6 +47,8 @@ function useStripUsage(now: () => number) {
 }
 
 export function Home() {
+  const navigate = useNavigate();
+  const [compose, setCompose] = createSignal<"ask" | "message" | "thread" | null>(null);
   const now = useNow(15_000);
   const [detail, setDetail] = createSignal<string | null>(null);
   const strip = useStripUsage(now);
@@ -50,10 +56,16 @@ export function Home() {
   return (
     <>
       <PageHead title="Home">
+        <button onClick={() => setCompose("thread")}>New thread</button>
+        <button onClick={() => setCompose("message")}>Message an agent</button>
+        <button class="primary" onClick={() => setCompose("ask")}>Ask an agent</button>
         <A class="btn" href="/settings/subscriptions">
           Subscriptions
         </A>
       </PageHead>
+      <Show when={compose() === "ask"}><AskDialog onClose={() => setCompose(null)} onAsked={() => { setCompose(null); navigate("/inbox?status=asked"); }} /></Show>
+      <Show when={compose() === "message"}><MessageDialog onClose={() => setCompose(null)} onSent={() => { setCompose(null); navigate("/inbox"); }} /></Show>
+      <Show when={compose() === "thread"}><NewThreadDialog onClose={() => setCompose(null)} onOpened={(t) => { setCompose(null); navigate(threadHref(t.id)); }} /></Show>
 
       <section aria-label="Usage">
         <div class="usage-strip">

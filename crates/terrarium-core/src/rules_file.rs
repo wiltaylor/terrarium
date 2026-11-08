@@ -81,6 +81,7 @@ pub const DEFAULT_MAX_RULES: usize = 50;
 /// The type of an argument of a verb.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Arg {
+    Bool,
     /// Text; templates allowed.
     Text,
     /// A list of texts; templates allowed.
@@ -126,6 +127,62 @@ impl Verb {
 
 /// The verbs, in the order of the schema.
 pub const VERBS: &[Verb] = &[
+    Verb {
+        kind: "version_cut",
+        name: "version.cut",
+        args: &[("min_cards", Arg::Count), ("max_wait_minutes", Arg::Count)],
+        required: &["min_cards", "max_wait_minutes"],
+    },
+    Verb {
+        kind: "group_open",
+        name: "group.open",
+        args: &[
+            ("key", Arg::Text),
+            ("title", Arg::Text),
+            ("column", Arg::Column),
+            ("done_when", Arg::Column),
+            ("eta", Arg::Text),
+            ("close_after", Arg::Text),
+        ],
+        required: &["key", "title", "column", "done_when"],
+    },
+    Verb {
+        kind: "group_add",
+        name: "group.add",
+        args: &[("key", Arg::Text)],
+        required: &["key"],
+    },
+    Verb {
+        kind: "group_remove",
+        name: "group.remove",
+        args: &[("key", Arg::Text)],
+        required: &["key"],
+    },
+    Verb {
+        kind: "group_status",
+        name: "group.status",
+        args: &[
+            ("key", Arg::Text),
+            ("text", Arg::Text),
+            ("eta", Arg::Text),
+            ("step", Arg::Text),
+            (
+                "state",
+                Arg::OneOf(&["pending", "running", "done", "failed"]),
+            ),
+        ],
+        required: &["key"],
+    },
+    Verb {
+        kind: "group_close",
+        name: "group.close",
+        args: &[
+            ("key", Arg::Text),
+            ("comment", Arg::Text),
+            ("all_done", Arg::Bool),
+        ],
+        required: &["key"],
+    },
     Verb {
         kind: "card_move",
         name: "card.move",
@@ -250,8 +307,13 @@ pub const JOB_OUTCOMES: &[&str] = &["red", "conflict", "error", "none"];
 
 /// The placeholders after `card.`.
 pub const CARD_FIELDS: &[&str] = &["id", "title", "column", "assignee", "labels", "project"];
+/// The group containing the event's card (or the group card itself).
+pub const GROUP_FIELDS: &[&str] = &[
+    "id", "key", "title", "column", "status", "done", "total", "eta_at",
+];
 /// The placeholders after `job.`.
 pub const JOB_FIELDS: &[&str] = &[
+    "group_key",
     "id",
     "kind",
     "state",
@@ -286,6 +348,7 @@ pub const JOB_FIELDS: &[&str] = &[
 /// mail, or a turn. Only `card_prepend` writes it as it is, into the card
 /// body (which agents read as data).
 pub const RAW_FIELDS: &[&str] = &[
+    "job.group_key",
     "card.id",
     "card.project",
     "card.column",
@@ -660,15 +723,18 @@ pub fn check_template(template: &str) -> Result<(), String> {
             CARD_FIELDS.contains(&f)
         } else if let Some(f) = inner.strip_prefix("job.") {
             JOB_FIELDS.contains(&f)
+        } else if let Some(f) = inner.strip_prefix("group.") {
+            GROUP_FIELDS.contains(&f)
         } else {
             inner == "rule.name"
         };
         if !known {
             return Err(format!(
                 "unknown placeholder `{{{{{inner}}}}}`: use event.<kind|summary|project|seq|actor|data.path>, \
-                 card.<{}>, job.<{}>, or rule.name",
+                 card.<{}>, job.<{}>, group.<{}>, or rule.name",
                 CARD_FIELDS.join("|"),
-                JOB_FIELDS.join("|")
+                JOB_FIELDS.join("|"),
+                GROUP_FIELDS.join("|")
             ));
         }
         rest = &after[close + 2..];
@@ -752,6 +818,13 @@ fn check_arg(ctx: &Context, arg: Arg, v: &Value) -> Result<(), String> {
                 check_template(t)?;
             }
             Ok(())
+        }
+        Arg::Bool => {
+            if v.is_boolean() {
+                Ok(())
+            } else {
+                Err("must be a boolean".into())
+            }
         }
         Arg::Count => match v.as_i64() {
             Some(n) if n >= 1 => Ok(()),
@@ -1281,6 +1354,14 @@ rule "validate-pass" {
   agent_end { outcome = "done" }
 }
 "#;
+
+    #[test]
+    fn group_close_all_done_requires_a_boolean() {
+        let err = errors(
+            "rule \"close\" { on = [\"card\"] group_close { key = \"batch\" all_done = \"yes\" } }",
+        );
+        assert!(err.contains("all_done"), "{err}");
+    }
 
     fn errors(text: &str) -> String {
         parse(text, "rules.wcl", &board()).unwrap_err().to_string()

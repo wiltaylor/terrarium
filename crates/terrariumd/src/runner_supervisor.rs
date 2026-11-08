@@ -1819,15 +1819,17 @@ impl RunnerSupervisor {
         }
         // A commit in the sandbox needs an identity: the home has no
         // `.gitconfig`, and the host name gives no mail domain.
-        let email = format!("{}.{}@terrarium.invalid", agent.name, agent.project);
-        for (k, v) in [
-            ("GIT_AUTHOR_NAME", agent.name.as_str()),
-            ("GIT_COMMITTER_NAME", agent.name.as_str()),
-            ("GIT_AUTHOR_EMAIL", email.as_str()),
-            ("GIT_COMMITTER_EMAIL", email.as_str()),
-        ] {
-            spec.env.entry(k.to_owned()).or_insert_with(|| v.to_owned());
-        }
+        crate::git_identity::Identity::from_env().env(&mut spec.env);
+        spec.env.insert(
+            "TERRARIUM_GIT_TRAILERS_FILE".into(),
+            layout
+                .workspace_mount
+                .as_ref()
+                .unwrap_or(&layout.workspace)
+                .join(crate::git_identity::TRAILERS_FILE)
+                .display()
+                .to_string(),
+        );
         let env = cfg
             .sandbox
             .child_env(&layout, &spec.env, &|k| std::env::var(k).ok());
