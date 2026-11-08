@@ -3280,14 +3280,23 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&mut conn).unwrap();
         conn.execute("INSERT INTO events(id,project,kind,payload,at) VALUES ('bad','p','card','not JSON','now')", []).unwrap();
-        conn.execute("UPDATE events SET payload = '{broken' WHERE id = 'bad'", []).unwrap();
-        let plan: String = conn.query_row(
-            "EXPLAIN QUERY PLAN SELECT seq FROM events WHERE project = 'p' AND kind = 'card'
+        conn.execute("UPDATE events SET payload = '{broken' WHERE id = 'bad'", [])
+            .unwrap();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT seq FROM events WHERE project = 'p' AND kind = 'card'
              AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
-             ORDER BY seq DESC LIMIT 2000", [], |r| r.get(3),
-        ).unwrap();
+             ORDER BY seq DESC LIMIT 2000",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
         assert!(plan.contains("events_card_moves"), "{plan}");
-        assert!(crate::store::card_history::completed_visits(&conn,"p","review",20).unwrap().is_empty());
+        assert!(
+            crate::store::card_history::completed_visits(&conn, "p", "review", 20)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
