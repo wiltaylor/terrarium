@@ -23,7 +23,7 @@ describe("bookmarks", () => {
     expect(store.items()).toEqual([{ title: "Renamed", href: "/p/demo/knowledge/wiki/start" }]);
     const restored = createBookmarksStore(storage, origin);
     expect(restored.has("/p/demo/knowledge/wiki/start")).toBe(true);
-    restored.remove("/p/demo/knowledge/wiki/start");
+    restored.remove(`${origin}/p/demo/knowledge/wiki/start`);
     expect(createBookmarksStore(storage, origin).items()).toEqual([]);
     expect(store.add("", "https://example.com")).toBe(false);
   });
@@ -32,6 +32,48 @@ describe("bookmarks", () => {
     expect(createBookmarksStore({ getItem: () => JSON.stringify(stored), setItem: () => {} }, origin).items()).toEqual([{ title: "Good", href: "https://example.com/" }]);
     const store = createBookmarksStore({ getItem: () => { throw Error("blocked"); }, setItem: () => { throw Error("blocked"); } }, origin);
     expect(store.add("Good", "https://example.com")).toBe(true);
+    expect(store.items()).toHaveLength(1);
+  });
+  it("migrates once, deduplicates and refreshes across browsers", async () => {
+    let rows = [{ title: "Server title", href: "https://existing.test/" }];
+    const remote = {
+      list: async () => [...rows],
+      add: async (title: string, href: string) => (rows = [...rows.filter((b) => b.href !== href), { title, href }]),
+      remove: async (href: string) => (rows = rows.filter((b) => b.href !== href)),
+    };
+    let legacy = JSON.stringify([{ title: "Old title", href: "https://existing.test" }, { title: "Local", href: "https://local.test" }]);
+    const first = createBookmarksStore({ getItem: () => legacy, setItem: (_k, v) => { legacy = v; } }, origin, remote);
+    const second = createBookmarksStore(null, origin, remote);
+    await first.refresh();
+    expect(JSON.parse(legacy)).toEqual([]);
+    expect(first.items()[0]?.title).toBe("Server title");
+    await second.refresh();
+    expect(second.items()).toEqual(first.items());
+    second.add("New", "https://new.test");
+    await second.refresh();
+    await first.refresh();
+    expect(first.has("https://new.test")).toBe(true);
+    first.remove("https://local.test");
+    await first.refresh();
+    await second.refresh();
+    expect(second.has("https://local.test")).toBe(false);
+    expect(second.items()).toHaveLength(2);
+  });
+  it("keeps the legacy list after a failed import and retries", async () => {
+    let legacy = JSON.stringify([{ title: "Local", href: "https://local.test" }]);
+    let fail = true;
+    let rows: { title: string; href: string }[] = [];
+    const store = createBookmarksStore({ getItem: () => legacy, setItem: (_k, v) => { legacy = v; } }, origin, {
+      list: async () => rows,
+      add: async (title, href) => { if (fail) throw Error("offline"); return rows = [{ title, href }]; },
+      remove: async () => [],
+    });
+    await store.refresh();
+    expect(JSON.parse(legacy)).toHaveLength(1);
+    expect(store.error()).toBeInstanceOf(Error);
+    fail = false;
+    await store.refresh();
+    expect(JSON.parse(legacy)).toEqual([]);
     expect(store.items()).toHaveLength(1);
   });
 });

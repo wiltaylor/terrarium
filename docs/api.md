@@ -3699,6 +3699,24 @@ focus.
 
 ### 6.12 Project folders
 
+#### Sidebar bookmarks
+
+`/api/bookmarks` stores the operator's sidebar bookmarks in SQLite, shared
+across browsers. All methods are operator-only. GET returns an array of
+`{title, href}` in insertion order. PUT accepts `{title, href}`, adds or
+renames that URL, and returns the list. DELETE accepts `{href}` and returns
+the list, including when the URL was absent. Mutations write `bookmark.add`
+or `bookmark.remove` audit rows.
+
+Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
+without credentials, or a relative `/p/<project>/knowledge/wiki` path.
+URLs are normalized and deduplicated, and are limited to 8192 bytes on add.
+Invalid values return `422 invalid`. Wiki links open in place. External
+links open in a new window. The dashboard refreshes on focus and every 30
+seconds and imports its old `terrarium.bookmarks` list on first load,
+clearing that list only after successful import. Existing daemon titles win
+over legacy titles during migration.
+
 The code is in `crates/terrariumd/src/store/project_folders.rs` and
 `crates/terrariumd/src/api/project_folders.rs`. The tables are
 `project_folders` and `project_placements` (migration 68).
@@ -5336,6 +5354,8 @@ A subscription:
 | `held_agents` | Agents whose turns wait after a usage-limit error on this subscription (cause `limit:<subscription>`, §16.6). |
 | `account` | The plan account of the subscription (PLAN §16.3), when it has one: `harness` (whose login it holds), `has_login` (the credential file is there), `login` (the Copilot login name, or the email of a Claude login), `source` (`migration`: the shared login moved here at a daemon start; `login`: the login wizard), `created_at`, `updated_at`. Never a secret. |
 | `agents` | The agents whose current `subscription` this is: `[{id, name, project}]`. Always present. |
+| `session_period` | `{since, until}` in RFC 3339 UTC. The longest active probe window (`monthly`, `<n>h` or `<n>d`), otherwise the current UTC calendar month. The start is inclusive and the end exclusive. |
+| `sessions` | Newest-first sessions overlapping `session_period`, including retained sessions of removed ephemeral agents. Each has `id`, `agent_id`, `agent` (name), `project`, `harness`, `started_at`, optional `ended_at`, `removed`, and nullable `model`, `card`, `input_tokens`, `output_tokens`. Token totals count only usage within the period. Usage samples attribute historical subscriptions, otherwise the live agent's current subscription is used. Model and card are representative values when several occur. Cost is not available. The dashboard and CLI subscription show consume this same list. Earlier-period navigation is not provided. |
 | `default` | `true` when the plan account is the default account of its harness (PLAN §16.3): a Claude Code, Codex, or Copilot agent with no subscription runs on it. Each harness has one default or none. Always present. |
 | `default_models` | The model that each harness gets on this subscription when the agent sets no `model`, by harness name, for example `{"pi":"glm-5.3-flash","claude":"glm-5.3"}` for a Z.ai key, or `{"pi":"kimi-for-coding"}` for a Moonshot `coding` key. Only the harnesses where the daemon picks the model: pi (the provider's default from the pi adapter's table; no entry when pi refuses the subscription) and Claude Code on Z.ai. `{}` when every harness keeps its own default. Always present. |
 

@@ -198,6 +198,16 @@ export default function SubscriptionsPage() {
                         </For>
                       </Show>
                     </div>
+                    <Show when={s.session_period}>
+                      <div class="small">Sessions: {s.session_period?.since} – {s.session_period?.until}</div>
+                      <For each={s.sessions ?? []}>{(session) => (
+                        <div class="small">
+                          <A href={`/sessions/${encodeURIComponent(session.id)}`}>{session.project}/{session.agent}</A>
+                          {" · "}{session.harness} · {session.model ?? "model unknown"} · {session.card ?? "no card"} · {session.started_at}
+                          {" · "}{session.input_tokens ?? "?"} in / {session.output_tokens ?? "?"} out
+                        </div>
+                      )}</For>
+                    </Show>
                     <Show when={s.probe_status === "failed" && s.probe_error}>
                       <div class="small" style={{ color: "var(--warn)" }}>
                         Probe error: {s.probe_error}
