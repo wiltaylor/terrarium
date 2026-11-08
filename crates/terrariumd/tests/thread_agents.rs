@@ -846,7 +846,12 @@ async fn an_ended_agent_marks_only_its_open_thread_once() {
                 json!({"text": "Keep this operator follow-up."}),
             )
             .await;
-        assert_eq!(late_post.status, if endpoint == "respond" { 200 } else { 201 }, "{}", late_post.body);
+        assert_eq!(
+            late_post.status,
+            if endpoint == "respond" { 200 } else { 201 },
+            "{}",
+            late_post.body
+        );
         let saved = lab.thread(&tid).await;
         assert_eq!(saved["status"], "closed");
         assert_eq!(saved["close_reason"], "agent_ended");
