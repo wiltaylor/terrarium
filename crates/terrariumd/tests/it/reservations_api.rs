@@ -91,12 +91,15 @@ async fn setup_docker(
     options.docker_bin = docker.to_string_lossy().into_owned();
     options.capabilities = HostCapabilities {
         gpu_reservations: true,
-        gpus: vec![terrarium_core::resources::GpuDevice {
-            uuid: "GPU-abcd".into(),
-            name: "test".into(),
-            memory_bytes: 8 << 30,
-            used_bytes: 0,
-        }],
+        gpus: ["GPU-abcd", "GPU-1234"]
+            .into_iter()
+            .map(|uuid| terrarium_core::resources::GpuDevice {
+                uuid: uuid.into(),
+                name: "test".into(),
+                memory_bytes: 8 << 30,
+                used_bytes: 0,
+            })
+            .collect(),
         reservations: true,
         capacity: Some(HostCapacity {
             cpu_ids: vec![0, 1, 2, 3],
@@ -139,6 +142,134 @@ async fn setup_docker(
         .await
         .ok();
     (td, server, client)
+}
+
+#[tokio::test]
+async fn disjoint_exclusive_gpus_can_run_concurrently() {
+    let (td, server, client) = setup().await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    for target in ["p-box", "p-box2"] {
+        td.patch(&format!("/api/targets/{target}"), json!({"ephemeral":true}))
+            .await
+            .ok();
+    }
+    td.post(
+        "/api/hosts/h/reservations",
+        json!({"target":"p-box","gpus":[{"uuid":"GPU-abcd","exclusive":true}],"until":"30m"}),
+    )
+    .await
+    .ok();
+    state
+        .db
+        .write("system", |tx| {
+            terrariumd::store::targets::set_state(tx, "p-box", "running", None)
+        })
+        .await
+        .unwrap();
+    td.post(
+        "/api/hosts/h/reservations",
+        json!({"target":"p-box2","gpus":[{"uuid":"GPU-1234","exclusive":true}],"until":"30m"}),
+    )
+    .await
+    .ok();
+    let limits = state
+        .db
+        .read(|c| Ok(terrariumd::store::targets::get(c, "p-box2")?.def))
+        .await
+        .unwrap();
+    assert_eq!(
+        terrariumd::reservations::docker_budget(&state, &limits)
+            .unwrap()
+            .unwrap()
+            .gpu_devices,
+        vec!["GPU-1234"]
+    );
+    client.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn native_shared_gpu_monitor_sums_holder_scopes_without_enforcement() {
+    use terrariumd::store::{agents, reservations as r};
+    let (td, server, client) = setup().await;
+    td.post(
+        "/api/targets",
+        json!({"name":"p-native","kind":"host","host":"h","project":"p"}),
+    )
+    .await
+    .ok();
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    // Seed an acknowledged host scope without invoking the real user systemd
+    // manager on this shared build target. The API queue path is covered above.
+    let id = state
+        .db
+        .write("system", |tx| {
+            let agent = agents::find(tx, "p/worker", None)?;
+            let record = r::request(
+                tx,
+                r::Request {
+                    gpus: vec![terrarium_core::resources::GpuClaim {
+                        uuid: "GPU-abcd".into(),
+                        vram_bytes: 1 << 20,
+                        exclusive: false,
+                    }],
+                    host: "h".into(),
+                    project: "p".into(),
+                    holder: r::Holder::Agent(agent.agent.id.to_string()),
+                    target: "p-native".into(),
+                    amounts: Default::default(),
+                    exclusive: false,
+                    reason: "test".into(),
+                    duration_ms: 1_800_000,
+                    queue_ms: None,
+                },
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+            r::activate(tx, &record.id)?;
+            Ok(record.id)
+        })
+        .await
+        .unwrap();
+    let slice = terrarium_host::limits::slice_name("_reservation", "p/worker");
+    state.executor.hosts.record_metrics(
+        "h",
+        terrarium_host::protocol::HostMetrics {
+            gpu_usage: vec![
+                terrarium_host::gpu::Usage {
+                    uuid: "GPU-abcd".into(),
+                    container: String::new(),
+                    cgroup: format!("/user.slice/{slice}/one.scope"),
+                    used_bytes: 800_000,
+                },
+                terrarium_host::gpu::Usage {
+                    uuid: "GPU-abcd".into(),
+                    container: String::new(),
+                    cgroup: format!("/user.slice/{slice}/two.scope"),
+                    used_bytes: 800_000,
+                },
+            ],
+            ..Default::default()
+        },
+        std::time::Instant::now(),
+    );
+    terrariumd::reservations::sweep(&state).await.unwrap();
+    let record = state.db.read(move |c| r::get(c, &id)).await.unwrap();
+    assert!(record.gpu_warned);
+    assert_eq!(record.state, r::State::Active);
+    let count: i64 = state
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM messages WHERE subject LIKE '%gpu_overage'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    client.abort();
+    server.abort();
 }
 
 #[tokio::test]

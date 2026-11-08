@@ -206,6 +206,8 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
             "host is missing the reservations capability; upgrade its host agent",
         ));
     }
+    let host = r.host.clone();
+    let reservations = state.db.read(move |c| store::list(c, &host)).await?;
     if !r.gpus.is_empty() {
         if !caps.gpu_reservations {
             return Err(ApiError::conflict("host lacks GPU reservation support"));
@@ -231,13 +233,32 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
         }
         let incompatible: Vec<_> = rows
             .iter()
-            .filter(|t| t.def.kind != TargetKind::Host)
+            .filter(|t| {
+                // A known GPU holder was admitted with the new create-time
+                // allowlist. Disjoint devices can run concurrently. Containers
+                // with no GPU reservation have no durable exposure baseline.
+                let known_allowlist = t.def.kind == TargetKind::Docker
+                    && t.def.ephemeral
+                    && t.def.image.is_some()
+                    && reservations.iter().any(|other| {
+                        other.id != r.id
+                            && other.state == State::Active
+                            && other.target == t.def.name
+                            && !other.gpus.is_empty()
+                            && other.gpus.iter().all(|g| {
+                                !r.gpus
+                                    .iter()
+                                    .any(|wanted| wanted.uuid == g.uuid && wanted.exclusive)
+                            })
+                    });
+                t.def.kind != TargetKind::Host && !known_allowlist
+            })
             .map(|t| t.def.name.clone())
             .collect();
         if r.gpus.iter().any(|g| g.exclusive)
             && (rows
                 .iter()
-                .any(|t| t.state == "running" && t.def.kind != TargetKind::Host)
+                .any(|t| t.state == "running" && incompatible.contains(&t.def.name))
                 || !state
                     .executor
                     .resource_sessions(&incompatible, None)
@@ -249,8 +270,6 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
         }
     }
     let limits = budget(r)?;
-    let host = r.host.clone();
-    let reservations = state.db.read(move |c| store::list(c, &host)).await?;
     if reservations.iter().any(|other| {
         other.id != r.id
             && managed(other)
