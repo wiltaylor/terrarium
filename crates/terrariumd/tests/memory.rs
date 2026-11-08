@@ -359,6 +359,55 @@ async fn links_contradictions_first_and_graph() {
 }
 
 #[tokio::test]
+async fn edits_and_supersedes_isolate_colliding_project_ids() {
+    let td = setup().await;
+    for (project, agent) in [("proj", "proj/w1"), ("other", "other/x")] {
+        for n in 1..=2 {
+            td.post_as(
+                agent,
+                &format!("/api/projects/{project}/memories"),
+                json!({"title": format!("{project} title {n}"), "body": format!("{project} body {n}")}),
+            )
+            .await
+            .ok();
+        }
+    }
+    let untouched = td.get("/api/memories/other%2FMEM-1").await.ok().clone();
+
+    // An operator must disambiguate writes just as it does reads.
+    td.patch("/api/memories/MEM-1", json!({"body": "ambiguous"}))
+        .await
+        .err(400, "bad_request");
+    td.post("/api/memories/MEM-1/supersede", json!({"by": "MEM-2"}))
+        .await
+        .err(400, "bad_request");
+    // An explicit foreign key cannot redirect an agent's write.
+    td.patch_as("proj/w1", "/api/memories/other%2FMEM-1", json!({"body": "foreign"}))
+        .await
+        .err(403, "forbidden");
+    td.post_as("proj/w1", "/api/memories/MEM-1/supersede", json!({"by": "other/MEM-2"}))
+        .await
+        .err(422, "invalid");
+
+    // Project-qualified operator edits and bare agent edits affect the same row.
+    td.patch("/api/memories/proj%2FMEM-1", json!({"body": "operator edit"}))
+        .await
+        .ok();
+    let edited = td.patch_as("proj/w1", "/api/memories/MEM-1", json!({"body": "agent edit"}))
+        .await.ok().clone();
+    assert_eq!(edited["title"], "proj title 1");
+    assert_eq!(edited["body"], "agent edit");
+    let old = td.post("/api/memories/proj%2FMEM-1/supersede", json!({"by": "MEM-2"}))
+        .await.ok().clone();
+    assert_eq!(old["superseded_by"], "MEM-2");
+    assert_eq!(td.get("/api/memories/proj%2FMEM-2").await.ok()["supersedes"], json!(["MEM-1"]));
+    assert_eq!(td.get("/api/memories/other%2FMEM-1").await.ok(), &untouched);
+    let other_new = td.get("/api/memories/other%2FMEM-2").await;
+    assert_eq!(other_new.ok()["supersedes"], json!([]));
+    assert_eq!(other_new.ok()["body"], "other body 2");
+}
+
+#[tokio::test]
 async fn same_id_in_two_projects_resolves_by_project() {
     let td = setup().await;
     mem(&td, "proj/w1", json!({"title": "Proj MEM-1 (GPU wheels)"})).await;
