@@ -9,7 +9,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::error::ApiResult;
 
 /// A completed worker estimate. Raw guesses remain in the event log.
+#[derive(Clone)]
 pub struct WorkSample {
+    pub card: String,
     pub start_seq: i64,
     pub end_seq: i64,
     pub actual_ms: f64,
@@ -23,7 +25,7 @@ pub struct WorkSample {
 pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSample>> {
     let mut stmt = conn.prepare(
         "SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
-                coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]'), e.seq, x.seq
+                coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]'), e.seq, x.seq, e.card
          FROM events e JOIN events x ON x.seq = (
            SELECT min(n.seq) FROM events n WHERE n.card = e.card AND n.seq > e.seq
              AND n.kind = 'card' AND json_extract(n.payload, '$.change') IN ('eta','moved'))
@@ -43,11 +45,12 @@ pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSampl
             r.get::<_, String>(3)?,
             r.get::<_, i64>(4)?,
             r.get::<_, i64>(5)?,
+            r.get::<_, String>(6)?,
         ))
     })?;
     let mut samples = Vec::new();
     for row in rows {
-        let (start, guess, end, labels, start_seq, end_seq) = row?;
+        let (start, guess, end, labels, start_seq, end_seq, card) = row?;
         let Some(guess) = guess else { continue };
         if let (Ok(start), Ok(guess), Ok(end)) = (
             DateTime::parse_from_rfc3339(&start),
@@ -57,6 +60,7 @@ pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSampl
             && end > start
         {
             samples.push(WorkSample {
+                card,
                 start_seq,
                 end_seq,
                 actual_ms: (end - start).num_milliseconds() as f64,
@@ -78,13 +82,17 @@ fn p70(mut values: Vec<f64>) -> Option<f64> {
 }
 
 pub fn calibrated_ms(samples: &[WorkSample], labels: &[String], guess: Option<f64>) -> Option<f64> {
+    let mut seen = std::collections::HashSet::new();
     let ratios = p70(samples
         .iter()
+        .filter(|s| seen.insert(&s.card))
         .take(30)
         .map(|s| s.actual_ms / s.guess_ms)
         .collect());
+    seen.clear();
     let actual = p70(samples
         .iter()
+        .filter(|s| seen.insert(&s.card))
         .filter(|s| {
             labels
                 .iter()
@@ -285,6 +293,7 @@ mod tests {
         let samples: Vec<_> = (1..=10)
             .rev()
             .map(|n| WorkSample {
+                card: n.to_string(),
                 start_seq: 0,
                 end_seq: 1,
                 actual_ms: f64::from(n) * 1000.0,
@@ -307,15 +316,22 @@ mod tests {
             calibrated_ms(&samples, &labels, Some(40000.0)),
             Some(14000.0)
         );
-        let mut recent = samples;
-        recent.extend((0..40).map(|_| WorkSample {
+        // Repeated visits of one card do not satisfy the five-card minimum.
+        let repeats = vec![samples[0].clone(); 10];
+        assert_eq!(calibrated_ms(&repeats, &labels, None), None);
+        let mut recent: Vec<_> = (0..30).map(|n| WorkSample {
+            card: format!("new{n}"), ..samples[0].clone()
+        }).collect();
+        recent.extend((0..40).map(|n| WorkSample {
+            card: format!("old{n}"),
             start_seq: 0,
             end_seq: 1,
             actual_ms: 1e9,
             guess_ms: 1.0,
             labels: labels.clone(),
         }));
-        assert!(calibrated_ms(&recent, &labels, None).is_some());
+        assert_eq!(calibrated_ms(&recent, &labels, None), Some(10000.0));
+        assert_eq!(calibrated_ms(&recent, &labels, Some(10000.0)), Some(10000.0));
     }
 
     #[test]
@@ -369,13 +385,7 @@ mod tests {
                 let history: Vec<_> = samples
                     .iter()
                     .filter(|s| s.end_seq < sample.start_seq)
-                    .map(|s| WorkSample {
-                        start_seq: s.start_seq,
-                        end_seq: s.end_seq,
-                        actual_ms: s.actual_ms,
-                        guess_ms: s.guess_ms,
-                        labels: s.labels.clone(),
-                    })
+                    .cloned()
                     .collect();
                 let Some(prediction) =
                     calibrated_ms(&history, &sample.labels, Some(sample.guess_ms))

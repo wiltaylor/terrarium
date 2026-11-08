@@ -45,6 +45,11 @@ describe("resolveEta", () => {
 });
 
 describe("countdown", () => {
+  it("marks worker estimates as calibrated or uncalibrated", () => {
+    expect(countdown(card({ eta_at: at(30), eta_calibrated: false }), NOW)?.title).toContain("uncalibrated");
+    expect(countdown(card({ eta_at: at(30), eta_calibrated: true }), NOW)?.title).toContain("calibrated p70");
+    expect(countdown(card({ eta_at: at(30) }), NOW)?.title).not.toContain("calibrated");
+  });
   it("shows seconds under an hour, hours and minutes above", () => {
     expect(span(45_000)).toBe("45s");
     expect(span(34 * 60_000 + 5_000)).toBe("34m 05s");
