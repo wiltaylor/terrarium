@@ -15,18 +15,6 @@ use crate::ctx::Ctx;
 use crate::output::field;
 use crate::transport::encode;
 
-/// The error of a removed `--version` flag (TER-58). The hidden flags go
-/// in the version after.
-pub fn no_version_flag(given: bool) -> anyhow::Result<()> {
-    if given {
-        return Err(CliError::usage(
-            "--version is removed: versions are card labels; use --label version:<X.Y.Z> \
-             (or --label version:vnext)",
-        ));
-    }
-    Ok(())
-}
-
 /// The largest artifact the CLI sends.
 pub const MAX_ARTIFACT: usize = 32 * 1024 * 1024;
 
@@ -194,11 +182,9 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
             name,
             page,
             labels,
-            version,
             card,
             note,
         } => {
-            no_version_flag(version.is_some())?;
             let p = ctx.project_or(None).await?;
             if note.is_some() {
                 eprintln!(
@@ -249,13 +235,7 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
                 }
             })
         }
-        ArtifactCmd::Ls {
-            page,
-            label,
-            version,
-            card,
-        } => {
-            no_version_flag(version.is_some())?;
+        ArtifactCmd::Ls { page, label, card } => {
             let p = ctx.project_or(None).await?;
             let q = query([
                 ("page", page.clone()),
@@ -353,13 +333,6 @@ mod tests {
             vec![("card", "DEM-1".to_owned())]
         );
         assert!(attaches_of(&None, &[], &None).is_empty());
-    }
-
-    #[test]
-    fn the_version_flag_names_label() {
-        assert!(no_version_flag(false).is_ok());
-        let e = no_version_flag(true).unwrap_err().to_string();
-        assert!(e.contains("--label version:"), "{e}");
     }
 
     #[test]

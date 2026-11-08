@@ -2050,6 +2050,13 @@ async fn memory_project_keys_for_every_id_command() {
                 Some(json!({"title": "changed"})),
             ),
             (
+                vec!["edit", id, "--body", "changed body"],
+                Patch,
+                "",
+                vec![],
+                Some(json!({"body": "changed body"})),
+            ),
+            (
                 vec!["supersede", id, other],
                 Post,
                 "/supersede",
@@ -2325,8 +2332,7 @@ async fn artifacts_and_labels() {
     )
     .await;
 
-    // TER-58: the version subcommands are gone. Each exits 2 with an
-    // error that names card labels, and sends no request.
+    // Removed version subcommands are rejected by the parser.
     for args in [
         &["version", "new", "v1", "--card", "TER-1"][..],
         &["version", "ls", "--all"],
@@ -2334,21 +2340,26 @@ async fn artifacts_and_labels() {
         &["version", "wait", "v1", "--timeout", "20"],
         &["version", "approve", "v1", "-m", "ok"],
     ] {
-        let r = exec(true, args, vec![], None).await;
-        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
-        let e = r.result.unwrap_err();
-        assert_eq!(exit_code_of(&e), 2, "{args:?}");
-        assert!(e.to_string().contains("card labels"), "{args:?}: {e}");
+        let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
-    // The hidden --version flags of artifact push and ls name --label.
+    // Removed artifact --version flags are rejected by the parser.
     for args in [
         &["artifact", "push", "x.txt", "--version", "v1"][..],
         &["artifact", "ls", "--version", "v1"],
     ] {
-        let r = exec(true, args, vec![], None).await;
-        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
-        let e = r.result.unwrap_err();
-        assert!(e.to_string().contains("--label version:"), "{args:?}: {e}");
+        let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
     // `artifact ls --label` sends `label` to the daemon (TER-129), and keeps
     // the artifacts with that label also when a daemon from before ignores
@@ -8907,17 +8918,20 @@ async fn test_runs() {
         )],
     )
     .await;
-    // TER-58: --version names --label and sends nothing.
+    // Removed test --version flags are rejected by the parser.
     for args in [
         &["test", "push", "x.xml", "--version", "v1"][..],
         &["test", "ls", "--version", "v1"],
         &["test", "link", "01RUN", "--version", "v1"],
         &["test", "unlink", "01RUN", "--version", "v1"],
     ] {
-        let r = exec(true, args, vec![], None).await;
-        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
-        let e = r.result.unwrap_err();
-        assert!(e.to_string().contains("--label version:"), "{args:?}: {e}");
+        let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
     let r = exec(true, &["test", "link", "01RUN"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), 2);

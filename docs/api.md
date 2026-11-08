@@ -2182,13 +2182,20 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/compact` | none, or `{"then"?: "<prompt>", "defer"?: false}` | `202` agent with `reset` (below). At rest: `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused or held. `409 not_running`: the agent does not run. |
 | `POST /api/agents/{id}/new-session` | none, or `{"then"?: "<prompt>", "recap"?: true, "defer"?: false}` | `202` agent with `reset` (below). A new harness session, not a resume. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run, or an earlier turn still waits in the store) |
-| `GET /api/agents/{id}/queued` | none | `200 {"items": [{"id", "source", "text", "body", "created_at"}]}`: the turns that wait in the store for the agent's wake (`"queued": true` above), oldest first. `source` is where the turn waits: `store` (the live queues of a running agent come with TER-66). `text` is the turn as it will be typed, `body` the text after its tag. Redacted for the caller. The read right of the agent (TER-54). |
-| `DELETE /api/agents/{id}/queued/{turn}?source=store` | none | `204`. Drops one queued turn before the wake types it. `source`: the `source` of the turn in the list (default `store`; another value is `422`); the others keep their order. project_admin of the agent's project, sysadmin, or the operator. `404` when the turn does not wait (any more): the wake hands the turns over one at a time, so a removed turn is never typed and a typed turn is `404`. Audit `agent.queued.remove` with the turn ID and its length (TER-54). |
+| `GET /api/agents/{id}/queued` | none | `200 {"items": [{"id", "source", "text", "body", "created_at"}]}`. Waiting turns in delivery order: `runner`, `supervisor`, then `store`, preserving each queue's order. Store IDs are numbers. Live IDs are opaque strings and are not reused on restart. `created_at` is empty for live turns. `text` includes the tag, `body` excludes it. Redacted for the caller, with the agent's read right. The snapshot can become stale during delivery. Recaps, mail pointers and quota-hold work are not included. |
+| `DELETE /api/agents/{id}/queued/{turn}?source=store` | none | `204`. Removes an untouched queued turn. Pass its ID and `source` from the list (`store` by default, also `supervisor` or `runner`). Unknown sources are `422`. Requires project_admin of the agent's project, sysadmin, or operator. `404` once dispatch takes the turn, including between list and delete. Never interrupts typing or cancels a retry of an already typed turn. Remaining turns keep their order. Audit `agent.queued.remove` includes the ID and source for live turns, or ID and byte length for store turns. |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/interrupt` | none | `202 {"accepted": true, "interrupted": true}`. Stops the running turn; the harness keeps running (§6.5, "Interrupt"). |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/subscription` | `{"subscription": "anthropic-max-20x-2"}` | `200 {"agent", "from"?, "to", "applied"}` (below) |
+
+The queued-turn response also includes `queues.runner`: `available`,
+`unsupported` (an older runner without `list_pending`), or `unavailable`
+(for example an exiting runner or lost control connection). A runner-list
+failure does not hide the supervisor or store items. The dashboard shows
+the marker and still allows editing those items. Empty idle queues are not
+polled repeatedly.
 
 All need project_admin; an agent may `compact` and `new-session`
 itself. The work happens in the background. A `send` writes a row to the
@@ -5261,7 +5268,7 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
 | `POST /api/projects/{name}/artifacts` | §12.2 | `201` artifact |
 | `GET /api/projects/{name}/artifacts/usage` | | `200 {"project", "count", "used_bytes", "quota_bytes", "max_file_bytes"}` |
 | `GET /api/artifacts/{id}` | | `200` artifact |
-| `DELETE /api/artifacts/{id}` | | `204`; the author or an admin; `409` on a released version from before TER-58 |
+| `DELETE /api/artifacts/{id}` | | `204`; the author or an admin |
 | `POST /api/artifacts/{id}/links` | `{"kind": "page" \| "card" \| "label", "ref"}` | `201` artifact |
 | `POST /api/artifacts/{id}/url` | none, or `{"ttl"?}` | `200 {"url", "exp", "expires_at"}` |
 | `POST /api/artifacts/prune` | `{"dry_run"?, "as_of"?}` | `200` prune report; sysadmin or operator |
@@ -5272,11 +5279,7 @@ listens alone on `$TERRARIUM_ARTIFACT_LISTEN` (default `0.0.0.0:8081`).
   `422 invalid` with a message that names `label`.
 - An admin delete of another author's artifact writes `artifact.delete`. The
   blob goes when no artifact uses it.
-- An artifact on a `released` version from before TER-58 (an old
-  `version_artifacts` row) is not deleted: `409 conflict`, also for its
-  author, an admin, or the operator. The rows stay read only until a later
-  version drops the tables (TER-128). A label link does not block a
-  delete.
+- A label link does not block deletion.
 
 ### 12.4 Serving: `GET /a/{uid}/{path}`
 
@@ -5351,8 +5354,8 @@ port (8081) as a separate origin. The dashboard embeds them in
 endpoint. `as_of` is an RFC 3339 time; the default is now.
 
 - The rule keeps an artifact that is attached to a live page, a card, or a
-  label, or to a version from before TER-58 (the old `version_artifacts`
-  rows), or that a live page embeds.
+  label, or that a live page embeds. Old version links no longer retain artifacts.
+  They go through the same warning and prune as other unattached artifacts.
 - An unattached artifact older than `retention_days - 1` days gets the
   audit row `artifact.prune_warning` with `prune_after`.
 - An unattached artifact older than `retention_days` whose warning is a day
@@ -5378,8 +5381,9 @@ question ask`) with the artifacts linked.
 Every `/api/projects/{name}/versions` and `/api/versions/...` route gives
 `404`. The `version.*` events are gone. The tables `versions`,
 `version_cards`, `version_artifacts`, `version_reviews`, and
-`test_run_versions` keep their rows, and nothing reads or writes them
-except the artifact prune (§12.5). A later version drops them.
+`test_run_versions` and their indexes are dropped by TER-128. No current data
+uses these legacy tables. Artifact deletion (§12.3) and prune (§12.5) no
+longer read them. The migration irreversibly discards the legacy metadata.
 
 ## 14. Not in this phase
 

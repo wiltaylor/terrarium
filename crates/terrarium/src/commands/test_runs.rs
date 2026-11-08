@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::print_table;
 use crate::api::{CliError, query};
 use crate::cli::TestCmd;
-use crate::commands::artifacts::{base64, no_version_flag};
+use crate::commands::artifacts::base64;
 use crate::commands::projects::project_path;
 use crate::commands::system::as_items;
 use crate::ctx::Ctx;
@@ -222,12 +222,10 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
             name,
             cards,
             labels,
-            versions,
             commit,
             branch,
             fail_on_failures,
         } => {
-            no_version_flag(!versions.is_empty())?;
             let p = ctx.project_or(None).await?;
             let body = push_body(
                 file,
@@ -260,11 +258,9 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
         TestCmd::Ls {
             card,
             label,
-            version,
             name,
             failed,
         } => {
-            no_version_flag(version.is_some())?;
             let p = ctx.project_or(None).await?;
             let q = query([
                 ("card", card.clone()),
@@ -396,19 +392,7 @@ pub async fn test(ctx: &Ctx, cmd: &TestCmd) -> anyhow::Result<()> {
                 }
             })
         }
-        TestCmd::Link {
-            id,
-            cards,
-            labels,
-            versions,
-        }
-        | TestCmd::Unlink {
-            id,
-            cards,
-            labels,
-            versions,
-        } => {
-            no_version_flag(!versions.is_empty())?;
+        TestCmd::Link { id, cards, labels } | TestCmd::Unlink { id, cards, labels } => {
             if cards.is_empty() && labels.is_empty() {
                 return Err(CliError::usage("give --card or --label"));
             }

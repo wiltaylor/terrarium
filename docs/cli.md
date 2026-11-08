@@ -1086,11 +1086,9 @@ artifact links to the label with `--label`. The operator's review of a
 result, and the approval of a full release, is a `terrarium question ask`
 with the artifacts linked. The `version new | ls | show | rename | add-card
 | rm-card | archive | unarchive | attach | submit | wait | release | approve
-| reject` subcommands are removed: each exits 2 with an error that names
-the labels. `terrarium version` with no subcommand still prints the build
-versions of the CLI and the daemon. The hidden `--version` flags of `artifact push | ls`
-and `test push | ls | link | unlink` exit 2 with an error that names
-`--label`; they go in the version after.
+| reject` subcommands are removed and rejected as unexpected arguments. `terrarium version` with no subcommand still prints the build
+versions of the CLI and the daemon. The `--version` flags of `artifact push | ls`
+and `test push | ls | link | unlink` are removed. Use `--label` instead.
 
 `artifact push` sends the file as base64 in JSON. A directory becomes a tar
 archive with `kind: "bundle"`; the CLI runs the system `tar`. The limit is

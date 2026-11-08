@@ -108,6 +108,45 @@ function mountConversation(initial: Agent) {
 }
 
 describe("the queued turns", () => {
+  it("keeps store items visible when the runner queue is unavailable", async () => {
+    sessions.mockResolvedValue({ items: [] });
+    queued.mockResolvedValue({ items: [turn(1, "stored")], queues: { runner: "unavailable" } });
+    const { el, items } = mountConversation(agent("working"));
+    await vi.waitFor(() => expect(items()).toEqual(["stored"]));
+    expect(el.textContent).toContain("Runner queue: unavailable");
+  });
+
+  it("does not poll an empty idle queue", async () => {
+    vi.useFakeTimers();
+    try {
+      sessions.mockResolvedValue({ items: [] });
+      queued.mockResolvedValue({ items: [] });
+      mountConversation(agent("idle"));
+      await Promise.resolve();
+      await Promise.resolve();
+      const calls = queued.mock.calls.length;
+      expect(calls).toBe(1);
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(queued).toHaveBeenCalledTimes(calls);
+    } finally {
+      dispose?.();
+      dispose = undefined;
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["runner", "supervisor"] as const)("edits opaque %s IDs even without a store queue count", async (source) => {
+    sessions.mockResolvedValue({ items: [] });
+    queued.mockResolvedValue({ items: [{ ...turn(1, "live"), id: "opaque-id", source }] });
+    removeQueued.mockResolvedValue(undefined);
+    const { items, button, box } = mountConversation(agent("working"));
+    await vi.waitFor(() => expect(items()).toEqual(["live"]));
+    button(0, "Edit").click();
+    expect(removeQueued).toHaveBeenCalledWith("A1", "opaque-id", source);
+    await vi.waitFor(() => expect(items()).toEqual([]));
+    expect(box().value).toBe("live");
+  });
+
   it("show oldest first; Edit moves the text into the composer and out of the queue", async () => {
     sessions.mockResolvedValue({ items: [] });
     queued.mockResolvedValue({ items: [turn(1, "first"), turn(2, "second")] });
@@ -149,9 +188,9 @@ describe("the queued turns", () => {
     expect(box().value).toBe("");
   });
 
-  it("reads nothing while the agent has no queued work", async () => {
+  it("reads nothing while a stopped agent has no queued work", async () => {
     sessions.mockResolvedValue({ items: [] });
-    const { el, setA } = mountConversation(agent("idle"));
+    const { el, setA } = mountConversation(agent("stopped"));
     await Promise.resolve();
     expect(queued).not.toHaveBeenCalled();
     expect(el.querySelector(".convo-queued")).toBeNull();

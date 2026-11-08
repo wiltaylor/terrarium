@@ -64,6 +64,7 @@ pub mod settings;
 pub mod skills;
 pub mod spawn;
 pub mod spawn_rights;
+pub mod spawn_selection;
 pub mod ssh_agent;
 pub mod store;
 pub mod stream_limit;
