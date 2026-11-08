@@ -411,6 +411,9 @@ fn live_project(
         "repos": repos,
         "checkout": checkout,
     });
+    if let Some(owner) = &p.card_dispatcher {
+        spec["card_dispatcher"] = json!(owner);
+    }
     if delivery {
         spec["delivery"] = json!(jobs::delivery(conn, &p.name)?);
     }
@@ -430,6 +433,13 @@ fn desired_project(
         "repos": desired_repos(def),
         "checkout": def.checkout.on_agent_create,
     });
+    if let Some(owner) = def
+        .card_dispatcher
+        .as_deref()
+        .filter(|owner| *owner != "off")
+    {
+        spec["card_dispatcher"] = json!(owner);
+    }
     if let Some(d) = delivery {
         spec["delivery"] = json!(d);
     }

@@ -247,7 +247,7 @@ async fn lead_id(td: &TestDaemon) -> String {
 async fn failures_back_off_once_and_do_not_block_later_cards() {
     let td = setup(3, 3, 20).await;
     let bad = card(&td, "small").await;
-    td.agent("p", &bad.to_ascii_lowercase(), json!({})).await;
+    let obstruction = td.agent("p", &bad.to_ascii_lowercase(), json!({})).await;
     let good = card(&td, "impl").await;
     enabled(&td).await;
     terrariumd::card_dispatcher::pass(&state(&td)).await;
@@ -302,6 +302,38 @@ async fn failures_back_off_once_and_do_not_block_later_cards() {
     );
     let mails: i64 = state(&td).db.read(|c| Ok(c.query_row("SELECT count(*) FROM messages WHERE subject LIKE '%dispatcher could not start agent'", [], |r| r.get(0))?)).await.unwrap();
     assert_eq!(mails, 1);
+    td.delete(&format!(
+        "/api/agents/{}",
+        obstruction["id"].as_str().unwrap()
+    ))
+    .await
+    .ok();
+    let key = bad.clone();
+    state(&td)
+        .db
+        .write("operator", move |t| {
+            t.execute(
+                "UPDATE card_dispatch_retries SET retry_at = 0 WHERE card = ?1",
+                [&key],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(dispatch(&state(&td), "p").await.unwrap());
+    assert_eq!(get(&td, &bad).await["column"], "coding");
+    let remaining: i64 = state(&td)
+        .db
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT count(*) FROM card_dispatch_retries", [], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0);
 }
 
 #[tokio::test]
