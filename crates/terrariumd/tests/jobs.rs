@@ -2880,7 +2880,8 @@ async fn a_red_batch_gets_fix_cards_then_splits_with_the_rule_pack() {
 /// One scenario of the card flow on a fresh lab with `flow`, and the
 /// board, the jobs, and the mails to the worker after it, with the IDs,
 /// the commits, the times, and the paths made neutral. Each step waits
-/// for the one before, so the two flows see the same order.
+/// for the one before, except for the successful halves of the final
+/// split batch, whose relative completion order is not defined.
 async fn flow_scenario(flow: &'static str) -> Value {
     let lab = lab_flow(2, flow).await;
     set_recipe(&lab, "test -f OK && { test ! -f SLOW || sleep 30; }").await;
@@ -2998,7 +2999,32 @@ async fn flow_scenario(flow: &'static str) -> Value {
         let t = ulid.replace_all(&t, "<ID>");
         sha.replace_all(&t, "<SHA>").into_owned()
     };
-    let board = lab.td.get("/api/projects/p/board").await.ok().clone();
+    let mut board = lab.td.get("/api/projects/p/board").await.ok().clone();
+    // The split halves can finish in either order: in rules mode a
+    // deferred split can let the right half start before the left (see
+    // the batch-splitting test above). Compare that cohort in card-ID
+    // order, but retain its positions relative to every other card.
+    // In particular, neither card may overtake the earlier green merge.
+    let board_cards = board["cards"].as_array_mut().unwrap();
+    let cohort: Vec<usize> = board_cards
+        .iter()
+        .enumerate()
+        .filter(|(_, card)| card["id"] == f1 || card["id"] == f3)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(cohort.len(), 2);
+    for &i in &cohort {
+        assert_eq!(board_cards[i]["column"], "accepted");
+    }
+    if board_cards[cohort[0]]["id"].as_str() > board_cards[cohort[1]]["id"].as_str() {
+        board_cards.swap(cohort[0], cohort[1]);
+    }
+    let accepted: Vec<&str> = board_cards
+        .iter()
+        .filter(|card| card["column"] == "accepted")
+        .map(|card| card["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(accepted, [&c, &f1, &f3]);
     let mut cards = Vec::new();
     for id in [&first, &a, &b, &c, &d, &e, &f1, &f2, &f3] {
         let card = lab.card_of(id).await;
@@ -3049,7 +3075,8 @@ async fn flow_scenario(flow: &'static str) -> Value {
 /// TER-170 acceptance: one scenario (a green and a red validate, a green
 /// and a conflicting merge, a cancel while it runs, a batch with a
 /// conflict) leaves the same board with `board_flow = code` and with
-/// `board_flow = rules`: the columns, the positions, the labels, the
+/// `board_flow = rules`: the columns, the positions (with the concurrent
+/// split-batch cohort in card-ID order), the labels, the
 /// assignees, the bodies, the comment texts in order, the jobs, and the
 /// mails to the worker (subject and body). Not compared, by design: the
 /// author of a comment (`system` against `rule:p/<rule>`) and the sender
