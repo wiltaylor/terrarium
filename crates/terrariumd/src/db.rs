@@ -2474,6 +2474,13 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE projects ADD COLUMN board_flow TEXT;
     ALTER TABLE projects ADD COLUMN board_flow_at TEXT;
     "#,
+    // Operator preferences (TER-253). Self-contained migration.
+    r#"
+    CREATE TABLE operator_preferences (
+        owner TEXT PRIMARY KEY,
+        default_agent TEXT REFERENCES agents(id) ON DELETE SET NULL
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

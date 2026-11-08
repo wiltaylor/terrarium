@@ -21,6 +21,7 @@ pub(crate) mod mail;
 mod memory;
 mod monitors;
 mod pins;
+mod preferences;
 mod pipelines;
 mod project_folders;
 mod projects;
@@ -310,6 +311,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(pipelines::routes())
         .merge(calendar::routes())
         .merge(pins::routes())
+        .merge(preferences::routes())
         .merge(subscriptions::routes())
         .merge(usage::routes())
         .merge(fleet::routes())
