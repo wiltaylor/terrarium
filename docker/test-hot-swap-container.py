@@ -48,7 +48,8 @@ COPY hot-swap.py /usr/local/lib/terrarium-hot-swap.py
 RUN chmod +x /usr/local/bin/terrarium-entrypoint && ln -s /state/releases/current/bin/terrariumd /usr/local/bin/terrariumd && ln -s /state/releases/current/bin/terrarium /usr/local/bin/terrarium && ln -s /state/releases/current/bin/terrarium-runner /usr/local/bin/terrarium-runner
 ENV TERRARIUM_STATE_DIR=/state TERRARIUM_CONFIG_REPO=/config/terrarium TERRARIUM_CONFIG_DIR=/config/terrarium TERRARIUM_API_SOCKET=/run/terrarium/api.sock TERRARIUM_RUNTIME_DIR=/run/terrarium TERRARIUM_RUNNER=/usr/local/bin/terrarium-runner TERRARIUM_RUNNER_MODE=process TERRARIUM_HARNESS_INSTALL=0 TERRARIUM_NO_HARNESS_INSTALL=true TERRARIUM_HOST_LISTEN="" TERRARIUM_DEFAULTS_DIR=/state/releases/current/defaults
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/terrarium-entrypoint"]
-CMD ["--daemon-service", "terrariumd", "--sandbox", "none"]
+ENV TERRARIUM_SANDBOX=none
+CMD ["terrariumd"]
 USER terrarium
 HEALTHCHECK --interval=1s --timeout=2s --start-period=10s --retries=3 CMD terrarium daemon status
 LABEL io.terrarium.hot-swap-layout="1" io.terrarium.runner-compat-epoch="1"
@@ -82,7 +83,7 @@ raise SystemExit(42)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     created_images.append(image)
                 docker("volume", "create", volume)
-                docker("run", "-d", "--name", name, "--mount", f"type=volume,src={volume},dst=/state", "ter-261-old")
+                docker("run", "-d", "--name", name, "--mount", f"type=volume,src={volume},dst=/state", "ter-261-old", "--daemon-service", "terrariumd")
                 deadline = time.monotonic() + 60
                 while docker("exec", name, "terrarium", "daemon", "status", check=False).returncode:
                     if time.monotonic() > deadline:
@@ -99,7 +100,7 @@ raise SystemExit(42)
                 docker("exec", name, "python3", "-c", check)
                 # Even an accidental second default service command cannot
                 # acquire the state-volume lock while the live service owns it.
-                second = docker("run", "--rm", "--volumes-from", name, "ter-261-old", check=False)
+                second = docker("run", "--rm", "--volumes-from", name, "ter-261-old", "--daemon-service", "terrariumd", check=False)
                 self.assertNotEqual(second.returncode, 0)
                 docker("exec", name, "python3", "-c", check)
                 docker("exec", name, "python3", "-c", "from pathlib import Path; r=Path('/state/releases'); (r/'current').unlink(); (r/'current').symlink_to('a'*64); (r/'probation').unlink()")

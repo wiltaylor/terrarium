@@ -483,6 +483,33 @@ pub fn create_body(spec: &Value, reference: &str) -> Value {
     Value::Object(body)
 }
 
+// The service opt-in is an entrypoint interface, not a user daemon argument.
+// Normalize it against the destination image, including cross-layout rollback.
+fn service_command(body: &mut Value, image: &Value) {
+    let mut cmd: Vec<String> = body
+        .get("Cmd")
+        .unwrap_or(&image["Config"]["Cmd"])
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    if cmd.first().is_some_and(|s| s == "--daemon-service") {
+        cmd.remove(0);
+    }
+    if cmd
+        .first()
+        .is_some_and(|s| Path::new(s).file_name().is_some_and(|n| n == "terrariumd"))
+        && image["Config"]["Labels"]["io.terrarium.hot-swap-layout"] == "1"
+    {
+        cmd.insert(0, "--daemon-service".into());
+    }
+    if !cmd.is_empty() {
+        body["Cmd"] = json!(cmd);
+    }
+}
+
 /// The body of a one-off container like `spec` that runs `argv`: the same
 /// binds and user, no ports, no network, no restart, no health check, and
 /// no compose labels.
@@ -758,6 +785,11 @@ impl Engine for Docker {
     fn create<'a>(&'a self, spec: &'a Container, image: &'a Image) -> BoxFut<'a, Res<Container>> {
         Box::pin(async move {
             let mut body = create_body(&spec.spec, &image.reference);
+            let destination = self
+                .inspect_image(&image.reference)
+                .await?
+                .ok_or_else(|| "destination image missing before service creation".to_owned())?;
+            service_command(&mut body, &destination);
             // Compose records the image ID in a label; a stale one makes
             // the next `compose up` make the container again.
             if let Some(l) = body
@@ -855,6 +887,20 @@ pub fn hot_swap_compatible(old: &Value, new: &Value) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_command_crosses_the_legacy_image_boundary_both_ways() {
+        let old = json!({"Config": {"Cmd": ["terrariumd"]}});
+        let new = json!({"Config": {"Cmd": ["terrariumd"], "Labels": {"io.terrarium.hot-swap-layout": "1"}}});
+        let mut body = create_body(&spec(), "new");
+        service_command(&mut body, &new);
+        assert_eq!(body["Cmd"], json!(["--daemon-service", "terrariumd"]));
+        service_command(&mut body, &old);
+        assert_eq!(body["Cmd"], json!(["terrariumd"]));
+        body["Cmd"] = json!(["--daemon-service", "terrariumd", "--sandbox", "none"]);
+        service_command(&mut body, &old);
+        assert_eq!(body["Cmd"], json!(["terrariumd", "--sandbox", "none"]));
+    }
 
     #[test]
     fn hot_swap_requires_identical_runtime_base_and_compatibility_epoch() {

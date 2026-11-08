@@ -719,6 +719,29 @@ impl Updater {
                 )
                 .await
                 .map_err(failed)?;
+                // Admission may already have effects. Failure here is visible,
+                // but must never enter automatic database rollback.
+                self.step(
+                    "activation",
+                    async {
+                        let deadline = hold_deadline.min(
+                            tokio::time::Instant::now()
+                                + self.cfg.health_timeout.min(Duration::from_secs(30)),
+                        );
+                        loop {
+                            match self.exec_ok(&cur.id, hot_argv("ready", &[])).await {
+                                Ok(out) => break Ok(out),
+                                Err(error) if tokio::time::Instant::now() >= deadline => {
+                                    break Err(error);
+                                }
+                                Err(_) => tokio::time::sleep(self.cfg.health_poll).await,
+                            }
+                        }
+                    },
+                    Clone::clone,
+                )
+                .await
+                .map_err(failed)?;
                 Ok(Outcome::Succeeded)
             }
             Err(f) => {

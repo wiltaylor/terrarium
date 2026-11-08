@@ -51,6 +51,11 @@ never change the live release or probation marker. A state-volume lock rejects
 a second service, including an accidental `compose run terrarium` without a
 replacement command.
 
+The updater normalizes the service prefix for the destination image when it
+creates a long-running container. This installs the new supervisor from an old
+image default command, and strips the prefix again for rollback to an old image.
+One-off offline commands never receive this prefix.
+
 ## Binary-only upgrades
 
 The image has one final release-payload layer. All preceding RootFS layer
@@ -89,6 +94,16 @@ The updater reserves the last minute for recovery and retries commit three
 times. Admission remains closed until activation finishes. An activation
 failure exits the daemon nonzero so the supervisor can restart it. Once any
 commit was attempted, automatic journal rollback is forbidden.
+After commit the updater waits up to 30 seconds (within the remaining hold
+budget) for core activation. A failure reports Failed without a journal rewind.
+Use explicit rollback if the committed release cannot activate.
+
+Post-commit activation has two remaining ordering windows: harness pin install
+and default seeding in the executable follow core activation, and the git proxy
+binds asynchronously. An agent admitted in that interval can see the previous
+pins/defaults or a not-yet-ready proxy. Core reconcile and background activation
+must finish before admission, but auxiliary provisioning is not atomic with it.
+Do not treat probation health as proof that post-commit provisioning succeeded.
 
 Commit prunes unused payloads, keeping `current`, `previous`, and releases
 with a live executable under `/proc`. Thus retained runners keep their binaries.
@@ -114,13 +129,19 @@ The helper is private to administrators, not exposed to agents.
   It is idempotent. Check daemon logs and health. If activation failed, fix
   the reported cause and let the supervisor restart the selected release.
   A later rollback must use the updater's drained container-replacement path.
-* For `staged`, `paused` or `snapshotting`, before a new payload started,
+* For `staged` or `snapshotting`, with `current` equal to `old` and no probation,
   run `docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py cancel-pause`.
   The old daemon resumes. A partial snapshot is not a valid rollback source.
 * For `backed_up`, `probation`, `restoring` or `restored` with
   `admission_attempted: false`, restore the old release with the sequence below.
   An interrupted SQLite restore is safe to repeat from the completed snapshot.
   Do not use this sequence if admission was ever attempted.
+
+`paused` and `pause_requested` are independent status flags, not transaction
+phases. A pause during rollback preserves `probation`, `restoring` or `restored`.
+After interruption at any pause, use the durable phase and admission flag above,
+not the pause flag, to choose recovery. `cancel-pause` refuses probation/restore
+states rather than incorrectly marking an unfinished rollback aborted.
 
 ```sh
 docker exec terrarium python3 /usr/local/lib/terrarium-hot-swap.py pause

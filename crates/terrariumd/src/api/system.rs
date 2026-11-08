@@ -60,7 +60,14 @@ pub async fn health(State(state): State<Shared>) -> Response {
     let failed = state.agent_calls.failure().is_some();
     let d = state.definitions();
     let body = Json(Health {
-        status: if failed { "activation_failed" } else { "ok" }.into(),
+        status: if failed {
+            "activation_failed"
+        } else if state.agent_calls.in_probation() && !state.agent_calls.has_probation_marker() {
+            "activating"
+        } else {
+            "ok"
+        }
+        .into(),
         version: terrarium_version::FULL.into(),
         uptime: state.started.elapsed().as_secs(),
         started_at: state.started_at,

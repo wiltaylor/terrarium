@@ -151,6 +151,22 @@ class HotSwapTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             HOT.main(["restore-database", backup])
 
+    def test_interrupted_rollback_pause_preserves_phase_and_refuses_cancel(self):
+        HOT.main(["init"])
+        root = self.state / "releases"
+        (self.run / "upgrade-supervisor.pid").write_text("123")
+        (self.run / "upgrade-paused").touch()
+        (root / "probation").touch()
+        for phase in ("probation", "restoring", "restored"):
+            HOT.record(root, phase=phase, admission_attempted=False, old="a" * 64)
+            with patch.object(HOT.os, "kill"):
+                HOT.main(["pause"])
+            self.assertEqual(HOT.transaction(root)["phase"], phase)
+            with self.assertRaisesRegex(RuntimeError, "rollback in progress"):
+                HOT.main(["cancel-pause"])
+            self.assertTrue((self.run / "upgrade-pause").exists())
+            self.assertEqual(HOT.transaction(root)["phase"], phase)
+
     def test_supervisor_pauses_clean_exit_without_stopping_container(self):
         HOT.main(["init"])
         # Run exactly the production supervisor loop, skipping the image's

@@ -76,6 +76,60 @@ impl Verifier for Release {
 }
 
 #[tokio::test]
+#[ignore = "requires real legacy image and owned disposable Docker fixtures"]
+async fn legacy_image_swap_and_rollback() {
+    let Ok(target) = std::env::var("TER261_LEGACY_CONTAINER") else {
+        return;
+    };
+    assert!(target.starts_with("ter-261-"));
+    let docker = Docker {
+        socket: "/var/run/docker.sock".into(),
+        target: Some(target),
+    };
+    let before = docker.target().await.unwrap();
+    assert_eq!(
+        before.spec["container"]["Config"]["Cmd"],
+        serde_json::json!(["terrariumd"])
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let updater = Arc::new(Updater::new(
+        Arc::new(Local {
+            docker: docker.clone(),
+            next: "ter-261-real-runtime".into(),
+        }),
+        Arc::new(Release),
+        Arc::new(Release),
+        Store::new(dir.path(), 10),
+        Config {
+            health_timeout: Duration::from_secs(60),
+            health_poll: Duration::from_millis(100),
+            ..Default::default()
+        },
+    ));
+    let update = updater
+        .run_now(RunKind::Update, "test", "legacy-scratch")
+        .await;
+    assert_eq!(update.outcome, Outcome::Succeeded, "{update:#?}");
+    let upgraded = docker.target().await.unwrap();
+    assert_ne!(upgraded.id, before.id);
+    assert_eq!(
+        upgraded.spec["container"]["Config"]["Cmd"],
+        serde_json::json!(["--daemon-service", "terrariumd"])
+    );
+    let rollback = updater
+        .run_now(RunKind::Rollback, "previous", "legacy-scratch")
+        .await;
+    assert_eq!(rollback.outcome, Outcome::Succeeded, "{rollback:#?}");
+    let restored = docker.target().await.unwrap();
+    assert_ne!(restored.id, upgraded.id);
+    assert_eq!(restored.image.reference, before.image.reference);
+    assert_eq!(
+        restored.spec["container"]["Config"]["Cmd"],
+        serde_json::json!(["terrariumd"])
+    );
+}
+
+#[tokio::test]
 #[ignore = "requires owned disposable Docker fixtures"]
 async fn real_container_hot_swap_and_failed_health_rollback() {
     let target = std::env::var("TER261_CONTAINER").unwrap();

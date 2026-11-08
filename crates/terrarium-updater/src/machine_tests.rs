@@ -460,6 +460,20 @@ async fn lost_commit_response_is_retried_without_rewinding() {
 }
 
 #[tokio::test]
+async fn failed_post_commit_activation_reports_failure_without_rewind() {
+    let r = rig();
+    r.fake.0.lock().unwrap().hot = true;
+    r.fake.fail("hot:ready");
+    let result = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
+    assert_eq!(result.outcome, Outcome::Failed);
+    assert!(r.fake.calls().iter().any(|c| c == "hot:commit"));
+    assert!(!r.fake.calls().iter().any(|c| c == "hot:restore-database"));
+}
+
+#[tokio::test]
 async fn failed_pause_is_cancelled_without_switching_or_restoring() {
     let r = rig();
     r.fake.0.lock().unwrap().hot = true;

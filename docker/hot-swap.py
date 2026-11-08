@@ -6,10 +6,12 @@ and probation markers are deliberately durable across updater disconnection.
 An interrupted transaction remains held for operator recovery, not half-admitted.
 """
 import json
+import http.client
 import os
 from pathlib import Path
 import shutil
 import signal
+import socket
 import sqlite3
 import sys
 import time
@@ -138,6 +140,20 @@ def main(argv):
                           "paused": (run / "upgrade-paused").exists(),
                           "pause_requested": (run / "upgrade-pause").exists(),
                           "probation": (root / "probation").exists()}))
+    elif command == "ready":
+        if (root / "probation").exists():
+            raise RuntimeError("probation is not committed")
+        connection = http.client.HTTPConnection("localhost", timeout=5)
+        connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.sock.settimeout(5)
+        connection.sock.connect(os.environ.get("TERRARIUM_API_SOCKET", str(run / "api.sock")))
+        try:
+            connection.request("GET", "/api/health")
+            response = connection.getresponse()
+            if response.status != 200 or json.loads(response.read())["status"] != "ok":
+                raise RuntimeError("post-commit activation is not ready")
+        finally:
+            connection.close()
     elif command == "active":
         try:
             print((root / "current" / "image.json").read_text())
@@ -158,13 +174,16 @@ def main(argv):
             os.kill(pid, signal.SIGUSR1)
             signalled = True
             wait_for(lambda: (run / "upgrade-paused").exists(), argv[1] if len(argv) > 1 else None)
-            record(root, phase="paused")
+            # Pausing is orthogonal to the durable transaction phase. Recovery
+            # may pause a migrated probation daemon or an already-restored one.
         except BaseException:
             if signalled:
                 (run / "upgrade-resume").touch()
             (run / "upgrade-pause").unlink(missing_ok=True)
             raise
     elif command == "cancel-pause":
+        if (root / "probation").exists() or transaction(root).get("phase") in ("probation", "restoring", "restored"):
+            raise RuntimeError("rollback in progress: restore/start/commit, not cancel-pause")
         # The daemon may already be draining after SIGTERM. Keep a restart
         # request until the supervisor launches it again, even for exit 0.
         if (run / "upgrade-pause").exists() or (run / "upgrade-paused").exists():
