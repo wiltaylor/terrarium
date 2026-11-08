@@ -5,6 +5,53 @@ use rusqlite::params;
 use std::time::{Duration, Instant};
 
 #[tokio::test]
+async fn inbox_pages_reach_every_item_across_projects() {
+    use terrariumd::store::inbox::{self, Filter};
+    let td = TestDaemon::start().await;
+    for p in ["p", "other"] { td.project(p).await; }
+    let agent = td.agent("p", "lead", serde_json::json!({})).await["id"].as_str().unwrap().to_owned();
+    let other = td.agent("other", "lead", serde_json::json!({})).await["id"].as_str().unwrap().to_owned();
+    let db = &td.daemon.as_ref().unwrap().state.db;
+    db.write("operator", move |t| {
+        for i in 0..2400 {
+            t.execute("INSERT INTO messages (id,thread_id,from_agent,to_agent,subject,body,created_at,from_kind,to_kind) VALUES (?1,?1,?2,'operator','Page','Full body','2026-11-08T00:00:00Z','agent','operator')",
+                params![format!("page-{i:06}"), if i < 1200 { &agent } else { &other }])?;
+        }
+        for i in 0..250 {
+            t.execute("INSERT INTO questions (id,agent,project,text,thread_id,created_at,updated_at,kind,priority) VALUES (?1,?2,'p','Question',?1,'2026-11-08T00:00:00Z','2026-11-08T00:00:00Z','question',?3)",
+                params![format!("page-question-{i:06}"), agent, if i == 0 { "critical" } else { "normal" }])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let response = td.get("/api/inbox?project=p&limit=37").await;
+    assert_eq!(response.headers["x-inbox-open"], "1450");
+    assert_eq!(response.ok().as_array().unwrap().len(), 37);
+    assert_eq!(response.body[0]["critical"], true);
+    td.get("/api/inbox?limit=0").await.err(422, "invalid");
+    td.get("/api/inbox?cursor=broken").await.err(422, "invalid");
+    db.read(|c| {
+        let f = Filter { project: Some("p".into()), ..Filter::default() };
+        let mut cursor = None;
+        let mut ids = std::collections::HashSet::new();
+        loop {
+            let rows = inbox::page(c, &f, cursor.as_deref(), 37)?;
+            if rows.is_empty() { break; }
+            for row in &rows {
+                assert_eq!(row.project.as_deref(), Some("p"));
+                assert!(ids.insert(row.id.clone()), "duplicate {}", row.id);
+                if let Some(m) = &row.message { assert_eq!(m.body, "Full body"); }
+            }
+            let last = rows.last().unwrap();
+            cursor = Some(serde_json::to_string(&(last.open, last.critical, last.urgent, &last.at, &last.id)).unwrap());
+            // Deleting the boundary item must not invalidate the cursor.
+            if let Some(m) = &last.message { c.execute("DELETE FROM messages WHERE id = ?1", [&m.id])?; }
+        }
+        assert_eq!(ids.len(), 1450);
+        Ok(())
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn inbox_live_and_tenfold_load() {
     for scale in [1, 10] {
         let td = TestDaemon::start().await;

@@ -373,6 +373,15 @@ const LIST_MAX: usize = 200;
 /// oldest first.
 /// Then the others, the newest first. At most [`LIST_MAX`].
 pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
+    list_with_limit(conn, f, LIST_MAX as i64)
+}
+
+/// Inbox pagination applies its limit after merging all kinds by urgency.
+pub fn list_inbox(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
+    list_with_limit(conn, f, -1)
+}
+
+fn list_with_limit(conn: &Connection, f: &Filter, limit: i64) -> ApiResult<Vec<Question>> {
     let mut sql = String::from("SELECT * FROM questions WHERE 1 = 1");
     let mut args: Vec<String> = Vec::new();
     if let Some(a) = &f.agent {
@@ -415,7 +424,7 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
                    CASE WHEN status = 'open' THEN {PRIORITY_RANK_SQL} ELSE 0 END DESC,
                    CASE WHEN status = 'open' THEN created_at END ASC,
                    coalesce(answered_at, updated_at) DESC, id
-          LIMIT {LIST_MAX}"
+          LIMIT {limit}"
     ));
     let mut st = conn.prepare(&sql)?;
     let rows = st

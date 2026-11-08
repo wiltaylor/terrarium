@@ -1466,6 +1466,9 @@ export interface InboxItem {
 }
 
 export interface InboxQuery {
+  /** JSON tuple [open, critical, urgent, at, id] of the previous page's last item. */
+  cursor?: string;
+  limit?: number;
   status?: InboxStatus;
   kind?: InboxKind;
   project?: string;
