@@ -14,6 +14,10 @@ use crate::runner::{Delivery, ExitStatus, Runner, ScreenSnapshot};
 /// One harness, in this process or in a runner process. The trait is
 /// object safe: hold an `Arc<dyn RunnerHandle>`.
 pub trait RunnerHandle: Send + Sync + 'static {
+    /// Hold new agent RPCs during a graceful daemon restart.
+    fn hold(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
     fn agent(&self) -> AgentId;
     /// The hook and agent RPC socket, `<run>/agents/<ulid>.sock`.
     fn socket_path(&self) -> &Path;
@@ -42,6 +46,14 @@ pub trait RunnerHandle: Send + Sync + 'static {
     fn resize(&self, rows: u16, cols: u16) -> BoxFuture<'_, Result<()>>;
     /// Queue a user turn (see `docs/runner.md`, "Typing a turn").
     fn type_turn(&self, text: String) -> Delivery;
+    /// Claim an idle stop under the same lock as `type_turn`.
+    /// Unsupported handles refuse the claim rather than risk a busy stop.
+    fn claim_idle_stop(&self) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+    fn release_idle_stop(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
     fn answer<'a>(&'a self, request_id: &'a str, answer: &'a Answer) -> BoxFuture<'a, Result<()>>;
     fn answer_keys<'a>(&'a self, keys: &'a str) -> BoxFuture<'a, Result<()>>;
     /// Interrupt the running turn with the adapter's interrupt keys
@@ -60,6 +72,15 @@ pub trait RunnerHandle: Send + Sync + 'static {
 }
 
 impl RunnerHandle for Runner {
+    fn release_idle_stop(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            Runner::release_idle_stop(self);
+            Ok(())
+        })
+    }
+    fn claim_idle_stop(&self) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(Runner::claim_idle_stop(self)) })
+    }
     fn agent(&self) -> AgentId {
         Runner::agent(self)
     }

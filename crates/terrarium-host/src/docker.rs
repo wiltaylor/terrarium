@@ -87,7 +87,11 @@ pub fn plan_run(
     if req.init {
         a.push(s("--init"));
     }
-    if let Some(l) = &req.limits {
+    if let Some(l) = &req.reservation {
+        l.validate().map_err(BuildError::bad)?;
+        a.extend(limit_flags(&l.limits));
+        a.extend(reservation_flags(l, std::path::Path::new("/dev/block"))?);
+    } else if let Some(l) = &req.limits {
         a.extend(limit_flags(l));
     }
     if let Some(name) = &req.name {
@@ -99,6 +103,24 @@ pub fn plan_run(
         sources.push(crate::workspace::resolve(work_dir, w)?);
     }
     let mut req_env = req.env.clone();
+    // Override image defaults and caller env. Docker mounts only this allowlist.
+    let devices = req
+        .reservation
+        .as_ref()
+        .map(|r| r.gpu_devices.as_slice())
+        .unwrap_or_default();
+    req_env.insert(
+        "NVIDIA_VISIBLE_DEVICES".into(),
+        if devices.is_empty() {
+            "void".into()
+        } else {
+            devices.join(",")
+        },
+    );
+    if !devices.is_empty() {
+        a.push("--gpus".into());
+        a.push(format!("\"device={}\"", devices.join(",")));
+    }
     let mut user = req.user.clone();
     if user.is_none()
         && let Some(first) = sources.first()
@@ -193,6 +215,76 @@ pub fn limit_flags(l: &Limits) -> Vec<String> {
         a.push(format!("--blkio-weight={}", blkio_weight(w)));
     }
     a
+}
+
+/// Create-only device IO flags and CPU affinity. Device IDs were resolved on
+/// this host, so Docker can use the kernel's /dev/block symlinks.
+pub fn reservation_flags(
+    l: &terrarium_core::resources::RuntimeLimits,
+    device_root: &std::path::Path,
+) -> Result<Vec<String>, BuildError> {
+    l.validate().map_err(BuildError::bad)?;
+    let mut args = Vec::new();
+    if l.cpus.is_some() {
+        args.push(format!("--cpuset-cpus={}", l.cpuset()));
+    }
+    for (device, io) in &l.io {
+        // Docker splits device:rate at the colon, so /dev/block/major:minor
+        // cannot be passed literally. Resolve the host's kernel device link.
+        let path = std::fs::canonicalize(device_root.join(device))
+            .map_err(|e| BuildError::bad(format!("cannot resolve IO device {device}: {e}")))?;
+        let path = path
+            .to_str()
+            .filter(|p| !p.contains(':'))
+            .ok_or_else(|| BuildError::bad("Docker IO device path must be UTF-8 without colons"))?;
+        for (flag, value) in [
+            ("read-bps", io.read_bps),
+            ("write-bps", io.write_bps),
+            ("read-iops", io.read_iops),
+            ("write-iops", io.write_iops),
+        ] {
+            if value > 0 {
+                args.push(format!("--device-{flag}={path}:{value}"));
+            }
+        }
+    }
+    Ok(args)
+}
+
+/// Docker update cannot apply per-device IO. Refuse it rather than silently
+/// dropping the fields or recreating a container with other agents' processes.
+pub fn plan_update(
+    container: &str,
+    l: &terrarium_core::resources::RuntimeLimits,
+    bin: &str,
+) -> Result<VerbPlan, BuildError> {
+    l.validate().map_err(BuildError::bad)?;
+    if !l.io.is_empty() {
+        return Err(BuildError::bad(
+            "device IO limits take effect at the next up; Docker cannot change them live",
+        ));
+    }
+    if !l.gpu_devices.is_empty() {
+        return Err(BuildError::bad(
+            "GPU exposure takes effect at create; Docker cannot change it live",
+        ));
+    }
+    if l.limits.cpu_millis.is_none() || l.limits.memory_bytes.is_none() || l.cpus.is_none() {
+        return Err(BuildError::bad(
+            "Docker live updates require explicit host-capacity defaults",
+        ));
+    }
+    let mut a = vec![s("update")];
+    a.extend(limit_flags(&l.limits));
+    if l.limits.pids.is_none() {
+        a.push("--pids-limit=-1".into());
+    }
+    if l.limits.io_weight.is_none() {
+        a.push(format!("--blkio-weight={}", blkio_weight(100)));
+    }
+    a.push(format!("--cpuset-cpus={}", l.cpuset()));
+    a.push(ident("container", container)?.to_owned());
+    Ok(VerbPlan::plain(base(bin, a, Some(30))))
 }
 
 /// runc maps a blkio weight `b` (10 to 1000) to the cgroup v2 IO weight
@@ -449,6 +541,49 @@ mod tests {
     }
 
     #[test]
+    fn gpu_allowlist_overrides_caller_and_image_defaults() {
+        let mut r = run_req();
+        r.env.insert("NVIDIA_VISIBLE_DEVICES".into(), "all".into());
+        let plan = plan_run(
+            &r,
+            "docker",
+            &PathPolicy::default(),
+            std::path::Path::new("/nonexistent"),
+        )
+        .unwrap();
+        assert_eq!(plan.exec.env["NVIDIA_VISIBLE_DEVICES"], "void");
+        assert!(!plan.exec.args.contains(&"--gpus".into()));
+        r.reservation = Some(terrarium_core::resources::RuntimeLimits {
+            gpu_devices: vec!["GPU-abcd".into(), "GPU-1234".into()],
+            ..Default::default()
+        });
+        let plan = plan_run(
+            &r,
+            "docker",
+            &PathPolicy::default(),
+            std::path::Path::new("/nonexistent"),
+        )
+        .unwrap();
+        assert_eq!(plan.exec.env["NVIDIA_VISIBLE_DEVICES"], "GPU-abcd,GPU-1234");
+        assert!(
+            plan.exec
+                .args
+                .windows(2)
+                .any(|w| w == ["--gpus", "\"device=GPU-abcd,GPU-1234\""])
+        );
+        r.reservation.as_mut().unwrap().gpu_devices = vec!["all".into()];
+        assert!(
+            plan_run(
+                &r,
+                "docker",
+                &PathPolicy::default(),
+                std::path::Path::new("/nonexistent")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn run_golden() {
         let mut r = run_req();
         r.name = Some("t-buildbox".into());
@@ -481,7 +616,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             plan.exec.args.join(" "),
-            "run -d --rm --init --name t-buildbox -e TOKEN -v /srv/work:/work -v cache:/cache:ro \
+            "run -d --rm --init --name t-buildbox -e NVIDIA_VISIBLE_DEVICES -e TOKEN -v /srv/work:/work -v cache:/cache:ro \
              -w /work --network lab -u 1000:1000 --label terrarium.target=buildbox \
              alpine:3 sleep infinity"
         );
@@ -511,7 +646,7 @@ mod tests {
         assert_eq!(
             plan.exec.args.join(" "),
             "run -d --init --cpus=1.5 --memory=4294967296 --memory-swap=4294967296 \
-             --pids-limit=256 --blkio-weight=20 alpine:3"
+             --pids-limit=256 --blkio-weight=20 -e NVIDIA_VISIBLE_DEVICES alpine:3"
         );
         // Swap comes on top of the memory.
         let swap = Limits {
@@ -552,7 +687,7 @@ mod tests {
         assert_eq!(
             plan.exec.args.join(" "),
             format!(
-                "run -d -e HOME -v {w}/terra/w1:/work/terra/w1 -v {w}/terra/w2:/work/terra/w2 \
+                "run -d -e HOME -e NVIDIA_VISIBLE_DEVICES -v {w}/terra/w1:/work/terra/w1 -v {w}/terra/w2:/work/terra/w2 \
                  -u {u}:{g} alpine:3",
                 w = real.display(),
                 u = m.uid(),
@@ -590,7 +725,17 @@ mod tests {
             std::path::Path::new("/nonexistent"),
         )
         .unwrap();
-        assert_eq!(plan.exec.args, ["run", "-i", "-t", "alpine:3"]);
+        assert_eq!(
+            plan.exec.args,
+            [
+                "run",
+                "-i",
+                "-t",
+                "-e",
+                "NVIDIA_VISIBLE_DEVICES",
+                "alpine:3"
+            ]
+        );
         assert!(plan.exec.pty.is_some());
         assert_eq!(plan.parser, None);
     }

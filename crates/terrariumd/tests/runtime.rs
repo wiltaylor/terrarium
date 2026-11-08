@@ -453,6 +453,90 @@ async fn rpc(socket: &Path, method: &str, params: Value) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_stop_refuses_a_turn_handed_over_after_the_idle_check() {
+    use terrarium_core::AgentStatus;
+    use terrariumd::supervisor::{Supervisor, SupervisorError};
+
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let agent = id.parse().unwrap();
+    assert_eq!(td.sup.status(agent).await, Some(AgentStatus::Idle));
+    // No await for a working status: the reservation must protect even
+    // the interval before the runner has taken the turn.
+    td.sup
+        .send_turn(agent, "do not stop this turn".into())
+        .await
+        .unwrap();
+    assert!(matches!(
+        td.sup.stop_idle(agent).await,
+        Err(SupervisorError::NotReady(_))
+    ));
+    td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
+    td.wait_status(&id, "idle").await;
+    td.sup.stop_idle(agent).await.unwrap();
+    td.wait_status(&id, "stopped").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_stop_refuses_a_pending_push_pointer() {
+    use terrariumd::supervisor::{Supervisor, SupervisorError};
+
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let agent = id.parse().unwrap();
+    // Hold the pointer before typing, while the live runner is idle.
+    td.sup.reset_gate(agent, true);
+    td.sup.lease_granted(agent, "box".into(), "lease".into());
+    assert!(matches!(
+        td.sup.stop_idle(agent).await,
+        Err(SupervisorError::NotReady(_))
+    ));
+    td.sup.stop(agent).await.unwrap();
+    td.wait_status(&id, "stopped").await;
+    assert!(td.sup.send_turn(agent, "too late".into()).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_stop_queues_a_turn_during_the_graceful_stop() {
+    use terrariumd::supervisor::Supervisor;
+
+    let td = Td::start().await;
+    *td.adapter.exit_keys.lock().unwrap() = b"/exit 0\r".to_vec();
+    *td.adapter.exit_pause.lock().unwrap() = WAIT;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let agent = id.parse().unwrap();
+    let runner = td.sup.runner(agent).unwrap();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .lifecycle
+        .expect_stop(agent, "idle");
+    td.sup.stop_idle(agent).await.unwrap();
+    let result = td
+        .post(
+            &format!("/api/agents/{id}/send"),
+            Some(json!({"text": "after idle stop"})),
+        )
+        .await;
+    assert_eq!(result["queued"], true, "{result}");
+    // Finish the split exit keys only after the API has persisted the turn.
+    runner.write(b"\r").await.unwrap();
+    td.wait_events(&id, "turn_start", |events| {
+        events
+            .iter()
+            .any(|e| e["data"]["prompt"] == "[User] after idle stop")
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lifecycle_events_sse_and_pty() {
     let td = Td::start().await;
     let id = td.agent("demo", "bob", json!({})).await;
@@ -1487,6 +1571,136 @@ async fn daemon_restart_relaunches_with_resume() {
     assert_eq!(sessions[1]["resumes"], 2);
     assert_eq!(sessions[1]["outcome"], "resume_failed");
     assert_eq!(sessions[1]["current"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_drain_retries_long_polls_without_journaling_them() {
+    use terrarium_runner::RequestHandler;
+    let td = Td::start_with(false).await;
+    let bob = td.agent("demo", "bob", json!({})).await;
+    let state = &td.daemon.as_ref().unwrap().state;
+    let handler = terrariumd::agent_rpc::AgentRpc::new(Arc::downgrade(state));
+    let ctx = serde_json::from_value(json!({"agent":bob, "name":"bob", "project":"demo",
+        "harness":"claude", "status":"idle"}))
+    .unwrap();
+    let pending = handler.handle(
+        &ctx,
+        "http",
+        json!({"method":"GET", "path":"/api/mail",
+        "query":{"wait":30}, "request_id":"long-poll"}),
+    );
+    tokio::pin!(pending);
+    tokio::select! {
+        result = &mut pending => panic!("long poll answered early: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+    }
+    let (drained, answer) = tokio::join!(
+        terrariumd::agent_rpc::drain(state, Duration::from_secs(2)),
+        pending
+    );
+    drained.unwrap();
+    assert_eq!(answer.unwrap_err().code, "retry");
+    let refused = handler
+        .handle(
+            &ctx,
+            "http",
+            json!({"method":"POST", "path":"/api/mail",
+        "body":{"to":"demo/bob", "body":"not admitted"}, "request_id":"held"}),
+        )
+        .await;
+    assert_eq!(refused.unwrap_err().code, "retry");
+    let count: i64 = state
+        .db
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM agent_rpc_answers", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runner_whoami_reads_role_changes_without_restart() {
+    let td = Td::start_with(false).await;
+    let bob = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{bob}/start"), None).await;
+    td.wait_status(&bob, "idle").await;
+    let sock = td.runner_socket(&bob);
+    for roles in [json!([]), json!(["project_admin"]), json!([])] {
+        let (status, body) = td
+            .req(
+                Method::PUT,
+                &format!("/api/agents/{bob}/roles"),
+                Some(roles.clone()),
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let answer = rpc(&sock, "whoami", json!({})).await;
+        assert_eq!(answer["result"]["roles"], roles, "{answer}");
+        assert_eq!(answer["result"]["agent"], bob);
+        assert_eq!(answer["result"]["name"], "bob");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_rpc_write_answers_survive_restart_without_duplicate_mail() {
+    use sha2::{Digest, Sha256};
+    let mut td = Td::start_with(false).await;
+    let bob = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{bob}/start"), None).await;
+    td.wait_status(&bob, "idle").await;
+    let sock = td.runner_socket(&bob);
+    let params = json!({"method":"POST", "path":"/api/mail", "request_id":"replay-mail",
+        "body":{"to":"demo/bob", "body":"exactly one copy"}});
+    let (a, b) = tokio::join!(
+        rpc(&sock, "http", params.clone()),
+        rpc(&sock, "http", params.clone())
+    );
+    assert_eq!(a["result"]["status"], 201, "{a}");
+    assert_eq!(a, b);
+    let mut changed = params.clone();
+    changed["body"]["body"] = json!("different");
+    assert_eq!(
+        rpc(&sock, "http", changed).await["error"]["code"],
+        "invalid_params"
+    );
+    td.restart_daemon().await;
+    td.wait_status(&bob, "idle").await;
+    assert_eq!(rpc(&sock, "http", params).await, a);
+    let mail = rpc(&sock, "http", json!({"method":"GET", "path":"/api/mail"})).await;
+    assert_eq!(
+        mail["result"]["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["body"] == "exactly one copy")
+            .count(),
+        1
+    );
+
+    // Simulate a crash after admitting a write but before persisting its answer.
+    let pending = json!({"method":"POST", "path":"/api/mail", "request_id":"unresolved",
+        "body":{"to":"demo/bob", "body":"must not run"}});
+    let hash: String = Sha256::digest(serde_json::to_vec(&pending).unwrap())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let key = bob.clone();
+    td.daemon.as_ref().unwrap().state.db.write("test", move |t| {
+        t.execute("INSERT INTO agent_rpc_answers(agent, request_id, fingerprint) VALUES (?1, 'unresolved', ?2)", rusqlite::params![key, hash])?;
+        Ok(())
+    }).await.unwrap();
+    td.restart_daemon().await;
+    td.wait_status(&bob, "idle").await;
+    let answer = rpc(&sock, "http", pending).await;
+    assert_eq!(answer["error"]["code"], "indeterminate", "{answer}");
+    let mail = rpc(&sock, "http", json!({"method":"GET", "path":"/api/mail"})).await;
+    assert!(
+        !mail["result"]["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["body"] == "must not run")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3281,6 +3495,10 @@ async fn a_failed_wake_is_an_error_and_stops_the_wakes() {
 async fn a_compaction_holds_turns_until_its_end_hook() {
     use terrarium_core::config::{CompactMaxAge, IdleStop};
     let td = Td::start().await;
+    let gate_dir = tempfile::tempdir().unwrap();
+    let gate = gate_dir.path().join("compact.end");
+    td.adapter
+        .set_env("FAKE_TUI_COMPACT_GATE", gate.to_str().unwrap());
     td.adapter.set_env("FAKE_TUI_DELAY_MS", "600");
     let id = td.agent("demo", "comp", json!({})).await;
     td.post(&format!("/api/agents/{id}/start"), None).await;
@@ -3294,8 +3512,7 @@ async fn a_compaction_holds_turns_until_its_end_hook() {
     td.wait_status(&id, "idle").await;
 
     td.post(&format!("/api/agents/{id}/compact"), None).await;
-    // From the status events, not one read: under load the 600 ms
-    // compaction ended before the read (TER-117).
+    // The gate keeps compaction open even if sending the next turn is slow.
     td.wait_events(&id, "status", |e| {
         e.iter()
             .any(|s| s["data"]["status"] == "working" && s["data"]["reason"] == "compacting")
@@ -3306,6 +3523,12 @@ async fn a_compaction_holds_turns_until_its_end_hook() {
         Some(json!({"text": "second"})),
     )
     .await;
+    // send has returned, so the supervisor has accepted the held turn.
+    // Give an incorrectly delivered turn time to emit its start hook.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(td.events(&id, "turn_start").await.len(), 1);
+    assert!(td.events(&id, "compact_finished").await.is_empty());
+    std::fs::write(&gate, "go").unwrap();
     let done = td
         .wait_events(&id, "agent.compacted", |e| !e.is_empty())
         .await;

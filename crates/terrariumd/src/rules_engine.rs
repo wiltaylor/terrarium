@@ -149,7 +149,7 @@ struct LoadRow {
 /// after the switch. Each changed file is parsed off the DB lock, without
 /// the column check (the engine checks the columns when a run starts). A
 /// file that does not parse (a stored text that a later schema refuses)
-/// runs nothing of its own and logs a warning.
+/// runs nothing of its own and emits a `rules.invalid` project event.
 pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
     let rows: Vec<LoadRow> = db
         .read(|c| {
@@ -240,6 +240,24 @@ pub async fn load(db: &Db, cache: &mut Cache) -> ApiResult<Vec<ProjectRules>> {
                     Ok(s) => s,
                     Err(e) => {
                         warn!(project = %project, "the stored rules do not parse; they run nothing: {e}");
+                        let p = project.clone();
+                        let data = json!({"hash": file_hash, "problems": rules::problems(&e)});
+                        let emitted = db
+                            .write("system", move |tx| {
+                                tx.emit(
+                                events::EventDraft::new(
+                                    "rules.invalid",
+                                    "stored board rules no longer parse; own rules will not run",
+                                    data,
+                                )
+                                .project(p),
+                            )?;
+                                Ok(())
+                            })
+                            .await;
+                        if let Err(error) = emitted {
+                            warn!(project = %project, %error, "could not record rules parse failure");
+                        }
                         RuleSet::default()
                     }
                 };
@@ -383,7 +401,20 @@ pub fn decide(
             .on
             .iter()
             .any(|k| terrarium_core::schedule::glob(k, &e.kind))
-            || !rule.when.iter().all(|m| m.holds(&view))
+            || !rule.when.iter().all(|m| {
+                // Legacy boards/events have no roles. Only the built-in
+                // bound rules retain their column-name fallback.
+                if matches!(rule.name.as_str(), "agent-park" | "agent-unpark")
+                    && matches!(m.path.as_str(), "data.to_role" | "data.from_role")
+                    && e.data[m.path.trim_start_matches("data.")].is_null()
+                {
+                    let mut legacy = m.clone();
+                    legacy.path = m.path.trim_end_matches("_role").into();
+                    legacy.holds(&view)
+                } else {
+                    m.holds(&view)
+                }
+            })
         {
             return Ok(Vec::new());
         }
@@ -1193,6 +1224,17 @@ pub fn card_condition_fails(
     card: &board::Card,
     columns: &[BoardColumn],
 ) -> Option<String> {
+    if let Some(prefix) = &cond.group_key_prefix
+        && !card
+            .group
+            .as_ref()
+            .is_some_and(|g| g.key.starts_with(prefix))
+    {
+        return Some(format!(
+            "{} is not in a group with key prefix {prefix}",
+            card.id
+        ));
+    }
     let is_in = |refs: &[String]| {
         refs.iter()
             .any(|r| rules_file::resolve_column(columns, r).is_some_and(|c| c.name == card.column))
@@ -1243,6 +1285,16 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
             "done" => g.done.to_string(),
             "total" => g.total.to_string(),
             "eta_at" => g.eta_at.clone()?,
+            "failed_step" => {
+                if g.steps
+                    .iter()
+                    .any(|s| s.name == "e2e" && s.started_at.is_some())
+                {
+                    "e2e".into()
+                } else {
+                    "merge job".into()
+                }
+            }
             _ => return None,
         });
     }

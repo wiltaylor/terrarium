@@ -2217,7 +2217,7 @@ Conventions:
   `designs/runner-v2`. Every project starts with an `index` page that the lead
   keeps as a table of contents.
 - Wikilinks: `[[designs/runner-v2]]` a page, `[[TER-42]]` a card, `[[MEM-17]]`
-  a memory, `[[v0.3.0]]` a version, `[[project:other/reports/x]]` a page in
+  a memory, `[[v0.3.0]]` a page (not a version), `[[project:other/reports/x]]` a page in
   another project. Backlinks are indexed.
 - Artifacts embed by ID: `![diagram](artifact:ART-9)` renders an image,
   `[report](artifact:ART-10)` links a file, and a fenced block

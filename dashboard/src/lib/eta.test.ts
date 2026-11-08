@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Card } from "../api/types";
-import { countdown, doneSummary, parseDuration, resolveEta, span, tickInterval } from "./eta";
+import { countdown, doneSummary, etaStopped, parseDuration, resolveEta, span, tickInterval } from "./eta";
 
 const NOW = Date.parse("2026-10-30T10:00:00Z");
 const at = (min: number) => new Date(NOW + min * 60_000).toISOString();
@@ -21,6 +21,12 @@ const card = (extra: Partial<Card> = {}): Card => ({
   updated_at: at(-60),
   archived: false,
   ...extra,
+});
+
+it("stops ETA by role rather than a renamed column's name", () => {
+  expect(etaStopped(card({ column: "shipped", column_role: "accepted" }))).toBe(true);
+  expect(etaStopped(card({ column: "accepted", column_role: "working" }))).toBe(false);
+  expect(etaStopped(card({ column: "accepted" }))).toBe(true);
 });
 
 describe("parseDuration", () => {

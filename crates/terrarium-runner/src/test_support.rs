@@ -25,6 +25,13 @@ use crate::process::live_runner_pid;
 /// The file name of the runner binary.
 const RUNNER: &str = "terrarium-runner";
 
+/// A completed delivery for a fake `RunnerHandle` in another crate.
+pub fn delivered_turn() -> crate::Delivery {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = tx.send(Ok(()));
+    crate::Delivery::from_parts(0, rx)
+}
+
 /// How long [`RunnerProcessGuard`] waits after SIGTERM before SIGKILL.
 pub const TERM_GRACE: Duration = Duration::from_secs(2);
 

@@ -7,7 +7,7 @@
 // version labels shows in each of their lanes. The WIP limits and the column
 // counts stay per column, over all lanes.
 
-import type { Card } from "../../api/types";
+import type { CardSummary as Card } from "../../api/types";
 import { boardVersions, cardVersions, versionLabel } from "./versionLabels";
 
 /** The lane of the cards with no version label. A version lane key starts with `version:`, so it is never this word. */

@@ -188,6 +188,9 @@ fn need(kind: &str, field: &str, present: bool) -> ApiResult<()> {
 /// Check a definition against the rules of its kind (PLAN §19).
 pub fn validate(def: &TargetDef) -> ApiResult<()> {
     check_name("target", &def.name)?;
+    if def.sync_workspace && def.kind != TargetKind::Ssh {
+        return Err(ApiError::invalid("sync_workspace requires an ssh target"));
+    }
     if let Some(p) = &def.project {
         check_name("project", p)?;
     }
@@ -515,7 +518,16 @@ pub fn admin_after_write(
     def: &TargetDef,
     before: Option<(&TargetDef, bool)>,
 ) -> ApiResult<bool> {
-    if secrets::is_admin_actor(t, &t.actor)? {
+    admin_after_write_as(t, &t.actor, def, before)
+}
+
+fn admin_after_write_as(
+    t: &Connection,
+    actor: &str,
+    def: &TargetDef,
+    before: Option<(&TargetDef, bool)>,
+) -> ApiResult<bool> {
+    if secrets::is_admin_actor(t, actor)? {
         return Ok(true);
     }
     let Some((old, true)) = before else {
@@ -564,6 +576,69 @@ fn refuse_file(r: &TargetRow) -> ApiResult<()> {
 /// Apply a JSON merge patch to an API target: `null` removes a field.
 /// `name` cannot change.
 pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow> {
+    update_with_live_limits(t, name, patch, false, false)
+}
+
+/// Only the API executor may opt into limits it has acknowledged on the host.
+pub fn update_with_live_limits(
+    t: &mut Tx<'_>,
+    name: &str,
+    patch: &Value,
+    live: bool,
+    acknowledged: bool,
+) -> ApiResult<TargetRow> {
+    let (def, admin) = prepare_update(t, &t.actor, name, patch, live)?;
+    let current = get(t, name)?;
+    if def.kind == TargetKind::Docker
+        && !def.ephemeral
+        && def.container.is_none()
+        && (def.image != current.def.image || def.limits != current.def.limits)
+    {
+        let mut rt = current.runtime.clone();
+        if acknowledged && let Some(baseline) = &mut rt.docker_settings {
+            baseline.limits = DockerSettings::of(&def).limits;
+        }
+        rt.recreate_required = rt
+            .docker_settings
+            .as_ref()
+            .is_some_and(|baseline| !baseline.equivalent(&DockerSettings::of(&def)));
+        set_runtime(t, name, &rt)?;
+    }
+    t.execute(
+        "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5,
+                            credential_admin = ?6
+         WHERE name = ?1",
+        params![
+            name,
+            def.project,
+            kind_str(def.kind),
+            def_json(&def)?,
+            now(),
+            admin
+        ],
+    )?;
+    if patch.as_object().is_some_and(|p| p.contains_key("address")) {
+        for address in [current.def.address.as_deref(), def.address.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            t.execute(
+                "DELETE FROM job_host_keys WHERE hostname = ?1",
+                [super::jobs::address_key(address)],
+            )?;
+        }
+    }
+    get(t, name)
+}
+
+/// Validate without changing stored defaults before host acknowledgement.
+pub fn prepare_update(
+    t: &Connection,
+    actor: &str,
+    name: &str,
+    patch: &Value,
+    live: bool,
+) -> ApiResult<(TargetDef, bool)> {
     let current = get(t, name)?;
     refuse_file(&current)?;
     let Some(p) = patch.as_object() else {
@@ -584,7 +659,8 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
             .collect();
         // A `host` target is always `running` while its host agent is
         // online. Its limits apply to each new session, so they change.
-        if current.def.kind == TargetKind::Host {
+        if current.def.kind == TargetKind::Host || (live && current.def.kind == TargetKind::Docker)
+        {
             changed.retain(|k| *k != "limits");
         }
         changed.sort_unstable();
@@ -601,7 +677,7 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
             .with_details(json!({"state": "running", "fields": changed})));
         }
     }
-    if p.contains_key("limits") && current.def.container.is_some() {
+    if !live && p.contains_key("limits") && current.def.container.is_some() {
         refuse_docker_limits(&current, p.get("limits"), o.get("limits"))?;
     }
     for (k, val) in p {
@@ -621,39 +697,15 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
         .map_err(|e| ApiError::bad_request(format!("bad target field: {e}")))?;
     def.name = name.to_owned();
     validate(&def)?;
+    guard_reserved_update(t, &current.def, &def)?;
     if let Some(p) = &def.project {
         crate::store::projects::get(t, p)?;
     }
     check_credential(t, &def, Some(&current.def))?;
     let was = credential_admin(t, name)?;
-    let admin = admin_after_write(t, &def, Some((&current.def, was)))?;
+    let admin = admin_after_write_as(t, actor, &def, Some((&current.def, was)))?;
     check_global_credential(t, &def, admin)?;
-    if def.kind == TargetKind::Docker
-        && !def.ephemeral
-        && def.container.is_none()
-        && (def.image != current.def.image || def.limits != current.def.limits)
-    {
-        let mut rt = current.runtime.clone();
-        rt.recreate_required = rt
-            .docker_settings
-            .as_ref()
-            .is_some_and(|baseline| !baseline.equivalent(&DockerSettings::of(&def)));
-        set_runtime(t, name, &rt)?;
-    }
-    t.execute(
-        "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5,
-                            credential_admin = ?6
-         WHERE name = ?1",
-        params![
-            name,
-            def.project,
-            kind_str(def.kind),
-            def_json(&def)?,
-            now(),
-            admin
-        ],
-    )?;
-    get(t, name)
+    Ok((def, admin))
 }
 
 /// RFC 7396 merge of one object into another: `null` removes a key.
@@ -714,8 +766,25 @@ fn is_running(r: &TargetRow) -> bool {
 pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<TargetRow> {
     let current = get(t, name)?;
     refuse_file(&current)?;
+    super::reservations::guard_identity(t, "target", name)?;
     t.execute("DELETE FROM targets WHERE name = ?1", [name])?;
     Ok(current)
+}
+
+fn guard_reserved_update(conn: &Connection, old: &TargetDef, new: &TargetDef) -> ApiResult<()> {
+    let mut old_value = serde_json::to_value(old)?;
+    let mut new_value = serde_json::to_value(new)?;
+    for value in [&mut old_value, &mut new_value] {
+        if let Some(object) = value.as_object_mut() {
+            for field in ["limits", "keep", "snapshot_before_task"] {
+                object.remove(field);
+            }
+        }
+    }
+    if old_value != new_value {
+        super::reservations::guard_identity(conn, "target", &old.name)?;
+    }
+    Ok(())
 }
 
 /// Record the state that a lifecycle verb saw, and a snapshot name to add.
@@ -789,6 +858,10 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[TargetDef]) -> ApiResult<(Changes, Vec
                 changes.added.push(def.name.clone());
             }
             Some(r) if r.def != *def || r.source != SOURCE_FILE => {
+                if let Err(e) = guard_reserved_update(t, &r.def, def) {
+                    errors.push(format!("targets/{}.toml: {}", def.name, e.message));
+                    continue;
+                }
                 t.execute(
                     "UPDATE targets SET project = ?2, kind = ?3, def = ?4, source = 'file',
                                         updated_at = ?5, credential_admin = 1
@@ -812,6 +885,10 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[TargetDef]) -> ApiResult<(Changes, Vec
         .map(|r| r.def.name)
         .collect();
     for name in gone {
+        if let Err(e) = super::reservations::guard_identity(t, "target", &name) {
+            errors.push(format!("targets/{name}.toml: {}", e.message));
+            continue;
+        }
         t.execute("DELETE FROM targets WHERE name = ?1", [&name])?;
         changes.removed.push(name);
     }

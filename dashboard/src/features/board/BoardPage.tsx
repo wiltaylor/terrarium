@@ -4,7 +4,7 @@ import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
-import type { Card, Column, NewCard, Question } from "../../api/types";
+import type { Card, CardSummary, Column, NewCard, Question } from "../../api/types";
 import { ago, compact } from "../../lib/format";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { idleBadge } from "../../lib/idle";
@@ -59,7 +59,7 @@ export function BoardPage(props: { done?: boolean }) {
     onCleanup(() => phoneQuery.removeEventListener("change", change));
   });
 
-  createEffect(on(() => params.project, (p) => void board.load(p)));
+  createEffect(on(() => [params.project, props.done] as const, ([p, done]) => void board.load(p, done)));
 
   // The open questions of the project: the "? n" badges of the cards and the "Link a question" list of the drawer.
   const [questions, setQuestions] = createSignal<Question[]>([]);
@@ -130,12 +130,23 @@ export function BoardPage(props: { done?: boolean }) {
   });
 
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  let detailTimer: ReturnType<typeof setTimeout> | undefined;
   let questionTimer: ReturnType<typeof setTimeout> | undefined;
-  // Live: card, board, test run, and job events of this project reload the board (a test run changes the test chip of its cards; a job changes the state chip and the queue places); question events reload the badges.
+  // Live events refresh summaries (including compact test chips and job state),
+  // retaining the loaded Done range. Only the open drawer reloads full details.
   const off = events.on((e) => {
     if ((e.kind === "card" || e.kind === "board" || e.kind === "test_run" || e.kind === "job") && e.project === params.project && !dragging()) {
       clearTimeout(reloadTimer);
-      reloadTimer = setTimeout(() => void board.reload(), 300);
+      // Done can span many pages. Coalesce busy project bursts before fetching
+      // that range, rather than requesting every page several times a second.
+      reloadTimer = setTimeout(() => void board.reload(), props.done ? 2000 : 300);
+      const card = search.card;
+      if (card && (e.card === card || e.data.card_id === card)) {
+        clearTimeout(detailTimer);
+        detailTimer = setTimeout(() => {
+          if (search.card === card) void reloadSelected();
+        }, 300);
+      }
     }
     if (isCardQuestionEvent(e, { project: params.project })) {
       clearTimeout(questionTimer);
@@ -145,12 +156,13 @@ export function BoardPage(props: { done?: boolean }) {
   onCleanup(() => {
     off();
     clearTimeout(reloadTimer);
+    clearTimeout(detailTimer);
     clearTimeout(questionTimer);
   });
 
   const labels = () => [...new Set(board.state.board?.cards.flatMap((c) => c.labels) ?? [])].sort();
   const assignees = () => [...new Set(board.state.board?.cards.map((c) => c.assignee_name ?? c.assignee).filter((a): a is string => !!a) ?? [])].sort();
-  const visible = (c: Card) =>
+  const visible = (c: CardSummary) =>
     (!label() || c.labels.includes(label())) && (!assignee() || (c.assignee_name ?? c.assignee) === assignee()) && matchesVersion(c.labels, versionFilter());
 
   const boardColumns = (): Column[] => board.state.board?.columns ?? [];
@@ -164,7 +176,18 @@ export function BoardPage(props: { done?: boolean }) {
     await board.move(id, column, index, comment);
   };
 
-  const selected = () => board.state.board?.cards.find((c) => c.id === search.card);
+  const [detailError, setDetailError] = createSignal<unknown>(null);
+  const [detail, { mutate: setSelected, refetch: reloadSelected }] = createResource(
+    () => search.card ? [params.project, search.card] as const : false,
+    async ([project, id]) => {
+      setDetailError(null);
+      try {
+        const card = await api.cards.get(id);
+        return card.project === project ? card : undefined;
+      } catch (e) { setDetailError(e); return undefined; }
+    },
+  );
+  const selected = () => detail()?.id.toUpperCase() === search.card?.toUpperCase() ? detail() : undefined;
 
   // The column of the phone board: `?col=` in the URL, so a reload and the back button keep it.
   // A tap on a column chip and a swipe on the board change it; a change of the URL scrolls the board to it.
@@ -352,6 +375,8 @@ export function BoardPage(props: { done?: boolean }) {
         )}
       </Show>
 
+      <LoadMore hasMore={!!board.state.board?.next_cursor} loading={board.state.loading} onMore={() => void board.more()} />
+      <ErrorBanner error={detailError()} />
       <Show when={newCardIn()}>
         {(column) => (
           <NewCardModal
@@ -415,9 +440,9 @@ export function BoardPage(props: { done?: boolean }) {
             onMove={(column, comment) => {
               const b = board.state.board;
               const end = b ? cardsIn(b, column).filter((x) => x.id !== c().id).length : 0;
-              return commitMove(c().id, column, end, comment);
+              return commitMove(c().id, column, end, comment).then(() => { void reloadSelected(); });
             }}
-            onSaved={board.put}
+            onSaved={(card) => { board.put(card); setSelected(card); }}
             onArchived={() => {
               board.drop(c().id);
               setSearch({ card: undefined });
@@ -430,7 +455,7 @@ export function BoardPage(props: { done?: boolean }) {
 }
 
 /** The countdown chip of a card with an ETA, with a thin bar of the time used. Nothing for a done or archived card. */
-function EtaChip(props: { card: Card; now: number }) {
+function EtaChip(props: { card: CardSummary; now: number }) {
   const cd = () => countdown(props.card, props.now);
   return (
     <Show when={cd()}>
@@ -452,7 +477,7 @@ function EtaChip(props: { card: Card; now: number }) {
 }
 
 function KCard(props: {
-  card: Card;
+  card: CardSummary;
   now: number;
   questions?: CardQuestionBadge;
   /** A line under the title, for example "also in 1.4.0" in a version lane. */
@@ -525,6 +550,7 @@ function KCard(props: {
       <EtaChip card={props.card} now={props.now} />
       <div class="row small">
         <Show when={props.card.tests}>{(t) => <CardTestsChip project={props.card.project} tests={t()} />}</Show>
+        <Show when={props.card.comment_count}><span class="small muted" title={props.card.last_comment_at ?? undefined}>{props.card.comment_count} comments</span></Show>
         <For each={tileLabels(props.card.labels)}>{(l) => <span class="chip">{l}</span>}</For>
       </div>
       <Show when={props.card.assignee}>

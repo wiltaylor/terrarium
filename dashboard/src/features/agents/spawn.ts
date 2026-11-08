@@ -6,6 +6,7 @@ import type { Agent, AgentTemplate, Spawn, SpawnPolicy } from "../../api/types";
 /** The defaults of the daemon (`terrarium_core::config::SpawnPolicy`). */
 export const SPAWN_DEFAULT_CONCURRENT = 2;
 export const SPAWN_DEFAULT_LIFETIME = "2h";
+export const SPAWN_DEFAULT_BOUND_LIFETIME = "30d";
 const MAX_COUNT = 50;
 const MAX_LIFETIME_SECS = 24 * 3600;
 
@@ -35,6 +36,11 @@ export function spawnProblem(sp: SpawnPolicy): string | null {
     if (!secs) return `Spawn rights: max lifetime \`${sp.max_lifetime}\` is not a duration such as 30m or 2h.`;
     if (secs > MAX_LIFETIME_SECS) return "Spawn rights: max lifetime is at most 24h.";
   }
+  if (sp.max_bound_lifetime?.trim()) {
+    const secs = durationSecs(sp.max_bound_lifetime);
+    if (!secs) return `Spawn rights: max bound lifetime \`${sp.max_bound_lifetime}\` is not a duration such as 12h or 3d.`;
+    if (secs > 30 * 86400) return "Spawn rights: max bound lifetime is at most 30d.";
+  }
   return null;
 }
 
@@ -47,7 +53,9 @@ export function sameSpawn(a: SpawnPolicy | null | undefined, b: SpawnPolicy | nu
     (a.max_concurrent ?? SPAWN_DEFAULT_CONCURRENT) === (b.max_concurrent ?? SPAWN_DEFAULT_CONCURRENT) &&
     a.max_per_day === b.max_per_day &&
     (a.max_lifetime?.trim() || undefined) === (b.max_lifetime?.trim() || undefined) &&
-    !!a.may_spawn_children === !!b.may_spawn_children
+    !!a.may_spawn_children === !!b.may_spawn_children &&
+    !!a.bound === !!b.bound &&
+    (a.max_bound_lifetime?.trim() || undefined) === (b.max_bound_lifetime?.trim() || undefined)
   );
 }
 
@@ -77,6 +85,7 @@ export function spawnRightsText(sp: SpawnPolicy | null | undefined): string {
   if (sp.max_per_day) parts.push(`${sp.max_per_day} a day`);
   parts.push(`lifetime ${sp.max_lifetime?.trim() || SPAWN_DEFAULT_LIFETIME}`);
   if (sp.may_spawn_children) parts.push("children may spawn");
+  if (sp.bound) parts.push(`bound agents allowed (cap ${sp.max_bound_lifetime?.trim() || SPAWN_DEFAULT_BOUND_LIFETIME})`);
   return parts.join(" · ");
 }
 

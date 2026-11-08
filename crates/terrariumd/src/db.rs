@@ -3268,7 +3268,7 @@ mod tests {
 
     fn migration_count() -> usize {
         MIGRATIONS.len()
-            + NamedMigrations::iter()
+            + <NamedMigrations as rust_embed::RustEmbed>::iter()
                 .filter(|name| name.ends_with(".sql"))
                 .count()
     }
@@ -3304,6 +3304,36 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn agent_rpc_journal_upgrades_legacy_once_and_preserves_answers() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
+        assert!(!conn.table_exists(None, "agent_rpc_answers").unwrap());
+        migrate(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO agent_rpc_answers VALUES ('agent', 'request', 'fingerprint', 'answer')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+        let answer: String = conn
+            .query_row("SELECT answer FROM agent_rpc_answers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(answer, "answer");
+        let version: usize = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 97);
+        let recorded: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = 'ter-260-agent-rpc-answers.sql')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(recorded);
     }
 
     #[test]

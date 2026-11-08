@@ -30,6 +30,7 @@ mod questions;
 mod records;
 mod repo_trees;
 mod repos;
+mod reservations;
 mod rules;
 mod rules_tools;
 mod schedules;
@@ -93,6 +94,7 @@ pub const NEXT_CURSOR: &str = "x-next-cursor";
 
 /// Shared daemon state.
 pub struct AppState {
+    pub agent_calls: crate::agent_rpc::CallGate,
     pub started: Instant,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub db: Db,
@@ -281,6 +283,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .route("/harnesses/{name}/pin", post(system::harness_pin))
         .route("/harnesses/{name}/unpin", post(system::harness_unpin))
         .merge(hosts::routes())
+        .merge(reservations::routes())
         .merge(targets::routes())
         .merge(tools::routes())
         .route("/reload", post(system::reload))
@@ -915,6 +918,7 @@ mod tests {
         crate::db::migrate(&mut conn).unwrap();
         let hub = crate::events::EventHub::default();
         Arc::new(AppState {
+            agent_calls: Default::default(),
             started: Instant::now(),
             started_at: chrono::Utc::now(),
             db: Db::new(conn, hub),

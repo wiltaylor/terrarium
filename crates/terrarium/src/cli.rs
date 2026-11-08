@@ -42,6 +42,16 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Import a GitHub issue using its daemon-verified author
+    Issue {
+        #[command(subcommand)]
+        command: IssueCmd,
+    },
+    /// Reserve host CPU, memory and device IO capacity
+    Reserve {
+        #[command(subcommand)]
+        command: ReserveCmd,
+    },
     /// Daemon commands
     Daemon {
         #[command(subcommand)]
@@ -124,8 +134,9 @@ pub enum Command {
         #[command(subcommand)]
         command: InboxCmd,
     },
-    /// The project board, grouped by column; `board columns` and `board
-    /// column` change the columns
+    /// The project board, grouped by column, excluding Done cards.
+    /// Use `card ls --column done` for completed cards. `board columns`
+    /// and `board column` change the columns.
     Board {
         #[command(subcommand)]
         command: Option<BoardCmd>,
@@ -368,6 +379,16 @@ pub enum Command {
             num_args = 1..
         )]
         argv: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IssueCmd {
+    /// Import an issue from a configured repository (idempotent)
+    Import {
+        number: u64,
+        #[arg(long)]
+        repo: String,
     },
 }
 
@@ -1517,9 +1538,8 @@ pub struct CardNewArgs {
     /// The ETA: a duration such as 45m, 2h30m, or 1d, or an RFC 3339 time
     #[arg(long, value_name = "DURATION|TIME")]
     pub eta: Option<String>,
-    /// The GitHub login of the issue author, for a GitHub card (label
-    /// `github` or a `GitHub #<n>:` title). An author off the project's
-    /// `github_authors` list holds the card for the operator
+    /// Legacy author assertion, ignored by the gate. Use the daemon's GitHub
+    /// issue import endpoint for a verified author
     #[arg(long, value_name = "LOGIN")]
     pub github_author: Option<String>,
     /// Link the new card to this Inbox thread, which tracks it (you must
@@ -2436,7 +2456,73 @@ pub struct WaitOpts {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ReserveCmd {
+    /// Grant a reservation, or queue it FIFO when capacity is occupied
+    New {
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        target: String,
+        /// Agent holder (default: the target)
+        #[arg(long)]
+        agent: Option<String>,
+        /// CPU cores, for example 2 or 0.5
+        #[arg(long)]
+        cpu: Option<String>,
+        /// Bytes or a size such as 4G
+        #[arg(long)]
+        memory: Option<String>,
+        /// JSON device map: {"8:0":{"read_bps":1048576}}
+        #[arg(long)]
+        io: Option<String>,
+        #[arg(long)]
+        until: String,
+        #[arg(long)]
+        exclusive: bool,
+        #[arg(long, short = 'm', default_value = "")]
+        reason: String,
+        #[arg(long)]
+        queue: bool,
+        #[arg(long, requires = "queue")]
+        queue_timeout: Option<String>,
+        /// GPU claims JSON: [{"uuid":"GPU-...","exclusive":true}] or vram_bytes for shared
+        #[arg(long)]
+        gpus: Option<String>,
+    },
+    /// Extend an active reservation
+    Extend {
+        id: String,
+        #[arg(long)]
+        until: String,
+    },
+    /// End a reservation and its holder's sessions on that host
+    Retract { id: String },
+    /// Cancel a queued reservation
+    Cancel { id: String },
+    /// List a host's reservations
+    Ls {
+        #[arg(long)]
+        host: String,
+    },
+    /// Read capacity, or configure its reservable percentage (sysadmin)
+    Capacity {
+        host: String,
+        #[arg(long)]
+        percentage: Option<u8>,
+        /// Device IO capacities as a JSON device map
+        #[arg(long, requires = "percentage")]
+        io: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum WaitCmd {
+    /// Mail when a queued reservation starts, or ends without starting
+    Reservation {
+        id: String,
+        #[command(flatten)]
+        opts: WaitOpts,
+    },
     /// Wait until another agent is done (idle, no open waits, no mail
     /// waiting for it), or until it is idle, blocked, or changes status.
     /// Also ends when it goes to error or stopped, or is deleted
@@ -2602,6 +2688,9 @@ pub enum ThreadCmd {
         /// (repeat for more)
         #[arg(long = "card", value_name = "PROJECT:CARD")]
         cards: Vec<String>,
+        /// Wait for this monitor to be green too
+        #[arg(long, value_name = "PROJECT:MONITOR")]
+        monitor: Option<String>,
     },
     /// List the threads: the open ones (an agent: its own)
     Ls {
@@ -4127,6 +4216,9 @@ pub struct AdminTargetNewArgs {
     /// credential
     #[arg(long)]
     pub credential: Option<String>,
+    /// `ssh`: rsync the agent workspace before and after commands
+    #[arg(long)]
+    pub sync_workspace: bool,
     /// `vnc`, `rdp`: the user name
     #[arg(long)]
     pub username: Option<String>,
@@ -4635,6 +4727,18 @@ pub fn hide_for_mode(cmd: clap::Command, agent_mode: bool) -> clap::Command {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn board_help_points_to_completed_cards() {
+        let mut cli = Cli::command();
+        let help = cli
+            .find_subcommand_mut("board")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("excluding Done cards"));
+        assert!(help.contains("card ls --column done"));
+    }
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))

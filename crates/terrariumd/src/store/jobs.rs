@@ -652,6 +652,27 @@ const MAX_ALIASES: usize = 32;
 
 /// The aliases of each host agent, by host-agent ID, sorted.
 pub fn host_aliases(conn: &Connection) -> ApiResult<HashMap<String, Vec<String>>> {
+    let mut clashes = conn.prepare(
+        "SELECT DISTINCT h.name, other.name, COALESCE(k.host_key, a.alias)
+         FROM job_host_aliases a JOIN hosts h ON h.id = a.host_id
+         LEFT JOIN job_host_keys k ON k.hostname = a.alias
+         JOIN job_host_aliases b ON b.host_id > a.host_id
+         JOIN hosts other ON other.id = b.host_id
+         LEFT JOIN job_host_keys kb ON kb.hostname = b.alias
+         WHERE COALESCE(k.host_key, a.alias) = COALESCE(kb.host_key, b.alias)
+            OR a.alias = COALESCE(kb.host_key, b.alias)
+            OR b.alias = COALESCE(k.host_key, a.alias)",
+    )?;
+    for clash in clashes.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })? {
+        let (host, other, key) = clash?;
+        tracing::warn!(%host, %other, %key, "stored job-host alias pin clash");
+    }
     let mut st = conn.prepare("SELECT host_id, alias FROM job_host_aliases ORDER BY alias")?;
     let rows = st
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
@@ -697,7 +718,10 @@ pub fn set_host_aliases(
         if key.is_empty() {
             return Err(ApiError::invalid(format!("bad alias `{a}`")));
         }
-        if agents.iter().any(|h| h.name == key || h.id == key) {
+        if agents
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case(&key) || h.id.eq_ignore_ascii_case(&key))
+        {
             return Err(ApiError::invalid(format!(
                 "alias `{key}` is the name of a host agent"
             )));
@@ -718,6 +742,15 @@ pub fn set_host_aliases(
                 "alias `{key}` belongs to host agent `{name}`"
             )));
         }
+        let pinned: String = t
+            .query_row(
+                "SELECT host_key FROM job_host_keys WHERE hostname = ?1",
+                [&key],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| key.clone());
+        check_alias_pin(t, &agent.id, &pinned)?;
         keys.push(key);
     }
     keys.sort();
@@ -752,18 +785,23 @@ pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<V
         .filter_map(|t| t.def.address)
         .collect();
     let mut st = conn.prepare(
-        "SELECT host FROM job_hosts UNION SELECT host FROM jobs WHERE host IS NOT NULL
-         UNION SELECT alias FROM job_host_aliases",
+        "SELECT host FROM job_hosts WHERE host NOT IN (SELECT name FROM targets)
+         UNION SELECT host FROM jobs
+         WHERE host IS NOT NULL AND state IN ('queued', 'running')
+         AND host NOT IN (SELECT name FROM targets)
+         UNION SELECT alias FROM job_host_aliases a
+         WHERE EXISTS (SELECT 1 FROM hosts h WHERE h.id = a.host_id)",
     )?;
+    let agents = hosts::list(conn)?;
     keys.extend(
         st.query_map([], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?,
     );
     keys.extend(extra);
-    let agents = hosts::list(conn)?;
     let mut names = Vec::new();
     for key in keys {
-        if agents.iter().any(|h| h.name == key || h.id == key) {
+        if agents.iter().any(|h| h.name == key || h.id == key) || key.parse::<ulid::Ulid>().is_ok()
+        {
             continue;
         }
         let hostname = address_key(&key);
@@ -771,7 +809,7 @@ pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<V
             continue;
         }
         let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1 AND host_key != hostname)",
             [&hostname],
             |r| r.get(0),
         )?;
@@ -784,10 +822,59 @@ pub fn unresolved_hosts(conn: &Connection, extra: Option<String>) -> ApiResult<V
     Ok(names)
 }
 
-/// First writer wins, including a failed resolution pinned to the hostname.
+/// The first successful resolution wins. Failed lookups can be retried.
 pub fn pin_hosts(t: &mut Tx<'_>, keys: Vec<(String, String)>) -> ApiResult<()> {
     for (hostname, key) in keys {
-        t.execute("INSERT INTO job_host_keys (hostname, host_key) VALUES (?1, ?2) ON CONFLICT(hostname) DO NOTHING", params![hostname, key])?;
+        let exists: bool = t.query_row(
+            "SELECT EXISTS(SELECT 1 FROM job_host_keys WHERE hostname = ?1 AND host_key != hostname)",
+            [&hostname],
+            |r| r.get(0),
+        )?;
+        if exists {
+            continue;
+        }
+        let owner: Option<String> = t
+            .query_row(
+                "SELECT host_id FROM job_host_aliases WHERE alias = ?1",
+                [&hostname],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(owner) = owner
+            && let Err(error) = check_alias_pin(t, &owner, &key)
+        {
+            if error.code != crate::error::Code::Conflict {
+                return Err(error);
+            }
+            let host: String =
+                t.query_row("SELECT name FROM hosts WHERE id = ?1", [&owner], |r| {
+                    r.get(0)
+                })?;
+            tracing::warn!(%host, %hostname, %key, clash = %error.message, "skipping clashing job-host pin");
+            continue;
+        }
+        t.execute("INSERT INTO job_host_keys (hostname, host_key) VALUES (?1, ?2) ON CONFLICT(hostname) DO UPDATE SET host_key = excluded.host_key WHERE job_host_keys.host_key = job_host_keys.hostname", params![hostname, key])?;
+    }
+    Ok(())
+}
+
+/// An effective address key must not identify two host agents.
+fn check_alias_pin(conn: &Connection, owner: &str, key: &str) -> ApiResult<()> {
+    let clash: Option<String> = conn
+        .query_row(
+            "SELECT h.name FROM job_host_aliases a
+         JOIN hosts h ON h.id = a.host_id
+         LEFT JOIN job_host_keys k ON k.hostname = a.alias
+         WHERE a.host_id != ?1 AND (a.alias = ?2 OR COALESCE(k.host_key, a.alias) = ?2)
+         LIMIT 1",
+            params![owner, key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(name) = clash {
+        return Err(ApiError::conflict(format!(
+            "pinned key `{key}` belongs to host agent `{name}`"
+        )));
     }
     Ok(())
 }
@@ -1255,7 +1342,7 @@ pub fn set_planned(t: &mut Tx<'_>, job: &Job, secs: i64, by: &str) -> ApiResult<
     Ok(job)
 }
 
-/// Clear the ETA of the cards of a queued job that has a planned duration.
+/// Clear card ETAs when a planned job is queued or cancelled.
 fn queued_eta(t: &mut Tx<'_>, job: &Job) -> ApiResult<()> {
     if job.planned_secs.is_none() {
         return Ok(());
@@ -1611,6 +1698,7 @@ pub fn cancel(t: &mut Tx<'_>, id: &str) -> ApiResult<Job> {
         params![id, now()],
     )?;
     let job = get(t, id)?;
+    queued_eta(t, &job)?;
     t.audit(
         "job.cancel",
         id,
@@ -2134,11 +2222,165 @@ mod tests {
             assert_eq!(canonical_key(&conn, key).unwrap(), want, "{key}");
         }
         let unresolved = unresolved_hosts(&conn, None).unwrap();
-        assert!(
-            unresolved.contains(&"gone.lan".to_owned()),
-            "{unresolved:?}"
-        );
+        assert!(!unresolved.contains(&"gone.lan".to_owned()));
         assert!(!unresolved.contains(&"helios.lan".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn host_alias_collisions_are_rejected_in_both_orders() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        let db = crate::db::Db::new(conn, crate::events::EventHub::default());
+        db.write("operator", |t| {
+            hosts::create(t, "first", false)?;
+            hosts::create(t, "second", false)?;
+            set_host_aliases(t, "first", &["one-lan".into(), "10.0.0.1".into()])?;
+            set_host_aliases(t, "second", &["two.lan".into()])?;
+            pin_hosts(t, vec![("one-lan".into(), "10.0.0.1".into())])
+        })
+        .await
+        .unwrap();
+        db.write("system", |t| {
+            pin_hosts(
+                t,
+                vec![
+                    ("two.lan".into(), "10.0.0.1".into()),
+                    ("unrelated.lan".into(), "10.0.0.9".into()),
+                ],
+            )
+        })
+        .await
+        .unwrap();
+        db.read_now(|c| {
+            let unrelated = canonical_key(c, "unrelated.lan")?;
+            assert_eq!(unrelated, "10.0.0.9");
+            let q = queues(&[("p", 1, &unrelated)]);
+            let picked = pick(
+                vec![job("J1", "p", JobKind::Validate, "r", "b")],
+                &[],
+                &q,
+                &HashMap::new(),
+            );
+            assert_eq!(ids(&picked), ["J1"]);
+            assert_eq!(picked[0].1, "10.0.0.9");
+            Ok(())
+        })
+        .unwrap();
+        db.write("operator", |t| {
+            pin_hosts(t, vec![("free.lan".into(), "10.0.0.1".into())])
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            db.write("operator", |t| {
+                set_host_aliases(t, "second", &["free.lan".into()])
+            })
+            .await
+            .unwrap_err()
+            .code
+            .status(),
+            axum::http::StatusCode::CONFLICT
+        );
+        assert_eq!(
+            db.write("operator", |t| {
+                set_host_aliases(t, "second", &["FIRST".into()])
+            })
+            .await
+            .unwrap_err()
+            .code
+            .status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            db.write("operator", |t| { hosts::create(t, "one-lan", false) })
+                .await
+                .unwrap_err()
+                .code
+                .status(),
+            axum::http::StatusCode::CONFLICT
+        );
+        // Failed writes leave the previous aliases and pins untouched.
+        db.read_now(|c| {
+            assert_eq!(canonical_key(c, "two.lan")?, hosts::get(c, "second")?.id);
+            assert_eq!(canonical_key(c, "free.lan")?, hosts::get(c, "first")?.id);
+            Ok(())
+        })
+        .unwrap();
+        // A repeated resolution must preserve the first pin, even if the new key clashes.
+        db.write("operator", |t| {
+            pin_hosts(t, vec![("one-lan".into(), "two.lan".into())])
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn unresolved_hosts_ignores_history_and_fallback_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        for (id, state, host) in [
+            ("old", "passed", "old.invalid"),
+            ("running", "running", "active.invalid"),
+            ("queued", "queued", "queued.invalid"),
+            ("removed", "running", "01M6Y0BHFHXXBDVXWN7BQP96AN"),
+            ("fallback", "running", "local-box"),
+        ] {
+            conn.execute(
+                "INSERT INTO jobs (id, project, card, kind, repo, branch, state, host,
+                                   created_by, created_at)
+                 VALUES (?1, 'p', 'C', 'validate', 'app', 'b', ?2, ?3, 't', 't')",
+                params![id, state, host],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO targets (name, def, source, state, snapshots, created_at, updated_at)
+             VALUES ('local-box', '{\"kind\":\"docker\",\"image\":\"x\"}', 'api', 'unknown', '[]', '', '')",
+            [],
+        ).unwrap();
+        assert_eq!(
+            unresolved_hosts(&conn, None).unwrap(),
+            ["active.invalid", "queued.invalid"]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_job_host_and_alias_pins_can_recover() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        db.write("operator", |t| {
+            hosts::create(t, "agent", false)?;
+            set_host_aliases(t, "agent", &["alias.invalid".into()])?;
+            t.execute("INSERT INTO job_hosts (host, heavy_jobs, updated_by, updated_at) VALUES ('job.invalid', 1, 'operator', '')", [])?;
+            pin_hosts(t, vec![
+                ("alias.invalid".into(), "alias.invalid".into()),
+                ("job.invalid".into(), "job.invalid".into()),
+            ])?;
+            assert_eq!(unresolved_hosts(t, None)?, ["alias.invalid", "job.invalid"]);
+            pin_hosts(t, vec![
+                ("alias.invalid".into(), "192.0.2.1".into()),
+                ("job.invalid".into(), "192.0.2.2".into()),
+            ])?;
+            assert!(unresolved_hosts(t, None)?.is_empty());
+            assert_eq!(canonical_key(t, "job.invalid")?, "192.0.2.2");
+            assert_eq!(canonical_key(t, "192.0.2.1")?, hosts::get(t, "agent")?.id);
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[test]
+    fn target_address_is_resolved_even_when_it_is_a_target_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("state.db")).unwrap();
+        conn.execute(
+            "INSERT INTO targets (name, def, source, state, snapshots, created_at, updated_at)
+             VALUES ('box.invalid', '{\"kind\":\"ssh\",\"address\":\"box.invalid\"}', 'api', 'unknown', '[]', '', '')",
+            [],
+        ).unwrap();
+        assert_eq!(unresolved_hosts(&conn, None).unwrap(), ["box.invalid"]);
     }
 
     #[test]

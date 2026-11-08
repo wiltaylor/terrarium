@@ -221,6 +221,9 @@ struct State {
     /// The last PTY output or hook.
     last_activity: Instant,
     stop_requested: bool,
+    /// A reversible idle-stop reservation. A lost control reply must not
+    /// disable delivery forever. The supervisor also gates new work.
+    idle_stop_until: Option<Instant>,
     /// A SIGKILL follows the SIGHUP of `kill` after `kill_grace`.
     kill_armed: bool,
     exited: bool,
@@ -363,6 +366,7 @@ impl Runner {
                 last_output: now,
                 last_activity: now,
                 stop_requested: false,
+                idle_stop_until: None,
                 kill_armed: false,
                 exited: false,
                 queue: VecDeque::new(),
@@ -544,7 +548,7 @@ impl Runner {
         let id = self.inner.next_delivery.fetch_add(1, Ordering::Relaxed);
         let delivery = Delivery { id, rx };
         let mut state = lock(&self.inner.state);
-        if state.exited {
+        if state.exited || state.stop_requested {
             let _ = tx.send(Err(DeliveryError::Exited));
             return delivery;
         }
@@ -626,6 +630,37 @@ impl Runner {
         });
         self.inner.wake.notify_one();
         Ok(true)
+    }
+
+    /// Atomically claim an idle stop against queued and running turns.
+    /// Idempotent while held. The caller must finish the stop with exit
+    /// keys or `kill`, or release it. A lost reply expires after five
+    /// seconds. New turns may queue, but cannot dispatch while held.
+    pub fn claim_idle_stop(&self) -> bool {
+        let mut state = lock(&self.inner.state);
+        if state
+            .idle_stop_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            return true;
+        }
+        if state.exited
+            || state.stop_requested
+            || !state.status.is_resting()
+            || state.turn_open
+            || state.in_flight.is_some()
+            || !state.queue.is_empty()
+        {
+            return false;
+        }
+        state.idle_stop_until = Some(Instant::now() + Duration::from_secs(5));
+        true
+    }
+
+    /// Release a claim, including one whose reply was lost.
+    pub fn release_idle_stop(&self) {
+        lock(&self.inner.state).idle_stop_until = None;
+        self.inner.wake.notify_one();
     }
 
     /// Stop the harness on purpose. The status becomes `stopped` when the
@@ -1216,6 +1251,9 @@ impl Inner {
 
             if state.in_flight.is_none()
                 && !state.stop_requested
+                && state
+                    .idle_stop_until
+                    .is_none_or(|until| Instant::now() >= until)
                 && state.status == AgentStatus::Idle
                 && ready
                 && let Some(mut turn) = state.queue.pop_front()

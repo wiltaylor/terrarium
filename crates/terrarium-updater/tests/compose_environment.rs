@@ -20,7 +20,7 @@ fn scratch_docker() -> Docker {
 async fn missing_mounts_stop_resolution() {
     let docker = scratch_docker();
     let old = docker.target().await.unwrap();
-    let error = docker.prepare(&old).await.unwrap_err();
+    let error = docker.prepare(&old, &old.image).await.unwrap_err();
     assert!(error.contains("mounts are missing"), "{error}");
     assert!(docker.target().await.is_ok(), "original container remains");
 }
@@ -30,7 +30,7 @@ async fn missing_mounts_stop_resolution() {
 async fn interpolation_failure_is_redacted_and_leaves_original_container() {
     let docker = scratch_docker();
     let old = docker.target().await.unwrap();
-    let error = docker.prepare(&old).await.unwrap_err();
+    let error = docker.prepare(&old, &old.image).await.unwrap_err();
     assert!(error.contains("resolution failed"), "{error}");
     assert!(!error.contains("diagnostic-sentinel"));
     assert!(docker.target().await.is_ok(), "original container remains");
@@ -41,7 +41,7 @@ async fn interpolation_failure_is_redacted_and_leaves_original_container() {
 async fn update_reads_edited_dotenv_and_recovery_keeps_original_environment() {
     let docker = scratch_docker();
     let old = docker.target().await.unwrap();
-    let prepared = docker.prepare(&old).await.unwrap();
+    let prepared = docker.prepare(&old, &old.image).await.unwrap();
     assert!(
         prepared.spec["compose_env"]
             .as_array()

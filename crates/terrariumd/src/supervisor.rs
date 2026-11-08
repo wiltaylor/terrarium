@@ -258,6 +258,11 @@ pub trait Supervisor: Send + Sync + 'static {
         resume: Option<HarnessSessionId>,
     ) -> BoxFuture<'_, Result<(), SupervisorError>>;
     fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>>;
+    /// Stop only if no turn is running or being handed to the harness.
+    /// Implementations must claim the stop atomically with turn delivery.
+    fn stop_idle(&self, _agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        Box::pin(async { Err(SupervisorError::Unsupported("atomic idle stop".into())) })
+    }
     /// [`Supervisor::stop`] for a caller that is not the operator: `by`
     /// goes into `runner-exit.json` (`stopped_by`). The default ignores
     /// `by`.
@@ -523,6 +528,10 @@ pub trait Supervisor: Send + Sync + 'static {
             .join(&agent.project)
             .join(&agent.name)
     }
+    /// Hold new agent calls on connected runners before draining writes.
+    fn hold_agent_calls(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
     /// The daemon shuts down. Keep the stored status. A harness in a
     /// runner process keeps running, and the next daemon start connects to
     /// it again. An in-process harness ends, and the next daemon start
@@ -609,6 +618,7 @@ mod fake {
         state: Option<std::sync::Weak<crate::api::AppState>>,
         /// `stop` returns only after the store shows `stopped`.
         settle_stops: bool,
+        stop_gates: HashMap<AgentId, (oneshot::Sender<()>, oneshot::Receiver<()>)>,
         /// Harnesses that the fake cannot compact, on top of the ones with
         /// no `compact_command`.
         no_compact: HashSet<HarnessId>,
@@ -630,6 +640,15 @@ mod fake {
     }
 
     impl InMemorySupervisor {
+        /// Hold the next stop of `agent` until released. The receiver fires
+        /// after the harness is stopped, before stop returns to its caller.
+        pub fn gate_stop(&self, agent: AgentId) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered, entering) = oneshot::channel();
+            let (release, gate) = oneshot::channel();
+            self.lock().stop_gates.insert(agent, (entered, gate));
+            (entering, release)
+        }
+
         pub fn new(delay: Duration) -> Self {
             let (tx, _) = broadcast::channel(1024);
             Self {
@@ -804,12 +823,17 @@ mod fake {
             prompt: String,
             gate: Option<tokio::sync::oneshot::Receiver<()>>,
         ) -> Result<(), SupervisorError> {
-            let Some((_, epoch)) = self.current(agent).filter(|(s, _)| s.is_live()) else {
-                return Err(SupervisorError::NotRunning(agent));
-            };
-            if let Some(a) = self.lock().agents.get_mut(&agent) {
+            let epoch = {
+                let mut inner = self.lock();
+                let a = inner
+                    .agents
+                    .get_mut(&agent)
+                    .filter(|a| a.status.is_live())
+                    .ok_or(SupervisorError::NotRunning(agent))?;
                 a.prompts.push(prompt.clone());
-            }
+                a.status = AgentStatus::Working;
+                a.epoch
+            };
             self.emit(
                 agent,
                 SupervisorEventKind::Harness(Event::TurnStart {
@@ -1181,6 +1205,36 @@ mod fake {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 }
+                let gate = self.lock().stop_gates.remove(&agent);
+                if let Some((entered, gate)) = gate {
+                    let _ = entered.send(());
+                    let _ = gate.await;
+                }
+                Ok(())
+            })
+        }
+
+        fn stop_idle(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            Box::pin(async move {
+                {
+                    let mut inner = self.lock();
+                    let a = inner
+                        .agents
+                        .get_mut(&agent)
+                        .ok_or(SupervisorError::NotRunning(agent))?;
+                    if !a.status.is_resting() || !a.early.is_empty() || a.compacting.is_some() {
+                        return Err(SupervisorError::NotReady(
+                            "the agent has work; no idle stop".into(),
+                        ));
+                    }
+                    a.epoch += 1;
+                    a.status = AgentStatus::Stopped;
+                }
+                self.emit(
+                    agent,
+                    SupervisorEventKind::Harness(Event::Exit { code: Some(0) }),
+                );
+                self.set_status(agent, AgentStatus::Stopped, Some("stopped"));
                 Ok(())
             })
         }

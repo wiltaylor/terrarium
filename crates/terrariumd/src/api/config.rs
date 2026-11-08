@@ -114,6 +114,17 @@ async fn refresh_export(state: &Shared, r: &ConfigRepo, force: bool) -> ApiResul
     if r.state().export_pending && !force {
         return blocking(r.clone(), move |r| {
             r.ensure()?;
+            let held: Vec<&str> = files
+                .iter()
+                .filter(|f| r.dir.join(&f.path).exists())
+                .map(|f| f.path.as_str())
+                .collect();
+            if !held.is_empty() {
+                tracing::warn!(
+                    paths = ?held,
+                    "pulled export pending: these files await a successful pull --apply or force_export"
+                );
+            }
             r.write_export_new(&files)
         })
         .await;
@@ -368,6 +379,20 @@ async fn export_plans(
         // --approve-grants` plans it again.
         let pending = failed || holds_grants(&secrets.report);
         blocking(r.clone(), move |r| r.set_export_pending(pending)).await?;
+        if !pending {
+            // Refresh from the resulting store only after all imports succeed.
+            let refresh = async {
+                refresh_export(state, r, false).await?;
+                blocking(r.clone(), |r| r.commit("Refresh config export after apply")).await?;
+                Ok::<(), ApiError>(())
+            }
+            .await;
+            if let Err(error) = refresh {
+                // Applying already succeeded. Do not hide its result if the
+                // follow-up export or commit fails.
+                tracing::warn!(error = %error.message, "config apply succeeded but export refresh failed");
+            }
+        }
         return Ok((rows, Some(secrets)));
     }
     let mut out = Vec::new();

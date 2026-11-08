@@ -818,6 +818,10 @@ pub async fn close(
                 return spawns::get(t, &key);
             }
             let sp = spawns::get(t, &key)?;
+            let thread = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:"));
+            if let Some(thread) = thread {
+                crate::store::threads::agent_ended(t, thread, &sp.id, outcome)?;
+            }
             let owner_live = sp.owner != OPERATOR && agents::display_name(t, &sp.owner)?.is_some();
             let mut data = json!({
                 "outcome": outcome, "spawn": sp.id, "name": sp.name,
@@ -830,7 +834,7 @@ pub async fn close(
                 Some(w) => waits::finish(t, w, WaitState::Resolved, data, true, 0)?.is_some(),
                 None => false,
             };
-            if notify && !waited && outcome != spawns::OWNER_GONE {
+            if notify && !waited && outcome != spawns::OWNER_GONE && thread.is_none() {
                 let to = if sp.owner == OPERATOR {
                     Some(mail::Address::Operator)
                 } else if owner_live {
@@ -1070,7 +1074,12 @@ pub struct PromptInfo {
 /// agents"): who the owner is, and how to finish. Only stable facts.
 pub fn prompt_section(info: &PromptInfo) -> String {
     match &info.bound {
-        Some(b) => bound_prompt_section(&info.owner, b),
+        Some(b) => format!(
+            "{}\n- Your lifetime cap is {} (`spawn.max_bound_lifetime`, default and maximum 30d). \
+             The daemon stops you at the cap even if your bound object is not finished.\n",
+            bound_prompt_section(&info.owner, b),
+            info.lifetime
+        ),
         None => plain_prompt_section(&info.owner, &info.lifetime),
     }
 }
@@ -1207,6 +1216,15 @@ mod tests {
         assert!(s.contains("bound to card TER-74"), "{s}");
         assert!(s.contains("Do not run `terrarium agent done`"), "{s}");
         assert!(!s.contains("lifetime is"), "{s}");
+        assert!(
+            s.contains("lifetime cap is 2h (`spawn.max_bound_lifetime`"),
+            "{s}"
+        );
+        info.bound = Some("thread:T1".into());
+        let s = prompt_section(&info);
+        assert!(s.contains("Inbox thread T1"), "{s}");
+        assert!(s.contains("spawn.max_bound_lifetime"), "{s}");
+        assert!(!s.contains("send the card"), "{s}");
     }
 
     #[test]

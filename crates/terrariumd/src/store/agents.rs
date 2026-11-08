@@ -1275,6 +1275,7 @@ pub fn set_subscription(t: &mut Tx<'_>, id: &str, subscription: &str) -> ApiResu
 
 pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     let a = get(t, id)?;
+    super::reservations::guard_identity(t, "agent", id)?;
     crate::store::waits::on_agent_deleted(t, id)?;
     // The monitors and schedules that run as it: disabled, with a notice
     // to the project leads and the operator (`crate::owner`).
