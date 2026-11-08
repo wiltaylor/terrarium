@@ -734,6 +734,14 @@ async fn a_missed_event_unparks_on_the_timer() {
     .await
     .unwrap();
     terrariumd::thread_agent::retry_missed(&s).await;
+    let restart = lab
+        .prompt(
+            &eph,
+            &format!("[Thread:{tid}] Before acting after this restart"),
+        )
+        .await;
+    assert!(restart.contains("linked cards"), "{restart}");
+    assert!(restart.contains("terrarium card show"), "{restart}");
     let turn = lab
         .prompt(&eph, &format!("[Thread:{tid}] The thread changed"))
         .await;
@@ -779,11 +787,26 @@ async fn an_ended_agent_marks_only_its_open_thread_once() {
             .td
             .get(&format!("/api/mail?to={}&from=system", lab.p_lead))
             .await
-            .ok();
+            .ok()
+            .clone();
         assert!(
             mail.to_string()
                 .contains(&format!("Thread {tid}: agent ended")),
             "{mail}"
+        );
+        assert_eq!(
+            mail.as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["subject"] == format!("Thread {tid}: agent ended"))
+                .count(),
+            1
+        );
+        let operator = lab.td.get("/api/mail?to=operator&from=system").await;
+        assert!(
+            operator.ok().as_array().unwrap().is_empty(),
+            "{}",
+            operator.body
         );
     }
 }

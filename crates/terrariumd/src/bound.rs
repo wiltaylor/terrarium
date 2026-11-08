@@ -340,11 +340,6 @@ fn end_park(t: &mut crate::db::Tx<'_>, sp: &spawns::Spawn, cause: &str) -> ApiRe
     if !spawns::clear_parked(t, &sp.id)? {
         return Ok(false);
     }
-    if let Some(thread) = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:")) {
-        let turn = crate::thread_agent::restart_turn(thread);
-        crate::store::transcripts::record_turn(t, &sp.id, &turn)?;
-        crate::store::agents::queue_turn(t, &sp.id, &turn)?;
-    }
     t.emit(
         EventDraft::new(
             "agent.unparked",
@@ -399,6 +394,14 @@ pub fn unpark_tx(
     {
         refuse(t, &sp, &other, cause)?;
         return Ok((Unparked::Refused, sp.owner));
+    }
+    if sp.parked_at.is_some()
+        && sp.unpark_queued_at.is_none()
+        && let Some(thread) = sp.bound.as_deref().and_then(|b| b.strip_prefix("thread:"))
+    {
+        let restart = crate::thread_agent::restart_turn(thread);
+        crate::store::transcripts::record_turn(t, id, &restart)?;
+        crate::store::agents::queue_turn(t, id, &restart)?;
     }
     if let Some(turn) = turn {
         crate::store::transcripts::record_turn(t, id, turn)?;
