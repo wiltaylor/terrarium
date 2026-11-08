@@ -1422,7 +1422,7 @@ async fn set_roles(
 /// One queued turn in the answer of `GET /api/agents/{id}/queued`.
 #[derive(Debug, Serialize)]
 struct QueuedView {
-    id: i64,
+    id: serde_json::Value,
     /// Where the turn waits: `store` (the `queued_turns` table, for an
     /// agent that does not run). TER-66 adds the live queues.
     source: &'static str,
@@ -1478,7 +1478,7 @@ async fn queued(
         .map(|t| {
             let text = redactor.redact_string_as(t.text, &view).0;
             QueuedView {
-                id: t.id,
+                id: json!(t.id),
                 source: QUEUE_STORE,
                 body: untagged(&text).to_owned(),
                 text,
@@ -1487,16 +1487,19 @@ async fn queued(
         })
         .collect();
     let live = state.supervisor.list_pending(agent_id(&a)).await.map_err(supervisor_error)?;
+    let mut live_items = Vec::new();
     for turn in live {
         let text = redactor.redact_string_as(turn.text, &view).0;
-        items.push(QueuedView {
-            id: i64::try_from(turn.id).map_err(|_| ApiError::internal("delivery ID exceeds API range"))?,
+        live_items.push(QueuedView {
+            id: json!(turn.id),
             source: turn.source,
             body: untagged(&text).to_owned(),
             text,
             created_at: String::new(),
         });
     }
+    live_items.append(&mut items);
+    let items = live_items;
     Ok(Json(json!({"items": items})))
 }
 
@@ -1508,7 +1511,7 @@ async fn queued(
 async fn remove_queued(
     State(state): State<Shared>,
     actor: Actor,
-    Path((id, turn)): Path<(String, i64)>,
+    Path((id, turn)): Path<(String, String)>,
     ApiQuery(q): ApiQuery<QueuedQuery>,
 ) -> ApiResult<StatusCode> {
     let a = load(&state, &actor, id).await?;
@@ -1523,8 +1526,7 @@ async fn remove_queued(
     let lock = state.lifecycle.turn_lock(agent_id(&a));
     let _held = lock.lock().await;
     if let Some(source @ ("runner" | "supervisor")) = q.source.as_deref() {
-        let delivery = u64::try_from(turn).map_err(|_| ApiError::invalid("invalid delivery ID"))?;
-        if !state.supervisor.cancel_pending(agent_id(&a), source, delivery).await.map_err(supervisor_error)? {
+        if !state.supervisor.cancel_pending(agent_id(&a), source, turn.clone()).await.map_err(supervisor_error)? {
             return Err(ApiError::not_found("turn no longer waits for the agent"));
         }
         let (key, project, source) = (a.agent.id.to_string(), a.agent.project.clone(), source.to_owned());
@@ -1533,6 +1535,7 @@ async fn remove_queued(
         }).await?;
         return Ok(StatusCode::NO_CONTENT);
     }
+    let turn: i64 = turn.parse().map_err(|_| ApiError::invalid("invalid store turn ID"))?;
     let (key, project) = (a.agent.id.to_string(), a.agent.project.clone());
     let removed = state
         .db

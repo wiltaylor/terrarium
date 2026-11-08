@@ -4182,7 +4182,7 @@ impl Supervisor for RunnerSupervisor {
         })
     }
 
-    fn cancel_pending(&self, agent: AgentId, source: &str, id: u64) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+    fn cancel_pending(&self, agent: AgentId, source: &str, id: String) -> BoxFuture<'_, Result<bool, SupervisorError>> {
         let source = source.to_owned();
         Box::pin(async move {
             let runner = {
@@ -5391,7 +5391,7 @@ mod tests {
                     .get_mut(&id)
                     .unwrap()
                     .turns
-                    .push("pending hand-over".into());
+                    .push(String::from("pending hand-over").into());
                 sup.deliver_pending(id);
             }
             assert!(lock(&runner.typed).is_empty());

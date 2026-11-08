@@ -152,7 +152,7 @@ export function LiveLine(props: { agent: Agent }) {
 export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => void }) {
   const [items, setItems] = createSignal<QueuedTurn[]>([]);
   const [error, setError] = createSignal<unknown>(null);
-  const [busy, setBusy] = createSignal<number | null>(null);
+  const [busy, setBusy] = createSignal<number | string | null>(null);
   let gen = 0;
   const load = async () => {
     const mine = ++gen;
@@ -163,17 +163,20 @@ export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => voi
       if (mine === gen) setError(e);
     }
   };
-  // `queued` counts turns, mail, and pointers; 0 means no queued turn, so no read.
+  // The store count excludes the in-memory queues of live agents.
   createEffect(
     on([() => props.agent.id, () => props.agent.queued ?? 0, () => props.agent.status], ([, n]) => {
-      if (n > 0) void load();
+      if (n > 0 || !["stopped", "error"].includes(props.agent.status)) void load();
       else {
         gen++;
         setItems([]);
       }
     }),
   );
-  onCleanup(() => gen++);
+  const timer = setInterval(() => {
+    if (!["stopped", "error"].includes(props.agent.status)) void load();
+  }, 2000);
+  onCleanup(() => { clearInterval(timer); gen++; });
   const take = async (turn: QueuedTurn, edit: boolean) => {
     if (busy() !== null) return;
     setBusy(turn.id);

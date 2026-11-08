@@ -78,6 +78,33 @@ fn bodies(items: &[Value]) -> Vec<String> {
         .collect()
 }
 
+#[tokio::test]
+async fn live_queue_remove_keeps_order_and_refuses_a_turn_that_started() {
+    use terrariumd::supervisor::Supervisor;
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let w = td.agent("p", "w", json!({})).await["id"].as_str().unwrap().to_owned();
+    td.agent("p", "lead", json!({"roles": ["project_admin"]})).await;
+    td.post(&format!("/api/agents/{w}/start"), json!({})).await.ok();
+    td.wait_status(&w, "idle").await;
+    td.sup.reset_gate(aid(&w), true);
+    for body in ["first", "second", "third"] {
+        td.post(&format!("/api/agents/{w}/send"), json!({"text": body})).await.ok();
+    }
+    let items = queued(&td, &w).await;
+    assert_eq!(bodies(&items), ["first", "second", "third"]);
+    assert!(items.iter().all(|t| t["source"] == "supervisor"));
+    let path = format!("/api/agents/{w}/queued/{}?source=supervisor", items[1]["id"].as_str().unwrap());
+    td.req(Method::DELETE, &path, None, Some("p/w")).await.err(403, "forbidden");
+    assert_eq!(td.req(Method::DELETE, &path, None, Some("p/lead")).await.status, 204);
+    assert_eq!(bodies(&queued(&td, &w).await), ["first", "third"]);
+    td.sup.reset_gate(aid(&w), false);
+    until("both surviving turns typed", || async { td.sup.prompts(aid(&w)).len() == 2 }).await;
+    let path = format!("/api/agents/{w}/queued/{}?source=supervisor", items[0]["id"].as_str().unwrap());
+    assert_eq!(td.delete(&path).await.status, 404);
+    assert_eq!(td.sup.prompts(aid(&w)), ["[User] first", "[User] third"]);
+}
+
 /// The list is oldest first, with the typed text, the body after the tag,
 /// and the time. A member of the project reads it; another project does
 /// not see the agent.
@@ -125,7 +152,7 @@ async fn a_remove_keeps_the_order_and_needs_a_lead() {
     assert_eq!(r.status, 204, "{}", r.body);
     let r = td.delete(&path).await;
     assert_eq!(r.status, 404, "{}", r.body);
-    td.delete(&format!("{path}?source=runner"))
+    td.delete(&format!("{path}?source=unknown"))
         .await
         .err(422, "invalid");
     let r = td.delete(&format!("/api/agents/{w}/queued/{first}")).await;

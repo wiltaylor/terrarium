@@ -248,27 +248,26 @@ impl SwapApplied {
     }
 }
 
-/// Runs agents. Every method returns quickly; the work happens in the
-/// background and shows up as events.
+/// One untouched turn. The ID is opaque and is never reused on a restart.
 #[derive(Debug, Clone)]
 pub struct PendingTurn {
-    pub id: u64,
+    pub id: String,
     pub text: String,
     pub source: &'static str,
 }
 
 impl From<String> for PendingTurn {
     fn from(text: String) -> Self {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        Self { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), text, source: "supervisor" }
+        Self { id: AgentId::new().to_string(), text, source: "supervisor" }
     }
 }
 
+/// Runs agents. Work happens in the background and shows up as events.
 pub trait Supervisor: Send + Sync + 'static {
     fn list_pending(&self, _agent: AgentId) -> BoxFuture<'_, Result<Vec<PendingTurn>, SupervisorError>> {
         Box::pin(async { Ok(Vec::new()) })
     }
-    fn cancel_pending(&self, _agent: AgentId, _source: &str, _id: u64) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+    fn cancel_pending(&self, _agent: AgentId, _source: &str, _id: String) -> BoxFuture<'_, Result<bool, SupervisorError>> {
         Box::pin(async { Ok(false) })
     }
     /// Start the agent. `resume` is the harness session to continue.
@@ -1120,7 +1119,7 @@ mod fake {
             })
         }
 
-        fn cancel_pending(&self, agent: AgentId, source: &str, id: u64) -> BoxFuture<'_, Result<bool, SupervisorError>> {
+        fn cancel_pending(&self, agent: AgentId, source: &str, id: String) -> BoxFuture<'_, Result<bool, SupervisorError>> {
             let supported = source == "supervisor";
             Box::pin(async move {
                 let mut inner = self.lock();

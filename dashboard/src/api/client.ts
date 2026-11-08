@@ -355,7 +355,7 @@ export interface Api {
     /** `GET /api/agents/{id}/queued` (docs/api.md §6.2, TER-54): the turns that wait in the store for the agent's wake, oldest first. The read right of the agent. */
     queued(id: string): Promise<{ items: QueuedTurn[] }>;
     /** `DELETE /api/agents/{id}/queued/{turn}` (TER-54): drop one queued turn. project_admin, sysadmin, or the operator. `404`: the turn went out already. */
-    removeQueued(id: string, turn: number, source?: QueuedSource): Promise<void>;
+    removeQueued(id: string, turn: number | string, source?: QueuedSource): Promise<void>;
     answer(id: string, body: { request_id: string; answer: unknown } | { text: string }): Promise<{ accepted: boolean }>;
     events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
     sessions(id: string, q?: PageQuery): Promise<Page<Session>>;

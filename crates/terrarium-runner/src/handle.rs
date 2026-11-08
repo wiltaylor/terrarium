@@ -49,7 +49,7 @@ pub trait RunnerHandle: Send + Sync + 'static {
     fn list_pending(&self) -> BoxFuture<'_, Result<Vec<crate::WaitingTurn>>> {
         Box::pin(async { Err(crate::RunnerError::Other("pending queues unsupported".into())) })
     }
-    fn cancel_pending(&self, _id: u64) -> BoxFuture<'_, Result<bool>> {
+    fn cancel_pending(&self, _id: String) -> BoxFuture<'_, Result<bool>> {
         Box::pin(async { Err(crate::RunnerError::Other("pending queues unsupported".into())) })
     }
     /// Claim an idle stop under the same lock as `type_turn`.
@@ -81,8 +81,8 @@ impl RunnerHandle for Runner {
     fn list_pending(&self) -> BoxFuture<'_, Result<Vec<crate::WaitingTurn>>> {
         Box::pin(async move { Ok(Runner::list_pending(self)) })
     }
-    fn cancel_pending(&self, id: u64) -> BoxFuture<'_, Result<bool>> {
-        Box::pin(async move { Ok(Runner::cancel_pending(self, id)) })
+    fn cancel_pending(&self, id: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(Runner::cancel_pending(self, &id)) })
     }
     fn release_idle_stop(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
