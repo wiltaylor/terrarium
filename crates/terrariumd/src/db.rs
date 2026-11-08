@@ -3141,9 +3141,26 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
 
 /// Run every migration newer than the database's `user_version`.
 pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
+    migrate_with(conn, MIGRATIONS)
+}
+
+fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> anyhow::Result<usize> {
     let current: usize = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    // A fresh database has no state to preserve between versions. Commit
+    // its schema once, without changing SQLite's durability settings.
+    if current == 0 {
+        let tx = conn.transaction()?;
+        for (index, sql) in migrations.iter().enumerate() {
+            let version = index + 1;
+            tx.execute_batch(sql)
+                .with_context(|| format!("migration {version} failed"))?;
+            tx.pragma_update(None, "user_version", version)?;
+        }
+        tx.commit()?;
+        return Ok(migrations.len());
+    }
     let mut applied = 0;
-    for (index, sql) in MIGRATIONS.iter().enumerate().skip(current) {
+    for (index, sql) in migrations.iter().enumerate().skip(current) {
         let version = index + 1;
         let tx = conn.transaction()?;
         tx.execute_batch(sql)
@@ -3160,6 +3177,40 @@ pub fn migrate(conn: &mut Connection) -> anyhow::Result<usize> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_migrations_roll_back_together() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let err = migrate_with(
+            &mut conn,
+            &["CREATE TABLE first (id INTEGER);", "invalid SQL"],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("migration 2 failed"));
+        let version: usize = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        assert!(!conn.table_exists(None, "first").unwrap());
+    }
+
+    #[test]
+    fn upgrades_keep_each_successful_migration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        assert!(
+            migrate_with(
+                &mut conn,
+                &["unused", "CREATE TABLE second (id INTEGER);", "invalid SQL"],
+            )
+            .is_err()
+        );
+        let version: usize = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        assert!(conn.table_exists(None, "second").unwrap());
+    }
 
     #[test]
     fn migrations_create_tables_and_are_idempotent() {
