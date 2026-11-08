@@ -72,6 +72,120 @@ fn state(td: &TestDaemon) -> terrariumd::api::Shared {
 }
 
 #[tokio::test]
+async fn status_lines_do_not_block_or_mail_the_lead() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let lead = td
+        .agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let (id, aid) = running(&td, "p", "w", json!({})).await;
+    let end = turn(&td, &id, aid, async || {}).await;
+    for text in [
+        "Next: when you tell me TER-91 is merged, I merge ...",
+        "I am idle now, as you asked. I am waiting for your mail that TER-91 is merged.",
+    ] {
+        assert!(
+            !terrariumd::question_guard::check_text(&state(&td), &id, end, text)
+                .await
+                .unwrap()
+        );
+    }
+    td.wait_status(&id, "idle").await;
+    assert!(td.mail_of(lead["id"].as_str().unwrap()).await.is_empty());
+}
+
+#[tokio::test]
+async fn registered_waits_and_tracked_questions_are_exempt() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    for (index, kind) in ["wait", "thread", "question", "bundle"]
+        .into_iter()
+        .enumerate()
+    {
+        let name = format!("w{index}");
+        let (id, aid) = running(&td, "p", &name, json!({})).await;
+        let end = turn(&td, &id, aid, async || {}).await;
+        if kind == "wait" {
+            td.post_as(
+                &id,
+                &format!("/api/agents/{id}/waits"),
+                json!({"kind": "time", "for": "1h"}),
+            )
+            .await
+            .ok();
+        } else {
+            let thread = td
+                .post(
+                    "/api/threads",
+                    json!({"topic": "Decision", "scope": "p", "agent": format!("p/{name}")}),
+                )
+                .await
+                .ok()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            if kind == "thread" {
+                let st = state(&td);
+                st.db
+                    .write("system", move |t| {
+                        t.execute(
+                            "UPDATE threads SET status = 'waiting_operator' WHERE id = ?1",
+                            [thread],
+                        )?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            } else {
+                let mut body = json!({"kind": kind, "text": "Choose a branch", "thread": thread});
+                if kind == "bundle" {
+                    body["items"] = json!([
+                        {"text": "Which branch?", "options": ["next", "main"]},
+                        {"text": "Which target?", "options": ["build", "test"]}
+                    ]);
+                }
+                td.post_as(&id, &format!("/api/agents/{id}/questions"), body)
+                    .await
+                    .ok();
+                // Isolate the open question exemption from the thread status.
+                state(&td)
+                    .db
+                    .write("system", move |t| {
+                        t.execute(
+                            "UPDATE threads SET status = 'waiting_agent' WHERE id = ?1",
+                            [thread],
+                        )?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        // Read the facts at a fresh turn end, so a newer turn or mail in
+        // the setup cannot accidentally supply the exemption under test.
+        td.wait_status(&id, if kind == "wait" { "waiting" } else { "idle" })
+            .await;
+        let end = turn(&td, &id, aid, async || {}).await.max(end);
+        assert!(
+            !terrariumd::question_guard::check_text(&state(&td), &id, end, "Should I continue?")
+                .await
+                .unwrap(),
+            "{kind}"
+        );
+        assert!(
+            td.get(&format!("/api/agents/{id}/events?kind=question_guard"))
+                .await
+                .ok()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_worker_question_blocks_the_agent_and_mails_the_lead() {
     let td = TestDaemon::start().await;
     td.project("p").await;

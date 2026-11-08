@@ -4681,6 +4681,8 @@ export interface RuleToggle {
   /** False: the rule was so already, rules.wcl did not change. */
   changed: boolean;
   hash?: string | null;
+  /** The lint of the rules that run after the change. */
+  findings?: RuleFinding[];
 }
 
 /** What the migration does with one pack rule. */

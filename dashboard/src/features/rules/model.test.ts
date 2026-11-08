@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EffectiveRule, RuleFinding } from "../../api/types";
-import { changeText, eventsText, findingText, flowText, offerMigration, ruleRows, runTone, stepsText } from "./model";
+import { changeText, eventsText, findingText, flowText, offerMigration, ruleRows, runTone, stepsText, toggleText } from "./model";
 
 const rule = (over: Partial<EffectiveRule>): EffectiveRule => ({
   name: "merge-pass",
@@ -24,6 +24,14 @@ describe("rules model", () => {
     expect(rows[1]).toMatchObject({ originLabel: "pack", events: "card", verbs: "-", enabled: false, description: "parks" });
     expect(eventsText({ on: [] })).toBe("-");
     expect(ruleRows([rule({ origin: "own" })])[0]!.originLabel).toBe("rules.wcl");
+  });
+
+  it("writes the notice of a switch, with the lint findings as a warning", () => {
+    expect(toggleText("job-cancelled", { enabled: false, changed: true, findings: [] })).toBe("job-cancelled is off: rules.wcl changed.");
+    expect(toggleText("agent-park", { enabled: true, changed: false })).toBe("agent-park was on already.");
+    expect(toggleText("merge-pass", { enabled: true, changed: true, findings: [missing] })).toBe(
+      "merge-pass is on: rules.wcl changed. Lint: Missing column @accepted: the board has no column `@accepted`: each run of `merge-pass` fails.",
+    );
   });
 
   it("says who runs the flow", () => {

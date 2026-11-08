@@ -83,7 +83,19 @@
 //!   back to the queue ([`jobs::requeue`]); an ssh target is tried again
 //!   after [`RETRY`]. Neither uses an attempt or moves a card. After
 //!   [`LONG_WAIT`] the queue notes the wait on the cards, once per job and
-//!   daemon run. A failure after the recipe started stays a failure.
+//!   daemon run.
+//! - A recipe run lost to the infrastructure is not a failure (TER-196):
+//!   only an end of the recipe itself (an exit code, a signal, its
+//!   timeout) is red, and only a red batch splits. A run that ends with no
+//!   exit code ([`lost_run`]: the host agent no longer holds the session,
+//!   the host went offline, the run process died) or that its host agent
+//!   ended because the daemon link was down, or an ssh run whose link to
+//!   the target broke, is lost. Its processes on the target get the kill
+//!   of a lost run ([`end_lost`], with the slot wipe when the kill is not
+//!   confirmed), and the same job goes back to the queue with its attempt
+//!   and its place ([`jobs::requeue_infra`]): a batch reruns whole. An
+//!   error end that a rerun gets again ([`FIXED_ERRORS`]) is red, and after
+//!   [`MAX_LOST_RERUNS`] lost runs in a row the next one is red.
 //! - Each end and each cancel emits one `job.verdict` event per card
 //!   (TER-167): `passed`, `red`, `conflict`, `cancelled`, or `error`, with
 //!   the end comment and the failure block. It is written in the same
@@ -299,7 +311,9 @@ pub fn spawn(state: &Shared) -> JoinHandle<()> {
     })
 }
 
-/// A job that the last daemon left, found by [`recover_lost`].
+/// A job whose run is lost: one that the last daemon left, found by
+/// [`recover_lost`], or one whose recipe run this daemon lost to the
+/// infrastructure (TER-196, [`lost_run`]).
 struct Lost {
     job: Job,
     /// Still `running` in the database (else cancelled in the drain
@@ -314,6 +328,12 @@ struct Lost {
     /// It ran on another host than the delivery target's now: the kill
     /// may miss its processes.
     other_host: bool,
+    /// Why this daemon lost the run (TER-196). `None`: the last daemon
+    /// left it.
+    why: Option<String>,
+    /// The red end of a run past [`MAX_LOST_RERUNS`]: after the kill the
+    /// job ends with it instead of going back to the queue.
+    red: Option<JobEnd>,
 }
 
 /// TER-123: end the processes that the jobs of the last daemon left on
@@ -390,6 +410,8 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
                     def,
                     live,
                     other_host,
+                    why: None,
+                    red: None,
                 });
             }
             Ok(out)
@@ -410,7 +432,8 @@ pub async fn recover_lost(state: &Shared) -> JoinHandle<()> {
 }
 
 /// Kill what still runs of lost job `l` on its target, then end it: see
-/// [`recover_lost`].
+/// [`recover_lost`]. A run that this daemon lost (TER-196) gets the same
+/// kill: the host agent may have left its processes running.
 async fn end_lost(state: &Shared, l: Lost) {
     let Lost {
         job,
@@ -418,6 +441,8 @@ async fn end_lost(state: &Shared, l: Lost) {
         def,
         live,
         other_host,
+        why,
+        red,
     } = l;
     let mut report = None;
     let wraps = def.as_ref().is_some_and(crate::run_kill::kind_wraps);
@@ -468,16 +493,24 @@ async fn end_lost(state: &Shared, l: Lost) {
             }
         }
     }
-    if running {
+    if running && let Some(end) = red {
+        // TER-196 review 2, major 1: a lost run past the cap ends red, but
+        // only after the kill and the slot mark above.
+        finish_job(state, &job.id, end).await;
+    } else if running {
         // P5: the run is lost, not failed. The job goes back to the queue
         // with its attempt and its place, as TER-160 does for a host that
-        // could not be reached.
+        // could not be reached. TER-196: the same for a run lost to the
+        // infrastructure; a batch reruns whole.
         let id = job.id.clone();
         let cards = job.cards();
         let back = state
             .db
             .write("system", move |t| {
-                let j = jobs::requeue_lost(t, &id)?;
+                let j = match &why {
+                    Some(why) => jobs::requeue_infra(t, &id, why)?,
+                    None => jobs::requeue_lost(t, &id)?,
+                };
                 if let Some(j) = &j
                     && code_flow(t, &j.project)?
                 {
@@ -738,28 +771,40 @@ pub async fn tick(state: &Shared) -> ApiResult<()> {
                     drop(live_run);
                     return;
                 }
+                Ran::Lost { why, red } => {
+                    set_control(&job.id, None);
+                    rerun_lost(&state, job.clone(), why, red, live_run).await;
+                    return;
+                }
             };
             set_control(&job.id, None);
-            waits().remove(&job.id);
-            let id = job.id.clone();
-            let ended = state
-                .db
-                .write("system", move |t| jobs::finish(t, &id, &end))
-                .await;
-            match ended {
-                Ok(Some(j)) => {
-                    if let Err(e) = after_end(&state, &j).await {
-                        warn!(job = %j.id, "cannot handle the end of a job: {e}");
-                    }
-                }
-                Ok(None) => debug!(job = %job.id, "the job was cancelled while it ran"),
-                Err(e) => warn!(job = %job.id, "cannot end a job: {e}"),
-            }
+            finish_job(&state, &job.id, end).await;
             drop(live_run);
             kick(&state);
         });
     }
     Ok(())
+}
+
+/// End running job `id` with `end`, then run its card flow
+/// ([`after_end`]). A job that was cancelled meanwhile stays cancelled.
+async fn finish_job(state: &Shared, id: &str, end: JobEnd) {
+    waits().remove(id);
+    lost_runs().remove(id);
+    let jid = id.to_owned();
+    let ended = state
+        .db
+        .write("system", move |t| jobs::finish(t, &jid, &end))
+        .await;
+    match ended {
+        Ok(Some(j)) => {
+            if let Err(e) = after_end(state, &j).await {
+                warn!(job = %j.id, "cannot handle the end of a job: {e}");
+            }
+        }
+        Ok(None) => debug!(job = %id, "the job was cancelled while it ran"),
+        Err(e) => warn!(job = %id, "cannot end a job: {e}"),
+    }
 }
 
 /// Resolve only unpinned names, on the blocking pool and outside DB closures.
@@ -961,6 +1006,57 @@ enum Ran {
     /// (TER-160): not a failure. `ssh`: an ssh target, tried again after
     /// [`RETRY`].
     Wait { why: String, ssh: bool },
+    /// The recipe started, and its run was lost to the infrastructure
+    /// (TER-196, [`lost_run`]), with why. It gets the kill of a lost run
+    /// ([`end_lost`]). Then the job reruns, or, past
+    /// [`MAX_LOST_RERUNS`], ends with `red` (TER-196 review 2, major 1).
+    Lost { why: String, red: Option<JobEnd> },
+}
+
+/// Put a job whose recipe run was lost to the infrastructure back in the
+/// queue (TER-196): first the kill of a lost run ends what may still run
+/// of it on the target ([`end_lost`]), then the same job waits again with
+/// its attempt and its place. `live` keeps its slot taken until then.
+async fn rerun_lost(state: &Shared, job: Job, why: String, red: Option<JobEnd>, live: LiveRun) {
+    warn!(job = %job.id, "the run of a job was lost after its recipe started: {why}");
+    hold(&job.id, why.clone(), None);
+    // As in [`recover_lost`]: the kill goes to the current delivery
+    // target, and a job that ran on another host gets no confirmed kill.
+    let (project, ran_on) = (job.project.clone(), job.host.clone());
+    let found = state
+        .db
+        .read(move |c| {
+            let delivery = jobs::delivery(c, &project)?;
+            let def = match delivery.target.as_deref().map(|n| targets::get(c, n)) {
+                Some(Ok(row)) if row.def.project.as_ref().is_none_or(|p| *p == project) => {
+                    Some(row.def)
+                }
+                _ => None,
+            };
+            let other = def.is_some()
+                && ran_on
+                    .as_deref()
+                    .is_some_and(|h| h != jobs::host_of(c, &delivery));
+            Ok((def, other))
+        })
+        .await;
+    let (def, other_host) = found.unwrap_or_else(|e| {
+        warn!(job = %job.id, "cannot read the target of a lost job run: {e}");
+        (None, false)
+    });
+    end_lost(
+        state,
+        Lost {
+            job,
+            running: true,
+            def,
+            live,
+            other_host,
+            why: Some(why),
+            red,
+        },
+    )
+    .await;
 }
 
 /// Put a job that could not reach its host back in the queue: no attempt,
@@ -991,20 +1087,57 @@ async fn requeue(state: &Shared, job: &Job, why: String, ssh: bool) {
     }
 }
 
-/// Run a job to its end. Never fails: an error is a failed end, or a
-/// wait when the target could not be reached before the recipe started.
+/// Run a job to its end. Never fails: an error is a failed end, a wait
+/// when the target could not be reached before the recipe started, or a
+/// lost run when the infrastructure lost the recipe run (TER-196).
 async fn run(state: &Shared, job: &Job, def: &DeliveryDef) -> Ran {
     let recipe = AtomicBool::new(false);
-    let end = match run_inner(state, job, def, &recipe).await {
+    let lost = OnceLock::new();
+    let end = match run_inner(state, job, def, &recipe, &lost).await {
         Ok(end) => end,
         Err(e) => error_end(format!("the job could not run: {}", e.message)),
     };
+    if !end.passed
+        && let Some(why) = lost.into_inner()
+    {
+        return lost_or_red(&job.id, why, end);
+    }
     if end.passed || end.outcome.as_deref() != Some("error") || recipe.load(Ordering::SeqCst) {
         return Ran::End(end);
     }
     match unreachable(state, def, &end).await {
         Some((why, ssh)) => Ran::Wait { why, ssh },
         None => Ran::End(end),
+    }
+}
+
+/// A lost run of job `job`: it reruns ([`Ran::Lost`] without `red`) up
+/// to [`MAX_LOST_RERUNS`] times in a row. The next lost run ends red,
+/// with the reason in its tail, so a run that keeps getting lost ends.
+/// Both get the kill of a lost run first.
+fn lost_or_red(job: &str, why: String, end: JobEnd) -> Ran {
+    let n = {
+        let mut m = lost_runs();
+        let n = m.entry(job.to_owned()).or_insert(0);
+        *n += 1;
+        *n
+    };
+    if n <= MAX_LOST_RERUNS {
+        return Ran::Lost { why, red: None };
+    }
+    lost_runs().remove(job);
+    let tail = format!(
+        "the infrastructure lost the run {n} times in a row, so this run counts as red: {why}\n{}",
+        end.tail.as_deref().unwrap_or("")
+    );
+    let red = JobEnd {
+        outcome: Some("red".into()),
+        tail: Some(tail),
+        ..end
+    };
+    Ran::Lost {
+        why,
+        red: Some(red),
     }
 }
 
@@ -1041,11 +1174,101 @@ fn ssh_connect_error<'a>(text: &'a str, host: &str) -> Option<&'a str> {
     })
 }
 
+/// The error codes of a run end that a rerun gets again: the command or
+/// its path is refused or cannot start. Such an end is red, not lost
+/// (TER-196 review, minor 2).
+const FIXED_ERRORS: &[&str] = &[
+    "spawn_failed",
+    "path_denied",
+    "unsupported",
+    "bad_request",
+    "refused",
+];
+
+/// How often the queue reruns one job whose recipe run the infrastructure
+/// lost, in a row and in one daemon run (TER-196 review, minor 2). The
+/// next lost run is red, with the reason.
+pub const MAX_LOST_RERUNS: u32 = 3;
+
+/// The lost runs in a row of each job ([`MAX_LOST_RERUNS`]). An end of
+/// the job clears its count.
+fn lost_runs() -> MutexGuard<'static, HashMap<String, u32>> {
+    static L: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    match L.get_or_init(Mutex::default).lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// Set the count of lost runs in a row of job `job`. For the tests of the
+/// capped path only: the daemon counts by itself ([`lost_or_red`]).
+#[doc(hidden)]
+pub fn set_lost_runs(job: &str, n: u32) {
+    lost_runs().insert(job.to_owned(), n);
+}
+
+/// Why a recipe run that did not pass was lost to the infrastructure
+/// (TER-196), or `None` for an end of the recipe itself (an exit code, a
+/// signal, its timeout): only that is red. Lost: no end, an error end
+/// with no exit code (the host agent no longer holds the session, the
+/// host is offline, the run process could not be read), except the codes
+/// that a rerun gets again ([`FIXED_ERRORS`]), an end by the
+/// host agent because the daemon link was down, or, with `ssh_host`, exit
+/// code 255 with a line of the ssh client that its link to that host
+/// broke. A cancelled job is never lost: the caller checks [`killed`].
+fn lost_run(end: Option<&End>, stderr: &[u8], ssh_host: Option<&str>) -> Option<String> {
+    match end {
+        None => Some("the run ended without an end".into()),
+        Some(End::Error { code, .. }) if FIXED_ERRORS.contains(&code.as_str()) => None,
+        Some(End::Error { code, message }) => Some(format!("error {code}: {message}")),
+        Some(End::Exit { reason, .. })
+            if reason == "detached_timeout" || reason == "output_overflow" =>
+        {
+            Some(format!(
+                "the host agent ended the run ({reason}): its link to the daemon was down"
+            ))
+        }
+        Some(End::Exit {
+            code: Some(255), ..
+        }) => {
+            let text = String::from_utf8_lossy(stderr);
+            ssh_link_lost(&text, ssh_host?)
+                .map(|l| format!("the ssh link to the target broke: {l}"))
+        }
+        _ => None,
+    }
+}
+
+/// The line of `text` in which the ssh client says that its link to
+/// `host` (lower case) broke or could not be made: closed by the remote
+/// host, reset, a broken pipe, or a server that does not answer. Each line
+/// names the host: `client_loop: send disconnect:` does not, and it may
+/// come from an ssh of the recipe to another host, so it is red (TER-196
+/// review, minor 3).
+fn ssh_link_lost(text: &str, host: &str) -> Option<String> {
+    if let Some(l) = ssh_connect_error(text, host) {
+        return Some(l.to_owned());
+    }
+    text.lines()
+        .map(str::trim)
+        .find(|l| {
+            let low = l.to_lowercase();
+            low.starts_with(&format!("connection to {host} closed by remote host"))
+                || (low.starts_with(&format!("connection to {host} port "))
+                    && (low.contains("broken pipe") || low.contains("reset by peer")))
+                || low.starts_with(&format!("packet_write_wait: connection to {host} port "))
+                || low.starts_with(&format!("read from remote host {host}:"))
+                || low.starts_with(&format!("timeout, server {host} not responding"))
+        })
+        .map(str::to_owned)
+}
+
 async fn run_inner(
     state: &Shared,
     job: &Job,
     def: &DeliveryDef,
     recipe_started: &AtomicBool,
+    recipe_lost: &OnceLock<String>,
 ) -> ApiResult<JobEnd> {
     let target = def
         .target
@@ -1127,6 +1350,13 @@ async fn run_inner(
         holder,
         ionice,
         recipe_started,
+        recipe_lost,
+        ssh_host: row
+            .def
+            .address
+            .as_deref()
+            .filter(|_| row.def.kind == TargetKind::Ssh)
+            .map(jobs::address_key),
         slot,
         wipe,
     };
@@ -1258,9 +1488,15 @@ struct StepCtx<'a> {
     holder: Option<String>,
     /// The target has a working `ionice` ([`has_ionice`]).
     ionice: bool,
-    /// Set when the recipe step started: a failure after it is a failure,
-    /// also when the host is gone then (TER-160).
+    /// Set when the recipe step started: a failure after it is no wait for
+    /// the host (TER-160).
     recipe_started: &'a AtomicBool,
+    /// Set when the infrastructure lost the recipe run, with why
+    /// ([`lost_run`], TER-196): the job goes back to the queue.
+    recipe_lost: &'a OnceLock<String>,
+    /// The host of an ssh target ([`jobs::address_key`]), for the lines of
+    /// the ssh client about a broken link.
+    ssh_host: Option<String>,
     /// The job's slot ([`jobs::pick`]).
     slot: i64,
     /// A lost job may still run in the slot's tree: the receive step makes
@@ -1571,6 +1807,13 @@ async fn steps(x: &StepCtx<'_>, recipe: String, delivery: &DeliveryDef) -> ApiRe
     let c = x.run(&recipe_cmd, RECIPE_MAX, None).await?;
     x.recipe_started.store(true, Ordering::SeqCst);
     let ok = c.end.as_ref().is_some_and(End::success);
+    // TER-196: a run that the infrastructure lost is no red; [`run`]
+    // puts the job back in the queue. A cancel is never lost.
+    let lost = if ok || killed(&job.id) {
+        None
+    } else {
+        lost_run(c.end.as_ref(), &c.stderr, x.ssh_host.as_deref())
+    };
     let mut tail = format!(
         "{}\n[{}]\n[run as: {} sh -c <recipe>]\nFull log on target {}: {}",
         output_of(&c).trim_end(),
@@ -1582,9 +1825,18 @@ async fn steps(x: &StepCtx<'_>, recipe: String, delivery: &DeliveryDef) -> ApiRe
     if let Some(b) = &batch {
         tail.push_str(&format!("\n[{}]", batch_summary(b)));
     }
+    if let Some(why) = lost {
+        let _ = x.recipe_lost.set(why);
+    }
     let result = JobEnd {
         passed: ok,
-        outcome: (!ok).then(|| "red".to_owned()),
+        outcome: (!ok).then(|| {
+            if x.recipe_lost.get().is_some() {
+                "error".to_owned()
+            } else {
+                "red".to_owned()
+            }
+        }),
         exit_code: exit_code(c.end.as_ref()),
         tail: Some(tail),
         head: Some(head.clone()),
@@ -2059,6 +2311,9 @@ fn verdicts(j: &Job) -> Vec<Value> {
 /// Emit one `job.verdict` event for each card of an ended or cancelled
 /// job (TER-167), in the write of the end or the cancel.
 pub fn emit_verdicts(t: &mut Tx<'_>, j: &Job) -> ApiResult<()> {
+    // Each end and each cancel (API or rule) comes here: the job's count
+    // of lost runs goes (TER-196 review 2, minor 2).
+    lost_runs().remove(&j.id);
     for data in verdicts(j) {
         let card = data["card"].as_str().unwrap_or_default().to_owned();
         let summary = format!(
@@ -2985,6 +3240,131 @@ mod tests {
             .is_none()
         );
         assert!(ssh_connect_error("error: tests failed", "10.3.0.2").is_none());
+    }
+
+    fn exit(code: Option<i32>, signal: Option<i32>, reason: &str) -> End {
+        End::Exit {
+            code,
+            signal,
+            reason: reason.into(),
+        }
+    }
+
+    /// TER-196: only an end of the recipe itself is red. A run with no
+    /// exit code, one that the host agent ended for a down daemon link, and
+    /// an ssh run whose link broke are lost to the infrastructure.
+    #[test]
+    fn a_lost_run_is_told_from_a_recipe_end() {
+        let lost = End::Error {
+            code: "lost".into(),
+            message: "the host agent no longer holds the session".into(),
+        };
+        let why = lost_run(Some(&lost), b"", None).unwrap();
+        assert!(why.contains("no longer holds the session"), "{why}");
+        let offline = End::Error {
+            code: "offline".into(),
+            message: "host lab1 is offline".into(),
+        };
+        assert!(lost_run(Some(&offline), b"", None).is_some());
+        assert!(lost_run(None, b"", None).is_some());
+        // A code that a rerun gets again is red (review, minor 2).
+        for code in FIXED_ERRORS {
+            let e = End::Error {
+                code: (*code).into(),
+                message: "no".into(),
+            };
+            assert!(lost_run(Some(&e), b"", None).is_none(), "{code}");
+        }
+        for reason in ["detached_timeout", "output_overflow"] {
+            let w = lost_run(Some(&exit(None, Some(9), reason)), b"", None).unwrap();
+            assert!(w.contains(reason), "{w}");
+        }
+        // The recipe's own ends: an exit code, a signal, its timeout.
+        for e in [
+            exit(Some(1), None, "exited"),
+            exit(Some(101), None, "exited"),
+            exit(None, Some(9), "signaled"),
+            exit(None, Some(9), "timeout"),
+            exit(Some(255), None, "exited"),
+        ] {
+            assert!(
+                lost_run(Some(&e), b"error: tests failed\n", None).is_none(),
+                "{e:?}"
+            );
+        }
+        // An ssh target: 255 with a broken link to that host is lost; 255
+        // from the recipe, or a broken link to another host, is red.
+        let e255 = exit(Some(255), None, "exited");
+        for line in [
+            "Connection to 10.3.0.2 closed by remote host.",
+            "Connection to 10.3.0.2 port 22: Broken pipe",
+            "packet_write_wait: Connection to 10.3.0.2 port 22: Broken pipe",
+            "Read from remote host 10.3.0.2: Connection reset by peer",
+            "Timeout, server 10.3.0.2 not responding.",
+            "ssh: connect to host 10.3.0.2 port 22: Connection refused",
+        ] {
+            let stderr = format!("compiling\n{line}\n");
+            let w = lost_run(Some(&e255), stderr.as_bytes(), Some("10.3.0.2"));
+            assert!(w.is_some_and(|w| w.contains(line)), "{line}");
+        }
+        let other = b"Connection to github.com closed by remote host.\n";
+        let no_host = b"client_loop: send disconnect: Broken pipe\n";
+        assert!(lost_run(Some(&e255), no_host, Some("10.3.0.2")).is_none());
+        assert!(lost_run(Some(&e255), other, Some("10.3.0.2")).is_none());
+        assert!(lost_run(Some(&e255), b"exit 255\n", Some("10.3.0.2")).is_none());
+        let closed = b"Connection to 10.3.0.2 closed by remote host.\n";
+        assert!(
+            lost_run(
+                Some(&exit(Some(1), None, "exited")),
+                closed,
+                Some("10.3.0.2")
+            )
+            .is_none()
+        );
+        // No ssh target: the ssh lines do not count.
+        assert!(lost_run(Some(&e255), closed, None).is_none());
+    }
+
+    /// TER-196 review, minor 2: a job reruns after a lost run at most
+    /// [`MAX_LOST_RERUNS`] times in a row; the next lost run is red with
+    /// the reason, and the count starts again.
+    #[test]
+    fn lost_reruns_have_a_cap() {
+        let job = ulid::Ulid::new().to_string();
+        let end = || JobEnd {
+            outcome: Some("error".into()),
+            tail: Some("output".into()),
+            ..JobEnd::default()
+        };
+        for _ in 0..MAX_LOST_RERUNS {
+            let r = lost_or_red(&job, "error lost: gone".into(), end());
+            assert!(matches!(r, Ran::Lost { ref why, red: None } if why == "error lost: gone"));
+        }
+        // Past the cap: still a lost run, so it gets the kill of a lost
+        // run, but it ends red (review 2, major 1).
+        let Ran::Lost { red: Some(e), .. } = lost_or_red(&job, "error lost: gone".into(), end())
+        else {
+            panic!("the run after the cap has no red end");
+        };
+        assert!(!e.passed);
+        assert_eq!(e.outcome.as_deref(), Some("red"));
+        let tail = e.tail.unwrap();
+        assert!(
+            tail.starts_with(&format!(
+                "the infrastructure lost the run {} times in a row",
+                MAX_LOST_RERUNS + 1
+            )),
+            "{tail}"
+        );
+        assert!(
+            tail.contains("error lost: gone") && tail.ends_with("output"),
+            "{tail}"
+        );
+        assert!(matches!(
+            lost_or_red(&job, "again".into(), end()),
+            Ran::Lost { red: None, .. }
+        ));
+        lost_runs().remove(&job);
     }
 
     #[test]

@@ -38,7 +38,7 @@ use crate::actor::Actor;
 use crate::api::Shared;
 use crate::api::jobs as api_jobs;
 use crate::db::Tx;
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
 use crate::rules_engine::{Done, RunCtx, lookup};
 use crate::store::board::{self, Card, CardPatch, NewCard, NewLink};
@@ -518,12 +518,18 @@ pub struct BatchPick {
     pub first_since: Option<DateTime<Utc>>,
     /// The cards of the column that the batch leaves out, with the reason.
     pub left_out: Vec<Value>,
+    /// The repo of the batch: the repo of the first card that waits. A
+    /// card of another repo is left out and waits for a later batch.
+    pub repo: Option<String>,
 }
 
 /// The cards of column `from` of `project` that a batch takes, in board
-/// order, at most `limit` (`None`: all). A card that is held or has an
-/// open job is left out. There is no limit of the daemon's own: the rule
-/// sets it (TER-162 D9).
+/// order, at most `limit` (`None`: all). A card that is held, has an
+/// open job, or has no usable repo is left out. A batch is one repo: the repo of the first card
+/// that waits. A card of another repo is left out and does not count as
+/// waiting, so it does not block the queue; it goes in a later batch
+/// (TER-227). There is no limit of the daemon's own: the rule sets it
+/// (TER-162 D9).
 pub fn pick_batch(
     conn: &Connection,
     project: &str,
@@ -541,6 +547,29 @@ pub fn pick_batch(
             out.left_out
                 .push(json!({"card": c.id, "reason": format!("open job {}", j.id)}));
             continue;
+        }
+        // A card without a usable repo (none in a project of several
+        // repos, or one that is not the project's) is left out, so it
+        // does not stop the batch or the timers (TER-227 review).
+        let r = match api_jobs::repo_of(conn, c, None) {
+            Ok(r) => r,
+            Err(e) if e.code == Code::Invalid => {
+                out.left_out
+                    .push(json!({"card": c.id, "reason": e.message}));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        match &out.repo {
+            Some(have) if *have != r => {
+                out.left_out.push(json!({
+                    "card": c.id,
+                    "reason": format!("repo `{r}`, the batch is repo `{have}`"),
+                }));
+                continue;
+            }
+            Some(_) => {}
+            None => out.repo = Some(r),
         }
         out.waiting += 1;
         let since = board::last_moved_at(conn, &c.id)?.unwrap_or_else(|| c.created_at.clone());
@@ -625,19 +654,8 @@ fn queue_batch(
             "due": due.map(schedules::stamp), "reason": reason,
         })));
     }
-    let mut repo: Option<String> = None;
     let mut batch = Vec::new();
     for c in &pick.cards {
-        let r = api_jobs::repo_of(t, c, None)?;
-        match &repo {
-            Some(have) if *have != r => {
-                return Err(ApiError::invalid(format!(
-                    "card {} is in repo `{r}`, the batch in `{have}`: a batch is one repo",
-                    c.id
-                )));
-            }
-            _ => repo = Some(r),
-        }
         batch.push(BatchCard {
             card: c.id.clone(),
             branch: api_jobs::branch_of(c, None)?,
@@ -646,7 +664,7 @@ fn queue_batch(
             note: None,
         });
     }
-    let repo = repo.unwrap_or_default();
+    let repo = pick.repo.clone().unwrap_or_default();
     if !def.next_repos.contains(&repo) {
         return Err(ApiError::conflict(format!(
             "repo `{repo}` has no `next` branch in the queue config: add it to `next_repos`"

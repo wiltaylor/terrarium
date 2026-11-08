@@ -8252,9 +8252,11 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
   repo in `next_repos`). `batch` queues one merge of the cards of column
   `from` in board order, at most `limit` (absent: all; the daemon has no
   batch limit of its own, TER-162 D9); a held card or one with an open
-  job is left out (`left_out` in the detail). With `min_cards` the batch
-  goes only when that many cards wait (held cards and cards with a job
-  do not count), or, with `max_wait_minutes`, when the first of them came
+  job is left out (`left_out` in the detail). A batch is one repo: the
+  repo of the first card that waits; a card of another repo is left out
+  and goes in a later batch, so it does not block the queue (TER-227).
+  With `min_cards` the batch goes only when that many cards wait (held
+  cards, cards with a job and cards of another repo do not count), or, with `max_wait_minutes`, when the first of them came
   into the column that many minutes ago (its newest move, else its
   creation); until then the verb is a no-op whose detail has `waiting`,
   `due` (the time the wait ends), and the reason. A card with an open
@@ -8297,9 +8299,12 @@ does not hold changes nothing (a no-op, `changed: false` in `steps`).
 
 Timers (TER-172): the engine checks the batch rules (`job_queue` of kind
 `batch` with `min_cards` and `max_wait_minutes`) about every 10 seconds.
-When cards wait in the rule's `from` column, fewer than `min_cards`, and
-the first came `max_wait_minutes` ago, it writes one `rule.timer` event
-(actor `system`, `data: {rule, due, waiting}`) for that wait. A
+When cards wait in the rule's `from` column and the first came
+`max_wait_minutes` ago, it writes one `rule.timer` event (actor
+`system`, `data: {rule, due, waiting}`) for that wait. It does so also
+when `min_cards` or more wait: then no card move ran the batch (a held
+card was released in place) or that run failed, and the timer runs it
+once more (TER-227). A
 `rule.timer` event plans a run of the rule it names only, without a card;
 `on` and `when` do not apply to it, and a rule with an `if_card` does not
 run for it. The verb checks the time again. A daemon restart may write
@@ -8323,7 +8328,7 @@ ends the agent of a finished card.
 
 | Method and path | Body | Answer |
 |---|---|---|
-| `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. The stored rules of a project with `board_flow = rules` include the pack (§19.12). No rules, no pack, and no `text`: `404`. |
+| `POST /api/projects/{name}/rules/dry-run` | `{seq}` or `{from, to?}`, and `text?` | `200`, `{project, source: "stored" or "text", from, to, events, max_events, plans: [{event, kind, rule, card?, outcome, reason?, actions: [{verb, args, implemented}], actor}]}`. `outcome` is `run`, `skipped` (a guard or a condition), or `failed` (a missing column). It plans the rules (or `text`, checked first) for the project's events with `seq` in `from..=to` (at most 500), on the current state, and writes nothing. It ignores the time of the rules. Each action's arguments are filled from the state before the run: a later action does not see what an earlier one would change. The rules of a project with `board_flow = rules`, the stored ones or `text`, include the pack (§19.12), as in the lint. No rules, no pack, and no `text`: `404`. |
 | `GET /api/projects/{name}/rules/runs?rule=&limit=` | | `200`, `{runs: [{id, project, rule, rule_hash, event_seq, card?, state, step, steps, reason?, created_at, updated_at}]}`, newest first (`limit` 1 to 500, default 100). `state` is `pending`, `done`, `noop`, `failed`, or `skipped`; `step` the next action (pending) or the actions run; `steps` one `{verb, ok, changed?, detail?, error?}` for each action run. The project keeps its newest 500 finished runs, and every run of the last hour (the rate limits count them). |
 
 Both: whoever reads the project.
@@ -8480,7 +8485,9 @@ such a board a run of the pack fails (§19.9). The migration maps the pack
 to the board's columns:
 
 - A `card_move` to a column that the board lacks becomes a `card_comment`
-  with the move's `comment`. With no comment the move is dropped. The
+  with the move's `comment`. With no comment the move is dropped. A move
+  with a `from` is dropped too: a comment has no `from`, so it would reach
+  the cards that the move skips. The
   coded flow wrote a comment when such a move failed. Example: on a board
   with no `accepted` column, `merge-pass` takes the labels off, writes
   the end comment, and unassigns the card. The card stays where it is.
@@ -8519,7 +8526,7 @@ Rules that are off count for nothing. It finds two problems:
 | `GET /api/projects/{name}/rules/effective` | | `200`, `{project, board_flow, exists, hash?, source?, rules: [...]}`. `rules` is the rules that the engine runs, in its order. Each rule has the fields of §19.8, `origin` (`pack`, `override`: a rule of `rules.wcl` with a pack name, or `own`), and `wcl` (the rule as WCL text). |
 | `POST /api/projects/{name}/rules/lint` | `{text?}` | `200`, `{project, board_flow, source: "stored" or "text", findings: [{code, column, rules, message}]}`. With `text`, the text is checked as the `rules.wcl` first (`422` as §19.8). |
 | `POST /api/projects/{name}/rules/migrate` | `{apply?, base_hash?}` | `200`, `{project, applied, board_flow, changed, text, hash?, changes: [{rule, change, reasons}], findings}`. `change` is `mapped`, `disabled`, or `kept`. `text` is the new `rules.wcl` (the old text, then the overrides). `findings` is the lint of the rules after the migration, with the pack. Without `apply` it writes nothing. With `apply`, one write stores the text (when it changed) and sets `board_flow = rules`, with the audit row `rules.migrate` (`{board_flow, previous_board_flow, hash, changes}`) and `rules.put` for the text. |
-| `POST /api/projects/{name}/rules/{rule}/enable` | | `200`, `{project, rule, enabled, changed, hash?}`. |
+| `POST /api/projects/{name}/rules/{rule}/enable` | | `200`, `{project, rule, enabled, changed, hash?, findings}`. `findings` is the lint of the rules that run after the change (as `lint`). |
 | `POST /api/projects/{name}/rules/{rule}/disable` | | The same. |
 
 `enable` and `disable` edit the text of `rules.wcl` and keep the rest of
@@ -8527,8 +8534,10 @@ the text as it is. A rule of the file gets its `enabled` field set (or a
 new `enabled = false` line after its `{`). A pack rule that the file does
 not name gets `rule "<name>" { enabled = false }` at the end. To enable a
 pack rule that the file turns off with that short form, the short form is
-removed, so the pack rule runs again. A rule that is already so changes
-nothing (`changed: false`). An unknown rule is `404`. A short form of a
+removed, so the pack rule runs again. Such a pack rule can name a column
+that the board lacks (the migration turned it off for that reason): the
+answer's `findings` then has a `missing_column`, and the CLI prints it. A
+rule that is already so changes nothing (`changed: false`). An unknown rule is `404`. A short form of a
 rule that is not in the pack is `409`: edit the file.
 
 Rights: `effective`, `lint`, and a `migrate` without `apply` are for
@@ -8542,9 +8551,10 @@ whose rules come from a file, run the migration without `apply`, put
 `text` into `projects/<project>.rules.wcl`, and set `board_flow =
 "rules"` in the project file.
 
-The dry run of §19.9 without `text` plans the pack too when the project
-runs it (`board_flow = rules`). Such a project with no `rules.wcl` plans
-the pack alone (before TER-171 it was `404`).
+The dry run of §19.9 plans the pack too when the project runs it
+(`board_flow = rules`), with the stored rules or with `text`, as the lint
+does. Such a project with no `rules.wcl` plans the pack alone (before
+TER-171 it was `404`).
 
 ## 20. Event sources and ingest
 
@@ -11456,8 +11466,25 @@ one key, the strictest applies until a cap write replaces them.
   <why>` and the event change `requeued`. An ssh target is tried again
   after 60 s. Neither uses an attempt or moves the card, and the card
   keeps `validation:queued`. After 30 min of waiting the card gets one
-  comment that says so (once per job in a daemon run). A failure after
-  the recipe started stays a failure.
+  comment that says so (once per job in a daemon run).
+- A recipe run lost to the infrastructure is not a failure (TER-196).
+  Only an end of the recipe itself (an exit code, a signal, its timeout)
+  is `red`. A run with no exit code (the host agent no longer holds the
+  session, the host went offline, the run process died), a run that the
+  host agent ended because its link to the daemon was down, or an ssh run
+  whose link to the target broke (exit code 255 and an ssh client line
+  that names the target host) is lost. An error end that a rerun gets
+  again (`spawn_failed`, `path_denied`, `unsupported`, `bad_request`,
+  `refused`) is `red`. What may still run of it on the target is killed first,
+  and the slot's tree is made new when the kill is not confirmed. Then
+  the same job goes back to the queue with its attempt and its place,
+  with `tail` `the infrastructure lost the run after the recipe started
+  (<why>); ...` and the event change `requeued`. A batch merge reruns
+  whole and does not split. The card does not move. A job reruns this
+  way at most 3 times in a row in one daemon run: the next lost run gets
+  the same kill (and the slot mark), then it is `red`, and its `tail`
+  starts with `the infrastructure lost the run 4
+  times in a row, so this run counts as red: <why>`.
 
 A batch merge:
 
