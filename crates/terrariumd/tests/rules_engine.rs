@@ -957,7 +957,11 @@ async fn a_running_lane_reloads_live_rules_between_rows() {
             Ok(())
         }).await.unwrap();
         settle(&td).await;
-        assert_eq!(comments(&td, &card).await.len(), 1, "{change}: later rows must not act");
+        assert_eq!(
+            comments(&td, &card).await.len(),
+            1,
+            "{change}: later rows must not act"
+        );
         let rows = runs(&td, "off").await;
         assert_eq!(rows.len(), 10);
         assert_eq!(rows.iter().filter(|r| r["state"] == "skipped").count(), 9);
