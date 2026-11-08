@@ -553,6 +553,15 @@ pub fn check_delivery(
     project: &str,
     def: &DeliveryDef,
 ) -> ApiResult<()> {
+    if def
+        .failure_patterns
+        .as_ref()
+        .is_some_and(|patterns| patterns.iter().any(|p| p.trim().is_empty()))
+    {
+        return Err(ApiError::invalid(
+            "failure_patterns must not contain empty strings",
+        ));
+    }
     if let Some(target) = def.target.as_deref().filter(|t| !t.is_empty()) {
         let row = targets::get(conn, target)?;
         match &row.def.project {
@@ -1360,7 +1369,7 @@ async fn run_inner(
     // The slot's tree stays on the target for the next job of the slot
     // (TER-190): no delete of the tree and its build output per job.
     let bundle = ctx.bundle.clone();
-    let result = steps(&ctx, recipe, def.timeout_secs(), guard).await;
+    let result = steps(&ctx, recipe, def, guard).await;
     drop(ctx);
     let _ = tokio::fs::remove_file(bundle).await;
     result
@@ -1745,7 +1754,7 @@ fn prepare(repo: &git::JobRepo, job: &Job, bundle: &std::path::Path) -> Prepared
 async fn steps(
     x: &StepCtx<'_>,
     recipe: String,
-    timeout: u64,
+    delivery: &DeliveryDef,
     guard: tokio::sync::OwnedMutexGuard<()>,
 ) -> ApiResult<JobEnd> {
     let job = x.job;
@@ -1828,11 +1837,22 @@ async fn steps(
         .get("base")
         .filter(|b| check_commit(b).is_ok())
         .map(String::as_str);
+    let log = format!(
+        "{}/{}/logs/{}-{}.log",
+        delivery.work_dir().trim_end_matches('/'),
+        job.project,
+        job.id,
+        job.attempt
+    );
     let recipe_cmd = RemoteCmd {
-        argv: vec!["sh".into(), "-c".into(), recipe_script(recipe, base)],
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            logged_recipe(recipe_script(recipe, base), &log),
+        ],
         cwd: Some(x.dir.to_owned()),
         env: recipe_env(job, x.dir, &head, base),
-        timeout_secs: Some(timeout),
+        timeout_secs: Some(delivery.timeout_secs()),
         holder: x.holder.clone(),
         ..RemoteCmd::default()
     };
@@ -1847,11 +1867,37 @@ async fn steps(
     } else {
         lost_run(c.end.as_ref(), &c.stderr, x.ssh_host.as_deref())
     };
+    // The recipe group is gone now, even after timeout or cancel. Read its
+    // log in a separate, bounded session that is not controlled by job.kill.
+    let excerpt = if lost.is_none() {
+        let cmd = RemoteCmd {
+            argv: low_priority(
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    log_excerpt(&log, delivery.failure_patterns.as_deref()),
+                ],
+                x.ionice,
+            ),
+            timeout_secs: Some(30),
+            holder: x.holder.clone(),
+            ..RemoteCmd::default()
+        };
+        match crate::executor::start_cmd(x.state, x.def, &cmd) {
+            Ok(run) => output_of(&run.collect(RECIPE_MAX).await),
+            Err(e) => format!("[cannot read retained log: {e}]"),
+        }
+    } else {
+        String::new()
+    };
     let mut tail = format!(
-        "{}\n[{}]\n[run as: {} sh -c <recipe>]",
+        "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\nFull log on target {}: {}",
+        excerpt.trim_end(),
         output_of(&c).trim_end(),
         end_text(c.end.as_ref()),
-        low_priority(Vec::new(), x.ionice).join(" ")
+        low_priority(Vec::new(), x.ionice).join(" "),
+        delivery.target.as_deref().unwrap_or("-"),
+        log
     );
     if let Some(b) = &batch {
         tail.push_str(&format!("\n[{}]", batch_summary(b)));
@@ -1917,6 +1963,49 @@ fn recipe_script(recipe: String, base: Option<&str>) -> String {
         return recipe;
     }
     format!("unset TERRARIUM_BASE TERRARIUM_CHANGED_FILES\n{recipe}")
+}
+
+/// Keep merged stdout/stderr outside the reusable slot, so the next checkout
+/// cannot clean it away. Only a bounded excerpt crosses the runner protocol.
+/// No pipeline wraps the recipe: its exact exit status remains the job status.
+fn logged_recipe(recipe: String, log: &str) -> String {
+    use crate::executor::sh_quote;
+    format!(
+        r#"log={log}
+mkdir -p -- "$(dirname -- "$log")" || exit 125
+(umask 077 && : > "$log") || exit 125
+exec sh -c {recipe} > "$log" 2>&1
+"#,
+        log = sh_quote(log),
+        recipe = sh_quote(&recipe),
+    )
+}
+
+/// Run after the recipe's session ends, including after its group was killed.
+fn log_excerpt(log: &str, patterns: Option<&[String]>) -> String {
+    use crate::executor::sh_quote;
+    let defaults = ["FAILED", "panicked", "test result: FAILED", "failures:"].map(str::to_owned);
+    let patterns = patterns.unwrap_or(&defaults);
+    let grep = if patterns.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "printf 'Failure lines (first 1800 bytes, with context):\\n'; grep -a -F -A 3 {} -- \"$log\" | head -c 1800; printf '\\n'",
+            patterns
+                .iter()
+                .map(|p| format!("-e {}", sh_quote(p)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+    format!(
+        r#"log={log}
+{grep}
+printf '\nOutput tail (last 1200 bytes):\n'
+tail -c 1200 -- "$log"
+"#,
+        log = sh_quote(log),
+    )
 }
 
 /// The env of the recipe (TER-100, docs/api.md 35.2): the job kind and
@@ -2095,15 +2184,10 @@ pub(crate) fn failure_block(j: &Job) -> String {
         .as_deref()
         .unwrap_or("")
         .lines()
-        .rev()
-        .take(40)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
         .map(|l| format!("    {l}\n"))
         .collect();
     format!(
-        "Validation failed: {}, {} job {}, repo {}, branch {}, commit {}, tested {}, exit code {}, outcome {}, attempt {}.\nOutput tail:\n\n{tail}\n",
+        "Validation failed: {}, {} job {}, repo {}, branch {}, commit {}, tested {}, exit code {}, outcome {}, attempt {}.\nJob output (failure lines, then tail):\n\n{tail}\n",
         j.ended_at.as_deref().unwrap_or("-"),
         j.kind.as_str(),
         j.id,
@@ -2740,6 +2824,102 @@ printf 'TERRARIUM_JOB\toutcome=ok\thead=%s\tbase=%s\n' "$sha" "$base"
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn job_log_keeps_early_panics_before_a_long_noisy_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("logs with 'quotes/job.log");
+        let recipe = "printf 'test early_failure ... FAILED\\n'\nprintf \"thread 'early_failure' panicked at test.rs:1:2:\\nexpected value\\n\" >&2\ni=0; while [ \"$i\" -lt 2000 ]; do printf 'unrelated build noise\\n'; i=$((i + 1)); done\nexit 101";
+        let script = logged_recipe(recipe.into(), log.to_str().unwrap());
+        let out = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(101));
+        let full = std::fs::read_to_string(&log).unwrap();
+        assert!(full.len() > RECIPE_MAX / 32);
+        assert!(full.contains("early_failure"));
+        assert!(full.contains("expected value"));
+        assert_eq!(full.matches("unrelated build noise").count(), 2000);
+        let summary = std::process::Command::new("sh")
+            .args(["-c", &log_excerpt(log.to_str().unwrap(), None)])
+            .output()
+            .unwrap();
+        let excerpt = String::from_utf8_lossy(&summary.stdout);
+        assert!(excerpt.len() < jobs::TAIL_MAX);
+        let mut j = ended(JobKind::Merge, jobs::JobState::Failed, Some("red"));
+        j.tail = Some(jobs::clip_tail(&excerpt));
+        let block = failure_block(&j);
+        assert!(block.contains("test early_failure ... FAILED"));
+        assert!(block.contains("panicked at test.rs:1:2"));
+        assert!(block.contains("expected value"));
+        assert!(block.find("expected value").unwrap() < block.find("Output tail").unwrap());
+    }
+
+    #[test]
+    fn job_log_patterns_are_literal_and_can_be_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("job.log");
+        for patterns in [Some(vec!["custom [failure] 'marker'".into()]), Some(vec![])] {
+            let script = logged_recipe(
+                "printf \"custom [failure] 'marker'\\nmessage\\n\"; exit 7".into(),
+                log.to_str().unwrap(),
+            );
+            let out = std::process::Command::new("sh")
+                .args(["-c", &script])
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(7));
+            let summary = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    &log_excerpt(log.to_str().unwrap(), patterns.as_deref()),
+                ])
+                .output()
+                .unwrap();
+            let excerpt = String::from_utf8_lossy(&summary.stdout);
+            assert_eq!(
+                excerpt.contains("Failure lines"),
+                !patterns.unwrap().is_empty()
+            );
+            assert!(excerpt.contains("custom [failure] 'marker'"));
+        }
+    }
+
+    #[test]
+    fn job_log_is_private_without_changing_the_recipe_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("recipe.log");
+        let script = format!(
+            "umask 022\n{}",
+            logged_recipe("umask; touch output".into(), log.to_str().unwrap())
+        );
+        let out = std::process::Command::new("sh")
+            .current_dir(dir.path())
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .trim()
+                .ends_with("022")
+        );
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("output"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+    }
 
     #[test]
     fn startup_removes_legacy_repos_and_bundles_but_keeps_cached_repos() {

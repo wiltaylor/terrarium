@@ -11315,6 +11315,22 @@ or the operator) read and set the config. The body is a JSON object:
 | `next_repos`   | the repos (by name) that have a `next` branch for merge jobs    | none                  |
 | `work_dir`     | the dir on the target for the work trees of the slots           | `/tmp/terrarium-jobs` |
 | `timeout_secs` | the most time the recipe may run                                | 3600                  |
+| `failure_patterns` | literal strings to extract from recipe output, with three following lines of context | `["FAILED", "panicked", "test result: FAILED", "failures:"]` |
+
+`failure_patterns: []` disables extraction. The patterns are literal, not
+regular expressions, must not be empty or whitespace-only, and can also be
+set in the project's `[delivery]` table.
+Recipe stdout and stderr are merged into
+`<work_dir>/<project>/logs/<job-id>-<attempt>.log` on the target. Logs are outside
+the reusable slot and are not removed by later jobs. `job show` and the
+card's failure block include the target and full log path. They show the
+first 1800 bytes of matching lines (with context), then the last 1200 bytes
+of output. A separate target session reads the excerpt after the recipe
+ends, including after a timeout or cancellation. A cancelled job keeps its
+cancelled state and receives its final output after draining. The recipe
+keeps its inherited umask, while the log file is created privately (0600).
+Each attempt has its own file, including reruns after a lost run. Logs have
+no automatic retention limit.
 
 The target must be a target of the project. A global target needs a
 sysadmin or the operator. The audit row `project.delivery` keeps the old
