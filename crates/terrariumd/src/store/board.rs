@@ -728,7 +728,11 @@ fn render(
 
 pub fn get_card(conn: &Connection, id: &str) -> ApiResult<Card> {
     let row = find_row(conn, id)?;
-    render(conn, row, &mut super::card_history::ReviewEstimates::for_card(id))
+    render(
+        conn,
+        row,
+        &mut super::card_history::ReviewEstimates::for_card(id),
+    )
 }
 
 pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {

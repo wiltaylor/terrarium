@@ -319,7 +319,8 @@ mod tests {
             "../../migrations/ter-157-card-move-history-index.sql"
         ))
         .unwrap();
-        c.execute_batch("CREATE INDEX events_project ON events(project, seq);").unwrap();
+        c.execute_batch("CREATE INDEX events_project ON events(project, seq);")
+            .unwrap();
         c
     }
 
@@ -448,8 +449,17 @@ mod tests {
         assert!(cache.entered_at(&c, "p", "a", None).unwrap().is_some());
         assert_eq!(cache.entries["p"].len(), 1);
         assert!(!cache.entries["p"].contains_key("b"));
-        let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {COLUMN_ENTRIES_SQL} AND c.id = ?2")).unwrap();
-        let plan = stmt.query_map(["p", "a"], |r| r.get::<_, String>(3)).unwrap().collect::<Result<Vec<_>, _>>().unwrap().join("\n");
+        let mut stmt = c
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {COLUMN_ENTRIES_SQL} AND c.id = ?2"
+            ))
+            .unwrap();
+        let plan = stmt
+            .query_map(["p", "a"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
         assert!(plan.contains("sqlite_autoindex_cards_1 (id=?"), "{plan}");
         assert!(!plan.contains("SCAN c"), "{plan}");
     }
