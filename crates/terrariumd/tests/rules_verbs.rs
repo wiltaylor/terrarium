@@ -472,7 +472,12 @@ async fn version_cut_default_pack_threshold_and_lead_notification() {
         )
         .await,
     );
-    td.post(&format!("/api/cards/{}/move", members[5]), json!({"column":"accepted"})).await.ok();
+    td.post(
+        &format!("/api/cards/{}/move", members[5]),
+        json!({"column":"accepted"}),
+    )
+    .await
+    .ok();
     settle(&td).await;
     let g = card(&td, &members[0]).await["group"].clone();
     assert_eq!(g["total"], 6);
@@ -1190,10 +1195,20 @@ async fn default_triage_notifies_leads_on_backlog_and_hourly() {
     emit(&td, "card", "p", &card, json!({"change": "updated"})).await;
     settle(&td).await;
     assert_eq!(count().await, 1, "unrelated updates do not notify");
-    td.post(&format!("/api/cards/{card}/move"), json!({"column":"ready"})).await.ok();
+    td.post(
+        &format!("/api/cards/{card}/move"),
+        json!({"column":"ready"}),
+    )
+    .await
+    .ok();
     settle(&td).await;
     assert_eq!(count().await, 1, "moves elsewhere do not notify");
-    td.post(&format!("/api/cards/{card}/move"), json!({"column":"backlog"})).await.ok();
+    td.post(
+        &format!("/api/cards/{card}/move"),
+        json!({"column":"backlog"}),
+    )
+    .await
+    .ok();
     settle(&td).await;
     assert_eq!(count().await, 2);
     let projects = rules_engine::load(&state(&td).db, &mut rules_engine::Cache::default())
