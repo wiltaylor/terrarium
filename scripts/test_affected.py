@@ -350,13 +350,15 @@ class Cli(unittest.TestCase):
         self.assertEqual(seen[1][0][1:], ["scripts/rust_tests.py", "-p", "terrarium", "--no-fail-fast"])
         self.assertEqual(seen[2][0][1:], ["scripts/rust_tests.py", "-p", "terrariumd", "--lib", "--bins", "--no-fail-fast"])
 
-    def test_main_run_starts_rust_json_empty(self):
+    def test_main_run_clears_old_rust_reports(self):
         with tempfile.TemporaryDirectory() as d:
             changed = Path(d, "changed")
             changed.write_text("docs/api.md\n")
             results = Path(d, "results")
             results.mkdir()
-            Path(results, "rust.json").write_text("stale\n")
+            Path(results, "doctests.json").write_text("stale\n")
+            Path(results, "rust.xml").write_text("stale\n")
+            Path(results, "rust-2.xml").write_text("stale\n")
             calls = []
             meta = json.dumps({"packages": [], "workspace_members": []})
             with mock.patch.object(affected.subprocess, "run",
@@ -366,7 +368,8 @@ class Cli(unittest.TestCase):
                     mock.patch.dict(os.environ, {"RESULTS_DIR": str(results)}), \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(affected.main(["--files", str(changed), "--run"]), 0)
-            self.assertFalse(Path(results, "rust.json").exists())
+            self.assertFalse(Path(results, "doctests.json").exists())
+            self.assertEqual(list(results.glob("rust*.xml")), [])
             self.assertEqual(calls, [["just", "ci::fmt-check"]])
 
     def test_plan_json_shape(self):

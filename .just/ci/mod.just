@@ -73,14 +73,14 @@ install-nextest: require-cargo
 		*) cargo install cargo-nextest --version 0.9.103 --locked ;;
 	esac
 
-# Parallel unit/integration tests and separate doctests. RESULTS_DIR retains rust.json.
+# Parallel unit/integration tests and separate doctests. RESULTS_DIR retains rust.xml and doctests.json.
 [group('ci')]
 test: require-cargo
 	#!/usr/bin/env bash
 	set -euo pipefail
 	if [ -n "${RESULTS_DIR:-}" ]; then
 		mkdir -p "$RESULTS_DIR"
-		: > "$RESULTS_DIR/rust.json"
+		rm -f "$RESULTS_DIR"/rust*.xml "$RESULTS_DIR/doctests.json"
 	fi
 	python3 scripts/rust_tests.py --workspace --no-fail-fast
 

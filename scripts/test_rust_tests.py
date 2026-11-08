@@ -28,24 +28,24 @@ class RustTests(unittest.TestCase):
             self.assertEqual(rust_tests.run(["-p", "terrariumd", "--test", "jobs"]), 0)
         self.assertEqual(call.call_count, 2)
 
-    def test_results_append_nextest_and_doctest_json(self):
+    def test_results_keep_nextest_junit_and_doctest_json_separate(self):
         calls = []
 
         def reported(cmd, results, env):
             calls.append((cmd, env))
-            with Path(results, "rust.json").open("ab") as out:
+            with Path(results, "doctests.json").open("ab") as out:
                 out.write(b'{"type":"suite"}\n')
             return 0
 
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(
             os.environ, {"RESULTS_DIR": d}, clear=True
         ), mock.patch.object(rust_tests.subprocess, "call", return_value=0), \
-                mock.patch.object(rust_tests, "reported", side_effect=reported):
+                mock.patch.object(rust_tests, "reported", side_effect=reported), \
+                mock.patch.object(rust_tests, "copy_junit") as junit:
             rust_tests.run(["--workspace"])
-            self.assertEqual(Path(d, "rust.json").read_bytes().count(b"\n"), 2)
-        self.assertEqual(calls[0][0][-2:], ["--message-format", "libtest-json"])
-        self.assertEqual(calls[0][1]["NEXTEST_EXPERIMENTAL_LIBTEST_JSON"], "1")
-        self.assertEqual(calls[1][1]["RUSTC_BOOTSTRAP"], "1")
+            self.assertEqual(Path(d, "doctests.json").read_bytes().count(b"\n"), 1)
+            junit.assert_called_once_with(d)
+        self.assertEqual(calls[0][1]["RUSTC_BOOTSTRAP"], "1")
 
     def test_failed_result_output_is_also_in_the_job_log(self):
         failure = '{"type":"test","event":"failed","name":"early_failure","stdout":"panicked: expected value"}\n'
@@ -58,11 +58,11 @@ class RustTests(unittest.TestCase):
         ), mock.patch.object(rust_tests.subprocess, "call", return_value=0), \
                 mock.patch.object(rust_tests.subprocess, "Popen", return_value=child), \
                 mock.patch.object(rust_tests.sys, "stdout", new_callable=io.StringIO) as console:
-            Path(d, "rust.json").write_text("old result\n")
-            self.assertEqual(rust_tests.run(["-p", "example", "--lib"]), 101)
+            Path(d, "doctests.json").write_text("old result\n")
+            self.assertEqual(rust_tests.reported(["cargo", "test", "--doc"], d, {}), 101)
             self.assertIn(failure, console.getvalue())
             self.assertNotIn("old result", console.getvalue())
-            self.assertEqual(Path(d, "rust.json").read_text(), "old result\n" + failure)
+            self.assertEqual(Path(d, "doctests.json").read_text(), "old result\n" + failure)
 
     def test_install_failure_stops_run(self):
         with mock.patch.object(rust_tests.subprocess, "call", return_value=7) as call:

@@ -50,7 +50,9 @@ The merge queue (a batch merge job) runs it on the merged result. Run it
 yourself only when your change touches the build (see above).
 
 When `RESULTS_DIR` is set to an absolute path, `ci::test` also writes libtest
-JSON to `$RESULTS_DIR/rust.json`, and `ci::dashboard-check` writes JUnit XML to
+JUnit XML to `$RESULTS_DIR/rust.xml` (additional affected invocations use
+`rust-2.xml`, and so on), doctest libtest JSON to `$RESULTS_DIR/doctests.json`,
+and `ci::dashboard-check` writes JUnit XML to
 `$RESULTS_DIR/dashboard.xml`. Without `RESULTS_DIR` the output is the plain console output.
 
 The recipes set `RUSTUP_TOOLCHAIN=1.97.1` (the toolchain CI pins) and the

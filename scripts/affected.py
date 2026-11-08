@@ -452,10 +452,11 @@ def main(argv: list[str]) -> int:
             print("  " + " ".join(c))
     if a.run:
         if os.environ.get("RESULTS_DIR"):
-            # rust.json is appended per cargo test call: start empty.
-            p = Path(os.environ["RESULTS_DIR"], "rust.json")
-            if p.exists() and not pl.full:
-                p.unlink()
+            if not pl.full:
+                directory = Path(os.environ["RESULTS_DIR"])
+                for p in [*directory.glob("rust*.xml"), directory / "doctests.json"]:
+                    if p.exists():
+                        p.unlink()
         return run(cmds)
     return 0
 
