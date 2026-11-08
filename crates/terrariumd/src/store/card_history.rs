@@ -31,7 +31,11 @@ pub fn dashboard_work_samples(conn: &Connection, project: &str) -> ApiResult<Vec
     read_work_samples(conn, project, true)
 }
 
-fn read_work_samples(conn: &Connection, project: &str, bounded: bool) -> ApiResult<Vec<WorkSample>> {
+fn read_work_samples(
+    conn: &Connection,
+    project: &str,
+    bounded: bool,
+) -> ApiResult<Vec<WorkSample>> {
     let mut stmt = conn.prepare(
         "SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
                 coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]'), e.seq, x.seq, e.card
@@ -107,13 +111,26 @@ pub struct AccuracyView {
 /// Missing calibration history is excluded, not counted as a raw prediction.
 pub fn accuracy_view(samples: &[WorkSample]) -> AccuracyView {
     let mut seen = std::collections::HashSet::new();
-    let predictions: Vec<_> = samples.iter()
-        .filter(|s| seen.insert(&s.card)).take(30)
+    let predictions: Vec<_> = samples
+        .iter()
+        .filter(|s| seen.insert(&s.card))
+        .take(30)
         .filter_map(|s| {
-            let older: Vec<_> = samples.iter().filter(|h| h.end_seq < s.start_seq).cloned().collect();
-            calibrated_ms(&older, &s.labels, Some(s.guess_ms)).map(|guess_ms| WorkSample { guess_ms, ..s.clone() })
-        }).collect();
-    AccuracyView { raw: work_accuracy(samples), calibrated: work_accuracy(&predictions) }
+            let older: Vec<_> = samples
+                .iter()
+                .filter(|h| h.end_seq < s.start_seq)
+                .cloned()
+                .collect();
+            calibrated_ms(&older, &s.labels, Some(s.guess_ms)).map(|guess_ms| WorkSample {
+                guess_ms,
+                ..s.clone()
+            })
+        })
+        .collect();
+    AccuracyView {
+        raw: work_accuracy(samples),
+        calibrated: work_accuracy(&predictions),
+    }
 }
 
 pub fn work_accuracy(samples: &[WorkSample]) -> WorkAccuracy {
@@ -424,17 +441,28 @@ mod tests {
 
     #[test]
     fn calibrated_accuracy_uses_only_completions_before_each_guess() {
-        let samples: Vec<_> = (0..10).rev().map(|n| WorkSample {
-            card: n.to_string(), start_seq: n * 2, end_seq: n * 2 + 1,
-            actual_ms: 100.0, guess_ms: 1000.0, labels: vec!["type:impl".into()],
-        }).collect();
+        let samples: Vec<_> = (0..10)
+            .rev()
+            .map(|n| WorkSample {
+                card: n.to_string(),
+                start_seq: n * 2,
+                end_seq: n * 2 + 1,
+                actual_ms: 100.0,
+                guess_ms: 1000.0,
+                labels: vec!["type:impl".into()],
+            })
+            .collect();
         let view = accuracy_view(&samples);
         assert_eq!(view.raw.samples, 10);
         assert_eq!(view.raw.within_half_to_double_pct, Some(0.0));
         assert_eq!(view.calibrated.samples, 5);
         assert_eq!(view.calibrated.on_time_pct, Some(100.0));
         assert_eq!(view.calibrated.within_half_to_double_pct, Some(100.0));
-        let overlapping: Vec<_> = samples.iter().cloned().map(|s| WorkSample { start_seq: 0, ..s }).collect();
+        let overlapping: Vec<_> = samples
+            .iter()
+            .cloned()
+            .map(|s| WorkSample { start_seq: 0, ..s })
+            .collect();
         assert_eq!(accuracy_view(&overlapping).calibrated.samples, 0);
         assert_eq!(accuracy_view(&overlapping).calibrated.on_time_pct, None);
     }
