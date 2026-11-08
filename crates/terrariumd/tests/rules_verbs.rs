@@ -167,7 +167,12 @@ async fn group_lifecycle_is_rule_only_and_members_keep_their_columns() {
     }
     let board = td.get("/api/projects/p/board").await;
     assert_eq!(board.status, 200, "{}", board.body);
-    let review = board.body["columns"].as_array().unwrap().iter().find(|c| c["name"] == "review").unwrap();
+    let review = board.body["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "review")
+        .unwrap();
     assert_eq!(review["count"], 1);
     ping(&td, "p", &a, 1).await;
     settle(&td).await;
@@ -181,7 +186,10 @@ async fn group_lifecycle_is_rule_only_and_members_keep_their_columns() {
     assert_eq!(card(&td, id).await["archived"], true);
     ping(&td, "p", &a, 1).await;
     settle(&td).await;
-    assert!(card(&td, &a).await.get("group").is_none(), "closed key cannot reopen");
+    assert!(
+        card(&td, &a).await.get("group").is_none(),
+        "closed key cannot reopen"
+    );
 }
 
 #[tokio::test]
@@ -196,7 +204,12 @@ async fn groups_refuse_second_membership_then_allow_the_next_lifecycle_group() {
     settle(&td).await;
     let logs = runs_of(&td, "p", "other-group").await;
     assert_eq!(logs[0]["state"], "failed");
-    assert!(logs[0]["reason"].as_str().unwrap().contains("already in open group"));
+    assert!(
+        logs[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("already in open group")
+    );
     ping(&td, "p", &a, 4).await;
     settle(&td).await;
     ping(&td, "p", &a, 2).await;
@@ -212,16 +225,36 @@ async fn group_timeout_closes_once_and_records_comment_and_rule_log() {
     let a = new_card(&td, "p", json!({"title":"a"})).await;
     ping(&td, "p", &a, 1).await;
     settle(&td).await;
-    let id = card(&td, &a).await["group"]["id"].as_str().unwrap().to_owned();
-    state(&td).db.write("test", |t| {
-        t.execute("UPDATE card_groups SET close_at = '2000-01-01T00:00:00Z'", [])?;
-        terrariumd::store::groups::expire(t)?;
-        terrariumd::store::groups::expire(t)
-    }).await.unwrap();
+    let id = card(&td, &a).await["group"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    state(&td)
+        .db
+        .write("test", |t| {
+            t.execute(
+                "UPDATE card_groups SET close_at = '2000-01-01T00:00:00Z'",
+                [],
+            )?;
+            terrariumd::store::groups::expire(t)?;
+            terrariumd::store::groups::expire(t)
+        })
+        .await
+        .unwrap();
     let closed = card(&td, &id).await;
     assert_eq!(closed["archived"], true);
-    assert_eq!(bodies(&closed), vec!["Group closed by the close_after safeguard."]);
-    assert_eq!(runs(&td, "p").await.iter().filter(|r| r["reason"] == "close_after safeguard").count(), 1);
+    assert_eq!(
+        bodies(&closed),
+        vec!["Group closed by the close_after safeguard."]
+    );
+    assert_eq!(
+        runs(&td, "p")
+            .await
+            .iter()
+            .filter(|r| r["reason"] == "close_after safeguard")
+            .count(),
+        1
+    );
     assert!(card(&td, &a).await.get("group").is_none());
 }
 

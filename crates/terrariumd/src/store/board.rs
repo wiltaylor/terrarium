@@ -1140,7 +1140,9 @@ fn owns(actor: &Actor, card: &CardRow) -> bool {
 
 fn may_edit(actor: &Actor, card: &CardRow) -> ApiResult<()> {
     if card.kind == "group" {
-        return Err(ApiError::invalid("group cards are managed only by board rules"));
+        return Err(ApiError::invalid(
+            "group cards are managed only by board rules",
+        ));
     }
     if policy::is_admin_of(actor, &card.project) {
         return Ok(());
@@ -1248,7 +1250,9 @@ fn card_is_held(card: &CardRow) -> bool {
 
 fn not_archived(card: &CardRow) -> ApiResult<()> {
     if card.kind == "group" {
-        return Err(ApiError::invalid("group cards are managed only by board rules"));
+        return Err(ApiError::invalid(
+            "group cards are managed only by board rules",
+        ));
     }
     if card.archived {
         Err(ApiError::conflict(format!("{} is archived", card.id)))
@@ -2175,7 +2179,9 @@ pub fn archive_card(t: &mut Tx<'_>, actor: &Actor, id: &str) -> ApiResult<()> {
     let card = find_row(t, id)?;
     policy::write_project(actor, &card.project)?;
     if card.kind == "group" {
-        return Err(ApiError::invalid("group cards are closed only by board rules"));
+        return Err(ApiError::invalid(
+            "group cards are closed only by board rules",
+        ));
     }
     if card.archived {
         return Ok(());
@@ -2204,7 +2210,9 @@ pub fn add_comment(t: &mut Tx<'_>, actor: &Actor, id: &str, body: &str) -> ApiRe
     let card = find_row(t, id)?;
     policy::write_project(actor, &card.project)?;
     if card.kind == "group" {
-        return Err(ApiError::invalid("group cards are managed only by board rules"));
+        return Err(ApiError::invalid(
+            "group cards are managed only by board rules",
+        ));
     }
     let body = body.trim();
     if body.is_empty() {

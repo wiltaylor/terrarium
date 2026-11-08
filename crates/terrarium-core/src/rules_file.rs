@@ -154,8 +154,16 @@ pub const VERBS: &[Verb] = &[
     Verb {
         kind: "group_status",
         name: "group.status",
-        args: &[("key", Arg::Text), ("text", Arg::Text), ("eta", Arg::Text),
-            ("step", Arg::Text), ("state", Arg::OneOf(&["pending", "running", "done", "failed"]))],
+        args: &[
+            ("key", Arg::Text),
+            ("text", Arg::Text),
+            ("eta", Arg::Text),
+            ("step", Arg::Text),
+            (
+                "state",
+                Arg::OneOf(&["pending", "running", "done", "failed"]),
+            ),
+        ],
         required: &["key"],
     },
     Verb {
@@ -289,7 +297,9 @@ pub const JOB_OUTCOMES: &[&str] = &["red", "conflict", "error", "none"];
 /// The placeholders after `card.`.
 pub const CARD_FIELDS: &[&str] = &["id", "title", "column", "assignee", "labels", "project"];
 /// The group containing the event's card (or the group card itself).
-pub const GROUP_FIELDS: &[&str] = &["id", "key", "title", "column", "status", "done", "total", "eta_at"];
+pub const GROUP_FIELDS: &[&str] = &[
+    "id", "key", "title", "column", "status", "done", "total", "eta_at",
+];
 /// The placeholders after `job.`.
 pub const JOB_FIELDS: &[&str] = &[
     "id",

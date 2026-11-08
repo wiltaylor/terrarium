@@ -277,16 +277,19 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
     let key = a.text("key").unwrap_or_default();
     let verb = a.action.verb.as_str();
     let did = if verb == "group.open" {
-        groups::open(t, groups::Open {
-            project: &ctx.project,
-            rule: &ctx.rule,
-            key: &key,
-            title: &a.text("title").unwrap_or_default(),
-            column: a.raw("column").unwrap_or_default(),
-            done_when: a.raw("done_when").unwrap_or_default(),
-            eta: a.text("eta").as_deref(),
-            close_after: a.text("close_after").as_deref(),
-        })?
+        groups::open(
+            t,
+            groups::Open {
+                project: &ctx.project,
+                rule: &ctx.rule,
+                key: &key,
+                title: &a.text("title").unwrap_or_default(),
+                column: a.raw("column").unwrap_or_default(),
+                done_when: a.raw("done_when").unwrap_or_default(),
+                eta: a.text("eta").as_deref(),
+                close_after: a.text("close_after").as_deref(),
+            },
+        )?
     } else {
         let g = groups::by_key(t, &ctx.project, &key)?
             .ok_or_else(|| ApiError::invalid(format!("no group with key `{key}`")))?;
@@ -294,17 +297,34 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
             "group.add" => groups::add(t, &g, &the_card(ctx, verb)?.id)?,
             "group.remove" => groups::remove(t, &g, &the_card(ctx, verb)?.id)?,
             "group.status" => match a.text("step") {
-                Some(step) => groups::step(t, &g, &step, a.raw("state"), a.text("text").as_deref(), a.text("eta").as_deref())?,
+                Some(step) => groups::step(
+                    t,
+                    &g,
+                    &step,
+                    a.raw("state"),
+                    a.text("text").as_deref(),
+                    a.text("eta").as_deref(),
+                )?,
                 None => {
-                    if a.raw("state").is_some() { return Err(ApiError::invalid("group_status state requires step")); }
+                    if a.raw("state").is_some() {
+                        return Err(ApiError::invalid("group_status state requires step"));
+                    }
                     groups::status(t, &g, a.text("text").as_deref(), a.text("eta").as_deref())?
                 }
             },
-            "group.close" => groups::close(t, &g, &a.text("comment").unwrap_or_else(|| format!("Closed by rule {}", ctx.rule)))?,
+            "group.close" => groups::close(
+                t,
+                &g,
+                &a.text("comment")
+                    .unwrap_or_else(|| format!("Closed by rule {}", ctx.rule)),
+            )?,
             _ => unreachable!(),
         }
     };
-    Ok(Done { changed: did, detail: json!({"key": key}) })
+    Ok(Done {
+        changed: did,
+        detail: json!({"key": key}),
+    })
 }
 
 fn card_move(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiResult<Done> {
@@ -577,7 +597,11 @@ pub fn pick_batch(
 ) -> ApiResult<BatchPick> {
     let board = board::get_board(conn, project)?;
     let mut out = BatchPick::default();
-    for c in board.cards.iter().filter(|c| c.column == from && c.kind != "group") {
+    for c in board
+        .cards
+        .iter()
+        .filter(|c| c.column == from && c.kind != "group")
+    {
         if api_jobs::not_held(c).is_err() {
             out.left_out.push(json!({"card": c.id, "reason": "held"}));
             continue;

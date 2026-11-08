@@ -631,9 +631,11 @@ pub fn lint(set: &RuleSet, columns: &[BoardColumn]) -> Vec<Finding> {
     for r in &live {
         for a in r.actions.iter().filter(|a| a.verb == "group.open") {
             let key = a.args.get("key");
-            let has_close = live.iter().any(|r| r.actions.iter().any(|close| {
-                close.verb == "group.close" && close.args.get("key") == key
-            }));
+            let has_close = live.iter().any(|r| {
+                r.actions
+                    .iter()
+                    .any(|close| close.verb == "group.close" && close.args.get("key") == key)
+            });
             if !has_close && !a.args.contains_key("close_after") {
                 out.push(Finding {
                     code: "group_without_close",
@@ -1170,13 +1172,30 @@ rule "to-blocked" {
           group_open { key = "batch:{{job.id}}" title = "Batch" column = "review" done_when = "done" }
         }"#;
         let set = parse(text, "rules.wcl", &Context::default()).unwrap();
-        assert!(lint(&set, &[]).iter().any(|f| f.code == "group_without_close"));
-        let closed = format!("{text}\nrule \"close\" {{ on = [\"job\"] group_close {{ key = \"batch:{{{{job.id}}}}\" }} }}");
+        assert!(
+            lint(&set, &[])
+                .iter()
+                .any(|f| f.code == "group_without_close")
+        );
+        let closed = format!(
+            "{text}\nrule \"close\" {{ on = [\"job\"] group_close {{ key = \"batch:{{{{job.id}}}}\" }} }}"
+        );
         let set = parse(&closed, "rules.wcl", &Context::default()).unwrap();
-        assert!(!lint(&set, &[]).iter().any(|f| f.code == "group_without_close"));
-        let timeout = text.replace("done_when = \"done\"", "done_when = \"done\" close_after = \"1h\"");
+        assert!(
+            !lint(&set, &[])
+                .iter()
+                .any(|f| f.code == "group_without_close")
+        );
+        let timeout = text.replace(
+            "done_when = \"done\"",
+            "done_when = \"done\" close_after = \"1h\"",
+        );
         let set = parse(&timeout, "rules.wcl", &Context::default()).unwrap();
-        assert!(!lint(&set, &[]).iter().any(|f| f.code == "group_without_close"));
+        assert!(
+            !lint(&set, &[])
+                .iter()
+                .any(|f| f.code == "group_without_close")
+        );
     }
 
     #[test]

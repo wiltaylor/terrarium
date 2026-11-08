@@ -1384,7 +1384,11 @@ pub async fn pass(state: &Shared, cache: &mut Cache) {
         if !timers_checked && cache.timers_at.is_none_or(|at| at.elapsed() >= TICK) {
             timers_checked = true;
             cache.timers_at = Some(std::time::Instant::now());
-            if let Err(e) = state.db.write("rule:group-timeout", crate::store::groups::expire).await {
+            if let Err(e) = state
+                .db
+                .write("rule:group-timeout", crate::store::groups::expire)
+                .await
+            {
                 warn!("the rule engine cannot close expired groups: {e}");
             }
             if let Err(e) = fire_timers(&state.db, &projects, &mut cache.fired, Utc::now()).await {
