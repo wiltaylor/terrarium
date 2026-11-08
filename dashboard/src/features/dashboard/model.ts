@@ -3,7 +3,7 @@
 // bucket, the y scale and ticks, the table columns, the layout checks that
 // the daemon makes, and the block moves of the edit mode.
 
-import type { DashboardBlock, DashboardBlockKind, DashboardBlockSize, DashboardRange, ItemOwner, Monitor, MonitorKind, MonitorPoint, MonitorRow, MonitorStatus } from "../../api/types";
+import type { DashboardBlock, DashboardBlockKind, DashboardBlockSize, DashboardRange, ItemOwner, JobStats, Monitor, MonitorKind, MonitorPoint, MonitorRow, MonitorStatus } from "../../api/types";
 
 /** The state that a block shows: a result status, or why it has none. */
 export type BlockState = MonitorStatus | "stale" | "pending" | "off";
@@ -273,3 +273,27 @@ export function stateCounts(monitors: readonly Monitor[], now: number): Record<B
  * `runs as <actor>`. A row with no owner is actor-owned. */
 export const ownerText = (m: { owner?: ItemOwner; run_as: string }): string =>
   m.owner === "project" ? "owned by the project" : m.owner === "system" ? "owned by the system" : `runs as ${m.run_as}`;
+
+/** The windows of the job-queue strip (TER-178): durations back from now, as the stats endpoint takes them. `7d` is the
+ * daemon's default window. */
+export const JOB_WINDOWS = [
+  { id: "24h", label: "24 hours" },
+  { id: "7d", label: "7 days" },
+  { id: "30d", label: "30 days" },
+] as const;
+
+/** A pass rate (0 to 1, `null` with no ended attempt) as a whole percent. */
+export const passRateText = (rate: number | null | undefined): string =>
+  rate === null || rate === undefined || !Number.isFinite(rate) ? "–" : `${Math.round(rate * 100)}%`;
+
+/** The quiet counts beside the rate of the job-queue strip: only the parts that are not zero, in this order. */
+export function jobStatNotes(s: JobStats | null | undefined): string[] {
+  if (!s) return [];
+  const n = (v: number, what: string) => `${v} ${what}${v === 1 ? "" : "s"}`;
+  const out: string[] = [];
+  if (s.reruns.ended > 0) out.push(`${s.reruns.passed} of ${s.reruns.ended} rerun${s.reruns.ended === 1 ? "" : "s"} passed`);
+  if (s.conflicts > 0) out.push(n(s.conflicts, "conflict"));
+  if (s.errors > 0) out.push(n(s.errors, "error"));
+  if (s.open > 0) out.push(`${s.open} open`);
+  return out;
+}
