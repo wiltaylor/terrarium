@@ -179,13 +179,13 @@ pub struct Collected {
 }
 
 impl Collected {
-    fn end(&self) -> End {
+    pub(crate) fn end(&self) -> End {
         self.end
             .clone()
             .unwrap_or_else(|| End::error("lost", "the run ended without an end"))
     }
 
-    fn stderr_tail(&self) -> String {
+    pub(crate) fn stderr_tail(&self) -> String {
         let s = String::from_utf8_lossy(&self.stderr);
         let start = s.len().saturating_sub(2000);
         let mut i = start;
@@ -1997,11 +1997,13 @@ async fn start_exec_secrets(
     secrets: Vec<(String, zeroize::Zeroizing<String>)>,
 ) -> ApiResult<Arc<ExecSession>> {
     let on = on.unwrap_or_default();
+    let _root_guard = crate::target_roots::lock_card(state, actor, name).await?;
     let row = usable(state, actor, name).await?;
     check_cap(state, actor)?;
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
     let mut cmd = cmd;
     cmd.holder = on.holder.clone().or_else(|| holder_of(actor));
+    crate::target_roots::prepare_exec(state, actor, &def, &mut cmd).await?;
     // VMLab's exec protocol cannot carry an environment.
     if def.kind != TargetKind::Vmlab
         && let Some(a) = actor.agent()
@@ -5044,7 +5046,7 @@ pub fn checkout_cmd(
     {
         return Err(ApiError::invalid(format!("bad branch name `{b}`")));
     }
-    if dest.is_empty() || dest.split('/').any(|c| c == "..") || dest.starts_with('-') {
+    if !dest.starts_with('/') || dest.split('/').any(|c| c == "..") {
         return Err(ApiError::invalid(format!("bad checkout path `{dest}`")));
     }
     Ok(RemoteCmd {
@@ -5106,6 +5108,8 @@ pub async fn checkout_on_target(
         ));
     }
     let mut cmd = checkout_cmd(url, dest, branch, depth, secret)?;
+    let _root_guard = crate::target_roots::lock_card(state, actor, &row.def.name).await?;
+    crate::target_roots::prepare(state, actor, &row.def, Some(dest)).await?;
     if let Some(a) = actor.agent() {
         let p = crate::git_identity::provenance(state, &a.id).await?;
         cmd.env.insert("TERRARIUM_COMMIT_HOOK".into(), p.hook());
@@ -5319,12 +5323,13 @@ mod tests {
             username: "x-access-token".into(),
             token: zeroize::Zeroizing::new("ghp_SECRET".into()),
         };
-        let c = checkout_cmd("https://h/r.git", "r", Some("main"), Some(1), Some(&s)).unwrap();
+        let c = checkout_cmd("https://h/r.git", "/r", Some("main"), Some(1), Some(&s)).unwrap();
         assert!(!c.argv.iter().any(|a| a.contains("ghp_SECRET")));
         assert_eq!(c.env["TERRARIUM_GIT_PASSWORD"], "ghp_SECRET");
-        assert_eq!(&c.argv[4..], ["https://h/r.git", "r", "main", "1"]);
-        assert!(checkout_cmd("ext::sh -c x", "r", None, None, None).is_err());
-        assert!(checkout_cmd("https://h/r", "r", Some("-x"), None, None).is_err());
+        assert_eq!(&c.argv[4..], ["https://h/r.git", "/r", "main", "1"]);
+        assert!(checkout_cmd("ext::sh -c x", "/r", None, None, None).is_err());
+        assert!(checkout_cmd("https://h/r", "/r", Some("-x"), None, None).is_err());
+        assert!(checkout_cmd("https://h/r", "r", None, None, None).is_err());
         assert!(checkout_cmd("https://h/r", "../r", None, None, None).is_err());
         let v = parse_checkout("noise\nTERRARIUM_CHECKOUT\taction=cloned\thead=abc\tbranch=main\tpath=/h/work/r\tnote=\n").unwrap();
         assert_eq!(

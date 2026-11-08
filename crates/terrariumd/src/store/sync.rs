@@ -85,6 +85,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
                     )?;
                     if prefix_change.is_some() {
                         let patch = projects::ProjectPatch {
+                            card_dispatcher: None,
                             human_comment_notifications: None,
                             description: None,
                             card_prefix: def.prefix.clone(),
@@ -127,6 +128,11 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
         {
             report.projects.updated.push(def.name.clone());
         }
+        projects::set_card_dispatcher(
+            t,
+            &def.name,
+            def.card_dispatcher.as_deref().unwrap_or("off"),
+        )?;
         // Repos: the file list replaces the file repos, and takes over API
         // repos with the same name.
         t.execute(
@@ -167,7 +173,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
         .filter(|n| !names.contains(&n.as_str()))
     {
         t.execute(
-            "UPDATE projects SET source = ?2, updated_at = ?3 WHERE name = ?1",
+            "UPDATE projects SET source = ?2, updated_at = ?3, card_dispatcher = NULL WHERE name = ?1",
             params![name, SOURCE_API, now()],
         )?;
         t.execute("UPDATE repos SET source = 'api' WHERE project = ?1", [name])?;
