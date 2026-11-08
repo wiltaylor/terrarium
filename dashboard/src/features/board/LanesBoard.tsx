@@ -21,11 +21,8 @@ export interface LaneDrag {
 
 type Drop = { lane: string; column: string; index: number };
 
-function StepTiming(props: { step: BoardGroup["steps"][number] }) {
-  const [now, setNow] = createSignal(Date.now());
-  const timer = setInterval(() => setNow(Date.now()), 1000);
-  onCleanup(() => clearInterval(timer));
-  return <span> {stepTiming(props.step, now())}</span>;
+function StepTiming(props: { step: BoardGroup["steps"][number]; now: number }) {
+  return <span> {stepTiming(props.step, props.now)}</span>;
 }
 
 export function LanesBoard(props: {
@@ -47,6 +44,9 @@ export function LanesBoard(props: {
 }) {
   const [dragging, setDragging] = createSignal<{ id: string; lane: string } | null>(null);
   const [drop, setDrop] = createSignal<Drop | null>(null);
+  const [now, setNow] = createSignal(Date.now());
+  const timer = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => clearInterval(timer));
 
   const dropIndex = (cell: HTMLElement, y: number, order: Card[]) => {
     const cards = [...cell.querySelectorAll<HTMLElement>("[data-card]")].filter((el) => el.dataset.card !== dragging()?.id);
@@ -110,7 +110,7 @@ export function LanesBoard(props: {
                   <Show when={group().status}><span>{group().status}</span></Show>
                   <ol><For each={group().steps}>{(step) => <li>
                     {step.name}: {step.state} {step.text}
-                    <StepTiming step={step} />
+                    <StepTiming step={step} now={now()} />
                   </li>}</For></ol>
                 </Show>
               </header>

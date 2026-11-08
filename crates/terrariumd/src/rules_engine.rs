@@ -1243,6 +1243,16 @@ pub(crate) fn lookup(ctx: &RunCtx, name: &str) -> Option<String> {
             "done" => g.done.to_string(),
             "total" => g.total.to_string(),
             "eta_at" => g.eta_at.clone()?,
+            "failed_step" => {
+                if g.steps
+                    .iter()
+                    .any(|s| s.name == "e2e" && s.started_at.is_some())
+                {
+                    "e2e".into()
+                } else {
+                    "merge job".into()
+                }
+            }
             _ => return None,
         });
     }

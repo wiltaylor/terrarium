@@ -1846,18 +1846,16 @@ async fn steps(
     );
     if job.kind == JobKind::Merge {
         let card = job.card.clone();
-        x.state
+        if let Err(e) = x
+            .state
             .db
             .write("system", move |t| {
-                if let Some(g) = crate::store::groups::for_card(t, &card)?
-                    && g.key.starts_with("merge:")
-                {
-                    crate::store::groups::step(t, &g, "merge job", Some("done"), None, None)?;
-                    crate::store::groups::step(t, &g, "e2e", Some("running"), None, None)?;
-                }
-                Ok(())
+                crate::store::groups::merge_recipe_started(t, &card)
             })
-            .await?;
+            .await
+        {
+            warn!(job = %job.id, "cannot update merge group recipe boundary: {e}");
+        }
     }
     let recipe_cmd = RemoteCmd {
         argv: vec![

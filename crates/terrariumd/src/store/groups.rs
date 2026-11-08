@@ -156,8 +156,9 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Group> {
     let mut cursor = chrono::DateTime::parse_from_rfc3339(&created)
         .map(|v| v.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
+    let estimates = historical_secs(conn, id)?;
     for step in &mut g.steps {
-        step.estimated_secs = historical_secs(conn, id, &step.name)?;
+        step.estimated_secs = estimates.get(&step.name).copied();
         if step.state == "done" || step.state == "failed" {
             step.eta_at = None;
             if let Some(at) = step
@@ -199,51 +200,62 @@ fn elapsed(start: Option<String>, end: Option<String>) -> Option<i64> {
 }
 
 /// Successful samples only, scoped to this project and group lifecycle rule.
-fn historical_secs(conn: &Connection, id: &str, name: &str) -> ApiResult<Option<i64>> {
+fn historical_secs(
+    conn: &Connection,
+    id: &str,
+) -> ApiResult<std::collections::BTreeMap<String, i64>> {
     let mut stmt = conn.prepare(
-        "SELECT s.started_at, s.finished_at FROM group_steps s
+        "SELECT s.name, s.started_at, s.finished_at FROM group_steps s
         JOIN card_groups g ON g.card = s.group_card
         JOIN card_groups current ON current.card = ?1
         WHERE g.project = current.project AND g.rule = current.rule
-        AND s.group_card <> ?1 AND s.name = ?2 AND s.state = 'done'
+        AND s.group_card <> ?1 AND s.state = 'done'
         AND s.started_at IS NOT NULL AND s.finished_at IS NOT NULL",
     )?;
-    let mut samples = stmt
-        .query_map(params![id, name], |r| Ok(elapsed(r.get(0)?, r.get(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let mut samples = std::collections::BTreeMap::<String, Vec<i64>>::new();
+    for row in stmt.query_map([id], |r| {
+        Ok((r.get::<_, String>(0)?, elapsed(r.get(1)?, r.get(2)?)))
+    })? {
+        let (name, secs) = row?;
+        if let Some(secs) = secs {
+            samples.entry(name).or_default().push(secs);
+        }
+    }
     // Before phase timing existed, successful merge jobs still recorded queue
     // wait and total run time. Use run time as the initial e2e estimate only.
-    if samples.is_empty() && matches!(name, "queued" | "e2e") {
+    if !samples.contains_key("queued") || !samples.contains_key("e2e") {
         let mut jobs = conn.prepare(
             "SELECT j.created_at, j.started_at, j.ended_at FROM jobs j
             JOIN card_groups g ON g.card = ?1 AND g.project = j.project
             WHERE g.key LIKE 'merge:%' AND j.kind = 'merge' AND j.state = 'passed'",
         )?;
-        samples = jobs
-            .query_map([id], |r| {
-                if name == "queued" {
-                    Ok(elapsed(r.get(0)?, r.get(1)?))
-                } else {
-                    Ok(elapsed(r.get(1)?, r.get(2)?))
-                }
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+        let mut queue = Vec::new();
+        let mut run = Vec::new();
+        for row in jobs.query_map([id], |r| {
+            Ok((elapsed(r.get(0)?, r.get(1)?), elapsed(r.get(1)?, r.get(2)?)))
+        })? {
+            let (queued, running) = row?;
+            queue.extend(queued);
+            run.extend(running);
+        }
+        samples.entry("queued".into()).or_insert(queue);
+        samples.entry("e2e".into()).or_insert(run);
     }
-    samples.sort_unstable();
-    let n = samples.len();
-    Ok(if n == 0 {
-        None
-    } else if n % 2 == 1 {
-        Some(samples[n / 2])
-    } else {
-        Some(samples[n / 2 - 1] + (samples[n / 2] - samples[n / 2 - 1]) / 2)
-    })
+    Ok(samples
+        .into_iter()
+        .filter_map(|(name, mut values)| {
+            values.sort_unstable();
+            let n = values.len();
+            if n == 0 {
+                None
+            } else {
+                Some((
+                    name,
+                    values[(n - 1) / 2] + (values[n / 2] - values[(n - 1) / 2]) / 2,
+                ))
+            }
+        })
+        .collect())
 }
 
 pub fn by_key(conn: &Connection, project: &str, key: &str) -> ApiResult<Option<Group>> {
@@ -433,6 +445,17 @@ pub fn close(t: &mut Tx<'_>, g: &Group, comment: &str) -> ApiResult<bool> {
     Ok(true)
 }
 
+/// The recipe boundary separates merge preparation from the test run.
+pub fn merge_recipe_started(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
+    if let Some(g) = for_card(t, card)?
+        && g.key.starts_with("merge:")
+    {
+        step(t, &g, "merge job", Some("done"), None, None)?;
+        step(t, &g, "e2e", Some("running"), None, None)?;
+    }
+    Ok(())
+}
+
 pub fn step(
     t: &mut Tx<'_>,
     g: &Group,
@@ -455,8 +478,26 @@ pub fn step(
         ));
     }
     // Callers may update several steps using the same group snapshot.
-    let fresh = get(t, &g.id)?;
-    let existing = fresh.steps.iter().find(|s| s.name == name);
+    let fresh = t
+        .query_row(
+            "SELECT name, state, text, eta_at, started_at, finished_at
+        FROM group_steps WHERE group_card = ?1 AND name = ?2",
+            params![g.id, name],
+            |r| {
+                Ok(GroupStep {
+                    name: r.get(0)?,
+                    state: r.get(1)?,
+                    text: r.get(2)?,
+                    eta_at: r.get(3)?,
+                    started_at: r.get(4)?,
+                    finished_at: r.get(5)?,
+                    duration_secs: None,
+                    estimated_secs: None,
+                })
+            },
+        )
+        .optional()?;
+    let existing = fresh.as_ref();
     let state = state
         .or_else(|| existing.map(|s| s.state.as_str()))
         .unwrap_or("pending");
@@ -489,7 +530,7 @@ pub fn step(
     let at = crate::time_param::stored(Utc::now());
     t.execute("INSERT INTO group_steps (group_card, name, position, state, text, eta_at, started_at, finished_at)
         SELECT ?1, ?2, coalesce(max(position), -1) + 1, ?3, ?4, ?5,
-        CASE WHEN ?3 <> 'pending' THEN ?6 END,
+        CASE WHEN ?3 = 'running' THEN ?6 END,
         CASE WHEN ?3 IN ('done', 'failed') THEN ?6 END FROM group_steps WHERE group_card = ?1
         ON CONFLICT(group_card, name) DO UPDATE SET state = excluded.state,
         text = excluded.text, eta_at = excluded.eta_at,

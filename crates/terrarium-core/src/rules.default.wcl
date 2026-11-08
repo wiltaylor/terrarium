@@ -111,7 +111,7 @@ rule "merge-group-failed" {
   max_per_hour = 600
   when "data.kind" { eq = "merge" }
   when "data.verdict" { one_of = ["red", "conflict", "error", "cancelled"] }
-  group_status { key = "{{job.group_key}}" step = "e2e" state = "failed" }
+  group_status { key = "{{job.group_key}}" step = "{{group.failed_step}}" state = "failed" }
 }
 
 rule "job-requeued" {

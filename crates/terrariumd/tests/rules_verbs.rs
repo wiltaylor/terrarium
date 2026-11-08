@@ -45,6 +45,14 @@ async fn group_step_eta_uses_project_history_and_records_real_duration() {
                 WHERE group_card = ?1", rusqlite::params![g.id, secs])?;
             ids.push(g.id);
         }
+        groups::open(t, groups::Open { project: "p", rule: "merge", key: "untimed", title: "untimed",
+            column: "review", done_when: "accepted", eta: None, close_after: None })?;
+        let untimed = groups::by_key(t, "p", "untimed")?.unwrap();
+        groups::step(t, &untimed, "e2e", Some("pending"), None, None)?;
+        groups::step(t, &untimed, "e2e", Some("done"), None, None)?;
+        let untimed = groups::get(t, &untimed.id)?;
+        assert!(untimed.steps[0].started_at.is_none());
+        assert!(untimed.steps[0].duration_secs.is_none());
         groups::open(t, groups::Open { project: "p", rule: "merge", key: "new", title: "new",
             column: "review", done_when: "accepted", eta: None, close_after: None })?;
         let g = groups::by_key(t, "p", "new")?.unwrap();
@@ -894,6 +902,68 @@ async fn default_merge_group_waits_for_every_member_and_passed_recipe() {
 }
 
 #[tokio::test]
+async fn merge_group_failure_tracks_the_phase_that_actually_started() {
+    use terrariumd::store::groups;
+    for (outcome, recipe) in [("conflict", false), ("error", false), ("red", true)] {
+        let td = queue_lab().await;
+        put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+        let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
+        let job = store_job(&td, JobKind::Merge, &[&a]).await;
+        settle(&td).await;
+        let id = job.id.clone();
+        state(&td)
+            .db
+            .write("system", move |t| {
+                jobs::start(t, &id, "machine", None)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        settle(&td).await;
+        if recipe {
+            let member = a.clone();
+            state(&td)
+                .db
+                .write("system", move |t| groups::merge_recipe_started(t, &member))
+                .await
+                .unwrap();
+            let g = card(&td, &a).await["group"].clone();
+            assert_eq!(g["steps"][1]["state"], "done");
+            assert_eq!(g["steps"][2]["state"], "running");
+        }
+        let (id, end_outcome) = (job.id.clone(), outcome.to_owned());
+        let failed = state(&td)
+            .db
+            .write("system", move |t| {
+                Ok(jobs::finish(
+                    t,
+                    &id,
+                    &JobEnd {
+                        passed: false,
+                        outcome: Some(end_outcome),
+                        exit_code: Some(1),
+                        ..JobEnd::default()
+                    },
+                )?
+                .unwrap())
+            })
+            .await
+            .unwrap();
+        verdict(&td, &failed, &a, outcome).await;
+        settle(&td).await;
+        let g = card(&td, &a).await["group"].clone();
+        assert_eq!(
+            g["steps"][1]["state"],
+            if recipe { "done" } else { "failed" }
+        );
+        assert_eq!(
+            g["steps"][2]["state"],
+            if recipe { "failed" } else { "pending" }
+        );
+    }
+}
+
+#[tokio::test]
 async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     let td = queue_lab().await;
     put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
@@ -911,8 +981,9 @@ async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     settle(&td).await;
     let g = card(&td, &gid).await["group"].clone();
     assert_eq!(g["total"], 3);
-    assert_eq!(g["steps"][2]["name"], "e2e");
-    assert_eq!(g["steps"][2]["state"], "failed");
+    assert_eq!(g["steps"][1]["name"], "merge job");
+    assert_eq!(g["steps"][1]["state"], "failed");
+    assert_eq!(g["steps"][2]["state"], "pending");
     let fix = g["members"][0].as_str().unwrap().to_owned();
     assert_ne!(fix, a);
     assert_ne!(fix, b);

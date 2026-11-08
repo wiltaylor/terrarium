@@ -14,4 +14,7 @@ describe("group step timing", () => {
   it("does not invent an estimate without samples", () => {
     expect(stepTiming({ ...step, eta_at: null }, now)).toBe("ETA unavailable (no history)");
   });
+  it("shows done for an untimed completion", () => {
+    expect(stepTiming({ ...step, state: "done", eta_at: null }, now)).toBe("done");
+  });
 });
