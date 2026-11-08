@@ -1572,7 +1572,7 @@ terrarium question bundle "<summary>" (--item "<text>"... | --items-file <path|-
                        [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
                        [--wait [--timeout 2h]]
 terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
-                 [--wait [--timeout 2h]]
+                 [--reply-to <id>] [--wait [--timeout 2h]]
 terrarium question ls [--all] [--status open|answered|acknowledged|retracted] [--kind question|notice|bundle] [--agent a]
 terrarium question show <id>
 terrarium question update <id> [--text t] [--option o]... [--clear-options] [--items-file <path|->]
@@ -1614,6 +1614,17 @@ terrarium admin inbox resume <thread-id> [-m note]
   questions together, and the agent gets all answers in one mail, item by
   item. Use a bundle only for decisions that belong together; ask an
   unrelated question on its own. `--wait` works as for `ask`.
+- Use `notify` only for an answer to the operator, one done per operator
+  request, or a real problem (security, data loss, outage, spent budget).
+  Do not send milestone, merge, CI, pre-release, deploy, hold, resume, or
+  progress notices. A notice requires `--card`, `--reply-to`, or urgent or
+  critical priority. `--reply-to` names an operator mail to you, an operator
+  message in your Inbox thread, or an answered question of yours. An invalid
+  reference is rejected. These flags provide context, not permission to send
+  routine updates.
+- Only one open question or bundle per agent may use the same card or Inbox
+  thread. A conflict returns the existing question ID. Follow up with
+  `question update` instead of asking again. Updates cannot bypass this rule.
 - `notify` sends a notice: `kind: "notice"`, with no options. It prints
   `notice <id> sent (<priority>). The acknowledgement comes as mail on
   thread <thread>.` With `--wait`, it registers a `question` wait on the
