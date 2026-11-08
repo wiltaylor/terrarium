@@ -28,6 +28,9 @@
 //!   leaves all linked cards in review or later, wakes the agent (the
 //!   `thread` event `cards`). A thread in `tracking` goes to
 //!   `waiting_agent` and back to `tracking` on the agent's reply.
+//!   Starting tracking with ready cards, or archiving the last unfinished
+//!   card, also checks review readiness. Card events never interrupt an
+//!   operator wait, and replies preserve open questions.
 //! - The overall response can be sent again (TER-148, D10): the newest
 //!   replaces `response`, and each stays in the conversation as a message
 //!   of kind `response`.
@@ -604,8 +607,8 @@ pub fn on_card_moved(
 /// Wake the agent of the thread `id` that tracks, for `reason`
 /// ([`WAKE_BLOCKED`], [`WAKE_REVIEW`]). A thread in `tracking` goes to
 /// `waiting_agent`; `tracking_at` stays, so the agent's reply puts it back
-/// into tracking ([`post`]). A thread that waits on the operator (an open
-/// question) or on the agent keeps its status. The `thread` event `cards`
+/// into tracking ([`post`]). A thread that waits on the operator is left
+/// parked. A thread waiting on the agent keeps its status. The `thread` event `cards`
 /// carries only the reason, not the card: a reader of the thread's events
 /// need not read the card's project (TER-146).
 fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
@@ -1039,6 +1042,7 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
 /// handoff (TER-145, TER-144 D1): the agent parks, and the reminder and
 /// the stale close do not apply. A close proposal is withdrawn. A thread
 /// with an open question waits on the operator: `409 conflict`.
+/// On the first handoff, cards already in review or later wake it at once.
 pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
     let first = th.tracking_at.is_none();

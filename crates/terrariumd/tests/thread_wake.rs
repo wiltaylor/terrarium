@@ -424,14 +424,18 @@ async fn tracking_ready_cards_and_archiving_unfinished_cards_wake_review() {
         } else {
             None
         };
-        let r = lab.td.post_empty_as(&eph, &format!("/api/threads/{tid}/track")).await;
+        let r = lab
+            .td
+            .post_empty_as(&eph, &format!("/api/threads/{tid}/track"))
+            .await;
         assert_eq!(r.status, 200, "{}", r.body);
         if let Some(card) = dropped {
             lab.parked(&eph).await;
             lab.td.delete(&format!("/api/cards/{card}")).await.ok();
         }
         assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
-        lab.nth_prompt(&eph, &format!("[Thread:{tid}] {REVIEW_TURN}"), 1).await;
+        lab.nth_prompt(&eph, &format!("[Thread:{tid}] {REVIEW_TURN}"), 1)
+            .await;
         assert_eq!(lab.wakes(&tid).await, ["review"]);
     }
 }
@@ -444,14 +448,22 @@ async fn card_events_and_agent_replies_preserve_open_question_waits() {
     lab.link(&tid, &format!("p:{card}")).await;
     lab.track(&eph, &tid).await;
     lab.parked(&eph).await;
-    lab.td.post_as(&eph, &format!("/api/agents/{eph}/questions"),
-        json!({"text": "Proceed?", "options": ["yes", "no"], "thread": tid})).await.ok();
+    lab.td
+        .post_as(
+            &eph,
+            &format!("/api/agents/{eph}/questions"),
+            json!({"text": "Proceed?", "options": ["yes", "no"], "thread": tid}),
+        )
+        .await
+        .ok();
     lab.parked(&eph).await;
     lab.mv(&card, "blocked", None).await;
     lab.mv(&card, "review", None).await;
     assert_eq!(lab.thread(&tid).await["status"], "waiting_operator");
     assert!(lab.wakes(&tid).await.is_empty());
-    let th = lab.post_as(&eph, &tid, "Still waiting for your answer.").await;
+    let th = lab
+        .post_as(&eph, &tid, "Still waiting for your answer.")
+        .await;
     assert_eq!(th["status"], "waiting_operator");
     lab.parked(&eph).await;
 }

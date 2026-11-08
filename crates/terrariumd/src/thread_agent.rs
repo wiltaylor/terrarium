@@ -898,8 +898,8 @@ mod tests {
             a(json!({"change": "agent", "id": "01T", "status": "waiting_agent"})),
             None
         );
-        // A linked card wakes it (TER-148), also while the thread waits on
-        // the operator; a closed thread ends it.
+        // A linked card wakes it unless it waits on the operator.
+        // A closed thread ends it.
         assert_eq!(
             a(
                 json!({"change": "cards", "id": "01T", "status": "waiting_agent",
