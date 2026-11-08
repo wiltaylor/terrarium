@@ -176,7 +176,7 @@ export function createRulesMock(ctx: RulesMockContext) {
           s.hash++;
           ctx.audit("rules.put", project, project, { hash: hashOf(s) });
         }
-        return { project, rule, enabled: true, changed, hash: hashOf(s) };
+        return { project, rule, enabled: true, changed, hash: hashOf(s), findings: findings(project) };
       }),
     disable: (project, rule) =>
       ctx.reply(() => {
@@ -188,11 +188,12 @@ export function createRulesMock(ctx: RulesMockContext) {
           s.hash++;
           ctx.audit("rules.put", project, project, { hash: hashOf(s) });
         }
-        return { project, rule, enabled: false, changed, hash: hashOf(s) };
+        return { project, rule, enabled: false, changed, hash: hashOf(s), findings: findings(project) };
       }),
-    migrate: (project, apply = false) =>
+    migrate: (project, apply = false, baseHash) =>
       ctx.reply(() => {
         const s = of(project);
+        if (apply && baseHash !== undefined && baseHash !== (hashOf(s) ?? "")) ctx.fail(409, "conflict", `the rules of project \`${project}\` changed: read them again`);
         const changes = plan(ctx.columns(project)).filter((c) => !s.mapped.has(c.rule));
         const text = changes.length ? `// The built-in pack mapped to this board (terrarium rule migrate, TER-171).\n${changes.map((c) => `rule "${c.rule}" { ... }\n`).join("")}` : "";
         if (apply) {

@@ -441,6 +441,32 @@ async fn enable_and_disable_edit_the_file() {
         .await
         .err(404, "not_found");
     assert_eq!(audit_rows(&td, "rules.put").await.len(), 4);
+    // The answer has the lint of the rules that run after the change: an
+    // enable of the short form of merge-pass lets the unmapped pack rule
+    // run, which names the missing @accepted (TER-226).
+    td.put(
+        "/api/projects/p/rules",
+        json!({"text": "rule \"merge-pass\" { enabled = false }\n"}),
+    )
+    .await
+    .ok();
+    let r = td
+        .post("/api/projects/p/rules/merge-pass/enable", json!({}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(r["changed"], true);
+    assert!(
+        codes(&r).contains(&("missing_column".into(), "@accepted".into())),
+        "{r}"
+    );
+    let r = td
+        .post("/api/projects/p/rules/merge-pass/enable", json!({}))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(r["changed"], false);
+    assert!(r["findings"].is_array(), "{r}");
 }
 
 #[tokio::test]
@@ -480,6 +506,23 @@ async fn the_dry_run_plans_the_pack_of_a_rules_project() {
         .await
         .ok()
         .clone();
+    let rules: Vec<&str> = plan["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["rule"].as_str().unwrap())
+        .collect();
+    assert!(rules.contains(&"agent-park"), "{plan}");
+    // With `text`, the pack runs too, as in the lint with `text` (TER-226).
+    let plan = td
+        .post(
+            "/api/projects/p/rules/dry-run",
+            json!({"from": seq - 5, "to": seq, "text": ""}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(plan["source"], "text");
     let rules: Vec<&str> = plan["plans"]
         .as_array()
         .unwrap()

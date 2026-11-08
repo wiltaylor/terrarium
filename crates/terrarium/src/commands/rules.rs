@@ -311,6 +311,11 @@ pub async fn rule(ctx: &Ctx, cmd: &RuleCmd) -> anyhow::Result<()> {
                 } else {
                     c.line(format!("rule {rule}: {state} already"));
                 }
+                // Warn when the rules that run now name a missing column
+                // or leave a column stuck (TER-226).
+                if v["findings"].as_array().is_some_and(|f| !f.is_empty()) {
+                    print_findings(c, &v["findings"]);
+                }
             })
         }
         RuleCmd::Migrate { apply, text } => {
