@@ -712,6 +712,12 @@ async fn run_lane(state: &Shared, lane: &str, live: &HashSet<(String, String)>) 
         }
     }
 }
+/// What one write of a run did.
+enum Step {
+    /// The run ended (or was not pending), with its final effects.
+    Ended(Vec<Effect>),
+    /// An action ran, with its effects; more may follow.
+    Next(Vec<Effect>),
     /// The action failed: its write rolled back. Record the failure.
     Failed {
         step: i64,
