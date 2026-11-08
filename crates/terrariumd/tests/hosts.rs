@@ -4218,9 +4218,10 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         "#!/usr/bin/python3\nimport subprocess,sys\nsys.exit(subprocess.call(['docker'] + ['{name}' if a == 'terrarium-dbox' else a for a in sys.argv[1:]]))\n"
     )).unwrap();
     let _h = lab.host("lab1").await;
+    let state = lab.state();
+    terrariumd::reservations::reconcile_host(&state, "lab1").await.unwrap();
     lab.target(json!({"name":"dbox", "kind":"docker", "host":"lab1", "image":"alpine:3.20"}))
         .await;
-    let state = lab.state();
     std::fs::create_dir_all(state.work_dir.join("terra/worker")).unwrap();
     let def = state
         .db
@@ -4229,13 +4230,6 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         .unwrap()
         .def;
     let _guard = ContainerGuard(name.clone());
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while state.executor.resource_pending("lab1") {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
     terrariumd::executor::lifecycle(
         &state,
         &def,

@@ -143,12 +143,15 @@ async fn setup_docker(
     }
     let client = tokio::spawn(Client::new(options).run());
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !state.executor.hosts.is_online("h") || state.executor.resource_pending("h") {
+        while !state.executor.hosts.is_online("h") || (!live && state.executor.resource_pending("h")) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .unwrap();
+    if live {
+        terrariumd::reservations::reconcile_host(&state, "h").await.unwrap();
+    }
     for name in ["p-box", "p-box2"] {
         td.post(
             "/api/targets",

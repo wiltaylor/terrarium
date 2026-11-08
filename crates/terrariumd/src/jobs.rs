@@ -1917,6 +1917,9 @@ async fn steps(
         .collect();
     let mut env = recipe_env(job, x.dir, &head, base);
     let tunnel = if let Some(key) = injected.first() {
+        // Reset hook: the meta-owned per-job VM reset must complete before
+        // this SSH connection opens. Keep rollout disabled until its
+        // interface is wired here (META/ops2 owns that interface).
         let tunnel =
             crate::docker_tunnel::open(x.state, x.def, &key.value, x.dir, delivery.timeout_secs())
                 .await?;
