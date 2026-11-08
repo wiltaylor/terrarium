@@ -220,6 +220,17 @@ mod session_period_tests {
         );
         assert_eq!(week.since, "2026-11-03T00:00:00+00:00");
         assert_eq!(
+            session_period(&[window("168h", "2026-11-10T00:00:00Z")], now),
+            week
+        );
+        assert_eq!(
+            session_period(
+                &[window("999999999999999999d", "2026-11-10T00:00:00Z")],
+                now
+            ),
+            month
+        );
+        assert_eq!(
             session_period(&[window("7d", "2026-10-10T00:00:00Z")], now),
             month
         );
@@ -239,12 +250,19 @@ fn session_period(windows: &[WindowView], now: chrono::DateTime<chrono::Utc>) ->
                 .with_timezone(&chrono::Utc);
             let duration = match w.window.as_str() {
                 "monthly" => end - end.checked_sub_months(chrono::Months::new(1))?,
-                "7d" => chrono::Duration::days(7),
-                "30d" => chrono::Duration::days(30),
-                "5h" => chrono::Duration::hours(5),
-                _ => return None,
+                name => {
+                    let hours = name.strip_suffix('h').and_then(|n| n.parse::<i64>().ok());
+                    let days = name.strip_suffix('d').and_then(|n| n.parse::<i64>().ok());
+                    let duration = hours
+                        .and_then(chrono::Duration::try_hours)
+                        .or_else(|| days.and_then(chrono::Duration::try_days))?;
+                    if duration <= chrono::Duration::zero() {
+                        return None;
+                    }
+                    duration
+                }
             };
-            let start = end - duration;
+            let start = end.checked_sub_signed(duration)?;
             (start <= now && now < end).then_some((duration, start, end))
         })
         .max_by_key(|(duration, _, _)| *duration);

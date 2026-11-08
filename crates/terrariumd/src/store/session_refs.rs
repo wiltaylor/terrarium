@@ -68,14 +68,14 @@ pub fn on_subscription(
 ) -> ApiResult<Vec<SubscriptionSession>> {
     let mut stmt = conn.prepare(&format!(
         "{SELECT}
-         WHERE julianday(s.started_at) >= julianday(?2)
-           AND julianday(s.started_at) < julianday(?3)
+         WHERE s.started_at < strftime('%Y-%m-%dT%H:%M:%fZ', ?3)
+           AND (s.ended_at IS NULL OR s.ended_at > strftime('%Y-%m-%dT%H:%M:%fZ', ?2))
            AND (EXISTS (SELECT 1 FROM usage_samples u
                 WHERE u.agent = s.agent_id
                   AND u.session IN (s.id, s.harness_session_id) AND u.subscription = ?1)
              OR (a.subscription = ?1 AND NOT EXISTS (SELECT 1 FROM usage_samples u
                 WHERE u.agent = s.agent_id AND u.session IN (s.id, s.harness_session_id))))
-         ORDER BY julianday(s.started_at) DESC, s.id DESC"
+         ORDER BY s.started_at DESC, s.id DESC"
     ))?;
     let sessions = stmt
         .query_map(params![subscription, since, until], row)?
@@ -501,8 +501,27 @@ mod tests {
         let worker = agent(&c, "p", "card-worker");
         c.execute("UPDATE agents SET subscription = 'sub'", [])
             .unwrap();
-        let old = session(&c, &persistent, "2026-09-30T23:59:59Z", None);
+        let old = session(
+            &c,
+            &persistent,
+            "2026-09-29T23:59:59.000Z",
+            Some("2026-09-30T23:59:59.000Z"),
+        );
         let live = session(&c, &persistent, "2026-10-01T00:00:00Z", None);
+        let ongoing = session(&c, &persistent, "2026-09-28T00:00:00.000Z", None);
+        let overlapping = session(
+            &c,
+            &persistent,
+            "2026-09-27T00:00:00.000Z",
+            Some("2026-10-01T01:00:00.000Z"),
+        );
+        let boundary = session(
+            &c,
+            &persistent,
+            "2026-09-26T00:00:00.000Z",
+            Some("2026-10-01T00:00:00.000Z"),
+        );
+        let future = session(&c, &persistent, "2026-11-01T00:00:00.000Z", None);
         let ephemeral = session(&c, &worker, "2026-10-02T00:00:00Z", None);
         c.execute("UPDATE sessions SET harness_session_id = 'harness-id', harness = 'claude' WHERE id = ?1", [&ephemeral]).unwrap();
         c.execute("INSERT INTO usage_samples (agent, project, subscription, model, input_tokens, output_tokens, cache_read, cache_write, message_id, session, at, card_id)
@@ -514,9 +533,14 @@ mod tests {
             on_subscription(&c, "sub", "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z").unwrap();
         assert_eq!(
             sessions.iter().map(|s| &s.session.id).collect::<Vec<_>>(),
-            vec![&ephemeral, &live]
+            vec![&ephemeral, &live, &ongoing, &overlapping]
         );
         assert!(!sessions.iter().any(|s| s.session.id == old));
+        assert!(
+            !sessions
+                .iter()
+                .any(|s| s.session.id == boundary || s.session.id == future)
+        );
         assert!(sessions[0].session.removed);
         assert_eq!(sessions[0].input_tokens, Some(12));
         assert_eq!(sessions[0].card.as_deref(), Some("TER-244"));
