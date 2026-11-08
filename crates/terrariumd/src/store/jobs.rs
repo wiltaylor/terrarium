@@ -1310,6 +1310,16 @@ pub fn create(t: &mut Tx<'_>, n: NewJob) -> ApiResult<Job> {
         n.batch.iter().map(|c| c.card.as_str()).collect()
     };
     for card in cards {
+        let is_group: bool = t.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cards WHERE id = ?1 AND kind = 'group')",
+            [card],
+            |r| r.get(0),
+        )?;
+        if is_group {
+            return Err(ApiError::invalid(
+                "group cards cannot be validated or merged",
+            ));
+        }
         if let Some(open) = open_of_card(t, card)? {
             return Err(ApiError::conflict(format!(
                 "card {card} has a {} job {} that is {} already; cancel it first",
@@ -1487,6 +1497,18 @@ pub fn finish(t: &mut Tx<'_>, id: &str, end: &JobEnd) -> ApiResult<Option<Job>> 
         ],
     )?;
     if n == 0 {
+        // A cancel wins the state transition, but the draining recipe still
+        // supplies its retained-log path and final output for job show.
+        t.execute(
+            "UPDATE jobs SET tail = ?2, head = COALESCE(?3, head), exit_code = ?4
+             WHERE id = ?1 AND state = 'cancelled'",
+            params![
+                id,
+                end.tail.as_deref().map(clip_tail),
+                end.head,
+                end.exit_code
+            ],
+        )?;
         return Ok(None);
     }
     let job = get(t, id)?;

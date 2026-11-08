@@ -874,6 +874,12 @@ pub struct CheckoutDef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryDef {
+    /// Literal failure markers to extract from job logs. None uses Rust's
+    /// FAILED, panicked, test result: FAILED, and failures: markers.
+    /// An empty list disables extraction. Matching lines include three
+    /// following lines so a panic's message is kept too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_patterns: Option<Vec<String>>,
     /// The target that runs the jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,

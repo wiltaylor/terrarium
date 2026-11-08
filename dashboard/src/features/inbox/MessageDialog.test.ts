@@ -33,6 +33,17 @@ const setValue = (sel: string, value: string, ev = "input") => {
 };
 
 describe("MessageDialog", () => {
+  it("preselects the server default and allows clearing it", async () => {
+    await api.account.setPreferences({ default_agent: `${target.project}/${target.name}` });
+    const el = document.createElement("div");
+    document.body.append(el);
+    dispose = render(() => createComponent(MessageDialog, { onClose: () => {}, onSent: () => {} }), el);
+    await settle();
+    expect((document.querySelector("select") as HTMLSelectElement).value).toBe(`${target.project}/${target.name}`);
+    setValue("select", "", "change");
+    expect((document.querySelector("select") as HTMLSelectElement).value).toBe("");
+    await api.account.setPreferences({ default_agent: null });
+  });
   it("sends one mail to the agent and makes no watch", async () => {
     const who = `${target.project}/${target.name}`;
     const before = await api.inbox.counts();

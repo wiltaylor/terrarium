@@ -12,9 +12,11 @@ import { waitFor } from "../test/wait";
 vi.mock("../stores", async () => {
   const { createMockApi } = await import("../api/mock");
   const { createProjectFoldersStore } = await import("../stores/projectFolders");
+  const { createBookmarksStore } = await import("../stores/bookmarks");
   const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
   return {
     api,
+    bookmarks: createBookmarksStore(null, window.location.origin),
     projectFolders: createProjectFoldersStore(api),
     projects: {
       projects: () => [{ name: "terrarium" }, { name: "webshop" }],

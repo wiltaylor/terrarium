@@ -326,6 +326,11 @@ pub enum Command {
         #[command(subcommand)]
         command: RuleCmd,
     },
+    /// Version group lifecycle acknowledgements (project admin)
+    Group {
+        #[command(subcommand)]
+        command: GroupCmd,
+    },
     /// Operator commands that an agent's role permits
     Admin {
         #[command(subcommand)]
@@ -3640,6 +3645,26 @@ pub enum SkillCmd {
     Validate { name: Option<String> },
     /// The agents and templates that name a skill
     Usage { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GroupCmd {
+    /// Record a version group's step
+    Status {
+        key: String,
+        #[arg(long)]
+        step: String,
+        #[arg(long, value_parser = ["pending", "running", "done", "failed"])]
+        state: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        eta: Option<String>,
+    },
+    /// Acknowledge publication after release CI succeeds
+    Built { key: String, version: String },
+    /// Remove a snapshot member, for example a card returned for a fix
+    Remove { key: String, card: String },
 }
 
 /// `terrarium rule` (docs/api.md §19.12). The project is `--project`, else

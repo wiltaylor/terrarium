@@ -2141,6 +2141,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   };
   const CSRF_REFUSED = "a request with the session cookie must send X-CSRF-Token with the csrf value of the session (POST or GET /api/session)";
   let password: string | null = opts.password === undefined ? MOCK_PASSWORD : opts.password;
+  let defaultAgent: string | null = null;
   /** The failed password logins, as the daemon's limiter counts them (5 free, then 30 s and more). */
   let failures = 0;
   let lockedUntil = 0;
@@ -2216,6 +2217,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         }),
     },
     account: {
+      preferences: () => reply(() => ({ default_agent: defaultAgent })),
+      setPreferences: (body) => reply(() => {
+        authorize("PUT");
+        defaultAgent = body.default_agent;
+        return { default_agent: defaultAgent };
+      }),
       setPassword: (change) =>
         reply(() => {
           authorize("PUT");
@@ -4083,6 +4090,14 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     calendar: calendarMock.api,
 
     projectFolders: folderMock.api,
+    bookmarks: (() => {
+      let rows: { title: string; href: string }[] = [];
+      return {
+        list: async () => [...rows],
+        add: async (title: string, href: string) => (rows = [...rows.filter((b) => b.href !== href), { title, href }]),
+        remove: async (href: string) => (rows = rows.filter((b) => b.href !== href)),
+      };
+    })(),
 
     // docs/api.md §6.11: operator only; each call answers with the list.
     pins: (() => {
