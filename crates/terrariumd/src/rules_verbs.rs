@@ -937,9 +937,10 @@ fn earlier_fixes(conn: &Connection, j: &Job) -> ApiResult<i64> {
                 Err(e) => Some(Err(e)),
             })
             .collect::<ApiResult<Vec<_>>>()?;
-        if std::iter::once(&group).chain(&ancestors).any(|cards| {
-            cards.len() == linked.len() && cards.iter().all(|c| linked.contains(c))
-        }) {
+        if std::iter::once(&group)
+            .chain(&ancestors)
+            .any(|cards| cards.len() == linked.len() && cards.iter().all(|c| linked.contains(c)))
+        {
             n += 1;
         }
     }
