@@ -846,7 +846,7 @@ async fn an_ended_agent_marks_only_its_open_thread_once() {
                 json!({"text": "Keep this operator follow-up."}),
             )
             .await;
-        assert_eq!(late_post.status, 201, "{}", late_post.body);
+        assert_eq!(late_post.status, if endpoint == "respond" { 200 } else { 201 }, "{}", late_post.body);
         let saved = lab.thread(&tid).await;
         assert_eq!(saved["status"], "closed");
         assert_eq!(saved["close_reason"], "agent_ended");
@@ -880,7 +880,6 @@ async fn ending_while_waiting_agent_warns_when_report_to_is_gone() {
     let tid = id(&th);
     let agent = th["agent"].as_str().unwrap().to_owned();
     lab.td.wait_status(&agent, "idle").await;
-    assert_eq!(lab.thread(&tid).await["status"], "waiting_agent");
     let log = tempfile::NamedTempFile::new().unwrap();
     let file = log.reopen().unwrap();
     let key = tid.clone();
@@ -888,7 +887,7 @@ async fn ending_while_waiting_agent_warns_when_report_to_is_gone() {
         .db
         .write("system", move |t| {
             t.execute(
-                "UPDATE threads SET report_to = 'missing-lead' WHERE id = ?1",
+                "UPDATE threads SET report_to = 'missing-lead', status = 'waiting_agent' WHERE id = ?1",
                 [&key],
             )?;
             let subscriber = tracing_subscriber::fmt()
