@@ -254,7 +254,7 @@ fn session_period(windows: &[WindowView], now: chrono::DateTime<chrono::Utc>) ->
         let start = chrono::Utc
             .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
             .single()
-            .expect("valid month start");
+            .unwrap_or(now);
         let end = start + chrono::Months::new(1);
         (start, end)
     };
