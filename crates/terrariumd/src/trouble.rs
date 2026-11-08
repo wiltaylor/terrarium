@@ -12,7 +12,7 @@ use crate::api::Shared;
 use crate::db::Tx;
 use crate::error::ApiResult;
 use crate::events::EventDraft;
-use crate::store::{mail, usage};
+use crate::store::{card_history::ReviewEstimates, mail, usage};
 use mail::{Address, Outgoing};
 
 /// Project overrides. Missing token/turn limits are off. Type names are
@@ -74,13 +74,17 @@ pub fn set_settings(t: &mut Tx<'_>, project: &str, s: &Settings) -> ApiResult<()
     Ok(())
 }
 
-/// Hook for the calibrated p70 history (TER-316). Until history is
-/// available, these are the approved fixed *budget* fallbacks, not ETAs.
-fn time_limit(kind: &str, s: &Settings) -> u64 {
-    s.time_seconds.get(kind).copied().unwrap_or(match kind {
-        "small" => 45 * 60,
-        "impl-hard" | "hard" => 4 * 60 * 60,
-        _ => 2 * 60 * 60,
+/// Overrides win over 4x the project/type p70 from TER-316. That history
+/// requires five distinct completed cards. Otherwise use fixed budgets.
+fn time_limit(kind: &str, s: &Settings, p70_ms: Option<f64>) -> u64 {
+    s.time_seconds.get(kind).copied().unwrap_or_else(|| {
+        p70_ms
+            .map(|ms| (4.0 * ms / 1000.0).ceil().max(1.0) as u64)
+            .unwrap_or(match kind {
+                "small" => 45 * 60,
+                "impl-hard" | "hard" => 4 * 60 * 60,
+                _ => 2 * 60 * 60,
+            })
     })
 }
 
@@ -366,6 +370,7 @@ fn desired(
     c: &Connection,
     card: &Watched,
     now: DateTime<Utc>,
+    estimates: &mut ReviewEstimates,
 ) -> ApiResult<(BTreeSet<String>, Facts, usage::Totals)> {
     let mut out = BTreeSet::new();
     if card.archived {
@@ -387,7 +392,17 @@ fn desired(
         .iter()
         .find_map(|l| l.strip_prefix("type:"))
         .unwrap_or("impl");
-    let limit = time_limit(kind, &s);
+    let p70 = if s.time_seconds.contains_key(kind) {
+        None
+    } else {
+        let labels = if card.labels.iter().any(|l| l.starts_with("type:")) {
+            card.labels.clone()
+        } else {
+            vec!["type:impl".into()]
+        };
+        estimates.worker_ms(c, &card.project, &labels, None)?
+    };
+    let limit = time_limit(kind, &s, p70);
     if limit > 0 && f.seconds >= limit {
         out.insert("time_budget".into());
     }
@@ -580,8 +595,9 @@ fn plan(c: &Connection, now: DateTime<Utc>) -> ApiResult<Vec<Change>> {
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut changes = Vec::new();
+    let mut estimates = ReviewEstimates::default();
     for card in rows {
-        let (signals, facts, totals) = desired(c, &card, now)?;
+        let (signals, facts, totals) = desired(c, &card, now, &mut estimates)?;
         let old: BTreeSet<String> = active_signals(c, &card.id)?.into_iter().collect();
         if old != signals {
             changes.push(Change {
@@ -759,12 +775,13 @@ mod tests {
     #[test]
     fn project_budgets_default_and_can_be_disabled() {
         let mut s: Settings = serde_json::from_value(json!({})).unwrap();
-        assert_eq!(time_limit("small", &s), 2700);
-        assert_eq!(time_limit("impl", &s), 7200);
-        assert_eq!(time_limit("impl-hard", &s), 14400);
+        assert_eq!(time_limit("small", &s, None), 2700);
+        assert_eq!(time_limit("impl", &s, None), 7200);
+        assert_eq!(time_limit("impl-hard", &s, None), 14400);
+        assert_eq!(time_limit("small", &s, Some(60000.0)), 240);
         assert!(s.tokens.is_empty() && s.turns.is_empty());
         s.time_seconds.insert("small".into(), 0);
-        assert_eq!(time_limit("small", &s), 0);
+        assert_eq!(time_limit("small", &s, Some(60000.0)), 0);
         assert!(serde_json::from_value::<Settings>(json!({"red_streak": -1})).is_err());
         assert!(serde_json::from_value::<Settings>(json!({"unknown": 1})).is_err());
     }
@@ -787,6 +804,39 @@ mod tests {
             ),
         ];
         assert_eq!(facts("P-1", &e, at(10)).eta_delays, 0);
+    }
+
+    #[test]
+    fn p70_requires_five_distinct_cards_and_uses_the_matching_type() {
+        use crate::store::card_history::{WorkSample, calibrated_ms};
+        let samples: Vec<_> = (1..=5)
+            .map(|n| WorkSample {
+                card: format!("P-{n}"),
+                start_seq: n * 2,
+                end_seq: n * 2 + 1,
+                actual_ms: n as f64 * 1000.0,
+                guess_ms: 10000.0,
+                labels: vec!["type:small".into()],
+            })
+            .collect();
+        let labels = vec!["type:small".into()];
+        let s = Settings::default();
+        assert_eq!(
+            time_limit("small", &s, calibrated_ms(&samples[..4], &labels, None)),
+            2700
+        );
+        assert_eq!(
+            time_limit("small", &s, calibrated_ms(&samples, &labels, None)),
+            16
+        );
+        assert_eq!(
+            time_limit(
+                "impl",
+                &s,
+                calibrated_ms(&samples, &["type:impl".into()], None)
+            ),
+            7200
+        );
     }
 
     #[test]

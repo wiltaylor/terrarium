@@ -5737,8 +5737,10 @@ defaults. Unknown fields and negative limits are rejected. Example:
 
 Time, token and turn maps are keyed by the suffix of the card's `type:` label
 (untyped cards use `impl`). Token/turn budgets are off until set. Time budgets
-currently use the fixed fallbacks above (`hard` also uses four hours), with a
-hook for calibrated type p70 history. A zero threshold disables that check.
+use four times the project's type-specific p70 from completed card history
+(TER-316), requiring at least five distinct cards. With too few samples,
+they use the fixed fallbacks above (`hard` also uses four hours). Explicit
+project time overrides take precedence. A zero threshold disables that check.
 An ETA at or before now produces `eta_overdue`. The other signal names are
 `time_budget`, `token_budget`, `turn_budget`, `eta_delayed`, `review_rounds`,
 `validation_red`, `timer_polls`, `compactions` and `review_wait`. Review wait
