@@ -77,7 +77,12 @@ fn review_eta(
 pub struct ReviewEstimates(std::collections::HashMap<String, Option<Duration>>);
 
 impl ReviewEstimates {
-    pub fn eta(&mut self, conn: &Connection, project: &str, card: &str) -> ApiResult<Option<(String, String)>> {
+    pub fn eta(
+        &mut self,
+        conn: &Connection,
+        project: &str,
+        card: &str,
+    ) -> ApiResult<Option<(String, String)>> {
         let median = match self.0.get(project) {
             Some(value) => *value,
             None => {
@@ -86,7 +91,9 @@ impl ReviewEstimates {
                 value
             }
         };
-        let Some(median) = median else { return Ok(None); };
+        let Some(median) = median else {
+            return Ok(None);
+        };
         review_deadline(conn, card, median)
     }
 }
@@ -106,14 +113,21 @@ fn review_duration(conn: &Connection, project: &str) -> ApiResult<Option<Duratio
     Ok(Some(median))
 }
 
-fn review_deadline(conn: &Connection, card: &str, median: Duration) -> ApiResult<Option<(String, String)>> {
-    let start: Option<String> = conn.query_row(
-        "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
+fn review_deadline(
+    conn: &Connection,
+    card: &str,
+    median: Duration,
+) -> ApiResult<Option<(String, String)>> {
+    let start: Option<String> = conn
+        .query_row(
+            "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
            AND json_extract(payload, '$.change') = 'moved'
            AND coalesce(json_extract(payload, '$.to_role'), json_extract(payload, '$.to')) = ?2
          ORDER BY seq DESC LIMIT 1",
-        params![card, super::board::REVIEW], |r| r.get(0),
-    ).optional()?;
+            params![card, super::board::REVIEW],
+            |r| r.get(0),
+        )
+        .optional()?;
     Ok(start.and_then(|start| {
         let at = DateTime::parse_from_rfc3339(&start)
             .ok()?
@@ -207,6 +221,11 @@ mod tests {
         c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,kind,payload) SELECT 'p','other','{}' FROM n;").unwrap();
         assert_eq!(cache.eta(&c, "p", "open").unwrap(), first);
         assert!(completed_visits(&c, "p", "review", 20).unwrap().is_empty());
-        assert!(ReviewEstimates::default().eta(&c,"p","open").unwrap().is_none());
+        assert!(
+            ReviewEstimates::default()
+                .eta(&c, "p", "open")
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -554,7 +554,11 @@ fn unmet(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
     Ok(rows)
 }
 
-fn render(conn: &Connection, row: CardRow, estimates: &mut super::card_history::ReviewEstimates) -> ApiResult<Card> {
+fn render(
+    conn: &Connection,
+    row: CardRow,
+    estimates: &mut super::card_history::ReviewEstimates,
+) -> ApiResult<Card> {
     let mut stmt = conn.prepare(
         "SELECT id, author, body, created_at, session_id FROM card_comments WHERE card = ?1
          ORDER BY created_at, id",
