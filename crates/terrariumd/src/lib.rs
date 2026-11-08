@@ -182,6 +182,11 @@ fn log_definitions(defs: &Definitions, errors: &[String], dir: &std::path::Path)
 /// subsystem takes its settings from the environment
 /// ([`usage_collector::UsageConfig::from_env`]).
 pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
+    start_with_executor(cfg, executor::Executor::default()).await
+}
+
+/// Start with an explicit executor, avoiding process-global SSH overrides in tests.
+pub async fn start_with_executor(cfg: DaemonConfig, executor: executor::Executor) -> anyhow::Result<Daemon> {
     start_with_usage(cfg, usage_collector::UsageConfig::from_env()).await
 }
 
@@ -215,7 +220,7 @@ pub async fn start_with_usage(
         repos_dir: cfg.repos_dir.clone(),
         insecure_agent_header: cfg.insecure_agent_header,
         usage: Arc::new(usage_collector::UsageRuntime::new(usage)),
-        executor: Arc::default(),
+        executor: Arc::new(executor),
         harness_latest: Arc::default(),
         harness_tools: Arc::default(),
         agent_tools: Arc::default(),

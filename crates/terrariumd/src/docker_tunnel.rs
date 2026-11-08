@@ -14,18 +14,18 @@ use crate::api::Shared;
 use crate::error::{ApiError, ApiResult};
 use crate::executor::{Control, Ev, RemoteCmd, Stream};
 use crate::secrets::{RunDir, RunDirs};
-use terrarium_core::config::TargetDef;
+use terrarium_core::config::{DockerCiDef, TargetDef};
 
-const KNOWN_HOST: &str = "[10.3.0.2]:2250 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGgTrtbsNPDR6lWHJVpgAh6tStS4C7O9F0ksb405ScXy\n";
 const RELAY: &str = include_str!("docker_relay.py");
 
 /// META-104 forced command. No recipe code or remote command is involved.
-pub async fn reset(state: &Shared, key: &str) -> ApiResult<()> {
+pub async fn reset(state: &Shared, key: &str, config: &DockerCiDef) -> ApiResult<()> {
     let dir = RunDirs::new(&state.state_dir).run_dir()?;
     let identity = dir.write_private("reset-identity", key.as_bytes())?;
     let hosts = crate::executor::known_hosts(&state.state_dir)?;
+    for attempt in 0..3 {
     let mut child = tokio::process::Command::new(&state.executor.ssh_bin)
-        .args(reset_args(&identity, &hosts))
+        .args(reset_args(&identity, &hosts, config))
         .env_remove("SSH_AUTH_SOCK")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -37,10 +37,15 @@ pub async fn reset(state: &Shared, key: &str) -> ApiResult<()> {
         .await
         .map_err(|_| ApiError::conflict("Docker CI reset timed out; tunnel not opened"))?
         .map_err(|_| ApiError::internal("cannot wait for Docker CI reset"))?;
-    reset_status(status.code())
+    if status.code() != Some(75) || attempt == 2 {
+        return reset_status(status.code());
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    unreachable!("reset loop always returns")
 }
 
-fn reset_args(identity: &std::path::Path, hosts: &std::path::Path) -> Vec<String> {
+fn reset_args(identity: &std::path::Path, hosts: &std::path::Path, config: &DockerCiDef) -> Vec<String> {
     vec![
         "-F".into(),
         "/dev/null".into(),
@@ -59,7 +64,9 @@ fn reset_args(identity: &std::path::Path, hosts: &std::path::Path) -> Vec<String
         format!("UserKnownHostsFile={}", hosts.display()),
         "-i".into(),
         identity.display().to_string(),
-        "dockerci@10.3.0.2".into(),
+        "-p".into(),
+        config.reset_port.to_string(),
+        config.reset_destination.clone(),
     ]
 }
 
@@ -116,10 +123,11 @@ pub async fn open(
     key: &str,
     work_dir: &str,
     timeout: u64,
+    config: &DockerCiDef,
 ) -> ApiResult<Tunnel> {
     let dir = RunDirs::new(&state.state_dir).run_dir()?;
     let keyfile = dir.write_private("identity", key.as_bytes())?;
-    let hosts = dir.write_private("known_hosts", KNOWN_HOST.as_bytes())?;
+    let hosts = dir.write_private("known_hosts", config.known_hosts.as_bytes())?;
     let socket = dir.path().join("docker.sock");
     let forward = format!("{}:/var/run/docker.sock", socket.display());
     let mut ssh = tokio::process::Command::new(&state.executor.ssh_bin)
@@ -128,8 +136,6 @@ pub async fn open(
             "/dev/null",
             "-N",
             "-T",
-            "-p",
-            "2250",
             "-o",
             "BatchMode=yes",
             "-o",
@@ -147,13 +153,15 @@ pub async fn open(
             "-o",
             "ServerAliveCountMax=2",
         ])
+        .arg("-p")
+        .arg(config.port.to_string())
         .arg("-o")
         .arg(format!("UserKnownHostsFile={}", hosts.display()))
         .arg("-i")
         .arg(keyfile)
         .arg("-L")
         .arg(forward)
-        .arg("root@10.3.0.2")
+        .arg(&config.destination)
         .env_remove("SSH_AUTH_SOCK")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -230,6 +238,9 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
     let mut buffer = Vec::new();
     let mut connections = HashMap::<u64, mpsc::Sender<Vec<u8>>>::new();
     let mut tasks = tokio::task::JoinSet::new();
+    // One data frame in flight per connection. Acknowledgement comes only
+    // after the target socket has accepted it, not after enqueueing stdin.
+    let mut credits = HashMap::<u64, mpsc::Sender<()>>::new();
     while let Some(event) = run.events.recv().await {
         let Ev::Data(Stream::Stdout, data) = event else {
             if matches!(event, Ev::End(_)) {
@@ -261,10 +272,17 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
                     continue;
                 }
                 let (tx, rx) = mpsc::channel(16);
+                let (credit, credit_rx) = mpsc::channel(1);
+                credits.insert(id, credit);
                 connections.insert(id, tx);
-                tasks.spawn(connection(id, socket.clone(), run.ctl.clone(), rx));
+                tasks.spawn(connection(id, socket.clone(), run.ctl.clone(), rx, credit_rx));
+            } else if event["ack"] == true {
+                if let Some(credit) = credits.get(&id) {
+                    if credit.send(()).await.is_err() { credits.remove(&id); }
+                }
             } else if event["close"] == true {
                 connections.remove(&id);
+                credits.remove(&id);
             } else if let Some(data) = event["data"].as_str() {
                 let Ok(data) = STANDARD.decode(data) else {
                     return;
@@ -273,7 +291,7 @@ async fn bridge(mut run: crate::executor::Running, socket: PathBuf, ready: onesh
                     return;
                 }
                 if let Some(tx) = connections.get(&id)
-                    && tx.try_send(data).is_err()
+                    && tx.send(data).await.is_err()
                 {
                     connections.remove(&id);
                     send(&run.ctl, json!({"id":id,"close":true}));
@@ -289,23 +307,30 @@ async fn connection(
     path: PathBuf,
     ctl: mpsc::UnboundedSender<Control>,
     mut input: mpsc::Receiver<Vec<u8>>,
+    mut credit: mpsc::Receiver<()>,
 ) {
-    if let Ok(mut socket) = tokio::net::UnixStream::connect(path).await {
+    if let Ok(socket) = tokio::net::UnixStream::connect(path).await {
+        let (mut reader, mut writer) = socket.into_split();
+        let write_ctl = ctl.clone();
+        let write = async move {
+            while let Some(data) = input.recv().await {
+                if writer.write_all(&data).await.is_err() { break; }
+                if !send(&write_ctl, json!({"id":id,"ack":true})) { break; }
+            }
+        };
+        let read = async {
         let mut data = vec![0; 16384];
         loop {
-            tokio::select! {
-                read = socket.read(&mut data) => {
-                    match read {
-                        Ok(n) if n > 0 => { if !send(&ctl, json!({"id":id,"data":STANDARD.encode(&data[..n])})) { break; } }
-                        _ => break,
-                    }
+            match reader.read(&mut data).await {
+                Ok(n) if n > 0 => {
+                    if !send(&ctl, json!({"id":id,"data":STANDARD.encode(&data[..n])})) { break; }
+                    if credit.recv().await.is_none() { break; }
                 }
-                data = input.recv() => {
-                    let Some(data) = data else { break; };
-                    if socket.write_all(&data).await.is_err() { break; }
-                }
+                _ => break,
             }
         }
+        };
+        tokio::select! { _ = write => {}, _ = read => {} }
     }
     send(&ctl, json!({"id":id,"close":true}));
 }
@@ -320,8 +345,9 @@ mod tests {
         let args = reset_args(
             std::path::Path::new("/private/reset"),
             std::path::Path::new("/pinned/hosts"),
+            &DockerCiDef { destination: "root@vm".into(), port: 2250, known_hosts: "pin".into(), reset_destination: "reset@host".into(), reset_port: 22 },
         );
-        assert_eq!(args.last().map(String::as_str), Some("dockerci@10.3.0.2"));
+        assert_eq!(args.last().map(String::as_str), Some("reset@host"));
         assert!(args.contains(&"IdentitiesOnly=yes".to_owned()));
         assert!(args.contains(&"StrictHostKeyChecking=yes".to_owned()));
         assert!(reset_status(Some(0)).is_ok());
@@ -359,10 +385,14 @@ mod tests {
             .await
             .unwrap();
         ready_rx.await.unwrap();
-        let response = tokio::time::timeout(Duration::from_secs(5), controls.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let response = loop {
+            let frame = tokio::time::timeout(Duration::from_secs(5), controls.recv()).await.unwrap().unwrap();
+            if let Control::Stdin(bytes) = &frame {
+                let event: Value = serde_json::from_slice(bytes).unwrap();
+                if event["ack"] == true { continue; }
+            }
+            break frame;
+        };
         let Control::Stdin(bytes) = response else {
             panic!("expected data");
         };
@@ -372,6 +402,7 @@ mod tests {
             STANDARD.decode(event["data"].as_str().unwrap()).unwrap(),
             b"pong"
         );
+        events.send(Ev::Data(Stream::Stdout, b"{\"id\":1,\"ack\":true}\n".to_vec())).await.unwrap();
         server.await.unwrap();
         drop(events);
         task.await.unwrap();

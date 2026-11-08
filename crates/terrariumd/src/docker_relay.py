@@ -5,6 +5,7 @@ No credential is accepted here. The daemon owns the SSH transport.
 import base64
 import json
 import os
+import queue
 import signal
 import socket
 import sys
@@ -20,6 +21,8 @@ def serve(directory):
     path = os.path.join(directory, "docker.sock")
     listener = socket.socket(socket.AF_UNIX)
     connections = {}
+    credits = {}
+    writes = {}
     output_lock = threading.Lock()
     state_lock = threading.Lock()
 
@@ -31,6 +34,10 @@ def serve(directory):
     def close(ident):
         with state_lock:
             connection = connections.pop(ident, None)
+            credit = credits.pop(ident, None)
+            writes.pop(ident, None)
+        if credit:
+            credit.set()
         if connection:
             try:
                 connection.shutdown(socket.SHUT_RDWR)
@@ -38,18 +45,34 @@ def serve(directory):
                 pass
             connection.close()
 
-    def read(ident, connection):
+    def read(ident, connection, credit):
         try:
             while True:
                 data = connection.recv(16384)
                 if not data:
                     break
                 emit({"id": ident, "data": base64.b64encode(data).decode("ascii")})
+                credit.wait()
+                credit.clear()
+                with state_lock:
+                    if ident not in connections:
+                        break
         except OSError:
             pass
         finally:
             close(ident)
             emit({"id": ident, "close": True})
+
+    def write(ident, connection, pending):
+        try:
+            while True:
+                data = pending.get()
+                if data is None:
+                    return
+                connection.sendall(data)
+                emit({"id": ident, "ack": True})
+        except OSError:
+            close(ident)
 
     def accept():
         ident = 0
@@ -64,8 +87,13 @@ def serve(directory):
                     continue
                 ident += 1
                 connections[ident] = connection
+                credit = threading.Event()
+                pending = queue.Queue(maxsize=1)
+                credits[ident] = credit
+                writes[ident] = pending
             emit({"id": ident, "open": True})
-            threading.Thread(target=read, args=(ident, connection), daemon=True).start()
+            threading.Thread(target=read, args=(ident, connection, credit), daemon=True).start()
+            threading.Thread(target=write, args=(ident, connection, pending), daemon=True).start()
 
     def stop(*_):
         raise SystemExit(0)
@@ -89,15 +117,16 @@ def serve(directory):
             ident = event["id"]
             with state_lock:
                 connection = connections.get(ident)
+                credit = credits.get(ident)
+                pending = writes.get(ident)
             if not connection:
                 continue
-            if event.get("close"):
+            if event.get("ack"):
+                credit.set()
+            elif event.get("close"):
                 close(ident)
             elif "data" in event:
-                try:
-                    connection.sendall(base64.b64decode(event["data"], validate=True))
-                except OSError:
-                    close(ident)
+                pending.put(base64.b64decode(event["data"], validate=True))
     finally:
         listener.close()
         for ident in list(connections):

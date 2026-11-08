@@ -875,6 +875,9 @@ pub struct CheckoutDef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryDef {
+    /// Public SSH endpoints and pinned VM host key for daemon-owned Docker access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_ci: Option<DockerCiDef>,
     /// Daemon-consumed Docker SSH key references under DOCKER_CI_KEY
     /// and DOCKER_CI_RESET_KEY (both required when configured).
     /// Values must be @secret:<name>[.<field>], authorized by delivery
@@ -907,6 +910,19 @@ pub struct DeliveryDef {
     /// The most time a job may run, in seconds. Default 3600.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerCiDef {
+    /// SSH destination, for example root@host. No SSH options are accepted.
+    pub destination: String,
+    pub port: u16,
+    /// OpenSSH known_hosts line for destination and port.
+    pub known_hosts: String,
+    /// Forced-command reset destination, pinned in the daemon known_hosts.
+    pub reset_destination: String,
+    pub reset_port: u16,
 }
 
 impl DeliveryDef {

@@ -196,11 +196,17 @@ impl TestDaemon {
 
     /// Start (or start again) the daemon on the same dirs.
     pub async fn boot(&mut self, listen: Option<&str>, token: Option<&str>) {
+        self.boot_with_ssh(listen, token, None).await;
+    }
+
+    pub async fn boot_with_ssh(&mut self, listen: Option<&str>, token: Option<&str>, ssh: Option<&str>) {
         if let Some(d) = self.daemon.take() {
             d.shutdown();
         }
         seed_database(&self.state);
-        let daemon = terrariumd::start(DaemonConfig {
+        let mut executor = terrariumd::executor::Executor::default();
+        if let Some(ssh) = ssh { executor.ssh_bin = ssh.to_owned(); }
+        let daemon = terrariumd::start_with_executor(DaemonConfig {
             socket: self.socket.clone(),
             listen: listen.map(str::to_owned),
             token: token.map(str::to_owned),
@@ -214,7 +220,7 @@ impl TestDaemon {
             insecure_agent_header: true,
             artifact_listen: self.artifact_listen.clone(),
             web: self.web.clone(),
-        })
+        }, executor)
         .await
         .unwrap();
         // TER-216: the job queue takes up the running jobs of the last

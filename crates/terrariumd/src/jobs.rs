@@ -1921,28 +1921,23 @@ async fn steps(
             .iter()
             .find(|i| i.env == "DOCKER_CI_RESET_KEY")
             .ok_or_else(|| ApiError::invalid("Docker tunnel requires DOCKER_CI_RESET_KEY"))?;
-        crate::docker_tunnel::reset(x.state, &reset.value).await?;
+        let config = delivery.docker_ci.as_ref().ok_or_else(|| ApiError::invalid("merge_secrets requires docker_ci endpoint configuration"))?;
+        crate::docker_tunnel::reset(x.state, &reset.value, config).await?;
         let tunnel =
-            crate::docker_tunnel::open(x.state, x.def, &key.value, x.dir, delivery.timeout_secs())
+            crate::docker_tunnel::open(x.state, x.def, &key.value, x.dir, delivery.timeout_secs(), config)
                 .await?;
         env.insert("DOCKER_HOST".into(), tunnel.endpoint.clone());
         Some(tunnel)
     } else {
         None
     };
-    // Secret-bearing recipes must not leave an unredacted log on the target.
-    // Their bounded output is redacted in the stream before collection.
-    let has_secrets = !injected.is_empty();
+    // Credentials stay in the daemon, so retain the normal target recipe log.
     let script = recipe_script(recipe, base);
     let recipe_cmd = RemoteCmd {
         argv: vec![
             "sh".into(),
             "-c".into(),
-            if has_secrets {
-                script
-            } else {
-                logged_recipe(script, &log)
-            },
+            logged_recipe(script, &log),
         ],
         cwd: Some(x.dir.to_owned()),
         env,
@@ -1973,9 +1968,7 @@ async fn steps(
     };
     // The recipe group is gone now, even after timeout or cancel. Read its
     // log in a separate, bounded session that is not controlled by job.kill.
-    let excerpt = if has_secrets {
-        "Secret-bearing recipe: no raw log retained on the target.".to_owned()
-    } else if lost.is_none() {
+    let excerpt = if lost.is_none() {
         let cmd = RemoteCmd {
             argv: low_priority(
                 vec![
@@ -1996,15 +1989,11 @@ async fn steps(
     } else {
         String::new()
     };
-    let log_location = if has_secrets {
-        "No raw log retained for this secret-bearing recipe.".to_owned()
-    } else {
-        format!(
+    let log_location = format!(
             "Full log on target {}: {}",
             delivery.target.as_deref().unwrap_or("-"),
             log
-        )
-    };
+        );
     let mut tail = format!(
         "{}\n{}\n[{}]\n[run as: {} sh -c <recipe>]\n{}",
         excerpt.trim_end(),

@@ -41,6 +41,7 @@ class DockerRelayTests(unittest.TestCase):
                         client.sendall(b"docker-request")
                         data = event()
                         self.assertEqual(base64.b64decode(data["data"]), b"docker-request")
+                        send({"id": ident, "ack": True})
                         send({"id": ident, "data": base64.b64encode(b"docker-response").decode()})
                         self.assertEqual(client.recv(1024), b"docker-response")
                     if explicit_stop:

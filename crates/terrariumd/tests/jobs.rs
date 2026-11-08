@@ -816,7 +816,12 @@ async fn lab_with(slots: u32, docker: Option<&Path>) -> Lab {
 }
 
 async fn lab_impl(slots: u32, docker: Option<&Path>, flow: &'static str) -> Lab {
-    let td = TestDaemon::start().await;
+    lab_impl_ssh(slots, docker, flow, None).await
+}
+
+async fn lab_impl_ssh(slots: u32, docker: Option<&Path>, flow: &'static str, ssh: Option<&str>) -> Lab {
+    let mut td = TestDaemon::start().await;
+    if ssh.is_some() { td.boot_with_ssh(None, None, ssh).await; }
     let state = td.daemon.as_ref().unwrap().state.clone();
     let (_task, addr) = terrariumd::hosts::serve(state, "127.0.0.1:0")
         .await
@@ -2209,6 +2214,68 @@ async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
     assert_eq!(r.status, 201, "{}", r.body);
     let jobs = lab.until_idle().await;
     jobs.into_iter().find(|j| j["card"] == id.as_str()).unwrap()
+}
+
+#[tokio::test]
+async fn merge_job_resolves_daemon_credentials_resets_before_tunnel_and_revokes() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixtures = tempfile::tempdir().unwrap();
+    let ssh = fixtures.path().join("ssh");
+    std::fs::write(&ssh, format!(r#"#!/usr/bin/env python3
+import os, pathlib, socket, sys, time
+root = pathlib.Path({root:?})
+args = sys.argv[1:]
+key = pathlib.Path(args[args.index('-i') + 1]).read_text()
+assert 'SSH_AUTH_SOCK' not in os.environ
+if '-L' not in args:
+    assert key == 'dummy-reset-key-363'
+    with (root / 'order').open('a') as f: f.write('reset\n')
+    status = root / 'status'
+    code = int(status.read_text()) if status.exists() else 0
+    if code == 75: status.write_text('0')
+    sys.exit(code)
+assert key == 'dummy-tunnel-key-363'
+assert (root / 'order').read_text().endswith('reset\n')
+with (root / 'order').open('a') as f: f.write('tunnel\n')
+s = socket.socket(socket.AF_UNIX)
+s.bind(args[args.index('-L') + 1].split(':')[0])
+s.listen()
+while True: time.sleep(1)
+"#, root=fixtures.path().to_str().unwrap())).unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let lab = lab_impl_ssh(1, None, "code", Some(ssh.to_str().unwrap())).await;
+    for (name, value) in [("vm", "dummy-tunnel-key-363"), ("reset", "dummy-reset-key-363")] {
+        lab.td.put(&format!("/api/secrets/p/{name}"), json!({"kind":"api_key", "fields":{"value":value}})).await.ok();
+        lab.td.post(&format!("/api/secrets/p/{name}/grants"), json!({"grantee":"delivery:p", "level":"run", "targets":["p-box"]})).await.ok();
+    }
+    let marker = fixtures.path().join("recipe-started");
+    let config = json!({"target":"p-box", "recipe":format!("test -z \"${{DOCKER_CI_KEY:-}}${{DOCKER_CI_RESET_KEY:-}}${{SSH_AUTH_SOCK:-}}\" && test -S \"${{DOCKER_HOST#unix://}}\" && touch '{}' && echo recipe-ok", marker.display()), "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs"), "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm", "DOCKER_CI_RESET_KEY":"@secret:reset"}, "docker_ci":{"destination":"root@test-vm", "port":2250, "known_hosts":"test-vm ssh-ed25519 public-test-pin\n", "reset_destination":"reset@test-host", "reset_port":22}});
+    lab.td.put("/api/projects/p/delivery", config).await.ok();
+    for (branch, status, expected) in [("secret-ok", 0, true), ("secret-reset-failed", 1, false), ("secret-reset-busy", 75, true), ("secret-revoked", 0, false)] {
+        std::fs::write(fixtures.path().join("status"), status.to_string()).unwrap();
+        let _ = std::fs::remove_file(&marker);
+        if branch == "secret-revoked" {
+            lab.td.delete("/api/secrets/p/vm/grants?grantee=delivery:p").await.ok();
+        }
+        lab.branch(branch, "next", &[(branch, "yes\n")]);
+        let card = lab.card(branch, branch).await;
+        lab.td.post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({})).await.ok();
+        let jobs = lab.until_idle().await;
+        let job = jobs.iter().find(|j| j["card"] == card).unwrap();
+        assert_eq!(job["state"] == "passed", expected, "{job:#}");
+        assert_eq!(marker.exists(), expected);
+        let detail = lab.td.get(&format!("/api/jobs/{}", job["id"].as_str().unwrap())).await;
+        let text = detail.ok().to_string();
+        for key in ["dummy-reset-key-363", "dummy-tunnel-key-363"] { assert!(!text.contains(key), "{text}"); }
+        if status == 1 { assert!(text.contains("reset failed"), "{text}"); }
+        if expected { assert!(text.contains("Full log on target"), "{text}"); }
+    }
+    let audit = lab.td.get("/api/audit").await;
+    let text = audit.ok().to_string();
+    assert!(text.contains("delivery:p"), "{text}");
+    for key in ["dummy-reset-key-363", "dummy-tunnel-key-363"] { assert!(!text.contains(key)); }
+    let order = std::fs::read_to_string(fixtures.path().join("order")).unwrap();
+    assert_eq!(order, "reset\ntunnel\nreset\nreset\nreset\ntunnel\n");
 }
 
 #[tokio::test]
