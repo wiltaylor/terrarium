@@ -4,7 +4,7 @@
 //! query work. Open visits and malformed or backwards times do not count.
 
 use chrono::{DateTime, Duration};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 use crate::error::ApiResult;
 
@@ -24,14 +24,16 @@ pub struct WorkSample {
 /// move closes an estimate, but only a move supplies a completed sample.
 pub fn work_samples(conn: &Connection, project: &str) -> ApiResult<Vec<WorkSample>> {
     let mut stmt = conn.prepare(
-        "SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
+        "WITH recent AS MATERIALIZED (
+           SELECT seq, card, at, payload FROM events WHERE project = ?1 AND kind = 'card'
+             AND json_extract(payload, '$.change') IN ('eta','moved')
+           ORDER BY seq DESC LIMIT 2000
+         ) SELECT e.at, json_extract(e.payload, '$.eta_at'), x.at,
                 coalesce(json_extract(e.payload, '$.labels'), c.labels, '[]'), e.seq, x.seq, e.card
-         FROM events e JOIN events x ON x.seq = (
-           SELECT min(n.seq) FROM events n WHERE n.card = e.card AND n.seq > e.seq
-             AND n.kind = 'card' AND json_extract(n.payload, '$.change') IN ('eta','moved'))
+         FROM recent e JOIN recent x ON x.seq = (
+           SELECT min(n.seq) FROM recent n WHERE n.card = e.card AND n.seq > e.seq)
          LEFT JOIN cards c ON c.id = e.card
-         WHERE e.project = ?1 AND e.kind = 'card'
-           AND json_extract(e.payload, '$.change') = 'eta'
+         WHERE json_extract(e.payload, '$.change') = 'eta'
            AND coalesce(json_extract(e.payload, '$.column_role'), json_extract(e.payload, '$.column')) IN ('working', 'in_progress')
            AND coalesce(json_extract(e.payload, '$.job'), 0) = 0
            AND json_extract(x.payload, '$.change') = 'moved'
@@ -102,7 +104,10 @@ pub fn calibrated_ms(samples: &[WorkSample], labels: &[String], guess: Option<f6
         .map(|s| s.actual_ms)
         .collect());
     match guess {
-        Some(guess) => Some((guess * ratios? * actual?).sqrt()),
+        Some(guess) if guess.is_finite() && guess > 0.0 => {
+            Some((guess * ratios? * actual?).sqrt())
+        }
+        Some(_) => None,
         None => actual,
     }
 }
@@ -162,9 +167,40 @@ pub fn completed_visits(
 pub struct ReviewEstimates {
     review: std::collections::HashMap<String, Option<Duration>>,
     work: std::collections::HashMap<String, Vec<WorkSample>>,
+    entries: std::collections::HashMap<String, std::collections::HashMap<String, (String, String)>>,
 }
 
 impl ReviewEstimates {
+    /// One latest-column-entry query per project per response, including misses.
+    pub fn entered_at(
+        &mut self,
+        conn: &Connection,
+        project: &str,
+        card: &str,
+        role: Option<&str>,
+    ) -> ApiResult<Option<String>> {
+        if !self.entries.contains_key(project) {
+            let mut stmt = conn.prepare(
+                "SELECT card, at, coalesce(json_extract(payload, '$.to_role'), json_extract(payload, '$.to'), '')
+                 FROM events WHERE seq IN (SELECT max(seq) FROM events WHERE project = ?1 AND kind = 'card'
+                   AND json_extract(payload, '$.change') = 'moved'
+                 GROUP BY card)",
+            )?;
+            let rows = stmt.query_map([project], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })?;
+            let mut entries = std::collections::HashMap::new();
+            for row in rows {
+                let (card, at, column) = row?;
+                entries.entry(card).or_insert((at, column));
+            }
+            self.entries.insert(project.to_owned(), entries);
+        }
+        Ok(self.entries.get(project).and_then(|e| e.get(card))
+            .filter(|(_, column)| role.is_none_or(|r| r == column))
+            .map(|(at, _)| at.clone()))
+    }
+
     pub fn worker_ms(
         &mut self,
         conn: &Connection,
@@ -199,7 +235,11 @@ impl ReviewEstimates {
         let Some(median) = median else {
             return Ok(None);
         };
-        review_deadline(conn, card, median)
+        let start = self.entered_at(conn, project, card, Some(super::board::REVIEW))?;
+        Ok(start.and_then(|start| {
+            let at = DateTime::parse_from_rfc3339(&start).ok()?.checked_add_signed(median)?;
+            Some((at.to_rfc3339(), start))
+        }))
     }
 }
 
@@ -216,29 +256,6 @@ fn review_duration(conn: &Connection, project: &str) -> ApiResult<Option<Duratio
         samples[mid]
     };
     Ok(Some(median))
-}
-
-fn review_deadline(
-    conn: &Connection,
-    card: &str,
-    median: Duration,
-) -> ApiResult<Option<(String, String)>> {
-    let start: Option<String> = conn
-        .query_row(
-            "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
-           AND json_extract(payload, '$.change') = 'moved'
-           AND coalesce(json_extract(payload, '$.to_role'), json_extract(payload, '$.to')) = ?2
-         ORDER BY seq DESC LIMIT 1",
-            params![card, super::board::REVIEW],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(start.and_then(|start| {
-        let at = DateTime::parse_from_rfc3339(&start)
-            .ok()?
-            .checked_add_signed(median)?;
-        Some((at.to_rfc3339(), start))
-    }))
 }
 
 #[cfg(test)]
@@ -293,6 +310,9 @@ mod tests {
             Some(7000.0)
         );
         assert_eq!(calibrated_ms(&samples, &labels, None), Some(7000.0));
+        for guess in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(calibrated_ms(&samples, &labels, Some(guess)), None);
+        }
         assert_eq!(calibrated_ms(&samples[..4], &labels, Some(10000.0)), None);
         assert_eq!(
             calibrated_ms(&samples, &["type:small".into()], Some(10000.0)),
@@ -340,6 +360,25 @@ mod tests {
         assert_eq!(samples[0].actual_ms, 240000.0);
         assert_eq!(samples[0].guess_ms, 540000.0);
         assert_eq!(samples[0].labels, vec!["type:impl"]);
+        let mut cache = ReviewEstimates::default();
+        let first = cache.worker_ms(&c, "p", &[], None).unwrap();
+        c.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO events(project,card,kind,payload) SELECT 'p','noise','card','{\"change\":\"moved\"}' FROM n;").unwrap();
+        assert!(work_samples(&c, "p").unwrap().is_empty());
+        assert_eq!(cache.worker_ms(&c, "p", &[], None).unwrap(), first);
+    }
+
+    #[test]
+    fn column_entries_are_cached_for_all_cards_including_misses() {
+        let c = db();
+        moved(&c, "p", "a", 1, "ready", "working");
+        moved(&c, "p", "b", 2, "working", "review");
+        let mut cache = ReviewEstimates::default();
+        assert!(cache.entered_at(&c, "p", "a", None).unwrap().is_some());
+        c.execute("DELETE FROM events", []).unwrap();
+        assert_eq!(cache.entered_at(&c, "p", "b", Some("review")).unwrap().as_deref(), Some("2026-11-08T00:02:00Z"));
+        moved(&c, "p", "missing", 3, "ready", "working");
+        assert!(cache.entered_at(&c, "p", "missing", None).unwrap().is_none());
+        assert!(cache.entered_at(&c, "other", "a", None).unwrap().is_none());
     }
 
     /// Run against a read-API export, never the daemon's live database.
