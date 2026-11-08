@@ -692,6 +692,13 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                     field(t, "name"),
                     keys.join(", ")
                 ));
+                if let Some(note) = t["recreate_note"].as_str() {
+                    c.line(note);
+                    c.line(format!(
+                        "run: terrarium admin target verb {} recreate",
+                        a.name
+                    ));
+                }
             })
         }
         AdminTargetCmd::Rm { name } => {
@@ -705,9 +712,10 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             snapshot,
             agent,
         } => {
-            if !["up", "down", "snapshot", "restore", "status"].contains(&verb.as_str()) {
+            if !["up", "down", "snapshot", "restore", "status", "recreate"].contains(&verb.as_str())
+            {
                 return Err(crate::api::CliError::usage(format!(
-                    "unknown verb `{verb}`: use up, down, snapshot, restore, or status"
+                    "unknown verb `{verb}`: use up, down, snapshot, restore, status, or recreate"
                 )));
             }
             let path = format!("/api/targets/{}/{verb}", crate::transport::encode(name));
@@ -718,6 +726,9 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             let v = ctx.api.post(&path, body).await?;
             ctx.emit(&v, |c, v| {
                 c.line(format!("{name}: {verb}: {}", field(v, "state")));
+                if let Some(note) = v["recreate_note"].as_str() {
+                    c.line(format!("warning: {note}"));
+                }
                 if let Some(e) = v["attach_error"].as_str() {
                     c.line(format!("warning: {e}"));
                 }

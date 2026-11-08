@@ -122,16 +122,6 @@ async fn host_caps_accept_names_ids_and_ssh_aliases() {
 async fn host_counts_respect_the_readers_project() {
     use terrariumd::store::jobs::{self, JobKind, NewJob};
     let td = TestDaemon::start().await;
-    // TER-211: the queue takes up the running jobs of the last daemon in
-    // the background after the start, and puts them back in the queue as
-    // lost. A job that the test starts before that write would be one of
-    // them, and `running` would be 1.
-    tokio::time::timeout(
-        DEADLINE,
-        td.daemon.as_ref().unwrap().state.job_queue.recovered(),
-    )
-    .await
-    .expect("the job queue takes up the jobs of the last daemon");
     for project in ["p", "q"] {
         td.project(project).await;
         let card = td
@@ -3588,15 +3578,15 @@ async fn lost_runs_are_killed_when_the_host_agent_is_back_and_keep_their_slots(f
     );
     let card = lab.td.get(&format!("/api/cards/{cr}")).await.ok().clone();
     assert_ne!(card["column"], "ready", "a restart moved the card: {card}");
-    // The requeue shows on the card in both flows (TER-170): one job
-    // label, queued or (when it runs again already) running.
+    // The coded flow labels validation requeues. The default rules pack
+    // labels only merge lifecycle events (TER-218).
     lab.settle().await;
     let card = lab.card_of(&cr).await;
     let l: Vec<String> = labels(&card)
         .into_iter()
         .filter(|l| l.starts_with("validation:"))
         .collect();
-    assert_eq!(l.len(), 1, "{card}");
+    assert_eq!(l.len(), usize::from(flow == "code"), "{card}");
     // The requeued job writes its own file again when it runs.
     let f = terrariumd::run_kill::job_pidfile(&cancel_id);
     assert!(!Path::new(&f).exists(), "{f} is left");

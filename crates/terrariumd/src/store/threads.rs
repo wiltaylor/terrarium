@@ -28,6 +28,9 @@
 //!   leaves all linked cards in review or later, wakes the agent (the
 //!   `thread` event `cards`). A thread in `tracking` goes to
 //!   `waiting_agent` and back to `tracking` on the agent's reply.
+//!   Starting tracking with ready cards, or archiving the last unfinished
+//!   card, also checks review readiness. Card events never interrupt an
+//!   operator wait, and replies preserve open questions.
 //! - The overall response can be sent again (TER-148, D10): the newest
 //!   replaces `response`, and each stays in the conversation as a message
 //!   of kind `response`.
@@ -604,13 +607,20 @@ pub fn on_card_moved(
 /// Wake the agent of the thread `id` that tracks, for `reason`
 /// ([`WAKE_BLOCKED`], [`WAKE_REVIEW`]). A thread in `tracking` goes to
 /// `waiting_agent`; `tracking_at` stays, so the agent's reply puts it back
-/// into tracking ([`post`]). A thread that waits on the operator (an open
-/// question) or on the agent keeps its status. The `thread` event `cards`
+/// into tracking ([`post`]). A thread that waits on the operator is left
+/// parked. A thread waiting on the agent keeps its status. The `thread` event `cards`
 /// carries only the reason, not the card: a reader of the thread's events
 /// need not read the card's project (TER-146).
 fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
     let th = get_bare(t, id)?;
     let at = now();
+    if th.status == ThreadStatus::WaitingOperator {
+        t.execute(
+            "INSERT OR IGNORE INTO thread_pending_wakes(thread, reason) VALUES (?1, ?2)",
+            params![id, reason],
+        )?;
+        return Ok(());
+    }
     let status = if th.status == ThreadStatus::Tracking {
         ThreadStatus::WaitingAgent
     } else {
@@ -625,6 +635,28 @@ fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
         json!({"reason": reason}),
     )?;
     emit_with(t, &th, "cards", json!({"reason": reason}))
+}
+
+/// Deliver each held reason once, after the operator wait ends. Keep the
+/// reason even if the card moved again: it is an event, not a status poll.
+fn flush_pending_wakes(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
+    let th = get_bare(t, id)?;
+    if th.status == ThreadStatus::WaitingOperator {
+        return Ok(());
+    }
+    let reasons: Vec<String> = {
+        let mut st =
+            t.prepare("SELECT reason FROM thread_pending_wakes WHERE thread = ?1 ORDER BY reason")?;
+        st.query_map([id], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    t.execute("DELETE FROM thread_pending_wakes WHERE thread = ?1", [id])?;
+    if th.status != ThreadStatus::Closed {
+        for reason in reasons {
+            wake(t, id, &reason)?;
+        }
+    }
+    Ok(())
 }
 
 fn messages(conn: &Connection, thread: &str) -> ApiResult<Vec<ThreadMessage>> {
@@ -979,6 +1011,8 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     let msg = insert_message(t, &th.id, author, "message", &text, &at)?;
     let status = if author == "operator" {
         ThreadStatus::WaitingAgent
+    } else if open_questions(t, &th.id)? > 0 {
+        ThreadStatus::WaitingOperator
     } else if th.tracking_at.is_some() {
         ThreadStatus::Tracking
     } else {
@@ -992,6 +1026,7 @@ pub fn post(t: &mut Tx<'_>, id: &str, author: &str, text: &str) -> ApiResult<Thr
     }
     let th = get(t, &th.id)?;
     emit_with(t, &th, "message", json!({"message": msg, "author": author}))?;
+    flush_pending_wakes(t, id)?;
     Ok(th)
 }
 
@@ -1027,6 +1062,7 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
         "response",
         json!({"message": msg, "author": "operator"}),
     )?;
+    flush_pending_wakes(t, id)?;
     Ok(th)
 }
 
@@ -1034,8 +1070,10 @@ pub fn respond(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<Thread> {
 /// handoff (TER-145, TER-144 D1): the agent parks, and the reminder and
 /// the stale close do not apply. A close proposal is withdrawn. A thread
 /// with an open question waits on the operator: `409 conflict`.
+/// On the first handoff, cards already in review or later wake it at once.
 pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     let th = get_bare(t, id)?;
+    let first = th.tracking_at.is_none();
     not_closed(&th, "tracking")?;
     let open = open_questions(t, &th.id)?;
     if open > 0 {
@@ -1055,7 +1093,32 @@ pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     let th = get(t, &th.id)?;
     t.audit("thread.track", &th.id, th.project(), json!({"by": by}))?;
     emit_with(t, &th, "tracking", json!({"author": by}))?;
-    Ok(th)
+    flush_pending_wakes(t, id)?;
+    if first && all_review_or_later(t, id)? {
+        wake(t, id, WAKE_REVIEW)?;
+    }
+    get(t, id)
+}
+
+/// Archiving an unfinished card can leave all remaining live cards ready.
+pub fn on_card_archived(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
+    let ids: Vec<String> = {
+        let mut st = t.prepare(
+            "SELECT th.id FROM thread_cards tc JOIN threads th ON th.id = tc.thread
+             WHERE tc.card = ?1 AND th.status != 'closed' AND th.tracking_at IS NOT NULL",
+        )?;
+        st.query_map([card], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for id in ids {
+        let states = linked_states(t, &id)?;
+        if states.iter().any(|s| s.card == card && !s.review_or_later)
+            && all_review_or_later(t, &id)?
+        {
+            wake(t, &id, WAKE_REVIEW)?;
+        }
+    }
+    Ok(())
 }
 
 fn clear_proposal(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
@@ -1376,7 +1439,8 @@ pub fn on_question(t: &mut Tx<'_>, id: &str, q: &Question, change: &str) -> ApiR
         }
     }
     let th = get_bare(t, &th.id)?;
-    emit(t, &th, "question")
+    emit(t, &th, "question")?;
+    flush_pending_wakes(t, id)
 }
 
 /// The `thread` and `inbox` events of a change.

@@ -21,6 +21,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 pub const DELAY: Duration = Duration::from_millis(20);
 /// The longest time a helper waits for a state before the test fails.
 pub const WAIT: Duration = Duration::from_secs(15);
+/// The longest time daemon boot waits for job queue recovery.
+pub const RECOVERY_WAIT: Duration = Duration::from_secs(90);
 
 /// Each test gets its own database, but pays for schema creation only once
 /// per test binary. Close the connection before copying so WAL is checkpointed.
@@ -219,7 +221,7 @@ impl TestDaemon {
         // daemon in the background after the start, and puts them back in
         // the queue as lost (TER-211). A test that starts a job before that
         // write would see it requeued, so wait for it here, once for all.
-        tokio::time::timeout(Duration::from_secs(90), daemon.state.job_queue.recovered())
+        tokio::time::timeout(RECOVERY_WAIT, daemon.state.job_queue.recovered())
             .await
             .expect("the job queue takes up the jobs of the last daemon");
         self.daemon = Some(daemon);
