@@ -834,7 +834,11 @@ async fn an_ended_agent_marks_only_its_open_thread_once() {
                 .count(),
             1
         );
-        let endpoint = if outcome == "done" || outcome == "failed" { "respond" } else { "messages" };
+        let endpoint = if outcome == "done" || outcome == "failed" {
+            "respond"
+        } else {
+            "messages"
+        };
         let late_post = lab
             .td
             .post(
@@ -870,7 +874,9 @@ async fn an_ended_agent_marks_only_its_open_thread_once() {
 #[tokio::test]
 async fn ending_while_waiting_agent_warns_when_report_to_is_gone() {
     let lab = lab().await;
-    let th = lab.open(json!({"topic": "Unanswered", "scope": "p", "template": "consult"})).await;
+    let th = lab
+        .open(json!({"topic": "Unanswered", "scope": "p", "template": "consult"}))
+        .await;
     let tid = id(&th);
     let agent = th["agent"].as_str().unwrap().to_owned();
     lab.td.wait_status(&agent, "idle").await;
@@ -878,16 +884,23 @@ async fn ending_while_waiting_agent_warns_when_report_to_is_gone() {
     let log = tempfile::NamedTempFile::new().unwrap();
     let file = log.reopen().unwrap();
     let key = tid.clone();
-    state(&lab.td).db.write("system", move |t| {
-        t.execute("UPDATE threads SET report_to = 'missing-lead' WHERE id = ?1", [&key])?;
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || file.try_clone().unwrap())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            terrariumd::store::threads::agent_ended(t, &key, &agent, "failed")
+    state(&lab.td)
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "UPDATE threads SET report_to = 'missing-lead' WHERE id = ?1",
+                [&key],
+            )?;
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || file.try_clone().unwrap())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                terrariumd::store::threads::agent_ended(t, &key, &agent, "failed")
+            })
         })
-    }).await.unwrap();
+        .await
+        .unwrap();
     let marked = lab.thread(&tid).await;
     assert_eq!(marked["status"], "waiting_operator");
     let warning = std::fs::read_to_string(log.path()).unwrap();

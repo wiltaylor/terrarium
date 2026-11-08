@@ -1125,7 +1125,14 @@ fn set_status(t: &mut Tx<'_>, id: &str, status: ThreadStatus, at: &str) -> ApiRe
 fn close_after_agent_end(t: &mut Tx<'_>, th: Thread) -> ApiResult<Thread> {
     let summary = "Your message was saved, but the thread agent has ended. Nobody will answer in this thread.";
     insert_message(t, &th.id, "system", "message", summary, &now())?;
-    close(t, &th.id, "system", CloseReason::AgentEnded, Some(summary), vec![])
+    close(
+        t,
+        &th.id,
+        "system",
+        CloseReason::AgentEnded,
+        Some(summary),
+        vec![],
+    )
 }
 
 /// Post a message: by the operator (then the agent must act) or by the
