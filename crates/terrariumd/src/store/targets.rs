@@ -656,6 +656,17 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
             admin
         ],
     )?;
+    if p.contains_key("address") {
+        for address in [current.def.address.as_deref(), def.address.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            t.execute(
+                "DELETE FROM job_host_keys WHERE hostname = ?1",
+                [super::jobs::address_key(address)],
+            )?;
+        }
+    }
     get(t, name)
 }
 

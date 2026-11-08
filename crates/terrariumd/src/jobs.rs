@@ -831,23 +831,45 @@ pub async fn prepare_hosts(db: &crate::db::Db, extra: Option<String>) -> ApiResu
 async fn prepare_hosts_with(
     db: &crate::db::Db,
     extra: Option<String>,
-    resolve: impl Fn(&str) -> String + Send + 'static,
+    resolve: impl Fn(&str) -> String + Send + Sync + 'static,
 ) -> ApiResult<()> {
+    static PREPARE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _prepare = PREPARE.lock().await;
     let names = db.read(move |c| jobs::unresolved_hosts(c, extra)).await?;
     if names.is_empty() {
         return Ok(());
     }
-    let keys = tokio::task::spawn_blocking(move || {
-        names
-            .into_iter()
-            .map(|name| {
-                let key = resolve(&name);
-                (name, key)
-            })
-            .collect::<Vec<_>>()
-    })
-    .await
-    .map_err(|e| ApiError::internal(format!("host resolver failed: {e}")))?;
+    // Keep the guard in the blocking task: timing out does not cancel libc
+    // DNS. Even an explicitly cleared pin must not start a second lookup.
+    static LOOKUPS: std::sync::Mutex<std::collections::HashSet<String>> =
+        std::sync::Mutex::new(std::collections::HashSet::new());
+    struct Lookup(String);
+    impl Drop for Lookup {
+        fn drop(&mut self) {
+            LOOKUPS.lock().unwrap().remove(&self.0);
+        }
+    }
+    let resolve = Arc::new(resolve);
+    let mut pending = Vec::new();
+    for name in names {
+        if !LOOKUPS.lock().unwrap().insert(name.clone()) {
+            continue;
+        }
+        let guard = Lookup(name.clone());
+        let resolve = resolve.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let key = resolve(&guard.0);
+            (guard, key)
+        });
+        pending.push(async move {
+            let key = match tokio::time::timeout(Duration::from_secs(2), task).await {
+                Ok(Ok((_guard, key))) => key,
+                _ => name.clone(),
+            };
+            (name, key)
+        });
+    }
+    let keys = futures_util::future::join_all(pending).await;
     db.write("system", move |t| jobs::pin_hosts(t, keys)).await
 }
 
@@ -3643,6 +3665,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_resolution_timeout_pins_once_and_address_reset_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::new(
+            crate::db::open(&dir.path().join("state.db")).unwrap(),
+            crate::events::EventHub::default(),
+        );
+        db.write("operator", |t| {
+            let def = serde_json::from_value(serde_json::json!({
+                "name": "dns-box", "kind": "ssh", "address": "SLOW.INVALID"
+            })).unwrap();
+            crate::store::targets::create(t, &def)?;
+            Ok(())
+        }).await.unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let ready = started.clone();
+        let other = db.clone();
+        let first = tokio::spawn(async move {
+            prepare_hosts_with(&other, None, move |_| {
+                ready.notify_one();
+                wait.lock().unwrap().recv().unwrap();
+                "192.0.2.2".into()
+            }).await.unwrap();
+        });
+        started.notified().await;
+        prepare_hosts_with(&db, Some("slow.invalid".into()), |_| {
+            panic!("parallel kick must not look up the name twice")
+        }).await.unwrap();
+        first.await.unwrap();
+        let key = db.read(|c| jobs::canonical_key(c, "SLOW.INVALID")).await.unwrap();
+        assert_eq!(key, "slow.invalid");
+        db.write("operator", |t| {
+            crate::store::targets::update(t, "dns-box", &serde_json::json!({"address": "SLOW.INVALID"}))?;
+            assert_eq!(jobs::unresolved_hosts(t, None)?, vec!["slow.invalid"]);
+            Ok(())
+        }).await.unwrap();
+        prepare_hosts_with(&db, None, |_| {
+            panic!("timed out libc lookup is still in flight")
+        }).await.unwrap();
+        release.send(()).unwrap();
+    }
+
+    #[tokio::test]
     async fn host_resolution_does_not_hold_the_database_and_is_pinned() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
@@ -3653,6 +3719,7 @@ mod tests {
         let started = Arc::new(tokio::sync::Notify::new());
         let ready = started.clone();
         let (release, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
         let resolver_db = db.clone();
         let task = tokio::spawn(async move {
             prepare_hosts_with(
@@ -3660,7 +3727,7 @@ mod tests {
                 Some("round-robin.invalid".into()),
                 move |_| {
                     ready.notify_one();
-                    wait.recv().unwrap();
+                    wait.lock().unwrap().recv().unwrap();
                     "192.0.2.1".into()
                 },
             )
