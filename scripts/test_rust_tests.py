@@ -41,10 +41,11 @@ class RustTests(unittest.TestCase):
             os.environ, {"RESULTS_DIR": d}, clear=True
         ), mock.patch.object(rust_tests.subprocess, "call", return_value=0), \
                 mock.patch.object(rust_tests, "reported", side_effect=reported), \
+                mock.patch.object(rust_tests, "junit_source", return_value=Path(d, "source.xml")), \
                 mock.patch.object(rust_tests, "copy_junit") as junit:
             rust_tests.run(["--workspace"])
             self.assertEqual(Path(d, "doctests.json").read_bytes().count(b"\n"), 1)
-            junit.assert_called_once_with(d)
+            junit.assert_called_once_with(d, Path(d, "source.xml"))
         self.assertEqual(calls[0][1]["RUSTC_BOOTSTRAP"], "1")
 
     def test_failed_result_output_is_also_in_the_job_log(self):
@@ -68,3 +69,18 @@ class RustTests(unittest.TestCase):
         with mock.patch.object(rust_tests.subprocess, "call", return_value=7) as call:
             self.assertEqual(rust_tests.run(["--workspace"]), 7)
         self.assertEqual(call.call_count, 1)
+
+    def test_junit_store_is_independent_of_cargo_target_directory(self):
+        with mock.patch.object(rust_tests.subprocess, "check_output", return_value=
+                               '{"workspace_root":"/repo","target_directory":"/build"}'):
+            self.assertEqual(rust_tests.junit_source(), Path("/repo/target/nextest/ci/junit.xml"))
+
+    def test_affected_invocations_preserve_each_junit_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d, "source.xml")
+            source.write_text("first")
+            rust_tests.copy_junit(d, source)
+            source.write_text("second")
+            rust_tests.copy_junit(d, source)
+            self.assertEqual(Path(d, "rust.xml").read_text(), "first")
+            self.assertEqual(Path(d, "rust-2.xml").read_text(), "second")

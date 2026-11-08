@@ -23,10 +23,15 @@ def reported(cmd: list[str], results: str, env: dict[str, str]) -> int:
             return child.wait()
 
 
-def copy_junit(results: str) -> None:
+def junit_source() -> Path:
     meta = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--no-deps", "--format-version", "1"], text=True))
-    source = Path(meta["target_directory"], "nextest", "ci", "junit.xml")
+    # nextest's store.dir defaults to workspace-root/target/nextest, even
+    # when Cargo's compilation artifacts use a separate CARGO_TARGET_DIR.
+    return Path(meta["workspace_root"], "target", "nextest", "ci", "junit.xml")
+
+
+def copy_junit(results: str, source: Path) -> None:
     if source.exists():
         dest = Path(results, "rust.xml")
         index = 2
@@ -42,11 +47,15 @@ def run(args: list[str]) -> int:
         return code
     cmd = ["cargo", "nextest", "run", "--profile", "ci", *args]
     results = os.environ.get("RESULTS_DIR")
+    source = junit_source() if results else None
+    if source is not None:
+        source.unlink(missing_ok=True)
     # nextest streams status and panic output normally while writing JUnit.
     code = subprocess.call(cmd)
     if results:
         Path(results).mkdir(parents=True, exist_ok=True)
-        copy_junit(results)
+        assert source is not None
+        copy_junit(results, source)
     # Target-specific cargo test never ran doctests. Whole-crate runs did.
     if not any(a in args for a in ("--lib", "--bins", "--test", "--bin", "--tests", "--all-targets")):
         doc = ["cargo", "test", "--doc", *args]
