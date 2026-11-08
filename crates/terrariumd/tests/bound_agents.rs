@@ -804,6 +804,74 @@ async fn reconcile_repairs_a_missed_park_and_unpark() {
     assert_eq!(terrariumd::bound::reconcile(&s).await, 0);
 }
 
+both_flows!(a_release_in_a_wait_column_keeps_the_agent_parked);
+/// TER-331: assignment releases are shared by both flows, but a release
+/// while the card still waits must not queue a return turn or unpark it.
+async fn a_release_in_a_wait_column_keeps_the_agent_parked(flow: &str) {
+    let (td, lead) = setup_flow(flow).await;
+    let w = worker(&td, "w").await;
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    for column in terrariumd::bound::WAIT_COLUMNS {
+        mv(&td, &c, column, None).await;
+        parked(&td, &eph).await;
+        td.post(&format!("/api/cards/{c}/assign"), json!({"assignee": w}))
+            .await
+            .ok();
+        td.post(&format!("/api/cards/{c}/assign"), json!({"assignee": null}))
+            .await
+            .ok();
+        // Let the driver's assignment event run before checking its absence
+        // of effects. The positive control below proves release delivery.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let sp = spawn_row(&td, &eph).await;
+        assert!(sp["parked_at"].is_string(), "{sp}");
+        assert!(sp["unpark_queued_at"].is_null(), "{sp}");
+        assert_eq!(agent(&td, &eph).await["status"], "stopped");
+        assert!(return_turns(&td, &eph, &c).is_empty());
+    }
+    mv(&td, &c, "ready", None).await;
+    td.wait_status(&eph, "idle").await;
+    until("return after leaving the wait column", || async {
+        !return_turns(&td, &eph, &c).is_empty()
+    })
+    .await;
+    assert_eq!(return_turns(&td, &eph, &c).len(), 1);
+}
+
+/// TER-331: repeated refusals deduplicate, but an assignment event
+/// resets that state even when the same worker takes the card again.
+#[tokio::test]
+async fn an_assignment_change_resets_unpark_refusal_dedup() {
+    let (td, lead) = setup().await;
+    let w = worker(&td, "w").await;
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    mv(&td, &c, "review", None).await;
+    parked(&td, &eph).await;
+    let path = format!("/api/cards/{c}/assign");
+    let s = state(&td);
+    for expected in 1..=2 {
+        td.post(&path, json!({"assignee": w})).await.ok();
+        let key = eph.clone();
+        s.db.write("system", move |t| {
+            for _ in 0..3 {
+                assert_eq!(
+                    terrariumd::bound::unpark_tx(t, &key, None, "test")?.0,
+                    terrariumd::bound::Unparked::Refused
+                );
+            }
+            Ok(())
+        }).await.unwrap();
+        let events = td.get(&format!("/api/agents/{eph}/events?kind=agent.unpark_refused"))
+            .await;
+        assert_eq!(events.ok().as_array().unwrap().len(), expected);
+        td.post(&path, json!({"assignee": null})).await.ok();
+    }
+}
+
 both_flows!(an_unpark_is_refused_when_another_agent_has_the_card);
 /// TER-111 (A2): the bound agent does not unpark when another agent
 /// works its card, so two agents never work one card. The unpark that
