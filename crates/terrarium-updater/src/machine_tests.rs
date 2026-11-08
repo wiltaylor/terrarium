@@ -343,7 +343,16 @@ async fn an_update_drains_backs_up_and_switches_the_image() {
     assert_eq!(
         steps(&run),
         [
-            "inspect", "resolve", "verify", "pull", "environment", "drain", "backup", "stop", "remove", "start",
+            "inspect",
+            "resolve",
+            "verify",
+            "pull",
+            "environment",
+            "drain",
+            "backup",
+            "stop",
+            "remove",
+            "start",
             "health"
         ]
     );
@@ -395,9 +404,15 @@ async fn the_same_digest_is_current_and_changes_nothing() {
 async fn unresolved_environment_stops_before_drain_backup_or_swap() {
     let r = rig();
     r.fake.fail("environment");
-    let run = r.updater.run_now(RunKind::Update, "latest", "operator").await;
+    let run = r
+        .updater
+        .run_now(RunKind::Update, "latest", "operator")
+        .await;
     assert_eq!(run.outcome, Outcome::Failed);
-    assert_eq!(steps(&run), ["inspect", "resolve", "verify", "pull", "!environment"]);
+    assert_eq!(
+        steps(&run),
+        ["inspect", "resolve", "verify", "pull", "!environment"]
+    );
     assert_eq!(r.fake.running_image().as_deref(), Some(OLD));
     assert!(r.fake.calls().iter().all(|c| c.starts_with("pull")));
 }
@@ -464,7 +479,14 @@ async fn a_failed_drain_or_backup_resumes_the_old_daemon() {
     assert_eq!(
         steps(&run),
         [
-            "inspect", "resolve", "verify", "pull", "environment", "drain", "!backup", "resume"
+            "inspect",
+            "resolve",
+            "verify",
+            "pull",
+            "environment",
+            "drain",
+            "!backup",
+            "resume"
         ]
     );
     assert!(run.error.unwrap().contains("backup broke"));
@@ -496,8 +518,22 @@ async fn an_unhealthy_new_image_goes_back_to_the_old_image_and_data() {
     assert_eq!(
         steps(&run),
         [
-            "inspect", "resolve", "verify", "pull", "environment", "drain", "backup", "stop", "remove", "start",
-            "!health", "rollback", "remove", "restore", "start", "health"
+            "inspect",
+            "resolve",
+            "verify",
+            "pull",
+            "environment",
+            "drain",
+            "backup",
+            "stop",
+            "remove",
+            "start",
+            "!health",
+            "rollback",
+            "remove",
+            "restore",
+            "start",
+            "health"
         ]
     );
     let calls = r.fake.calls();
@@ -559,7 +595,16 @@ async fn a_rollback_restores_the_backup_of_the_last_switch() {
     assert_eq!(
         steps(&run),
         [
-            "inspect", "pull", "-verify", "environment", "drain", "backup", "stop", "restore", "remove", "start",
+            "inspect",
+            "pull",
+            "-verify",
+            "environment",
+            "drain",
+            "backup",
+            "stop",
+            "restore",
+            "remove",
+            "start",
             "health"
         ]
     );

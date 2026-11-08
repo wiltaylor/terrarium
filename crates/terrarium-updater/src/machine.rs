@@ -451,9 +451,15 @@ impl Updater {
         let prepared = self
             .step("environment", self.engine.prepare(&cur), |c| {
                 let keys = c.spec["changed_env_keys"].as_array();
-                format!("resolved deployment environment; changed keys (values hidden): {}",
-                    keys.map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
-                        .unwrap_or_default())
+                format!(
+                    "resolved deployment environment; changed keys (values hidden): {}",
+                    keys.map(|a| a
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                        .unwrap_or_default()
+                )
             })
             .await
             .map_err(failed)?;

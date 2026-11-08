@@ -1875,7 +1875,7 @@ updater has it.
 
    ```bash
    cd <dir>
-   ./terrarium-compose exec -T terrarium terrariumd backup create --full
+   ./terrarium-compose exec -T terrarium terrariumd backup create
    # Confirm the backup command succeeded and retain its reported backup path.
    # Use the release image containing the Compose CLI for the updater too.
    # Set TERRARIUM_UPDATER_IMAGE=<release-image> in .env before proceeding.
