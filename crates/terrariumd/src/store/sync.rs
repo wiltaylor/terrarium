@@ -86,7 +86,7 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
                     if prefix_change.is_some() {
                         let patch = projects::ProjectPatch {
                             card_dispatcher: None,
- review_dispatcher: None,
+                            review_dispatcher: None,
                             human_comment_notifications: None,
                             description: None,
                             card_prefix: def.prefix.clone(),
@@ -129,8 +129,12 @@ pub fn sync(t: &mut Tx<'_>, defs: &Definitions, state_dir: &Path) -> ApiResult<S
         {
             report.projects.updated.push(def.name.clone());
         }
-        projects::set_review_dispatcher(t, &def.name, def.review_dispatcher.as_deref().unwrap_or("off"))?;
- projects::set_card_dispatcher(
+        projects::set_review_dispatcher(
+            t,
+            &def.name,
+            def.review_dispatcher.as_deref().unwrap_or("off"),
+        )?;
+        projects::set_card_dispatcher(
             t,
             &def.name,
             def.card_dispatcher.as_deref().unwrap_or("off"),

@@ -696,7 +696,14 @@ fn render(
         (worker_eta, worker_start, row.eta_set_by, eta_set_by_name)
     };
     Ok(Card {
-        review_round: conn.query_row("SELECT round FROM card_reviews WHERE card = ?1", [&row.id], |r| r.get(0)).optional()?.unwrap_or(0),
+        review_round: conn
+            .query_row(
+                "SELECT round FROM card_reviews WHERE card = ?1",
+                [&row.id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0),
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,
         tests: crate::store::test_runs::card_chip(conn, &row.id)?,

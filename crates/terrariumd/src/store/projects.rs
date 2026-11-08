@@ -271,7 +271,9 @@ pub struct ProjectPatch {
 /// no cards, so card IDs stay stable.
 pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Project> {
     let before = get(t, name)?;
-    if let Some(owner) = &patch.review_dispatcher { set_review_dispatcher(t, name, owner)?; }
+    if let Some(owner) = &patch.review_dispatcher {
+        set_review_dispatcher(t, name, owner)?;
+    }
     if let Some(owner) = &patch.card_dispatcher {
         set_card_dispatcher(t, name, owner)?;
     }
@@ -345,7 +347,10 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &ProjectPatch) -> ApiResult<Pro
 /// The runtime requires this agent to be a project admin on every dispatch.
 pub fn set_review_dispatcher(t: &mut Tx<'_>, project: &str, owner: &str) -> ApiResult<()> {
     check_name("review dispatcher owner", owner)?;
-    t.execute("UPDATE projects SET review_dispatcher = ?2 WHERE name = ?1", params![project, (owner != "off").then_some(owner)])?;
+    t.execute(
+        "UPDATE projects SET review_dispatcher = ?2 WHERE name = ?1",
+        params![project, (owner != "off").then_some(owner)],
+    )?;
     Ok(())
 }
 pub fn set_card_dispatcher(t: &mut Tx<'_>, project: &str, owner: &str) -> ApiResult<()> {
