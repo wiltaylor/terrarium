@@ -144,6 +144,20 @@ struct HttpParams {
     body: Option<Value>,
 }
 
+impl HttpParams {
+    fn is_read(&self) -> bool {
+        self.method.eq_ignore_ascii_case("GET")
+            || self.method.eq_ignore_ascii_case("HEAD")
+            // These POST routes are audited reads, not effects to deduplicate.
+            // Their no-store answers contain secrets and must never enter the
+            // answer journal (including the harness launch credentials).
+            || (self.method.eq_ignore_ascii_case("POST")
+                && (self.path == "/api/agent/secrets/env"
+                    || (self.path.starts_with("/api/agent/secrets/") && self.path.ends_with("/get"))
+                    || (self.path.starts_with("/api/secrets/") && self.path.ends_with("/reveal"))))
+    }
+}
+
 /// Answers the agent CLI on one runner socket.
 pub struct AgentRpc {
     state: Weak<AppState>,
@@ -217,7 +231,7 @@ impl AgentRpc {
         }
         let p: HttpParams = serde_json::from_value(params.clone())
             .map_err(|e| bad_params(format!("bad `http` params: {e}")))?;
-        if p.method.eq_ignore_ascii_case("GET") || p.method.eq_ignore_ascii_case("HEAD") {
+        if p.is_read() {
             return tokio::select! {
                 result = self.execute_http(ctx, params) => result,
                 _ = draining.wait_for(|v| *v) => Err(retry()),
@@ -294,6 +308,13 @@ impl AgentRpc {
         let mut headers = serde_json::Map::new();
         if let Some(v) = resp
             .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+        {
+            headers.insert("cache-control".into(), Value::String(v.to_owned()));
+        }
+        if let Some(v) = resp
+            .headers()
             .get(NEXT_CURSOR)
             .and_then(|v| v.to_str().ok())
         {
@@ -352,7 +373,12 @@ async fn journaled(
                     return Ok(Some(Err(bad_params("request_id was already used for a different request"))));
                 }
                 if let Some(answer) = answer {
-                    return Ok(Some(serde_json::from_str::<Result<Value, RpcError>>(&answer)?));
+                    let answer = serde_json::from_str::<Result<Value, RpcError>>(&answer)?;
+                    if answer.as_ref().is_err_and(|e| e.code == "indeterminate") {
+                        tracing::warn!(agent = key, request_id, "agent write answer cannot be replayed");
+                        t.audit("agent_rpc.indeterminate", &request_id, Some(&project), json!({"agent": key, "reason": "no_store_answer"}))?;
+                    }
+                    return Ok(Some(answer));
                 }
                 tracing::warn!(agent = key, request_id, "agent write has an indeterminate outcome");
                 t.audit("agent_rpc.indeterminate", &request_id, Some(&project), json!({"agent": key, "reason": "unresolved_journal"}))?;
@@ -365,8 +391,24 @@ async fn journaled(
         return answer;
     }
     let answer = effect.await;
-    let stored =
-        serde_json::to_string(&answer).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    // Respect no-store even for a future write endpoint. Its effect is still
+    // deduplicated, but a lost sensitive answer cannot be recovered by storing
+    // plaintext credentials in the ordinary database.
+    let no_store = answer.as_ref().is_ok_and(|v| {
+        v["headers"]["cache-control"].as_str().is_some_and(|h| {
+            h.split(',')
+                .any(|v| v.trim().eq_ignore_ascii_case("no-store"))
+        })
+    });
+    let nonreplayable = Err(RpcError::new(
+        "indeterminate",
+        format!(
+            "request {id} ({}): the answer cannot be stored; the call may or may not have happened; check before you retry",
+            params["method"].as_str().unwrap_or_default()
+        ),
+    ));
+    let stored = serde_json::to_string(if no_store { &nonreplayable } else { &answer })
+        .map_err(|e| RpcError::new("internal", e.to_string()))?;
     db.write(format!("agent:{agent}"), move |t| {
         t.execute(
             "UPDATE agent_rpc_answers SET answer = ?3 WHERE agent = ?1 AND request_id = ?2",
@@ -384,6 +426,24 @@ async fn journaled(
 mod tests {
     use super::*;
 
+    #[test]
+    fn secret_fetch_posts_are_uncached_reads_but_secret_writes_are_not() {
+        for (method, path, read) in [
+            ("POST", "/api/agent/secrets/env", true),
+            ("POST", "/api/agent/secrets/token/get", true),
+            ("POST", "/api/secrets/demo/token/reveal", true),
+            ("POST", "/api/secrets", false),
+            ("PUT", "/api/secrets/demo/token", false),
+            ("POST", "/api/secrets/demo/token/grants", false),
+            ("GET", "/api/mail", true),
+            ("POST", "/api/mail", false),
+        ] {
+            let p: HttpParams =
+                serde_json::from_value(json!({"method":method,"path":path})).unwrap();
+            assert_eq!(p.is_read(), read, "{method} {path}");
+        }
+    }
+
     fn crash_context() -> RequestContext {
         serde_json::from_value(json!({
             "agent":"00000000000000000000000001", "name":"tester", "project":"demo",
@@ -400,6 +460,33 @@ mod tests {
         let mut conn = rusqlite::Connection::open(path).unwrap();
         crate::db::migrate(&mut conn).unwrap();
         crate::db::Db::new(conn, crate::events::EventHub::default())
+    }
+
+    #[tokio::test]
+    async fn no_store_write_answers_are_not_persisted_or_reexecuted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crash_db(&dir.path().join("no-store.sqlite"));
+        let answer = journaled(&db, &crash_context(), "sensitive".into(), &crash_params(), async {
+            Ok(json!({"headers":{"cache-control":"private, no-store"},"body":"sensitive-test-fixture"}))
+        }).await.unwrap();
+        assert_eq!(answer["body"], "sensitive-test-fixture");
+        let stored: String = db
+            .read(|c| Ok(c.query_row("SELECT answer FROM agent_rpc_answers", [], |r| r.get(0))?))
+            .await
+            .unwrap();
+        assert!(!stored.contains("sensitive-test-fixture"));
+        let replay = journaled(
+            &db,
+            &crash_context(),
+            "sensitive".into(),
+            &crash_params(),
+            async {
+                panic!("a no-store write must not execute twice");
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(replay.code, "indeterminate");
     }
 
     #[tokio::test]

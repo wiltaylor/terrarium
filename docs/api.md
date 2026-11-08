@@ -11602,6 +11602,14 @@ request. A reused ID with different parameters is rejected. Completed write
 answers are stored in SQLite and returned without executing the write again,
 including after a daemon restart. Concurrent copies wait for the first call.
 Legacy callers without request IDs are drained but cannot safely replay.
+Secret reads (`POST /api/agent/secrets/env`, `/api/agent/secrets/{name}/get`,
+and `/api/secrets/{scope}/{name}/reveal`) are also retried without journaling.
+These are audited reads despite their HTTP verb. Their secret-bearing answers
+must not be stored in the restart journal.
+For other writes whose answer declares `Cache-Control: no-store`, the first
+caller receives the answer, but the journal stores only an `indeterminate`
+marker. Replays fail closed without repeating the write or retaining sensitive
+answer content.
 
 An unresolved (`started`, NULL answer) journal entry after a crash or the drain
 cap yields `indeterminate`, never another execution. The error includes the

@@ -754,11 +754,17 @@ fn agent_mode_tunnels_every_call_over_the_runner_socket() {
     {
         let seen = seen.lock().unwrap();
         assert_eq!(seen[0]["method"], "whoami");
+        let request_id = seen[1]["params"]["request_id"].as_str().unwrap();
+        assert!(ulid::Ulid::from_string(request_id).is_ok());
+        assert_ne!(
+            seen[1]["params"]["request_id"],
+            seen[2]["params"]["request_id"]
+        );
         assert_eq!(
             seen[1],
             json!({"type": "request", "id": 1, "method": "http", "params": {
                 "method": "GET", "path": "/api/projects/terra/cards",
-                "query": {"column": "ready", "unassigned": "true"}}})
+                "query": {"column": "ready", "unassigned": "true"}, "request_id": request_id}})
         );
         assert_eq!(seen[2]["params"]["query"]["cursor"], "2");
     }
@@ -772,9 +778,12 @@ fn agent_mode_tunnels_every_call_over_the_runner_socket() {
     {
         let seen = seen.lock().unwrap();
         let last = seen.last().unwrap();
+        let request_id = last["params"]["request_id"].as_str().unwrap();
+        assert!(ulid::Ulid::from_string(request_id).is_ok());
         assert_eq!(
             last["params"],
             json!({"method": "POST", "path": "/api/mail",
+                   "request_id": request_id,
                    "body": {"to": "ops/dev", "subject": "hi", "body": "body text"}})
         );
     }
@@ -848,9 +857,12 @@ fn card_files_over_the_runner_tunnel() {
     {
         let seen = seen.lock().unwrap();
         let last = seen.last().unwrap();
+        let request_id = last["params"]["request_id"].as_str().unwrap();
+        assert!(ulid::Ulid::from_string(request_id).is_ok());
         assert_eq!(
             last["params"],
             json!({"method": "POST", "path": "/api/cards/TER-1/files",
+                   "request_id": request_id,
                    "body": {"name": "notes.txt", "data_base64": "aGVsbG8="}})
         );
     }
