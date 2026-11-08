@@ -61,6 +61,7 @@ async fn new_cards(td: &TestDaemon, project: &str, n: usize) -> Vec<String> {
 }
 
 /// Print the engine state, the rules, the event `seq`, and the run rows.
+#[allow(clippy::type_complexity)] // Diagnostic SQL rows, printed only on timeout.
 async fn dump(st: &Shared, seq: i64) {
     let out = st
         .db
