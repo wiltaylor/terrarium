@@ -1339,9 +1339,12 @@ pub async fn fire_timers(
     fired: &mut HashMap<(String, String), String>,
     now: DateTime<Utc>,
 ) -> ApiResult<usize> {
-    let mut written = fire_hourly(db, projects, now).await?;
+    let mut written = fire_hourly(db, projects, fired, now).await;
     let timers = timer_rules(projects);
-    fired.retain(|(p, r), _| timers.iter().any(|t| t.project == *p && t.rule == *r));
+    fired.retain(|(p, r), _| {
+        (r == HOURLY_CACHE_KEY && projects.iter().any(|project| project.project == *p))
+            || timers.iter().any(|t| t.project == *p && t.rule == *r)
+    });
     for t in timers {
         match fire_timer(db, &t, fired, now).await {
             Ok(true) => written += 1,
@@ -1357,7 +1360,15 @@ pub async fn fire_timers(
 
 /// One persisted hourly event per rules project, including across restarts.
 /// There is no catch-up burst after downtime.
-async fn fire_hourly(db: &Db, projects: &[ProjectRules], now: DateTime<Utc>) -> ApiResult<usize> {
+// NUL cannot occur in a rule name, so this cannot collide with a rule timer.
+const HOURLY_CACHE_KEY: &str = "\0hourly";
+
+async fn fire_hourly(
+    db: &Db,
+    projects: &[ProjectRules],
+    fired: &mut HashMap<(String, String), String>,
+    now: DateTime<Utc>,
+) -> usize {
     let hour = now.format("%Y-%m-%dT%H").to_string();
     let mut written = 0;
     for p in projects {
@@ -1369,8 +1380,12 @@ async fn fire_hourly(db: &Db, projects: &[ProjectRules], now: DateTime<Utc>) -> 
         {
             continue;
         }
+        let key = (p.project.clone(), HOURLY_CACHE_KEY.to_owned());
+        if fired.get(&key) == Some(&hour) {
+            continue;
+        }
         let (project, hour) = (p.project.clone(), hour.clone());
-        written += db.write(TIMER_ACTOR, move |tx| {
+        let result = db.write(TIMER_ACTOR, move |tx| {
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM events WHERE project = ?1 AND kind = 'rule.hourly' AND actor = 'system' AND json_extract(payload, '$.hour') = ?2)",
                 rusqlite::params![project, hour], |r| r.get(0),
@@ -1378,9 +1393,16 @@ async fn fire_hourly(db: &Db, projects: &[ProjectRules], now: DateTime<Utc>) -> 
             if exists { return Ok(0); }
             tx.emit(events::EventDraft::new("rule.hourly", "hourly board check", json!({"hour": hour})).project(project))?;
             Ok(1)
-        }).await?;
+        }).await;
+        match result {
+            Ok(count) => {
+                written += count;
+                fired.insert(key, now.format("%Y-%m-%dT%H").to_string());
+            }
+            Err(e) => warn!("the rule engine cannot check the hourly timer of project {}: {e}", p.project),
+        }
     }
-    Ok(written)
+    written
 }
 
 /// [`fire_timers`] for one rule: `true` when it wrote the timer.
