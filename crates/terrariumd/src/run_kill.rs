@@ -564,7 +564,10 @@ mod tests {
             .unwrap();
         writer.join().unwrap();
         assert!(out.status.success());
-        assert_eq!(parse(&String::from_utf8_lossy(&out.stdout))["stale"], json!(std::process::id()));
+        assert_eq!(
+            parse(&String::from_utf8_lossy(&out.stdout))["stale"],
+            json!(std::process::id())
+        );
     }
 
     #[test]
