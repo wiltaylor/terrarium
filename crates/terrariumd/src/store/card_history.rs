@@ -104,9 +104,7 @@ pub fn calibrated_ms(samples: &[WorkSample], labels: &[String], guess: Option<f6
         .map(|s| s.actual_ms)
         .collect());
     match guess {
-        Some(guess) if guess.is_finite() && guess > 0.0 => {
-            Some((guess * ratios? * actual?).sqrt())
-        }
+        Some(guess) if guess.is_finite() && guess > 0.0 => Some((guess * ratios? * actual?).sqrt()),
         Some(_) => None,
         None => actual,
     }
@@ -187,7 +185,11 @@ impl ReviewEstimates {
                  GROUP BY card)",
             )?;
             let rows = stmt.query_map([project], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?;
             let mut entries = std::collections::HashMap::new();
             for row in rows {
@@ -196,7 +198,10 @@ impl ReviewEstimates {
             }
             self.entries.insert(project.to_owned(), entries);
         }
-        Ok(self.entries.get(project).and_then(|e| e.get(card))
+        Ok(self
+            .entries
+            .get(project)
+            .and_then(|e| e.get(card))
             .filter(|(_, column)| role.is_none_or(|r| r == column))
             .map(|(at, _)| at.clone()))
     }
@@ -237,7 +242,9 @@ impl ReviewEstimates {
         };
         let start = self.entered_at(conn, project, card, Some(super::board::REVIEW))?;
         Ok(start.and_then(|start| {
-            let at = DateTime::parse_from_rfc3339(&start).ok()?.checked_add_signed(median)?;
+            let at = DateTime::parse_from_rfc3339(&start)
+                .ok()?
+                .checked_add_signed(median)?;
             Some((at.to_rfc3339(), start))
         }))
     }
@@ -375,9 +382,20 @@ mod tests {
         let mut cache = ReviewEstimates::default();
         assert!(cache.entered_at(&c, "p", "a", None).unwrap().is_some());
         c.execute("DELETE FROM events", []).unwrap();
-        assert_eq!(cache.entered_at(&c, "p", "b", Some("review")).unwrap().as_deref(), Some("2026-11-08T00:02:00Z"));
+        assert_eq!(
+            cache
+                .entered_at(&c, "p", "b", Some("review"))
+                .unwrap()
+                .as_deref(),
+            Some("2026-11-08T00:02:00Z")
+        );
         moved(&c, "p", "missing", 3, "ready", "working");
-        assert!(cache.entered_at(&c, "p", "missing", None).unwrap().is_none());
+        assert!(
+            cache
+                .entered_at(&c, "p", "missing", None)
+                .unwrap()
+                .is_none()
+        );
         assert!(cache.entered_at(&c, "other", "a", None).unwrap().is_none());
     }
 
