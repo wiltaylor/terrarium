@@ -382,7 +382,8 @@ pub async fn spawn_with(
             };
             if !allowed(&first) {
                 return Err(ApiError::forbidden(format!(
-                    "template `{}` is not in spawn.templates", first.use_key()
+                    "template `{}` is not in spawn.templates",
+                    first.use_key()
                 )));
             }
             let candidate = |t: &templates::Template| {

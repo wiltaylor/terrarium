@@ -9,11 +9,7 @@ use crate::stream_limit::StreamGate;
 
 /// Pick the account with most headroom below 80 percent in every window.
 /// Missing samples are not evidence that an account is full.
-pub fn pick(
-    conn: &Connection,
-    def: &AgentDef,
-    streams: &StreamGate,
-) -> ApiResult<Option<String>> {
+pub fn pick(conn: &Connection, def: &AgentDef, streams: &StreamGate) -> ApiResult<Option<String>> {
     let now = chrono::Utc::now();
     let mut best = None;
     let mut lowest = f64::INFINITY;
@@ -34,14 +30,17 @@ pub fn pick(
         {
             continue;
         }
-        let used = subs::latest_windows(conn, name)?.iter().map(|w| {
-            let expired = w
-                .resets_at
-                .as_deref()
-                .and_then(|r| chrono::DateTime::parse_from_rfc3339(r).ok())
-                .is_some_and(|r| r <= now);
-            if expired { 0.0 } else { w.used_pct }
-        }).fold(0.0, f64::max);
+        let used = subs::latest_windows(conn, name)?
+            .iter()
+            .map(|w| {
+                let expired = w
+                    .resets_at
+                    .as_deref()
+                    .and_then(|r| chrono::DateTime::parse_from_rfc3339(r).ok())
+                    .is_some_and(|r| r <= now);
+                if expired { 0.0 } else { w.used_pct }
+            })
+            .fold(0.0, f64::max);
         if used < 80.0 && used < lowest {
             best = Some(name.clone());
             lowest = used;
