@@ -464,8 +464,22 @@ class CommitTrailers(unittest.TestCase):
         self.assertIn(bad, output)
 
     def test_body_mention_is_not_a_trailer(self):
-        self.commit("fix: explain\n\nCo-authored-by: is discussed here\n\nNot a trailer block.")
+        self.commit("fix: explain\n\nThe words Co-authored-by: are discussed here.")
         self.assertEqual(self.check(), (0, ""))
+
+    def test_rejects_non_final_paragraph(self):
+        self.commit("fix: bad\n\nCo-authored-by: Test <test@example.invalid>\n\nMore explanation.")
+        self.assertEqual(self.check()[0], 1)
+
+    def test_rejects_mixed_last_paragraph(self):
+        self.commit("fix: bad\n\nExplanation.\nco-authored-by: Test <test@example.invalid>\nMore text.")
+        self.assertEqual(self.check()[0], 1)
+
+    def test_standalone_gate_skips_plan(self):
+        with mock.patch.object(affected, "check_commit_trailers", return_value=1), \
+                mock.patch.object(affected, "read_changed") as read:
+            self.assertEqual(affected.main(["--check-commit-trailers"]), 1)
+        read.assert_not_called()
 
     def test_missing_base_fails_closed(self):
         self.git("update-ref", "-d", "refs/remotes/origin/next")
