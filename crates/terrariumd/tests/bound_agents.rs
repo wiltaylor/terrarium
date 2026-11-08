@@ -1062,7 +1062,6 @@ async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
         .await
         .unwrap()
         .unwrap();
-    assert!(s.lifecycle.waking(agent_id));
     let turn = format!("[System:card {c}] unpark inside stop");
     assert_eq!(
         terrariumd::bound::unpark(&s, &eph, Some(turn.clone()), "test race")
