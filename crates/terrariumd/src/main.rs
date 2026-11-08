@@ -228,6 +228,14 @@ async fn main() -> anyhow::Result<()> {
     let backup_cfg =
         terrariumd::backup::schedule::Config::from_env().map_err(anyhow::Error::msg)?;
     let backup_task = terrariumd::backup::schedule::spawn(daemon.state.clone(), backup_cfg);
+    let hints_state = std::sync::Arc::downgrade(&daemon.state);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let Some(state) = hints_state.upgrade() else { return };
+            terrariumd::conflict_hints::pass(&state).await;
+        }
+    });
     // The self-update (TERRARIUM_SELF_UPDATE, docs/api.md §34): the
     // release check, the result mails, and the auto-update. A bad setting
     // stops the start.
