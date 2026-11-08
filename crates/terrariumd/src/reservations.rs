@@ -655,11 +655,11 @@ pub async fn cancel(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Reserv
 pub async fn sweep(state: &Shared) -> ApiResult<()> {
     let _guard = state.executor.resource_lock.lock().await;
     for host in state.db.read(hosts::list).await? {
-        if state.executor.resource_pending(&host.name) {
-            if let Err(error) = reconcile_host_locked(state, &host.name).await {
-                tracing::warn!(host=%host.name, %error, "reservation reconciliation pending");
-                continue;
-            }
+        if state.executor.resource_pending(&host.name)
+            && let Err(error) = reconcile_host_locked(state, &host.name).await
+        {
+            tracing::warn!(host=%host.name, %error, "reservation reconciliation pending");
+            continue;
         }
         let name = host.name.clone();
         let rows = state.db.read(move |c| store::list(c, &name)).await?;
@@ -788,7 +788,7 @@ pub fn docker_budget(state: &Shared, def: &TargetDef) -> ApiResult<Option<Runtim
             None
         };
         for r in &rows {
-            if r.holder == Holder::Target(def.name.clone()) && managed(&r) {
+            if r.holder == Holder::Target(def.name.clone()) && managed(r) {
                 if r.state == State::Ending || r.until.is_some_and(|u| u <= now()) {
                     return Err(ApiError::conflict("reservation ended; cleanup is pending"));
                 }
