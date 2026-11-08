@@ -49,7 +49,7 @@
 //! | moved to `done` | end, `done` |
 //! | a merge job passed (merged onto `next`) | end, `done` |
 //! | archived | end, `cancelled` |
-//! | moved to `validating`, `review`, `accepted` | park |
+//! | moved to `validating`, `review`, `merge_queue`, `accepted` | park |
 //! | moved out of a wait column while parked (`ready` after a failure, `in_progress`) | unpark |
 //! | moved between two other columns | nothing |
 //!
@@ -92,7 +92,7 @@ use crate::store::spawns::{self, Bound};
 /// The kind of a binding to a card.
 pub const KIND_CARD: &str = "card";
 /// The columns where a card waits on others: its agent is parked there.
-pub const WAIT_COLUMNS: [&str; 3] = ["validating", "review", "accepted"];
+pub const WAIT_COLUMNS: [&str; 4] = ["validating", "review", "merge_queue", "accepted"];
 /// The most characters of the card body in an unpark turn.
 const MAX_BODY: usize = 3000;
 
@@ -906,6 +906,13 @@ mod tests {
             assert_eq!(on_move("in_progress", to, false), park(to));
         }
         assert_eq!(on_move("validating", "review", true), park("review"));
+        assert_eq!(on_move("review", "merge_queue", true), park("merge_queue"));
+        assert_eq!(on_move("merge_queue", "accepted", true), park("accepted"));
+        for from in WAIT_COLUMNS {
+            for to in ["ready", "blocked", "in_progress"] {
+                assert_eq!(on_move(from, to, true), Some(Action::Unpark));
+            }
+        }
         // Done ends.
         assert!(matches!(
             on_move("accepted", "done", true),

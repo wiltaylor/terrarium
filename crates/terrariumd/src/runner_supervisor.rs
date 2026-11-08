@@ -4249,7 +4249,9 @@ impl Supervisor for RunnerSupervisor {
             let runner = self
                 .runner(agent)
                 .ok_or(SupervisorError::NotRunning(agent))?;
-            runner.write(&bytes).await.map_err(|e| match e {
+            // `agent keys` is a person at the terminal: the input-box
+            // watchdog does not flag the text it leaves (TER-224).
+            runner.write_person(&bytes).await.map_err(|e| match e {
                 terrarium_runner::RunnerError::Exited
                 | terrarium_runner::RunnerError::Disconnected => SupervisorError::NotRunning(agent),
                 e => other(e),
@@ -4363,7 +4365,16 @@ impl Supervisor for RunnerSupervisor {
                         },
                         input = in_rx.recv() => match input {
                             Some(PtyInput::Bytes(b)) => {
-                                if let Err(e) = runner.write(&b).await {
+                                // A person types: the input-box watchdog
+                                // does not flag the text (TER-224). The
+                                // auto-replies of the viewer's terminal are
+                                // no typing.
+                                let w = if is_terminal_report(&b) {
+                                    runner.write(&b).await
+                                } else {
+                                    runner.write_person(&b).await
+                                };
+                                if let Err(e) = w {
                                     debug!("PTY input: {e}");
                                 }
                             }
@@ -4945,10 +4956,80 @@ impl Supervisor for RunnerSupervisor {
     }
 }
 
+/// True when `bytes` holds only replies that a terminal emulator sends by
+/// itself, not keys of a person (TER-224): focus in and out (`ESC [ I`,
+/// `ESC [ O`), a cursor position report (`ESC [ <n> ; <n> R`), and a device
+/// attributes report (`ESC [ ? ... c`, `ESC [ > ... c`).
+fn is_terminal_report(bytes: &[u8]) -> bool {
+    let mut rest = bytes;
+    if rest.is_empty() {
+        return false;
+    }
+    while !rest.is_empty() {
+        let Some(body) = rest.strip_prefix(b"\x1b[") else {
+            return false;
+        };
+        let Some(end) = body.iter().position(|b| (0x40..=0x7e).contains(b)) else {
+            return false;
+        };
+        let (params, last) = (&body[..end], body[end]);
+        let digits = |p: &[u8]| p.iter().all(|b| b.is_ascii_digit() || *b == b';');
+        let report = match last {
+            b'I' | b'O' => params.is_empty(),
+            b'R' => {
+                let mut parts = params.split(|b| *b == b';');
+                matches!(
+                    (parts.next(), parts.next(), parts.next()),
+                    (Some(r), Some(c), None)
+                        if !r.is_empty() && !c.is_empty() && digits(r) && digits(c)
+                )
+            }
+            b'c' => matches!(params.first(), Some(b'?' | b'>')) && digits(&params[1..]),
+            _ => false,
+        };
+        if !report {
+            return false;
+        }
+        rest = &body[end + 1..];
+    }
+    true
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// TER-224: the auto-replies of a terminal emulator are no person
+    /// typing. Keys, arrows and text are.
+    #[test]
+    fn terminal_reports_are_not_person_writes() {
+        for report in [
+            &b"\x1b[I"[..],
+            b"\x1b[O",
+            b"\x1b[12;40R",
+            b"\x1b[?1;2c",
+            b"\x1b[?62;22c",
+            b"\x1b[>0;276;0c",
+            b"\x1b[I\x1b[24;1R",
+        ] {
+            assert!(is_terminal_report(report), "{report:?}");
+        }
+        for typed in [
+            &b""[..],
+            b"a",
+            b"\r",
+            b"\x1b",
+            b"\x1b[A",
+            b"\x1b[1;5C",
+            b"\x1b[200~text\x1b[201~",
+            b"\x1b[Ihello",
+            b"\x1b[12R",
+            b"\x1b[1c",
+        ] {
+            assert!(!is_terminal_report(typed), "{typed:?}");
+        }
+    }
 
     /// A Moonshot subscription is for pi only: the start of an agent of any
     /// other harness on it is refused.

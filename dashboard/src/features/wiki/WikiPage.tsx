@@ -11,6 +11,7 @@ import { renderWiki, splitFrontMatter } from "../../lib/markdown";
 import { isMissingEndpoint } from "../../api/http";
 import type { WikiPage as Page } from "../../api/types";
 import { api, projects } from "../../stores";
+import { bookmarks } from "../../stores/bookmarks";
 import { buildTree, type TreeNode } from "./tree";
 
 const TABS = [
@@ -49,6 +50,7 @@ function Tree(props: { nodes: TreeNode[]; project: string; current: string }): J
 export default function WikiPage() {
   const params = useParams<{ project: string; path?: string }>();
   const path = () => (params.path && params.path.length ? decodeURIComponent(params.path) : "index");
+  const bookmarkUrl = () => `/p/${encodeURIComponent(params.project)}/knowledge/wiki/${path().split("/").map(encodeURIComponent).join("/")}`;
   const [tab, setTab] = createSignal<(typeof TABS)[number]["id"]>("page");
   const [error, setError] = createSignal<unknown>(null);
   const [q, setQ] = createSignal("");
@@ -131,6 +133,9 @@ export default function WikiPage() {
               <div class="spread">
                 <div>
                   <h3 style={{ margin: 0 }}>{p().title}</h3>
+                  <button aria-pressed={bookmarks.has(bookmarkUrl())} onClick={() => bookmarks.has(bookmarkUrl()) ? bookmarks.remove(bookmarkUrl()) : bookmarks.add(p().title, bookmarkUrl())}>
+                    {bookmarks.has(bookmarkUrl()) ? "Unpin bookmark" : "Pin to bookmarks"}
+                  </button>
                   <div class="muted small">
                     {p().path} · rev {p().rev} · {p().author_name}, {ago(p().updated_at)}
                     <Show when={p().status}>
