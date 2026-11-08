@@ -2124,12 +2124,27 @@ async fn a_merge_recipe_finds_no_credential_and_cannot_touch_the_push() {
         git(&lab.origin, &["log", "-1", "--format=%s", "next"]),
         "Merge ter-m3 onto next"
     );
-    // The daemon removed its repo of the job.
+    // The daemon keeps its repository, but removes the job's bundle.
     let state_jobs = lab.td.daemon.as_ref().unwrap().state.state_dir.join("jobs");
     let left: Vec<_> = std::fs::read_dir(state_jobs.join("p"))
         .map(|d| d.flatten().map(|e| e.file_name()).collect())
         .unwrap_or_default();
-    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(left, [std::ffi::OsString::from("repos")]);
+    let cached = state_jobs.join("p/repos/app.git");
+    assert_eq!(git(&cached, &["rev-parse", &next]), next);
+    git(&cached, &["update-ref", "refs/test/retained", &next]);
+    let second = merge_with_recipe(&lab, "ter-m4", "test -f OK").await;
+    assert_eq!(second["state"], "passed", "{second:#}");
+    assert_eq!(git(&cached, &["rev-parse", "refs/test/retained"]), next);
+    assert_eq!(
+        git(&cached, &["rev-parse", "refs/job/merge"]),
+        second["head"].as_str().unwrap()
+    );
+    let repos: Vec<_> = std::fs::read_dir(state_jobs.join("p/repos"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(repos, [std::ffi::OsString::from("app.git")]);
 }
 
 /// TER-159: merges have their own lane. With 1 slot, a validate job queued
