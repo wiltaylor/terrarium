@@ -307,7 +307,8 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
                 let added = groups::add(t, &g, &card.id)?;
                 // Per-card rule lanes may run in either order. Keep the
                 // merge group's membership in the queued batch order.
-                if added && a.raw("key") == Some("{{job.group_key}}")
+                if added
+                    && a.raw("key") == Some("{{job.group_key}}")
                     && let Some(job) = &ctx.job
                 {
                     for (position, member) in job.cards().iter().enumerate() {
