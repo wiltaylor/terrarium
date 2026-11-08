@@ -454,7 +454,10 @@ pub fn link_card(t: &mut Tx<'_>, actor: &Actor, id: &str, card: &str) -> ApiResu
     )?;
     if n > 0 {
         if !all_review_or_later(t, &th.id)? {
-            t.execute("UPDATE threads SET monitor_done = 0 WHERE id = ?1", [&th.id])?;
+            t.execute(
+                "UPDATE threads SET monitor_done = 0 WHERE id = ?1",
+                [&th.id],
+            )?;
         }
         // The row is in the card's project, not the thread's: a project
         // admin reads the audit rows of its own project (`audit_scope`),
@@ -590,8 +593,7 @@ pub fn link_monitor(t: &mut Tx<'_>, actor: &Actor, id: &str, key: &str) -> ApiRe
         .split_once(':')
         .filter(|(p, n)| !p.is_empty() && !n.is_empty())
         .ok_or_else(|| ApiError::invalid("monitor must be PROJECT:MONITOR"))?;
-    policy::read_project(actor, project)
-        .map_err(|_| ApiError::not_found("no monitor"))?;
+    policy::read_project(actor, project).map_err(|_| ApiError::not_found("no monitor"))?;
     crate::store::monitors::find(t, &format!("{project}/{name}"))?;
     t.execute(
         "UPDATE threads SET monitor = ?2, monitor_done = 0 WHERE id = ?1 AND monitor IS NOT ?2",
@@ -711,7 +713,10 @@ fn wake(t: &mut Tx<'_>, id: &str, reason: &str) -> ApiResult<()> {
         if reason == "monitor_green" || reason == "monitor_red" {
             // Coalesce each monitor reason at its latest position, so the
             // last delivered state matches the latest monitor transition.
-            t.execute("DELETE FROM thread_pending_wakes WHERE thread = ?1 AND reason = ?2", params![id, reason])?;
+            t.execute(
+                "DELETE FROM thread_pending_wakes WHERE thread = ?1 AND reason = ?2",
+                params![id, reason],
+            )?;
         }
         t.execute(
             "INSERT OR IGNORE INTO thread_pending_wakes(thread, reason) VALUES (?1, ?2)",
@@ -1207,7 +1212,8 @@ pub fn track(t: &mut Tx<'_>, id: &str, by: &str) -> ApiResult<Thread> {
     flush_pending_wakes(t, id)?;
     let monitor_pending: bool = t.query_row(
         "SELECT monitor IS NOT NULL AND monitor_done = 0 FROM threads WHERE id = ?1",
-        [id], |r| r.get(0),
+        [id],
+        |r| r.get(0),
     )?;
     if (first || monitor_pending) && all_review_or_later(t, id)? {
         wake(t, id, WAKE_REVIEW)?;

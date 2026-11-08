@@ -4025,10 +4025,16 @@ links an existing monitor in a project the attached agent can read. Omitting the
 option keeps the link. Readiness waits for all live cards to reach review or
 later and the monitor's latest result to be `ok`. A monitor-only thread waits
 for `ok`. A green transition wakes the agent when the cards are ready. A `crit`
-transition after readiness wakes it again. Repeated identical results do not
-wake it. These use the existing tracking wake path, including held wakes while
+transition after readiness wakes it again. Repeated results and warn/unknown
+flaps do not wake completed threads. Red re-arms the green wake. Adding
+unfinished cards or moving cards back before review clears completion.
+Linking an already green monitor on a later track call checks readiness too.
+Unreadable monitor links return `404`, and a missing link rolls back the write.
+These use the existing tracking wake path, including held wakes while
 waiting on an operator question, and create no operator notices. The monitor
-reference is hidden from readers who cannot read its project.
+reference is hidden from readers who cannot read its project. Held monitor
+wakes are coalesced by reason in latest-transition order, so the last delivered
+monitor state is the latest one.
 
 **The thread agent** (TER-92, `crates/terrariumd/src/thread_agent.rs`).
 A thread opened with a `template` and no `agent` gets its agent at the

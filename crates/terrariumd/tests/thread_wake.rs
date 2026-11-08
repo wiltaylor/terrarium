@@ -164,11 +164,23 @@ async fn ops_monitor_gates_ready_and_wakes_on_green_and_red() {
     let (ops, agent) = lab.started("consult", "Monitor only").await;
     lab.track(&agent, &ops).await;
     lab.parked(&agent).await;
-    let r = lab.td.post_as(&agent, &format!("/api/threads/{ops}/track"),
-        json!({"monitor": "q:hidden"})).await;
+    let r = lab
+        .td
+        .post_as(
+            &agent,
+            &format!("/api/threads/{ops}/track"),
+            json!({"monitor": "q:hidden"}),
+        )
+        .await;
     assert_eq!(r.status, 404, "{}", r.body);
-    let r = lab.td.post_as(&agent, &format!("/api/threads/{ops}/track"),
-        json!({"monitor": "p:health"})).await;
+    let r = lab
+        .td
+        .post_as(
+            &agent,
+            &format!("/api/threads/{ops}/track"),
+            json!({"monitor": "p:health"}),
+        )
+        .await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(lab.wakes(&ops).await, ["monitor_green"]);
 
@@ -176,16 +188,29 @@ async fn ops_monitor_gates_ready_and_wakes_on_green_and_red() {
     let mut th = serde_json::from_value::<terrariumd::store::threads::Thread>(r.body).unwrap();
     th.monitor = Some("q:hidden".to_owned());
     let actor = terrariumd::actor::Actor::Agent(terrariumd::actor::AgentActor {
-        id: agent.clone(), name: "reader".to_owned(), project: "p".to_owned(),
-        roles: vec![], policy: Default::default(),
+        id: agent.clone(),
+        name: "reader".to_owned(),
+        project: "p".to_owned(),
+        roles: vec![],
+        policy: Default::default(),
     });
-    assert!(terrariumd::store::threads::visible(&actor, th).monitor.is_none());
+    assert!(
+        terrariumd::store::threads::visible(&actor, th)
+            .monitor
+            .is_none()
+    );
 
     // Hold red then green while waiting for the operator. Delivery must
     // preserve that order, with green last, and must not violate SQL checks.
     lab.td.wait_status(&agent, "idle").await;
-    let question = lab.td.post_as(&agent, &format!("/api/agents/{agent}/questions"),
-        json!({"thread": ops, "text": "Proceed?", "options": ["yes", "no"]})).await;
+    let question = lab
+        .td
+        .post_as(
+            &agent,
+            &format!("/api/agents/{agent}/questions"),
+            json!({"thread": ops, "text": "Proceed?", "options": ["yes", "no"]}),
+        )
+        .await;
     assert_eq!(question.status, 201, "{}", question.body);
     lab.parked(&agent).await;
     monitor_sample(&lab, &monitor, Status::Crit).await;
@@ -193,18 +218,31 @@ async fn ops_monitor_gates_ready_and_wakes_on_green_and_red() {
     assert_eq!(lab.thread(&ops).await["status"], "waiting_operator");
     assert_eq!(lab.wakes(&ops).await, ["monitor_green"]);
     let qid = id(&question.body);
-    lab.td.post(&format!("/api/questions/{qid}/answer"), json!({"option": "yes"})).await.ok();
-    assert_eq!(lab.wakes(&ops).await, ["monitor_green", "monitor_red", "monitor_green"]);
+    lab.td
+        .post(
+            &format!("/api/questions/{qid}/answer"),
+            json!({"option": "yes"}),
+        )
+        .await
+        .ok();
+    assert_eq!(
+        lab.wakes(&ops).await,
+        ["monitor_green", "monitor_red", "monitor_green"]
+    );
 }
 
 async fn monitor_sample(lab: &Lab, monitor: &str, status: terrariumd::monitors::parse::Status) {
     let monitor = monitor.to_owned();
-    state(&lab.td).db.write("system", move |t| {
-        let mut parsed = terrariumd::monitors::parse::Parsed::unknown("test");
-        parsed.status = status;
-        terrariumd::store::monitors::record(t, &monitor, &parsed, chrono::Utc::now(), 1)?;
-        Ok(())
-    }).await.unwrap();
+    state(&lab.td)
+        .db
+        .write("system", move |t| {
+            let mut parsed = terrariumd::monitors::parse::Parsed::unknown("test");
+            parsed.status = status;
+            terrariumd::store::monitors::record(t, &monitor, &parsed, chrono::Utc::now(), 1)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 struct Lab {
