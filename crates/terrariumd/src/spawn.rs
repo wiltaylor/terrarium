@@ -381,19 +381,22 @@ pub async fn spawn_with(
                     })
             };
             if !allowed(&first) {
+                let allowed = selection_rules.as_ref().map(|sp| sp.templates.join(", "))
+                    .filter(|s| !s.is_empty()).unwrap_or_else(|| "none".to_owned());
                 return Err(ApiError::forbidden(format!(
-                    "template `{}` is not in spawn.templates",
+                    "template `{}` is not in spawn.templates (allowed: {allowed})",
                     first.use_key()
                 )));
             }
-            let candidate = |t: &templates::Template| {
+            let mut refusals = Vec::new();
+            let mut candidate = |t: &templates::Template| {
                 let mut def = agent_template::to_def(&t.spec, "selection", &p)
                     .map_err(|e| ApiError::invalid(e.to_string()))?;
                 spawn_rights::inherit_pool(&mut def, selection_owner.as_ref());
                 if def.subscription.is_none() && def.subscription_pool.is_empty() {
                     return Ok(Some(None));
                 }
-                crate::spawn_selection::pick(c, &def, &selection_state.usage.streams)
+                crate::spawn_selection::pick(c, &def, &selection_state, &mut refusals)
                     .map(|s| s.map(Some))
             };
             if let Some(sub) = candidate(&first)? {
@@ -409,8 +412,8 @@ pub async fn spawn_with(
                 return Ok((alt, sub));
             }
             Err(ApiError::conflict(format!(
-                "template `{}` and its allowed alternative have no subscription headroom",
-                first.use_key()
+                "template `{}` and its allowed alternative have no subscription headroom: {}",
+                first.use_key(), refusals.join("; ")
             )))
         })
         .await?;

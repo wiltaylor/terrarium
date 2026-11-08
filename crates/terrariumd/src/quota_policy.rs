@@ -104,7 +104,7 @@ pub fn budgets(config_dir: &Path, project: &str) -> Vec<Budget> {
 }
 
 /// A window that has passed its reset counts as zero.
-fn effective_pct(used: f64, resets_at: Option<&str>, now: DateTime<Utc>) -> f64 {
+pub(crate) fn effective_pct(used: f64, resets_at: Option<&str>, now: DateTime<Utc>) -> f64 {
     let reset = resets_at
         .and_then(|r| DateTime::parse_from_rfc3339(r).ok())
         .map(|r| r.with_timezone(&Utc));
