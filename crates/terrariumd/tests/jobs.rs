@@ -425,6 +425,34 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     assert_eq!(secs_between(&restart, &c["eta_at"]), 1200, "{c:#}");
     assert!(restarted.started_at > started.started_at);
 
+    // Requeue keeps the plan, clears the old ETA, and restarts its clock.
+    let rid = rerun.id.clone();
+    let queued = db
+        .write("system", move |t| jobs::requeue(t, &rid, "unreachable"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(queued.planned_secs, Some(1200));
+    assert!(queued.started_at.is_none());
+    assert!(card(ids[0].clone()).await.get("eta_at").is_none());
+    let rid = rerun.id.clone();
+    let restarted = db
+        .write("system", move |t| {
+            assert!(jobs::start(t, &rid, "machine", Some(1))?);
+            jobs::get(t, &rid)
+        })
+        .await
+        .unwrap();
+    let c = card(ids[0].clone()).await;
+    assert_eq!(secs_between(&json!(restarted.started_at.unwrap()), &c["eta_at"]), 1200);
+
+    // Cancelling a running planned job must not leave an overdue ETA.
+    let rid = rerun.id.clone();
+    db.write("system", move |t| jobs::cancel(t, &rid))
+        .await
+        .unwrap();
+    assert!(card(ids[0].clone()).await.get("eta_at").is_none());
+
     // No duration: the job leaves the card's ETA alone and sets none.
     let j = create(ids[1].clone(), None).await;
     let before = card(ids[1].clone()).await["eta_at"].clone();
@@ -478,6 +506,51 @@ async fn a_jobs_eta_starts_when_the_job_runs() {
     td.patch_as("p/w2", &path, json!({"eta_at": "2h"}))
         .await
         .err(403, "forbidden");
+
+    // Both halves inherit a batch's duration, wait without an ETA, and
+    // set their cards' ETA from their own start.
+    let jid = j.id.clone();
+    let batch = [ids[0].clone(), ids[2].clone()]
+        .into_iter()
+        .map(|card| jobs::BatchCard {
+            card,
+            branch: "b".into(),
+            by_agent: Some("w".into()),
+            outcome: None,
+            note: None,
+        })
+        .collect::<Vec<_>>();
+    let halves = db
+        .write("system", move |t| {
+            jobs::cancel(t, &jid)?;
+            let parent = jobs::create(t, NewJob {
+                project: "p".into(),
+                card: batch[0].card.clone(),
+                kind: JobKind::Merge,
+                repo: "app".into(),
+                branch: "b".into(),
+                commit: None,
+                by_agent: Some("w".into()),
+                batch: batch.clone(),
+                planned_secs: Some(1200),
+            })?;
+            jobs::start(t, &parent.id, "machine", Some(1))?;
+            let red = jobs::finish(t, &parent.id, &JobEnd::default())?.unwrap();
+            jobs::split(t, &red, &batch)
+        })
+        .await
+        .unwrap();
+    for half in [halves.0, halves.1] {
+        assert_eq!(half.planned_secs, Some(1200));
+        assert!(card(half.card.clone()).await.get("eta_at").is_none());
+        let hid = half.id.clone();
+        let started = db.write("system", move |t| {
+            assert!(jobs::start(t, &hid, "machine", Some(1))?);
+            jobs::get(t, &hid)
+        }).await.unwrap();
+        let c = card(half.card.clone()).await;
+        assert_eq!(secs_between(&json!(started.started_at.unwrap()), &c["eta_at"]), 1200);
+    }
 }
 
 #[tokio::test]

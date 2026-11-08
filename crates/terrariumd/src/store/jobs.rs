@@ -1611,6 +1611,7 @@ pub fn cancel(t: &mut Tx<'_>, id: &str) -> ApiResult<Job> {
         params![id, now()],
     )?;
     let job = get(t, id)?;
+    queued_eta(t, &job)?;
     t.audit(
         "job.cancel",
         id,
