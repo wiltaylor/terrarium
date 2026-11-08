@@ -187,7 +187,7 @@ pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
 
 /// Start with an explicit executor, avoiding process-global SSH overrides in tests.
 pub async fn start_with_executor(cfg: DaemonConfig, executor: executor::Executor) -> anyhow::Result<Daemon> {
-    start_with_usage(cfg, usage_collector::UsageConfig::from_env()).await
+    start_with_usage_and_executor(cfg, usage_collector::UsageConfig::from_env(), executor).await
 }
 
 /// [`start`] with the settings of usage accounting, quota probes, and login
@@ -195,6 +195,14 @@ pub async fn start_with_executor(cfg: DaemonConfig, executor: executor::Executor
 pub async fn start_with_usage(
     cfg: DaemonConfig,
     usage: usage_collector::UsageConfig,
+) -> anyhow::Result<Daemon> {
+    start_with_usage_and_executor(cfg, usage, executor::Executor::default()).await
+}
+
+async fn start_with_usage_and_executor(
+    cfg: DaemonConfig,
+    usage: usage_collector::UsageConfig,
+    executor: executor::Executor,
 ) -> anyhow::Result<Daemon> {
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("cannot create state dir {}", cfg.state_dir.display()))?;
