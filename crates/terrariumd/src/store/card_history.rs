@@ -179,9 +179,13 @@ impl ReviewEstimates {
         guess: Option<f64>,
     ) -> ApiResult<Option<f64>> {
         if !self.work.contains_key(project) {
-            self.work.insert(project.to_owned(), work_samples(conn, project)?);
+            self.work
+                .insert(project.to_owned(), work_samples(conn, project)?);
         }
-        Ok(self.work.get(project).and_then(|s| calibrated_ms(s, labels, guess)))
+        Ok(self
+            .work
+            .get(project)
+            .and_then(|s| calibrated_ms(s, labels, guess)))
     }
 
     pub fn eta(
@@ -335,10 +339,15 @@ mod tests {
     #[ignore = "requires TERRARIUM_ETA_HISTORY export"]
     fn backtest_export() {
         let path = std::env::var("TERRARIUM_ETA_HISTORY").unwrap();
-        let cards: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let cards: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let c = db();
         for card in &cards {
-            c.execute("INSERT INTO cards(id,labels) VALUES (?1,?2)", params![card["id"].as_str().unwrap(), card["labels"].to_string()]).unwrap();
+            c.execute(
+                "INSERT INTO cards(id,labels) VALUES (?1,?2)",
+                params![card["id"].as_str().unwrap(), card["labels"].to_string()],
+            )
+            .unwrap();
             for event in card["events"].as_array().unwrap() {
                 c.execute("INSERT INTO events(seq,project,card,kind,at,payload) VALUES (?1,?2,?3,'card',?4,?5)", params![event["seq"].as_i64().unwrap(), event["project"].as_str().unwrap(), card["id"].as_str().unwrap(), event["at"].as_str().unwrap(), event["data"].to_string()]).unwrap();
             }
@@ -349,21 +358,42 @@ mod tests {
         let mut raw_close = 0;
         let mut calibrated_close = 0;
         // Samples are ordered by completion. Only older completions train each prediction.
-        for project in cards.iter().flat_map(|c| c["events"].as_array().unwrap()).filter_map(|e| e["project"].as_str()).collect::<std::collections::BTreeSet<_>>() {
+        for project in cards
+            .iter()
+            .flat_map(|c| c["events"].as_array().unwrap())
+            .filter_map(|e| e["project"].as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
             let samples = work_samples(&c, project).unwrap();
             for sample in &samples {
-                let history: Vec<_> = samples.iter().filter(|s| s.end_seq < sample.start_seq).map(|s| WorkSample {
-                    start_seq: s.start_seq, end_seq: s.end_seq, actual_ms: s.actual_ms, guess_ms: s.guess_ms, labels: s.labels.clone(),
-                }).collect();
-                let Some(prediction) = calibrated_ms(&history, &sample.labels, Some(sample.guess_ms)) else { continue };
+                let history: Vec<_> = samples
+                    .iter()
+                    .filter(|s| s.end_seq < sample.start_seq)
+                    .map(|s| WorkSample {
+                        start_seq: s.start_seq,
+                        end_seq: s.end_seq,
+                        actual_ms: s.actual_ms,
+                        guess_ms: s.guess_ms,
+                        labels: s.labels.clone(),
+                    })
+                    .collect();
+                let Some(prediction) =
+                    calibrated_ms(&history, &sample.labels, Some(sample.guess_ms))
+                else {
+                    continue;
+                };
                 count += 1;
                 raw_on_time += usize::from(sample.actual_ms <= sample.guess_ms);
                 calibrated_on_time += usize::from(sample.actual_ms <= prediction);
-                raw_close += usize::from((0.5..=2.0).contains(&(sample.actual_ms / sample.guess_ms)));
-                calibrated_close += usize::from((0.5..=2.0).contains(&(sample.actual_ms / prediction)));
+                raw_close +=
+                    usize::from((0.5..=2.0).contains(&(sample.actual_ms / sample.guess_ms)));
+                calibrated_close +=
+                    usize::from((0.5..=2.0).contains(&(sample.actual_ms / prediction)));
             }
         }
-        println!("backtest: eligible={count}, raw_on_time={raw_on_time}, calibrated_on_time={calibrated_on_time}, raw_half_to_double={raw_close}, calibrated_half_to_double={calibrated_close}");
+        println!(
+            "backtest: eligible={count}, raw_on_time={raw_on_time}, calibrated_on_time={calibrated_on_time}, raw_half_to_double={raw_close}, calibrated_half_to_double={calibrated_close}"
+        );
         assert!(count > 0);
     }
 
