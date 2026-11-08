@@ -15,6 +15,8 @@ export const FILTER_THRESHOLD = 8;
  * (a-z, 0-9, `-`, `_`), so this name cannot be a project.
  */
 export const PROJECTS_ROOT = "/projects";
+/** Reserved node name, distinct from a project named `bookmarks`. */
+export const BOOKMARKS_KEY = "/bookmarks";
 
 /**
  * The root is open by default. The open set holds this marker while the root
@@ -159,7 +161,7 @@ export function toggle(list: readonly string[], name: string): string[] {
 export function prune(list: readonly string[], known: readonly string[], folders: readonly string[] | null = null): string[] {
   const kept = list.filter((n) => n !== OLD_AGENTS_ROOT && (folders === null || !n.startsWith("folder:") || folders.includes(n.slice(7))));
   if (known.length === 0) return kept;
-  return kept.filter((n) => n === ROOT_CLOSED || n.startsWith("folder:") || known.includes(n) || known.includes(projectOfNode(n) ?? ""));
+  return kept.filter((n) => n === ROOT_CLOSED || n === BOOKMARKS_KEY || n.startsWith("folder:") || known.includes(n) || known.includes(projectOfNode(n) ?? ""));
 }
 
 /** True for the pages under the Projects root: the cards (/projects) and every /p/<name>/... page. */
