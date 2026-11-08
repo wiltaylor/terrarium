@@ -177,6 +177,7 @@ pub struct Card {
     /// The dependencies that are neither accepted nor done yet.
     pub blocked_by: Vec<String>,
     pub comments: Vec<Comment>,
+    #[serde(default)]
     pub review_round: u32,
     pub links: Vec<Link>,
     pub created_by: String,
