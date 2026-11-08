@@ -8,6 +8,7 @@ import { render } from "solid-js/web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMockApi } from "../../api/mock";
 import { waitFor } from "../../test/wait";
+import type { InboxItem } from "../../api/types";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 vi.mock("../../stores", () => ({
@@ -48,6 +49,31 @@ function mount(url: string) {
 }
 
 const watchCards = (el: HTMLElement) => el.querySelectorAll("article[aria-label^='Watch ']");
+
+describe("Inbox load (TER-302)", () => {
+  for (const scale of [1, 10]) {
+    it(`renders ${scale}x live mail counts`, async () => {
+      const rows: InboxItem[] = Array.from({ length: 257 * scale }, (_, i) => ({
+        id: `mail:perf-${i}`, kind: "mail", open: true, urgent: false, critical: false,
+        project: "p", at: "2026-11-08T00:00:00Z",
+        message: { id: `perf-${i}`, thread_id: `thread-${i}`, from: "p/lead", from_kind: "agent", from_name: "p/lead",
+          to: "operator", to_kind: "operator", to_name: "operator", subject: `Performance ${i}`,
+          body: "Representative message content. ".repeat(100), state: "queued", created_at: "2026-11-08T00:00:00Z" },
+      }));
+      const spy = vi.spyOn(api.inbox, "list").mockResolvedValue(rows);
+      try {
+        const start = performance.now();
+        const el = mount("/inbox");
+        await waitFor(() => expect(el.querySelectorAll("article[aria-label^='Mail ']").length).toBeGreaterThan(0), 10000);
+        const elapsed = performance.now() - start;
+        console.log(`Inbox render scale=${scale}: ${elapsed.toFixed(1)}ms, cards=${el.querySelectorAll("article").length}`);
+        expect(elapsed).toBeLessThan(10000);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  }
+});
 
 describe("the Asked status tab (TER-42)", () => {
   it("shows a waiting ask only under Asked, and its reply on Open when the agent answers", async () => {
