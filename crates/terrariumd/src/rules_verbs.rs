@@ -291,8 +291,14 @@ fn group_verb(t: &mut Tx<'_>, actor: &Actor, ctx: &RunCtx, a: &Args<'_>) -> ApiR
             },
         )?
     } else {
-        let g = groups::by_key(t, &ctx.project, &key)?
-            .ok_or_else(|| ApiError::invalid(format!("no group with key `{key}`")))?;
+        let Some(g) = groups::by_key(t, &ctx.project, &key)? else {
+            // A job queued before the pack was installed has no header.
+            // Its completion must still run the ordinary delivery actions.
+            if a.raw("key") == Some("{{job.group_key}}") && ctx.job.is_some() {
+                return Ok(noop(json!({"key": key, "reason": "job has no merge group"})));
+            }
+            return Err(ApiError::invalid(format!("no group with key `{key}`")));
+        };
         match verb {
             "group.add" => groups::add(t, &g, &the_card(ctx, verb)?.id)?,
             "group.remove" => groups::remove(t, &g, &the_card(ctx, verb)?.id)?,

@@ -1349,6 +1349,12 @@ rule "validate-pass" {
 }
 "#;
 
+    #[test]
+    fn group_close_all_done_requires_a_boolean() {
+        let err = errors("rule \"close\" { on = [\"card\"] group_close { key = \"batch\" all_done = \"yes\" } }");
+        assert!(err.contains("all_done"), "{err}");
+    }
+
     fn errors(text: &str) -> String {
         parse(text, "rules.wcl", &board()).unwrap_err().to_string()
     }

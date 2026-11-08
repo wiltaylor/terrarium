@@ -8472,7 +8472,7 @@ not. Set another number with your own `merge-red-group` rule. The pack
 does not spawn the fix agent or queue the group again (TER-256).
 
 Queued merge jobs open a board group in `@review`, with `@accepted`
-as its completion anchor. The `queued` and `merge and e2e` steps track
+as its completion anchor. The `queued` and `merged (full suite passed)` steps track
 the job. A red result keeps the group open and adds its fix card as the
 first member. Queue the repair and the original members together, fix
 first, to reuse the group. The passed merge verdict follows the configured

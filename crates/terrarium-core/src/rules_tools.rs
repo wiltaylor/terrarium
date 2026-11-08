@@ -1051,6 +1051,18 @@ mod tests {
     }
 
     #[test]
+    fn the_migration_drops_the_entire_group_lifecycle_without_anchors() {
+        let board = cols(&[("ready", None), ("review", Some("review")), ("done", None)]);
+        let m = migrate(default_pack(), "", &RuleSet::default(), &board);
+        let own = parse(&m.text, "rules.wcl", &ctx(&board)).expect("migrated rules");
+        let set = rules_file::with_pack(default_pack(), &own);
+        assert!(set.rules.iter().all(|r| r.actions.iter().all(|a| !a.verb.starts_with("group."))));
+        let queued = set.rules.iter().find(|r| r.name == "merge-queued").unwrap();
+        assert!(queued.actions.iter().any(|a| a.verb == "card.label"));
+        assert!(queued.actions.iter().any(|a| a.verb == "card.comment"));
+    }
+
+    #[test]
     fn the_migration_maps_names_to_roles_and_keeps_own_rules() {
         let board = cols(&[
             ("ready", None),

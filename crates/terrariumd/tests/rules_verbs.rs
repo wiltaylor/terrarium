@@ -537,6 +537,54 @@ async fn default_merge_group_keeps_fix_first_and_identity_on_rerun() {
     assert!(card(&td, &a).await.get("group").is_none());
 }
 
+#[tokio::test]
+async fn default_merge_group_finds_members_after_a_manual_fix_card() {
+    let td = queue_lab().await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
+    let b = new_card(&td, "p", json!({"title":"b", "repo":"app"})).await;
+    let job = store_job(&td, JobKind::Merge, &[&a, &b]).await;
+    settle(&td).await;
+    let gid = card(&td, &a).await["group"]["id"].as_str().unwrap().to_owned();
+    fail_job(&td, &job, "red").await;
+    let fix = new_card(&td, "p", json!({"title":"manual fix", "repo":"app"})).await;
+    assert!(card(&td, &fix).await.get("group").is_none());
+    let retry = store_job(&td, JobKind::Merge, &[&fix, &a, &b]).await;
+    settle(&td).await;
+    for c in [&fix, &a, &b] {
+        assert_eq!(card(&td, c).await["group"]["id"], gid);
+        assert_eq!(card(&td, c).await["group"]["total"], 3);
+    }
+    assert_eq!(card(&td, &gid).await["archived"], false);
+    let runs = runs_of(&td, "p", "merge-queued").await;
+    assert!(runs.iter().all(|r| r["state"] != "failed"), "{runs:?}");
+    assert_eq!(card(&td, &fix).await["group"]["key"], format!("merge:{}", job.id));
+    assert_ne!(job.id, retry.id);
+}
+
+#[tokio::test]
+async fn default_merge_group_skips_jobs_queued_before_pack_installation() {
+    let td = queue_lab().await;
+    let a = new_card(&td, "p", json!({"title":"a", "repo":"app"})).await;
+    let job = store_job(&td, JobKind::Merge, &[&a]).await;
+    settle(&td).await;
+    put_rules(&td, "p", terrarium_core::rules_file::DEFAULT_PACK).await;
+    let id = job.id.clone();
+    let passed = state(&td).db.write("system", move |t| {
+        jobs::start(t, &id, "machine", None)?;
+        Ok(jobs::finish(t, &id, &JobEnd { passed: true, exit_code: Some(0), ..JobEnd::default() })?.unwrap())
+    }).await.unwrap();
+    verdict(&td, &passed, &a, "passed").await;
+    settle(&td).await;
+    assert_eq!(card(&td, &a).await["column"], "accepted");
+    assert!(card(&td, &a).await.get("group").is_none());
+    for rule in ["merge-group-started", "merge-pass"] {
+        let runs = runs_of(&td, "p", rule).await;
+        assert!(!runs.is_empty());
+        assert!(runs.iter().all(|r| r["state"] != "failed"), "{runs:?}");
+    }
+}
+
 const MOVE: &str = r#"rule "to-ready" {
   on = ["test.ping"]
   when "data.n" { eq = "1" }
