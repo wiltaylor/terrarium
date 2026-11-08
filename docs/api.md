@@ -8168,7 +8168,8 @@ on the events of the log.
   an event at chain depth 4 (`data.cause.depth`, shared with the
   triggers of §19.4) starts no run; a rule runs at most `max_per_hour`
   times in an hour (default 30), and at most 10 times for one card in an
-  hour. A guard records a `skipped` run with the reason.
+  hour by default. An explicit `max_per_hour` sets both limits (the built-in
+  pack uses 600). A guard records a `skipped` run with the reason.
 - Order. The runs of one card go one after another, in event order and
   then in rule order. The runs of other cards go beside them. A run that
   the engine cannot record (a database error) stays pending and holds the
