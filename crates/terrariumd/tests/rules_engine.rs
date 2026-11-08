@@ -157,24 +157,36 @@ async fn a_stopped_lane_does_not_block_new_plans_or_other_lanes() {
     put_rules(&td, "slow", &text).await;
     put_rules(&td, "fast", TWO_STEPS).await;
     settle(&td).await;
-    state(&td).db.write("system", |t| {
-        t.execute_batch(
-            "CREATE TRIGGER block_slow_run BEFORE UPDATE ON rule_runs
+    state(&td)
+        .db
+        .write("system", |t| {
+            t.execute_batch(
+                "CREATE TRIGGER block_slow_run BEFORE UPDATE ON rule_runs
              WHEN OLD.project = 'slow'
-             BEGIN SELECT RAISE(FAIL, 'test recording failure'); END;"
-        )?;
-        Ok(())
-    }).await.unwrap();
+             BEGIN SELECT RAISE(FAIL, 'test recording failure'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     for n in 0..10 {
         ping(&td, "slow", &slow, n).await;
     }
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            let count: i64 = state(&td).db.read(|c| Ok(c.query_row(
+            let count: i64 = state(&td)
+                .db
+                .read(|c| {
+                    Ok(c.query_row(
                 "SELECT count(*) FROM rule_runs WHERE project = 'slow' AND state = 'pending'",
                 [], |r| r.get(0),
-            )?)).await.unwrap();
-            if count == 250 { break; }
+            )?)
+                })
+                .await
+                .unwrap();
+            if count == 250 {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         // This event arrives after more than RUN_BATCH rows are stuck.
@@ -182,18 +194,34 @@ async fn a_stopped_lane_does_not_block_new_plans_or_other_lanes() {
         while comments(&td, &fast).await.len() != 2 {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.expect("a failed lane blocked another project's plan or run");
-    assert!(comments(&td, &slow).await.is_empty(), "failed writes rolled back");
-    state(&td).db.write("system", |t| {
-        t.execute_batch("DROP TRIGGER block_slow_run")?;
-        Ok(())
-    }).await.unwrap();
+    })
+    .await
+    .expect("a failed lane blocked another project's plan or run");
+    assert!(
+        comments(&td, &slow).await.is_empty(),
+        "failed writes rolled back"
+    );
+    state(&td)
+        .db
+        .write("system", |t| {
+            t.execute_batch("DROP TRIGGER block_slow_run")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     settle(&td).await;
-    let expected: Vec<String> = (0..10).flat_map(|event| {
-        (0..25).map(move |rule| format!("{rule}: `{event}`"))
-    }).collect();
-    let actual: Vec<String> = comments(&td, &slow).await.into_iter().map(|(_, body)| body).collect();
-    assert_eq!(actual, expected, "the stopped lane resumes in event and rule order");
+    let expected: Vec<String> = (0..10)
+        .flat_map(|event| (0..25).map(move |rule| format!("{rule}: `{event}`")))
+        .collect();
+    let actual: Vec<String> = comments(&td, &slow)
+        .await
+        .into_iter()
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "the stopped lane resumes in event and rule order"
+    );
 }
 
 #[tokio::test]

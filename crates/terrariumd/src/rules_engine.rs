@@ -659,11 +659,19 @@ struct Lanes {
 }
 
 impl Lanes {
-    async fn start(&mut self, state: &Shared, live: Arc<HashSet<(String, String)>>) -> ApiResult<()> {
-        let pending: Vec<String> = state.db.read(|c| {
-            let mut st = c.prepare("SELECT DISTINCT lane FROM rule_runs WHERE state = 'pending'")?;
-            Ok(st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
-        }).await?;
+    async fn start(
+        &mut self,
+        state: &Shared,
+        live: Arc<HashSet<(String, String)>>,
+    ) -> ApiResult<()> {
+        let pending: Vec<String> = state
+            .db
+            .read(|c| {
+                let mut st =
+                    c.prepare("SELECT DISTINCT lane FROM rule_runs WHERE state = 'pending'")?;
+                Ok(st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
+            })
+            .await?;
         for lane in pending {
             if self.stopped.contains(&lane) || self.active.values().any(|l| l == &lane) {
                 continue;
@@ -671,14 +679,18 @@ impl Lanes {
             let st = state.clone();
             let live = live.clone();
             let name = lane.clone();
-            let task = self.tasks.spawn(async move { run_lane(&st, &name, &live).await });
+            let task = self
+                .tasks
+                .spawn(async move { run_lane(&st, &name, &live).await });
             self.active.insert(task.id(), lane);
         }
         Ok(())
     }
 
     async fn join(&mut self) {
-        let Some(result) = self.tasks.join_next_with_id().await else { return };
+        let Some(result) = self.tasks.join_next_with_id().await else {
+            return;
+        };
         let (id, error) = match result {
             Ok((id, result)) => (id, result.err().map(|e| e.to_string())),
             Err(e) => (e.id(), Some(e.to_string())),
@@ -695,14 +707,18 @@ impl Lanes {
 async fn run_lane(state: &Shared, lane: &str, live: &HashSet<(String, String)>) -> ApiResult<()> {
     loop {
         let lane = lane.to_owned();
-        let ids: Vec<String> = state.db.read(move |c| {
-            let mut st = c.prepare(
-                "SELECT id FROM rule_runs WHERE state = 'pending' AND lane = ?1
+        let ids: Vec<String> = state
+            .db
+            .read(move |c| {
+                let mut st = c.prepare(
+                    "SELECT id FROM rule_runs WHERE state = 'pending' AND lane = ?1
                  ORDER BY event_seq, ord, id LIMIT ?2",
-            )?;
-            Ok(st.query_map(params![lane, RUN_BATCH as i64], |r| r.get(0))?
-                .collect::<Result<_, _>>()?)
-        }).await?;
+                )?;
+                Ok(st
+                    .query_map(params![lane, RUN_BATCH as i64], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?)
+            })
+            .await?;
         if ids.is_empty() {
             return Ok(());
         }
