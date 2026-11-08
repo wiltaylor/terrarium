@@ -401,7 +401,11 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
     }
     if runs(state, id).await {
         deliver_turns(state, id).await;
-        return if wake_guard.is_some() { Woke::Running } else { Woke::Busy };
+        return if wake_guard.is_some() {
+            Woke::Running
+        } else {
+            Woke::Busy
+        };
     }
     if wake_guard.is_none() {
         return Woke::Busy;

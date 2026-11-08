@@ -4054,7 +4054,11 @@ impl RunnerSupervisor {
                 // Claim against the runner's real queue and turn state too.
                 let claimed = tokio::time::timeout(Duration::from_secs(5), r.claim_idle_stop())
                     .await
-                    .unwrap_or_else(|_| Err(terrarium_runner::RunnerError::Other("idle-stop claim timed out".into())));
+                    .unwrap_or_else(|_| {
+                        Err(terrarium_runner::RunnerError::Other(
+                            "idle-stop claim timed out".into(),
+                        ))
+                    });
                 if !matches!(claimed, Ok(true)) {
                     if let Err(e) = &claimed {
                         if matches!(e, terrarium_runner::RunnerError::Control(e) if e.code == "method_not_found")
@@ -5227,8 +5231,12 @@ mod tests {
     #[tokio::test]
     async fn idle_stop_claim_rpc_keeps_a_turn_retryable_on_refusal_and_lost_reply() {
         for (lost, timeout, pointer) in [
-            (false, false, false), (true, false, false), (true, true, false),
-            (false, false, true), (true, false, true), (true, true, true),
+            (false, false, false),
+            (true, false, false),
+            (true, true, false),
+            (false, false, true),
+            (true, false, true),
+            (true, true, true),
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
@@ -5269,7 +5277,11 @@ mod tests {
             if pointer {
                 sup.lease_granted(id, "box".into(), "lease".into());
             } else {
-                lock(&sup.inner.slots).get_mut(&id).unwrap().turns.push("pending hand-over".into());
+                lock(&sup.inner.slots)
+                    .get_mut(&id)
+                    .unwrap()
+                    .turns
+                    .push("pending hand-over".into());
                 sup.deliver_pending(id);
             }
             assert!(lock(&runner.typed).is_empty());
@@ -5277,10 +5289,15 @@ mod tests {
                 runner.reply.notify_one();
             }
             assert!(stop.await.unwrap().is_err());
-            tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), runner.typed_ready.notified())
+                .await
+                .unwrap();
             let pending = lock(&runner.typed)[0].clone();
-            if pointer { assert!(pending.contains("box"), "{pending}"); }
-            else { assert_eq!(pending, "pending hand-over"); }
+            if pointer {
+                assert!(pending.contains("box"), "{pending}");
+            } else {
+                assert_eq!(pending, "pending hand-over");
+            }
             sup.send_turn(id, "queued turn".into()).await.unwrap();
             assert_eq!(lock(&runner.typed)[1], "queued turn");
             assert!(!runner.claimed.load(Ordering::SeqCst));

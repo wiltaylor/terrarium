@@ -128,11 +128,20 @@ async fn a_busy_wake_delivers_a_turn_queued_after_the_first_wake_read() {
     let st = state(&td);
     let held = terrariumd::lifecycle::WakeGuard::take(&st.lifecycle, aid(&w)).unwrap();
     let key = w.clone();
-    st.db.write("system", move |tx| {
-        terrariumd::store::agents::queue_turn(tx, &key, "[User] after the first wake read")
-    }).await.unwrap();
-    assert_eq!(terrariumd::lifecycle::wake(&st, aid(&w), "idle_stop_refused").await, terrariumd::lifecycle::Woke::Busy);
-    assert_eq!(td.sup.prompts(aid(&w)), ["[User] after the first wake read"]);
+    st.db
+        .write("system", move |tx| {
+            terrariumd::store::agents::queue_turn(tx, &key, "[User] after the first wake read")
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        terrariumd::lifecycle::wake(&st, aid(&w), "idle_stop_refused").await,
+        terrariumd::lifecycle::Woke::Busy
+    );
+    assert_eq!(
+        td.sup.prompts(aid(&w)),
+        ["[User] after the first wake read"]
+    );
     drop(held);
 }
 
