@@ -4,6 +4,15 @@ import { bookmarkHref, createBookmarksStore } from "./bookmarks";
 
 const origin = "https://terrarium.test";
 describe("bookmarks", () => {
+  it("edits in place, keeps order and rejects a duplicate destination", () => {
+    const store = createBookmarksStore(null, origin);
+    store.add("First", "https://first.test");
+    store.add("Second", "https://second.test");
+    expect(store.add("Renamed", "https://new.test", "https://first.test/")).toBe(true);
+    expect(store.items().map((b) => b.title)).toEqual(["Renamed", "Second"]);
+    expect(store.add("Duplicate", "https://second.test", "https://new.test/")).toBe(false);
+    expect(store.items()).toHaveLength(2);
+  });
   it("normalizes local wiki URLs but keeps other sites external", () => {
     expect(bookmarkHref(`${origin}/p/demo/knowledge/wiki/start#intro`, origin)).toBe("/p/demo/knowledge/wiki/start#intro");
     expect(bookmarkHref("https://other.test/p/demo/knowledge/wiki/start", origin)).toBe("https://other.test/p/demo/knowledge/wiki/start");
