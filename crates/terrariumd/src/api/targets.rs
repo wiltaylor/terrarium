@@ -414,9 +414,7 @@ async fn update(
     let label = actor.label().to_owned();
     let (candidate, _) = state
         .db
-        .read(move |t| {
-            targets::prepare_update(t, &label, &n, &p, live)
-        })
+        .read(move |t| targets::prepare_update(t, &label, &n, &p, live))
         .await?;
     let mut before = serde_json::to_value(&current.def)?;
     let mut after = serde_json::to_value(&candidate)?;

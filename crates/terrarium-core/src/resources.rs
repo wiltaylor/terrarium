@@ -192,11 +192,12 @@ pub struct HostCapacity {
     pub memory_bytes: u64,
 }
 
-pub const GPU_ENFORCEMENT: &str = "enforced: docker only; native processes not restricted";
-
 /// Stable NVIDIA UUID, rather than an index that can change after reboot.
 pub fn validate_gpu_id(id: &str) -> Result<(), String> {
-    if !id.starts_with("GPU-") || id.len() <= 4 || !id[4..].bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+    if !id.starts_with("GPU-")
+        || id.len() <= 4
+        || !id[4..].bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+    {
         return Err("GPU device must be an NVIDIA GPU UUID (GPU-...)".into());
     }
     Ok(())

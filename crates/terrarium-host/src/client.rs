@@ -601,8 +601,13 @@ impl Client {
         // when the other queue is empty, so a sample never delays a frame
         // of a session; a sample that finds the queue full is dropped.
         let (mtx, mut mrx) = mpsc::channel::<HostFrame>(1);
-        let sampler = (welcome.metrics && self.opts.capabilities.metrics)
-            .then(|| tokio::spawn(run_metrics(mtx, self.opts.metrics_interval, self.opts.docker_bin.clone())));
+        let sampler = (welcome.metrics && self.opts.capabilities.metrics).then(|| {
+            tokio::spawn(run_metrics(
+                mtx,
+                self.opts.metrics_interval,
+                self.opts.docker_bin.clone(),
+            ))
+        });
 
         let mut writer = tokio::spawn(async move {
             loop {

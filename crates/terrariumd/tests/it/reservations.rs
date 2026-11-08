@@ -68,7 +68,6 @@ async fn gpu_exclusive_shared_fifo_and_cleanup_accounting() {
         for id in [&a.id, &b.id] { r::finish_end(t, id)?; }
         assert_eq!(r::advance(t, "host", 2)?.unwrap().id, queued.id);
         assert!(r::request(t, gpu("d", false, 1, false), 2).is_err());
-        assert_eq!(queued.gpu_enforcement.as_deref(), Some(terrarium_core::resources::GPU_ENFORCEMENT));
         Ok(())
     }).await.unwrap();
 }

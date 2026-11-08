@@ -104,8 +104,19 @@ pub fn plan_run(
     }
     let mut req_env = req.env.clone();
     // Override image defaults and caller env. Docker mounts only this allowlist.
-    let devices = req.reservation.as_ref().map(|r| r.gpu_devices.as_slice()).unwrap_or_default();
-    req_env.insert("NVIDIA_VISIBLE_DEVICES".into(), if devices.is_empty() { "void".into() } else { devices.join(",") });
+    let devices = req
+        .reservation
+        .as_ref()
+        .map(|r| r.gpu_devices.as_slice())
+        .unwrap_or_default();
+    req_env.insert(
+        "NVIDIA_VISIBLE_DEVICES".into(),
+        if devices.is_empty() {
+            "void".into()
+        } else {
+            devices.join(",")
+        },
+    );
     if !devices.is_empty() {
         a.push("--gpus".into());
         a.push(format!("\"device={}\"", devices.join(",")));
@@ -254,7 +265,9 @@ pub fn plan_update(
         ));
     }
     if !l.gpu_devices.is_empty() {
-        return Err(BuildError::bad("GPU exposure takes effect at create; Docker cannot change it live"));
+        return Err(BuildError::bad(
+            "GPU exposure takes effect at create; Docker cannot change it live",
+        ));
     }
     if l.limits.cpu_millis.is_none() || l.limits.memory_bytes.is_none() || l.cpus.is_none() {
         return Err(BuildError::bad(
@@ -531,15 +544,43 @@ mod tests {
     fn gpu_allowlist_overrides_caller_and_image_defaults() {
         let mut r = run_req();
         r.env.insert("NVIDIA_VISIBLE_DEVICES".into(), "all".into());
-        let plan = plan_run(&r, "docker", &PathPolicy::default(), std::path::Path::new("/nonexistent")).unwrap();
+        let plan = plan_run(
+            &r,
+            "docker",
+            &PathPolicy::default(),
+            std::path::Path::new("/nonexistent"),
+        )
+        .unwrap();
         assert_eq!(plan.exec.env["NVIDIA_VISIBLE_DEVICES"], "void");
         assert!(!plan.exec.args.contains(&"--gpus".into()));
-        r.reservation = Some(terrarium_core::resources::RuntimeLimits { gpu_devices: vec!["GPU-abcd".into(), "GPU-1234".into()], ..Default::default() });
-        let plan = plan_run(&r, "docker", &PathPolicy::default(), std::path::Path::new("/nonexistent")).unwrap();
+        r.reservation = Some(terrarium_core::resources::RuntimeLimits {
+            gpu_devices: vec!["GPU-abcd".into(), "GPU-1234".into()],
+            ..Default::default()
+        });
+        let plan = plan_run(
+            &r,
+            "docker",
+            &PathPolicy::default(),
+            std::path::Path::new("/nonexistent"),
+        )
+        .unwrap();
         assert_eq!(plan.exec.env["NVIDIA_VISIBLE_DEVICES"], "GPU-abcd,GPU-1234");
-        assert!(plan.exec.args.windows(2).any(|w| w == ["--gpus", "\"device=GPU-abcd,GPU-1234\""]));
+        assert!(
+            plan.exec
+                .args
+                .windows(2)
+                .any(|w| w == ["--gpus", "\"device=GPU-abcd,GPU-1234\""])
+        );
         r.reservation.as_mut().unwrap().gpu_devices = vec!["all".into()];
-        assert!(plan_run(&r, "docker", &PathPolicy::default(), std::path::Path::new("/nonexistent")).is_err());
+        assert!(
+            plan_run(
+                &r,
+                "docker",
+                &PathPolicy::default(),
+                std::path::Path::new("/nonexistent")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -605,7 +646,7 @@ mod tests {
         assert_eq!(
             plan.exec.args.join(" "),
             "run -d --init --cpus=1.5 --memory=4294967296 --memory-swap=4294967296 \
-             --pids-limit=256 --blkio-weight=20 alpine:3"
+             --pids-limit=256 --blkio-weight=20 -e NVIDIA_VISIBLE_DEVICES alpine:3"
         );
         // Swap comes on top of the memory.
         let swap = Limits {
@@ -646,7 +687,7 @@ mod tests {
         assert_eq!(
             plan.exec.args.join(" "),
             format!(
-                "run -d -e HOME -v {w}/terra/w1:/work/terra/w1 -v {w}/terra/w2:/work/terra/w2 \
+                "run -d -e HOME -e NVIDIA_VISIBLE_DEVICES -v {w}/terra/w1:/work/terra/w1 -v {w}/terra/w2:/work/terra/w2 \
                  -u {u}:{g} alpine:3",
                 w = real.display(),
                 u = m.uid(),
@@ -684,7 +725,7 @@ mod tests {
             std::path::Path::new("/nonexistent"),
         )
         .unwrap();
-        assert_eq!(plan.exec.args, ["run", "-i", "-t", "alpine:3"]);
+        assert_eq!(plan.exec.args, ["run", "-i", "-t", "-e", "NVIDIA_VISIBLE_DEVICES", "alpine:3"]);
         assert!(plan.exec.pty.is_some());
         assert_eq!(plan.parser, None);
     }

@@ -521,7 +521,12 @@ pub fn admin_after_write(
     admin_after_write_as(t, &t.actor, def, before)
 }
 
-fn admin_after_write_as(t: &Connection, actor: &str, def: &TargetDef, before: Option<(&TargetDef, bool)>) -> ApiResult<bool> {
+fn admin_after_write_as(
+    t: &Connection,
+    actor: &str,
+    def: &TargetDef,
+    before: Option<(&TargetDef, bool)>,
+) -> ApiResult<bool> {
     if secrets::is_admin_actor(t, actor)? {
         return Ok(true);
     }

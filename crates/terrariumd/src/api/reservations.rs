@@ -51,7 +51,7 @@ async fn capacity(State(state): State<Shared>, Path(host): Path<String>) -> ApiR
         used["gpus"] = json!(gpus);
         let inventory = hosts::get(c, &host)?.capabilities.get("gpus").cloned().unwrap_or_else(|| json!([]));
         Ok(json!({"host":host,"physical":physical,"reservable":budget,"percentage":percentage,
-            "used":used,"gpus":inventory,"gpu_enforcement":terrarium_core::resources::GPU_ENFORCEMENT}))
+            "used":used,"gpus":inventory}))
     }).await?))
 }
 

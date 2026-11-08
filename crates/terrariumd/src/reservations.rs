@@ -29,6 +29,7 @@ pub struct NewBody {
     pub target: String,
     /// Absent: reserve for the target. Present: reserve for this agent.
     pub agent: Option<String>,
+    #[serde(default)]
     pub amounts: Amounts,
     pub until: String,
     #[serde(default)]
@@ -206,16 +207,39 @@ async fn preflight(state: &Shared, r: &Reservation) -> ApiResult<()> {
         ));
     }
     if !r.gpus.is_empty() {
-        if !caps.gpu_reservations { return Err(ApiError::conflict("host lacks GPU reservation support")); }
-        if target.def.kind != TargetKind::Docker || !target.def.ephemeral || target.def.image.is_none() || !matches!(r.holder, Holder::Target(_)) {
-            return Err(ApiError::invalid("GPU reservations require a managed ephemeral Docker target; native, SSH and vmlab reservations are unsupported"));
+        if !caps.gpu_reservations {
+            return Err(ApiError::conflict("host lacks GPU reservation support"));
         }
-        if target.state == "running" {
-            return Err(ApiError::conflict("stop the target before changing GPU exposure; recreate required"));
+        if r.gpus.iter().any(|g| g.exclusive) && target.def.kind != TargetKind::Docker {
+            return Err(ApiError::invalid("exclusive GPU needs a managed ephemeral Docker target; native host, SSH and vmlab cannot enforce exclusive access"));
         }
-        let incompatible: Vec<_> = rows.iter().filter(|t| t.def.kind != TargetKind::Host).map(|t| t.def.name.clone()).collect();
-        if r.gpus.iter().any(|g| g.exclusive) && (rows.iter().any(|t| t.state == "running" && t.def.kind != TargetKind::Host) || !state.executor.resource_sessions(&incompatible, None).is_empty()) {
-            return Err(ApiError::conflict("exclusive GPU admission requires incompatible containers and remote targets to stop"));
+        if target.def.kind == TargetKind::Docker && (!target.def.ephemeral || target.def.image.is_none() || !matches!(r.holder, Holder::Target(_))) {
+            return Err(ApiError::invalid(
+                "Docker GPU reservations require a managed ephemeral target, not an individual agent",
+            ));
+        }
+        if target.def.kind == TargetKind::Docker && target.state == "running" {
+            return Err(ApiError::conflict(
+                "stop the target before changing GPU exposure; recreate required",
+            ));
+        }
+        let incompatible: Vec<_> = rows
+            .iter()
+            .filter(|t| t.def.kind != TargetKind::Host)
+            .map(|t| t.def.name.clone())
+            .collect();
+        if r.gpus.iter().any(|g| g.exclusive)
+            && (rows
+                .iter()
+                .any(|t| t.state == "running" && t.def.kind != TargetKind::Host)
+                || !state
+                    .executor
+                    .resource_sessions(&incompatible, None)
+                    .is_empty())
+        {
+            return Err(ApiError::conflict(
+                "exclusive GPU admission requires incompatible containers and remote targets to stop",
+            ));
         }
     }
     let limits = budget(r)?;
@@ -708,18 +732,47 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         let name = host.name.clone();
         let rows = state.db.read(move |c| store::list(c, &name)).await?;
         for r in rows {
-            if r.state == State::Active && r.gpus.iter().any(|g| !g.exclusive)
-                && let Some((sample, false)) = state.executor.hosts.latest_metrics(&r.host) {
+            if r.state == State::Active
+                && r.gpus.iter().any(|g| !g.exclusive)
+                && let Some((sample, false)) = state.executor.hosts.latest_metrics(&r.host)
+            {
                 let target = r.target.clone();
-                let def = state.db.read(move |c| Ok(targets::get(c, &target)?.def)).await?;
+                let def = state
+                    .db
+                    .read(move |c| Ok(targets::get(c, &target)?.def))
+                    .await?;
                 let container = executor::container_name(&def);
+                let native_slice = if def.kind == TargetKind::Host {
+                    let (target, holder) = match &r.holder {
+                        Holder::Target(_) => (scope(&r, &r.target), String::new()),
+                        Holder::Agent(id) => {
+                            let id = id.clone();
+                            let holder = state.db.read(move |c| agents::display_name(c, &id)).await?.unwrap_or_default();
+                            (scope(&r, "_reservation"), holder)
+                        }
+                    };
+                    Some(terrarium_host::limits::slice_name(&target, &holder))
+                } else { None };
                 // Missing attribution is unknown, not zero. Do not rearm warnings
                 // on a failed sample or charge another holder's memory.
-                let measured: Vec<_> = sample.metrics.gpu_usage.iter().filter(|u| u.container == container).collect();
+                let measured: Vec<_> = sample
+                    .metrics
+                    .gpu_usage
+                    .iter()
+                    .filter(|u| match &native_slice {
+                        Some(slice) => u.cgroup.split('/').any(|s| s == slice),
+                        None => u.container == container,
+                    })
+                    .collect();
                 if !measured.is_empty() {
-                    let over = r.gpus.iter().filter(|g| !g.exclusive).any(|g| measured.iter().any(|u| u.uuid == g.uuid && u.used_bytes > g.vram_bytes));
+                    let over = r.gpus.iter().filter(|g| !g.exclusive).any(|g| {
+                        measured.iter().filter(|u| u.uuid == g.uuid).fold(0u64, |total, u| total.saturating_add(u.used_bytes)) > g.vram_bytes
+                    });
                     let id = r.id.clone();
-                    state.db.write("system", move |tx| store::gpu_usage(tx, &id, over)).await?;
+                    state
+                        .db
+                        .write("system", move |tx| store::gpu_usage(tx, &id, over))
+                        .await?;
                 }
             }
             let result = if r.state == State::Ending {
@@ -793,9 +846,20 @@ async fn reconcile_host_locked(state: &Shared, host: &str) -> ApiResult<()> {
     }
     let name = host.to_owned();
     let rows = state.db.read(move |c| store::list(c, &name)).await?;
-    let caps = state.executor.hosts.capabilities(host).ok_or_else(|| ApiError::conflict("host is offline"))?;
-    if rows.iter().filter(|r| managed(r)).flat_map(|r| &r.gpus).any(|g| !caps.gpu_reservations || !caps.gpus.iter().any(|d| d.uuid == g.uuid)) {
-        return Err(ApiError::conflict("reserved GPU is unavailable after reconnect; admission remains closed"));
+    let caps = state
+        .executor
+        .hosts
+        .capabilities(host)
+        .ok_or_else(|| ApiError::conflict("host is offline"))?;
+    if rows
+        .iter()
+        .filter(|r| managed(r))
+        .flat_map(|r| &r.gpus)
+        .any(|g| !caps.gpu_reservations || !caps.gpus.iter().any(|d| d.uuid == g.uuid))
+    {
+        return Err(ApiError::conflict(
+            "reserved GPU is unavailable after reconnect; admission remains closed",
+        ));
     }
     if rows.iter().any(|r| managed(r) && r.exclusive) {
         let physical = state
@@ -1006,7 +1070,9 @@ pub async fn before_docker_start(state: &Shared, def: &TargetDef) -> ApiResult<(
         ));
     }
     if !limits.gpu_devices.is_empty() {
-        return Err(ApiError::conflict("GPU exposure requires a newly created ephemeral container"));
+        return Err(ApiError::conflict(
+            "GPU exposure requires a newly created ephemeral container",
+        ));
     }
     docker_defaults(state, def, &mut limits)?;
     let target = def.name.clone();
@@ -1045,18 +1111,26 @@ pub fn exec_budget(
         let state = state.clone();
         let holder = holder.map(str::to_owned);
         tokio::spawn(async move {
-            let _ = state.db.write("system", move |tx| {
-                for r in store::list(tx, &host)?.iter().filter(|r| managed(r) && r.gpus.iter().any(|g| g.exclusive)) {
-                    store::notify(tx, r, "gpu_native_session")?;
-                    if let Some(holder) = &holder && let Ok(agent) = agents::find(tx, holder, None) {
-                        let mut warning = r.clone();
-                        warning.holder = Holder::Agent(agent.agent.id.to_string());
-                        warning.project = agent.agent.project;
-                        store::notify(tx, &warning, "gpu_native_session")?;
+            let _ = state
+                .db
+                .write("system", move |tx| {
+                    for r in store::list(tx, &host)?
+                        .iter()
+                        .filter(|r| managed(r) && r.gpus.iter().any(|g| g.exclusive))
+                    {
+                        store::notify(tx, r, "gpu_native_session")?;
+                        if let Some(holder) = &holder
+                            && let Ok(agent) = agents::find(tx, holder, None)
+                        {
+                            let mut warning = r.clone();
+                            warning.holder = Holder::Agent(agent.agent.id.to_string());
+                            warning.project = agent.agent.project;
+                            store::notify(tx, &warning, "gpu_native_session")?;
+                        }
                     }
-                }
-                Ok(())
-            }).await;
+                    Ok(())
+                })
+                .await;
         });
     }
     state.db.read_now(|c| {
@@ -1093,9 +1167,15 @@ pub fn exec_budget(
 }
 
 fn gpu_path_admission(def: &TargetDef, rows: &[Reservation]) -> ApiResult<()> {
-    if rows.iter().any(|r| managed(r) && r.gpus.iter().any(|g| g.exclusive))
-        && (matches!(def.kind, TargetKind::Ssh | TargetKind::Vmlab) || def.kind == TargetKind::Docker && (def.image.is_none() || !def.ephemeral)) {
-        return Err(ApiError::conflict("exclusive GPU reservations prohibit unmanaged or permanent Docker, SSH and vmlab paths on this host"));
+    if rows
+        .iter()
+        .any(|r| managed(r) && r.gpus.iter().any(|g| g.exclusive))
+        && (matches!(def.kind, TargetKind::Ssh | TargetKind::Vmlab)
+            || def.kind == TargetKind::Docker && (def.image.is_none() || !def.ephemeral))
+    {
+        return Err(ApiError::conflict(
+            "exclusive GPU reservations prohibit unmanaged or permanent Docker, SSH and vmlab paths on this host",
+        ));
     }
     Ok(())
 }

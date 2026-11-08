@@ -27,7 +27,11 @@ pub async fn run(ctx: &Ctx, cmd: &ReserveCmd) -> anyhow::Result<()> {
             queue_timeout,
             gpus,
         } => {
-            let gpus: Vec<terrarium_core::resources::GpuClaim> = gpus.as_deref().map(serde_json::from_str).transpose()?.unwrap_or_default();
+            let gpus: Vec<terrarium_core::resources::GpuClaim> = gpus
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?
+                .unwrap_or_default();
             let limits: TargetLimits = serde_json::from_value(json!({"cpu":cpu,"memory":memory}))?;
             let limits = limits.resolve().map_err(crate::api::CliError::usage)?;
             let amounts = terrarium_core::resources::Amounts {
