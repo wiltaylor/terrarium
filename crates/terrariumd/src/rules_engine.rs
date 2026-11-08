@@ -16,7 +16,8 @@
 //!   runs; an event at chain depth [`MAX_CHAIN_DEPTH`] (`data.cause.depth`,
 //!   counted over rule and trigger runs) starts no run; a rule runs at most
 //!   `max_per_hour` times in an hour (default [`DEFAULT_MAX_PER_HOUR`]),
-//!   and at most [`MAX_PER_CARD_PER_HOUR`] times for one card. A guard
+//!   and at most [`MAX_PER_CARD_PER_HOUR`] times for one card unless
+//!   `max_per_hour` explicitly sets both limits. A guard
 //!   writes a `skipped` row with the reason.
 //! - **Per-card order.** [`run_pending`] runs the pending rows in event
 //!   order, then rule order. The rows of one card (its lane) run one after
@@ -409,15 +410,16 @@ pub fn decide(
     }
     let hour_ago = schedules::stamp(now - chrono::Duration::hours(1));
     let max = i64::from(rule.max_per_hour.unwrap_or(DEFAULT_MAX_PER_HOUR));
+    let card_max = rule.max_per_hour.map_or(MAX_PER_CARD_PER_HOUR, i64::from);
     let mut out = Vec::new();
     for card in cards {
         let skip = if count_since(conn, project, &rule.name, None, &hour_ago)? >= max {
             Some(format!("rate limit: {max} runs in an hour"))
         } else if let Some(c) = &card
-            && count_since(conn, project, &rule.name, Some(c), &hour_ago)? >= MAX_PER_CARD_PER_HOUR
+            && count_since(conn, project, &rule.name, Some(c), &hour_ago)? >= card_max
         {
             Some(format!(
-                "card rate limit: {MAX_PER_CARD_PER_HOUR} runs for {c} in an hour"
+                "card rate limit: {card_max} runs for {c} in an hour"
             ))
         } else {
             None
