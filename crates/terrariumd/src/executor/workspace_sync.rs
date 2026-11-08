@@ -47,7 +47,9 @@ fn snapshot(root: &Path) -> std::io::Result<Snapshot> {
                 continue;
             }
             out.insert(
-                path.strip_prefix(root).unwrap().to_owned(),
+                path.strip_prefix(root)
+                    .map_err(std::io::Error::other)?
+                    .to_owned(),
                 hash.finalize().to_vec(),
             );
         }
@@ -194,7 +196,11 @@ pub(super) async fn prepare(
         return Err(ApiError::invalid("could not create remote workspace"));
     }
     let before = scan(&root).await?;
-    let remote = format!("{}:{}/", def.address.as_deref().unwrap(), root.display());
+    let address = def
+        .address
+        .as_deref()
+        .ok_or_else(|| ApiError::invalid("an ssh target needs address"))?;
+    let remote = format!("{address}:{}/", root.display());
     rsync(&format!("{}/", root.display()), &remote, Some(&shell)).await?;
     Ok(Some(Sync {
         root,
@@ -277,6 +283,7 @@ pub(super) fn finish_with(sess: &Arc<ExecSession>, sync: Option<Sync>) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
