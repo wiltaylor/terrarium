@@ -21,6 +21,13 @@
 
 // ------------------------------------------------------------ the queue
 
+rule "version-cut" {
+  description = "Freeze accepted cards for a version and mail the lead at 6 cards or 4 hours. Git and release numbering stay with the lead."
+  on = ["card"]
+  max_per_hour = 600
+  version_cut { min_cards = 6 max_wait_minutes = 240 }
+}
+
 rule "merge-queued" {
   description = "A new merge job: the label and the queue comment on each card. No move."
   on = ["job"]

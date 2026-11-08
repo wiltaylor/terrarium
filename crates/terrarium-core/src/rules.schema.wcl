@@ -45,6 +45,7 @@ type Rule {
   @children("if_job") if_job: list<IfJob>
 
   // The verbs, run in the order of the file.
+  @children("version_cut") version_cut: list<VersionCut>
   @children("group_open") group_open: list<GroupOpen>
   @children("group_add") group_add: list<GroupAdd>
   @children("group_remove") group_remove: list<GroupRemove>
@@ -80,6 +81,13 @@ type GroupOpen {
 
 @block("group_add")
 type GroupAdd { key: utf8 }
+
+// Freeze eligible accepted version:vnext cards when either threshold is met.
+@block("version_cut")
+type VersionCut {
+  min_cards: i64
+  max_wait_minutes: i64
+}
 
 @block("group_remove")
 type GroupRemove { key: utf8 }

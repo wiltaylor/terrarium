@@ -139,6 +139,81 @@ rule "close-group" {
 }
 "#;
 
+const VERSION_CUT: &str = r#"
+rule "version-cut" {
+  on = ["card", "test.ping"]
+  max_per_hour = 600
+  version_cut { min_cards = 2 max_wait_minutes = 240 }
+}
+"#;
+
+#[tokio::test]
+async fn version_cut_freezes_members_and_explicit_built_completes_only_snapshot() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.project("q").await;
+    let worker = td.agent("p", "worker", json!({})).await["id"].as_str().unwrap().to_owned();
+    put_rules(&td, "p", VERSION_CUT).await;
+    let a = new_card(&td, "p", json!({"title":"a","column":"accepted","labels":["version:vnext"]})).await;
+    settle(&td).await;
+    assert!(card(&td,&a).await.get("group").is_none());
+    let excluded = new_card(&td, "p", json!({"title":"not versioned","column":"accepted"})).await;
+    let b = new_card(&td, "p", json!({"title":"b","column":"accepted","labels":["version:vnext"]})).await;
+    settle(&td).await;
+    let g = card(&td,&a).await["group"].clone();
+    assert_eq!(g["total"],2);
+    assert_eq!(g["steps"][0]["state"],"done");
+    assert_eq!(g["steps"][1]["state"],"running");
+    let key = g["key"].as_str().unwrap();
+    let path = format!("/api/projects/p/version-groups/{key}");
+    let c = new_card(&td, "p", json!({"title":"later","column":"accepted","labels":["version:vnext"]})).await;
+    settle(&td).await;
+    ping(&td,"p",&a,1).await;
+    settle(&td).await;
+    assert_eq!(card(&td,&a).await["group"]["total"],2);
+    assert!(card(&td,&c).await.get("group").is_none());
+    assert_eq!(td.post_as(&worker,&format!("{path}/built"),json!({"version":"v1.2.3"})).await.status,403);
+    assert!(td.post(&format!("/api/projects/q/version-groups/{key}/built"),json!({"version":"v1.2.3"})).await.status.is_client_error());
+    let step = td.post(&format!("{path}/status"),json!({"step":"version branch e2e","state":"running","eta":"10m"})).await;
+    assert_eq!(step.status,200,"{}",step.body);
+    assert!(step.body["group"]["steps"][2]["eta_at"].is_string());
+    let built = td.post(&format!("{path}/built"),json!({"version":"v1.2.3"})).await;
+    assert_eq!(built.status,200,"{}",built.body);
+    assert_eq!(built.body["changed"],true);
+    assert_eq!(card(&td,&a).await["column"],"done");
+    assert_eq!(card(&td,&b).await["column"],"done");
+    assert_eq!(card(&td,&c).await["column"],"accepted");
+    assert_eq!(card(&td,&excluded).await["column"],"accepted");
+    assert_eq!(td.post(&format!("{path}/built"),json!({"version":"v1.2.3"})).await.body["changed"],false);
+    assert!(td.post(&format!("{path}/built"),json!({"version":"v9"})).await.status.is_client_error());
+}
+
+#[tokio::test]
+async fn version_cut_age_timer_waits_for_merge_group_close() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    put_rules(&td,"p",GROUPS).await;
+    let a = new_card(&td,"p",json!({"title":"old","column":"accepted","labels":["version:vnext"]})).await;
+    ping(&td,"p",&a,1).await;
+    settle(&td).await;
+    put_rules(&td,"p",VERSION_CUT).await;
+    let id = a.clone();
+    state(&td).db.write("test",move |t| {
+        t.execute("UPDATE cards SET created_at = '2000-01-01T00:00:00Z' WHERE id = ?1",[id])?;
+        assert_eq!(terrariumd::store::version_groups::pick(t,"p")?.waiting,0);
+        let g = terrariumd::store::groups::by_key(t,"p","batch")?.unwrap();
+        terrariumd::store::groups::close(t,&g,"merged")?;
+        Ok(())
+    }).await.unwrap();
+    let mut cache = rules_engine::Cache::default();
+    let projects = rules_engine::load(&state(&td).db,&mut cache).await.unwrap();
+    let mut fired = std::collections::HashMap::new();
+    assert_eq!(rules_engine::fire_timers(&state(&td).db,&projects,&mut fired,chrono::Utc::now()).await.unwrap(),1);
+    assert_eq!(rules_engine::fire_timers(&state(&td).db,&projects,&mut fired,chrono::Utc::now()).await.unwrap(),0);
+    settle(&td).await;
+    assert!(card(&td,&a).await["group"]["key"].as_str().unwrap().starts_with("version:"));
+}
+
 #[tokio::test]
 async fn group_lifecycle_is_rule_only_and_members_keep_their_columns() {
     let td = TestDaemon::start().await;
@@ -1166,6 +1241,10 @@ rule "h-group-remove" {
 rule "h-group-status" {
   on = ["test.ping"]
   group_status { key = "held" text = "waiting" }
+}
+rule "h-version-cut" {
+  on = ["test.ping"]
+  version_cut { min_cards = 6 max_wait_minutes = 240 }
 }
 rule "h-group-close" {
   on = ["test.ping"]
