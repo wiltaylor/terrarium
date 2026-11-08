@@ -132,8 +132,8 @@ fn publish(t: &mut crate::db::Tx<'_>, a: &Card, b: &Card, body: &str) -> ApiResu
     if seen {
         return Ok(());
     }
-    board::system_comment(t, &a.id, &body, None)?;
-    board::system_comment(t, &b.id, &body, None)?;
+    board::system_comment(t, &a.id, body, None)?;
+    board::system_comment(t, &b.id, body, None)?;
     let mut recipients = crate::question_guard::leads(t, &a.project, "")?;
     if recipients.is_empty() {
         recipients.push(Address::Operator);
