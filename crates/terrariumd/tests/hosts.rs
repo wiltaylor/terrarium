@@ -778,6 +778,21 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
         .await
         .unwrap();
     assert_eq!(counts, (1, 0));
+    // Checkout prepares the owned root and nested destination before git runs.
+    let src = tempfile::tempdir().unwrap();
+    git(src.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(src.path().join("README"), "owned checkout\n").unwrap();
+    git(src.path(), &["add", "."]);
+    git(src.path(), &["commit", "-q", "-m", "initial"]);
+    let repo = lab.td.post("/api/projects/terra/repos",
+        json!({"url": src.path(), "name": "owned-app"})).await.ok().clone();
+    let dest = root.join("nested/app");
+    let checkout = lab.td.post_as(&id,
+        &format!("/api/repos/{}/checkout", repo["id"].as_str().unwrap()),
+        json!({"target": "terra-box", "path": dest, "branch": "main"})).await;
+    assert_eq!(checkout.ok()["action"], "cloned");
+    assert_eq!(std::fs::read_to_string(dest.join("README")).unwrap(), "owned checkout\n");
+    assert_eq!(std::fs::read_to_string(root.join(".terrarium-owner")).unwrap(), id);
     let r = lab.td.post_as(&id, "/api/targets/terra-box/exec", json!({"cmd": ["sh", "-c",
         "printf '%s\\n%s\\n' \"$CARGO_TARGET_DIR\" \"$RESULTS_DIR\"; mkdir -p \"$CARGO_TARGET_DIR\" \"$RESULTS_DIR\"; echo output > \"$CARGO_TARGET_DIR/output\""]})).await;
     assert_eq!(r.status, 201, "{}", r.body);

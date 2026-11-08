@@ -4,6 +4,7 @@ use crate::api::Shared;
 use crate::error::{ApiError, ApiResult};
 use crate::executor::{RemoteCmd, start_cmd};
 use crate::store::targets;
+use futures_util::TryStreamExt;
 use rusqlite::params;
 use terrarium_core::config::TargetDef;
 
@@ -120,6 +121,9 @@ pub fn build_env(root: &str, cmd: &mut RemoteCmd) -> ApiResult<()> {
 
 // All traversal and deletion uses checked directory FDs. Supported on Linux
 // with Python 3.9+, without the Python 3.11-only rmtree(dir_fd=...) API.
+// Accepted boundary: a process with the same UID can rename an opened subtree
+// outside the root during traversal. Directory FDs prevent symlink redirection,
+// not same-UID renames. That UID already has permission to delete these files.
 const SCRIPT: &str = r#"
 import os, stat, sys
 mode, base, project, name, agent, dest = sys.argv[1:]
@@ -230,7 +234,7 @@ fn command(
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        timeout_secs: Some(if mode == "delete" { 900 } else { 120 }),
+        timeout_secs: Some(if mode == "prepare" { 120 } else { 900 }),
         ..RemoteCmd::default()
     })
 }
@@ -276,6 +280,21 @@ pub async fn prepare(
         .await?;
     if !card || def.kind == terrarium_core::config::TargetKind::Vmlab {
         return Ok(None);
+    }
+    // Probe separately: a missing interpreter is a legacy target, whereas a
+    // failed ownership check must still fail closed.
+    let probe = start_cmd(state, def, &RemoteCmd {
+        argv: vec!["sh".into(), "-c".into(), "command -v python3 >/dev/null || printf missing-python3".into()],
+        timeout_secs: Some(30),
+        ..RemoteCmd::default()
+    })?.collect(4096).await;
+    if probe.end().success() && probe.stdout == b"missing-python3" {
+        tracing::warn!(agent = %a.id, target = %def.name,
+            "python3 unavailable; owned root preparation and automatic cleanup disabled for this operation");
+        return Ok(None);
+    }
+    if !probe.end().success() {
+        return Err(ApiError::invalid("cannot check target python3 availability"));
     }
     let path = root(base(def), &a.project, &a.name)?;
     if dest.is_some_and(|d| !inside(&path, d)) {
@@ -371,6 +390,14 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             .collect::<Result<Vec<_>, _>>()?)
         })
         .await?;
+    let mut by_target = std::collections::HashMap::<_, Vec<_>>::new();
+    for row in rows {
+        by_target.entry(row.3.clone()).or_default().push(row);
+    }
+    // Serial within a target, at most three targets at once. Each measure and
+    // delete has its own deadline so one large tree cannot stall other targets.
+    futures_util::stream::iter(by_target.into_values().map(Ok::<_, ApiError>))
+        .try_for_each_concurrent(3, |rows| async move {
     for (id, project, name, target, definition) in rows {
         let _guard = lock(&format!("{id}:{target}")).await;
         if state.executor.live_of(&id) != 0 {
@@ -412,10 +439,17 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             refusal(state, &id, &project, &target, &measured.stderr_tail()).await?;
             continue;
         }
-        let size = String::from_utf8_lossy(&measured.stdout)
+        let size = match String::from_utf8_lossy(&measured.stdout)
             .trim()
             .parse::<u64>()
-            .map_err(|_| ApiError::internal("target measurement returned no size"))?;
+        {
+            Ok(size) => size,
+            Err(_) => {
+                refusal(state, &id, &project, &target, "target measurement returned no size").await?;
+                tracing::warn!(%id, %target, "target cleanup deferred: measurement returned no size");
+                continue;
+            }
+        };
         let path = root(base(&row.def), &project, &name)?;
         let (audit_id, audit_project, audit_target, audit_path) =
             (id.clone(), project.clone(), target.clone(), path.clone());
@@ -459,6 +493,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             .await?;
     }
     Ok(())
+    }).await
 }
 
 /// Audit a new refusal once, retaining its state for operator inspection and
