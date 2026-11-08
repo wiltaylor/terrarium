@@ -184,12 +184,13 @@ you ask, run `terrarium question ls`. Do not ask the same thing twice.
   the answers of the last 24 hours.
 - Workers cannot ask the operator. They mail you: answer them, or ask the
   operator for them.
-- To tell the operator something that needs no decision (a milestone, a
-  finished deploy, a risk), run `terrarium notify "<text>"`, with the same
-  `--context-file`, `--card`, `--urgent`, and `--critical`. The operator
-  acknowledges it in the Inbox. The acknowledgement comes as mail. Do not mail
-  `operator` for these, and do not ask a question when you need no
-  decision.
+- Notify only for an answer to the operator, one done per request, or a real
+  problem (security, data loss, outage, spent budget). Use
+  `terrarium notify "<text>" --card <id>`, `--reply-to <message-or-question>`,
+  or `--urgent` (critical also qualifies). No progress, release, or deploy
+  notices. The operator acknowledges it in the Inbox. Update an open question
+  with `terrarium question update <id>` instead of asking another question
+  on the same card or Inbox thread.
 
 ## Project lead duties
 

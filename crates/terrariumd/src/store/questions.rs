@@ -670,6 +670,8 @@ fn same_text(a: &str, b: &str) -> bool {
 /// A new question. The API layer checks the rights.
 #[derive(Debug, Clone, Default)]
 pub struct NewQuestion {
+    /// A notice answering an operator message or an answered question.
+    pub reply_to: Option<String>,
     /// The asking agent's ULID.
     pub agent: String,
     pub kind: QuestionKind,
@@ -699,6 +701,32 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     let items = check_items(n.kind, &n.items)?;
     let context = check_context(n.context.as_deref())?;
     let card = check_card(t, &project, n.card.as_deref())?;
+    if n.kind == QuestionKind::Notice {
+        if let Some(reply) = n.reply_to.as_deref() {
+            let valid: bool = t.query_row(
+                "SELECT EXISTS(SELECT 1 FROM questions WHERE id = ?1 AND agent = ?2
+                    AND status = 'answered')
+                 OR EXISTS(SELECT 1 FROM messages WHERE id = ?1 AND from_agent = 'operator'
+                    AND to_agent = ?2)
+                 OR EXISTS(SELECT 1 FROM thread_messages m JOIN threads th ON th.id = m.thread
+                    WHERE m.id = ?1 AND m.author = 'operator' AND th.agent = ?2)",
+                params![reply, n.agent],
+                |r| r.get(0),
+            )?;
+            if !valid {
+                return Err(ApiError::invalid(
+                    "reply_to must name an operator message to you or an answered question of yours",
+                ));
+            }
+        }
+        if card.is_none() && n.reply_to.is_none() && !n.priority.at_least_urgent() {
+            return Err(ApiError::invalid(
+                "notify requires --card, --reply-to or --urgent: only answers to the operator, one done per request, or real problems belong in the Inbox",
+            ));
+        }
+    } else if n.reply_to.is_some() {
+        return Err(ApiError::invalid("reply_to is only for notices"));
+    }
     let in_thread = match n.thread.as_deref() {
         Some(th) => Some(crate::store::threads::check_ask(t, th, &n.agent)?.id),
         None => None,
@@ -713,6 +741,19 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
             ..Filter::default()
         },
     )?;
+    if matches!(n.kind, QuestionKind::Question | QuestionKind::Bundle)
+        && let Some(q) = open.iter().find(|q| {
+            matches!(q.kind, QuestionKind::Question | QuestionKind::Bundle)
+                && ((card.is_some() && q.card == card)
+                    || (in_thread.is_some() && q.thread == in_thread))
+        })
+    {
+        return Err(ApiError::conflict(format!(
+            "question {} is open on this card or Inbox thread. Update it with `terrarium question update {}`",
+            q.id, q.id
+        ))
+        .with_details(json!({"question": q.id})));
+    }
     if open.len() >= MAX_OPEN {
         return Err(ApiError::new(
             Code::RateLimited,
@@ -768,6 +809,9 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     let q = get(t, &id)?;
     let mut detail = json!({"agent": q.agent, "kind": q.kind, "text": short(&q.text, 200),
                             "priority": q.priority, "options": q.options.len()});
+    if let Some(reply) = n.reply_to {
+        detail["reply_to"] = json!(reply);
+    }
     if let Some(th) = &q.thread {
         detail["thread"] = json!(th);
     }

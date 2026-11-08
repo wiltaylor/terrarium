@@ -641,6 +641,11 @@ pub(super) fn set_priority(body: &mut Value, urgent: bool, critical: bool) {
 
 /// `terrarium notify`: a leader sends a notice to the operator.
 pub async fn notify(ctx: &Ctx, a: &NotifyArgs) -> anyhow::Result<()> {
+    if a.card.is_none() && a.reply_to.is_none() && !a.urgent && !a.critical {
+        return Err(CliError::usage(
+            "notify requires --card, --reply-to or --urgent: only answers to the operator, one done per request, or real problems belong in the Inbox",
+        ));
+    }
     if !ctx.is_agent() {
         return Err(CliError::usage(
             "an agent sends notices; the operator acknowledges them with `terrarium admin \
@@ -651,6 +656,7 @@ pub async fn notify(ctx: &Ctx, a: &NotifyArgs) -> anyhow::Result<()> {
     let mut body = json!({"kind": "notice", "text": ctx.text(&a.text)?});
     super::set_opt(&mut body, "context", context_value(ctx, &a.context)?);
     super::set_opt(&mut body, "card", a.card.clone());
+    super::set_opt(&mut body, "reply_to", a.reply_to.clone());
     set_priority(&mut body, a.urgent, a.critical);
     if a.wait {
         body["wait"] = json!(true);

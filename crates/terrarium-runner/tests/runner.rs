@@ -299,7 +299,7 @@ fn transitions(events: &[EventRecord]) -> Vec<AgentStatus> {
 async fn turn_runs_starting_idle_working_idle() {
     let mut h = start(Opts::default()).await;
     until_idle(&mut h).await;
-    assert!(h.runner.screen().text().contains("fake tui 1.0"));
+    until_screen(&h, "fake tui 1.0").await;
 
     let delivery = h.runner.type_turn("hello");
     timeout(wait(), delivery.wait())
@@ -940,7 +940,7 @@ async fn a_turn_waits_for_the_startup_hook() {
 
     std::fs::write(&gate, b"").expect("end the startup");
     until_status(&mut h.events, AgentStatus::Idle).await;
-    assert!(h.runner.screen().text().contains("session s1 (startup)"));
+    until_screen(&h, "session s1 (startup)").await;
     timeout(wait(), delivery.wait())
         .await
         .expect("delivery in time")
