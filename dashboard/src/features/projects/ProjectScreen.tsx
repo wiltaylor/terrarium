@@ -24,7 +24,9 @@ export default function ProjectScreen(props: RouteSectionProps) {
     ),
   );
 
-  const base = () => `/p/${encodeURIComponent(params.project)}`;
+  // Router params retain their URL encoding; encoding again would turn `%20`
+  // into `%2520` and leave the project on tab navigation.
+  const base = () => `/p/${params.project}`;
   return (
     <>
       <PageHead title={params.project} />
