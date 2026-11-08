@@ -1268,6 +1268,7 @@ async fn serve_link(
         .next_conn
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
+    state.executor.set_resource_pending(&row.name, true);
     let (mut welcome, old, resumed, _) = reg.attach(
         &row,
         &hello,
@@ -1349,7 +1350,12 @@ async fn serve_link(
     // the host, once the link serves the verbs.
     {
         let (state, host) = (state.clone(), row.name.clone());
-        tokio::spawn(async move { crate::executor::reconcile_host(&state, &host).await });
+        tokio::spawn(async move {
+            crate::executor::reconcile_host(&state, &host).await;
+            if let Err(error) = crate::reservations::reconcile_host(&state, &host).await {
+                warn!(%host, %error, "reservation reconnect reconciliation pending");
+            }
+        });
     }
 
     let (mut sink, mut stream) = socket.split();
