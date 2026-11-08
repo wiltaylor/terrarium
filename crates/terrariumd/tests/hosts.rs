@@ -676,36 +676,65 @@ async fn owned_target_roots_wait_for_runs_and_audit_cleanup() {
     let lab = Lab::start().await;
     let _host = lab.host("lab1").await;
     lab.td.project("terra").await;
-    let worker = lab
-        .td
-        .agent("terra", "worker", json!({"policy": {"targets": ["box"]}}))
-        .await;
+    let owner = lab.td.agent("terra", "lead", json!({"roles": ["project_admin"],
+        "policy": {"targets": ["box"], "spawn": {"templates": ["project:*"],
+        "max_concurrent": 1, "max_lifetime": "5m", "bound": true}}})).await;
+    lab.td.post("/api/templates", json!({"name": "builder", "project": "terra",
+        "spec": {"harness": "claude", "policy": {"targets": ["box"]}}})).await.ok();
+    let card = lab.td.post("/api/projects/terra/cards", json!({"title": "Build", "column": "in_progress"})).await.ok().clone();
+    let owner_id = owner["id"].as_str().unwrap();
+    let worker = lab.td.post_as(owner_id, &format!("/api/agents/{owner_id}/spawn"),
+        json!({"template": "builder", "task": "Build", "bind": format!("card:{}", card["id"].as_str().unwrap())})).await.ok().clone();
     let id = worker["id"].as_str().unwrap().to_owned();
     let base = lab.bins.path().join("builds");
     lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "work_root": base}))
         .await;
-    let root = base.join("terra/worker");
-    std::fs::create_dir_all(root.join("target")).unwrap();
-    std::fs::write(root.join(".terrarium-owner"), &id).unwrap();
-    std::fs::write(root.join("target/output"), "build output").unwrap();
+    let root = base.join("terra").join(worker["name"].as_str().unwrap());
     let cache = base.join("shared-cache");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::write(cache.join("keep"), "shared data").unwrap();
+    for caller in [None, Some(owner_id)] {
+        let body = json!({"cmd": ["sh", "-c", "printf '%s' \"$CARGO_TARGET_DIR\""],
+            "env": {"CARGO_TARGET_DIR": cache}});
+        let r = match caller {
+            None => lab.td.post("/api/targets/box/exec", body).await,
+            Some(caller) => lab.td.post_as(caller, "/api/targets/box/exec", body).await,
+        };
+        assert_eq!(r.status, 201, "{}", r.body);
+        let out = drain(&lab.td, "box", r.body["session_id"].as_str().unwrap()).await;
+        assert_eq!(String::from_utf8_lossy(&out.stdout), cache.to_str().unwrap());
+    }
+    // Transition work outside the root neither creates nor claims it, and
+    // warns once even when the agent repeats the outside operation.
+    for _ in 0..2 {
+        let r = lab.td.post_as(&id, "/api/targets/box/exec", json!({"cmd": ["true"], "cwd": cache})).await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        drain(&lab.td, "box", r.body["session_id"].as_str().unwrap()).await;
+    }
+    assert!(!root.exists());
+    let state = lab.state();
+    let counts = state.db.read(|c| Ok((
+        c.query_row("SELECT count(*) FROM agent_target_root_warnings", [], |r| r.get::<_, i64>(0))?,
+        c.query_row("SELECT count(*) FROM agent_target_roots", [], |r| r.get::<_, i64>(0))?
+    ))).await.unwrap();
+    assert_eq!(counts, (1, 0));
+    let r = lab.td.post_as(&id, "/api/targets/box/exec", json!({"cmd": ["sh", "-c",
+        "printf '%s\\n%s\\n' \"$CARGO_TARGET_DIR\" \"$RESULTS_DIR\"; mkdir -p \"$CARGO_TARGET_DIR\" \"$RESULTS_DIR\"; echo output > \"$CARGO_TARGET_DIR/output\""]})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let output = drain(&lab.td, "box", r.body["session_id"].as_str().unwrap()).await;
+    assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{}/target\n{}/results\n", root.display(), root.display()));
+    assert_eq!(std::fs::read_to_string(root.join(".terrarium-owner")).unwrap(), id);
+    assert!(root.join("target/output").exists());
+    // An unrelated target edit must not block the next exec or cleanup.
+    lab.td.patch("/api/targets/box", json!({"keep": true})).await.ok();
     let gate = lab.bins.path().join("gate");
     let r = lab.td.post_as(&id, "/api/targets/box/exec", json!({
         "cmd": ["sh", "-c", "while [ ! -f \"$1\" ]; do sleep 0.02; done", "sh", gate], "timeout_secs": 10
     })).await;
     assert_eq!(r.status, 201, "{}", r.body);
     let sid = r.body["session_id"].as_str().unwrap().to_owned();
-    let state = lab.state();
-    let key = id.clone();
-    state.db.write("system", move |t| {
-        let target = terrariumd::store::targets::get(t, "box")?;
-        t.execute("INSERT INTO agent_target_roots (agent, project, name, target, definition) VALUES (?1, 'terra', 'worker', 'box', ?2)",
-            rusqlite::params![key, serde_json::to_string(&target.def).unwrap()])?;
-        terrariumd::store::agents::delete(t, &key)?;
-        Ok(())
-    }).await.unwrap();
+    terrariumd::spawn::close(&state, &id, terrariumd::store::spawns::DONE,
+        Some("Built".into()), false).await.unwrap();
     assert_eq!(state.executor.live_of(&id), 1);
     terrariumd::target_roots::sweep(&state).await.unwrap();
     assert!(root.exists(), "must not delete output of a live run");

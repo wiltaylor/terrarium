@@ -5,6 +5,7 @@ CREATE TABLE agent_target_roots (
     name TEXT NOT NULL,
     target TEXT NOT NULL,
     definition TEXT NOT NULL,
+    last_error TEXT,
     PRIMARY KEY (agent, target)
 );
 CREATE TABLE agent_target_root_warnings (

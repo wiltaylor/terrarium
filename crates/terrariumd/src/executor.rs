@@ -1997,10 +1997,7 @@ async fn start_exec_secrets(
     secrets: Vec<(String, zeroize::Zeroizing<String>)>,
 ) -> ApiResult<Arc<ExecSession>> {
     let on = on.unwrap_or_default();
-    let _root_guard = match actor.agent() {
-        Some(a) => Some(crate::target_roots::lock(&a.id).await),
-        None => None,
-    };
+    let _root_guard = crate::target_roots::lock_card(state, actor, name).await?;
     let row = usable(state, actor, name).await?;
     check_cap(state, actor)?;
     let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
@@ -5111,10 +5108,7 @@ pub async fn checkout_on_target(
         ));
     }
     let mut cmd = checkout_cmd(url, dest, branch, depth, secret)?;
-    let _root_guard = match actor.agent() {
-        Some(a) => Some(crate::target_roots::lock(&a.id).await),
-        None => None,
-    };
+    let _root_guard = crate::target_roots::lock_card(state, actor, &row.def.name).await?;
     crate::target_roots::prepare(state, actor, &row.def, Some(dest)).await?;
     if let Some(a) = actor.agent() {
         let p = crate::git_identity::provenance(state, &a.id).await?;

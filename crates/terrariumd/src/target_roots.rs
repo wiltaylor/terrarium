@@ -29,6 +29,15 @@ pub async fn lock(agent: &str) -> tokio::sync::OwnedMutexGuard<()> {
     mutex.lock_owned().await
 }
 
+pub async fn lock_card(state: &Shared, actor: &Actor, target: &str)
+    -> ApiResult<Option<tokio::sync::OwnedMutexGuard<()>>> {
+    let Some(a) = actor.agent() else { return Ok(None); };
+    let id = a.id.clone();
+    let card = state.db.read(move |c| Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM spawns WHERE id=?1 AND bound_kind='card')", [&id], |r| r.get::<_, bool>(0))?)).await?;
+    if card { Ok(Some(lock(&format!("{}:{target}", a.id)).await)) } else { Ok(None) }
+}
+
 pub fn check_base(base: &str) -> ApiResult<()> {
     if !base.starts_with('/')
         || base
@@ -54,6 +63,15 @@ fn base(def: &TargetDef) -> &str {
     def.work_root.as_deref().unwrap_or("/src/terrarium")
 }
 
+/// Only machine/path identity matters. Credentials and limits may be rotated
+/// without stranding roots or preventing live agents from starting work.
+fn same_location(old: &str, def: &TargetDef) -> bool {
+    let Ok(old) = serde_json::from_str::<TargetDef>(old) else { return false; };
+    old.kind == def.kind && old.host == def.host && old.address == def.address
+        && old.port == def.port && old.container == def.container
+        && old.username == def.username && base(&old) == base(def)
+}
+
 fn inside(root: &str, path: &str) -> bool {
     path.starts_with(&format!("{root}/"))
         && path
@@ -77,11 +95,36 @@ pub fn build_env(root: &str, cmd: &mut RemoteCmd) -> ApiResult<()> {
     Ok(())
 }
 
-// All traversal uses directory FDs and O_NOFOLLOW, including rmtree's
-// symlink-resistant implementation. Never resolve a link and delete its target.
+// All traversal and deletion uses checked directory FDs. Supported on Linux
+// with Python 3.9+, without the Python 3.11-only rmtree(dir_fd=...) API.
 const SCRIPT: &str = r#"
-import os, shutil, sys
+import os, stat, sys
 mode, base, project, name, agent, dest = sys.argv[1:]
+def mount_id(fd):
+    with open('/proc/self/fdinfo/' + str(fd)) as info:
+        for line in info:
+            if line.startswith('mnt_id:'): return line.split()[1]
+    raise RuntimeError('cannot determine mount identity; cleanup requires Linux procfs')
+def walk(fd, remove, device, mount, keep_owner=False):
+    size = 0
+    for item in os.listdir(fd):
+        meta = os.stat(item, dir_fd=fd, follow_symlinks=False)
+        if meta.st_dev != device: raise RuntimeError('refusing mounted data in owned root')
+        if stat.S_ISDIR(meta.st_mode):
+            child = os.open(item, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                if mount_id(child) != mount: raise RuntimeError('refusing bind mount in owned root')
+                size += walk(child, remove, device, mount)
+                if remove:
+                    current = os.stat(item, dir_fd=fd, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) != (meta.st_dev, meta.st_ino):
+                        raise RuntimeError('directory changed during cleanup')
+                    os.rmdir(item, dir_fd=fd)
+            finally: os.close(child)
+        elif remove and not (keep_owner and item == '.terrarium-owner'):
+            os.unlink(item, dir_fd=fd)
+        size += meta.st_blocks * 512
+    return size
 fds = []
 try:
     fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
@@ -92,7 +135,9 @@ try:
             except FileExistsError: pass
         try: fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         except FileNotFoundError:
-            if mode == 'delete': sys.exit(0)
+            if mode != 'prepare':
+                print(0)
+                sys.exit(0)
             raise
         fds.append(fd)
     parent = fd
@@ -104,7 +149,9 @@ try:
         except FileExistsError: pass
     try: fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
     except FileNotFoundError:
-        if mode == 'delete': sys.exit(0)
+        if mode != 'prepare':
+            print(0)
+            sys.exit(0)
         raise
     fds.append(fd)
     flags = os.O_RDONLY | os.O_NOFOLLOW
@@ -113,7 +160,8 @@ try:
         with os.fdopen(marker, 'w') as out: out.write(agent)
     marker = os.open('.terrarium-owner', flags, dir_fd=fd)
     with os.fdopen(marker) as inp:
-        if inp.read(128) != agent: raise RuntimeError('foreign target root')
+        if inp.read(128) != agent:
+            raise RuntimeError('root belongs to an earlier or different agent; wait for its live runs and cleanup, or inspect its cleanup refusal audit')
     if mode == 'prepare' and dest:
         for part in dest.split('/'):
             if part in ('', '.', '..'): raise RuntimeError('unsafe checkout path')
@@ -121,13 +169,23 @@ try:
             except FileExistsError: pass
             fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             fds.append(fd)
-    if mode == 'delete':
-        if not shutil.rmtree.avoids_symlink_attacks: raise RuntimeError('unsafe rmtree implementation')
-        size = 0
-        for _, dirs, files, walkfd in os.fwalk('.', dir_fd=fd, follow_symlinks=False):
-            for item in dirs + files:
-                size += os.stat(item, dir_fd=walkfd, follow_symlinks=False).st_blocks * 512
-        shutil.rmtree(name, dir_fd=parent)
+    if mode in ('measure', 'delete'):
+        meta = os.fstat(fd)
+        if mount_id(fd) != mount_id(parent): raise RuntimeError('refusing mounted agent root')
+        # First check the complete tree. In particular, refuse mounts before
+        # removing the owner marker so a refused cleanup stays retryable.
+        size = walk(fd, False, meta.st_dev, mount_id(fd))
+        if mode == 'delete':
+            walk(fd, True, meta.st_dev, mount_id(fd), keep_owner=True)
+            current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (meta.st_dev, meta.st_ino):
+                raise RuntimeError('agent root changed during cleanup')
+            os.unlink('.terrarium-owner', dir_fd=fd)
+            try: os.rmdir(name, dir_fd=parent)
+            except OSError:
+                marker = os.open('.terrarium-owner', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+                with os.fdopen(marker, 'w') as out: out.write(agent)
+                raise
         print(size)
 finally:
     for fd in reversed(fds): os.close(fd)
@@ -149,7 +207,7 @@ fn command(
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        timeout_secs: Some(120),
+        timeout_secs: Some(if mode == "delete" { 900 } else { 120 }),
         ..RemoteCmd::default()
     })
 }
@@ -208,6 +266,7 @@ pub async fn prepare(
         def.name.clone(),
     );
     let definition = serde_json::to_string(def).map_err(|e| ApiError::internal(e.to_string()))?;
+    let location = def.clone();
     state
         .db
         .write("system", move |t| {
@@ -221,8 +280,8 @@ pub async fn prepare(
                 params![id, target],
                 |r| r.get(0),
             )?;
-            if old != definition {
-                return Err(ApiError::conflict("owned target definition changed"));
+            if !same_location(&old, &location) {
+                return Err(ApiError::conflict("owned target machine or work_root changed"));
             }
             Ok(())
         })
@@ -288,7 +347,7 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         })
         .await?;
     for (id, project, name, target, definition) in rows {
-        let _guard = lock(&id).await;
+        let _guard = lock(&format!("{id}:{target}")).await;
         if state.executor.live_of(&id) != 0 {
             continue;
         }
@@ -296,14 +355,37 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         let row = match state.db.read(move |c| targets::get(c, &key)).await {
             Ok(row) => row,
             Err(e) => {
+                refusal(state, &id, &project, &target, &e.to_string()).await?;
                 tracing::warn!(%id, %target, "target cleanup deferred: {e}");
                 continue;
             }
         };
-        if serde_json::to_string(&row.def).ok().as_deref() != Some(&definition) {
+        if !same_location(&definition, &row.def) {
+            refusal(state, &id, &project, &target, "target machine or work_root changed").await?;
             tracing::warn!(%id, %target, "target cleanup refused: definition changed");
             continue;
         }
+        let measured = match start_cmd(state, &row.def,
+            &command("measure", base(&row.def), &project, &name, &id, "")?) {
+            Ok(run) => run.collect(4096).await,
+            Err(e) => {
+                refusal(state, &id, &project, &target, &e.to_string()).await?;
+                continue;
+            }
+        };
+        if !measured.end().success() {
+            refusal(state, &id, &project, &target, &measured.stderr_tail()).await?;
+            continue;
+        }
+        let size = String::from_utf8_lossy(&measured.stdout).trim().parse::<u64>()
+            .map_err(|_| ApiError::internal("target measurement returned no size"))?;
+        let path = root(base(&row.def), &project, &name)?;
+        let (audit_id, audit_project, audit_target, audit_path) =
+            (id.clone(), project.clone(), target.clone(), path.clone());
+        state.db.write("system", move |t| {
+            t.audit("agent.target_cleanup_started", &audit_id, Some(&audit_project),
+                serde_json::json!({"agent": audit_id, "target": audit_target, "path": audit_path, "size": size}))
+        }).await?;
         let run = match start_cmd(
             state,
             &row.def,
@@ -311,20 +393,17 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
         ) {
             Ok(run) => run,
             Err(e) => {
+                refusal(state, &id, &project, &target, &e.to_string()).await?;
                 tracing::warn!(%id, %target, "target cleanup deferred: {e}");
                 continue;
             }
         };
         let out = run.collect(4096).await;
         if !out.end().success() {
+            refusal(state, &id, &project, &target, &out.stderr_tail()).await?;
             tracing::warn!(%id, %target, error = %out.stderr_tail(), "owned target cleanup failed; will retry");
             continue;
         }
-        let path = root(base(&row.def), &project, &name)?;
-        let size = String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .parse::<u64>()
-            .unwrap_or(0);
         state
             .db
             .write("system", move |t| {
@@ -343,6 +422,21 @@ pub async fn sweep(state: &Shared) -> ApiResult<()> {
             .await?;
     }
     Ok(())
+}
+
+/// Audit a new refusal once, retaining its state for operator inspection and
+/// retry. The started audit keeps the original size even after a partial delete.
+async fn refusal(state: &Shared, id: &str, project: &str, target: &str, error: &str) -> ApiResult<()> {
+    let (id, project, target, error) = (id.to_owned(), project.to_owned(), target.to_owned(), error.to_owned());
+    state.db.write("system", move |t| {
+        let changed = t.execute("UPDATE agent_target_roots SET last_error=?3 WHERE agent=?1 AND target=?2 AND (last_error IS NULL OR last_error<>?3)",
+            params![id, target, error])?;
+        if changed != 0 {
+            t.audit("agent.target_cleanup_refused", &id, Some(&project),
+                serde_json::json!({"agent": id, "target": target, "error": error}))?;
+        }
+        Ok(())
+    }).await
 }
 
 async fn warn_outside(state: &Shared, actor: &Actor, def: &TargetDef, root: &str) -> ApiResult<()> {
@@ -382,6 +476,42 @@ pub fn spawn(state: Shared) -> tokio::task::JoinHandle<()> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn location_ignores_unrelated_edits() {
+        let mut def: TargetDef = toml::from_str("kind = 'ssh'\naddress = 'user@box'\n").unwrap();
+        let saved = serde_json::to_string(&def).unwrap();
+        def.keep = true;
+        def.snapshot_before_task = true;
+        def.credential = Some("rotated-key".into());
+        def.display_name = Some(":2".into());
+        def.work_root = Some("/src/terrarium".into());
+        assert!(same_location(&saved, &def));
+        def.address = Some("user@other".into());
+        assert!(!same_location(&saved, &def));
+        def.address = Some("user@box".into());
+        def.work_root = Some("/var/build".into());
+        assert!(!same_location(&saved, &def));
+    }
+
+    #[test]
+    fn mounted_subtree_is_refused_before_any_deletion() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(run(tmp.path(), "prepare", "repo"));
+        let owned = tmp.path().join("src/terrarium/p/a");
+        std::fs::create_dir(owned.join("mounted")).unwrap();
+        std::fs::write(owned.join("mounted/keep"), "mounted data").unwrap();
+        // Model a bind mount with the same device but a different mount ID.
+        let script = SCRIPT.replace("if mount_id(child) != mount:",
+            "if os.readlink('/proc/self/fd/' + str(child)).endswith('/mounted') or mount_id(child) != mount:");
+        let script = script.replace("os.open('/',", &format!("os.open({:?},", tmp.path().to_str().unwrap()));
+        let out = Command::new("python3").args(["-c", &script, "delete", "/src/terrarium", "p", "a", "agent-id", ""])
+            .output().unwrap();
+        assert!(!out.status.success());
+        assert!(owned.join("mounted/keep").exists());
+        assert!(owned.join(".terrarium-owner").exists());
+        assert!(owned.join("repo").exists());
+    }
 
     #[test]
     fn paths_are_strictly_owned() {

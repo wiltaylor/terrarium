@@ -6200,13 +6200,21 @@ root remains supported with one warning per agent and target and is never
 automatically deleted. Runs using the root default `CARGO_TARGET_DIR` and
 `RESULTS_DIR` to its `target` and `results` subdirectories. Shell commands
 must also keep their own output paths there. Target preparation and cleanup
-require Python 3 on the target.
+require Linux with procfs and Python 3.9 or newer on the target. Cleanup uses
+directory-FD operations available before Python 3.11, not `rmtree(dir_fd=...)`.
 
 After an agent is removed and its exec sessions end, the daemon sweeps its
 recorded roots within 30 seconds. Failures remain recorded for retry across
-daemon restarts. Cleanup refuses changed target definitions, foreign owner
+daemon restarts. Cleanup refuses changed machine/path identity (kind, host,
+address, port, container, username, work root), foreign owner
 markers, and symlink ancestors or roots. Nested symlinks are unlinked without
-following them. Each successful cleanup writes an `agent.target_cleanup`
+following them. Mount points, including same-device bind mounts, are refused
+before deleting anything. Unrelated edits such as limits, credentials and
+`keep` do not block live work or cleanup. Each cleanup starts with an
+`agent.target_cleanup_started` audit containing the pre-deletion allocated
+size, so even a timed-out or partially completed attempt has an audit. A new
+refusal writes `agent.target_cleanup_refused` and remains available for retry.
+Deletion has a 15-minute timeout. Each successful cleanup writes an `agent.target_cleanup`
 audit record with the agent, target, path and allocated size in bytes. Old
 untracked directories and shared caches are never swept.
 
