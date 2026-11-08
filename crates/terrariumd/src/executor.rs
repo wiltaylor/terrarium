@@ -5332,9 +5332,10 @@ mod tests {
         let c = checkout_cmd("https://h/r.git", "/r", Some("main"), Some(1), Some(&s)).unwrap();
         assert!(!c.argv.iter().any(|a| a.contains("ghp_SECRET")));
         assert_eq!(c.env["TERRARIUM_GIT_PASSWORD"], "ghp_SECRET");
-        assert_eq!(&c.argv[4..], ["https://h/r.git", "r", "main", "1"]);
-        assert!(checkout_cmd("ext::sh -c x", "r", None, None, None).is_err());
-        assert!(checkout_cmd("https://h/r", "r", Some("-x"), None, None).is_err());
+        assert_eq!(&c.argv[4..], ["https://h/r.git", "/r", "main", "1"]);
+        assert!(checkout_cmd("ext::sh -c x", "/r", None, None, None).is_err());
+        assert!(checkout_cmd("https://h/r", "/r", Some("-x"), None, None).is_err());
+        assert!(checkout_cmd("https://h/r", "r", None, None, None).is_err());
         assert!(checkout_cmd("https://h/r", "../r", None, None, None).is_err());
         let v = parse_checkout("noise\nTERRARIUM_CHECKOUT\taction=cloned\thead=abc\tbranch=main\tpath=/h/work/r\tnote=\n").unwrap();
         assert_eq!(
