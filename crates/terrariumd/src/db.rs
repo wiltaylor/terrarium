@@ -3283,6 +3283,30 @@ mod tests {
     }
 
     #[test]
+    fn card_move_index_tolerates_malformed_events_and_serves_history() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        conn.execute("INSERT INTO events(id,project,kind,payload,at) VALUES ('bad','p','card','not JSON','now')", []).unwrap();
+        conn.execute("UPDATE events SET payload = '{broken' WHERE id = 'bad'", [])
+            .unwrap();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT seq FROM events WHERE project = 'p' AND kind = 'card'
+             AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
+             ORDER BY seq DESC LIMIT 2000",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("events_card_moves"), "{plan}");
+        assert!(
+            crate::store::card_history::completed_visits(&conn, "p", "review", 20)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn agent_rpc_journal_upgrades_legacy_once_and_preserves_answers() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate_with(&mut conn, MIGRATIONS).unwrap();

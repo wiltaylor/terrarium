@@ -145,35 +145,43 @@ export function LiveLine(props: { agent: Agent }) {
 }
 
 /**
- * The turns that wait in the store for the agent's wake (TER-54), oldest first, at the bottom of
+ * Untouched queued turns in delivery order, at the bottom of
  * the conversation. Edit takes a turn out of the queue and gives its text to the composer; Remove
  * drops it. The list reads again when the agent's `queued` count or status changes.
  */
 export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => void }) {
   const [items, setItems] = createSignal<QueuedTurn[]>([]);
+  const [runnerStatus, setRunnerStatus] = createSignal<string | null>(null);
   const [error, setError] = createSignal<unknown>(null);
-  const [busy, setBusy] = createSignal<number | null>(null);
+  const [busy, setBusy] = createSignal<number | string | null>(null);
   let gen = 0;
   const load = async () => {
     const mine = ++gen;
     try {
       const r = await api.agents.queued(props.agent.id);
-      if (mine === gen) setItems(r.items);
+      if (mine === gen) {
+        setItems(r.items);
+        setRunnerStatus(r.queues?.runner && r.queues.runner !== "available" ? r.queues.runner : null);
+      }
     } catch (e) {
       if (mine === gen) setError(e);
     }
   };
-  // `queued` counts turns, mail, and pointers; 0 means no queued turn, so no read.
+  // The store count excludes the in-memory queues of live agents.
   createEffect(
     on([() => props.agent.id, () => props.agent.queued ?? 0, () => props.agent.status], ([, n]) => {
-      if (n > 0) void load();
+      if (n > 0 || !["stopped", "error"].includes(props.agent.status)) void load();
       else {
         gen++;
         setItems([]);
+        setRunnerStatus(null);
       }
     }),
   );
-  onCleanup(() => gen++);
+  const timer = setInterval(() => {
+    if (["working", "blocked"].includes(props.agent.status) || items().length > 0) void load();
+  }, 2000);
+  onCleanup(() => { clearInterval(timer); gen++; });
   const take = async (turn: QueuedTurn, edit: boolean) => {
     if (busy() !== null) return;
     setBusy(turn.id);
@@ -190,9 +198,10 @@ export function QueuedTurns(props: { agent: Agent; onEdit: (text: string) => voi
     }
   };
   return (
-    <Show when={items().length || error()}>
+    <Show when={items().length || error() || runnerStatus()}>
       <section class="convo-queued" aria-label="Queued turns">
         <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+        <Show when={runnerStatus()}><p class="small muted">Runner queue: {runnerStatus()}. Other queued turns are shown below.</p></Show>
         <Show when={items().length}>
           <p class="small muted convo-queued-head">Queued: these turns go to the agent in this order when it wakes.</p>
           <ol class="convo-queued-list">

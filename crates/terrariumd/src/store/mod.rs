@@ -8,6 +8,7 @@ pub mod audit;
 pub mod board;
 pub mod calendar;
 pub mod card_files;
+pub mod card_history;
 pub mod event_sources;
 pub mod github_gate;
 pub mod groups;
