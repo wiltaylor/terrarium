@@ -527,7 +527,13 @@ async fn spawn_headroom_picks_pool_then_allowed_alternative() {
         "templates": ["headroom"]}}}),
         )
         .await);
-    let r = spawn_as(&td, &restricted, &restricted, json!({"template": "headroom"})).await;
+    let r = spawn_as(
+        &td,
+        &restricted,
+        &restricted,
+        json!({"template": "headroom"}),
+    )
+    .await;
     assert_eq!(r.status, 409, "{}", r.body);
 }
 
