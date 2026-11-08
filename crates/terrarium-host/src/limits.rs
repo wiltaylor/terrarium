@@ -253,6 +253,14 @@ pub async fn apply_reservation(target: &str, holder: &str, l: &terrarium_core::r
 }
 
 /// Kill every process in the scope. It does not wait.
+pub fn reservation_stop_plan(target: &str, holder: &str) -> Result<crate::verb::VerbPlan, crate::verb::BuildError> {
+    Ok(crate::verb::VerbPlan::plain(ExecPlan {
+        program: SYSTEMCTL.into(),
+        args: vec!["--user".into(), "stop".into(), "--".into(), slice_name(target, holder)],
+        env: user_bus_env(), timeout: Some(CALL_TIMEOUT), ..Default::default()
+    }))
+}
+
 pub fn kill_scope(scope: &str) {
     let args = [
         "--user".to_owned(),

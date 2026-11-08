@@ -69,3 +69,12 @@ fn affinity_and_io_require_controllers_and_safe_devices() {
     b.cpus = Some(vec![]);
     assert!(b.validate().is_err());
 }
+
+#[test]
+fn expiry_stops_only_the_holder_slice() {
+    let p = limits::reservation_stop_plan("_reservation", "p/worker").unwrap();
+    assert_eq!(p.exec.program, "systemctl");
+    assert_eq!(p.exec.args, vec!["--user", "stop", "--", "terrarium-_reservation-p-worker.slice"]);
+    let p = limits::reservation_stop_plan("box", "").unwrap();
+    assert_eq!(p.exec.args.last().unwrap(), "terrarium-box.slice");
+}

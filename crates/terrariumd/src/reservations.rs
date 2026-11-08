@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration};
 use serde::Deserialize;
 use serde_json::json;
 use terrarium_core::{config::{TargetDef, TargetKind}, limits::Limits, resources::{Amounts, RuntimeLimits}};
-use terrarium_host::protocol::{DaemonFrame, ResourceApply};
+use terrarium_host::protocol::{DaemonFrame, ResourceApply, ResourceStop};
 use crate::{actor::Actor, api::Shared, error::{ApiError, ApiResult}, executor, policy};
 use crate::store::{agents, hosts, reservations::{self as store, Holder, Reservation, State}, targets};
 
@@ -182,7 +182,33 @@ async fn finish(state: &Shared, r: &Reservation) -> ApiResult<Reservation> {
         Holder::Target(target) => vec![target.clone()],
     };
     let agent = match &r.holder { Holder::Agent(id) => Some(id.as_str()), Holder::Target(_) => None };
-    state.executor.end_resource_sessions(&names, agent);
+    let unconfirmed = state.executor.end_resource_sessions(&names, agent).await;
+    let target = r.target.clone();
+    let t = state.db.read(move |c| targets::get(c, &target)).await?;
+    if t.def.kind == TargetKind::Host {
+        let (target, holder) = match &r.holder {
+            Holder::Target(target) => (target.clone(), String::new()),
+            Holder::Agent(id) => {
+                let id = id.clone();
+                let holder = state.db.read(move |c| agents::display_name(c, &id)).await?
+                    .ok_or_else(|| ApiError::not_found("reservation agent was deleted"))?;
+                ("_reservation".into(), holder)
+            }
+        };
+        executor::verb_ok(state, &t.def, "stop reservation slice", move |session| {
+            DaemonFrame::ResourceStop(ResourceStop { session, target, holder })
+        }).await?;
+    } else if !unconfirmed.is_empty() {
+        let id = r.id.clone();
+        let project = r.project.clone();
+        state.db.write("system", move |tx| {
+            let detail = json!({"reservation":id,"unconfirmed":unconfirmed});
+            tx.audit("reserve.cleanup_unconfirmed", &id, Some(&project), detail.clone())?;
+            tx.emit(crate::events::EventDraft::new("reservation_cleanup_warning",
+                format!("reservation {id}: session cleanup could not be confirmed within the bounded wait"), detail).project(project))?;
+            Ok(())
+        }).await?;
+    }
     apply(state, r, true).await?;
     let id = r.id.clone();
     state.db.write("system", move |tx| store::finish_end(tx, &id)).await

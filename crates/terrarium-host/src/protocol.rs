@@ -316,6 +316,14 @@ pub struct ResourceApply {
     pub limits: terrarium_core::resources::RuntimeLimits,
 }
 
+/// Stop only this managed slice and its child scopes. Never a container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceStop {
+    pub session: SessionId,
+    pub target: String,
+    pub holder: String,
+}
+
 /// Write a file on the host. File data frames follow, then `cp_end`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpPush {
@@ -967,6 +975,7 @@ pub enum DaemonFrame {
     DockerRun(DockerRun),
     #[serde(rename = "resource.apply")]
     ResourceApply(ResourceApply),
+    ResourceStop(ResourceStop),
     #[serde(rename = "docker.exec")]
     DockerExec(DockerExec),
     #[serde(rename = "docker.start")]
@@ -1033,6 +1042,7 @@ impl DaemonFrame {
             F::CpPull(r) => r.session,
             F::DockerRun(r) => r.session,
             F::ResourceApply(r) => r.session,
+            F::ResourceStop(r) => r.session,
             F::DockerExec(r) => r.session,
             F::DockerStart(r) => r.session,
             F::DockerStop(r) => r.session,

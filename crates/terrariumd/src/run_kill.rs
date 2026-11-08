@@ -267,11 +267,16 @@ pub fn start_named(
     }
     let weak = Arc::downgrade(state);
     let d = def.clone();
+    let initial = std::sync::atomic::AtomicBool::new(true);
     let starter = move |c: RemoteCmd| {
         let state = weak
             .upgrade()
             .ok_or_else(|| ApiError::internal("the daemon is shutting down"))?;
-        start_cmd(&state, &d, &c)
+        if initial.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            start_cmd(&state, &d, &c)
+        } else {
+            crate::executor::start_resource_cleanup(&state, &d, &c)
+        }
     };
     start_with_file(starter, cmd, GRACE_SECS, pidfile, true)
 }

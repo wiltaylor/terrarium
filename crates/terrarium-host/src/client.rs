@@ -881,6 +881,7 @@ impl Client {
                 };
                 self.start(r.session, plan, tx);
             }
+            F::ResourceStop(r) => self.start(r.session, crate::limits::reservation_stop_plan(&r.target, &r.holder), tx),
             F::DockerStart(r) => self.start(
                 r.session,
                 need(docker_ok, "docker").and_then(|_| docker::plan_start(&r, db)),

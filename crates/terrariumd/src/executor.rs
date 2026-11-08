@@ -1370,13 +1370,33 @@ impl Executor {
             .map(|s| s.id.clone()).collect()
     }
 
-    pub fn end_resource_sessions(&self, targets: &[String], holder: Option<&str>) {
+    pub async fn end_resource_sessions(&self, targets: &[String], holder: Option<&str>) -> Vec<Value> {
         let sessions: Vec<_> = self.table().values().filter(|s| targets.contains(&s.target)
             && holder.is_none_or(|a| s.owner.as_deref() == Some(a)) && !s.is_done()).cloned().collect();
+        let mut checks = tokio::task::JoinSet::new();
         for s in sessions {
+            let report = s.kill_report.lock().unwrap_or_else(|e| e.into_inner()).clone();
             s.finish(End::error("reservation_ended", "your resource reservation on this host ended"));
             s.kill();
+            checks.spawn(async move {
+                let result = match report {
+                    Some(report) => crate::run_kill::report(report).await,
+                    None => None,
+                };
+                let confirmed = result.as_ref().is_some_and(|r| r.get("error").is_none()
+                    && r["pid"].is_u64() && r["left"].as_array().is_some_and(Vec::is_empty));
+                (!confirmed).then(|| json!({"session":s.id,"target":s.target,"report":result}))
+            });
         }
+        let mut unconfirmed = Vec::new();
+        while let Some(result) = checks.join_next().await {
+            match result {
+                Ok(Some(detail)) => unconfirmed.push(detail),
+                Err(e) => unconfirmed.push(json!({"error":e.to_string()})),
+                _ => {}
+            }
+        }
+        unconfirmed
     }
 
     /// End the live sessions of `agent` on `target`: each ends with the
@@ -1489,6 +1509,19 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
 }
 
 /// Run a host-agent verb to its end.
+/// Only the run-kill guard calls this for its generated cleanup commands.
+/// Cleanup must work while reservations block new user commands, and must
+/// not enter the very slice being stopped.
+pub(crate) fn start_resource_cleanup(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
+    if !matches!(def.kind, TargetKind::Host | TargetKind::Docker) {
+        return start_cmd(state, def, cmd);
+    }
+    let host = host_of(def)?;
+    let shell = state.executor.hosts.capabilities(host).and_then(|c| c.shell);
+    let make = host_frame(def, shell.as_deref(), cmd, None)?;
+    Ok(pump_host(state.executor.hosts.open(host, make)?))
+}
+
 async fn verb(
     state: &Shared,
     def: &TargetDef,
