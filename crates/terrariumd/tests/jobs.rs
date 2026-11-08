@@ -2219,15 +2219,21 @@ async fn delivery_secret_config_refuses_plaintext_and_arbitrary_env_injection() 
         json!({"MERGE_KEY":"@secret:vm"}),
         json!({"PATH":"@secret:vm"}),
     ] {
-        lab.td.put("/api/projects/p/delivery", json!({
-            "target":"p-box", "recipe":"true", "merge_secrets":refs
-        })).await.err(422, "invalid");
+        lab.td
+            .put(
+                "/api/projects/p/delivery",
+                json!({
+                    "target":"p-box", "recipe":"true", "merge_secrets":refs
+                }),
+            )
+            .await
+            .err(422, "invalid");
     }
     lab.td.put("/api/projects/p/delivery", json!({
         "target":"p-box", "recipe":"test -z \"${DOCKER_CI_KEY:-}\" && test -z \"${SSH_AUTH_SOCK:-}\"",
         "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm"}
     })).await.ok();
-    let head = lab.branch("no-recipe-key", "next", &[("OK","yes\n")]);
+    let head = lab.branch("no-recipe-key", "next", &[("OK", "yes\n")]);
     let job = validate_card(&lab, "no-recipe-key", &head).await;
     assert_eq!(job["state"], "passed", "{job:#}");
 }

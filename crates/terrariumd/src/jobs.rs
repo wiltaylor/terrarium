@@ -1917,7 +1917,9 @@ async fn steps(
         .collect();
     let mut env = recipe_env(job, x.dir, &head, base);
     let tunnel = if let Some(key) = injected.first() {
-        let tunnel = crate::docker_tunnel::open(x.state, x.def, &key.value, x.dir, delivery.timeout_secs()).await?;
+        let tunnel =
+            crate::docker_tunnel::open(x.state, x.def, &key.value, x.dir, delivery.timeout_secs())
+                .await?;
         env.insert("DOCKER_HOST".into(), tunnel.endpoint.clone());
         Some(tunnel)
     } else {
@@ -2107,7 +2109,9 @@ fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
     for name in delivery.merge_secrets.keys() {
         secrets::grants::check_env_name(name)?;
         if name != "DOCKER_CI_KEY" {
-            return Err(ApiError::invalid("merge_secrets supports only DOCKER_CI_KEY, consumed by the daemon Docker tunnel, never recipe env"));
+            return Err(ApiError::invalid(
+                "merge_secrets supports only DOCKER_CI_KEY, consumed by the daemon Docker tunnel, never recipe env",
+            ));
         }
     }
     let refs = secrets::run_env::parse_refs(&delivery.merge_secrets)?;
@@ -2996,13 +3000,19 @@ mod tests {
 
     #[test]
     fn merge_references_refuse_literals_and_reserved_env_names() {
-        for (name, value) in [("KEY", "literal"), ("KEY", "@secret:"), ("PATH", "@secret:vm")] {
+        for (name, value) in [
+            ("KEY", "literal"),
+            ("KEY", "@secret:"),
+            ("PATH", "@secret:vm"),
+        ] {
             let mut delivery = DeliveryDef::default();
             delivery.merge_secrets.insert(name.into(), value.into());
             assert!(check_merge_refs(&delivery).is_err());
         }
         let mut delivery = DeliveryDef::default();
-        delivery.merge_secrets.insert("DOCKER_CI_KEY".into(), "@secret:vm.private_key".into());
+        delivery
+            .merge_secrets
+            .insert("DOCKER_CI_KEY".into(), "@secret:vm.private_key".into());
         assert!(check_merge_refs(&delivery).is_ok());
     }
 

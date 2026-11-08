@@ -4233,7 +4233,9 @@ async fn docker_real_recreate_changes_image_id_and_preserves_workspace() {
         while state.executor.resource_pending("lab1") {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     terrariumd::executor::lifecycle(
         &state,
         &def,

@@ -453,7 +453,10 @@ mod tests {
         let value = super::merged(&serde_json::json!({}), &args.delivery).unwrap();
         assert_eq!(value["merge_secrets"]["KEY"], "@secret:vm.private_key");
         let clear = parse(&["--clear-merge-secrets"]).unwrap();
-        assert_eq!(super::merged(&value, &clear.delivery).unwrap()["merge_secrets"], serde_json::json!({}));
+        assert_eq!(
+            super::merged(&value, &clear.delivery).unwrap()["merge_secrets"],
+            serde_json::json!({})
+        );
         for value in ["KEY=literal", "KEY", "=@secret:vm"] {
             let args = parse(&["--merge-secret", value]).unwrap();
             assert!(super::merged(&serde_json::json!({}), &args.delivery).is_err());

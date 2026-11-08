@@ -173,7 +173,9 @@ fn value_text(v: &Value) -> Option<String> {
 /// The stored grantee label of a grant, when it names no ID of this
 /// instance: `agent:<project>/<name>` or `project:<name>`.
 fn portable(label: &str) -> bool {
-    label.starts_with("project:") || label.starts_with("delivery:") || (label.starts_with("agent:") && label.contains('/'))
+    label.starts_with("project:")
+        || label.starts_with("delivery:")
+        || (label.starts_with("agent:") && label.contains('/'))
 }
 
 /// The text of the secrets file of one scope.
@@ -1370,7 +1372,10 @@ mod tests {
         grants::tests::grant_run(&c, &s, "delivery:p", &["box"]).unwrap();
         let files = files(&c).unwrap();
         let (_, text) = files.iter().find(|(p, _)| *p == path_of(GLOBAL)).unwrap();
-        assert!(text.contains("grantee = \"delivery:p\"\nlevel = \"run\"\ntargets = [\"box\"]"), "{text}");
+        assert!(
+            text.contains("grantee = \"delivery:p\"\nlevel = \"run\"\ntargets = [\"box\"]"),
+            "{text}"
+        );
         assert!(
             text.contains("level = \"run\"\ntargets = [\"box\", \"web\"]"),
             "{text}"

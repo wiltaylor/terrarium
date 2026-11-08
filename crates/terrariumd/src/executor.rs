@@ -2164,7 +2164,10 @@ pub(crate) fn own_redactor(
     let r = Redactor::build_min(
         secrets.iter().flat_map(|(label, v)| {
             std::iter::once(v.as_str())
-                .chain(v.lines().filter(|line| v.contains("PRIVATE KEY") && !line.trim().is_empty()))
+                .chain(
+                    v.lines()
+                        .filter(|line| v.contains("PRIVATE KEY") && !line.trim().is_empty()),
+                )
                 .map(move |value| Entry {
                     label: label.clone(),
                     scope: None,
@@ -5140,9 +5143,14 @@ mod tests {
     fn own_key_redaction_covers_individual_pem_lines() {
         let body = "dummy-base64-private-key-line-for-redaction";
         let value = format!("-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----\n");
-        let redactor = super::own_redactor(&[("job/vm".into(), zeroize::Zeroizing::new(value))]).unwrap();
+        let redactor =
+            super::own_redactor(&[("job/vm".into(), zeroize::Zeroizing::new(value))]).unwrap();
         assert!(!redactor.redact_str(body).contains(body));
-        assert!(redactor.redact_str("ordinary build output").contains("ordinary build output"));
+        assert!(
+            redactor
+                .redact_str("ordinary build output")
+                .contains("ordinary build output")
+        );
     }
     use super::*;
 
