@@ -1,0 +1,13 @@
+[profile.ci]
+# Bound load on the shared build target, independent of its CPU count.
+test-threads = 8
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"
+
+[[profile.ci.overrides]]
+# These suites contain wall-clock deadlines. Give them the entire test budget
+# so they run alone, not alongside seven other test processes.
+filter = 'binary(/jobs|runtime|wait|reset/)'
+threads-required = 8
