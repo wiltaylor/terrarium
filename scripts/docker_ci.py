@@ -1,20 +1,14 @@
-"""Merge-only Docker gate. The private key goes to ssh-add on stdin, never a file."""
+"""Opt-in Docker gate. Only a daemon-provisioned Unix endpoint reaches branch code."""
 
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 
-DOCKER_HOST = "ssh://root@10.3.0.2:2250"
-KNOWN_HOST = "[10.3.0.2]:2250 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGgTrtbsNPDR6lWHJVpgAh6tStS4C7O9F0ksb405ScXy\n"
-KEY_ENV = "DOCKER_CI_KEY"
 LIVE_TESTS = (
     "hosts::docker_real_recreate_changes_image_id_and_preserves_workspace",
     "reservations_api::live_docker_release",
@@ -67,61 +61,22 @@ def gate(env: dict[str, str]) -> int:
 
 
 def main() -> int:
-    key = os.environ.pop(KEY_ENV, "")
-    # Rollout is staged: deploy grant resolution and configure the delivery
-    # principal before enabling the live gate in the delivery recipe.
     enabled = os.environ.get("TERRARIUM_DOCKER_CI", "0")
     if enabled == "0":
         return subprocess.call(["just", "ci::validate"], env=dict(os.environ))
     if enabled != "1":
         print("TERRARIUM_DOCKER_CI must be 0 or 1", file=sys.stderr)
         return 1
-    if os.environ.get("TERRARIUM_JOB_KIND") != "merge" or not key:
-        print("Docker gate requires a merge job and its delivery-granted key", file=sys.stderr)
+    endpoint = os.environ.get("DOCKER_HOST", "")
+    if os.environ.get("TERRARIUM_JOB_KIND") != "merge" or not endpoint.startswith("unix://"):
+        print("Docker gate requires a merge job and its daemon-provisioned Unix endpoint", file=sys.stderr)
         return 1
     env = dict(os.environ)
-    # An inherited context overrides DOCKER_HOST. Never let the merge
-    # gate run its live tests against a developer's selected daemon.
-    for name in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"):
+    for name in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SSH_AUTH_SOCK"):
         env.pop(name, None)
-    ssh = shutil.which("ssh")
-    if not ssh:
-        raise RuntimeError("Docker gate needs OpenSSH and the Docker CLI on the build target")
-    with tempfile.TemporaryDirectory(prefix="terrarium-docker-ci-") as directory:
-        temp = Path(directory)
-        env["DOCKER_CONFIG"] = str(temp / "docker-config")
-        socket = temp / "agent.sock"
-        hosts = temp / "known_hosts"
-        hosts.write_text(KNOWN_HOST, encoding="utf-8")
-        wrapper = temp / "ssh"
-        wrapper.write_text(
-            "#!/bin/sh\nexec " + shlex.quote(ssh) + " -F /dev/null"
-            " -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentityFile=none"
-            " -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=" + shlex.quote(str(hosts))
-            + " -o IdentityAgent=" + shlex.quote(str(socket)) + ' "$@"\n', encoding="utf-8")
-        wrapper.chmod(0o700)
-        agent = subprocess.Popen(["ssh-agent", "-D", "-a", str(socket)],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            deadline = time.monotonic() + 5
-            while not socket.exists():
-                if agent.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError("ssh-agent did not start")
-                time.sleep(0.02)
-            env["SSH_AUTH_SOCK"] = str(socket)
-            subprocess.run(["ssh-add", "-"], input=key + "\n", text=True, env=env,
-                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            key = ""
-            env["PATH"] = str(temp) + os.pathsep + env.get("PATH", "")
-            env["DOCKER_HOST"] = DOCKER_HOST
-            return gate(env)
-        finally:
-            agent.terminate()
-            try:
-                agent.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                agent.kill()
-                agent.wait()
+    with tempfile.TemporaryDirectory(prefix="terrarium-docker-config-") as directory:
+        env["DOCKER_CONFIG"] = directory
+        return gate(env)
 
 
 if __name__ == "__main__":

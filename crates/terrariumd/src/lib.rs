@@ -34,6 +34,7 @@ pub mod idle_alert;
 pub mod ingest;
 pub mod input_watchdog;
 pub mod jobs;
+mod docker_tunnel;
 pub mod leases;
 pub mod lifecycle;
 pub mod login_session;

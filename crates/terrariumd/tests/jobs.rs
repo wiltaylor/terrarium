@@ -2212,66 +2212,24 @@ async fn merge_with_recipe(lab: &Lab, branch: &str, recipe: &str) -> Value {
 }
 
 #[tokio::test]
-async fn delivery_secrets_reach_only_merge_recipes_and_are_audited_and_redacted() {
+async fn delivery_secret_config_refuses_plaintext_and_arbitrary_env_injection() {
     let lab = lab(1).await;
-    const SENTINEL: &str = "merge-only-dummy-value-363";
-    lab.td
-        .put(
-            "/api/secrets/p/merge-key",
-            json!({"kind":"api_key", "fields":{"value":SENTINEL}}),
-        )
-        .await
-        .ok();
-    lab.td
-        .post(
-            "/api/secrets/p/merge-key/grants",
-            json!({"grantee":"delivery:p", "level":"run", "targets":["p-box"]}),
-        )
-        .await
-        .ok();
-    let config = json!({"target":"p-box", "recipe":"if [ \"$TERRARIUM_JOB_KIND\" = merge ]; then test -n \"$MERGE_KEY\" && printf '%s\\n' \"$MERGE_KEY\"; else test -z \"${MERGE_KEY:-}\"; fi", "next_repos":["app"], "work_dir":lab._dirs.path().join("jobs").display().to_string(), "merge_secrets":{"MERGE_KEY":"@secret:merge-key"}});
-    lab.td
-        .put("/api/projects/p/delivery", config.clone())
-        .await
-        .ok();
-    let head = lab.branch("secret-check", "next", &[("OK", "yes\n")]);
-    let validated = validate_card(&lab, "secret-check", &head).await;
-    assert_eq!(validated["state"], "passed", "{validated:#}");
-    let card = lab.card("secret merge", "secret-check").await;
-    lab.td
-        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
-        .await
-        .ok();
-    let jobs = lab.until_idle().await;
-    let merged = jobs.iter().find(|j| j["card"] == card).unwrap();
-    assert_eq!(merged["state"], "passed", "{merged:#}");
-    let detail = lab
-        .td
-        .get(&format!("/api/jobs/{}", merged["id"].as_str().unwrap()))
-        .await;
-    let text = detail.ok().to_string();
-    assert!(!text.contains(SENTINEL), "{text}");
-    assert!(text.contains("[secret:run/p/merge-key]"), "{text}");
-    let audit = lab.td.get("/api/audit?action=secret.run").await;
-    let text = audit.ok().to_string();
-    assert!(text.contains("delivery:p"), "{text}");
-    assert!(!text.contains(SENTINEL));
-    // Revocation is checked at the next recipe, not cached in delivery config.
-    lab.td
-        .delete("/api/secrets/p/merge-key/grants?grantee=delivery:p")
-        .await
-        .ok();
-    lab.branch("secret-revoked", "next", &[("revoked", "yes\n")]);
-    let card = lab.card("revoked merge", "secret-revoked").await;
-    lab.td
-        .post_as(&lab.lead, &format!("/api/cards/{card}/merge"), json!({}))
-        .await
-        .ok();
-    let jobs = lab.until_idle().await;
-    assert_ne!(
-        jobs.iter().find(|j| j["card"] == card).unwrap()["state"],
-        "passed"
-    );
+    for refs in [
+        json!({"DOCKER_CI_KEY":"literal"}),
+        json!({"MERGE_KEY":"@secret:vm"}),
+        json!({"PATH":"@secret:vm"}),
+    ] {
+        lab.td.put("/api/projects/p/delivery", json!({
+            "target":"p-box", "recipe":"true", "merge_secrets":refs
+        })).await.err(422, "invalid");
+    }
+    lab.td.put("/api/projects/p/delivery", json!({
+        "target":"p-box", "recipe":"test -z \"${DOCKER_CI_KEY:-}\" && test -z \"${SSH_AUTH_SOCK:-}\"",
+        "merge_secrets":{"DOCKER_CI_KEY":"@secret:vm"}
+    })).await.ok();
+    let head = lab.branch("no-recipe-key", "next", &[("OK","yes\n")]);
+    let job = validate_card(&lab, "no-recipe-key", &head).await;
+    assert_eq!(job["state"], "passed", "{job:#}");
 }
 
 /// Review B1: the recipe commits in its clone and moves HEAD. The push

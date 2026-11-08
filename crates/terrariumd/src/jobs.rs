@@ -1916,9 +1916,13 @@ async fn steps(
         .map(|i| (i.label(), i.value.clone()))
         .collect();
     let mut env = recipe_env(job, x.dir, &head, base);
-    for i in &injected {
-        env.insert(i.env.clone(), i.value.to_string());
-    }
+    let tunnel = if let Some(key) = injected.first() {
+        let tunnel = crate::docker_tunnel::open(x.state, x.def, &key.value, x.dir, delivery.timeout_secs()).await?;
+        env.insert("DOCKER_HOST".into(), tunnel.endpoint.clone());
+        Some(tunnel)
+    } else {
+        None
+    };
     // Secret-bearing recipes must not leave an unredacted log on the target.
     // Their bounded output is redacted in the stream before collection.
     let has_secrets = !injected.is_empty();
@@ -1948,6 +1952,9 @@ async fn steps(
         ..recipe_cmd
     };
     let c = step_redacted(x.state, &job.id, x.def, &recipe_cmd, RECIPE_MAX, None, &own).await?;
+    if let Some(tunnel) = tunnel {
+        tunnel.close().await;
+    }
     x.recipe_started.store(true, Ordering::SeqCst);
     let ok = c.end.as_ref().is_some_and(End::success);
     // TER-196: a run that the infrastructure lost is no red; [`run`]
@@ -2099,6 +2106,9 @@ async fn merge_secrets(
 fn check_merge_refs(delivery: &DeliveryDef) -> ApiResult<()> {
     for name in delivery.merge_secrets.keys() {
         secrets::grants::check_env_name(name)?;
+        if name != "DOCKER_CI_KEY" {
+            return Err(ApiError::invalid("merge_secrets supports only DOCKER_CI_KEY, consumed by the daemon Docker tunnel, never recipe env"));
+        }
     }
     let refs = secrets::run_env::parse_refs(&delivery.merge_secrets)?;
     if refs.len() != delivery.merge_secrets.len() {
