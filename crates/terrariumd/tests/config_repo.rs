@@ -573,7 +573,11 @@ async fn a_pulled_export_is_a_plan_until_apply() {
     assert!(body["export"][0]["applied"].is_object(), "{body}");
     let w1 = b.get("/api/agents/shared%2Fw1").await;
     assert_eq!(w1.ok()["persona"], "none");
-    assert!(std::fs::read_to_string(&own_path).unwrap().contains("later"));
+    assert!(
+        std::fs::read_to_string(&own_path)
+            .unwrap()
+            .contains("later")
+    );
     let s = b.get("/api/config/status").await;
     assert_eq!(s.ok()["export_pending"], false);
 }
