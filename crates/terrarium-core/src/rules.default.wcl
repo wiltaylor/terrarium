@@ -79,8 +79,10 @@ rule "merge-queued" {
   card_comment { text = "{{job.queue_comment}}" }
   group_open { key = "{{job.group_key}}" title = "Merge {{job.id}} (full suite)" column = "@review" done_when = "@accepted" eta = "jobs" }
   group_add { key = "{{job.group_key}}" }
-  group_status { key = "{{job.group_key}}" step = "queued" state = "done" }
-  group_status { key = "{{job.group_key}}" step = "merged (full suite passed)" state = "pending" }
+  group_status { key = "{{job.group_key}}" step = "queued" state = "running" }
+  group_status { key = "{{job.group_key}}" step = "merge job" state = "pending" }
+  group_status { key = "{{job.group_key}}" step = "e2e" state = "pending" }
+  group_status { key = "{{job.group_key}}" step = "merged" state = "pending" }
 }
 
 rule "job-started" {
@@ -100,7 +102,8 @@ rule "merge-group-started" {
   max_per_hour = 600
   when "data.change" { eq = "started" }
   when "data.kind" { eq = "merge" }
-  group_status { key = "{{job.group_key}}" step = "merged (full suite passed)" state = "running" }
+  group_status { key = "{{job.group_key}}" step = "queued" state = "done" }
+  group_status { key = "{{job.group_key}}" step = "merge job" state = "running" }
 }
 
 rule "merge-group-failed" {
@@ -108,7 +111,25 @@ rule "merge-group-failed" {
   max_per_hour = 600
   when "data.kind" { eq = "merge" }
   when "data.verdict" { one_of = ["red", "conflict", "error", "cancelled"] }
-  group_status { key = "{{job.group_key}}" step = "merged (full suite passed)" state = "failed" }
+  group_status { key = "{{job.group_key}}" step = "{{group.failed_step}}" state = "failed" }
+}
+
+rule "merge-group-returned" {
+  description = "A card returned for more work leaves its open merge group."
+  on = ["card"]
+  max_per_hour = 600
+  when "data.change" { eq = "moved" }
+  when "data.from_role" { one_of = ["merge_queue", "accepted", "review"] }
+  if_card { group_key_prefix = "merge:" column = ["@working", "ready", "@blocked", "backlog"] }
+  group_remove { key = "{{group.key}}" }
+}
+
+rule "merge-group-cancelled" {
+  on = ["job.verdict"]
+  max_per_hour = 600
+  when "data.kind" { eq = "merge" }
+  when "data.verdict" { eq = "cancelled" }
+  group_close { key = "{{job.group_key}}" comment = "Merge group abandoned: merge job cancelled." }
 }
 
 rule "job-requeued" {
@@ -121,6 +142,9 @@ rule "job-requeued" {
     remove = ["validation:running"]
     add = ["validation:queued"]
   }
+  group_status { key = "{{job.group_key}}" step = "queued" state = "running" }
+  group_status { key = "{{job.group_key}}" step = "merge job" state = "pending" }
+  group_status { key = "{{job.group_key}}" step = "e2e" state = "pending" }
 }
 
 // ------------------------------------------------------------ the end
@@ -149,7 +173,9 @@ rule "merge-pass" {
     comment = "{{job.end_comment}}"
   }
   card_assign { who = "none" }
-  group_status { key = "{{job.group_key}}" step = "merged (full suite passed)" state = "done" }
+  group_status { key = "{{job.group_key}}" step = "merge job" state = "done" }
+  group_status { key = "{{job.group_key}}" step = "e2e" state = "done" }
+  group_status { key = "{{job.group_key}}" step = "merged" state = "done" }
   group_close { key = "{{job.group_key}}" all_done = true comment = "All members merged (full suite passed)." }
 }
 
@@ -301,15 +327,14 @@ rule "job-cancelled" {
 
 // ---------------------------------------------------- the bound agents
 //
-// As bound.rs: the wait columns are names, so a board without them never
-// parks its bound agents.
+// Follow column roles, including boards that rename their wait columns.
 
 rule "agent-park" {
   description = "The card waits on others: its bound agent parks."
   on = ["card"]
   max_per_hour = 600
   when "data.change" { eq = "moved" }
-  when "data.to" { one_of = ["validating", "review", "merge_queue", "accepted"] }
+  when "data.to_role" { one_of = ["validating", "review", "merge_queue", "accepted"] }
   agent_park { reason = "card in {{card.column}}" }
 }
 
@@ -318,10 +343,11 @@ rule "agent-unpark" {
   on = ["card"]
   max_per_hour = 600
   when "data.change" { eq = "moved" }
-  when "data.to" { ne = "validating" }
-  when "data.to" { ne = "review" }
-  when "data.to" { ne = "merge_queue" }
-  when "data.to" { ne = "accepted" }
+  when "data.from_role" { one_of = ["validating", "review", "merge_queue", "accepted"] }
+  when "data.to_role" { ne = "validating" }
+  when "data.to_role" { ne = "review" }
+  when "data.to_role" { ne = "merge_queue" }
+  when "data.to_role" { ne = "accepted" }
   when "data.to" { ne = "done" }
   agent_unpark {}
 }

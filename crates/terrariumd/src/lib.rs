@@ -13,6 +13,7 @@ pub mod backup;
 pub mod bound;
 pub mod calendar;
 pub mod card_delivery;
+pub mod card_dispatcher;
 pub mod card_reminder;
 pub mod config_repo;
 pub mod db;
@@ -25,6 +26,7 @@ pub mod fleet;
 pub mod git;
 pub mod git_identity;
 pub mod git_proxy;
+pub mod github_issues;
 pub mod harness_auto_update;
 pub mod harness_tools;
 pub mod harness_versions;
@@ -48,6 +50,8 @@ pub mod question_guard;
 pub mod quota_notices;
 pub mod quota_policy;
 pub mod repo_browse;
+pub mod research_helpers;
+pub mod reservations;
 pub mod reset;
 pub mod rules_engine;
 pub mod rules_verbs;
@@ -62,11 +66,13 @@ pub mod settings;
 pub mod skills;
 pub mod spawn;
 pub mod spawn_rights;
+pub mod spawn_selection;
 pub mod ssh_agent;
 pub mod store;
 pub mod stream_limit;
 pub mod supervisor;
 pub mod system_prompts;
+pub mod target_roots;
 pub mod target_test;
 pub mod template_files;
 pub mod test_results;
@@ -411,7 +417,9 @@ async fn activate(
 
     warn_direct_push_deny(&state).await;
     tasks.push(spawn_prune_timer(state.clone()));
+    tasks.push(target_roots::spawn(state.clone()));
     tasks.push(leases::spawn_timer(&state));
+    tasks.push(reservations::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
     // The board rule engine (TER-168): runs the outbox rows that the last
     // daemon left pending, then the new events.

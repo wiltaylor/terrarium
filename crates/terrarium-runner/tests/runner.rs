@@ -296,6 +296,105 @@ fn transitions(events: &[EventRecord]) -> Vec<AgentStatus> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_turns_refuse_cancellation_during_typing() {
+    let mut h = start(Opts {
+        submit_pause: ms(1000),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    assert!(h.runner.claim_idle_stop());
+    let delivery = h.runner.type_turn("typing");
+    let id = h.runner.list_pending()[0].id.clone();
+    h.runner.release_idle_stop();
+    until("dispatch took the turn", || {
+        h.runner.list_pending().is_empty()
+    })
+    .await;
+    assert!(!h.runner.cancel_pending(&id));
+    delivery.wait().await.expect("typing was not cancelled");
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_turns_cancel_in_order_and_refuse_after_typing() {
+    let mut h = start(Opts::default()).await;
+    until_idle(&mut h).await;
+    let holding = h.runner.type_turn("/hold");
+    holding.wait().await.expect("holding");
+    let first = h.runner.type_turn("first");
+    let second = h.runner.type_turn("second");
+    let third = h.runner.type_turn("third");
+    let pending = h.runner.list_pending();
+    assert_eq!(
+        pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+    assert!(h.runner.cancel_pending(&pending[1].id));
+    assert!(!h.runner.cancel_pending(&pending[1].id));
+    assert_eq!(second.wait().await, Err(DeliveryError::Dropped));
+    assert_eq!(
+        h.runner
+            .list_pending()
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "third"]
+    );
+    h.runner.write(b"\r").await.expect("release hold");
+    first.wait().await.expect("first typed");
+    assert!(!h.runner.cancel_pending(&pending[0].id));
+    third.wait().await.expect("third typed");
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_stop_claim_excludes_queued_and_running_turns() {
+    let mut h = start(Opts::default()).await;
+    until_idle(&mut h).await;
+    let delivery = h.runner.type_turn("/hold");
+    assert!(
+        !h.runner.claim_idle_stop(),
+        "queued work must win over an idle stop"
+    );
+    delivery.wait().await.expect("delivered");
+    assert!(
+        !h.runner.claim_idle_stop(),
+        "running work must win over an idle stop"
+    );
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+    let mut h = start(Opts::default()).await;
+    until_idle(&mut h).await;
+    assert!(h.runner.claim_idle_stop());
+    assert!(h.runner.claim_idle_stop(), "claim retries are idempotent");
+    let delivery = h.runner.type_turn("after release");
+    h.runner.release_idle_stop();
+    delivery
+        .wait()
+        .await
+        .expect("released claim delivers queued work");
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_stop_claim_expires_after_a_lost_reply() {
+    let mut h = start(Opts::default()).await;
+    until_idle(&mut h).await;
+    assert!(h.runner.claim_idle_stop());
+    // The caller never received the reply and cannot release the claim.
+    timeout(wait(), h.runner.type_turn("after lost reply").wait())
+        .await
+        .expect("claim expired")
+        .expect("delivered");
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_runs_starting_idle_working_idle() {
     let mut h = start(Opts::default()).await;
     until_idle(&mut h).await;

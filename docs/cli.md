@@ -885,14 +885,14 @@ terrarium board column move <name> (--after c | --before c)
 terrarium card ls [-c column] [--mine | --assignee a] [--unassigned] [--label l] [--archived]
 terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
-                   [--assignee a] [--repo r] [--branch b] [-m comment] [--eta 2h30m]
+                   [--assignee a] [--repo r] [--branch b] [-m comment] [--eta <minutes>m]
                    [--github-author login]   the issue author of a GitHub card (api.md §8.3)
                    [--inbox-thread <thread>] an Inbox thread that tracks the card (api.md §6.13)
 terrarium card new --from-mail <message id> [...]
 terrarium card edit <id> [--title t] [-b body] [--label l|none]... [--depends-on id|none]...
                     [--repo r|none] [--branch b|none]
-terrarium card claim <id> [--eta 2h30m]
-terrarium card move <id> <column> [--position n] [-m comment] [--eta 2h30m]
+terrarium card claim <id> [--eta <minutes>m]
+terrarium card move <id> <column> [--position n] [-m comment] [--eta <minutes>m]
 terrarium card eta <id> (<duration | time> | --clear)
 terrarium card assign <id> <agent | operator | me | none>
 terrarium card comment <id> (<text | -> | -b text | - | -m text)
@@ -906,6 +906,10 @@ terrarium card files get <id> [name] [--version n] [-o path | -] [--dir d] [--fo
 terrarium card files versions <id> <name>
 terrarium card files rm <id> <name>
 ```
+
+ETAs are agent time in minutes, not human hours. Most cards take 5-60
+minutes. Set an ETA when claiming and update it with `card eta` when the
+estimate changes.
 
 `card comment` takes the text as the last argument, with `-b`/`--body`, or
 with `-m`, as `card move` does. Give only one of them.
@@ -1082,11 +1086,9 @@ artifact links to the label with `--label`. The operator's review of a
 result, and the approval of a full release, is a `terrarium question ask`
 with the artifacts linked. The `version new | ls | show | rename | add-card
 | rm-card | archive | unarchive | attach | submit | wait | release | approve
-| reject` subcommands are removed: each exits 2 with an error that names
-the labels. `terrarium version` with no subcommand still prints the build
-versions of the CLI and the daemon. The hidden `--version` flags of `artifact push | ls`
-and `test push | ls | link | unlink` exit 2 with an error that names
-`--label`; they go in the version after.
+| reject` subcommands are removed and rejected as unexpected arguments. `terrarium version` with no subcommand still prints the build
+versions of the CLI and the daemon. The `--version` flags of `artifact push | ls`
+and `test push | ls | link | unlink` are removed. Use `--label` instead.
 
 `artifact push` sends the file as base64 in JSON. A directory becomes a tar
 archive with `kind: "bundle"`; the CLI runs the system `tar`. The limit is
@@ -1568,7 +1570,7 @@ terrarium question bundle "<summary>" (--item "<text>"... | --items-file <path|-
                        [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
                        [--wait [--timeout 2h]]
 terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
-                 [--wait [--timeout 2h]]
+                 [--reply-to <id>] [--wait [--timeout 2h]]
 terrarium question ls [--all] [--status open|answered|acknowledged|retracted] [--kind question|notice|bundle] [--agent a]
 terrarium question show <id>
 terrarium question update <id> [--text t] [--option o]... [--clear-options] [--items-file <path|->]
@@ -1610,6 +1612,17 @@ terrarium admin inbox resume <thread-id> [-m note]
   questions together, and the agent gets all answers in one mail, item by
   item. Use a bundle only for decisions that belong together; ask an
   unrelated question on its own. `--wait` works as for `ask`.
+- Use `notify` only for an answer to the operator, one done per operator
+  request, or a real problem (security, data loss, outage, spent budget).
+  Do not send milestone, merge, CI, pre-release, deploy, hold, resume, or
+  progress notices. A notice requires `--card`, `--reply-to`, or urgent or
+  critical priority. `--reply-to` names an operator mail to you, an operator
+  message in your Inbox thread, or an answered question of yours. An invalid
+  reference is rejected. These flags provide context, not permission to send
+  routine updates.
+- Only one open question or bundle per agent may use the same card or Inbox
+  thread. A conflict returns the existing question ID. Follow up with
+  `question update` instead of asking again. Updates cannot bypass this rule.
 - `notify` sends a notice: `kind: "notice"`, with no options. It prints
   `notice <id> sent (<priority>). The acknowledgement comes as mail on
   thread <thread>.` With `--wait`, it registers a `question` wait on the

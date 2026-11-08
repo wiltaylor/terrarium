@@ -803,6 +803,9 @@ pub fn record(
             .project(m.project.clone()),
         )?;
     }
+    if prev != Some(p.status) {
+        crate::store::threads::on_monitor_status(t, &m.project, &m.def.name, p.status)?;
+    }
     prune(t, id, m.def.retention_days, at)?;
     Ok(r)
 }

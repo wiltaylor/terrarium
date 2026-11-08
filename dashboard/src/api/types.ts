@@ -17,12 +17,12 @@ export const AGENT_STATUSES = [
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
 /** The queue of a queued turn. */
-export type QueuedSource = "store";
+export type QueuedSource = "store" | "supervisor" | "runner";
 
-/** One turn that waits in the store for its agent's wake (`GET /api/agents/{id}/queued`, TER-54). */
+/** One untouched queued turn (`GET /api/agents/{id}/queued`). */
 export interface QueuedTurn {
-  id: number;
-  /** Where the turn waits: `store` (the daemon's queue for an agent that does not run). TER-66 adds the live queues. */
+  id: number | string;
+  /** Where the turn waits. Live queue IDs are opaque strings. */
   source: QueuedSource;
   /** The turn as it will be typed, with its tag (`[User] ...`). */
   text: string;
@@ -495,6 +495,10 @@ export interface SpawnPolicy {
   max_lifetime?: string;
   /** The ephemeral agents may spawn too, one level (sysadmin or the operator). */
   may_spawn_children?: boolean;
+  /** May bind agents to cards or threads. Default false. */
+  bound?: boolean;
+  /** Bound-agent lifetime cap. Absent: 30d. At most 30d. */
+  max_bound_lifetime?: string;
 }
 
 /** The outcome of a finished ephemeral agent. */
@@ -1466,6 +1470,9 @@ export interface InboxItem {
 }
 
 export interface InboxQuery {
+  /** JSON tuple [open, critical, urgent, at, id] of the previous page's last item. */
+  cursor?: string;
+  limit?: number;
   status?: InboxStatus;
   kind?: InboxKind;
   project?: string;
@@ -1565,6 +1572,8 @@ export interface Thread {
   agent_name: string | null;
   report_to: string | null;
   report_to_name: string | null;
+  /** The outcome when the attached agent ended while this thread was open. */
+  agent_end_outcome?: string | null;
   status: ThreadStatus;
   /** When the agent moved the thread into tracking (TER-145); set while it tracks. An older daemon sends none. */
   tracking_at?: string | null;
@@ -1597,7 +1606,7 @@ export interface ThreadCard {
 }
 
 /** `confirmed`: the operator confirmed the agent's proposal; `operator`: the operator closed it; `stale`: untouched; `failed_start`: its agent did not start. */
-export type ThreadCloseReason = "confirmed" | "operator" | "stale" | "failed_start";
+export type ThreadCloseReason = "confirmed" | "operator" | "stale" | "failed_start" | "agent_ended";
 
 /** `POST /api/threads`. `agent`: a ULID or `project/name`, until TER-92 spawns it from the template. */
 export interface NewThread {
@@ -1739,6 +1748,7 @@ export interface Card {
   id: string;
   project: string;
   column: string;
+  column_role?: ColumnRole | null;
   position: number;
   title: string;
   body: string;
@@ -1769,6 +1779,7 @@ export interface Card {
   /** The address that set the ETA: an agent ULID or `operator`. */
   eta_set_by?: string | null;
   eta_set_by_name?: string | null;
+  eta_calibrated?: boolean | null;
   /** When the card last moved to `done`; a reopen clears it. */
   done_at?: string | null;
   /** The latest test run linked to the card (docs/api.md, test runs). Absent when no run is linked. */
@@ -1782,7 +1793,7 @@ export interface Card {
 }
 
 export interface BoardGroup {
-  steps: { name: string; state: "pending" | "running" | "done" | "failed"; text: string; eta_at: string | null }[];
+  steps: { name: string; state: "pending" | "running" | "done" | "failed"; text: string; eta_at: string | null; started_at?: string | null; duration_secs?: number | null; estimated_secs?: number | null }[];
   id: string;
   key: string;
   title: string;
@@ -2951,7 +2962,33 @@ export interface ToolCapability {
 }
 
 /** `terrarium_core::protocol::HostCapabilities` (docs/host-protocol.md, Handshake). */
+export interface ResourceAmounts {
+  cpu_millis: number;
+  memory_bytes: number;
+  io?: Record<string, { read_bps: number; write_bps: number; read_iops: number; write_iops: number }>;
+}
+export interface HostCapacityBudget {
+  host: string;
+  percentage: number;
+  physical: { cpu_ids: number[]; memory_bytes: number };
+  reservable: ResourceAmounts;
+  used: ResourceAmounts & { exclusive_cores?: number[] };
+}
+export interface Reservation {
+  id: string;
+  host: string;
+  holder: { kind: "agent" | "target"; id: string };
+  amounts: ResourceAmounts;
+  state: "queued" | "starting" | "active" | "ending" | "expired" | "retracted" | "cancelled" | "timed_out";
+  exclusive: boolean;
+  reason: string;
+  start: number | null;
+  until: number | null;
+  queue_until: number | null;
+}
 export interface HostCapabilities {
+  reservations?: boolean;
+  capacity?: { cpu_ids: number[]; memory_bytes: number };
   docker?: ToolCapability;
   vmlab?: ToolCapability;
   shell?: string;

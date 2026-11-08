@@ -155,14 +155,18 @@ async fn request(inner: &Inner, method: &str, params: Value) -> Result<Value, Rp
     let ctx = inner.request_context();
     match method {
         "ping" => Ok(json!("pong")),
-        "whoami" => Ok(json!({
+        "whoami" => match inner.handler().handle(&ctx, method, params).await {
+            // Embedded runners without a daemon can still report their context.
+            Err(e) if e.code == "method_not_found" => Ok(json!({
             "agent": ctx.agent,
             "name": ctx.name,
             "project": ctx.project,
             "harness": ctx.harness,
             "roles": ctx.roles,
             "status": ctx.status,
-        })),
+            })),
+            answer => answer,
+        },
         _ => inner.handler().handle(&ctx, method, params).await,
     }
 }

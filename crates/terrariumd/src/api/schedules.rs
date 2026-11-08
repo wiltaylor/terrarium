@@ -871,7 +871,8 @@ use crate::webhooks::actor_of;
 /// cause of its writes.
 #[derive(Debug, Clone, Default)]
 struct RunCtx {
-    /// The actor of the run's writes. `None`: the `run_as` label.
+    /// The actor of the run's writes. `None`: the `run_as` label, or
+    /// `system` for an operator-owned schedule.
     label: Option<String>,
     /// `data.cause` of the run's events.
     cause: Option<Value>,
@@ -892,7 +893,10 @@ struct RunCtx {
 
 impl RunCtx {
     fn label(&self, actor: &Actor) -> String {
-        self.label.clone().unwrap_or_else(|| actor.label())
+        self.label.clone().unwrap_or_else(|| match actor {
+            Actor::Operator => "system".into(),
+            _ => actor.label(),
+        })
     }
 }
 

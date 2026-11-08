@@ -1,6 +1,6 @@
 //! The daemon side of the runner socket (`docs/agent-rpc.md`).
 //!
-//! The runner answers `ping` and `whoami` itself and sends every other
+//! The runner answers `ping` itself and sends every other
 //! request here. Method `http` runs one HTTP request through the daemon's
 //! own router, as the agent that owns the socket. The caller cannot choose
 //! the actor: it comes from the socket, through [`RequestContext`].
@@ -251,6 +251,23 @@ impl RequestHandler for AgentRpc {
     ) -> BoxFuture<'a, Result<Value, RpcError>> {
         Box::pin(async move {
             match method {
+                "whoami" => {
+                    let state = self.state.upgrade().ok_or_else(retry)?;
+                    let key = ctx.agent.to_string();
+                    let agent = state
+                        .db
+                        .read(move |c| crate::store::agents::get(c, &key))
+                        .await
+                        .map_err(|e| RpcError::new("internal", e.message))?;
+                    Ok(json!({
+                        "agent": ctx.agent,
+                        "name": agent.agent.name,
+                        "project": agent.agent.project,
+                        "harness": ctx.harness,
+                        "roles": agent.agent.roles,
+                        "status": ctx.status,
+                    }))
+                }
                 "http" => self.http(ctx, params).await,
                 "upload" | "upload.chunk" | "upload.finish" => Err(RpcError::new(
                     "not_implemented",
@@ -685,8 +702,9 @@ mod tests {
                 t.execute_batch("CREATE TABLE crash_effect(value INTEGER); INSERT INTO crash_effect VALUES (1);")?;
                 Ok(())
             }).await.unwrap();
-            println!("effect durable");
-            std::io::stdout().flush().unwrap();
+            // Keep readiness off libtest's stdout: with one test thread its
+            // `test ...` prefix shares a line with the effect's output.
+            writeln!(std::io::stderr(), "effect durable").unwrap();
             std::future::pending::<Result<Value, RpcError>>().await
         }).await;
     }
@@ -701,13 +719,16 @@ mod tests {
                 "--exact",
                 "agent_rpc::tests::journal_crash_child",
                 "--nocapture",
+                // Exercise the libtest mode that prefixes stdout without a newline.
+                "--test-threads=1",
             ])
             .env("TER_260_CRASH_DB", &path)
-            .stdout(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let line = lines

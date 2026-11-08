@@ -20,8 +20,15 @@ const MEM_COLS: &[(&str, &str)] = &[
     ("UPDATED", "updated_at"),
 ];
 
-fn mem_path(id: &str) -> String {
-    format!("/api/memories/{}", encode(id))
+fn mem_key(ctx: &Ctx, id: &str) -> String {
+    match &ctx.project {
+        Some(p) if !id.contains('/') => format!("{p}/{id}"),
+        _ => id.to_owned(),
+    }
+}
+
+fn mem_path(ctx: &Ctx, id: &str) -> String {
+    format!("/api/memories/{}", encode(&mem_key(ctx, id)))
 }
 
 /// Split `kind:ref`, at the first `:`.
@@ -126,17 +133,12 @@ pub async fn mem(ctx: &Ctx, cmd: &MemCmd) -> anyhow::Result<()> {
             })
         }
         MemCmd::Show { id, depth } => {
-            // IDs are per project: with `-p`, send `project/MEM-n`.
-            let key = match &ctx.project {
-                Some(p) if !id.contains('/') => format!("{p}/{id}"),
-                _ => id.clone(),
-            };
             let v = if *depth == 0 {
-                ctx.api.get(&mem_path(&key), vec![]).await?
+                ctx.api.get(&mem_path(ctx, id), vec![]).await?
             } else {
                 ctx.api
                     .get(
-                        &format!("{}/graph", mem_path(&key)),
+                        &format!("{}/graph", mem_path(ctx, id)),
                         query([("depth", Some(depth.to_string()))]),
                     )
                     .await?
@@ -150,11 +152,11 @@ pub async fn mem(ctx: &Ctx, cmd: &MemCmd) -> anyhow::Result<()> {
             relation,
             note,
         } => {
-            let mut body = json!({"to": b, "relation": relation});
+            let mut body = json!({"to": mem_key(ctx, b), "relation": relation});
             set_opt(&mut body, "note", note.clone());
             let r = ctx
                 .api
-                .post(&format!("{}/links", mem_path(a)), Some(body))
+                .post(&format!("{}/links", mem_path(ctx, a)), Some(body))
                 .await?;
             ctx.emit(&r, |c, _| c.line(format!("linked {a} -[{relation}]-> {b}")))
         }
@@ -163,9 +165,9 @@ pub async fn mem(ctx: &Ctx, cmd: &MemCmd) -> anyhow::Result<()> {
                 .api
                 .call(
                     Method::Delete,
-                    &format!("{}/links", mem_path(a)),
+                    &format!("{}/links", mem_path(ctx, a)),
                     vec![],
-                    Some(json!({"to": b, "relation": relation})),
+                    Some(json!({"to": mem_key(ctx, b), "relation": relation})),
                 )
                 .await?;
             ctx.emit(&r, |c, _| {
@@ -185,15 +187,15 @@ pub async fn mem(ctx: &Ctx, cmd: &MemCmd) -> anyhow::Result<()> {
             if b.as_object().is_some_and(serde_json::Map::is_empty) {
                 return Err(CliError::usage("give --body, --title, or --tag"));
             }
-            let m = ctx.api.patch(&mem_path(id), b).await?;
+            let m = ctx.api.patch(&mem_path(ctx, id), b).await?;
             ctx.emit(&m, |c, m| c.line(format!("updated {}", field(m, "id"))))
         }
         MemCmd::Supersede { old, new } => {
             let r = ctx
                 .api
                 .post(
-                    &format!("{}/supersede", mem_path(old)),
-                    Some(json!({"by": new})),
+                    &format!("{}/supersede", mem_path(ctx, old)),
+                    Some(json!({"by": mem_key(ctx, new)})),
                 )
                 .await?;
             ctx.emit(&r, |c, _| c.line(format!("{old} is superseded by {new}")))
@@ -202,7 +204,7 @@ pub async fn mem(ctx: &Ctx, cmd: &MemCmd) -> anyhow::Result<()> {
             let v = ctx
                 .api
                 .get(
-                    &format!("{}/graph", mem_path(id)),
+                    &format!("{}/graph", mem_path(ctx, id)),
                     query([("depth", Some("1".into())), ("relation", relation.clone())]),
                 )
                 .await?;
@@ -222,7 +224,7 @@ pub async fn mem(ctx: &Ctx, cmd: &MemCmd) -> anyhow::Result<()> {
             })
         }
         MemCmd::Rm { id } => {
-            ctx.api.delete(&mem_path(id), vec![]).await?;
+            ctx.api.delete(&mem_path(ctx, id), vec![]).await?;
             ctx.emit(&json!({"deleted": id}), |c, _| {
                 c.line(format!("deleted {id}"));
             })

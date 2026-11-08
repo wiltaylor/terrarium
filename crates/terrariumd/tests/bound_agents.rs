@@ -457,6 +457,41 @@ async fn forward_moves_stay_parked_and_returns_wake(flow: &str) {
 }
 
 both_flows!(done_and_archive_close);
+both_flows!(renamed_wait_columns_park_and_return);
+
+async fn renamed_wait_columns_park_and_return(flow: &str) {
+    let (td, lead) = setup_flow(flow).await;
+    let r = td
+        .patch(
+            "/api/projects/p/board",
+            json!({"columns": [
+                {"name": "backlog"}, {"name": "ready"},
+                {"name": "in_progress", "role": "working"},
+                {"name": "qa", "rename_from": "validating", "role": "validating"},
+                {"name": "review"}, {"name": "merge_queue"}, {"name": "accepted"},
+                {"name": "blocked", "role": "blocked"}, {"name": "done"}
+            ]}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    mv(&td, &c, "qa", None).await;
+    parked(&td, &eph).await;
+    assert_eq!(spawn_row(&td, &eph).await["park_reason"], "card in qa");
+    // Clearing an assignee must not unpark a card still waiting by role.
+    let r = td
+        .post(&format!("/api/cards/{c}/assign"), json!({"assignee": null}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(spawn_row(&td, &eph).await["parked_at"].is_string());
+    mv(&td, &c, "ready", Some("QA failed")).await;
+    td.wait_status(&eph, "idle").await;
+    assert!(spawn_row(&td, &eph).await["parked_at"].is_null());
+}
+
 /// A return to the working column unparks too; `done` and an archive
 /// close.
 async fn done_and_archive_close(flow: &str) {
@@ -749,6 +784,10 @@ async fn hidden_move(td: &TestDaemon, card: &str, to: &str) {
 async fn reconcile_repairs_a_missed_park_and_unpark() {
     let (td, lead) = setup().await;
     let s = state(&td);
+    s.db.write("test rename accepted", |t| {
+        t.execute("UPDATE board_columns SET name = 'shipped', role = 'accepted' WHERE project = 'p' AND name = 'accepted'", [])?;
+        Ok(())
+    }).await.unwrap();
     // Bound to a card in review (a reviewer): no move since the spawn,
     // so no missed park.
     let a = card(&td, "p", "review").await;
@@ -758,7 +797,7 @@ async fn reconcile_repairs_a_missed_park_and_unpark() {
     assert!(spawn_row(&td, &ea).await["parked_at"].is_null());
     // A missed park: the card moves on to accepted, and the driver does
     // not see the move.
-    hidden_move(&td, &a, "accepted").await;
+    hidden_move(&td, &a, "shipped").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(spawn_row(&td, &ea).await["parked_at"].is_null());
     assert_eq!(terrariumd::bound::reconcile(&s).await, 1);
@@ -802,6 +841,79 @@ async fn reconcile_repairs_a_missed_park_and_unpark() {
     assert_eq!(after.len(), 1, "{after:?}");
     assert_eq!(after[0]["resumes"], 1, "{after:?}");
     assert_eq!(terrariumd::bound::reconcile(&s).await, 0);
+}
+
+both_flows!(a_release_in_a_wait_column_keeps_the_agent_parked);
+/// TER-331: assignment releases are shared by both flows, but a release
+/// while the card still waits must not queue a return turn or unpark it.
+async fn a_release_in_a_wait_column_keeps_the_agent_parked(flow: &str) {
+    let (td, lead) = setup_flow(flow).await;
+    let w = worker(&td, "w").await;
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    for column in terrariumd::bound::WAIT_COLUMNS {
+        mv(&td, &c, column, None).await;
+        parked(&td, &eph).await;
+        td.post(&format!("/api/cards/{c}/assign"), json!({"assignee": w}))
+            .await
+            .ok();
+        td.post(&format!("/api/cards/{c}/assign"), json!({"assignee": null}))
+            .await
+            .ok();
+        // Let the driver's assignment event run before checking its absence
+        // of effects. The positive control below proves release delivery.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let sp = spawn_row(&td, &eph).await;
+        assert!(sp["parked_at"].is_string(), "{sp}");
+        assert!(sp["unpark_queued_at"].is_null(), "{sp}");
+        assert_eq!(agent(&td, &eph).await["status"], "stopped");
+        assert!(return_turns(&td, &eph, &c).is_empty());
+    }
+    mv(&td, &c, "ready", None).await;
+    td.wait_status(&eph, "idle").await;
+    until("return after leaving the wait column", || async {
+        !return_turns(&td, &eph, &c).is_empty()
+    })
+    .await;
+    assert_eq!(return_turns(&td, &eph, &c).len(), 1);
+}
+
+/// TER-331: repeated refusals deduplicate, but an assignment event
+/// resets that state even when the same worker takes the card again.
+#[tokio::test]
+async fn an_assignment_change_resets_unpark_refusal_dedup() {
+    let (td, lead) = setup().await;
+    let w = worker(&td, "w").await;
+    let c = card(&td, "p", "in_progress").await;
+    let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
+    td.wait_status(&eph, "idle").await;
+    mv(&td, &c, "review", None).await;
+    parked(&td, &eph).await;
+    let path = format!("/api/cards/{c}/assign");
+    let s = state(&td);
+    for expected in 1..=2 {
+        td.post(&path, json!({"assignee": w})).await.ok();
+        let key = eph.clone();
+        s.db.write("system", move |t| {
+            for _ in 0..3 {
+                assert_eq!(
+                    terrariumd::bound::unpark_tx(t, &key, None, "test")?.0,
+                    terrariumd::bound::Unparked::Refused
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let events = td
+            .get(&format!(
+                "/api/agents/{eph}/events?kind=agent.unpark_refused"
+            ))
+            .await;
+        assert_eq!(events.ok().as_array().unwrap().len(), expected);
+        td.post(&path, json!({"assignee": null})).await.ok();
+    }
 }
 
 both_flows!(an_unpark_is_refused_when_another_agent_has_the_card);
@@ -1042,10 +1154,41 @@ async fn a_park_stop_spares_an_unparked_agent() {
 async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
     let (td, lead) = setup().await;
     let s = state(&td);
+    // A card reminder after the spawn task would add an unrelated turn
+    // while stop is gated. This test controls the task and return turns only.
+    s.lifecycle.reminders.set_default(false);
+    // The card stays in_progress while we park manually. Reconciliation
+    // would unpark it on the next fast tick, before the gated stop enters.
+    // Drive the park stop and unpark explicitly instead of racing that tick.
+    s.lifecycle.set_tuning(terrariumd::lifecycle::Tuning {
+        idle_stop: IdleStop::Off,
+        tick: Duration::from_secs(3600),
+        compact_on_idle: false,
+        compact_max_age: CompactMaxAge::Off,
+        compact_wait: Duration::from_secs(5),
+    });
     let c = card(&td, "p", "in_progress").await;
     let eph = id(&spawn_bound(&td, &lead, "w-claude", &c).await.body);
     let agent_id = eph.parse().unwrap();
+    // Startup emits idle before the queued spawn task runs. Wait for its
+    // stored turn_end so the following idle cannot be that startup idle.
+    until("the spawn task ends", || async {
+        !td.get(&format!("/api/agents/{eph}/events?kind=turn_end"))
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    })
+    .await;
     td.wait_status(&eph, "idle").await;
+    let ends = td
+        .get(&format!("/api/agents/{eph}/events?kind=turn_end"))
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .len();
     let before = sessions(&td, &eph).await;
     let hold = terrariumd::lifecycle::WakeGuard::take(&s.lifecycle, agent_id).unwrap();
     terrariumd::bound::park(&s, &eph, "test stop race")
@@ -1073,11 +1216,23 @@ async fn an_unpark_during_a_park_stop_wakes_after_the_stop() {
         terrariumd::lifecycle::wake(&s, agent_id, "test race").await,
         terrariumd::lifecycle::Woke::Busy
     );
-    assert_eq!(agent(&td, &eph).await["status"], "idle");
+    assert_eq!(agent(&td, &eph).await["status"], "stopped");
     release.send(()).unwrap();
     stopping.await.unwrap();
     until("the resumed return turn", || async {
         td.sup.prompts(agent_id).contains(&turn)
+    })
+    .await;
+    // A recorded prompt precedes working in the event pump. Do not mistake
+    // the resume's startup idle for the idle after this return turn either.
+    until("the return turn ends", || async {
+        td.get(&format!("/api/agents/{eph}/events?kind=turn_end"))
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .len()
+            > ends
     })
     .await;
     td.wait_status(&eph, "idle").await;

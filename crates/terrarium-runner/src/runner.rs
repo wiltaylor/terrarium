@@ -171,9 +171,17 @@ enum Block {
 
 struct PendingTurn {
     id: u64,
+    pending_id: String,
     text: String,
     attempts: u32,
     tx: oneshot::Sender<Result<(), DeliveryError>>,
+}
+
+/// A turn that has not started typing. IDs belong to one runner lifetime.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WaitingTurn {
+    pub id: String,
+    pub text: String,
 }
 
 struct InFlight {
@@ -221,6 +229,9 @@ struct State {
     /// The last PTY output or hook.
     last_activity: Instant,
     stop_requested: bool,
+    /// A reversible idle-stop reservation. A lost control reply must not
+    /// disable delivery forever. The supervisor also gates new work.
+    idle_stop_until: Option<Instant>,
     /// A SIGKILL follows the SIGHUP of `kill` after `kill_grace`.
     kill_armed: bool,
     exited: bool,
@@ -363,6 +374,7 @@ impl Runner {
                 last_output: now,
                 last_activity: now,
                 stop_requested: false,
+                idle_stop_until: None,
                 kill_armed: false,
                 exited: false,
                 queue: VecDeque::new(),
@@ -544,12 +556,13 @@ impl Runner {
         let id = self.inner.next_delivery.fetch_add(1, Ordering::Relaxed);
         let delivery = Delivery { id, rx };
         let mut state = lock(&self.inner.state);
-        if state.exited {
+        if state.exited || state.stop_requested {
             let _ = tx.send(Err(DeliveryError::Exited));
             return delivery;
         }
         state.queue.push_back(PendingTurn {
             id,
+            pending_id: terrarium_core::AgentId::new().to_string(),
             text: text.into(),
             attempts: 0,
             tx,
@@ -557,6 +570,34 @@ impl Runner {
         drop(state);
         self.inner.wake.notify_one();
         delivery
+    }
+
+    /// Snapshot only untouched turns, under the dispatch lock.
+    pub fn list_pending(&self) -> Vec<WaitingTurn> {
+        lock(&self.inner.state)
+            .queue
+            .iter()
+            .filter(|t| t.attempts == 0)
+            .map(|t| WaitingTurn {
+                id: t.pending_id.clone(),
+                text: t.text.clone(),
+            })
+            .collect()
+    }
+
+    /// Refuse a turn once dispatch has taken it, including retries.
+    pub fn cancel_pending(&self, id: &str) -> bool {
+        let mut state = lock(&self.inner.state);
+        let Some(index) = state
+            .queue
+            .iter()
+            .position(|t| t.pending_id == id && t.attempts == 0)
+        else {
+            return false;
+        };
+        let turn = state.queue.remove(index).expect("pending turn");
+        let _ = turn.tx.send(Err(DeliveryError::Dropped));
+        true
     }
 
     /// Answer the question `request_id` (from `Event::Question` or a
@@ -626,6 +667,37 @@ impl Runner {
         });
         self.inner.wake.notify_one();
         Ok(true)
+    }
+
+    /// Atomically claim an idle stop against queued and running turns.
+    /// Idempotent while held. The caller must finish the stop with exit
+    /// keys or `kill`, or release it. A lost reply expires after five
+    /// seconds. New turns may queue, but cannot dispatch while held.
+    pub fn claim_idle_stop(&self) -> bool {
+        let mut state = lock(&self.inner.state);
+        if state
+            .idle_stop_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            return true;
+        }
+        if state.exited
+            || state.stop_requested
+            || !state.status.is_resting()
+            || state.turn_open
+            || state.in_flight.is_some()
+            || !state.queue.is_empty()
+        {
+            return false;
+        }
+        state.idle_stop_until = Some(Instant::now() + Duration::from_secs(5));
+        true
+    }
+
+    /// Release a claim, including one whose reply was lost.
+    pub fn release_idle_stop(&self) {
+        lock(&self.inner.state).idle_stop_until = None;
+        self.inner.wake.notify_one();
     }
 
     /// Stop the harness on purpose. The status becomes `stopped` when the
@@ -1216,6 +1288,9 @@ impl Inner {
 
             if state.in_flight.is_none()
                 && !state.stop_requested
+                && state
+                    .idle_stop_until
+                    .is_none_or(|until| Instant::now() >= until)
                 && state.status == AgentStatus::Idle
                 && ready
                 && let Some(mut turn) = state.queue.pop_front()

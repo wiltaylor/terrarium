@@ -800,6 +800,22 @@ async fn forward_attach(
 }
 
 impl RunnerHandle for RemoteRunner {
+    fn list_pending(&self) -> BoxFuture<'_, Result<Vec<crate::WaitingTurn>>> {
+        Box::pin(async move {
+            let value = self.inner.shared.call("list_pending", json!({})).await?;
+            serde_json::from_value(value).map_err(|e| RunnerError::Other(e.to_string()))
+        })
+    }
+    fn cancel_pending(&self, id: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move {
+            let value = self
+                .inner
+                .shared
+                .call("cancel_pending", json!({"delivery": id}))
+                .await?;
+            serde_json::from_value(value).map_err(|e| RunnerError::Other(e.to_string()))
+        })
+    }
     fn hold(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             self.inner
@@ -937,6 +953,17 @@ impl RunnerHandle for RemoteRunner {
             let v = self.inner.shared.call("interrupt", json!({})).await?;
             Ok(v.get("sent").and_then(Value::as_bool).unwrap_or(false))
         })
+    }
+
+    fn claim_idle_stop(&self) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move {
+            let v = self.inner.shared.call("claim_idle_stop", json!({})).await?;
+            Ok(v.get("claimed").and_then(Value::as_bool).unwrap_or(false))
+        })
+    }
+
+    fn release_idle_stop(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.call_unit("release_idle_stop", json!({})))
     }
 
     fn kill(&self) -> BoxFuture<'_, Result<()>> {

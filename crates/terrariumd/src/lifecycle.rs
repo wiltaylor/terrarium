@@ -282,6 +282,9 @@ impl Lifecycle {
 
 /// Holds the wake of one agent; the drop lets the next wake go. Public
 /// for the tests that hold a wake on the way.
+/// This serializes starts, not queued-turn delivery: a Busy wake still
+/// drains DB-queued turns to a running supervisor under the turn lock.
+/// Turns refused while starting stay queued for the start or timer pass.
 pub struct WakeGuard {
     lifecycle: Arc<Lifecycle>,
     agent: AgentId,
@@ -370,9 +373,7 @@ async fn runs(state: &Shared, id: AgentId) -> bool {
 /// new session (`crate::reset`) starts it with no resume instead. See the
 /// module doc for the agents that do not wake.
 pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
-    let Some(_guard) = WakeGuard::take(&state.lifecycle, id) else {
-        return Woke::Busy;
-    };
+    let wake_guard = WakeGuard::take(&state.lifecycle, id);
     let key = id.to_string();
     let read = state
         .db
@@ -403,7 +404,14 @@ pub async fn wake(state: &Shared, id: AgentId, cause: &str) -> Woke {
     }
     if runs(state, id).await {
         deliver_turns(state, id).await;
-        return Woke::Running;
+        return if wake_guard.is_some() {
+            Woke::Running
+        } else {
+            Woke::Busy
+        };
+    }
+    if wake_guard.is_none() {
+        return Woke::Busy;
     }
     if state.self_update.draining() {
         return Woke::Draining;
@@ -585,11 +593,7 @@ async fn idle_stop(state: &Shared, id: AgentId) {
     guard(&state.lifecycle.resting).remove(&id);
     state.lifecycle.expect_stop(id, REASON_IDLE);
     info!(agent = %id, "the agent rested for its idle stop; stopping it");
-    if let Err(e) = state
-        .supervisor
-        .stop_by(id, terrarium_runner::StoppedBy::Operator)
-        .await
-    {
+    if let Err(e) = state.supervisor.stop_idle(id).await {
         state.lifecycle.forget_stop(id);
         debug!(agent = %id, "the idle stop did not stop the agent: {e}");
     }
@@ -602,8 +606,9 @@ async fn idle_stop(state: &Shared, id: AgentId) {
 /// an unpark may have landed since. The stop holds the wake of the agent
 /// ([`WakeGuard`]) and checks the park again first: an agent that was
 /// unparked runs on, and a wake on the way skips the stop. An unpark
-/// that lands during the stop finds the wake held (`Woke::Busy`), so the
-/// agent wakes after the stop.
+/// that lands during the stop finds the wake held (`Woke::Busy`): it may
+/// deliver DB-queued turns if the supervisor still runs. After the stop
+/// the agent wakes again to deliver any turns that remain queued.
 pub async fn park_stop(state: &Shared, id: AgentId) {
     let Some(wake) = WakeGuard::take(&state.lifecycle, id) else {
         return;
@@ -1153,6 +1158,7 @@ pub fn spawn(state: &Shared) -> Vec<JoinHandle<()>> {
             crate::idle_alert::pass(&state).await;
             // The lifetime and the owner of each ephemeral agent.
             crate::spawn::pass(&state).await;
+            crate::card_dispatcher::pass(&state).await;
         }
     });
     vec![listener, timer]

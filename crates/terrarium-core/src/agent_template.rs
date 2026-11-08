@@ -305,15 +305,38 @@ fn full(def: &AgentDef) -> Spec {
     fn to<T: Serialize>(v: &T) -> Value {
         serde_json::to_value(v).unwrap_or(Value::Null)
     }
+    // Identity is not a template override. New fields must be handled here.
+    let AgentDef {
+        name: _,
+        project: _,
+        harness,
+        subscription,
+        subscription_pool,
+        model,
+        prompt,
+        system_prompt,
+        persona,
+        roles,
+        policy,
+        restart,
+        idle_stop,
+        compact_on_idle,
+        compact_max_age,
+        card_reminder,
+        skills,
+        skills_off,
+        default_skills,
+        new_session_on_prompt_change,
+    } = def;
     let mut m = Map::new();
-    m.insert("harness".into(), to(&def.harness));
-    m.insert("subscription".into(), to(&def.subscription));
-    m.insert("subscription_pool".into(), to(&def.subscription_pool));
-    m.insert("model".into(), to(&def.model));
-    m.insert("prompt".into(), to(&def.prompt));
-    m.insert("system_prompt".into(), to(&def.system_prompt));
-    m.insert("persona".into(), to(&def.persona));
-    m.insert("roles".into(), to(&def.roles));
+    m.insert("harness".into(), to(harness));
+    m.insert("subscription".into(), to(subscription));
+    m.insert("subscription_pool".into(), to(subscription_pool));
+    m.insert("model".into(), to(model));
+    m.insert("prompt".into(), to(prompt));
+    m.insert("system_prompt".into(), to(system_prompt));
+    m.insert("persona".into(), to(persona));
+    m.insert("roles".into(), to(roles));
     // Each policy field (TER-193: the export of an agent of a template
     // dropped `spawn`, `calendar_write`, and `thread_open`). The pattern
     // names every field, so a new one does not build until it is here.
@@ -324,7 +347,7 @@ fn full(def: &AgentDef) -> Spec {
         spawn,
         calendar_write,
         thread_open,
-    } = &def.policy;
+    } = policy;
     let mut p = Map::new();
     p.insert("targets".into(), to(targets));
     p.insert("mail_to".into(), to(mail_to));
@@ -333,17 +356,17 @@ fn full(def: &AgentDef) -> Spec {
     p.insert("calendar_write".into(), Value::Bool(*calendar_write));
     p.insert("thread_open".into(), Value::Bool(*thread_open));
     m.insert("policy".into(), Value::Object(p));
-    m.insert("restart".into(), to(&def.restart));
-    m.insert("idle_stop".into(), to(&def.idle_stop));
-    m.insert("compact_on_idle".into(), to(&def.compact_on_idle));
-    m.insert("compact_max_age".into(), to(&def.compact_max_age));
-    m.insert("card_reminder".into(), to(&def.card_reminder));
-    m.insert("skills".into(), to(&def.skills));
-    m.insert("skills_off".into(), to(&def.skills_off));
-    m.insert("default_skills".into(), Value::Bool(def.default_skills));
+    m.insert("restart".into(), to(restart));
+    m.insert("idle_stop".into(), to(idle_stop));
+    m.insert("compact_on_idle".into(), to(compact_on_idle));
+    m.insert("compact_max_age".into(), to(compact_max_age));
+    m.insert("card_reminder".into(), to(card_reminder));
+    m.insert("skills".into(), to(skills));
+    m.insert("skills_off".into(), to(skills_off));
+    m.insert("default_skills".into(), Value::Bool(*default_skills));
     m.insert(
         "new_session_on_prompt_change".into(),
-        Value::Bool(def.new_session_on_prompt_change),
+        Value::Bool(*new_session_on_prompt_change),
     );
     m
 }

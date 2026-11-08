@@ -12,6 +12,17 @@ the tests in `crates/terrarium-host/tests/stub_daemon.rs`.
 
 ## Summary
 
+Commands with an argv on host, Docker, and SSH targets run through a POSIX
+`sh` wrapper, including direct argv commands that do not request a shell.
+The target environment (inside the image for Docker) must provide `sh`,
+`mv`, `rm`, and `sleep`, plus the shell's `kill` builtin or an equivalent
+utility. BusyBox implementations suffice, GNU coreutils are not required.
+Shell-less images such as distroless are not supported for these commands.
+The wrapper writes PID files in writable `/tmp`. Linux `/proc` enables
+PID start-time checks and session-wide cleanup. Without it, cancellation
+can only signal the process group. A missing PID file is retried once after
+one second before cancellation falls back to killing the local client.
+
 - The host agent dials **out** to `wss://<daemon>:8082/hosts/connect`. It
   sends `Authorization: Bearer <per-host token>`. Plaintext `ws://` is for
   loopback only, unless the config sets `allow_insecure` (see [TLS](#tls)).
@@ -817,6 +828,64 @@ replay, and no `ack`. The code is `crates/terrarium-host/src/metrics.rs`.
   back only the next sample.
 
 ## Resource limits
+
+Reservation-capable hosts advertise `reservations: true` and `capacity`
+with logical `cpu_ids` and `memory_bytes`. Missing capability means no
+reservation enforcement, not unlimited fallback. Per-device IO budgets are
+configured by the daemon operator rather than detected throughput.
+
+### GPU reservations and metrics
+
+GPU-capable hosts additionally advertise `gpu_reservations: true` and a `gpus`
+array in `hello.capabilities`. Each device has `uuid`, `name`, `memory_bytes`
+and `used_bytes`. UUIDs come from `nvidia-smi`, rather than unstable device
+indices. Both fields default to false/empty for older hosts. Inventory is
+queried again before each connection's hello, including reconnects. A failed
+probe produces empty inventory rather than reusing a stale startup result.
+The daemon refuses GPU grants without this capability and keeps admission
+closed if a reserved device is missing after reconnect.
+
+`docker.run.reservation.gpu_devices` is a UUID array, default empty. Containers
+get **no GPU by default**: the host overrides `NVIDIA_VISIBLE_DEVICES` with
+`void`, even if the caller or image set it to `all`. With a nonempty allowlist,
+it sets the variable to those UUIDs and adds `--gpus` with the same device list.
+GPU exposure is create-only. `resource.apply` with nonempty `gpu_devices` for
+a Docker update is rejected. The daemon supports GPU claims on managed
+ephemeral containers, whose next `up` recreates the device exposure. No MIG
+configuration or privileged native device control is added.
+
+`metrics.gpus` carries device inventory and sampled total usage.
+`metrics.gpu_usage` contains `{uuid, container, cgroup, used_bytes}` entries
+aggregated from compute-process VRAM. The host joins NVIDIA PIDs with
+`/proc/<pid>/cgroup` and Docker container IDs. Native entries have an empty
+`container` and retain their cgroup path for holder-scope attribution.
+Unavailable or unparseable measurements are omitted, not charged to another
+holder. Graphics-only allocations are not included. The GPU sampler caches
+both successful and failed probes for 30 seconds, independently of the
+ordinary metrics tick. Each command has a two-second timeout. A new connection
+starts a fresh cache. Shared overages only notify, never kill.
+
+### Applying CPU, memory and IO limits
+
+`resource.apply` carries `session`, `target`, `holder`, optional `container`
+and runtime `limits` (fixed limits, optional CPU list and per-device IO).
+With a container it invokes `docker update`; per-device IO in a live update
+is rejected. Docker creation accepts per-device limits, only for ephemeral
+reservation containers in phase 1. Without a container, the host applies
+systemd slice properties including AllowedCPUs and device bandwidth/IOPS.
+An empty target and holder address the shared `terrarium.slice`. Exclusive
+scopes use the sibling `terrariumreserved` hierarchy. Clearing affinity
+restores inheritance. Device identifiers map to `/dev/block/<major>:<minor>`.
+For Docker, the host resolves that symlink before constructing the
+`device:rate` flag, because Docker does not accept colons inside its device
+path. A missing device fails closed.
+
+`resource_stop` carries `session`, `target` and `holder`. It stops only that
+reservation slice through the user systemd manager. Both verbs use normal
+session completion acknowledgements. The daemon keeps capacity charged
+until cleanup and restoration succeed. Docker expiry uses registered
+process-tree cleanup rather than stopping permanent shared containers.
+No privileged helper or direct cgroup-file writes are used.
 
 docs/api.md §17.2, "Resource limits". The code is
 `crates/terrarium-host/src/limits.rs` (systemd) and `limit_flags` in

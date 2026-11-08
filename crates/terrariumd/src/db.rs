@@ -3283,6 +3283,30 @@ mod tests {
     }
 
     #[test]
+    fn card_move_index_tolerates_malformed_events_and_serves_history() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        conn.execute("INSERT INTO events(id,project,kind,payload,at) VALUES ('bad','p','card','not JSON','now')", []).unwrap();
+        conn.execute("UPDATE events SET payload = '{broken' WHERE id = 'bad'", [])
+            .unwrap();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT seq FROM events WHERE project = 'p' AND kind = 'card'
+             AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.change') END = 'moved'
+             ORDER BY seq DESC LIMIT 2000",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("events_card_moves"), "{plan}");
+        assert!(
+            crate::store::card_history::completed_visits(&conn, "p", "review", 20)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn agent_rpc_journal_upgrades_legacy_once_and_preserves_answers() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate_with(&mut conn, MIGRATIONS).unwrap();
@@ -3334,7 +3358,7 @@ mod tests {
     #[test]
     fn named_migrations_upgrade_legacy_and_allow_earlier_names() {
         let mut conn = Connection::open_in_memory().unwrap();
-        migrate(&mut conn).unwrap();
+        migrate_with(&mut conn, MIGRATIONS).unwrap();
         conn.execute(
             "INSERT INTO projects (name, created_at, updated_at) VALUES ('preserved', ?1, ?1)",
             [now()],
@@ -3345,6 +3369,10 @@ mod tests {
         assert_eq!(migrate_named(&mut conn, &[later]).unwrap(), 1);
         assert_eq!(migrate_named(&mut conn, &[earlier, later]).unwrap(), 1);
         assert_eq!(migrate_named(&mut conn, &[earlier, later]).unwrap(), 0);
+        assert_eq!(
+            migrate(&mut conn).unwrap(),
+            migration_count() - MIGRATIONS.len()
+        );
         assert_eq!(migrate(&mut conn).unwrap(), 0);
         let version: usize = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -3445,10 +3473,6 @@ mod tests {
             "wiki_fts",
             "artifacts",
             "artifact_links",
-            "versions",
-            "version_cards",
-            "version_artifacts",
-            "version_reviews",
             "subscriptions",
             "quota_samples",
             "usage_samples",
@@ -3475,7 +3499,6 @@ mod tests {
             "test_suites",
             "test_cases",
             "test_run_cards",
-            "test_run_versions",
             "test_run_labels",
             "artifact_labels",
             "spawns",
@@ -3516,7 +3539,7 @@ mod tests {
                VALUES ('R1', 'V1', 'operator', 'approved', 't');",
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), migration_count() - 79);
+        assert_eq!(migrate_with(&mut conn, &MIGRATIONS[..80]).unwrap(), 1);
         let n: i64 = conn
             .query_row(
                 "SELECT (SELECT count(*) FROM versions WHERE status = 'released')
@@ -3526,6 +3549,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 2);
+        assert_eq!(migrate(&mut conn).unwrap(), migration_count() - 80);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+        for table in [
+            "versions",
+            "version_cards",
+            "version_artifacts",
+            "version_reviews",
+            "test_run_versions",
+        ] {
+            assert!(!conn.table_exists(None, table).unwrap(), "{table}");
+            let indexes: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(indexes, 0, "{table}");
+        }
         for table in ["test_run_labels", "artifact_labels"] {
             let n: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))

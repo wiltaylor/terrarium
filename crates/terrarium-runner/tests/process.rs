@@ -227,6 +227,89 @@ fn seqs(path: &Path) -> Vec<u64> {
 }
 
 #[tokio::test]
+async fn pending_turns_remote_cancel_keeps_order_and_refuses_typed() {
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    r.type_turn("/hold".into()).wait().await.expect("holding");
+    let first = r.type_turn("first".into());
+    let second = r.type_turn("second".into());
+    let third = r.type_turn("third".into());
+    // Remote delivery handles use local IDs. Queue controls use runner IDs.
+    let pending = r.list_pending().await.expect("list");
+    assert_eq!(
+        pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+    assert!(
+        r.cancel_pending(pending[1].id.clone())
+            .await
+            .expect("cancel")
+    );
+    assert!(
+        !r.cancel_pending(pending[1].id.clone())
+            .await
+            .expect("cancel again")
+    );
+    assert!(second.wait().await.is_err());
+    let pending = r.list_pending().await.expect("remaining");
+    assert_eq!(
+        pending.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+        ["first", "third"]
+    );
+    let first_id = pending[0].id.clone();
+    r.write(b"\r").await.expect("release hold");
+    first.wait().await.expect("first typed");
+    assert!(!r.cancel_pending(first_id).await.expect("refuse typed"));
+    third.wait().await.expect("third typed");
+    r.kill().await.expect("kill");
+    r.wait().await;
+}
+
+#[tokio::test]
+async fn idle_stop_claim_uses_the_remote_turn_state() {
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    r.type_turn("/hold".into()).wait().await.expect("delivered");
+    assert!(!r.claim_idle_stop().await.expect("claim"));
+    r.kill().await.expect("kill");
+    r.wait().await;
+
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    assert!(r.claim_idle_stop().await.expect("idle claim"));
+    assert!(r.claim_idle_stop().await.expect("idempotent retry"));
+    let delivery = r.type_turn("after release".into());
+    r.release_idle_stop().await.expect("release");
+    delivery.wait().await.expect("released claim delivers");
+    r.kill().await.expect("kill");
+    r.wait().await;
+}
+
+#[tokio::test]
+async fn idle_stop_claim_expires_when_a_daemon_disconnects_after_claiming() {
+    let env = Env::new();
+    let r = env.spawn().await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    assert!(r.claim_idle_stop().await.expect("claim applied"));
+    drop(events);
+    drop(r);
+    let r = env.connect(None).await;
+    timeout(wait(), r.type_turn("after lost claim reply".into()).wait())
+        .await
+        .expect("claim expired")
+        .expect("delivered");
+    r.kill().await.expect("kill");
+    r.wait().await;
+}
+
+#[tokio::test]
 async fn the_runner_process_survives_a_daemon_disconnect() {
     let env = Env::new();
     let first = env.spawn().await;
@@ -283,7 +366,7 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
         false,
     )
     .await;
-    // The runner answers `whoami` itself.
+    // Identity needs the daemon so roles cannot silently go stale offline.
     let who = hook_socket(
         &hooks,
         json!({"type":"request","id":1,"method":"whoami"}),
@@ -291,7 +374,7 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
     )
     .await
     .expect("whoami");
-    assert_eq!(who["result"]["name"], "tester");
+    assert_eq!(who["error"]["code"], "unavailable", "{who}");
     // A request for the daemon gets the tunnel error.
     let rpc = hook_socket(
         &hooks,

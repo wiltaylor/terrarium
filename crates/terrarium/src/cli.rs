@@ -42,6 +42,16 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Import a GitHub issue using its daemon-verified author
+    Issue {
+        #[command(subcommand)]
+        command: IssueCmd,
+    },
+    /// Reserve host CPU, memory and device IO capacity
+    Reserve {
+        #[command(subcommand)]
+        command: ReserveCmd,
+    },
     /// Daemon commands
     Daemon {
         #[command(subcommand)]
@@ -159,12 +169,7 @@ pub enum Command {
     /// The build version of this CLI and of the daemon, with a warning
     /// when their refs differ. Versions of a project are card labels
     /// (`version:vnext`, `version:<X.Y.Z>`), not objects
-    Version {
-        /// The removed `version new | ls | submit | ...` subcommands
-        /// (TER-58): they exit with an error that names card labels
-        #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
-        removed: Vec<String>,
-    },
+    Version,
     /// Test runs: upload test result files as proof, list, show, compare
     Test {
         #[command(subcommand)]
@@ -369,6 +374,16 @@ pub enum Command {
             num_args = 1..
         )]
         argv: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IssueCmd {
+    /// Import an issue from a configured repository (idempotent)
+    Import {
+        number: u64,
+        #[arg(long)]
+        repo: String,
     },
 }
 
@@ -1518,9 +1533,8 @@ pub struct CardNewArgs {
     /// The ETA: a duration such as 45m, 2h30m, or 1d, or an RFC 3339 time
     #[arg(long, value_name = "DURATION|TIME")]
     pub eta: Option<String>,
-    /// The GitHub login of the issue author, for a GitHub card (label
-    /// `github` or a `GitHub #<n>:` title). An author off the project's
-    /// `github_authors` list holds the card for the operator
+    /// Legacy author assertion, ignored by the gate. Use the daemon's GitHub
+    /// issue import endpoint for a verified author
     #[arg(long, value_name = "LOGIN")]
     pub github_author: Option<String>,
     /// Link the new card to this Inbox thread, which tracks it (you must
@@ -1875,9 +1889,6 @@ pub enum ArtifactCmd {
         /// Link it to this label, such as `version:1.4.0` (repeat for more)
         #[arg(long = "label")]
         labels: Vec<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long, hide = true)]
-        version: Option<String>,
         /// Link it to this card
         #[arg(long)]
         card: Option<String>,
@@ -1891,9 +1902,6 @@ pub enum ArtifactCmd {
         /// Only the artifacts with this label, such as `version:1.4.0`
         #[arg(long, group = "attach")]
         label: Option<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long, hide = true)]
-        version: Option<String>,
         #[arg(long, group = "attach")]
         card: Option<String>,
     },
@@ -1938,9 +1946,6 @@ pub enum TestCmd {
         /// more)
         #[arg(long = "label")]
         labels: Vec<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long = "version", hide = true)]
-        versions: Vec<String>,
         /// The commit that was tested
         #[arg(long)]
         commit: Option<String>,
@@ -1958,9 +1963,6 @@ pub enum TestCmd {
         /// Only the runs with this label, such as `version:1.4.0`
         #[arg(long)]
         label: Option<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long, hide = true)]
-        version: Option<String>,
         #[arg(long)]
         name: Option<String>,
         /// Only runs with a failed or errored test
@@ -1989,9 +1991,6 @@ pub enum TestCmd {
         /// A label, such as `version:1.4.0` (repeat for more)
         #[arg(long = "label")]
         labels: Vec<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long = "version", hide = true)]
-        versions: Vec<String>,
     },
     /// Unlink a run from cards and labels
     Unlink {
@@ -2001,9 +2000,6 @@ pub enum TestCmd {
         /// A label, such as `version:1.4.0` (repeat for more)
         #[arg(long = "label")]
         labels: Vec<String>,
-        /// Removed: use `--label version:<X.Y.Z>`
-        #[arg(long = "version", hide = true)]
-        versions: Vec<String>,
     },
     /// Delete a run (its creator, a project admin, or the operator)
     Rm { id: String },
@@ -2437,7 +2433,73 @@ pub struct WaitOpts {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ReserveCmd {
+    /// Grant a reservation, or queue it FIFO when capacity is occupied
+    New {
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        target: String,
+        /// Agent holder (default: the target)
+        #[arg(long)]
+        agent: Option<String>,
+        /// CPU cores, for example 2 or 0.5
+        #[arg(long)]
+        cpu: Option<String>,
+        /// Bytes or a size such as 4G
+        #[arg(long)]
+        memory: Option<String>,
+        /// JSON device map: {"8:0":{"read_bps":1048576}}
+        #[arg(long)]
+        io: Option<String>,
+        #[arg(long)]
+        until: String,
+        #[arg(long)]
+        exclusive: bool,
+        #[arg(long, short = 'm', default_value = "")]
+        reason: String,
+        #[arg(long)]
+        queue: bool,
+        #[arg(long, requires = "queue")]
+        queue_timeout: Option<String>,
+        /// GPU claims JSON: [{"uuid":"GPU-...","exclusive":true}] or vram_bytes for shared
+        #[arg(long)]
+        gpus: Option<String>,
+    },
+    /// Extend an active reservation
+    Extend {
+        id: String,
+        #[arg(long)]
+        until: String,
+    },
+    /// End a reservation and its holder's sessions on that host
+    Retract { id: String },
+    /// Cancel a queued reservation
+    Cancel { id: String },
+    /// List a host's reservations
+    Ls {
+        #[arg(long)]
+        host: String,
+    },
+    /// Read capacity, or configure its reservable percentage (sysadmin)
+    Capacity {
+        host: String,
+        #[arg(long)]
+        percentage: Option<u8>,
+        /// Device IO capacities as a JSON device map
+        #[arg(long, requires = "percentage")]
+        io: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum WaitCmd {
+    /// Mail when a queued reservation starts, or ends without starting
+    Reservation {
+        id: String,
+        #[command(flatten)]
+        opts: WaitOpts,
+    },
     /// Wait until another agent is done (idle, no open waits, no mail
     /// waiting for it), or until it is idle, blocked, or changes status.
     /// Also ends when it goes to error or stopped, or is deleted
@@ -2603,6 +2665,9 @@ pub enum ThreadCmd {
         /// (repeat for more)
         #[arg(long = "card", value_name = "PROJECT:CARD")]
         cards: Vec<String>,
+        /// Wait for this monitor to be green too
+        #[arg(long, value_name = "PROJECT:MONITOR")]
+        monitor: Option<String>,
     },
     /// List the threads: the open ones (an agent: its own)
     Ls {

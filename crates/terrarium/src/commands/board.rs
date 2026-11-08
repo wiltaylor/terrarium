@@ -396,8 +396,13 @@ pub fn eta_line(k: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<String>
         format!("overdue {}", super::inspect::duration(-secs))
     };
     Some(format!(
-        "eta: {at} ({state}), set by {}",
-        field(k, "eta_set_by_name")
+        "eta: {at} ({state}), set by {}{}",
+        field(k, "eta_set_by_name"),
+        match k["eta_calibrated"].as_bool() {
+            Some(true) => " (calibrated p70)",
+            Some(false) => " (uncalibrated)",
+            None => "",
+        }
     ))
 }
 

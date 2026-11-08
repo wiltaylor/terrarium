@@ -26,6 +26,7 @@ pub mod paths;
 pub mod protocol;
 pub mod providers;
 pub mod redact;
+pub mod resources;
 pub mod role;
 #[cfg(feature = "wcl")]
 pub mod rules_file;

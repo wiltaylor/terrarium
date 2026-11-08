@@ -151,6 +151,8 @@ pub struct Card {
     pub id: String,
     pub project: String,
     pub column: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_role: Option<String>,
     pub position: i64,
     pub title: String,
     pub body: String,
@@ -172,7 +174,7 @@ pub struct Card {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     pub depends_on: Vec<String>,
-    /// The dependencies that are not done yet.
+    /// The dependencies that are neither accepted nor done yet.
     pub blocked_by: Vec<String>,
     pub comments: Vec<Comment>,
     pub links: Vec<Link>,
@@ -195,6 +197,9 @@ pub struct Card {
     pub eta_set_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta_set_by_name: Option<String>,
+    /// Worker ETA calibration status. Absent for review and job estimates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_calibrated: Option<bool>,
     /// When the card last moved to `done`. A reopen clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<String>,
@@ -545,7 +550,8 @@ fn unmet(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
         "SELECT d.depends_on FROM card_deps d
          JOIN cards c ON c.id = d.depends_on
          JOIN board_columns k ON k.id = c.column_id
-         WHERE d.card = ?1 AND k.name <> 'done' AND c.archived = 0
+         WHERE d.card = ?1 AND c.archived = 0
+           AND coalesce(k.role, k.name) NOT IN ('accepted', 'done')
          ORDER BY d.depends_on",
     )?;
     let rows = stmt
@@ -554,7 +560,11 @@ fn unmet(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
     Ok(rows)
 }
 
-fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
+fn render(
+    conn: &Connection,
+    row: CardRow,
+    estimates: &mut super::card_history::ReviewEstimates,
+) -> ApiResult<Card> {
     let mut stmt = conn.prepare(
         "SELECT id, author, body, created_at, session_id FROM card_comments WHERE card = ?1
          ORDER BY created_at, id",
@@ -621,11 +631,74 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
             .optional()?,
         _ => None,
     };
+    let job = crate::store::jobs::card_job(conn, &row.id)?;
+    let review = row.column_role.as_deref() == Some(REVIEW)
+        || (row.column_role.is_none() && row.column == REVIEW);
+    let review_eta = if review && !row.archived && job.is_none() {
+        estimates.eta(conn, &row.project, &row.id)?
+    } else {
+        None
+    };
+    let mut eta_calibrated = None;
+    let mut worker_eta = row.eta_at.clone();
+    let mut worker_start = row.eta_set_at.clone();
+    if !row.archived
+        && job.is_none()
+        && (row.column_role.as_deref() == Some(WORKING)
+            || (row.column_role.is_none() && row.column == WORKING))
+    {
+        if worker_start.is_none() {
+            worker_start = conn
+                .query_row(
+                    "SELECT at FROM events WHERE card = ?1 AND kind = 'card'
+                 AND json_extract(payload, '$.change') = 'moved' ORDER BY seq DESC LIMIT 1",
+                    [&row.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+        }
+        if let Some(start) = worker_start
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        {
+            let guess = row
+                .eta_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|at| (at - start).num_milliseconds() as f64);
+            let labels: Vec<String> = json_col(&row.labels);
+            let calibrated = estimates.worker_ms(conn, &row.project, &labels, guess)?;
+            eta_calibrated = Some(calibrated.is_some());
+            if let Some(ms) = calibrated
+                && let Some(at) =
+                    start.checked_add_signed(chrono::Duration::milliseconds(ms.round() as i64))
+            {
+                worker_eta = Some(at.to_rfc3339());
+            }
+        }
+    }
+    if worker_eta.is_none() {
+        worker_start = row.eta_set_at.clone();
+        eta_calibrated = None;
+    }
+    let queued = job
+        .as_ref()
+        .is_some_and(|j| j.state == super::jobs::JobState::Queued);
+    let (eta_at, eta_set_at, eta_set_by, eta_set_by_name) = if review && (job.is_none() || queued) {
+        (
+            review_eta.as_ref().map(|v| v.0.clone()),
+            review_eta.map(|v| v.1),
+            None,
+            None,
+        )
+    } else {
+        (worker_eta, worker_start, row.eta_set_by, eta_set_by_name)
+    };
     Ok(Card {
         kind: row.kind,
         group: crate::store::groups::for_card(conn, &row.id)?,
         tests: crate::store::test_runs::card_chip(conn, &row.id)?,
-        job: crate::store::jobs::card_job(conn, &row.id)?,
+        job,
         assignee_status,
         depends_on: deps(conn, &row.id)?,
         blocked_by: unmet(conn, &row.id)?,
@@ -633,6 +706,7 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         id: row.id,
         project: row.project,
         column: row.column,
+        column_role: row.column_role,
         position: row.position,
         title: row.title,
         body: row.body,
@@ -649,10 +723,11 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         created_at: row.created_at,
         updated_at: row.updated_at,
         archived: row.archived,
-        eta_at: row.eta_at,
-        eta_set_at: row.eta_set_at,
-        eta_set_by: row.eta_set_by,
+        eta_at,
+        eta_set_at,
+        eta_set_by,
         eta_set_by_name,
+        eta_calibrated,
         done_at: row.done_at,
         idle_since: row.idle_since,
     })
@@ -660,7 +735,7 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
 
 pub fn get_card(conn: &Connection, id: &str) -> ApiResult<Card> {
     let row = find_row(conn, id)?;
-    render(conn, row)
+    render(conn, row, &mut Default::default())
 }
 
 pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
@@ -682,9 +757,10 @@ pub fn get_board(conn: &Connection, project: &str) -> ApiResult<Board> {
     let rows = stmt
         .query_map([project], card_row)?
         .collect::<Result<Vec<_>, _>>()?;
+    let mut estimates = super::card_history::ReviewEstimates::default();
     let cards = rows
         .into_iter()
-        .map(|r| render(conn, r))
+        .map(|r| render(conn, r, &mut estimates))
         .collect::<ApiResult<Vec<_>>>()?;
     Ok(Board {
         project: project.to_owned(),
@@ -729,6 +805,7 @@ pub fn board_summary(
     let mut stmt = conn.prepare(
         "SELECT json_object(
           'id', c.id, 'kind', c.kind, 'project', c.project, 'column', k.name,
+          '_column_role', k.role,
           'position', c.position, 'title', c.title, 'labels', json(c.labels),
           'assignee', c.assignee, 'assignee_name', coalesce(a.project || '/' || a.name, ar.project || '/' || ar.name, c.assignee),
           'assignee_status', a.status, 'agent', s.id,
@@ -749,7 +826,8 @@ pub fn board_summary(
           'depends_on', (SELECT json_group_array(depends_on) FROM card_deps WHERE card = c.id),
           'blocked_by', (SELECT json_group_array(d.depends_on) FROM card_deps d
             JOIN cards dc ON dc.id = d.depends_on JOIN board_columns dk ON dk.id = dc.column_id
-            WHERE d.card = c.id AND dc.archived = 0 AND dk.name <> 'done'))
+            WHERE d.card = c.id AND dc.archived = 0
+              AND coalesce(dk.role, dk.name) NOT IN ('accepted', 'done')))
          FROM cards c JOIN board_columns k ON k.id = c.column_id
          LEFT JOIN agents a ON a.id = c.assignee
          LEFT JOIN agents_removed ar ON ar.id = c.assignee
@@ -773,6 +851,70 @@ pub fn board_summary(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut cards: Vec<Value> = raw.iter().map(|s| json_col(s)).collect();
+    let mut estimates = super::card_history::ReviewEstimates::default();
+    for card in &mut cards {
+        let role = card
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("board summary is not an object"))?
+            .remove("_column_role");
+        let review = role.as_ref().and_then(Value::as_str) == Some(REVIEW)
+            || (role.as_ref().is_none_or(Value::is_null) && card["column"] == REVIEW);
+        let working = role.as_ref().and_then(Value::as_str) == Some(WORKING)
+            || (role.as_ref().is_none_or(Value::is_null) && card["column"] == WORKING);
+        if working {
+            let id = card["id"]
+                .as_str()
+                .ok_or_else(|| ApiError::internal("board summary has no card id"))?;
+            if super::jobs::card_job(conn, id)?.is_none() {
+                let mut start = card["eta_set_at"].as_str().map(str::to_owned);
+                if start.is_none() {
+                    start = last_moved_at(conn, id)?;
+                }
+                if let Some(at) = start
+                    .as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                {
+                    let guess = card["eta_at"]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|end| (end - at).num_milliseconds() as f64);
+                    let labels: Vec<String> = serde_json::from_value(card["labels"].clone())?;
+                    let calibrated = estimates.worker_ms(conn, project, &labels, guess)?;
+                    if let Some(ms) = calibrated
+                        && let Some(end) =
+                            at.checked_add_signed(chrono::Duration::milliseconds(ms.round() as i64))
+                    {
+                        card["eta_at"] = json!(end.to_rfc3339());
+                    }
+                    if !card["eta_at"].is_null() {
+                        card["eta_set_at"] = json!(start);
+                        card["eta_calibrated"] = json!(calibrated.is_some());
+                    }
+                }
+            }
+        }
+        if review {
+            let id = card["id"]
+                .as_str()
+                .ok_or_else(|| ApiError::internal("board summary has no card id"))?;
+            let job = super::jobs::card_job(conn, id)?;
+            if job.is_none()
+                || job
+                    .as_ref()
+                    .is_some_and(|j| j.state == super::jobs::JobState::Queued)
+            {
+                let eta = if job.is_none() {
+                    estimates.eta(conn, project, id)?
+                } else {
+                    None
+                };
+                card["eta_at"] = json!(eta.as_ref().map(|v| &v.0));
+                card["eta_set_at"] = json!(eta.as_ref().map(|v| &v.1));
+                card["eta_set_by"] = Value::Null;
+                card["eta_set_by_name"] = Value::Null;
+            }
+        }
+    }
     // Preserve the card API's absent-when-unset optional metadata contract.
     for card in &mut cards {
         if let Some(fields) = card.as_object_mut() {
@@ -903,8 +1045,9 @@ pub fn list_cards(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::new();
+    let mut estimates = super::card_history::ReviewEstimates::default();
     for (place, row) in rows {
-        out.push((place, render(conn, row)?));
+        out.push((place, render(conn, row, &mut estimates)?));
     }
     let paged = Paged::from_rows(out, limit, |((k, p, n), _)| format!("{k}.{p}.{n}"));
     Ok(Paged {
@@ -1001,6 +1144,7 @@ pub fn active_cards(
         .query_map(params![wanted_json, projects_json], card_row)?
         .collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::with_capacity(rows.len());
+    let mut estimates = super::card_history::ReviewEstimates::default();
     for row in rows {
         let kind = match row.column_role.as_deref() {
             Some(WORKING) => WORKING.to_owned(),
@@ -1008,7 +1152,7 @@ pub fn active_cards(
             _ => row.column.to_lowercase(),
         };
         // The card has the assignee's status (`Card::assignee_status`).
-        let card = render(conn, row)?;
+        let card = render(conn, row, &mut estimates)?;
         let (blocked_since, blocked_reason) = if kind == BLOCKED {
             let (since, reason) = blocked_info(conn, &card)?;
             (Some(since), reason)
@@ -1223,7 +1367,7 @@ fn notify_blocked(t: &mut Tx<'_>, actor: &Actor, card: &CardRow, comment: &str) 
         card.id, card.title, card.column, card.id
     );
     let mut thread: Option<String> = None;
-    for recipient in to.iter().filter(|a| a.key() != me) {
+    for recipient in to.iter().filter(|a| a.key() != me || author != me) {
         let m = mail::send(
             t,
             Outgoing {
@@ -1498,7 +1642,7 @@ fn check_move(
             return Err(ApiError::new(
                 Code::DependenciesUnmet,
                 format!(
-                    "{} depends on {} that are not done",
+                    "{} depends on {} that are not accepted or done",
                     card.id,
                     open.join(", ")
                 ),
@@ -1506,8 +1650,13 @@ fn check_move(
             .with_details(json!({"blocked_by": open})));
         }
     }
+    let helpers = if to.name.eq_ignore_ascii_case("research") {
+        crate::research_helpers::running(t, &card.project)?
+    } else {
+        0
+    };
     if let Some(limit) = to.wip_limit
-        && active_count(t, to.id)? >= limit
+        && active_count(t, to.id)? + helpers >= limit
     {
         return Err(ApiError::new(
             Code::WipLimit,
@@ -1705,6 +1854,18 @@ pub fn assign_card(t: &mut Tx<'_>, actor: &Actor, id: &str, who: Option<&str>) -
     if new == card.assignee {
         return get_card(t, &card.id);
     }
+    if new.is_some() && card.assignee.is_none() && card.column.eq_ignore_ascii_case("research") {
+        let column = column(t, &card.project, &card.column)?;
+        if let Some(limit) = column.wip_limit
+            && active_count(t, column.id)? + crate::research_helpers::running(t, &card.project)?
+                > limit
+        {
+            return Err(ApiError::new(
+                Code::WipLimit,
+                "research helpers occupy the remaining research capacity",
+            ));
+        }
+    }
     t.execute(
         "UPDATE cards SET assignee = ?2, idle_since = NULL, updated_at = ?3 WHERE id = ?1",
         params![card.id, new, now()],
@@ -1789,9 +1950,8 @@ pub struct NewCard {
     /// The ETA: an RFC 3339 time or a duration from now (`2h30m`).
     #[serde(default)]
     pub eta_at: Option<String>,
-    /// The GitHub login of the issue author, for a GitHub card (TER-85,
-    /// [`github_gate`]). The caller says it; the daemon does not check it
-    /// against GitHub.
+    /// Legacy caller assertion. Ignored by the author gate. Import an issue
+    /// through the daemon's GitHub import endpoint for a verified author.
     #[serde(default)]
     pub github_author: Option<String>,
     /// An Inbox thread that tracks the new card (TER-146, TER-144 D2,
@@ -1854,11 +2014,17 @@ pub fn may_read_message(actor: &Actor, m: &mail::Message) -> bool {
     }
 }
 
-pub fn create_card(
+pub fn create_card(t: &mut Tx<'_>, actor: &Actor, project: &str, new: NewCard) -> ApiResult<Card> {
+    create_card_with_author(t, actor, project, new, None)
+}
+
+/// Only daemon-verified issue data may supply an author to the gate.
+pub(crate) fn create_card_with_author(
     t: &mut Tx<'_>,
     actor: &Actor,
     project: &str,
     mut new: NewCard,
+    verified_author: Option<&str>,
 ) -> ApiResult<Card> {
     policy::write_project(actor, project)?;
     let prefix = crate::store::projects::get(t, project)?.card_prefix;
@@ -1887,9 +2053,9 @@ pub fn create_card(
     let held_for = match actor {
         Actor::Agent(a) => {
             let list = github_gate::authors(t, project)?;
-            (!list.is_empty()
+            ((!list.is_empty() || verified_author.is_some())
                 && github_gate::is_github(&title, &new.labels)
-                && !github_gate::allowed(&list, new.github_author.as_deref()))
+                && !github_gate::allowed(&list, verified_author))
             .then(|| a.clone())
         }
         Actor::Operator => None,
@@ -1948,7 +2114,7 @@ pub fn create_card(
         json!({"from_mail": new.from_mail, "thread_id": thread}),
     )?;
     if let Some(agent) = &held_for {
-        hold(t, actor, agent, &row, new.github_author.as_deref())?;
+        hold(t, actor, agent, &row, verified_author)?;
         if let Some(c) = new.comment.as_deref().filter(|c| !c.trim().is_empty()) {
             let author = author_of(t, actor);
             insert_comment(t, &id, &author, c.trim())?;
@@ -1999,8 +2165,7 @@ fn hold(
     let comment = github_gate::hold_comment(&row.project, author);
     apply_move(t, actor, row, &blocked, None, Some(&comment))?;
     let context = format!(
-        "Title: {}\nGitHub author given: {}\nThe author is what the agent said; the daemon \
-         does not read the issue.",
+        "Title: {}\nDaemon-verified GitHub author: {}",
         row.title,
         author
             .map(str::trim)
@@ -2328,7 +2493,7 @@ pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> Ap
         t,
         &row,
         "eta",
-        json!({"eta_at": at, "previous": card.eta_at}),
+        json!({"eta_at": at, "previous": card.eta_at, "labels": json_col::<Vec<String>>(&card.labels)}),
     )?;
     get_card(t, &card.id)
 }

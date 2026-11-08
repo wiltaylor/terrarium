@@ -20,6 +20,7 @@ pub mod pipelines;
 pub mod projects;
 pub mod questions;
 pub mod remote;
+pub mod reservations;
 pub mod rules;
 pub mod schedules;
 pub mod screen;
@@ -49,6 +50,20 @@ use crate::transport::encode;
 
 pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
     match cmd {
+        Command::Issue {
+            command: crate::cli::IssueCmd::Import { number, repo },
+        } => {
+            let project = ctx.project_or(None).await?;
+            let card = ctx
+                .api
+                .post(
+                    &format!("/api/projects/{}/github-issues/import", encode(&project)),
+                    Some(serde_json::json!({"repo": repo, "number": number})),
+                )
+                .await?;
+            ctx.emit(&card, board::print_card)
+        }
+        Command::Reserve { command } => reservations::run(ctx, command).await,
         Command::Daemon { command } => system::daemon(ctx, command).await,
         Command::Whoami => system::whoami(ctx).await,
         Command::Group { command } => groups::group(ctx, command).await,
@@ -78,14 +93,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Dashboard { command } => monitors::dashboard(ctx, command).await,
         Command::Pipeline { command } => pipelines::pipeline(ctx, command).await,
         Command::Calendar { command } => calendar::calendar(ctx, command).await,
-        Command::Version { removed } if removed.is_empty() => system::version(ctx).await,
-        Command::Version { removed } => Err(crate::api::CliError::usage(format!(
-            "`terrarium version {}` is removed: versions are card labels \
-             (version:vnext, renamed to version:<X.Y.Z> at the cut). Use `card ls --label \
-             version:<X.Y.Z>`, `--label` on `test push` and `artifact push`, and \
-             `terrarium question ask` (through the lead) for the operator's review",
-            removed.join(" ")
-        ))),
+        Command::Version => system::version(ctx).await,
         Command::Usage { command } => system::usage(ctx, command.as_ref()).await,
         Command::Status { command } => agents::status(ctx, command).await,
         Command::Targets {

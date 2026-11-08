@@ -6,9 +6,11 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createMockApi } from "../../api/mock";
 
 const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
+const listeners = new Set<(e: import("../../api/types").AgentEvent) => void>();
+const onEvent = (e: import("../../api/types").AgentEvent) => listeners.forEach(fn => fn(e));
 vi.mock("../../stores", () => ({
   api,
-  events: { on: () => () => {} },
+  events: { on: (fn: typeof onEvent) => { listeners.add(fn); return () => listeners.delete(fn); } },
   inbox: { refresh: async () => {} },
   agents: { inProject: () => [], byId: () => undefined },
 }));
@@ -45,6 +47,14 @@ it("opens full details for a Done card absent from the active board", async () =
   await vi.waitFor(() => expect(document.body.textContent).toContain("Full comment only"));
   expect(document.body.textContent).toContain("Full detail only");
   expect((await api.board.get("terrarium")).cards.some(c => c.id === done.id)).toBe(false);
+  get.mockClear();
+  const event = { kind: "card", project: "terrarium", card: "TER-other", data: {} } as import("../../api/types").AgentEvent;
+  onEvent(event);
+  await new Promise(resolve => setTimeout(resolve, 400));
+  expect(get).not.toHaveBeenCalled();
+  onEvent({ ...event, card: done.id });
+  onEvent(event);
+  await vi.waitFor(() => expect(get).toHaveBeenCalledExactlyOnceWith(done.id));
 });
 
 it("does not fetch full cards when the board has no open drawer", async () => {

@@ -25,7 +25,7 @@
 //!
 //! A process that leaves both the group and the session (`setsid` in the
 //! command) is not found. A kill in the moment before the wrapper wrote its
-//! file finds no file and falls back to the client kill.
+//! file waits one second and retries once before falling back to the client kill.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,14 +52,29 @@ const PID_DIR: &str = "/tmp";
 /// half-written one. The clean-up removes the files of the runs that
 /// ended, and the ones whose PID now names a process with another start
 /// time (TER-123).
+/// Missing PIDs are only dead when the proc mount proves unrestricted
+/// visibility. Without that proof (including no proc), retain the file.
 pub const WRAP: &str = r#"f=$1; shift
 st() { s=; { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 0; s=${s##*) }; set -- $s; echo "${20}"; }
+visible=
+if [ -d /proc/self ] && [ -r /proc/mounts ]; then
+  while read -r dev mount kind opts rest; do
+    [ "$mount" = /proc ] || continue
+    [ "$kind" = proc ] || { visible=; break; }
+    visible=yes
+    case ,$opts, in
+      *,hidepid=0,*) ;;
+      *,hidepid=*) visible=; break ;;
+    esac
+  done < /proc/mounts
+fi
 for o in /tmp/terrarium-run-*.pid; do
   [ -f "$o" ] || continue
   q= t=
   read -r q t < "$o" 2>/dev/null
   case $q in ''|*[!0-9]*) continue ;; esac
-  if ! kill -0 "$q" 2>/dev/null || { [ -n "$t" ] && [ "$(st "$q")" != "$t" ]; }; then
+  u=$(st "$q")
+  if { [ "$visible" = yes ] && [ ! -d "/proc/$q" ]; } || { [ -n "$t" ] && [ -n "$u" ] && [ "$u" != "$t" ]; }; then
     rm -f "$o" 2>/dev/null
   fi
 done
@@ -77,8 +92,10 @@ exec "$@""#;
 /// process, the members of its group and session (if any) are still the
 /// run's: Linux does not reuse a PID while it is a group or session ID.
 pub const KILL: &str = r#"f=$1; g=${2:-5}; p= t=
+[ -f "$f" ] || sleep 1
 [ -f "$f" ] && read -r p t < "$f"
 case $p in ''|*[!0-9]*) echo none; exit 0 ;; esac
+[ "$p" -gt 1 ] 2>/dev/null || { rm -f "$f"; echo none; exit 0; }
 rm -f "$f"
 if [ -n "$t" ]; then
   s=
@@ -262,16 +279,57 @@ pub fn start_named(
     cmd: &RemoteCmd,
     pidfile: String,
 ) -> ApiResult<(Running, Option<Report>)> {
+    start_named_inner(state, def, cmd, pidfile, false)
+}
+
+/// Start while the executor holds admission through registration.
+pub(crate) fn start_named_locked(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+    pidfile: String,
+    _guard: &tokio::sync::OwnedMutexGuard<()>,
+) -> ApiResult<(Running, Option<Report>)> {
+    start_named_inner(state, def, cmd, pidfile, true)
+}
+
+/// Start while the executor holds admission through registration.
+pub(crate) fn start_registered(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+    _guard: &tokio::sync::OwnedMutexGuard<()>,
+) -> ApiResult<(Running, Option<Report>)> {
+    start_named_inner(state, def, cmd, new_pidfile(), true)
+}
+
+fn start_named_inner(
+    state: &Shared,
+    def: &TargetDef,
+    cmd: &RemoteCmd,
+    pidfile: String,
+    locked: bool,
+) -> ApiResult<(Running, Option<Report>)> {
+    let initial_start = if locked {
+        crate::executor::start_cmd_locked
+    } else {
+        start_cmd
+    };
     if !wraps(def, cmd) {
-        return Ok((start_cmd(state, def, cmd)?, None));
+        return Ok((initial_start(state, def, cmd)?, None));
     }
     let weak = Arc::downgrade(state);
     let d = def.clone();
+    let initial = std::sync::atomic::AtomicBool::new(true);
     let starter = move |c: RemoteCmd| {
         let state = weak
             .upgrade()
             .ok_or_else(|| ApiError::internal("the daemon is shutting down"))?;
-        start_cmd(&state, &d, &c)
+        if initial.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            initial_start(&state, &d, &c)
+        } else {
+            crate::executor::start_resource_cleanup(&state, &d, &c)
+        }
     };
     start_with_file(starter, cmd, GRACE_SECS, pidfile, true)
 }
@@ -543,6 +601,96 @@ mod tests {
 
     use super::*;
     use crate::executor::{pump_process, ssh_plan};
+
+    #[test]
+    fn kill_retries_a_missing_pidfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("late.pid");
+        let writer_file = file.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            // A stale identity must be found on the second read, not signalled.
+            std::fs::write(writer_file, format!("{} 0\n", std::process::id())).unwrap();
+        });
+        let out = std::process::Command::new("sh")
+            .args(["-c", KILL, "test"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        writer.join().unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            parse(&String::from_utf8_lossy(&out.stdout))["stale"],
+            json!(std::process::id())
+        );
+    }
+
+    #[test]
+    fn kill_rejects_pid_zero_and_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("invalid.pid");
+        for pid in ["0", "1", "0001"] {
+            std::fs::write(&file, pid).unwrap();
+            let out = std::process::Command::new("sh")
+                .args(["-c", KILL, "test"])
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "none");
+            assert!(!file.exists());
+        }
+    }
+
+    #[test]
+    fn wrapper_removes_dead_pidfiles_only_with_known_visibility() {
+        for options in [None, Some("rw,hidepid=2"), Some("rw,hidepid=0"), Some("rw")] {
+            let dir = tempfile::tempdir().unwrap();
+            let proc = dir.path().join("proc");
+            std::fs::create_dir_all(proc.join("self")).unwrap();
+            if let Some(options) = options {
+                std::fs::write(
+                    proc.join("mounts"),
+                    format!("proc {} proc {options} 0 0\n", proc.display()),
+                )
+                .unwrap();
+            }
+            let file = dir.path().join("terrarium-run-dead.pid");
+            std::fs::write(&file, "12345\n").unwrap();
+            let script = WRAP.replace("/proc", &proc.display().to_string()).replace(
+                "/tmp/terrarium-run-",
+                &format!("{}/terrarium-run-", dir.path().display()),
+            );
+            let out = std::process::Command::new("sh")
+                .args(["-c", &script, "test"])
+                .arg(dir.path().join("own.pid"))
+                .arg("true")
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            assert_eq!(
+                file.exists(),
+                !matches!(options, Some("rw" | "rw,hidepid=0"))
+            );
+        }
+    }
+
+    #[test]
+    fn wrapper_keeps_a_live_pidfile_when_kill_zero_is_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = new_pidfile();
+        std::fs::write(&live, format!("{}\n", std::process::id())).unwrap();
+        let out = std::process::Command::new("sh")
+            .args(["-c", &format!("kill() {{ return 1; }}\n{WRAP}"), "test"])
+            .arg(dir.path().join("own.pid"))
+            .arg("true")
+            .output()
+            .unwrap();
+        let kept = Path::new(&live).exists();
+        let _ = std::fs::remove_file(&live);
+        assert!(out.status.success());
+        assert!(kept, "a failed kill -0 must not imply a dead process");
+    }
 
     /// TER-196: only a run that ended by itself clears its PID file. A
     /// lost run keeps it for the kill of a lost run.

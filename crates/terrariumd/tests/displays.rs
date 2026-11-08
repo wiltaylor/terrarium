@@ -73,6 +73,8 @@ impl Lab {
         let token = r.body["token"].as_str().unwrap().to_owned();
         let mut o = ClientOptions::new(format!("ws://{}/hosts/connect", self.addr), token, name);
         o.capabilities = HostCapabilities {
+            gpus: vec![],
+            gpu_reservations: false,
             docker: ToolCapability {
                 present: true,
                 version: Some("29.8.0".into()),
@@ -89,6 +91,8 @@ impl Lab {
             metrics: false,
             limits: None,
             no_workspaces: false,
+            capacity: None,
+            reservations: false,
         };
         o.display.enabled = desktop;
         o.docker_bin = self.bins.path().join("docker").display().to_string();

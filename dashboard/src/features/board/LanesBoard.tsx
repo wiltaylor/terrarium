@@ -3,7 +3,9 @@
 // (one column at a time) each column holds the lanes as sections that collapse; a phone has no drag and drop, so
 // the Labels field of the card drawer moves a card between lanes. The plain lane has no lane head.
 
-import { createSignal, For, type JSX, Show } from "solid-js";
+import { createSignal, For, type JSX, Show, onCleanup } from "solid-js";
+import type { BoardGroup } from "../../api/types";
+import { stepTiming } from "./stepTiming";
 import type { Board, CardSummary as Card, Column } from "../../api/types";
 import { cardsIn } from "../../stores/board";
 import { columnTitle, overLimit } from "./columns";
@@ -18,6 +20,10 @@ export interface LaneDrag {
 }
 
 type Drop = { lane: string; column: string; index: number };
+
+function StepTiming(props: { step: BoardGroup["steps"][number]; now: number }) {
+  return <span> {stepTiming(props.step, props.now)}</span>;
+}
 
 export function LanesBoard(props: {
   board: Board;
@@ -38,6 +44,9 @@ export function LanesBoard(props: {
 }) {
   const [dragging, setDragging] = createSignal<{ id: string; lane: string } | null>(null);
   const [drop, setDrop] = createSignal<Drop | null>(null);
+  const [now, setNow] = createSignal(Date.now());
+  const timer = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => clearInterval(timer));
   const [limits, setLimits] = createSignal<Record<string, number>>({});
   const limit = (column: string) => limits()[column] ?? 50;
   const filteredColumn = (column: string) => cardsIn(props.board, column).filter(c => c.kind === "group" || props.visible(c));
@@ -109,7 +118,7 @@ export function LanesBoard(props: {
                   <Show when={group().status}><span>{group().status}</span></Show>
                   <ol><For each={group().steps}>{(step) => <li>
                     {step.name}: {step.state} {step.text}
-                    <Show when={step.eta_at}>{(eta) => <time dateTime={eta()}> ETA {new Date(eta()).toLocaleString()}</time>}</Show>
+                    <StepTiming step={step} now={now()} />
                   </li>}</For></ol>
                 </Show>
               </header>

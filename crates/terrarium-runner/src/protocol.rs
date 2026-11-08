@@ -88,7 +88,7 @@ pub struct RequestContext {
     pub agent: AgentId,
     pub name: String,
     pub project: String,
-    /// The roles above `member`, for `whoami`.
+    /// Launch-time roles above `member`. Not an authorization source.
     #[serde(default)]
     pub roles: Vec<String>,
     pub harness: HarnessId,
@@ -99,7 +99,8 @@ pub struct RequestContext {
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Answers agent CLI requests that the runner does not answer itself. The
-/// runner answers `ping` and `whoami`. The daemon implements this trait for
+/// runner answers `ping` and falls back to local `whoami` only when the handler
+/// does not implement it. The daemon implements this trait for
 /// mail, the board, and the other agent commands.
 pub trait RequestHandler: Send + Sync {
     fn handle<'a>(

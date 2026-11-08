@@ -526,6 +526,14 @@ impl Conn {
                 }
                 Err(e) => Err(e),
             },
+            "list_pending" => to_value(&runner.list_pending()),
+            "cancel_pending" => match p.get("delivery").and_then(Value::as_str) {
+                Some(delivery) => Ok(json!(runner.cancel_pending(delivery))),
+                None => Err(RpcError::new(
+                    "invalid_params",
+                    "delivery must be a pending turn ID",
+                )),
+            },
             "status" => Ok(json!({ "status": runner.status() })),
             "screen" => to_value(&WireSnapshot::from(&runner.screen())),
             "write" => match params::<WriteParams>(p)
@@ -547,6 +555,11 @@ impl Conn {
                     .map_err(runner_err),
                 Err(e) => Err(e),
             },
+            "claim_idle_stop" => Ok(json!({ "claimed": runner.claim_idle_stop() })),
+            "release_idle_stop" => {
+                runner.release_idle_stop();
+                Ok(Value::Null)
+            }
             "type_turn" => match params::<TypeTurnParams>(p) {
                 Ok(t) => {
                     let delivery = runner.type_turn(t.text);

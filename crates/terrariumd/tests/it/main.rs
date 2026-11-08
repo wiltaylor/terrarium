@@ -6,6 +6,9 @@ mod common;
 mod ter221_latency;
 mod workspace_sync;
 
+mod reservations;
+mod reservations_api;
+
 #[path = "../agent_interrupt.rs"]
 mod agent_interrupt;
 #[path = "../agent_keys.rs"]
@@ -30,6 +33,8 @@ mod bound_agents;
 mod build_inputs;
 #[path = "../calendar.rs"]
 mod calendar;
+#[path = "../card_dispatcher.rs"]
+mod card_dispatcher;
 #[path = "../card_files.rs"]
 mod card_files;
 #[path = "../card_reminder.rs"]

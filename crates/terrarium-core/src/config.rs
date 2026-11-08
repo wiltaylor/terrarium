@@ -934,6 +934,9 @@ impl DeliveryDef {
 /// A project definition, `projects/<name>.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectDef {
+    /// Opt-in ready-card dispatcher owner (a project admin). `off` disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_dispatcher: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1026,6 +1029,10 @@ impl TargetKind {
 /// A target definition, `targets/<name>.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetDef {
+    /// Card-agent build roots live under `<work_root>/<project>/<agent>`.
+    /// Shared project caches must live outside these roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_root: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     pub kind: TargetKind,

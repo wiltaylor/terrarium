@@ -1422,9 +1422,8 @@ async fn set_roles(
 /// One queued turn in the answer of `GET /api/agents/{id}/queued`.
 #[derive(Debug, Serialize)]
 struct QueuedView {
-    id: i64,
-    /// Where the turn waits: `store` (the `queued_turns` table, for an
-    /// agent that does not run). TER-66 adds the live queues.
+    id: serde_json::Value,
+    /// Where the turn waits: `store`, `supervisor`, or `runner`.
     source: &'static str,
     /// The turn as it will be typed, with its tag (`[User] ...`).
     text: String,
@@ -1457,9 +1456,7 @@ struct QueuedQuery {
     source: Option<String>,
 }
 
-/// `GET /api/agents/{id}/queued` (TER-54): the turns that wait in the
-/// store for the agent's wake, oldest first, redacted for the caller. The
-/// read right of the agent, as its transcripts.
+/// Waiting turns in delivery order, redacted with the agent's read right.
 async fn queued(
     State(state): State<Shared>,
     actor: Actor,
@@ -1473,12 +1470,12 @@ async fn queued(
         .await?;
     let redactor = state.db.redactor().get();
     let view = crate::secrets::redact::view_of(&actor);
-    let items: Vec<QueuedView> = turns
+    let mut items: Vec<QueuedView> = turns
         .into_iter()
         .map(|t| {
             let text = redactor.redact_string_as(t.text, &view).0;
             QueuedView {
-                id: t.id,
+                id: json!(t.id),
                 source: QUEUE_STORE,
                 body: untagged(&text).to_owned(),
                 text,
@@ -1486,7 +1483,33 @@ async fn queued(
             }
         })
         .collect();
-    Ok(Json(json!({"items": items})))
+    let live = match state.supervisor.list_pending(agent_id(&a)).await {
+        Ok(live) => live,
+        Err(e) => crate::supervisor::PendingTurns {
+            items: Vec::new(),
+            runner: Some(if matches!(e, SupervisorError::Unsupported(_)) {
+                "unsupported"
+            } else {
+                "unavailable"
+            }),
+        },
+    };
+    let mut live_items = Vec::new();
+    for turn in live.items {
+        let text = redactor.redact_string_as(turn.text, &view).0;
+        live_items.push(QueuedView {
+            id: json!(turn.id),
+            source: turn.source,
+            body: untagged(&text).to_owned(),
+            text,
+            created_at: String::new(),
+        });
+    }
+    live_items.append(&mut items);
+    let items = live_items;
+    Ok(Json(
+        json!({"items": items, "queues": {"runner": live.runner.unwrap_or("available")}}),
+    ))
 }
 
 /// `DELETE /api/agents/{id}/queued/{turn}` (TER-54): drop one queued turn
@@ -1497,20 +1520,50 @@ async fn queued(
 async fn remove_queued(
     State(state): State<Shared>,
     actor: Actor,
-    Path((id, turn)): Path<(String, i64)>,
+    Path((id, turn)): Path<(String, String)>,
     ApiQuery(q): ApiQuery<QueuedQuery>,
 ) -> ApiResult<StatusCode> {
     let a = load(&state, &actor, id).await?;
     if let Some(s) = q.source.as_deref()
-        && s != QUEUE_STORE
+        && ![QUEUE_STORE, "supervisor", "runner"].contains(&s)
     {
         return Err(ApiError::invalid(format!(
-            "unknown queue `{s}`: give `store` (the source of the turn in the list)"
+            "unknown queue `{s}`: give the source of the turn in the list"
         )));
     }
     policy::admin_project(&actor, &a.agent.project, "removing a queued turn")?;
     let lock = state.lifecycle.turn_lock(agent_id(&a));
     let _held = lock.lock().await;
+    if let Some(source @ ("runner" | "supervisor")) = q.source.as_deref() {
+        if !state
+            .supervisor
+            .cancel_pending(agent_id(&a), source, turn.clone())
+            .await
+            .map_err(supervisor_error)?
+        {
+            return Err(ApiError::not_found("turn no longer waits for the agent"));
+        }
+        let (key, project, source) = (
+            a.agent.id.to_string(),
+            a.agent.project.clone(),
+            source.to_owned(),
+        );
+        state
+            .db
+            .write(actor.label(), move |t| {
+                t.audit(
+                    "agent.queued.remove",
+                    &key,
+                    Some(&project),
+                    json!({"turn": turn, "source": source}),
+                )
+            })
+            .await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let turn: i64 = turn
+        .parse()
+        .map_err(|_| ApiError::invalid("invalid store turn ID"))?;
     let (key, project) = (a.agent.id.to_string(), a.agent.project.clone());
     let removed = state
         .db

@@ -16,6 +16,101 @@ use crate::transport::{ApiRequest, Method};
 
 const ME: &str = "01AGENTAGENTAGENTAGENTAGEN";
 
+#[tokio::test]
+async fn issue_import_uses_the_daemon_endpoint() {
+    let run = exec(
+        true,
+        &["issue", "import", "7", "--repo", "terrarium"],
+        vec![(
+            200,
+            json!({"id":"TER-1", "title":"GitHub #7: x", "column":"backlog"}),
+        )],
+        None,
+    )
+    .await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].path, "/api/projects/terra/github-issues/import");
+    assert_eq!(
+        run.reqs[0].body,
+        Some(json!({"repo":"terrarium", "number":7}))
+    );
+}
+
+#[tokio::test]
+async fn reservation_commands_send_amounts_and_queue_options() {
+    let run = exec(
+        true,
+        &[
+            "reserve",
+            "new",
+            "--host",
+            "h",
+            "--target",
+            "box",
+            "--cpu",
+            "2",
+            "--memory",
+            "4G",
+            "--until",
+            "1h",
+            "--queue",
+            "--queue-timeout",
+            "30m",
+        ],
+        vec![(201, json!({"id":"R1","state":"queued"}))],
+        None,
+    )
+    .await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].path, "/api/hosts/h/reservations");
+    let b = run.reqs[0].body.as_ref().unwrap();
+    assert_eq!(b["amounts"]["cpu_millis"], 2000);
+    assert_eq!(b["amounts"]["memory_bytes"], 4_u64 << 30);
+    assert_eq!(b["queue_timeout"], "30m");
+    assert!(run.out.contains("terrarium wait reservation R1"));
+}
+
+#[tokio::test]
+async fn reservation_commands_use_item_routes() {
+    for (args, path, method) in [
+        (
+            vec!["reserve", "extend", "R1", "--until", "2h"],
+            "/api/reservations/R1",
+            Method::Patch,
+        ),
+        (
+            vec!["reserve", "retract", "R1"],
+            "/api/reservations/R1",
+            Method::Delete,
+        ),
+        (
+            vec!["reserve", "cancel", "R1"],
+            "/api/reservations/R1/cancel",
+            Method::Post,
+        ),
+        (
+            vec!["reserve", "ls", "--host", "h"],
+            "/api/hosts/h/reservations",
+            Method::Get,
+        ),
+    ] {
+        let run = exec(true, &args, vec![(200, json!({}))], None).await;
+        run.result.unwrap();
+        assert_eq!(run.reqs[0].path, path);
+        assert_eq!(run.reqs[0].method, method);
+    }
+    let run = exec(
+        false,
+        &["reserve", "capacity", "h", "--percentage", "50"],
+        vec![(200, json!({})), (200, json!({"percentage":50}))],
+        None,
+    )
+    .await;
+    run.result.unwrap();
+    assert_eq!(run.reqs[0].body.as_ref().unwrap()["percentage"], 50);
+    assert_eq!(run.reqs[1].method, Method::Get);
+}
+
 struct Run {
     result: anyhow::Result<()>,
     out: String,
@@ -1903,6 +1998,97 @@ async fn memory() {
 }
 
 #[tokio::test]
+async fn memory_project_keys_for_every_id_command() {
+    // Bare IDs use -p, qualified IDs win over -p, and without -p the
+    // daemon keeps resolving bare IDs in the caller's project.
+    for (project, id, other, key, other_key) in [
+        (
+            Some("other"),
+            "MEM-1",
+            "MEM-2",
+            "other%2FMEM-1",
+            "other/MEM-2",
+        ),
+        (
+            Some("other"),
+            "explicit/MEM-1",
+            "target/MEM-2",
+            "explicit%2FMEM-1",
+            "target/MEM-2",
+        ),
+        (None, "MEM-1", "MEM-2", "MEM-1", "MEM-2"),
+    ] {
+        let cases = [
+            (vec!["show", id], Get, "/graph", vec![("depth", "1")], None),
+            (vec!["show", id, "--depth", "0"], Get, "", vec![], None),
+            (
+                vec!["neighbors", id, "--relation", "supports"],
+                Get,
+                "/graph",
+                vec![("depth", "1"), ("relation", "supports")],
+                None,
+            ),
+            (
+                vec!["link", id, other, "supports"],
+                Post,
+                "/links",
+                vec![],
+                Some(json!({"to": other_key, "relation": "supports"})),
+            ),
+            (
+                vec!["unlink", id, other, "supports"],
+                Delete,
+                "/links",
+                vec![],
+                Some(json!({"to": other_key, "relation": "supports"})),
+            ),
+            (
+                vec!["edit", id, "--title", "changed"],
+                Patch,
+                "",
+                vec![],
+                Some(json!({"title": "changed"})),
+            ),
+            (
+                vec!["edit", id, "--body", "changed body"],
+                Patch,
+                "",
+                vec![],
+                Some(json!({"body": "changed body"})),
+            ),
+            (
+                vec!["supersede", id, other],
+                Post,
+                "/supersede",
+                vec![],
+                Some(json!({"by": other_key})),
+            ),
+            (vec!["rm", id], Delete, "", vec![], None),
+        ];
+        for (command, method, suffix, query, body) in cases {
+            let mut args = vec!["mem"];
+            if let Some(project) = project {
+                args.extend(["-p", project]);
+            }
+            args.extend(command);
+            let run = exec(true, &args, vec![(200, json!({}))], None).await;
+            assert!(run.result.is_ok(), "{args:?}: {:?}", run.result);
+            let path = format!("/api/memories/{key}{suffix}");
+            assert_eq!(run.reqs.len(), 1, "{args:?}");
+            let request = &run.reqs[0];
+            assert_eq!(request.method, method, "{args:?}");
+            assert_eq!(request.path, path, "{args:?}");
+            let query: Vec<(String, String)> = query
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect();
+            assert_eq!(request.query, query, "{args:?}");
+            assert_eq!(request.body, body, "{args:?}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn wiki() {
     let out = ok(
         true,
@@ -2146,8 +2332,7 @@ async fn artifacts_and_labels() {
     )
     .await;
 
-    // TER-58: the version subcommands are gone. Each exits 2 with an
-    // error that names card labels, and sends no request.
+    // Removed version subcommands are rejected by the parser.
     for args in [
         &["version", "new", "v1", "--card", "TER-1"][..],
         &["version", "ls", "--all"],
@@ -2155,21 +2340,26 @@ async fn artifacts_and_labels() {
         &["version", "wait", "v1", "--timeout", "20"],
         &["version", "approve", "v1", "-m", "ok"],
     ] {
-        let r = exec(true, args, vec![], None).await;
-        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
-        let e = r.result.unwrap_err();
-        assert_eq!(exit_code_of(&e), 2, "{args:?}");
-        assert!(e.to_string().contains("card labels"), "{args:?}: {e}");
+        let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
-    // The hidden --version flags of artifact push and ls name --label.
+    // Removed artifact --version flags are rejected by the parser.
     for args in [
         &["artifact", "push", "x.txt", "--version", "v1"][..],
         &["artifact", "ls", "--version", "v1"],
     ] {
-        let r = exec(true, args, vec![], None).await;
-        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
-        let e = r.result.unwrap_err();
-        assert!(e.to_string().contains("--label version:"), "{args:?}: {e}");
+        let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
     // `artifact ls --label` sends `label` to the daemon (TER-129), and keeps
     // the artifacts with that label also when a daemon from before ignores
@@ -8728,17 +8918,20 @@ async fn test_runs() {
         )],
     )
     .await;
-    // TER-58: --version names --label and sends nothing.
+    // Removed test --version flags are rejected by the parser.
     for args in [
         &["test", "push", "x.xml", "--version", "v1"][..],
         &["test", "ls", "--version", "v1"],
         &["test", "link", "01RUN", "--version", "v1"],
         &["test", "unlink", "01RUN", "--version", "v1"],
     ] {
-        let r = exec(true, args, vec![], None).await;
-        assert!(r.reqs.is_empty(), "{args:?}: {:#?}", r.reqs);
-        let e = r.result.unwrap_err();
-        assert!(e.to_string().contains("--label version:"), "{args:?}: {e}");
+        let e = Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
     }
     let r = exec(true, &["test", "link", "01RUN"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), 2);
@@ -10188,6 +10381,19 @@ async fn thread_commands() {
     )
     .await;
     assert_eq!(out, "thread T1 is tracking.\n");
+    let out = ok(
+        true,
+        &["thread", "track", "T1", "--monitor", "ops:health"],
+        vec![(200, json!({"id": "T1", "status": "tracking"}))],
+        vec![(
+            Post,
+            "/api/threads/T1/track",
+            vec![],
+            Some(json!({"cards": [], "monitor": "ops:health"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "thread T1 is tracking.\n");
     // TER-146: the agent links cards of any project as it tracks.
     let out = ok(
         true,
@@ -10555,4 +10761,49 @@ async fn rules_every_command() {
         out.contains("applied: project terra runs board_flow rules (rules.wcl changed)"),
         "{out}"
     );
+}
+
+#[tokio::test]
+async fn rules_stored_parse_problems_are_printed_and_check_fails() {
+    let problems = json!([{"line": 3, "column": 5, "message": "unknown verb retired_comment"}]);
+    let out = ok(
+        true,
+        &["rule", "ls"],
+        vec![(
+            200,
+            json!({"project": "terra", "board_flow": "daemon", "rules": [], "problems": problems}),
+        )],
+        vec![req(Get, "/api/projects/terra/rules/effective")],
+    )
+    .await;
+    assert!(
+        out.contains("rules.wcl:3:5: unknown verb retired_comment"),
+        "{out}"
+    );
+    for json_output in [false, true] {
+        let args = if json_output {
+            vec!["--json", "rule", "check"]
+        } else {
+            vec!["rule", "check"]
+        };
+        let r = exec(
+            true,
+            &args,
+            vec![(200, json!({"findings": [], "problems": problems}))],
+            None,
+        )
+        .await;
+        assert_eq!(exit_code_of(&r.result.unwrap_err()), 1);
+        if json_output {
+            let v: Value = serde_json::from_str(&r.out).unwrap();
+            assert_eq!(v["problems"], problems);
+        } else {
+            assert!(
+                r.out
+                    .contains("rules.wcl:3:5: unknown verb retired_comment"),
+                "{}",
+                r.out
+            );
+        }
+    }
 }
