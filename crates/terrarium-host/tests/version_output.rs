@@ -3,7 +3,7 @@
 
 use std::process::Command;
 
-/// The check of host agents 0.5.0 and older: the last word of the first
+/// The check of host agents from releases before TER-195: the last word of the first
 /// line of `<new binary> --version` is the version of the staged update.
 fn old_check(stdout: &str) -> &str {
     stdout

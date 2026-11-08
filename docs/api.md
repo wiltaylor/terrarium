@@ -294,6 +294,8 @@ gives them to the routers and the mail code.
 | Env | Flag | Default | Use |
 |---|---|---|---|
 | `TERRARIUM_PUBLIC_URL` | `--public-url` | unset (mail: `http://localhost:8080`) | Mail links, `Version.url`, the cookie `Origin` check, CORS on `/a/...`. |
+| `TERRARIUM_GIT_NAME` | none | `Terrarium` | Author and committer name for agent commits, independent of forge authentication. Set in the deployment `.env` to override per instance. |
+| `TERRARIUM_GIT_EMAIL` | none | `terrarium@localhost` | Author and committer email for agent commits, independent of forge authentication. Set in the deployment `.env` to override per instance. |
 | `TERRARIUM_MAIL_LOOP_LIMIT` | none | `6` | The mail loop guard (§6, PLAN §12): the agent-to-agent messages a thread can have since the last operator or project-inbox message before new agent mail on it types no pointer. The daemon reads it once. |
 | `TERRARIUM_HARNESS_AUTO_UPDATE` | `--harness-auto-update` | `daily` | The background check for harness updates (§4, "Auto-update and pins"): `daily`, `off`, or a duration of `1h` or more (`6h`). A value that does not parse stops the daemon at start. |
 | `TERRARIUM_HARNESS_UPDATE_MAIL` | `--harness-update-mail` | `off` | An Inbox mail for each update that the auto-update installs (§4, "Auto-update and pins"): `off` or `on`. A failed install sends one mail for each failed version with both values. |
@@ -3720,6 +3722,10 @@ across browsers. All methods are operator-only. GET returns an array of
 renames that URL, and returns the list. DELETE accepts `{href}` and returns
 the list, including when the URL was absent. Mutations write `bookmark.add`
 or `bookmark.remove` audit rows.
+
+PUT also accepts an optional `previous_href` to edit an existing bookmark's
+title and URL atomically, preserving its position. A missing source or a URL
+already used by another bookmark returns `422 invalid` without changing the list.
 
 Titles must be nonblank and at most 500 bytes. URLs must be absolute HTTP(S)
 without credentials, or a relative `/p/<project>/knowledge/wiki` path.

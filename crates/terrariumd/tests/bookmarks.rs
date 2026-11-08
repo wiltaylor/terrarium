@@ -6,6 +6,35 @@ use hyper::Method;
 use serde_json::json;
 
 #[tokio::test]
+async fn edits_keep_order_and_reject_duplicate_or_missing_source() {
+    let mut td = TestDaemon::start().await;
+    for name in ["first", "second"] {
+        td.put(
+            "/api/bookmarks",
+            json!({"title": name, "href": format!("https://{name}.test")}),
+        )
+        .await
+        .ok();
+    }
+    let expected = json!([
+        {"title": "Edited", "href": "https://new.test/"},
+        {"title": "second", "href": "https://second.test/"}
+    ]);
+    assert_eq!(td.put("/api/bookmarks", json!({"title": "Edited", "href": "https://new.test", "previous_href": "https://first.test"})).await.ok(), &expected);
+    for previous in ["https://new.test", "https://missing.test"] {
+        td.put(
+            "/api/bookmarks",
+            json!({"title": "Bad", "href": "https://second.test", "previous_href": previous}),
+        )
+        .await
+        .err(422, "invalid");
+    }
+    assert_eq!(td.get("/api/bookmarks").await.ok(), &expected);
+    td.boot(None, None).await;
+    assert_eq!(td.get("/api/bookmarks").await.ok(), &expected);
+}
+
+#[tokio::test]
 async fn shared_list_deduplicates_and_removes() {
     let mut td = TestDaemon::start().await;
     let bookmark = json!({"title": " Example ", "href": "https://example.com"});
